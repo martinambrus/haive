@@ -1,0 +1,88 @@
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  mailpit:
+    ports:
+      - "1085:1025"
+      - "8085:8025"
+
+  db-migrate:
+    image: node:24-alpine
+    container_name: haive-db-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-haive}:${POSTGRES_PASSWORD:-haive_dev_password}@postgres:5432/${POSTGRES_DB:-haive}
+    command: >
+      sh -c "corepack enable &&
+             pnpm install --frozen-lockfile=false &&
+             pnpm --filter @haive/database push --force"
+    networks:
+      - haive-network
+    restart: "no"
+
+  api:
+    build:
+      target: deps
+    ports:
+      - "3001:3001"
+    volumes:
+      - .:/app
+      - haive_node_modules_root:/app/node_modules
+      - haive_node_modules_api:/app/packages/api/node_modules
+      - haive_node_modules_shared:/app/packages/shared/node_modules
+      - haive_node_modules_database:/app/packages/database/node_modules
+      - haive_repos:/var/lib/haive/repos
+    command: sh -c "pnpm --filter @haive/shared build && pnpm --filter @haive/database build && pnpm --filter @haive/api dev"
+    environment:
+      NODE_ENV: development
+      REPO_STORAGE_ROOT: /var/lib/haive/repos
+
+  worker:
+    build:
+      target: deps
+    volumes:
+      - .:/app
+      - haive_node_modules_root:/app/node_modules
+      - haive_node_modules_worker:/app/packages/worker/node_modules
+      - haive_node_modules_shared:/app/packages/shared/node_modules
+      - haive_node_modules_database:/app/packages/database/node_modules
+      - /var/run/docker.sock:/var/run/docker.sock
+      - haive_repos:/var/lib/haive/repos
+    command: sh -c "pnpm --filter @haive/shared build && pnpm --filter @haive/database build && pnpm --filter @haive/worker dev"
+    environment:
+      NODE_ENV: development
+
+  web:
+    build:
+      target: deps
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - haive_node_modules_root:/app/node_modules
+      - haive_node_modules_web:/app/packages/web/node_modules
+      - haive_node_modules_shared:/app/packages/shared/node_modules
+      - haive_web_next:/app/packages/web/.next
+    command: sh -c "pnpm --filter @haive/shared build && pnpm --filter @haive/web dev"
+    environment:
+      NODE_ENV: development
+
+volumes:
+  haive_node_modules_root:
+  haive_node_modules_shared:
+  haive_node_modules_database:
+  haive_node_modules_api:
+  haive_node_modules_worker:
+  haive_node_modules_web:
+  haive_web_next:

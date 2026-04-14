@@ -1,0 +1,9 @@
+{
+  "name": "haive/drupal7-fixture",
+  "description": "Minimal Drupal 7 fixture for haive onboarding smoke.",
+  "type": "project",
+  "require": {
+    "php": "^7.4",
+    "drupal/core": "~7"
+  }
+}

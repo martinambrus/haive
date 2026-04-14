@@ -1,0 +1,6 @@
+<?php
+function haive_cache_schema() {
+  $schema = array();
+  $schema['cache_haive'] = drupal_get_schema_unprocessed('system', 'cache');
+  return $schema;
+}

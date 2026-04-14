@@ -1,0 +1,47 @@
+{
+  "name": "@haive/worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BullMQ workers, step engine, sandbox manager and CLI adapters for Haive",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke:onboarding": "tsx test/onboarding-smoke.ts",
+    "smoke:onboarding-full": "tsx test/onboarding-full-smoke.ts",
+    "smoke:drupal7": "tsx test/drupal7-onboarding-smoke.ts",
+    "smoke:workflow": "tsx test/workflow-smoke.ts",
+    "smoke:workflow-commit": "tsx test/workflow-commit-smoke.ts",
+    "smoke:env-replicate": "tsx test/env-replicate-smoke.ts",
+    "smoke:env-replicate-wrap": "tsx test/env-replicate-wrap-smoke.ts",
+    "smoke:sub-agent": "tsx test/sub-agent-smoke.ts",
+    "smoke:container-cleanup": "tsx test/container-cleanup-smoke.ts",
+    "smoke:worker-kill-resume": "tsx test/worker-kill-resume-smoke.ts",
+    "smoke:all": "pnpm smoke:onboarding && pnpm smoke:onboarding-full && pnpm smoke:drupal7 && pnpm smoke:workflow && pnpm smoke:workflow-commit && pnpm smoke:env-replicate && pnpm smoke:env-replicate-wrap && pnpm smoke:sub-agent && pnpm smoke:container-cleanup && pnpm smoke:worker-kill-resume",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@haive/database": "workspace:*",
+    "@haive/shared": "workspace:*",
+    "bullmq": "^5.34.8",
+    "dockerode": "^4.0.4",
+    "drizzle-orm": "0.45.1",
+    "ioredis": "^5.4.2",
+    "prom-client": "^15.1.3",
+    "tar-fs": "^3.0.9",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^4.0.1",
+    "@types/tar-fs": "^2.0.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^4.0.18"
+  }
+}

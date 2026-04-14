@@ -1,0 +1,7 @@
+<?php
+function haive_api_schema() {
+  return array();
+}
+function haive_api_install() {
+  variable_set('haive_api_version', '1.0');
+}

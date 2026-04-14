@@ -1,0 +1,443 @@
+import { Queue, Worker, type Job } from 'bullmq';
+import { and, eq } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
+import {
+  CLI_EXEC_JOB_NAMES,
+  QUEUE_NAMES,
+  TASK_JOB_NAMES,
+  logger,
+  type CliExecJobPayload,
+  type TaskJobPayload,
+  type WorkflowType,
+} from '@haive/shared';
+import type { CliProviderRecord } from '../cli-adapters/types.js';
+import { getDb } from '../db.js';
+import { getBullRedis } from '../redis.js';
+import {
+  advanceStep,
+  stepRegistry,
+  registerAllSteps,
+  type AdvanceStepResult,
+  type WorkerDeps,
+} from '../step-engine/index.js';
+import type { StepDefinition } from '../step-engine/step-definition.js';
+import { ContainerManager } from '../sandbox/container-manager.js';
+import { getCliExecQueue } from './cli-exec-queue.js';
+
+let registered = false;
+let taskQueueInstance: Queue<TaskJobPayload> | null = null;
+
+function ensureRegistered(): void {
+  if (registered) return;
+  registerAllSteps(stepRegistry);
+  registered = true;
+}
+
+export function getTaskQueue(): Queue<TaskJobPayload> {
+  if (!taskQueueInstance) {
+    taskQueueInstance = new Queue<TaskJobPayload>(QUEUE_NAMES.TASK, {
+      connection: getBullRedis(),
+    });
+  }
+  return taskQueueInstance;
+}
+
+export async function closeTaskQueue(): Promise<void> {
+  if (taskQueueInstance) {
+    await taskQueueInstance.close();
+    taskQueueInstance = null;
+  }
+}
+
+interface ResolvedTaskContext {
+  taskId: string;
+  userId: string;
+  workflowType: WorkflowType;
+  repoPath: string;
+  workspacePath: string;
+  cliProviderId: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+function buildRunList(ctx: ResolvedTaskContext): StepDefinition[] {
+  const main = stepRegistry.listByWorkflow(ctx.workflowType);
+  const prelude =
+    ctx.metadata?.envReplicatePrelude === true && ctx.workflowType !== 'env_replicate'
+      ? stepRegistry.listByWorkflow('env_replicate')
+      : [];
+  return [...prelude, ...main];
+}
+
+async function resolveTaskContext(
+  db: Database,
+  taskId: string,
+): Promise<ResolvedTaskContext | null> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+  });
+  if (!task) return null;
+
+  let repoPath: string | null = null;
+  if (task.repositoryId) {
+    const repo = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, task.repositoryId),
+      columns: { storagePath: true, localPath: true },
+    });
+    repoPath = repo?.storagePath ?? repo?.localPath ?? null;
+  }
+  if (!repoPath) {
+    throw new Error(`task ${taskId} has no resolvable repo path`);
+  }
+
+  return {
+    taskId: task.id,
+    userId: task.userId,
+    workflowType: task.type,
+    repoPath,
+    workspacePath: repoPath,
+    cliProviderId: task.cliProviderId,
+    metadata: task.metadata ?? null,
+  };
+}
+
+async function appendEvent(
+  db: Database,
+  taskId: string,
+  taskStepId: string | null,
+  eventType: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  await db.insert(schema.taskEvents).values({
+    taskId,
+    taskStepId,
+    eventType,
+    payload,
+  });
+}
+
+async function markTaskRunning(db: Database, taskId: string): Promise<void> {
+  await db
+    .update(schema.tasks)
+    .set({ status: 'running', startedAt: new Date(), updatedAt: new Date() })
+    .where(eq(schema.tasks.id, taskId));
+}
+
+async function markTaskWaiting(
+  db: Database,
+  taskId: string,
+  stepId: string,
+  stepIndex: number,
+): Promise<void> {
+  await db
+    .update(schema.tasks)
+    .set({
+      status: 'waiting_user',
+      currentStepId: stepId,
+      currentStepIndex: stepIndex,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.tasks.id, taskId));
+}
+
+async function markTaskRunningWithStep(
+  db: Database,
+  taskId: string,
+  stepId: string,
+  stepIndex: number,
+): Promise<void> {
+  await db
+    .update(schema.tasks)
+    .set({
+      status: 'running',
+      currentStepId: stepId,
+      currentStepIndex: stepIndex,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.tasks.id, taskId));
+}
+
+async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
+  await db
+    .update(schema.tasks)
+    .set({
+      status: 'completed',
+      completedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.tasks.id, taskId));
+  await cleanupTaskContainers(db, taskId, 'completed');
+}
+
+async function markTaskFailed(db: Database, taskId: string, message: string): Promise<void> {
+  await db
+    .update(schema.tasks)
+    .set({
+      status: 'failed',
+      errorMessage: message,
+      completedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.tasks.id, taskId));
+  await cleanupTaskContainers(db, taskId, 'failed');
+}
+
+export type ContainerCleanupRunner = (db: Database, taskId: string) => Promise<number>;
+
+let containerCleanupRunner: ContainerCleanupRunner | null = null;
+
+export function setContainerCleanupRunner(runner: ContainerCleanupRunner | null): void {
+  containerCleanupRunner = runner;
+}
+
+async function cleanupTaskContainers(
+  db: Database,
+  taskId: string,
+  reason: 'completed' | 'failed' | 'cancelled',
+): Promise<void> {
+  try {
+    let destroyed = 0;
+    if (containerCleanupRunner) {
+      destroyed = await containerCleanupRunner(db, taskId);
+    } else {
+      destroyed = await defaultContainerCleanup(db, taskId);
+    }
+    if (destroyed > 0) {
+      await appendEvent(db, taskId, null, 'containers.destroyed', {
+        reason,
+        count: destroyed,
+      });
+    }
+  } catch (err) {
+    logger.warn({ err, taskId, reason }, 'cleanup-task-containers failed');
+  }
+}
+
+async function defaultContainerCleanup(db: Database, taskId: string): Promise<number> {
+  const manager = new ContainerManager({ db });
+  const rows = await manager.getByTask(taskId);
+  let destroyed = 0;
+  for (const row of rows) {
+    if (row.status === 'destroyed') continue;
+    try {
+      await manager.destroy(row.id, { force: true });
+      destroyed += 1;
+    } catch (err) {
+      logger.warn({ err, containerId: row.id, taskId }, 'container destroy failed');
+    }
+  }
+  return destroyed;
+}
+
+async function enqueueAdvance(taskId: string, userId: string, stepId: string): Promise<void> {
+  const queue = getTaskQueue();
+  await queue.add(
+    TASK_JOB_NAMES.ADVANCE_STEP,
+    { taskId, userId, stepId },
+    {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 5000 },
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    },
+  );
+}
+
+async function loadProviders(db: Database, userId: string): Promise<CliProviderRecord[]> {
+  const rows = await db
+    .select()
+    .from(schema.cliProviders)
+    .where(eq(schema.cliProviders.userId, userId));
+  return rows;
+}
+
+const workerDeps: WorkerDeps = {
+  async enqueueCliInvocation(payload: CliExecJobPayload): Promise<void> {
+    await getCliExecQueue().add(CLI_EXEC_JOB_NAMES.INVOKE, payload, {
+      attempts: 2,
+      backoff: { type: 'exponential', delay: 5000 },
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    });
+  },
+};
+
+async function handleResult(
+  db: Database,
+  ctx: ResolvedTaskContext,
+  stepId: string,
+  result: AdvanceStepResult,
+): Promise<void> {
+  const stepDef = stepRegistry.require(stepId);
+  switch (result.status) {
+    case 'done':
+    case 'skipped': {
+      await appendEvent(db, ctx.taskId, result.row.id, `step.${result.status}`, {
+        stepId,
+      });
+      const steps = buildRunList(ctx);
+      const idx = steps.findIndex((s) => s.metadata.id === stepId);
+      const next = idx >= 0 ? steps[idx + 1] : undefined;
+      if (next) {
+        await markTaskRunningWithStep(db, ctx.taskId, next.metadata.id, next.metadata.index);
+        await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id);
+      } else {
+        await markTaskCompleted(db, ctx.taskId);
+        await appendEvent(db, ctx.taskId, null, 'task.completed', {});
+      }
+      return;
+    }
+    case 'waiting_form': {
+      await markTaskWaiting(db, ctx.taskId, stepId, stepDef.metadata.index);
+      await appendEvent(db, ctx.taskId, result.row.id, 'step.waiting_form', { stepId });
+      return;
+    }
+    case 'waiting_cli': {
+      await db
+        .update(schema.tasks)
+        .set({
+          status: 'running',
+          currentStepId: stepId,
+          currentStepIndex: stepDef.metadata.index,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      await appendEvent(db, ctx.taskId, result.row.id, 'step.waiting_cli', { stepId });
+      return;
+    }
+    case 'failed': {
+      await markTaskFailed(db, ctx.taskId, result.error);
+      await appendEvent(db, ctx.taskId, result.row.id, 'step.failed', {
+        stepId,
+        error: result.error,
+      });
+      return;
+    }
+  }
+}
+
+async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<void> {
+  const ctx = await resolveTaskContext(db, payload.taskId);
+  if (!ctx) {
+    logger.warn({ taskId: payload.taskId }, 'start-task: task not found');
+    return;
+  }
+  await markTaskRunning(db, ctx.taskId);
+  await appendEvent(db, ctx.taskId, null, 'task.running', {});
+
+  const steps = buildRunList(ctx);
+  const first = steps[0];
+  if (!first) {
+    await markTaskFailed(db, ctx.taskId, `no steps registered for workflow ${ctx.workflowType}`);
+    return;
+  }
+  const providers = await loadProviders(db, ctx.userId);
+  const result = await advanceStep({
+    db,
+    taskId: ctx.taskId,
+    userId: ctx.userId,
+    repoPath: ctx.repoPath,
+    workspacePath: ctx.workspacePath,
+    cliProviderId: ctx.cliProviderId,
+    stepDef: first,
+    providers,
+    deps: workerDeps,
+  });
+  await handleResult(db, ctx, first.metadata.id, result);
+}
+
+async function handleAdvanceStep(db: Database, payload: TaskJobPayload): Promise<void> {
+  const ctx = await resolveTaskContext(db, payload.taskId);
+  if (!ctx) {
+    logger.warn({ taskId: payload.taskId }, 'advance-step: task not found');
+    return;
+  }
+  if (!payload.stepId) {
+    throw new Error('advance-step requires stepId');
+  }
+  const stepDef = stepRegistry.get(payload.stepId);
+  if (!stepDef) {
+    await markTaskFailed(db, ctx.taskId, `unknown step id ${payload.stepId}`);
+    return;
+  }
+
+  let formValues = payload.formValues;
+  if (!formValues) {
+    const existing = await db
+      .select()
+      .from(schema.taskSteps)
+      .where(
+        and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, payload.stepId)),
+      )
+      .limit(1);
+    formValues = existing[0]?.formValues ?? undefined;
+  }
+
+  const providers = await loadProviders(db, ctx.userId);
+  const result = await advanceStep({
+    db,
+    taskId: ctx.taskId,
+    userId: ctx.userId,
+    repoPath: ctx.repoPath,
+    workspacePath: ctx.workspacePath,
+    cliProviderId: ctx.cliProviderId,
+    stepDef,
+    formValues,
+    providers,
+    deps: workerDeps,
+  });
+  await handleResult(db, ctx, payload.stepId, result);
+}
+
+async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<void> {
+  await db
+    .update(schema.tasks)
+    .set({ status: 'cancelled', completedAt: new Date(), updatedAt: new Date() })
+    .where(eq(schema.tasks.id, payload.taskId));
+  await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
+  await cleanupTaskContainers(db, payload.taskId, 'cancelled');
+}
+
+export function startTaskWorker(): Worker<TaskJobPayload> {
+  ensureRegistered();
+  const worker = new Worker<TaskJobPayload>(
+    QUEUE_NAMES.TASK,
+    async (job: Job<TaskJobPayload>) => {
+      const db = getDb();
+      const payload = job.data;
+      try {
+        if (job.name === TASK_JOB_NAMES.START) {
+          await handleStartTask(db, payload);
+        } else if (job.name === TASK_JOB_NAMES.ADVANCE_STEP) {
+          await handleAdvanceStep(db, payload);
+        } else if (job.name === TASK_JOB_NAMES.CANCEL) {
+          await handleCancelTask(db, payload);
+        } else {
+          throw new Error(`unknown task job ${job.name}`);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error({ taskId: payload.taskId, jobName: job.name, err }, 'task job failed');
+        await markTaskFailed(db, payload.taskId, message).catch((cleanupErr) => {
+          logger.warn(
+            { err: cleanupErr, taskId: payload.taskId },
+            'markTaskFailed during catch failed',
+          );
+        });
+        throw err;
+      }
+    },
+    {
+      connection: getBullRedis(),
+      concurrency: 5,
+    },
+  );
+
+  worker.on('completed', (job) => {
+    logger.info({ jobId: job.id, name: job.name }, 'task job completed');
+  });
+  worker.on('failed', (job, err) => {
+    logger.warn({ jobId: job?.id, name: job?.name, err }, 'task job failed');
+  });
+
+  return worker;
+}

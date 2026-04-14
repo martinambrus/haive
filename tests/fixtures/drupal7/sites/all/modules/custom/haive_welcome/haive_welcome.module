@@ -1,0 +1,9 @@
+<?php
+function haive_welcome_block_info() {
+  return array('welcome' => array('info' => t('Haive welcome'), 'cache' => DRUPAL_NO_CACHE));
+}
+function haive_welcome_block_view($delta = '') {
+  if ($delta === 'welcome') {
+    return array('subject' => t('Welcome'), 'content' => t('Hello from Haive.'));
+  }
+}

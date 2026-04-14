@@ -1,0 +1,5 @@
+name = Haive API
+description = Exposes a JSON endpoint for Haive.
+core = 7.x
+package = Haive
+dependencies[] = services

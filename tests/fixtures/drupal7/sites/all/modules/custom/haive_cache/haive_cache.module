@@ -1,0 +1,7 @@
+<?php
+function haive_cache_init() {
+  if (!function_exists('cache_clear_all')) return;
+}
+function haive_cache_cron() {
+  cache_clear_all(NULL, 'cache_haive');
+}

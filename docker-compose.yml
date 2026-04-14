@@ -1,0 +1,137 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: haive-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-haive}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-haive_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-haive}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-haive} -d ${POSTGRES_DB:-haive}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - haive-network
+
+  redis:
+    image: redis:8.4-alpine
+    container_name: haive-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - haive-network
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: haive-mailpit
+    restart: unless-stopped
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_DATABASE: /data/mailpit.db
+    volumes:
+      - mailpit_data:/data
+    networks:
+      - haive-network
+
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+    container_name: haive-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      API_PORT: 3001
+      DATABASE_URL: postgres://${POSTGRES_USER:-haive}:${POSTGRES_PASSWORD:-haive_dev_password}@postgres:5432/${POSTGRES_DB:-haive}
+      REDIS_URL: redis://redis:6379
+      CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@haive.local}
+      HOST_REPO_ROOT: /host-fs
+      REPO_STORAGE_ROOT: /var/lib/haive/repos
+      GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-}
+    volumes:
+      - ${HOST_REPO_ROOT:-${HOME}}:/host-fs:ro
+      - haive_repos:/var/lib/haive/repos
+    networks:
+      - haive-network
+
+  worker:
+    build:
+      context: .
+      dockerfile: packages/worker/Dockerfile
+    container_name: haive-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      DATABASE_URL: postgres://${POSTGRES_USER:-haive}:${POSTGRES_PASSWORD:-haive_dev_password}@postgres:5432/${POSTGRES_DB:-haive}
+      REDIS_URL: redis://redis:6379
+      CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
+      CLAWKER_BIN: ${CLAWKER_BIN:-/usr/local/bin/clawker}
+      SANDBOX_NETWORK: ${SANDBOX_NETWORK:-haive-network}
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - haive_repos:/var/lib/haive/repos
+    networks:
+      - haive-network
+
+  web:
+    build:
+      context: .
+      dockerfile: packages/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+    container_name: haive-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+      API_URL_INTERNAL: ${API_URL_INTERNAL:-http://api:3001}
+    networks:
+      - haive-network
+
+networks:
+  haive-network:
+    driver: bridge
+    name: haive-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  mailpit_data:
+  haive_repos:

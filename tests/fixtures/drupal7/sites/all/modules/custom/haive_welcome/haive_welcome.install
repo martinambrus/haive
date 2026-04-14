@@ -1,0 +1,7 @@
+<?php
+function haive_welcome_install() {
+  variable_set('haive_welcome_installed', TRUE);
+}
+function haive_welcome_uninstall() {
+  variable_del('haive_welcome_installed');
+}

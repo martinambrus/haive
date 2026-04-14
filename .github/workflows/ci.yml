@@ -1,0 +1,222 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-typecheck-test:
+    name: Lint, Typecheck, Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Build shared + database (required by other packages)
+        run: |
+          pnpm --filter @haive/shared build
+          pnpm --filter @haive/database build
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+  smokes:
+    name: End-to-end smokes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: haive
+          POSTGRES_PASSWORD: haive_dev_password
+          POSTGRES_DB: haive
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U haive -d haive"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:8.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://haive:haive_dev_password@localhost:5432/haive
+      REDIS_URL: redis://localhost:6379
+      CONFIG_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      JWT_SECRET: ci-smoke-jwt-secret-not-real-just-for-smoke-tests-padding
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Build shared + database
+        run: |
+          pnpm --filter @haive/shared build
+          pnpm --filter @haive/database build
+
+      - name: Configure redis maxmemory-policy
+        run: |
+          docker exec ${{ job.services.redis.id }} redis-cli CONFIG SET maxmemory-policy noeviction
+
+      - name: Push database schema
+        run: pnpm db:push
+
+      - name: Run smokes
+        run: pnpm smoke
+
+  compose-boot:
+    name: docker compose up (fresh-host boot)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Seed .env for compose
+        run: |
+          cp .env.example .env
+          python3 - <<'PY'
+          import os, re, secrets
+          path = '.env'
+          with open(path, 'r') as f:
+              text = f.read()
+          text = re.sub(
+              r'^CONFIG_ENCRYPTION_KEY=.*$',
+              'CONFIG_ENCRYPTION_KEY=' + secrets.token_hex(32),
+              text,
+              flags=re.MULTILINE,
+          )
+          text = re.sub(
+              r'^JWT_SECRET=.*$',
+              'JWT_SECRET=' + secrets.token_urlsafe(48),
+              text,
+              flags=re.MULTILINE,
+          )
+          text = re.sub(
+              r'^HOST_REPO_ROOT=.*$',
+              'HOST_REPO_ROOT=' + os.path.expanduser('~'),
+              text,
+              flags=re.MULTILINE,
+          )
+          with open(path, 'w') as f:
+              f.write(text)
+          PY
+
+      - name: Build compose images
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml build
+
+      - name: Start infrastructure
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis mailpit
+
+      - name: Wait for postgres + redis health
+        run: |
+          for svc in postgres redis; do
+            for i in $(seq 1 30); do
+              status=$(docker inspect --format '{{.State.Health.Status}}' haive-$svc 2>/dev/null || echo missing)
+              if [ "$status" = "healthy" ]; then
+                echo "$svc healthy"
+                break
+              fi
+              if [ $i -eq 30 ]; then
+                echo "$svc not healthy after 60s (status=$status)"
+                docker compose -f docker-compose.yml -f docker-compose.dev.yml logs $svc
+                exit 1
+              fi
+              sleep 2
+            done
+          done
+
+      - name: Push database schema
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm db-migrate
+
+      - name: Start api, worker, web
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d api worker web
+
+      - name: Probe api /health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:3001/health >/dev/null 2>&1; then
+              echo "api healthy"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "api /health unreachable after 120s"
+              docker compose -f docker-compose.yml -f docker-compose.dev.yml logs api worker
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Probe web root
+        run: |
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/ || echo 000)
+            if [ "$code" = "200" ] || [ "$code" = "307" ] || [ "$code" = "308" ]; then
+              echo "web responded $code"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "web root unreachable after 120s (last=$code)"
+              docker compose -f docker-compose.yml -f docker-compose.dev.yml logs web
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Dump service status
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
+
+      - name: Capture logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml logs --tail 300
+
+      - name: Teardown
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v

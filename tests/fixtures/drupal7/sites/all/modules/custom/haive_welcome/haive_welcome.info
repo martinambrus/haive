@@ -1,0 +1,4 @@
+name = Haive Welcome
+description = Adds a welcome block.
+core = 7.x
+package = Haive

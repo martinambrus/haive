@@ -1,0 +1,69 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useParams } from 'next/navigation';
+import Link from 'next/link';
+import { api, type CliProvider, type CliProviderMetadata } from '@/lib/api-client';
+import { Card, CardDescription, CardHeader, CardTitle, FormError } from '@/components/ui';
+import { CliProviderForm } from '@/components/cli-provider-form';
+import { CliProviderSecrets } from '@/components/cli-provider-secrets';
+
+export default function EditCliProviderPage() {
+  const params = useParams<{ id: string }>();
+  const id = params.id;
+  const [provider, setProvider] = useState<CliProvider | null>(null);
+  const [meta, setMeta] = useState<CliProviderMetadata | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    Promise.all([
+      api.get<{ provider: CliProvider }>(`/cli-providers/${id}`),
+      api.get<{ providers: CliProviderMetadata[] }>('/cli-providers/catalog'),
+    ])
+      .then(([providerData, catalogData]) => {
+        setProvider(providerData.provider);
+        const found = catalogData.providers.find((p) => p.name === providerData.provider.name);
+        setMeta(found ?? null);
+      })
+      .catch((err) => setError((err as Error).message ?? 'Failed to load provider'));
+  }, [id]);
+
+  if (error) return <FormError message={error} />;
+  if (!provider || !meta) return <p className="text-sm text-neutral-500">Loading...</p>;
+
+  return (
+    <div className="flex max-w-2xl flex-col gap-6">
+      <div>
+        <Link
+          href="/settings/cli-providers"
+          className="text-xs text-neutral-500 hover:text-neutral-300"
+        >
+          Back to providers
+        </Link>
+        <h1 className="mt-2 text-2xl font-bold text-neutral-50">{provider.label}</h1>
+        <p className="text-sm text-neutral-400">{meta.description}</p>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Configuration</CardTitle>
+          <CardDescription>
+            Default executable:{' '}
+            <code className="font-mono text-neutral-300">{meta.defaultExecutable}</code>
+          </CardDescription>
+        </CardHeader>
+        <CliProviderForm mode="edit" provider={provider} metadata={meta} />
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Secrets</CardTitle>
+          <CardDescription>
+            Envelope-encrypted at rest. Use these for API keys and other sensitive values.
+          </CardDescription>
+        </CardHeader>
+        <CliProviderSecrets providerId={provider.id} apiKeyEnvName={meta.apiKeyEnvName} />
+      </Card>
+    </div>
+  );
+}

@@ -1,0 +1,3 @@
+<?php
+// Stub core user module presence so detection sees modules/ indicator.
+function user_permission() { return array(); }

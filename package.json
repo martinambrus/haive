@@ -1,0 +1,49 @@
+{
+  "name": "haive",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deterministic multi-CLI orchestration and AI agentic workflow utility",
+  "license": "MIT",
+  "scripts": {
+    "dev": "turbo run dev",
+    "dev:api": "pnpm --filter @haive/api dev",
+    "dev:web": "pnpm --filter @haive/web dev",
+    "dev:worker": "pnpm --filter @haive/worker dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "test:e2e": "playwright test --pass-with-no-tests",
+    "smoke": "pnpm --filter @haive/worker smoke:all",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "clean": "turbo run clean && rm -rf node_modules .turbo",
+    "db:generate": "pnpm --filter @haive/database generate",
+    "db:push": "pnpm --filter @haive/database push",
+    "db:studio": "pnpm --filter @haive/database studio",
+    "docker:dev": "docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\""
+  },
+  "engines": {
+    "node": ">=24.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@9.15.4",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^25.3.5",
+    "husky": "^9.1.7",
+    "postgres": "^3.4.5",
+    "prettier": "^3.4.2",
+    "tsx": "^4.19.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.3",
+    "vitest": "^4.0.18"
+  },
+  "pnpm": {
+    "overrides": {
+      "drizzle-orm": "0.45.1"
+    }
+  }
+}

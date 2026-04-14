@@ -1,0 +1,5 @@
+name = Haive Theme
+description = Custom theme for the Haive fixture site.
+core = 7.x
+engine = phptemplate
+base theme = bartik

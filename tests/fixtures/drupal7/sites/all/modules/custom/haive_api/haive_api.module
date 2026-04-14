@@ -1,0 +1,13 @@
+<?php
+function haive_api_menu() {
+  return array(
+    'api/haive' => array(
+      'page callback' => 'haive_api_callback',
+      'access callback' => TRUE,
+      'type' => MENU_CALLBACK,
+    ),
+  );
+}
+function haive_api_callback() {
+  drupal_json_output(array('ok' => TRUE));
+}
