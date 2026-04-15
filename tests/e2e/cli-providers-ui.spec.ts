@@ -198,6 +198,164 @@ test.describe('cli providers UI', () => {
     }
   });
 
+  test('Edit form: Test connection disabled by any unsaved form change', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      const email = uniqueEmail('cli-ui-test-gate');
+      userId = await registerAndGetUserId(page.request, email);
+
+      const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
+        data: { name: 'claude-code', label: 'Gate target', authMode: 'subscription' },
+      });
+      expect(createRes.status()).toBe(201);
+      const {
+        provider: { id: providerId },
+      } = (await createRes.json()) as { provider: { id: string } };
+
+      await page.goto(`/settings/cli-providers/${providerId}`);
+      await expect(page.getByRole('heading', { level: 1, name: 'Gate target' })).toBeVisible();
+
+      const testButton = page.getByRole('button', { name: 'Test connection' });
+      const notice = page.getByText(/Unsaved form changes/);
+
+      // Clean state on load.
+      await expect(testButton).toBeEnabled();
+      await expect(notice).toHaveCount(0);
+
+      // Each of these fields, when touched, should disable the Test button and
+      // show the yellow notice. The baseline resets between cases so we can
+      // verify each field independently.
+      const dirtyCases: Array<{ name: string; dirty: () => Promise<void>; clean: () => Promise<void> }> = [
+        {
+          name: 'executablePath',
+          dirty: async () => page.getByLabel('Executable path').fill('/usr/local/bin/claude-timed'),
+          clean: async () => page.getByLabel('Executable path').fill(''),
+        },
+        {
+          name: 'wrapperPath',
+          dirty: async () => page.getByLabel('Wrapper script path').fill('/opt/wrap.sh'),
+          clean: async () => page.getByLabel('Wrapper script path').fill(''),
+        },
+        {
+          name: 'wrapperContent',
+          dirty: async () => page.getByLabel('Wrapper script content').fill('#!/bin/bash\nexit 0'),
+          clean: async () => page.getByLabel('Wrapper script content').fill(''),
+        },
+        {
+          name: 'authMode',
+          dirty: async () => page.locator('#authMode').selectOption('api_key'),
+          clean: async () => page.locator('#authMode').selectOption('subscription'),
+        },
+        {
+          name: 'sandboxDockerfileExtra',
+          dirty: async () => page.locator('#sandboxDockerfileExtra').fill('RUN echo hi'),
+          clean: async () => page.locator('#sandboxDockerfileExtra').fill(''),
+        },
+        {
+          name: 'envVars',
+          dirty: async () => page.locator('#envVars').fill('FOO=bar'),
+          clean: async () => page.locator('#envVars').fill(''),
+        },
+        {
+          name: 'cliArgs',
+          dirty: async () => page.locator('#cliArgs').fill('--verbose'),
+          clean: async () => page.locator('#cliArgs').fill(''),
+        },
+        {
+          name: 'networkMode',
+          dirty: async () => page.getByRole('radio', { name: /No network/ }).check(),
+          clean: async () => page.getByRole('radio', { name: /Full internet/ }).check(),
+        },
+      ];
+
+      for (const tc of dirtyCases) {
+        await tc.dirty();
+        await expect(testButton, `dirty via ${tc.name}`).toBeDisabled();
+        await expect(notice, `notice for ${tc.name}`).toBeVisible();
+
+        await tc.clean();
+        await expect(testButton, `cleaned ${tc.name}`).toBeEnabled();
+        await expect(notice, `notice cleared for ${tc.name}`).toHaveCount(0);
+      }
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('Edit form: Rebuild persists form and keeps Test disabled through dirty->building handoff', async ({
+    page,
+  }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      const email = uniqueEmail('cli-ui-rebuild');
+      userId = await registerAndGetUserId(page.request, email);
+
+      const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
+        data: { name: 'claude-code', label: 'Rebuild target', authMode: 'subscription' },
+      });
+      expect(createRes.status()).toBe(201);
+      const {
+        provider: { id: providerId },
+      } = (await createRes.json()) as { provider: { id: string } };
+
+      await page.goto(`/settings/cli-providers/${providerId}`);
+      await expect(page.getByRole('heading', { level: 1, name: 'Rebuild target' })).toBeVisible();
+
+      const testButton = page.getByRole('button', { name: 'Test connection' });
+
+      // Wait for the initial build kicked off by provider creation to settle
+      // so the baseline is the enabled state (not the building gate).
+      await expect(testButton).toBeEnabled({ timeout: 30_000 });
+
+      // Non-image field (executablePath) plus image field (Dockerfile extra):
+      // Rebuild must persist both and keep the button disabled throughout
+      // the dirty -> building transition.
+      await page.getByLabel('Executable path').fill('/usr/local/bin/claude-custom');
+      await page.locator('#sandboxDockerfileExtra').fill('# e2e rebuild marker');
+
+      // Dirty state disables the button with the save-first notice.
+      await expect(testButton).toBeDisabled();
+      await expect(page.getByText(/Unsaved form changes/)).toBeVisible();
+
+      await page.getByRole('button', { name: /Rebuild image/ }).click();
+
+      // persistEdit runs synchronously with the click: DB must reflect both
+      // the non-image and image field immediately.
+      await expect
+        .poll(
+          async () => {
+            const rows = await sql<{
+              executable_path: string | null;
+              sandbox_dockerfile_extra: string | null;
+            }[]>`
+              select executable_path, sandbox_dockerfile_extra from cli_providers
+              where id = ${providerId}
+            `;
+            return rows[0];
+          },
+          { timeout: 5_000 },
+        )
+        .toEqual({
+          executable_path: '/usr/local/bin/claude-custom',
+          sandbox_dockerfile_extra: '# e2e rebuild marker',
+        });
+
+      // After the click, the dirty gate clears but the building gate kicks in,
+      // so the notice swaps text and the button must stay disabled.
+      await expect(page.getByText(/Sandbox image is currently rebuilding/)).toBeVisible({
+        timeout: 10_000,
+      });
+      await expect(testButton).toBeDisabled();
+      await expect(page.getByText(/Unsaved form changes/)).toHaveCount(0);
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
   test('Edit form: clearing executablePath persists as null', async ({ page }) => {
     const sql = getSql();
     let userId = '';

@@ -14,6 +14,7 @@ export default function EditCliProviderPage() {
   const [provider, setProvider] = useState<CliProvider | null>(null);
   const [meta, setMeta] = useState<CliProviderCatalogEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [testBlockMessage, setTestBlockMessage] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -52,7 +53,12 @@ export default function EditCliProviderPage() {
             <code className="font-mono text-neutral-300">{meta.defaultExecutable}</code>
           </CardDescription>
         </CardHeader>
-        <CliProviderForm mode="edit" provider={provider} metadata={meta} />
+        <CliProviderForm
+          mode="edit"
+          provider={provider}
+          metadata={meta}
+          onTestBlockChange={setTestBlockMessage}
+        />
       </Card>
 
       <Card>
@@ -62,7 +68,7 @@ export default function EditCliProviderPage() {
             Verify the CLI binary and/or API credentials respond correctly.
           </CardDescription>
         </CardHeader>
-        <CliProviderTest providerId={provider.id} />
+        <CliProviderTest providerId={provider.id} blockMessage={testBlockMessage} />
       </Card>
     </div>
   );

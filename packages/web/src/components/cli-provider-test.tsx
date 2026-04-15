@@ -6,12 +6,14 @@ import { Badge, Button, FormError } from '@/components/ui';
 
 interface CliProviderTestProps {
   providerId: string;
+  blockMessage?: string | null;
 }
 
-export function CliProviderTest({ providerId }: CliProviderTestProps) {
+export function CliProviderTest({ providerId, blockMessage }: CliProviderTestProps) {
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<CliProbeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const blocked = Boolean(blockMessage);
 
   async function handleTest() {
     setError(null);
@@ -39,8 +41,14 @@ export function CliProviderTest({ providerId }: CliProviderTestProps) {
         mode it sends a tiny ping through the SDK. Mixed mode tests both paths.
       </p>
 
+      {blockMessage && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-950/30 p-3 text-xs text-amber-300">
+          {blockMessage}
+        </div>
+      )}
+
       <div>
-        <Button onClick={handleTest} disabled={testing}>
+        <Button onClick={handleTest} disabled={testing || blocked}>
           {testing ? 'Testing...' : 'Test connection'}
         </Button>
       </div>

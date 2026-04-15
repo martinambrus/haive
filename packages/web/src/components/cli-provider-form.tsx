@@ -21,7 +21,21 @@ interface CliProviderFormProps {
   mode: 'create' | 'edit';
   provider?: CliProvider;
   metadata: CliProviderCatalogEntry;
+  // Emits a human-readable reason the Test connection button should be
+  // disabled, or null if it should be enabled. Lets the parent page render
+  // the matching notice and gate the sibling test component without knowing
+  // anything about the form's internal state.
+  onTestBlockChange?: (blockMessage: string | null) => void;
 }
+
+const TEST_BLOCK_DIRTY =
+  'Unsaved form changes detected. Save the form first so the probe runs against the updated ' +
+  'configuration instead of the values last written to the database.';
+const TEST_BLOCK_BUILDING =
+  'Sandbox image is currently rebuilding. Wait for the build to finish so the probe runs ' +
+  'against the new image instead of the previous one.';
+const TEST_BLOCK_FAILED =
+  'The last sandbox image build failed. Fix the Dockerfile and rebuild before running the probe.';
 
 interface FormState {
   name: CliProviderName;
@@ -84,7 +98,31 @@ function parseCliArgs(text: string): string[] {
     .filter(Boolean);
 }
 
-export function CliProviderForm({ mode, provider, metadata }: CliProviderFormProps) {
+function statesEqual(a: FormState, b: FormState): boolean {
+  return (
+    a.label === b.label &&
+    a.executablePath === b.executablePath &&
+    a.wrapperPath === b.wrapperPath &&
+    a.wrapperContent === b.wrapperContent &&
+    a.envVarsText === b.envVarsText &&
+    a.secretsText === b.secretsText &&
+    a.cliArgsText === b.cliArgsText &&
+    a.authMode === b.authMode &&
+    a.cliVersion === b.cliVersion &&
+    a.sandboxDockerfileExtra === b.sandboxDockerfileExtra &&
+    a.enabled === b.enabled &&
+    a.networkMode === b.networkMode &&
+    a.networkDomainsText === b.networkDomainsText &&
+    a.networkIpsText === b.networkIpsText
+  );
+}
+
+export function CliProviderForm({
+  mode,
+  provider,
+  metadata,
+  onTestBlockChange,
+}: CliProviderFormProps) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -121,6 +159,30 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
     networkIpsText: (provider?.networkPolicy?.ips ?? []).join('\n'),
   });
 
+  // Full snapshot of the last known saved form state. Any field that diverges
+  // from this snapshot is considered unsaved, and the edit page uses that to
+  // gate the Test connection button so the probe never runs against a stale
+  // DB row that does not match what the user sees in the form.
+  const [savedState, setSavedState] = useState<FormState>(() => state);
+
+  const formDirty = !statesEqual(state, savedState);
+
+  // Precedence: dirty wins over building wins over failed. A dirty form
+  // overrides an in-flight build so the user is told to save first; after
+  // save/rebuild the building state takes over so the probe is held back
+  // until the new image is ready.
+  const testBlockMessage: string | null = formDirty
+    ? TEST_BLOCK_DIRTY
+    : buildState.status === 'building'
+      ? TEST_BLOCK_BUILDING
+      : buildState.status === 'failed'
+        ? TEST_BLOCK_FAILED
+        : null;
+
+  useEffect(() => {
+    onTestBlockChange?.(testBlockMessage);
+  }, [testBlockMessage, onTestBlockChange]);
+
   useEffect(() => {
     if (mode !== 'edit' || !provider?.id) return;
     let cancelled = false;
@@ -131,10 +193,11 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
         );
         if (cancelled) return;
         setExistingSecrets(secrets);
-        setState((prev) => ({
-          ...prev,
-          secretsText: secrets.map((s) => `${s.secretName}=`).join('\n'),
-        }));
+        const nextSecretsText = secrets.map((s) => `${s.secretName}=`).join('\n');
+        // Auto-filled placeholder text is not a user edit, so the baseline is
+        // updated in lockstep to keep the dirty flag from tripping on mount.
+        setState((prev) => ({ ...prev, secretsText: nextSecretsText }));
+        setSavedState((prev) => ({ ...prev, secretsText: nextSecretsText }));
       } catch {
         // Leave empty; user will see no existing secrets.
       }
@@ -196,20 +259,94 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
     }
   }
 
+  // Commits every field of the current form to the DB (PATCH + secrets sync),
+  // then rebases the saved-state baseline onto the just-saved snapshot so the
+  // dirty flag clears. Shared between Rebuild image (stays on page) and Save
+  // (redirects) so both flows persist the same payload and leave the form in
+  // a consistent "clean" state.
+  async function persistEdit(): Promise<void> {
+    if (mode !== 'edit' || !provider?.id) return;
+    const snapshot = state;
+
+    const networkPolicy: CliNetworkPolicy = {
+      mode: snapshot.networkMode,
+      domains:
+        snapshot.networkMode === 'allowlist' ? parseLinesList(snapshot.networkDomainsText) : [],
+      ips: snapshot.networkMode === 'allowlist' ? parseLinesList(snapshot.networkIpsText) : [],
+    };
+
+    const payload = {
+      label: snapshot.label,
+      executablePath: snapshot.executablePath,
+      wrapperPath: snapshot.wrapperPath,
+      wrapperContent: snapshot.wrapperContent,
+      envVars: parseEnvVars(snapshot.envVarsText),
+      cliArgs: parseCliArgs(snapshot.cliArgsText),
+      authMode: snapshot.authMode,
+      cliVersion: snapshot.cliVersion || null,
+      sandboxDockerfileExtra: snapshot.sandboxDockerfileExtra,
+      enabled: snapshot.enabled,
+      networkPolicy,
+    };
+
+    await api.patch(`/cli-providers/${provider.id}`, payload);
+
+    const parsedSecrets = parseEnvVars(snapshot.secretsText);
+    const submittedNames = new Set(Object.keys(parsedSecrets));
+
+    for (const s of existingSecrets) {
+      if (!submittedNames.has(s.secretName)) {
+        await api.delete(
+          `/cli-providers/${provider.id}/secrets/${encodeURIComponent(s.secretName)}`,
+        );
+      }
+    }
+
+    for (const [secretName, value] of Object.entries(parsedSecrets)) {
+      if (value.length > 0) {
+        await api.post(`/cli-providers/${provider.id}/secrets`, { secretName, value });
+      }
+    }
+
+    const { secrets: freshSecrets } = await api.get<{ secrets: CliProviderSecret[] }>(
+      `/cli-providers/${provider.id}/secrets`,
+    );
+    setExistingSecrets(freshSecrets);
+    const nextSecretsText = freshSecrets.map((s) => `${s.secretName}=`).join('\n');
+
+    setState((prev) => ({ ...prev, secretsText: nextSecretsText }));
+    setSavedState({ ...snapshot, secretsText: nextSecretsText });
+  }
+
   async function handleRebuildImage() {
     if (mode !== 'edit' || !provider?.id) return;
     setBuildRequesting(true);
     setError(null);
+    // Flip build gating on synchronously with the click so the Test connection
+    // button stays disabled through the dirty -> building handoff. Without
+    // this, persistEdit clears the dirty flag before the setBuildState call
+    // completes, briefly opening the button in the intermediate render.
+    setBuildState((prev) => ({ ...prev, status: 'building', error: null }));
     try {
-      if ((provider.sandboxDockerfileExtra ?? '') !== state.sandboxDockerfileExtra) {
-        await api.patch(`/cli-providers/${provider.id}`, {
-          sandboxDockerfileExtra: state.sandboxDockerfileExtra,
-        });
+      if (formDirty) {
+        await persistEdit();
       }
       await api.post(`/cli-providers/${provider.id}/sandbox-image/build`);
-      setBuildState((prev) => ({ ...prev, status: 'building', error: null }));
     } catch (err) {
       setError((err as Error).message ?? 'Failed to start build');
+      try {
+        const { provider: fresh } = await api.get<{ provider: CliProvider }>(
+          `/cli-providers/${provider.id}`,
+        );
+        setBuildState({
+          status: fresh.sandboxImageBuildStatus,
+          error: fresh.sandboxImageBuildError,
+          imageTag: fresh.sandboxImageTag,
+          builtAt: fresh.sandboxImageBuiltAt,
+        });
+      } catch {
+        // Best effort refetch; leave optimistic 'building' in place.
+      }
     } finally {
       setBuildRequesting(false);
     }
@@ -220,54 +357,44 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
     setError(null);
     setSubmitting(true);
     try {
-      const networkPolicy: CliNetworkPolicy = {
-        mode: state.networkMode,
-        domains: state.networkMode === 'allowlist' ? parseLinesList(state.networkDomainsText) : [],
-        ips: state.networkMode === 'allowlist' ? parseLinesList(state.networkIpsText) : [],
-      };
-
-      const payload = {
-        name: state.name,
-        label: state.label,
-        executablePath: state.executablePath,
-        wrapperPath: state.wrapperPath,
-        wrapperContent: state.wrapperContent,
-        envVars: parseEnvVars(state.envVarsText),
-        cliArgs: parseCliArgs(state.cliArgsText),
-        authMode: state.authMode,
-        cliVersion: state.cliVersion || null,
-        sandboxDockerfileExtra: state.sandboxDockerfileExtra,
-        enabled: state.enabled,
-        networkPolicy,
-      };
-
-      let providerId: string;
       if (mode === 'create') {
+        const networkPolicy: CliNetworkPolicy = {
+          mode: state.networkMode,
+          domains:
+            state.networkMode === 'allowlist' ? parseLinesList(state.networkDomainsText) : [],
+          ips: state.networkMode === 'allowlist' ? parseLinesList(state.networkIpsText) : [],
+        };
+
+        const payload = {
+          name: state.name,
+          label: state.label,
+          executablePath: state.executablePath,
+          wrapperPath: state.wrapperPath,
+          wrapperContent: state.wrapperContent,
+          envVars: parseEnvVars(state.envVarsText),
+          cliArgs: parseCliArgs(state.cliArgsText),
+          authMode: state.authMode,
+          cliVersion: state.cliVersion || null,
+          sandboxDockerfileExtra: state.sandboxDockerfileExtra,
+          enabled: state.enabled,
+          networkPolicy,
+        };
+
         const { provider: created } = await api.post<{ provider: CliProvider }>(
           '/cli-providers',
           payload,
         );
-        providerId = created.id;
+
+        const parsedSecrets = parseEnvVars(state.secretsText);
+        for (const [secretName, value] of Object.entries(parsedSecrets)) {
+          if (value.length > 0) {
+            await api.post(`/cli-providers/${created.id}/secrets`, { secretName, value });
+          }
+        }
       } else if (provider) {
-        await api.patch(`/cli-providers/${provider.id}`, payload);
-        providerId = provider.id;
+        await persistEdit();
       } else {
         throw new Error('No provider context for edit mode');
-      }
-
-      const parsedSecrets = parseEnvVars(state.secretsText);
-      const submittedNames = new Set(Object.keys(parsedSecrets));
-
-      for (const s of existingSecrets) {
-        if (!submittedNames.has(s.secretName)) {
-          await api.delete(`/cli-providers/${providerId}/secrets/${encodeURIComponent(s.secretName)}`);
-        }
-      }
-
-      for (const [secretName, value] of Object.entries(parsedSecrets)) {
-        if (value.length > 0) {
-          await api.post(`/cli-providers/${providerId}/secrets`, { secretName, value });
-        }
       }
 
       router.push('/settings/cli-providers');
