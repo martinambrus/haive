@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { CLI_INSTALL_METADATA, type CliProviderName } from '@haive/shared';
 import { buildProviderInstallLines } from '../cli-versions/codegen.js';
 
@@ -41,8 +42,13 @@ export function resolveImageTag(params: {
     };
   }
 
+  const contentHash = createHash('sha256')
+    .update(`${dockerfileLines.join('\n\n')}\n`, 'utf8')
+    .digest('hex')
+    .slice(0, 16);
+
   return {
-    tag: `haive-cli-sandbox:provider-${params.providerId}`,
+    tag: `haive-cli-sandbox:provider-${params.providerId}-${contentHash}`,
     shared: false,
     dockerfileLines,
   };

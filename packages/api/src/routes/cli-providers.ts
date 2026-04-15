@@ -51,6 +51,15 @@ async function resolveCliVersionForSave(
 }
 
 async function enqueueBuildForProvider(providerId: string, userId: string): Promise<void> {
+  const db = getDb();
+  await db
+    .update(schema.cliProviders)
+    .set({
+      sandboxImageBuildStatus: 'building',
+      sandboxImageBuildError: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.cliProviders.id, providerId));
   const payload: SandboxImageBuildJobPayload = { providerId, userId };
   const queue = getCliExecQueue();
   await queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
@@ -185,7 +194,10 @@ cliProviderRoutes.post('/', async (c) => {
 
   const created = inserted[0]!;
   await enqueueBuildForProvider(created.id, userId);
-  return c.json({ provider: created }, 201);
+  return c.json(
+    { provider: { ...created, sandboxImageBuildStatus: 'building' as const } },
+    201,
+  );
 });
 
 cliProviderRoutes.patch('/:id', async (c) => {
@@ -246,6 +258,13 @@ cliProviderRoutes.patch('/:id', async (c) => {
 
   if (imageInputsChanged) {
     await enqueueBuildForProvider(id, userId);
+    return c.json({
+      provider: {
+        ...updated[0]!,
+        sandboxImageBuildStatus: 'building' as const,
+        sandboxImageBuildError: null,
+      },
+    });
   }
 
   return c.json({ provider: updated[0]! });

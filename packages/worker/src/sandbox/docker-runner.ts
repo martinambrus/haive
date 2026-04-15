@@ -56,10 +56,17 @@ export interface DockerInspectResult {
   imageId: string | null;
 }
 
+export interface DockerRemoveResult {
+  ok: boolean;
+  stderr: string;
+  error?: string;
+}
+
 export interface DockerRunner {
   build(opts: DockerBuildOpts): Promise<DockerBuildResult>;
   run(opts: DockerRunOpts): Promise<DockerRunResult>;
   inspect(tag: string): Promise<DockerInspectResult>;
+  remove(ref: string): Promise<DockerRemoveResult>;
 }
 
 const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60 * 1000;
@@ -186,6 +193,19 @@ export const defaultDockerRunner: DockerRunner = {
       return { exists: true, imageId: result.stdout.trim() || null };
     }
     return { exists: false, imageId: null };
+  },
+
+  async remove(ref) {
+    const result = await spawnAndCollect(
+      'docker',
+      ['image', 'rm', '--force', ref],
+      { timeoutMs: 30_000 },
+    );
+    return {
+      ok: result.exitCode === 0,
+      stderr: result.stderr,
+      error: result.error,
+    };
   },
 
   async run(opts) {

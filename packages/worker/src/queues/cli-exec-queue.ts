@@ -27,7 +27,11 @@ import {
   type TaskJobPayload,
 } from '@haive/shared';
 import { refreshAllCliVersions } from '../cli-versions/index.js';
-import { defaultDockerRunner, type DockerVolumeMount } from '../sandbox/docker-runner.js';
+import {
+  defaultDockerRunner,
+  type DockerRunner,
+  type DockerVolumeMount,
+} from '../sandbox/docker-runner.js';
 import { renderDockerfile, resolveImageTag } from '../sandbox/image-cache.js';
 import { ensureComposedImage } from '../sandbox/composed-image-cache.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
@@ -273,6 +277,16 @@ async function ensureProviderSandboxImage(
 
   const existing = await defaultDockerRunner.inspect(resolution.tag);
   if (existing.exists) return resolution.tag;
+
+  const fresh = await db.query.cliProviders.findFirst({
+    where: eq(schema.cliProviders.id, provider.id),
+    columns: { sandboxImageBuildStatus: true },
+  });
+  if (fresh?.sandboxImageBuildStatus === 'building') {
+    throw new Error(
+      'sandbox image build is in progress, please wait for it to finish and retry',
+    );
+  }
 
   log.info(
     { providerId: provider.id, tag: resolution.tag },
@@ -832,6 +846,48 @@ async function markProvidersReady(
     .where(eq(schema.cliProviders.id, providerId));
 }
 
+export async function removeOrphanedPreviousImage(
+  db: Database,
+  args: { providerId: string; previousDbTag: string | null; newTag: string },
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<{ removed: boolean; reason: 'no-previous' | 'same-tag' | 'still-in-use' | 'missing' | 'remove-failed' | 'removed' }> {
+  const { previousDbTag, newTag, providerId } = args;
+  if (!previousDbTag) return { removed: false, reason: 'no-previous' };
+  if (previousDbTag === newTag) return { removed: false, reason: 'same-tag' };
+  const stillInUse = await db.query.cliProviders.findFirst({
+    where: eq(schema.cliProviders.sandboxImageTag, previousDbTag),
+    columns: { id: true },
+  });
+  if (stillInUse) {
+    log.info(
+      { providerId, previousDbTag, newTag, otherProviderId: stillInUse.id },
+      'keeping previous sandbox image, still referenced by another provider',
+    );
+    return { removed: false, reason: 'still-in-use' };
+  }
+  const inspected = await runner.inspect(previousDbTag);
+  if (!inspected.exists) return { removed: false, reason: 'missing' };
+  const removeResult = await runner.remove(previousDbTag);
+  if (removeResult.ok) {
+    log.info(
+      { providerId, previousDbTag, newTag },
+      'removed orphaned previous sandbox image',
+    );
+    return { removed: true, reason: 'removed' };
+  }
+  log.warn(
+    {
+      providerId,
+      previousDbTag,
+      newTag,
+      stderr: removeResult.stderr,
+      error: removeResult.error,
+    },
+    'failed to remove orphaned previous sandbox image',
+  );
+  return { removed: false, reason: 'remove-failed' };
+}
+
 export async function handleBuildSandboxImageJob(
   db: Database,
   payload: SandboxImageBuildJobPayload,
@@ -870,6 +926,7 @@ export async function handleBuildSandboxImageJob(
   }
 
   const { tag: imageTag, shared } = resolution;
+  const previousDbTag = provider.sandboxImageTag;
 
   await db
     .update(schema.cliProviders)
@@ -885,6 +942,11 @@ export async function handleBuildSandboxImageJob(
     const existing = await defaultDockerRunner.inspect(imageTag);
     if (existing.exists) {
       await markProvidersReady(db, imageTag, provider.id, shared);
+      await removeOrphanedPreviousImage(db, {
+        providerId: provider.id,
+        previousDbTag,
+        newTag: imageTag,
+      });
       log.info(
         { providerId: provider.id, imageTag, shared },
         'sandbox image cache hit',
@@ -892,6 +954,9 @@ export async function handleBuildSandboxImageJob(
       return { ok: true, providerId: provider.id, imageTag };
     }
   }
+
+  const previousInspect = await defaultDockerRunner.inspect(imageTag);
+  const previousImageId = previousInspect.exists ? previousInspect.imageId : null;
 
   const dockerfileContent = renderDockerfile(resolution);
   const buildDir = join(tmpdir(), `haive-sandbox-build-${randomUUID()}`);
@@ -911,6 +976,31 @@ export async function handleBuildSandboxImageJob(
 
     if (result.exitCode === 0) {
       await markProvidersReady(db, imageTag, provider.id, shared);
+      await removeOrphanedPreviousImage(db, {
+        providerId: provider.id,
+        previousDbTag,
+        newTag: imageTag,
+      });
+      if (previousImageId && result.imageId && previousImageId !== result.imageId) {
+        const removeResult = await defaultDockerRunner.remove(previousImageId);
+        if (!removeResult.ok) {
+          log.warn(
+            {
+              providerId: provider.id,
+              imageTag,
+              previousImageId,
+              stderr: removeResult.stderr,
+              error: removeResult.error,
+            },
+            'failed to remove previous sandbox image',
+          );
+        } else {
+          log.info(
+            { providerId: provider.id, imageTag, previousImageId },
+            'removed previous sandbox image',
+          );
+        }
+      }
       log.info(
         { providerId: provider.id, imageTag, durationMs: result.durationMs },
         'sandbox image build succeeded',
