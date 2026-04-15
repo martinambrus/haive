@@ -177,11 +177,20 @@ test.describe('task actions API', () => {
       expect(res.status()).toBe(200);
       expect((await res.json()).status).toBe('queued');
 
-      const rows = await sql<{ status: string; error_message: string | null }[]>`
-        select status, error_message from tasks where id = ${fixture.taskId}
+      // errorMessage is cleared synchronously in the retry transaction and
+      // is not restored to the original value when the worker re-fails the
+      // fixture task (markTaskFailed writes a new message). The presence of
+      // task.retried in the event log proves the synchronous handler ran.
+      const events = await sql<{ event_type: string }[]>`
+        select event_type from task_events
+        where task_id = ${fixture.taskId} and event_type = 'task.retried'
       `;
-      expect(rows[0]!.status).toBe('queued');
-      expect(rows[0]!.error_message).toBeNull();
+      expect(events).toHaveLength(1);
+
+      const rows = await sql<{ error_message: string | null }[]>`
+        select error_message from tasks where id = ${fixture.taskId}
+      `;
+      expect(rows[0]!.error_message).not.toBe('simulated failure');
     } finally {
       if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
       if (userId) await cleanupUser(sql, userId);

@@ -105,11 +105,19 @@ test.describe('step retry/skip UI', () => {
       expect(finalStatus).toBe('pending');
 
       const taskState = await waitForTaskState(sql, fixture.taskId, {
-        status: 'running',
         currentStepId: 'failing-step',
       });
-      expect(taskState.status).toBe('running');
       expect(taskState.currentStepId).toBe('failing-step');
+
+      // The step.retry event is inserted in the same transaction as the
+      // step flip, so it is observable even if the worker has already
+      // re-processed and re-failed the task (the fixture uses a fake
+      // step_id so the orchestrator cannot actually advance it).
+      const events = await sql<{ event_type: string }[]>`
+        select event_type from task_events
+        where task_id = ${fixture.taskId} and event_type = 'step.retry'
+      `;
+      expect(events).toHaveLength(1);
 
       await expect(page.getByRole('button', { name: 'Retry step' })).toBeHidden({
         timeout: 10_000,
@@ -144,11 +152,15 @@ test.describe('step retry/skip UI', () => {
       expect(finalStatus).toBe('skipped');
 
       const taskState = await waitForTaskState(sql, fixture.taskId, {
-        status: 'running',
         currentStepId: 'middle-step',
       });
-      expect(taskState.status).toBe('running');
       expect(taskState.currentStepId).toBe('middle-step');
+
+      const events = await sql<{ event_type: string }[]>`
+        select event_type from task_events
+        where task_id = ${fixture.taskId} and event_type = 'step.skip'
+      `;
+      expect(events).toHaveLength(1);
     } finally {
       if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
       if (userId) await cleanupUser(sql, userId);

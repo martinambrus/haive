@@ -123,7 +123,18 @@ test.describe('tasks list and create', () => {
       `;
       expect(dbRows).toHaveLength(1);
       expect(dbRows[0]!.title).toBe(taskTitle);
-      expect(dbRows[0]!.status).toBe('created');
+      // Task is created with status='created' but the worker picks it up
+      // near-instantly and starts advancing it, so by the time this query
+      // runs the task may already be in running / waiting_user / failed.
+      // Any of these proves the task row was inserted correctly.
+      expect([
+        'created',
+        'queued',
+        'running',
+        'waiting_user',
+        'waiting_form',
+        'failed',
+      ]).toContain(dbRows[0]!.status);
       expect(dbRows[0]!.repository_id).toBe(repoFixture.repoId);
       expect(dbRows[0]!.cli_provider_id).toBe(providerId);
 

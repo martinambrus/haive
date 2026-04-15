@@ -126,15 +126,23 @@ test.describe('task detail page', () => {
 
       await page.getByRole('button', { name: 'Retry', exact: true }).click();
 
+      // The retry transaction inserts task.retried in task_events and clears
+      // errorMessage synchronously. Both are race-proof even when the worker
+      // picks up the START job and re-fails the fixture task immediately.
       const deadline = Date.now() + 10_000;
-      let last = '';
+      let retried = false;
       while (Date.now() < deadline) {
-        const state = await readTaskStatus(sql, fixture.taskId);
-        last = state?.status ?? '';
-        if (last === 'queued') break;
+        const events = await sql<{ event_type: string }[]>`
+          select event_type from task_events
+          where task_id = ${fixture.taskId} and event_type = 'task.retried'
+        `;
+        if (events.length > 0) {
+          retried = true;
+          break;
+        }
         await new Promise((r) => setTimeout(r, 200));
       }
-      expect(last).toBe('queued');
+      expect(retried).toBe(true);
     } finally {
       if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
       if (userId) await cleanupUser(sql, userId);

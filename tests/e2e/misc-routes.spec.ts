@@ -165,14 +165,27 @@ test.describe('misc routes', () => {
       userId = await registerAndGetUserId(page.request, email);
       fixture = await seedRepoFixture(sql, userId, 'refresh');
 
+      const beforeRows = await sql<{ updated_at: Date }[]>`
+        select updated_at from repositories where id = ${fixture.repoId}
+      `;
+      const beforeUpdatedAt = beforeRows[0]!.updated_at;
+
       const res = await page.request.post(`${API_BASE}/repos/${fixture.repoId}/refresh-tree`);
       expect(res.status()).toBe(200);
       expect((await res.json()).ok).toBe(true);
 
-      const rows = await sql<{ status: string }[]>`
-        select status from repositories where id = ${fixture.repoId}
+      // The refresh handler synchronously sets status='cloning' and clears
+      // statusMessage, then enqueues a scan/clone job. The worker picks up
+      // near-instantly and may flip the repo to 'failed' (fixture uses a
+      // non-existent /tmp/e2e-fake path) before the test can observe the
+      // intermediate 'cloning' state. Verify that the refresh ran by checking
+      // updated_at advanced and the status is one of the expected downstream
+      // values.
+      const rows = await sql<{ status: string; updated_at: Date }[]>`
+        select status, updated_at from repositories where id = ${fixture.repoId}
       `;
-      expect(rows[0]!.status).toBe('cloning');
+      expect(rows[0]!.updated_at.getTime()).toBeGreaterThan(beforeUpdatedAt.getTime());
+      expect(['cloning', 'ready', 'failed']).toContain(rows[0]!.status);
     } finally {
       if (fixture) await cleanupRepoFixture(sql, fixture.repoId);
       if (userId) await cleanupUser(sql, userId);

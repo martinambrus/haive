@@ -145,10 +145,11 @@ test.describe('task data API', () => {
       expect(stepRows[0]!.status).toBe('pending');
       expect(stepRows[0]!.error_message).toBeNull();
 
-      const taskRows = await sql<{ status: string; current_step_id: string | null }[]>`
-        select status, current_step_id from tasks where id = ${fixture.taskId}
+      // task.currentStepId is set synchronously in the retry transaction and
+      // is not touched by markTaskFailed, so it survives any worker race.
+      const taskRows = await sql<{ current_step_id: string | null }[]>`
+        select current_step_id from tasks where id = ${fixture.taskId}
       `;
-      expect(taskRows[0]!.status).toBe('running');
       expect(taskRows[0]!.current_step_id).toBe('failing-step');
 
       const eventRows = await sql<{ event_type: string }[]>`
@@ -186,11 +187,15 @@ test.describe('task data API', () => {
       `;
       expect(stepRows[0]!.status).toBe('skipped');
 
-      const taskRows = await sql<{ status: string; current_step_id: string | null }[]>`
-        select status, current_step_id from tasks where id = ${fixture.taskId}
+      const taskRows = await sql<{ current_step_id: string | null }[]>`
+        select current_step_id from tasks where id = ${fixture.taskId}
       `;
-      expect(taskRows[0]!.status).toBe('running');
       expect(taskRows[0]!.current_step_id).toBe('middle-step');
+
+      const eventRows = await sql<{ event_type: string }[]>`
+        select event_type from task_events where task_id = ${fixture.taskId}
+      `;
+      expect(eventRows.map((e) => e.event_type)).toContain('step.skip');
     } finally {
       if (fixture) await cleanupTaskFixture(sql, fixture.taskId);
       if (userId) await cleanupUser(sql, userId);
