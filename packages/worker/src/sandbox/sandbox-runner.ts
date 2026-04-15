@@ -36,6 +36,7 @@ export interface SandboxRunnerOptions {
   wrapperSandboxPath?: string;
   workdir?: string;
   docker?: DockerRunner;
+  extraMounts?: DockerVolumeMount[];
 }
 
 export interface SandboxRunResult extends DockerRunResult {
@@ -67,6 +68,7 @@ export async function runInSandbox(
 
   const mounts: DockerVolumeMount[] = [
     { source: volumeName, target: wrapperSandboxRoot, readOnly: true },
+    ...(options.extraMounts ?? []),
   ];
 
   let wrapperId: string | null = null;

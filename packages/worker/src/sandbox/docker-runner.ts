@@ -25,6 +25,7 @@ export interface DockerVolumeMount {
   source: string;
   target: string;
   readOnly?: boolean;
+  subpath?: string;
 }
 
 export interface DockerRunOpts {
@@ -201,8 +202,19 @@ export const defaultDockerRunner: DockerRunner = {
     }
     if (opts.mounts) {
       for (const m of opts.mounts) {
-        const suffix = m.readOnly ? ':ro' : '';
-        args.push('-v', `${m.source}:${m.target}${suffix}`);
+        if (m.subpath) {
+          const parts = [
+            'type=volume',
+            `source=${m.source}`,
+            `destination=${m.target}`,
+            `volume-subpath=${m.subpath}`,
+          ];
+          if (m.readOnly) parts.push('readonly');
+          args.push('--mount', parts.join(','));
+        } else {
+          const suffix = m.readOnly ? ':ro' : '';
+          args.push('-v', `${m.source}:${m.target}${suffix}`);
+        }
       }
     }
     args.push(opts.image, ...opts.cmd);

@@ -26,7 +26,7 @@ import {
   type TaskJobPayload,
 } from '@haive/shared';
 import { refreshAllCliVersions } from '../cli-versions/index.js';
-import { defaultDockerRunner } from '../sandbox/docker-runner.js';
+import { defaultDockerRunner, type DockerVolumeMount } from '../sandbox/docker-runner.js';
 import { renderDockerfile, resolveImageTag } from '../sandbox/image-cache.js';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type { BaseCliAdapter } from '../cli-adapters/base-adapter.js';
@@ -156,6 +156,7 @@ async function executeByKind(
   deps: CliExecDeps,
   secrets: Record<string, string>,
 ): Promise<ExecutionOutcome> {
+  const repoMount = await resolveTaskRepoMount(db, payload.taskId);
   switch (payload.kind) {
     case 'cli': {
       const { wrapperContent, sandboxImage } = await loadProviderRuntimeConfig(
@@ -169,14 +170,15 @@ async function executeByKind(
         secrets,
         wrapperContent,
         sandboxImage,
+        repoMount,
       );
     }
     case 'api':
       return executeApiSpec(db, payload, secrets);
     case 'subagent_sequential':
-      return executeSubAgentSequential(db, payload, secrets);
+      return executeSubAgentSequential(db, payload, secrets, repoMount);
     case 'subagent_native':
-      return executeSubAgentNative(db, payload, deps, secrets);
+      return executeSubAgentNative(db, payload, deps, secrets, repoMount);
     default:
       throw new Error(
         `unknown cli exec kind: ${(payload as { kind: CliExecInvocationKind }).kind}`,
@@ -202,6 +204,25 @@ async function loadProviderRuntimeConfig(
   return {
     wrapperContent: row.wrapperContent ?? null,
     sandboxImage,
+  };
+}
+
+const REPO_VOLUME_NAME = 'haive_repos';
+const REPO_MOUNT_TARGET = '/haive/workdir';
+
+async function resolveTaskRepoMount(
+  db: Database,
+  taskId: string,
+): Promise<DockerVolumeMount | null> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { userId: true, repositoryId: true },
+  });
+  if (!task?.repositoryId) return null;
+  return {
+    source: REPO_VOLUME_NAME,
+    target: REPO_MOUNT_TARGET,
+    subpath: `${task.userId}/${task.repositoryId}`,
   };
 }
 
@@ -247,12 +268,13 @@ async function executeCliSpec(
   secrets: Record<string, string> = {},
   wrapperContent: string | null = null,
   sandboxImage: string | null = null,
+  repoMount: DockerVolumeMount | null = null,
 ): Promise<ExecutionOutcome> {
   const mergedSpec: CliCommandSpec = {
     ...spec,
     env: { ...spec.env, ...secrets },
   };
-  const spawner: CliSpawner = createSandboxSpawner(wrapperContent, sandboxImage);
+  const spawner: CliSpawner = createSandboxSpawner(wrapperContent, sandboxImage, repoMount);
   const result = await spawner(mergedSpec, { timeoutMs });
   void deps;
   return {
@@ -266,8 +288,12 @@ async function executeCliSpec(
 function createSandboxSpawner(
   wrapperContent: string | null | undefined,
   sandboxImage: string | null = null,
+  repoMount: DockerVolumeMount | null = null,
 ): CliSpawner {
   return async (spec, opts: SpawnOptions = {}): Promise<CliExecutionResult> => {
+    const runnerOptions: Parameters<typeof runInSandbox>[1] = {};
+    if (sandboxImage) runnerOptions.image = sandboxImage;
+    if (repoMount) runnerOptions.extraMounts = [repoMount];
     const result = await runInSandbox(
       {
         command: spec.command,
@@ -279,7 +305,7 @@ function createSandboxSpawner(
         onStderrChunk: opts.onStderrChunk,
         signal: opts.signal,
       },
-      sandboxImage ? { image: sandboxImage } : undefined,
+      runnerOptions,
     );
     return {
       exitCode: result.exitCode,
@@ -416,6 +442,7 @@ async function executeSubAgentNative(
   payload: CliExecJobPayload,
   deps: CliExecDeps,
   secrets: Record<string, string>,
+  repoMount: DockerVolumeMount | null,
 ): Promise<ExecutionOutcome> {
   if (!payload.cliProviderId) {
     throw new Error('subagent_native requires cliProviderId');
@@ -446,6 +473,7 @@ async function executeSubAgentNative(
     secrets,
     provider.wrapperContent,
     sandboxImage,
+    repoMount,
   );
 }
 
@@ -453,6 +481,7 @@ async function executeSubAgentSequential(
   db: Database,
   payload: CliExecJobPayload,
   secrets: Record<string, string>,
+  repoMount: DockerVolumeMount | null,
 ): Promise<ExecutionOutcome> {
   if (!payload.cliProviderId) {
     throw new Error('subagent_sequential requires cliProviderId');
@@ -471,7 +500,7 @@ async function executeSubAgentSequential(
   }
 
   const sandboxImage = await ensureProviderSandboxImage(db, provider);
-  const spawner = createSandboxSpawner(provider.wrapperContent, sandboxImage);
+  const spawner = createSandboxSpawner(provider.wrapperContent, sandboxImage, repoMount);
   const result: SubAgentRunResult = await runSequentialSubAgent(
     invocation,
     (prompt) =>

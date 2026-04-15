@@ -9,6 +9,7 @@ export interface MountSpec {
   target: string;
   mode: 'bind' | 'volume';
   readOnly?: boolean;
+  subpath?: string;
 }
 
 export interface RunContainerOptions {
