@@ -2,6 +2,12 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
+import {
+  findEnvTemplateByHash,
+  getTaskEnvTemplate,
+  hashDockerfile,
+  linkTaskToEnvTemplate,
+} from './_shared.js';
 
 export interface GenerateDockerfileDetect {
   envTemplateId: string;
@@ -30,10 +36,7 @@ export const generateDockerfileStep: StepDefinition<
   },
 
   async detect(ctx) {
-    const templateName = `task-${ctx.taskId.slice(0, 8)}`;
-    const row = await ctx.db.query.envTemplates.findFirst({
-      where: (t, { and, eq: eqOp }) => and(eqOp(t.userId, ctx.userId), eqOp(t.name, templateName)),
-    });
+    const row = await getTaskEnvTemplate(ctx.db, ctx.taskId);
     if (!row) {
       throw new Error(
         `env template for task ${ctx.taskId} not found; declare-deps step must run first`,
@@ -70,27 +73,72 @@ export const generateDockerfileStep: StepDefinition<
   async apply(ctx, args) {
     const dockerfile = String(args.formValues.dockerfile ?? '').trim();
     if (!dockerfile) throw new Error('dockerfile cannot be empty');
+    const dockerfileHash = hashDockerfile(dockerfile);
+    const currentId = args.detected.envTemplateId;
+
+    const existingByHash = await findEnvTemplateByHash(ctx.db, ctx.userId, dockerfileHash);
+    if (existingByHash && existingByHash.id !== currentId) {
+      await linkTaskToEnvTemplate(ctx.db, ctx.taskId, existingByHash.id);
+      await ctx.db
+        .delete(schema.envTemplates)
+        .where(eq(schema.envTemplates.id, currentId));
+      ctx.logger.info(
+        {
+          dedupedFrom: currentId,
+          envTemplateId: existingByHash.id,
+          dockerfileHash,
+        },
+        'env template deduped to existing hash',
+      );
+      return {
+        envTemplateId: existingByHash.id,
+        dockerfileLength: dockerfile.length,
+      };
+    }
+
     await ctx.db
       .update(schema.envTemplates)
-      .set({ generatedDockerfile: dockerfile, updatedAt: new Date() })
-      .where(eq(schema.envTemplates.id, args.detected.envTemplateId));
+      .set({
+        generatedDockerfile: dockerfile,
+        dockerfileHash,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.envTemplates.id, currentId));
     ctx.logger.info(
       {
-        envTemplateId: args.detected.envTemplateId,
+        envTemplateId: currentId,
         dockerfileLength: dockerfile.length,
+        dockerfileHash,
       },
       'dockerfile saved',
     );
     return {
-      envTemplateId: args.detected.envTemplateId,
+      envTemplateId: currentId,
       dockerfileLength: dockerfile.length,
     };
   },
 };
 
+type PackageManager =
+  | 'npm'
+  | 'pnpm'
+  | 'yarn'
+  | 'bun'
+  | 'composer'
+  | 'pip'
+  | 'poetry'
+  | 'uv'
+  | 'pdm'
+  | 'pipenv'
+  | 'bundler'
+  | 'gomod'
+  | 'cargo';
+
 interface DeclaredDepsShape {
   runtimes?: string[];
   versions?: { node?: string | null; php?: string | null; python?: string | null };
+  packageManagers?: Partial<Record<string, PackageManager | null>>;
+  preinstallDeps?: boolean;
   containerTool?: string;
   database?: { kind?: string; version?: string | null };
   lspServers?: string[];
@@ -123,7 +171,7 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     lines.push(`RUN curl -fsSL https://deb.nodesource.com/setup_${nodeMajor}.x | bash - \\`);
     lines.push('    && apt-get install -y --no-install-recommends nodejs \\');
     lines.push('    && rm -rf /var/lib/apt/lists/* \\');
-    lines.push('    && npm install -g pnpm');
+    lines.push('    && corepack enable');
     lines.push('');
   }
 
@@ -229,7 +277,98 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   }
 
   lines.push('WORKDIR /workspace');
+  lines.push('');
+
+  if (deps.preinstallDeps && deps.packageManagers) {
+    for (const [language, manager] of Object.entries(deps.packageManagers)) {
+      if (!manager) continue;
+      const block = renderDepInstallBlock(language, manager);
+      if (block.length === 0) continue;
+      lines.push(`# Project dependencies (${language} via ${manager})`);
+      lines.push(...block);
+      lines.push('');
+    }
+  }
+
   lines.push('CMD ["bash"]');
 
   return lines.join('\n') + '\n';
+}
+
+function renderDepInstallBlock(language: string, manager: PackageManager): string[] {
+  switch (manager) {
+    case 'npm':
+      return [
+        'COPY package.json package-lock.json ./',
+        'RUN npm ci --omit=dev',
+      ];
+    case 'pnpm':
+      return [
+        'COPY package.json pnpm-lock.yaml ./',
+        'RUN pnpm install --frozen-lockfile --prod',
+      ];
+    case 'yarn':
+      return [
+        'COPY package.json yarn.lock ./',
+        'RUN yarn install --frozen-lockfile --production',
+      ];
+    case 'bun':
+      return [
+        'RUN curl -fsSL https://bun.sh/install | bash && ln -s /root/.bun/bin/bun /usr/local/bin/bun',
+        'COPY package.json bun.lockb ./',
+        'RUN bun install --frozen-lockfile --production',
+      ];
+    case 'composer':
+      return [
+        'COPY composer.json composer.lock ./',
+        'RUN composer install --no-dev --prefer-dist --no-scripts --no-progress',
+      ];
+    case 'pip':
+      return [
+        'COPY requirements.txt ./',
+        'RUN pip install --break-system-packages --no-cache-dir -r requirements.txt',
+      ];
+    case 'poetry':
+      return [
+        'RUN pip install --break-system-packages --no-cache-dir poetry',
+        'COPY pyproject.toml poetry.lock ./',
+        'RUN poetry config virtualenvs.create false && poetry install --no-root --only main',
+      ];
+    case 'uv':
+      return [
+        'RUN pip install --break-system-packages --no-cache-dir uv',
+        'COPY pyproject.toml uv.lock ./',
+        'RUN uv sync --no-dev --frozen',
+      ];
+    case 'pdm':
+      return [
+        'RUN pip install --break-system-packages --no-cache-dir pdm',
+        'COPY pyproject.toml pdm.lock ./',
+        'RUN pdm install --prod --no-lock',
+      ];
+    case 'pipenv':
+      return [
+        'RUN pip install --break-system-packages --no-cache-dir pipenv',
+        'COPY Pipfile Pipfile.lock ./',
+        'RUN pipenv install --deploy --system',
+      ];
+    case 'bundler':
+      return [
+        'COPY Gemfile Gemfile.lock ./',
+        'RUN bundle config set --local without "development test" && bundle install',
+      ];
+    case 'gomod':
+      return [
+        'COPY go.mod go.sum ./',
+        'RUN go mod download',
+      ];
+    case 'cargo':
+      return [
+        'COPY Cargo.toml Cargo.lock ./',
+        'RUN mkdir -p src && echo "fn main() {}" > src/main.rs && cargo fetch && rm -rf src',
+      ];
+    default:
+      void language;
+      return [];
+  }
 }

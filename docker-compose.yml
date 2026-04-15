@@ -107,6 +107,7 @@ services:
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
       - haive_repos:/var/lib/haive/repos
       - haive_wrappers:/var/lib/haive/wrappers
+      - haive_squid_configs:/var/lib/haive/squid-configs
     networks:
       - haive-network
 
@@ -147,3 +148,5 @@ volumes:
   haive_repos:
   haive_wrappers:
     name: haive_wrappers
+  haive_squid_configs:
+    name: haive_squid_configs

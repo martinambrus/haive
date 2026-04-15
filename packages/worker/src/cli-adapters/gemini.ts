@@ -10,7 +10,7 @@ import type {
 export class GeminiAdapter extends BaseCliAdapter {
   readonly providerName = 'gemini' as const;
   readonly defaultExecutable = 'gemini';
-  readonly supportsSubagents = true;
+  readonly supportsSubagents = false;
   readonly supportsApi = true;
   readonly supportsCliAuth = true;
   readonly defaultAuthMode = 'subscription' as const;

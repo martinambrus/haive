@@ -6,6 +6,7 @@ import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import { defaultDockerRunner, type DockerRunner } from '../../../sandbox/docker-runner.js';
+import { getTaskEnvTemplate } from './_shared.js';
 
 export interface BuildImageDetect {
   envTemplateId: string;
@@ -47,11 +48,7 @@ export function createBuildImageStep(
     },
 
     async detect(ctx) {
-      const templateName = `task-${ctx.taskId.slice(0, 8)}`;
-      const row = await ctx.db.query.envTemplates.findFirst({
-        where: (t, { and, eq: eqOp }) =>
-          and(eqOp(t.userId, ctx.userId), eqOp(t.name, templateName)),
-      });
+      const row = await getTaskEnvTemplate(ctx.db, ctx.taskId);
       if (!row) {
         throw new Error(`env template for task ${ctx.taskId} not found`);
       }
@@ -130,16 +127,17 @@ export function createBuildImageStep(
       try {
         const dockerfilePath = path.join(tempDir, 'Dockerfile');
         await writeFile(dockerfilePath, detected.dockerfile, 'utf8');
+        const contextDir = ctx.repoPath || tempDir;
         ctx.logger.info(
           {
             envTemplateId: detected.envTemplateId,
             imageTag,
-            contextDir: tempDir,
+            contextDir,
           },
           'docker build starting',
         );
         const buildResult = await runner.build({
-          contextDir: tempDir,
+          contextDir,
           dockerfilePath,
           tag: imageTag,
           onStdoutChunk: (chunk) => ctx.logger.debug({ chunk }, 'docker stdout'),
@@ -160,6 +158,7 @@ export function createBuildImageStep(
           .update(schema.envTemplates)
           .set({
             status: 'ready',
+            imageTag,
             builtImageId: buildResult.imageId ?? imageTag,
             lastBuiltAt: new Date(),
             updatedAt: new Date(),

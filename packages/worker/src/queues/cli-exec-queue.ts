@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Queue, Worker, type Job } from 'bullmq';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { GoogleGenAI } from '@google/genai';
@@ -15,6 +15,7 @@ import {
   logger,
   type CliExecInvocationKind,
   type CliExecJobPayload,
+  type CliNetworkPolicy,
   type CliProbeJobPayload,
   type CliProbePathResult,
   type CliProbeResult,
@@ -28,6 +29,8 @@ import {
 import { refreshAllCliVersions } from '../cli-versions/index.js';
 import { defaultDockerRunner, type DockerVolumeMount } from '../sandbox/docker-runner.js';
 import { renderDockerfile, resolveImageTag } from '../sandbox/image-cache.js';
+import { ensureComposedImage } from '../sandbox/composed-image-cache.js';
+import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type { BaseCliAdapter } from '../cli-adapters/base-adapter.js';
 import type {
@@ -157,11 +160,13 @@ async function executeByKind(
   secrets: Record<string, string>,
 ): Promise<ExecutionOutcome> {
   const repoMount = await resolveTaskRepoMount(db, payload.taskId);
+  const sandboxWorkdir = await resolveTaskSandboxWorkdir(db, payload.taskId);
   switch (payload.kind) {
     case 'cli': {
-      const { wrapperContent, sandboxImage } = await loadProviderRuntimeConfig(
+      const { wrapperContent, sandboxImage, networkPolicy } = await loadProviderRuntimeConfig(
         db,
         payload.cliProviderId,
+        payload.taskId,
       );
       return executeCliSpec(
         payload.spec as CliCommandSpec,
@@ -171,14 +176,16 @@ async function executeByKind(
         wrapperContent,
         sandboxImage,
         repoMount,
+        sandboxWorkdir,
+        networkPolicy,
       );
     }
     case 'api':
       return executeApiSpec(db, payload, secrets);
     case 'subagent_sequential':
-      return executeSubAgentSequential(db, payload, secrets, repoMount);
+      return executeSubAgentSequential(db, payload, secrets, repoMount, sandboxWorkdir);
     case 'subagent_native':
-      return executeSubAgentNative(db, payload, deps, secrets, repoMount);
+      return executeSubAgentNative(db, payload, deps, secrets, repoMount, sandboxWorkdir);
     default:
       throw new Error(
         `unknown cli exec kind: ${(payload as { kind: CliExecInvocationKind }).kind}`,
@@ -189,26 +196,31 @@ async function executeByKind(
 interface ProviderRuntimeConfig {
   wrapperContent: string | null;
   sandboxImage: string | null;
+  networkPolicy: CliNetworkPolicy | null;
 }
 
 async function loadProviderRuntimeConfig(
   db: Database,
   providerId?: string | null,
+  taskId?: string | null,
 ): Promise<ProviderRuntimeConfig> {
-  if (!providerId) return { wrapperContent: null, sandboxImage: null };
+  if (!providerId) {
+    return { wrapperContent: null, sandboxImage: null, networkPolicy: null };
+  }
   const row = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, providerId),
   });
-  if (!row) return { wrapperContent: null, sandboxImage: null };
-  const sandboxImage = await ensureProviderSandboxImage(db, row);
+  if (!row) return { wrapperContent: null, sandboxImage: null, networkPolicy: null };
+  const sandboxImage = await resolveSandboxImageTag(db, taskId ?? null, row);
   return {
     wrapperContent: row.wrapperContent ?? null,
     sandboxImage,
+    networkPolicy: row.networkPolicy,
   };
 }
 
 const REPO_VOLUME_NAME = 'haive_repos';
-const REPO_MOUNT_TARGET = '/haive/workdir';
+const REPO_MOUNT_TARGET = SANDBOX_WORKDIR;
 
 async function resolveTaskRepoMount(
   db: Database,
@@ -224,6 +236,21 @@ async function resolveTaskRepoMount(
     target: REPO_MOUNT_TARGET,
     subpath: `${task.userId}/${task.repositoryId}`,
   };
+}
+
+async function resolveTaskSandboxWorkdir(
+  db: Database,
+  taskId: string,
+): Promise<string> {
+  const row = await db.query.taskSteps.findFirst({
+    where: and(
+      eq(schema.taskSteps.taskId, taskId),
+      eq(schema.taskSteps.stepId, '01-worktree-setup'),
+    ),
+    columns: { output: true },
+  });
+  const output = row?.output as { sandboxWorktreePath?: string } | null;
+  return output?.sandboxWorktreePath ?? SANDBOX_WORKDIR;
 }
 
 async function ensureProviderSandboxImage(
@@ -261,6 +288,28 @@ async function ensureProviderSandboxImage(
   return result.imageTag ?? null;
 }
 
+async function resolveSandboxImageTag(
+  db: Database,
+  taskId: string | null,
+  provider: {
+    id: string;
+    userId: string;
+    name: string;
+    cliVersion: string | null;
+    sandboxDockerfileExtra: string | null;
+  },
+): Promise<string | null> {
+  if (taskId) {
+    const composedTag = await ensureComposedImage(db, taskId, {
+      name: provider.name as CliProviderName,
+      cliVersion: provider.cliVersion?.trim() || null,
+      sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
+    });
+    if (composedTag) return composedTag;
+  }
+  return ensureProviderSandboxImage(db, provider);
+}
+
 async function executeCliSpec(
   spec: CliCommandSpec,
   deps: CliExecDeps,
@@ -269,12 +318,20 @@ async function executeCliSpec(
   wrapperContent: string | null = null,
   sandboxImage: string | null = null,
   repoMount: DockerVolumeMount | null = null,
+  sandboxWorkdir: string = SANDBOX_WORKDIR,
+  networkPolicy: CliNetworkPolicy | null = null,
 ): Promise<ExecutionOutcome> {
   const mergedSpec: CliCommandSpec = {
     ...spec,
     env: { ...spec.env, ...secrets },
   };
-  const spawner: CliSpawner = createSandboxSpawner(wrapperContent, sandboxImage, repoMount);
+  const spawner: CliSpawner = createSandboxSpawner(
+    wrapperContent,
+    sandboxImage,
+    repoMount,
+    sandboxWorkdir,
+    networkPolicy,
+  );
   const result = await spawner(mergedSpec, { timeoutMs });
   void deps;
   return {
@@ -289,11 +346,14 @@ function createSandboxSpawner(
   wrapperContent: string | null | undefined,
   sandboxImage: string | null = null,
   repoMount: DockerVolumeMount | null = null,
+  sandboxWorkdir: string = SANDBOX_WORKDIR,
+  networkPolicy: CliNetworkPolicy | null = null,
 ): CliSpawner {
   return async (spec, opts: SpawnOptions = {}): Promise<CliExecutionResult> => {
-    const runnerOptions: Parameters<typeof runInSandbox>[1] = {};
+    const runnerOptions: Parameters<typeof runInSandbox>[1] = { workdir: sandboxWorkdir };
     if (sandboxImage) runnerOptions.image = sandboxImage;
     if (repoMount) runnerOptions.extraMounts = [repoMount];
+    if (networkPolicy) runnerOptions.networkPolicy = networkPolicy;
     const result = await runInSandbox(
       {
         command: spec.command,
@@ -443,6 +503,7 @@ async function executeSubAgentNative(
   deps: CliExecDeps,
   secrets: Record<string, string>,
   repoMount: DockerVolumeMount | null,
+  sandboxWorkdir: string,
 ): Promise<ExecutionOutcome> {
   if (!payload.cliProviderId) {
     throw new Error('subagent_native requires cliProviderId');
@@ -462,10 +523,10 @@ async function executeSubAgentNative(
 
   const prompt = assembleNativePrompt(invocation);
   const spec = adapter.buildCliInvocation(provider, prompt, {
-    cwd: undefined,
+    cwd: sandboxWorkdir,
     extraEnv: secrets,
   });
-  const sandboxImage = await ensureProviderSandboxImage(db, provider);
+  const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
   return executeCliSpec(
     spec,
     deps,
@@ -474,6 +535,8 @@ async function executeSubAgentNative(
     provider.wrapperContent,
     sandboxImage,
     repoMount,
+    sandboxWorkdir,
+    provider.networkPolicy,
   );
 }
 
@@ -482,6 +545,7 @@ async function executeSubAgentSequential(
   payload: CliExecJobPayload,
   secrets: Record<string, string>,
   repoMount: DockerVolumeMount | null,
+  sandboxWorkdir: string,
 ): Promise<ExecutionOutcome> {
   if (!payload.cliProviderId) {
     throw new Error('subagent_sequential requires cliProviderId');
@@ -499,12 +563,18 @@ async function executeSubAgentSequential(
     throw new Error(`subagent_sequential expected sequential invocation, got ${invocation.mode}`);
   }
 
-  const sandboxImage = await ensureProviderSandboxImage(db, provider);
-  const spawner = createSandboxSpawner(provider.wrapperContent, sandboxImage, repoMount);
+  const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
+  const spawner = createSandboxSpawner(
+    provider.wrapperContent,
+    sandboxImage,
+    repoMount,
+    sandboxWorkdir,
+    provider.networkPolicy,
+  );
   const result: SubAgentRunResult = await runSequentialSubAgent(
     invocation,
     (prompt) =>
-      adapter.buildCliInvocation(provider, prompt, { cwd: undefined, extraEnv: secrets }),
+      adapter.buildCliInvocation(provider, prompt, { cwd: sandboxWorkdir, extraEnv: secrets }),
     spawner,
     { timeoutMs: payload.timeoutMs },
   );

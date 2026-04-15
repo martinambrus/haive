@@ -2,13 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { chmod } from 'node:fs/promises';
-import { logger } from '@haive/shared';
+import { logger, type CliNetworkPolicy } from '@haive/shared';
 import {
   defaultDockerRunner,
   type DockerRunner,
   type DockerRunResult,
   type DockerVolumeMount,
 } from './docker-runner.js';
+import { createEgressGateway, type EgressGateway } from './egress-gateway.js';
 
 const log = logger.child({ module: 'sandbox-runner' });
 
@@ -16,7 +17,8 @@ const DEFAULT_SANDBOX_IMAGE = process.env.SANDBOX_IMAGE ?? 'haive-cli-sandbox:la
 const DEFAULT_WRAPPER_VOLUME = process.env.SANDBOX_WRAPPER_HOST_VOLUME ?? 'haive_wrappers';
 const DEFAULT_WRAPPER_WORKER_PATH = process.env.SANDBOX_WRAPPER_WORKER_PATH ?? '/var/lib/haive/wrappers';
 const DEFAULT_WRAPPER_SANDBOX_PATH = '/haive/wrappers';
-const DEFAULT_WORKDIR = '/haive/workdir';
+export const SANDBOX_WORKDIR = '/haive/workdir';
+const DEFAULT_WORKDIR = SANDBOX_WORKDIR;
 
 export interface SandboxRunSpec {
   command: string;
@@ -37,6 +39,7 @@ export interface SandboxRunnerOptions {
   workdir?: string;
   docker?: DockerRunner;
   extraMounts?: DockerVolumeMount[];
+  networkPolicy?: CliNetworkPolicy | null;
 }
 
 export interface SandboxRunResult extends DockerRunResult {
@@ -71,33 +74,42 @@ export async function runInSandbox(
     ...(options.extraMounts ?? []),
   ];
 
+  const policy = options.networkPolicy ?? null;
+
   let wrapperId: string | null = null;
   let wrapperWorkerPath: string | null = null;
   let resolvedCommand = spec.command;
+  let gateway: EgressGateway | null = null;
 
-  if (spec.wrapperContent && spec.wrapperContent.trim().length > 0) {
-    wrapperId = randomUUID();
-    const fileName = 'wrapper.sh';
-    wrapperWorkerPath = join(wrapperWorkerRoot, wrapperId, fileName);
-    const wrapperSandboxPath = `${wrapperSandboxRoot}/${wrapperId}/${fileName}`;
-    try {
+  try {
+    if (policy?.mode === 'allowlist') {
+      gateway = await createEgressGateway({
+        domains: policy.domains,
+        ips: policy.ips,
+      });
+    }
+
+    if (spec.wrapperContent && spec.wrapperContent.trim().length > 0) {
+      wrapperId = randomUUID();
+      const fileName = 'wrapper.sh';
+      wrapperWorkerPath = join(wrapperWorkerRoot, wrapperId, fileName);
+      const wrapperSandboxPath = `${wrapperSandboxRoot}/${wrapperId}/${fileName}`;
       await mkdir(dirname(wrapperWorkerPath), { recursive: true });
       await writeFile(wrapperWorkerPath, normalizeWrapperContent(spec.wrapperContent), 'utf8');
       await chmod(wrapperWorkerPath, 0o755);
       resolvedCommand = wrapperSandboxPath;
-    } catch (err) {
-      log.warn({ err, wrapperWorkerPath }, 'failed to materialize wrapper');
-      throw err;
     }
-  }
 
-  try {
+    const network = resolveDockerNetwork(policy, gateway);
+    const env = mergeProxyEnv(spec.env, gateway);
+
     const result = await runner.run({
       image,
       cmd: [resolvedCommand, ...spec.args],
-      env: spec.env,
+      env,
       mounts,
       workdir,
+      network,
       timeoutMs: spec.timeoutMs,
       onStdoutChunk: spec.onStdoutChunk,
       onStderrChunk: spec.onStderrChunk,
@@ -111,7 +123,39 @@ export async function runInSandbox(
         log.warn({ err, wrapperDir }, 'failed to cleanup wrapper dir');
       });
     }
+    if (gateway) {
+      gateway.cleanup().catch((err: unknown) => {
+        log.warn({ err }, 'egress gateway cleanup failed');
+      });
+    }
   }
+}
+
+function resolveDockerNetwork(
+  policy: CliNetworkPolicy | null,
+  gateway: EgressGateway | null,
+): string | undefined {
+  if (gateway) return gateway.networkName;
+  if (policy?.mode === 'none') return 'none';
+  return undefined;
+}
+
+function mergeProxyEnv(
+  base: Record<string, string> | undefined,
+  gateway: EgressGateway | null,
+): Record<string, string> | undefined {
+  if (!gateway) return base;
+  const proxyUrl = gateway.proxyUrl;
+  const noProxy = 'localhost,127.0.0.1,::1';
+  return {
+    ...(base ?? {}),
+    HTTP_PROXY: proxyUrl,
+    HTTPS_PROXY: proxyUrl,
+    http_proxy: proxyUrl,
+    https_proxy: proxyUrl,
+    NO_PROXY: noProxy,
+    no_proxy: noProxy,
+  };
 }
 
 function normalizeWrapperContent(content: string): string {

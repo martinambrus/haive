@@ -173,6 +173,7 @@ cliProviderRoutes.post('/', async (c) => {
       envVars: body.envVars ?? null,
       cliArgs: body.cliArgs ? normalizeCliArgsArray(body.cliArgs) : null,
       supportsSubagents: meta.supportsSubagents,
+      networkPolicy: body.networkPolicy ?? { mode: 'full', domains: [], ips: [] },
       authMode: body.authMode,
       cliVersion: resolvedVersion,
       sandboxDockerfileExtra: body.sandboxDockerfileExtra?.length
@@ -216,6 +217,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
   if (body.envVars !== undefined) updates.envVars = body.envVars;
   if (body.cliArgs !== undefined) updates.cliArgs = normalizeCliArgsArray(body.cliArgs);
   if (body.authMode !== undefined) updates.authMode = body.authMode;
+  if (body.networkPolicy !== undefined) updates.networkPolicy = body.networkPolicy;
 
   let imageInputsChanged = false;
   if (body.cliVersion !== undefined) {

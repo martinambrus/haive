@@ -4,7 +4,10 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   api,
+  DEFAULT_CLI_NETWORK_POLICY,
   type CliAuthMode,
+  type CliNetworkMode,
+  type CliNetworkPolicy,
   type CliPackageVersionsEntry,
   type CliProvider,
   type CliProviderCatalogEntry,
@@ -33,6 +36,16 @@ interface FormState {
   cliVersion: string;
   sandboxDockerfileExtra: string;
   enabled: boolean;
+  networkMode: CliNetworkMode;
+  networkDomainsText: string;
+  networkIpsText: string;
+}
+
+function parseLinesList(text: string): string[] {
+  return text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
 }
 
 interface BuildState {
@@ -103,6 +116,9 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
       (metadata.versionPinnable ? metadata.versionCache?.latestVersion ?? '' : ''),
     sandboxDockerfileExtra: provider?.sandboxDockerfileExtra ?? '',
     enabled: provider?.enabled ?? true,
+    networkMode: (provider?.networkPolicy ?? DEFAULT_CLI_NETWORK_POLICY).mode,
+    networkDomainsText: (provider?.networkPolicy?.domains ?? []).join('\n'),
+    networkIpsText: (provider?.networkPolicy?.ips ?? []).join('\n'),
   });
 
   useEffect(() => {
@@ -204,6 +220,12 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
     setError(null);
     setSubmitting(true);
     try {
+      const networkPolicy: CliNetworkPolicy = {
+        mode: state.networkMode,
+        domains: state.networkMode === 'allowlist' ? parseLinesList(state.networkDomainsText) : [],
+        ips: state.networkMode === 'allowlist' ? parseLinesList(state.networkIpsText) : [],
+      };
+
       const payload = {
         name: state.name,
         label: state.label,
@@ -216,6 +238,7 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
         cliVersion: state.cliVersion || null,
         sandboxDockerfileExtra: state.sandboxDockerfileExtra,
         enabled: state.enabled,
+        networkPolicy,
       };
 
       let providerId: string;
@@ -534,6 +557,90 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
           prose values, wrap the whole value in a single pair of quotes; no shell escape
           rules apply inside.
         </p>
+      </div>
+
+      <div>
+        <Label>Network access</Label>
+        <div className="mt-2 flex flex-col gap-2">
+          <label className="flex items-start gap-2 text-sm text-neutral-200">
+            <input
+              type="radio"
+              name="networkMode"
+              className="mt-1"
+              checked={state.networkMode === 'full'}
+              onChange={() => update('networkMode', 'full')}
+            />
+            <div>
+              <div className="font-medium">Full internet</div>
+              <div className="text-xs text-neutral-500">
+                Sandbox can reach any domain or IP. Default.
+              </div>
+            </div>
+          </label>
+          <label className="flex items-start gap-2 text-sm text-neutral-200">
+            <input
+              type="radio"
+              name="networkMode"
+              className="mt-1"
+              checked={state.networkMode === 'none'}
+              onChange={() => update('networkMode', 'none')}
+            />
+            <div>
+              <div className="font-medium">No network</div>
+              <div className="text-xs text-neutral-500">
+                Container is started with <code className="font-mono">--network=none</code>.
+                CLI cannot reach the internet or any external service.
+              </div>
+            </div>
+          </label>
+          <label className="flex items-start gap-2 text-sm text-neutral-200">
+            <input
+              type="radio"
+              name="networkMode"
+              className="mt-1"
+              checked={state.networkMode === 'allowlist'}
+              onChange={() => update('networkMode', 'allowlist')}
+            />
+            <div>
+              <div className="font-medium">Allowlist (domains / IPs)</div>
+              <div className="text-xs text-neutral-500">
+                Only the listed destinations are reachable. Enforced by a per-task squid
+                forward proxy on an isolated docker network; the sandbox only sees squid.
+                Traffic that does not respect <code className="font-mono">HTTP_PROXY</code>{' '}
+                will fail (no route).
+              </div>
+            </div>
+          </label>
+        </div>
+
+        {state.networkMode === 'allowlist' && (
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <div>
+              <Label htmlFor="networkDomains">Allowed domains</Label>
+              <textarea
+                id="networkDomains"
+                rows={4}
+                className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
+                value={state.networkDomainsText}
+                onChange={(e) => update('networkDomainsText', e.target.value)}
+                placeholder="api.anthropic.com&#10;registry.npmjs.org"
+              />
+              <p className="mt-1 text-xs text-neutral-500">One hostname per line.</p>
+            </div>
+            <div>
+              <Label htmlFor="networkIps">Allowed IPs / CIDRs</Label>
+              <textarea
+                id="networkIps"
+                rows={4}
+                className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
+                value={state.networkIpsText}
+                onChange={(e) => update('networkIpsText', e.target.value)}
+                placeholder="10.0.0.0/8&#10;192.168.1.42"
+              />
+              <p className="mt-1 text-xs text-neutral-500">One IP or CIDR per line.</p>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex items-center gap-2">

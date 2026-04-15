@@ -178,6 +178,10 @@ export const cliProviders = pgTable(
     envVars: jsonb('env_vars').$type<Record<string, string>>(),
     cliArgs: jsonb('cli_args').$type<string[]>(),
     supportsSubagents: boolean('supports_subagents').notNull().default(false),
+    networkPolicy: jsonb('network_policy')
+      .$type<{ mode: 'none' | 'full' | 'allowlist'; domains: string[]; ips: string[] }>()
+      .notNull()
+      .default({ mode: 'full', domains: [], ips: [] }),
     authMode: cliAuthModeEnum('auth_mode').notNull().default('subscription'),
     cliVersion: text('cli_version'),
     sandboxDockerfileExtra: text('sandbox_dockerfile_extra'),
@@ -294,6 +298,9 @@ export const tasks = pgTable(
     cliProviderId: uuid('cli_provider_id').references(() => cliProviders.id, {
       onDelete: 'set null',
     }),
+    envTemplateId: uuid('env_template_id').references(() => envTemplates.id, {
+      onDelete: 'set null',
+    }),
     type: workflowTypeEnum('type').notNull(),
     title: varchar('title', { length: 512 }).notNull(),
     description: text('description'),
@@ -315,6 +322,7 @@ export const tasks = pgTable(
     index('tasks_user_id_idx').on(table.userId),
     index('tasks_status_idx').on(table.status),
     index('tasks_repository_id_idx').on(table.repositoryId),
+    index('tasks_env_template_id_idx').on(table.envTemplateId),
   ],
 );
 
@@ -450,10 +458,15 @@ export const envTemplates = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    repositoryId: uuid('repository_id').references(() => repositories.id, {
+      onDelete: 'set null',
+    }),
     name: varchar('name', { length: 255 }).notNull(),
     baseImage: varchar('base_image', { length: 255 }).notNull(),
     declaredDeps: jsonb('declared_deps').$type<Record<string, unknown>>(),
     generatedDockerfile: text('generated_dockerfile'),
+    dockerfileHash: varchar('dockerfile_hash', { length: 64 }),
+    imageTag: varchar('image_tag', { length: 255 }),
     builtImageId: varchar('built_image_id', { length: 255 }),
     status: envTemplateStatusEnum('status').notNull().default('pending'),
     lastBuiltAt: timestamp('last_built_at'),
@@ -462,7 +475,8 @@ export const envTemplates = pgTable(
   },
   (table) => [
     index('env_templates_user_id_idx').on(table.userId),
-    uniqueIndex('env_templates_user_name_idx').on(table.userId, table.name),
+    index('env_templates_repository_id_idx').on(table.repositoryId),
+    uniqueIndex('env_templates_user_hash_idx').on(table.userId, table.dockerfileHash),
   ],
 );
 
@@ -546,6 +560,7 @@ export const repositoriesRelations = relations(repositories, ({ one, many }) => 
     references: [repoCredentials.id],
   }),
   tasks: many(tasks),
+  envTemplates: many(envTemplates),
 }));
 
 export const repoCredentialsRelations = relations(repoCredentials, ({ one, many }) => ({
@@ -562,6 +577,10 @@ export const tasksRelations = relations(tasks, ({ one, many }) => ({
   cliProvider: one(cliProviders, {
     fields: [tasks.cliProviderId],
     references: [cliProviders.id],
+  }),
+  envTemplate: one(envTemplates, {
+    fields: [tasks.envTemplateId],
+    references: [envTemplates.id],
   }),
   steps: many(taskSteps),
   events: many(taskEvents),
@@ -609,7 +628,12 @@ export const terminalSessionsRelations = relations(terminalSessions, ({ one }) =
 
 export const envTemplatesRelations = relations(envTemplates, ({ one, many }) => ({
   user: one(users, { fields: [envTemplates.userId], references: [users.id] }),
+  repository: one(repositories, {
+    fields: [envTemplates.repositoryId],
+    references: [repositories.id],
+  }),
   files: many(envTemplateFiles),
+  tasks: many(tasks),
 }));
 
 export const envTemplateFilesRelations = relations(envTemplateFiles, ({ one }) => ({

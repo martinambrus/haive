@@ -108,6 +108,20 @@ export type CliProviderName =
 export type CliAuthMode = 'subscription' | 'api_key' | 'mixed';
 export type CliSandboxBuildStatus = 'idle' | 'building' | 'ready' | 'failed';
 
+export type CliNetworkMode = 'none' | 'full' | 'allowlist';
+
+export interface CliNetworkPolicy {
+  mode: CliNetworkMode;
+  domains: string[];
+  ips: string[];
+}
+
+export const DEFAULT_CLI_NETWORK_POLICY: CliNetworkPolicy = {
+  mode: 'full',
+  domains: [],
+  ips: [],
+};
+
 export interface CliProviderMetadata {
   name: CliProviderName;
   displayName: string;
@@ -148,6 +162,7 @@ export interface CliProvider {
   envVars: Record<string, string> | null;
   cliArgs: string[] | null;
   supportsSubagents: boolean;
+  networkPolicy: CliNetworkPolicy;
   authMode: CliAuthMode;
   cliVersion: string | null;
   sandboxDockerfileExtra: string | null;

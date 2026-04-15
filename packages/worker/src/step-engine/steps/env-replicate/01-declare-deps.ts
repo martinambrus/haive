@@ -4,16 +4,36 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, FormValues } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
+import {
+  deriveEnvTemplateName,
+  getTaskEnvTemplate,
+  linkTaskToEnvTemplate,
+} from './_shared.js';
 
 type ContainerTool = 'ddev' | 'docker-compose' | 'docker' | 'none';
 type DatabaseKind = 'postgres' | 'mysql' | 'mariadb' | 'sqlite' | 'none';
 type LanguageKey = 'node' | 'php' | 'python' | 'ruby' | 'go' | 'rust';
 type LspKey = 'intelephense' | 'vtsls' | 'pyright' | 'gopls' | 'rust-analyzer' | 'solargraph';
+export type PackageManager =
+  | 'npm'
+  | 'pnpm'
+  | 'yarn'
+  | 'bun'
+  | 'composer'
+  | 'pip'
+  | 'poetry'
+  | 'uv'
+  | 'pdm'
+  | 'pipenv'
+  | 'bundler'
+  | 'gomod'
+  | 'cargo';
 
 interface DetectedRuntime {
   language: LanguageKey;
   version: string | null;
   source: string;
+  packageManager: PackageManager | null;
 }
 
 export interface DeclareDepsDetect {
@@ -142,6 +162,12 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       },
       {
         type: 'checkbox',
+        id: 'preinstallDeps',
+        label: 'Install project dependencies at image build time',
+        default: detected.runtimes.length > 0,
+      },
+      {
+        type: 'checkbox',
         id: 'browserTesting',
         label: 'Install Chrome + chrome-devtools-mcp for browser testing',
         default: false,
@@ -168,11 +194,20 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     const values = args.formValues as DeclareDepsFormValues;
     const baseImage = computeBaseImage(values.containerTool);
 
-    const templateName = `task-${ctx.taskId.slice(0, 8)}`;
+    const templateName = deriveEnvTemplateName(ctx.taskId);
+    const existing = await getTaskEnvTemplate(ctx.db, ctx.taskId);
 
-    const existing = await ctx.db.query.envTemplates.findFirst({
-      where: (t, { and, eq }) => and(eq(t.userId, ctx.userId), eq(t.name, templateName)),
+    const task = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { repositoryId: true },
     });
+
+    const packageManagers: Partial<Record<LanguageKey, PackageManager | null>> = {};
+    for (const detected of args.detected.runtimes) {
+      if (values.runtimes.includes(detected.language)) {
+        packageManagers[detected.language] = detected.packageManager;
+      }
+    }
 
     const declaredDeps: Record<string, unknown> = {
       runtimes: values.runtimes,
@@ -181,6 +216,8 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         php: values.phpVersion || null,
         python: values.pythonVersion || null,
       },
+      packageManagers,
+      preinstallDeps: values.preinstallDeps ?? true,
       containerTool: values.containerTool,
       database: {
         kind: values.databaseKind,
@@ -197,7 +234,10 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         .set({
           baseImage,
           declaredDeps,
+          repositoryId: task?.repositoryId ?? existing.repositoryId,
           status: 'pending',
+          dockerfileHash: null,
+          imageTag: null,
           updatedAt: new Date(),
         })
         .where(eq(schema.envTemplates.id, existing.id));
@@ -212,6 +252,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       .insert(schema.envTemplates)
       .values({
         userId: ctx.userId,
+        repositoryId: task?.repositoryId ?? null,
         name: templateName,
         baseImage,
         declaredDeps,
@@ -220,6 +261,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       .returning();
     const row = inserted[0];
     if (!row) throw new Error('failed to insert env_template row');
+    await linkTaskToEnvTemplate(ctx.db, ctx.taskId, row.id);
     ctx.logger.info({ envTemplateId: row.id, baseImage, templateName }, 'env template declared');
     return { envTemplateId: row.id, baseImage };
   },
@@ -234,6 +276,7 @@ interface DeclareDepsFormValues extends FormValues {
   databaseKind: DatabaseKind;
   databaseVersion: string;
   lspServers: LspKey[];
+  preinstallDeps: boolean;
   browserTesting: boolean;
   extraPackages: string;
 }
@@ -274,6 +317,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
       language: 'node',
       version: nodeVersion ? sanitizeVersion(nodeVersion) : null,
       source: 'package.json',
+      packageManager: await detectNodePackageManager(repoPath),
     });
     suggestedLsp.add('vtsls');
   }
@@ -288,6 +332,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
       language: 'php',
       version: phpSpec ? sanitizeVersion(phpSpec) : null,
       source: 'composer.json',
+      packageManager: 'composer',
     });
     suggestedLsp.add('intelephense');
   }
@@ -300,6 +345,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
       language: 'python',
       version: pythonVersionFile?.trim() || null,
       source: pyprojectToml ? 'pyproject.toml' : 'requirements.txt',
+      packageManager: await detectPythonPackageManager(repoPath),
     });
     suggestedLsp.add('pyright');
   }
@@ -311,6 +357,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
       language: 'go',
       version: match?.[1] ?? null,
       source: 'go.mod',
+      packageManager: 'gomod',
     });
     suggestedLsp.add('gopls');
   }
@@ -322,6 +369,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
       language: 'rust',
       version: match?.[1] ?? null,
       source: 'Cargo.toml',
+      packageManager: 'cargo',
     });
     suggestedLsp.add('rust-analyzer');
   }
@@ -333,6 +381,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
       language: 'ruby',
       version: match?.[1] ?? null,
       source: 'Gemfile',
+      packageManager: 'bundler',
     });
     suggestedLsp.add('solargraph');
   }
@@ -354,7 +403,12 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
     const phpEntry = runtimes.find((r) => r.language === 'php');
     if (phpEntry && !phpEntry.version) phpEntry.version = ddev.phpVersion;
     if (!phpEntry) {
-      runtimes.push({ language: 'php', version: ddev.phpVersion, source: '.ddev/config.yaml' });
+      runtimes.push({
+        language: 'php',
+        version: ddev.phpVersion,
+        source: '.ddev/config.yaml',
+        packageManager: null,
+      });
       suggestedLsp.add('intelephense');
     }
   }
@@ -440,6 +494,21 @@ function matchYamlField(text: string, field: string): string | null {
 
 function sanitizeVersion(raw: string): string {
   return raw.replace(/^[\^~><=!]+/, '').trim();
+}
+
+async function detectNodePackageManager(repoPath: string): Promise<PackageManager> {
+  if (await fileExists(path.join(repoPath, 'bun.lockb'))) return 'bun';
+  if (await fileExists(path.join(repoPath, 'pnpm-lock.yaml'))) return 'pnpm';
+  if (await fileExists(path.join(repoPath, 'yarn.lock'))) return 'yarn';
+  return 'npm';
+}
+
+async function detectPythonPackageManager(repoPath: string): Promise<PackageManager> {
+  if (await fileExists(path.join(repoPath, 'uv.lock'))) return 'uv';
+  if (await fileExists(path.join(repoPath, 'poetry.lock'))) return 'poetry';
+  if (await fileExists(path.join(repoPath, 'pdm.lock'))) return 'pdm';
+  if (await fileExists(path.join(repoPath, 'Pipfile.lock'))) return 'pipenv';
+  return 'pip';
 }
 
 async function readJsonIfExists(filePath: string): Promise<unknown | null> {

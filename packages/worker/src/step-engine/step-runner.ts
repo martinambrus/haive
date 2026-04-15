@@ -11,6 +11,7 @@ import type {
 } from '@haive/shared';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveDispatch } from '../orchestrator/dispatcher.js';
+import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type { StepContext, StepDefinition } from './step-definition.js';
 
 const log = logger.child({ module: 'step-runner' });
@@ -64,6 +65,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     userId: params.userId,
     repoPath: params.repoPath,
     workspacePath: params.workspacePath,
+    sandboxWorkdir: SANDBOX_WORKDIR,
     cliProviderId: params.cliProviderId,
     db,
     logger: log.child({ stepId: meta.id, taskId, taskStepId: row.id }),

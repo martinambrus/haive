@@ -14,6 +14,22 @@ export const cliProviderNameSchema = z.enum([
 export const cliAuthModeSchema = z.enum(['subscription', 'api_key', 'mixed']);
 export const cliSandboxBuildStatusSchema = z.enum(['idle', 'building', 'ready', 'failed']);
 
+export const cliNetworkModeSchema = z.enum(['none', 'full', 'allowlist']);
+export type CliNetworkMode = z.infer<typeof cliNetworkModeSchema>;
+
+export const cliNetworkPolicySchema = z.object({
+  mode: cliNetworkModeSchema,
+  domains: z.array(z.string()).default([]),
+  ips: z.array(z.string()).default([]),
+});
+export type CliNetworkPolicy = z.infer<typeof cliNetworkPolicySchema>;
+
+export const DEFAULT_CLI_NETWORK_POLICY: CliNetworkPolicy = {
+  mode: 'full',
+  domains: [],
+  ips: [],
+};
+
 export const createCliProviderRequestSchema = z.object({
   name: cliProviderNameSchema,
   label: z.string().min(1).max(255),
@@ -26,6 +42,7 @@ export const createCliProviderRequestSchema = z.object({
   cliVersion: z.string().nullable().optional(),
   sandboxDockerfileExtra: z.string().optional(),
   enabled: z.boolean().optional(),
+  networkPolicy: cliNetworkPolicySchema.optional(),
 });
 
 export const updateCliProviderRequestSchema = createCliProviderRequestSchema.partial();

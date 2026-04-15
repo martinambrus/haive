@@ -22,6 +22,7 @@ import {
 } from '../step-engine/index.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
+import { scanRepoForDeps } from '../step-engine/steps/env-replicate/01-declare-deps.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 
 let registered = false;
@@ -59,13 +60,24 @@ interface ResolvedTaskContext {
   metadata: Record<string, unknown> | null;
 }
 
-function buildRunList(ctx: ResolvedTaskContext): StepDefinition[] {
+async function buildRunList(ctx: ResolvedTaskContext): Promise<StepDefinition[]> {
   const main = stepRegistry.listByWorkflow(ctx.workflowType);
-  const prelude =
-    ctx.metadata?.envReplicatePrelude === true && ctx.workflowType !== 'env_replicate'
-      ? stepRegistry.listByWorkflow('env_replicate')
-      : [];
+  if (ctx.workflowType === 'env_replicate') return main;
+
+  const forced = ctx.metadata?.envReplicatePrelude === true;
+  const shouldPrelude = forced || (await shouldAutoRunEnvReplicate(ctx.repoPath));
+  const prelude = shouldPrelude ? stepRegistry.listByWorkflow('env_replicate') : [];
   return [...prelude, ...main];
+}
+
+async function shouldAutoRunEnvReplicate(repoPath: string): Promise<boolean> {
+  try {
+    const deps = await scanRepoForDeps(repoPath);
+    return deps.runtimes.length > 0 || deps.containerTool !== 'none';
+  } catch (err) {
+    logger.warn({ err, repoPath }, 'env-replicate detection failed; skipping prelude');
+    return false;
+  }
 }
 
 async function resolveTaskContext(
@@ -274,7 +286,7 @@ async function handleResult(
       await appendEvent(db, ctx.taskId, result.row.id, `step.${result.status}`, {
         stepId,
       });
-      const steps = buildRunList(ctx);
+      const steps = await buildRunList(ctx);
       const idx = steps.findIndex((s) => s.metadata.id === stepId);
       const next = idx >= 0 ? steps[idx + 1] : undefined;
       if (next) {
@@ -324,7 +336,7 @@ async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<v
   await markTaskRunning(db, ctx.taskId);
   await appendEvent(db, ctx.taskId, null, 'task.running', {});
 
-  const steps = buildRunList(ctx);
+  const steps = await buildRunList(ctx);
   const first = steps[0];
   if (!first) {
     await markTaskFailed(db, ctx.taskId, `no steps registered for workflow ${ctx.workflowType}`);

@@ -5,7 +5,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 interface ImplementDetect {
   specSummary: string;
   spec: string;
-  workspacePath: string;
+  sandboxWorkspacePath: string;
   gateFeedback: string;
 }
 
@@ -111,12 +111,19 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
   async detect(ctx: StepContext): Promise<ImplementDetect> {
     const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
     const gate = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06-gate-1-spec-approval');
+    const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const planOutput = (plan?.output as PrePlanningOutput | null) ?? {};
     const gateOutput = (gate?.output as Gate1Output | null) ?? {};
+    const worktreeOutput = (worktree?.output as { sandboxWorktreePath?: string } | null) ?? {};
+    if (!worktreeOutput.sandboxWorktreePath) {
+      throw new Error(
+        '07-phase-2-implement requires 01-worktree-setup to have produced sandboxWorktreePath',
+      );
+    }
     return {
       specSummary: planOutput.summary ?? '',
       spec: planOutput.spec ?? '',
-      workspacePath: ctx.workspacePath,
+      sandboxWorkspacePath: worktreeOutput.sandboxWorktreePath,
       gateFeedback: gateOutput.feedback ?? '',
     };
   },
@@ -125,7 +132,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     return {
       title: 'Phase 2: Implement',
       description: [
-        `Workspace: ${detected.workspacePath}`,
+        `Workspace (inside sandbox): ${detected.sandboxWorkspacePath}`,
         `Spec length: ${detected.spec.length} chars`,
         detected.gateFeedback
           ? `Gate 1 feedback: ${detected.gateFeedback}`
@@ -157,7 +164,8 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         'When finished emit ONE JSON object inside a ```json fenced code block with the shape:',
         '{ "summary": "<what changed and why>", "filesTouched": ["path/one", "path/two"], "notes": "<follow-ups or caveats>" }',
         '',
-        `Workspace path: ${detected.workspacePath}`,
+        `Workspace path: ${detected.sandboxWorkspacePath}`,
+        `Your current working directory is already set to the workspace path above.`,
         `Gate 1 feedback: ${detected.gateFeedback || '(none)'}`,
         `Extra instructions: ${values.instructions ?? '(none)'}`,
         '',

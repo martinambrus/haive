@@ -85,6 +85,119 @@ describe('scanRepoForDeps', () => {
     const go = result.runtimes.find((r) => r.language === 'go');
     expect(go?.version).toBe('1.22');
     expect(result.suggestedLsp).toContain('gopls');
+    expect(go?.packageManager).toBe('gomod');
+  });
+
+  it('detects rust runtime and cargo package manager from Cargo.toml', async () => {
+    await writeFile(
+      path.join(tmpRoot, 'Cargo.toml'),
+      '[package]\nname = "test"\nrust-version = "1.78"\n',
+    );
+    const result = await scanRepoForDeps(tmpRoot);
+    const rust = result.runtimes.find((r) => r.language === 'rust');
+    expect(rust?.version).toBe('1.78');
+    expect(rust?.packageManager).toBe('cargo');
+    expect(result.suggestedLsp).toContain('rust-analyzer');
+  });
+
+  it('detects ruby runtime and bundler package manager from Gemfile', async () => {
+    await writeFile(path.join(tmpRoot, 'Gemfile'), "source 'https://rubygems.org'\nruby '3.3.0'\n");
+    const result = await scanRepoForDeps(tmpRoot);
+    const ruby = result.runtimes.find((r) => r.language === 'ruby');
+    expect(ruby?.version).toBe('3.3.0');
+    expect(ruby?.packageManager).toBe('bundler');
+    expect(result.suggestedLsp).toContain('solargraph');
+  });
+
+  it('detects pnpm when pnpm-lock.yaml is present', async () => {
+    await writeFile(path.join(tmpRoot, 'package.json'), JSON.stringify({ name: 'test' }));
+    await writeFile(path.join(tmpRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n');
+    const result = await scanRepoForDeps(tmpRoot);
+    const node = result.runtimes.find((r) => r.language === 'node');
+    expect(node?.packageManager).toBe('pnpm');
+  });
+
+  it('detects yarn when yarn.lock is present', async () => {
+    await writeFile(path.join(tmpRoot, 'package.json'), JSON.stringify({ name: 'test' }));
+    await writeFile(path.join(tmpRoot, 'yarn.lock'), '# yarn lockfile v1\n');
+    const result = await scanRepoForDeps(tmpRoot);
+    const node = result.runtimes.find((r) => r.language === 'node');
+    expect(node?.packageManager).toBe('yarn');
+  });
+
+  it('detects bun when bun.lockb is present and wins over pnpm-lock.yaml', async () => {
+    await writeFile(path.join(tmpRoot, 'package.json'), JSON.stringify({ name: 'test' }));
+    await writeFile(path.join(tmpRoot, 'bun.lockb'), '');
+    await writeFile(path.join(tmpRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n');
+    const result = await scanRepoForDeps(tmpRoot);
+    const node = result.runtimes.find((r) => r.language === 'node');
+    expect(node?.packageManager).toBe('bun');
+  });
+
+  it('defaults the node package manager to npm when no lockfile is present', async () => {
+    await writeFile(path.join(tmpRoot, 'package.json'), JSON.stringify({ name: 'test' }));
+    const result = await scanRepoForDeps(tmpRoot);
+    const node = result.runtimes.find((r) => r.language === 'node');
+    expect(node?.packageManager).toBe('npm');
+  });
+
+  it('detects uv when uv.lock is present and wins over poetry', async () => {
+    await writeFile(
+      path.join(tmpRoot, 'pyproject.toml'),
+      '[project]\nname = "test"\nversion = "0.1.0"\n',
+    );
+    await writeFile(path.join(tmpRoot, 'uv.lock'), 'version = 1\n');
+    await writeFile(path.join(tmpRoot, 'poetry.lock'), '# poetry lockfile\n');
+    const result = await scanRepoForDeps(tmpRoot);
+    const python = result.runtimes.find((r) => r.language === 'python');
+    expect(python?.packageManager).toBe('uv');
+  });
+
+  it('detects poetry when poetry.lock is present', async () => {
+    await writeFile(
+      path.join(tmpRoot, 'pyproject.toml'),
+      '[tool.poetry]\nname = "test"\nversion = "0.1.0"\n',
+    );
+    await writeFile(path.join(tmpRoot, 'poetry.lock'), '# poetry lockfile\n');
+    const result = await scanRepoForDeps(tmpRoot);
+    const python = result.runtimes.find((r) => r.language === 'python');
+    expect(python?.packageManager).toBe('poetry');
+  });
+
+  it('detects pdm when pdm.lock is present', async () => {
+    await writeFile(
+      path.join(tmpRoot, 'pyproject.toml'),
+      '[project]\nname = "test"\nversion = "0.1.0"\n',
+    );
+    await writeFile(path.join(tmpRoot, 'pdm.lock'), '# pdm lockfile\n');
+    const result = await scanRepoForDeps(tmpRoot);
+    const python = result.runtimes.find((r) => r.language === 'python');
+    expect(python?.packageManager).toBe('pdm');
+  });
+
+  it('detects pipenv when Pipfile.lock is present', async () => {
+    await writeFile(path.join(tmpRoot, 'requirements.txt'), 'requests==2.31.0\n');
+    await writeFile(path.join(tmpRoot, 'Pipfile.lock'), '{}');
+    const result = await scanRepoForDeps(tmpRoot);
+    const python = result.runtimes.find((r) => r.language === 'python');
+    expect(python?.packageManager).toBe('pipenv');
+  });
+
+  it('defaults the python package manager to pip when only requirements.txt is present', async () => {
+    await writeFile(path.join(tmpRoot, 'requirements.txt'), 'requests==2.31.0\n');
+    const result = await scanRepoForDeps(tmpRoot);
+    const python = result.runtimes.find((r) => r.language === 'python');
+    expect(python?.packageManager).toBe('pip');
+  });
+
+  it('detects composer as the php package manager from composer.json', async () => {
+    await writeFile(
+      path.join(tmpRoot, 'composer.json'),
+      JSON.stringify({ name: 'test/app', require: { php: '>=8.2' } }),
+    );
+    const result = await scanRepoForDeps(tmpRoot);
+    const php = result.runtimes.find((r) => r.language === 'php');
+    expect(php?.packageManager).toBe('composer');
   });
 });
 
@@ -105,7 +218,7 @@ describe('renderDockerfile', () => {
     });
     expect(out).toContain('# Node.js 22');
     expect(out).toContain('https://deb.nodesource.com/setup_22.x');
-    expect(out).toContain('npm install -g pnpm');
+    expect(out).toContain('corepack enable');
   });
 
   it('adds a PHP install block with the declared version', () => {

@@ -83,21 +83,21 @@ describe('resolveDispatch', () => {
     }
   });
 
-  it('emits a native sub-agent invocation for codex', () => {
+  it('emits a sequential sub-agent invocation for codex', () => {
     const provider = makeProvider({
       id: 'prov-codex',
       name: 'codex',
-      supportsSubagents: true,
+      supportsSubagents: false,
     });
     const plan = resolveDispatch({
       providers: [provider],
       input: { kind: 'subagent', spec: sampleSubAgentSpec, capabilities: ['subagents'] },
       invokeOpts: {},
     });
-    expect(plan.mode).toBe('cli');
-    expect(plan.reason).toBe('native_subagents');
+    expect(plan.mode).toBe('subagent_emulated');
+    expect(plan.reason).toBe('sequential_emulation');
     if (plan.invocation?.kind === 'subagent') {
-      expect(plan.invocation.spec.mode).toBe('native');
+      expect(plan.invocation.spec.mode).toBe('sequential');
       expect(plan.invocation.spec.steps).toHaveLength(2);
     }
   });

@@ -10,7 +10,7 @@ import type {
 export class GrokAdapter extends BaseCliAdapter {
   readonly providerName = 'grok' as const;
   readonly defaultExecutable = 'grok';
-  readonly supportsSubagents = true;
+  readonly supportsSubagents = false;
   readonly supportsApi = true;
   readonly supportsCliAuth = true;
   readonly defaultAuthMode = 'mixed' as const;

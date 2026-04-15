@@ -10,7 +10,7 @@ import type {
 export class QwenAdapter extends BaseCliAdapter {
   readonly providerName = 'qwen' as const;
   readonly defaultExecutable = 'qwen';
-  readonly supportsSubagents = true;
+  readonly supportsSubagents = false;
   readonly supportsApi = true;
   readonly supportsCliAuth = true;
   readonly defaultAuthMode = 'mixed' as const;

@@ -28,7 +28,13 @@ export class ZaiAdapter extends BaseCliAdapter {
     if (env.Z_AI_MODEL) env.CLAUDE_MODEL = env.Z_AI_MODEL;
     return {
       command: this.resolveExecutable(provider),
-      args: this.mergedArgs(provider, ['-p', prompt, '--output-format', 'json']),
+      args: this.mergedArgs(provider, [
+        '--dangerously-skip-permissions',
+        '-p',
+        prompt,
+        '--output-format',
+        'json',
+      ]),
       env,
       cwd: opts.cwd,
     };

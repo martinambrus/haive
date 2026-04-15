@@ -3,6 +3,7 @@ import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import { defaultDockerRunner, type DockerRunner } from '../../../sandbox/docker-runner.js';
+import { getTaskEnvTemplate } from './_shared.js';
 
 export interface SmokeCheck {
   id: string;
@@ -133,21 +134,17 @@ export function createVerifyEnvironmentStep(
     },
 
     async detect(ctx) {
-      const templateName = `task-${ctx.taskId.slice(0, 8)}`;
-      const row = await ctx.db.query.envTemplates.findFirst({
-        where: (t, { and, eq: eqOp }) =>
-          and(eqOp(t.userId, ctx.userId), eqOp(t.name, templateName)),
-      });
+      const row = await getTaskEnvTemplate(ctx.db, ctx.taskId);
       if (!row) {
         throw new Error(`env template for task ${ctx.taskId} not found`);
       }
-      if (row.status !== 'ready' || !row.builtImageId) {
+      if (row.status !== 'ready' || !row.imageTag) {
         throw new Error('image not built yet; run step 03 first');
       }
       const deps = (row.declaredDeps ?? {}) as DeclaredDepsShape;
       return {
         envTemplateId: row.id,
-        imageRef: row.builtImageId,
+        imageRef: row.imageTag,
         checks: buildSmokeChecks(deps),
       };
     },

@@ -10,6 +10,7 @@ export interface StepContext {
   userId: string;
   repoPath: string;
   workspacePath: string;
+  sandboxWorkdir: string;
   cliProviderId: string | null;
   db: Database;
   logger: Logger;

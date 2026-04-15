@@ -53,29 +53,29 @@ describe('splitSubAgentForProvider', () => {
     expect(result.reason).toBe('native_subagents');
   });
 
-  it('uses native mode for codex', () => {
+  it('uses sequential mode for codex', () => {
     const provider = makeProvider({
       id: 'p-codex',
       name: 'codex',
-      supportsSubagents: true,
+      supportsSubagents: false,
     });
     const adapter = cliAdapterRegistry.get('codex');
     const result = splitSubAgentForProvider(adapter, provider, spec, {});
-    expect(result.mode).toBe('native');
-    expect(result.invocation.mode).toBe('native');
+    expect(result.mode).toBe('sequential');
+    expect(result.invocation.mode).toBe('sequential');
     expect(result.invocation.steps.map((s) => s.collectInto)).toEqual(['files', 'labels']);
-    expect(result.reason).toBe('native_subagents');
+    expect(result.reason).toBe('sequential_emulation');
   });
 
-  it('uses native mode for amp', () => {
+  it('uses sequential mode for amp', () => {
     const provider = makeProvider({
       id: 'p-amp',
       name: 'amp',
-      supportsSubagents: true,
+      supportsSubagents: false,
     });
     const adapter = cliAdapterRegistry.get('amp');
     const result = splitSubAgentForProvider(adapter, provider, spec, {});
-    expect(result.mode).toBe('native');
+    expect(result.mode).toBe('sequential');
     expect(result.invocation.steps.map((s) => s.id)).toEqual(['scanner', 'labeler']);
   });
 
@@ -94,7 +94,7 @@ describe('splitSubAgentForProvider', () => {
       const provider = makeProvider({
         id: `p-${name}`,
         name,
-        supportsSubagents: true,
+        supportsSubagents: false,
       });
       const adapter = cliAdapterRegistry.get(name);
       const result = splitSubAgentForProvider(adapter, provider, spec, {});
@@ -102,12 +102,12 @@ describe('splitSubAgentForProvider', () => {
     });
     expect(matrix).toEqual([
       { name: 'claude-code', mode: 'native' },
-      { name: 'codex', mode: 'native' },
-      { name: 'gemini', mode: 'native' },
-      { name: 'amp', mode: 'native' },
-      { name: 'grok', mode: 'native' },
-      { name: 'qwen', mode: 'native' },
-      { name: 'kiro', mode: 'native' },
+      { name: 'codex', mode: 'sequential' },
+      { name: 'gemini', mode: 'sequential' },
+      { name: 'amp', mode: 'sequential' },
+      { name: 'grok', mode: 'sequential' },
+      { name: 'qwen', mode: 'sequential' },
+      { name: 'kiro', mode: 'sequential' },
       { name: 'zai', mode: 'native' },
     ]);
   });

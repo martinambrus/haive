@@ -24,7 +24,13 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
   ): CliCommandSpec {
     return {
       command: this.resolveExecutable(provider),
-      args: this.mergedArgs(provider, ['-p', prompt, '--output-format', 'json']),
+      args: this.mergedArgs(provider, [
+        '--dangerously-skip-permissions',
+        '-p',
+        prompt,
+        '--output-format',
+        'json',
+      ]),
       env: this.mergedEnv(provider, opts.extraEnv),
       cwd: opts.cwd,
     };

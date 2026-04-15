@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
@@ -7,6 +8,9 @@ import { pathExists } from '../onboarding/_helpers.js';
 
 const exec = promisify(execFile);
 
+const WORKTREE_SUBDIR = '.haive/worktrees';
+const EXCLUDE_MARKER = '.haive/';
+
 interface WorktreeDetect {
   hasGit: boolean;
   currentBranch: string | null;
@@ -14,8 +18,9 @@ interface WorktreeDetect {
 }
 
 interface WorktreeApply {
-  mode: 'no-git' | 'inplace' | 'worktree';
+  mode: 'worktree';
   worktreePath: string;
+  sandboxWorktreePath: string;
   branchName: string;
 }
 
@@ -44,6 +49,21 @@ async function gitRun(
   }
 }
 
+async function ensureExcludeEntry(repoPath: string): Promise<void> {
+  const excludePath = path.join(repoPath, '.git', 'info', 'exclude');
+  await mkdir(path.dirname(excludePath), { recursive: true });
+  let content = '';
+  try {
+    content = await readFile(excludePath, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  const lines = content.split('\n').map((line) => line.trim());
+  if (lines.includes(EXCLUDE_MARKER)) return;
+  const suffix = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
+  await writeFile(excludePath, `${content}${suffix}${EXCLUDE_MARKER}\n`, 'utf8');
+}
+
 export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = {
   metadata: {
     id: '01-worktree-setup',
@@ -51,7 +71,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     index: 1,
     title: 'Worktree setup',
     description:
-      'Prepares the workspace for the autonomous workflow. Optionally creates a git worktree on a feature branch so work is isolated from the main checkout.',
+      'Creates a mandatory git worktree inside the repo at .haive/worktrees/<branch>. All subsequent work runs in the worktree, never in the main checkout.',
     requiresCli: false,
   },
 
@@ -71,12 +91,18 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
   },
 
   form(_ctx, detected): FormSchema {
-    const description = detected.hasGit
-      ? `Current branch: ${detected.currentBranch ?? 'unknown'}. Working tree ${detected.isClean ? 'clean' : 'dirty'}.`
-      : 'No git repository detected. Worktree creation will be skipped.';
+    if (!detected.hasGit) {
+      return {
+        title: 'Worktree setup',
+        description:
+          'No git repository detected at the repo root. Worktrees are mandatory for this workflow — initialise the repo with git before starting the task.',
+        fields: [],
+        submitLabel: 'Blocked',
+      };
+    }
     return {
       title: 'Worktree setup',
-      description,
+      description: `Current branch: ${detected.currentBranch ?? 'unknown'}. Working tree ${detected.isClean ? 'clean' : 'dirty'}. A new worktree will be created inside the repo at .haive/worktrees/<branch>.`,
       fields: [
         {
           type: 'text',
@@ -84,12 +110,6 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
           label: 'Feature branch name',
           placeholder: 'feature/my-change',
           required: true,
-        },
-        {
-          type: 'checkbox',
-          id: 'useWorktree',
-          label: 'Create a separate git worktree for this task',
-          default: detected.hasGit,
         },
         {
           type: 'text',
@@ -103,25 +123,21 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
   },
 
   async apply(ctx, args): Promise<WorktreeApply> {
+    if (!args.detected.hasGit) {
+      throw new Error(
+        `worktree setup requires a git repository; none detected at ${ctx.repoPath}`,
+      );
+    }
     const values = args.formValues as {
       branchName?: string;
-      useWorktree?: boolean;
       baseBranch?: string;
     };
     const branchName = slugify(values.branchName ?? 'feature-task');
-    if (!args.detected.hasGit) {
-      ctx.logger.warn('no git repo; skipping worktree setup');
-      return { mode: 'no-git', worktreePath: ctx.workspacePath, branchName };
-    }
-    if (!values.useWorktree) {
-      ctx.logger.info({ branchName }, 'worktree skipped; running in-place');
-      return { mode: 'inplace', worktreePath: ctx.workspacePath, branchName };
-    }
     const base = values.baseBranch ?? 'main';
-    const worktreePath = path.join(
-      path.dirname(ctx.repoPath),
-      `${path.basename(ctx.repoPath)}-${branchName}`,
-    );
+
+    await ensureExcludeEntry(ctx.repoPath);
+
+    const worktreePath = path.join(ctx.repoPath, WORKTREE_SUBDIR, branchName);
     const result = await gitRun(ctx.repoPath, [
       'worktree',
       'add',
@@ -135,7 +151,17 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
         `git worktree add failed (exit ${result.code}): ${result.stderr || result.stdout}`,
       );
     }
-    ctx.logger.info({ worktreePath, branchName, base }, 'worktree created');
-    return { mode: 'worktree', worktreePath, branchName };
+
+    const sandboxWorktreePath = `${ctx.sandboxWorkdir}/${WORKTREE_SUBDIR}/${branchName}`;
+    ctx.logger.info(
+      { worktreePath, sandboxWorktreePath, branchName, base },
+      'worktree created',
+    );
+    return {
+      mode: 'worktree',
+      worktreePath,
+      sandboxWorktreePath,
+      branchName,
+    };
   },
 };
