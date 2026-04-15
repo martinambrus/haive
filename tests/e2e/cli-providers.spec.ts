@@ -251,4 +251,264 @@ test.describe('cli providers', () => {
       await sql.end({ timeout: 5 });
     }
   });
+
+  test('POST /cli-providers flips sandboxImageBuildStatus to building synchronously', async ({
+    page,
+  }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      const email = uniqueEmail('cli-build-flip');
+      userId = await registerAndGetUserId(page.request, email);
+
+      const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
+        data: { name: 'claude-code', label: 'Build flip', authMode: 'subscription' },
+      });
+      expect(createRes.status()).toBe(201);
+      const createBody = (await createRes.json()) as {
+        provider: { id: string; sandboxImageBuildStatus: string };
+      };
+      // HTTP response is the only race-proof observation: the handler hard-
+      // codes 'building' into the returned body regardless of whether the
+      // worker has already reused a cached image and flipped the DB row.
+      expect(createBody.provider.sandboxImageBuildStatus).toBe('building');
+
+      // DB side-effect is transient but must have occurred in one of the two
+      // valid post-flip states.
+      const rows = await sql<{ sandbox_image_build_status: string }[]>`
+        select sandbox_image_build_status from cli_providers
+        where id = ${createBody.provider.id}
+      `;
+      expect(['building', 'ready']).toContain(rows[0]!.sandbox_image_build_status);
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('PATCH /cli-providers/:id only flips to building when image inputs change', async ({
+    page,
+  }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      const email = uniqueEmail('cli-patch-flip');
+      userId = await registerAndGetUserId(page.request, email);
+
+      const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
+        data: { name: 'claude-code', label: 'Patch target', authMode: 'subscription' },
+      });
+      expect(createRes.status()).toBe(201);
+      const { provider } = (await createRes.json()) as { provider: { id: string } };
+
+      // Wait for the worker to finish reusing the cached image so the DB row
+      // settles on 'ready'. Without this the label-only PATCH below races.
+      await expect
+        .poll(
+          async () => {
+            const r = await sql<{ sandbox_image_build_status: string }[]>`
+              select sandbox_image_build_status from cli_providers where id = ${provider.id}
+            `;
+            return r[0]?.sandbox_image_build_status;
+          },
+          { timeout: 10_000 },
+        )
+        .toBe('ready');
+
+      // Label-only PATCH does not change any image inputs. Handler returns the
+      // row as-is, so status stays 'ready'.
+      const labelRes = await page.request.patch(`${API_BASE}/cli-providers/${provider.id}`, {
+        data: { label: 'Patched label' },
+      });
+      expect(labelRes.status()).toBe(200);
+      const labelBody = (await labelRes.json()) as {
+        provider: { label: string; sandboxImageBuildStatus: string };
+      };
+      expect(labelBody.provider.label).toBe('Patched label');
+      expect(labelBody.provider.sandboxImageBuildStatus).toBe('ready');
+
+      // sandboxDockerfileExtra change IS an image input. Handler hard-codes
+      // 'building' in the response regardless of how fast the worker runs.
+      const dockerRes = await page.request.patch(`${API_BASE}/cli-providers/${provider.id}`, {
+        data: { sandboxDockerfileExtra: '# test comment' },
+      });
+      expect(dockerRes.status()).toBe(200);
+      const dockerBody = (await dockerRes.json()) as {
+        provider: { sandboxImageBuildStatus: string; sandboxImageBuildError: string | null };
+      };
+      expect(dockerBody.provider.sandboxImageBuildStatus).toBe('building');
+      expect(dockerBody.provider.sandboxImageBuildError).toBeNull();
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('POST /:id/clone creates a copy with " Copy" label and copies secrets', async ({
+    page,
+  }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      const email = uniqueEmail('cli-clone');
+      userId = await registerAndGetUserId(page.request, email);
+
+      const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
+        data: {
+          name: 'claude-code',
+          label: 'Claude Prod',
+          authMode: 'api_key',
+          executablePath: '/usr/local/bin/claude',
+          envVars: { NODE_ENV: 'production' },
+          cliArgs: ['--verbose'],
+        },
+      });
+      expect(createRes.status()).toBe(201);
+      const { provider: source } = (await createRes.json()) as {
+        provider: { id: string };
+      };
+
+      const seedRes = await page.request.post(
+        `${API_BASE}/cli-providers/${source.id}/secrets`,
+        { data: { secretName: 'ANTHROPIC_API_KEY', value: 'sk-cloned-from-source' } },
+      );
+      expect(seedRes.status()).toBe(201);
+
+      const cloneRes = await page.request.post(`${API_BASE}/cli-providers/${source.id}/clone`);
+      expect(cloneRes.status(), `clone failed: ${await cloneRes.text()}`).toBe(201);
+      const { provider: clone } = (await cloneRes.json()) as {
+        provider: {
+          id: string;
+          name: string;
+          label: string;
+          executablePath: string | null;
+          envVars: Record<string, string> | null;
+          cliArgs: string[];
+          authMode: string;
+          sandboxImageBuildStatus: string;
+        };
+      };
+
+      expect(clone.id).not.toBe(source.id);
+      expect(clone.label).toBe('Claude Prod Copy');
+      expect(clone.name).toBe('claude-code');
+      expect(clone.authMode).toBe('api_key');
+      expect(clone.executablePath).toBe('/usr/local/bin/claude');
+      expect(clone.envVars).toEqual({ NODE_ENV: 'production' });
+      expect(clone.cliArgs).toEqual(['--verbose']);
+      expect(clone.sandboxImageBuildStatus).toBe('building');
+
+      // Secrets copied verbatim (envelope encryption uses master KEK so the
+      // ciphertext does not need to be re-wrapped for the new provider).
+      const cloneSecretsRes = await page.request.get(
+        `${API_BASE}/cli-providers/${clone.id}/secrets`,
+      );
+      expect(cloneSecretsRes.status()).toBe(200);
+      const cloneSecrets = (await cloneSecretsRes.json()) as {
+        secrets: Array<{ secretName: string }>;
+      };
+      expect(cloneSecrets.secrets).toHaveLength(1);
+      expect(cloneSecrets.secrets[0]!.secretName).toBe('ANTHROPIC_API_KEY');
+
+      // Both providers appear in the list.
+      const listRes = await page.request.get(`${API_BASE}/cli-providers`);
+      const listBody = (await listRes.json()) as {
+        providers: Array<{ id: string; label: string }>;
+      };
+      expect(listBody.providers).toHaveLength(2);
+      const labels = listBody.providers.map((p) => p.label).sort();
+      expect(labels).toEqual(['Claude Prod', 'Claude Prod Copy']);
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('POST /:id/clone picks " Copy N" when earlier copies already exist', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      const email = uniqueEmail('cli-clone-n');
+      userId = await registerAndGetUserId(page.request, email);
+
+      const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
+        data: { name: 'gemini', label: 'Gemini', authMode: 'api_key' },
+      });
+      expect(createRes.status()).toBe(201);
+      const { provider: source } = (await createRes.json()) as {
+        provider: { id: string };
+      };
+
+      const firstClone = await page.request.post(
+        `${API_BASE}/cli-providers/${source.id}/clone`,
+      );
+      expect(firstClone.status()).toBe(201);
+      expect(((await firstClone.json()) as { provider: { label: string } }).provider.label).toBe(
+        'Gemini Copy',
+      );
+
+      const secondClone = await page.request.post(
+        `${API_BASE}/cli-providers/${source.id}/clone`,
+      );
+      expect(secondClone.status()).toBe(201);
+      expect(((await secondClone.json()) as { provider: { label: string } }).provider.label).toBe(
+        'Gemini Copy 2',
+      );
+
+      const thirdClone = await page.request.post(
+        `${API_BASE}/cli-providers/${source.id}/clone`,
+      );
+      expect(thirdClone.status()).toBe(201);
+      expect(((await thirdClone.json()) as { provider: { label: string } }).provider.label).toBe(
+        'Gemini Copy 3',
+      );
+
+      const listRes = await page.request.get(`${API_BASE}/cli-providers`);
+      const listBody = (await listRes.json()) as { providers: Array<{ label: string }> };
+      const labels = listBody.providers.map((p) => p.label).sort();
+      expect(labels).toEqual(['Gemini', 'Gemini Copy', 'Gemini Copy 2', 'Gemini Copy 3']);
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('POST /:id/clone 404s on unknown id and cannot cross users', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    let otherUserId = '';
+    try {
+      const email = uniqueEmail('cli-clone-iso');
+      userId = await registerAndGetUserId(page.request, email);
+
+      const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
+        data: { name: 'codex', label: 'Codex', authMode: 'api_key' },
+      });
+      const { provider } = (await createRes.json()) as { provider: { id: string } };
+
+      const missingRes = await page.request.post(
+        `${API_BASE}/cli-providers/00000000-0000-0000-0000-000000000000/clone`,
+      );
+      expect(missingRes.status()).toBe(404);
+
+      // Other user cannot clone user A's provider.
+      const otherCtx = await page.request.storageState();
+      void otherCtx;
+      const otherEmail = uniqueEmail('cli-clone-iso-b');
+      const otherRes = await page.request.post(`${API_BASE}/auth/register`, {
+        data: { email: otherEmail, password: PASSWORD },
+      });
+      expect(otherRes.status()).toBe(201);
+      otherUserId = ((await otherRes.json()) as { user: { id: string } }).user.id;
+
+      const crossRes = await page.request.post(
+        `${API_BASE}/cli-providers/${provider.id}/clone`,
+      );
+      expect(crossRes.status()).toBe(404);
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      if (otherUserId) await cleanupUser(sql, otherUserId);
+      await sql.end({ timeout: 5 });
+    }
+  });
 });

@@ -198,6 +198,48 @@ test.describe('cli providers UI', () => {
     }
   });
 
+  test('Clone button on list page creates a Copy and reloads the list', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      const email = uniqueEmail('cli-ui-clone');
+      userId = await registerAndGetUserId(page.request, email);
+
+      const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
+        data: {
+          name: 'claude-code',
+          label: 'Clone me UI',
+          authMode: 'subscription',
+        },
+      });
+      expect(createRes.status()).toBe(201);
+
+      await page.goto('/settings/cli-providers');
+      await expect(page.getByRole('heading', { level: 1, name: 'CLI Providers' })).toBeVisible();
+      await expect(page.getByRole('heading', { level: 3, name: 'Clone me UI' })).toBeVisible();
+
+      await page.getByRole('button', { name: 'Clone', exact: true }).click();
+
+      await expect(page.getByRole('heading', { level: 3, name: 'Clone me UI Copy' })).toBeVisible({
+        timeout: 10_000,
+      });
+
+      const rows = await sql<{ label: string; sandbox_image_build_status: string }[]>`
+        select label, sandbox_image_build_status from cli_providers
+        where user_id = ${userId}
+        order by label
+      `;
+      expect(rows).toHaveLength(2);
+      expect(rows.map((r) => r.label)).toEqual(['Clone me UI', 'Clone me UI Copy']);
+      // Clone synchronously flips status to 'building' then the worker flips
+      // back to 'ready' after the cached image is reused. Either is valid.
+      expect(['building', 'ready']).toContain(rows[1]!.sandbox_image_build_status);
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
   test('Secrets textarea: leaving value blank keeps existing secret unchanged', async ({
     page,
   }) => {
