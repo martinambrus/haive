@@ -387,7 +387,6 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
                 {versionCache?.versions.map((v) => (
                   <option key={v} value={v}>
                     {v}
-                    {versionCache.latestVersion === v ? ' (latest)' : ''}
                   </option>
                 ))}
               </select>
@@ -623,9 +622,13 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
                 className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
                 value={state.networkDomainsText}
                 onChange={(e) => update('networkDomainsText', e.target.value)}
-                placeholder="api.anthropic.com&#10;registry.npmjs.org"
+                placeholder="api.anthropic.com&#10;*.npmjs.org&#10;example.*"
               />
-              <p className="mt-1 text-xs text-neutral-500">One hostname per line.</p>
+              <p className="mt-1 text-xs text-neutral-500">
+                One hostname per line. Wildcards:{' '}
+                <code className="font-mono">*.example.com</code> matches all subdomains,{' '}
+                <code className="font-mono">example.*</code> matches any single-label TLD.
+              </p>
             </div>
             <div>
               <Label htmlFor="networkIps">Allowed IPs / CIDRs</Label>

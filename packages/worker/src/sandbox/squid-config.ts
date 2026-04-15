@@ -6,7 +6,7 @@ export interface SquidConfigInput {
 
 const DEFAULT_PORT = 3128;
 
-const DOMAIN_TOKEN = /^[A-Za-z0-9.-]+$/;
+const DOMAIN_TOKEN = /^[A-Za-z0-9*.-]+$/;
 const IP_TOKEN = /^[0-9a-fA-F:./]+$/;
 
 function sanitizeDomains(input: string[]): string[] {
@@ -31,9 +31,30 @@ function sanitizeIps(input: string[]): string[] {
   return Array.from(seen).sort();
 }
 
-function expandDomainForms(domain: string): string[] {
-  if (domain.startsWith('.')) return [domain];
-  return [domain, `.${domain}`];
+interface DomainClassification {
+  dstdomain: string[];
+  dstRegex: string | null;
+}
+
+function classifyDomain(domain: string): DomainClassification {
+  if (domain.startsWith('*.')) {
+    const tail = domain.slice(2);
+    if (!tail || tail.includes('*') || tail.startsWith('.')) {
+      return { dstdomain: [], dstRegex: null };
+    }
+    return { dstdomain: [`.${tail}`], dstRegex: null };
+  }
+  if (domain.endsWith('.*')) {
+    const head = domain.slice(0, -2);
+    if (!head || head.includes('*') || head.startsWith('.')) {
+      return { dstdomain: [], dstRegex: null };
+    }
+    const escaped = head.replace(/\./g, '\\.');
+    return { dstdomain: [], dstRegex: `^${escaped}\\.[^.]+$` };
+  }
+  if (domain.includes('*')) return { dstdomain: [], dstRegex: null };
+  if (domain.startsWith('.')) return { dstdomain: [domain], dstRegex: null };
+  return { dstdomain: [domain, `.${domain}`], dstRegex: null };
 }
 
 export function renderSquidConfig(input: SquidConfigInput): string {
@@ -41,6 +62,16 @@ export function renderSquidConfig(input: SquidConfigInput): string {
   const domains = sanitizeDomains(input.domains);
   const ips = sanitizeIps(input.ips);
   const lines: string[] = [];
+
+  const dstDomainSet = new Set<string>();
+  const dstRegexSet = new Set<string>();
+  for (const domain of domains) {
+    const classification = classifyDomain(domain);
+    for (const form of classification.dstdomain) dstDomainSet.add(form);
+    if (classification.dstRegex) dstRegexSet.add(classification.dstRegex);
+  }
+  const dstDomainList = Array.from(dstDomainSet).sort();
+  const dstRegexList = Array.from(dstRegexSet).sort();
 
   lines.push(`http_port ${port}`);
   lines.push('');
@@ -52,9 +83,11 @@ export function renderSquidConfig(input: SquidConfigInput): string {
   lines.push('acl CONNECT method CONNECT');
   lines.push('');
 
-  if (domains.length > 0) {
-    const expanded = domains.flatMap(expandDomainForms);
-    lines.push(`acl allowed_domains dstdomain ${expanded.join(' ')}`);
+  if (dstDomainList.length > 0) {
+    lines.push(`acl allowed_domains dstdomain ${dstDomainList.join(' ')}`);
+  }
+  if (dstRegexList.length > 0) {
+    lines.push(`acl allowed_domain_regex dstdom_regex ${dstRegexList.join(' ')}`);
   }
   if (ips.length > 0) {
     lines.push(`acl allowed_ips dst ${ips.join(' ')}`);
@@ -63,7 +96,8 @@ export function renderSquidConfig(input: SquidConfigInput): string {
 
   lines.push('http_access deny !Safe_ports');
   lines.push('http_access deny CONNECT !SSL_ports');
-  if (domains.length > 0) lines.push('http_access allow allowed_domains');
+  if (dstDomainList.length > 0) lines.push('http_access allow allowed_domains');
+  if (dstRegexList.length > 0) lines.push('http_access allow allowed_domain_regex');
   if (ips.length > 0) lines.push('http_access allow allowed_ips');
   lines.push('http_access deny all');
   lines.push('');

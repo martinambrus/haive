@@ -12,7 +12,7 @@ describe('renderSquidConfig', () => {
 
   it('emits dstdomain ACL with both bare and leading-dot forms', () => {
     const cfg = renderSquidConfig({ domains: ['api.anthropic.com'], ips: [] });
-    expect(cfg).toContain('acl allowed_domains dstdomain api.anthropic.com .api.anthropic.com');
+    expect(cfg).toContain('acl allowed_domains dstdomain .api.anthropic.com api.anthropic.com');
     expect(cfg).toContain('http_access allow allowed_domains');
   });
 
@@ -48,7 +48,7 @@ describe('renderSquidConfig', () => {
       ips: ['10.0.0.2', '10.0.0.1', '10.0.0.1'],
     });
     const domainLine = cfg.split('\n').find((l) => l.startsWith('acl allowed_domains'));
-    expect(domainLine).toBe('acl allowed_domains dstdomain a.com .a.com b.com .b.com');
+    expect(domainLine).toBe('acl allowed_domains dstdomain .a.com .b.com a.com b.com');
     const ipLine = cfg.split('\n').find((l) => l.startsWith('acl allowed_ips'));
     expect(ipLine).toBe('acl allowed_ips dst 10.0.0.1 10.0.0.2');
   });
@@ -63,5 +63,56 @@ describe('renderSquidConfig', () => {
   it('honors custom port', () => {
     const cfg = renderSquidConfig({ domains: [], ips: [], port: 8888 });
     expect(cfg).toContain('http_port 8888');
+  });
+
+  it('translates *.example.com into the leading-dot dstdomain form', () => {
+    const cfg = renderSquidConfig({ domains: ['*.example.com'], ips: [] });
+    expect(cfg).toContain('acl allowed_domains dstdomain .example.com');
+    expect(cfg).toContain('http_access allow allowed_domains');
+    expect(cfg).not.toContain('dstdom_regex');
+  });
+
+  it('translates example.* into a dstdom_regex ACL', () => {
+    const cfg = renderSquidConfig({ domains: ['example.*'], ips: [] });
+    expect(cfg).toContain('acl allowed_domain_regex dstdom_regex ^example\\.[^.]+$');
+    expect(cfg).toContain('http_access allow allowed_domain_regex');
+    expect(cfg).not.toContain('acl allowed_domains dstdomain');
+  });
+
+  it('emits both dstdomain and dstdom_regex ACLs when both kinds are present', () => {
+    const cfg = renderSquidConfig({
+      domains: ['api.anthropic.com', '*.npmjs.org', 'example.*'],
+      ips: [],
+    });
+    const dstLine = cfg.split('\n').find((l) => l.startsWith('acl allowed_domains'));
+    expect(dstLine).toBe(
+      'acl allowed_domains dstdomain .api.anthropic.com .npmjs.org api.anthropic.com',
+    );
+    const regexLine = cfg
+      .split('\n')
+      .find((l) => l.startsWith('acl allowed_domain_regex'));
+    expect(regexLine).toBe('acl allowed_domain_regex dstdom_regex ^example\\.[^.]+$');
+    expect(cfg).toContain('http_access allow allowed_domains');
+    expect(cfg).toContain('http_access allow allowed_domain_regex');
+  });
+
+  it('escapes dots in the prefix of a trailing-wildcard domain', () => {
+    const cfg = renderSquidConfig({ domains: ['foo.bar.*'], ips: [] });
+    expect(cfg).toContain('^foo\\.bar\\.[^.]+$');
+  });
+
+  it('silently drops pathological wildcard patterns', () => {
+    const cfg = renderSquidConfig({
+      domains: ['*', '*.*', '**.example.com', '*.example.*', '.example.*', '*..com'],
+      ips: [],
+    });
+    expect(cfg).not.toContain('allowed_domains');
+    expect(cfg).not.toContain('allowed_domain_regex');
+  });
+
+  it('does not duplicate the dstdomain form when *.example.com and example.com are both listed', () => {
+    const cfg = renderSquidConfig({ domains: ['example.com', '*.example.com'], ips: [] });
+    const dstLine = cfg.split('\n').find((l) => l.startsWith('acl allowed_domains'));
+    expect(dstLine).toBe('acl allowed_domains dstdomain .example.com example.com');
   });
 });
