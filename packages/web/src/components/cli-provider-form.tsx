@@ -5,10 +5,12 @@ import { useRouter } from 'next/navigation';
 import {
   api,
   type CliAuthMode,
+  type CliExecutionMode,
   type CliProvider,
   type CliProviderMetadata,
   type CliProviderName,
   type CliProviderSecret,
+  type CliSandboxBuildStatus,
 } from '@/lib/api-client';
 import { Button, FormError, Input, Label } from '@/components/ui';
 
@@ -28,7 +30,16 @@ interface FormState {
   secretsText: string;
   cliArgsText: string;
   authMode: CliAuthMode;
+  executionMode: CliExecutionMode;
+  sandboxDockerfileExtra: string;
   enabled: boolean;
+}
+
+interface BuildState {
+  status: CliSandboxBuildStatus;
+  error: string | null;
+  imageTag: string | null;
+  builtAt: string | null;
 }
 
 function envVarsToText(envVars: Record<string, string> | null | undefined): string {
@@ -65,6 +76,13 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [existingSecrets, setExistingSecrets] = useState<CliProviderSecret[]>([]);
+  const [buildState, setBuildState] = useState<BuildState>({
+    status: provider?.sandboxImageBuildStatus ?? 'idle',
+    error: provider?.sandboxImageBuildError ?? null,
+    imageTag: provider?.sandboxImageTag ?? null,
+    builtAt: provider?.sandboxImageBuiltAt ?? null,
+  });
+  const [buildRequesting, setBuildRequesting] = useState(false);
 
   const [state, setState] = useState<FormState>({
     name: provider?.name ?? metadata.name,
@@ -76,6 +94,8 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
     secretsText: '',
     cliArgsText: (provider?.cliArgs ?? []).join('\n'),
     authMode: provider?.authMode ?? metadata.defaultAuthMode,
+    executionMode: provider?.executionMode ?? 'sandbox',
+    sandboxDockerfileExtra: provider?.sandboxDockerfileExtra ?? '',
     enabled: provider?.enabled ?? true,
   });
 
@@ -102,8 +122,54 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
     };
   }, [mode, provider?.id]);
 
+  useEffect(() => {
+    if (mode !== 'edit' || !provider?.id) return;
+    if (buildState.status !== 'building') return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const { provider: fresh } = await api.get<{ provider: CliProvider }>(
+          `/cli-providers/${provider.id}`,
+        );
+        if (cancelled) return;
+        setBuildState({
+          status: fresh.sandboxImageBuildStatus,
+          error: fresh.sandboxImageBuildError,
+          imageTag: fresh.sandboxImageTag,
+          builtAt: fresh.sandboxImageBuiltAt,
+        });
+      } catch {
+        // Keep polling even if a single request fails.
+      }
+    };
+    const interval = setInterval(tick, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [mode, provider?.id, buildState.status]);
+
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setState((prev) => ({ ...prev, [key]: value }));
+  }
+
+  async function handleRebuildImage() {
+    if (mode !== 'edit' || !provider?.id) return;
+    setBuildRequesting(true);
+    setError(null);
+    try {
+      if ((provider.sandboxDockerfileExtra ?? '') !== state.sandboxDockerfileExtra) {
+        await api.patch(`/cli-providers/${provider.id}`, {
+          sandboxDockerfileExtra: state.sandboxDockerfileExtra,
+        });
+      }
+      await api.post(`/cli-providers/${provider.id}/sandbox-image/build`);
+      setBuildState((prev) => ({ ...prev, status: 'building', error: null }));
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to start build');
+    } finally {
+      setBuildRequesting(false);
+    }
   }
 
   async function handleSubmit(e: FormEvent) {
@@ -120,6 +186,8 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
         envVars: parseEnvVars(state.envVarsText),
         cliArgs: parseCliArgs(state.cliArgsText),
         authMode: state.authMode,
+        executionMode: state.executionMode,
+        sandboxDockerfileExtra: state.sandboxDockerfileExtra,
         enabled: state.enabled,
       };
 
@@ -241,6 +309,104 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
       </div>
 
       <div>
+        <Label htmlFor="executionMode">Execution mode</Label>
+        <select
+          id="executionMode"
+          className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+          value={state.executionMode}
+          onChange={(e) => update('executionMode', e.target.value as CliExecutionMode)}
+        >
+          <option value="sandbox">Sandbox (recommended)</option>
+          <option value="local">Local (advanced)</option>
+        </select>
+        <p className="mt-1 text-xs text-neutral-500">
+          Sandbox runs the CLI inside a disposable Docker container per invocation. Local runs
+          it directly in the worker environment.
+        </p>
+        {state.executionMode === 'local' && (
+          <div className="mt-2 rounded-md border border-red-900 bg-red-950/40 p-3 text-xs text-red-300">
+            <p className="font-bold text-red-400">Warning: local execution is advanced.</p>
+            <p className="mt-1">
+              The CLI runs directly in the worker container with no container isolation between
+              invocations. The worker holds Docker socket access, so a compromised or
+              misbehaving CLI in local mode can affect the host and other users. Only enable
+              for providers you fully trust.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {state.executionMode === 'sandbox' && (
+        <div>
+          <Label htmlFor="sandboxDockerfileExtra">Custom Dockerfile lines (sandbox image)</Label>
+          <textarea
+            id="sandboxDockerfileExtra"
+            rows={6}
+            className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
+            value={state.sandboxDockerfileExtra}
+            onChange={(e) => update('sandboxDockerfileExtra', e.target.value)}
+            placeholder="# Appended to a per-provider image based on haive-cli-sandbox:latest&#10;RUN apk add --no-cache jq&#10;RUN npm install -g some-tool"
+          />
+          <p className="mt-1 text-xs text-neutral-500">
+            These lines are appended to <code className="font-mono">FROM haive-cli-sandbox:latest</code>{' '}
+            when you click Rebuild. The resulting image is tagged{' '}
+            <code className="font-mono">haive-cli-sandbox:provider-&lt;id&gt;</code> and used only
+            for this provider&apos;s sandbox runs. Leave empty to use the default image.
+          </p>
+
+          {mode === 'edit' && provider?.id && (
+            <div className="mt-3 rounded-md border border-neutral-800 bg-neutral-950/60 p-3 text-xs">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-neutral-400">Image build status:</span>
+                  <span
+                    className={
+                      buildState.status === 'ready'
+                        ? 'font-semibold text-emerald-400'
+                        : buildState.status === 'building'
+                          ? 'font-semibold text-amber-400'
+                          : buildState.status === 'failed'
+                            ? 'font-semibold text-red-400'
+                            : 'font-semibold text-neutral-400'
+                    }
+                  >
+                    {buildState.status}
+                  </span>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={handleRebuildImage}
+                  disabled={buildRequesting || buildState.status === 'building'}
+                >
+                  {buildState.status === 'building'
+                    ? 'Building...'
+                    : buildRequesting
+                      ? 'Starting...'
+                      : 'Rebuild image'}
+                </Button>
+              </div>
+              {buildState.imageTag && (
+                <p className="mt-1 text-neutral-500">
+                  Tag: <code className="font-mono text-neutral-300">{buildState.imageTag}</code>
+                </p>
+              )}
+              {buildState.builtAt && (
+                <p className="mt-1 text-neutral-500">
+                  Built at: {new Date(buildState.builtAt).toLocaleString()}
+                </p>
+              )}
+              {buildState.status === 'failed' && buildState.error && (
+                <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap rounded bg-red-950/40 p-2 font-mono text-[11px] text-red-300">
+                  {buildState.error}
+                </pre>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div>
         <Label htmlFor="secrets">Secrets</Label>
         {mode === 'edit' && existingSecrets.length > 0 && (
           <p className="mb-1 text-xs text-neutral-400">
@@ -294,9 +460,19 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
           placeholder="--verbose"
         />
         <p className="mt-1 text-xs text-neutral-500">
-          Shell-style tokenization. Put one argument per line, or write{' '}
-          <code className="font-mono text-neutral-300">--flag &quot;value with spaces&quot;</code>{' '}
-          to keep a quoted span as a single argument. Outer quotes are stripped.
+          One argument per line. A line that looks like{' '}
+          <code className="font-mono text-neutral-300">--flag value</code> is split at the
+          first whitespace into two argv elements; the value is taken verbatim from there
+          to the end of the line, so embedded quotes, punctuation, and any other characters
+          survive unchanged. Everything else is treated as a single argument. A single
+          pair of outer matching quotes around the value (or around a whole standalone
+          line) is stripped, so{' '}
+          <code className="font-mono text-neutral-300">--mcp-config &quot;.claude/mcp.json&quot;</code>{' '}
+          becomes{' '}
+          <code className="font-mono text-neutral-300">--mcp-config</code> +{' '}
+          <code className="font-mono text-neutral-300">.claude/mcp.json</code>. For long
+          prose values, wrap the whole value in a single pair of quotes; no shell escape
+          rules apply inside.
         </p>
       </div>
 

@@ -15,6 +15,7 @@ import {
   type CliProbeJobPayload,
   type CliProbeResult,
   type CliProbeTargetMode,
+  type SandboxImageBuildJobPayload,
 } from '@haive/shared';
 import { HttpError, type AppEnv } from '../context.js';
 import { getDb } from '../db.js';
@@ -78,6 +79,10 @@ cliProviderRoutes.post('/', async (c) => {
       cliArgs: body.cliArgs ? normalizeCliArgsArray(body.cliArgs) : null,
       supportsSubagents: meta.supportsSubagents,
       authMode: body.authMode,
+      executionMode: body.executionMode ?? 'sandbox',
+      sandboxDockerfileExtra: body.sandboxDockerfileExtra?.length
+        ? body.sandboxDockerfileExtra
+        : null,
       enabled: body.enabled ?? true,
     })
     .returning();
@@ -114,6 +119,12 @@ cliProviderRoutes.patch('/:id', async (c) => {
   if (body.envVars !== undefined) updates.envVars = body.envVars;
   if (body.cliArgs !== undefined) updates.cliArgs = normalizeCliArgsArray(body.cliArgs);
   if (body.authMode !== undefined) updates.authMode = body.authMode;
+  if (body.executionMode !== undefined) updates.executionMode = body.executionMode;
+  if (body.sandboxDockerfileExtra !== undefined) {
+    updates.sandboxDockerfileExtra = body.sandboxDockerfileExtra.length
+      ? body.sandboxDockerfileExtra
+      : null;
+  }
   if (body.enabled !== undefined) updates.enabled = body.enabled;
 
   const updated = await db
@@ -135,6 +146,39 @@ cliProviderRoutes.delete('/:id', async (c) => {
     .returning({ id: schema.cliProviders.id });
   if (result.length === 0) throw new HttpError(404, 'CLI provider not found');
   return c.json({ ok: true });
+});
+
+cliProviderRoutes.post('/:id/sandbox-image/build', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const db = getDb();
+  const provider = await db.query.cliProviders.findFirst({
+    where: and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)),
+    columns: { id: true },
+  });
+  if (!provider) throw new HttpError(404, 'CLI provider not found');
+
+  await db
+    .update(schema.cliProviders)
+    .set({
+      sandboxImageBuildStatus: 'building',
+      sandboxImageBuildError: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.cliProviders.id, provider.id));
+
+  const payload: SandboxImageBuildJobPayload = {
+    providerId: provider.id,
+    userId,
+  };
+
+  const queue = getCliExecQueue();
+  await queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
+    removeOnComplete: true,
+    removeOnFail: 50,
+  });
+
+  return c.json({ ok: true, status: 'building' }, 202);
 });
 
 cliProviderRoutes.post('/:id/test', async (c) => {

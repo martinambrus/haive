@@ -29,6 +29,13 @@ export const cliProviderNameEnum = pgEnum('cli_provider_name', [
   'zai',
 ]);
 export const cliAuthModeEnum = pgEnum('cli_auth_mode', ['subscription', 'api_key', 'mixed']);
+export const cliExecutionModeEnum = pgEnum('cli_execution_mode', ['sandbox', 'local']);
+export const cliSandboxBuildStatusEnum = pgEnum('cli_sandbox_build_status', [
+  'idle',
+  'building',
+  'ready',
+  'failed',
+]);
 export const cliInvocationModeEnum = pgEnum('cli_invocation_mode', [
   'api',
   'cli',
@@ -173,6 +180,14 @@ export const cliProviders = pgTable(
     cliArgs: jsonb('cli_args').$type<string[]>(),
     supportsSubagents: boolean('supports_subagents').notNull().default(false),
     authMode: cliAuthModeEnum('auth_mode').notNull().default('subscription'),
+    executionMode: cliExecutionModeEnum('execution_mode').notNull().default('sandbox'),
+    sandboxDockerfileExtra: text('sandbox_dockerfile_extra'),
+    sandboxImageTag: text('sandbox_image_tag'),
+    sandboxImageBuildStatus: cliSandboxBuildStatusEnum('sandbox_image_build_status')
+      .notNull()
+      .default('idle'),
+    sandboxImageBuildError: text('sandbox_image_build_error'),
+    sandboxImageBuiltAt: timestamp('sandbox_image_built_at'),
     enabled: boolean('enabled').notNull().default(true),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),

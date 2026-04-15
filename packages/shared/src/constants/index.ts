@@ -30,6 +30,7 @@ export interface TaskJobPayload {
 export const CLI_EXEC_JOB_NAMES = {
   INVOKE: 'cli-invoke',
   PROBE: 'cli-probe',
+  BUILD_SANDBOX_IMAGE: 'cli-build-sandbox-image',
 } as const;
 
 export type CliExecInvocationKind = 'cli' | 'api' | 'subagent_native' | 'subagent_sequential';
@@ -51,6 +52,19 @@ export interface CliProbeJobPayload {
   providerId: string;
   userId: string;
   targetMode: CliProbeTargetMode;
+}
+
+export interface SandboxImageBuildJobPayload {
+  providerId: string;
+  userId: string;
+}
+
+export interface SandboxImageBuildResult {
+  ok: boolean;
+  providerId: string;
+  imageTag?: string;
+  durationMs?: number;
+  error?: string;
 }
 
 export interface CliProbePathResult {
