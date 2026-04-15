@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { api, type CliProvider, type CliProviderMetadata } from '@/lib/api-client';
+import { api, type CliProvider, type CliProviderCatalogEntry } from '@/lib/api-client';
 import { Card, CardDescription, CardHeader, CardTitle, FormError } from '@/components/ui';
 import { CliProviderForm } from '@/components/cli-provider-form';
 import { CliProviderTest } from '@/components/cli-provider-test';
@@ -12,13 +12,13 @@ export default function EditCliProviderPage() {
   const params = useParams<{ id: string }>();
   const id = params.id;
   const [provider, setProvider] = useState<CliProvider | null>(null);
-  const [meta, setMeta] = useState<CliProviderMetadata | null>(null);
+  const [meta, setMeta] = useState<CliProviderCatalogEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([
       api.get<{ provider: CliProvider }>(`/cli-providers/${id}`),
-      api.get<{ providers: CliProviderMetadata[] }>('/cli-providers/catalog'),
+      api.get<{ providers: CliProviderCatalogEntry[] }>('/cli-providers/catalog'),
     ])
       .then(([providerData, catalogData]) => {
         setProvider(providerData.provider);

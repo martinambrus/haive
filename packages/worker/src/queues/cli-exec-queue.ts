@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Queue, Worker, type Job } from 'bullmq';
@@ -15,14 +15,17 @@ import {
   logger,
   type CliExecInvocationKind,
   type CliExecJobPayload,
-  type CliExecutionMode,
   type CliProbeJobPayload,
   type CliProbePathResult,
   type CliProbeResult,
+  type CliProviderName,
+  type RefreshCliVersionsJobPayload,
+  type RefreshCliVersionsJobResult,
   type SandboxImageBuildJobPayload,
   type SandboxImageBuildResult,
   type TaskJobPayload,
 } from '@haive/shared';
+import { buildProviderInstallLines, refreshAllCliVersions } from '../cli-versions/index.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type { BaseCliAdapter } from '../cli-adapters/base-adapter.js';
@@ -49,7 +52,11 @@ import { getTaskQueue } from './task-queue.js';
 
 const log = logger.child({ module: 'cli-exec-queue' });
 
-type CliExecQueuePayload = CliExecJobPayload | CliProbeJobPayload | SandboxImageBuildJobPayload;
+type CliExecQueuePayload =
+  | CliExecJobPayload
+  | CliProbeJobPayload
+  | SandboxImageBuildJobPayload
+  | RefreshCliVersionsJobPayload;
 
 let cliExecQueueInstance: Queue<CliExecQueuePayload> | null = null;
 
@@ -150,7 +157,7 @@ async function executeByKind(
 ): Promise<ExecutionOutcome> {
   switch (payload.kind) {
     case 'cli': {
-      const { wrapperContent, executionMode, sandboxImage } = await loadProviderRuntimeConfig(
+      const { wrapperContent, sandboxImage } = await loadProviderRuntimeConfig(
         db,
         payload.cliProviderId,
       );
@@ -160,7 +167,6 @@ async function executeByKind(
         payload.timeoutMs,
         secrets,
         wrapperContent,
-        executionMode,
         sandboxImage,
       );
     }
@@ -179,7 +185,6 @@ async function executeByKind(
 
 interface ProviderRuntimeConfig {
   wrapperContent: string | null;
-  executionMode: CliExecutionMode;
   sandboxImage: string | null;
 }
 
@@ -187,19 +192,17 @@ async function loadProviderRuntimeConfig(
   db: Database,
   providerId?: string | null,
 ): Promise<ProviderRuntimeConfig> {
-  if (!providerId) return { wrapperContent: null, executionMode: 'sandbox', sandboxImage: null };
+  if (!providerId) return { wrapperContent: null, sandboxImage: null };
   const row = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, providerId),
     columns: {
       wrapperContent: true,
-      executionMode: true,
       sandboxImageTag: true,
       sandboxImageBuildStatus: true,
     },
   });
   return {
     wrapperContent: row?.wrapperContent ?? null,
-    executionMode: row?.executionMode ?? 'sandbox',
     sandboxImage: resolveSandboxImageFromRow(row?.sandboxImageTag, row?.sandboxImageBuildStatus),
   };
 }
@@ -217,17 +220,14 @@ async function executeCliSpec(
   timeoutMs?: number,
   secrets: Record<string, string> = {},
   wrapperContent: string | null = null,
-  executionMode: CliExecutionMode = 'sandbox',
   sandboxImage: string | null = null,
 ): Promise<ExecutionOutcome> {
   const mergedSpec: CliCommandSpec = {
     ...spec,
     env: { ...spec.env, ...secrets },
   };
-  const spawner: CliSpawner = createSpawnerForProvider(wrapperContent, executionMode, sandboxImage);
+  const spawner: CliSpawner = createSandboxSpawner(wrapperContent, sandboxImage);
   const result = await spawner(mergedSpec, { timeoutMs });
-  // deps.spawner stays injectable for tests; default code path uses the sandbox
-  // or local spawner built from provider config.
   void deps;
   return {
     exitCode: result.exitCode,
@@ -235,16 +235,6 @@ async function executeCliSpec(
     parsedOutput: tryJsonParse(result.stdout),
     errorMessage: result.error ?? (result.exitCode !== 0 ? result.stderr.slice(0, 2000) : null),
   };
-}
-
-function createSpawnerForProvider(
-  wrapperContent: string | null | undefined,
-  executionMode: CliExecutionMode,
-  sandboxImage: string | null = null,
-): CliSpawner {
-  return executionMode === 'local'
-    ? createLocalSpawner(wrapperContent)
-    : createSandboxSpawner(wrapperContent, sandboxImage);
 }
 
 function createSandboxSpawner(
@@ -273,38 +263,6 @@ function createSandboxSpawner(
       timedOut: result.timedOut,
       error: result.error,
     };
-  };
-}
-
-const LOCAL_WRAPPER_ROOT = process.env.LOCAL_WRAPPER_ROOT ?? '/tmp/haive-local-wrappers';
-
-function createLocalSpawner(wrapperContent: string | null | undefined): CliSpawner {
-  return async (spec, opts: SpawnOptions = {}): Promise<CliExecutionResult> => {
-    let wrapperDir: string | null = null;
-    let resolvedCommand = spec.command;
-    if (wrapperContent && wrapperContent.trim().length > 0) {
-      const id = randomUUID();
-      wrapperDir = join(LOCAL_WRAPPER_ROOT, id);
-      const wrapperFile = join(wrapperDir, 'wrapper.sh');
-      await mkdir(wrapperDir, { recursive: true });
-      const withShebang = wrapperContent.startsWith('#!')
-        ? wrapperContent
-        : `#!/bin/bash\n${wrapperContent}`;
-      const normalized = withShebang.endsWith('\n') ? withShebang : `${withShebang}\n`;
-      await writeFile(wrapperFile, normalized, 'utf8');
-      await chmod(wrapperFile, 0o755);
-      resolvedCommand = wrapperFile;
-    }
-    try {
-      return await defaultCliSpawner({ ...spec, command: resolvedCommand }, opts);
-    } finally {
-      if (wrapperDir) {
-        const dir = wrapperDir;
-        rm(dir, { recursive: true, force: true }).catch((err: unknown) => {
-          log.warn({ err, wrapperDir: dir }, 'failed to cleanup local wrapper dir');
-        });
-      }
-    }
   };
 }
 
@@ -460,7 +418,6 @@ async function executeSubAgentNative(
     payload.timeoutMs,
     secrets,
     provider.wrapperContent,
-    provider.executionMode,
     resolveSandboxImageFromRow(provider.sandboxImageTag, provider.sandboxImageBuildStatus),
   );
 }
@@ -486,9 +443,8 @@ async function executeSubAgentSequential(
     throw new Error(`subagent_sequential expected sequential invocation, got ${invocation.mode}`);
   }
 
-  const spawner = createSpawnerForProvider(
+  const spawner = createSandboxSpawner(
     provider.wrapperContent,
-    provider.executionMode,
     resolveSandboxImageFromRow(provider.sandboxImageTag, provider.sandboxImageBuildStatus),
   );
   const result: SubAgentRunResult = await runSequentialSubAgent(
@@ -616,9 +572,8 @@ async function probeCliPath(
 ): Promise<CliProbePathResult> {
   const startedAt = Date.now();
   const resolvedCommand = resolveProviderExecutable(adapter, provider);
-  const spawner = createSpawnerForProvider(
+  const spawner = createSandboxSpawner(
     provider.wrapperContent,
-    provider.executionMode,
     resolveSandboxImageFromRow(provider.sandboxImageTag, provider.sandboxImageBuildStatus),
   );
   try {
@@ -637,8 +592,7 @@ async function probeCliPath(
     }
     const error =
       result.error ??
-      (result.stderr.trim() ||
-        `exit ${result.exitCode ?? 'unknown'} from ${provider.executionMode} probe`);
+      (result.stderr.trim() || `exit ${result.exitCode ?? 'unknown'} from sandbox probe`);
     return { ok: false, error, durationMs };
   } catch (err) {
     return {
@@ -736,8 +690,16 @@ export async function handleBuildSandboxImageJob(
     .where(eq(schema.cliProviders.id, provider.id));
 
   const extra = (provider.sandboxDockerfileExtra ?? '').trim();
+  const cliVersion = provider.cliVersion?.trim() || null;
+  const installResult = buildProviderInstallLines(
+    provider.name as CliProviderName,
+    cliVersion,
+  );
+  const installBlock = cliVersion && installResult.supported
+    ? installResult.lines.join('\n')
+    : '';
 
-  if (!extra) {
+  if (!extra && !installBlock) {
     await db
       .update(schema.cliProviders)
       .set({
@@ -748,14 +710,20 @@ export async function handleBuildSandboxImageJob(
         updatedAt: new Date(),
       })
       .where(eq(schema.cliProviders.id, provider.id));
-    log.info({ providerId: provider.id }, 'sandbox image build skipped (no extra)');
+    log.info(
+      { providerId: provider.id },
+      'sandbox image build skipped (no version override, no extra)',
+    );
     return { ok: true, providerId: provider.id };
   }
 
   const imageTag = `haive-cli-sandbox:provider-${provider.id}`;
   const buildDir = join(tmpdir(), `haive-sandbox-build-${randomUUID()}`);
   const dockerfilePath = join(buildDir, 'Dockerfile');
-  const dockerfileContent = `FROM haive-cli-sandbox:latest\n${extra}\n`;
+  const blocks = ['FROM haive-cli-sandbox:latest'];
+  if (installBlock) blocks.push(installBlock);
+  if (extra) blocks.push(extra);
+  const dockerfileContent = `${blocks.join('\n\n')}\n`;
 
   try {
     await mkdir(buildDir, { recursive: true });
@@ -830,10 +798,44 @@ export async function handleBuildSandboxImageJob(
   }
 }
 
+export async function handleRefreshCliVersionsJob(
+  db: Database,
+): Promise<RefreshCliVersionsJobResult> {
+  return refreshAllCliVersions(db);
+}
+
+const VERSION_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
+const VERSION_REFRESH_JOB_ID = 'cli-refresh-versions-repeatable';
+
+export async function scheduleCliVersionRefresh(): Promise<void> {
+  const queue = getCliExecQueue();
+  await queue.add(
+    CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
+    { force: false } satisfies RefreshCliVersionsJobPayload,
+    {
+      repeat: { every: VERSION_REFRESH_INTERVAL_MS },
+      jobId: VERSION_REFRESH_JOB_ID,
+      removeOnComplete: true,
+      removeOnFail: 10,
+    },
+  );
+  await queue.add(
+    CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
+    { force: true } satisfies RefreshCliVersionsJobPayload,
+    { removeOnComplete: true, removeOnFail: 10 },
+  );
+}
+
 export function startCliExecWorker(
   deps: CliExecDeps = defaultDeps,
-): Worker<CliExecQueuePayload, CliProbeResult | SandboxImageBuildResult | void> {
-  const worker = new Worker<CliExecQueuePayload, CliProbeResult | SandboxImageBuildResult | void>(
+): Worker<
+  CliExecQueuePayload,
+  CliProbeResult | SandboxImageBuildResult | RefreshCliVersionsJobResult | void
+> {
+  const worker = new Worker<
+    CliExecQueuePayload,
+    CliProbeResult | SandboxImageBuildResult | RefreshCliVersionsJobResult | void
+  >(
     QUEUE_NAMES.CLI_EXEC,
     async (job: Job<CliExecQueuePayload>) => {
       const db = getDb();
@@ -846,6 +848,9 @@ export function startCliExecWorker(
       }
       if (job.name === CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE) {
         return handleBuildSandboxImageJob(db, job.data as SandboxImageBuildJobPayload);
+      }
+      if (job.name === CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS) {
+        return handleRefreshCliVersionsJob(db);
       }
       throw new Error(`unknown cli-exec job ${job.name}`);
     },

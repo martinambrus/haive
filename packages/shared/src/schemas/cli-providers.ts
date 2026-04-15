@@ -12,7 +12,6 @@ export const cliProviderNameSchema = z.enum([
 ]);
 
 export const cliAuthModeSchema = z.enum(['subscription', 'api_key', 'mixed']);
-export const cliExecutionModeSchema = z.enum(['sandbox', 'local']);
 export const cliSandboxBuildStatusSchema = z.enum(['idle', 'building', 'ready', 'failed']);
 
 export const createCliProviderRequestSchema = z.object({
@@ -24,7 +23,7 @@ export const createCliProviderRequestSchema = z.object({
   envVars: z.record(z.string(), z.string()).optional(),
   cliArgs: z.array(z.string()).optional(),
   authMode: cliAuthModeSchema,
-  executionMode: cliExecutionModeSchema.optional(),
+  cliVersion: z.string().nullable().optional(),
   sandboxDockerfileExtra: z.string().optional(),
   enabled: z.boolean().optional(),
 });
@@ -33,8 +32,17 @@ export const updateCliProviderRequestSchema = createCliProviderRequestSchema.par
 
 export type CreateCliProviderRequest = z.infer<typeof createCliProviderRequestSchema>;
 export type UpdateCliProviderRequest = z.infer<typeof updateCliProviderRequestSchema>;
-export type CliExecutionMode = z.infer<typeof cliExecutionModeSchema>;
 export type CliSandboxBuildStatus = z.infer<typeof cliSandboxBuildStatusSchema>;
+
+export const cliPackageVersionsEntrySchema = z.object({
+  name: cliProviderNameSchema,
+  versions: z.array(z.string()),
+  latestVersion: z.string().nullable(),
+  fetchedAt: z.string().nullable(),
+  fetchError: z.string().nullable(),
+});
+
+export type CliPackageVersionsEntry = z.infer<typeof cliPackageVersionsEntrySchema>;
 
 export const setCliProviderSecretRequestSchema = z.object({
   secretName: z.string().min(1).max(255),

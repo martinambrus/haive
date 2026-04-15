@@ -106,7 +106,6 @@ export type CliProviderName =
   | 'zai';
 
 export type CliAuthMode = 'subscription' | 'api_key' | 'mixed';
-export type CliExecutionMode = 'sandbox' | 'local';
 export type CliSandboxBuildStatus = 'idle' | 'building' | 'ready' | 'failed';
 
 export interface CliProviderMetadata {
@@ -124,6 +123,20 @@ export interface CliProviderMetadata {
   docsUrl?: string;
 }
 
+export interface CliPackageVersionsEntry {
+  name: CliProviderName;
+  versions: string[];
+  latestVersion: string | null;
+  fetchedAt: string | null;
+  fetchError: string | null;
+}
+
+export interface CliProviderCatalogEntry extends CliProviderMetadata {
+  versionPinnable: boolean;
+  installSupported: boolean;
+  versionCache: CliPackageVersionsEntry | null;
+}
+
 export interface CliProvider {
   id: string;
   userId: string;
@@ -136,7 +149,7 @@ export interface CliProvider {
   cliArgs: string[] | null;
   supportsSubagents: boolean;
   authMode: CliAuthMode;
-  executionMode: CliExecutionMode;
+  cliVersion: string | null;
   sandboxDockerfileExtra: string | null;
   sandboxImageTag: string | null;
   sandboxImageBuildStatus: CliSandboxBuildStatus;

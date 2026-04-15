@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { api, type CliProviderMetadata, type CliProviderName } from '@/lib/api-client';
+import { api, type CliProviderCatalogEntry, type CliProviderName } from '@/lib/api-client';
 import { Card, CardDescription, CardHeader, CardTitle, FormError } from '@/components/ui';
 import { CliProviderForm } from '@/components/cli-provider-form';
 
@@ -11,7 +11,7 @@ export default function NewCliProviderPage() {
   const params = useSearchParams();
   const name = params.get('name') as CliProviderName | null;
 
-  const [meta, setMeta] = useState<CliProviderMetadata | null>(null);
+  const [meta, setMeta] = useState<CliProviderCatalogEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -20,7 +20,7 @@ export default function NewCliProviderPage() {
       return;
     }
     api
-      .get<{ providers: CliProviderMetadata[] }>('/cli-providers/catalog')
+      .get<{ providers: CliProviderCatalogEntry[] }>('/cli-providers/catalog')
       .then((data) => {
         const found = data.providers.find((p) => p.name === name);
         if (!found) {

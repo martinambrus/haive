@@ -29,7 +29,6 @@ export const cliProviderNameEnum = pgEnum('cli_provider_name', [
   'zai',
 ]);
 export const cliAuthModeEnum = pgEnum('cli_auth_mode', ['subscription', 'api_key', 'mixed']);
-export const cliExecutionModeEnum = pgEnum('cli_execution_mode', ['sandbox', 'local']);
 export const cliSandboxBuildStatusEnum = pgEnum('cli_sandbox_build_status', [
   'idle',
   'building',
@@ -180,7 +179,7 @@ export const cliProviders = pgTable(
     cliArgs: jsonb('cli_args').$type<string[]>(),
     supportsSubagents: boolean('supports_subagents').notNull().default(false),
     authMode: cliAuthModeEnum('auth_mode').notNull().default('subscription'),
-    executionMode: cliExecutionModeEnum('execution_mode').notNull().default('sandbox'),
+    cliVersion: text('cli_version'),
     sandboxDockerfileExtra: text('sandbox_dockerfile_extra'),
     sandboxImageTag: text('sandbox_image_tag'),
     sandboxImageBuildStatus: cliSandboxBuildStatusEnum('sandbox_image_build_status')
@@ -214,6 +213,15 @@ export const cliProviderSecrets = pgTable(
     uniqueIndex('cli_provider_secrets_provider_name_idx').on(table.providerId, table.secretName),
   ],
 );
+
+export const cliPackageVersions = pgTable('cli_package_versions', {
+  name: cliProviderNameEnum('name').primaryKey(),
+  versions: jsonb('versions').$type<string[]>().notNull().default([]),
+  latestVersion: text('latest_version'),
+  fetchedAt: timestamp('fetched_at'),
+  fetchError: text('fetch_error'),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+});
 
 // --- Repositories --------------------------------------------------------
 

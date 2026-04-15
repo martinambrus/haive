@@ -3,8 +3,10 @@ import { Hono } from 'hono';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
+  CLI_INSTALL_METADATA,
   CLI_PROVIDER_CATALOG,
   CLI_PROVIDER_LIST,
+  cliProviderNameSchema,
   computeKeyFingerprint,
   createCliProviderRequestSchema,
   envelopeEncrypt,
@@ -12,9 +14,12 @@ import {
   secretsService,
   setCliProviderSecretRequestSchema,
   updateCliProviderRequestSchema,
+  type CliPackageVersionsEntry,
   type CliProbeJobPayload,
   type CliProbeResult,
   type CliProbeTargetMode,
+  type CliProviderName,
+  type RefreshCliVersionsJobPayload,
   type SandboxImageBuildJobPayload,
 } from '@haive/shared';
 import { HttpError, type AppEnv } from '../context.js';
@@ -33,8 +38,70 @@ async function loadOwnedProvider(db: Database, userId: string, providerId: strin
 
 export const cliProviderRoutes = new Hono<AppEnv>();
 
-cliProviderRoutes.get('/catalog', (c) => {
-  return c.json({ providers: CLI_PROVIDER_LIST });
+cliProviderRoutes.get('/catalog', async (c) => {
+  const db = getDb();
+  const versionRows = await db.query.cliPackageVersions.findMany();
+  const versionMap = new Map<string, CliPackageVersionsEntry>();
+  for (const row of versionRows) {
+    versionMap.set(row.name, {
+      name: row.name,
+      versions: row.versions ?? [],
+      latestVersion: row.latestVersion,
+      fetchedAt: row.fetchedAt ? row.fetchedAt.toISOString() : null,
+      fetchError: row.fetchError,
+    });
+  }
+  const providers = CLI_PROVIDER_LIST.map((p) => {
+    const name = p.name as CliProviderName;
+    const meta = CLI_INSTALL_METADATA[name];
+    return {
+      ...p,
+      versionPinnable: meta.versionPinnable,
+      installSupported: meta.install.kind !== 'unsupported',
+      versionCache: versionMap.get(name) ?? null,
+    };
+  });
+  return c.json({ providers });
+});
+
+cliProviderRoutes.post('/catalog/:name/refresh-versions', async (c) => {
+  const name = cliProviderNameSchema.parse(c.req.param('name'));
+  const payload: RefreshCliVersionsJobPayload = { force: true };
+  const queue = getCliExecQueue();
+  const events = getCliExecQueueEvents();
+  const job = await queue.add(CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS, payload, {
+    removeOnComplete: true,
+    removeOnFail: 20,
+  });
+  try {
+    await job.waitUntilFinished(events, 30_000);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new HttpError(504, `refresh timed out or failed: ${message}`, 'refresh_failed');
+  }
+  const db = getDb();
+  const row = await db.query.cliPackageVersions.findFirst({
+    where: eq(schema.cliPackageVersions.name, name),
+  });
+  if (!row) {
+    return c.json({
+      entry: {
+        name,
+        versions: [],
+        latestVersion: null,
+        fetchedAt: null,
+        fetchError: null,
+      } satisfies CliPackageVersionsEntry,
+    });
+  }
+  const entry: CliPackageVersionsEntry = {
+    name: row.name,
+    versions: row.versions ?? [],
+    latestVersion: row.latestVersion,
+    fetchedAt: row.fetchedAt ? row.fetchedAt.toISOString() : null,
+    fetchError: row.fetchError,
+  };
+  return c.json({ entry });
 });
 
 cliProviderRoutes.use('*', requireAuth);
@@ -79,7 +146,7 @@ cliProviderRoutes.post('/', async (c) => {
       cliArgs: body.cliArgs ? normalizeCliArgsArray(body.cliArgs) : null,
       supportsSubagents: meta.supportsSubagents,
       authMode: body.authMode,
-      executionMode: body.executionMode ?? 'sandbox',
+      cliVersion: body.cliVersion?.trim() || null,
       sandboxDockerfileExtra: body.sandboxDockerfileExtra?.length
         ? body.sandboxDockerfileExtra
         : null,
@@ -119,7 +186,9 @@ cliProviderRoutes.patch('/:id', async (c) => {
   if (body.envVars !== undefined) updates.envVars = body.envVars;
   if (body.cliArgs !== undefined) updates.cliArgs = normalizeCliArgsArray(body.cliArgs);
   if (body.authMode !== undefined) updates.authMode = body.authMode;
-  if (body.executionMode !== undefined) updates.executionMode = body.executionMode;
+  if (body.cliVersion !== undefined) {
+    updates.cliVersion = body.cliVersion?.trim() || null;
+  }
   if (body.sandboxDockerfileExtra !== undefined) {
     updates.sandboxDockerfileExtra = body.sandboxDockerfileExtra.length
       ? body.sandboxDockerfileExtra

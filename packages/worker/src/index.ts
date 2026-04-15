@@ -1,6 +1,10 @@
 import { logger } from '@haive/shared';
 import { bootstrap } from './bootstrap.js';
-import { closeCliExecQueue, startCliExecWorker } from './queues/cli-exec-queue.js';
+import {
+  closeCliExecQueue,
+  scheduleCliVersionRefresh,
+  startCliExecWorker,
+} from './queues/cli-exec-queue.js';
 import { startRepoWorker } from './queues/repo-queue.js';
 import { closeTaskQueue, startTaskWorker } from './queues/task-queue.js';
 import { closeRedis } from './redis.js';
@@ -11,6 +15,9 @@ async function main(): Promise<void> {
   const repoWorker = startRepoWorker(repoStoragePath);
   const taskWorker = startTaskWorker();
   const cliExecWorker = startCliExecWorker();
+  await scheduleCliVersionRefresh().catch((err) => {
+    logger.warn({ err }, 'failed to schedule cli version refresh');
+  });
   logger.info('haive-worker ready');
 
   const shutdown = async (signal: string): Promise<void> => {

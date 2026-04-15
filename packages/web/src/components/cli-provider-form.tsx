@@ -5,9 +5,9 @@ import { useRouter } from 'next/navigation';
 import {
   api,
   type CliAuthMode,
-  type CliExecutionMode,
+  type CliPackageVersionsEntry,
   type CliProvider,
-  type CliProviderMetadata,
+  type CliProviderCatalogEntry,
   type CliProviderName,
   type CliProviderSecret,
   type CliSandboxBuildStatus,
@@ -17,7 +17,7 @@ import { Button, FormError, Input, Label } from '@/components/ui';
 interface CliProviderFormProps {
   mode: 'create' | 'edit';
   provider?: CliProvider;
-  metadata: CliProviderMetadata;
+  metadata: CliProviderCatalogEntry;
 }
 
 interface FormState {
@@ -30,7 +30,7 @@ interface FormState {
   secretsText: string;
   cliArgsText: string;
   authMode: CliAuthMode;
-  executionMode: CliExecutionMode;
+  cliVersion: string;
   sandboxDockerfileExtra: string;
   enabled: boolean;
 }
@@ -83,6 +83,10 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
     builtAt: provider?.sandboxImageBuiltAt ?? null,
   });
   const [buildRequesting, setBuildRequesting] = useState(false);
+  const [versionCache, setVersionCache] = useState<CliPackageVersionsEntry | null>(
+    metadata.versionCache,
+  );
+  const [refreshingVersions, setRefreshingVersions] = useState(false);
 
   const [state, setState] = useState<FormState>({
     name: provider?.name ?? metadata.name,
@@ -94,7 +98,7 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
     secretsText: '',
     cliArgsText: (provider?.cliArgs ?? []).join('\n'),
     authMode: provider?.authMode ?? metadata.defaultAuthMode,
-    executionMode: provider?.executionMode ?? 'sandbox',
+    cliVersion: provider?.cliVersion ?? '',
     sandboxDockerfileExtra: provider?.sandboxDockerfileExtra ?? '',
     enabled: provider?.enabled ?? true,
   });
@@ -153,6 +157,22 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
     setState((prev) => ({ ...prev, [key]: value }));
   }
 
+  async function handleRefreshVersions() {
+    if (!metadata.versionPinnable) return;
+    setRefreshingVersions(true);
+    setError(null);
+    try {
+      const { entry } = await api.post<{ entry: CliPackageVersionsEntry }>(
+        `/cli-providers/catalog/${metadata.name}/refresh-versions`,
+      );
+      setVersionCache(entry);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to refresh versions');
+    } finally {
+      setRefreshingVersions(false);
+    }
+  }
+
   async function handleRebuildImage() {
     if (mode !== 'edit' || !provider?.id) return;
     setBuildRequesting(true);
@@ -186,7 +206,7 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
         envVars: parseEnvVars(state.envVarsText),
         cliArgs: parseCliArgs(state.cliArgsText),
         authMode: state.authMode,
-        executionMode: state.executionMode,
+        cliVersion: state.cliVersion || null,
         sandboxDockerfileExtra: state.sandboxDockerfileExtra,
         enabled: state.enabled,
       };
@@ -309,36 +329,67 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
       </div>
 
       <div>
-        <Label htmlFor="executionMode">Execution mode</Label>
-        <select
-          id="executionMode"
-          className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
-          value={state.executionMode}
-          onChange={(e) => update('executionMode', e.target.value as CliExecutionMode)}
-        >
-          <option value="sandbox">Sandbox (recommended)</option>
-          <option value="local">Local (advanced)</option>
-        </select>
-        <p className="mt-1 text-xs text-neutral-500">
-          Sandbox runs the CLI inside a disposable Docker container per invocation. Local runs
-          it directly in the worker environment.
-        </p>
-        {state.executionMode === 'local' && (
-          <div className="mt-2 rounded-md border border-red-900 bg-red-950/40 p-3 text-xs text-red-300">
-            <p className="font-bold text-red-400">Warning: local execution is advanced.</p>
-            <p className="mt-1">
-              The CLI runs directly in the worker container with no container isolation between
-              invocations. The worker holds Docker socket access, so a compromised or
-              misbehaving CLI in local mode can affect the host and other users. Only enable
-              for providers you fully trust.
+        <Label htmlFor="cliVersion">CLI version</Label>
+        {!metadata.installSupported ? (
+          <p className="mt-1 text-xs text-neutral-500">
+            No first-party CLI is available for this provider. The sandbox will not install a
+            binary; configure your own via Custom Dockerfile lines below.
+          </p>
+        ) : !metadata.versionPinnable ? (
+          <p className="mt-1 text-xs text-neutral-500">
+            This provider uses an installer script and cannot be pinned to a specific version.
+            The sandbox base image installs the version available at build time.
+          </p>
+        ) : (
+          <>
+            <div className="flex items-center gap-2">
+              <select
+                id="cliVersion"
+                className="h-10 flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                value={state.cliVersion}
+                onChange={(e) => update('cliVersion', e.target.value)}
+              >
+                <option value="">Default (baked into base image)</option>
+                {versionCache?.versions.map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                    {versionCache.latestVersion === v ? ' (latest)' : ''}
+                  </option>
+                ))}
+              </select>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={handleRefreshVersions}
+                disabled={refreshingVersions}
+                title="Refresh version list from registry"
+              >
+                {refreshingVersions ? 'Refreshing...' : 'Refresh'}
+              </Button>
+            </div>
+            <p className="mt-1 text-xs text-neutral-500">
+              Pinning a version builds a per-provider image layered on the base sandbox. Leave
+              on Default to use the version already baked into{' '}
+              <code className="font-mono">haive-cli-sandbox:latest</code>. The auto-updater is
+              always disabled so your pin cannot drift.
             </p>
-          </div>
+            {versionCache?.fetchedAt && (
+              <p className="mt-1 text-xs text-neutral-600">
+                Version list refreshed {new Date(versionCache.fetchedAt).toLocaleString()} (max
+                every 12h automatically).
+              </p>
+            )}
+            {versionCache?.fetchError && (
+              <p className="mt-1 text-xs text-red-400">
+                Last refresh failed: {versionCache.fetchError}
+              </p>
+            )}
+          </>
         )}
       </div>
 
-      {state.executionMode === 'sandbox' && (
-        <div>
-          <Label htmlFor="sandboxDockerfileExtra">Custom Dockerfile lines (sandbox image)</Label>
+      <div>
+        <Label htmlFor="sandboxDockerfileExtra">Custom Dockerfile lines (sandbox image)</Label>
           <textarea
             id="sandboxDockerfileExtra"
             rows={6}
@@ -403,8 +454,7 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
               )}
             </div>
           )}
-        </div>
-      )}
+      </div>
 
       <div>
         <Label htmlFor="secrets">Secrets</Label>

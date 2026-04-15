@@ -31,7 +31,18 @@ export const CLI_EXEC_JOB_NAMES = {
   INVOKE: 'cli-invoke',
   PROBE: 'cli-probe',
   BUILD_SANDBOX_IMAGE: 'cli-build-sandbox-image',
+  REFRESH_VERSIONS: 'cli-refresh-versions',
 } as const;
+
+export interface RefreshCliVersionsJobPayload {
+  force?: boolean;
+}
+
+export interface RefreshCliVersionsJobResult {
+  ok: boolean;
+  refreshed: { name: string; count: number; latest: string | null }[];
+  errors: { name: string; error: string }[];
+}
 
 export type CliExecInvocationKind = 'cli' | 'api' | 'subagent_native' | 'subagent_sequential';
 
