@@ -30,6 +30,7 @@ export default function CliProvidersPage() {
   const [catalog, setCatalog] = useState<CliProviderMetadata[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testStates, setTestStates] = useState<Record<string, TestState>>({});
+  const [cloningIds, setCloningIds] = useState<Record<string, boolean>>({});
 
   async function load() {
     try {
@@ -55,6 +56,23 @@ export default function CliProvidersPage() {
       await load();
     } catch (err) {
       setError((err as Error).message ?? 'Failed to delete provider');
+    }
+  }
+
+  async function handleClone(id: string) {
+    setCloningIds((s) => ({ ...s, [id]: true }));
+    setError(null);
+    try {
+      await api.post<{ provider: CliProvider }>(`/cli-providers/${id}/clone`);
+      await load();
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to clone provider');
+    } finally {
+      setCloningIds((s) => {
+        const next = { ...s };
+        delete next[id];
+        return next;
+      });
     }
   }
 
@@ -141,6 +159,14 @@ export default function CliProvidersPage() {
                               Edit
                             </Button>
                           </Link>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => handleClone(p.id)}
+                            disabled={cloningIds[p.id] === true}
+                          >
+                            {cloningIds[p.id] ? 'Cloning...' : 'Clone'}
+                          </Button>
                           <Button
                             variant="destructive"
                             size="sm"

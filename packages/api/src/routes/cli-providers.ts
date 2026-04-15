@@ -36,6 +36,36 @@ async function loadOwnedProvider(db: Database, userId: string, providerId: strin
   return provider;
 }
 
+const CLI_PROVIDER_LABEL_MAX_LENGTH = 255;
+const MAX_CLONE_ATTEMPTS = 1000;
+
+export function makeCopyLabel(base: string, n: number): string {
+  const suffix = n === 1 ? ' Copy' : ` Copy ${n}`;
+  const room = CLI_PROVIDER_LABEL_MAX_LENGTH - suffix.length;
+  const trimmedBase = room > 0 && base.length > room ? base.slice(0, room) : base;
+  const combined = `${trimmedBase}${suffix}`;
+  return combined.length > CLI_PROVIDER_LABEL_MAX_LENGTH
+    ? combined.slice(0, CLI_PROVIDER_LABEL_MAX_LENGTH)
+    : combined;
+}
+
+export async function nextAvailableCloneLabel(
+  db: Database,
+  userId: string,
+  originalLabel: string,
+): Promise<string> {
+  const rows = await db.query.cliProviders.findMany({
+    where: eq(schema.cliProviders.userId, userId),
+    columns: { label: true },
+  });
+  const existing = new Set(rows.map((r) => r.label));
+  for (let n = 1; n <= MAX_CLONE_ATTEMPTS; n++) {
+    const candidate = makeCopyLabel(originalLabel, n);
+    if (!existing.has(candidate)) return candidate;
+  }
+  throw new HttpError(409, 'too many clones of this provider', 'clone_limit_reached');
+}
+
 async function resolveCliVersionForSave(
   db: Database,
   name: CliProviderName,
@@ -352,6 +382,60 @@ cliProviderRoutes.post('/:id/test', async (c) => {
     const message = err instanceof Error ? err.message : String(err);
     throw new HttpError(504, `probe timed out or failed: ${message}`, 'probe_failed');
   }
+});
+
+cliProviderRoutes.post('/:id/clone', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const db = getDb();
+  const source = await db.query.cliProviders.findFirst({
+    where: and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)),
+  });
+  if (!source) throw new HttpError(404, 'CLI provider not found');
+
+  const newLabel = await nextAvailableCloneLabel(db, userId, source.label);
+
+  const inserted = await db
+    .insert(schema.cliProviders)
+    .values({
+      userId: source.userId,
+      name: source.name,
+      label: newLabel,
+      executablePath: source.executablePath,
+      wrapperPath: source.wrapperPath,
+      wrapperContent: source.wrapperContent,
+      envVars: source.envVars,
+      cliArgs: source.cliArgs,
+      supportsSubagents: source.supportsSubagents,
+      networkPolicy: source.networkPolicy,
+      authMode: source.authMode,
+      cliVersion: source.cliVersion,
+      sandboxDockerfileExtra: source.sandboxDockerfileExtra,
+      enabled: source.enabled,
+    })
+    .returning();
+  const created = inserted[0]!;
+
+  const sourceSecrets = await db.query.cliProviderSecrets.findMany({
+    where: eq(schema.cliProviderSecrets.providerId, source.id),
+  });
+  if (sourceSecrets.length > 0) {
+    await db.insert(schema.cliProviderSecrets).values(
+      sourceSecrets.map((s) => ({
+        providerId: created.id,
+        secretName: s.secretName,
+        encryptedValue: s.encryptedValue,
+        encryptedDek: s.encryptedDek,
+        fingerprint: s.fingerprint,
+      })),
+    );
+  }
+
+  await enqueueBuildForProvider(created.id, userId);
+  return c.json(
+    { provider: { ...created, sandboxImageBuildStatus: 'building' as const } },
+    201,
+  );
 });
 
 cliProviderRoutes.get('/:providerId/secrets', async (c) => {
