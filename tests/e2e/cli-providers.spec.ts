@@ -165,6 +165,62 @@ test.describe('cli providers', () => {
     }
   });
 
+  test('PATCH with empty strings clears executablePath, wrapperPath, wrapperContent', async ({
+    page,
+  }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      const email = uniqueEmail('cli-patch-clear');
+      userId = await registerAndGetUserId(page.request, email);
+
+      const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
+        data: {
+          name: 'claude-code',
+          label: 'Clearable',
+          authMode: 'subscription',
+          executablePath: '/usr/local/bin/claude-timed',
+          wrapperPath: '/opt/wrappers/w.sh',
+          wrapperContent: '#!/bin/bash\nexec /usr/local/bin/claude "$@"',
+        },
+      });
+      expect(createRes.status()).toBe(201);
+      const { provider } = (await createRes.json()) as {
+        provider: {
+          id: string;
+          executablePath: string | null;
+          wrapperPath: string | null;
+          wrapperContent: string | null;
+        };
+      };
+      expect(provider.executablePath).toBe('/usr/local/bin/claude-timed');
+      expect(provider.wrapperPath).toBe('/opt/wrappers/w.sh');
+      expect(provider.wrapperContent).toContain('#!/bin/bash');
+
+      const patchRes = await page.request.patch(`${API_BASE}/cli-providers/${provider.id}`, {
+        data: { executablePath: '', wrapperPath: '', wrapperContent: '' },
+      });
+      expect(patchRes.status()).toBe(200);
+
+      const rows = await sql<
+        {
+          executable_path: string | null;
+          wrapper_path: string | null;
+          wrapper_content: string | null;
+        }[]
+      >`
+        select executable_path, wrapper_path, wrapper_content
+        from cli_providers where id = ${provider.id}
+      `;
+      expect(rows[0]!.executable_path).toBeNull();
+      expect(rows[0]!.wrapper_path).toBeNull();
+      expect(rows[0]!.wrapper_content).toBeNull();
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
   test('DELETE removes provider', async ({ page }) => {
     const sql = getSql();
     let userId = '';

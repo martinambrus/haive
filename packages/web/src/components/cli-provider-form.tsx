@@ -229,9 +229,9 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
       const payload = {
         name: state.name,
         label: state.label,
-        executablePath: state.executablePath || undefined,
-        wrapperPath: state.wrapperPath || undefined,
-        wrapperContent: state.wrapperContent || undefined,
+        executablePath: state.executablePath,
+        wrapperPath: state.wrapperPath,
+        wrapperContent: state.wrapperContent,
         envVars: parseEnvVars(state.envVarsText),
         cliArgs: parseCliArgs(state.cliArgsText),
         authMode: state.authMode,

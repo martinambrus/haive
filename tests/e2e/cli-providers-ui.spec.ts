@@ -198,6 +198,46 @@ test.describe('cli providers UI', () => {
     }
   });
 
+  test('Edit form: clearing executablePath persists as null', async ({ page }) => {
+    const sql = getSql();
+    let userId = '';
+    try {
+      const email = uniqueEmail('cli-ui-clear');
+      userId = await registerAndGetUserId(page.request, email);
+
+      const createRes = await page.request.post(`${API_BASE}/cli-providers`, {
+        data: {
+          name: 'claude-code',
+          label: 'Clearable UI',
+          authMode: 'subscription',
+          executablePath: '/usr/local/bin/claude-timed',
+        },
+      });
+      expect(createRes.status()).toBe(201);
+      const {
+        provider: { id: providerId },
+      } = (await createRes.json()) as { provider: { id: string } };
+
+      await page.goto(`/settings/cli-providers/${providerId}`);
+      await expect(page.getByRole('heading', { level: 1, name: 'Clearable UI' })).toBeVisible();
+
+      const execField = page.getByLabel('Executable path');
+      await expect(execField).toHaveValue('/usr/local/bin/claude-timed');
+      await execField.fill('');
+
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await page.waitForURL(/\/settings\/cli-providers$/, { timeout: 10_000 });
+
+      const rows = await sql<{ executable_path: string | null }[]>`
+        select executable_path from cli_providers where id = ${providerId}
+      `;
+      expect(rows[0]!.executable_path).toBeNull();
+    } finally {
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+    }
+  });
+
   test('Clone button on list page creates a Copy and reloads the list', async ({ page }) => {
     const sql = getSql();
     let userId = '';
