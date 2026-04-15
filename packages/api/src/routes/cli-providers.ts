@@ -36,6 +36,29 @@ async function loadOwnedProvider(db: Database, userId: string, providerId: strin
   return provider;
 }
 
+async function resolveCliVersionForSave(
+  db: Database,
+  name: CliProviderName,
+  requested: string | null,
+): Promise<string | null> {
+  const meta = CLI_INSTALL_METADATA[name];
+  if (!meta.versionPinnable) return null;
+  if (requested) return requested;
+  const row = await db.query.cliPackageVersions.findFirst({
+    where: eq(schema.cliPackageVersions.name, name),
+  });
+  return row?.latestVersion ?? null;
+}
+
+async function enqueueBuildForProvider(providerId: string, userId: string): Promise<void> {
+  const payload: SandboxImageBuildJobPayload = { providerId, userId };
+  const queue = getCliExecQueue();
+  await queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
+    removeOnComplete: true,
+    removeOnFail: 50,
+  });
+}
+
 export const cliProviderRoutes = new Hono<AppEnv>();
 
 cliProviderRoutes.get('/catalog', async (c) => {
@@ -133,6 +156,11 @@ cliProviderRoutes.post('/', async (c) => {
   const meta = CLI_PROVIDER_CATALOG[body.name];
 
   const db = getDb();
+  const resolvedVersion = await resolveCliVersionForSave(
+    db,
+    body.name,
+    body.cliVersion?.trim() || null,
+  );
   const inserted = await db
     .insert(schema.cliProviders)
     .values({
@@ -146,7 +174,7 @@ cliProviderRoutes.post('/', async (c) => {
       cliArgs: body.cliArgs ? normalizeCliArgsArray(body.cliArgs) : null,
       supportsSubagents: meta.supportsSubagents,
       authMode: body.authMode,
-      cliVersion: body.cliVersion?.trim() || null,
+      cliVersion: resolvedVersion,
       sandboxDockerfileExtra: body.sandboxDockerfileExtra?.length
         ? body.sandboxDockerfileExtra
         : null,
@@ -154,7 +182,9 @@ cliProviderRoutes.post('/', async (c) => {
     })
     .returning();
 
-  return c.json({ provider: inserted[0]! }, 201);
+  const created = inserted[0]!;
+  await enqueueBuildForProvider(created.id, userId);
+  return c.json({ provider: created }, 201);
 });
 
 cliProviderRoutes.patch('/:id', async (c) => {
@@ -186,13 +216,23 @@ cliProviderRoutes.patch('/:id', async (c) => {
   if (body.envVars !== undefined) updates.envVars = body.envVars;
   if (body.cliArgs !== undefined) updates.cliArgs = normalizeCliArgsArray(body.cliArgs);
   if (body.authMode !== undefined) updates.authMode = body.authMode;
+
+  let imageInputsChanged = false;
   if (body.cliVersion !== undefined) {
-    updates.cliVersion = body.cliVersion?.trim() || null;
+    const resolved = await resolveCliVersionForSave(
+      db,
+      existing.name,
+      body.cliVersion?.trim() || null,
+    );
+    if (resolved !== existing.cliVersion) imageInputsChanged = true;
+    updates.cliVersion = resolved;
   }
   if (body.sandboxDockerfileExtra !== undefined) {
-    updates.sandboxDockerfileExtra = body.sandboxDockerfileExtra.length
+    const nextExtra = body.sandboxDockerfileExtra.length
       ? body.sandboxDockerfileExtra
       : null;
+    if (nextExtra !== existing.sandboxDockerfileExtra) imageInputsChanged = true;
+    updates.sandboxDockerfileExtra = nextExtra;
   }
   if (body.enabled !== undefined) updates.enabled = body.enabled;
 
@@ -201,6 +241,10 @@ cliProviderRoutes.patch('/:id', async (c) => {
     .set(updates)
     .where(eq(schema.cliProviders.id, id))
     .returning();
+
+  if (imageInputsChanged) {
+    await enqueueBuildForProvider(id, userId);
+  }
 
   return c.json({ provider: updated[0]! });
 });
@@ -239,6 +283,7 @@ cliProviderRoutes.post('/:id/sandbox-image/build', async (c) => {
   const payload: SandboxImageBuildJobPayload = {
     providerId: provider.id,
     userId,
+    force: true,
   };
 
   const queue = getCliExecQueue();

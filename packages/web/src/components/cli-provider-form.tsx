@@ -98,7 +98,9 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
     secretsText: '',
     cliArgsText: (provider?.cliArgs ?? []).join('\n'),
     authMode: provider?.authMode ?? metadata.defaultAuthMode,
-    cliVersion: provider?.cliVersion ?? '',
+    cliVersion:
+      provider?.cliVersion ??
+      (metadata.versionPinnable ? metadata.versionCache?.latestVersion ?? '' : ''),
     sandboxDockerfileExtra: provider?.sandboxDockerfileExtra ?? '',
     enabled: provider?.enabled ?? true,
   });
@@ -166,6 +168,11 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
         `/cli-providers/catalog/${metadata.name}/refresh-versions`,
       );
       setVersionCache(entry);
+      setState((prev) =>
+        prev.cliVersion || !entry.latestVersion
+          ? prev
+          : { ...prev, cliVersion: entry.latestVersion },
+      );
     } catch (err) {
       setError((err as Error).message ?? 'Failed to refresh versions');
     } finally {
@@ -338,7 +345,8 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
         ) : !metadata.versionPinnable ? (
           <p className="mt-1 text-xs text-neutral-500">
             This provider uses an installer script and cannot be pinned to a specific version.
-            The sandbox base image installs the version available at build time.
+            The sandbox image installs whichever version the installer ships the first time the
+            provider runs.
           </p>
         ) : (
           <>
@@ -348,8 +356,11 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
                 className="h-10 flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
                 value={state.cliVersion}
                 onChange={(e) => update('cliVersion', e.target.value)}
+                disabled={!versionCache?.versions.length}
               >
-                <option value="">Default (baked into base image)</option>
+                {!versionCache?.versions.length && (
+                  <option value="">Click Refresh to load versions</option>
+                )}
                 {versionCache?.versions.map((v) => (
                   <option key={v} value={v}>
                     {v}
@@ -368,10 +379,9 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
               </Button>
             </div>
             <p className="mt-1 text-xs text-neutral-500">
-              Pinning a version builds a per-provider image layered on the base sandbox. Leave
-              on Default to use the version already baked into{' '}
-              <code className="font-mono">haive-cli-sandbox:latest</code>. The auto-updater is
-              always disabled so your pin cannot drift.
+              The sandbox image for this CLI and version is built on first use and cached, then
+              reused across all providers that pin the same version. Auto-update is always
+              disabled inside the image so your pin cannot drift.
             </p>
             {versionCache?.fetchedAt && (
               <p className="mt-1 text-xs text-neutral-600">
@@ -396,13 +406,13 @@ export function CliProviderForm({ mode, provider, metadata }: CliProviderFormPro
             className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
             value={state.sandboxDockerfileExtra}
             onChange={(e) => update('sandboxDockerfileExtra', e.target.value)}
-            placeholder="# Appended to a per-provider image based on haive-cli-sandbox:latest&#10;RUN apk add --no-cache jq&#10;RUN npm install -g some-tool"
+            placeholder="# Appended after the CLI install lines on top of haive-cli-sandbox:latest&#10;RUN apk add --no-cache jq&#10;RUN npm install -g some-tool"
           />
           <p className="mt-1 text-xs text-neutral-500">
-            These lines are appended to <code className="font-mono">FROM haive-cli-sandbox:latest</code>{' '}
-            when you click Rebuild. The resulting image is tagged{' '}
-            <code className="font-mono">haive-cli-sandbox:provider-&lt;id&gt;</code> and used only
-            for this provider&apos;s sandbox runs. Leave empty to use the default image.
+            Leave empty to reuse the shared cached image for this CLI and version. If you add
+            lines here, the image is tagged{' '}
+            <code className="font-mono">haive-cli-sandbox:provider-&lt;id&gt;</code> and rebuilt
+            on demand for this provider only (no cross-user sharing).
           </p>
 
           {mode === 'edit' && provider?.id && (

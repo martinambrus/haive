@@ -25,8 +25,9 @@ import {
   type SandboxImageBuildResult,
   type TaskJobPayload,
 } from '@haive/shared';
-import { buildProviderInstallLines, refreshAllCliVersions } from '../cli-versions/index.js';
+import { refreshAllCliVersions } from '../cli-versions/index.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
+import { renderDockerfile, resolveImageTag } from '../sandbox/image-cache.js';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type { BaseCliAdapter } from '../cli-adapters/base-adapter.js';
 import type {
@@ -195,23 +196,48 @@ async function loadProviderRuntimeConfig(
   if (!providerId) return { wrapperContent: null, sandboxImage: null };
   const row = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, providerId),
-    columns: {
-      wrapperContent: true,
-      sandboxImageTag: true,
-      sandboxImageBuildStatus: true,
-    },
   });
+  if (!row) return { wrapperContent: null, sandboxImage: null };
+  const sandboxImage = await ensureProviderSandboxImage(db, row);
   return {
-    wrapperContent: row?.wrapperContent ?? null,
-    sandboxImage: resolveSandboxImageFromRow(row?.sandboxImageTag, row?.sandboxImageBuildStatus),
+    wrapperContent: row.wrapperContent ?? null,
+    sandboxImage,
   };
 }
 
-function resolveSandboxImageFromRow(
-  tag: string | null | undefined,
-  status: string | null | undefined,
-): string | null {
-  return status === 'ready' && tag ? tag : null;
+async function ensureProviderSandboxImage(
+  db: Database,
+  provider: {
+    id: string;
+    userId: string;
+    name: string;
+    cliVersion: string | null;
+    sandboxDockerfileExtra: string | null;
+  },
+): Promise<string | null> {
+  const resolution = resolveImageTag({
+    name: provider.name as CliProviderName,
+    cliVersion: provider.cliVersion?.trim() || null,
+    providerId: provider.id,
+    sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
+  });
+  if (!resolution) return null;
+
+  const existing = await defaultDockerRunner.inspect(resolution.tag);
+  if (existing.exists) return resolution.tag;
+
+  log.info(
+    { providerId: provider.id, tag: resolution.tag },
+    'sandbox image cache miss, building inline',
+  );
+  const result = await handleBuildSandboxImageJob(db, {
+    providerId: provider.id,
+    userId: provider.userId,
+  });
+  if (!result.ok) {
+    throw new Error(`sandbox image build failed: ${result.error ?? 'unknown'}`);
+  }
+  return result.imageTag ?? null;
 }
 
 async function executeCliSpec(
@@ -412,13 +438,14 @@ async function executeSubAgentNative(
     cwd: undefined,
     extraEnv: secrets,
   });
+  const sandboxImage = await ensureProviderSandboxImage(db, provider);
   return executeCliSpec(
     spec,
     deps,
     payload.timeoutMs,
     secrets,
     provider.wrapperContent,
-    resolveSandboxImageFromRow(provider.sandboxImageTag, provider.sandboxImageBuildStatus),
+    sandboxImage,
   );
 }
 
@@ -443,10 +470,8 @@ async function executeSubAgentSequential(
     throw new Error(`subagent_sequential expected sequential invocation, got ${invocation.mode}`);
   }
 
-  const spawner = createSandboxSpawner(
-    provider.wrapperContent,
-    resolveSandboxImageFromRow(provider.sandboxImageTag, provider.sandboxImageBuildStatus),
-  );
+  const sandboxImage = await ensureProviderSandboxImage(db, provider);
+  const spawner = createSandboxSpawner(provider.wrapperContent, sandboxImage);
   const result: SubAgentRunResult = await runSequentialSubAgent(
     invocation,
     (prompt) =>
@@ -552,7 +577,7 @@ export async function handleProbeJob(
   };
 
   if (wantCli) {
-    result.cli = await probeCliPath(adapter, provider);
+    result.cli = await probeCliPath(db, adapter, provider);
   }
 
   if (wantApi) {
@@ -567,15 +592,23 @@ export async function handleProbeJob(
 }
 
 async function probeCliPath(
+  db: Database,
   adapter: BaseCliAdapter,
   provider: CliProviderRecord,
 ): Promise<CliProbePathResult> {
   const startedAt = Date.now();
   const resolvedCommand = resolveProviderExecutable(adapter, provider);
-  const spawner = createSandboxSpawner(
-    provider.wrapperContent,
-    resolveSandboxImageFromRow(provider.sandboxImageTag, provider.sandboxImageBuildStatus),
-  );
+  let sandboxImage: string | null;
+  try {
+    sandboxImage = await ensureProviderSandboxImage(db, provider);
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      durationMs: Date.now() - startedAt,
+    };
+  }
+  const spawner = createSandboxSpawner(provider.wrapperContent, sandboxImage);
   try {
     const result = await spawner(
       {
@@ -669,6 +702,37 @@ async function probeApiPath(
   }
 }
 
+async function markProvidersReady(
+  db: Database,
+  imageTag: string,
+  providerId: string,
+  shared: boolean,
+): Promise<void> {
+  const now = new Date();
+  if (shared) {
+    await db
+      .update(schema.cliProviders)
+      .set({
+        sandboxImageTag: imageTag,
+        sandboxImageBuildStatus: 'ready',
+        sandboxImageBuildError: null,
+        sandboxImageBuiltAt: now,
+        updatedAt: now,
+      })
+      .where(eq(schema.cliProviders.sandboxImageTag, imageTag));
+  }
+  await db
+    .update(schema.cliProviders)
+    .set({
+      sandboxImageTag: imageTag,
+      sandboxImageBuildStatus: 'ready',
+      sandboxImageBuildError: null,
+      sandboxImageBuiltAt: now,
+      updatedAt: now,
+    })
+    .where(eq(schema.cliProviders.id, providerId));
+}
+
 export async function handleBuildSandboxImageJob(
   db: Database,
   payload: SandboxImageBuildJobPayload,
@@ -680,26 +744,15 @@ export async function handleBuildSandboxImageJob(
     return { ok: false, providerId: payload.providerId, error: 'provider not found' };
   }
 
-  await db
-    .update(schema.cliProviders)
-    .set({
-      sandboxImageBuildStatus: 'building',
-      sandboxImageBuildError: null,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.cliProviders.id, provider.id));
-
-  const extra = (provider.sandboxDockerfileExtra ?? '').trim();
   const cliVersion = provider.cliVersion?.trim() || null;
-  const installResult = buildProviderInstallLines(
-    provider.name as CliProviderName,
+  const resolution = resolveImageTag({
+    name: provider.name as CliProviderName,
     cliVersion,
-  );
-  const installBlock = cliVersion && installResult.supported
-    ? installResult.lines.join('\n')
-    : '';
+    providerId: provider.id,
+    sandboxDockerfileExtra: provider.sandboxDockerfileExtra,
+  });
 
-  if (!extra && !installBlock) {
+  if (!resolution) {
     await db
       .update(schema.cliProviders)
       .set({
@@ -712,24 +765,44 @@ export async function handleBuildSandboxImageJob(
       .where(eq(schema.cliProviders.id, provider.id));
     log.info(
       { providerId: provider.id },
-      'sandbox image build skipped (no version override, no extra)',
+      'sandbox image build skipped (no install lines, no extras)',
     );
     return { ok: true, providerId: provider.id };
   }
 
-  const imageTag = `haive-cli-sandbox:provider-${provider.id}`;
+  const { tag: imageTag, shared } = resolution;
+
+  await db
+    .update(schema.cliProviders)
+    .set({
+      sandboxImageTag: imageTag,
+      sandboxImageBuildStatus: 'building',
+      sandboxImageBuildError: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.cliProviders.id, provider.id));
+
+  if (!payload.force) {
+    const existing = await defaultDockerRunner.inspect(imageTag);
+    if (existing.exists) {
+      await markProvidersReady(db, imageTag, provider.id, shared);
+      log.info(
+        { providerId: provider.id, imageTag, shared },
+        'sandbox image cache hit',
+      );
+      return { ok: true, providerId: provider.id, imageTag };
+    }
+  }
+
+  const dockerfileContent = renderDockerfile(resolution);
   const buildDir = join(tmpdir(), `haive-sandbox-build-${randomUUID()}`);
   const dockerfilePath = join(buildDir, 'Dockerfile');
-  const blocks = ['FROM haive-cli-sandbox:latest'];
-  if (installBlock) blocks.push(installBlock);
-  if (extra) blocks.push(extra);
-  const dockerfileContent = `${blocks.join('\n\n')}\n`;
 
   try {
     await mkdir(buildDir, { recursive: true });
     await writeFile(dockerfilePath, dockerfileContent, 'utf8');
 
-    log.info({ providerId: provider.id, imageTag }, 'building sandbox image');
+    log.info({ providerId: provider.id, imageTag, shared }, 'building sandbox image');
     const result = await defaultDockerRunner.build({
       contextDir: buildDir,
       dockerfilePath,
@@ -738,16 +811,7 @@ export async function handleBuildSandboxImageJob(
     });
 
     if (result.exitCode === 0) {
-      await db
-        .update(schema.cliProviders)
-        .set({
-          sandboxImageTag: imageTag,
-          sandboxImageBuildStatus: 'ready',
-          sandboxImageBuildError: null,
-          sandboxImageBuiltAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.cliProviders.id, provider.id));
+      await markProvidersReady(db, imageTag, provider.id, shared);
       log.info(
         { providerId: provider.id, imageTag, durationMs: result.durationMs },
         'sandbox image build succeeded',

@@ -68,6 +68,7 @@ export interface CliProbeJobPayload {
 export interface SandboxImageBuildJobPayload {
   providerId: string;
   userId: string;
+  force?: boolean;
 }
 
 export interface SandboxImageBuildResult {
