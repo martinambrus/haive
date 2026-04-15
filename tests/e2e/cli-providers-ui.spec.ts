@@ -108,7 +108,7 @@ test.describe('cli providers UI', () => {
     }
   });
 
-  test('Secrets panel: add secret via UI, appears in list, encrypted in DB', async ({ page }) => {
+  test('Secrets textarea: add secret via UI Save, encrypted in DB', async ({ page }) => {
     const sql = getSql();
     let userId = '';
     const PLAINTEXT = 'sk-ui-never-leak-this';
@@ -130,19 +130,15 @@ test.describe('cli providers UI', () => {
 
       await page.goto(`/settings/cli-providers/${providerId}`);
       await expect(page.getByRole('heading', { level: 1, name: 'Secrets target' })).toBeVisible();
-      await expect(page.getByText('No secrets stored.')).toBeVisible();
 
-      // secretName is pre-filled with apiKeyEnvName for claude-code (ANTHROPIC_API_KEY)
-      await expect(page.getByLabel('Secret name')).toHaveValue(/ANTHROPIC/);
-      await page.getByLabel('Value', { exact: true }).fill(PLAINTEXT);
-      await page.getByRole('button', { name: 'Save secret' }).click();
+      const secretsField = page.getByLabel('Secrets', { exact: true });
+      await expect(secretsField).toHaveValue('');
+      await secretsField.fill(`ANTHROPIC_API_KEY=${PLAINTEXT}`);
 
-      await expect(page.getByText('No secrets stored.')).toHaveCount(0);
-      await expect(
-        page.locator('li').filter({ hasText: 'ANTHROPIC_API_KEY' }).first(),
-      ).toBeVisible();
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
 
-      // DB: encrypted_value must not contain plaintext
+      await page.waitForURL(/\/settings\/cli-providers$/, { timeout: 10_000 });
+
       const rows = await sql<{ encrypted_value: string }[]>`
         select encrypted_value from cli_provider_secrets
         where provider_id = ${providerId}
@@ -156,7 +152,7 @@ test.describe('cli providers UI', () => {
     }
   });
 
-  test('Secrets panel: Delete button removes secret via confirm dialog', async ({ page }) => {
+  test('Secrets textarea: clearing the line and saving deletes the secret', async ({ page }) => {
     const sql = getSql();
     let userId = '';
     try {
@@ -184,22 +180,12 @@ test.describe('cli providers UI', () => {
       await page.goto(`/settings/cli-providers/${providerId}`);
       await expect(page.getByRole('heading', { level: 1, name: 'Delete target' })).toBeVisible();
 
-      const secretRow = page.locator('li').filter({ hasText: 'ANTHROPIC_API_KEY' }).first();
-      await expect(secretRow).toBeVisible();
+      const secretsField = page.getByLabel('Secrets', { exact: true });
+      await expect(secretsField).toHaveValue('ANTHROPIC_API_KEY=');
+      await secretsField.fill('');
 
-      const dialogMessages: string[] = [];
-      page.on('dialog', (dialog) => {
-        dialogMessages.push(dialog.message());
-        void dialog.accept();
-      });
-
-      await secretRow.getByRole('button', { name: 'Delete' }).click();
-
-      await expect(secretRow).toHaveCount(0);
-      await expect(page.getByText('No secrets stored.')).toBeVisible();
-
-      expect(dialogMessages).toHaveLength(1);
-      expect(dialogMessages[0]).toContain('ANTHROPIC_API_KEY');
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await page.waitForURL(/\/settings\/cli-providers$/, { timeout: 10_000 });
 
       const rows = await sql<{ secret_name: string }[]>`
         select secret_name from cli_provider_secrets
@@ -212,7 +198,9 @@ test.describe('cli providers UI', () => {
     }
   });
 
-  test('Secrets panel: Delete dismissed (confirm cancelled) keeps secret', async ({ page }) => {
+  test('Secrets textarea: leaving value blank keeps existing secret unchanged', async ({
+    page,
+  }) => {
     const sql = getSql();
     let userId = '';
     try {
@@ -235,24 +223,30 @@ test.describe('cli providers UI', () => {
         data: { secretName: 'ANTHROPIC_API_KEY', value: 'sk-keep' },
       });
 
-      await page.goto(`/settings/cli-providers/${providerId}`);
-      const secretRow = page.locator('li').filter({ hasText: 'ANTHROPIC_API_KEY' }).first();
-      await expect(secretRow).toBeVisible();
-
-      page.on('dialog', (dialog) => {
-        void dialog.dismiss();
-      });
-
-      await secretRow.getByRole('button', { name: 'Delete' }).click();
-
-      // row still there after dismiss
-      await expect(secretRow).toBeVisible();
-
-      const rows = await sql<{ secret_name: string }[]>`
-        select secret_name from cli_provider_secrets
+      const before = await sql<{ encrypted_value: string }[]>`
+        select encrypted_value from cli_provider_secrets
         where provider_id = ${providerId}
       `;
-      expect(rows).toHaveLength(1);
+      expect(before).toHaveLength(1);
+      const beforeEncrypted = before[0]!.encrypted_value;
+
+      await page.goto(`/settings/cli-providers/${providerId}`);
+      await expect(page.getByRole('heading', { level: 1, name: 'Keep target' })).toBeVisible();
+
+      // Auto-filled with name= placeholder; do not touch, click Save.
+      const secretsField = page.getByLabel('Secrets', { exact: true });
+      await expect(secretsField).toHaveValue('ANTHROPIC_API_KEY=');
+
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await page.waitForURL(/\/settings\/cli-providers$/, { timeout: 10_000 });
+
+      const after = await sql<{ secret_name: string; encrypted_value: string }[]>`
+        select secret_name, encrypted_value from cli_provider_secrets
+        where provider_id = ${providerId}
+      `;
+      expect(after).toHaveLength(1);
+      expect(after[0]!.secret_name).toBe('ANTHROPIC_API_KEY');
+      expect(after[0]!.encrypted_value).toBe(beforeEncrypted);
     } finally {
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });

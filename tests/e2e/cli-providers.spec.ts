@@ -69,7 +69,7 @@ test.describe('cli providers', () => {
       await page.goto('/settings/cli-providers');
       await expect(page.getByRole('heading', { level: 1, name: 'CLI Providers' })).toBeVisible();
       await expect(page.getByText('None yet. Pick a CLI below to get started.')).toBeVisible();
-      await expect(page.getByRole('heading', { level: 2, name: 'Available' })).toBeVisible();
+      await expect(page.getByRole('heading', { level: 2, name: 'Add another CLI' })).toBeVisible();
       await expect(page.getByRole('heading', { level: 2, name: 'Claude Code' })).toBeVisible();
     } finally {
       if (userId) await cleanupUser(sql, userId);
@@ -77,7 +77,9 @@ test.describe('cli providers', () => {
     }
   });
 
-  test('create provider, list returns it, duplicate returns 409', async ({ page }) => {
+  test('create provider, list returns it, second instance with same name is allowed', async ({
+    page,
+  }) => {
     const sql = getSql();
     let userId = '';
     try {
@@ -105,16 +107,22 @@ test.describe('cli providers', () => {
       expect(listBody.providers).toHaveLength(1);
       expect(listBody.providers[0]!.name).toBe('claude-code');
 
-      const dupRes = await page.request.post(`${API_BASE}/cli-providers`, {
+      const secondRes = await page.request.post(`${API_BASE}/cli-providers`, {
         data: {
           name: 'claude-code',
-          label: 'Duplicate',
+          label: 'Claude Code (second)',
           authMode: 'subscription',
         },
       });
-      expect(dupRes.status()).toBe(409);
-      const dupBody = (await dupRes.json()) as { error?: string };
-      expect(dupBody.error ?? '').toMatch(/already/i);
+      expect(secondRes.status(), `second create failed: ${await secondRes.text()}`).toBe(201);
+
+      const listAgain = await page.request.get(`${API_BASE}/cli-providers`);
+      const listAgainBody = (await listAgain.json()) as {
+        providers: Array<{ id: string; name: string; label: string }>;
+      };
+      expect(listAgainBody.providers).toHaveLength(2);
+      const labels = listAgainBody.providers.map((p) => p.label).sort();
+      expect(labels).toEqual(['Claude Code', 'Claude Code (second)']);
     } finally {
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });
