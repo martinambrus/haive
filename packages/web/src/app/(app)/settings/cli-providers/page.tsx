@@ -2,7 +2,13 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { api, type CliProvider, type CliProviderMetadata } from '@/lib/api-client';
+import {
+  api,
+  type CliProbePathResult,
+  type CliProbeResult,
+  type CliProvider,
+  type CliProviderMetadata,
+} from '@/lib/api-client';
 import {
   Badge,
   Button,
@@ -13,10 +19,17 @@ import {
   FormError,
 } from '@/components/ui';
 
+interface TestState {
+  testing: boolean;
+  result: CliProbeResult | null;
+  error: string | null;
+}
+
 export default function CliProvidersPage() {
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
   const [catalog, setCatalog] = useState<CliProviderMetadata[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [testStates, setTestStates] = useState<Record<string, TestState>>({});
 
   async function load() {
     try {
@@ -42,6 +55,26 @@ export default function CliProvidersPage() {
       await load();
     } catch (err) {
       setError((err as Error).message ?? 'Failed to delete provider');
+    }
+  }
+
+  async function handleTest(id: string) {
+    setTestStates((s) => ({ ...s, [id]: { testing: true, result: null, error: null } }));
+    try {
+      const data = await api.post<{ result: CliProbeResult }>(`/cli-providers/${id}/test`);
+      setTestStates((s) => ({
+        ...s,
+        [id]: { testing: false, result: data.result, error: null },
+      }));
+    } catch (err) {
+      setTestStates((s) => ({
+        ...s,
+        [id]: {
+          testing: false,
+          result: null,
+          error: (err as Error).message ?? 'Test failed',
+        },
+      }));
     }
   }
 
@@ -71,6 +104,7 @@ export default function CliProvidersPage() {
               <div className="grid gap-3">
                 {providers.map((p) => {
                   const meta = catalog.find((m) => m.name === p.name);
+                  const testState = testStates[p.id];
                   return (
                     <Card key={p.id}>
                       <div className="flex items-start justify-between gap-4">
@@ -84,12 +118,25 @@ export default function CliProvidersPage() {
                               <Badge variant="warning">disabled</Badge>
                             )}
                             <Badge>{p.authMode}</Badge>
+                            {testState?.result && (
+                              <Badge variant={testState.result.ok ? 'success' : 'error'}>
+                                {testState.result.ok ? 'test ok' : 'test failed'}
+                              </Badge>
+                            )}
                           </div>
                           {meta && (
                             <p className="mt-1 text-xs text-neutral-500">{meta.description}</p>
                           )}
                         </div>
                         <div className="flex flex-shrink-0 gap-2">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => handleTest(p.id)}
+                            disabled={testState?.testing === true}
+                          >
+                            {testState?.testing ? 'Testing...' : 'Test'}
+                          </Button>
                           <Link href={`/settings/cli-providers/${p.id}`}>
                             <Button variant="secondary" size="sm">
                               Edit
@@ -104,6 +151,19 @@ export default function CliProvidersPage() {
                           </Button>
                         </div>
                       </div>
+                      {(testState?.error || testState?.result) && (
+                        <div className="mt-3 border-t border-neutral-800 pt-3">
+                          {testState.error && (
+                            <p className="font-mono text-xs text-red-400">{testState.error}</p>
+                          )}
+                          {testState.result?.cli && (
+                            <TestPathLine label="CLI" res={testState.result.cli} />
+                          )}
+                          {testState.result?.api && (
+                            <TestPathLine label="API" res={testState.result.api} />
+                          )}
+                        </div>
+                      )}
                     </Card>
                   );
                 })}
@@ -139,6 +199,21 @@ export default function CliProvidersPage() {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+function TestPathLine({ label, res }: { label: string; res: CliProbePathResult }) {
+  return (
+    <div className="mt-1 flex items-start gap-2 text-xs">
+      <span className="font-semibold text-neutral-400">{label}</span>
+      <Badge variant={res.ok ? 'success' : 'error'}>{res.ok ? 'OK' : 'FAIL'}</Badge>
+      {typeof res.durationMs === 'number' && (
+        <span className="text-neutral-500">{res.durationMs}ms</span>
+      )}
+      <pre className="flex-1 whitespace-pre-wrap break-words font-mono text-neutral-400">
+        {res.ok ? (res.detail ?? '') : (res.error ?? '')}
+      </pre>
     </div>
   );
 }

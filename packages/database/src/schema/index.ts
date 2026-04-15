@@ -168,6 +168,7 @@ export const cliProviders = pgTable(
     label: varchar('label', { length: 255 }).notNull(),
     executablePath: text('executable_path'),
     wrapperPath: text('wrapper_path'),
+    wrapperContent: text('wrapper_content'),
     envVars: jsonb('env_vars').$type<Record<string, string>>(),
     cliArgs: jsonb('cli_args').$type<string[]>(),
     supportsSubagents: boolean('supports_subagents').notNull().default(false),

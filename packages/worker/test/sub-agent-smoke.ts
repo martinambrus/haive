@@ -16,8 +16,7 @@ import {
   closeCliExecQueue,
   startCliExecWorker,
 } from '../src/queues/cli-exec-queue.js';
-import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
-import { splitSubAgentForProvider } from '../src/sub-agent-emulator/splitter.js';
+import { buildCodexSequentialInvocation } from '../src/sub-agent-emulator/codex-mode.js';
 import type { CliProviderRecord, SubAgentSpec } from '../src/cli-adapters/types.js';
 import type { CliExecutionResult, CliSpawner } from '../src/cli-executor/index.js';
 
@@ -163,7 +162,6 @@ async function main(): Promise<void> {
     state.taskStepId = taskStep.id;
 
     const providerRecord = provider as CliProviderRecord;
-    const adapter = cliAdapterRegistry.get(providerRecord.name);
 
     const spec: SubAgentSpec = {
       subAgents: [
@@ -173,11 +171,11 @@ async function main(): Promise<void> {
       synthesisPrompt: 'Produce a markdown report',
     };
 
-    const split = splitSubAgentForProvider(adapter, providerRecord, spec, {});
-    if (split.mode !== 'sequential') {
-      throw new Error(`expected sequential mode for codex, got ${split.mode}`);
-    }
-    log.info({ providerName: providerRecord.name, mode: split.mode }, 'split resolved');
+    const subAgentInvocation = buildCodexSequentialInvocation(spec);
+    log.info(
+      { providerName: providerRecord.name, mode: subAgentInvocation.mode },
+      'sequential invocation built',
+    );
 
     const [invocation] = await db
       .insert(schema.cliInvocations)
@@ -201,7 +199,7 @@ async function main(): Promise<void> {
       userId,
       cliProviderId: providerRecord.id,
       kind: 'subagent_sequential',
-      spec: split.invocation,
+      spec: subAgentInvocation,
     });
     log.info({ invocationId: invocation.id }, 'cli-exec job enqueued');
 

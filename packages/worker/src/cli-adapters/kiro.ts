@@ -4,7 +4,7 @@ import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from
 export class KiroAdapter extends BaseCliAdapter {
   readonly providerName = 'kiro' as const;
   readonly defaultExecutable = 'kiro';
-  readonly supportsSubagents = false;
+  readonly supportsSubagents = true;
   readonly supportsApi = false;
   readonly supportsCliAuth = true;
   readonly defaultAuthMode = 'subscription' as const;

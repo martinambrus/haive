@@ -10,7 +10,7 @@ import type {
 export class CodexAdapter extends BaseCliAdapter {
   readonly providerName = 'codex' as const;
   readonly defaultExecutable = 'codex';
-  readonly supportsSubagents = false;
+  readonly supportsSubagents = true;
   readonly supportsApi = true;
   readonly supportsCliAuth = true;
   readonly defaultAuthMode = 'subscription' as const;

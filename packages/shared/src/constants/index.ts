@@ -29,6 +29,7 @@ export interface TaskJobPayload {
 
 export const CLI_EXEC_JOB_NAMES = {
   INVOKE: 'cli-invoke',
+  PROBE: 'cli-probe',
 } as const;
 
 export type CliExecInvocationKind = 'cli' | 'api' | 'subagent_native' | 'subagent_sequential';
@@ -42,6 +43,29 @@ export interface CliExecJobPayload {
   kind: CliExecInvocationKind;
   spec: unknown;
   timeoutMs?: number;
+}
+
+export type CliProbeTargetMode = 'cli' | 'api' | 'both';
+
+export interface CliProbeJobPayload {
+  providerId: string;
+  userId: string;
+  targetMode: CliProbeTargetMode;
+}
+
+export interface CliProbePathResult {
+  ok: boolean;
+  detail?: string;
+  error?: string;
+  durationMs?: number;
+}
+
+export interface CliProbeResult {
+  ok: boolean;
+  providerId: string;
+  targetMode: CliProbeTargetMode;
+  cli?: CliProbePathResult;
+  api?: CliProbePathResult;
 }
 
 export const PUBSUB_CHANNELS = {

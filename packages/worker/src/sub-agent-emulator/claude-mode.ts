@@ -12,7 +12,7 @@ export function buildNativeSubAgentInvocation(
   spec: SubAgentSpec,
   opts: InvokeOpts,
 ): SubAgentInvocation {
-  if (!adapter.supportsSubagents || !adapter.buildSubAgentInvocation) {
+  if (!adapter.supportsSubagents) {
     throw new Error(`${adapter.providerName} does not support native sub-agents`);
   }
   return adapter.buildSubAgentInvocation(provider, spec, opts);

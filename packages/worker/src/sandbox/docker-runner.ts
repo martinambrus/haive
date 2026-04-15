@@ -21,10 +21,20 @@ export interface DockerBuildResult {
   error?: string;
 }
 
+export interface DockerVolumeMount {
+  source: string;
+  target: string;
+  readOnly?: boolean;
+}
+
 export interface DockerRunOpts {
   image: string;
   cmd: string[];
   env?: Record<string, string>;
+  mounts?: DockerVolumeMount[];
+  workdir?: string;
+  entrypoint?: string | null;
+  network?: string;
   timeoutMs?: number;
   onStdoutChunk?: (chunk: string) => void;
   onStderrChunk?: (chunk: string) => void;
@@ -161,9 +171,20 @@ export const defaultDockerRunner: DockerRunner = {
 
   async run(opts) {
     const args = ['run', '--rm'];
+    if (opts.workdir) args.push('-w', opts.workdir);
+    if (opts.network) args.push('--network', opts.network);
+    if (opts.entrypoint !== undefined) {
+      args.push('--entrypoint', opts.entrypoint ?? '');
+    }
     if (opts.env) {
       for (const [key, value] of Object.entries(opts.env)) {
         args.push('-e', `${key}=${value}`);
+      }
+    }
+    if (opts.mounts) {
+      for (const m of opts.mounts) {
+        const suffix = m.readOnly ? ':ro' : '';
+        args.push('-v', `${m.source}:${m.target}${suffix}`);
       }
     }
     args.push(opts.image, ...opts.cmd);

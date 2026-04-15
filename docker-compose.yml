@@ -7,6 +7,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-haive}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-haive_dev_password}
       POSTGRES_DB: ${POSTGRES_DB:-haive}
+      PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -105,8 +106,17 @@ services:
     volumes:
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
       - haive_repos:/var/lib/haive/repos
+      - haive_wrappers:/var/lib/haive/wrappers
     networks:
       - haive-network
+
+  cli-sandbox:
+    build:
+      context: .
+      dockerfile: packages/worker/sandbox-image/Dockerfile
+    image: haive-cli-sandbox:latest
+    profiles: ["sandbox"]
+    command: ["true"]
 
   web:
     build:
@@ -135,3 +145,5 @@ volumes:
   redis_data:
   mailpit_data:
   haive_repos:
+  haive_wrappers:
+    name: haive_wrappers

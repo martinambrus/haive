@@ -2,18 +2,24 @@ import { and, desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { schema, type Database } from '@haive/database';
 import {
+  CLI_EXEC_JOB_NAMES,
   CLI_PROVIDER_CATALOG,
   CLI_PROVIDER_LIST,
   computeKeyFingerprint,
   createCliProviderRequestSchema,
   envelopeEncrypt,
+  normalizeCliArgsArray,
   secretsService,
   setCliProviderSecretRequestSchema,
   updateCliProviderRequestSchema,
+  type CliProbeJobPayload,
+  type CliProbeResult,
+  type CliProbeTargetMode,
 } from '@haive/shared';
 import { HttpError, type AppEnv } from '../context.js';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
+import { getCliExecQueue, getCliExecQueueEvents } from '../queues.js';
 
 async function loadOwnedProvider(db: Database, userId: string, providerId: string) {
   const provider = await db.query.cliProviders.findFirst({
@@ -75,8 +81,9 @@ cliProviderRoutes.post('/', async (c) => {
       label: body.label,
       executablePath: body.executablePath?.trim() || null,
       wrapperPath: body.wrapperPath?.trim() || null,
+      wrapperContent: body.wrapperContent?.length ? body.wrapperContent : null,
       envVars: body.envVars ?? null,
-      cliArgs: body.cliArgs ?? null,
+      cliArgs: body.cliArgs ? normalizeCliArgsArray(body.cliArgs) : null,
       supportsSubagents: meta.supportsSubagents,
       authMode: body.authMode,
       enabled: body.enabled ?? true,
@@ -109,8 +116,11 @@ cliProviderRoutes.patch('/:id', async (c) => {
   if (body.wrapperPath !== undefined) {
     updates.wrapperPath = body.wrapperPath.trim() || null;
   }
+  if (body.wrapperContent !== undefined) {
+    updates.wrapperContent = body.wrapperContent.length ? body.wrapperContent : null;
+  }
   if (body.envVars !== undefined) updates.envVars = body.envVars;
-  if (body.cliArgs !== undefined) updates.cliArgs = body.cliArgs;
+  if (body.cliArgs !== undefined) updates.cliArgs = normalizeCliArgsArray(body.cliArgs);
   if (body.authMode !== undefined) updates.authMode = body.authMode;
   if (body.enabled !== undefined) updates.enabled = body.enabled;
 
@@ -133,6 +143,44 @@ cliProviderRoutes.delete('/:id', async (c) => {
     .returning({ id: schema.cliProviders.id });
   if (result.length === 0) throw new HttpError(404, 'CLI provider not found');
   return c.json({ ok: true });
+});
+
+cliProviderRoutes.post('/:id/test', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const db = getDb();
+  const provider = await db.query.cliProviders.findFirst({
+    where: and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)),
+  });
+  if (!provider) throw new HttpError(404, 'CLI provider not found');
+
+  const targetMode: CliProbeTargetMode =
+    provider.authMode === 'subscription'
+      ? 'cli'
+      : provider.authMode === 'api_key'
+        ? 'api'
+        : 'both';
+
+  const payload: CliProbeJobPayload = {
+    providerId: provider.id,
+    userId,
+    targetMode,
+  };
+
+  const queue = getCliExecQueue();
+  const events = getCliExecQueueEvents();
+  const job = await queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, {
+    removeOnComplete: true,
+    removeOnFail: true,
+  });
+
+  try {
+    const result = (await job.waitUntilFinished(events, 30_000)) as CliProbeResult;
+    return c.json({ result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new HttpError(504, `probe timed out or failed: ${message}`, 'probe_failed');
+  }
 });
 
 cliProviderRoutes.get('/:providerId/secrets', async (c) => {

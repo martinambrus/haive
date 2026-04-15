@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { api, type CliProvider, type CliProviderMetadata } from '@/lib/api-client';
 import { Card, CardDescription, CardHeader, CardTitle, FormError } from '@/components/ui';
 import { CliProviderForm } from '@/components/cli-provider-form';
-import { CliProviderSecrets } from '@/components/cli-provider-secrets';
+import { CliProviderTest } from '@/components/cli-provider-test';
 
 export default function EditCliProviderPage() {
   const params = useParams<{ id: string }>();
@@ -57,12 +57,12 @@ export default function EditCliProviderPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Secrets</CardTitle>
+          <CardTitle>Test connection</CardTitle>
           <CardDescription>
-            Envelope-encrypted at rest. Use these for API keys and other sensitive values.
+            Verify the CLI binary and/or API credentials respond correctly.
           </CardDescription>
         </CardHeader>
-        <CliProviderSecrets providerId={provider.id} apiKeyEnvName={meta.apiKeyEnvName} />
+        <CliProviderTest providerId={provider.id} />
       </Card>
     </div>
   );

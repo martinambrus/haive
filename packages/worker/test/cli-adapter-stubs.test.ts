@@ -32,7 +32,7 @@ describe('grok adapter', () => {
   it('declares expected capability flags', () => {
     expect(adapter.providerName).toBe('grok');
     expect(adapter.defaultExecutable).toBe('grok');
-    expect(adapter.supportsSubagents).toBe(false);
+    expect(adapter.supportsSubagents).toBe(true);
     expect(adapter.supportsApi).toBe(true);
     expect(adapter.supportsCliAuth).toBe(true);
     expect(adapter.defaultAuthMode).toBe('mixed');
@@ -80,7 +80,7 @@ describe('qwen adapter', () => {
   it('declares expected capability flags', () => {
     expect(adapter.providerName).toBe('qwen');
     expect(adapter.defaultExecutable).toBe('qwen');
-    expect(adapter.supportsSubagents).toBe(false);
+    expect(adapter.supportsSubagents).toBe(true);
     expect(adapter.supportsApi).toBe(true);
     expect(adapter.apiKeyEnvName).toBe('DASHSCOPE_API_KEY');
     expect(adapter.defaultModel).toBe('qwen-max');

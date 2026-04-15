@@ -129,6 +129,7 @@ export interface CliProvider {
   label: string;
   executablePath: string | null;
   wrapperPath: string | null;
+  wrapperContent: string | null;
   envVars: Record<string, string> | null;
   cliArgs: string[] | null;
   supportsSubagents: boolean;
@@ -144,6 +145,23 @@ export interface CliProviderSecret {
   fingerprint: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export type CliProbeTargetMode = 'cli' | 'api' | 'both';
+
+export interface CliProbePathResult {
+  ok: boolean;
+  detail?: string;
+  error?: string;
+  durationMs?: number;
+}
+
+export interface CliProbeResult {
+  ok: boolean;
+  providerId: string;
+  targetMode: CliProbeTargetMode;
+  cli?: CliProbePathResult;
+  api?: CliProbePathResult;
 }
 
 export type ContainerStatus = 'creating' | 'running' | 'stopped' | 'destroyed' | 'error';

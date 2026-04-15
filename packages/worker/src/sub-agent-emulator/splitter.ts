@@ -25,7 +25,7 @@ export function splitSubAgentForProvider(
   spec: SubAgentSpec,
   opts: InvokeOpts,
 ): SplitResult {
-  if (adapter.supportsSubagents && adapter.buildSubAgentInvocation) {
+  if (adapter.supportsSubagents) {
     const invocation = buildNativeSubAgentInvocation(adapter, provider, spec, opts);
     return {
       mode: 'native',

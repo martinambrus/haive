@@ -83,23 +83,22 @@ describe('resolveDispatch', () => {
     }
   });
 
-  it('falls back to sequential emulation when the CLI lacks sub-agent support', () => {
+  it('emits a native sub-agent invocation for codex', () => {
     const provider = makeProvider({
       id: 'prov-codex',
       name: 'codex',
-      supportsSubagents: false,
+      supportsSubagents: true,
     });
     const plan = resolveDispatch({
       providers: [provider],
       input: { kind: 'subagent', spec: sampleSubAgentSpec, capabilities: ['subagents'] },
       invokeOpts: {},
     });
-    expect(plan.mode).toBe('subagent_emulated');
-    expect(plan.reason).toBe('sequential_emulation');
+    expect(plan.mode).toBe('cli');
+    expect(plan.reason).toBe('native_subagents');
     if (plan.invocation?.kind === 'subagent') {
-      expect(plan.invocation.spec.mode).toBe('sequential');
-      expect(plan.invocation.spec.steps.map((s) => s.id)).toEqual(['detector', 'analyzer']);
-      expect(plan.invocation.spec.synthesis.id).toBe('synthesis');
+      expect(plan.invocation.spec.mode).toBe('native');
+      expect(plan.invocation.spec.steps).toHaveLength(2);
     }
   });
 
@@ -117,20 +116,6 @@ describe('resolveDispatch', () => {
     expect(plan.mode).toBe('api');
     expect(plan.reason).toBe('api_byok');
     expect(plan.invocation?.kind).toBe('api');
-  });
-
-  it('skips a claude-code subscription provider when the prompt needs sub-agents and none exist', () => {
-    const provider = makeProvider({
-      id: 'prov-codex',
-      name: 'codex',
-    });
-    const plan = resolveDispatch({
-      providers: [provider],
-      input: { kind: 'prompt', prompt: 'complex work', capabilities: ['subagents'] },
-      invokeOpts: {},
-    });
-    expect(plan.mode).toBe('skip');
-    expect(plan.reason).toBe('no provider matched required capabilities');
   });
 
   it('skips disabled providers entirely', () => {

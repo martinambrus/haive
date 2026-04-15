@@ -53,24 +53,30 @@ describe('splitSubAgentForProvider', () => {
     expect(result.reason).toBe('native_subagents');
   });
 
-  it('falls back to sequential mode for codex', () => {
-    const provider = makeProvider({ id: 'p-codex', name: 'codex' });
+  it('uses native mode for codex', () => {
+    const provider = makeProvider({
+      id: 'p-codex',
+      name: 'codex',
+      supportsSubagents: true,
+    });
     const adapter = cliAdapterRegistry.get('codex');
     const result = splitSubAgentForProvider(adapter, provider, spec, {});
-    expect(result.mode).toBe('sequential');
-    expect(result.invocation.mode).toBe('sequential');
+    expect(result.mode).toBe('native');
+    expect(result.invocation.mode).toBe('native');
     expect(result.invocation.steps.map((s) => s.collectInto)).toEqual(['files', 'labels']);
-    expect(result.invocation.steps[0]?.prompt).toContain('<<<JSON>>>');
-    expect(result.invocation.steps[0]?.prompt).toContain('sub-agent 1/2');
+    expect(result.reason).toBe('native_subagents');
   });
 
-  it('uses the amp-specific prompt wrapper for amp', () => {
-    const provider = makeProvider({ id: 'p-amp', name: 'amp' });
+  it('uses native mode for amp', () => {
+    const provider = makeProvider({
+      id: 'p-amp',
+      name: 'amp',
+      supportsSubagents: true,
+    });
     const adapter = cliAdapterRegistry.get('amp');
     const result = splitSubAgentForProvider(adapter, provider, spec, {});
-    expect(result.mode).toBe('sequential');
-    expect(result.invocation.steps[0]?.prompt).toContain('Sub-agent: scanner');
-    expect(result.invocation.steps[0]?.prompt).toContain('fenced block tagged json');
+    expect(result.mode).toBe('native');
+    expect(result.invocation.steps.map((s) => s.id)).toEqual(['scanner', 'labeler']);
   });
 
   it('produces a capability matrix for every registered provider', () => {
@@ -88,7 +94,7 @@ describe('splitSubAgentForProvider', () => {
       const provider = makeProvider({
         id: `p-${name}`,
         name,
-        supportsSubagents: name === 'claude-code',
+        supportsSubagents: true,
       });
       const adapter = cliAdapterRegistry.get(name);
       const result = splitSubAgentForProvider(adapter, provider, spec, {});
@@ -96,12 +102,12 @@ describe('splitSubAgentForProvider', () => {
     });
     expect(matrix).toEqual([
       { name: 'claude-code', mode: 'native' },
-      { name: 'codex', mode: 'sequential' },
-      { name: 'gemini', mode: 'sequential' },
-      { name: 'amp', mode: 'sequential' },
-      { name: 'grok', mode: 'sequential' },
-      { name: 'qwen', mode: 'sequential' },
-      { name: 'kiro', mode: 'sequential' },
+      { name: 'codex', mode: 'native' },
+      { name: 'gemini', mode: 'native' },
+      { name: 'amp', mode: 'native' },
+      { name: 'grok', mode: 'native' },
+      { name: 'qwen', mode: 'native' },
+      { name: 'kiro', mode: 'native' },
       { name: 'zai', mode: 'native' },
     ]);
   });

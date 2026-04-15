@@ -18,6 +18,7 @@ export const createCliProviderRequestSchema = z.object({
   label: z.string().min(1).max(255),
   executablePath: z.string().optional(),
   wrapperPath: z.string().optional(),
+  wrapperContent: z.string().optional(),
   envVars: z.record(z.string(), z.string()).optional(),
   cliArgs: z.array(z.string()).optional(),
   authMode: cliAuthModeSchema,

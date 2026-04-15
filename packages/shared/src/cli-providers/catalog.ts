@@ -34,9 +34,9 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   codex: {
     name: 'codex',
     displayName: 'OpenAI Codex',
-    description: 'OpenAI Codex CLI. Sub-agents are emulated via the splitter.',
+    description: "OpenAI's Codex CLI. Native sub-agent orchestration.",
     defaultExecutable: 'codex',
-    supportsSubagents: false,
+    supportsSubagents: true,
     supportsApi: true,
     supportsCliAuth: true,
     defaultAuthMode: 'subscription',
@@ -47,9 +47,9 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   gemini: {
     name: 'gemini',
     displayName: 'Google Gemini',
-    description: 'Google Gemini CLI. Sub-agents are emulated via the splitter.',
+    description: 'Google Gemini CLI. Native sub-agents via markdown agent definitions.',
     defaultExecutable: 'gemini',
-    supportsSubagents: false,
+    supportsSubagents: true,
     supportsApi: true,
     supportsCliAuth: true,
     defaultAuthMode: 'subscription',
@@ -60,9 +60,9 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   amp: {
     name: 'amp',
     displayName: 'Sourcegraph Amp',
-    description: 'Sourcegraph Amp CLI. CLI-only, sub-agents emulated.',
+    description: 'Sourcegraph Amp CLI. Native sub-agents spawn parallel mini-Amp threads.',
     defaultExecutable: 'amp',
-    supportsSubagents: false,
+    supportsSubagents: true,
     supportsApi: false,
     supportsCliAuth: true,
     defaultAuthMode: 'subscription',
@@ -73,9 +73,10 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   grok: {
     name: 'grok',
     displayName: 'xAI Grok',
-    description: 'xAI Grok CLI. OpenAI-compatible API path via api.x.ai.',
+    description:
+      'xAI Grok CLI. OpenAI-compatible API path via api.x.ai. Configurable sub-agents.',
     defaultExecutable: 'grok',
-    supportsSubagents: false,
+    supportsSubagents: true,
     supportsApi: true,
     supportsCliAuth: true,
     defaultAuthMode: 'mixed',
@@ -86,9 +87,10 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   qwen: {
     name: 'qwen',
     displayName: 'Alibaba Qwen',
-    description: 'Alibaba Qwen CLI. OpenAI-compatible API via DashScope.',
+    description:
+      'Alibaba Qwen CLI. OpenAI-compatible API via DashScope. Native sub-agent support.',
     defaultExecutable: 'qwen',
-    supportsSubagents: false,
+    supportsSubagents: true,
     supportsApi: true,
     supportsCliAuth: true,
     defaultAuthMode: 'mixed',
@@ -99,9 +101,9 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   kiro: {
     name: 'kiro',
     displayName: 'Kiro',
-    description: 'Kiro CLI. CLI-only, sub-agents emulated.',
+    description: 'Kiro CLI. CLI-only. Native sub-agents with task dependencies.',
     defaultExecutable: 'kiro',
-    supportsSubagents: false,
+    supportsSubagents: true,
     supportsApi: false,
     supportsCliAuth: true,
     defaultAuthMode: 'subscription',

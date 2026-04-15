@@ -4,7 +4,7 @@ import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from
 export class AmpAdapter extends BaseCliAdapter {
   readonly providerName = 'amp' as const;
   readonly defaultExecutable = 'amp';
-  readonly supportsSubagents = false;
+  readonly supportsSubagents = true;
   readonly supportsApi = false;
   readonly supportsCliAuth = true;
   readonly defaultAuthMode = 'subscription' as const;

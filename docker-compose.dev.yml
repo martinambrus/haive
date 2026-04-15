@@ -59,9 +59,12 @@ services:
       - haive_node_modules_database:/app/packages/database/node_modules
       - /var/run/docker.sock:/var/run/docker.sock
       - haive_repos:/var/lib/haive/repos
+      - haive_wrappers:/var/lib/haive/wrappers
     command: sh -c "pnpm --filter @haive/shared build && pnpm --filter @haive/database build && pnpm --filter @haive/worker dev"
     environment:
       NODE_ENV: development
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-haive-cli-sandbox:latest}
+      SANDBOX_WRAPPER_HOST_VOLUME: ${SANDBOX_WRAPPER_HOST_VOLUME:-haive_wrappers}
 
   web:
     build:

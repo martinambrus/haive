@@ -5,8 +5,6 @@ import type {
   CliProviderRecord,
   EnvInjection,
   InvokeOpts,
-  SubAgentInvocation,
-  SubAgentSpec,
 } from './types.js';
 
 export class ZaiAdapter extends BaseCliAdapter {
@@ -49,27 +47,6 @@ export class ZaiAdapter extends BaseCliAdapter {
       prompt,
       model: this.effectiveModel(opts),
       maxOutputTokens: this.effectiveMaxTokens(opts),
-    };
-  }
-
-  override buildSubAgentInvocation(
-    _provider: CliProviderRecord,
-    spec: SubAgentSpec,
-    _opts: InvokeOpts,
-  ): SubAgentInvocation {
-    return {
-      mode: 'native',
-      steps: spec.subAgents.map((sub) => ({
-        id: sub.name,
-        prompt: sub.prompt,
-        expectJsonOutput: true,
-        collectInto: sub.outputKey,
-      })),
-      synthesis: {
-        id: 'synthesis',
-        prompt: spec.synthesisPrompt,
-        expectJsonOutput: true,
-      },
     };
   }
 

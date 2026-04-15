@@ -106,7 +106,6 @@ Sandbox and Docker
 Dev services
 
 - [Mailpit](https://mailpit.axllent.org/) local SMTP
-- [MinIO](https://min.io/) S3-compatible storage
 
 Testing
 
@@ -189,6 +188,10 @@ DOCKER_SOCKET=/run/user/1000/docker.sock  # substitute your uid from `id -u`
 Bring the stack up with `pnpm docker:dev`. The worker container still sees `/var/run/docker.sock` internally (via `DOCKER_HOST=unix:///var/run/docker.sock`), but the host side is now the unprivileged rootless daemon. A container escape at that point lands the attacker in the unprivileged user's rootless namespace, not as root on the host.
 
 Caveats: rootless Docker uses user-namespaced uid mapping, so files written inside per-task containers will not be owned by uid 0 on the host; clawker's bind-mount copy mode handles this correctly. Networking still uses the `haive-network` bridge. Rootless does not support `--privileged` containers, but haive's per-task sandboxes never request privilege so this is not a regression.
+
+## Acknowledgements
+
+The workflow DAG design is directly inspired by [SWE-AF](https://github.com/Agent-Field/SWE-AF).
 
 ## License
 
