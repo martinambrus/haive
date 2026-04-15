@@ -177,10 +177,7 @@ export const cliProviders = pgTable(
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
-  (table) => [
-    index('cli_providers_user_id_idx').on(table.userId),
-    uniqueIndex('cli_providers_user_name_idx').on(table.userId, table.name),
-  ],
+  (table) => [index('cli_providers_user_id_idx').on(table.userId)],
 );
 
 export const cliProviderSecrets = pgTable(

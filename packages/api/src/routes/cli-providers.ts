@@ -65,14 +65,6 @@ cliProviderRoutes.post('/', async (c) => {
   const meta = CLI_PROVIDER_CATALOG[body.name];
 
   const db = getDb();
-  const existing = await db.query.cliProviders.findFirst({
-    where: and(eq(schema.cliProviders.userId, userId), eq(schema.cliProviders.name, body.name)),
-    columns: { id: true },
-  });
-  if (existing) {
-    throw new HttpError(409, `Provider ${body.name} already configured`, 'duplicate_provider');
-  }
-
   const inserted = await db
     .insert(schema.cliProviders)
     .values({

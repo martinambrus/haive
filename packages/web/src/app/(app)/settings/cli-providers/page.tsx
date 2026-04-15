@@ -78,8 +78,7 @@ export default function CliProvidersPage() {
     }
   }
 
-  const configuredNames = new Set(providers?.map((p) => p.name) ?? []);
-  const unconfigured = catalog?.filter((m) => !configuredNames.has(m.name)) ?? [];
+  const availableCatalog = catalog ?? [];
 
   return (
     <div className="flex flex-col gap-6">
@@ -171,11 +170,15 @@ export default function CliProvidersPage() {
             )}
           </section>
 
-          {unconfigured.length > 0 && (
+          {availableCatalog.length > 0 && (
             <section className="flex flex-col gap-4">
-              <h2 className="text-lg font-semibold text-neutral-100">Available</h2>
+              <h2 className="text-lg font-semibold text-neutral-100">Add another CLI</h2>
+              <p className="text-xs text-neutral-500">
+                You can register the same CLI multiple times with different labels, models, or
+                permissions.
+              </p>
               <div className="grid gap-3 md:grid-cols-2">
-                {unconfigured.map((m) => (
+                {availableCatalog.map((m) => (
                   <Card key={m.name}>
                     <CardHeader>
                       <CardTitle>{m.displayName}</CardTitle>
