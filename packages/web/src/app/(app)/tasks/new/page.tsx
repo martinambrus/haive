@@ -32,11 +32,6 @@ const WORKFLOW_OPTIONS: { value: WorkflowType; label: string; description: strin
     label: 'Workflow (autonomous)',
     description: 'Autonomous implementation loop with spec/verify/commit gates.',
   },
-  {
-    value: 'env_replicate',
-    label: 'Environment replication',
-    description: 'Build a sandboxed Docker image matching this project.',
-  },
 ];
 
 export default function NewTaskPage() {
@@ -50,7 +45,6 @@ export default function NewTaskPage() {
   const [description, setDescription] = useState('');
   const [repositoryId, setRepositoryId] = useState<string>('');
   const [cliProviderId, setCliProviderId] = useState<string>('');
-  const [envReplicatePrelude, setEnvReplicatePrelude] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,9 +89,6 @@ export default function NewTaskPage() {
       if (description.trim()) body.description = description.trim();
       if (repositoryId) body.repositoryId = repositoryId;
       if (cliProviderId) body.cliProviderId = cliProviderId;
-      if (envReplicatePrelude && type !== 'env_replicate') {
-        body.envReplicatePrelude = true;
-      }
 
       const data = await api.post<{ task: Task }>('/tasks', body);
       router.push(`/tasks/${data.task.id}`);
@@ -227,26 +218,6 @@ export default function NewTaskPage() {
             ))}
           </select>
         </div>
-
-        {type !== 'env_replicate' && (
-          <label className="flex cursor-pointer items-start gap-3 rounded-md border border-neutral-800 bg-neutral-900/40 p-3 text-sm hover:border-neutral-700">
-            <input
-              type="checkbox"
-              checked={envReplicatePrelude}
-              onChange={(e) => setEnvReplicatePrelude(e.target.checked)}
-              className="mt-1"
-            />
-            <div>
-              <div className="font-medium text-neutral-100">
-                Set up sandboxed local environment first
-              </div>
-              <div className="text-xs text-neutral-400">
-                Prepends the environment-replication step sequence (declare deps, generate
-                Dockerfile, build image, verify) before the chosen workflow.
-              </div>
-            </div>
-          </label>
-        )}
 
         <FormError message={error} />
 

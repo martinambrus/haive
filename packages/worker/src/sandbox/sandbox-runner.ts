@@ -21,11 +21,19 @@ const DEFAULT_WRAPPER_SANDBOX_PATH = '/haive/wrappers';
 export const SANDBOX_WORKDIR = '/haive/workdir';
 const DEFAULT_WORKDIR = SANDBOX_WORKDIR;
 
+export interface SandboxExtraFile {
+  /** Absolute path inside the sandbox container. */
+  containerPath: string;
+  content: string;
+}
+
 export interface SandboxRunSpec {
   command: string;
   args: string[];
   env?: Record<string, string>;
   wrapperContent?: string | null;
+  /** Files to inject into the container via bind-mount from the wrappers volume. */
+  extraFiles?: SandboxExtraFile[];
   timeoutMs?: number;
   onStdoutChunk?: (chunk: string) => void;
   onStderrChunk?: (chunk: string) => void;
@@ -81,6 +89,7 @@ export async function runInSandbox(
   let wrapperWorkerPath: string | null = null;
   let resolvedCommand = spec.command;
   let gateway: EgressGateway | null = null;
+  const extraFileDirs: string[] = [];
 
   try {
     if (policy?.mode === 'allowlist') {
@@ -99,6 +108,23 @@ export async function runInSandbox(
       await writeFile(wrapperWorkerPath, normalizeWrapperContent(spec.wrapperContent), 'utf8');
       await chmod(wrapperWorkerPath, 0o755);
       resolvedCommand = wrapperSandboxPath;
+    }
+
+    if (spec.extraFiles && spec.extraFiles.length > 0) {
+      for (let i = 0; i < spec.extraFiles.length; i++) {
+        const ef = spec.extraFiles[i]!;
+        const efId = randomUUID();
+        const efDir = join(wrapperWorkerRoot, efId);
+        const efHostPath = join(efDir, `extra-${i}`);
+        await mkdir(efDir, { recursive: true });
+        await writeFile(efHostPath, ef.content, 'utf8');
+        extraFileDirs.push(efDir);
+        mounts.push({
+          source: `${volumeName}/${efId}/extra-${i}`,
+          target: ef.containerPath,
+          readOnly: true,
+        });
+      }
     }
 
     const network = resolveDockerNetwork(policy, gateway);
@@ -122,6 +148,11 @@ export async function runInSandbox(
       const wrapperDir = dirname(wrapperWorkerPath);
       rm(wrapperDir, { recursive: true, force: true }).catch((err: unknown) => {
         log.warn({ err, wrapperDir }, 'failed to cleanup wrapper dir');
+      });
+    }
+    for (const efDir of extraFileDirs) {
+      rm(efDir, { recursive: true, force: true }).catch((err: unknown) => {
+        log.warn({ err, efDir }, 'failed to cleanup extra file dir');
       });
     }
     if (gateway) {

@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { api, type Task, type TaskStatus, type WorkflowType } from '@/lib/api-client';
+import { api, type Task, type TaskStatus } from '@/lib/api-client';
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
@@ -22,10 +22,10 @@ function statusVariant(status: TaskStatus): BadgeVariant {
   }
 }
 
-const TYPE_LABELS: Record<WorkflowType, string> = {
+const TYPE_LABELS: Record<string, string> = {
   onboarding: 'Onboarding',
   workflow: 'Workflow',
-  env_replicate: 'Env replicate',
+  env_replicate: 'Env replicate', // legacy tasks only
 };
 
 export default function TasksPage() {

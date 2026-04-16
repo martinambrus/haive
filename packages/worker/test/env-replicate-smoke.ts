@@ -154,9 +154,10 @@ async function main(): Promise<void> {
       .values({
         userId,
         repositoryId: repo.id,
-        type: 'env_replicate',
+        type: 'workflow',
         title: 'Stand up sandboxed dev environment',
-        description: 'Build a minimal Node-based sandbox image for the fixture.',
+        description:
+          'Build a minimal Node-based sandbox image for the fixture (env-replicate runs as mandatory prelude).',
         status: 'created',
       })
       .returning();

@@ -94,10 +94,7 @@ taskRoutes.post('/', async (c) => {
     if (!provider) throw new HttpError(404, 'CLI provider not found');
   }
 
-  const metadata: Record<string, unknown> | null =
-    body.envReplicatePrelude && body.type !== 'env_replicate'
-      ? { envReplicatePrelude: true }
-      : null;
+  const metadata: Record<string, unknown> | null = null;
 
   const inserted = await db
     .insert(schema.tasks)

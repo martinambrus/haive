@@ -51,6 +51,9 @@ export const repoSourceEnum = pgEnum('repo_source', [
 ]);
 export const repoStatusEnum = pgEnum('repo_status', ['cloning', 'ready', 'error']);
 
+// 'env_replicate' kept in pgEnum for backward compat with existing DB rows.
+// It is no longer a user-facing type — env-replicate steps run as a mandatory
+// prelude for workflow tasks. The TS WorkflowType union enforces 'onboarding' | 'workflow'.
 export const workflowTypeEnum = pgEnum('workflow_type', [
   'onboarding',
   'workflow',

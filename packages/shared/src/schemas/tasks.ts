@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const workflowTypeSchema = z.enum(['onboarding', 'workflow', 'env_replicate']);
+export const workflowTypeSchema = z.enum(['onboarding', 'workflow']);
 
 export const taskStatusSchema = z.enum([
   'created',
@@ -39,7 +39,6 @@ export const createTaskRequestSchema = z.object({
   repositoryId: z.string().uuid().optional(),
   cliProviderId: z.string().uuid().optional(),
   envTemplateId: z.string().uuid().optional(),
-  envReplicatePrelude: z.boolean().optional(),
   resourceLimits: resourceLimitsSchema,
 });
 

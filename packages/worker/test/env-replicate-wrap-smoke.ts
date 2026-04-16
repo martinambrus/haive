@@ -160,11 +160,11 @@ async function main(): Promise<void> {
       .values({
         userId,
         repositoryId: repo.id,
-        type: 'onboarding',
+        type: 'workflow',
         title: 'env-replicate wrap smoke',
-        description: 'Onboarding preceded by env_replicate prelude.',
+        description: 'Workflow task with mandatory env_replicate prelude.',
         status: 'created',
-        metadata: { envReplicatePrelude: true },
+        metadata: null,
       })
       .returning();
     if (!task) throw new Error('task insert failed');
@@ -301,24 +301,21 @@ async function main(): Promise<void> {
       '03-build-image',
       '04-verify-environment',
     ];
-    const expectedOnboarding = [
-      '01-env-detect',
-      '01_5-ripgrep-config',
-      '02-detection-confirmation',
-      '04-tooling-infrastructure',
-      '06-workflow-prefs',
-      '06_5-agent-discovery',
-      '07-generate-files',
-      '07_5-verify-files',
-      '08-knowledge-acquisition',
-      '09-qa',
-      '09_5-skill-generation',
-      '09_6-skill-verification',
-      '10-rag-populate',
-      '11-final-review',
-      '12-post-onboarding',
+    const expectedWorkflow = [
+      '01-worktree-setup',
+      '02-pre-rag-sync',
+      '03-phase-0a-discovery',
+      '04-phase-0b-pre-planning',
+      '05-phase-0b5-spec-quality',
+      '06-gate-1-spec-approval',
+      '07-phase-2-implement',
+      '08-phase-5-verify',
+      '09-gate-2-verify-approval',
+      '10-gate-3-commit',
+      '11-phase-8-learning',
+      '12-worktree-cleanup',
     ];
-    const expected = [...expectedEnv, ...expectedOnboarding];
+    const expected = [...expectedEnv, ...expectedWorkflow];
     for (const id of expected) {
       const row = allSteps.find((s) => s.stepId === id);
       if (!row) throw new Error(`missing step row ${id}`);
@@ -328,10 +325,10 @@ async function main(): Promise<void> {
     }
 
     const envIndex = allSteps.findIndex((s) => s.stepId === '04-verify-environment');
-    const onboardingIndex = allSteps.findIndex((s) => s.stepId === '01-env-detect');
-    if (envIndex < 0 || onboardingIndex < 0 || envIndex > onboardingIndex) {
+    const workflowIndex = allSteps.findIndex((s) => s.stepId === '01-worktree-setup');
+    if (envIndex < 0 || workflowIndex < 0 || envIndex > workflowIndex) {
       throw new Error(
-        `env_replicate prelude did not precede onboarding: envIndex=${envIndex}, onboardingIndex=${onboardingIndex}`,
+        `env_replicate prelude did not precede workflow: envIndex=${envIndex}, workflowIndex=${workflowIndex}`,
       );
     }
 

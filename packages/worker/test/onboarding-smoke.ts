@@ -119,7 +119,7 @@ async function main(): Promise<void> {
         type: 'onboarding',
         title: 'onboarding smoke',
         status: 'created',
-        metadata: { envReplicatePrelude: false },
+        metadata: null,
       })
       .returning();
     if (!task) throw new Error('task insert failed');

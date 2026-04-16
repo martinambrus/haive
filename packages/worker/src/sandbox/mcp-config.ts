@@ -18,6 +18,7 @@ export interface BuildDefaultMcpServersOptions {
   databaseUrl?: string;
   includeFilesystem?: boolean;
   includeGit?: boolean;
+  includeChromeDevtools?: boolean;
 }
 
 export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): McpServerSpec[] {
@@ -46,6 +47,15 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
       name: 'postgres',
       command: 'npx',
       args: ['-y', '@modelcontextprotocol/server-postgres', opts.databaseUrl],
+    });
+  }
+
+  if (opts.includeChromeDevtools) {
+    servers.push({
+      name: 'chrome-devtools',
+      command: 'chrome-devtools-mcp',
+      args: [],
+      env: { CHROME_PATH: '/usr/bin/chromium' },
     });
   }
 

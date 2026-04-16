@@ -1,5 +1,5 @@
 import type { FormSchema, FormField } from '../schemas/form.js';
-import type { WorkflowType, StepStatus } from '../types/index.js';
+import type { StepStatus } from '../types/index.js';
 
 export type StepCapability = 'subagents' | 'tool_use' | 'file_write';
 
@@ -13,7 +13,8 @@ export type FormValues = Record<string, unknown>;
 
 export interface StepMetadata {
   id: string;
-  workflowType: WorkflowType;
+  /** User-facing WorkflowType or internal registry key (e.g. 'env_replicate'). */
+  workflowType: string;
   index: number;
   title: string;
   description: string;

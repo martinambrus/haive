@@ -170,9 +170,9 @@ test.describe('tasks list and create', () => {
         },
         {
           id: randomUUID(),
-          type: 'env_replicate' as const,
-          typeLabel: 'Env replicate',
-          title: `e2e list env_replicate ${base}`,
+          type: 'workflow' as const,
+          typeLabel: 'Workflow',
+          title: `e2e list workflow2 ${base}`,
           status: 'completed',
           createdAt: new Date(base),
         },
@@ -217,7 +217,9 @@ test.describe('tasks list and create', () => {
     }
   });
 
-  test('POST /tasks accepts onboarding and env_replicate types', async ({ page }) => {
+  test('POST /tasks accepts onboarding and workflow types, rejects env_replicate', async ({
+    page,
+  }) => {
     const sql = getSql();
     let userId = '';
     const createdIds: string[] = [];
@@ -239,27 +241,32 @@ test.describe('tasks list and create', () => {
       expect(onboardingBody.task.status).toBe('created');
       createdIds.push(onboardingBody.task.id);
 
-      const envRes = await page.request.post(`${API_BASE}/tasks`, {
+      const workflowRes = await page.request.post(`${API_BASE}/tasks`, {
         data: {
-          type: 'env_replicate',
-          title: `e2e env_replicate ${Date.now().toString(36)}`,
+          type: 'workflow',
+          title: `e2e workflow ${Date.now().toString(36)}`,
         },
       });
-      expect(envRes.status()).toBe(201);
-      const envBody = (await envRes.json()) as {
+      expect(workflowRes.status()).toBe(201);
+      const workflowBody = (await workflowRes.json()) as {
         task: { id: string; type: string; status: string };
       };
-      expect(envBody.task.type).toBe('env_replicate');
-      expect(envBody.task.status).toBe('created');
-      createdIds.push(envBody.task.id);
+      expect(workflowBody.task.type).toBe('workflow');
+      expect(workflowBody.task.status).toBe('created');
+      createdIds.push(workflowBody.task.id);
 
       const rows = await sql<{ id: string; type: string }[]>`
         select id, type from tasks
-        where id in (${onboardingBody.task.id}, ${envBody.task.id})
+        where id in (${onboardingBody.task.id}, ${workflowBody.task.id})
       `;
       const byId = new Map(rows.map((r) => [r.id, r.type]));
       expect(byId.get(onboardingBody.task.id)).toBe('onboarding');
-      expect(byId.get(envBody.task.id)).toBe('env_replicate');
+      expect(byId.get(workflowBody.task.id)).toBe('workflow');
+
+      const envRes = await page.request.post(`${API_BASE}/tasks`, {
+        data: { type: 'env_replicate', title: 'e2e deprecated type' },
+      });
+      expect(envRes.status()).toBe(400);
 
       const badRes = await page.request.post(`${API_BASE}/tasks`, {
         data: { type: 'not_a_real_type', title: 'e2e bad type' },

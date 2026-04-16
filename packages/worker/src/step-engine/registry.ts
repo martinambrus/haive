@@ -1,9 +1,8 @@
 import type { StepDefinition } from './step-definition.js';
-import type { WorkflowType } from '@haive/shared';
 
 export class StepRegistry {
   private byId = new Map<string, StepDefinition>();
-  private byWorkflow = new Map<WorkflowType, StepDefinition[]>();
+  private byWorkflow = new Map<string, StepDefinition[]>();
 
   register(def: StepDefinition): void {
     const meta = def.metadata;
@@ -41,7 +40,7 @@ export class StepRegistry {
     return def;
   }
 
-  listByWorkflow(type: WorkflowType): StepDefinition[] {
+  listByWorkflow(type: string): StepDefinition[] {
     return (this.byWorkflow.get(type) ?? []).slice();
   }
 

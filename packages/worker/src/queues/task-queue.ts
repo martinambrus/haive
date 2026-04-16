@@ -22,7 +22,6 @@ import {
 } from '../step-engine/index.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
-import { scanRepoForDeps } from '../step-engine/steps/env-replicate/01-declare-deps.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 
 let registered = false;
@@ -62,23 +61,11 @@ interface ResolvedTaskContext {
 
 async function buildRunList(ctx: ResolvedTaskContext): Promise<StepDefinition[]> {
   const main = stepRegistry.listByWorkflow(ctx.workflowType);
-  if (ctx.workflowType === 'env_replicate') return main;
-
-  if (ctx.metadata?.envReplicatePrelude === false) return main;
-  const forced = ctx.metadata?.envReplicatePrelude === true;
-  const shouldPrelude = forced || (await shouldAutoRunEnvReplicate(ctx.repoPath));
-  const prelude = shouldPrelude ? stepRegistry.listByWorkflow('env_replicate') : [];
-  return [...prelude, ...main];
-}
-
-async function shouldAutoRunEnvReplicate(repoPath: string): Promise<boolean> {
-  try {
-    const deps = await scanRepoForDeps(repoPath);
-    return deps.runtimes.length > 0 || deps.containerTool !== 'none';
-  } catch (err) {
-    logger.warn({ err, repoPath }, 'env-replicate detection failed; skipping prelude');
-    return false;
+  if (ctx.workflowType === 'workflow') {
+    const prelude = stepRegistry.listByWorkflow('env_replicate');
+    return [...prelude, ...main];
   }
+  return main;
 }
 
 async function resolveTaskContext(
@@ -105,7 +92,7 @@ async function resolveTaskContext(
   return {
     taskId: task.id,
     userId: task.userId,
-    workflowType: task.type,
+    workflowType: task.type as WorkflowType,
     repoPath,
     workspacePath: repoPath,
     cliProviderId: task.cliProviderId,

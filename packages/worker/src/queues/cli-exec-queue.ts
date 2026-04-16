@@ -34,7 +34,8 @@ import {
 } from '../sandbox/docker-runner.js';
 import { renderDockerfile, resolveImageTag } from '../sandbox/image-cache.js';
 import { ensureComposedImage } from '../sandbox/composed-image-cache.js';
-import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
+import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../sandbox/sandbox-runner.js';
+import { buildDefaultMcpServers, buildMcpConfigForCli } from '../sandbox/mcp-config.js';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type { BaseCliAdapter } from '../cli-adapters/base-adapter.js';
 import type {
@@ -172,6 +173,20 @@ async function executeByKind(
         payload.cliProviderId,
         payload.taskId,
       );
+      const providerRow = payload.cliProviderId
+        ? await db.query.cliProviders.findFirst({
+            where: eq(schema.cliProviders.id, payload.cliProviderId),
+            columns: { name: true },
+          })
+        : null;
+      const mcpFiles = providerRow
+        ? await resolveMcpExtraFiles(
+            db,
+            payload.taskId,
+            providerRow.name as CliProviderName,
+            sandboxWorkdir,
+          )
+        : [];
       return executeCliSpec(
         payload.spec as CliCommandSpec,
         deps,
@@ -182,6 +197,7 @@ async function executeByKind(
         repoMount,
         sandboxWorkdir,
         networkPolicy,
+        mcpFiles,
       );
     }
     case 'api':
@@ -221,6 +237,37 @@ async function loadProviderRuntimeConfig(
     sandboxImage,
     networkPolicy: row.networkPolicy,
   };
+}
+
+async function resolveMcpExtraFiles(
+  db: Database,
+  taskId: string,
+  providerName: CliProviderName,
+  sandboxWorkdir: string,
+): Promise<SandboxExtraFile[]> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { envTemplateId: true },
+  });
+  if (!task?.envTemplateId) return [];
+
+  const envTemplate = await db.query.envTemplates.findFirst({
+    where: eq(schema.envTemplates.id, task.envTemplateId),
+    columns: { declaredDeps: true, status: true },
+  });
+  if (!envTemplate || envTemplate.status !== 'ready') return [];
+
+  const deps = envTemplate.declaredDeps as Record<string, unknown> | null;
+  const servers = buildDefaultMcpServers({
+    repoPath: sandboxWorkdir,
+    includeChromeDevtools: !!deps?.browserTesting,
+  });
+  if (servers.length === 0) return [];
+
+  const config = buildMcpConfigForCli(providerName, servers);
+  if (!config) return [];
+
+  return [{ containerPath: config.path, content: config.content }];
 }
 
 const REPO_VOLUME_NAME = 'haive_repos';
@@ -329,6 +376,7 @@ async function executeCliSpec(
   repoMount: DockerVolumeMount | null = null,
   sandboxWorkdir: string = SANDBOX_WORKDIR,
   networkPolicy: CliNetworkPolicy | null = null,
+  extraFiles: SandboxExtraFile[] = [],
 ): Promise<ExecutionOutcome> {
   const mergedSpec: CliCommandSpec = {
     ...spec,
@@ -340,6 +388,7 @@ async function executeCliSpec(
     repoMount,
     sandboxWorkdir,
     networkPolicy,
+    extraFiles,
   );
   const result = await spawner(mergedSpec, { timeoutMs });
   void deps;
@@ -357,6 +406,7 @@ function createSandboxSpawner(
   repoMount: DockerVolumeMount | null = null,
   sandboxWorkdir: string = SANDBOX_WORKDIR,
   networkPolicy: CliNetworkPolicy | null = null,
+  extraFiles: SandboxExtraFile[] = [],
 ): CliSpawner {
   return async (spec, opts: SpawnOptions = {}): Promise<CliExecutionResult> => {
     const runnerOptions: Parameters<typeof runInSandbox>[1] = { workdir: sandboxWorkdir };
@@ -369,6 +419,7 @@ function createSandboxSpawner(
         args: spec.args,
         env: spec.env,
         wrapperContent: wrapperContent ?? undefined,
+        extraFiles: extraFiles.length > 0 ? extraFiles : undefined,
         timeoutMs: opts.timeoutMs,
         onStdoutChunk: opts.onStdoutChunk,
         onStderrChunk: opts.onStderrChunk,
@@ -536,6 +587,12 @@ async function executeSubAgentNative(
     extraEnv: secrets,
   });
   const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
+  const mcpFiles = await resolveMcpExtraFiles(
+    db,
+    payload.taskId,
+    provider.name as CliProviderName,
+    sandboxWorkdir,
+  );
   return executeCliSpec(
     spec,
     deps,
@@ -546,6 +603,7 @@ async function executeSubAgentNative(
     repoMount,
     sandboxWorkdir,
     provider.networkPolicy,
+    mcpFiles,
   );
 }
 
@@ -573,12 +631,19 @@ async function executeSubAgentSequential(
   }
 
   const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
+  const mcpFiles = await resolveMcpExtraFiles(
+    db,
+    payload.taskId,
+    provider.name as CliProviderName,
+    sandboxWorkdir,
+  );
   const spawner = createSandboxSpawner(
     provider.wrapperContent,
     sandboxImage,
     repoMount,
     sandboxWorkdir,
     provider.networkPolicy,
+    mcpFiles,
   );
   const result: SubAgentRunResult = await runSequentialSubAgent(
     invocation,

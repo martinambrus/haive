@@ -219,7 +219,7 @@ export interface Container {
   destroyedAt: string | null;
 }
 
-export type WorkflowType = 'onboarding' | 'workflow' | 'env_replicate';
+export type WorkflowType = 'onboarding' | 'workflow';
 
 export type TaskStatus =
   | 'created'
