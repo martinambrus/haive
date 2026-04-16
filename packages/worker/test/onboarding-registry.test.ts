@@ -52,7 +52,15 @@ describe('onboarding registry', () => {
       containerType: 'ddev',
       databaseType: 'postgres',
       databaseVersion: '17',
+      webserver: 'nginx-fpm',
+      docroot: 'web',
+      runtimeVersions: { php: '8.3' },
       testPaths: ['tests'],
+      testFrameworks: ['phpunit'],
+      localUrl: 'https://foo.ddev.site',
+      buildTool: null,
+      projectDescription: 'A Drupal project',
+      source: 'llm',
     });
     expect(schema).not.toBeNull();
     expect(schema!.fields.map((f) => f.id)).toEqual([
@@ -60,6 +68,11 @@ describe('onboarding registry', () => {
       'framework',
       'primaryLanguage',
       'localUrl',
+      'databaseType',
+      'databaseVersion',
+      'webserver',
+      'testFrameworks',
+      'buildTool',
       'projectDescription',
     ]);
   });
@@ -68,12 +81,81 @@ describe('onboarding registry', () => {
     const ctx = {} as never;
     const schema = toolingInfrastructureStep.form!(ctx, {
       primaryLanguage: 'php',
+      framework: 'generic',
       containerType: 'ddev',
       databaseType: 'postgres',
+      hasPhpExtendedExtensions: false,
     });
     const lsp = schema!.fields.find((f) => f.id === 'lspLanguage');
     expect(lsp?.type).toBe('select');
     expect((lsp as { default: string }).default).toBe('php');
+  });
+
+  it('tooling infrastructure defaults to php-extended for Drupal frameworks', () => {
+    const ctx = {} as never;
+    const schema = toolingInfrastructureStep.form!(ctx, {
+      primaryLanguage: 'php',
+      framework: 'drupal',
+      containerType: 'ddev',
+      databaseType: 'postgres',
+      hasPhpExtendedExtensions: false,
+    });
+    const lsp = schema!.fields.find((f) => f.id === 'lspLanguage');
+    expect((lsp as { default: string }).default).toBe('php-extended');
+  });
+
+  it('tooling infrastructure defaults to php-extended when PHP candidate extensions detected', () => {
+    const ctx = {} as never;
+    const schema = toolingInfrastructureStep.form!(ctx, {
+      primaryLanguage: 'php',
+      framework: 'generic',
+      containerType: 'none',
+      databaseType: null,
+      hasPhpExtendedExtensions: true,
+    });
+    const lsp = schema!.fields.find((f) => f.id === 'lspLanguage');
+    expect((lsp as { default: string }).default).toBe('php-extended');
+  });
+
+  it('tooling infrastructure includes DDEV rag option only when DDEV detected', () => {
+    const ctx = {} as never;
+    const withDdev = toolingInfrastructureStep.form!(ctx, {
+      primaryLanguage: 'php',
+      framework: 'drupal',
+      containerType: 'ddev',
+      databaseType: 'postgres',
+      hasPhpExtendedExtensions: false,
+    });
+    const ragWithDdev = withDdev!.fields.find((f) => f.id === 'ragMode');
+    expect(ragWithDdev?.type).toBe('select');
+    const ddevOpts = (ragWithDdev as { options: { value: string }[] }).options;
+    expect(ddevOpts.map((o) => o.value)).toContain('ddev');
+
+    const noDdev = toolingInfrastructureStep.form!(ctx, {
+      primaryLanguage: 'javascript',
+      framework: 'generic',
+      containerType: 'none',
+      databaseType: null,
+      hasPhpExtendedExtensions: false,
+    });
+    const ragNoDdev = noDdev!.fields.find((f) => f.id === 'ragMode');
+    const noDdevOpts = (ragNoDdev as { options: { value: string }[] }).options;
+    expect(noDdevOpts.map((o) => o.value)).not.toContain('ddev');
+  });
+
+  it('tooling infrastructure includes Ollama and embedding fields', () => {
+    const ctx = {} as never;
+    const schema = toolingInfrastructureStep.form!(ctx, {
+      primaryLanguage: 'php',
+      framework: 'generic',
+      containerType: 'none',
+      databaseType: null,
+      hasPhpExtendedExtensions: false,
+    });
+    const fieldIds = schema!.fields.map((f) => f.id);
+    expect(fieldIds).toContain('ollamaUrl');
+    expect(fieldIds).toContain('embeddingModel');
+    expect(fieldIds).toContain('embeddingDimensions');
   });
 
   it('workflow prefs form contains verification level radio with three options', () => {

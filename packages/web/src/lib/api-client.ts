@@ -14,15 +14,44 @@ export interface ApiError extends Error {
   issues?: { path: string; message: string }[];
 }
 
+let refreshing: Promise<boolean> | null = null;
+
+async function tryRefresh(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/refresh`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
-  });
+  const doFetch = () =>
+    fetch(`${API_BASE}${path}`, {
+      ...init,
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init?.headers ?? {}),
+      },
+    });
+
+  let res = await doFetch();
+
+  // On 401, attempt one silent refresh then retry the original request
+  if (res.status === 401 && !path.startsWith('/auth/')) {
+    if (!refreshing) refreshing = tryRefresh();
+    const ok = await refreshing;
+    refreshing = null;
+    if (ok) {
+      res = await doFetch();
+    }
+  }
+
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as {
       error?: string;
@@ -271,6 +300,7 @@ export interface TaskStep {
   formSchema: unknown;
   formValues: Record<string, unknown> | null;
   output: unknown;
+  statusMessage: string | null;
   errorMessage: string | null;
   startedAt: string | null;
   endedAt: string | null;

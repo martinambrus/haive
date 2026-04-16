@@ -31,6 +31,7 @@ const TYPE_LABELS: Record<string, string> = {
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showCancelled, setShowCancelled] = useState(false);
 
   async function reload() {
     try {
@@ -56,9 +57,18 @@ export default function TasksPage() {
             Deterministic step engine runs. Status refreshes every few seconds.
           </p>
         </div>
-        <Link href="/tasks/new">
-          <Button>New task</Button>
-        </Link>
+        <div className="flex items-center gap-2">
+          <Button
+            variant={showCancelled ? 'primary' : 'secondary'}
+            size="sm"
+            onClick={() => setShowCancelled((v) => !v)}
+          >
+            {showCancelled ? 'Hide cancelled' : 'Show cancelled'}
+          </Button>
+          <Link href="/tasks/new">
+            <Button>New task</Button>
+          </Link>
+        </div>
       </div>
 
       {error && (
@@ -85,28 +95,32 @@ export default function TasksPage() {
 
       {tasks && tasks.length > 0 && (
         <div className="grid gap-3">
-          {tasks.map((task) => (
-            <Link key={task.id} href={`/tasks/${task.id}`} className="block">
-              <Card className="flex flex-col gap-2 transition-colors hover:border-indigo-700">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <h2 className="text-lg font-semibold text-neutral-50">{task.title}</h2>
-                    <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
-                    <Badge>{TYPE_LABELS[task.type]}</Badge>
+          {tasks
+            .filter((task) => showCancelled || task.status !== 'cancelled')
+            .map((task) => (
+              <Link key={task.id} href={`/tasks/${task.id}`} className="block">
+                <Card className="flex flex-col gap-2 transition-colors hover:border-indigo-700">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-lg font-semibold text-neutral-50">{task.title}</h2>
+                      <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
+                      <Badge>{TYPE_LABELS[task.type]}</Badge>
+                    </div>
+                    <span className="text-xs text-neutral-500">
+                      {new Date(task.createdAt).toLocaleString()}
+                    </span>
                   </div>
-                  <span className="text-xs text-neutral-500">
-                    {new Date(task.createdAt).toLocaleString()}
-                  </span>
-                </div>
-                {task.description && <p className="text-xs text-neutral-400">{task.description}</p>}
-                <div className="flex items-center gap-3 text-xs text-neutral-500">
-                  <span>Step index: {task.currentStepIndex}</span>
-                  {task.currentStepId && <span>Current: {task.currentStepId}</span>}
-                  {task.errorMessage && <span className="text-red-400">{task.errorMessage}</span>}
-                </div>
-              </Card>
-            </Link>
-          ))}
+                  {task.description && (
+                    <p className="text-xs text-neutral-400">{task.description}</p>
+                  )}
+                  <div className="flex items-center gap-3 text-xs text-neutral-500">
+                    <span>Step index: {task.currentStepIndex}</span>
+                    {task.currentStepId && <span>Current: {task.currentStepId}</span>}
+                    {task.errorMessage && <span className="text-red-400">{task.errorMessage}</span>}
+                  </div>
+                </Card>
+              </Link>
+            ))}
         </div>
       )}
     </div>

@@ -34,7 +34,11 @@ import {
 } from '../sandbox/docker-runner.js';
 import { renderDockerfile, resolveImageTag } from '../sandbox/image-cache.js';
 import { ensureComposedImage } from '../sandbox/composed-image-cache.js';
-import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../sandbox/sandbox-runner.js';
+import {
+  SANDBOX_WORKDIR,
+  SANDBOX_USER_HOME,
+  type SandboxExtraFile,
+} from '../sandbox/sandbox-runner.js';
 import { buildDefaultMcpServers, buildMcpConfigForCli } from '../sandbox/mcp-config.js';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type { BaseCliAdapter } from '../cli-adapters/base-adapter.js';
@@ -176,9 +180,13 @@ async function executeByKind(
       const providerRow = payload.cliProviderId
         ? await db.query.cliProviders.findFirst({
             where: eq(schema.cliProviders.id, payload.cliProviderId),
-            columns: { name: true },
           })
         : null;
+      let authMounts: DockerVolumeMount[] = [];
+      if (providerRow && cliAdapterRegistry.has(providerRow.name)) {
+        const adapter = cliAdapterRegistry.get(providerRow.name);
+        authMounts = resolveAuthMounts(adapter, providerRow);
+      }
       const mcpFiles = providerRow
         ? await resolveMcpExtraFiles(
             db,
@@ -198,6 +206,7 @@ async function executeByKind(
         sandboxWorkdir,
         networkPolicy,
         mcpFiles,
+        authMounts,
       );
     }
     case 'api':
@@ -272,6 +281,8 @@ async function resolveMcpExtraFiles(
 
 const REPO_VOLUME_NAME = 'haive_repos';
 const REPO_MOUNT_TARGET = SANDBOX_WORKDIR;
+const HOST_REPO_ROOT = process.env.HOST_REPO_ROOT ?? '/host-fs';
+const HOST_REPO_ROOT_REAL = process.env.HOST_REPO_ROOT_REAL ?? process.env.HOME ?? '/';
 
 async function resolveTaskRepoMount(
   db: Database,
@@ -282,6 +293,28 @@ async function resolveTaskRepoMount(
     columns: { userId: true, repositoryId: true },
   });
   if (!task?.repositoryId) return null;
+
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, task.repositoryId),
+    columns: { source: true, storagePath: true, localPath: true },
+  });
+  if (!repo) return null;
+
+  const storagePath = repo.storagePath ?? repo.localPath;
+
+  // Local-path repos: storagePath starts with HOST_REPO_ROOT (e.g. /host-fs/...).
+  // For Docker-in-Docker the sandbox needs a bind mount from the real host path.
+  if (storagePath && storagePath.startsWith(HOST_REPO_ROOT + '/')) {
+    const relativePart = storagePath.slice(HOST_REPO_ROOT.length);
+    const hostPath = HOST_REPO_ROOT_REAL + relativePart;
+    return {
+      source: hostPath,
+      target: REPO_MOUNT_TARGET,
+      readOnly: true,
+    };
+  }
+
+  // Volume-based repos (uploaded / cloned): use named volume with subpath
   return {
     source: REPO_VOLUME_NAME,
     target: REPO_MOUNT_TARGET,
@@ -299,6 +332,32 @@ async function resolveTaskSandboxWorkdir(db: Database, taskId: string): Promise<
   });
   const output = row?.output as { sandboxWorktreePath?: string } | null;
   return output?.sandboxWorktreePath ?? SANDBOX_WORKDIR;
+}
+
+const HOST_USER_HOME = process.env.HOST_USER_HOME ?? process.env.HOME ?? '/root';
+
+function resolveAuthMounts(
+  adapter: BaseCliAdapter,
+  provider: CliProviderRecord,
+): DockerVolumeMount[] {
+  const injection = adapter.envInjection(provider);
+  if (!injection.copyPaths.length) return [];
+
+  const mounts: DockerVolumeMount[] = [];
+  for (const cp of injection.copyPaths) {
+    // Resolve ~ to the real host home directory (for Docker-in-Docker bind mounts)
+    const src = cp.src.startsWith('~/') ? HOST_USER_HOME + cp.src.slice(1) : cp.src;
+
+    // Remap /root/ destinations to the sandbox user's home
+    const dest = cp.dest.startsWith('/root/')
+      ? SANDBOX_USER_HOME + cp.dest.slice(5)
+      : cp.dest === '/root'
+        ? SANDBOX_USER_HOME
+        : cp.dest;
+
+    mounts.push({ source: src, target: dest, readOnly: true });
+  }
+  return mounts;
 }
 
 async function ensureProviderSandboxImage(
@@ -377,6 +436,7 @@ async function executeCliSpec(
   sandboxWorkdir: string = SANDBOX_WORKDIR,
   networkPolicy: CliNetworkPolicy | null = null,
   extraFiles: SandboxExtraFile[] = [],
+  authMounts: DockerVolumeMount[] = [],
 ): Promise<ExecutionOutcome> {
   const mergedSpec: CliCommandSpec = {
     ...spec,
@@ -389,6 +449,7 @@ async function executeCliSpec(
     sandboxWorkdir,
     networkPolicy,
     extraFiles,
+    authMounts,
   );
   const result = await spawner(mergedSpec, { timeoutMs });
   void deps;
@@ -407,11 +468,14 @@ function createSandboxSpawner(
   sandboxWorkdir: string = SANDBOX_WORKDIR,
   networkPolicy: CliNetworkPolicy | null = null,
   extraFiles: SandboxExtraFile[] = [],
+  authMounts: DockerVolumeMount[] = [],
 ): CliSpawner {
   return async (spec, opts: SpawnOptions = {}): Promise<CliExecutionResult> => {
+    const allMounts: DockerVolumeMount[] = [...authMounts];
+    if (repoMount) allMounts.push(repoMount);
     const runnerOptions: Parameters<typeof runInSandbox>[1] = { workdir: sandboxWorkdir };
     if (sandboxImage) runnerOptions.image = sandboxImage;
-    if (repoMount) runnerOptions.extraMounts = [repoMount];
+    if (allMounts.length > 0) runnerOptions.extraMounts = allMounts;
     if (networkPolicy) runnerOptions.networkPolicy = networkPolicy;
     const result = await runInSandbox(
       {
@@ -593,6 +657,7 @@ async function executeSubAgentNative(
     provider.name as CliProviderName,
     sandboxWorkdir,
   );
+  const authMounts = resolveAuthMounts(adapter, provider);
   return executeCliSpec(
     spec,
     deps,
@@ -604,6 +669,7 @@ async function executeSubAgentNative(
     sandboxWorkdir,
     provider.networkPolicy,
     mcpFiles,
+    authMounts,
   );
 }
 
@@ -637,6 +703,7 @@ async function executeSubAgentSequential(
     provider.name as CliProviderName,
     sandboxWorkdir,
   );
+  const authMounts = resolveAuthMounts(adapter, provider);
   const spawner = createSandboxSpawner(
     provider.wrapperContent,
     sandboxImage,
@@ -644,6 +711,7 @@ async function executeSubAgentSequential(
     sandboxWorkdir,
     provider.networkPolicy,
     mcpFiles,
+    authMounts,
   );
   const result: SubAgentRunResult = await runSequentialSubAgent(
     invocation,
@@ -680,25 +748,21 @@ function tryJsonParse(raw: string): unknown {
 
 async function resumeStepIfLinked(
   payload: CliExecJobPayload,
-  success: boolean,
+  _success: boolean,
   _errorMessage: string | null,
 ): Promise<void> {
   if (!payload.taskStepId) return;
+  const db = getDb();
+  const stepRow = await db.query.taskSteps.findFirst({
+    where: eq(schema.taskSteps.id, payload.taskStepId),
+    columns: { stepId: true },
+  });
   const taskPayload: TaskJobPayload = {
     taskId: payload.taskId,
     userId: payload.userId,
+    stepId: stepRow?.stepId,
   };
   const queue = getTaskQueue();
-  if (success) {
-    const db = getDb();
-    const stepRow = await db.query.taskSteps.findFirst({
-      where: eq(schema.taskSteps.id, payload.taskStepId),
-      columns: { stepId: true },
-    });
-    if (stepRow) {
-      taskPayload.stepId = stepRow.stepId;
-    }
-  }
   await queue.add(TASK_JOB_NAMES.ADVANCE_STEP, taskPayload, {
     removeOnComplete: 100,
     removeOnFail: 100,

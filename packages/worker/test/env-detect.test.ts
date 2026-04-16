@@ -50,6 +50,7 @@ function fakeCtx(repoPath: string): StepContext {
     cliProviderId: null,
     db: undefined as never,
     logger: logger.child({ test: 'env-detect' }),
+    emitProgress: async () => {},
   };
 }
 

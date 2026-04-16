@@ -4,6 +4,7 @@ const PUBLIC_PATHS = new Set(['/login', '/register']);
 
 export function middleware(request: NextRequest) {
   const accessCookie = request.cookies.get('haive_access');
+  const refreshCookie = request.cookies.get('haive_refresh');
   const path = request.nextUrl.pathname;
 
   if (PUBLIC_PATHS.has(path)) {
@@ -13,7 +14,8 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  if (!accessCookie) {
+  // Allow through if either token exists — client-side interceptor handles refresh
+  if (!accessCookie && !refreshCookie) {
     const loginUrl = new URL('/login', request.url);
     return NextResponse.redirect(loginUrl);
   }

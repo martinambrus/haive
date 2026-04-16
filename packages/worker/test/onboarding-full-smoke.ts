@@ -118,7 +118,7 @@ async function createFixtureRepo(): Promise<string> {
 }
 
 interface RagChunkRow {
-  file_path: string;
+  source_path: string;
   chunk_index: number;
 }
 
@@ -354,13 +354,13 @@ async function main(): Promise<void> {
     }
 
     const ragResult = (await db.execute(
-      sql`SELECT file_path, chunk_index FROM rag_chunks WHERE task_id = ${task.id}`,
+      sql`SELECT source_path, chunk_index FROM ai_rag_embeddings WHERE task_id = ${task.id}`,
     )) as unknown;
     const ragRows: RagChunkRow[] = Array.isArray(ragResult) ? (ragResult as RagChunkRow[]) : [];
     if (ragRows.length === 0) {
-      throw new Error('rag_chunks table has no rows for this task');
+      throw new Error('ai_rag_embeddings table has no rows for this task');
     }
-    const distinctFiles = new Set(ragRows.map((r) => r.file_path)).size;
+    const distinctFiles = new Set(ragRows.map((r) => r.source_path)).size;
 
     const events = await db
       .select()
@@ -410,7 +410,7 @@ async function main(): Promise<void> {
       const db = getDb();
       if (state.taskId) {
         await db
-          .execute(sql`DELETE FROM rag_chunks WHERE task_id = ${state.taskId}`)
+          .execute(sql`DELETE FROM ai_rag_embeddings WHERE task_id = ${state.taskId}`)
           .catch(() => undefined);
         await db.delete(schema.tasks).where(eq(schema.tasks.id, state.taskId));
       }

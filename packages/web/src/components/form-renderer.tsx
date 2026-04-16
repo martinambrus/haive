@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { FormField, FormSchema } from '@haive/shared';
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { cn } from '@/lib/cn';
@@ -14,6 +14,9 @@ interface FormRendererProps {
   submitting?: boolean;
   initialValues?: FormValues;
   errorMessage?: string | null;
+  onValuesChange?: (values: FormValues) => void;
+  /** Render extra content (e.g. test buttons) after a specific field. */
+  renderAfterField?: (fieldId: string, values: FormValues) => React.ReactNode;
 }
 
 function defaultValueFor(field: FormField): unknown {
@@ -52,9 +55,15 @@ export function FormRenderer({
   submitting = false,
   initialValues,
   errorMessage,
+  onValuesChange,
+  renderAfterField,
 }: FormRendererProps) {
   const initial = useMemo(() => buildInitial(schema, initialValues), [schema, initialValues]);
   const [values, setValues] = useState<FormValues>(initial);
+
+  useEffect(() => {
+    onValuesChange?.(values);
+  }, [values]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function update(id: string, value: unknown) {
     setValues((prev) => ({ ...prev, [id]: value }));
@@ -76,13 +85,15 @@ export function FormRenderer({
       </div>
       <div className="flex flex-col gap-4">
         {schema.fields.map((field) => (
-          <FieldRow
-            key={field.id}
-            field={field}
-            value={values[field.id]}
-            onChange={(value) => update(field.id, value)}
-            disabled={disabled || submitting}
-          />
+          <div key={field.id}>
+            <FieldRow
+              field={field}
+              value={values[field.id]}
+              onChange={(value) => update(field.id, value)}
+              disabled={disabled || submitting}
+            />
+            {renderAfterField?.(field.id, values)}
+          </div>
         ))}
       </div>
       <FormError message={errorMessage ?? null} />
@@ -92,6 +103,27 @@ export function FormRenderer({
         </Button>
       </div>
     </form>
+  );
+}
+
+const BADGE_COLORS: Record<string, string> = {
+  default: 'bg-neutral-800 text-neutral-300',
+  amber: 'bg-amber-900/60 text-amber-300',
+  indigo: 'bg-indigo-900/60 text-indigo-300',
+  green: 'bg-green-900/60 text-green-300',
+};
+
+function OptionBadge({ text, color }: { text: string; color?: string }) {
+  const cls = BADGE_COLORS[color ?? 'default'] ?? BADGE_COLORS.default;
+  return (
+    <span
+      className={cn(
+        'ml-1 inline-block rounded px-1.5 py-0.5 text-[10px] font-medium leading-none',
+        cls,
+      )}
+    >
+      {text}
+    </span>
   );
 }
 
@@ -201,7 +233,8 @@ function FieldControl({ field, value, onChange, disabled }: FieldRowProps) {
                     }
                   }}
                 />
-                {opt.label}
+                <span>{opt.label}</span>
+                {opt.badge && <OptionBadge text={opt.badge} color={opt.badgeColor} />}
               </label>
             );
           })}

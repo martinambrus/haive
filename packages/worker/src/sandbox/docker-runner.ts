@@ -36,6 +36,8 @@ export interface DockerRunOpts {
   workdir?: string;
   entrypoint?: string | null;
   network?: string;
+  /** Run container as this user (e.g. 'node', '1000:1000'). Omit for image default. */
+  user?: string;
   timeoutMs?: number;
   onStdoutChunk?: (chunk: string) => void;
   onStderrChunk?: (chunk: string) => void;
@@ -208,6 +210,7 @@ export const defaultDockerRunner: DockerRunner = {
 
   async run(opts) {
     const args = ['run', '--rm'];
+    if (opts.user) args.push('--user', opts.user);
     if (opts.workdir) args.push('-w', opts.workdir);
     if (opts.network) args.push('--network', opts.network);
     if (opts.entrypoint !== undefined) {

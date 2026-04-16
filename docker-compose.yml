@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:18-alpine
+    image: pgvector/pgvector:pg18
     container_name: haive-postgres
     restart: unless-stopped
     environment:
@@ -70,8 +70,8 @@ services:
       REDIS_URL: redis://redis:6379
       CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
       JWT_SECRET: ${JWT_SECRET}
-      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
-      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-1d}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-30d}
       SMTP_HOST: ${SMTP_HOST:-mailpit}
       SMTP_PORT: ${SMTP_PORT:-1025}
       SMTP_FROM: ${SMTP_FROM:-no-reply@haive.local}
@@ -103,8 +103,11 @@ services:
       CLAWKER_BIN: ${CLAWKER_BIN:-/usr/local/bin/clawker}
       SANDBOX_NETWORK: ${SANDBOX_NETWORK:-haive-network}
       DOCKER_HOST: unix:///var/run/docker.sock
+      HOST_REPO_ROOT: /host-fs
+      HOST_REPO_ROOT_REAL: ${HOST_REPO_ROOT:-${HOME}}
     volumes:
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - ${HOST_REPO_ROOT:-${HOME}}:/host-fs
       - haive_repos:/var/lib/haive/repos
       - haive_wrappers:/var/lib/haive/wrappers
       - haive_squid_configs:/var/lib/haive/squid-configs

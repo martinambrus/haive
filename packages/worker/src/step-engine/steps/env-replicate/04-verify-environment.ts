@@ -69,7 +69,7 @@ export function buildSmokeChecks(deps: DeclaredDepsShape): SmokeCheck[] {
   }
 
   const lsp = deps.lspServers ?? [];
-  if (lsp.includes('intelephense')) {
+  if (lsp.includes('intelephense') || lsp.includes('intelephense-extended')) {
     checks.push({
       id: 'lsp-intelephense',
       label: 'intelephense',

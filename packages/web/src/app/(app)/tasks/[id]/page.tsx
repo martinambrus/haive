@@ -18,6 +18,7 @@ import {
 } from '@/lib/api-client';
 import { Badge, Button, Card, Label } from '@/components/ui';
 import { FormRenderer, type FormValues } from '@/components/form-renderer';
+import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { TaskOutputs } from '@/components/task-outputs';
 import { Terminal } from '@/components/terminal/Terminal';
 
@@ -225,7 +226,7 @@ export default function TaskDetailPage() {
 
   const canPause = task.status === 'running';
   const canResume = task.status === 'paused';
-  const canCancel = !['completed', 'cancelled', 'failed'].includes(task.status);
+  const canCancel = !['completed', 'cancelled'].includes(task.status);
   const canRetry = task.status === 'failed';
 
   return (
@@ -312,6 +313,8 @@ export default function TaskDetailPage() {
             <StepCard
               key={step.id}
               step={step}
+              taskType={task.type}
+              taskStatus={task.status}
               submitting={submitting === step.stepId}
               submitError={submitting === step.stepId ? submitError : null}
               onSubmit={(values) => submitStep(step, values)}
@@ -373,43 +376,45 @@ export default function TaskDetailPage() {
             </div>
           </Card>
 
-          <Card className="flex flex-col gap-3 p-4">
-            <div className="flex flex-col gap-1">
-              <h3 className="text-sm font-semibold text-neutral-100">Override next step</h3>
-              <p className="text-xs text-neutral-500">
-                Jump forward to a specific step. Any intermediate pending steps will be marked
-                skipped. Forward-only — use step retry to rerun an earlier step.
-              </p>
-            </div>
-            <div className="flex flex-wrap items-end gap-2">
-              <div className="flex min-w-[240px] flex-1 flex-col gap-2">
-                <Label htmlFor="overrideStep">Target step</Label>
-                <select
-                  id="overrideStep"
-                  value={overrideTarget}
-                  onChange={(e) => setOverrideTarget(e.target.value)}
-                  disabled={overrideBusy}
-                  className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-                >
-                  <option value="">(pick a step)</option>
-                  {steps
-                    .filter((s) => s.status !== 'done' && s.status !== 'skipped')
-                    .map((s) => (
-                      <option key={s.id} value={s.stepId}>
-                        #{s.stepIndex} {s.title} ({s.stepId})
-                      </option>
-                    ))}
-                </select>
+          {task.type !== 'onboarding' && (
+            <Card className="flex flex-col gap-3 p-4">
+              <div className="flex flex-col gap-1">
+                <h3 className="text-sm font-semibold text-neutral-100">Override next step</h3>
+                <p className="text-xs text-neutral-500">
+                  Jump forward to a specific step. Any intermediate pending steps will be marked
+                  skipped. Forward-only — use step retry to rerun an earlier step.
+                </p>
               </div>
-              <Button
-                onClick={() => void submitOverride()}
-                disabled={overrideBusy || !overrideTarget}
-              >
-                {overrideBusy ? 'Working...' : 'Jump to step'}
-              </Button>
-            </div>
-            {overrideError && <p className="text-xs text-red-400">{overrideError}</p>}
-          </Card>
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="flex min-w-[240px] flex-1 flex-col gap-2">
+                  <Label htmlFor="overrideStep">Target step</Label>
+                  <select
+                    id="overrideStep"
+                    value={overrideTarget}
+                    onChange={(e) => setOverrideTarget(e.target.value)}
+                    disabled={overrideBusy}
+                    className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                  >
+                    <option value="">(pick a step)</option>
+                    {steps
+                      .filter((s) => s.status !== 'done' && s.status !== 'skipped')
+                      .map((s) => (
+                        <option key={s.id} value={s.stepId}>
+                          #{s.stepIndex} {s.title} ({s.stepId})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <Button
+                  onClick={() => void submitOverride()}
+                  disabled={overrideBusy || !overrideTarget}
+                >
+                  {overrideBusy ? 'Working...' : 'Jump to step'}
+                </Button>
+              </div>
+              {overrideError && <p className="text-xs text-red-400">{overrideError}</p>}
+            </Card>
+          )}
         </div>
       )}
 
@@ -466,6 +471,8 @@ function TabButton({
 
 interface StepCardProps {
   step: TaskStep;
+  taskType: string;
+  taskStatus: TaskStatus;
   submitting: boolean;
   submitError: string | null;
   onSubmit: (values: FormValues) => Promise<void>;
@@ -476,6 +483,8 @@ interface StepCardProps {
 
 function StepCard({
   step,
+  taskType,
+  taskStatus,
   submitting,
   submitError,
   onSubmit,
@@ -486,9 +495,19 @@ function StepCard({
   const [showOutput, setShowOutput] = useState(false);
   const schema = step.formSchema as FormSchema | null;
   const initialValues = (step.formValues as FormValues | null) ?? undefined;
-  const showForm = step.status === 'waiting_form' && schema;
-  const canRetry = step.status === 'failed';
-  const canSkip = step.status === 'failed' || step.status === 'waiting_form';
+  const taskCancelled = taskStatus === 'cancelled';
+  const showForm = !taskCancelled && step.status === 'waiting_form' && schema;
+  const canRetry = !taskCancelled && step.status === 'failed';
+  const canSkip =
+    !taskCancelled &&
+    taskType !== 'onboarding' &&
+    (step.status === 'failed' || step.status === 'waiting_form');
+
+  // Detect tooling step fields for inline connection test buttons
+  const hasConnectionFields =
+    showForm &&
+    schema?.fields.some((f) => f.id === 'ragMode') &&
+    schema?.fields.some((f) => f.id === 'ollamaUrl');
 
   return (
     <Card className="flex flex-col gap-3">
@@ -500,6 +519,13 @@ function StepCard({
         </div>
         <span className="font-mono text-xs text-neutral-500">{step.stepId}</span>
       </div>
+
+      {step.statusMessage && (step.status === 'running' || step.status === 'waiting_cli') && (
+        <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">
+          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
+          {step.statusMessage}
+        </div>
+      )}
 
       {step.errorMessage && (
         <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
@@ -541,6 +567,19 @@ function StepCard({
             submitting={submitting}
             errorMessage={submitError}
             onSubmit={onSubmit}
+            renderAfterField={
+              hasConnectionFields
+                ? (fieldId, values) => {
+                    if (fieldId === 'ragConnectionString') {
+                      return <PostgresTestButton formValues={values} />;
+                    }
+                    if (fieldId === 'embeddingModel') {
+                      return <OllamaTestButton formValues={values} />;
+                    }
+                    return null;
+                  }
+                : undefined
+            }
           />
         </div>
       )}

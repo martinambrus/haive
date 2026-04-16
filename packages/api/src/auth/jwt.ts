@@ -14,8 +14,27 @@ export interface RefreshTokenPayload {
   tv: number;
 }
 
-const ACCESS_TTL_SECONDS = 15 * 60;
-const REFRESH_TTL_SECONDS = 7 * 24 * 60 * 60;
+function parseTtl(envValue: string | undefined, fallbackSeconds: number): number {
+  if (!envValue) return fallbackSeconds;
+  const m = envValue.match(/^(\d+)\s*(s|m|h|d)$/);
+  if (!m) return fallbackSeconds;
+  const n = parseInt(m[1]!, 10);
+  switch (m[2]) {
+    case 's':
+      return n;
+    case 'm':
+      return n * 60;
+    case 'h':
+      return n * 3600;
+    case 'd':
+      return n * 86400;
+    default:
+      return fallbackSeconds;
+  }
+}
+
+const ACCESS_TTL_SECONDS = parseTtl(process.env.JWT_ACCESS_TTL, 24 * 3600); // default: 1 day
+const REFRESH_TTL_SECONDS = parseTtl(process.env.JWT_REFRESH_TTL, 30 * 86400); // default: 30 days
 
 export async function signAccessToken(payload: AccessTokenPayload): Promise<string> {
   const secret = await secretsService.getJwtSecret();

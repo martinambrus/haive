@@ -85,7 +85,7 @@ async function copyFixtureToTmp(): Promise<string> {
 }
 
 interface RagChunkRow {
-  file_path: string;
+  source_path: string;
   chunk_index: number;
 }
 
@@ -304,18 +304,18 @@ async function main(): Promise<void> {
     }
 
     const ragRows = (await db.execute(
-      sql`select file_path, chunk_index from rag_chunks where task_id = ${task.id} order by file_path, chunk_index`,
+      sql`select source_path, chunk_index from ai_rag_embeddings where task_id = ${task.id} order by source_path, chunk_index`,
     )) as unknown as RagChunkRow[];
     if (ragRows.length === 0) {
-      throw new Error('rag_chunks empty for drupal7 task');
+      throw new Error('ai_rag_embeddings empty for drupal7 task');
     }
-    const distinctFiles = new Set(ragRows.map((r) => r.file_path));
+    const distinctFiles = new Set(ragRows.map((r) => r.source_path));
     const hasDrupalAgent = Array.from(distinctFiles).some(
       (f) => f === '.claude/agents/drupal-module-dev.md',
     );
     if (!hasDrupalAgent) {
       throw new Error(
-        `rag_chunks missing .claude/agents/drupal-module-dev.md; indexed files: ${JSON.stringify(
+        `ai_rag_embeddings missing .claude/agents/drupal-module-dev.md; indexed files: ${JSON.stringify(
           Array.from(distinctFiles).slice(0, 15),
         )}`,
       );

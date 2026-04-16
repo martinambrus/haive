@@ -32,6 +32,7 @@ function makeStubCtx(): { ctx: StepContext; updates: Record<string, unknown>[] }
       cliProviderId: null,
       db,
       logger: logger.child({ test: 'env-replicate-build' }),
+      emitProgress: async () => {},
     },
     updates,
   };

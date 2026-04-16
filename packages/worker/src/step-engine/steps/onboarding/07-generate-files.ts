@@ -23,6 +23,7 @@ export interface GenerateFilesDetect {
   language: string | null;
   projectName: string | null;
   acceptedAgentIds: string[];
+  lspLanguage: string | null;
   prefs: {
     verificationLevel?: string;
     autoCommit?: boolean;
@@ -289,26 +290,105 @@ function workflowConfigJson(prefs: GenerateFilesDetect['prefs'], framework: stri
   return `${JSON.stringify(config, null, 2)}\n`;
 }
 
-function resolveAgents(framework: string | null, acceptedIds: string[]): AgentSpec[] {
-  const out: AgentSpec[] = [...BASELINE_AGENTS];
-  const seen = new Set(out.map((a) => a.id));
+/* ------------------------------------------------------------------ */
+/* drupal-php-lsp Claude Code plugin generation                       */
+/* ------------------------------------------------------------------ */
+
+const DRUPAL_LSP_MARKETPLACE = JSON.stringify(
+  {
+    name: 'drupal-lsp-marketplace',
+    description: 'Local marketplace for Drupal PHP LSP plugin',
+    owner: { name: 'haive' },
+    plugins: [
+      {
+        name: 'drupal-php-lsp',
+        source: './.claude-plugin/drupal-php-lsp',
+        description: 'PHP LSP with CMS extensions (Intelephense)',
+        version: '1.0.0',
+      },
+    ],
+  },
+  null,
+  2,
+);
+
+const DRUPAL_LSP_PLUGIN = JSON.stringify(
+  {
+    name: 'drupal-php-lsp',
+    version: '1.0.0',
+    description: 'PHP LSP with CMS extensions (Intelephense)',
+    author: { name: 'haive' },
+  },
+  null,
+  2,
+);
+
+const DRUPAL_LSP_CONFIG = JSON.stringify(
+  {
+    php: {
+      command: 'intelephense',
+      args: ['--stdio'],
+      extensionToLanguage: {
+        '.php': 'php',
+        '.inc': 'php',
+        '.module': 'php',
+        '.install': 'php',
+        '.theme': 'php',
+        '.profile': 'php',
+      },
+      transport: 'stdio',
+      initializationOptions: {},
+      settings: {},
+      maxRestarts: 3,
+    },
+  },
+  null,
+  2,
+);
+
+const DRUPAL_LSP_FILES: { rel: string; content: string }[] = [
+  {
+    rel: '.claude/plugins/drupal-php-lsp/.claude-plugin/marketplace.json',
+    content: DRUPAL_LSP_MARKETPLACE,
+  },
+  {
+    rel: '.claude/plugins/drupal-php-lsp/.claude-plugin/drupal-php-lsp/.claude-plugin/plugin.json',
+    content: DRUPAL_LSP_PLUGIN,
+  },
+  {
+    rel: '.claude/plugins/drupal-php-lsp/.claude-plugin/drupal-php-lsp/.lsp.json',
+    content: DRUPAL_LSP_CONFIG,
+  },
+];
+
+/** All known agent specs: baselines + framework extras. */
+function allKnownAgents(framework: string | null): Map<string, AgentSpec> {
+  const map = new Map<string, AgentSpec>();
+  for (const a of BASELINE_AGENTS) map.set(a.id, a);
   if (framework && FRAMEWORK_EXTRA_AGENTS[framework]) {
-    for (const extra of FRAMEWORK_EXTRA_AGENTS[framework]) {
-      if (!seen.has(extra.id)) {
-        out.push(extra);
-        seen.add(extra.id);
-      }
-    }
+    for (const a of FRAMEWORK_EXTRA_AGENTS[framework]) map.set(a.id, a);
   }
+  return map;
+}
+
+function resolveAgents(framework: string | null, acceptedIds: string[]): AgentSpec[] {
+  const known = allKnownAgents(framework);
+  const out: AgentSpec[] = [];
+  const seen = new Set<string>();
   for (const id of acceptedIds) {
     if (seen.has(id)) continue;
-    out.push({
-      id,
-      description: `${id} agent accepted via agent discovery step.`,
-      tools: 'Read, Edit, Write, Grep, Glob, Bash',
-      body: `${id} agent. Fill in responsibilities and constraints for this role. This is a stub generated because the discovery pattern matched ${id} in the repository.`,
-    });
     seen.add(id);
+    const spec = known.get(id);
+    if (spec) {
+      out.push(spec);
+    } else {
+      out.push({
+        id,
+        description: `${id} agent accepted via agent discovery step.`,
+        tools: 'Read, Edit, Write, Grep, Glob, Bash',
+        body: `${id} agent. Fill in responsibilities and constraints for this role. This is a stub generated because the discovery pattern matched ${id} in the repository.`,
+      });
+    }
   }
   return out;
 }
@@ -343,6 +423,14 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const prefs = ((prefsPrev?.output as { prefs?: Record<string, unknown> } | null)?.prefs ??
       {}) as GenerateFilesDetect['prefs'];
 
+    const toolingPrev = await loadPreviousStepOutput(
+      ctx.db,
+      ctx.taskId,
+      '04-tooling-infrastructure',
+    );
+    const toolingOutput = toolingPrev?.output as { tooling?: { lspLanguage?: string } } | null;
+    const lspLanguage = toolingOutput?.tooling?.lspLanguage ?? null;
+
     const discoveryPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06_5-agent-discovery');
     const discoveryOutput = discoveryPrev?.output as { accepted?: { id: string }[] } | null;
     const acceptedAgentIds = (discoveryOutput?.accepted ?? []).map((a) => a.id);
@@ -357,6 +445,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       '.claude/workflow-config.json',
       ...agents.map((a) => `.claude/agents/${a.id}.md`),
       ...BASELINE_COMMANDS.map((c) => `.claude/commands/${c.id}.md`),
+      ...(lspLanguage === 'php-extended' ? DRUPAL_LSP_FILES.map((f) => f.rel) : []),
     ];
     const existingFiles: string[] = [];
     for (const rel of candidates) {
@@ -378,6 +467,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       language,
       projectName,
       acceptedAgentIds,
+      lspLanguage,
       prefs,
       plannedAgents,
       plannedCommands,
@@ -443,6 +533,12 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     }
     for (const cmd of BASELINE_COMMANDS) {
       await writeIfAllowed(`.claude/commands/${cmd.id}.md`, commandFileMarkdown(cmd));
+    }
+
+    if (detected.lspLanguage === 'php-extended') {
+      for (const f of DRUPAL_LSP_FILES) {
+        await writeIfAllowed(f.rel, f.content + '\n');
+      }
     }
 
     ctx.logger.info(

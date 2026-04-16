@@ -1,6 +1,31 @@
 import type { DetectResult, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
+import type { EnvDetectApply } from './01-env-detect.js';
+
+interface EnvDetectData {
+  project: {
+    name: string;
+    framework: string;
+    primaryLanguage: string;
+    description: string | null;
+  };
+  container: {
+    type: string;
+    databaseType: string | null;
+    databaseVersion: string | null;
+    webserver: string | null;
+    docroot: string | null;
+  };
+  stack: {
+    runtimeVersions: Record<string, string>;
+  };
+  paths: { testPaths: string[] };
+  localUrl: string | null;
+  testFrameworks: string[];
+  buildTool: string | null;
+  source: 'llm' | 'deterministic';
+}
 
 interface ConfirmationDetect {
   detectedName: string;
@@ -9,13 +34,49 @@ interface ConfirmationDetect {
   containerType: string;
   databaseType: string | null;
   databaseVersion: string | null;
+  webserver: string | null;
+  docroot: string | null;
+  runtimeVersions: Record<string, string>;
   testPaths: string[];
+  testFrameworks: string[];
+  localUrl: string | null;
+  buildTool: string | null;
+  projectDescription: string | null;
+  source: 'llm' | 'deterministic';
 }
 
-interface EnvDetectData {
-  project: { name: string; framework: string; primaryLanguage: string };
-  container: { type: string; databaseType: string | null; databaseVersion: string | null };
-  paths: { testPaths: string[] };
+function extractEnvDetectData(prev: { detect: unknown; output: unknown }): EnvDetectData {
+  // Prefer enriched data from apply output over raw detect output
+  const applyOutput = prev.output as EnvDetectApply | null;
+  if (applyOutput?.enrichedData) {
+    return applyOutput.enrichedData as unknown as EnvDetectData;
+  }
+  // Fallback to detect output
+  const detectResult = prev.detect as DetectResult | null;
+  const data = detectResult?.data as unknown as EnvDetectData | undefined;
+  return (
+    data ?? {
+      project: {
+        name: 'unknown',
+        framework: 'general',
+        primaryLanguage: 'unknown',
+        description: null,
+      },
+      container: {
+        type: 'none',
+        databaseType: null,
+        databaseVersion: null,
+        webserver: null,
+        docroot: null,
+      },
+      stack: { runtimeVersions: {} },
+      paths: { testPaths: [] },
+      localUrl: null,
+      testFrameworks: [],
+      buildTool: null,
+      source: 'deterministic',
+    }
+  );
 }
 
 export const detectionConfirmationStep: StepDefinition<ConfirmationDetect, { confirmed: true }> = {
@@ -25,19 +86,36 @@ export const detectionConfirmationStep: StepDefinition<ConfirmationDetect, { con
     index: 3,
     title: 'Detection confirmation',
     description:
-      'Presents detected project information for the user to confirm or override, and captures a project description.',
+      'Presents detected project information (including LLM-enriched fields) for the user to confirm or override.',
     requiresCli: false,
   },
 
   async detect(ctx: StepContext): Promise<ConfirmationDetect> {
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
-    const data = ((prev?.detect as DetectResult | null)?.data as unknown as
-      | EnvDetectData
-      | undefined) ?? {
-      project: { name: 'unknown', framework: 'general', primaryLanguage: 'unknown' },
-      container: { type: 'none', databaseType: null, databaseVersion: null },
-      paths: { testPaths: [] },
-    };
+    const data = prev
+      ? extractEnvDetectData(prev)
+      : {
+          project: {
+            name: 'unknown',
+            framework: 'general',
+            primaryLanguage: 'unknown',
+            description: null,
+          },
+          container: {
+            type: 'none',
+            databaseType: null,
+            databaseVersion: null,
+            webserver: null,
+            docroot: null,
+          },
+          stack: { runtimeVersions: {} },
+          paths: { testPaths: [] },
+          localUrl: null,
+          testFrameworks: [],
+          buildTool: null,
+          source: 'deterministic' as const,
+        };
+
     return {
       detectedName: data.project.name,
       detectedFramework: data.project.framework,
@@ -45,25 +123,50 @@ export const detectionConfirmationStep: StepDefinition<ConfirmationDetect, { con
       containerType: data.container.type,
       databaseType: data.container.databaseType,
       databaseVersion: data.container.databaseVersion,
+      webserver: data.container.webserver,
+      docroot: data.container.docroot,
+      runtimeVersions: data.stack.runtimeVersions ?? {},
       testPaths: data.paths.testPaths,
+      testFrameworks: data.testFrameworks ?? [],
+      localUrl: data.localUrl,
+      buildTool: data.buildTool,
+      projectDescription: data.project.description,
+      source: data.source,
     };
   },
 
   form(_ctx, detected): FormSchema {
-    const summary = [
+    const summaryParts = [
       `Project: ${detected.detectedName}`,
       `Framework: ${detected.detectedFramework}`,
       `Language: ${detected.detectedLanguage}`,
       `Container: ${detected.containerType}`,
-      detected.databaseType
-        ? `Database: ${detected.databaseType}${detected.databaseVersion ? ` ${detected.databaseVersion}` : ''}`
-        : 'Database: not detected',
+    ];
+    if (detected.databaseType) {
+      summaryParts.push(
+        `Database: ${detected.databaseType}${detected.databaseVersion ? ` ${detected.databaseVersion}` : ''}`,
+      );
+    } else {
+      summaryParts.push('Database: not detected');
+    }
+    if (detected.webserver) summaryParts.push(`Webserver: ${detected.webserver}`);
+    if (detected.docroot) summaryParts.push(`Docroot: ${detected.docroot}`);
+    const rtVersions = Object.entries(detected.runtimeVersions);
+    if (rtVersions.length > 0) {
+      summaryParts.push(`Runtimes: ${rtVersions.map(([k, v]) => `${k} ${v}`).join(', ')}`);
+    }
+    if (detected.testFrameworks.length > 0) {
+      summaryParts.push(`Test frameworks: ${detected.testFrameworks.join(', ')}`);
+    }
+    summaryParts.push(
       `Test paths: ${detected.testPaths.length > 0 ? detected.testPaths.join(', ') : 'none'}`,
-    ].join('\n');
+    );
+    if (detected.buildTool) summaryParts.push(`Build tool: ${detected.buildTool}`);
+    summaryParts.push(`Detection source: ${detected.source}`);
 
     return {
       title: 'Confirm detected project information',
-      description: summary,
+      description: summaryParts.join('\n'),
       fields: [
         {
           type: 'text',
@@ -90,12 +193,50 @@ export const detectionConfirmationStep: StepDefinition<ConfirmationDetect, { con
           type: 'text',
           id: 'localUrl',
           label: 'Local development URL',
-          placeholder: 'https://my-project.ddev.site',
+          default: detected.localUrl ?? undefined,
+          placeholder: detected.localUrl ? undefined : 'https://my-project.ddev.site',
+        },
+        {
+          type: 'text',
+          id: 'databaseType',
+          label: 'Database type',
+          default: detected.databaseType ?? undefined,
+          placeholder: detected.databaseType ? undefined : 'postgres, mysql, mariadb...',
+        },
+        {
+          type: 'text',
+          id: 'databaseVersion',
+          label: 'Database version',
+          default: detected.databaseVersion ?? undefined,
+          placeholder: detected.databaseVersion ? undefined : '17, 8.0, 11.4...',
+        },
+        {
+          type: 'text',
+          id: 'webserver',
+          label: 'Webserver',
+          default: detected.webserver ?? undefined,
+          placeholder: detected.webserver ? undefined : 'nginx, apache...',
+        },
+        {
+          type: 'text',
+          id: 'testFrameworks',
+          label: 'Test frameworks (comma-separated)',
+          default:
+            detected.testFrameworks.length > 0 ? detected.testFrameworks.join(', ') : undefined,
+          placeholder: 'phpunit, playwright, jest...',
+        },
+        {
+          type: 'text',
+          id: 'buildTool',
+          label: 'Build tool',
+          default: detected.buildTool ?? undefined,
+          placeholder: detected.buildTool ? undefined : 'vite, webpack, turbo...',
         },
         {
           type: 'textarea',
           id: 'projectDescription',
           label: 'Project description (1-2 sentences)',
+          default: detected.projectDescription ?? undefined,
           rows: 3,
           required: true,
         },

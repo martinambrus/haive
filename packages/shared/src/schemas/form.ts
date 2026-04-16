@@ -23,6 +23,10 @@ export const textareaFieldSchema = baseField.extend({
 export const optionSchema = z.object({
   value: z.string(),
   label: z.string(),
+  /** Optional short badge text rendered next to the label (e.g. "AI-suggested"). */
+  badge: z.string().optional(),
+  /** Badge color variant. Defaults to 'default' (neutral). */
+  badgeColor: z.enum(['default', 'amber', 'indigo', 'green']).optional(),
 });
 
 export const selectFieldSchema = baseField.extend({

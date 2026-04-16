@@ -2,7 +2,7 @@ import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
 import { FRAMEWORK_PATTERNS, type FrameworkName, type DetectResult } from '@haive/shared';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
+import type { StepContext, StepDefinition, LlmBuildArgs } from '../../step-definition.js';
 
 type ContainerType = 'ddev' | 'docker-compose' | 'lando' | 'vagrant' | 'none';
 
@@ -33,10 +33,19 @@ interface PathsDetection {
 }
 
 interface EnvDetectData {
-  project: { name: string; framework: FrameworkName; primaryLanguage: string };
+  project: {
+    name: string;
+    framework: FrameworkName;
+    primaryLanguage: string;
+    description: string | null;
+  };
   container: ContainerDetection;
   stack: StackDetection;
   paths: PathsDetection;
+  localUrl: string | null;
+  testFrameworks: string[];
+  buildTool: string | null;
+  source: 'llm' | 'deterministic';
 }
 
 const STACK_INDICATORS: { file: string; language: string }[] = [
@@ -362,6 +371,198 @@ async function collectEnvFiles(
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* LLM enrichment types + helpers                                      */
+/* ------------------------------------------------------------------ */
+
+interface LlmEnrichment {
+  framework: string | null;
+  primaryLanguage: string | null;
+  localUrl: string | null;
+  databaseType: string | null;
+  databaseVersion: string | null;
+  webserver: string | null;
+  docroot: string | null;
+  runtimeVersions: Record<string, string>;
+  testFrameworks: string[];
+  buildTool: string | null;
+  projectDescription: string | null;
+}
+
+function parseEnrichment(raw: unknown): LlmEnrichment | null {
+  if (!raw) return null;
+  let text: string;
+  if (typeof raw === 'string') {
+    text = raw;
+  } else if (typeof raw === 'object' && !Array.isArray(raw)) {
+    // Already parsed object from the dispatcher
+    return isValidEnrichment(raw as Record<string, unknown>)
+      ? (raw as unknown as LlmEnrichment)
+      : null;
+  } else {
+    return null;
+  }
+  const fenceRe = /```json\s*([\s\S]*?)```/;
+  const match = fenceRe.exec(text);
+  const body = match?.[1] ?? text;
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    return isValidEnrichment(parsed) ? (parsed as unknown as LlmEnrichment) : null;
+  } catch {
+    return null;
+  }
+}
+
+function isValidEnrichment(v: Record<string, unknown>): boolean {
+  // Minimal shape check: at least one enriched field present
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    (typeof v.framework === 'string' ||
+      typeof v.localUrl === 'string' ||
+      typeof v.projectDescription === 'string' ||
+      typeof v.buildTool === 'string' ||
+      Array.isArray(v.testFrameworks))
+  );
+}
+
+function mergeEnrichment(base: EnvDetectData, enrichment: LlmEnrichment): EnvDetectData {
+  const merged = { ...base, source: 'llm' as const };
+
+  if (enrichment.framework) {
+    const fw = enrichment.framework as FrameworkName;
+    if (fw in FRAMEWORK_PATTERNS) {
+      merged.project = { ...merged.project, framework: fw };
+    }
+  }
+  if (enrichment.primaryLanguage) {
+    merged.project = { ...merged.project, primaryLanguage: enrichment.primaryLanguage };
+  }
+  if (enrichment.projectDescription) {
+    merged.project = { ...merged.project, description: enrichment.projectDescription };
+  }
+  if (enrichment.localUrl) {
+    merged.localUrl = enrichment.localUrl;
+  }
+  if (enrichment.databaseType) {
+    merged.stack = {
+      ...merged.stack,
+      database: {
+        type: enrichment.databaseType,
+        version: enrichment.databaseVersion ?? merged.stack.database.version,
+      },
+    };
+  }
+  if (enrichment.webserver) {
+    merged.container = { ...merged.container, webserver: enrichment.webserver };
+  }
+  if (enrichment.docroot) {
+    merged.container = { ...merged.container, docroot: enrichment.docroot };
+  }
+  if (enrichment.runtimeVersions && typeof enrichment.runtimeVersions === 'object') {
+    merged.stack = {
+      ...merged.stack,
+      runtimeVersions: { ...merged.stack.runtimeVersions, ...enrichment.runtimeVersions },
+    };
+  }
+  if (Array.isArray(enrichment.testFrameworks) && enrichment.testFrameworks.length > 0) {
+    merged.testFrameworks = enrichment.testFrameworks;
+  }
+  if (enrichment.buildTool) {
+    merged.buildTool = enrichment.buildTool;
+  }
+  return merged;
+}
+
+async function collectConfigFileContents(repoPath: string): Promise<string> {
+  const candidates = [
+    'package.json',
+    'composer.json',
+    '.ddev/config.yaml',
+    'docker-compose.yml',
+    'docker-compose.yaml',
+    '.lando.yml',
+    'README.md',
+    '.env.example',
+    '.env.dist',
+    'Makefile',
+    'Taskfile.yml',
+    'turbo.json',
+    'nx.json',
+  ];
+  const parts: string[] = [];
+  for (const name of candidates) {
+    const content = await readTextSafe(path.join(repoPath, name));
+    if (content !== null) {
+      // Truncate large files (README etc.) to keep prompt reasonable
+      const truncated =
+        content.length > 4000 ? content.slice(0, 4000) + '\n[...truncated]' : content;
+      parts.push(`--- ${name} ---\n${truncated}`);
+    }
+  }
+  return parts.join('\n\n');
+}
+
+function buildEnvDetectPrompt(args: LlmBuildArgs): string {
+  const detected = args.detected as DetectResult;
+  const data = detected.data as unknown as EnvDetectData;
+  const configContents =
+    ((detected.data as Record<string, unknown>).__configContents as string) ?? '';
+
+  return [
+    'You are analysing a software repository to detect its development environment.',
+    'Below is what deterministic file scanning already found, plus the raw contents of key config files.',
+    'Your job: confirm or correct the detection, and fill in fields that file scanning cannot determine.',
+    '',
+    '## Deterministic detection results',
+    '```json',
+    JSON.stringify(
+      {
+        project: data.project,
+        container: { type: data.container.type, configFile: data.container.configFile },
+        stack: data.stack,
+        paths: data.paths,
+      },
+      null,
+      2,
+    ),
+    '```',
+    '',
+    '## Config file contents',
+    configContents || '(no config files found)',
+    '',
+    '## Instructions',
+    '1. Confirm or correct: framework, primaryLanguage',
+    '2. Detect the local development URL (from DDEV config, docker-compose port mappings, .env files, etc.)',
+    '3. Detect database type and version more precisely if possible',
+    '4. Identify the webserver (nginx, apache, etc.) and document root',
+    '5. Identify test frameworks (jest, vitest, phpunit, playwright, cypress, pytest, etc.) from config files or dependencies',
+    '6. Identify build tooling (vite, webpack, esbuild, turbo, nx, etc.)',
+    '7. Write a 1-2 sentence project description based on README or project structure',
+    '8. Detect runtime versions (PHP, Node, Python, etc.) from config files',
+    '',
+    '## Required output format',
+    'Emit exactly ONE JSON object inside a ```json fenced code block with this shape:',
+    '```',
+    '{',
+    '  "framework": "<FrameworkName or null if deterministic was correct>",',
+    '  "primaryLanguage": "<language or null>",',
+    '  "localUrl": "<url or null>",',
+    '  "databaseType": "<type or null>",',
+    '  "databaseVersion": "<version or null>",',
+    '  "webserver": "<nginx|apache|... or null>",',
+    '  "docroot": "<relative path or null>",',
+    '  "runtimeVersions": { "php": "8.3", "node": "22" },',
+    '  "testFrameworks": ["phpunit", "playwright"],',
+    '  "buildTool": "<vite|webpack|... or null>",',
+    '  "projectDescription": "<1-2 sentence description or null>"',
+    '}',
+    '```',
+    'Only emit fields you can determine from the provided data. Use null for unknowns.',
+    'Do not emit any prose outside the fenced block.',
+  ].join('\n');
+}
+
 function buildSummary(data: EnvDetectData): string {
   const parts: string[] = [];
   parts.push(`framework=${data.project.framework}`);
@@ -373,18 +574,28 @@ function buildSummary(data: EnvDetectData): string {
     );
   }
   if (data.paths.testPaths.length > 0) parts.push(`tests=${data.paths.testPaths.length}`);
+  if (data.localUrl) parts.push(`url=${data.localUrl}`);
+  if (data.testFrameworks.length > 0) parts.push(`testfw=${data.testFrameworks.join(',')}`);
+  if (data.buildTool) parts.push(`build=${data.buildTool}`);
+  parts.push(`source=${data.source}`);
   return parts.join(' ');
 }
 
-export const envDetectStep: StepDefinition<DetectResult, { directoriesCreated: string[] }> = {
+export type EnvDetectApply = {
+  directoriesCreated: string[];
+  enrichedData: EnvDetectData;
+  source: 'llm' | 'deterministic';
+};
+
+export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
   metadata: {
     id: '01-env-detect',
     workflowType: 'onboarding',
     index: 1,
     title: 'Environment detection',
     description:
-      'Scans the repository for container config, language and framework indicators, test directories and env files. No CLI required.',
-    requiresCli: false,
+      'Scans the repository for container config, language and framework indicators, test directories and env files, then optionally enriches via LLM analysis.',
+    requiresCli: true,
   },
 
   async detect(ctx: StepContext): Promise<DetectResult> {
@@ -396,23 +607,54 @@ export const envDetectStep: StepDefinition<DetectResult, { directoriesCreated: s
         name: projectName,
         framework: stack.framework ?? 'general',
         primaryLanguage: stack.language ?? 'unknown',
+        description: null,
       },
       container,
       stack,
       paths: await detectPaths(ctx.repoPath, stack.framework ?? 'general'),
+      localUrl: null,
+      testFrameworks: [],
+      buildTool: null,
+      source: 'deterministic',
     };
+
+    // Collect config file contents for the LLM prompt
+    const configContents = await collectConfigFileContents(ctx.repoPath);
+
     const warnings: string[] = [];
     if (data.stack.indicators.length === 0) {
       warnings.push('no language indicators detected');
     }
     return {
       summary: buildSummary(data),
-      data: data as unknown as Record<string, unknown>,
+      data: { ...(data as unknown as Record<string, unknown>), __configContents: configContents },
       warnings,
     };
   },
 
-  async apply(ctx, args): Promise<{ directoriesCreated: string[] }> {
+  llm: {
+    requiredCapabilities: [],
+    optional: true,
+    buildPrompt: buildEnvDetectPrompt,
+    parseOutput: (raw: string, _parsed: unknown) => parseEnrichment(raw),
+  },
+
+  async apply(ctx, args): Promise<EnvDetectApply> {
+    const detectResult = args.detected as DetectResult;
+    const rawData = { ...detectResult.data } as Record<string, unknown>;
+    // Remove the transient config contents before persisting
+    delete rawData.__configContents;
+    let data = rawData as unknown as EnvDetectData;
+
+    // Merge LLM enrichment if available
+    const enrichment = parseEnrichment(args.llmOutput ?? null);
+    if (enrichment) {
+      data = mergeEnrichment(data, enrichment);
+      ctx.logger.info({ source: 'llm' }, 'env-detect enriched by LLM');
+    } else {
+      ctx.logger.info({ source: 'deterministic' }, 'env-detect using deterministic results only');
+    }
+
     const created: string[] = [];
     for (const dir of ['.claude', path.join('.claude', 'knowledge_base')]) {
       const full = path.join(ctx.repoPath, dir);
@@ -420,9 +662,9 @@ export const envDetectStep: StepDefinition<DetectResult, { directoriesCreated: s
       created.push(dir);
     }
     ctx.logger.info(
-      { detected: (args.detected as DetectResult).summary, created },
+      { detected: detectResult.summary, created, source: data.source },
       'env-detect apply complete',
     );
-    return { directoriesCreated: created };
+    return { directoriesCreated: created, enrichedData: data, source: data.source };
   },
 };

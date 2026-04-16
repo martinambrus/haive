@@ -15,6 +15,8 @@ export interface StepContext {
   db: Database;
   logger: Logger;
   signal?: AbortSignal;
+  /** Update the step's status_message column (shown in UI during running state). */
+  emitProgress(message: string): Promise<void>;
 }
 
 export interface LlmBuildArgs {
@@ -27,6 +29,9 @@ export interface LlmInvocationSpec {
   buildPrompt: (args: LlmBuildArgs) => string;
   parseOutput?: (raw: string, parsed: unknown) => unknown;
   optional?: boolean;
+  /** When true, LLM runs after detect but before the form is generated.
+   *  The form() function receives the parsed llmOutput as its third argument. */
+  preForm?: boolean;
 }
 
 export interface StepApplyArgs<TDetect = unknown> {
@@ -39,7 +44,7 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   readonly metadata: StepMetadata;
   shouldRun?(ctx: StepContext): Promise<boolean> | boolean;
   detect?(ctx: StepContext): Promise<TDetect>;
-  form?(ctx: StepContext, detected: TDetect): FormSchema | null;
+  form?(ctx: StepContext, detected: TDetect, llmOutput?: unknown): FormSchema | null;
   llm?: LlmInvocationSpec;
   apply(ctx: StepContext, args: StepApplyArgs<TDetect>): Promise<TApply>;
 }

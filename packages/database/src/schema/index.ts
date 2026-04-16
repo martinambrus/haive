@@ -345,6 +345,7 @@ export const taskSteps = pgTable(
     formSchema: jsonb('form_schema').$type<unknown>(),
     formValues: jsonb('form_values').$type<Record<string, unknown>>(),
     output: jsonb('output').$type<unknown>(),
+    statusMessage: text('status_message'),
     errorMessage: text('error_message'),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),

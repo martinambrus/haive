@@ -19,6 +19,8 @@ const DEFAULT_WRAPPER_WORKER_PATH =
   process.env.SANDBOX_WRAPPER_WORKER_PATH ?? '/var/lib/haive/wrappers';
 const DEFAULT_WRAPPER_SANDBOX_PATH = '/haive/wrappers';
 export const SANDBOX_WORKDIR = '/haive/workdir';
+export const SANDBOX_USER = 'node';
+export const SANDBOX_USER_HOME = '/home/node';
 const DEFAULT_WORKDIR = SANDBOX_WORKDIR;
 
 export interface SandboxExtraFile {
@@ -137,6 +139,7 @@ export async function runInSandbox(
       mounts,
       workdir,
       network,
+      user: 'node',
       timeoutMs: spec.timeoutMs,
       onStdoutChunk: spec.onStdoutChunk,
       onStderrChunk: spec.onStderrChunk,

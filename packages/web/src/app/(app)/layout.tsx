@@ -21,13 +21,38 @@ async function fetchMe(): Promise<MeResponse | null> {
     .getAll()
     .map((c) => `${c.name}=${c.value}`)
     .join('; ');
-  try {
+
+  const doFetch = async (cookie: string) => {
     const res = await fetch(`${apiBase}/auth/me`, {
-      headers: { Cookie: cookieHeader },
+      headers: { Cookie: cookie },
       cache: 'no-store',
     });
     if (!res.ok) return null;
     return (await res.json()) as MeResponse;
+  };
+
+  try {
+    const result = await doFetch(cookieHeader);
+    if (result) return result;
+
+    // Access token may be expired — try server-side refresh
+    const hasRefresh = cookieStore.get('haive_refresh');
+    if (!hasRefresh) return null;
+
+    const refreshRes = await fetch(`${apiBase}/auth/refresh`, {
+      method: 'POST',
+      headers: { Cookie: cookieHeader, 'Content-Type': 'application/json' },
+      cache: 'no-store',
+    });
+    if (!refreshRes.ok) return null;
+
+    // Extract new cookies from refresh response and retry /auth/me
+    const setCookies = refreshRes.headers.getSetCookie();
+    const newCookieHeader = setCookies
+      .map((sc) => sc.split(';')[0]!)
+      .concat(cookieHeader.split('; ').filter((c) => !c.startsWith('haive_')))
+      .join('; ');
+    return await doFetch(newCookieHeader);
   } catch {
     return null;
   }

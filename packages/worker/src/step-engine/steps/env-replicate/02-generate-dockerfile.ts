@@ -245,6 +245,9 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
         case 'intelephense':
           lines.push('RUN npm install -g intelephense');
           break;
+        case 'intelephense-extended':
+          lines.push('RUN npm install -g intelephense');
+          break;
         case 'vtsls':
           lines.push('RUN npm install -g @vtsls/language-server typescript');
           break;

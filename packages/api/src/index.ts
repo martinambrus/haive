@@ -18,6 +18,7 @@ import { integrationsRoutes } from './routes/integrations.js';
 import { taskRoutes } from './routes/tasks.js';
 import { installTerminalWebSocket } from './routes/terminal.js';
 import { terminalSessionRoutes } from './routes/terminal-sessions.js';
+import { toolingRoutes } from './routes/tooling.js';
 
 export function createApiApp(webOrigin: string): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
@@ -47,6 +48,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/tasks', taskRoutes);
   app.route('/terminal-sessions', terminalSessionRoutes);
   app.route('/admin', adminRoutes);
+  app.route('/tooling', toolingRoutes);
 
   return app;
 }

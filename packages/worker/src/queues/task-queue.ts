@@ -22,6 +22,7 @@ import {
 } from '../step-engine/index.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
+import { cleanupRagForTask } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 
 let registered = false;
@@ -395,6 +396,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
     .where(eq(schema.tasks.id, payload.taskId));
   await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
+  await cleanupRagForTask(db, payload.taskId);
 }
 
 export function startTaskWorker(): Worker<TaskJobPayload> {

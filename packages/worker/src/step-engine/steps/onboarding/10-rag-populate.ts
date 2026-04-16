@@ -1,10 +1,34 @@
-import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { sql } from 'drizzle-orm';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { listFilesMatching, pathExists } from './_helpers.js';
+import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
+import {
+  resolveRagConnection,
+  ensureRagSchema,
+  RAG_TABLE,
+  type RagConnection,
+  type RagMode,
+  type RagToolingPrefs,
+} from './_rag-connection.js';
+import {
+  extractMarkdownSections,
+  extractCodeSections,
+  chunkSection,
+  CODE_EXTENSIONS,
+  type RagChunk,
+} from './_rag-chunkers.js';
+import {
+  probeOllama,
+  ollamaEmbed,
+  hashEmbed,
+  vectorLiteral,
+  EMBED_BATCH_SIZE,
+} from './_rag-embed.js';
+
+/* ------------------------------------------------------------------ */
+/* Types                                                               */
+/* ------------------------------------------------------------------ */
 
 export interface RagSourceFile {
   relPath: string;
@@ -12,25 +36,57 @@ export interface RagSourceFile {
 }
 
 export interface RagPopulateDetect {
-  sourceFiles: RagSourceFile[];
-  extensionAvailable: boolean;
+  kbFiles: RagSourceFile[];
+  codeFiles: RagSourceFile[];
+  ollamaReachable: boolean;
+  ollamaUrl: string | null;
+  embeddingModel: string | null;
+  embeddingDimensions: number;
+  ragMode: RagMode;
+  ragConnectionString: string | null;
+  projectName: string;
 }
 
 export interface RagPopulateApply {
-  chunkCount: number;
-  fileCount: number;
+  kbChunkCount: number;
+  codeChunkCount: number;
+  kbFileCount: number;
+  codeFileCount: number;
   embeddingDimensions: number;
   tableName: string;
   usedPgvector: boolean;
+  ragMode: RagMode;
+  usedOllama: boolean;
 }
 
-const EMBEDDING_DIMENSIONS = 384;
-const CHUNK_SIZE_CHARS = 1200;
-const CHUNK_OVERLAP_CHARS = 150;
+/* ------------------------------------------------------------------ */
+/* Constants                                                           */
+/* ------------------------------------------------------------------ */
+
 const SOURCE_PREFIXES = ['.claude/knowledge_base/', '.claude/skills/', '.claude/agents/'];
 const ROOT_FILES = ['CLAUDE.md', 'AGENTS.md'];
 
-async function collectSourceFiles(repo: string): Promise<RagSourceFile[]> {
+const CODE_IGNORE_DIRS = new Set([
+  'node_modules',
+  '.git',
+  'vendor',
+  '__pycache__',
+  '.next',
+  'dist',
+  'build',
+  '.ddev',
+  '.cache',
+  'coverage',
+  '.tox',
+  '.venv',
+  'venv',
+]);
+
+/* ------------------------------------------------------------------ */
+/* File collection                                                     */
+/* ------------------------------------------------------------------ */
+
+async function collectKbFiles(repo: string): Promise<RagSourceFile[]> {
   const out: RagSourceFile[] = [];
 
   for (const rel of ROOT_FILES) {
@@ -68,120 +124,126 @@ async function collectSourceFiles(repo: string): Promise<RagSourceFile[]> {
   return out;
 }
 
-function chunkText(text: string): string[] {
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return [];
-  if (trimmed.length <= CHUNK_SIZE_CHARS) return [trimmed];
-  const chunks: string[] = [];
-  let start = 0;
-  while (start < trimmed.length) {
-    const end = Math.min(trimmed.length, start + CHUNK_SIZE_CHARS);
-    chunks.push(trimmed.slice(start, end));
-    if (end >= trimmed.length) break;
-    start = end - CHUNK_OVERLAP_CHARS;
-  }
-  return chunks;
-}
+async function collectCodeFiles(
+  repo: string,
+  excludePaths: readonly string[],
+): Promise<RagSourceFile[]> {
+  const codeExts = new Set(Object.keys(CODE_EXTENSIONS));
+  const excludeSet = new Set(excludePaths.map((p) => p.replace(/\/$/, '')));
 
-export function hashEmbed(text: string, dimensions = EMBEDDING_DIMENSIONS): number[] {
-  const out = new Array<number>(dimensions).fill(0);
-  let blockIndex = 0;
-  let produced = 0;
-  while (produced < dimensions) {
-    const hash = createHash('sha256').update(`${blockIndex}:${text}`).digest();
-    for (let i = 0; i < hash.length && produced < dimensions; i += 2) {
-      const raw = hash.readUInt16BE(i);
-      out[produced] = raw / 65535 - 0.5;
-      produced += 1;
+  const files = await listFilesMatching(
+    repo,
+    (rel, isDir) => {
+      const parts = rel.split('/');
+      // Skip ignored directories
+      if (parts.some((p) => CODE_IGNORE_DIRS.has(p))) return false;
+      // Skip user-excluded paths
+      for (const ex of excludeSet) {
+        if (rel.startsWith(ex + '/') || rel === ex) return false;
+      }
+      if (isDir) return false;
+      const ext = path.extname(rel).toLowerCase();
+      return codeExts.has(ext);
+    },
+    8,
+  );
+
+  const out: RagSourceFile[] = [];
+  for (const rel of files) {
+    try {
+      const text = await readFile(path.join(repo, rel), 'utf8');
+      out.push({ relPath: rel, sizeBytes: Buffer.byteLength(text, 'utf8') });
+    } catch {
+      continue;
     }
-    blockIndex += 1;
   }
-  let sumSq = 0;
-  for (const v of out) sumSq += v * v;
-  const norm = Math.sqrt(sumSq) || 1;
-  for (let i = 0; i < out.length; i += 1) {
-    out[i] = out[i]! / norm;
-  }
+  out.sort((a, b) => a.relPath.localeCompare(b.relPath));
   return out;
 }
 
-function vectorLiteral(values: number[]): string {
-  return `[${values.map((v) => v.toFixed(6)).join(',')}]`;
+/* ------------------------------------------------------------------ */
+/* Load tooling prefs from step 04                                     */
+/* ------------------------------------------------------------------ */
+
+interface ToolingOutput {
+  tooling: {
+    ragMode?: string;
+    ragConnectionString?: string;
+    ollamaUrl?: string;
+    embeddingModel?: string;
+    embeddingDimensions?: number;
+  };
 }
 
-async function ensurePgvector(
-  ctx: StepContext,
-): Promise<{ usedPgvector: boolean; tableName: string }> {
-  let usedPgvector = true;
-  try {
-    await ctx.db.execute(sql`CREATE EXTENSION IF NOT EXISTS vector`);
-  } catch (err) {
-    ctx.logger.warn(
-      { err },
-      'pgvector extension unavailable; falling back to text-encoded embeddings',
-    );
-    usedPgvector = false;
-  }
+function loadToolingPrefs(output: unknown): RagToolingPrefs {
+  const o = output as ToolingOutput | null;
+  const t = o?.tooling ?? {};
+  return {
+    ragMode: (t.ragMode ?? 'none') as RagMode,
+    ragConnectionString: t.ragConnectionString || null,
+    ollamaUrl: t.ollamaUrl || null,
+    embeddingModel: t.embeddingModel || null,
+    embeddingDimensions: typeof t.embeddingDimensions === 'number' ? t.embeddingDimensions : 2560,
+  };
+}
 
+/* ------------------------------------------------------------------ */
+/* INSERT helper                                                       */
+/* ------------------------------------------------------------------ */
+
+async function insertChunk(
+  conn: RagConnection,
+  usedPgvector: boolean,
+  taskId: string,
+  repositoryId: string | null,
+  sourceType: 'kb' | 'code',
+  sourcePath: string,
+  sectionId: string,
+  chunkIndex: number,
+  chunkHash: string,
+  content: string,
+  embedding: number[],
+): Promise<void> {
   if (usedPgvector) {
-    await ctx.db.execute(sql`
-      CREATE TABLE IF NOT EXISTS rag_chunks (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        task_id uuid NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-        repository_id uuid REFERENCES repositories(id) ON DELETE SET NULL,
-        file_path text NOT NULL,
-        chunk_index integer NOT NULL,
-        content text NOT NULL,
-        embedding vector(${sql.raw(String(EMBEDDING_DIMENSIONS))}) NOT NULL,
-        created_at timestamp NOT NULL DEFAULT now()
-      )
-    `);
+    const literal = vectorLiteral(embedding);
+    await conn.pg.unsafe(
+      `INSERT INTO ${RAG_TABLE} (task_id, repository_id, source_type, source_path, section_id, chunk_index, chunk_hash, content, vector)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector)`,
+      [
+        taskId,
+        repositoryId,
+        sourceType,
+        sourcePath,
+        sectionId,
+        chunkIndex,
+        chunkHash,
+        content,
+        literal,
+      ],
+    );
   } else {
-    await ctx.db.execute(sql`
-      CREATE TABLE IF NOT EXISTS rag_chunks (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        task_id uuid NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-        repository_id uuid REFERENCES repositories(id) ON DELETE SET NULL,
-        file_path text NOT NULL,
-        chunk_index integer NOT NULL,
-        content text NOT NULL,
-        embedding_json jsonb NOT NULL,
-        created_at timestamp NOT NULL DEFAULT now()
-      )
-    `);
-  }
-
-  await ctx.db.execute(sql`
-    CREATE INDEX IF NOT EXISTS rag_chunks_task_id_idx ON rag_chunks(task_id)
-  `);
-
-  return { usedPgvector, tableName: 'rag_chunks' };
-}
-
-async function checkExtensionAvailable(ctx: StepContext): Promise<boolean> {
-  try {
-    const result = (await ctx.db.execute(
-      sql`SELECT 1 FROM pg_available_extensions WHERE name = 'vector'`,
-    )) as unknown;
-    if (Array.isArray(result)) return result.length > 0;
-    return false;
-  } catch {
-    return false;
+    const json = JSON.stringify(embedding);
+    await conn.pg.unsafe(
+      `INSERT INTO ${RAG_TABLE} (task_id, repository_id, source_type, source_path, section_id, chunk_index, chunk_hash, content, embedding_json)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
+      [
+        taskId,
+        repositoryId,
+        sourceType,
+        sourcePath,
+        sectionId,
+        chunkIndex,
+        chunkHash,
+        content,
+        json,
+      ],
+    );
   }
 }
 
-async function resolveRepositoryId(ctx: StepContext): Promise<string | null> {
-  try {
-    const result = (await ctx.db.execute(
-      sql`SELECT repository_id FROM tasks WHERE id = ${ctx.taskId} LIMIT 1`,
-    )) as unknown;
-    if (!Array.isArray(result) || result.length === 0) return null;
-    const first = result[0] as { repository_id?: string | null } | undefined;
-    return first?.repository_id ?? null;
-  } catch {
-    return null;
-  }
-}
+/* ------------------------------------------------------------------ */
+/* Step definition                                                     */
+/* ------------------------------------------------------------------ */
 
 export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply> = {
   metadata: {
@@ -190,28 +252,106 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
     index: 13,
     title: 'Populate RAG index',
     description:
-      'Chunks the generated knowledge base, agents, skills, CLAUDE.md and AGENTS.md, computes deterministic embeddings, and writes them to the rag_chunks table. Ensures the pgvector extension when available and falls back to a jsonb-encoded embedding column otherwise.',
+      'Chunks knowledge base and code files, computes embeddings via Ollama (or deterministic fallback), and writes them to the configured PostgreSQL RAG database.',
     requiresCli: false,
   },
 
   async detect(ctx: StepContext): Promise<RagPopulateDetect> {
-    const sourceFiles = await collectSourceFiles(ctx.repoPath);
-    const extensionAvailable = await checkExtensionAvailable(ctx);
+    // Load tooling prefs from step 04
+    await ctx.emitProgress('Loading tooling preferences...');
+    const toolingPrev = await loadPreviousStepOutput(
+      ctx.db,
+      ctx.taskId,
+      '04-tooling-infrastructure',
+    );
+    const prefs = loadToolingPrefs(toolingPrev?.output);
+
+    // Load project name + exclude paths from step 01
+    const envPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
+    const envData = (
+      envPrev?.detect as {
+        data?: {
+          project?: { name?: string };
+          paths?: { customCodePaths?: { exclude?: string[] } };
+        };
+      } | null
+    )?.data;
+    const projectName = envData?.project?.name ?? 'default';
+    const excludePaths = envData?.paths?.customCodePaths?.exclude ?? [];
+
+    // Collect KB files
+    await ctx.emitProgress('Scanning for knowledge base files...');
+    const kbFiles = await collectKbFiles(ctx.repoPath);
+
+    // Collect code files
+    await ctx.emitProgress('Scanning for code files...');
+    const codeFiles = await collectCodeFiles(ctx.repoPath, excludePaths);
+
+    // Probe Ollama connectivity
+    await ctx.emitProgress('Testing Ollama connectivity...');
+    const ollamaReachable = prefs.ollamaUrl ? await probeOllama(prefs.ollamaUrl) : false;
+
+    await ctx.emitProgress(
+      `Found ${kbFiles.length} KB files, ${codeFiles.length} code files. Ollama: ${ollamaReachable ? 'reachable' : 'unavailable'}.`,
+    );
+
     ctx.logger.info(
-      { fileCount: sourceFiles.length, extensionAvailable },
+      {
+        kbFileCount: kbFiles.length,
+        codeFileCount: codeFiles.length,
+        ragMode: prefs.ragMode,
+        ollamaReachable,
+        embeddingModel: prefs.embeddingModel,
+        embeddingDimensions: prefs.embeddingDimensions,
+      },
       'rag populate detect complete',
     );
-    return { sourceFiles, extensionAvailable };
+
+    return {
+      kbFiles,
+      codeFiles,
+      ollamaReachable,
+      ollamaUrl: prefs.ollamaUrl,
+      embeddingModel: prefs.embeddingModel,
+      embeddingDimensions: prefs.embeddingDimensions,
+      ragMode: prefs.ragMode,
+      ragConnectionString: prefs.ragConnectionString,
+      projectName,
+    };
+  },
+
+  shouldRun() {
+    return true;
   },
 
   form(_ctx, detected): FormSchema {
+    if (detected.ragMode === 'none') {
+      return {
+        title: 'RAG population skipped',
+        description:
+          'RAG infrastructure was set to "none" in tooling preferences. Nothing to populate.',
+        fields: [{ type: 'checkbox', id: 'confirmSkip', label: 'Confirm skip', default: true }],
+        submitLabel: 'Continue',
+      };
+    }
+
+    const statusParts: string[] = [
+      `KB files: ${detected.kbFiles.length}`,
+      `Code files: ${detected.codeFiles.length}`,
+      `RAG mode: ${detected.ragMode}`,
+      `Ollama: ${detected.ollamaReachable ? 'reachable' : 'UNREACHABLE'} at ${detected.ollamaUrl ?? '(not configured)'}`,
+      `Model: ${detected.embeddingModel ?? '(not set)'}`,
+      `Dimensions: ${detected.embeddingDimensions}`,
+    ];
+    if (!detected.ollamaReachable) {
+      statusParts.push(
+        'WARNING: Ollama not reachable. Will use deterministic hash embeddings as fallback.',
+      );
+    }
+
     return {
       title: 'Populate RAG index',
-      description: `Will chunk ${detected.sourceFiles.length} source file(s) and write embeddings to rag_chunks. ${
-        detected.extensionAvailable
-          ? 'pgvector extension detected.'
-          : 'pgvector not detected; will fall back to jsonb embeddings.'
-      }`,
+      description: statusParts.join('\n'),
       fields: [
         {
           type: 'checkbox',
@@ -226,74 +366,231 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
 
   async apply(ctx, args): Promise<RagPopulateApply> {
     const detected = args.detected as RagPopulateDetect;
-    const values = args.formValues as { truncateExisting?: boolean };
 
-    const { usedPgvector, tableName } = await ensurePgvector(ctx);
-    const repositoryId = await resolveRepositoryId(ctx);
-
-    if (values.truncateExisting !== false) {
-      await ctx.db.execute(sql`DELETE FROM rag_chunks WHERE task_id = ${ctx.taskId}`);
+    if (detected.ragMode === 'none') {
+      ctx.logger.info('rag populate skipped (mode=none)');
+      return {
+        kbChunkCount: 0,
+        codeChunkCount: 0,
+        kbFileCount: 0,
+        codeFileCount: 0,
+        embeddingDimensions: detected.embeddingDimensions,
+        tableName: RAG_TABLE,
+        usedPgvector: false,
+        ragMode: 'none',
+        usedOllama: false,
+      };
     }
 
-    let chunkCount = 0;
-    let fileCount = 0;
-
-    for (const file of detected.sourceFiles) {
-      let text: string;
-      try {
-        text = await readFile(path.join(ctx.repoPath, file.relPath), 'utf8');
-      } catch (err) {
-        ctx.logger.warn(
-          { err, file: file.relPath },
-          'rag populate failed to read source file; skipping',
-        );
-        continue;
-      }
-      const chunks = chunkText(text);
-      if (chunks.length === 0) continue;
-      fileCount += 1;
-
-      for (let index = 0; index < chunks.length; index += 1) {
-        const chunk = chunks[index]!;
-        const embedding = hashEmbed(chunk);
-        if (usedPgvector) {
-          const literal = vectorLiteral(embedding);
-          await ctx.db.execute(sql`
-            INSERT INTO rag_chunks (task_id, repository_id, file_path, chunk_index, content, embedding)
-            VALUES (
-              ${ctx.taskId},
-              ${repositoryId},
-              ${file.relPath},
-              ${index},
-              ${chunk},
-              ${literal}::vector
-            )
-          `);
-        } else {
-          const json = JSON.stringify(embedding);
-          await ctx.db.execute(sql`
-            INSERT INTO rag_chunks (task_id, repository_id, file_path, chunk_index, content, embedding_json)
-            VALUES (
-              ${ctx.taskId},
-              ${repositoryId},
-              ${file.relPath},
-              ${index},
-              ${chunk},
-              ${json}::jsonb
-            )
-          `);
-        }
-        chunkCount += 1;
-      }
-    }
-
-    ctx.logger.info({ chunkCount, fileCount, usedPgvector }, 'rag populate apply complete');
-    return {
-      chunkCount,
-      fileCount,
-      embeddingDimensions: EMBEDDING_DIMENSIONS,
-      tableName,
-      usedPgvector,
+    const prefs: RagToolingPrefs = {
+      ragMode: detected.ragMode,
+      ragConnectionString: detected.ragConnectionString,
+      ollamaUrl: detected.ollamaUrl,
+      embeddingModel: detected.embeddingModel,
+      embeddingDimensions: detected.embeddingDimensions,
     };
+
+    await ctx.emitProgress('Connecting to RAG database...');
+    const conn = await resolveRagConnection(prefs, ctx.db, detected.projectName);
+    if (!conn) {
+      ctx.logger.warn('rag connection resolved to null');
+      return {
+        kbChunkCount: 0,
+        codeChunkCount: 0,
+        kbFileCount: 0,
+        codeFileCount: 0,
+        embeddingDimensions: detected.embeddingDimensions,
+        tableName: RAG_TABLE,
+        usedPgvector: false,
+        ragMode: detected.ragMode,
+        usedOllama: false,
+      };
+    }
+
+    try {
+      await ctx.emitProgress('Creating RAG schema and indexes...');
+      const { usedPgvector } = await ensureRagSchema(conn);
+      const values = args.formValues as { truncateExisting?: boolean };
+
+      if (values.truncateExisting !== false) {
+        await ctx.emitProgress('Clearing existing RAG data...');
+        await conn.pg.unsafe(`DELETE FROM ${RAG_TABLE} WHERE task_id = $1`, [ctx.taskId]);
+      }
+
+      // Resolve repository_id
+      let repositoryId: string | null = null;
+      try {
+        const rows = (await ctx.db.execute({
+          sql: `SELECT repository_id FROM tasks WHERE id = $1 LIMIT 1`,
+          params: [ctx.taskId],
+        } as never)) as unknown;
+        if (Array.isArray(rows) && rows.length > 0) {
+          repositoryId = (rows[0] as { repository_id?: string }).repository_id ?? null;
+        }
+      } catch {
+        /* non-critical */
+      }
+
+      const useOllama =
+        detected.ollamaReachable && !!detected.ollamaUrl && !!detected.embeddingModel;
+
+      let kbChunkCount = 0;
+      let codeChunkCount = 0;
+      let kbFileCount = 0;
+      let codeFileCount = 0;
+
+      // --- KB files ---
+      const totalKb = detected.kbFiles.length;
+      for (let fi = 0; fi < totalKb; fi += 1) {
+        const file = detected.kbFiles[fi]!;
+        await ctx.emitProgress(`Indexing KB (${fi + 1}/${totalKb}): ${file.relPath}`);
+
+        let text: string;
+        try {
+          text = await readFile(path.join(ctx.repoPath, file.relPath), 'utf8');
+        } catch (err) {
+          ctx.logger.warn({ err, file: file.relPath }, 'failed to read KB file; skipping');
+          continue;
+        }
+
+        const sections = extractMarkdownSections(text, file.relPath);
+        const chunks: RagChunk[] = [];
+        for (const section of sections) {
+          chunks.push(...chunkSection(section));
+        }
+        if (chunks.length === 0) continue;
+        kbFileCount += 1;
+
+        // Embed and insert in batches
+        for (let batchStart = 0; batchStart < chunks.length; batchStart += EMBED_BATCH_SIZE) {
+          const batch = chunks.slice(batchStart, batchStart + EMBED_BATCH_SIZE);
+          const texts = batch.map((c) => c.content);
+          let embeddings: number[][];
+
+          if (useOllama) {
+            try {
+              embeddings = await ollamaEmbed(detected.ollamaUrl!, detected.embeddingModel!, texts);
+            } catch (err) {
+              ctx.logger.warn(
+                { err, file: file.relPath, batchStart },
+                'Ollama failed; hash fallback',
+              );
+              embeddings = texts.map((t) => hashEmbed(t, detected.embeddingDimensions));
+            }
+          } else {
+            embeddings = texts.map((t) => hashEmbed(t, detected.embeddingDimensions));
+          }
+
+          for (let i = 0; i < batch.length; i += 1) {
+            const chunk = batch[i]!;
+            await insertChunk(
+              conn,
+              usedPgvector,
+              ctx.taskId,
+              repositoryId,
+              'kb',
+              file.relPath,
+              chunk.sectionId,
+              chunk.chunkIndex,
+              chunk.chunkHash,
+              chunk.content,
+              embeddings[i]!,
+            );
+            kbChunkCount += 1;
+          }
+        }
+      }
+
+      // --- Code files ---
+      const totalCode = detected.codeFiles.length;
+      for (let fi = 0; fi < totalCode; fi += 1) {
+        const file = detected.codeFiles[fi]!;
+        await ctx.emitProgress(`Indexing code (${fi + 1}/${totalCode}): ${file.relPath}`);
+
+        let text: string;
+        try {
+          text = await readFile(path.join(ctx.repoPath, file.relPath), 'utf8');
+        } catch (err) {
+          ctx.logger.warn({ err, file: file.relPath }, 'failed to read code file; skipping');
+          continue;
+        }
+
+        const sections = extractCodeSections(text, file.relPath);
+        const chunks: RagChunk[] = [];
+        for (const section of sections) {
+          chunks.push(...chunkSection(section));
+        }
+        if (chunks.length === 0) continue;
+        codeFileCount += 1;
+
+        for (let batchStart = 0; batchStart < chunks.length; batchStart += EMBED_BATCH_SIZE) {
+          const batch = chunks.slice(batchStart, batchStart + EMBED_BATCH_SIZE);
+          const texts = batch.map((c) => c.content);
+          let embeddings: number[][];
+
+          if (useOllama) {
+            try {
+              embeddings = await ollamaEmbed(detected.ollamaUrl!, detected.embeddingModel!, texts);
+            } catch (err) {
+              ctx.logger.warn(
+                { err, file: file.relPath, batchStart },
+                'Ollama failed; hash fallback',
+              );
+              embeddings = texts.map((t) => hashEmbed(t, detected.embeddingDimensions));
+            }
+          } else {
+            embeddings = texts.map((t) => hashEmbed(t, detected.embeddingDimensions));
+          }
+
+          for (let i = 0; i < batch.length; i += 1) {
+            const chunk = batch[i]!;
+            await insertChunk(
+              conn,
+              usedPgvector,
+              ctx.taskId,
+              repositoryId,
+              'code',
+              file.relPath,
+              chunk.sectionId,
+              chunk.chunkIndex,
+              chunk.chunkHash,
+              chunk.content,
+              embeddings[i]!,
+            );
+            codeChunkCount += 1;
+          }
+        }
+      }
+
+      await ctx.emitProgress(
+        `RAG populate complete: ${kbChunkCount} KB chunks from ${kbFileCount} files, ${codeChunkCount} code chunks from ${codeFileCount} files.`,
+      );
+
+      ctx.logger.info(
+        {
+          kbChunkCount,
+          codeChunkCount,
+          kbFileCount,
+          codeFileCount,
+          usedPgvector,
+          usedOllama: useOllama,
+          ragMode: detected.ragMode,
+        },
+        'rag populate apply complete',
+      );
+      return {
+        kbChunkCount,
+        codeChunkCount,
+        kbFileCount,
+        codeFileCount,
+        embeddingDimensions: detected.embeddingDimensions,
+        tableName: RAG_TABLE,
+        usedPgvector,
+        ragMode: detected.ragMode,
+        usedOllama: useOllama,
+      };
+    } finally {
+      await conn.close();
+    }
   },
 };

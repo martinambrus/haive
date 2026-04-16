@@ -31,6 +31,7 @@ function makeCtx(repo: string): StepContext {
     cliProviderId: null,
     db: {} as unknown as Database,
     logger: logger.child({ test: 'knowledge-acquisition' }),
+    emitProgress: async () => {},
   };
 }
 

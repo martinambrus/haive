@@ -9,7 +9,14 @@ import { deriveEnvTemplateName, getTaskEnvTemplate, linkTaskToEnvTemplate } from
 type ContainerTool = 'ddev' | 'docker-compose' | 'docker' | 'none';
 type DatabaseKind = 'postgres' | 'mysql' | 'mariadb' | 'sqlite' | 'none';
 type LanguageKey = 'node' | 'php' | 'python' | 'ruby' | 'go' | 'rust';
-type LspKey = 'intelephense' | 'vtsls' | 'pyright' | 'gopls' | 'rust-analyzer' | 'solargraph';
+type LspKey =
+  | 'intelephense'
+  | 'intelephense-extended'
+  | 'vtsls'
+  | 'pyright'
+  | 'gopls'
+  | 'rust-analyzer'
+  | 'solargraph';
 export type PackageManager =
   | 'npm'
   | 'pnpm'
@@ -62,6 +69,10 @@ const DB_OPTIONS: { value: DatabaseKind; label: string }[] = [
 
 const LSP_OPTIONS: { value: LspKey; label: string }[] = [
   { value: 'intelephense', label: 'Intelephense (PHP)' },
+  {
+    value: 'intelephense-extended',
+    label: 'Intelephense + CMS extensions (.inc, .module, .install)',
+  },
   { value: 'vtsls', label: 'vtsls (TypeScript/JavaScript)' },
   { value: 'pyright', label: 'Pyright (Python)' },
   { value: 'gopls', label: 'gopls (Go)' },
@@ -319,6 +330,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
   }
 
   const composerJson = await readJsonIfExists(path.join(repoPath, 'composer.json'));
+  let isCmsPhpProject = false;
   if (composerJson) {
     const requireField = (composerJson as Record<string, unknown>).require as
       | Record<string, string>
@@ -330,7 +342,16 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
       source: 'composer.json',
       packageManager: 'composer',
     });
-    suggestedLsp.add('intelephense');
+    // Detect CMS frameworks that use non-standard PHP extensions (.inc, .module, etc.)
+    const allDeps = Object.keys(requireField ?? {});
+    isCmsPhpProject = allDeps.some(
+      (dep) =>
+        dep.startsWith('drupal/') ||
+        dep === 'drupal/core' ||
+        dep === 'drupal/core-recommended' ||
+        dep === 'laravel/framework',
+    );
+    suggestedLsp.add(isCmsPhpProject ? 'intelephense-extended' : 'intelephense');
   }
 
   const requirementsTxt = await fileExists(path.join(repoPath, 'requirements.txt'));
@@ -405,7 +426,8 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
         source: '.ddev/config.yaml',
         packageManager: null,
       });
-      suggestedLsp.add('intelephense');
+      // DDEV projects are typically Drupal/CMS — prefer extended
+      suggestedLsp.add(isCmsPhpProject || ddev.present ? 'intelephense-extended' : 'intelephense');
     }
   }
 
