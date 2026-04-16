@@ -24,7 +24,8 @@
     "docker:logs": "docker compose logs -f",
     "sandbox:build": "docker compose --profile sandbox build cli-sandbox",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
-    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\""
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "prepare": "husky"
   },
   "engines": {
     "node": ">=24.0.0",
@@ -35,12 +36,16 @@
     "@playwright/test": "^1.58.2",
     "@types/node": "^25.3.5",
     "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
     "postgres": "^3.4.5",
     "prettier": "^3.4.2",
     "tsx": "^4.19.2",
     "turbo": "^2.3.3",
     "typescript": "^5.7.3",
     "vitest": "^4.0.18"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx,json,md}": "prettier --write"
   },
   "pnpm": {
     "overrides": {
