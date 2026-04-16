@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { schema } from '@haive/database';
-import { SECRET_KEYS, encrypt, encryptDek, generateDek, secretsService } from '@haive/shared';
+import { encrypt, encryptDek, generateDek, secretsService, userSecretsService } from '@haive/shared';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -54,7 +54,8 @@ export async function startDeviceCode(
     body: new URLSearchParams({ client_id: clientId, scope: 'repo' }),
   });
   if (!res.ok) {
-    throw new HttpError(502, `GitHub device-code request failed (HTTP ${res.status})`);
+    const errBody = await res.text().catch(() => '');
+    throw new HttpError(502, `GitHub device-code request failed (HTTP ${res.status}): ${errBody}`);
   }
   const body = (await res.json()) as DeviceCodeResponse;
   if (!body.device_code || !body.user_code || !body.verification_uri) {
@@ -82,7 +83,8 @@ export async function pollAccessToken(
     }),
   });
   if (!res.ok) {
-    throw new HttpError(502, `GitHub token-exchange failed (HTTP ${res.status})`);
+    const errBody = await res.text().catch(() => '');
+    throw new HttpError(502, `GitHub token-exchange failed (HTTP ${res.status}): ${errBody}`);
   }
   return (await res.json()) as AccessTokenResponse;
 }
@@ -107,11 +109,11 @@ export function isPendingError(tokenRes: AccessTokenResponse): tokenRes is Acces
   return 'error' in tokenRes && PENDING_ERRORS.has(tokenRes.error);
 }
 
-async function resolveClientId(): Promise<string | null> {
+async function resolveClientId(userId: string): Promise<string | null> {
   const fromEnv = process.env.GITHUB_OAUTH_CLIENT_ID?.trim();
   if (fromEnv) return fromEnv;
   try {
-    const stored = await secretsService.get(SECRET_KEYS.GITHUB_CLIENT_ID);
+    const stored = await userSecretsService.get(userId, 'github_client_id');
     return stored && stored.trim().length > 0 ? stored.trim() : null;
   } catch {
     return null;
@@ -122,7 +124,8 @@ export const githubOauthRoutes = new Hono<AppEnv>();
 githubOauthRoutes.use('*', requireAuth);
 
 githubOauthRoutes.post('/device-code', async (c) => {
-  const clientId = await resolveClientId();
+  const userId = c.get('userId');
+  const clientId = await resolveClientId(userId);
   if (!clientId) {
     throw new HttpError(503, 'GitHub OAuth is not configured on this server');
   }
@@ -139,7 +142,7 @@ githubOauthRoutes.post('/device-code', async (c) => {
 githubOauthRoutes.post('/poll', async (c) => {
   const userId = c.get('userId');
   const body = pollSchema.parse(await c.req.json());
-  const clientId = await resolveClientId();
+  const clientId = await resolveClientId(userId);
   if (!clientId) {
     throw new HttpError(503, 'GitHub OAuth is not configured on this server');
   }

@@ -7,6 +7,7 @@ import { cn } from '@/lib/cn';
 const SETTINGS_TABS = [
   { href: '/settings/cli-providers', label: 'CLI Providers' },
   { href: '/settings/credentials', label: 'Git Credentials' },
+  { href: '/settings/integrations', label: 'Integrations' },
 ];
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {

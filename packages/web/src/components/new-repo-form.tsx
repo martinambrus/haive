@@ -62,6 +62,7 @@ export function NewRepoForm() {
   const [oauthVerificationUri, setOauthVerificationUri] = useState('');
   const [oauthLabel, setOauthLabel] = useState<string | null>(null);
   const [credModalOpen, setCredModalOpen] = useState(false);
+  const [githubConfigured, setGithubConfigured] = useState<boolean | null>(null);
   const oauthCancelRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -76,6 +77,15 @@ export function NewRepoForm() {
       oauthCancelRef.current?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (source === 'github_oauth') {
+      api
+        .get<{ configured: boolean }>('/integrations/github')
+        .then((data) => setGithubConfigured(data.configured))
+        .catch(() => setGithubConfigured(false));
+    }
+  }, [source]);
 
   function resetOauthState() {
     oauthCancelRef.current?.();
@@ -225,6 +235,7 @@ export function NewRepoForm() {
               setRemoteUrl('');
               resetOauthState();
               setCredentialsId('');
+              setGithubConfigured(null);
             }}
             className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
           >
@@ -266,15 +277,27 @@ export function NewRepoForm() {
             {source === 'github_oauth' ? (
               <div className="flex flex-col gap-1.5">
                 <Label>GitHub sign-in</Label>
-                {oauthLabel ? (
+                {githubConfigured === false ? (
+                  <div className="rounded-md border border-amber-900 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+                    GitHub OAuth is not configured. Set it up in{' '}
+                    <a href="/settings/integrations" className="underline">
+                      Settings &gt; Integrations
+                    </a>
+                    .
+                  </div>
+                ) : oauthLabel ? (
                   <div className="rounded-md border border-emerald-900 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-200">
                     Signed in — credential stored as <span className="font-mono">{oauthLabel}</span>
                   </div>
                 ) : (
                   <>
                     {oauthPhase === 'idle' || oauthPhase === 'error' ? (
-                      <Button type="button" onClick={() => void startGithubOauth()}>
-                        Sign in with GitHub
+                      <Button
+                        type="button"
+                        onClick={() => void startGithubOauth()}
+                        disabled={githubConfigured === null}
+                      >
+                        {githubConfigured === null ? 'Checking...' : 'Sign in with GitHub'}
                       </Button>
                     ) : null}
                     {(oauthPhase === 'awaiting_user' || oauthPhase === 'polling') && (
