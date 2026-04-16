@@ -111,9 +111,6 @@ async function buildTree(
       if (children.length === 0) children = undefined;
     }
 
-    // Skip empty dirs with no children (unless framework path)
-    if (fileCount === 0 && !children && !isFrameworkPath) continue;
-
     const badgeColor = isFrameworkPath ? 'green' : isExcluded ? 'default' : 'amber';
 
     nodes.push({
