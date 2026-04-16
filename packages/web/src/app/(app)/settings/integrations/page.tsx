@@ -37,7 +37,9 @@ export default function IntegrationsPage() {
       const trimmed = clientId.trim();
       setConfigured(trimmed.length > 0);
       setClientId('');
-      setSuccess(trimmed.length > 0 ? 'GitHub OAuth Client ID saved.' : 'GitHub OAuth Client ID cleared.');
+      setSuccess(
+        trimmed.length > 0 ? 'GitHub OAuth Client ID saved.' : 'GitHub OAuth Client ID cleared.',
+      );
     } catch (err) {
       setError((err as ApiError).message ?? 'Failed to save');
     } finally {
@@ -87,9 +89,7 @@ export default function IntegrationsPage() {
             http://localhost:3000). The device flow does not use this, but the field cannot be left
             blank.
           </li>
-          <li>
-            Check &quot;Enable Device Flow&quot; — this is required and off by default.
-          </li>
+          <li>Check &quot;Enable Device Flow&quot; — this is required and off by default.</li>
           <li>Copy the Client ID and paste it below.</li>
         </ol>
         <div className="flex flex-col gap-3">

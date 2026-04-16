@@ -36,10 +36,7 @@ export function Dialog({ open, onOpenChange, children }: DialogProps) {
 export function DialogContent({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn(
-        'rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl',
-        className,
-      )}
+      className={cn('rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-xl', className)}
       {...props}
     />
   );

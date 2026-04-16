@@ -99,7 +99,10 @@ export default function CredentialsPage() {
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         onCreated={(cred) => {
-          setCredentials((prev) => [{ ...cred, createdAt: new Date().toISOString() }, ...(prev ?? [])]);
+          setCredentials((prev) => [
+            { ...cred, createdAt: new Date().toISOString() },
+            ...(prev ?? []),
+          ]);
         }}
       />
     </div>

@@ -1,7 +1,13 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { schema } from '@haive/database';
-import { encrypt, encryptDek, generateDek, secretsService, userSecretsService } from '@haive/shared';
+import {
+  encrypt,
+  encryptDek,
+  generateDek,
+  secretsService,
+  userSecretsService,
+} from '@haive/shared';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';

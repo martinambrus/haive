@@ -31,7 +31,13 @@ export type CliProviderName =
 
 export type AuthMode = 'subscription' | 'api_key' | 'mixed';
 
-export type RepoSource = 'local_path' | 'git_https' | 'github_https' | 'github_oauth' | 'gitlab_https' | 'upload';
+export type RepoSource =
+  | 'local_path'
+  | 'git_https'
+  | 'github_https'
+  | 'github_oauth'
+  | 'gitlab_https'
+  | 'upload';
 
 export type ArchiveFormat = 'zip' | 'tar' | 'tar.gz';
 
