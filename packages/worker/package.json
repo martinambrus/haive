@@ -24,6 +24,7 @@
     "smoke:container-cleanup": "tsx test/container-cleanup-smoke.ts",
     "smoke:worker-kill-resume": "tsx test/worker-kill-resume-smoke.ts",
     "smoke:all": "pnpm smoke:onboarding && pnpm smoke:onboarding-full && pnpm smoke:drupal7 && pnpm smoke:workflow && pnpm smoke:workflow-commit && pnpm smoke:env-replicate && pnpm smoke:env-replicate-wrap && pnpm smoke:sub-agent && pnpm smoke:container-cleanup && pnpm smoke:worker-kill-resume",
+    "smoke:ci": "pnpm smoke:onboarding && pnpm smoke:onboarding-full && pnpm smoke:drupal7 && pnpm smoke:workflow && pnpm smoke:workflow-commit && pnpm smoke:env-replicate && pnpm smoke:env-replicate-wrap && pnpm smoke:container-cleanup && pnpm smoke:worker-kill-resume",
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {

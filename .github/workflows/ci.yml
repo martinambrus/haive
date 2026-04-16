@@ -109,7 +109,7 @@ jobs:
         run: pnpm --filter @haive/database push --force
 
       - name: Run smokes
-        run: pnpm smoke
+        run: pnpm --filter @haive/worker smoke:ci
 
   compose-boot:
     name: docker compose up (fresh-host boot)
