@@ -227,12 +227,19 @@ async function main(): Promise<void> {
       if (!values) throw new Error(`no canned form values for step ${stepId}`);
 
       if (stepId === '10-gate-3-commit' && !fabricatedDiff) {
+        const worktreeStep = await db.query.taskSteps.findFirst({
+          where: eq(schema.taskSteps.taskId, task.id),
+          columns: { output: true },
+          orderBy: asc(schema.taskSteps.stepIndex),
+        });
+        const wtOutput = worktreeStep?.output as { worktreePath?: string } | null;
+        const targetDir = wtOutput?.worktreePath ?? fixtureDir;
         await writeFile(
-          path.join(fixtureDir, 'LOGOUT.md'),
+          path.join(targetDir, 'LOGOUT.md'),
           '# Logout button\n\nStub feature file added for smoke commit.\n',
         );
         fabricatedDiff = true;
-        log.info({ fixtureDir }, 'fabricated diff for gate-3 commit');
+        log.info({ targetDir }, 'fabricated diff for gate-3 commit');
         await new Promise((r) => setTimeout(r, 150));
       }
 
@@ -271,18 +278,22 @@ async function main(): Promise<void> {
     const commitSha = commitOutput.commitSha;
     if (!commitSha) throw new Error('commit step missing commitSha');
 
-    const head = await git(fixtureDir, ['rev-parse', 'HEAD']);
+    const worktreeSetup = allSteps.find((s) => s.stepId === '01-worktree-setup');
+    const wtOut = worktreeSetup?.output as { worktreePath?: string } | null;
+    const verifyDir = wtOut?.worktreePath ?? fixtureDir;
+
+    const head = await git(verifyDir, ['rev-parse', 'HEAD']);
     if (head !== commitSha) {
       throw new Error(`HEAD ${head} != commitSha ${commitSha}`);
     }
     if (head === baseSha) {
       throw new Error('HEAD unchanged; no new commit created');
     }
-    const headMsg = await git(fixtureDir, ['log', '-1', '--pretty=%s']);
+    const headMsg = await git(verifyDir, ['log', '-1', '--pretty=%s']);
     if (!headMsg.includes('logout button')) {
       throw new Error(`commit message mismatch: ${headMsg}`);
     }
-    const logoutExists = await git(fixtureDir, ['ls-files', 'LOGOUT.md']);
+    const logoutExists = await git(verifyDir, ['ls-files', 'LOGOUT.md']);
     if (logoutExists !== 'LOGOUT.md') {
       throw new Error('LOGOUT.md not in git index after commit');
     }
