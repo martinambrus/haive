@@ -15,7 +15,8 @@ const log = logger.child({ module: 'sandbox-runner' });
 
 const DEFAULT_SANDBOX_IMAGE = process.env.SANDBOX_IMAGE ?? 'haive-cli-sandbox:latest';
 const DEFAULT_WRAPPER_VOLUME = process.env.SANDBOX_WRAPPER_HOST_VOLUME ?? 'haive_wrappers';
-const DEFAULT_WRAPPER_WORKER_PATH = process.env.SANDBOX_WRAPPER_WORKER_PATH ?? '/var/lib/haive/wrappers';
+const DEFAULT_WRAPPER_WORKER_PATH =
+  process.env.SANDBOX_WRAPPER_WORKER_PATH ?? '/var/lib/haive/wrappers';
 const DEFAULT_WRAPPER_SANDBOX_PATH = '/haive/wrappers';
 export const SANDBOX_WORKDIR = '/haive/workdir';
 const DEFAULT_WORKDIR = SANDBOX_WORKDIR;

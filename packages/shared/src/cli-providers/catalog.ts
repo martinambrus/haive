@@ -73,8 +73,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   grok: {
     name: 'grok',
     displayName: 'xAI Grok',
-    description:
-      'xAI Grok CLI. OpenAI-compatible API path via api.x.ai. Configurable sub-agents.',
+    description: 'xAI Grok CLI. OpenAI-compatible API path via api.x.ai. Configurable sub-agents.',
     defaultExecutable: 'grok',
     supportsSubagents: true,
     supportsApi: true,
@@ -87,8 +86,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   qwen: {
     name: 'qwen',
     displayName: 'Alibaba Qwen',
-    description:
-      'Alibaba Qwen CLI. OpenAI-compatible API via DashScope. Native sub-agent support.',
+    description: 'Alibaba Qwen CLI. OpenAI-compatible API via DashScope. Native sub-agent support.',
     defaultExecutable: 'qwen',
     supportsSubagents: true,
     supportsApi: true,

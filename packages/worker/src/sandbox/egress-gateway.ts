@@ -37,9 +37,7 @@ type LifecycleStage =
   | 'squid_connected'
   | 'squid_started';
 
-export async function createEgressGateway(
-  opts: EgressGatewayOptions,
-): Promise<EgressGateway> {
+export async function createEgressGateway(opts: EgressGatewayOptions): Promise<EgressGateway> {
   const id = randomUUID();
   const networkName = `haive-egress-${id}`;
   const squidName = `haive-squid-${id}`;
@@ -140,15 +138,11 @@ async function waitForSquidReady(containerName: string, timeoutMs: number): Prom
       { ignoreFailure: true },
     );
     if (inspect.exitCode === 0 && inspect.stdout.trim().startsWith('false ')) {
-      throw new Error(
-        `squid container exited before becoming ready:\n${tail(lastLog, 1000)}`,
-      );
+      throw new Error(`squid container exited before becoming ready:\n${tail(lastLog, 1000)}`);
     }
     await new Promise((res) => setTimeout(res, 250));
   }
-  throw new Error(
-    `squid not ready after ${timeoutMs}ms; last logs:\n${tail(lastLog, 1000)}`,
-  );
+  throw new Error(`squid not ready after ${timeoutMs}ms; last logs:\n${tail(lastLog, 1000)}`);
 }
 
 function tail(text: string, length: number): string {

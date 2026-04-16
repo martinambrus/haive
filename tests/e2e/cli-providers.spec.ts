@@ -400,9 +400,7 @@ test.describe('cli providers', () => {
     }
   });
 
-  test('POST /:id/clone creates a copy with " Copy" label and copies secrets', async ({
-    page,
-  }) => {
+  test('POST /:id/clone creates a copy with " Copy" label and copies secrets', async ({ page }) => {
     const sql = getSql();
     let userId = '';
     try {
@@ -424,10 +422,9 @@ test.describe('cli providers', () => {
         provider: { id: string };
       };
 
-      const seedRes = await page.request.post(
-        `${API_BASE}/cli-providers/${source.id}/secrets`,
-        { data: { secretName: 'ANTHROPIC_API_KEY', value: 'sk-cloned-from-source' } },
-      );
+      const seedRes = await page.request.post(`${API_BASE}/cli-providers/${source.id}/secrets`, {
+        data: { secretName: 'ANTHROPIC_API_KEY', value: 'sk-cloned-from-source' },
+      });
       expect(seedRes.status()).toBe(201);
 
       const cloneRes = await page.request.post(`${API_BASE}/cli-providers/${source.id}/clone`);
@@ -495,25 +492,19 @@ test.describe('cli providers', () => {
         provider: { id: string };
       };
 
-      const firstClone = await page.request.post(
-        `${API_BASE}/cli-providers/${source.id}/clone`,
-      );
+      const firstClone = await page.request.post(`${API_BASE}/cli-providers/${source.id}/clone`);
       expect(firstClone.status()).toBe(201);
       expect(((await firstClone.json()) as { provider: { label: string } }).provider.label).toBe(
         'Gemini Copy',
       );
 
-      const secondClone = await page.request.post(
-        `${API_BASE}/cli-providers/${source.id}/clone`,
-      );
+      const secondClone = await page.request.post(`${API_BASE}/cli-providers/${source.id}/clone`);
       expect(secondClone.status()).toBe(201);
       expect(((await secondClone.json()) as { provider: { label: string } }).provider.label).toBe(
         'Gemini Copy 2',
       );
 
-      const thirdClone = await page.request.post(
-        `${API_BASE}/cli-providers/${source.id}/clone`,
-      );
+      const thirdClone = await page.request.post(`${API_BASE}/cli-providers/${source.id}/clone`);
       expect(thirdClone.status()).toBe(201);
       expect(((await thirdClone.json()) as { provider: { label: string } }).provider.label).toBe(
         'Gemini Copy 3',
@@ -557,9 +548,7 @@ test.describe('cli providers', () => {
       expect(otherRes.status()).toBe(201);
       otherUserId = ((await otherRes.json()) as { user: { id: string } }).user.id;
 
-      const crossRes = await page.request.post(
-        `${API_BASE}/cli-providers/${provider.id}/clone`,
-      );
+      const crossRes = await page.request.post(`${API_BASE}/cli-providers/${provider.id}/clone`);
       expect(crossRes.status()).toBe(404);
     } finally {
       if (userId) await cleanupUser(sql, userId);

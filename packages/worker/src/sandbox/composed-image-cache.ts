@@ -46,10 +46,7 @@ export async function ensureComposedImage(
     return composition.tag;
   }
 
-  log.info(
-    { tag: composition.tag, hash: composition.hash },
-    'composed image cache miss, building',
-  );
+  log.info({ tag: composition.tag, hash: composition.hash }, 'composed image cache miss, building');
   await buildComposedImage(composition, runner);
   return composition.tag;
 }

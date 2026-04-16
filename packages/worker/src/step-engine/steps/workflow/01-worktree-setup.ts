@@ -124,9 +124,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
 
   async apply(ctx, args): Promise<WorktreeApply> {
     if (!args.detected.hasGit) {
-      throw new Error(
-        `worktree setup requires a git repository; none detected at ${ctx.repoPath}`,
-      );
+      throw new Error(`worktree setup requires a git repository; none detected at ${ctx.repoPath}`);
     }
     const values = args.formValues as {
       branchName?: string;
@@ -153,10 +151,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     }
 
     const sandboxWorktreePath = `${ctx.sandboxWorkdir}/${WORKTREE_SUBDIR}/${branchName}`;
-    ctx.logger.info(
-      { worktreePath, sandboxWorktreePath, branchName, base },
-      'worktree created',
-    );
+    ctx.logger.info({ worktreePath, sandboxWorktreePath, branchName, base }, 'worktree created');
     return {
       mode: 'worktree',
       worktreePath,

@@ -20,9 +20,7 @@ export function CliProviderTest({ providerId, blockMessage }: CliProviderTestPro
     setResult(null);
     setTesting(true);
     try {
-      const data = await api.post<{ result: CliProbeResult }>(
-        `/cli-providers/${providerId}/test`,
-      );
+      const data = await api.post<{ result: CliProbeResult }>(`/cli-providers/${providerId}/test`);
       setResult(data.result);
     } catch (err) {
       setError((err as Error).message ?? 'Test failed');
@@ -36,9 +34,9 @@ export function CliProviderTest({ providerId, blockMessage }: CliProviderTestPro
       <FormError message={error} />
 
       <p className="text-sm text-neutral-400">
-        Runs a fast probe against this provider. For subscription mode it invokes the CLI
-        binary with <code className="font-mono text-neutral-300">--version</code>; for API
-        mode it sends a tiny ping through the SDK. Mixed mode tests both paths.
+        Runs a fast probe against this provider. For subscription mode it invokes the CLI binary
+        with <code className="font-mono text-neutral-300">--version</code>; for API mode it sends a
+        tiny ping through the SDK. Mixed mode tests both paths.
       </p>
 
       {blockMessage && (
@@ -57,9 +55,7 @@ export function CliProviderTest({ providerId, blockMessage }: CliProviderTestPro
         <div className="flex flex-col gap-3 border-t border-neutral-800 pt-4">
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold text-neutral-100">Overall:</span>
-            <Badge variant={result.ok ? 'success' : 'error'}>
-              {result.ok ? 'OK' : 'FAILED'}
-            </Badge>
+            <Badge variant={result.ok ? 'success' : 'error'}>{result.ok ? 'OK' : 'FAILED'}</Badge>
             <span className="text-xs text-neutral-500">mode: {result.targetMode}</span>
           </div>
 

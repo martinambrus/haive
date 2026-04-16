@@ -48,8 +48,7 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
       {
         kind: 'config-file',
         path: '/etc/gemini-cli/settings.json',
-        content:
-          '{"general":{"enableAutoUpdate":false,"enableAutoUpdateNotification":false}}\n',
+        content: '{"general":{"enableAutoUpdate":false,"enableAutoUpdateNotification":false}}\n',
       },
     ],
     versionPinnable: true,

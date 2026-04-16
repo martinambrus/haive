@@ -79,9 +79,7 @@ export const generateDockerfileStep: StepDefinition<
     const existingByHash = await findEnvTemplateByHash(ctx.db, ctx.userId, dockerfileHash);
     if (existingByHash && existingByHash.id !== currentId) {
       await linkTaskToEnvTemplate(ctx.db, ctx.taskId, existingByHash.id);
-      await ctx.db
-        .delete(schema.envTemplates)
-        .where(eq(schema.envTemplates.id, currentId));
+      await ctx.db.delete(schema.envTemplates).where(eq(schema.envTemplates.id, currentId));
       ctx.logger.info(
         {
           dedupedFrom: currentId,
@@ -298,20 +296,11 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
 function renderDepInstallBlock(language: string, manager: PackageManager): string[] {
   switch (manager) {
     case 'npm':
-      return [
-        'COPY package.json package-lock.json ./',
-        'RUN npm ci --omit=dev',
-      ];
+      return ['COPY package.json package-lock.json ./', 'RUN npm ci --omit=dev'];
     case 'pnpm':
-      return [
-        'COPY package.json pnpm-lock.yaml ./',
-        'RUN pnpm install --frozen-lockfile --prod',
-      ];
+      return ['COPY package.json pnpm-lock.yaml ./', 'RUN pnpm install --frozen-lockfile --prod'];
     case 'yarn':
-      return [
-        'COPY package.json yarn.lock ./',
-        'RUN yarn install --frozen-lockfile --production',
-      ];
+      return ['COPY package.json yarn.lock ./', 'RUN yarn install --frozen-lockfile --production'];
     case 'bun':
       return [
         'RUN curl -fsSL https://bun.sh/install | bash && ln -s /root/.bun/bin/bun /usr/local/bin/bun',
@@ -358,10 +347,7 @@ function renderDepInstallBlock(language: string, manager: PackageManager): strin
         'RUN bundle config set --local without "development test" && bundle install',
       ];
     case 'gomod':
-      return [
-        'COPY go.mod go.sum ./',
-        'RUN go mod download',
-      ];
+      return ['COPY go.mod go.sum ./', 'RUN go mod download'];
     case 'cargo':
       return [
         'COPY Cargo.toml Cargo.lock ./',

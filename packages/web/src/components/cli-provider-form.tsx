@@ -151,7 +151,7 @@ export function CliProviderForm({
     authMode: provider?.authMode ?? metadata.defaultAuthMode,
     cliVersion:
       provider?.cliVersion ??
-      (metadata.versionPinnable ? metadata.versionCache?.latestVersion ?? '' : ''),
+      (metadata.versionPinnable ? (metadata.versionCache?.latestVersion ?? '') : ''),
     sandboxDockerfileExtra: provider?.sandboxDockerfileExtra ?? '',
     enabled: provider?.enabled ?? true,
     networkMode: (provider?.networkPolicy ?? DEFAULT_CLI_NETWORK_POLICY).mode,
@@ -462,12 +462,12 @@ export function CliProviderForm({
           className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
           value={state.wrapperContent}
           onChange={(e) => update('wrapperContent', e.target.value)}
-          placeholder="#!/bin/bash&#10;exec /usr/local/bin/claude &quot;$@&quot;"
+          placeholder='#!/bin/bash&#10;exec /usr/local/bin/claude "$@"'
         />
         <p className="mt-1 text-xs text-neutral-500">
-          Optional. Materialized to <code className="font-mono">/haive/wrapper.sh</code> inside
-          the sandbox at each run, chmod +x, then used as the executable (overrides executable
-          and wrapper path). Useful for inline logging wrappers or flag injection.
+          Optional. Materialized to <code className="font-mono">/haive/wrapper.sh</code> inside the
+          sandbox at each run, chmod +x, then used as the executable (overrides executable and
+          wrapper path). Useful for inline logging wrappers or flag injection.
         </p>
       </div>
 
@@ -494,9 +494,9 @@ export function CliProviderForm({
           </p>
         ) : !metadata.versionPinnable ? (
           <p className="mt-1 text-xs text-neutral-500">
-            This provider uses an installer script and cannot be pinned to a specific version.
-            The sandbox image installs whichever version the installer ships the first time the
-            provider runs.
+            This provider uses an installer script and cannot be pinned to a specific version. The
+            sandbox image installs whichever version the installer ships the first time the provider
+            runs.
           </p>
         ) : (
           <>
@@ -529,8 +529,8 @@ export function CliProviderForm({
             </div>
             <p className="mt-1 text-xs text-neutral-500">
               The sandbox image for this CLI and version is built on first use and cached, then
-              reused across all providers that pin the same version. Auto-update is always
-              disabled inside the image so your pin cannot drift.
+              reused across all providers that pin the same version. Auto-update is always disabled
+              inside the image so your pin cannot drift.
             </p>
             {versionCache?.fetchedAt && (
               <p className="mt-1 text-xs text-neutral-600">
@@ -549,70 +549,70 @@ export function CliProviderForm({
 
       <div>
         <Label htmlFor="sandboxDockerfileExtra">Custom Dockerfile lines (sandbox image)</Label>
-          <textarea
-            id="sandboxDockerfileExtra"
-            rows={6}
-            className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
-            value={state.sandboxDockerfileExtra}
-            onChange={(e) => update('sandboxDockerfileExtra', e.target.value)}
-            placeholder="# Appended after the CLI install lines on top of haive-cli-sandbox:latest&#10;RUN apk add --no-cache jq&#10;RUN npm install -g some-tool"
-          />
-          <p className="mt-1 text-xs text-neutral-500">
-            Leave empty to reuse the shared cached image for this CLI and version. If you add
-            lines here, the image is tagged{' '}
-            <code className="font-mono">haive-cli-sandbox:provider-&lt;id&gt;</code> and rebuilt
-            on demand for this provider only (no cross-user sharing).
-          </p>
+        <textarea
+          id="sandboxDockerfileExtra"
+          rows={6}
+          className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
+          value={state.sandboxDockerfileExtra}
+          onChange={(e) => update('sandboxDockerfileExtra', e.target.value)}
+          placeholder="# Appended after the CLI install lines on top of haive-cli-sandbox:latest&#10;RUN apk add --no-cache jq&#10;RUN npm install -g some-tool"
+        />
+        <p className="mt-1 text-xs text-neutral-500">
+          Leave empty to reuse the shared cached image for this CLI and version. If you add lines
+          here, the image is tagged{' '}
+          <code className="font-mono">haive-cli-sandbox:provider-&lt;id&gt;</code> and rebuilt on
+          demand for this provider only (no cross-user sharing).
+        </p>
 
-          {mode === 'edit' && provider?.id && (
-            <div className="mt-3 rounded-md border border-neutral-800 bg-neutral-950/60 p-3 text-xs">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-neutral-400">Image build status:</span>
-                  <span
-                    className={
-                      buildState.status === 'ready'
-                        ? 'font-semibold text-emerald-400'
-                        : buildState.status === 'building'
-                          ? 'font-semibold text-amber-400'
-                          : buildState.status === 'failed'
-                            ? 'font-semibold text-red-400'
-                            : 'font-semibold text-neutral-400'
-                    }
-                  >
-                    {buildState.status}
-                  </span>
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={handleRebuildImage}
-                  disabled={buildRequesting || buildState.status === 'building'}
+        {mode === 'edit' && provider?.id && (
+          <div className="mt-3 rounded-md border border-neutral-800 bg-neutral-950/60 p-3 text-xs">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-neutral-400">Image build status:</span>
+                <span
+                  className={
+                    buildState.status === 'ready'
+                      ? 'font-semibold text-emerald-400'
+                      : buildState.status === 'building'
+                        ? 'font-semibold text-amber-400'
+                        : buildState.status === 'failed'
+                          ? 'font-semibold text-red-400'
+                          : 'font-semibold text-neutral-400'
+                  }
                 >
-                  {buildState.status === 'building'
-                    ? 'Building...'
-                    : buildRequesting
-                      ? 'Starting...'
-                      : 'Rebuild image'}
-                </Button>
+                  {buildState.status}
+                </span>
               </div>
-              {buildState.imageTag && (
-                <p className="mt-1 text-neutral-500">
-                  Tag: <code className="font-mono text-neutral-300">{buildState.imageTag}</code>
-                </p>
-              )}
-              {buildState.builtAt && (
-                <p className="mt-1 text-neutral-500">
-                  Built at: {new Date(buildState.builtAt).toLocaleString()}
-                </p>
-              )}
-              {buildState.status === 'failed' && buildState.error && (
-                <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap rounded bg-red-950/40 p-2 font-mono text-[11px] text-red-300">
-                  {buildState.error}
-                </pre>
-              )}
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={handleRebuildImage}
+                disabled={buildRequesting || buildState.status === 'building'}
+              >
+                {buildState.status === 'building'
+                  ? 'Building...'
+                  : buildRequesting
+                    ? 'Starting...'
+                    : 'Rebuild image'}
+              </Button>
             </div>
-          )}
+            {buildState.imageTag && (
+              <p className="mt-1 text-neutral-500">
+                Tag: <code className="font-mono text-neutral-300">{buildState.imageTag}</code>
+              </p>
+            )}
+            {buildState.builtAt && (
+              <p className="mt-1 text-neutral-500">
+                Built at: {new Date(buildState.builtAt).toLocaleString()}
+              </p>
+            )}
+            {buildState.status === 'failed' && buildState.error && (
+              <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap rounded bg-red-950/40 p-2 font-mono text-[11px] text-red-300">
+                {buildState.error}
+              </pre>
+            )}
+          </div>
+        )}
       </div>
 
       <div>
@@ -670,18 +670,18 @@ export function CliProviderForm({
         />
         <p className="mt-1 text-xs text-neutral-500">
           One argument per line. A line that looks like{' '}
-          <code className="font-mono text-neutral-300">--flag value</code> is split at the
-          first whitespace into two argv elements; the value is taken verbatim from there
-          to the end of the line, so embedded quotes, punctuation, and any other characters
-          survive unchanged. Everything else is treated as a single argument. A single
-          pair of outer matching quotes around the value (or around a whole standalone
-          line) is stripped, so{' '}
-          <code className="font-mono text-neutral-300">--mcp-config &quot;.claude/mcp.json&quot;</code>{' '}
-          becomes{' '}
-          <code className="font-mono text-neutral-300">--mcp-config</code> +{' '}
-          <code className="font-mono text-neutral-300">.claude/mcp.json</code>. For long
-          prose values, wrap the whole value in a single pair of quotes; no shell escape
-          rules apply inside.
+          <code className="font-mono text-neutral-300">--flag value</code> is split at the first
+          whitespace into two argv elements; the value is taken verbatim from there to the end of
+          the line, so embedded quotes, punctuation, and any other characters survive unchanged.
+          Everything else is treated as a single argument. A single pair of outer matching quotes
+          around the value (or around a whole standalone line) is stripped, so{' '}
+          <code className="font-mono text-neutral-300">
+            --mcp-config &quot;.claude/mcp.json&quot;
+          </code>{' '}
+          becomes <code className="font-mono text-neutral-300">--mcp-config</code> +{' '}
+          <code className="font-mono text-neutral-300">.claude/mcp.json</code>. For long prose
+          values, wrap the whole value in a single pair of quotes; no shell escape rules apply
+          inside.
         </p>
       </div>
 
@@ -714,8 +714,8 @@ export function CliProviderForm({
             <div>
               <div className="font-medium">No network</div>
               <div className="text-xs text-neutral-500">
-                Container is started with <code className="font-mono">--network=none</code>.
-                CLI cannot reach the internet or any external service.
+                Container is started with <code className="font-mono">--network=none</code>. CLI
+                cannot reach the internet or any external service.
               </div>
             </div>
           </label>
@@ -730,10 +730,9 @@ export function CliProviderForm({
             <div>
               <div className="font-medium">Allowlist (domains / IPs)</div>
               <div className="text-xs text-neutral-500">
-                Only the listed destinations are reachable. Enforced by a per-task squid
-                forward proxy on an isolated docker network; the sandbox only sees squid.
-                Traffic that does not respect <code className="font-mono">HTTP_PROXY</code>{' '}
-                will fail (no route).
+                Only the listed destinations are reachable. Enforced by a per-task squid forward
+                proxy on an isolated docker network; the sandbox only sees squid. Traffic that does
+                not respect <code className="font-mono">HTTP_PROXY</code> will fail (no route).
               </div>
             </div>
           </label>
@@ -752,9 +751,9 @@ export function CliProviderForm({
                 placeholder="api.anthropic.com&#10;*.npmjs.org&#10;example.*"
               />
               <p className="mt-1 text-xs text-neutral-500">
-                One hostname per line. Wildcards:{' '}
-                <code className="font-mono">*.example.com</code> matches all subdomains,{' '}
-                <code className="font-mono">example.*</code> matches any single-label TLD.
+                One hostname per line. Wildcards: <code className="font-mono">*.example.com</code>{' '}
+                matches all subdomains, <code className="font-mono">example.*</code> matches any
+                single-label TLD.
               </p>
             </div>
             <div>

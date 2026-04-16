@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  SANDBOX_CORE_IMAGE,
-  composeSandboxImage,
-} from '../src/sandbox/image-composer.js';
+import { SANDBOX_CORE_IMAGE, composeSandboxImage } from '../src/sandbox/image-composer.js';
 
 const claudeCodeProvider = {
   name: 'claude-code' as const,

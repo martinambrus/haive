@@ -226,7 +226,11 @@ test.describe('cli providers UI', () => {
       // Each of these fields, when touched, should disable the Test button and
       // show the yellow notice. The baseline resets between cases so we can
       // verify each field independently.
-      const dirtyCases: Array<{ name: string; dirty: () => Promise<void>; clean: () => Promise<void> }> = [
+      const dirtyCases: Array<{
+        name: string;
+        dirty: () => Promise<void>;
+        clean: () => Promise<void>;
+      }> = [
         {
           name: 'executablePath',
           dirty: async () => page.getByLabel('Executable path').fill('/usr/local/bin/claude-timed'),
@@ -327,10 +331,12 @@ test.describe('cli providers UI', () => {
       await expect
         .poll(
           async () => {
-            const rows = await sql<{
-              executable_path: string | null;
-              sandbox_dockerfile_extra: string | null;
-            }[]>`
+            const rows = await sql<
+              {
+                executable_path: string | null;
+                sandbox_dockerfile_extra: string | null;
+              }[]
+            >`
               select executable_path, sandbox_dockerfile_extra from cli_providers
               where id = ${providerId}
             `;

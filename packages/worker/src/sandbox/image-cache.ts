@@ -31,8 +31,7 @@ export function resolveImageTag(params: {
   const dockerfileLines = [blocks.join('\n\n')];
 
   if (hasInstall && !hasExtras) {
-    const effectiveName =
-      meta.install.kind === 'piggyback' ? meta.install.uses : params.name;
+    const effectiveName = meta.install.kind === 'piggyback' ? meta.install.uses : params.name;
     const versionSegment =
       meta.versionPinnable && params.cliVersion ? params.cliVersion : 'installer';
     return {

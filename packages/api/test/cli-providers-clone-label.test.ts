@@ -70,15 +70,11 @@ describe('nextAvailableCloneLabel', () => {
 
   it('clones a label that already ends with " Copy"', async () => {
     const db = makeDb(['Claude Copy']);
-    expect(await nextAvailableCloneLabel(db, 'user-1', 'Claude Copy')).toBe(
-      'Claude Copy Copy',
-    );
+    expect(await nextAvailableCloneLabel(db, 'user-1', 'Claude Copy')).toBe('Claude Copy Copy');
   });
 
   it('clones a label that already ends with " Copy N"', async () => {
     const db = makeDb(['Claude Copy 2']);
-    expect(await nextAvailableCloneLabel(db, 'user-1', 'Claude Copy 2')).toBe(
-      'Claude Copy 2 Copy',
-    );
+    expect(await nextAvailableCloneLabel(db, 'user-1', 'Claude Copy 2')).toBe('Claude Copy 2 Copy');
   });
 });

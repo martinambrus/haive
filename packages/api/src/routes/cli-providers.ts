@@ -224,10 +224,7 @@ cliProviderRoutes.post('/', async (c) => {
 
   const created = inserted[0]!;
   await enqueueBuildForProvider(created.id, userId);
-  return c.json(
-    { provider: { ...created, sandboxImageBuildStatus: 'building' as const } },
-    201,
-  );
+  return c.json({ provider: { ...created, sandboxImageBuildStatus: 'building' as const } }, 201);
 });
 
 cliProviderRoutes.patch('/:id', async (c) => {
@@ -272,9 +269,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
     updates.cliVersion = resolved;
   }
   if (body.sandboxDockerfileExtra !== undefined) {
-    const nextExtra = body.sandboxDockerfileExtra.length
-      ? body.sandboxDockerfileExtra
-      : null;
+    const nextExtra = body.sandboxDockerfileExtra.length ? body.sandboxDockerfileExtra : null;
     if (nextExtra !== existing.sandboxDockerfileExtra) imageInputsChanged = true;
     updates.sandboxDockerfileExtra = nextExtra;
   }
@@ -356,11 +351,7 @@ cliProviderRoutes.post('/:id/test', async (c) => {
   if (!provider) throw new HttpError(404, 'CLI provider not found');
 
   const targetMode: CliProbeTargetMode =
-    provider.authMode === 'subscription'
-      ? 'cli'
-      : provider.authMode === 'api_key'
-        ? 'api'
-        : 'both';
+    provider.authMode === 'subscription' ? 'cli' : provider.authMode === 'api_key' ? 'api' : 'both';
 
   const payload: CliProbeJobPayload = {
     providerId: provider.id,
@@ -432,10 +423,7 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
   }
 
   await enqueueBuildForProvider(created.id, userId);
-  return c.json(
-    { provider: { ...created, sandboxImageBuildStatus: 'building' as const } },
-    201,
-  );
+  return c.json({ provider: { ...created, sandboxImageBuildStatus: 'building' as const } }, 201);
 });
 
 cliProviderRoutes.get('/:providerId/secrets', async (c) => {

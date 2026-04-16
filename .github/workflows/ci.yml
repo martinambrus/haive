@@ -106,7 +106,7 @@ jobs:
           docker exec ${{ job.services.redis.id }} redis-cli CONFIG SET maxmemory-policy noeviction
 
       - name: Push database schema
-        run: pnpm db:push
+        run: pnpm --filter @haive/database push --force
 
       - name: Run smokes
         run: pnpm smoke

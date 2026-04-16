@@ -242,10 +242,7 @@ async function resolveTaskRepoMount(
   };
 }
 
-async function resolveTaskSandboxWorkdir(
-  db: Database,
-  taskId: string,
-): Promise<string> {
+async function resolveTaskSandboxWorkdir(db: Database, taskId: string): Promise<string> {
   const row = await db.query.taskSteps.findFirst({
     where: and(
       eq(schema.taskSteps.taskId, taskId),
@@ -283,9 +280,7 @@ async function ensureProviderSandboxImage(
     columns: { sandboxImageBuildStatus: true },
   });
   if (fresh?.sandboxImageBuildStatus === 'building') {
-    throw new Error(
-      'sandbox image build is in progress, please wait for it to finish and retry',
-    );
+    throw new Error('sandbox image build is in progress, please wait for it to finish and retry');
   }
 
   log.info(
@@ -749,10 +744,7 @@ async function probeCliPath(
   }
 }
 
-function resolveProviderExecutable(
-  adapter: BaseCliAdapter,
-  provider: CliProviderRecord,
-): string {
+function resolveProviderExecutable(adapter: BaseCliAdapter, provider: CliProviderRecord): string {
   const wrapper = provider.wrapperPath?.trim();
   if (wrapper) return wrapper;
   const explicit = provider.executablePath?.trim();
@@ -850,7 +842,10 @@ export async function removeOrphanedPreviousImage(
   db: Database,
   args: { providerId: string; previousDbTag: string | null; newTag: string },
   runner: DockerRunner = defaultDockerRunner,
-): Promise<{ removed: boolean; reason: 'no-previous' | 'same-tag' | 'still-in-use' | 'missing' | 'remove-failed' | 'removed' }> {
+): Promise<{
+  removed: boolean;
+  reason: 'no-previous' | 'same-tag' | 'still-in-use' | 'missing' | 'remove-failed' | 'removed';
+}> {
   const { previousDbTag, newTag, providerId } = args;
   if (!previousDbTag) return { removed: false, reason: 'no-previous' };
   if (previousDbTag === newTag) return { removed: false, reason: 'same-tag' };
@@ -869,10 +864,7 @@ export async function removeOrphanedPreviousImage(
   if (!inspected.exists) return { removed: false, reason: 'missing' };
   const removeResult = await runner.remove(previousDbTag);
   if (removeResult.ok) {
-    log.info(
-      { providerId, previousDbTag, newTag },
-      'removed orphaned previous sandbox image',
-    );
+    log.info({ providerId, previousDbTag, newTag }, 'removed orphaned previous sandbox image');
     return { removed: true, reason: 'removed' };
   }
   log.warn(
@@ -947,10 +939,7 @@ export async function handleBuildSandboxImageJob(
         previousDbTag,
         newTag: imageTag,
       });
-      log.info(
-        { providerId: provider.id, imageTag, shared },
-        'sandbox image cache hit',
-      );
+      log.info({ providerId: provider.id, imageTag, shared }, 'sandbox image cache hit');
       return { ok: true, providerId: provider.id, imageTag };
     }
   }

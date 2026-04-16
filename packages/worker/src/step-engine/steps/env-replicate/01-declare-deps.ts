@@ -4,11 +4,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, FormValues } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
-import {
-  deriveEnvTemplateName,
-  getTaskEnvTemplate,
-  linkTaskToEnvTemplate,
-} from './_shared.js';
+import { deriveEnvTemplateName, getTaskEnvTemplate, linkTaskToEnvTemplate } from './_shared.js';
 
 type ContainerTool = 'ddev' | 'docker-compose' | 'docker' | 'none';
 type DatabaseKind = 'postgres' | 'mysql' | 'mariadb' | 'sqlite' | 'none';

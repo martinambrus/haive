@@ -19,9 +19,7 @@ async function fetchFromSource(source: VersionSource): Promise<FetchedVersions |
   return null;
 }
 
-export async function refreshAllCliVersions(
-  db: Database,
-): Promise<RefreshCliVersionsJobResult> {
+export async function refreshAllCliVersions(db: Database): Promise<RefreshCliVersionsJobResult> {
   const refreshed: RefreshCliVersionsJobResult['refreshed'] = [];
   const errors: RefreshCliVersionsJobResult['errors'] = [];
 

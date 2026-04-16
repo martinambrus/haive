@@ -88,9 +88,7 @@ describe('renderSquidConfig', () => {
     expect(dstLine).toBe(
       'acl allowed_domains dstdomain .api.anthropic.com .npmjs.org api.anthropic.com',
     );
-    const regexLine = cfg
-      .split('\n')
-      .find((l) => l.startsWith('acl allowed_domain_regex'));
+    const regexLine = cfg.split('\n').find((l) => l.startsWith('acl allowed_domain_regex'));
     expect(regexLine).toBe('acl allowed_domain_regex dstdom_regex ^example\\.[^.]+$');
     expect(cfg).toContain('http_access allow allowed_domains');
     expect(cfg).toContain('http_access allow allowed_domain_regex');

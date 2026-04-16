@@ -196,11 +196,9 @@ export const defaultDockerRunner: DockerRunner = {
   },
 
   async remove(ref) {
-    const result = await spawnAndCollect(
-      'docker',
-      ['image', 'rm', '--force', ref],
-      { timeoutMs: 30_000 },
-    );
+    const result = await spawnAndCollect('docker', ['image', 'rm', '--force', ref], {
+      timeoutMs: 30_000,
+    });
     return {
       ok: result.exitCode === 0,
       stderr: result.stderr,

@@ -19,9 +19,7 @@ export function buildProviderInstallLines(
 
   if (install.kind === 'npm') {
     const pin = version ? `@${version}` : '';
-    lines.push(
-      `RUN npm install -g ${install.package}${pin} && ${install.binary} --version`,
-    );
+    lines.push(`RUN npm install -g ${install.package}${pin} && ${install.binary} --version`);
   } else if (install.kind === 'curl-script') {
     lines.push(`RUN curl -fsSL ${install.url} | bash`);
   } else if (install.kind === 'piggyback') {
@@ -48,9 +46,7 @@ export function buildProviderInstallLines(
           `cli-versions/codegen: config-file content for ${name} contains a single quote; extend escape logic`,
         );
       }
-      lines.push(
-        `RUN mkdir -p ${dir} && printf '%s\\n' '${content}' > ${knob.path}`,
-      );
+      lines.push(`RUN mkdir -p ${dir} && printf '%s\\n' '${content}' > ${knob.path}`);
     }
   }
 

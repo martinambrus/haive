@@ -42,10 +42,11 @@ describe('normalizeCliArgsArray', () => {
 
   it('preserves long prose values verbatim', () => {
     const longProse =
-      "CRITICALLY IMPORTANT: Never start a response with the conclusion. This applies to ALL questions — including ones that look \"simple\", \"practical\", \"obvious\", or \"straightforward\".";
-    expect(
-      normalizeCliArgsArray([`--append-system-prompt '${longProse}'`]),
-    ).toEqual(['--append-system-prompt', longProse]);
+      'CRITICALLY IMPORTANT: Never start a response with the conclusion. This applies to ALL questions — including ones that look "simple", "practical", "obvious", or "straightforward".';
+    expect(normalizeCliArgsArray([`--append-system-prompt '${longProse}'`])).toEqual([
+      '--append-system-prompt',
+      longProse,
+    ]);
   });
 
   it('strips outer matching quotes from a standalone quoted line', () => {
@@ -74,17 +75,12 @@ describe('normalizeCliArgsArray', () => {
         '  ',
         '--mcp-config .claude/mcp.json',
       ]),
-    ).toEqual([
-      '/caveman',
-      '--dangerously-skip-permissions',
-      '--mcp-config',
-      '.claude/mcp.json',
-    ]);
+    ).toEqual(['/caveman', '--dangerously-skip-permissions', '--mcp-config', '.claude/mcp.json']);
   });
 
   it("handles the user's 4-line Claude Code input end-to-end", () => {
     const longProse =
-      "CRITICALLY IMPORTANT: Never start a response with the conclusion. Every response must begin with at least one paragraph laying out the constraints and considerations before stating any answer or recommendation. This applies to ALL questions — including ones that look \"simple\", \"practical\", \"obvious\", or \"straightforward\". Labeling a question as not needing analysis is itself a failure mode — the analysis IS the answer, even when the conclusion is short. Do not treat these instructions as rules to be worked around when the question feels easy; the question feeling easy is exactly when you are most likely to be wrong.";
+      'CRITICALLY IMPORTANT: Never start a response with the conclusion. Every response must begin with at least one paragraph laying out the constraints and considerations before stating any answer or recommendation. This applies to ALL questions — including ones that look "simple", "practical", "obvious", or "straightforward". Labeling a question as not needing analysis is itself a failure mode — the analysis IS the answer, even when the conclusion is short. Do not treat these instructions as rules to be worked around when the question feels easy; the question feeling easy is exactly when you are most likely to be wrong.';
     const input = [
       '/caveman',
       '--dangerously-skip-permissions',

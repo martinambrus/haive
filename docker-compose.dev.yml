@@ -43,7 +43,7 @@ services:
       - haive_node_modules_shared:/app/packages/shared/node_modules
       - haive_node_modules_database:/app/packages/database/node_modules
       - haive_repos:/var/lib/haive/repos
-    command: sh -c "pnpm --filter @haive/shared build && pnpm --filter @haive/database build && pnpm --filter @haive/api dev"
+    command: sh -c "pnpm --filter @haive/database build && pnpm --filter @haive/shared build && pnpm --filter @haive/api dev"
     environment:
       NODE_ENV: development
       REPO_STORAGE_ROOT: /var/lib/haive/repos
@@ -60,7 +60,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - haive_repos:/var/lib/haive/repos
       - haive_wrappers:/var/lib/haive/wrappers
-    command: sh -c "pnpm --filter @haive/shared build && pnpm --filter @haive/database build && pnpm --filter @haive/worker dev"
+    command: sh -c "pnpm --filter @haive/database build && pnpm --filter @haive/shared build && pnpm --filter @haive/worker dev"
     environment:
       NODE_ENV: development
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:-haive-cli-sandbox:latest}
