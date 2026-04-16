@@ -189,6 +189,7 @@ async function resolveLlmPhase(
     cliProviderId: plan.providerId,
     kind: payloadKind,
     spec: plan.invocation.spec,
+    timeoutMs: llmSpec.timeoutMs,
   });
   const updated = await updateRow(db, current.id, {
     status: 'waiting_cli',

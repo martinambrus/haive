@@ -32,6 +32,9 @@ export interface LlmInvocationSpec {
   /** When true, LLM runs after detect but before the form is generated.
    *  The form() function receives the parsed llmOutput as its third argument. */
   preForm?: boolean;
+  /** Sandbox timeout for the CLI invocation in milliseconds.
+   *  Defaults to 2 minutes; tool_use steps that browse the repo need more. */
+  timeoutMs?: number;
 }
 
 export interface StepApplyArgs<TDetect = unknown> {

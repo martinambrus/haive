@@ -158,7 +158,7 @@ export const toolingInfrastructureStep: StepDefinition<
           type: 'checkbox',
           id: 'mcpEnabled',
           label: 'Enable Chrome DevTools MCP browser testing',
-          default: false,
+          default: true,
         },
         {
           type: 'select',

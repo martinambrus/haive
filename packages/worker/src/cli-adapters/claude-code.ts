@@ -29,7 +29,8 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
         '-p',
         prompt,
         '--output-format',
-        'json',
+        'stream-json',
+        '--verbose',
       ]),
       env: this.mergedEnv(provider, opts.extraEnv),
       cwd: opts.cwd,
@@ -55,6 +56,7 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
     return {
       envVars: {},
       copyPaths: [
+        { src: '~/.claude.json', dest: '/root/.claude.json', mode: 'file', optional: true },
         { src: '~/.config/claude', dest: '/root/.config/claude', mode: 'dir', optional: true },
         { src: '~/.claude', dest: '/root/.claude', mode: 'dir', optional: true },
       ],

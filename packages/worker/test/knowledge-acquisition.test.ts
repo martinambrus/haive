@@ -8,7 +8,6 @@ import type { StepContext } from '../src/step-engine/step-definition.js';
 import {
   knowledgeAcquisitionStep,
   parseKbEntries,
-  scanKnowledgeTopics,
 } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
 
 let tmpRoot: string;
@@ -34,31 +33,6 @@ function makeCtx(repo: string): StepContext {
     emitProgress: async () => {},
   };
 }
-
-describe('scanKnowledgeTopics', () => {
-  it('flags testing hints from __tests__ and jest config', async () => {
-    await mkdir(path.join(tmpRoot, '__tests__'));
-    await writeFile(path.join(tmpRoot, 'jest.config.js'), 'module.exports = {}');
-    const topics = await scanKnowledgeTopics(tmpRoot);
-    const testing = topics.find((t) => t.id === 'testing');
-    expect(testing?.hints).toContain('__tests__');
-    expect(testing?.hints).toContain('jest.config.js');
-  });
-
-  it('flags deployment hints from Dockerfile', async () => {
-    await writeFile(path.join(tmpRoot, 'Dockerfile'), 'FROM node:20\n');
-    const topics = await scanKnowledgeTopics(tmpRoot);
-    const deploy = topics.find((t) => t.id === 'deployment');
-    expect(deploy?.hints).toContain('Dockerfile');
-  });
-
-  it('returns empty hint arrays when nothing matches', async () => {
-    const topics = await scanKnowledgeTopics(tmpRoot);
-    for (const t of topics) {
-      expect(t.hints).toEqual([]);
-    }
-  });
-});
 
 describe('parseKbEntries', () => {
   it('parses a single JSON fenced block into an entry', () => {
@@ -100,6 +74,22 @@ describe('parseKbEntries', () => {
     expect(entries.map((e) => e.id)).toEqual(['testing', 'deployment']);
   });
 
+  it('parses { entries: [...] } wrapper', () => {
+    const raw = [
+      '```json',
+      JSON.stringify({
+        entries: [
+          { id: 'arch', title: 'Architecture', sections: [{ heading: 'a', body: 'b' }] },
+          { id: 'db', title: 'Database', sections: [{ heading: 'c', body: 'd' }] },
+        ],
+      }),
+      '```',
+    ].join('\n');
+    const entries = parseKbEntries(raw);
+    expect(entries).toHaveLength(2);
+    expect(entries.map((e) => e.id)).toEqual(['arch', 'db']);
+  });
+
   it('accepts an array of entries as object input', () => {
     const entries = parseKbEntries([
       {
@@ -111,6 +101,32 @@ describe('parseKbEntries', () => {
     expect(entries).toHaveLength(1);
   });
 
+  it('accepts entries with optional confidence and sourceFiles', () => {
+    const entries = parseKbEntries([
+      {
+        id: 'arch',
+        title: 'Architecture',
+        sections: [{ heading: 'a', body: 'b' }],
+        confidence: 'high',
+        sourceFiles: ['src/index.ts'],
+      },
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.id).toBe('arch');
+  });
+
+  it('unwraps Claude Code { result: "..." } wrapper', () => {
+    const inner = [
+      '```json',
+      JSON.stringify({
+        entries: [{ id: 'x', title: 'X', sections: [{ heading: 'a', body: 'b' }] }],
+      }),
+      '```',
+    ].join('\n');
+    const entries = parseKbEntries({ result: inner });
+    expect(entries).toHaveLength(1);
+  });
+
   it('returns empty array for null, undefined, or malformed input', () => {
     expect(parseKbEntries(null)).toEqual([]);
     expect(parseKbEntries(undefined)).toEqual([]);
@@ -119,93 +135,92 @@ describe('parseKbEntries', () => {
 });
 
 describe('knowledgeAcquisitionStep.apply', () => {
-  it('writes stub files when llmOutput is null', async () => {
-    await mkdir(path.join(tmpRoot, '__tests__'));
+  it('writes LLM entries as markdown when selected', async () => {
+    const ctx = makeCtx(tmpRoot);
+    const raw = [
+      '```json',
+      JSON.stringify({
+        entries: [
+          {
+            id: 'architecture',
+            title: 'Architecture',
+            confidence: 'high',
+            sourceFiles: ['src/index.ts', 'src/app.ts'],
+            sections: [
+              { heading: 'Module structure', body: 'Uses layered architecture.' },
+              { heading: 'Dependency injection', body: 'Constructor-based DI throughout.' },
+            ],
+          },
+          {
+            id: 'testing-strategy',
+            title: 'Testing Strategy',
+            confidence: 'medium',
+            sourceFiles: ['vitest.config.ts'],
+            sections: [{ heading: 'Framework', body: 'Vitest drives unit tests.' }],
+          },
+        ],
+      }),
+      '```',
+    ].join('\n');
+    const result = await knowledgeAcquisitionStep.apply(ctx, {
+      detected: { framework: 'nodejs', language: 'typescript' },
+      formValues: { selectedTopics: ['architecture'] },
+      llmOutput: raw,
+    });
+    expect(result.llmAvailable).toBe(true);
+    expect(result.written).toHaveLength(1);
+    expect(result.written[0]!.source).toBe('llm');
+    const md = await readFile(
+      path.join(tmpRoot, '.claude', 'knowledge_base', 'architecture.md'),
+      'utf8',
+    );
+    expect(md).toContain('# Architecture');
+    expect(md).toContain('## Module structure');
+    expect(md).toContain('Uses layered architecture.');
+    expect(md).toContain('## Source files');
+    expect(md).toContain('`src/index.ts`');
+  });
+
+  it('writes stub files from manual topics when LLM unavailable', async () => {
     const ctx = makeCtx(tmpRoot);
     const result = await knowledgeAcquisitionStep.apply(ctx, {
-      detected: {
-        topics: [
-          { id: 'testing', label: 'Testing', hints: ['__tests__'] },
-          { id: 'documentation', label: 'Docs', hints: [] },
-        ],
-      },
-      formValues: { selectedTopics: ['testing', 'documentation'] },
+      detected: { framework: null, language: null },
+      formValues: { manualTopics: 'Testing strategy\nDeployment' },
       llmOutput: null,
     });
-    expect(result.source).toBe('stub');
+    expect(result.llmAvailable).toBe(false);
     expect(result.written).toHaveLength(2);
-    const testingMd = await readFile(
-      path.join(tmpRoot, '.claude', 'knowledge_base', 'testing.md'),
-      'utf8',
-    );
-    expect(testingMd).toContain('Testing');
-    expect(testingMd).toContain('`__tests__`');
-    const docsMd = await readFile(
-      path.join(tmpRoot, '.claude', 'knowledge_base', 'documentation.md'),
-      'utf8',
-    );
-    expect(docsMd).toContain('No indicators detected');
-  });
-
-  it('writes llm entries as markdown when provided', async () => {
-    const ctx = makeCtx(tmpRoot);
-    const raw = [
-      '```json',
-      JSON.stringify({
-        id: 'testing',
-        title: 'Testing',
-        sections: [
-          { heading: 'Framework', body: 'Vitest drives unit tests.' },
-          { heading: 'Fixtures', body: 'Located under __tests__.' },
-        ],
-      }),
-      '```',
-    ].join('\n');
-    const result = await knowledgeAcquisitionStep.apply(ctx, {
-      detected: {
-        topics: [{ id: 'testing', label: 'Testing', hints: ['__tests__'] }],
-      },
-      formValues: { selectedTopics: ['testing'] },
-      llmOutput: raw,
-    });
-    expect(result.source).toBe('llm');
+    expect(result.written[0]!.source).toBe('stub');
     const md = await readFile(
-      path.join(tmpRoot, '.claude', 'knowledge_base', 'testing.md'),
+      path.join(tmpRoot, '.claude', 'knowledge_base', 'testing-strategy.md'),
       'utf8',
     );
-    expect(md).toContain('# Testing');
-    expect(md).toContain('## Framework');
-    expect(md).toContain('Vitest drives unit tests.');
-    expect(md).toContain('## Fixtures');
+    expect(md).toContain('# Testing strategy');
+    expect(md).toContain('LLM synthesis was skipped');
   });
 
-  it('falls back to stub for topics without matching llm entries', async () => {
+  it('writes nothing when no topics selected or entered', async () => {
     const ctx = makeCtx(tmpRoot);
-    const raw = [
-      '```json',
-      JSON.stringify({
-        id: 'testing',
-        title: 'Testing',
-        sections: [{ heading: 'a', body: 'b' }],
-      }),
-      '```',
-    ].join('\n');
     const result = await knowledgeAcquisitionStep.apply(ctx, {
-      detected: {
-        topics: [
-          { id: 'testing', label: 'Testing', hints: [] },
-          { id: 'database', label: 'Database', hints: ['prisma/schema.prisma'] },
-        ],
-      },
-      formValues: { selectedTopics: ['testing', 'database'] },
-      llmOutput: raw,
+      detected: { framework: null, language: null },
+      formValues: {},
+      llmOutput: null,
     });
-    expect(result.source).toBe('llm');
-    const db = await readFile(
-      path.join(tmpRoot, '.claude', 'knowledge_base', 'database.md'),
-      'utf8',
-    );
-    expect(db).toContain('`prisma/schema.prisma`');
-    expect(db).toContain('LLM synthesis was skipped');
+    expect(result.written).toHaveLength(0);
+  });
+
+  it('filters to only selected LLM entries', async () => {
+    const ctx = makeCtx(tmpRoot);
+    const entries = [
+      { id: 'a', title: 'A', sections: [{ heading: 'x', body: 'y' }] },
+      { id: 'b', title: 'B', sections: [{ heading: 'x', body: 'y' }] },
+      { id: 'c', title: 'C', sections: [{ heading: 'x', body: 'y' }] },
+    ];
+    const result = await knowledgeAcquisitionStep.apply(ctx, {
+      detected: { framework: null, language: null },
+      formValues: { selectedTopics: ['a', 'c'] },
+      llmOutput: entries,
+    });
+    expect(result.written.map((w) => w.id)).toEqual(['a', 'c']);
   });
 });

@@ -229,7 +229,7 @@ async function main(): Promise<void> {
       '06_5-agent-discovery': { acceptedAgents: [] },
       '07-generate-files': { overwrite: true },
       '08-knowledge-acquisition': {
-        selectedTopics: ['testing', 'documentation'],
+        manualTopics: 'testing\ndocumentation',
       },
       '09-qa': {},
       '09_5-skill-generation': { selectedSkills: [] },

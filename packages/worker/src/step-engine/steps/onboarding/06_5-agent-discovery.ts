@@ -561,7 +561,16 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
       label: `${c.label}${c.count > 0 ? ` (${c.count} files)` : ''} — ${c.hint}`,
       ...(c.source === 'llm' ? { badge: 'AI-suggested', badgeColor: 'amber' as const } : {}),
     }));
-    const defaults = enriched.filter((c) => c.recommended).map((c) => c.id);
+    // These agents are always pre-selected regardless of LLM recommendations
+    const ALWAYS_SELECTED = new Set([
+      'code-reviewer',
+      'security-auditor',
+      'knowledge-miner',
+      'learning-recorder',
+    ]);
+    const defaults = enriched
+      .filter((c) => c.recommended || ALWAYS_SELECTED.has(c.id))
+      .map((c) => c.id);
 
     const hasLlm = llmOutput !== undefined && llmOutput !== null;
     const customCount = enriched.filter((c) => c.source === 'llm').length;

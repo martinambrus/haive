@@ -195,6 +195,9 @@ async function executeByKind(
             sandboxWorkdir,
           )
         : [];
+      const statusUpdater = payload.taskStepId
+        ? createStepStatusUpdater(db, payload.taskStepId)
+        : undefined;
       return executeCliSpec(
         payload.spec as CliCommandSpec,
         deps,
@@ -207,6 +210,7 @@ async function executeByKind(
         networkPolicy,
         mcpFiles,
         authMounts,
+        statusUpdater,
       );
     }
     case 'api':
@@ -273,7 +277,7 @@ async function resolveMcpExtraFiles(
   });
   if (servers.length === 0) return [];
 
-  const config = buildMcpConfigForCli(providerName, servers);
+  const config = buildMcpConfigForCli(providerName, servers, SANDBOX_USER_HOME);
   if (!config) return [];
 
   return [{ containerPath: config.path, content: config.content }];
@@ -335,6 +339,183 @@ async function resolveTaskSandboxWorkdir(db: Database, taskId: string): Promise<
 }
 
 const HOST_USER_HOME = process.env.HOST_USER_HOME ?? process.env.HOME ?? '/root';
+
+const STATUS_THROTTLE_MS = 2_000;
+const STATUS_STALE_MS = 30_000;
+const STATUS_DEFAULT_MESSAGE = 'Waiting for AI analysis...';
+
+function createStepStatusUpdater(db: Database, taskStepId: string): (message: string) => void {
+  let lastFlush = 0;
+  let pending: ReturnType<typeof setTimeout> | null = null;
+  let staleTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastMessage = '';
+
+  const writeStatus = (message: string): void => {
+    const truncated = message.length > 200 ? message.slice(0, 200) + '...' : message;
+    lastFlush = Date.now();
+    db.update(schema.taskSteps)
+      .set({ statusMessage: truncated, updatedAt: new Date() })
+      .where(eq(schema.taskSteps.id, taskStepId))
+      .catch((err: unknown) => {
+        log.warn({ err, taskStepId }, 'failed to update step status');
+      });
+  };
+
+  const flush = (): void => {
+    if (!lastMessage) return;
+    writeStatus(lastMessage);
+  };
+
+  const resetStaleTimer = (): void => {
+    if (staleTimer) clearTimeout(staleTimer);
+    staleTimer = setTimeout(() => {
+      staleTimer = null;
+      writeStatus(STATUS_DEFAULT_MESSAGE);
+    }, STATUS_STALE_MS);
+  };
+
+  return (message: string): void => {
+    lastMessage = message;
+    resetStaleTimer();
+    const now = Date.now();
+    if (now - lastFlush >= STATUS_THROTTLE_MS) {
+      if (pending) clearTimeout(pending);
+      pending = null;
+      flush();
+    } else if (!pending) {
+      pending = setTimeout(
+        () => {
+          pending = null;
+          flush();
+        },
+        STATUS_THROTTLE_MS - (now - lastFlush),
+      );
+    }
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* NDJSON stream-json parser for Claude Code / Zai                     */
+/* ------------------------------------------------------------------ */
+
+interface StreamJsonCollector {
+  /** Feed raw stdout chunks. Parses NDJSON lines, emits progress, collects result. */
+  onChunk: (chunk: string) => void;
+  /** Final result text extracted from the result/success event, or null. */
+  getResult: () => string | null;
+  /** Whether the stream contained valid NDJSON events (vs plain JSON output). */
+  isStreamJson: () => boolean;
+}
+
+function createStreamJsonCollector(onProgress?: (message: string) => void): StreamJsonCollector {
+  let buffer = '';
+  let resultText: string | null = null;
+  let eventCount = 0;
+
+  function processLine(line: string): void {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    if (typeof event.type !== 'string') return;
+    eventCount++;
+
+    const type = event.type as string;
+    const subtype = event.subtype as string | undefined;
+
+    // Extract final result
+    if (type === 'result' && subtype === 'success' && typeof event.result === 'string') {
+      resultText = event.result;
+      return;
+    }
+
+    if (!onProgress) return;
+
+    // Extract progress from assistant messages (tool_use blocks)
+    if (type === 'assistant') {
+      const msg = event.message as Record<string, unknown> | undefined;
+      const content = msg?.content as unknown[] | undefined;
+      if (!Array.isArray(content)) return;
+      for (const block of content) {
+        const b = block as Record<string, unknown>;
+        if (b.type === 'tool_use') {
+          const toolName = b.name as string;
+          const input = b.input as Record<string, unknown> | undefined;
+          const desc = describeToolUse(toolName, input);
+          if (desc) onProgress(desc);
+        }
+        // Skip text blocks — they're final output, not progress.
+        // For tool_use sessions, tool_use blocks provide the real progress.
+      }
+    }
+  }
+
+  return {
+    onChunk(chunk: string): void {
+      buffer += chunk;
+      let newlineIdx: number;
+      while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newlineIdx);
+        buffer = buffer.slice(newlineIdx + 1);
+        processLine(line);
+      }
+    },
+    getResult(): string | null {
+      // Process any remaining buffer content
+      if (buffer.trim()) {
+        processLine(buffer);
+        buffer = '';
+      }
+      return resultText;
+    },
+    isStreamJson(): boolean {
+      return eventCount > 0;
+    },
+  };
+}
+
+function describeToolUse(name: string, input?: Record<string, unknown>): string | null {
+  switch (name) {
+    case 'Read':
+    case 'read_file': {
+      const filePath = (input?.file_path ?? input?.path) as string | undefined;
+      return filePath ? `Reading ${filePath}` : `Reading file...`;
+    }
+    case 'Grep':
+    case 'grep':
+    case 'search': {
+      const pattern = input?.pattern as string | undefined;
+      return pattern ? `Searching for "${pattern}"` : 'Searching codebase...';
+    }
+    case 'Glob':
+    case 'glob':
+    case 'list_files': {
+      const pat = input?.pattern as string | undefined;
+      return pat ? `Finding files: ${pat}` : 'Finding files...';
+    }
+    case 'Write':
+    case 'write_file':
+    case 'Edit':
+    case 'edit_file': {
+      const filePath = (input?.file_path ?? input?.path) as string | undefined;
+      return filePath ? `Editing ${filePath}` : 'Editing file...';
+    }
+    case 'Bash':
+    case 'bash':
+    case 'execute_command': {
+      const cmd = input?.command as string | undefined;
+      if (!cmd) return 'Running command...';
+      const short = cmd.length > 80 ? cmd.slice(0, 77) + '...' : cmd;
+      return `Running: ${short}`;
+    }
+    default:
+      return `Using ${name}...`;
+  }
+}
 
 function resolveAuthMounts(
   adapter: BaseCliAdapter,
@@ -437,6 +618,7 @@ async function executeCliSpec(
   networkPolicy: CliNetworkPolicy | null = null,
   extraFiles: SandboxExtraFile[] = [],
   authMounts: DockerVolumeMount[] = [],
+  statusCallback?: (message: string) => void,
 ): Promise<ExecutionOutcome> {
   const mergedSpec: CliCommandSpec = {
     ...spec,
@@ -451,8 +633,27 @@ async function executeCliSpec(
     extraFiles,
     authMounts,
   );
-  const result = await spawner(mergedSpec, { timeoutMs });
+
+  // Hook stdout for NDJSON stream-json parsing (Claude Code / Zai)
+  const collector = createStreamJsonCollector(statusCallback);
+  const result = await spawner(mergedSpec, {
+    timeoutMs,
+    onStdoutChunk: collector.onChunk,
+  });
   void deps;
+
+  // If stream-json output detected, use extracted result instead of raw stdout
+  const streamResult = collector.getResult();
+  if (collector.isStreamJson() && streamResult !== null) {
+    return {
+      exitCode: result.exitCode,
+      rawOutput: streamResult,
+      parsedOutput: tryJsonParse(streamResult),
+      errorMessage: result.error ?? (result.exitCode !== 0 ? result.stderr.slice(0, 2000) : null),
+    };
+  }
+
+  // Fallback: plain JSON output from non-streaming CLIs
   return {
     exitCode: result.exitCode,
     rawOutput: result.stdout,

@@ -152,7 +152,7 @@ describe('zai adapter', () => {
     expect(adapter.apiKeyEnvName).toBe('ANTHROPIC_API_KEY');
   });
 
-  it('appends --output-format json to CLI invocations', () => {
+  it('appends --output-format stream-json --verbose to CLI invocations', () => {
     const spec = adapter.buildCliInvocation(provider, 'hello', opts);
     expect(spec.command).toBe('claude');
     expect(spec.args).toEqual([
@@ -160,7 +160,8 @@ describe('zai adapter', () => {
       '-p',
       'hello',
       '--output-format',
-      'json',
+      'stream-json',
+      '--verbose',
     ]);
   });
 

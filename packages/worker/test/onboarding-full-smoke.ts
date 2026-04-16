@@ -216,7 +216,7 @@ async function main(): Promise<void> {
         overwrite: true,
       },
       '08-knowledge-acquisition': {
-        selectedTopics: ['testing', 'deployment', 'database', 'documentation'],
+        manualTopics: 'testing\ndeployment\ndatabase\ndocumentation',
       },
       '09-qa': {},
       '09_5-skill-generation': {
