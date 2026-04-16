@@ -32,6 +32,31 @@ function repoStorageRoot(): string {
   return process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
 }
 
+function deriveRepoName(opts: {
+  name?: string;
+  remoteUrl?: string;
+  localPath?: string;
+  filename?: string;
+}): string {
+  if (opts.name?.trim()) return opts.name.trim();
+  if (opts.remoteUrl) {
+    try {
+      const last = new URL(opts.remoteUrl).pathname.split('/').filter(Boolean).pop();
+      if (last) return last.replace(/\.git$/, '');
+    } catch {
+      // malformed URL — fall through
+    }
+  }
+  if (opts.localPath) {
+    const base = path.basename(opts.localPath);
+    if (base) return base;
+  }
+  if (opts.filename) {
+    return opts.filename.replace(/\.(zip|tar|tar\.gz|tgz)$/i, '') || 'unnamed-repo';
+  }
+  return 'unnamed-repo';
+}
+
 export const repoRoutes = new Hono<AppEnv>();
 
 repoRoutes.use('*', requireAuth);
@@ -72,11 +97,17 @@ repoRoutes.post('/', async (c) => {
     }
   }
 
+  const repoName = deriveRepoName({
+    name: body.name,
+    remoteUrl: body.remoteUrl,
+    localPath: body.localPath,
+  });
+
   const inserted = await db
     .insert(schema.repositories)
     .values({
       userId,
-      name: body.name,
+      name: repoName,
       source: body.source,
       localPath,
       remoteUrl: body.remoteUrl ?? null,
@@ -117,8 +148,11 @@ repoRoutes.post('/upload', async (c) => {
   const branchField = form.get('branch');
   const archiveField = form.get('archive');
 
-  if (typeof nameField !== 'string' || nameField.length === 0 || nameField.length > 255) {
-    throw new HttpError(400, 'name is required (1-255 chars)');
+  if (nameField !== null && typeof nameField !== 'string') {
+    throw new HttpError(400, 'name must be a string');
+  }
+  if (typeof nameField === 'string' && nameField.length > 255) {
+    throw new HttpError(400, 'name must be at most 255 characters');
   }
   if (!(archiveField instanceof File)) {
     throw new HttpError(400, 'archive file is required');
@@ -135,11 +169,16 @@ repoRoutes.post('/upload', async (c) => {
   }
   const branch = typeof branchField === 'string' && branchField.length > 0 ? branchField : 'main';
 
+  const uploadRepoName = deriveRepoName({
+    name: nameField ?? undefined,
+    filename: archiveField.name,
+  });
+
   const inserted = await db
     .insert(schema.repositories)
     .values({
       userId,
-      name: nameField,
+      name: uploadRepoName,
       source: 'upload',
       localPath: null,
       remoteUrl: null,

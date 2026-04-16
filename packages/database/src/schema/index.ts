@@ -43,6 +43,7 @@ export const cliInvocationModeEnum = pgEnum('cli_invocation_mode', [
 
 export const repoSourceEnum = pgEnum('repo_source', [
   'local_path',
+  'git_https',
   'github_https',
   'github_oauth',
   'gitlab_https',

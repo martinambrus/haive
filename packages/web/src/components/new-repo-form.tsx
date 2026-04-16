@@ -13,9 +13,10 @@ import {
   CardDescription,
   FormError,
 } from '@/components/ui';
+import { CredentialModal } from './credential-modal';
 import { FilesystemBrowser } from './filesystem-browser';
 
-type Source = 'local_path' | 'github_https' | 'github_oauth' | 'gitlab_https' | 'upload';
+type Source = 'local_path' | 'git_https' | 'github_oauth' | 'upload';
 
 interface CredentialRow {
   id: string;
@@ -39,9 +40,8 @@ type PollResponse =
 
 const SOURCE_OPTIONS: { value: Source; label: string }[] = [
   { value: 'local_path', label: 'Local directory' },
-  { value: 'github_https', label: 'GitHub (HTTPS)' },
-  { value: 'github_oauth', label: 'GitHub (OAuth)' },
-  { value: 'gitlab_https', label: 'GitLab (HTTPS)' },
+  { value: 'git_https', label: 'Git (HTTPS)' },
+  { value: 'github_oauth', label: 'GitHub (OAuth device flow)' },
   { value: 'upload', label: 'Upload archive (zip/tar)' },
 ];
 
@@ -61,6 +61,7 @@ export function NewRepoForm() {
   const [oauthUserCode, setOauthUserCode] = useState('');
   const [oauthVerificationUri, setOauthVerificationUri] = useState('');
   const [oauthLabel, setOauthLabel] = useState<string | null>(null);
+  const [credModalOpen, setCredModalOpen] = useState(false);
   const oauthCancelRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -148,7 +149,7 @@ export function NewRepoForm() {
       if (source === 'upload') {
         if (!uploadFile) throw new Error('Pick an archive file (.zip, .tar, .tar.gz)');
         const formData = new FormData();
-        formData.append('name', name);
+        if (name.trim()) formData.append('name', name.trim());
         if (branch.trim()) formData.append('branch', branch.trim());
         formData.append('archive', uploadFile);
         const res = await fetch(
@@ -164,7 +165,8 @@ export function NewRepoForm() {
           throw new Error(body.error ?? `Upload failed (HTTP ${res.status})`);
         }
       } else {
-        const body: Record<string, unknown> = { name, source };
+        const body: Record<string, unknown> = { source };
+        if (name.trim()) body.name = name.trim();
         if (source === 'local_path') {
           if (!localPath) throw new Error('Pick a local directory containing a .git folder');
           body.localPath = localPath;
@@ -199,15 +201,17 @@ export function NewRepoForm() {
       </CardHeader>
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="repo-name">Display name</Label>
+          <Label htmlFor="repo-name">Display name (optional)</Label>
           <Input
             id="repo-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            required
             maxLength={255}
             placeholder="my-project"
           />
+          <p className="text-xs text-neutral-500">
+            Leave blank to derive from the repository URL or folder name.
+          </p>
         </div>
 
         <div className="flex flex-col gap-1.5">
@@ -244,7 +248,7 @@ export function NewRepoForm() {
           </div>
         )}
 
-        {(source === 'github_https' || source === 'github_oauth' || source === 'gitlab_https') && (
+        {(source === 'git_https' || source === 'github_oauth') && (
           <>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="repo-url">Repository URL</Label>
@@ -253,12 +257,11 @@ export function NewRepoForm() {
                 value={remoteUrl}
                 onChange={(e) => setRemoteUrl(e.target.value)}
                 required
-                placeholder={
-                  source === 'gitlab_https'
-                    ? 'https://gitlab.com/group/project.git'
-                    : 'https://github.com/owner/repo.git'
-                }
+                placeholder="https://github.com/owner/repo.git"
               />
+              <p className="text-xs text-neutral-500">
+                Any HTTPS git URL — GitHub, GitLab, Bitbucket, self-hosted, etc.
+              </p>
             </div>
             {source === 'github_oauth' ? (
               <div className="flex flex-col gap-1.5">
@@ -307,23 +310,32 @@ export function NewRepoForm() {
             ) : (
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="repo-credentials">Credentials (optional)</Label>
-                <select
-                  id="repo-credentials"
-                  value={credentialsId}
-                  onChange={(e) => setCredentialsId(e.target.value)}
-                  className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
-                >
-                  <option value="">(none — public repository)</option>
-                  {credentials.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.label} — {c.host}
-                    </option>
-                  ))}
-                </select>
+                <div className="flex gap-2">
+                  <select
+                    id="repo-credentials"
+                    value={credentialsId}
+                    onChange={(e) => setCredentialsId(e.target.value)}
+                    className="h-10 flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                  >
+                    <option value="">(none — public repository)</option>
+                    {credentials.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.label} — {c.host}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setCredModalOpen(true)}
+                  >
+                    Add
+                  </Button>
+                </div>
                 {credentials.length === 0 && (
                   <p className="text-xs text-neutral-500">
-                    No credentials on file. Add one at Settings → Credentials for private
-                    repositories.
+                    No credentials on file. Click Add to create one for private repositories.
                   </p>
                 )}
               </div>
@@ -375,6 +387,14 @@ export function NewRepoForm() {
           </Button>
         </div>
       </form>
+      <CredentialModal
+        open={credModalOpen}
+        onClose={() => setCredModalOpen(false)}
+        onCreated={(cred) => {
+          setCredentials((prev) => [cred, ...prev]);
+          setCredentialsId(cred.id);
+        }}
+      />
     </Card>
   );
 }

@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const repoSourceSchema = z.enum([
   'local_path',
+  'git_https',
   'github_https',
   'github_oauth',
   'gitlab_https',
@@ -10,7 +11,7 @@ export const repoSourceSchema = z.enum([
 
 export const createRepoRequestSchema = z
   .object({
-    name: z.string().min(1).max(255),
+    name: z.string().max(255).optional(),
     source: repoSourceSchema,
     localPath: z.string().optional(),
     remoteUrl: z.string().url().optional(),
@@ -26,7 +27,8 @@ export const createRepoRequestSchema = z
       });
     }
     if (
-      (val.source === 'github_https' ||
+      (val.source === 'git_https' ||
+        val.source === 'github_https' ||
         val.source === 'github_oauth' ||
         val.source === 'gitlab_https') &&
       !val.remoteUrl
