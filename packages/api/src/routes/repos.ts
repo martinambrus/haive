@@ -247,7 +247,7 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
 
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
-    columns: { id: true, fileTree: true },
+    columns: { id: true, fileTree: true, excludedPaths: true },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
 
@@ -257,9 +257,15 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
     const segment = file.split('/')[0];
     if (segment) topLevel.add(segment);
   }
+  // Also accept paths already stored as exclusions (e.g. framework defaults
+  // like .git, .DS_Store that buildFileTree skips during scanning)
+  const existingExcluded = new Set(
+    (repo.excludedPaths ?? []).map((p) => p.replace(/^\/+|\/+$/g, '')),
+  );
   const invalid = body.excludedPaths.filter((p) => {
     const head = p.replace(/^\/+/, '').split('/')[0];
-    return head ? !topLevel.has(head) : true;
+    if (!head) return true;
+    return !topLevel.has(head) && !existingExcluded.has(head);
   });
   if (invalid.length > 0) {
     throw new HttpError(400, `Unknown paths: ${invalid.slice(0, 5).join(', ')}`);

@@ -30,7 +30,6 @@ export default function ReposPage() {
   const [error, setError] = useState<string | null>(null);
   const [expandedRepoId, setExpandedRepoId] = useState<string | null>(null);
   const [pendingExclusions, setPendingExclusions] = useState<Set<string>>(new Set());
-  const [saving, setSaving] = useState(false);
 
   async function reload() {
     try {
@@ -67,27 +66,24 @@ export default function ReposPage() {
     setExpandedRepoId(repo.id);
   }
 
-  function togglePath(path: string) {
+  function togglePath(repoId: string, path: string) {
     setPendingExclusions((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
       else next.add(path);
+      void saveExclusions(repoId, next);
       return next;
     });
   }
 
-  async function saveExclusions(repoId: string) {
-    setSaving(true);
+  async function saveExclusions(repoId: string, paths: Set<string>) {
     try {
       await api.patch(`/repos/${repoId}/exclusions`, {
-        excludedPaths: Array.from(pendingExclusions).sort(),
+        excludedPaths: Array.from(paths).sort(),
       });
-      setExpandedRepoId(null);
       await reload();
     } catch (err) {
       setError((err as Error).message ?? 'Failed to update exclusions');
-    } finally {
-      setSaving(false);
     }
   }
 
@@ -135,11 +131,9 @@ export default function ReposPage() {
               repo={repo}
               expanded={expandedRepoId === repo.id}
               pendingExclusions={pendingExclusions}
-              saving={saving && expandedRepoId === repo.id}
               onExpand={() => toggleExpand(repo)}
               onDelete={() => handleDelete(repo.id)}
-              onTogglePath={togglePath}
-              onSave={() => saveExclusions(repo.id)}
+              onTogglePath={(p) => togglePath(repo.id, p)}
             />
           ))}
         </div>
@@ -152,16 +146,13 @@ interface RepoCardProps {
   repo: Repository;
   expanded: boolean;
   pendingExclusions: Set<string>;
-  saving: boolean;
   onExpand: () => void;
   onDelete: () => void;
   onTogglePath: (path: string) => void;
-  onSave: () => void;
 }
 
 function RepoCard(props: RepoCardProps) {
-  const { repo, expanded, pendingExclusions, saving, onExpand, onDelete, onTogglePath, onSave } =
-    props;
+  const { repo, expanded, pendingExclusions, onExpand, onDelete, onTogglePath } = props;
 
   const topLevelPaths = useMemo(() => deriveTopLevelPaths(repo.fileTree), [repo.fileTree]);
   const canEdit = repo.status === 'ready' && topLevelPaths.length > 0;
@@ -234,11 +225,6 @@ function RepoCard(props: RepoCardProps) {
                 </label>
               );
             })}
-          </div>
-          <div className="mt-3 flex justify-end">
-            <Button size="sm" onClick={onSave} disabled={saving}>
-              {saving ? 'Saving...' : 'Save'}
-            </Button>
           </div>
         </div>
       )}
