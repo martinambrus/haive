@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -77,6 +78,12 @@ async function createFixtureRepo(): Promise<string> {
     path.join(dir, '.claude', 'knowledge_base', 'architecture.md'),
     '# Architecture\n\nMonolith with API, worker, and web layers.\n',
   );
+  const git = (args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  git(['init', '-b', 'main']);
+  git(['config', 'user.email', 'smoke@test.local']);
+  git(['config', 'user.name', 'Smoke Test']);
+  git(['add', '.']);
+  git(['commit', '-m', 'initial']);
   return dir;
 }
 
