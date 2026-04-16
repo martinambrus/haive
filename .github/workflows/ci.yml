@@ -34,8 +34,8 @@ jobs:
 
       - name: Build shared + database (required by other packages)
         run: |
-          pnpm --filter @haive/shared build
           pnpm --filter @haive/database build
+          pnpm --filter @haive/shared build
 
       - name: Format check
         run: pnpm format:check
@@ -98,8 +98,8 @@ jobs:
 
       - name: Build shared + database
         run: |
-          pnpm --filter @haive/shared build
           pnpm --filter @haive/database build
+          pnpm --filter @haive/shared build
 
       - name: Configure redis maxmemory-policy
         run: |
@@ -175,8 +175,8 @@ jobs:
       - name: Push database schema
         run: docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm db-migrate
 
-      - name: Start api, worker, web
-        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d api worker web
+      - name: Start api (populates shared node_modules volume)
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d api
 
       - name: Probe api /health
         run: |
@@ -187,11 +187,14 @@ jobs:
             fi
             if [ $i -eq 60 ]; then
               echo "api /health unreachable after 120s"
-              docker compose -f docker-compose.yml -f docker-compose.dev.yml logs api worker
+              docker compose -f docker-compose.yml -f docker-compose.dev.yml logs api
               exit 1
             fi
             sleep 2
           done
+
+      - name: Start worker, web
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d worker web
 
       - name: Probe web root
         run: |
