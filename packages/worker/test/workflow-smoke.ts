@@ -134,6 +134,7 @@ async function main(): Promise<void> {
         description:
           'Users have asked for an explicit logout button in the top-right navigation. Keep the change minimal.',
         status: 'created',
+        metadata: { envReplicatePrelude: false },
       })
       .returning();
     if (!task) throw new Error('task insert failed');

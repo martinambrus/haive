@@ -145,6 +145,7 @@ async function main(): Promise<void> {
         title: 'Add a logout button',
         description: 'Smoke test: real commit path.',
         status: 'created',
+        metadata: { envReplicatePrelude: false },
       })
       .returning();
     if (!task) throw new Error('task insert failed');

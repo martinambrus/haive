@@ -64,6 +64,7 @@ async function buildRunList(ctx: ResolvedTaskContext): Promise<StepDefinition[]>
   const main = stepRegistry.listByWorkflow(ctx.workflowType);
   if (ctx.workflowType === 'env_replicate') return main;
 
+  if (ctx.metadata?.envReplicatePrelude === false) return main;
   const forced = ctx.metadata?.envReplicatePrelude === true;
   const shouldPrelude = forced || (await shouldAutoRunEnvReplicate(ctx.repoPath));
   const prelude = shouldPrelude ? stepRegistry.listByWorkflow('env_replicate') : [];
