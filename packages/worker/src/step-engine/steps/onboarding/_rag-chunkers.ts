@@ -29,10 +29,19 @@ export const CODE_EXTENSIONS: Record<string, string> = {
   '.theme': 'php',
   '.profile': 'php',
   '.js': 'javascript',
+  '.mjs': 'javascript',
+  '.cjs': 'javascript',
   '.ts': 'typescript',
   '.tsx': 'tsx',
   '.jsx': 'javascript',
+  '.vue': 'javascript',
+  '.svelte': 'javascript',
   '.py': 'python',
+  '.pyi': 'python',
+  '.go': 'go',
+  '.rs': 'rust',
+  '.rb': 'ruby',
+  '.java': 'java',
 };
 
 /* ------------------------------------------------------------------ */
@@ -228,6 +237,62 @@ function extractBraceBlock(content: string, start: number): string | null {
   return content.slice(start, start + 3000);
 }
 
+function extractGoSections(content: string): RagSection[] {
+  const sections: RagSection[] = [];
+  const funcRe = /func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\([^)]*\)[^{]*\{/g;
+  let match: RegExpExecArray | null;
+  while ((match = funcRe.exec(content)) !== null) {
+    const name = match[1]!;
+    const bodyStart = content.indexOf('{', match.index + match[0].length - 1);
+    const body = extractBraceBlock(content, bodyStart);
+    if (body) {
+      sections.push({
+        sectionId: `function-${name}`,
+        content: (content.slice(match.index, bodyStart) + body).slice(0, 3000),
+      });
+    }
+  }
+  if (sections.length === 0) {
+    sections.push({ sectionId: 'full-file', content: content.slice(0, 5000) });
+  }
+  return sections;
+}
+
+function extractRustSections(content: string): RagSection[] {
+  const sections: RagSection[] = [];
+  // Functions
+  const fnRe = /(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\([^)]*\)[^{]*\{/g;
+  let match: RegExpExecArray | null;
+  while ((match = fnRe.exec(content)) !== null) {
+    const name = match[1]!;
+    const bodyStart = content.indexOf('{', match.index + match[0].length - 1);
+    const body = extractBraceBlock(content, bodyStart);
+    if (body) {
+      sections.push({
+        sectionId: `function-${name}`,
+        content: (content.slice(match.index, bodyStart) + body).slice(0, 3000),
+      });
+    }
+  }
+  // Impl blocks
+  const implRe = /impl\s+(?:<[^>]*>\s+)?(\w+)(?:\s+for\s+\w+)?\s*\{/g;
+  while ((match = implRe.exec(content)) !== null) {
+    const name = match[1]!;
+    const bodyStart = content.indexOf('{', match.index + match[0].length - 1);
+    const body = extractBraceBlock(content, bodyStart);
+    if (body) {
+      sections.push({
+        sectionId: `impl-${name}`,
+        content: (content.slice(match.index, bodyStart) + body).slice(0, 3000),
+      });
+    }
+  }
+  if (sections.length === 0) {
+    sections.push({ sectionId: 'full-file', content: content.slice(0, 5000) });
+  }
+  return sections;
+}
+
 export function extractCodeSections(content: string, filePath: string): RagSection[] {
   const ext = path.extname(filePath).toLowerCase();
   const lang = CODE_EXTENSIONS[ext];
@@ -237,9 +302,15 @@ export function extractCodeSections(content: string, filePath: string): RagSecti
     case 'javascript':
     case 'typescript':
     case 'tsx':
+    case 'java':
       return extractJsSections(content);
     case 'python':
+    case 'ruby':
       return extractPythonSections(content);
+    case 'go':
+      return extractGoSections(content);
+    case 'rust':
+      return extractRustSections(content);
     default:
       return [{ sectionId: 'full-file', content: content.slice(0, 5000) }];
   }

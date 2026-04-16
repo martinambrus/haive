@@ -168,6 +168,7 @@ async function main(): Promise<void> {
       },
       '09-qa': {},
       '09_5-skill-generation': { selectedSkills: [] },
+      '09_7-rag-source-selection': { selectedDirs: [] },
       '10-rag-populate': { truncateExisting: true },
       '11-final-review': {
         acknowledged: true,

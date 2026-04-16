@@ -46,7 +46,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
   metadata: {
     id: '12-post-onboarding',
     workflowType: 'onboarding',
-    index: 15,
+    index: 16,
     title: 'Post-onboarding cleanup and commit',
     description:
       'Optionally removes leftover orchestration scaffolding and commits the generated workflow files.',

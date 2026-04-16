@@ -191,6 +191,7 @@ async function main(): Promise<void> {
       '09_5-skill-generation': {
         selectedSkills: ['drupal7-project', 'testing-skill', 'documentation-skill'],
       },
+      '09_7-rag-source-selection': { selectedDirs: [] },
       '10-rag-populate': {
         truncateExisting: true,
       },

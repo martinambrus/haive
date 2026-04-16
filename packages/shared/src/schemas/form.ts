@@ -79,6 +79,32 @@ export const numberFieldSchema = baseField.extend({
   step: z.number().optional(),
 });
 
+export const treeNodeSchema: z.ZodType<TreeNode> = z.lazy(() =>
+  z.object({
+    path: z.string(),
+    label: z.string(),
+    fileCount: z.number().int().nonnegative().optional(),
+    badge: z.string().optional(),
+    badgeColor: z.enum(['default', 'amber', 'indigo', 'green']).optional(),
+    children: z.array(treeNodeSchema).optional(),
+  }),
+);
+
+export interface TreeNode {
+  path: string;
+  label: string;
+  fileCount?: number;
+  badge?: string;
+  badgeColor?: 'default' | 'amber' | 'indigo' | 'green';
+  children?: TreeNode[];
+}
+
+export const directoryTreeFieldSchema = baseField.extend({
+  type: z.literal('directory-tree'),
+  tree: z.array(treeNodeSchema),
+  defaults: z.array(z.string()).optional(),
+});
+
 export const formFieldSchema = z.discriminatedUnion('type', [
   textFieldSchema,
   textareaFieldSchema,
@@ -90,6 +116,7 @@ export const formFieldSchema = z.discriminatedUnion('type', [
   directoryPickerFieldSchema,
   fileUploadFieldSchema,
   numberFieldSchema,
+  directoryTreeFieldSchema,
 ]);
 
 export type FormField = z.infer<typeof formFieldSchema>;

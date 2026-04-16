@@ -11,6 +11,7 @@ import { knowledgeAcquisitionStep } from './08-knowledge-acquisition.js';
 import { knowledgeQaStep } from './09-qa.js';
 import { skillGenerationStep } from './09_5-skill-generation.js';
 import { skillVerificationStep } from './09_6-skill-verification.js';
+import { ragSourceSelectionStep } from './09_7-rag-source-selection.js';
 import { ragPopulateStep } from './10-rag-populate.js';
 import { finalReviewStep } from './11-final-review.js';
 import { postOnboardingStep } from './12-post-onboarding.js';
@@ -28,6 +29,7 @@ export {
   knowledgeQaStep,
   skillGenerationStep,
   skillVerificationStep,
+  ragSourceSelectionStep,
   ragPopulateStep,
   finalReviewStep,
   postOnboardingStep,
@@ -46,6 +48,7 @@ export function registerOnboardingSteps(registry: StepRegistry): void {
   registry.register(knowledgeQaStep);
   registry.register(skillGenerationStep);
   registry.register(skillVerificationStep);
+  registry.register(ragSourceSelectionStep);
   registry.register(ragPopulateStep);
   registry.register(finalReviewStep);
   registry.register(postOnboardingStep);

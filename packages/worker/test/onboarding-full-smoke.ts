@@ -222,6 +222,7 @@ async function main(): Promise<void> {
       '09_5-skill-generation': {
         selectedSkills: ['testing-skill', 'documentation-skill', 'nextjs-project'],
       },
+      '09_7-rag-source-selection': { selectedDirs: [] },
       '10-rag-populate': {
         truncateExisting: true,
       },
@@ -309,6 +310,7 @@ async function main(): Promise<void> {
       '09-qa',
       '09_5-skill-generation',
       '09_6-skill-verification',
+      '09_7-rag-source-selection',
       '10-rag-populate',
       '11-final-review',
       '12-post-onboarding',

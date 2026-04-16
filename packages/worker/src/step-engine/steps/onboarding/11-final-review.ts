@@ -180,7 +180,7 @@ export const finalReviewStep: StepDefinition<FinalReviewDetect, FinalReviewApply
   metadata: {
     id: '11-final-review',
     workflowType: 'onboarding',
-    index: 14,
+    index: 15,
     title: 'Final review',
     description:
       'Summarises everything produced by the onboarding workflow, flags missing artefacts, and writes .claude/onboarding-review.md for the user to read before the post-onboarding step.',

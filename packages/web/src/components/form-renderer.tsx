@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { FormField, FormSchema } from '@haive/shared';
 import { Button, FormError, Input, Label } from '@/components/ui';
+import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { cn } from '@/lib/cn';
 
 export type FormValues = Record<string, unknown>;
@@ -29,6 +30,8 @@ function defaultValueFor(field: FormField): unknown {
     case 'radio':
       return field.default ?? field.options[0]?.value ?? '';
     case 'multi-select':
+      return field.defaults ?? [];
+    case 'directory-tree':
       return field.defaults ?? [];
     case 'checkbox':
       return field.default ?? false;
@@ -324,5 +327,16 @@ function FieldControl({ field, value, onChange, disabled }: FieldRowProps) {
       return (
         <p className="text-sm text-neutral-500">File upload not wired to this renderer yet.</p>
       );
+    case 'directory-tree': {
+      const current = Array.isArray(value) ? (value as string[]) : [];
+      return (
+        <DirectoryTreeSelect
+          tree={field.tree}
+          value={current}
+          onChange={(paths) => onChange(paths)}
+          disabled={disabled}
+        />
+      );
+    }
   }
 }

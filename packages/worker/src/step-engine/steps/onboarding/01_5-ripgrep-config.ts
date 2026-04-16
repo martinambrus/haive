@@ -3,29 +3,7 @@ import path from 'node:path';
 import type { DetectResult, FrameworkName } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
-
-/* ------------------------------------------------------------------ */
-/* ripgrep built-in type mappings (stable across rg 14+)              */
-/* Only extensions we might encounter in web projects are listed.     */
-/* ------------------------------------------------------------------ */
-
-const RG_BUILTIN_TYPES: Record<string, Set<string>> = {
-  php: new Set(['php', 'php3', 'php4', 'php5', 'phtml']),
-  js: new Set(['js', 'mjs', 'cjs']),
-  ts: new Set(['ts', 'tsx', 'cts', 'mts']),
-  ruby: new Set(['rb', 'gemspec']),
-  python: new Set(['py', 'pyi']),
-  go: new Set(['go']),
-  rust: new Set(['rs']),
-  java: new Set(['java']),
-  html: new Set(['htm', 'html', 'xhtml']),
-  css: new Set(['css', 'scss', 'less']),
-  json: new Set(['json', 'jsonl']),
-  yaml: new Set(['yaml', 'yml']),
-  xml: new Set(['xml', 'xsl', 'xslt', 'svg']),
-  markdown: new Set(['md', 'markdown']),
-  twig: new Set(['twig']),
-};
+import { RG_BUILTIN_TYPES, KNOWN_LANGUAGE_EXTENSIONS } from './_extension-registry.js';
 
 /** Extensions that might contain PHP code even though they're not *.php */
 const PHP_CANDIDATE_EXTENSIONS = new Set([
@@ -37,21 +15,6 @@ const PHP_CANDIDATE_EXTENSIONS = new Set([
   'engine',
   'test',
 ]);
-
-/** Extensions that belong to specific languages without needing content inspection */
-const KNOWN_LANGUAGE_EXTENSIONS: Record<string, string> = {
-  jsx: 'js',
-  vue: 'js',
-  svelte: 'js',
-  erb: 'ruby',
-  rake: 'ruby',
-  blade: 'php', // blade.php handled separately
-  jinja: 'html',
-  jinja2: 'html',
-  njk: 'html',
-  hbs: 'html',
-  ejs: 'html',
-};
 
 /* ------------------------------------------------------------------ */
 /* Extension scanning                                                  */

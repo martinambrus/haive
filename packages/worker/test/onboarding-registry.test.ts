@@ -27,12 +27,13 @@ describe('onboarding registry', () => {
       '09-qa',
       '09_5-skill-generation',
       '09_6-skill-verification',
+      '09_7-rag-source-selection',
       '10-rag-populate',
       '11-final-review',
       '12-post-onboarding',
     ]);
     expect(steps.map((s) => s.metadata.index)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
     ]);
   });
 

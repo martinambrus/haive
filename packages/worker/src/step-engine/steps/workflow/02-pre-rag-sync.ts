@@ -54,7 +54,7 @@ interface RagSyncApply {
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
-const SOURCE_PREFIXES = ['.claude/knowledge_base/', '.claude/skills/', '.claude/agents/'];
+const SOURCE_PREFIXES = ['.claude/knowledge_base/'];
 const ROOT_FILES = ['CLAUDE.md', 'AGENTS.md'];
 const CODE_IGNORE_DIRS = new Set([
   'node_modules',

@@ -63,7 +63,7 @@ export interface RagPopulateApply {
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
-const SOURCE_PREFIXES = ['.claude/knowledge_base/', '.claude/skills/', '.claude/agents/'];
+const SOURCE_PREFIXES = ['.claude/knowledge_base/'];
 const ROOT_FILES = ['CLAUDE.md', 'AGENTS.md'];
 
 const CODE_IGNORE_DIRS = new Set([
@@ -127,9 +127,12 @@ async function collectKbFiles(repo: string): Promise<RagSourceFile[]> {
 async function collectCodeFiles(
   repo: string,
   excludePaths: readonly string[],
+  selectedDirs?: readonly string[],
+  extensionSet?: ReadonlySet<string>,
 ): Promise<RagSourceFile[]> {
-  const codeExts = new Set(Object.keys(CODE_EXTENSIONS));
+  const codeExts = extensionSet ?? new Set(Object.keys(CODE_EXTENSIONS));
   const excludeSet = new Set(excludePaths.map((p) => p.replace(/\/$/, '')));
+  const dirFilter = selectedDirs && selectedDirs.length > 0 ? new Set(selectedDirs) : null;
 
   const files = await listFilesMatching(
     repo,
@@ -142,6 +145,16 @@ async function collectCodeFiles(
         if (rel.startsWith(ex + '/') || rel === ex) return false;
       }
       if (isDir) return false;
+      // Filter to selected directories when available
+      if (dirFilter) {
+        const topDir = parts.length === 1 ? '.' : parts[0]!;
+        // Check against both top-level and nested dir selections (e.g. 'modules/custom')
+        let inSelected = dirFilter.has(topDir);
+        if (!inSelected && parts.length > 2) {
+          inSelected = dirFilter.has(parts.slice(0, 2).join('/'));
+        }
+        if (!inSelected) return false;
+      }
       const ext = path.extname(rel).toLowerCase();
       return codeExts.has(ext);
     },
@@ -249,7 +262,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
   metadata: {
     id: '10-rag-populate',
     workflowType: 'onboarding',
-    index: 13,
+    index: 14,
     title: 'Populate RAG index',
     description:
       'Chunks knowledge base and code files, computes embeddings via Ollama (or deterministic fallback), and writes them to the configured PostgreSQL RAG database.',
@@ -279,13 +292,33 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
     const projectName = envData?.project?.name ?? 'default';
     const excludePaths = envData?.paths?.customCodePaths?.exclude ?? [];
 
+    // Load selected folders and extension set from step 09_7
+    const ragSourcePrev = await loadPreviousStepOutput(
+      ctx.db,
+      ctx.taskId,
+      '09_7-rag-source-selection',
+    );
+    const ragSourceOutput = ragSourcePrev?.output as {
+      selectedDirs?: string[];
+      extensionSet?: string[];
+    } | null;
+    const selectedDirs = ragSourceOutput?.selectedDirs;
+    const resolvedExtSet = ragSourceOutput?.extensionSet
+      ? new Set(ragSourceOutput.extensionSet)
+      : undefined;
+
     // Collect KB files
     await ctx.emitProgress('Scanning for knowledge base files...');
     const kbFiles = await collectKbFiles(ctx.repoPath);
 
-    // Collect code files
+    // Collect code files (filtered to user-selected directories if available)
     await ctx.emitProgress('Scanning for code files...');
-    const codeFiles = await collectCodeFiles(ctx.repoPath, excludePaths);
+    const codeFiles = await collectCodeFiles(
+      ctx.repoPath,
+      excludePaths,
+      selectedDirs,
+      resolvedExtSet,
+    );
 
     // Probe Ollama connectivity
     await ctx.emitProgress('Testing Ollama connectivity...');

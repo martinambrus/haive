@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormSchema } from '@haive/shared';
 import {
   api,
@@ -83,6 +83,8 @@ export default function TaskDetailPage() {
   const [overrideTarget, setOverrideTarget] = useState<string>('');
   const [overrideBusy, setOverrideBusy] = useState(false);
   const [overrideError, setOverrideError] = useState<string | null>(null);
+  const stepsContainerRef = useRef<HTMLDivElement>(null);
+  const prevActiveStepRef = useRef<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -115,6 +117,21 @@ export default function TaskDetailPage() {
   useEffect(() => {
     if (tab === 'activity') void reloadEvents();
   }, [tab, reloadEvents]);
+
+  // Auto-scroll to active step when it changes
+  useEffect(() => {
+    const activeStep = steps.find(
+      (s) => s.status === 'waiting_form' || s.status === 'running' || s.status === 'waiting_cli',
+    );
+    const activeId = activeStep?.stepId ?? null;
+    if (activeId && activeId !== prevActiveStepRef.current && stepsContainerRef.current) {
+      const el = stepsContainerRef.current.querySelector(`[data-step-id="${activeId}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+    prevActiveStepRef.current = activeId;
+  }, [steps]);
 
   useEffect(() => {
     if (tab !== 'settings') return;
@@ -303,25 +320,28 @@ export default function TaskDetailPage() {
       </div>
 
       {tab === 'steps' && (
-        <div className="flex flex-col gap-3">
+        <div ref={stepsContainerRef} className="flex flex-col gap-3">
           {steps.length === 0 && (
             <div className="text-sm text-neutral-500">
               No steps recorded yet. The task worker will populate them once it starts.
             </div>
           )}
           {steps.map((step) => (
-            <StepCard
-              key={step.id}
-              step={step}
-              taskType={task.type}
-              taskStatus={task.status}
-              submitting={submitting === step.stepId}
-              submitError={submitting === step.stepId ? submitError : null}
-              onSubmit={(values) => submitStep(step, values)}
-              actionBusy={stepActionBusy === step.stepId}
-              actionError={stepActionError?.stepId === step.stepId ? stepActionError.message : null}
-              onAction={(action) => runStepAction(step, action)}
-            />
+            <div key={step.id} data-step-id={step.stepId}>
+              <StepCard
+                step={step}
+                taskType={task.type}
+                taskStatus={task.status}
+                submitting={submitting === step.stepId}
+                submitError={submitting === step.stepId ? submitError : null}
+                onSubmit={(values) => submitStep(step, values)}
+                actionBusy={stepActionBusy === step.stepId}
+                actionError={
+                  stepActionError?.stepId === step.stepId ? stepActionError.message : null
+                }
+                onAction={(action) => runStepAction(step, action)}
+              />
+            </div>
           ))}
         </div>
       )}
