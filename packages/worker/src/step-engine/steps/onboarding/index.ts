@@ -8,7 +8,8 @@ import { agentDiscoveryStep } from './06_5-agent-discovery.js';
 import { generateFilesStep } from './07-generate-files.js';
 import { verifyFilesStep } from './07_5-verify-files.js';
 import { knowledgeAcquisitionStep } from './08-knowledge-acquisition.js';
-import { knowledgeQaStep } from './09-qa.js';
+import { knowledgeQaPrepStep } from './09-qa.js';
+import { knowledgeQaResolveStep } from './09_2-qa-resolve.js';
 import { skillGenerationStep } from './09_5-skill-generation.js';
 import { skillVerificationStep } from './09_6-skill-verification.js';
 import { ragSourceSelectionStep } from './09_7-rag-source-selection.js';
@@ -26,7 +27,8 @@ export {
   generateFilesStep,
   verifyFilesStep,
   knowledgeAcquisitionStep,
-  knowledgeQaStep,
+  knowledgeQaPrepStep,
+  knowledgeQaResolveStep,
   skillGenerationStep,
   skillVerificationStep,
   ragSourceSelectionStep,
@@ -45,7 +47,8 @@ export function registerOnboardingSteps(registry: StepRegistry): void {
   registry.register(generateFilesStep);
   registry.register(verifyFilesStep);
   registry.register(knowledgeAcquisitionStep);
-  registry.register(knowledgeQaStep);
+  registry.register(knowledgeQaPrepStep);
+  registry.register(knowledgeQaResolveStep);
   registry.register(skillGenerationStep);
   registry.register(skillVerificationStep);
   registry.register(ragSourceSelectionStep);

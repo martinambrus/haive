@@ -25,6 +25,7 @@ describe('onboarding registry', () => {
       '07_5-verify-files',
       '08-knowledge-acquisition',
       '09-qa',
+      '09_2-qa-resolve',
       '09_5-skill-generation',
       '09_6-skill-verification',
       '09_7-rag-source-selection',
@@ -33,7 +34,7 @@ describe('onboarding registry', () => {
       '12-post-onboarding',
     ]);
     expect(steps.map((s) => s.metadata.index)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10.5, 11, 12, 13, 14, 15, 16,
     ]);
   });
 

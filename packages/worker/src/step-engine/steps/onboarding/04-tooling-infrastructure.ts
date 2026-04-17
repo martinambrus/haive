@@ -213,12 +213,6 @@ export const toolingInfrastructureStep: StepDefinition<
             detected.hasPhpExtendedExtensions,
           ),
         },
-        {
-          type: 'textarea',
-          id: 'installNotes',
-          label: 'Notes for the installation step (optional)',
-          rows: 3,
-        },
       ],
       submitLabel: 'Save tooling preferences',
     };

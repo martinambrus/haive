@@ -172,7 +172,6 @@ async function main(): Promise<void> {
         ragConnectionString: '',
         mcpSettingsJson: '',
         lspLanguages: ['php'],
-        installNotes: 'intelephense for PHP LSP.',
       },
       '06-workflow-prefs': {
         verificationLevel: 'standard',

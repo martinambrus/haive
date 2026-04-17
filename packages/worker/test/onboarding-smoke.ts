@@ -148,7 +148,6 @@ async function main(): Promise<void> {
         ragConnectionString: '',
         mcpSettingsJson: '',
         lspLanguages: ['typescript'],
-        installNotes: '',
       },
       '06-workflow-prefs': {
         verificationLevel: 'standard',

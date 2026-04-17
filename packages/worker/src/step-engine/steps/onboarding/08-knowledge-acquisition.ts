@@ -538,14 +538,6 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
             options,
             defaults: defaults.length > 0 ? defaults : options.map((o) => o.value),
           },
-          {
-            type: 'textarea',
-            id: 'additionalNotes',
-            label: 'Additional notes or corrections (optional)',
-            rows: 3,
-            placeholder:
-              'Add any corrections to the discovered topics, or note additional areas the AI may have missed.',
-          },
         ],
         submitLabel: 'Generate knowledge base',
       };
@@ -582,7 +574,6 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     const detected = args.detected as KnowledgeDetect;
     const values = args.formValues as {
       selectedTopics?: string[];
-      additionalNotes?: string;
       manualTopics?: string;
     };
 
