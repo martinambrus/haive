@@ -12,6 +12,10 @@ services:
       - "1085:1025"
       - "8085:8025"
 
+  ollama:
+    ports:
+      - "11434:11434"
+
   db-migrate:
     image: node:24-alpine
     container_name: haive-db-migrate

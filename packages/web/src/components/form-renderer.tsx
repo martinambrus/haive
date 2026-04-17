@@ -20,6 +20,30 @@ interface FormRendererProps {
   renderAfterField?: (fieldId: string, values: FormValues) => React.ReactNode;
 }
 
+function validateRequired(schema: FormSchema, values: FormValues): string | null {
+  for (const field of schema.fields) {
+    if (!field.required) continue;
+    const value = values[field.id];
+    switch (field.type) {
+      case 'checkbox':
+        if (value !== true) return `${field.label} is required`;
+        break;
+      case 'multi-select':
+      case 'directory-tree':
+        if (!Array.isArray(value) || value.length === 0) return `${field.label} is required`;
+        break;
+      case 'number':
+        if (value === '' || value === null || value === undefined || Number.isNaN(value as number))
+          return `${field.label} is required`;
+        break;
+      default:
+        if (typeof value !== 'string' || value.trim().length === 0)
+          return `${field.label} is required`;
+    }
+  }
+  return null;
+}
+
 function defaultValueFor(field: FormField): unknown {
   switch (field.type) {
     case 'text':
@@ -63,6 +87,7 @@ export function FormRenderer({
 }: FormRendererProps) {
   const initial = useMemo(() => buildInitial(schema, initialValues), [schema, initialValues]);
   const [values, setValues] = useState<FormValues>(initial);
+  const [localError, setLocalError] = useState<string | null>(null);
 
   useEffect(() => {
     onValuesChange?.(values);
@@ -70,11 +95,18 @@ export function FormRenderer({
 
   function update(id: string, value: unknown) {
     setValues((prev) => ({ ...prev, [id]: value }));
+    if (localError) setLocalError(null);
   }
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (disabled || submitting) return;
+    const required = validateRequired(schema, values);
+    if (required) {
+      setLocalError(required);
+      return;
+    }
+    setLocalError(null);
     await onSubmit(values);
   }
 
@@ -99,7 +131,7 @@ export function FormRenderer({
           </div>
         ))}
       </div>
-      <FormError message={errorMessage ?? null} />
+      <FormError message={localError ?? errorMessage ?? null} />
       <div>
         <Button type="submit" disabled={disabled || submitting}>
           {submitting ? 'Submitting...' : (schema.submitLabel ?? 'Submit')}
@@ -138,6 +170,28 @@ interface FieldRowProps {
 }
 
 function FieldRow({ field, value, onChange, disabled }: FieldRowProps) {
+  if (field.type === 'checkbox') {
+    return (
+      <div className="flex flex-col gap-1">
+        <label className="flex items-center gap-2 text-sm text-neutral-200">
+          <input
+            id={field.id}
+            type="checkbox"
+            checked={Boolean(value)}
+            disabled={disabled}
+            onChange={(e) => onChange(e.target.checked)}
+          />
+          <span>
+            {field.label}
+            {field.required && <span className="ml-1 text-red-400">*</span>}
+          </span>
+        </label>
+        {field.description && (
+          <p className="whitespace-pre-line pl-6 text-xs text-neutral-500">{field.description}</p>
+        )}
+      </div>
+    );
+  }
   return (
     <div className="flex flex-col gap-1.5">
       <Label htmlFor={field.id}>
@@ -272,7 +326,7 @@ function FieldControl({ field, value, onChange, disabled }: FieldRowProps) {
             disabled={disabled}
             onChange={(e) => onChange(e.target.checked)}
           />
-          <span>{field.description ?? 'Enabled'}</span>
+          <span>{field.label}</span>
         </label>
       );
     case 'select-with-text': {

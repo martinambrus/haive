@@ -1,4 +1,4 @@
-# haive
+# hAIv<sup>e</sup>
 
 Deterministic multi-CLI orchestration and AI agentic workflow utility. Replaces a markdown-driven Claude Code onboarding flow, an autonomous `/workflow` implementation loop, and a sandboxed local environment replication step set with a deterministic web project. Agentic CLI invocations only happen for parts that need reasoning; everything else is a TypeScript step module with a web form.
 
@@ -187,7 +187,7 @@ DOCKER_SOCKET=/run/user/1000/docker.sock  # substitute your uid from `id -u`
 
 Bring the stack up with `pnpm docker:dev`. The worker container still sees `/var/run/docker.sock` internally (via `DOCKER_HOST=unix:///var/run/docker.sock`), but the host side is now the unprivileged rootless daemon. A container escape at that point lands the attacker in the unprivileged user's rootless namespace, not as root on the host.
 
-Caveats: rootless Docker uses user-namespaced uid mapping, so files written inside per-task containers will not be owned by uid 0 on the host; clawker's bind-mount copy mode handles this correctly. Networking still uses the `haive-network` bridge. Rootless does not support `--privileged` containers, but haive's per-task sandboxes never request privilege so this is not a regression.
+Caveats: rootless Docker uses user-namespaced uid mapping, so files written inside per-task containers will not be owned by uid 0 on the host; clawker's bind-mount copy mode handles this correctly. Networking still uses the `haive-network` bridge. Rootless does not support `--privileged` containers, but hAIv<sup>e</sup>'s per-task sandboxes never request privilege so this is not a regression.
 
 ## Acknowledgements
 

@@ -4,7 +4,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { listFilesMatching, loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { listFilesMatching, loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
   resolveRagConnection,
   ensureRagSchema,
@@ -55,7 +55,6 @@ interface RagSyncApply {
 /* ------------------------------------------------------------------ */
 
 const SOURCE_PREFIXES = ['.claude/knowledge_base/'];
-const ROOT_FILES = ['CLAUDE.md', 'AGENTS.md'];
 const CODE_IGNORE_DIRS = new Set([
   'node_modules',
   '.git',
@@ -78,9 +77,6 @@ const CODE_IGNORE_DIRS = new Set([
 
 async function collectKbFiles(repo: string): Promise<string[]> {
   const out: string[] = [];
-  for (const rel of ROOT_FILES) {
-    if (await pathExists(path.join(repo, rel))) out.push(rel);
-  }
   const candidates = await listFilesMatching(
     repo,
     (rel, isDir) => {

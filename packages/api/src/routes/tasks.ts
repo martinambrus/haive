@@ -374,26 +374,6 @@ taskRoutes.post('/:id/action', async (c) => {
   if (!task) throw new HttpError(404, 'Task not found');
 
   switch (body.action) {
-    case 'pause':
-      if (task.status !== 'running') {
-        throw new HttpError(409, `Cannot pause task in status ${task.status}`);
-      }
-      await db
-        .update(schema.tasks)
-        .set({ status: 'paused', updatedAt: new Date() })
-        .where(eq(schema.tasks.id, id));
-      await appendTaskEvent(db, id, null, 'task.paused', { by: userId });
-      return c.json({ ok: true, status: 'paused' });
-    case 'resume':
-      if (task.status !== 'paused') {
-        throw new HttpError(409, `Cannot resume task in status ${task.status}`);
-      }
-      await db
-        .update(schema.tasks)
-        .set({ status: 'running', updatedAt: new Date() })
-        .where(eq(schema.tasks.id, id));
-      await appendTaskEvent(db, id, null, 'task.resumed', { by: userId });
-      return c.json({ ok: true, status: 'running' });
     case 'cancel':
       if (task.status === 'completed' || task.status === 'cancelled') {
         return c.json({ ok: true, status: task.status });

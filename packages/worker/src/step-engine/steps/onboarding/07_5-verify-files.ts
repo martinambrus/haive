@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, pathExists } from './_helpers.js';
@@ -14,24 +13,6 @@ interface VerifyDetect {
   checks: FileCheck[];
   passedCount: number;
   failedCount: number;
-}
-
-async function fileContains(filePath: string, needle: string): Promise<boolean> {
-  try {
-    const text = await readFile(filePath, 'utf8');
-    return text.includes(needle);
-  } catch {
-    return false;
-  }
-}
-
-async function fileNonEmpty(filePath: string): Promise<boolean> {
-  try {
-    const text = await readFile(filePath, 'utf8');
-    return text.trim().length > 0;
-  } catch {
-    return false;
-  }
 }
 
 async function countMatching(
@@ -62,32 +43,13 @@ export const verifyFilesStep: StepDefinition<
     index: 8,
     title: 'Verify generated files',
     description:
-      'Checks that the generated CLAUDE.md, AGENTS.md, agents, skills, commands, knowledge base files and workflow config exist with the minimum required counts.',
+      'Checks that the generated agents, skills, commands, knowledge base files and workflow config exist with the minimum required counts.',
     requiresCli: false,
   },
 
   async detect(ctx: StepContext): Promise<VerifyDetect> {
     const repo = ctx.repoPath;
     const checks: FileCheck[] = [];
-
-    const claudeMdPath = path.join(repo, 'CLAUDE.md');
-    const claudeOk = await pathExists(claudeMdPath);
-    const claudeRefsAgents = claudeOk ? await fileContains(claudeMdPath, '@AGENTS.md') : false;
-    checks.push({
-      id: 'claude_md',
-      label: 'CLAUDE.md exists and references @AGENTS.md',
-      passed: claudeOk && claudeRefsAgents,
-      detail: !claudeOk ? 'missing' : claudeRefsAgents ? 'ok' : 'missing @AGENTS.md reference',
-    });
-
-    const agentsMdPath = path.join(repo, 'AGENTS.md');
-    const agentsOk = (await pathExists(agentsMdPath)) && (await fileNonEmpty(agentsMdPath));
-    checks.push({
-      id: 'agents_md',
-      label: 'AGENTS.md exists and is non-empty',
-      passed: agentsOk,
-      detail: agentsOk ? 'ok' : 'missing or empty',
-    });
 
     const agentsCount = await countMatching(repo, '.claude/agents/', '.md');
     checks.push({

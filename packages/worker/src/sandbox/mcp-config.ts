@@ -53,9 +53,14 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
   if (opts.includeChromeDevtools) {
     servers.push({
       name: 'chrome-devtools',
-      command: 'chrome-devtools-mcp',
-      args: [],
-      env: { CHROME_PATH: '/usr/bin/chromium' },
+      command: 'npx',
+      args: [
+        '-y',
+        'chrome-devtools-mcp@latest',
+        '--channel=stable',
+        '--isolated=true',
+        '--viewport=1920x1080',
+      ],
     });
   }
 

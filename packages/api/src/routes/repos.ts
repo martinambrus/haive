@@ -287,6 +287,62 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
   return c.json({ repository: updated[0]! });
 });
 
+const ONBOARDING_MARKERS = [
+  '.claude/knowledge_base',
+  '.claude/agents',
+  '.claude/skills',
+  '.claude/workflow-config.json',
+];
+
+const ONBOARDING_RESET_TARGETS = ['.claude'];
+
+async function resolveRepoRoot(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  id: string,
+): Promise<string> {
+  const repo = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    columns: { storagePath: true, localPath: true },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+  const root = repo.storagePath ?? repo.localPath;
+  if (!root) throw new HttpError(409, 'Repository has no resolvable path');
+  return root;
+}
+
+repoRoutes.get('/:id/onboarding-status', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const db = getDb();
+  const root = await resolveRepoRoot(db, userId, id);
+
+  const present: string[] = [];
+  const missing: string[] = [];
+  for (const rel of ONBOARDING_MARKERS) {
+    if (await pathExists(path.join(root, rel))) present.push(rel);
+    else missing.push(rel);
+  }
+  return c.json({ onboarded: missing.length === 0, present, missing });
+});
+
+repoRoutes.delete('/:id/claude-folder', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const db = getDb();
+  const root = await resolveRepoRoot(db, userId, id);
+
+  const removed: string[] = [];
+  for (const rel of ONBOARDING_RESET_TARGETS) {
+    const full = path.join(root, rel);
+    if (await pathExists(full)) {
+      await rm(full, { recursive: true, force: true });
+      removed.push(rel);
+    }
+  }
+  return c.json({ ok: true, removed });
+});
+
 repoRoutes.delete('/:id', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');

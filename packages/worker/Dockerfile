@@ -5,6 +5,9 @@ RUN apk add --no-cache \
       python3 make g++ libc6-compat \
       git unzip curl ca-certificates \
       docker-cli docker-cli-buildx
+# Host-mounted repos have a different UID than the worker process; bypass git's
+# safe.directory ownership check so repo ops don't fail with "dubious ownership".
+RUN git config --system --add safe.directory '*'
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 # clawker (sandbox runtime). Pin a tagged release via build arg; default empty

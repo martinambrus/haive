@@ -52,6 +52,21 @@ services:
     networks:
       - haive-network
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: haive-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - haive-network
+
   api:
     build:
       context: .
@@ -148,6 +163,7 @@ volumes:
   postgres_data:
   redis_data:
   mailpit_data:
+  ollama_data:
   haive_repos:
   haive_wrappers:
     name: haive_wrappers

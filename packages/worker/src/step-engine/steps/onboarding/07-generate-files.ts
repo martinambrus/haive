@@ -2,14 +2,14 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import {
+  type AgentSpec,
+  BASELINE_AGENT_SPECS,
+  buildAgentFileMarkdown,
+  FRAMEWORK_AGENT_SPECS,
+  stubCustomAgent,
+} from './_agent-templates.js';
 import { loadPreviousStepOutput, pathExists } from './_helpers.js';
-
-interface AgentSpec {
-  id: string;
-  description: string;
-  tools: string;
-  body: string;
-}
 
 interface CommandSpec {
   id: string;
@@ -23,7 +23,9 @@ export interface GenerateFilesDetect {
   language: string | null;
   projectName: string | null;
   acceptedAgentIds: string[];
-  lspLanguage: string | null;
+  customAgentSpecs: AgentSpec[];
+  lspLanguages: string[];
+  mcpSettingsJson: string;
   prefs: {
     verificationLevel?: string;
     autoCommit?: boolean;
@@ -41,113 +43,6 @@ export interface GenerateFilesApply {
   agentCount: number;
   commandCount: number;
 }
-
-const BASELINE_AGENTS: AgentSpec[] = [
-  {
-    id: 'code-reviewer',
-    description:
-      'Reviews code changes for correctness, style, and maintainability before they land.',
-    tools: 'Read, Grep, Glob, Bash',
-    body: 'Review the diff provided. Check for correctness, unhandled errors, security issues, and adherence to project conventions documented in CLAUDE.md and AGENTS.md. Report findings grouped by severity (blocker, major, minor, nit). Do not write code; only review.',
-  },
-  {
-    id: 'test-writer',
-    description: 'Writes and maintains automated unit and integration tests for the project.',
-    tools: 'Read, Edit, Write, Glob, Grep, Bash',
-    body: 'Write new tests or update existing ones for the code under review. Follow the test framework and naming convention already used in the repository. Prefer integration tests that exercise real dependencies over mocks. Run the test command after writing to confirm they pass.',
-  },
-  {
-    id: 'docs-writer',
-    description: 'Curates project documentation under docs/ and inline code comments.',
-    tools: 'Read, Edit, Write, Glob, Grep',
-    body: 'Update project documentation to match the code. Keep documentation factual and grounded in the current repository state. Do not speculate about planned features. Use the existing docs tree layout and formatting conventions.',
-  },
-  {
-    id: 'refactorer',
-    description: 'Performs safe refactoring without changing behavior.',
-    tools: 'Read, Edit, Grep, Glob, Bash',
-    body: 'Refactor the code identified for cleanup while keeping observable behavior unchanged. Run tests before and after every change. Stop immediately if tests fail and report the last known-good state.',
-  },
-  {
-    id: 'migration-author',
-    description: 'Owns database migrations and schema evolution.',
-    tools: 'Read, Edit, Write, Grep, Glob, Bash',
-    body: 'Author new migrations or update existing ones. Preserve backwards compatibility during rollout. For destructive changes, add an explicit checklist and confirm with the caller before running.',
-  },
-  {
-    id: 'api-route-dev',
-    description: 'Owns HTTP handlers, route definitions, and API contracts.',
-    tools: 'Read, Edit, Write, Grep, Glob, Bash',
-    body: 'Implement or modify API routes. Keep request and response shapes documented. Validate inputs at the boundary. Emit structured errors matching the project error contract.',
-  },
-  {
-    id: 'config-manager',
-    description: 'Owns YAML and TOML configuration files and environment variable wiring.',
-    tools: 'Read, Edit, Write, Grep, Glob',
-    body: 'Maintain configuration files under config/ and .env examples. Never commit real secrets. Document every new key in the project README or the relevant docs file.',
-  },
-  {
-    id: 'security-auditor',
-    description: 'Scans for common security issues and advises on mitigations.',
-    tools: 'Read, Grep, Glob, Bash',
-    body: 'Audit the code for injection risks, unsafe deserialization, authentication flaws, secrets in source, and overly permissive defaults. Report findings with reproduction steps and recommended fixes.',
-  },
-  {
-    id: 'knowledge-miner',
-    description: 'Mines the codebase for patterns worth recording in the knowledge base.',
-    tools: 'Read, Grep, Glob, Bash',
-    body: 'Scan the repository for recurring patterns, domain vocabulary, and implicit conventions. Propose new knowledge-base entries under .claude/knowledge_base/ when the same concept appears in multiple unrelated files.',
-  },
-  {
-    id: 'learning-recorder',
-    description: 'Records lessons learned from completed workflow runs into the knowledge base.',
-    tools: 'Read, Edit, Write, Grep, Glob',
-    body: 'After a /workflow run completes, summarise what worked, what failed, and which assumptions proved wrong. Append the summary to .claude/knowledge_base/learnings.md without overwriting previous entries.',
-  },
-];
-
-const FRAMEWORK_EXTRA_AGENTS: Record<string, AgentSpec[]> = {
-  drupal7: [
-    {
-      id: 'drupal7-module-dev',
-      description: 'Owns Drupal 7 .module and .install files and hook implementations.',
-      tools: 'Read, Edit, Write, Grep, Glob, Bash',
-      body: 'Implement or modify Drupal 7 modules. Use hook_ implementations, the schema API, and the Form API correctly. Run drush cache-clear after schema changes.',
-    },
-  ],
-  drupal: [
-    {
-      id: 'drupal-module-dev',
-      description: 'Owns Drupal module developer concerns including hooks and services.',
-      tools: 'Read, Edit, Write, Grep, Glob, Bash',
-      body: 'Implement or modify Drupal modules. Follow the services and plugins pattern. Run drush cr after container changes.',
-    },
-  ],
-  nextjs: [
-    {
-      id: 'react-component-dev',
-      description: 'Owns React components under src/components and app/.',
-      tools: 'Read, Edit, Write, Grep, Glob, Bash',
-      body: 'Build or modify React components. Use server components by default. Opt into client components only when interactivity is required.',
-    },
-  ],
-  nodejs: [
-    {
-      id: 'node-package-dev',
-      description: 'Owns Node.js package code under src/.',
-      tools: 'Read, Edit, Write, Grep, Glob, Bash',
-      body: 'Maintain Node.js source files. Keep imports ESM, match the existing module layout, run the project test command after every edit.',
-    },
-  ],
-  django: [
-    {
-      id: 'django-model-dev',
-      description: 'Owns Django model files and their migrations.',
-      tools: 'Read, Edit, Write, Grep, Glob, Bash',
-      body: 'Maintain Django models, managers, and migrations. After any model change, run makemigrations and commit the resulting migration file alongside the model change.',
-    },
-  ],
-};
 
 const BASELINE_COMMANDS: CommandSpec[] = [
   {
@@ -202,80 +97,11 @@ const BASELINE_COMMANDS: CommandSpec[] = [
   },
 ];
 
-function agentFileMarkdown(spec: AgentSpec, customNotes: string): string {
-  const frontmatter = [
-    '---',
-    `name: ${spec.id}`,
-    `description: ${spec.description}`,
-    `tools: ${spec.tools}`,
-    '---',
-    '',
-  ].join('\n');
-  const body = [spec.body];
-  if (customNotes.trim().length > 0) {
-    body.push('');
-    body.push('## Project notes');
-    body.push('');
-    body.push(customNotes.trim());
-  }
-  body.push('');
-  return frontmatter + body.join('\n');
-}
-
 function commandFileMarkdown(cmd: CommandSpec): string {
   const frontmatter = ['---', `name: ${cmd.id}`, `description: ${cmd.description}`, '---', ''].join(
     '\n',
   );
   return frontmatter + cmd.body;
-}
-
-function claudeMdTemplate(
-  projectName: string | null,
-  framework: string | null,
-  language: string | null,
-  customNotes: string,
-): string {
-  const name = projectName ?? 'this project';
-  const lines = [
-    `# ${name}`,
-    '',
-    `Framework: ${framework ?? 'unknown'}`,
-    `Primary language: ${language ?? 'unknown'}`,
-    '',
-    'This file configures Claude Code for this repository. See @AGENTS.md for the list of available subagents and their responsibilities.',
-    '',
-    '## How to work in this repo',
-    '',
-    '- Read .claude/knowledge_base/ before making non-trivial changes.',
-    '- Use the workflow-config.json settings for verification level and auto-commit behaviour.',
-    '- Delegate to the appropriate subagent listed in @AGENTS.md when a task falls clearly in their domain.',
-    '',
-  ];
-  if (customNotes.trim().length > 0) {
-    lines.push('## Project notes');
-    lines.push('');
-    lines.push(customNotes.trim());
-    lines.push('');
-  }
-  return lines.join('\n');
-}
-
-function agentsMdTemplate(agents: AgentSpec[]): string {
-  const lines = [
-    '# Agents',
-    '',
-    'Subagents available in this repository. Delegate work to the agent whose description matches the task.',
-    '',
-  ];
-  for (const a of agents) {
-    lines.push(`## ${a.id}`);
-    lines.push('');
-    lines.push(a.description);
-    lines.push('');
-    lines.push(`Tools: ${a.tools}`);
-    lines.push('');
-  }
-  return lines.join('\n');
 }
 
 function workflowConfigJson(prefs: GenerateFilesDetect['prefs'], framework: string | null): string {
@@ -364,31 +190,26 @@ const DRUPAL_LSP_FILES: { rel: string; content: string }[] = [
 /** All known agent specs: baselines + framework extras. */
 function allKnownAgents(framework: string | null): Map<string, AgentSpec> {
   const map = new Map<string, AgentSpec>();
-  for (const a of BASELINE_AGENTS) map.set(a.id, a);
-  if (framework && FRAMEWORK_EXTRA_AGENTS[framework]) {
-    for (const a of FRAMEWORK_EXTRA_AGENTS[framework]) map.set(a.id, a);
+  for (const a of BASELINE_AGENT_SPECS) map.set(a.id, a);
+  if (framework && FRAMEWORK_AGENT_SPECS[framework]) {
+    for (const a of FRAMEWORK_AGENT_SPECS[framework]!) map.set(a.id, a);
   }
   return map;
 }
 
-function resolveAgents(framework: string | null, acceptedIds: string[]): AgentSpec[] {
+function resolveAgents(
+  framework: string | null,
+  acceptedIds: string[],
+  customBodies: Map<string, AgentSpec>,
+): AgentSpec[] {
   const known = allKnownAgents(framework);
   const out: AgentSpec[] = [];
   const seen = new Set<string>();
   for (const id of acceptedIds) {
     if (seen.has(id)) continue;
     seen.add(id);
-    const spec = known.get(id);
-    if (spec) {
-      out.push(spec);
-    } else {
-      out.push({
-        id,
-        description: `${id} agent accepted via agent discovery step.`,
-        tools: 'Read, Edit, Write, Grep, Glob, Bash',
-        body: `${id} agent. Fill in responsibilities and constraints for this role. This is a stub generated because the discovery pattern matched ${id} in the repository.`,
-      });
-    }
+    const spec = known.get(id) ?? customBodies.get(id) ?? stubCustomAgent(id);
+    out.push(spec);
   }
   return out;
 }
@@ -400,7 +221,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     index: 7,
     title: 'Generate workflow files',
     description:
-      'Writes CLAUDE.md, AGENTS.md, the subagent files under .claude/agents/, the slash commands under .claude/commands/, and .claude/workflow-config.json. All content is template-driven; no CLI invocation required.',
+      'Writes the subagent files under .claude/agents/, the slash commands under .claude/commands/, and .claude/workflow-config.json. All content is template-driven; no CLI invocation required.',
     requiresCli: false,
   },
 
@@ -428,24 +249,40 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       ctx.taskId,
       '04-tooling-infrastructure',
     );
-    const toolingOutput = toolingPrev?.output as { tooling?: { lspLanguage?: string } } | null;
-    const lspLanguage = toolingOutput?.tooling?.lspLanguage ?? null;
+    const toolingOutput = toolingPrev?.output as {
+      tooling?: { lspLanguages?: unknown; mcpSettingsJson?: string };
+    } | null;
+    const lspLanguages = Array.isArray(toolingOutput?.tooling?.lspLanguages)
+      ? (toolingOutput!.tooling!.lspLanguages as unknown[]).filter(
+          (v): v is string => typeof v === 'string',
+        )
+      : [];
+    const mcpSettingsJson =
+      typeof toolingOutput?.tooling?.mcpSettingsJson === 'string'
+        ? toolingOutput.tooling.mcpSettingsJson
+        : '';
 
     const discoveryPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06_5-agent-discovery');
-    const discoveryOutput = discoveryPrev?.output as { accepted?: { id: string }[] } | null;
-    const acceptedAgentIds = (discoveryOutput?.accepted ?? []).map((a) => a.id);
+    const discoveryOutput = discoveryPrev?.output as {
+      accepted?: { id: string; body?: AgentSpec }[];
+    } | null;
+    const acceptedList = discoveryOutput?.accepted ?? [];
+    const acceptedAgentIds = acceptedList.map((a) => a.id);
+    const customAgentSpecs: AgentSpec[] = acceptedList
+      .filter((a): a is { id: string; body: AgentSpec } => !!a.body && typeof a.body === 'object')
+      .map((a) => a.body);
+    const customBodies = new Map(customAgentSpecs.map((s) => [s.id, s]));
 
-    const agents = resolveAgents(framework, acceptedAgentIds);
+    const agents = resolveAgents(framework, acceptedAgentIds, customBodies);
     const plannedAgents = agents.map((a) => a.id);
     const plannedCommands = BASELINE_COMMANDS.map((c) => c.id);
 
     const candidates = [
-      'CLAUDE.md',
-      'AGENTS.md',
       '.claude/workflow-config.json',
       ...agents.map((a) => `.claude/agents/${a.id}.md`),
       ...BASELINE_COMMANDS.map((c) => `.claude/commands/${c.id}.md`),
-      ...(lspLanguage === 'php-extended' ? DRUPAL_LSP_FILES.map((f) => f.rel) : []),
+      ...(lspLanguages.includes('php-extended') ? DRUPAL_LSP_FILES.map((f) => f.rel) : []),
+      ...(mcpSettingsJson.trim().length > 0 ? ['.claude/mcp_settings.json'] : []),
     ];
     const existingFiles: string[] = [];
     for (const rel of candidates) {
@@ -467,7 +304,9 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       language,
       projectName,
       acceptedAgentIds,
-      lspLanguage,
+      customAgentSpecs,
+      lspLanguages,
+      mcpSettingsJson,
       prefs,
       plannedAgents,
       plannedCommands,
@@ -482,7 +321,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
         : '';
     return {
       title: 'Generate workflow files',
-      description: `Plans to write ${detected.plannedAgents.length} agent file(s) and ${detected.plannedCommands.length} command file(s) plus CLAUDE.md, AGENTS.md, and .claude/workflow-config.json.${existingSummary}`,
+      description: `Plans to write ${detected.plannedAgents.length} agent file(s) and ${detected.plannedCommands.length} command file(s) plus .claude/workflow-config.json.${existingSummary}`,
       fields: [
         {
           type: 'checkbox',
@@ -501,7 +340,8 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const overwrite = values.overwrite === true;
     const customNotes =
       typeof detected.prefs.customNotes === 'string' ? detected.prefs.customNotes : '';
-    const agents = resolveAgents(detected.framework, detected.acceptedAgentIds);
+    const customBodies = new Map((detected.customAgentSpecs ?? []).map((s) => [s.id, s]));
+    const agents = resolveAgents(detected.framework, detected.acceptedAgentIds, customBodies);
 
     const wroteFiles: string[] = [];
     const skippedFiles: string[] = [];
@@ -519,26 +359,30 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     };
 
     await writeIfAllowed(
-      'CLAUDE.md',
-      claudeMdTemplate(detected.projectName, detected.framework, detected.language, customNotes),
-    );
-    await writeIfAllowed('AGENTS.md', agentsMdTemplate(agents));
-    await writeIfAllowed(
       '.claude/workflow-config.json',
       workflowConfigJson(detected.prefs, detected.framework),
     );
 
     for (const agent of agents) {
-      await writeIfAllowed(`.claude/agents/${agent.id}.md`, agentFileMarkdown(agent, customNotes));
+      await writeIfAllowed(
+        `.claude/agents/${agent.id}.md`,
+        buildAgentFileMarkdown(agent, customNotes),
+      );
     }
     for (const cmd of BASELINE_COMMANDS) {
       await writeIfAllowed(`.claude/commands/${cmd.id}.md`, commandFileMarkdown(cmd));
     }
 
-    if (detected.lspLanguage === 'php-extended') {
+    if (detected.lspLanguages.includes('php-extended')) {
       for (const f of DRUPAL_LSP_FILES) {
         await writeIfAllowed(f.rel, f.content + '\n');
       }
+    }
+
+    const mcpContent = detected.mcpSettingsJson.trim();
+    if (mcpContent.length > 0) {
+      const suffix = detected.mcpSettingsJson.endsWith('\n') ? '' : '\n';
+      await writeIfAllowed('.claude/mcp_settings.json', detected.mcpSettingsJson + suffix);
     }
 
     ctx.logger.info(

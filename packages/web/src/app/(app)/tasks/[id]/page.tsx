@@ -32,7 +32,6 @@ function taskStatusVariant(status: TaskStatus): BadgeVariant {
     case 'cancelled':
       return 'error';
     case 'waiting_user':
-    case 'paused':
       return 'warning';
     default:
       return 'default';
@@ -241,8 +240,6 @@ export default function TaskDetailPage() {
     );
   }
 
-  const canPause = task.status === 'running';
-  const canResume = task.status === 'paused';
   const canCancel = !['completed', 'cancelled'].includes(task.status);
   const canRetry = task.status === 'failed';
 
@@ -262,16 +259,6 @@ export default function TaskDetailPage() {
           {task.errorMessage && <p className="text-sm text-red-400">Error: {task.errorMessage}</p>}
         </div>
         <div className="flex flex-wrap gap-2">
-          {canPause && (
-            <Button variant="secondary" size="sm" onClick={() => runAction('pause')}>
-              Pause
-            </Button>
-          )}
-          {canResume && (
-            <Button size="sm" onClick={() => runAction('resume')}>
-              Resume
-            </Button>
-          )}
           {canRetry && (
             <Button size="sm" onClick={() => runAction('retry')}>
               Retry

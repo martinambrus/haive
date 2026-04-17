@@ -1,7 +1,19 @@
 import type { DetectResult, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { buildDefaultMcpServers, buildMcpConfigForCli } from '../../../sandbox/mcp-config.js';
 import { loadPreviousStepOutput } from './_helpers.js';
 import type { EnvDetectApply } from './01-env-detect.js';
+
+const DEFAULT_MCP_SETTINGS_JSON: string = (() => {
+  const servers = buildDefaultMcpServers({
+    repoPath: '.',
+    includeFilesystem: false,
+    includeGit: false,
+    includeChromeDevtools: true,
+  });
+  const config = buildMcpConfigForCli('claude-code', servers);
+  return config ? config.content : '{\n  "mcpServers": {}\n}';
+})();
 
 interface ToolingDetect {
   primaryLanguage: string;
@@ -26,7 +38,6 @@ const LSP_OPTIONS: { value: string; label: string }[] = [
   { value: 'python', label: 'Pyright (Python)' },
   { value: 'go', label: 'gopls (Go)' },
   { value: 'rust', label: 'rust-analyzer (Rust)' },
-  { value: 'none', label: 'Skip LSP installation' },
 ];
 
 /** Frameworks that use non-standard PHP file extensions (.inc, .module, etc.) */
@@ -39,21 +50,21 @@ const PHP_EXTENDED_FRAMEWORKS = new Set([
   'laravel',
 ]);
 
-function defaultLspForLanguage(lang: string, framework: string, hasPhpExtended: boolean): string {
+function defaultLspForLanguage(lang: string, framework: string, hasPhpExtended: boolean): string[] {
   switch (lang) {
     case 'php':
-      return hasPhpExtended || PHP_EXTENDED_FRAMEWORKS.has(framework) ? 'php-extended' : 'php';
+      return [hasPhpExtended || PHP_EXTENDED_FRAMEWORKS.has(framework) ? 'php-extended' : 'php'];
     case 'javascript':
     case 'typescript':
-      return 'typescript';
+      return ['typescript'];
     case 'python':
-      return 'python';
+      return ['python'];
     case 'go':
-      return 'go';
+      return ['go'];
     case 'rust':
-      return 'rust';
+      return ['rust'];
     default:
-      return 'none';
+      return [];
   }
 }
 
@@ -133,9 +144,21 @@ export const toolingInfrastructureStep: StepDefinition<
           placeholder: 'postgres://user:password@host:5432/database',
         },
         {
+          type: 'select',
+          id: 'ollamaMode',
+          label: 'Ollama server',
+          description:
+            'Pick the internal Ollama service bundled with haive, or point at an external Ollama instance. Internal mode uses http://ollama:11434 automatically.',
+          default: 'internal',
+          options: [
+            { value: 'internal', label: 'Use haive internal Ollama service' },
+            { value: 'external', label: 'Use an external Ollama server' },
+          ],
+        },
+        {
           type: 'text',
           id: 'ollamaUrl',
-          label: 'Ollama API URL',
+          label: 'External Ollama API URL (only used when external mode is selected)',
           default: 'http://host.docker.internal:11434',
           placeholder: 'http://host.docker.internal:11434',
         },
@@ -155,17 +178,22 @@ export const toolingInfrastructureStep: StepDefinition<
           max: 8192,
         },
         {
-          type: 'checkbox',
-          id: 'mcpEnabled',
-          label: 'Enable Chrome DevTools MCP browser testing',
-          default: true,
+          type: 'textarea',
+          id: 'mcpSettingsJson',
+          label: 'MCP server definitions (.claude/mcp_settings.json)',
+          description:
+            'Written verbatim to .claude/mcp_settings.json and passed to Claude Code via --mcp-config. Pre-filled with the Chrome DevTools MCP server used by browser-testing workflow steps. Add additional servers inside the mcpServers object (e.g. filesystem, git, postgres). Leave empty to skip writing the file.',
+          default: DEFAULT_MCP_SETTINGS_JSON,
+          rows: 14,
         },
         {
-          type: 'select',
-          id: 'lspLanguage',
-          label: 'LSP language server',
+          type: 'multi-select',
+          id: 'lspLanguages',
+          label: 'LSP language servers',
+          description:
+            'Pick one or more language servers to install. Leave empty to skip LSP installation.',
           options: LSP_OPTIONS,
-          default: defaultLspForLanguage(
+          defaults: defaultLspForLanguage(
             detected.primaryLanguage,
             detected.framework,
             detected.hasPhpExtendedExtensions,
@@ -183,7 +211,10 @@ export const toolingInfrastructureStep: StepDefinition<
   },
 
   async apply(ctx, args) {
-    const tooling = args.formValues;
+    const tooling: Record<string, unknown> = { ...args.formValues };
+    if (tooling.ollamaMode === 'internal') {
+      tooling.ollamaUrl = 'http://ollama:11434';
+    }
     ctx.logger.info({ tooling }, 'tooling preferences saved');
     return { tooling };
   },

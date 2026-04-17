@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
+import type { AgentColor, AgentSpec } from './_agent-templates.js';
 import {
   countFilesMatching,
   listFilesMatching,
@@ -17,6 +18,8 @@ export interface AgentCandidate {
   recommended: boolean;
   /** 'scan' for deterministic file-pattern matches, 'llm' for AI-suggested. */
   source?: 'scan' | 'llm';
+  /** Full structured body; set for LLM-generated custom agents only. */
+  body?: AgentSpec;
 }
 
 export interface AgentDiscoveryDetect {
@@ -354,11 +357,27 @@ async function collectKeyFiles(repoPath: string): Promise<string> {
 /* LLM prompt + parse                                                  */
 /* ------------------------------------------------------------------ */
 
+interface LlmCustomAgentBody {
+  title?: string;
+  description?: string;
+  color?: AgentColor;
+  field?: string;
+  tools?: string[];
+  coreMission?: string;
+  responsibilities?: string[];
+  whenInvoked?: string[];
+  executionSteps?: { title: string; body: string }[];
+  outputFormat?: string;
+  qualityCriteria?: string[];
+  antiPatterns?: string[];
+}
+
 interface LlmAgentSuggestion {
   id: string;
   label: string;
   hint: string;
   recommended: boolean;
+  body?: LlmCustomAgentBody;
 }
 
 function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
@@ -393,22 +412,52 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '3. Suggest additional custom agents specific to this project that are NOT in the predefined list.',
     '   Custom agents should cover project-specific concerns like specific frameworks, service layers, or domain patterns you see in the file tree.',
     '   Only suggest custom agents that genuinely add value — do not pad the list.',
-    '4. For each custom agent, provide: id (kebab-case), label, hint (one-line description), recommended (true/false).',
+    '4. For each custom agent, provide a FULL structured body with the following fields, tailored to this repository:',
+    '   - title: Human-friendly title (Title Case).',
+    '   - description: One-line description.',
+    '   - color: one of blue, purple, green, gold, red, orange.',
+    '   - field: short domain label (e.g. backend, frontend, quality, security, database).',
+    '   - tools: subset of [Read, Edit, Write, Grep, Glob, Bash] relevant to the role.',
+    '   - coreMission: 1-2 sentences — what this agent exists to do.',
+    '   - responsibilities: 3-5 bullets. Each starts with a bolded noun phrase in **double asterisks**, then an em dash, then the explanation.',
+    '   - whenInvoked: 2-4 concrete trigger conditions.',
+    '   - executionSteps: 3-5 ordered steps, each as { title, body }. The body is one sentence minimum; ground it in this specific repo.',
+    '   - outputFormat: a code-block (triple-backtick fenced) showing the structured shape the agent should emit.',
+    '   - qualityCriteria: 3-5 bullets describing verifiable post-conditions.',
+    '   - antiPatterns: 3-5 bullets describing what this agent MUST NOT do (each a concrete failure mode, not generic advice).',
     '',
     '## Required output format',
     'Emit exactly ONE JSON object inside a ```json fenced code block:',
     '```',
     '{',
     '  "predefined": {',
-    '    "<agent-id>": true|false,',
-    '    "...": "..."',
+    '    "<agent-id>": true|false',
     '  },',
     '  "custom": [',
-    '    { "id": "my-agent", "label": "My agent", "hint": "does X", "recommended": true }',
+    '    {',
+    '      "id": "my-agent",',
+    '      "label": "My agent",',
+    '      "hint": "does X",',
+    '      "recommended": true,',
+    '      "body": {',
+    '        "title": "My Agent",',
+    '        "description": "One-line description.",',
+    '        "color": "blue",',
+    '        "field": "backend",',
+    '        "tools": ["Read", "Edit", "Write", "Grep", "Glob", "Bash"],',
+    '        "coreMission": "...",',
+    '        "responsibilities": ["**Thing** — explanation", "..."],',
+    '        "whenInvoked": ["trigger 1", "trigger 2"],',
+    '        "executionSteps": [ { "title": "Step name", "body": "Step detail." } ],',
+    '        "outputFormat": "```\\n<schema>\\n```",',
+    '        "qualityCriteria": ["check 1", "check 2"],',
+    '        "antiPatterns": ["failure mode 1", "failure mode 2"]',
+    '      }',
+    '    }',
     '  ]',
     '}',
     '```',
-    'Do not emit any prose outside the fenced block.',
+    'Do not emit any prose outside the fenced block. The body field is REQUIRED for every custom agent.',
   ].join('\n');
 }
 
@@ -434,6 +483,116 @@ function parseLlmAgentOutput(
 /* ------------------------------------------------------------------ */
 /* LLM enrichment merge                                                */
 /* ------------------------------------------------------------------ */
+
+const VALID_COLORS: Set<AgentColor> = new Set(['blue', 'purple', 'green', 'gold', 'red', 'orange']);
+const DEFAULT_TOOLS = ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash'];
+
+function titleCase(id: string): string {
+  return id
+    .split(/[-_]/g)
+    .filter(Boolean)
+    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+    .join(' ');
+}
+
+function normaliseExecutionSteps(raw: unknown): { title: string; body: string }[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((s) => {
+      if (!s || typeof s !== 'object') return null;
+      const o = s as { title?: unknown; body?: unknown };
+      const title = typeof o.title === 'string' ? o.title.trim() : '';
+      const body = typeof o.body === 'string' ? o.body.trim() : '';
+      if (!title || !body) return null;
+      return { title, body };
+    })
+    .filter((s): s is { title: string; body: string } => s !== null);
+}
+
+function normaliseStringArray(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((s): s is string => typeof s === 'string' && s.trim().length > 0);
+}
+
+function buildAgentSpecFromLlm(
+  id: string,
+  label: string,
+  hint: string,
+  llmBody: LlmCustomAgentBody | undefined,
+): AgentSpec | undefined {
+  if (!llmBody || typeof llmBody !== 'object') return undefined;
+  const title =
+    typeof llmBody.title === 'string' && llmBody.title.trim().length > 0
+      ? llmBody.title.trim()
+      : label || titleCase(id);
+  const description =
+    typeof llmBody.description === 'string' && llmBody.description.trim().length > 0
+      ? llmBody.description.trim()
+      : hint;
+  const color: AgentColor =
+    llmBody.color && VALID_COLORS.has(llmBody.color as AgentColor)
+      ? (llmBody.color as AgentColor)
+      : 'purple';
+  const field =
+    typeof llmBody.field === 'string' && llmBody.field.trim().length > 0
+      ? llmBody.field.trim()
+      : 'custom';
+  const tools = (() => {
+    const arr = normaliseStringArray(llmBody.tools);
+    return arr.length > 0 ? arr : DEFAULT_TOOLS;
+  })();
+  const coreMission =
+    typeof llmBody.coreMission === 'string' && llmBody.coreMission.trim().length > 0
+      ? llmBody.coreMission.trim()
+      : `Describe what the ${title} is responsible for in this repository.`;
+  const responsibilities = (() => {
+    const arr = normaliseStringArray(llmBody.responsibilities);
+    return arr.length > 0 ? arr : ['**Responsibility** — describe the core duties of this agent.'];
+  })();
+  const whenInvoked = (() => {
+    const arr = normaliseStringArray(llmBody.whenInvoked);
+    return arr.length > 0 ? arr : ['The user explicitly requests this specialist.'];
+  })();
+  const executionSteps = (() => {
+    const arr = normaliseExecutionSteps(llmBody.executionSteps);
+    return arr.length > 0
+      ? arr
+      : [
+          {
+            title: 'Execute the role',
+            body: 'Describe the execution protocol for this agent using the repository conventions.',
+          },
+        ];
+  })();
+  const outputFormat =
+    typeof llmBody.outputFormat === 'string' && llmBody.outputFormat.trim().length > 0
+      ? llmBody.outputFormat.trim()
+      : '```\n<replace with schema>\n```';
+  const qualityCriteria = (() => {
+    const arr = normaliseStringArray(llmBody.qualityCriteria);
+    return arr.length > 0 ? arr : ['Verify the output satisfies project conventions.'];
+  })();
+  const antiPatterns = (() => {
+    const arr = normaliseStringArray(llmBody.antiPatterns);
+    return arr.length > 0 ? arr : ['Skip the search order and grep blindly.'];
+  })();
+
+  return {
+    id,
+    title,
+    description,
+    color,
+    field,
+    tools,
+    coreMission,
+    responsibilities,
+    whenInvoked,
+    executionSteps,
+    outputFormat,
+    qualityCriteria,
+    antiPatterns,
+  };
+}
 
 function enrichCandidates(detected: AgentDiscoveryDetect, llmOutput: unknown): AgentCandidate[] {
   const candidates: AgentCandidate[] = detected.candidates.map((c) => ({
@@ -474,13 +633,17 @@ function enrichCandidates(detected: AgentDiscoveryDetect, llmOutput: unknown): A
     const existingIds = new Set(candidates.map((c) => c.id));
     for (const custom of llmResult.custom) {
       if (!custom.id || existingIds.has(custom.id)) continue;
+      const label = custom.label || custom.id;
+      const hint = custom.hint || 'AI-suggested agent';
+      const body = buildAgentSpecFromLlm(custom.id, label, hint, custom.body);
       candidates.push({
         id: custom.id,
-        label: custom.label || custom.id,
-        hint: custom.hint || 'AI-suggested agent',
+        label,
+        hint,
         count: 0,
         recommended: custom.recommended !== false,
         source: 'llm',
+        ...(body ? { body } : {}),
       });
       existingIds.add(custom.id);
     }

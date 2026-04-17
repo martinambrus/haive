@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
+import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
 import {
   resolveRagConnection,
   ensureRagSchema,
@@ -64,7 +64,6 @@ export interface RagPopulateApply {
 /* ------------------------------------------------------------------ */
 
 const SOURCE_PREFIXES = ['.claude/knowledge_base/'];
-const ROOT_FILES = ['CLAUDE.md', 'AGENTS.md'];
 
 const CODE_IGNORE_DIRS = new Set([
   'node_modules',
@@ -88,18 +87,6 @@ const CODE_IGNORE_DIRS = new Set([
 
 async function collectKbFiles(repo: string): Promise<RagSourceFile[]> {
   const out: RagSourceFile[] = [];
-
-  for (const rel of ROOT_FILES) {
-    const full = path.join(repo, rel);
-    if (await pathExists(full)) {
-      try {
-        const text = await readFile(full, 'utf8');
-        out.push({ relPath: rel, sizeBytes: Buffer.byteLength(text, 'utf8') });
-      } catch {
-        continue;
-      }
-    }
-  }
 
   const candidates = await listFilesMatching(
     repo,

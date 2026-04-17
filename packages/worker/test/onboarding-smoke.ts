@@ -144,8 +144,8 @@ async function main(): Promise<void> {
       '04-tooling-infrastructure': {
         ragMode: 'none',
         ragConnectionString: '',
-        mcpEnabled: false,
-        lspLanguage: 'typescript',
+        mcpSettingsJson: '',
+        lspLanguages: ['typescript'],
         installNotes: '',
       },
       '06-workflow-prefs': {
@@ -176,7 +176,6 @@ async function main(): Promise<void> {
         reviewerNotes: 'Smoke run; stubs expected due to missing CLI.',
       },
       '12-post-onboarding': {
-        cleanup: false,
         commit: false,
         commitMessage: '',
       },

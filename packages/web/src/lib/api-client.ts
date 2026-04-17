@@ -250,11 +250,16 @@ export interface Container {
 
 export type WorkflowType = 'onboarding' | 'workflow';
 
+export interface OnboardingStatus {
+  onboarded: boolean;
+  present: string[];
+  missing: string[];
+}
+
 export type TaskStatus =
   | 'created'
   | 'queued'
   | 'running'
-  | 'paused'
   | 'waiting_user'
   | 'completed'
   | 'failed'
@@ -317,7 +322,7 @@ export interface TaskEvent {
   createdAt: string;
 }
 
-export type TaskAction = 'pause' | 'resume' | 'cancel' | 'retry';
+export type TaskAction = 'cancel' | 'retry';
 
 export type StepAction = 'retry' | 'skip';
 

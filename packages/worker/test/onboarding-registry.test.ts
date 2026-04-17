@@ -87,9 +87,9 @@ describe('onboarding registry', () => {
       databaseType: 'postgres',
       hasPhpExtendedExtensions: false,
     });
-    const lsp = schema!.fields.find((f) => f.id === 'lspLanguage');
-    expect(lsp?.type).toBe('select');
-    expect((lsp as { default: string }).default).toBe('php');
+    const lsp = schema!.fields.find((f) => f.id === 'lspLanguages');
+    expect(lsp?.type).toBe('multi-select');
+    expect((lsp as { defaults: string[] }).defaults).toEqual(['php']);
   });
 
   it('tooling infrastructure defaults to php-extended for Drupal frameworks', () => {
@@ -101,8 +101,8 @@ describe('onboarding registry', () => {
       databaseType: 'postgres',
       hasPhpExtendedExtensions: false,
     });
-    const lsp = schema!.fields.find((f) => f.id === 'lspLanguage');
-    expect((lsp as { default: string }).default).toBe('php-extended');
+    const lsp = schema!.fields.find((f) => f.id === 'lspLanguages');
+    expect((lsp as { defaults: string[] }).defaults).toEqual(['php-extended']);
   });
 
   it('tooling infrastructure defaults to php-extended when PHP candidate extensions detected', () => {
@@ -114,8 +114,8 @@ describe('onboarding registry', () => {
       databaseType: null,
       hasPhpExtendedExtensions: true,
     });
-    const lsp = schema!.fields.find((f) => f.id === 'lspLanguage');
-    expect((lsp as { default: string }).default).toBe('php-extended');
+    const lsp = schema!.fields.find((f) => f.id === 'lspLanguages');
+    expect((lsp as { defaults: string[] }).defaults).toEqual(['php-extended']);
   });
 
   it('tooling infrastructure includes DDEV rag option only when DDEV detected', () => {
@@ -171,9 +171,9 @@ describe('onboarding registry', () => {
     ]);
   });
 
-  it('post-onboarding form has cleanup, commit and commitMessage fields', () => {
+  it('post-onboarding form has commit and commitMessage fields', () => {
     const ctx = {} as never;
-    const schema = postOnboardingStep.form!(ctx, { hasOrchestrationFolder: false });
-    expect(schema!.fields.map((f) => f.id)).toEqual(['cleanup', 'commit', 'commitMessage']);
+    const schema = postOnboardingStep.form!(ctx, {});
+    expect(schema!.fields.map((f) => f.id)).toEqual(['commit', 'commitMessage']);
   });
 });

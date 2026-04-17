@@ -15,7 +15,6 @@ function statusVariant(status: TaskStatus): BadgeVariant {
     case 'cancelled':
       return 'error';
     case 'waiting_user':
-    case 'paused':
       return 'warning';
     default:
       return 'default';

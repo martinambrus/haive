@@ -1,9 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { FormSchema } from '@haive/shared';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
+import type { StepDefinition } from '../../step-definition.js';
 import { pathExists } from './_helpers.js';
 
 const exec = promisify(execFile);
@@ -11,14 +10,11 @@ const exec = promisify(execFile);
 const DEFAULT_COMMIT_MESSAGE = [
   'add: agentic workflow setup',
   '',
-  'Generated workflow infrastructure including CLAUDE.md, AGENTS.md,',
-  '.claude/ (agents, skills, knowledge base, commands, workflow steps,',
-  'RAG scripts) and the updated .gitignore.',
+  'Generated .claude/ (agents, skills, knowledge base, commands, workflow',
+  'steps, RAG scripts) and the updated .gitignore.',
 ].join('\n');
 
 const STAGE_PATHS = [
-  'CLAUDE.md',
-  'AGENTS.md',
   '.gitignore',
   '.claude/commands/',
   '.claude/agents/',
@@ -31,46 +27,34 @@ const STAGE_PATHS = [
   '.claude/project-config.yaml',
 ];
 
-interface PostOnboardingDetect {
-  hasOrchestrationFolder: boolean;
-}
+const GIT_IDENTITY = ['-c', 'user.email=haive@local', '-c', 'user.name=Haive Worker'];
 
 interface PostOnboardingOutput {
-  cleanupPerformed: boolean;
   commitPerformed: boolean;
   commitSha: string | null;
+  stagedPaths: string[];
   warnings: string[];
 }
 
-export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboardingOutput> = {
+export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboardingOutput> = {
   metadata: {
     id: '12-post-onboarding',
     workflowType: 'onboarding',
     index: 16,
-    title: 'Post-onboarding cleanup and commit',
-    description:
-      'Optionally removes leftover orchestration scaffolding and commits the generated workflow files.',
+    title: 'Post-onboarding commit',
+    description: 'Optionally commits the generated workflow files.',
     requiresCli: false,
   },
 
-  async detect(ctx: StepContext): Promise<PostOnboardingDetect> {
-    const orch = path.join(ctx.repoPath, 'orchestration');
-    return { hasOrchestrationFolder: await pathExists(orch) };
+  async detect(): Promise<Record<string, never>> {
+    return {};
   },
 
-  form(_ctx, detected): FormSchema {
+  form(): FormSchema {
     return {
       title: 'Post-onboarding actions',
-      description: detected.hasOrchestrationFolder
-        ? 'The legacy orchestration/ folder is still present. You can delete it now and optionally commit the generated workflow files in one step.'
-        : 'You can commit the generated workflow files now or skip and commit later.',
+      description: 'You can commit the generated workflow files now or skip and commit later.',
       fields: [
-        {
-          type: 'checkbox',
-          id: 'cleanup',
-          label: 'Delete orchestration/ folder if present',
-          default: detected.hasOrchestrationFolder,
-        },
         {
           type: 'checkbox',
           id: 'commit',
@@ -92,37 +76,60 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
   async apply(ctx, args): Promise<PostOnboardingOutput> {
     const values = args.formValues;
     const warnings: string[] = [];
-    let cleanupPerformed = false;
     let commitPerformed = false;
     let commitSha: string | null = null;
+    const stagedPaths: string[] = [];
 
-    if (values.cleanup === true && args.detected.hasOrchestrationFolder) {
-      await rm(path.join(ctx.repoPath, 'orchestration'), { recursive: true, force: true });
-      cleanupPerformed = true;
+    if (values.commit !== true) {
+      return { commitPerformed, commitSha, stagedPaths, warnings };
     }
 
-    if (values.commit === true) {
-      try {
-        await exec('git', ['add', '--', ...STAGE_PATHS], { cwd: ctx.repoPath });
-        const message =
-          typeof values.commitMessage === 'string' && values.commitMessage.trim().length > 0
-            ? values.commitMessage
-            : DEFAULT_COMMIT_MESSAGE;
-        await exec('git', ['commit', '-m', message], { cwd: ctx.repoPath });
-        const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
-        commitSha = stdout.trim();
-        commitPerformed = true;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        warnings.push(`commit failed: ${message}`);
-        ctx.logger.warn({ err }, 'post-onboarding commit failed');
+    const existingPaths: string[] = [];
+    for (const rel of STAGE_PATHS) {
+      if (await pathExists(path.join(ctx.repoPath, rel))) existingPaths.push(rel);
+    }
+
+    if (existingPaths.length === 0) {
+      warnings.push('no generated files found to stage');
+      ctx.logger.warn('post-onboarding: no existing paths to stage');
+      return { commitPerformed, commitSha, stagedPaths, warnings };
+    }
+
+    try {
+      await exec('git', ['add', '--', ...existingPaths], { cwd: ctx.repoPath });
+      const { stdout: stagedOut } = await exec('git', ['diff', '--cached', '--name-only'], {
+        cwd: ctx.repoPath,
+      });
+      const staged = stagedOut
+        .split('\n')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      stagedPaths.push(...staged);
+
+      if (staged.length === 0) {
+        warnings.push('no changes to commit (files already committed or identical)');
+        ctx.logger.info('post-onboarding: nothing staged after git add');
+        return { commitPerformed, commitSha, stagedPaths, warnings };
       }
+
+      const message =
+        typeof values.commitMessage === 'string' && values.commitMessage.trim().length > 0
+          ? values.commitMessage
+          : DEFAULT_COMMIT_MESSAGE;
+      await exec('git', [...GIT_IDENTITY, 'commit', '-m', message], { cwd: ctx.repoPath });
+      const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
+      commitSha = stdout.trim();
+      commitPerformed = true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      warnings.push(`commit failed: ${message}`);
+      ctx.logger.warn({ err }, 'post-onboarding commit failed');
     }
 
     ctx.logger.info(
-      { cleanupPerformed, commitPerformed, commitSha, warnings },
+      { commitPerformed, commitSha, staged: stagedPaths.length, warnings },
       'post-onboarding apply complete',
     );
-    return { cleanupPerformed, commitPerformed, commitSha, warnings };
+    return { commitPerformed, commitSha, stagedPaths, warnings };
   },
 };

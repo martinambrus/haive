@@ -199,8 +199,8 @@ async function main(): Promise<void> {
       '04-tooling-infrastructure': {
         ragMode: 'none',
         ragConnectionString: '',
-        mcpEnabled: false,
-        lspLanguage: 'typescript',
+        mcpSettingsJson: '',
+        lspLanguages: ['typescript'],
         installNotes: '',
       },
       '06-workflow-prefs': {
@@ -231,7 +231,6 @@ async function main(): Promise<void> {
         reviewerNotes: 'Full smoke run; template content expected, no CLI.',
       },
       '12-post-onboarding': {
-        cleanup: false,
         commit: false,
         commitMessage: '',
       },
@@ -324,16 +323,6 @@ async function main(): Promise<void> {
     }
 
     const fixtureDir = state.fixtureDir!;
-    const claudeMdPath = path.join(fixtureDir, 'CLAUDE.md');
-    if (!(await pathExists(claudeMdPath))) throw new Error('CLAUDE.md missing');
-    const claudeMdText = await readFile(claudeMdPath, 'utf8');
-    if (!claudeMdText.includes('@AGENTS.md')) {
-      throw new Error('CLAUDE.md does not reference @AGENTS.md');
-    }
-
-    const agentsMdPath = path.join(fixtureDir, 'AGENTS.md');
-    if (!(await pathExists(agentsMdPath))) throw new Error('AGENTS.md missing');
-
     const agentCount = await countMarkdownFiles(path.join(fixtureDir, '.claude', 'agents'));
     if (agentCount < 10) {
       throw new Error(`expected at least 10 agent files, got ${agentCount}`);

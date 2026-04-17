@@ -6,7 +6,6 @@ export const taskStatusSchema = z.enum([
   'created',
   'queued',
   'running',
-  'paused',
   'waiting_user',
   'completed',
   'failed',
@@ -50,7 +49,7 @@ export const submitStepRequestSchema = z.object({
 
 export type SubmitStepRequest = z.infer<typeof submitStepRequestSchema>;
 
-export const taskActionSchema = z.enum(['pause', 'resume', 'cancel', 'retry']);
+export const taskActionSchema = z.enum(['cancel', 'retry']);
 
 export const taskActionRequestSchema = z.object({
   action: taskActionSchema,

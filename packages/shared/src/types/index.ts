@@ -4,7 +4,6 @@ export type TaskStatus =
   | 'created'
   | 'queued'
   | 'running'
-  | 'paused'
   | 'waiting_user'
   | 'completed'
   | 'failed'

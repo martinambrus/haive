@@ -2,10 +2,11 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   api,
   type CliProvider,
+  type OnboardingStatus,
   type Repository,
   type Task,
   type WorkflowType,
@@ -21,30 +22,22 @@ import {
   Label,
 } from '@/components/ui';
 
-const WORKFLOW_OPTIONS: { value: WorkflowType; label: string; description: string }[] = [
-  {
-    value: 'onboarding',
-    label: 'Onboarding',
-    description: 'Run deterministic environment detection and setup steps.',
-  },
-  {
-    value: 'workflow',
-    label: 'Workflow (autonomous)',
-    description: 'Autonomous implementation loop with spec/verify/commit gates.',
-  },
-];
-
 export default function NewTaskPage() {
   const router = useRouter();
   const [repos, setRepos] = useState<Repository[] | null>(null);
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [type, setType] = useState<WorkflowType>('onboarding');
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [repositoryId, setRepositoryId] = useState<string>('');
   const [cliProviderId, setCliProviderId] = useState<string>('');
+
+  const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatus | null>(null);
+  const [statusLoading, setStatusLoading] = useState(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
+
+  const [resetting, setResetting] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,21 +66,71 @@ export default function NewTaskPage() {
     };
   }, []);
 
+  const refreshStatus = useCallback(async (repoId: string) => {
+    if (!repoId) {
+      setOnboardingStatus(null);
+      setStatusError(null);
+      return;
+    }
+    setStatusLoading(true);
+    setStatusError(null);
+    try {
+      const res = await api.get<OnboardingStatus>(`/repos/${repoId}/onboarding-status`);
+      setOnboardingStatus(res);
+    } catch (err) {
+      setOnboardingStatus(null);
+      setStatusError((err as Error).message ?? 'Failed to check onboarding status');
+    } finally {
+      setStatusLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshStatus(repositoryId);
+  }, [repositoryId, refreshStatus]);
+
+  async function handleResetOnboarding() {
+    if (!repositoryId) return;
+    const confirmed = window.confirm(
+      'This will permanently delete the .claude/ directory from the repository so onboarding can run again. This cannot be undone. Continue?',
+    );
+    if (!confirmed) return;
+    setResetting(true);
+    try {
+      await api.delete<{ ok: boolean; removed: string[] }>(`/repos/${repositoryId}/claude-folder`);
+      await refreshStatus(repositoryId);
+    } catch (err) {
+      setStatusError((err as Error).message ?? 'Failed to reset onboarding');
+    } finally {
+      setResetting(false);
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!title.trim()) {
       setError('Title is required');
       return;
     }
+    if (!repositoryId) {
+      setError('Repository is required');
+      return;
+    }
+    if (!onboardingStatus) {
+      setError('Waiting for onboarding status check');
+      return;
+    }
+    const type: WorkflowType = onboardingStatus.onboarded ? 'workflow' : 'onboarding';
+
     setError(null);
     setSubmitting(true);
     try {
       const body: Record<string, unknown> = {
         type,
         title: title.trim(),
+        repositoryId,
       };
       if (description.trim()) body.description = description.trim();
-      if (repositoryId) body.repositoryId = repositoryId;
       if (cliProviderId) body.cliProviderId = cliProviderId;
 
       const data = await api.post<{ task: Task }>('/tasks', body);
@@ -99,6 +142,11 @@ export default function NewTaskPage() {
   }
 
   const readyRepos = repos?.filter((r) => r.status === 'ready') ?? [];
+  const inferredType: WorkflowType | null = onboardingStatus
+    ? onboardingStatus.onboarded
+      ? 'workflow'
+      : 'onboarding'
+    : null;
 
   return (
     <div className="flex max-w-2xl flex-col gap-6">
@@ -106,14 +154,28 @@ export default function NewTaskPage() {
         <div>
           <h1 className="text-2xl font-bold text-neutral-50">New task</h1>
           <p className="text-sm text-neutral-400">
-            Pick a workflow type and target repository. CLI provider is optional for now.
+            Workflow type is auto-detected from the selected repository. Onboarded repos run the
+            autonomous workflow; fresh repos run onboarding.
           </p>
         </div>
-        <Link href="/tasks">
-          <Button variant="secondary" size="sm">
-            Cancel
-          </Button>
-        </Link>
+        <div className="flex items-center gap-2">
+          {onboardingStatus?.onboarded && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={resetting}
+              onClick={handleResetOnboarding}
+            >
+              {resetting ? 'Resetting...' : 'Re-run onboarding'}
+            </Button>
+          )}
+          <Link href="/tasks">
+            <Button variant="secondary" size="sm">
+              Cancel
+            </Button>
+          </Link>
+        </div>
       </div>
 
       {loadError && (
@@ -123,59 +185,6 @@ export default function NewTaskPage() {
       )}
 
       <form onSubmit={handleSubmit} className="flex flex-col gap-5">
-        <div className="flex flex-col gap-2">
-          <Label>Workflow type</Label>
-          <div className="grid gap-2">
-            {WORKFLOW_OPTIONS.map((opt) => (
-              <label
-                key={opt.value}
-                className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 text-sm ${
-                  type === opt.value
-                    ? 'border-indigo-500 bg-indigo-950/30'
-                    : 'border-neutral-800 bg-neutral-900/40 hover:border-neutral-700'
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="type"
-                  value={opt.value}
-                  checked={type === opt.value}
-                  onChange={() => setType(opt.value)}
-                  className="mt-1"
-                />
-                <div>
-                  <div className="font-medium text-neutral-100">{opt.label}</div>
-                  <div className="text-xs text-neutral-400">{opt.description}</div>
-                </div>
-              </label>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="title">Title</Label>
-          <Input
-            id="title"
-            type="text"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Onboard my-drupal-site"
-            required
-          />
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="description">Description (optional)</Label>
-          <textarea
-            id="description"
-            rows={3}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="Short note about this run"
-            className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-          />
-        </div>
-
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="repositoryId">Repository</Label>
           <select
@@ -183,8 +192,9 @@ export default function NewTaskPage() {
             value={repositoryId}
             onChange={(e) => setRepositoryId(e.target.value)}
             className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+            required
           >
-            <option value="">(none)</option>
+            <option value="">(select a repository)</option>
             {readyRepos.map((repo) => (
               <option key={repo.id} value={repo.id}>
                 {repo.name} {repo.detectedFramework ? `(${repo.detectedFramework})` : ''}
@@ -200,6 +210,65 @@ export default function NewTaskPage() {
               first.
             </p>
           )}
+          {repositoryId && (
+            <div className="mt-1 rounded-md border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-xs">
+              {statusLoading && <span className="text-neutral-400">Checking onboarding...</span>}
+              {statusError && <span className="text-red-400">{statusError}</span>}
+              {!statusLoading && !statusError && onboardingStatus && (
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={
+                        onboardingStatus.onboarded
+                          ? 'rounded bg-green-950/50 px-2 py-0.5 text-green-300'
+                          : 'rounded bg-amber-950/50 px-2 py-0.5 text-amber-300'
+                      }
+                    >
+                      {onboardingStatus.onboarded ? 'Onboarded' : 'Not onboarded'}
+                    </span>
+                    <span className="text-neutral-400">
+                      Will run: <strong>{inferredType}</strong>
+                    </span>
+                  </div>
+                  {!onboardingStatus.onboarded && onboardingStatus.missing.length > 0 && (
+                    <p className="text-neutral-500">
+                      Missing: {onboardingStatus.missing.join(', ')}
+                    </p>
+                  )}
+                  {onboardingStatus.onboarded && (
+                    <p className="text-neutral-500">
+                      Use &quot;Re-run onboarding&quot; above to wipe the generated workflow files
+                      and start fresh.
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="title">Title</Label>
+          <Input
+            id="title"
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder={inferredType === 'workflow' ? 'Implement feature X' : 'Onboard repo'}
+            required
+          />
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="description">Description (optional)</Label>
+          <textarea
+            id="description"
+            rows={3}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Short note about this run"
+            className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+          />
         </div>
 
         <div className="flex flex-col gap-1.5">
@@ -222,7 +291,7 @@ export default function NewTaskPage() {
         <FormError message={error} />
 
         <div>
-          <Button type="submit" disabled={submitting}>
+          <Button type="submit" disabled={submitting || !onboardingStatus}>
             {submitting ? 'Creating...' : 'Create task'}
           </Button>
         </div>

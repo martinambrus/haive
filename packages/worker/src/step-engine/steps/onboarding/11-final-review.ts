@@ -19,8 +19,6 @@ interface FinalReviewDetect {
     agents: number;
     commands: number;
   };
-  claudeMdPresent: boolean;
-  agentsMdPresent: boolean;
 }
 
 interface FinalReviewApply {
@@ -67,26 +65,7 @@ export async function collectReviewFindings(repo: string): Promise<FinalReviewDe
     countFiles(agentsDir, (n) => n.endsWith('.md')),
     countFiles(commandsDir, (n) => n.endsWith('.md')),
   ]);
-  const claudeMdPresent = await pathExists(path.join(repo, 'CLAUDE.md'));
-  const agentsMdPresent = await pathExists(path.join(repo, 'AGENTS.md'));
-
   const findings: ReviewFinding[] = [];
-  if (!claudeMdPresent) {
-    findings.push({
-      id: 'missing-claude-md',
-      severity: 'warn',
-      label: 'CLAUDE.md missing',
-      detail: 'No CLAUDE.md at the repo root. Generate-files step has not run yet.',
-    });
-  }
-  if (!agentsMdPresent) {
-    findings.push({
-      id: 'missing-agents-md',
-      severity: 'warn',
-      label: 'AGENTS.md missing',
-      detail: 'No AGENTS.md at the repo root.',
-    });
-  }
   if (knowledgeBase === 0) {
     findings.push({
       id: 'empty-knowledge-base',
@@ -132,8 +111,6 @@ export async function collectReviewFindings(repo: string): Promise<FinalReviewDe
   return {
     findings,
     counts: { knowledgeBase, skills, agents, commands },
-    claudeMdPresent,
-    agentsMdPresent,
   };
 }
 
@@ -147,8 +124,6 @@ function defaultReviewMarkdown(detected: FinalReviewDetect, notes: string): stri
     `- Skills: ${detected.counts.skills}`,
     `- Agents: ${detected.counts.agents}`,
     `- Commands: ${detected.counts.commands}`,
-    `- CLAUDE.md present: ${detected.claudeMdPresent ? 'yes' : 'no'}`,
-    `- AGENTS.md present: ${detected.agentsMdPresent ? 'yes' : 'no'}`,
     '',
     '## Findings',
     '',
@@ -202,8 +177,6 @@ export const finalReviewStep: StepDefinition<FinalReviewDetect, FinalReviewApply
       `Skills: ${detected.counts.skills}`,
       `Agents: ${detected.counts.agents}`,
       `Commands: ${detected.counts.commands}`,
-      `CLAUDE.md present: ${detected.claudeMdPresent ? 'yes' : 'no'}`,
-      `AGENTS.md present: ${detected.agentsMdPresent ? 'yes' : 'no'}`,
       '',
       'Findings:',
       ...detected.findings.map((f) => `- [${f.severity}] ${f.label}`),
@@ -215,7 +188,7 @@ export const finalReviewStep: StepDefinition<FinalReviewDetect, FinalReviewApply
         {
           type: 'checkbox',
           id: 'acknowledged',
-          label: 'I have reviewed the findings above',
+          label: 'Confirm',
           default: false,
           required: true,
         },
@@ -243,8 +216,6 @@ export const finalReviewStep: StepDefinition<FinalReviewDetect, FinalReviewApply
         'Do not invent artefacts. Keep it under 400 words.',
         '',
         `Counts: ${JSON.stringify(detected.counts)}`,
-        `CLAUDE.md present: ${detected.claudeMdPresent}`,
-        `AGENTS.md present: ${detected.agentsMdPresent}`,
         `Findings: ${JSON.stringify(detected.findings)}`,
         `Reviewer notes: ${values.reviewerNotes ?? ''}`,
       ].join('\n');
