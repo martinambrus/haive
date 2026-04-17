@@ -19,6 +19,8 @@ import {
   startTaskWorker,
 } from '../src/queues/task-queue.js';
 
+process.env.HAIVE_TEST_BYPASS_LLM = '1';
+
 const log = logger.child({ module: 'container-cleanup-smoke' });
 
 const REQUIRED_ENV = ['DATABASE_URL', 'REDIS_URL', 'CONFIG_ENCRYPTION_KEY'] as const;

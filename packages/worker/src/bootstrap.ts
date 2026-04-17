@@ -31,7 +31,9 @@ export async function bootstrap(): Promise<BootstrapResult> {
   await userSecretsService.initialize(db, masterKek);
 
   const repoStoragePath =
-    (await configService.get(CONFIG_KEYS.REPO_STORAGE_PATH)) ?? '/var/lib/haive/repos';
+    process.env.REPO_STORAGE_ROOT ??
+    (await configService.get(CONFIG_KEYS.REPO_STORAGE_PATH)) ??
+    '/var/lib/haive/repos';
   await mkdir(repoStoragePath, { recursive: true });
 
   logger.info({ repoStoragePath }, 'Worker bootstrap complete');

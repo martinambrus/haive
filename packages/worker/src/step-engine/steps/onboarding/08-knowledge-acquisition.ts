@@ -359,7 +359,6 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
 
   llm: {
     requiredCapabilities: ['tool_use'],
-    optional: true,
     preForm: true,
     buildPrompt: buildKnowledgePrompt,
     timeoutMs: 90 * 60 * 1000, // 90 minutes — large repos need extensive tool_use scanning

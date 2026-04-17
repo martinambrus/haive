@@ -369,7 +369,6 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
 
   llm: {
     requiredCapabilities: ['tool_use', 'file_write'],
-    optional: true,
     buildPrompt: (args) => {
       const detected = args.detected as SkillGenDetect;
       const values = args.formValues as { selectedSkills?: string[] };

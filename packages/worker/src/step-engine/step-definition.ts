@@ -28,7 +28,6 @@ export interface LlmInvocationSpec {
   requiredCapabilities: StepCapability[];
   buildPrompt: (args: LlmBuildArgs) => string;
   parseOutput?: (raw: string, parsed: unknown) => unknown;
-  optional?: boolean;
   /** When true, LLM runs after detect but before the form is generated.
    *  The form() function receives the parsed llmOutput as its third argument. */
   preForm?: boolean;

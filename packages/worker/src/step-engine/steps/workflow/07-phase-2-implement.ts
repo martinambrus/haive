@@ -153,7 +153,6 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
 
   llm: {
     requiredCapabilities: ['tool_use', 'file_write'],
-    optional: true,
     buildPrompt: (args) => {
       const detected = args.detected as ImplementDetect;
       const values = args.formValues as { instructions?: string };

@@ -18,6 +18,8 @@ import { initDatabase, getDb } from '../src/db.js';
 import { initRedis, getBullRedis, closeRedis } from '../src/redis.js';
 import { closeTaskQueue, startTaskWorker } from '../src/queues/task-queue.js';
 
+process.env.HAIVE_TEST_BYPASS_LLM = '1';
+
 const log = logger.child({ module: 'worker-kill-resume-smoke' });
 
 const REQUIRED_ENV = ['DATABASE_URL', 'REDIS_URL', 'CONFIG_ENCRYPTION_KEY'] as const;

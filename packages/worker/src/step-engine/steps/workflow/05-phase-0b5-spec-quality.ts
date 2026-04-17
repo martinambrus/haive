@@ -162,7 +162,6 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
 
   llm: {
     requiredCapabilities: ['tool_use'],
-    optional: true,
     buildPrompt: (args) => {
       const detected = args.detected as SpecQualityDetect;
       const values = args.formValues as { focusAreas?: string };

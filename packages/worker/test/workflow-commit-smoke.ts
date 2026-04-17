@@ -54,6 +54,8 @@ function createFakeRunner(): DockerRunner {
   };
 }
 
+process.env.HAIVE_TEST_BYPASS_LLM = '1';
+
 const log = logger.child({ module: 'workflow-commit-smoke' });
 const exec = promisify(execFile);
 

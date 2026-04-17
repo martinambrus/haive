@@ -710,7 +710,6 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
 
   llm: {
     requiredCapabilities: [],
-    optional: true,
     preForm: true,
     buildPrompt: buildAgentDiscoveryPrompt,
   },

@@ -53,6 +53,8 @@ function createFakeRunner(): DockerRunner {
   };
 }
 
+process.env.HAIVE_TEST_BYPASS_LLM = '1';
+
 const log = logger.child({ module: 'workflow-smoke' });
 
 const REQUIRED_ENV = ['DATABASE_URL', 'REDIS_URL', 'CONFIG_ENCRYPTION_KEY'] as const;

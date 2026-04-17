@@ -170,7 +170,6 @@ export const phase0aDiscoveryStep: StepDefinition<DiscoveryDetect, DiscoveryAppl
 
   llm: {
     requiredCapabilities: ['tool_use'],
-    optional: true,
     buildPrompt: (args) => {
       const detected = args.detected as DiscoveryDetect;
       const values = args.formValues as { extraContext?: string };

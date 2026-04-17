@@ -634,7 +634,6 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
 
   llm: {
     requiredCapabilities: [],
-    optional: true,
     buildPrompt: buildEnvDetectPrompt,
     parseOutput: (raw: string, _parsed: unknown) => parseEnrichment(raw),
   },

@@ -145,7 +145,6 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
 
   llm: {
     requiredCapabilities: ['tool_use'],
-    optional: true,
     buildPrompt: (args) => {
       const detected = args.detected as PrePlanningDetect;
       const values = args.formValues as { scope?: string };

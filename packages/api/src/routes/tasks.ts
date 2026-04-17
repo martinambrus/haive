@@ -239,6 +239,7 @@ taskRoutes.post('/:id/steps/:stepId/action', async (c) => {
     }
     await db.transaction(async (tx) => {
       const now = new Date();
+      await tx.delete(schema.cliInvocations).where(eq(schema.cliInvocations.taskStepId, step.id));
       await tx
         .update(schema.taskSteps)
         .set({

@@ -205,7 +205,6 @@ export const finalReviewStep: StepDefinition<FinalReviewDetect, FinalReviewApply
 
   llm: {
     requiredCapabilities: ['tool_use'],
-    optional: true,
     buildPrompt: (args) => {
       const detected = args.detected as FinalReviewDetect;
       const values = args.formValues as { reviewerNotes?: string };

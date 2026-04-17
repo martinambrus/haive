@@ -29,6 +29,8 @@ import type {
   DockerRunner,
 } from '../src/sandbox/docker-runner.js';
 
+process.env.HAIVE_TEST_BYPASS_LLM = '1';
+
 const log = logger.child({ module: 'env-replicate-smoke' });
 
 const REQUIRED_ENV = ['DATABASE_URL', 'REDIS_URL', 'CONFIG_ENCRYPTION_KEY'] as const;

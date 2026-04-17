@@ -67,6 +67,11 @@ async function resolveLlmPhase(
   formValues: FormValues | null,
   params: AdvanceStepParams,
 ): Promise<LlmResolved> {
+  if (process.env.HAIVE_TEST_BYPASS_LLM === '1') {
+    ctx.logger.warn('HAIVE_TEST_BYPASS_LLM=1, skipping llm with null output');
+    return { resolved: true, llmOutput: null, current };
+  }
+
   const llmSpec = stepDef.llm!;
 
   const latest = await db
@@ -79,14 +84,6 @@ async function resolveLlmPhase(
 
   if (invocation && invocation.endedAt !== null) {
     if ((invocation.exitCode ?? 0) !== 0) {
-      if (llmSpec.optional) {
-        const message = invocation.errorMessage ?? `cli exited ${invocation.exitCode}`;
-        ctx.logger.warn(
-          { exitCode: invocation.exitCode, error: message },
-          'optional llm invocation failed; continuing with null llmOutput',
-        );
-        return { resolved: true, llmOutput: null, current };
-      }
       const message = invocation.errorMessage ?? `cli exited ${invocation.exitCode}`;
       const failed = await updateRow(db, current.id, {
         status: 'failed',
@@ -105,10 +102,6 @@ async function resolveLlmPhase(
 
   // No invocation exists yet — dispatch one
   if (!params.providers || !params.deps) {
-    if (llmSpec.optional) {
-      ctx.logger.warn('optional llm skipped; no providers or deps supplied');
-      return { resolved: true, llmOutput: null, current };
-    }
     const failed = await updateRow(db, current.id, {
       status: 'failed',
       errorMessage: 'step requires CLI invocation but no providers or deps supplied',
@@ -137,13 +130,6 @@ async function resolveLlmPhase(
   });
 
   if (plan.mode === 'skip' || !plan.invocation) {
-    if (llmSpec.optional) {
-      ctx.logger.warn(
-        { reason: plan.reason },
-        'optional llm skipped; applying with null llmOutput',
-      );
-      return { resolved: true, llmOutput: null, current };
-    }
     const failed = await updateRow(db, current.id, {
       status: 'failed',
       errorMessage: `no cli provider available: ${plan.reason}`,

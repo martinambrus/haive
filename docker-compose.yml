@@ -120,6 +120,7 @@ services:
       DOCKER_HOST: unix:///var/run/docker.sock
       HOST_REPO_ROOT: /host-fs
       HOST_REPO_ROOT_REAL: ${HOST_REPO_ROOT:-${HOME}}
+      REPO_STORAGE_ROOT: /var/lib/haive/repos
     volumes:
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
       - ${HOST_REPO_ROOT:-${HOME}}:/host-fs
@@ -165,6 +166,7 @@ volumes:
   mailpit_data:
   ollama_data:
   haive_repos:
+    name: haive_repos
   haive_wrappers:
     name: haive_wrappers
   haive_squid_configs:
