@@ -13,10 +13,19 @@ export interface InvokeOpts {
   extraEnv?: Record<string, string>;
   sessionId?: string;
   nonInteractive?: boolean;
-  /** When true, ask the adapter to enable maximum reasoning/thinking effort
-   *  via whatever mechanism the underlying CLI supports (env var, flag, or
-   *  prompt suffix). No-op for adapters that don't expose such a control. */
-  maxThinking?: boolean;
+  /** Per-call override for reasoning/effort level. Must be a value from the
+   *  adapter's effortScale. When unset the adapter falls back to
+   *  provider.effortLevel, then to the adapter's effortScale.max. Adapters
+   *  with effortScale=null ignore this option. */
+  effortLevel?: string;
+}
+
+export interface EffortScale {
+  /** Allowed level identifiers for this CLI, ordered low-to-high. */
+  values: readonly string[];
+  /** Identifier corresponding to the highest effort. Used as the default
+   *  when no per-provider override is set. */
+  max: string;
 }
 
 export interface CliCommandSpec {

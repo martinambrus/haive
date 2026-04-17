@@ -80,6 +80,15 @@ async function resolveCliVersionForSave(
   return row?.latestVersion ?? null;
 }
 
+// Drops any value the adapter does not declare. Adapters with no effort knob
+// always store null so a stale UI cannot poison the column.
+function resolveEffortLevelForSave(name: CliProviderName, requested: string | null): string | null {
+  const scale = CLI_PROVIDER_CATALOG[name].effortScale;
+  if (!scale) return null;
+  if (requested === null) return null;
+  return scale.values.includes(requested) ? requested : null;
+}
+
 async function enqueueBuildForProvider(providerId: string, userId: string): Promise<void> {
   const db = getDb();
   await db
@@ -215,6 +224,7 @@ cliProviderRoutes.post('/', async (c) => {
       networkPolicy: body.networkPolicy ?? { mode: 'full', domains: [], ips: [] },
       authMode: body.authMode,
       cliVersion: resolvedVersion,
+      effortLevel: resolveEffortLevelForSave(body.name, body.effortLevel ?? null),
       sandboxDockerfileExtra: body.sandboxDockerfileExtra?.length
         ? body.sandboxDockerfileExtra
         : null,
@@ -272,6 +282,9 @@ cliProviderRoutes.patch('/:id', async (c) => {
     const nextExtra = body.sandboxDockerfileExtra.length ? body.sandboxDockerfileExtra : null;
     if (nextExtra !== existing.sandboxDockerfileExtra) imageInputsChanged = true;
     updates.sandboxDockerfileExtra = nextExtra;
+  }
+  if (body.effortLevel !== undefined) {
+    updates.effortLevel = resolveEffortLevelForSave(existing.name, body.effortLevel);
   }
   if (body.enabled !== undefined) updates.enabled = body.enabled;
 
@@ -401,6 +414,7 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
       networkPolicy: source.networkPolicy,
       authMode: source.authMode,
       cliVersion: source.cliVersion,
+      effortLevel: source.effortLevel,
       sandboxDockerfileExtra: source.sandboxDockerfileExtra,
       enabled: source.enabled,
     })

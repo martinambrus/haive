@@ -5,6 +5,7 @@ import type {
   CliCommandSpec,
   CliProviderName,
   CliProviderRecord,
+  EffortScale,
   EnvInjection,
   InvokeOpts,
   PluginInstallCommand,
@@ -28,6 +29,10 @@ export abstract class BaseCliAdapter {
   abstract readonly defaultAuthMode: CliAuthMode;
   abstract readonly apiKeyEnvName: string | null;
   abstract readonly defaultModel: string | null;
+  /** Effort/reasoning scale exposed by this CLI, or null when the underlying
+   *  CLI has no such knob. Adapters that override this MUST also override
+   *  effortEnv() to translate a level into env vars. */
+  readonly effortScale: EffortScale | null = null;
 
   async isAvailable(provider: CliProviderRecord): Promise<boolean> {
     const result = await this.probeExecutable(provider);
@@ -75,10 +80,11 @@ export abstract class BaseCliAdapter {
     opts: PluginInstallOpts,
   ): PluginInstallCommand[];
 
-  /** Env vars to inject when InvokeOpts.maxThinking is true. Default: none.
-   *  Override per-adapter when the underlying CLI supports an effort/budget
-   *  knob (e.g. CLAUDE_CODE_EFFORT_LEVEL=max). */
-  maxThinkingEnv(): Record<string, string> {
+  /** Env vars to inject for the given effort level. Default: none. Override
+   *  per-adapter when the underlying CLI supports an effort/budget knob
+   *  (e.g. CLAUDE_CODE_EFFORT_LEVEL). The level passed in is guaranteed to
+   *  be a member of effortScale.values when effortScale is non-null. */
+  effortEnv(_level: string): Record<string, string> {
     return {};
   }
 
@@ -91,8 +97,24 @@ export abstract class BaseCliAdapter {
   }
 
   protected mergedEnv(provider: CliProviderRecord, opts: InvokeOpts): Record<string, string> {
-    const thinking = opts.maxThinking ? this.maxThinkingEnv() : {};
-    return { ...(provider.envVars ?? {}), ...thinking, ...(opts.extraEnv ?? {}) };
+    const effort = this.resolveEffortEnv(provider, opts);
+    return { ...(provider.envVars ?? {}), ...effort, ...(opts.extraEnv ?? {}) };
+  }
+
+  /** Resolution order: explicit InvokeOpts.effortLevel wins, then the
+   *  per-provider stored effortLevel, then the adapter's effortScale.max.
+   *  Adapters with effortScale=null always emit no effort env. Unknown
+   *  level values are ignored (no env injected) so a stale DB row cannot
+   *  push an invalid value into the CLI. */
+  protected resolveEffortEnv(
+    provider: CliProviderRecord,
+    opts: InvokeOpts,
+  ): Record<string, string> {
+    const scale = this.effortScale;
+    if (!scale) return {};
+    const candidate = opts.effortLevel ?? provider.effortLevel ?? scale.max;
+    if (!scale.values.includes(candidate)) return {};
+    return this.effortEnv(candidate);
   }
 
   protected mergedArgs(provider: CliProviderRecord, base: string[]): string[] {

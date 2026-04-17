@@ -48,6 +48,7 @@ interface FormState {
   cliArgsText: string;
   authMode: CliAuthMode;
   cliVersion: string;
+  effortLevel: string;
   sandboxDockerfileExtra: string;
   enabled: boolean;
   networkMode: CliNetworkMode;
@@ -109,6 +110,7 @@ function statesEqual(a: FormState, b: FormState): boolean {
     a.cliArgsText === b.cliArgsText &&
     a.authMode === b.authMode &&
     a.cliVersion === b.cliVersion &&
+    a.effortLevel === b.effortLevel &&
     a.sandboxDockerfileExtra === b.sandboxDockerfileExtra &&
     a.enabled === b.enabled &&
     a.networkMode === b.networkMode &&
@@ -152,6 +154,7 @@ export function CliProviderForm({
     cliVersion:
       provider?.cliVersion ??
       (metadata.versionPinnable ? (metadata.versionCache?.latestVersion ?? '') : ''),
+    effortLevel: metadata.effortScale ? (provider?.effortLevel ?? metadata.effortScale.max) : '',
     sandboxDockerfileExtra: provider?.sandboxDockerfileExtra ?? '',
     enabled: provider?.enabled ?? true,
     networkMode: (provider?.networkPolicy ?? DEFAULT_CLI_NETWORK_POLICY).mode,
@@ -284,6 +287,7 @@ export function CliProviderForm({
       cliArgs: parseCliArgs(snapshot.cliArgsText),
       authMode: snapshot.authMode,
       cliVersion: snapshot.cliVersion || null,
+      effortLevel: metadata.effortScale ? snapshot.effortLevel || null : null,
       sandboxDockerfileExtra: snapshot.sandboxDockerfileExtra,
       enabled: snapshot.enabled,
       networkPolicy,
@@ -375,6 +379,7 @@ export function CliProviderForm({
           cliArgs: parseCliArgs(state.cliArgsText),
           authMode: state.authMode,
           cliVersion: state.cliVersion || null,
+          effortLevel: metadata.effortScale ? state.effortLevel || null : null,
           sandboxDockerfileExtra: state.sandboxDockerfileExtra,
           enabled: state.enabled,
           networkPolicy,
@@ -546,6 +551,36 @@ export function CliProviderForm({
           </>
         )}
       </div>
+
+      {metadata.effortScale && (
+        <div>
+          <Label>Reasoning effort</Label>
+          <div className="mt-2 flex flex-col gap-2">
+            {metadata.effortScale.values.map((level) => (
+              <label key={level} className="flex items-start gap-2 text-sm text-neutral-200">
+                <input
+                  type="radio"
+                  name="effortLevel"
+                  className="mt-1"
+                  value={level}
+                  checked={state.effortLevel === level}
+                  onChange={() => update('effortLevel', level)}
+                />
+                <div>
+                  <div className="font-medium">{level}</div>
+                </div>
+              </label>
+            ))}
+          </div>
+          <p className="mt-1 text-xs text-neutral-500">
+            Forwarded to the CLI as <code className="font-mono">CLAUDE_CODE_EFFORT_LEVEL</code>.
+            Lower levels are faster and cheaper but reduce reasoning depth. Default is{' '}
+            <code className="font-mono">{metadata.effortScale.max}</code>; tasks that produce
+            long-lived configuration (onboarding) warn before starting if this provider is set below
+            the maximum.
+          </p>
+        </div>
+      )}
 
       <div>
         <Label htmlFor="sandboxDockerfileExtra">Custom Dockerfile lines (sandbox image)</Label>

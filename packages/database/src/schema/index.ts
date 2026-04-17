@@ -189,6 +189,7 @@ export const cliProviders = pgTable(
       .default({ mode: 'full', domains: [], ips: [] }),
     authMode: cliAuthModeEnum('auth_mode').notNull().default('subscription'),
     cliVersion: text('cli_version'),
+    effortLevel: text('effort_level'),
     sandboxDockerfileExtra: text('sandbox_dockerfile_extra'),
     sandboxImageTag: text('sandbox_image_tag'),
     sandboxImageBuildStatus: cliSandboxBuildStatusEnum('sandbox_image_build_status')

@@ -156,6 +156,11 @@ export const DEFAULT_CLI_NETWORK_POLICY: CliNetworkPolicy = {
   ips: [],
 };
 
+export interface EffortScaleMetadata {
+  values: readonly string[];
+  max: string;
+}
+
 export interface CliProviderMetadata {
   name: CliProviderName;
   displayName: string;
@@ -171,6 +176,7 @@ export interface CliProviderMetadata {
   defaultModel: string | null;
   authConfigPaths: string[];
   docsUrl?: string;
+  effortScale: EffortScaleMetadata | null;
 }
 
 export interface CliPackageVersionsEntry {
@@ -201,6 +207,7 @@ export interface CliProvider {
   networkPolicy: CliNetworkPolicy;
   authMode: CliAuthMode;
   cliVersion: string | null;
+  effortLevel: string | null;
   sandboxDockerfileExtra: string | null;
   sandboxImageTag: string | null;
   sandboxImageBuildStatus: CliSandboxBuildStatus;

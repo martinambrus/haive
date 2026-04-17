@@ -948,7 +948,6 @@ async function executeSubAgentNative(
   const spec = adapter.buildCliInvocation(provider, prompt, {
     cwd: sandboxWorkdir,
     extraEnv: secrets,
-    maxThinking: payload.maxThinking,
   });
   const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
   const mcpFiles = await resolveMcpExtraFiles(
@@ -1019,7 +1018,6 @@ async function executeSubAgentSequential(
       adapter.buildCliInvocation(provider, prompt, {
         cwd: sandboxWorkdir,
         extraEnv: secrets,
-        maxThinking: payload.maxThinking,
       }),
     spawner,
     { timeoutMs: payload.timeoutMs },

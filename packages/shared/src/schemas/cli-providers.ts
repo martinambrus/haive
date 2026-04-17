@@ -40,6 +40,7 @@ export const createCliProviderRequestSchema = z.object({
   cliArgs: z.array(z.string()).optional(),
   authMode: cliAuthModeSchema,
   cliVersion: z.string().nullable().optional(),
+  effortLevel: z.string().nullable().optional(),
   sandboxDockerfileExtra: z.string().optional(),
   enabled: z.boolean().optional(),
   networkPolicy: cliNetworkPolicySchema.optional(),

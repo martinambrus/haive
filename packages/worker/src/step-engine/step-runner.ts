@@ -123,10 +123,6 @@ async function resolveLlmPhase(
   }
 
   const prompt = llmSpec.buildPrompt({ detected, formValues: formValues ?? {} });
-  // Onboarding steps always run with maximum reasoning effort because they generate
-  // long-lived configuration that must be carefully reasoned about. Workflow steps
-  // use the adapter default (a per-step or per-task toggle can be added later).
-  const maxThinking = stepDef.metadata.workflowType === 'onboarding';
   const plan = resolveDispatch({
     providers: params.providers,
     preferredProviderId: params.cliProviderId ?? null,
@@ -135,7 +131,7 @@ async function resolveLlmPhase(
       prompt,
       capabilities: llmSpec.requiredCapabilities,
     },
-    invokeOpts: { cwd: params.workspacePath, maxThinking },
+    invokeOpts: { cwd: params.workspacePath },
   });
 
   if (plan.mode === 'skip' || !plan.invocation) {
@@ -185,7 +181,6 @@ async function resolveLlmPhase(
     kind: payloadKind,
     spec: plan.invocation.spec,
     timeoutMs: llmSpec.timeoutMs,
-    maxThinking,
   });
   const updated = await updateRow(db, current.id, {
     status: 'waiting_cli',

@@ -3,11 +3,17 @@ import type {
   ApiCallSpec,
   CliCommandSpec,
   CliProviderRecord,
+  EffortScale,
   EnvInjection,
   InvokeOpts,
   PluginInstallCommand,
   PluginInstallOpts,
 } from './types.js';
+
+const ZAI_EFFORT_SCALE: EffortScale = {
+  values: ['low', 'medium', 'high', 'max'],
+  max: 'max',
+};
 
 const ZAI_LSP_PLUGINS: Record<string, string> = {
   typescript: 'vtsls',
@@ -30,6 +36,7 @@ export class ZaiAdapter extends BaseCliAdapter {
   readonly defaultAuthMode = 'mixed' as const;
   readonly apiKeyEnvName = 'ANTHROPIC_API_KEY';
   readonly defaultModel = 'zai-latest';
+  override readonly effortScale = ZAI_EFFORT_SCALE;
 
   buildCliInvocation(
     provider: CliProviderRecord,
@@ -71,8 +78,8 @@ export class ZaiAdapter extends BaseCliAdapter {
     };
   }
 
-  override maxThinkingEnv(): Record<string, string> {
-    return { CLAUDE_CODE_EFFORT_LEVEL: 'max' };
+  override effortEnv(level: string): Record<string, string> {
+    return { CLAUDE_CODE_EFFORT_LEVEL: level };
   }
 
   envInjection(_provider: CliProviderRecord): EnvInjection {

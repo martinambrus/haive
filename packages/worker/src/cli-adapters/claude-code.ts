@@ -3,11 +3,17 @@ import type {
   ApiCallSpec,
   CliCommandSpec,
   CliProviderRecord,
+  EffortScale,
   EnvInjection,
   InvokeOpts,
   PluginInstallCommand,
   PluginInstallOpts,
 } from './types.js';
+
+const CLAUDE_EFFORT_SCALE: EffortScale = {
+  values: ['low', 'medium', 'high', 'max'],
+  max: 'max',
+};
 
 const CLAUDE_LSP_PLUGINS: Record<string, string> = {
   typescript: 'vtsls',
@@ -30,6 +36,7 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
   readonly defaultAuthMode = 'subscription' as const;
   readonly apiKeyEnvName = 'ANTHROPIC_API_KEY';
   readonly defaultModel = 'claude-sonnet-4-20250514';
+  override readonly effortScale = CLAUDE_EFFORT_SCALE;
 
   buildCliInvocation(
     provider: CliProviderRecord,
@@ -66,8 +73,8 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
     };
   }
 
-  override maxThinkingEnv(): Record<string, string> {
-    return { CLAUDE_CODE_EFFORT_LEVEL: 'max' };
+  override effortEnv(level: string): Record<string, string> {
+    return { CLAUDE_CODE_EFFORT_LEVEL: level };
   }
 
   envInjection(_provider: CliProviderRecord): EnvInjection {

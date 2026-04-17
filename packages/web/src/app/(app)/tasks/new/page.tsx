@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   api,
   type CliProvider,
+  type CliProviderCatalogEntry,
   type OnboardingStatus,
   type Repository,
   type Task,
@@ -26,6 +27,7 @@ export default function NewTaskPage() {
   const router = useRouter();
   const [repos, setRepos] = useState<Repository[] | null>(null);
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
+  const [catalog, setCatalog] = useState<CliProviderCatalogEntry[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [title, setTitle] = useState('');
@@ -46,15 +48,19 @@ export default function NewTaskPage() {
     let cancelled = false;
     async function load() {
       try {
-        const [repoRes, providerRes] = await Promise.all([
+        const [repoRes, providerRes, catalogRes] = await Promise.all([
           api.get<{ repositories: Repository[] }>('/repos'),
           api.get<{ providers: CliProvider[] }>('/cli-providers').catch(() => ({
             providers: [],
           })),
+          api
+            .get<{ providers: CliProviderCatalogEntry[] }>('/cli-providers/catalog')
+            .catch(() => ({ providers: [] })),
         ]);
         if (cancelled) return;
         setRepos(repoRes.repositories);
         setProviders(providerRes.providers);
+        setCatalog(catalogRes.providers);
       } catch (err) {
         if (cancelled) return;
         setLoadError((err as Error).message ?? 'Failed to load repositories');
@@ -147,6 +153,26 @@ export default function NewTaskPage() {
       ? 'workflow'
       : 'onboarding'
     : null;
+
+  const selectedProvider = (providers ?? []).find((p) => p.id === cliProviderId) ?? null;
+  const selectedProviderMeta = selectedProvider
+    ? ((catalog ?? []).find((c) => c.name === selectedProvider.name) ?? null)
+    : null;
+  // Onboarding produces long-lived agent/skill/KB files. A below-max effort
+  // here propagates into every later task that runs against the same repo,
+  // so we surface a yellow warning before the user commits to it.
+  const effortWarning =
+    inferredType === 'onboarding' &&
+    selectedProvider &&
+    selectedProviderMeta?.effortScale &&
+    (selectedProvider.effortLevel ?? selectedProviderMeta.effortScale.max) !==
+      selectedProviderMeta.effortScale.max
+      ? {
+          chosen: selectedProvider.effortLevel ?? selectedProviderMeta.effortScale.max,
+          max: selectedProviderMeta.effortScale.max,
+          providerLabel: selectedProvider.label,
+        }
+      : null;
 
   return (
     <div className="flex max-w-2xl flex-col gap-6">
@@ -286,6 +312,18 @@ export default function NewTaskPage() {
               </option>
             ))}
           </select>
+          {effortWarning && (
+            <div className="mt-2 rounded-md border border-amber-700 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+              <strong>Reasoning effort below maximum.</strong> Provider{' '}
+              <code className="font-mono">{effortWarning.providerLabel}</code> is set to{' '}
+              <code className="font-mono">{effortWarning.chosen}</code> (max:{' '}
+              <code className="font-mono">{effortWarning.max}</code>). Onboarding produces
+              long-lived agent, skill, and knowledge-base files that every later task against this
+              repository inherits — running it below the maximum effort can degrade the quality of
+              every future workflow. Adjust the level on the provider in Settings &rarr; CLI
+              providers, or pick a different provider, before continuing.
+            </div>
+          )}
         </div>
 
         <FormError message={error} />

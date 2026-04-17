@@ -1,5 +1,13 @@
 import type { AuthMode, CliProviderName } from '../types/index.js';
 
+export interface EffortScaleMetadata {
+  /** Allowed level identifiers for this CLI, ordered low-to-high. */
+  values: readonly string[];
+  /** Identifier for the highest effort level. Used as the default when no
+   *  per-provider override is set, and to gate the onboarding warning. */
+  max: string;
+}
+
 export interface CliProviderMetadata {
   name: CliProviderName;
   displayName: string;
@@ -15,7 +23,16 @@ export interface CliProviderMetadata {
   defaultModel: string | null;
   authConfigPaths: string[];
   docsUrl?: string;
+  /** When non-null the provider exposes a reasoning/effort knob and the UI
+   *  must render a selector for it. Adapters that don't support such a knob
+   *  set this to null and ignore any stored effortLevel. */
+  effortScale: EffortScaleMetadata | null;
 }
+
+const CLAUDE_LIKE_EFFORT_SCALE: EffortScaleMetadata = {
+  values: ['low', 'medium', 'high', 'max'],
+  max: 'max',
+};
 
 export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> = {
   'claude-code': {
@@ -34,6 +51,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     defaultModel: 'claude-sonnet-4-20250514',
     authConfigPaths: ['~/.config/claude', '~/.claude'],
     docsUrl: 'https://docs.anthropic.com/en/docs/claude-code',
+    effortScale: CLAUDE_LIKE_EFFORT_SCALE,
   },
   codex: {
     name: 'codex',
@@ -49,6 +67,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     apiKeyEnvName: 'OPENAI_API_KEY',
     defaultModel: 'o3',
     authConfigPaths: ['~/.codex'],
+    effortScale: null,
   },
   gemini: {
     name: 'gemini',
@@ -64,6 +83,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     apiKeyEnvName: 'GEMINI_API_KEY',
     defaultModel: 'gemini-2.5-pro',
     authConfigPaths: ['~/.config/gemini', '~/.gemini'],
+    effortScale: null,
   },
   amp: {
     name: 'amp',
@@ -79,6 +99,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     apiKeyEnvName: null,
     defaultModel: null,
     authConfigPaths: ['~/.config/amp', '~/.amp'],
+    effortScale: null,
   },
   grok: {
     name: 'grok',
@@ -94,6 +115,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     apiKeyEnvName: 'XAI_API_KEY',
     defaultModel: 'grok-3',
     authConfigPaths: ['~/.config/grok', '~/.grok'],
+    effortScale: null,
   },
   qwen: {
     name: 'qwen',
@@ -109,6 +131,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     apiKeyEnvName: 'DASHSCOPE_API_KEY',
     defaultModel: 'qwen-max',
     authConfigPaths: ['~/.qwen'],
+    effortScale: null,
   },
   kiro: {
     name: 'kiro',
@@ -124,6 +147,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     apiKeyEnvName: null,
     defaultModel: null,
     authConfigPaths: ['~/.kiro'],
+    effortScale: null,
   },
   zai: {
     name: 'zai',
@@ -139,6 +163,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     apiKeyEnvName: 'ANTHROPIC_API_KEY',
     defaultModel: 'zai-latest',
     authConfigPaths: ['~/.config/claude', '~/.claude'],
+    effortScale: CLAUDE_LIKE_EFFORT_SCALE,
   },
 };
 
