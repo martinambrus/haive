@@ -461,23 +461,33 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
   ].join('\n');
 }
 
-function parseLlmAgentOutput(
+export function parseLlmAgentOutput(
   raw: string,
 ): { predefined: Record<string, boolean>; custom: LlmAgentSuggestion[] } | null {
-  const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (!match) return null;
-  try {
-    const obj = JSON.parse(match[1]!) as {
-      predefined?: Record<string, boolean>;
-      custom?: LlmAgentSuggestion[];
-    };
-    return {
-      predefined: obj.predefined ?? {},
-      custom: Array.isArray(obj.custom) ? obj.custom : [],
-    };
-  } catch {
-    return null;
+  // Custom agent bodies include an `outputFormat` field that is itself a
+  // triple-backtick fenced Markdown block. That means the outer ```json fence
+  // contains inner ``` sequences inside JSON string values, so a lazy regex
+  // match ends at the first inner ``` and yields truncated/invalid JSON.
+  // Try lazy first (single-block happy path), then greedy that spans to the
+  // final ``` (handles embedded fences).
+  const lazy = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const greedy = raw.match(/```(?:json)?\s*([\s\S]*)```/);
+  for (const candidate of [lazy?.[1], greedy?.[1]]) {
+    if (!candidate) continue;
+    try {
+      const obj = JSON.parse(candidate) as {
+        predefined?: Record<string, boolean>;
+        custom?: LlmAgentSuggestion[];
+      };
+      return {
+        predefined: obj.predefined ?? {},
+        custom: Array.isArray(obj.custom) ? obj.custom : [],
+      };
+    } catch {
+      // try the next candidate
+    }
   }
+  return null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -712,6 +722,7 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
     requiredCapabilities: [],
     preForm: true,
     buildPrompt: buildAgentDiscoveryPrompt,
+    timeoutMs: 60 * 60 * 1000,
   },
 
   form(_ctx, detected, llmOutput): FormSchema {

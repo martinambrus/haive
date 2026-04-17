@@ -276,4 +276,72 @@ describe('advanceStep LLM phase', () => {
       expect(result.error).toContain('boom');
     }
   });
+
+  it('fails the step when exitCode is 0 but errorMessage is set (stream-json no-result case)', async () => {
+    const state = freshState();
+    state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
+    state.cliInvocationRow = {
+      id: 'inv-1',
+      exitCode: 0,
+      rawOutput: '{"type":"system","subtype":"init"}',
+      parsedOutput: null,
+      endedAt: new Date(),
+      errorMessage: 'LLM emitted no result event',
+      createdAt: new Date(),
+    };
+    const db = makeMockDb(state);
+    const result = await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: baseStep(),
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation() {
+          throw new Error('should not enqueue');
+        },
+      },
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toMatch(/no result event/);
+    }
+  });
+
+  it('fails the step when exitCode is null (abnormal termination)', async () => {
+    const state = freshState();
+    state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
+    state.cliInvocationRow = {
+      id: 'inv-1',
+      exitCode: null,
+      rawOutput: null,
+      parsedOutput: null,
+      endedAt: new Date(),
+      errorMessage: null,
+      createdAt: new Date(),
+    };
+    const db = makeMockDb(state);
+    const result = await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: baseStep(),
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation() {
+          throw new Error('should not enqueue');
+        },
+      },
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toMatch(/cli exited null/);
+    }
+  });
 });

@@ -461,12 +461,23 @@ interface StreamJsonCollector {
   getResult: () => string | null;
   /** Whether the stream contained valid NDJSON events (vs plain JSON output). */
   isStreamJson: () => boolean;
+  /** Human-readable reason when the stream ended without a success result. */
+  getNoResultReason: () => string | null;
 }
 
-function createStreamJsonCollector(onProgress?: (message: string) => void): StreamJsonCollector {
+export function createStreamJsonCollector(
+  onProgress?: (message: string) => void,
+): StreamJsonCollector {
   let buffer = '';
   let resultText: string | null = null;
   let eventCount = 0;
+  let lastResultSubtype: string | null = null;
+  let lastRateLimit: {
+    status?: string;
+    overageStatus?: string;
+    overageDisabledReason?: string;
+    isUsingOverage?: boolean;
+  } | null = null;
 
   function processLine(line: string): void {
     const trimmed = line.trim();
@@ -483,10 +494,18 @@ function createStreamJsonCollector(onProgress?: (message: string) => void): Stre
     const type = event.type as string;
     const subtype = event.subtype as string | undefined;
 
+    if (type === 'rate_limit_event') {
+      const info = event.rate_limit_info as typeof lastRateLimit;
+      if (info) lastRateLimit = info;
+    }
+
     // Extract final result
-    if (type === 'result' && subtype === 'success' && typeof event.result === 'string') {
-      resultText = event.result;
-      return;
+    if (type === 'result') {
+      if (typeof subtype === 'string') lastResultSubtype = subtype;
+      if (subtype === 'success' && typeof event.result === 'string') {
+        resultText = event.result;
+        return;
+      }
     }
 
     if (!onProgress) return;
@@ -530,6 +549,17 @@ function createStreamJsonCollector(onProgress?: (message: string) => void): Stre
     },
     isStreamJson(): boolean {
       return eventCount > 0;
+    },
+    getNoResultReason(): string | null {
+      if (resultText !== null) return null;
+      if (eventCount === 0) return null;
+      if (lastResultSubtype && lastResultSubtype !== 'success') {
+        return `LLM stream ended with result subtype "${lastResultSubtype}"`;
+      }
+      if (lastRateLimit?.overageStatus === 'rejected' && lastRateLimit.isUsingOverage) {
+        return `LLM blocked by rate limit (${lastRateLimit.overageDisabledReason ?? 'overage rejected'})`;
+      }
+      return 'LLM emitted no result event (stream ended prematurely — likely timeout, session abort, or quota rejection)';
     },
   };
 }
@@ -706,6 +736,18 @@ async function executeCliSpec(
       rawOutput: streamResult,
       parsedOutput: tryJsonParse(streamResult),
       errorMessage: result.error ?? (result.exitCode !== 0 ? result.stderr.slice(0, 2000) : null),
+    };
+  }
+
+  // Stream-json detected but no success result — surface this as a failure
+  // so the step can fail loudly rather than silently falling back to defaults.
+  if (collector.isStreamJson() && streamResult === null) {
+    const reason = collector.getNoResultReason() ?? 'LLM emitted no result event';
+    return {
+      exitCode: result.exitCode,
+      rawOutput: result.stdout,
+      parsedOutput: null,
+      errorMessage: result.error ?? reason,
     };
   }
 

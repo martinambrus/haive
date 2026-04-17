@@ -64,7 +64,7 @@ describe('skillToMarkdown', () => {
     expect(md).toContain('Is DB online?');
     expect(md).toContain('## Implementation Patterns');
     expect(md).toContain('### Pattern A');
-    expect(md).toContain('## Common Pitfalls');
+    expect(md).toContain('## Pitfalls and Edge Cases');
     expect(md).toContain('### Pitfall X');
     expect(md).toContain('## Code Locations');
     expect(md).toContain('- **Tests** — `packages/worker/test/`');
@@ -87,7 +87,7 @@ describe('skillToMarkdown', () => {
     };
     const md = skillToMarkdown(entry);
     expect(md).not.toContain('## Key Concepts');
-    expect(md).not.toContain('## Common Pitfalls');
+    expect(md).not.toContain('## Pitfalls and Edge Cases');
     expect(md).not.toContain('## Code Locations');
   });
 });

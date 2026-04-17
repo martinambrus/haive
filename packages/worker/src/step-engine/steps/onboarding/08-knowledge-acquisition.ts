@@ -11,6 +11,7 @@ import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helper
 interface KnowledgeDetect {
   framework: string | null;
   language: string | null;
+  projectName: string | null;
   /** Transient — file tree for LLM prompt, stripped before persisting. */
   __fileTree?: string;
   /** Transient — README excerpt for LLM prompt context. */
@@ -23,12 +24,22 @@ interface KnowledgeApply {
   llmAvailable: boolean;
 }
 
+type KbCategory = 'general' | 'tech_pattern' | 'anti_pattern';
+
 interface KbEntry {
   id: string;
   title: string;
   sections: { heading: string; body: string }[];
   confidence?: 'high' | 'medium' | 'low';
   sourceFiles?: string[];
+  /** Uppercase stem (no extension) like "ARCHITECTURE" to force a canonical filename
+   *  at the KB root. Only used for root-level standards; tech/anti entries ignore it. */
+  canonical?: string;
+  /** Determines which subdir the entry lands in. Defaults to `general`. */
+  category?: KbCategory;
+  /** Required when `category` is `tech_pattern` or `anti_pattern`. The technology or
+   *  framework the pattern covers — becomes the subdir / filename stem. */
+  tech?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -149,6 +160,9 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '      "title": "Human Readable Title",',
     '      "confidence": "high|medium|low",',
     '      "sourceFiles": ["path/to/file1.ts", "path/to/file2.ts"],',
+    '      "category": "general | tech_pattern | anti_pattern",',
+    '      "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit for topic-specific entries)",',
+    '      "tech": "<required when category is tech_pattern or anti_pattern — e.g. node-pty, shell, drupal-entity-api>",',
     '      "sections": [',
     '        { "heading": "Section Name", "body": "Detailed markdown content..." }',
     '      ]',
@@ -162,11 +176,20 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '- title: clear human-readable name',
     '- confidence: "high" if you read the actual files, "medium" if inferred from structure, "low" if speculative',
     '- sourceFiles: list the files you actually read to produce this entry',
-    '- sections: at least 2 sections per entry with real extracted content, not generic advice',
-    '  - Include actual code patterns, specific config values, real file paths from the project',
-    '  - Write as if explaining to a new team member who needs to understand this area',
+    '- category:',
+    '    * "general" for broad project knowledge — maps either to a canonical root file (when `canonical` is set) or a kebab-case root file.',
+    '    * "tech_pattern" for HOW a specific technology/library is used in THIS repo — maps to TECH_PATTERNS/<tech>/INDEX.md.',
+    '    * "anti_pattern" for pitfalls/mistakes with a technology — maps to ANTI_PATTERNS/<tech>-mistakes.md.',
+    '- canonical: optional. Use when the entry matches one of the standard root-level files',
+    '    (ARCHITECTURE, API_REFERENCE, CODING_STANDARDS, TESTING_STANDARDS, SECURITY_STANDARDS, DEPLOYMENT, BUSINESS_LOGIC).',
+    '    Produce AT MOST ONE entry per canonical name. Omit for all other entries.',
+    '- tech: required when category is tech_pattern or anti_pattern. kebab-case (e.g. node-pty, drupal-form-api, rails-ar).',
+    '- sections: at least 2 sections per entry with real extracted content, not generic advice.',
+    '  - Include actual code patterns, specific config values, real file paths from the project.',
+    '  - Write as if explaining to a new team member who needs to understand this area.',
     '',
-    'Aim for 5-15 knowledge entries depending on project complexity.',
+    'Aim for 5-15 knowledge entries depending on project complexity. Cover the canonical root files',
+    'first, then add tech_pattern / anti_pattern entries per major technology this repo actually uses.',
     'Do not emit any prose outside the fenced JSON block.',
   ].join('\n');
 }
@@ -270,6 +293,123 @@ function entryToMarkdown(entry: KbEntry): string {
   return lines.join('\n');
 }
 
+const CANONICAL_STEMS = new Set([
+  'ARCHITECTURE',
+  'API_REFERENCE',
+  'CODING_STANDARDS',
+  'TESTING_STANDARDS',
+  'SECURITY_STANDARDS',
+  'DEPLOYMENT',
+  'BUSINESS_LOGIC',
+]);
+
+function normalizeTech(raw: string | undefined): string | null {
+  if (typeof raw !== 'string') return null;
+  const slug = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || null;
+}
+
+function normalizeCanonical(raw: string | undefined): string | null {
+  if (typeof raw !== 'string') return null;
+  const stem = raw
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (!stem) return null;
+  return CANONICAL_STEMS.has(stem) ? stem : null;
+}
+
+export interface RoutedEntry {
+  entry: KbEntry;
+  /** Path relative to `.claude/knowledge_base/` — includes subdirs. */
+  relPath: string;
+  bucket: 'core' | 'tech_pattern' | 'anti_pattern' | 'topic';
+  /** Canonical stem for core entries, tech slug for tech/anti entries, entry id for topic. */
+  key: string;
+}
+
+/** Dedupes by (bucket, key) — first entry wins when the LLM emits two with the same canonical/tech. */
+export function routeEntries(entries: KbEntry[]): RoutedEntry[] {
+  const out: RoutedEntry[] = [];
+  const seen = new Set<string>();
+  const push = (r: RoutedEntry) => {
+    const k = `${r.bucket}:${r.key}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(r);
+  };
+  for (const entry of entries) {
+    const canonical = normalizeCanonical(entry.canonical);
+    const category = entry.category ?? 'general';
+    if (canonical) {
+      push({ entry, relPath: `${canonical}.md`, bucket: 'core', key: canonical });
+      continue;
+    }
+    if (category === 'tech_pattern') {
+      const tech = normalizeTech(entry.tech);
+      if (tech) {
+        push({
+          entry,
+          relPath: `TECH_PATTERNS/${tech}/INDEX.md`,
+          bucket: 'tech_pattern',
+          key: tech,
+        });
+        continue;
+      }
+    }
+    if (category === 'anti_pattern') {
+      const tech = normalizeTech(entry.tech);
+      if (tech) {
+        push({
+          entry,
+          relPath: `ANTI_PATTERNS/${tech}-mistakes.md`,
+          bucket: 'anti_pattern',
+          key: tech,
+        });
+        continue;
+      }
+    }
+    push({ entry, relPath: `${entry.id}.md`, bucket: 'topic', key: entry.id });
+  }
+  return out;
+}
+
+export function kbIndexMarkdown(routed: RoutedEntry[], projectName: string | null): string {
+  const core = routed.filter((r) => r.bucket === 'core');
+  const tech = routed.filter((r) => r.bucket === 'tech_pattern');
+  const anti = routed.filter((r) => r.bucket === 'anti_pattern');
+  const topic = routed.filter((r) => r.bucket === 'topic');
+  const lines: string[] = ['# Knowledge Base Index', ''];
+  if (projectName) lines.push(projectName + '.', '');
+
+  if (core.length > 0) {
+    lines.push('## Core Files', '');
+    for (const r of core) lines.push(`- ${r.relPath} - ${r.entry.title}`);
+    lines.push('');
+  }
+  if (tech.length > 0) {
+    lines.push('## Tech Patterns', '');
+    for (const r of tech) lines.push(`- ${r.relPath} - ${r.entry.title}`);
+    lines.push('');
+  }
+  if (anti.length > 0) {
+    lines.push('## Anti-Patterns', '');
+    for (const r of anti) lines.push(`- ${r.relPath} - ${r.entry.title}`);
+    lines.push('');
+  }
+  if (topic.length > 0) {
+    lines.push('## Topics', '');
+    for (const r of topic) lines.push(`- ${r.relPath} - ${r.entry.title}`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
 function stubMarkdown(title: string): string {
   return [
     `# ${title}`,
@@ -330,10 +470,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     await ctx.emitProgress('Loading project metadata...');
     const envPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
     const envData = (envPrev?.detect as DetectResult | null)?.data as
-      | { project?: { framework?: string; primaryLanguage?: string } }
+      | { project?: { framework?: string; primaryLanguage?: string; name?: string } }
       | undefined;
     const framework = envData?.project?.framework ?? null;
     const language = envData?.project?.primaryLanguage ?? null;
+    const projectName = envData?.project?.name ?? null;
 
     await ctx.emitProgress('Collecting file tree for LLM orientation...');
     const fileTree = await collectShortFileTree(ctx.repoPath);
@@ -346,12 +487,13 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     );
 
     ctx.logger.info(
-      { framework, language, fileTreeLines: fileTree.split('\n').length },
+      { framework, language, projectName, fileTreeLines: fileTree.split('\n').length },
       'knowledge acquisition detect complete',
     );
     return {
       framework,
       language,
+      projectName,
       __fileTree: fileTree,
       __readmeExcerpt: readmeExcerpt ?? undefined,
     };
@@ -454,20 +596,23 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     const entries = extractEntries(args.llmOutput ?? null);
     const llmAvailable = entries.length > 0;
     const written: { id: string; filePath: string; source: 'llm' | 'stub' }[] = [];
+    const routedForIndex: RoutedEntry[] = [];
 
     if (llmAvailable) {
-      // LLM path: write selected entries
+      // LLM path: filter to user-selected entries, then route into the canonical
+      // KB layout (core / TECH_PATTERNS / ANTI_PATTERNS / topic).
       const selected = new Set(values.selectedTopics ?? []);
-      const byId = new Map(entries.map((e) => [e.id, e]));
-      for (const id of selected) {
-        const entry = byId.get(id);
-        if (!entry) continue;
-        const filePath = path.join(kbDir, `${entry.id}.md`);
-        await writeFile(filePath, entryToMarkdown(entry), 'utf8');
-        written.push({ id: entry.id, filePath, source: 'llm' });
+      const selectedEntries = entries.filter((e) => selected.has(e.id));
+      const routed = routeEntries(selectedEntries);
+      for (const r of routed) {
+        const filePath = path.join(kbDir, r.relPath);
+        await mkdir(path.dirname(filePath), { recursive: true });
+        await writeFile(filePath, entryToMarkdown(r.entry), 'utf8');
+        written.push({ id: r.entry.id, filePath, source: 'llm' });
+        routedForIndex.push(r);
       }
     } else {
-      // Fallback path: write stubs from manual topic list
+      // Fallback path: write stubs from manual topic list at the KB root (flat).
       const raw = typeof values.manualTopics === 'string' ? values.manualTopics : '';
       const topics = raw
         .split('\n')
@@ -479,10 +624,22 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
           .replace(/[^a-z0-9]+/g, '-')
           .replace(/^-|-$/g, '');
         if (!id) continue;
-        const filePath = path.join(kbDir, `${id}.md`);
+        const relPath = `${id}.md`;
+        const filePath = path.join(kbDir, relPath);
         await writeFile(filePath, stubMarkdown(title), 'utf8');
         written.push({ id, filePath, source: 'stub' });
+        routedForIndex.push({
+          entry: { id, title, sections: [] },
+          relPath,
+          bucket: 'topic',
+          key: id,
+        });
       }
+    }
+
+    if (routedForIndex.length > 0) {
+      const indexPath = path.join(kbDir, 'INDEX.md');
+      await writeFile(indexPath, kbIndexMarkdown(routedForIndex, detected.projectName), 'utf8');
     }
 
     ctx.logger.info(

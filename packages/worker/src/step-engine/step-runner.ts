@@ -83,7 +83,12 @@ async function resolveLlmPhase(
   const invocation = latest[0];
 
   if (invocation && invocation.endedAt !== null) {
-    if ((invocation.exitCode ?? 0) !== 0) {
+    // An invocation failed if the CLI exited non-zero, exited abnormally
+    // (null exit code = killed/timeout), or emitted an explicit errorMessage
+    // (e.g. stream-json without a success result — rate-limit / early abort).
+    const exitedBad = invocation.exitCode === null || invocation.exitCode !== 0;
+    const contentBad = invocation.errorMessage !== null;
+    if (exitedBad || contentBad) {
       const message = invocation.errorMessage ?? `cli exited ${invocation.exitCode}`;
       const failed = await updateRow(db, current.id, {
         status: 'failed',

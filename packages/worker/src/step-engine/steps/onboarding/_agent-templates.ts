@@ -1,8 +1,10 @@
 export type AgentColor = 'blue' | 'purple' | 'green' | 'gold' | 'red' | 'orange';
+export type AgentModel = 'opus' | 'sonnet' | 'haiku';
+export type AgentExpertise = 'expert' | 'senior' | 'mid';
 
 export interface AgentKbRefs {
   patterns?: string;
-  antipatterns?: string;
+  standards?: string;
   reference?: string;
 }
 
@@ -13,6 +15,10 @@ export interface AgentSpec {
   color: AgentColor;
   field: string;
   tools: string[];
+  /** Reasoning model hint for Claude Code's sub-agent runtime. Defaults to 'opus'. */
+  model?: AgentModel;
+  /** Seniority hint used by agent-routing orchestration. Defaults to 'expert'. */
+  expertise?: AgentExpertise;
   coreMission: string;
   responsibilities: string[];
   whenInvoked: string[];
@@ -57,7 +63,7 @@ function firstCharLower(s: string): string {
 function yamlKbRefs(refs: AgentKbRefs): string[] {
   const out: string[] = ['kb-references:'];
   if (refs.patterns) out.push(`  patterns: ${refs.patterns}`);
-  if (refs.antipatterns) out.push(`  antipatterns: ${refs.antipatterns}`);
+  if (refs.standards) out.push(`  standards: ${refs.standards}`);
   if (refs.reference) out.push(`  reference: ${refs.reference}`);
   return out.length === 1 ? [] : out;
 }
@@ -67,9 +73,11 @@ export function buildAgentFileMarkdown(spec: AgentSpec): string {
     '---',
     `name: ${spec.id}`,
     `description: ${spec.description}`,
+    `model: ${spec.model ?? 'opus'}`,
     `color: ${spec.color}`,
     `field: ${spec.field}`,
-    `tools: [${spec.tools.join(', ')}]`,
+    `expertise: ${spec.expertise ?? 'expert'}`,
+    `allowed-tools: [${spec.tools.join(', ')}]`,
     'auto-invoke: false',
     ...(spec.kbReferences ? yamlKbRefs(spec.kbReferences) : []),
     '---',

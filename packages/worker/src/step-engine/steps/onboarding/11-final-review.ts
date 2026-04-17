@@ -219,6 +219,7 @@ export const finalReviewStep: StepDefinition<FinalReviewDetect, FinalReviewApply
         `Reviewer notes: ${values.reviewerNotes ?? ''}`,
       ].join('\n');
     },
+    timeoutMs: 15 * 60 * 1000,
   },
 
   async apply(ctx, args): Promise<FinalReviewApply> {
