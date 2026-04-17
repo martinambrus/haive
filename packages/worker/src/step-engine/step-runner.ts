@@ -68,8 +68,13 @@ async function resolveLlmPhase(
   params: AdvanceStepParams,
 ): Promise<LlmResolved> {
   if (process.env.HAIVE_TEST_BYPASS_LLM === '1') {
-    ctx.logger.warn('HAIVE_TEST_BYPASS_LLM=1, skipping llm with null output');
-    return { resolved: true, llmOutput: null, current };
+    const stub = stepDef.llm?.bypassStub;
+    const llmOutput = stub ? stub({ detected, formValues: formValues ?? {} }) : null;
+    ctx.logger.warn(
+      { hasStub: Boolean(stub) },
+      'HAIVE_TEST_BYPASS_LLM=1, skipping llm with bypass stub',
+    );
+    return { resolved: true, llmOutput, current };
   }
 
   const llmSpec = stepDef.llm!;

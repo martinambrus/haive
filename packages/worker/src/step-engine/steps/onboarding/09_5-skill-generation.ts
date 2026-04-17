@@ -1,23 +1,23 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { DetectResult, FormSchema } from '@haive/shared';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from './_helpers.js';
-
-interface SkillCandidate {
-  id: string;
-  label: string;
-  source: 'kb' | 'framework';
-  hint: string;
-}
+import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
+import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
+import type { KbFileSummary } from './09-qa.js';
 
 interface SkillGenDetect {
-  candidates: SkillCandidate[];
+  framework: string | null;
+  language: string | null;
+  kbFiles: KbFileSummary[];
+  /** Transient — file tree handed to the LLM prompt; stripped before persisting. */
+  __fileTree?: string;
 }
 
 interface SkillGenApply {
-  written: { id: string; filePath: string }[];
-  source: 'llm' | 'stub';
+  written: { id: string; filePath: string; subSkillCount: number }[];
+  totalSubSkills: number;
+  droppedFromCap: number;
+  rejectedIds: string[];
 }
 
 interface SkillKeyConcept {
@@ -89,72 +89,155 @@ export interface SkillEntry {
   commonPatterns?: SkillNamedBlock[];
 }
 
-async function listKbTopics(repo: string): Promise<string[]> {
-  const dir = path.join(repo, '.claude', 'knowledge_base');
-  if (!(await pathExists(dir))) return [];
+const DEFAULT_MAX_SKILLS = 15;
+const HARD_MAX_SKILLS = 30;
+const IGNORE_DIRS = new Set([
+  'node_modules',
+  '.git',
+  'vendor',
+  '__pycache__',
+  '.next',
+  'dist',
+  'build',
+  '.ddev',
+  '.claude',
+]);
+
+/* ------------------------------------------------------------------ */
+/* Detect helpers                                                      */
+/* ------------------------------------------------------------------ */
+
+function parseKbFile(text: string): { title: string; sectionHeadings: string[] } {
+  const lines = text.split('\n');
+  let title = '';
+  const sectionHeadings: string[] = [];
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!title) {
+      const h1 = /^#\s+(.+)$/.exec(line);
+      if (h1 && h1[1]) {
+        title = h1[1].trim();
+        continue;
+      }
+    }
+    const h2 = /^##\s+(.+)$/.exec(line);
+    if (h2 && h2[1]) sectionHeadings.push(h2[1].trim());
+  }
+  return { title, sectionHeadings };
+}
+
+async function listKbFiles(repoRoot: string): Promise<KbFileSummary[]> {
+  const kbDir = path.join(repoRoot, '.claude', 'knowledge_base');
+  if (!(await pathExists(kbDir))) return [];
+  const out: KbFileSummary[] = [];
+  await collectKbDir(kbDir, kbDir, out);
+  out.sort((a, b) => a.relPath.localeCompare(b.relPath));
+  return out;
+}
+
+async function collectKbDir(rootDir: string, current: string, out: KbFileSummary[]): Promise<void> {
+  let entries;
   try {
-    const entries = await readdir(dir, { withFileTypes: true });
-    return entries
-      .filter((e) => e.isFile() && e.name.endsWith('.md'))
-      .map((e) => e.name.replace(/\.md$/, ''));
+    entries = await readdir(current, { withFileTypes: true });
   } catch {
-    return [];
+    return;
+  }
+  for (const entry of entries) {
+    const full = path.join(current, entry.name);
+    if (entry.isDirectory()) {
+      await collectKbDir(rootDir, full, out);
+      continue;
+    }
+    if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
+    let text: string;
+    try {
+      text = await readFile(full, 'utf8');
+    } catch {
+      continue;
+    }
+    const parsed = parseKbFile(text);
+    const relInsideKb = path.relative(rootDir, full);
+    out.push({
+      id: relInsideKb.replace(/\.md$/, ''),
+      title: parsed.title || relInsideKb,
+      relPath: path.join('.claude', 'knowledge_base', relInsideKb),
+      sectionHeadings: parsed.sectionHeadings,
+    });
   }
 }
 
-export async function discoverSkillCandidates(
-  repo: string,
-  framework: string | null,
-): Promise<SkillCandidate[]> {
-  const candidates: SkillCandidate[] = [];
-  const kbTopics = await listKbTopics(repo);
-  for (const topic of kbTopics) {
-    candidates.push({
-      id: `${topic}-skill`,
-      label: `${toTitle(topic)} skill`,
-      source: 'kb',
-      hint: `.claude/knowledge_base/${topic}.md`,
-    });
-  }
-  if (framework && framework !== 'general' && framework !== 'unknown') {
-    candidates.push({
-      id: `${framework}-project`,
-      label: `${toTitle(framework)} project skill`,
-      source: 'framework',
-      hint: `detected framework: ${framework}`,
-    });
-  }
-  return candidates;
+async function collectShortFileTree(repoPath: string): Promise<string> {
+  const files = await listFilesMatching(
+    repoPath,
+    (rel, isDir) => {
+      const parts = rel.split('/');
+      if (parts.some((p) => IGNORE_DIRS.has(p))) return false;
+      if (isDir) return false;
+      return true;
+    },
+    4,
+  );
+  const capped = files.slice(0, 150);
+  const tree = capped.join('\n');
+  return capped.length < files.length
+    ? tree + `\n[...truncated, ${files.length - capped.length} more files]`
+    : tree;
 }
 
-function toTitle(id: string): string {
-  return id
-    .split(/[-_]/g)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
+/* ------------------------------------------------------------------ */
+/* ID sanitization                                                     */
+/* ------------------------------------------------------------------ */
+
+/** Coerce an LLM-proposed skill id into a safe kebab-case directory name.
+ *  Strips a trailing `-skill` artefact (heritage from earlier prompts that
+ *  appended it to KB filenames) and rejects empty results. */
+export function sanitizeSkillId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  let id = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s/\\.]+/g, '-')
+    .replace(/[^a-z0-9-]+/g, '')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (id.endsWith('-skill')) id = id.slice(0, -'-skill'.length).replace(/-+$/g, '');
+  if (id.length === 0) return null;
+  if (id.length > 64) id = id.slice(0, 64).replace(/-+$/g, '');
+  return id;
+}
+
+/* ------------------------------------------------------------------ */
+/* LLM output parsing                                                  */
+/* ------------------------------------------------------------------ */
+
+export class SkillGenParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SkillGenParseError';
+  }
 }
 
 export function parseSkillEntries(raw: unknown): SkillEntry[] {
   if (!raw) return [];
-  let text: string;
-  if (typeof raw === 'string') {
-    text = raw;
-  } else if (Array.isArray(raw)) {
-    return raw.filter(isValidSkill);
-  } else if (typeof raw === 'object' && raw !== null) {
-    const asObj = raw as Record<string, unknown>;
+  let source: unknown = raw;
+  if (typeof raw === 'object' && raw !== null && 'result' in (raw as Record<string, unknown>)) {
+    source = (raw as Record<string, unknown>).result;
+  }
+  if (Array.isArray(source)) {
+    return source.filter(isValidSkill);
+  }
+  if (typeof source === 'object' && source !== null) {
+    const asObj = source as Record<string, unknown>;
     if (Array.isArray(asObj.skills)) {
       return (asObj.skills as unknown[]).filter(isValidSkill);
     }
     return [];
-  } else {
-    return [];
   }
+  if (typeof source !== 'string') return [];
   const out: SkillEntry[] = [];
   const fenceRe = /```json\s*([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
-  while ((match = fenceRe.exec(text)) !== null) {
+  while ((match = fenceRe.exec(source)) !== null) {
     const body = match[1];
     if (!body) continue;
     try {
@@ -185,7 +268,6 @@ function isValidSkill(val: unknown): val is SkillEntry {
   if (typeof v.id !== 'string' || v.id.trim().length === 0) return false;
   if (typeof v.title !== 'string' || v.title.trim().length === 0) return false;
   if (typeof v.description !== 'string' || v.description.trim().length === 0) return false;
-  // Require at least one body section OR at least one sub-skill.
   const hasBody =
     typeof v.instructions === 'string' ||
     typeof v.quickStart === 'string' ||
@@ -237,6 +319,10 @@ export function sanitizeSubSkills(entry: SkillEntry): SkillSubSkill[] {
   return out;
 }
 
+/* ------------------------------------------------------------------ */
+/* Markdown rendering                                                  */
+/* ------------------------------------------------------------------ */
+
 function renderKeyConcepts(items: SkillKeyConcept[]): string[] {
   return items
     .filter((c) => c && typeof c.term === 'string' && typeof c.definition === 'string')
@@ -267,8 +353,6 @@ function renderCodeLocations(items: SkillCodeLocation[]): string[] {
     .map((c) => `- **${c.label.trim()}** — \`${c.path.trim()}\``);
 }
 
-/** Group sub-skills by category and render the `## Sub-Skills` block. Any sub-skill
- *  without a category is bucketed under "Topics". Ordering follows first appearance. */
 function renderSubSkillsBlock(subs: SkillSubSkill[]): string[] {
   if (subs.length === 0) return [];
   const groups = new Map<string, SkillSubSkill[]>();
@@ -289,7 +373,6 @@ function renderSubSkillsBlock(subs: SkillSubSkill[]): string[] {
   return out;
 }
 
-/** Auto-generate a Decision Tree from sub-skills when the LLM didn't provide one. */
 function decisionTreeFromSubSkills(subs: SkillSubSkill[]): string {
   const lines = ['```', 'Working in this domain?'];
   for (const s of subs) lines.push(`|-- ${s.title}? -> See sub-skills/${s.slug}.md`);
@@ -303,8 +386,6 @@ function renderRelatedSkills(items: SkillRelated[]): string[] {
     .map((r) => `- [${r.path.trim()}](${r.path.trim()}) - ${r.summary.trim()}`);
 }
 
-/** Multi-line YAML-folded description keeps Claude Code's 1024-char limit honest when
- *  the LLM produces a long activation blurb. Short descriptions stay on one line. */
 function yamlDescription(desc: string): string {
   const clean = desc.trim();
   if (clean.length <= 120 && !clean.includes('\n')) return `description: ${clean}`;
@@ -389,9 +470,6 @@ export function skillToMarkdown(entry: SkillEntry): string {
   return fm + body.join('\n');
 }
 
-/** Renders one sub-skill file. Frontmatter uses the full `<parent>-<slug>` name.
- *  An Identification block is auto-prepended so every sub-skill links back to its
- *  parent SKILL.md — callers can append extra rows via `sub.identification`. */
 export function subSkillToMarkdown(parentId: string, sub: SkillSubSkill): string {
   const fm = ['---', `name: ${sub.name}`, yamlDescription(sub.description), '---', ''].join('\n');
   const ident: string[] = ['## Identification', ''];
@@ -407,8 +485,6 @@ export function subSkillToMarkdown(parentId: string, sub: SkillSubSkill): string
   return [fm, `# ${sub.title}`, '', ...ident, sub.body.trim(), ''].join('\n');
 }
 
-/** Emits the `.claude/skills/README.md` domain-index. Only lists skills actually
- *  written in this run; the user can re-run onboarding to refresh. */
 export function skillsReadmeMarkdown(
   written: { id: string; title: string; description: string }[],
 ): string {
@@ -447,77 +523,152 @@ export function skillsReadmeMarkdown(
   return lines.join('\n');
 }
 
-async function stubSkillMarkdown(candidate: SkillCandidate, repo: string): Promise<string> {
-  let kbPreview = '';
-  if (candidate.source === 'kb') {
-    const topic = candidate.id.replace(/-skill$/, '');
-    const kbFile = path.join(repo, '.claude', 'knowledge_base', `${topic}.md`);
-    try {
-      const text = await readFile(kbFile, 'utf8');
-      kbPreview = text.trim().slice(0, 1500);
-    } catch {
-      kbPreview = '';
-    }
-  }
-  const fm = [
-    '---',
-    `name: ${candidate.id}`,
-    `description: ${candidate.label} (stub — replace with real description before use)`,
-    '---',
+/* ------------------------------------------------------------------ */
+/* LLM prompt                                                          */
+/* ------------------------------------------------------------------ */
+
+function buildPrompt(args: LlmBuildArgs): string {
+  const detected = args.detected as SkillGenDetect;
+  const values = args.formValues as { maxSkills?: number; domainHints?: string };
+  const maxSkills = clampMaxSkills(values.maxSkills);
+  const hints = typeof values.domainHints === 'string' ? values.domainHints.trim() : '';
+
+  const fileTree = detected.__fileTree ?? '(no file tree available)';
+  const kbList =
+    detected.kbFiles.length > 0
+      ? detected.kbFiles
+          .map(
+            (f) =>
+              `- ${f.relPath} — ${f.title}` +
+              (f.sectionHeadings.length > 0
+                ? `\n    sections: ${f.sectionHeadings.slice(0, 8).join('; ')}`
+                : ''),
+          )
+          .join('\n')
+      : '(no knowledge base files yet)';
+
+  return [
+    'You are a senior software engineer generating Claude Code SKILLS for this specific codebase.',
     '',
-  ].join('\n');
-  const lines = [
-    `# ${candidate.label}`,
+    '## Critical definitions',
     '',
-    '## Quick Start',
+    '- **AGENTS** capture technical expertise (HOW to use a framework). They live in `.claude/agents/`. NOT your concern here.',
+    '- **SKILLS** capture business/domain capabilities of THIS project — discrete features the code',
+    '  exposes that an agent might need to understand or modify. They live in `.claude/skills/`.',
+    '- A skill is a CAPABILITY DOMAIN, NOT a documentation chapter.',
+    '',
+    '## What a good skill looks like',
+    '',
+    'GOOD skill ids (kebab-case, name a discrete capability):',
+    '  parallel-detection, pty-wrapping, hook-installation, rate-limit-detection,',
+    '  session-timing, settings-management, sound-notifications, stall-detection,',
+    '  task-tracking, timing-log, statistics, update-checking',
+    '',
+    'BAD skill ids (DO NOT EMIT THESE — they mirror documentation taxonomies, not capabilities):',
+    '  api-reference, architecture, business-logic, coding-standards, deployment,',
+    '  index, security-standards, anything ending in `-skill`, anything matching a',
+    '  knowledge-base filename verbatim.',
+    '',
+    'Note: KB files like `BUSINESS_LOGIC.md`, `ARCHITECTURE.md` are REFERENCE MATERIAL that you',
+    'CONSULT to understand the project. They are NOT skills. Do not propose a skill per KB file.',
+    '',
+    '## Project context',
+    '',
+    `Framework: ${detected.framework ?? 'unknown'}`,
+    `Language: ${detected.language ?? 'unknown'}`,
+    '',
+    '## Existing knowledge base (consult these for domain understanding)',
+    '',
+    kbList,
+    '',
+    '## Repository overview (partial file tree)',
     '',
     '```',
-    'Replace with a short code snippet or command that demonstrates typical usage.',
+    fileTree,
     '```',
     '',
-    '## Overview',
+    hints.length > 0 ? `## User-supplied hints about likely skill domains\n\n${hints}\n` : '',
+    '## Your task',
     '',
-    `Stub for **${candidate.label}**. Hint: ${candidate.hint}.`,
-    'Replace this paragraph with 1-2 sentences describing when this skill applies and why it exists.',
+    'Use your file-reading tools (Read, Grep, Glob) to deeply explore this repository:',
+    '1. Read the knowledge base files listed above for domain context.',
+    '2. Scan the source tree (src/, lib/, bin/, app/, packages/, modules/, etc.) — each focused module',
+    '   or feature flag often corresponds to a skill domain.',
+    '3. Identify CAPABILITY-BASED skill domains. Each domain should be something a future agent',
+    '   would need to understand WHEN modifying or extending that part of the code.',
+    `4. Produce between 3 and ${maxSkills} skills. Quality over quantity. If the codebase is small,`,
+    '   produce fewer skills.',
     '',
-    '## Key Concepts',
+    '## Required structure per skill',
     '',
-    '- **Concept** — Replace with the main term this skill teaches.',
-    '- **Concept** — Replace with another term this skill teaches.',
+    'Each skill is a directory `.claude/skills/<id>/` containing:',
+    '  - `SKILL.md` — concise overview with YAML frontmatter (the loader)',
+    '  - `sub-skills/<slug>.md` — 3 to 8 leaf documents covering distinct facets of the domain',
     '',
-    '## Decision Tree',
+    'SKILL.md MUST be lightweight (under ~1000 tokens of body). It indexes the sub-skills.',
+    'Sub-skills carry the detail. Each sub-skill is a focused leaf doc.',
     '',
+    '## JSON output format',
+    '',
+    'Emit ONE JSON object inside a single ```json fenced code block:',
+    '',
+    '```json',
+    '{',
+    '  "skills": [',
+    '    {',
+    '      "id": "<kebab-case capability id — NOT a KB filename, NOT ending in -skill>",',
+    '      "title": "<Title Case skill title>",',
+    '      "description": "<activation description for SKILL.md frontmatter — include trigger keywords>",',
+    '      "quickStart": "<short code block or command demonstrating typical usage — optional>",',
+    '      "overview": "<1-2 paragraphs: what this domain covers, when an agent invokes it, why it exists in this codebase>",',
+    '      "keyConcepts": [ { "term": "<term>", "definition": "<one-sentence definition>" } ],',
+    '      "quickReference": "<optional markdown table summarising constants and sources>",',
+    '      "decisionTree": "<optional markdown block routing the reader to the right sub-skill>",',
+    '      "relatedSkills": [ { "path": "../<other-skill>/SKILL.md", "summary": "<one line>" } ],',
+    '      "codeLocations": [ { "label": "<human label>", "path": "<concrete repo-relative path>" } ],',
+    '      "subSkills": [',
+    '        {',
+    '          "slug": "<kebab-case filename, no extension>",',
+    '          "name": "<full frontmatter name — convention: <skill-id>-<slug>>",',
+    '          "title": "<H1 title of the sub-skill file>",',
+    '          "description": "<activation description in sub-skill frontmatter>",',
+    '          "category": "<optional grouping shown under ## Sub-Skills in parent>",',
+    '          "summary": "<short line shown beside the sub-skill link in parent SKILL.md>",',
+    '          "body": "<full markdown body with ## Purpose, ## Process, ## Code Pattern, ## Pitfalls, ## Related>",',
+    '          "identification": [ { "label": "Function", "value": "lib/foo.mjs::bar" } ]',
+    '        }',
+    '      ]',
+    '    }',
+    '  ]',
+    '}',
     '```',
-    'Is <condition>?',
-    '  Yes → use approach A',
-    '  No  → use approach B',
-    '```',
     '',
-    '## Implementation Patterns',
+    '## Hard rules',
     '',
-    '### Pattern name',
-    '',
-    'Replace with the pattern body, including concrete examples.',
-    '',
-    '## Common Pitfalls',
-    '',
-    '### Pitfall name',
-    '',
-    'Replace with what typically goes wrong and how to avoid it.',
-    '',
-    '## Code Locations',
-    '',
-    `- **Source** — \`${candidate.hint}\``,
-    '',
-  ];
-  if (kbPreview) {
-    lines.push('## Source knowledge base excerpt');
-    lines.push('');
-    lines.push(kbPreview);
-    lines.push('');
-  }
-  return fm + lines.join('\n');
+    '- Ground every claim in concrete repo paths (e.g. `lib/wrapper.mjs::startWrapper`, NOT "the wrapper module").',
+    '- Each skill MUST have at least 3 sub-skills (and at most 8).',
+    `- Cap: at most ${maxSkills} top-level skills. Quality over quantity.`,
+    '- Skill ids: kebab-case, lowercase, no `-skill` suffix, no underscores, max 64 chars.',
+    '- Do NOT emit prose outside the fenced JSON block.',
+    '- Do NOT propose generic skills like "general-knowledge", "project-overview", "documentation".',
+    '- If the codebase has fewer than 3 distinct capability domains, emit fewer skills — never pad.',
+  ]
+    .filter((line) => line !== '')
+    .concat([''])
+    .join('\n');
 }
+
+function clampMaxSkills(raw: unknown): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_MAX_SKILLS;
+  const n = Math.floor(raw);
+  if (n < 1) return 1;
+  if (n > HARD_MAX_SKILLS) return HARD_MAX_SKILLS;
+  return n;
+}
+
+/* ------------------------------------------------------------------ */
+/* Step definition                                                     */
+/* ------------------------------------------------------------------ */
 
 export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> = {
   metadata: {
@@ -526,37 +677,67 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     index: 11,
     title: 'Skill generation',
     description:
-      'Generates .claude/skills/<id>/SKILL.md entries for each selected candidate. Candidates are derived from the knowledge base topics and the detected framework.',
-    requiresCli: false,
+      'LLM scans the repository and the knowledge base, identifies capability-based domain skills, and writes .claude/skills/<id>/SKILL.md plus sub-skills/<slug>.md files for each.',
+    requiresCli: true,
   },
 
   async detect(ctx: StepContext): Promise<SkillGenDetect> {
-    const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
-    const data = (prev?.detect as DetectResult | null)?.data as
-      | { project?: { framework?: string } }
+    await ctx.emitProgress('Loading project metadata...');
+    const envPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
+    const envData = (envPrev?.detect as DetectResult | null)?.data as
+      | { project?: { framework?: string; primaryLanguage?: string } }
       | undefined;
-    const framework = data?.project?.framework ?? null;
-    const candidates = await discoverSkillCandidates(ctx.repoPath, framework);
-    ctx.logger.info({ candidateCount: candidates.length }, 'skill candidates discovered');
-    return { candidates };
+    const framework = envData?.project?.framework ?? null;
+    const language = envData?.project?.primaryLanguage ?? null;
+
+    await ctx.emitProgress('Listing existing knowledge base...');
+    const kbFiles = await listKbFiles(ctx.repoPath);
+
+    await ctx.emitProgress('Collecting file tree for LLM orientation...');
+    const fileTree = await collectShortFileTree(ctx.repoPath);
+
+    ctx.logger.info(
+      { framework, language, kbFileCount: kbFiles.length },
+      'skill-generation detect complete',
+    );
+    return { framework, language, kbFiles, __fileTree: fileTree };
   },
 
-  form(_ctx, detected): FormSchema {
-    const options = detected.candidates.map((c) => ({
-      value: c.id,
-      label: `${c.label} — ${c.hint}`,
-    }));
+  form(_ctx, _detected): FormSchema {
     return {
-      title: 'Generate skill entries',
-      description:
-        'Select which skill entries to generate. Each selected skill produces a .claude/skills/<id>/SKILL.md file.',
+      title: 'Generate domain skills',
+      description: [
+        'The LLM will scan the repository and the knowledge base, then propose CAPABILITY-based domain skills',
+        '(e.g. "parallel-detection", "pty-wrapping" — never "API_REFERENCE-skill" or "ARCHITECTURE-skill").',
+        'Each skill is written as `.claude/skills/<id>/SKILL.md` plus 3-8 sub-skill files under `sub-skills/`.',
+      ].join(' '),
       fields: [
         {
-          type: 'multi-select',
-          id: 'selectedSkills',
-          label: 'Skills to generate',
-          options,
-          defaults: options.map((o) => o.value),
+          type: 'number',
+          id: 'maxSkills',
+          label: 'Maximum number of skills to generate',
+          description:
+            'Cap on top-level skills. The LLM may produce fewer if the codebase is small.',
+          default: DEFAULT_MAX_SKILLS,
+          min: 1,
+          max: HARD_MAX_SKILLS,
+          step: 1,
+        },
+        {
+          type: 'textarea',
+          id: 'domainHints',
+          label: 'Domain hints for the LLM (optional)',
+          description: [
+            'List capabilities you know exist in this codebase, one per line — the LLM treats them as hints,',
+            'not requirements. Leave blank to let the LLM discover everything.',
+            '',
+            'Examples (for a CLI wrapper project):',
+            '- parallel session detection',
+            '- PTY child process management',
+            '- rate-limit warnings from upstream',
+          ].join('\n'),
+          rows: 6,
+          placeholder: 'one domain hint per line, or leave blank',
         },
       ],
       submitLabel: 'Generate skills',
@@ -565,119 +746,108 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
 
   llm: {
     requiredCapabilities: ['tool_use', 'file_write'],
-    buildPrompt: (args) => {
-      const detected = args.detected as SkillGenDetect;
-      const values = args.formValues as { selectedSkills?: string[] };
-      const selected = new Set(values.selectedSkills ?? []);
-      const picked = detected.candidates.filter((c) => selected.has(c.id));
-      const bullets = picked
-        .map((c) => `- id: ${c.id}; label: ${c.label}; source: ${c.source}; hint: ${c.hint}`)
-        .join('\n');
-      return [
-        'You are generating Claude Code skill entries for an engineering onboarding workflow.',
-        '',
-        'Each skill is a directory `.claude/skills/<id>/` containing:',
-        '  - `SKILL.md` — the domain overview (metadata + key concepts + decision tree + links into sub-skills)',
-        '  - `sub-skills/<slug>.md` — one file per drill-down topic (progressive disclosure leaves)',
-        '',
-        'For each skill below, emit ONE JSON object inside a ```json fenced code block.',
-        '',
-        'The JSON shape (SKILL.md is the loader — keep it concise. Push detail into sub-skills):',
-        '{',
-        '  "id": "<skill id — kebab-case>",',
-        '  "title": "<skill title — Title Case>",',
-        '  "description": "<activation description shown in SKILL.md frontmatter — include trigger keywords>",',
-        '  "quickStart": "<short code block or command demonstrating typical usage — optional>",',
-        '  "overview": "<1-2 paragraphs: what this skill is, when it applies, why it exists>",',
-        '  "keyConcepts": [ { "term": "<term>", "definition": "<one-sentence definition>" } ],',
-        '  "quickReference": "<optional markdown table (`| Concept | Value |`) summarising constants and sources>",',
-        '  "decisionTree": "<optional markdown block routing the reader to the right sub-skill — when omitted, one is auto-generated from subSkills>",',
-        '  "implementationPatterns": [ { "name": "<pattern name>", "body": "<markdown pattern body with concrete examples>" } ],',
-        '  "commonPatterns": [ { "name": "<pattern name>", "body": "<short everyday usage snippet>" } ],',
-        '  "pitfalls": [ { "title": "<pitfall name>", "body": "<explanation + mitigation>" } ],',
-        '  "codeLocations": [ { "label": "<human-friendly label>", "path": "<relative path in this repo>" } ],',
-        '  "relatedSkills": [ { "path": "<../other-skill/SKILL.md>", "summary": "<one line>" } ],',
-        '  "subSkills": [',
-        '    {',
-        '      "slug": "<kebab-case filename, no extension>",',
-        '      "name": "<full frontmatter name — convention: \\"<skill-id>-<slug>\\">",',
-        '      "title": "<H1 title of the sub-skill file>",',
-        '      "description": "<activation description in sub-skill frontmatter — trigger keywords>",',
-        '      "category": "<optional grouping heading shown under ## Sub-Skills in parent>",',
-        '      "summary": "<short line shown beside the sub-skill link in parent SKILL.md>",',
-        '      "body": "<full markdown body — Purpose, Process, Code Pattern, Pitfalls, Related, etc.>",',
-        '      "identification": [ { "label": "Function", "value": "lib/foo.mjs::bar" } ]',
-        '    }',
-        '  ],',
-        '  "instructions": "<optional extra markdown notes that do not fit other sections>",',
-        '  "usage": "<optional usage examples in markdown>"',
-        '}',
-        '',
-        'Rules:',
-        '- Treat SKILL.md as a lightweight index. It should describe the domain and route the reader to sub-skills — NOT duplicate the full sub-skill content.',
-        '- Each sub-skill is a leaf document covering one specific topic. Produce 4-10 sub-skills per skill when the domain is broad enough; fewer is fine for narrow skills.',
-        '- Sub-skill `body` should include its own headings (e.g. `## Purpose`, `## Process`, `## Code Pattern`, `## Pitfalls`). It must NOT restate the parent overview.',
-        '- Ground every claim in this specific repository; prefer a concrete file path over a generic library reference.',
-        '- When a skill is sourced from a knowledge-base file, mirror the terminology that file uses.',
-        '- Do not emit prose outside the fenced JSON blocks.',
-        '',
-        'Skills to generate:',
-        bullets,
-      ].join('\n');
-    },
+    buildPrompt,
     timeoutMs: 60 * 60 * 1000,
+    bypassStub: () => ({
+      skills: [
+        {
+          id: 'fixture-skill',
+          title: 'Fixture skill',
+          description:
+            'Synthetic skill emitted by the bypass stub so smoke tests can exercise the full skill-write pipeline without a real CLI provider.',
+          overview:
+            'Smoke-test placeholder. Real skill generation is gated on a live LLM with file-reading tools.',
+          subSkills: [
+            {
+              slug: 'fixture-leaf-a',
+              name: 'fixture-skill-fixture-leaf-a',
+              title: 'Fixture leaf A',
+              description: 'Synthetic sub-skill A for smoke coverage.',
+              summary: 'first sub-skill',
+              body: '## Purpose\n\nSmoke-test sub-skill A.',
+            },
+            {
+              slug: 'fixture-leaf-b',
+              name: 'fixture-skill-fixture-leaf-b',
+              title: 'Fixture leaf B',
+              description: 'Synthetic sub-skill B for smoke coverage.',
+              summary: 'second sub-skill',
+              body: '## Purpose\n\nSmoke-test sub-skill B.',
+            },
+            {
+              slug: 'fixture-leaf-c',
+              name: 'fixture-skill-fixture-leaf-c',
+              title: 'Fixture leaf C',
+              description: 'Synthetic sub-skill C for smoke coverage.',
+              summary: 'third sub-skill',
+              body: '## Purpose\n\nSmoke-test sub-skill C.',
+            },
+          ],
+        },
+      ],
+    }),
   },
 
   async apply(ctx, args): Promise<SkillGenApply> {
-    const detected = args.detected as SkillGenDetect;
-    const values = args.formValues as { selectedSkills?: string[] };
-    const selected = new Set(values.selectedSkills ?? []);
-    const picked = detected.candidates.filter((c) => selected.has(c.id));
+    const values = args.formValues as { maxSkills?: number };
+    const maxSkills = clampMaxSkills(values.maxSkills);
 
     const entries = parseSkillEntries(args.llmOutput ?? null);
-    const byId = new Map<string, SkillEntry>();
-    for (const e of entries) byId.set(e.id, e);
+    if (entries.length === 0) {
+      throw new SkillGenParseError(
+        'LLM produced no valid skill entries — surface failure for retry.',
+      );
+    }
 
-    const written: { id: string; filePath: string }[] = [];
+    const seenIds = new Set<string>();
+    const rejectedIds: string[] = [];
+    const accepted: SkillEntry[] = [];
+    for (const entry of entries) {
+      const cleanId = sanitizeSkillId(entry.id);
+      if (!cleanId) {
+        rejectedIds.push(String(entry.id));
+        continue;
+      }
+      if (seenIds.has(cleanId)) {
+        rejectedIds.push(`${entry.id} (duplicate of ${cleanId})`);
+        continue;
+      }
+      seenIds.add(cleanId);
+      accepted.push({ ...entry, id: cleanId });
+    }
+
+    if (accepted.length === 0) {
+      throw new SkillGenParseError(
+        'No skill entries survived id sanitization — surface failure for retry.',
+      );
+    }
+
+    const droppedFromCap = Math.max(0, accepted.length - maxSkills);
+    const final = accepted.slice(0, maxSkills);
+
+    const written: { id: string; filePath: string; subSkillCount: number }[] = [];
     const summaryForReadme: { id: string; title: string; description: string }[] = [];
-    let usedLlm = 0;
-    let subSkillsWritten = 0;
+    let totalSubSkills = 0;
 
-    for (const candidate of picked) {
-      const dir = path.join(ctx.repoPath, '.claude', 'skills', candidate.id);
+    for (const entry of final) {
+      const dir = path.join(ctx.repoPath, '.claude', 'skills', entry.id);
       await mkdir(dir, { recursive: true });
       const filePath = path.join(dir, 'SKILL.md');
-      const entry = byId.get(candidate.id);
-      const markdown = entry
-        ? skillToMarkdown(entry)
-        : await stubSkillMarkdown(candidate, ctx.repoPath);
-      if (entry) usedLlm += 1;
-      await writeFile(filePath, markdown, 'utf8');
-      written.push({ id: candidate.id, filePath });
+      await writeFile(filePath, skillToMarkdown(entry), 'utf8');
 
-      if (entry) {
-        const subs = sanitizeSubSkills(entry);
-        if (subs.length > 0) {
-          const subDir = path.join(dir, 'sub-skills');
-          await mkdir(subDir, { recursive: true });
-          for (const sub of subs) {
-            const subPath = path.join(subDir, `${sub.slug}.md`);
-            await writeFile(subPath, subSkillToMarkdown(entry.id, sub), 'utf8');
-            subSkillsWritten += 1;
-          }
+      const subs = sanitizeSubSkills(entry);
+      if (subs.length > 0) {
+        const subDir = path.join(dir, 'sub-skills');
+        await mkdir(subDir, { recursive: true });
+        for (const sub of subs) {
+          const subPath = path.join(subDir, `${sub.slug}.md`);
+          await writeFile(subPath, subSkillToMarkdown(entry.id, sub), 'utf8');
+          totalSubSkills += 1;
         }
-        summaryForReadme.push({
-          id: entry.id,
-          title: entry.title,
-          description: entry.description,
-        });
-      } else {
-        summaryForReadme.push({
-          id: candidate.id,
-          title: candidate.label,
-          description: `${candidate.label} (stub — replace with real description before use)`,
-        });
       }
+
+      written.push({ id: entry.id, filePath, subSkillCount: subs.length });
+      summaryForReadme.push({ id: entry.id, title: entry.title, description: entry.description });
     }
 
     if (summaryForReadme.length > 0) {
@@ -686,11 +856,15 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       await writeFile(readmePath, skillsReadmeMarkdown(summaryForReadme), 'utf8');
     }
 
-    const source: 'llm' | 'stub' = usedLlm > 0 ? 'llm' : 'stub';
     ctx.logger.info(
-      { written: written.length, subSkillsWritten, llmEntries: usedLlm, source },
+      {
+        written: written.length,
+        totalSubSkills,
+        droppedFromCap,
+        rejectedIds: rejectedIds.length,
+      },
       'skills written',
     );
-    return { written, source };
+    return { written, totalSubSkills, droppedFromCap, rejectedIds };
   },
 };

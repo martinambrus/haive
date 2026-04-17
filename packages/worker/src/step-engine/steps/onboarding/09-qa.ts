@@ -351,6 +351,7 @@ export const knowledgeQaPrepStep: StepDefinition<KnowledgeQaPrepDetect, Knowledg
     requiredCapabilities: ['tool_use'],
     buildPrompt,
     timeoutMs: 60 * 60 * 1000,
+    bypassStub: () => ({ agentQuestions: [], explicitNoQuestions: true }),
   },
 
   async apply(ctx, args): Promise<KnowledgeQaPrepApply> {

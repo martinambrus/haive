@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   parseSkillEntries,
+  sanitizeSkillId,
   skillToMarkdown,
   type SkillEntry,
 } from '../src/step-engine/steps/onboarding/09_5-skill-generation.js';
@@ -149,5 +150,70 @@ describe('parseSkillEntries', () => {
     ];
     const entries = parseSkillEntries(raw);
     expect(entries.map((e) => e.id)).toEqual(['a', 'b']);
+  });
+
+  it('unwraps a top-level result wrapper', () => {
+    const raw = {
+      result: {
+        skills: [{ id: 'a', title: 'A', description: 'd', overview: 'ov' }],
+      },
+    };
+    const entries = parseSkillEntries(raw);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.id).toBe('a');
+  });
+
+  it('accepts a skill whose only body field is a non-empty subSkills array', () => {
+    const raw = [
+      {
+        id: 'sub-only',
+        title: 'Sub',
+        description: 'd',
+        subSkills: [
+          { slug: 's', name: 'sub-only-s', title: 'S', description: 'd', summary: 's', body: 'b' },
+        ],
+      },
+    ];
+    const entries = parseSkillEntries(raw);
+    expect(entries.map((e) => e.id)).toEqual(['sub-only']);
+  });
+});
+
+describe('sanitizeSkillId', () => {
+  it('returns null for non-string or empty input', () => {
+    expect(sanitizeSkillId(null)).toBeNull();
+    expect(sanitizeSkillId(undefined)).toBeNull();
+    expect(sanitizeSkillId(42)).toBeNull();
+    expect(sanitizeSkillId('')).toBeNull();
+    expect(sanitizeSkillId('   ')).toBeNull();
+  });
+
+  it('lowercases and converts separators to dashes', () => {
+    expect(sanitizeSkillId('PTY_Wrapping')).toBe('pty-wrapping');
+    expect(sanitizeSkillId('parallel/detection')).toBe('parallel-detection');
+    expect(sanitizeSkillId('parallel.detection')).toBe('parallel-detection');
+    expect(sanitizeSkillId('parallel detection')).toBe('parallel-detection');
+  });
+
+  it('strips a trailing -skill artefact', () => {
+    expect(sanitizeSkillId('API_REFERENCE-skill')).toBe('api-reference');
+    expect(sanitizeSkillId('parallel-detection-skill')).toBe('parallel-detection');
+  });
+
+  it('returns null when the id collapses to empty after sanitization', () => {
+    expect(sanitizeSkillId('!!!')).toBeNull();
+    expect(sanitizeSkillId('___')).toBeNull();
+    expect(sanitizeSkillId('---')).toBeNull();
+  });
+
+  it('collapses repeated dashes and strips edge dashes', () => {
+    expect(sanitizeSkillId('--foo---bar--')).toBe('foo-bar');
+  });
+
+  it('truncates ids longer than 64 chars and trims trailing dash', () => {
+    const long = 'a'.repeat(80);
+    const out = sanitizeSkillId(long);
+    expect(out).not.toBeNull();
+    expect(out!.length).toBeLessThanOrEqual(64);
   });
 });

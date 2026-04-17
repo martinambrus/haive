@@ -189,8 +189,9 @@ async function main(): Promise<void> {
         manualTopics: 'testing\ndatabase\ndocumentation\ndeployment',
       },
       '09-qa': {},
+      '09_2-qa-resolve': { userQuestions: '' },
       '09_5-skill-generation': {
-        selectedSkills: ['drupal7-project', 'testing-skill', 'documentation-skill'],
+        maxSkills: 5,
       },
       '09_7-rag-source-selection': { selectedDirs: [] },
       '10-rag-populate': {

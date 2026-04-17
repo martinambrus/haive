@@ -502,6 +502,7 @@ export const knowledgeQaResolveStep: StepDefinition<
     requiredCapabilities: ['tool_use'],
     buildPrompt,
     timeoutMs: 60 * 60 * 1000,
+    bypassStub: () => ({ kbWrites: [], answers: [], unanswered: [] }),
   },
 
   async apply(ctx, args): Promise<KnowledgeQaResolveApply> {

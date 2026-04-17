@@ -34,6 +34,10 @@ export interface LlmInvocationSpec {
   /** Sandbox timeout for the CLI invocation in milliseconds.
    *  Defaults to 2 minutes; tool_use steps that browse the repo need more. */
   timeoutMs?: number;
+  /** Test-only synthetic LLM output used when HAIVE_TEST_BYPASS_LLM=1.
+   *  Steps whose apply() throws on null llmOutput must define this so smoke
+   *  tests can exercise the full pipeline without a real CLI provider. */
+  bypassStub?: (args: LlmBuildArgs) => unknown;
 }
 
 export interface StepApplyArgs<TDetect = unknown> {

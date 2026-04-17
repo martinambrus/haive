@@ -231,8 +231,9 @@ async function main(): Promise<void> {
         manualTopics: 'testing\ndeployment\ndatabase\ndocumentation',
       },
       '09-qa': {},
+      '09_2-qa-resolve': { userQuestions: '' },
       '09_5-skill-generation': {
-        selectedSkills: ['testing-skill', 'documentation-skill'],
+        maxSkills: 5,
       },
       '09_7-rag-source-selection': { selectedDirs: [] },
       '10-rag-populate': {
@@ -319,6 +320,7 @@ async function main(): Promise<void> {
       '07_5-verify-files',
       '08-knowledge-acquisition',
       '09-qa',
+      '09_2-qa-resolve',
       '09_5-skill-generation',
       '09_6-skill-verification',
       '09_7-rag-source-selection',

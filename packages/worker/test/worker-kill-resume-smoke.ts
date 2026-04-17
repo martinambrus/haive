@@ -168,7 +168,8 @@ async function main(): Promise<void> {
         manualTopics: 'testing\ndocumentation',
       },
       '09-qa': {},
-      '09_5-skill-generation': { selectedSkills: [] },
+      '09_2-qa-resolve': { userQuestions: '' },
+      '09_5-skill-generation': { maxSkills: 3 },
       '09_7-rag-source-selection': { selectedDirs: [] },
       '10-rag-populate': { truncateExisting: true },
       '11-final-review': {

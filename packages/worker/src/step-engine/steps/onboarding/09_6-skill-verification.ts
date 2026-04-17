@@ -27,28 +27,39 @@ interface ParsedSkill {
   name: string | null;
   description: string | null;
   hasTitle: boolean;
-  hasDescriptionSection: boolean;
-  hasInstructionsSection: boolean;
+  hasOverviewSection: boolean;
 }
 
 const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---/;
+const FOLDED_DESC_RE = /^description:\s*>\s*\n([\s\S]*?)(?=\n[A-Za-z][^\n]*:|\n*$)/m;
 
 function parseSkillMarkdown(text: string): ParsedSkill {
   const fm = text.match(FRONTMATTER_RE);
   let name: string | null = null;
   let description: string | null = null;
   if (fm && fm[1]) {
-    const nameMatch = fm[1].match(/^name:\s*(.+)$/m);
+    const fmBody = fm[1];
+    const nameMatch = fmBody.match(/^name:\s*(.+)$/m);
     if (nameMatch && nameMatch[1]) name = nameMatch[1].trim();
-    const descMatch = fm[1].match(/^description:\s*(.+)$/m);
-    if (descMatch && descMatch[1]) description = descMatch[1].trim();
+    const inlineDesc = fmBody.match(/^description:\s*(\S.*)$/m);
+    if (inlineDesc && inlineDesc[1]) {
+      description = inlineDesc[1].trim();
+    } else {
+      const folded = fmBody.match(FOLDED_DESC_RE);
+      if (folded && folded[1]) {
+        const lines = folded[1]
+          .split('\n')
+          .map((l) => l.replace(/^\s+/, ''))
+          .filter((l) => l.length > 0);
+        if (lines.length > 0) description = lines.join(' ');
+      }
+    }
   }
   return {
     name,
     description,
     hasTitle: /^#\s+\S/m.test(text),
-    hasDescriptionSection: /^##\s+Description\b/m.test(text),
-    hasInstructionsSection: /^##\s+Instructions\b/m.test(text),
+    hasOverviewSection: /^##\s+Overview\b/m.test(text),
   };
 }
 
@@ -63,13 +74,9 @@ function stubSkillContent(skillId: string): string {
   const body = [
     `# ${skillId}`,
     '',
-    '## Description',
+    '## Overview',
     '',
-    `${skillId} stub regenerated because the original SKILL.md file was missing. Replace this section with a real description.`,
-    '',
-    '## Instructions',
-    '',
-    'Skill instructions missing. Re-run step 09_5 skill generation to produce a full entry, or replace this section manually.',
+    `${skillId} stub regenerated because the original SKILL.md file was missing. Re-run step 09_5 skill generation to produce a full entry, or replace this section manually.`,
     '',
   ].join('\n');
   return fm + body;
@@ -123,8 +130,7 @@ async function checkSkill(repo: string, skillId: string): Promise<SkillCheck> {
   if (!parsed.name) issues.push('frontmatter missing name');
   if (!parsed.description) issues.push('frontmatter missing description');
   if (!parsed.hasTitle) issues.push('missing level-1 title heading');
-  if (!parsed.hasDescriptionSection) issues.push('missing ## Description section');
-  if (!parsed.hasInstructionsSection) issues.push('missing ## Instructions section');
+  if (!parsed.hasOverviewSection) issues.push('missing ## Overview section');
   return {
     skillId,
     skillPath,
