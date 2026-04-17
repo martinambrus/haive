@@ -1,9 +1,20 @@
-import type { FormSchema } from '@haive/shared';
+import type { FormField, FormSchema } from '@haive/shared';
 
 export type FormValues = Record<string, unknown>;
 
 export function validateRequired(schema: FormSchema, values: FormValues): string | null {
-  for (const field of schema.fields) {
+  return checkFields(schema.fields, values);
+}
+
+function checkFields(fields: readonly FormField[], values: FormValues): string | null {
+  for (const field of fields) {
+    if (field.type === 'accordion') {
+      for (const item of field.items) {
+        const issue = checkFields(item.fields, values);
+        if (issue) return issue;
+      }
+      continue;
+    }
     if (!field.required) continue;
     const value = values[field.id];
     switch (field.type) {

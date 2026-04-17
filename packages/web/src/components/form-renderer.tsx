@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import type { FormField, FormSchema } from '@haive/shared';
+import type { FormField, FormSchema, LeafFormField } from '@haive/shared';
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { cn } from '@/lib/cn';
@@ -41,13 +41,27 @@ function defaultValueFor(field: FormField): unknown {
     case 'directory-picker':
     case 'file-upload':
       return '';
+    case 'accordion':
+      return undefined;
   }
+}
+
+function addFieldDefaults(field: FormField, base: FormValues, overrides?: FormValues): void {
+  if (field.type === 'accordion') {
+    for (const item of field.items) {
+      for (const leaf of item.fields) {
+        addFieldDefaults(leaf, base, overrides);
+      }
+    }
+    return;
+  }
+  base[field.id] = overrides?.[field.id] ?? defaultValueFor(field);
 }
 
 function buildInitial(schema: FormSchema, overrides?: FormValues): FormValues {
   const base: FormValues = {};
   for (const field of schema.fields) {
-    base[field.id] = overrides?.[field.id] ?? defaultValueFor(field);
+    addFieldDefaults(field, base, overrides);
   }
   return base;
 }
@@ -98,12 +112,21 @@ export function FormRenderer({
       <div className="flex flex-col gap-4">
         {schema.fields.map((field) => (
           <div key={field.id}>
-            <FieldRow
-              field={field}
-              value={values[field.id]}
-              onChange={(value) => update(field.id, value)}
-              disabled={disabled || submitting}
-            />
+            {field.type === 'accordion' ? (
+              <AccordionField
+                field={field}
+                values={values}
+                onChange={update}
+                disabled={disabled || submitting}
+              />
+            ) : (
+              <FieldRow
+                field={field}
+                value={values[field.id]}
+                onChange={(value) => update(field.id, value)}
+                disabled={disabled || submitting}
+              />
+            )}
             {renderAfterField?.(field.id, values)}
           </div>
         ))}
@@ -139,8 +162,52 @@ function OptionBadge({ text, color }: { text: string; color?: string }) {
   );
 }
 
+type AccordionFormField = Extract<FormField, { type: 'accordion' }>;
+
+interface AccordionFieldProps {
+  field: AccordionFormField;
+  values: FormValues;
+  onChange: (id: string, value: unknown) => void;
+  disabled: boolean;
+}
+
+function AccordionField({ field, values, onChange, disabled }: AccordionFieldProps) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label htmlFor={field.id}>{field.label}</Label>
+      {field.description && <p className="text-xs text-neutral-200">{field.description}</p>}
+      <div className="flex flex-col overflow-hidden rounded-md border border-neutral-800 bg-neutral-950">
+        {field.items.map((item, idx) => (
+          <details
+            key={`${field.id}-item-${idx}`}
+            className="border-b border-neutral-800 last:border-b-0"
+          >
+            <summary className="cursor-pointer select-none px-3 py-2 text-sm text-neutral-100 hover:bg-neutral-900">
+              {item.title}
+            </summary>
+            <div className="flex flex-col gap-3 border-t border-neutral-800 bg-neutral-950 px-3 py-3">
+              {item.description && (
+                <p className="whitespace-pre-line text-xs text-neutral-200">{item.description}</p>
+              )}
+              {item.fields.map((leaf) => (
+                <FieldRow
+                  key={leaf.id}
+                  field={leaf}
+                  value={values[leaf.id]}
+                  onChange={(value) => onChange(leaf.id, value)}
+                  disabled={disabled}
+                />
+              ))}
+            </div>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 interface FieldRowProps {
-  field: FormField;
+  field: LeafFormField;
   value: unknown;
   onChange: (value: unknown) => void;
   disabled: boolean;
@@ -164,7 +231,7 @@ function FieldRow({ field, value, onChange, disabled }: FieldRowProps) {
           </span>
         </label>
         {field.description && (
-          <p className="whitespace-pre-line pl-6 text-xs text-neutral-500">{field.description}</p>
+          <p className="whitespace-pre-line pl-6 text-xs text-neutral-200">{field.description}</p>
         )}
       </div>
     );
@@ -175,7 +242,7 @@ function FieldRow({ field, value, onChange, disabled }: FieldRowProps) {
         {field.label}
         {field.required && <span className="ml-1 text-red-400">*</span>}
       </Label>
-      {field.description && <p className="text-xs text-neutral-500">{field.description}</p>}
+      {field.description && <p className="text-xs text-neutral-200">{field.description}</p>}
       <FieldControl field={field} value={value} onChange={onChange} disabled={disabled} />
     </div>
   );

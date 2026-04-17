@@ -21,12 +21,29 @@ export function validateFormValues(
   const issues: string[] = [];
   const data: Record<string, unknown> = {};
   for (const field of schema.fields) {
-    const raw = input[field.id];
-    const coerced = coerceField(field, raw, issues);
-    if (coerced !== undefined) data[field.id] = coerced;
+    processField(field, input, data, issues);
   }
   if (issues.length > 0) return { success: false, issues };
   return { success: true, data };
+}
+
+function processField(
+  field: FormField,
+  input: Record<string, unknown>,
+  data: Record<string, unknown>,
+  issues: string[],
+): void {
+  if (field.type === 'accordion') {
+    for (const item of field.items) {
+      for (const leaf of item.fields) {
+        processField(leaf, input, data, issues);
+      }
+    }
+    return;
+  }
+  const raw = input[field.id];
+  const coerced = coerceField(field, raw, issues);
+  if (coerced !== undefined) data[field.id] = coerced;
 }
 
 function coerceField(field: FormField, raw: unknown, issues: string[]): unknown {

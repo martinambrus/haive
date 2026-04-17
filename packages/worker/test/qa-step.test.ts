@@ -157,21 +157,37 @@ const sampleQuestions: AgentQuestion[] = [
 ];
 
 describe('buildResolveForm', () => {
-  it('renders one textarea per agent question + the user-questions textarea', () => {
+  it('wraps agent questions in an accordion + appends the user-questions textarea', () => {
     const detected: KnowledgeQaResolveDetect = {
       agentQuestions: sampleQuestions,
       explicitNoQuestions: false,
       kbFiles: [],
     };
     const form = buildResolveForm(detected);
-    expect(form.fields).toHaveLength(3);
-    expect(form.fields[0]!.id).toBe('agentAnswer__q1');
-    expect(form.fields[0]!.type).toBe('textarea');
-    expect(form.fields[0]!.description).toContain('How does partial delivery work?');
-    expect(form.fields[0]!.description).toContain('Suggested KB file: BUSINESS_LOGIC.md');
-    expect(form.fields[1]!.id).toBe('agentAnswer__q2');
-    expect(form.fields[1]!.description).not.toContain('Suggested KB file');
-    expect(form.fields[2]!.id).toBe('userQuestions');
+    expect(form.fields).toHaveLength(2);
+
+    const accordion = form.fields[0]!;
+    expect(accordion.type).toBe('accordion');
+    expect(accordion.id).toBe('agent-questions');
+    if (accordion.type !== 'accordion') throw new Error('not accordion');
+    expect(accordion.label).toContain('(2)');
+    expect(accordion.items).toHaveLength(2);
+
+    const item0 = accordion.items[0]!;
+    expect(item0.title).toBe('How does partial delivery work?');
+    expect(item0.description).toContain('Topic: Order delivery');
+    expect(item0.description).toContain('Suggested KB file: BUSINESS_LOGIC.md');
+    expect(item0.fields).toHaveLength(1);
+    expect(item0.fields[0]!.id).toBe('agentAnswer__q1');
+    expect(item0.fields[0]!.type).toBe('textarea');
+
+    const item1 = accordion.items[1]!;
+    expect(item1.title).toBe('What does the default scope hide?');
+    expect(item1.description).not.toContain('Suggested KB file');
+    expect(item1.fields[0]!.id).toBe('agentAnswer__q2');
+
+    expect(form.fields[1]!.id).toBe('userQuestions');
+    expect(form.fields[1]!.type).toBe('textarea');
   });
 
   it('renders only the user-questions textarea when there are no agent questions', () => {

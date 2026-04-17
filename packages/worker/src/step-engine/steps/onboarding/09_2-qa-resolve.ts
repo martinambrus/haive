@@ -45,6 +45,7 @@ export interface KnowledgeQaResolveApply {
 
 const USER_QUESTIONS_FIELD = 'userQuestions';
 const AGENT_ANSWER_PREFIX = 'agentAnswer__';
+const AGENT_QUESTIONS_ACCORDION_ID = 'agent-questions';
 const KB_ROOT = path.join('.claude', 'knowledge_base');
 
 /* ------------------------------------------------------------------ */
@@ -89,29 +90,42 @@ export function buildResolveForm(detected: KnowledgeQaResolveDetect): FormSchema
     };
   }
 
-  for (const q of detected.agentQuestions) {
-    const desc = [
-      q.question,
-      '',
+  const accordionItems = detected.agentQuestions.map((q) => {
+    const itemDescription = [
+      `Topic: ${q.topic}`,
       `Context: ${q.context}`,
       q.suggestedKbFile ? `Suggested KB file: ${q.suggestedKbFile}` : '',
     ]
       .filter(Boolean)
       .join('\n');
-    fields.push({
-      type: 'textarea',
-      id: `${AGENT_ANSWER_PREFIX}${q.id}`,
-      label: q.topic,
-      description: desc,
-      rows: 4,
-      placeholder: 'Your answer (leave blank to skip this question).',
-    });
-  }
+    return {
+      title: q.question,
+      description: itemDescription,
+      fields: [
+        {
+          type: 'textarea' as const,
+          id: `${AGENT_ANSWER_PREFIX}${q.id}`,
+          label: 'Your answer',
+          rows: 4,
+          placeholder: 'Leave blank to skip this question.',
+        },
+      ],
+    };
+  });
+
+  fields.push({
+    type: 'accordion',
+    id: AGENT_QUESTIONS_ACCORDION_ID,
+    label: `Agent questions (${detected.agentQuestions.length})`,
+    description:
+      'Click a row to expand. Answer any you have context for; leave the rest blank. All start collapsed.',
+    items: accordionItems,
+  });
   fields.push(userQuestionsField(true));
 
   return {
     title: 'Knowledge base Q&A',
-    description: `The LLM identified ${detected.agentQuestions.length} ambiguous areas. Answer any you have context for; leave the rest blank. Then ask your own questions in the bottom textarea.`,
+    description: `The LLM identified ${detected.agentQuestions.length} ambiguous areas. Expand any to answer; leave the rest collapsed. Then ask your own questions in the bottom textarea.`,
     fields,
     submitLabel: 'Submit and update KB',
   };

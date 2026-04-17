@@ -105,6 +105,35 @@ export const directoryTreeFieldSchema = baseField.extend({
   defaults: z.array(z.string()).optional(),
 });
 
+export const leafFormFieldSchema = z.discriminatedUnion('type', [
+  textFieldSchema,
+  textareaFieldSchema,
+  selectFieldSchema,
+  multiSelectFieldSchema,
+  checkboxFieldSchema,
+  radioFieldSchema,
+  selectWithTextFieldSchema,
+  directoryPickerFieldSchema,
+  fileUploadFieldSchema,
+  numberFieldSchema,
+  directoryTreeFieldSchema,
+]);
+
+export type LeafFormField = z.infer<typeof leafFormFieldSchema>;
+
+export const accordionItemSchema = z.object({
+  title: z.string().min(1),
+  description: z.string().optional(),
+  fields: z.array(leafFormFieldSchema),
+});
+
+export type AccordionItem = z.infer<typeof accordionItemSchema>;
+
+export const accordionFieldSchema = baseField.extend({
+  type: z.literal('accordion'),
+  items: z.array(accordionItemSchema),
+});
+
 export const formFieldSchema = z.discriminatedUnion('type', [
   textFieldSchema,
   textareaFieldSchema,
@@ -117,6 +146,7 @@ export const formFieldSchema = z.discriminatedUnion('type', [
   fileUploadFieldSchema,
   numberFieldSchema,
   directoryTreeFieldSchema,
+  accordionFieldSchema,
 ]);
 
 export type FormField = z.infer<typeof formFieldSchema>;
