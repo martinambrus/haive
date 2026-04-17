@@ -38,6 +38,14 @@ type PollResponse =
   | { status: 'pending'; error: string }
   | { status: 'ok'; credential: { id: string; label: string; host: string } };
 
+interface GithubRepo {
+  fullName: string;
+  cloneUrl: string;
+  defaultBranch: string;
+  private: boolean;
+  pushedAt: string | null;
+}
+
 const SOURCE_OPTIONS: { value: Source; label: string }[] = [
   { value: 'local_path', label: 'Local directory' },
   { value: 'git_https', label: 'Git (HTTPS)' },
@@ -63,7 +71,16 @@ export function NewRepoForm() {
   const [oauthLabel, setOauthLabel] = useState<string | null>(null);
   const [credModalOpen, setCredModalOpen] = useState(false);
   const [githubConfigured, setGithubConfigured] = useState<boolean | null>(null);
+  const [repos, setRepos] = useState<GithubRepo[] | null>(null);
+  const [reposLoading, setReposLoading] = useState(false);
+  const [reposError, setReposError] = useState<string | null>(null);
+  const [reposTruncated, setReposTruncated] = useState(false);
+  const [repoFilter, setRepoFilter] = useState('');
+  const [repoListOpen, setRepoListOpen] = useState(false);
+  const [manualUrl, setManualUrl] = useState(false);
+  const [branchTouched, setBranchTouched] = useState(false);
   const oauthCancelRef = useRef<(() => void) | null>(null);
+  const repoListBlurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     api
@@ -86,6 +103,46 @@ export function NewRepoForm() {
         .catch(() => setGithubConfigured(false));
     }
   }, [source]);
+
+  useEffect(() => {
+    if (source !== 'github_oauth' || oauthPhase !== 'idle' || oauthLabel !== null) return;
+    const existing = credentials.find(
+      (c) => c.host === 'github.com' && c.label.startsWith('GitHub OAuth '),
+    );
+    if (existing) {
+      setOauthLabel(existing.label);
+      setCredentialsId(existing.id);
+    }
+  }, [source, credentials, oauthPhase, oauthLabel]);
+
+  useEffect(() => {
+    setRepos(null);
+    setReposError(null);
+    setReposTruncated(false);
+    setRepoFilter('');
+    if (source !== 'github_oauth' || !credentialsId || manualUrl) return;
+    let cancelled = false;
+    setReposLoading(true);
+    api
+      .get<{ repos: GithubRepo[]; truncated: boolean }>(
+        `/github-oauth/repos?credentialId=${encodeURIComponent(credentialsId)}`,
+      )
+      .then((data) => {
+        if (cancelled) return;
+        setRepos(data.repos);
+        setReposTruncated(data.truncated);
+      })
+      .catch((err: ApiError) => {
+        if (cancelled) return;
+        setReposError(err.message ?? 'Failed to load GitHub repositories');
+      })
+      .finally(() => {
+        if (!cancelled) setReposLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [source, credentialsId, manualUrl]);
 
   function resetOauthState() {
     oauthCancelRef.current?.();
@@ -236,6 +293,9 @@ export function NewRepoForm() {
               resetOauthState();
               setCredentialsId('');
               setGithubConfigured(null);
+              setManualUrl(false);
+              setBranchTouched(false);
+              setBranch('');
             }}
             className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
           >
@@ -261,19 +321,120 @@ export function NewRepoForm() {
 
         {(source === 'git_https' || source === 'github_oauth') && (
           <>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="repo-url">Repository URL</Label>
-              <Input
-                id="repo-url"
-                value={remoteUrl}
-                onChange={(e) => setRemoteUrl(e.target.value)}
-                required
-                placeholder="https://github.com/owner/repo.git"
-              />
-              <p className="text-xs text-neutral-500">
-                Any HTTPS git URL — GitHub, GitLab, Bitbucket, self-hosted, etc.
-              </p>
-            </div>
+            {source === 'github_oauth' && credentialsId && !manualUrl ? (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="repo-picker">Repository</Label>
+                <div className="relative">
+                  <Input
+                    id="repo-picker"
+                    value={repoFilter}
+                    onChange={(e) => {
+                      setRepoFilter(e.target.value);
+                      setRepoListOpen(true);
+                      if (remoteUrl) setRemoteUrl('');
+                    }}
+                    onFocus={() => setRepoListOpen(true)}
+                    onBlur={() => {
+                      if (repoListBlurTimer.current) clearTimeout(repoListBlurTimer.current);
+                      repoListBlurTimer.current = setTimeout(() => setRepoListOpen(false), 150);
+                    }}
+                    placeholder={
+                      reposLoading
+                        ? 'Loading repositories...'
+                        : repos
+                          ? 'Filter repositories...'
+                          : 'Repositories unavailable'
+                    }
+                    autoComplete="off"
+                    disabled={reposLoading || repos === null}
+                  />
+                  {repoListOpen && repos && (
+                    <div className="absolute z-10 mt-1 max-h-64 w-full overflow-y-auto rounded-md border border-neutral-800 bg-neutral-950 shadow-lg">
+                      {(() => {
+                        const filtered = repoFilter.trim()
+                          ? repos.filter((r) =>
+                              r.fullName.toLowerCase().includes(repoFilter.trim().toLowerCase()),
+                            )
+                          : repos;
+                        if (filtered.length === 0) {
+                          return (
+                            <div className="px-3 py-2 text-xs text-neutral-500">No matches.</div>
+                          );
+                        }
+                        return filtered.slice(0, 100).map((r) => (
+                          <button
+                            key={r.fullName}
+                            type="button"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              setRemoteUrl(r.cloneUrl);
+                              setRepoFilter(r.fullName);
+                              setRepoListOpen(false);
+                              if (!branchTouched && !branch) setBranch(r.defaultBranch);
+                            }}
+                            className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs text-neutral-200 hover:bg-neutral-800"
+                          >
+                            <span className="font-mono">{r.fullName}</span>
+                            {r.private && (
+                              <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-amber-300">
+                                private
+                              </span>
+                            )}
+                          </button>
+                        ));
+                      })()}
+                    </div>
+                  )}
+                </div>
+                {remoteUrl && (
+                  <p className="text-xs text-neutral-500">
+                    Selected: <span className="font-mono">{remoteUrl}</span>
+                  </p>
+                )}
+                {reposError && (
+                  <p className="text-xs text-rose-400">
+                    {reposError}{' '}
+                    <button type="button" className="underline" onClick={() => setManualUrl(true)}>
+                      Enter URL manually
+                    </button>
+                  </p>
+                )}
+                {!reposError && (
+                  <div className="flex items-center gap-3 text-xs text-neutral-500">
+                    {reposTruncated && <span>Showing first 1000 — use filter or manual URL.</span>}
+                    <button type="button" className="underline" onClick={() => setManualUrl(true)}>
+                      Enter URL manually
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="repo-url">Repository URL</Label>
+                <Input
+                  id="repo-url"
+                  value={remoteUrl}
+                  onChange={(e) => setRemoteUrl(e.target.value)}
+                  required
+                  placeholder="https://github.com/owner/repo.git"
+                />
+                <p className="text-xs text-neutral-500">
+                  Any HTTPS git URL — GitHub, GitLab, Bitbucket, self-hosted, etc.
+                </p>
+                {source === 'github_oauth' && credentialsId && manualUrl && (
+                  <button
+                    type="button"
+                    className="self-start text-xs text-indigo-300 underline"
+                    onClick={() => {
+                      setManualUrl(false);
+                      setRemoteUrl('');
+                    }}
+                  >
+                    Pick from your repositories instead
+                  </button>
+                )}
+              </div>
+            )}
             {source === 'github_oauth' ? (
               <div className="flex flex-col gap-1.5">
                 <Label>GitHub sign-in</Label>
@@ -394,7 +555,10 @@ export function NewRepoForm() {
           <Input
             id="repo-branch"
             value={branch}
-            onChange={(e) => setBranch(e.target.value)}
+            onChange={(e) => {
+              setBranch(e.target.value);
+              setBranchTouched(true);
+            }}
             placeholder="main"
           />
         </div>

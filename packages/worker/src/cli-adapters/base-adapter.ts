@@ -7,6 +7,8 @@ import type {
   CliProviderRecord,
   EnvInjection,
   InvokeOpts,
+  PluginInstallCommand,
+  PluginInstallOpts,
   ProbeResult,
   SubAgentInvocation,
   SubAgentSpec,
@@ -21,6 +23,8 @@ export abstract class BaseCliAdapter {
   abstract readonly supportsSubagents: boolean;
   abstract readonly supportsApi: boolean;
   abstract readonly supportsCliAuth: boolean;
+  abstract readonly supportsMcp: boolean;
+  abstract readonly supportsPlugins: boolean;
   abstract readonly defaultAuthMode: CliAuthMode;
   abstract readonly apiKeyEnvName: string | null;
   abstract readonly defaultModel: string | null;
@@ -66,6 +70,18 @@ export abstract class BaseCliAdapter {
 
   abstract envInjection(provider: CliProviderRecord): EnvInjection;
 
+  buildPluginInstallCommands?(
+    provider: CliProviderRecord,
+    opts: PluginInstallOpts,
+  ): PluginInstallCommand[];
+
+  /** Env vars to inject when InvokeOpts.maxThinking is true. Default: none.
+   *  Override per-adapter when the underlying CLI supports an effort/budget
+   *  knob (e.g. CLAUDE_CODE_EFFORT_LEVEL=max). */
+  maxThinkingEnv(): Record<string, string> {
+    return {};
+  }
+
   protected resolveExecutable(provider: CliProviderRecord): string {
     const wrapper = provider.wrapperPath?.trim();
     if (wrapper) return wrapper;
@@ -74,11 +90,9 @@ export abstract class BaseCliAdapter {
     return this.defaultExecutable;
   }
 
-  protected mergedEnv(
-    provider: CliProviderRecord,
-    extra?: Record<string, string>,
-  ): Record<string, string> {
-    return { ...(provider.envVars ?? {}), ...(extra ?? {}) };
+  protected mergedEnv(provider: CliProviderRecord, opts: InvokeOpts): Record<string, string> {
+    const thinking = opts.maxThinking ? this.maxThinkingEnv() : {};
+    return { ...(provider.envVars ?? {}), ...thinking, ...(opts.extraEnv ?? {}) };
   }
 
   protected mergedArgs(provider: CliProviderRecord, base: string[]): string[] {

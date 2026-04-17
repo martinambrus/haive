@@ -1,7 +1,10 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  decrypt,
+  decryptDek,
   encrypt,
   encryptDek,
   generateDek,
@@ -186,4 +189,74 @@ githubOauthRoutes.post('/poll', async (c) => {
     });
 
   return c.json({ status: 'ok', credential: inserted[0] });
+});
+
+interface GithubRepoApi {
+  full_name: string;
+  clone_url: string;
+  default_branch: string;
+  private: boolean;
+  pushed_at: string | null;
+}
+
+const REPOS_PAGE_CAP = 10;
+const REPOS_PER_PAGE = 100;
+
+githubOauthRoutes.get('/repos', async (c) => {
+  const userId = c.get('userId');
+  const credentialId = c.req.query('credentialId');
+  if (!credentialId) throw new HttpError(400, 'credentialId is required');
+
+  const db = getDb();
+  const cred = await db.query.repoCredentials.findFirst({
+    where: and(
+      eq(schema.repoCredentials.id, credentialId),
+      eq(schema.repoCredentials.userId, userId),
+    ),
+  });
+  if (!cred) throw new HttpError(404, 'Credential not found');
+  if (cred.host !== 'github.com') {
+    throw new HttpError(400, 'Credential is not a github.com credential');
+  }
+
+  const masterKek = await secretsService.getMasterKek();
+  const dekHex = decryptDek(cred.encryptedDek, masterKek);
+  const token = decrypt(cred.secretEncrypted, dekHex);
+
+  const repos: GithubRepoApi[] = [];
+  for (let page = 1; page <= REPOS_PAGE_CAP; page += 1) {
+    const url = new URL('https://api.github.com/user/repos');
+    url.searchParams.set('per_page', String(REPOS_PER_PAGE));
+    url.searchParams.set('page', String(page));
+    url.searchParams.set('sort', 'pushed');
+    url.searchParams.set('affiliation', 'owner,collaborator,organization_member');
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'haive',
+      },
+    });
+    if (res.status === 401) {
+      throw new HttpError(401, 'GitHub token rejected. Re-authenticate via "Sign in with GitHub".');
+    }
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      throw new HttpError(502, `GitHub /user/repos failed (HTTP ${res.status}): ${errBody}`);
+    }
+    const batch = (await res.json()) as GithubRepoApi[];
+    repos.push(...batch);
+    if (batch.length < REPOS_PER_PAGE) break;
+  }
+
+  return c.json({
+    repos: repos.map((r) => ({
+      fullName: r.full_name,
+      cloneUrl: r.clone_url,
+      defaultBranch: r.default_branch,
+      private: r.private,
+      pushedAt: r.pushed_at,
+    })),
+    truncated: repos.length === REPOS_PAGE_CAP * REPOS_PER_PAGE,
+  });
 });

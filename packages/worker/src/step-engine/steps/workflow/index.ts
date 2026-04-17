@@ -1,5 +1,6 @@
 import type { StepRegistry } from '../../registry.js';
 import { worktreeSetupStep } from './01-worktree-setup.js';
+import { installPluginsStep } from './01b-install-plugins.js';
 import { appBootStep } from './01a-app-boot.js';
 import { preRagSyncStep } from './02-pre-rag-sync.js';
 import { phase0aDiscoveryStep } from './03-phase-0a-discovery.js';
@@ -16,6 +17,7 @@ import { worktreeCleanupStep } from './12-worktree-cleanup.js';
 
 export {
   worktreeSetupStep,
+  installPluginsStep,
   appBootStep,
   preRagSyncStep,
   phase0aDiscoveryStep,
@@ -33,6 +35,7 @@ export {
 
 export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(worktreeSetupStep);
+  registry.register(installPluginsStep);
   registry.register(appBootStep);
   registry.register(preRagSyncStep);
   registry.register(phase0aDiscoveryStep);

@@ -55,6 +55,9 @@ export interface CliExecJobPayload {
   kind: CliExecInvocationKind;
   spec: unknown;
   timeoutMs?: number;
+  /** Forwarded to InvokeOpts.maxThinking when sub-agent kinds rebuild the
+   *  CLI invocation inside cli-exec-queue. Cli kind already has env baked in. */
+  maxThinking?: boolean;
 }
 
 export type CliProbeTargetMode = 'cli' | 'api' | 'both';

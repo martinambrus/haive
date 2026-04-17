@@ -13,6 +13,8 @@ export class GeminiAdapter extends BaseCliAdapter {
   readonly supportsSubagents = false;
   readonly supportsApi = true;
   readonly supportsCliAuth = true;
+  readonly supportsMcp = true;
+  readonly supportsPlugins = false;
   readonly defaultAuthMode = 'subscription' as const;
   readonly apiKeyEnvName = 'GEMINI_API_KEY';
   readonly defaultModel = 'gemini-2.5-pro';
@@ -25,7 +27,7 @@ export class GeminiAdapter extends BaseCliAdapter {
     return {
       command: this.resolveExecutable(provider),
       args: this.mergedArgs(provider, ['-p', prompt]),
-      env: this.mergedEnv(provider, opts.extraEnv),
+      env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
     };
   }

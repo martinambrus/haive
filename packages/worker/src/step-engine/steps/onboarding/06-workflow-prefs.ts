@@ -51,8 +51,10 @@ export const workflowPrefsStep: StepDefinition<null, { prefs: Record<string, unk
         {
           type: 'textarea',
           id: 'customNotes',
-          label: 'Project-specific notes for all generated agents (optional)',
-          rows: 4,
+          label: 'General CLI guidelines (written to AGENTS.md)',
+          description:
+            "Project-wide rules and conventions the CLI must always follow (e.g. coding style, libraries to prefer, do/don't lists). These are appended to AGENTS.md, and CLAUDE.md is set up to import AGENTS.md via a single-line `@AGENTS.md` directive. Existing AGENTS.md / CLAUDE.md content is preserved — your notes are appended.",
+          rows: 6,
         },
       ],
       submitLabel: 'Save workflow preferences',

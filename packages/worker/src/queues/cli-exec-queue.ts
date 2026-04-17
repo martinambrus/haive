@@ -308,7 +308,7 @@ async function loadProviderRuntimeConfig(
   };
 }
 
-async function resolveMcpExtraFiles(
+export async function resolveMcpExtraFiles(
   db: Database,
   taskId: string,
   providerName: CliProviderName,
@@ -344,7 +344,7 @@ const REPO_MOUNT_TARGET = SANDBOX_WORKDIR;
 const HOST_REPO_ROOT = process.env.HOST_REPO_ROOT ?? '/host-fs';
 const HOST_REPO_ROOT_REAL = process.env.HOST_REPO_ROOT_REAL ?? process.env.HOME ?? '/';
 
-async function resolveTaskRepoMount(
+export async function resolveTaskRepoMount(
   db: Database,
   taskId: string,
 ): Promise<DockerVolumeMount | null> {
@@ -382,7 +382,7 @@ async function resolveTaskRepoMount(
   };
 }
 
-async function resolveTaskSandboxWorkdir(db: Database, taskId: string): Promise<string> {
+export async function resolveTaskSandboxWorkdir(db: Database, taskId: string): Promise<string> {
   const row = await db.query.taskSteps.findFirst({
     where: and(
       eq(schema.taskSteps.taskId, taskId),
@@ -573,7 +573,7 @@ function describeToolUse(name: string, input?: Record<string, unknown>): string 
   }
 }
 
-function resolveAuthMounts(
+export function resolveAuthMounts(
   adapter: BaseCliAdapter,
   provider: CliProviderRecord,
 ): DockerVolumeMount[] {
@@ -640,7 +640,7 @@ async function ensureProviderSandboxImage(
   return result.imageTag ?? null;
 }
 
-async function resolveSandboxImageTag(
+export async function resolveSandboxImageTag(
   db: Database,
   taskId: string | null,
   provider: {
@@ -906,6 +906,7 @@ async function executeSubAgentNative(
   const spec = adapter.buildCliInvocation(provider, prompt, {
     cwd: sandboxWorkdir,
     extraEnv: secrets,
+    maxThinking: payload.maxThinking,
   });
   const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
   const mcpFiles = await resolveMcpExtraFiles(
@@ -973,7 +974,11 @@ async function executeSubAgentSequential(
   const result: SubAgentRunResult = await runSequentialSubAgent(
     invocation,
     (prompt) =>
-      adapter.buildCliInvocation(provider, prompt, { cwd: sandboxWorkdir, extraEnv: secrets }),
+      adapter.buildCliInvocation(provider, prompt, {
+        cwd: sandboxWorkdir,
+        extraEnv: secrets,
+        maxThinking: payload.maxThinking,
+      }),
     spawner,
     { timeoutMs: payload.timeoutMs },
   );

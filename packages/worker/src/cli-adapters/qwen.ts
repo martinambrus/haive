@@ -5,7 +5,11 @@ import type {
   CliProviderRecord,
   EnvInjection,
   InvokeOpts,
+  PluginInstallCommand,
+  PluginInstallOpts,
 } from './types.js';
+
+const QWEN_LSP_MARKETPLACE = 'Piebald-AI/claude-code-lsps';
 
 export class QwenAdapter extends BaseCliAdapter {
   readonly providerName = 'qwen' as const;
@@ -13,6 +17,8 @@ export class QwenAdapter extends BaseCliAdapter {
   readonly supportsSubagents = false;
   readonly supportsApi = true;
   readonly supportsCliAuth = true;
+  readonly supportsMcp = false;
+  readonly supportsPlugins = true;
   readonly defaultAuthMode = 'mixed' as const;
   readonly apiKeyEnvName = 'DASHSCOPE_API_KEY';
   readonly defaultModel = 'qwen-max';
@@ -25,7 +31,7 @@ export class QwenAdapter extends BaseCliAdapter {
     return {
       command: this.resolveExecutable(provider),
       args: this.mergedArgs(provider, ['-p', prompt]),
-      env: this.mergedEnv(provider, opts.extraEnv),
+      env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
     };
   }
@@ -52,5 +58,28 @@ export class QwenAdapter extends BaseCliAdapter {
       copyPaths: [{ src: '~/.qwen', dest: '/root/.qwen', mode: 'dir', optional: true }],
       extraArgs: [],
     };
+  }
+
+  override buildPluginInstallCommands(
+    provider: CliProviderRecord,
+    opts: PluginInstallOpts,
+  ): PluginInstallCommand[] {
+    const exec = this.resolveExecutable(provider);
+    const cmds: PluginInstallCommand[] = [];
+    if (opts.lspLanguages.length > 0) {
+      cmds.push({
+        description: `Install LSP extensions from ${QWEN_LSP_MARKETPLACE}`,
+        command: exec,
+        args: ['extensions', 'install', QWEN_LSP_MARKETPLACE],
+      });
+    }
+    if (opts.drupalLspPath) {
+      cmds.push({
+        description: 'Install drupal-php-lsp extension',
+        command: exec,
+        args: ['extensions', 'install', opts.drupalLspPath],
+      });
+    }
+    return cmds;
   }
 }

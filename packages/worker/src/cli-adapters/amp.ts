@@ -7,6 +7,8 @@ export class AmpAdapter extends BaseCliAdapter {
   readonly supportsSubagents = false;
   readonly supportsApi = false;
   readonly supportsCliAuth = true;
+  readonly supportsMcp = false;
+  readonly supportsPlugins = false;
   readonly defaultAuthMode = 'subscription' as const;
   readonly apiKeyEnvName = null;
   readonly defaultModel = null;
@@ -19,7 +21,7 @@ export class AmpAdapter extends BaseCliAdapter {
     return {
       command: this.resolveExecutable(provider),
       args: this.mergedArgs(provider, [prompt]),
-      env: this.mergedEnv(provider, opts.extraEnv),
+      env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
     };
   }

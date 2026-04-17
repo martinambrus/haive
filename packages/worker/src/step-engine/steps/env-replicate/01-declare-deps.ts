@@ -1,10 +1,44 @@
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { and, desc, eq } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
 import type { FormSchema, FormValues } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import { deriveEnvTemplateName, getTaskEnvTemplate, linkTaskToEnvTemplate } from './_shared.js';
+
+const ONBOARDING_LSP_TO_ENV_KEY: Record<string, LspKey> = {
+  typescript: 'vtsls',
+  python: 'pyright',
+  go: 'gopls',
+  rust: 'rust-analyzer',
+  php: 'intelephense',
+  'php-extended': 'intelephense-extended',
+};
+
+async function loadOnboardingLspKeys(db: Database, repositoryId: string | null): Promise<LspKey[]> {
+  if (!repositoryId) return [];
+  const rows = await db
+    .select({ output: schema.taskSteps.output })
+    .from(schema.taskSteps)
+    .innerJoin(schema.tasks, eq(schema.taskSteps.taskId, schema.tasks.id))
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'onboarding'),
+        eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
+        eq(schema.taskSteps.status, 'done'),
+      ),
+    )
+    .orderBy(desc(schema.taskSteps.endedAt))
+    .limit(1);
+  const out = rows[0]?.output as { tooling?: { lspLanguages?: unknown } } | null;
+  const langs = out?.tooling?.lspLanguages;
+  if (!Array.isArray(langs)) return [];
+  return langs
+    .filter((v): v is string => typeof v === 'string')
+    .map((l) => ONBOARDING_LSP_TO_ENV_KEY[l])
+    .filter((v): v is LspKey => !!v);
+}
 
 type ContainerTool = 'ddev' | 'docker-compose' | 'docker' | 'none';
 type DatabaseKind = 'postgres' | 'mysql' | 'mariadb' | 'sqlite' | 'none';
@@ -101,7 +135,16 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
   },
 
   async detect(ctx) {
-    return scanRepoForDeps(ctx.repoPath);
+    const result = await scanRepoForDeps(ctx.repoPath);
+    const taskRow = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { repositoryId: true },
+    });
+    const onboardingLsp = await loadOnboardingLspKeys(ctx.db, taskRow?.repositoryId ?? null);
+    if (onboardingLsp.length > 0) {
+      result.suggestedLsp = Array.from(new Set([...result.suggestedLsp, ...onboardingLsp]));
+    }
+    return result;
   },
 
   form(_ctx, detected) {

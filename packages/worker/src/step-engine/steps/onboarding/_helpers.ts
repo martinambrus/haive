@@ -3,6 +3,22 @@ import type { Dirent } from 'node:fs';
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { CLI_PROVIDER_CATALOG, type CliProviderMetadata } from '@haive/shared';
+
+export async function loadCliProviderMetadata(
+  db: Database,
+  cliProviderId: string | null,
+): Promise<CliProviderMetadata | null> {
+  if (!cliProviderId) return null;
+  const rows = await db
+    .select({ name: schema.cliProviders.name })
+    .from(schema.cliProviders)
+    .where(eq(schema.cliProviders.id, cliProviderId))
+    .limit(1);
+  const name = rows[0]?.name;
+  if (!name) return null;
+  return CLI_PROVIDER_CATALOG[name] ?? null;
+}
 
 export async function loadPreviousStepOutput(
   db: Database,

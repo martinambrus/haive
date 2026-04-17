@@ -164,6 +164,8 @@ export interface CliProviderMetadata {
   supportsSubagents: boolean;
   supportsApi: boolean;
   supportsCliAuth: boolean;
+  supportsMcp: boolean;
+  supportsPlugins: boolean;
   defaultAuthMode: CliAuthMode;
   apiKeyEnvName: string | null;
   defaultModel: string | null;

@@ -5,7 +5,19 @@ import type {
   CliProviderRecord,
   EnvInjection,
   InvokeOpts,
+  PluginInstallCommand,
+  PluginInstallOpts,
 } from './types.js';
+
+const ZAI_LSP_PLUGINS: Record<string, string> = {
+  typescript: 'vtsls',
+  python: 'pyright',
+  go: 'gopls',
+  rust: 'rust-analyzer',
+  php: 'phpactor',
+};
+const ZAI_LSP_MARKETPLACE_REF = 'Piebald-AI/claude-code-lsps';
+const ZAI_LSP_MARKETPLACE_ID = 'claude-code-lsps';
 
 export class ZaiAdapter extends BaseCliAdapter {
   readonly providerName = 'zai' as const;
@@ -13,6 +25,8 @@ export class ZaiAdapter extends BaseCliAdapter {
   readonly supportsSubagents = true;
   readonly supportsApi = true;
   readonly supportsCliAuth = true;
+  readonly supportsMcp = true;
+  readonly supportsPlugins = true;
   readonly defaultAuthMode = 'mixed' as const;
   readonly apiKeyEnvName = 'ANTHROPIC_API_KEY';
   readonly defaultModel = 'zai-latest';
@@ -22,7 +36,7 @@ export class ZaiAdapter extends BaseCliAdapter {
     prompt: string,
     opts: InvokeOpts,
   ): CliCommandSpec {
-    const env = this.mergedEnv(provider, opts.extraEnv);
+    const env = this.mergedEnv(provider, opts);
     if (env.Z_AI_API_URL) env.ANTHROPIC_BASE_URL = env.Z_AI_API_URL;
     if (env.Z_AI_API_KEY) env.ANTHROPIC_API_KEY = env.Z_AI_API_KEY;
     if (env.Z_AI_MODEL) env.CLAUDE_MODEL = env.Z_AI_MODEL;
@@ -57,6 +71,10 @@ export class ZaiAdapter extends BaseCliAdapter {
     };
   }
 
+  override maxThinkingEnv(): Record<string, string> {
+    return { CLAUDE_CODE_EFFORT_LEVEL: 'max' };
+  }
+
   envInjection(_provider: CliProviderRecord): EnvInjection {
     return {
       envVars: {},
@@ -66,5 +84,44 @@ export class ZaiAdapter extends BaseCliAdapter {
       ],
       extraArgs: [],
     };
+  }
+
+  override buildPluginInstallCommands(
+    provider: CliProviderRecord,
+    opts: PluginInstallOpts,
+  ): PluginInstallCommand[] {
+    const exec = this.resolveExecutable(provider);
+    const cmds: PluginInstallCommand[] = [];
+    const lspPlugins = opts.lspLanguages
+      .map((lang) => ZAI_LSP_PLUGINS[lang === 'php-extended' ? 'php' : lang])
+      .filter((v): v is string => !!v);
+    const uniqueLsp = [...new Set(lspPlugins)];
+    if (uniqueLsp.length > 0) {
+      cmds.push({
+        description: `Add ${ZAI_LSP_MARKETPLACE_REF} marketplace`,
+        command: exec,
+        args: ['plugin', 'marketplace', 'add', ZAI_LSP_MARKETPLACE_REF],
+      });
+      for (const name of uniqueLsp) {
+        cmds.push({
+          description: `Install LSP plugin ${name}`,
+          command: exec,
+          args: ['plugin', 'install', `${name}@${ZAI_LSP_MARKETPLACE_ID}`],
+        });
+      }
+    }
+    if (opts.drupalLspPath) {
+      cmds.push({
+        description: 'Add local drupal-lsp marketplace',
+        command: exec,
+        args: ['plugin', 'marketplace', 'add', opts.drupalLspPath],
+      });
+      cmds.push({
+        description: 'Install drupal-php-lsp plugin',
+        command: exec,
+        args: ['plugin', 'install', 'drupal-php-lsp@drupal-lsp-marketplace'],
+      });
+    }
+    return cmds;
   }
 }

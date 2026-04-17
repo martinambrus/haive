@@ -13,6 +13,8 @@ export class GrokAdapter extends BaseCliAdapter {
   readonly supportsSubagents = false;
   readonly supportsApi = true;
   readonly supportsCliAuth = true;
+  readonly supportsMcp = false;
+  readonly supportsPlugins = false;
   readonly defaultAuthMode = 'mixed' as const;
   readonly apiKeyEnvName = 'XAI_API_KEY';
   readonly defaultModel = 'grok-3';
@@ -25,7 +27,7 @@ export class GrokAdapter extends BaseCliAdapter {
     return {
       command: this.resolveExecutable(provider),
       args: this.mergedArgs(provider, ['-p', prompt]),
-      env: this.mergedEnv(provider, opts.extraEnv),
+      env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
     };
   }

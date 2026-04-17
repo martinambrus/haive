@@ -62,7 +62,7 @@ function yamlKbRefs(refs: AgentKbRefs): string[] {
   return out.length === 1 ? [] : out;
 }
 
-export function buildAgentFileMarkdown(spec: AgentSpec, projectNotes: string): string {
+export function buildAgentFileMarkdown(spec: AgentSpec): string {
   const frontmatter = [
     '---',
     `name: ${spec.id}`,
@@ -113,13 +113,6 @@ export function buildAgentFileMarkdown(spec: AgentSpec, projectNotes: string): s
     ...spec.antiPatterns.map((a) => `- **DO NOT** ${a}`),
     '',
   ];
-
-  if (projectNotes.trim().length > 0) {
-    body.push('## Project Notes');
-    body.push('');
-    body.push(projectNotes.trim());
-    body.push('');
-  }
 
   return frontmatter + body.join('\n');
 }

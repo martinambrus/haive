@@ -13,6 +13,8 @@ export class CodexAdapter extends BaseCliAdapter {
   readonly supportsSubagents = false;
   readonly supportsApi = true;
   readonly supportsCliAuth = true;
+  readonly supportsMcp = true;
+  readonly supportsPlugins = false;
   readonly defaultAuthMode = 'subscription' as const;
   readonly apiKeyEnvName = 'OPENAI_API_KEY';
   readonly defaultModel = 'o3';
@@ -25,7 +27,7 @@ export class CodexAdapter extends BaseCliAdapter {
     return {
       command: this.resolveExecutable(provider),
       args: this.mergedArgs(provider, ['exec', prompt]),
-      env: this.mergedEnv(provider, opts.extraEnv),
+      env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
     };
   }

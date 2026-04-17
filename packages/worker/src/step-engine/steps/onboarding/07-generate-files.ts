@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -172,20 +172,24 @@ const DRUPAL_LSP_CONFIG = JSON.stringify(
   2,
 );
 
-const DRUPAL_LSP_FILES: { rel: string; content: string }[] = [
-  {
-    rel: '.claude/plugins/drupal-php-lsp/.claude-plugin/marketplace.json',
-    content: DRUPAL_LSP_MARKETPLACE,
-  },
-  {
-    rel: '.claude/plugins/drupal-php-lsp/.claude-plugin/drupal-php-lsp/.claude-plugin/plugin.json',
-    content: DRUPAL_LSP_PLUGIN,
-  },
-  {
-    rel: '.claude/plugins/drupal-php-lsp/.claude-plugin/drupal-php-lsp/.lsp.json',
-    content: DRUPAL_LSP_CONFIG,
-  },
+/** Plugin base directories per CLI plugin protocol. claude-code/zai use `.claude/plugins`;
+ *  qwen auto-converts claude-plugin.json from `.qwen/extensions`. codex/gemini have
+ *  different plugin formats not yet packaged here. */
+const DRUPAL_LSP_TARGET_BASES = [
+  '.claude/plugins/drupal-php-lsp',
+  '.qwen/extensions/drupal-php-lsp',
 ];
+
+const DRUPAL_LSP_FILES: { rel: string; content: string }[] = DRUPAL_LSP_TARGET_BASES.flatMap(
+  (base) => [
+    { rel: `${base}/.claude-plugin/marketplace.json`, content: DRUPAL_LSP_MARKETPLACE },
+    {
+      rel: `${base}/.claude-plugin/drupal-php-lsp/.claude-plugin/plugin.json`,
+      content: DRUPAL_LSP_PLUGIN,
+    },
+    { rel: `${base}/.claude-plugin/drupal-php-lsp/.lsp.json`, content: DRUPAL_LSP_CONFIG },
+  ],
+);
 
 /** All known agent specs: baselines + framework extras. */
 function allKnownAgents(framework: string | null): Map<string, AgentSpec> {
@@ -339,12 +343,13 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const values = args.formValues as { overwrite?: boolean };
     const overwrite = values.overwrite === true;
     const customNotes =
-      typeof detected.prefs.customNotes === 'string' ? detected.prefs.customNotes : '';
+      typeof detected.prefs.customNotes === 'string' ? detected.prefs.customNotes.trim() : '';
     const customBodies = new Map((detected.customAgentSpecs ?? []).map((s) => [s.id, s]));
     const agents = resolveAgents(detected.framework, detected.acceptedAgentIds, customBodies);
 
     const wroteFiles: string[] = [];
     const skippedFiles: string[] = [];
+    const appendedFiles: string[] = [];
 
     const writeIfAllowed = async (rel: string, contents: string): Promise<void> => {
       const full = path.join(ctx.repoPath, rel);
@@ -358,16 +363,33 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       wroteFiles.push(rel);
     };
 
+    /** Append text to file if not already present, or create if missing. Never overwrites. */
+    const appendOrCreate = async (rel: string, block: string, marker: string): Promise<void> => {
+      const full = path.join(ctx.repoPath, rel);
+      const exists = await pathExists(full);
+      if (exists) {
+        const current = await readFile(full, 'utf8');
+        if (current.includes(marker)) {
+          skippedFiles.push(rel);
+          return;
+        }
+        const sep = current.length === 0 || current.endsWith('\n') ? '' : '\n';
+        await writeFile(full, current + sep + block, 'utf8');
+        appendedFiles.push(rel);
+        return;
+      }
+      await mkdir(path.dirname(full), { recursive: true });
+      await writeFile(full, block, 'utf8');
+      wroteFiles.push(rel);
+    };
+
     await writeIfAllowed(
       '.claude/workflow-config.json',
       workflowConfigJson(detected.prefs, detected.framework),
     );
 
     for (const agent of agents) {
-      await writeIfAllowed(
-        `.claude/agents/${agent.id}.md`,
-        buildAgentFileMarkdown(agent, customNotes),
-      );
+      await writeIfAllowed(`.claude/agents/${agent.id}.md`, buildAgentFileMarkdown(agent));
     }
     for (const cmd of BASELINE_COMMANDS) {
       await writeIfAllowed(`.claude/commands/${cmd.id}.md`, commandFileMarkdown(cmd));
@@ -385,9 +407,23 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       await writeIfAllowed('.claude/mcp_settings.json', detected.mcpSettingsJson + suffix);
     }
 
+    // CLAUDE.md is always set up to import AGENTS.md via a single-line directive.
+    // Existing CLAUDE.md content is preserved — the `@AGENTS.md` line is appended
+    // only if it isn't already present.
+    await appendOrCreate('CLAUDE.md', '@AGENTS.md\n', '@AGENTS.md');
+
+    // AGENTS.md gets the user's CLI guidelines. Existing content preserved; the new
+    // notes are appended under a marker block so re-runs don't duplicate them.
+    if (customNotes.length > 0) {
+      const marker = '<!-- haive:onboarding-notes -->';
+      const block = `${marker}\n## Project guidelines\n\n${customNotes}\n`;
+      await appendOrCreate('AGENTS.md', block, marker);
+    }
+
     ctx.logger.info(
       {
         wrote: wroteFiles.length,
+        appended: appendedFiles.length,
         skipped: skippedFiles.length,
         agents: agents.length,
         commands: BASELINE_COMMANDS.length,
@@ -395,7 +431,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       'generate-files apply complete',
     );
     return {
-      wroteFiles,
+      wroteFiles: [...wroteFiles, ...appendedFiles],
       skippedFiles,
       agentCount: agents.length,
       commandCount: BASELINE_COMMANDS.length,

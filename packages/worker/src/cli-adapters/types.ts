@@ -13,6 +13,10 @@ export interface InvokeOpts {
   extraEnv?: Record<string, string>;
   sessionId?: string;
   nonInteractive?: boolean;
+  /** When true, ask the adapter to enable maximum reasoning/thinking effort
+   *  via whatever mechanism the underlying CLI supports (env var, flag, or
+   *  prompt suffix). No-op for adapters that don't expose such a control. */
+  maxThinking?: boolean;
 }
 
 export interface CliCommandSpec {
@@ -75,4 +79,18 @@ export interface ProbeResult {
   ok: boolean;
   version?: string;
   error?: string;
+}
+
+export type LspLanguage = 'typescript' | 'python' | 'go' | 'rust' | 'php' | 'php-extended';
+
+export interface PluginInstallOpts {
+  repoRoot: string;
+  lspLanguages: LspLanguage[];
+  drupalLspPath?: string;
+}
+
+export interface PluginInstallCommand {
+  description: string;
+  command: string;
+  args: string[];
 }

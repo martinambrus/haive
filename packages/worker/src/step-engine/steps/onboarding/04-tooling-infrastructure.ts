@@ -1,7 +1,7 @@
 import type { DetectResult, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { buildDefaultMcpServers, buildMcpConfigForCli } from '../../../sandbox/mcp-config.js';
-import { loadPreviousStepOutput } from './_helpers.js';
+import { loadCliProviderMetadata, loadPreviousStepOutput } from './_helpers.js';
 import type { EnvDetectApply } from './01-env-detect.js';
 
 const DEFAULT_MCP_SETTINGS_JSON: string = (() => {
@@ -21,6 +21,9 @@ interface ToolingDetect {
   containerType: string;
   databaseType: string | null;
   hasPhpExtendedExtensions: boolean;
+  cliDisplayName: string | null;
+  cliSupportsMcp: boolean;
+  cliSupportsPlugins: boolean;
 }
 
 interface EnvDetectData {
@@ -104,12 +107,17 @@ export const toolingInfrastructureStep: StepDefinition<
     const rgDetect = rgPrev?.detect as { extensions?: { ext: string; isPhp: boolean }[] } | null;
     const hasPhpExtendedExtensions = (rgDetect?.extensions ?? []).some((e) => e.isPhp);
 
+    const cliMeta = await loadCliProviderMetadata(ctx.db, ctx.cliProviderId);
+
     return {
       primaryLanguage: data.project.primaryLanguage,
       framework: data.project.framework ?? 'unknown',
       containerType: data.container.type,
       databaseType: data.container.databaseType,
       hasPhpExtendedExtensions,
+      cliDisplayName: cliMeta?.displayName ?? null,
+      cliSupportsMcp: cliMeta?.supportsMcp ?? false,
+      cliSupportsPlugins: cliMeta?.supportsPlugins ?? false,
     };
   },
 
@@ -182,6 +190,9 @@ export const toolingInfrastructureStep: StepDefinition<
           id: 'mcpSettingsJson',
           label: 'MCP server definitions (.claude/mcp_settings.json)',
           description:
+            (detected.cliSupportsMcp
+              ? ''
+              : `WARNING: ${detected.cliDisplayName ?? 'the current CLI'} does not support MCP in haive. Settings will be saved but ignored until you switch to a CLI that does (e.g. Claude Code, Codex, Gemini, Z.AI). `) +
             'Written verbatim to .claude/mcp_settings.json and passed to Claude Code via --mcp-config. Pre-filled with the Chrome DevTools MCP server used by browser-testing workflow steps. Add additional servers inside the mcpServers object (e.g. filesystem, git, postgres). Leave empty to skip writing the file.',
           default: DEFAULT_MCP_SETTINGS_JSON,
           rows: 14,
@@ -191,6 +202,9 @@ export const toolingInfrastructureStep: StepDefinition<
           id: 'lspLanguages',
           label: 'LSP language servers',
           description:
+            (detected.cliSupportsPlugins
+              ? ''
+              : `WARNING: ${detected.cliDisplayName ?? 'the current CLI'} does not support plugin install in haive. LSP servers will still be baked into the project image, but LSP plugins will not be installed into the CLI until you switch to a CLI that supports them (e.g. Claude Code, Z.AI, Qwen). `) +
             'Pick one or more language servers to install. Leave empty to skip LSP installation.',
           options: LSP_OPTIONS,
           defaults: defaultLspForLanguage(

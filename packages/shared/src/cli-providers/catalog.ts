@@ -8,6 +8,8 @@ export interface CliProviderMetadata {
   supportsSubagents: boolean;
   supportsApi: boolean;
   supportsCliAuth: boolean;
+  supportsMcp: boolean;
+  supportsPlugins: boolean;
   defaultAuthMode: AuthMode;
   apiKeyEnvName: string | null;
   defaultModel: string | null;
@@ -25,6 +27,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsSubagents: true,
     supportsApi: true,
     supportsCliAuth: true,
+    supportsMcp: true,
+    supportsPlugins: true,
     defaultAuthMode: 'subscription',
     apiKeyEnvName: 'ANTHROPIC_API_KEY',
     defaultModel: 'claude-sonnet-4-20250514',
@@ -39,6 +43,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsSubagents: true,
     supportsApi: true,
     supportsCliAuth: true,
+    supportsMcp: true,
+    supportsPlugins: false,
     defaultAuthMode: 'subscription',
     apiKeyEnvName: 'OPENAI_API_KEY',
     defaultModel: 'o3',
@@ -52,6 +58,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsSubagents: true,
     supportsApi: true,
     supportsCliAuth: true,
+    supportsMcp: true,
+    supportsPlugins: false,
     defaultAuthMode: 'subscription',
     apiKeyEnvName: 'GEMINI_API_KEY',
     defaultModel: 'gemini-2.5-pro',
@@ -65,6 +73,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsSubagents: true,
     supportsApi: false,
     supportsCliAuth: true,
+    supportsMcp: false,
+    supportsPlugins: false,
     defaultAuthMode: 'subscription',
     apiKeyEnvName: null,
     defaultModel: null,
@@ -78,6 +88,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsSubagents: true,
     supportsApi: true,
     supportsCliAuth: true,
+    supportsMcp: false,
+    supportsPlugins: false,
     defaultAuthMode: 'mixed',
     apiKeyEnvName: 'XAI_API_KEY',
     defaultModel: 'grok-3',
@@ -91,6 +103,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsSubagents: true,
     supportsApi: true,
     supportsCliAuth: true,
+    supportsMcp: false,
+    supportsPlugins: true,
     defaultAuthMode: 'mixed',
     apiKeyEnvName: 'DASHSCOPE_API_KEY',
     defaultModel: 'qwen-max',
@@ -104,6 +118,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsSubagents: true,
     supportsApi: false,
     supportsCliAuth: true,
+    supportsMcp: false,
+    supportsPlugins: false,
     defaultAuthMode: 'subscription',
     apiKeyEnvName: null,
     defaultModel: null,
@@ -117,6 +133,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsSubagents: true,
     supportsApi: true,
     supportsCliAuth: true,
+    supportsMcp: true,
+    supportsPlugins: true,
     defaultAuthMode: 'mixed',
     apiKeyEnvName: 'ANTHROPIC_API_KEY',
     defaultModel: 'zai-latest',
