@@ -357,7 +357,7 @@ async function collectKeyFiles(repoPath: string): Promise<string> {
 /* LLM prompt + parse                                                  */
 /* ------------------------------------------------------------------ */
 
-interface LlmCustomAgentBody {
+export interface LlmCustomAgentBody {
   title?: string;
   description?: string;
   color?: AgentColor;
@@ -514,7 +514,7 @@ function normaliseStringArray(raw: unknown): string[] {
   return raw.filter((s): s is string => typeof s === 'string' && s.trim().length > 0);
 }
 
-function buildAgentSpecFromLlm(
+export function buildAgentSpecFromLlm(
   id: string,
   label: string,
   hint: string,

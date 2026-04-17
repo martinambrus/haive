@@ -5,8 +5,9 @@ import type { FormField, FormSchema } from '@haive/shared';
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { cn } from '@/lib/cn';
+import { validateRequired, type FormValues } from '@/components/form-validation';
 
-export type FormValues = Record<string, unknown>;
+export type { FormValues };
 
 interface FormRendererProps {
   schema: FormSchema;
@@ -18,30 +19,6 @@ interface FormRendererProps {
   onValuesChange?: (values: FormValues) => void;
   /** Render extra content (e.g. test buttons) after a specific field. */
   renderAfterField?: (fieldId: string, values: FormValues) => React.ReactNode;
-}
-
-function validateRequired(schema: FormSchema, values: FormValues): string | null {
-  for (const field of schema.fields) {
-    if (!field.required) continue;
-    const value = values[field.id];
-    switch (field.type) {
-      case 'checkbox':
-        if (value !== true) return `${field.label} is required`;
-        break;
-      case 'multi-select':
-      case 'directory-tree':
-        if (!Array.isArray(value) || value.length === 0) return `${field.label} is required`;
-        break;
-      case 'number':
-        if (value === '' || value === null || value === undefined || Number.isNaN(value as number))
-          return `${field.label} is required`;
-        break;
-      default:
-        if (typeof value !== 'string' || value.trim().length === 0)
-          return `${field.label} is required`;
-    }
-  }
-  return null;
 }
 
 function defaultValueFor(field: FormField): unknown {

@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Queue } from 'bullmq';
 import { asc, eq } from 'drizzle-orm';
@@ -84,6 +85,12 @@ async function createFixture(): Promise<string> {
     path.join(dir, '__tests__', 'sanity.test.ts'),
     "import { describe, it, expect } from 'vitest'; describe('s', () => { it('p', () => { expect(1).toBe(1); }); });\n",
   );
+  const git = (args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  git(['init', '-b', 'main']);
+  git(['config', 'user.email', 'smoke@test.local']);
+  git(['config', 'user.name', 'Smoke Test']);
+  git(['add', '.']);
+  git(['commit', '-m', 'initial']);
   return dir;
 }
 
@@ -243,6 +250,39 @@ async function main(): Promise<void> {
         commit: false,
         commitMessage: '',
       },
+      '01-worktree-setup': {
+        branchName: 'feature/envwrap-smoke',
+        baseBranch: 'main',
+      },
+      '02-pre-rag-sync': { runSync: false },
+      '03-phase-0a-discovery': { extraContext: '' },
+      '04-phase-0b-pre-planning': {
+        scope: 'envwrap smoke workflow prelude verification.',
+      },
+      '05-phase-0b5-spec-quality': { focusAreas: '' },
+      '06-gate-1-spec-approval': {
+        decision: 'approve',
+        feedback: 'envwrap smoke stub approval.',
+      },
+      '07-phase-2-implement': { instructions: '' },
+      '08-phase-5-verify': {
+        runTest: false,
+        runLint: false,
+        runTypecheck: false,
+      },
+      '09-gate-2-verify-approval': {
+        decision: 'approve',
+        feedback: 'envwrap smoke verify approval.',
+      },
+      '10-gate-3-commit': {
+        commit: false,
+        commitMessage: '',
+      },
+      '11-phase-8-learning': {
+        observations: 'envwrap smoke: prelude+workflow end-to-end.',
+        writeFiles: true,
+      },
+      '12-worktree-cleanup': { removeWorktree: false },
     };
 
     const submitted = new Set<string>();
@@ -344,7 +384,7 @@ async function main(): Promise<void> {
     log.info(
       {
         envSteps: expectedEnv.length,
-        onboardingSteps: expectedOnboarding.length,
+        workflowSteps: expectedWorkflow.length,
         totalSteps: allSteps.length,
       },
       'env-replicate wrap smoke assertions passed',
@@ -353,7 +393,7 @@ async function main(): Promise<void> {
       JSON.stringify({
         smoke: 'ENV_WRAP_OK',
         envSteps: expectedEnv.length,
-        onboardingSteps: expectedOnboarding.length,
+        workflowSteps: expectedWorkflow.length,
         totalSteps: allSteps.length,
         imageId: envTemplate.builtImageId,
       }),

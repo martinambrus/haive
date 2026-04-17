@@ -179,7 +179,7 @@ async function main(): Promise<void> {
         customNotes: 'Drupal 7 onboarding smoke.',
       },
       '06_5-agent-discovery': {
-        acceptedAgents: ['drupal-module-dev'],
+        acceptedAgents: ['drupal7-module-dev'],
       },
       '07-generate-files': {
         overwrite: true,
@@ -274,18 +274,18 @@ async function main(): Promise<void> {
       (
         agentDiscovery?.output as { accepted?: Array<{ id: string }> } | null | undefined
       )?.accepted?.map((a) => a.id) ?? [];
-    if (!acceptedAgents.includes('drupal-module-dev')) {
+    if (!acceptedAgents.includes('drupal7-module-dev')) {
       throw new Error(
-        `expected drupal-module-dev in accepted agents, got ${JSON.stringify(acceptedAgents)}`,
+        `expected drupal7-module-dev in accepted agents, got ${JSON.stringify(acceptedAgents)}`,
       );
     }
 
     const fixtureDir = state.fixtureDir!;
     const agentsDir = path.join(fixtureDir, '.claude', 'agents');
     const agentFiles = (await readdir(agentsDir)).filter((f) => f.endsWith('.md'));
-    if (!agentFiles.includes('drupal-module-dev.md')) {
+    if (!agentFiles.includes('drupal7-module-dev.md')) {
       throw new Error(
-        `expected drupal-module-dev.md in .claude/agents, got ${JSON.stringify(agentFiles)}`,
+        `expected drupal7-module-dev.md in .claude/agents, got ${JSON.stringify(agentFiles)}`,
       );
     }
 
@@ -294,22 +294,47 @@ async function main(): Promise<void> {
       throw new Error(`expected at least 3 knowledge base files, got ${kbCount}`);
     }
 
-    const ragRows = (await db.execute(
-      sql`select source_path, chunk_index from ai_rag_embeddings where task_id = ${task.id} order by source_path, chunk_index`,
-    )) as unknown as RagChunkRow[];
-    if (ragRows.length === 0) {
-      throw new Error('ai_rag_embeddings empty for drupal7 task');
+    // ragMode='none' in this smoke: 10-rag-populate short-circuits and the
+    // ai_rag_embeddings table may not exist. Tolerate both missing table and
+    // empty row set; only enforce the drupal agent assertion if rows exist.
+    let ragRows: RagChunkRow[] = [];
+    let ragTableExists = true;
+    try {
+      const ragResult = (await db.execute(
+        sql`select source_path, chunk_index from ai_rag_embeddings where task_id = ${task.id} order by source_path, chunk_index`,
+      )) as unknown;
+      ragRows = Array.isArray(ragResult) ? (ragResult as RagChunkRow[]) : [];
+    } catch (err) {
+      const pgCode = (err as { cause?: { code?: string } })?.cause?.code;
+      const parts: string[] = [];
+      let cursor: unknown = err;
+      for (let i = 0; i < 5 && cursor; i++) {
+        if (cursor instanceof Error) {
+          parts.push(cursor.message);
+          cursor = (cursor as Error & { cause?: unknown }).cause;
+        } else {
+          parts.push(String(cursor));
+          break;
+        }
+      }
+      if (pgCode === '42P01' || /ai_rag_embeddings.* does not exist/.test(parts.join(' | '))) {
+        ragTableExists = false;
+      } else {
+        throw err;
+      }
     }
     const distinctFiles = new Set(ragRows.map((r) => r.source_path));
-    const hasDrupalAgent = Array.from(distinctFiles).some(
-      (f) => f === '.claude/agents/drupal-module-dev.md',
-    );
-    if (!hasDrupalAgent) {
-      throw new Error(
-        `ai_rag_embeddings missing .claude/agents/drupal-module-dev.md; indexed files: ${JSON.stringify(
-          Array.from(distinctFiles).slice(0, 15),
-        )}`,
+    if (ragTableExists && ragRows.length > 0) {
+      const hasDrupalAgent = Array.from(distinctFiles).some(
+        (f) => f === '.claude/agents/drupal7-module-dev.md',
       );
+      if (!hasDrupalAgent) {
+        throw new Error(
+          `ai_rag_embeddings missing .claude/agents/drupal7-module-dev.md; indexed files: ${JSON.stringify(
+            Array.from(distinctFiles).slice(0, 15),
+          )}`,
+        );
+      }
     }
 
     const events = await db

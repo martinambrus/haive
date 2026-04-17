@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Queue } from 'bullmq';
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   configService,
@@ -19,6 +19,40 @@ import {
 import { initDatabase, getDb } from '../src/db.js';
 import { initRedis, getBullRedis, closeRedis } from '../src/redis.js';
 import { closeTaskQueue, startTaskWorker } from '../src/queues/task-queue.js';
+import { stepRegistry } from '../src/step-engine/registry.js';
+import { createBuildImageStep } from '../src/step-engine/steps/env-replicate/03-build-image.js';
+import { createVerifyEnvironmentStep } from '../src/step-engine/steps/env-replicate/04-verify-environment.js';
+import type {
+  DockerBuildOpts,
+  DockerBuildResult,
+  DockerRunOpts,
+  DockerRunResult,
+  DockerRunner,
+} from '../src/sandbox/docker-runner.js';
+
+function createFakeRunner(): DockerRunner {
+  return {
+    async build(opts: DockerBuildOpts): Promise<DockerBuildResult> {
+      return {
+        exitCode: 0,
+        imageTag: opts.tag,
+        imageId: `sha256:${randomBytes(16).toString('hex')}`,
+        durationMs: 50,
+        stderr: '',
+        timedOut: false,
+      };
+    },
+    async run(opts: DockerRunOpts): Promise<DockerRunResult> {
+      return {
+        exitCode: 0,
+        stdout: `fake-ok ${opts.cmd.join(' ')}`,
+        stderr: '',
+        durationMs: 7,
+        timedOut: false,
+      };
+    },
+  };
+}
 
 const log = logger.child({ module: 'workflow-commit-smoke' });
 const exec = promisify(execFile);
@@ -152,6 +186,11 @@ async function main(): Promise<void> {
     state.taskId = task.id;
 
     state.worker = startTaskWorker();
+
+    const fakeRunner = createFakeRunner();
+    stepRegistry.override(createBuildImageStep(fakeRunner));
+    stepRegistry.override(createVerifyEnvironmentStep(fakeRunner));
+
     state.queue = new Queue<TaskJobPayload>(QUEUE_NAMES.TASK, {
       connection: getBullRedis(),
     });
@@ -160,6 +199,29 @@ async function main(): Promise<void> {
 
     const commitMessage = 'feat: logout button stub (workflow-commit smoke)';
     const formPayloads: Record<string, Record<string, unknown>> = {
+      '01-declare-deps': {
+        runtimes: ['node'],
+        nodeVersion: '22',
+        phpVersion: '8.3',
+        pythonVersion: '3.12',
+        containerTool: 'none',
+        databaseKind: 'none',
+        databaseVersion: '',
+        lspServers: [],
+        browserTesting: false,
+        extraPackages: '',
+      },
+      '02-generate-dockerfile': {
+        dockerfile:
+          'FROM busybox\nENV DEBIAN_FRONTEND=noninteractive\nWORKDIR /workspace\nCMD ["sh"]\n',
+      },
+      '03-build-image': {
+        imageTag: 'haive-wfcommit:latest',
+        forceRebuild: true,
+      },
+      '04-verify-environment': {
+        selectedChecks: ['node', 'bash'],
+      },
       '01-worktree-setup': {
         branchName: 'feature/logout-button',
         useWorktree: false,
@@ -228,9 +290,11 @@ async function main(): Promise<void> {
 
       if (stepId === '10-gate-3-commit' && !fabricatedDiff) {
         const worktreeStep = await db.query.taskSteps.findFirst({
-          where: eq(schema.taskSteps.taskId, task.id),
+          where: and(
+            eq(schema.taskSteps.taskId, task.id),
+            eq(schema.taskSteps.stepId, '01-worktree-setup'),
+          ),
           columns: { output: true },
-          orderBy: asc(schema.taskSteps.stepIndex),
         });
         const wtOutput = worktreeStep?.output as { worktreePath?: string } | null;
         const targetDir = wtOutput?.worktreePath ?? fixtureDir;

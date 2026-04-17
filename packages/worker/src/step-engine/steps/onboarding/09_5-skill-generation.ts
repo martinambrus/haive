@@ -40,7 +40,7 @@ interface SkillCodeLocation {
   path: string;
 }
 
-interface SkillEntry {
+export interface SkillEntry {
   id: string;
   title: string;
   description: string;
@@ -195,7 +195,7 @@ function renderCodeLocations(items: SkillCodeLocation[]): string[] {
     .map((c) => `- **${c.label.trim()}** — \`${c.path.trim()}\``);
 }
 
-function skillToMarkdown(entry: SkillEntry): string {
+export function skillToMarkdown(entry: SkillEntry): string {
   const fm = ['---', `name: ${entry.id}`, `description: ${entry.description}`, '---', ''].join(
     '\n',
   );

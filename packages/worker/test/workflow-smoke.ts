@@ -18,6 +18,40 @@ import {
 import { initDatabase, getDb } from '../src/db.js';
 import { initRedis, getBullRedis, closeRedis } from '../src/redis.js';
 import { closeTaskQueue, startTaskWorker } from '../src/queues/task-queue.js';
+import { stepRegistry } from '../src/step-engine/registry.js';
+import { createBuildImageStep } from '../src/step-engine/steps/env-replicate/03-build-image.js';
+import { createVerifyEnvironmentStep } from '../src/step-engine/steps/env-replicate/04-verify-environment.js';
+import type {
+  DockerBuildOpts,
+  DockerBuildResult,
+  DockerRunOpts,
+  DockerRunResult,
+  DockerRunner,
+} from '../src/sandbox/docker-runner.js';
+
+function createFakeRunner(): DockerRunner {
+  return {
+    async build(opts: DockerBuildOpts): Promise<DockerBuildResult> {
+      return {
+        exitCode: 0,
+        imageTag: opts.tag,
+        imageId: `sha256:${randomBytes(16).toString('hex')}`,
+        durationMs: 50,
+        stderr: '',
+        timedOut: false,
+      };
+    },
+    async run(opts: DockerRunOpts): Promise<DockerRunResult> {
+      return {
+        exitCode: 0,
+        stdout: `fake-ok ${opts.cmd.join(' ')}`,
+        stderr: '',
+        durationMs: 7,
+        timedOut: false,
+      };
+    },
+  };
+}
 
 const log = logger.child({ module: 'workflow-smoke' });
 
@@ -148,6 +182,11 @@ async function main(): Promise<void> {
     state.taskId = task.id;
 
     state.worker = startTaskWorker();
+
+    const fakeRunner = createFakeRunner();
+    stepRegistry.override(createBuildImageStep(fakeRunner));
+    stepRegistry.override(createVerifyEnvironmentStep(fakeRunner));
+
     state.queue = new Queue<TaskJobPayload>(QUEUE_NAMES.TASK, {
       connection: getBullRedis(),
     });
@@ -156,6 +195,29 @@ async function main(): Promise<void> {
     await state.queue.add(TASK_JOB_NAMES.START, { taskId: task.id, userId });
 
     const formPayloads: Record<string, Record<string, unknown>> = {
+      '01-declare-deps': {
+        runtimes: ['node'],
+        nodeVersion: '22',
+        phpVersion: '8.3',
+        pythonVersion: '3.12',
+        containerTool: 'none',
+        databaseKind: 'none',
+        databaseVersion: '',
+        lspServers: [],
+        browserTesting: false,
+        extraPackages: '',
+      },
+      '02-generate-dockerfile': {
+        dockerfile:
+          'FROM busybox\nENV DEBIAN_FRONTEND=noninteractive\nWORKDIR /workspace\nCMD ["sh"]\n',
+      },
+      '03-build-image': {
+        imageTag: 'haive-workflow:latest',
+        forceRebuild: true,
+      },
+      '04-verify-environment': {
+        selectedChecks: ['node', 'bash'],
+      },
       '01-worktree-setup': {
         branchName: 'feature/logout-button',
         useWorktree: false,

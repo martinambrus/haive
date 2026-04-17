@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Queue } from 'bullmq';
 import { asc, eq } from 'drizzle-orm';
@@ -77,6 +78,12 @@ async function createFixtureRepo(): Promise<string> {
       2,
     ),
   );
+  const git = (args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  git(['init', '-b', 'main']);
+  git(['config', 'user.email', 'smoke@test.local']);
+  git(['config', 'user.name', 'Smoke Test']);
+  git(['add', '.']);
+  git(['commit', '-m', 'initial']);
   return dir;
 }
 
@@ -203,12 +210,27 @@ async function main(): Promise<void> {
       '04-verify-environment': {
         selectedChecks: ['node', 'bash'],
       },
+      '01-worktree-setup': {
+        branchName: 'feature/env-smoke',
+        baseBranch: 'main',
+      },
+      '02-pre-rag-sync': { runSync: false },
+      '03-phase-0a-discovery': { extraContext: '' },
+      '04-phase-0b-pre-planning': { scope: 'env-replicate smoke scope.' },
+      '05-phase-0b5-spec-quality': { focusAreas: '' },
+      '06-gate-1-spec-approval': { decision: 'approve', feedback: 'env smoke.' },
+      '07-phase-2-implement': { instructions: '' },
+      '08-phase-5-verify': { runTest: false, runLint: false, runTypecheck: false },
+      '09-gate-2-verify-approval': { decision: 'approve', feedback: 'env smoke verify.' },
+      '10-gate-3-commit': { commit: false, commitMessage: '' },
+      '11-phase-8-learning': { observations: 'env smoke observations.', writeFiles: true },
+      '12-worktree-cleanup': { removeWorktree: false },
     };
 
     const submitted = new Set<string>();
     let lastStepId: string | null = null;
     let iterations = 0;
-    while (iterations < 20) {
+    while (iterations < 40) {
       iterations += 1;
       const updated = await pollUntil(
         async () => {
