@@ -124,6 +124,9 @@ export async function handleCliExecJob(
     const result = await executeByKind(db, payload, deps, secrets);
     const durationMs = Date.now() - startedAt;
 
+    const providerName = await resolveProviderNameForPayload(db, payload);
+    const finalErrorMessage = interpretCliFailure(result, providerName);
+
     await db
       .update(schema.cliInvocations)
       .set({
@@ -131,12 +134,12 @@ export async function handleCliExecJob(
         rawOutput: result.rawOutput,
         parsedOutput: result.parsedOutput as unknown,
         durationMs,
-        errorMessage: result.errorMessage ?? null,
+        errorMessage: finalErrorMessage,
         endedAt: new Date(),
       })
       .where(eq(schema.cliInvocations.id, row.id));
 
-    await resumeStepIfLinked(payload, result.exitCode === 0, result.errorMessage ?? null);
+    await resumeStepIfLinked(payload, result.exitCode === 0, finalErrorMessage);
   } catch (err) {
     const durationMs = Date.now() - startedAt;
     const message = err instanceof Error ? err.message : String(err);
@@ -155,7 +158,60 @@ export async function handleCliExecJob(
   }
 }
 
-interface ExecutionOutcome {
+const AUTH_FAILURE_PATTERNS: RegExp[] = [
+  /\b401\b/,
+  /authentication_error/i,
+  /invalid authentication credentials/i,
+  /\bunauthorized\b/i,
+  /\bunauthenticated\b/i,
+  /please log.?in/i,
+  /not authenticated/i,
+  /token.*(expired|invalid)/i,
+];
+
+const PROVIDER_LOGIN_HINTS: Record<string, string> = {
+  'claude-code': 'claude /login',
+  codex: 'codex login',
+  gemini: 'gemini auth login',
+  amp: 'amp login',
+  grok: 'grok login',
+  qwen: 'qwen login',
+  kiro: 'kiro login',
+  zai: 'zai login',
+};
+
+export function interpretCliFailure(
+  result: ExecutionOutcome,
+  providerName: string | null,
+): string | null {
+  const existing = result.errorMessage ?? null;
+  if (result.exitCode === 0) return existing;
+
+  const haystack = [existing ?? '', result.rawOutput ?? ''].join('\n');
+  const looksLikeAuth = AUTH_FAILURE_PATTERNS.some((p) => p.test(haystack));
+  if (!looksLikeAuth) return existing;
+
+  const loginCmd = providerName ? PROVIDER_LOGIN_HINTS[providerName] : null;
+  const hint = loginCmd
+    ? `run \`${loginCmd}\` in your terminal and then retry this step`
+    : 're-authenticate your CLI in your terminal and then retry this step';
+  const detail = existing && existing.trim().length > 0 ? ` (${existing.trim()})` : '';
+  return `CLI authentication failed — ${hint}.${detail}`;
+}
+
+async function resolveProviderNameForPayload(
+  db: Database,
+  payload: CliExecJobPayload,
+): Promise<string | null> {
+  if (!payload.cliProviderId) return null;
+  const row = await db.query.cliProviders.findFirst({
+    where: eq(schema.cliProviders.id, payload.cliProviderId),
+    columns: { name: true },
+  });
+  return row?.name ?? null;
+}
+
+export interface ExecutionOutcome {
   exitCode: number | null;
   rawOutput: string | null;
   parsedOutput: unknown;
