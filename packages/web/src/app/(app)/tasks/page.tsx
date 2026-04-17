@@ -32,6 +32,7 @@ export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showCancelled, setShowCancelled] = useState(false);
+  const [showCompleted, setShowCompleted] = useState(false);
 
   async function reload() {
     try {
@@ -58,6 +59,13 @@ export default function TasksPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant={showCompleted ? 'primary' : 'secondary'}
+            size="sm"
+            onClick={() => setShowCompleted((v) => !v)}
+          >
+            {showCompleted ? 'Hide completed' : 'Show completed'}
+          </Button>
           <Button
             variant={showCancelled ? 'primary' : 'secondary'}
             size="sm"
@@ -97,6 +105,7 @@ export default function TasksPage() {
         <div className="grid gap-3">
           {tasks
             .filter((task) => showCancelled || task.status !== 'cancelled')
+            .filter((task) => showCompleted || task.status !== 'completed')
             .map((task) => (
               <Link key={task.id} href={`/tasks/${task.id}`} className="block">
                 <Card className="flex flex-col gap-2 transition-colors hover:border-indigo-700">
