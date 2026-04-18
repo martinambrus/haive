@@ -228,11 +228,23 @@ export interface CliProviderSecret {
 
 export type CliProbeTargetMode = 'cli' | 'api' | 'both';
 
+export type CliAuthStatus =
+  | 'unknown'
+  | 'ok'
+  | 'auth_expired'
+  | 'auth_denied'
+  | 'rate_limited'
+  | 'network_error'
+  | 'timeout'
+  | 'unknown_error';
+
 export interface CliProbePathResult {
   ok: boolean;
   detail?: string;
   error?: string;
   durationMs?: number;
+  authStatus?: CliAuthStatus;
+  authMessage?: string;
 }
 
 export interface CliProbeResult {
@@ -241,6 +253,12 @@ export interface CliProbeResult {
   targetMode: CliProbeTargetMode;
   cli?: CliProbePathResult;
   api?: CliProbePathResult;
+}
+
+export interface CliLoginStartResult {
+  ok: boolean;
+  containerId: string;
+  dockerContainerId?: string;
 }
 
 export type ContainerStatus = 'creating' | 'running' | 'stopped' | 'destroyed' | 'error';

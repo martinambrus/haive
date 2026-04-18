@@ -153,7 +153,9 @@ export function CliProviderForm({
     authMode: provider?.authMode ?? metadata.defaultAuthMode,
     cliVersion:
       provider?.cliVersion ??
-      (metadata.versionPinnable ? (metadata.versionCache?.latestVersion ?? '') : ''),
+      (metadata.versionPinnable
+        ? (metadata.versionCache?.versions[0] ?? metadata.versionCache?.latestVersion ?? '')
+        : ''),
     effortLevel: metadata.effortScale ? (provider?.effortLevel ?? metadata.effortScale.max) : '',
     sandboxDockerfileExtra: provider?.sandboxDockerfileExtra ?? '',
     enabled: provider?.enabled ?? true,
@@ -250,11 +252,8 @@ export function CliProviderForm({
         `/cli-providers/catalog/${metadata.name}/refresh-versions`,
       );
       setVersionCache(entry);
-      setState((prev) =>
-        prev.cliVersion || !entry.latestVersion
-          ? prev
-          : { ...prev, cliVersion: entry.latestVersion },
-      );
+      const newest = entry.versions[0] ?? entry.latestVersion;
+      setState((prev) => (prev.cliVersion || !newest ? prev : { ...prev, cliVersion: newest }));
     } catch (err) {
       setError((err as Error).message ?? 'Failed to refresh versions');
     } finally {

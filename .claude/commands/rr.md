@@ -1,8 +1,8 @@
 ---
-description: Rebuilds and restarts the current project.
-allowed-tools: Bash
+name: rr
+description: Rebuilds and reloads the current project.
 ---
 
-# Rebuild and Restart Command
+# /rr
 
-Find out how to rebuild and restart the current application stack and do it.
+Rebuild and reload the current project by using the relevant build and reload mechanics for it.

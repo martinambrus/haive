@@ -68,7 +68,12 @@ export default function EditCliProviderPage() {
             Verify the CLI binary and/or API credentials respond correctly.
           </CardDescription>
         </CardHeader>
-        <CliProviderTest providerId={provider.id} blockMessage={testBlockMessage} />
+        <CliProviderTest
+          providerId={provider.id}
+          providerName={provider.name}
+          providerLabel={provider.label}
+          blockMessage={testBlockMessage}
+        />
       </Card>
     </div>
   );

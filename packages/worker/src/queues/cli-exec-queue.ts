@@ -15,6 +15,8 @@ import {
   logger,
   type CliExecInvocationKind,
   type CliExecJobPayload,
+  type CliLoginStartJobPayload,
+  type CliLoginStartResult,
   type CliNetworkPolicy,
   type CliProbeJobPayload,
   type CliProbePathResult,
@@ -59,6 +61,14 @@ import {
 import { assembleNativePrompt } from '../sub-agent-emulator/native-mode.js';
 import { resolveProviderSecrets } from '../secrets/provider-secrets.js';
 import { runInSandbox } from '../sandbox/sandbox-runner.js';
+import { resolveCliAuthMounts } from '../sandbox/cli-auth-volume.js';
+import { resolveCliAuthHostBinds } from '../sandbox/cli-auth-host.js';
+import {
+  buildAuthProbeCommand,
+  classifyAuthProbeOutput,
+  isAuthProbeSupported,
+} from '../cli-adapters/auth-probe.js';
+import { startLoginContainer } from '../sandbox/login-container.js';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { getTaskQueue } from './task-queue.js';
@@ -69,7 +79,8 @@ type CliExecQueuePayload =
   | CliExecJobPayload
   | CliProbeJobPayload
   | SandboxImageBuildJobPayload
-  | RefreshCliVersionsJobPayload;
+  | RefreshCliVersionsJobPayload
+  | CliLoginStartJobPayload;
 
 let cliExecQueueInstance: Queue<CliExecQueuePayload> | null = null;
 
@@ -1127,6 +1138,18 @@ export async function handleProbeJob(
   const apiOk = !wantApi || result.api?.ok === true;
   result.ok = cliOk && apiOk;
 
+  if (wantCli && result.cli?.authStatus) {
+    await db
+      .update(schema.cliProviders)
+      .set({
+        authStatus: result.cli.authStatus,
+        authMessage: result.cli.authMessage ?? null,
+        authLastCheckedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.cliProviders.id, provider.id));
+  }
+
   return result;
 }
 
@@ -1147,9 +1170,33 @@ async function probeCliPath(
       durationMs: Date.now() - startedAt,
     };
   }
-  const spawner = createSandboxSpawner(provider.wrapperContent, sandboxImage);
+  let authMounts: Awaited<ReturnType<typeof resolveCliAuthMounts>> = [];
+  if (isAuthProbeSupported(provider.name)) {
+    const hostBinds = await resolveCliAuthHostBinds(provider.name, { writable: true });
+    const hostTargets = new Set(hostBinds.map((b) => b.containerPath));
+    const volumeMounts = resolveCliAuthMounts(provider.userId, provider.name, {
+      writable: false,
+    }).filter((m) => !hostTargets.has(m.target));
+    authMounts = [
+      ...hostBinds.map((b) => ({
+        source: b.hostPath,
+        target: b.containerPath,
+        readOnly: b.readOnly,
+      })),
+      ...volumeMounts,
+    ];
+  }
+  const spawner = createSandboxSpawner(
+    provider.wrapperContent,
+    sandboxImage,
+    null,
+    SANDBOX_WORKDIR,
+    null,
+    [],
+    authMounts,
+  );
   try {
-    const result = await spawner(
+    const versionResult = await spawner(
       {
         command: resolvedCommand,
         args: ['--version'],
@@ -1157,15 +1204,49 @@ async function probeCliPath(
       },
       { timeoutMs: 15_000 },
     );
-    const durationMs = Date.now() - startedAt;
-    if (result.exitCode === 0) {
-      const detail = result.stdout.trim() || result.stderr.trim() || 'binary reachable';
-      return { ok: true, detail, durationMs };
+    if (versionResult.exitCode !== 0) {
+      const error =
+        versionResult.error ??
+        (versionResult.stderr.trim() ||
+          `exit ${versionResult.exitCode ?? 'unknown'} from sandbox probe`);
+      return { ok: false, error, durationMs: Date.now() - startedAt };
     }
-    const error =
-      result.error ??
-      (result.stderr.trim() || `exit ${result.exitCode ?? 'unknown'} from sandbox probe`);
-    return { ok: false, error, durationMs };
+    const versionDetail =
+      versionResult.stdout.trim() || versionResult.stderr.trim() || 'binary reachable';
+
+    if (!isAuthProbeSupported(provider.name)) {
+      return { ok: true, detail: versionDetail, durationMs: Date.now() - startedAt };
+    }
+
+    const authSpec = buildAuthProbeCommand(provider, resolvedCommand);
+    const authResult = await spawner(
+      { command: authSpec.command, args: authSpec.args, env: authSpec.env },
+      { timeoutMs: 25_000 },
+    );
+    const classification = classifyAuthProbeOutput({
+      stdout: authResult.stdout,
+      stderr: authResult.stderr,
+      exitCode: authResult.exitCode ?? -1,
+      timedOut: authResult.timedOut,
+    });
+    const durationMs = Date.now() - startedAt;
+    if (classification.status === 'ok') {
+      return {
+        ok: true,
+        detail: versionDetail,
+        durationMs,
+        authStatus: 'ok',
+        authMessage: classification.message,
+      };
+    }
+    return {
+      ok: false,
+      detail: versionDetail,
+      error: classification.message,
+      durationMs,
+      authStatus: classification.status,
+      authMessage: classification.message,
+    };
   } catch (err) {
     return {
       ok: false,
@@ -1503,11 +1584,19 @@ export function startCliExecWorker(
   deps: CliExecDeps = defaultDeps,
 ): Worker<
   CliExecQueuePayload,
-  CliProbeResult | SandboxImageBuildResult | RefreshCliVersionsJobResult | void
+  | CliProbeResult
+  | SandboxImageBuildResult
+  | RefreshCliVersionsJobResult
+  | CliLoginStartResult
+  | void
 > {
   const worker = new Worker<
     CliExecQueuePayload,
-    CliProbeResult | SandboxImageBuildResult | RefreshCliVersionsJobResult | void
+    | CliProbeResult
+    | SandboxImageBuildResult
+    | RefreshCliVersionsJobResult
+    | CliLoginStartResult
+    | void
   >(
     QUEUE_NAMES.CLI_EXEC,
     async (job: Job<CliExecQueuePayload>) => {
@@ -1524,6 +1613,9 @@ export function startCliExecWorker(
       }
       if (job.name === CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS) {
         return handleRefreshCliVersionsJob(db);
+      }
+      if (job.name === CLI_EXEC_JOB_NAMES.LOGIN_START) {
+        return startLoginContainer(db, job.data as CliLoginStartJobPayload);
       }
       throw new Error(`unknown cli-exec job ${job.name}`);
     },

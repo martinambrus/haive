@@ -2,6 +2,7 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { SidebarNav } from '@/components/sidebar-nav';
+import { CliLoginProvider } from '@/components/cli-login-provider';
 
 interface MeResponse {
   user: {
@@ -63,9 +64,11 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   if (!data) redirect('/login');
 
   return (
-    <div className="flex min-h-screen">
-      <SidebarNav email={data.user.email} role={data.user.role} />
-      <main className="flex-1 overflow-y-auto p-8">{children}</main>
-    </div>
+    <CliLoginProvider>
+      <div className="flex min-h-screen">
+        <SidebarNav email={data.user.email} role={data.user.role} />
+        <main className="flex-1 overflow-y-auto p-8">{children}</main>
+      </div>
+    </CliLoginProvider>
   );
 }

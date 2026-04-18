@@ -32,6 +32,7 @@ export const CLI_EXEC_JOB_NAMES = {
   PROBE: 'cli-probe',
   BUILD_SANDBOX_IMAGE: 'cli-build-sandbox-image',
   REFRESH_VERSIONS: 'cli-refresh-versions',
+  LOGIN_START: 'cli-login-start',
 } as const;
 
 export interface RefreshCliVersionsJobPayload {
@@ -79,11 +80,34 @@ export interface SandboxImageBuildResult {
   error?: string;
 }
 
+export type CliAuthStatus =
+  | 'unknown'
+  | 'ok'
+  | 'auth_expired'
+  | 'auth_denied'
+  | 'rate_limited'
+  | 'network_error'
+  | 'timeout'
+  | 'unknown_error';
+
+export const CLI_AUTH_STATUS_VALUES: readonly CliAuthStatus[] = [
+  'unknown',
+  'ok',
+  'auth_expired',
+  'auth_denied',
+  'rate_limited',
+  'network_error',
+  'timeout',
+  'unknown_error',
+] as const;
+
 export interface CliProbePathResult {
   ok: boolean;
   detail?: string;
   error?: string;
   durationMs?: number;
+  authStatus?: CliAuthStatus;
+  authMessage?: string;
 }
 
 export interface CliProbeResult {
@@ -92,6 +116,18 @@ export interface CliProbeResult {
   targetMode: CliProbeTargetMode;
   cli?: CliProbePathResult;
   api?: CliProbePathResult;
+}
+
+export interface CliLoginStartJobPayload {
+  providerId: string;
+  userId: string;
+}
+
+export interface CliLoginStartResult {
+  ok: boolean;
+  containerId?: string;
+  dockerContainerId?: string;
+  error?: string;
 }
 
 export const PUBSUB_CHANNELS = {

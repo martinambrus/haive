@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import {
   api,
@@ -17,11 +18,12 @@ type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
 interface TerminalProps {
   containerId: string;
   onExit?: (code: number) => void;
+  fill?: boolean;
 }
 
 const KEEPALIVE_INTERVAL_MS = 30_000;
 
-export function Terminal({ containerId, onExit }: TerminalProps) {
+export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const [state, setState] = useState<ConnectionState>('connecting');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -89,11 +91,42 @@ export function Terminal({ containerId, onExit }: TerminalProps) {
 
     const fitAddon = new FitAddon();
     const webLinksAddon = new WebLinksAddon();
+    const clipboardAddon = new ClipboardAddon();
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
+    term.loadAddon(clipboardAddon);
+    term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== 'keydown') return true;
+      if (ev.ctrlKey && ev.shiftKey && (ev.key === 'C' || ev.key === 'c')) {
+        const sel = term.getSelection();
+        if (sel) {
+          void navigator.clipboard.writeText(sel);
+          return false;
+        }
+      }
+      if (ev.ctrlKey && ev.shiftKey && (ev.key === 'V' || ev.key === 'v')) {
+        void navigator.clipboard.readText().then((text) => {
+          if (text) term.paste(text);
+        });
+        return false;
+      }
+      return true;
+    });
     term.open(mountRef.current);
-    fitAddon.fit();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        try {
+          fitAddon.fit();
+          term.refresh(0, term.rows - 1);
+          term.focus();
+        } catch {
+          // ignore
+        }
+      });
+    });
 
+    let disposed = false;
+    let firstOutputSeen = false;
     const ws = new WebSocket(apiWebSocketUrl(`/terminal/${containerId}`));
     setState('connecting');
 
@@ -123,10 +156,18 @@ export function Terminal({ containerId, onExit }: TerminalProps) {
     });
 
     const handleResize = () => {
-      fitAddon.fit();
+      try {
+        fitAddon.fit();
+        term.refresh(0, term.rows - 1);
+      } catch {
+        // ignore
+      }
       sendResize();
     };
     window.addEventListener('resize', handleResize);
+
+    const resizeObserver = new ResizeObserver(() => handleResize());
+    resizeObserver.observe(mountRef.current);
 
     ws.onopen = () => {
       sendResize();
@@ -143,11 +184,21 @@ export function Terminal({ containerId, onExit }: TerminalProps) {
       switch (parsed.type) {
         case 'connected':
           setState('connected');
-          fitAddon.fit();
-          sendResize();
+          setErrorMsg(null);
+          handleResize();
+          term.focus();
+          setTimeout(() => handleResize(), 250);
+          setTimeout(() => handleResize(), 1000);
           break;
         case 'output':
-          if (typeof parsed.data === 'string') term.write(parsed.data);
+          if (typeof parsed.data === 'string') {
+            const wasEmpty = !firstOutputSeen;
+            term.write(parsed.data);
+            if (wasEmpty) {
+              firstOutputSeen = true;
+              requestAnimationFrame(() => handleResize());
+            }
+          }
           break;
         case 'exit':
           setState('closed');
@@ -169,11 +220,13 @@ export function Terminal({ containerId, onExit }: TerminalProps) {
     };
 
     ws.onerror = () => {
+      if (disposed) return;
       setState('error');
       setErrorMsg('websocket error');
     };
 
     ws.onclose = (ev) => {
+      if (disposed) return;
       setState((prev) => (prev === 'error' ? prev : 'closed'));
       if (ev.code !== 1000) {
         term.writeln(
@@ -187,8 +240,10 @@ export function Terminal({ containerId, onExit }: TerminalProps) {
     }, KEEPALIVE_INTERVAL_MS);
 
     return () => {
+      disposed = true;
       clearInterval(keepalive);
       window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
       inputDisposable.dispose();
       try {
         ws.close(1000, 'unmount');
@@ -200,7 +255,7 @@ export function Terminal({ containerId, onExit }: TerminalProps) {
   }, [containerId, onExit]);
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className={`flex flex-col gap-2 ${fill ? 'h-full min-h-0' : ''}`}>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-xs">
           <StatusBadge state={state} />
@@ -227,7 +282,7 @@ export function Terminal({ containerId, onExit }: TerminalProps) {
       </div>
       <div
         ref={mountRef}
-        className="h-[600px] w-full rounded border border-neutral-800 bg-[#0a0a0a] p-2"
+        className={`w-full rounded border border-neutral-800 bg-[#0a0a0a] p-2 ${fill ? 'min-h-0 flex-1' : 'h-[600px]'}`}
       />
       {rawLogOpen && (
         <div className="rounded border border-neutral-800 bg-neutral-950 p-3">

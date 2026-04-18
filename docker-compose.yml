@@ -93,9 +93,11 @@ services:
       HOST_REPO_ROOT: /host-fs
       REPO_STORAGE_ROOT: /var/lib/haive/repos
       GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-}
+      DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ${HOST_REPO_ROOT:-${HOME}}:/host-fs:ro
       - haive_repos:/var/lib/haive/repos
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
     networks:
       - haive-network
 

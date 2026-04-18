@@ -1,3 +1,4 @@
+import http from 'node:http';
 import type { Server, IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -94,13 +95,7 @@ async function runTerminalSession(
   log.info({ sessionId, containerId: container.id }, 'terminal session opened');
 
   const dockerContainer = docker.getContainer(container.dockerContainerId!);
-  const stream = (await dockerContainer.attach({
-    stream: true,
-    stdin: true,
-    stdout: true,
-    stderr: true,
-    hijack: true,
-  })) as Duplex;
+  const stream = await attachContainerStream(docker, container.dockerContainerId!);
 
   await incrementAttached(container.id);
   sendFrame(ws, { type: 'connected', sessionId });
@@ -265,6 +260,20 @@ async function loadContainerForUser(
     .limit(1);
   const container = rows[0];
   if (!container) return null;
+
+  if (container.purpose === 'cli_login') {
+    if (!container.cliProviderId) return null;
+    const providerRows = await db
+      .select({ userId: schema.cliProviders.userId })
+      .from(schema.cliProviders)
+      .where(eq(schema.cliProviders.id, container.cliProviderId))
+      .limit(1);
+    const provider = providerRows[0];
+    if (!provider || provider.userId !== userId) return null;
+    return container;
+  }
+
+  if (!container.taskId) return null;
   const taskRows = await db
     .select({ userId: schema.tasks.userId })
     .from(schema.tasks)
@@ -374,6 +383,43 @@ function sendFrame(ws: WebSocket, frame: TerminalServerFrame): void {
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+async function attachContainerStream(docker: Docker, dockerContainerId: string): Promise<Duplex> {
+  const modemOpts = (
+    docker as unknown as {
+      modem: { socketPath?: string; host?: string; port?: number; protocol?: string };
+    }
+  ).modem;
+  return new Promise<Duplex>((resolve, reject) => {
+    const reqOpts: http.RequestOptions = {
+      method: 'POST',
+      path: `/containers/${dockerContainerId}/attach?stream=1&stdin=1&stdout=1&stderr=1&logs=1`,
+      headers: {
+        Host: 'docker',
+        Connection: 'Upgrade',
+        Upgrade: 'tcp',
+        'Content-Type': 'application/vnd.docker.raw-stream',
+        'Content-Length': '0',
+      },
+    };
+    if (modemOpts.socketPath) {
+      reqOpts.socketPath = modemOpts.socketPath;
+    } else {
+      reqOpts.host = modemOpts.host;
+      reqOpts.port = modemOpts.port;
+    }
+    const req = http.request(reqOpts);
+    req.on('upgrade', (_res, socket, head) => {
+      if (head.length > 0) socket.unshift(head);
+      resolve(socket as Duplex);
+    });
+    req.on('error', reject);
+    req.on('response', (res) => {
+      reject(new Error(`docker attach failed: ${res.statusCode}`));
+    });
+    req.end();
+  });
 }
 
 export function scanOauthPrompts(

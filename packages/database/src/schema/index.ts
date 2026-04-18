@@ -88,6 +88,18 @@ export const containerStatusEnum = pgEnum('container_status', [
   'destroyed',
   'error',
 ]);
+export const containerPurposeEnum = pgEnum('container_purpose', ['task', 'cli_login']);
+
+export const cliAuthStatusEnum = pgEnum('cli_auth_status', [
+  'unknown',
+  'ok',
+  'auth_expired',
+  'auth_denied',
+  'rate_limited',
+  'network_error',
+  'timeout',
+  'unknown_error',
+]);
 
 export const envTemplateStatusEnum = pgEnum('env_template_status', [
   'pending',
@@ -198,6 +210,9 @@ export const cliProviders = pgTable(
     sandboxImageBuildError: text('sandbox_image_build_error'),
     sandboxImageBuiltAt: timestamp('sandbox_image_built_at'),
     enabled: boolean('enabled').notNull().default(true),
+    authStatus: cliAuthStatusEnum('auth_status').notNull().default('unknown'),
+    authLastCheckedAt: timestamp('auth_last_checked_at'),
+    authMessage: text('auth_message'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
@@ -437,9 +452,11 @@ export const containers = pgTable(
   'containers',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    taskId: uuid('task_id')
-      .notNull()
-      .references(() => tasks.id, { onDelete: 'cascade' }),
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'cascade' }),
+    purpose: containerPurposeEnum('purpose').notNull().default('task'),
+    cliProviderId: uuid('cli_provider_id').references(() => cliProviders.id, {
+      onDelete: 'cascade',
+    }),
     runtime: containerRuntimeEnum('runtime').notNull().default('clawker'),
     dockerContainerId: varchar('docker_container_id', { length: 255 }),
     name: varchar('name', { length: 255 }),
@@ -454,6 +471,7 @@ export const containers = pgTable(
   (table) => [
     index('containers_task_id_idx').on(table.taskId),
     index('containers_status_idx').on(table.status),
+    index('containers_cli_provider_id_idx').on(table.cliProviderId),
   ],
 );
 
@@ -552,6 +570,7 @@ export const cliProvidersRelations = relations(cliProviders, ({ one, many }) => 
   secrets: many(cliProviderSecrets),
   tasks: many(tasks),
   invocations: many(cliInvocations),
+  loginContainers: many(containers),
 }));
 
 export const cliProviderSecretsRelations = relations(cliProviderSecrets, ({ one }) => ({
@@ -623,6 +642,10 @@ export const cliInvocationsRelations = relations(cliInvocations, ({ one }) => ({
 
 export const containersRelations = relations(containers, ({ one, many }) => ({
   task: one(tasks, { fields: [containers.taskId], references: [tasks.id] }),
+  cliProvider: one(cliProviders, {
+    fields: [containers.cliProviderId],
+    references: [cliProviders.id],
+  }),
   terminalSessions: many(terminalSessions),
 }));
 

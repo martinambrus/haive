@@ -48,11 +48,13 @@ services:
       - haive_node_modules_database:/app/packages/database/node_modules
       - ${HOST_REPO_ROOT:-${HOME}}:/host-fs:ro
       - haive_repos:/var/lib/haive/repos
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
     command: sh -c "pnpm --filter @haive/database build && pnpm --filter @haive/shared build && pnpm --filter @haive/api dev"
     environment:
       NODE_ENV: development
       HOST_REPO_ROOT: /host-fs
       REPO_STORAGE_ROOT: /var/lib/haive/repos
+      DOCKER_HOST: unix:///var/run/docker.sock
 
   worker:
     build:

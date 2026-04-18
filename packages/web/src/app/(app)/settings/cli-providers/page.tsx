@@ -4,10 +4,12 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
   api,
+  type CliAuthStatus,
   type CliProbePathResult,
   type CliProbeResult,
   type CliProvider,
   type CliProviderMetadata,
+  type CliProviderName,
 } from '@/lib/api-client';
 import {
   Badge,
@@ -18,6 +20,15 @@ import {
   CardTitle,
   FormError,
 } from '@/components/ui';
+import { useCliLogin } from '@/lib/use-cli-login';
+
+const LOGIN_SUPPORTED: CliProviderName[] = ['claude-code', 'codex'];
+const LOGIN_RECOVERABLE: CliAuthStatus[] = [
+  'auth_expired',
+  'auth_denied',
+  'unknown_error',
+  'timeout',
+];
 
 interface TestState {
   testing: boolean;
@@ -31,6 +42,20 @@ export default function CliProvidersPage() {
   const [error, setError] = useState<string | null>(null);
   const [testStates, setTestStates] = useState<Record<string, TestState>>({});
   const [cloningIds, setCloningIds] = useState<Record<string, boolean>>({});
+  const { requireCliLogin } = useCliLogin();
+
+  function handleLogin(p: CliProvider) {
+    requireCliLogin({
+      providerId: p.id,
+      providerLabel: p.label,
+      providerName: p.name,
+      onComplete: (res) =>
+        setTestStates((s) => ({
+          ...s,
+          [p.id]: { testing: false, result: res, error: null },
+        })),
+    });
+  }
 
   async function load() {
     try {
@@ -122,6 +147,11 @@ export default function CliProvidersPage() {
                 {providers.map((p) => {
                   const meta = catalog.find((m) => m.name === p.name);
                   const testState = testStates[p.id];
+                  const cliAuthStatus = testState?.result?.cli?.authStatus;
+                  const showLogin =
+                    LOGIN_SUPPORTED.includes(p.name) &&
+                    cliAuthStatus !== undefined &&
+                    LOGIN_RECOVERABLE.includes(cliAuthStatus);
                   return (
                     <Card key={p.id}>
                       <div className="flex items-start justify-between gap-4">
@@ -154,6 +184,11 @@ export default function CliProvidersPage() {
                           >
                             {testState?.testing ? 'Testing...' : 'Test'}
                           </Button>
+                          {showLogin && (
+                            <Button variant="secondary" size="sm" onClick={() => handleLogin(p)}>
+                              Log in
+                            </Button>
+                          )}
                           <Link href={`/settings/cli-providers/${p.id}`}>
                             <Button variant="secondary" size="sm">
                               Edit
@@ -182,10 +217,20 @@ export default function CliProvidersPage() {
                             <p className="font-mono text-xs text-red-400">{testState.error}</p>
                           )}
                           {testState.result?.cli && (
-                            <TestPathLine label="CLI" res={testState.result.cli} />
+                            <TestPathLine
+                              label="CLI"
+                              res={testState.result.cli}
+                              providerName={p.name}
+                              onLogin={() => handleLogin(p)}
+                            />
                           )}
                           {testState.result?.api && (
-                            <TestPathLine label="API" res={testState.result.api} />
+                            <TestPathLine
+                              label="API"
+                              res={testState.result.api}
+                              providerName={p.name}
+                              onLogin={() => handleLogin(p)}
+                            />
                           )}
                         </div>
                       )}
@@ -232,17 +277,69 @@ export default function CliProvidersPage() {
   );
 }
 
-function TestPathLine({ label, res }: { label: string; res: CliProbePathResult }) {
+const AUTH_STATUS_LABEL: Record<CliAuthStatus, string> = {
+  unknown: 'unknown',
+  ok: 'authenticated',
+  auth_expired: 'login expired',
+  auth_denied: 'login denied',
+  rate_limited: 'rate limited',
+  network_error: 'network error',
+  timeout: 'timeout',
+  unknown_error: 'error',
+};
+
+function authBadgeVariant(status: CliAuthStatus): 'success' | 'warning' | 'error' | 'default' {
+  if (status === 'ok') return 'success';
+  if (status === 'rate_limited' || status === 'network_error') return 'warning';
+  if (status === 'unknown') return 'default';
+  return 'error';
+}
+
+function TestPathLine({
+  label,
+  res,
+  providerName,
+  onLogin,
+}: {
+  label: string;
+  res: CliProbePathResult;
+  providerName: CliProviderName;
+  onLogin: () => void;
+}) {
+  const loginPrompt =
+    !res.ok &&
+    res.authStatus &&
+    LOGIN_SUPPORTED.includes(providerName) &&
+    LOGIN_RECOVERABLE.includes(res.authStatus);
   return (
     <div className="mt-1 flex items-start gap-2 text-xs">
       <span className="font-semibold text-neutral-400">{label}</span>
       <Badge variant={res.ok ? 'success' : 'error'}>{res.ok ? 'OK' : 'FAIL'}</Badge>
+      {res.authStatus && (
+        <Badge variant={authBadgeVariant(res.authStatus)}>
+          {AUTH_STATUS_LABEL[res.authStatus]}
+        </Badge>
+      )}
       {typeof res.durationMs === 'number' && (
         <span className="text-neutral-500">{res.durationMs}ms</span>
       )}
-      <pre className="flex-1 whitespace-pre-wrap break-words font-mono text-neutral-400">
-        {res.ok ? (res.detail ?? '') : (res.error ?? '')}
-      </pre>
+      {loginPrompt ? (
+        <span className="flex-1 text-amber-300">
+          Not logged in. Click the{' '}
+          <button
+            type="button"
+            onClick={onLogin}
+            className="font-semibold text-amber-200 underline underline-offset-2 hover:text-amber-100"
+          >
+            Log in
+          </button>{' '}
+          button to start an interactive login.
+        </span>
+      ) : (
+        <pre className="flex-1 whitespace-pre-wrap break-words font-mono text-neutral-400">
+          {res.ok ? (res.detail ?? '') : (res.error ?? '')}
+        </pre>
+      )}
     </div>
   );
 }
