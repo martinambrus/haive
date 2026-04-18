@@ -1,4 +1,4 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
 import { logger, validateFormValues } from '@haive/shared';
@@ -82,7 +82,12 @@ async function resolveLlmPhase(
   const latest = await db
     .select()
     .from(schema.cliInvocations)
-    .where(eq(schema.cliInvocations.taskStepId, current.id))
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, current.id),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    )
     .orderBy(desc(schema.cliInvocations.createdAt))
     .limit(1);
   const invocation = latest[0];

@@ -1,7 +1,7 @@
 import { open, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { Hono } from 'hono';
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   createTaskRequestSchema,
@@ -239,7 +239,15 @@ taskRoutes.post('/:id/steps/:stepId/action', async (c) => {
     }
     await db.transaction(async (tx) => {
       const now = new Date();
-      await tx.delete(schema.cliInvocations).where(eq(schema.cliInvocations.taskStepId, step.id));
+      await tx
+        .update(schema.cliInvocations)
+        .set({ supersededAt: now })
+        .where(
+          and(
+            eq(schema.cliInvocations.taskStepId, step.id),
+            isNull(schema.cliInvocations.supersededAt),
+          ),
+        );
       await tx
         .update(schema.taskSteps)
         .set({

@@ -423,6 +423,7 @@ export const cliInvocations = pgTable(
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
+    supersededAt: timestamp('superseded_at'),
   },
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),
