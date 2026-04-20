@@ -1,7 +1,7 @@
 'use client';
 
 import type { ReactNode } from 'react';
-import { CliLoginModal } from '@/components/cli-login-modal';
+import { CliAuthBannerModal } from '@/components/cli-auth-banner-modal';
 import { CliLoginContext, useCliLoginController } from '@/lib/use-cli-login';
 import type { CliProbeResult } from '@/lib/api-client';
 
@@ -16,7 +16,7 @@ export function CliLoginProvider({ children }: { children: ReactNode }) {
   return (
     <CliLoginContext.Provider value={controller}>
       {children}
-      <CliLoginModal
+      <CliAuthBannerModal
         open={Boolean(request)}
         providerId={request?.providerId ?? ''}
         providerLabel={request?.providerLabel ?? ''}

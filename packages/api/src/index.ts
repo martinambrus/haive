@@ -16,6 +16,7 @@ import { githubOauthRoutes } from './routes/github-oauth.js';
 import { filesystemRoutes } from './routes/filesystem.js';
 import { integrationsRoutes } from './routes/integrations.js';
 import { taskRoutes } from './routes/tasks.js';
+import { installCliLoginBannerWebSocket } from './routes/cli-login-banner.js';
 import { installTerminalWebSocket } from './routes/terminal.js';
 import { terminalSessionRoutes } from './routes/terminal-sessions.js';
 import { toolingRoutes } from './routes/tooling.js';
@@ -63,6 +64,7 @@ async function main(): Promise<void> {
   }) as unknown as Server;
 
   installTerminalWebSocket(server);
+  installCliLoginBannerWebSocket(server);
 }
 
 const invokedAsScript =

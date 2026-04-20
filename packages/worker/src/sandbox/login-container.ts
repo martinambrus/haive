@@ -1,64 +1,55 @@
 import Docker from 'dockerode';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { logger, type CliLoginStartJobPayload, type CliLoginStartResult } from '@haive/shared';
+import { logger } from '@haive/shared';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
-import {
-  buildLoginCommand,
-  CliLoginUnsupportedError,
-  isCliLoginSupported,
-} from '../cli-adapters/login-command.js';
+import type { CliCommandSpec, CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveCliAuthMounts } from './cli-auth-volume.js';
 import { resolveCliAuthHostBinds } from './cli-auth-host.js';
 import { SANDBOX_USER, SANDBOX_WORKDIR } from './sandbox-runner.js';
 
 const log = logger.child({ module: 'login-container' });
 
-export interface StartLoginContainerDeps {
-  docker?: Docker;
+/** Env keys injected into every login container to force CLIs into their
+ *  device-code / paste-token flow instead of trying to launch a host browser
+ *  (which cannot reach the container's loopback from outside). */
+const HEADLESS_AUTH_ENV: Record<string, string> = {
+  BROWSER: '/bin/false',
+  DISPLAY: '',
+  SSH_TTY: '/dev/pts/0',
+  SSH_CONNECTION: '127.0.0.1 22 127.0.0.1 22',
+  // Consumed by /usr/local/bin/restore-claude.sh — resets ~/.claude.json to
+  // the onboarding-complete seed and removes stale .credentials.json before
+  // claude setup-token starts, so the welcome/theme picker is skipped and
+  // the OAuth exchange is deterministic.
+  HAIVE_LOGIN_CONTAINER: '1',
+};
+
+export interface CreateLoginContainerOpts {
+  provider: CliProviderRecord;
+  commandSpec: CliCommandSpec;
+  docker: Docker;
 }
 
-export async function startLoginContainer(
-  db: Database,
-  payload: CliLoginStartJobPayload,
-  deps: StartLoginContainerDeps = {},
-): Promise<CliLoginStartResult> {
-  const docker = deps.docker ?? new Docker();
+export interface CreateLoginContainerResult {
+  containerRowId: string;
+  dockerContainer: Docker.Container;
+  dockerContainerId: string;
+}
 
-  const provider = await db.query.cliProviders.findFirst({
-    where: eq(schema.cliProviders.id, payload.providerId),
-  });
-  if (!provider) {
-    return { ok: false, error: 'provider not found' };
-  }
-  if (provider.userId !== payload.userId) {
-    return { ok: false, error: 'provider not owned by user' };
-  }
-  if (!isCliLoginSupported(provider.name)) {
-    return { ok: false, error: `interactive login not supported for ${provider.name}` };
+/** Create (but do not start) a login container using the supplied command spec.
+ *  Persists a `containers` row with purpose='cli_login'. Caller is responsible
+ *  for attaching, starting, and removing the container. */
+export async function createSandboxLoginContainer(
+  db: Database,
+  opts: CreateLoginContainerOpts,
+): Promise<CreateLoginContainerResult> {
+  const { provider, commandSpec, docker } = opts;
+  if (!cliAdapterRegistry.has(provider.name)) {
+    throw new Error(`no adapter registered for ${provider.name}`);
   }
   if (provider.sandboxImageBuildStatus !== 'ready' || !provider.sandboxImageTag) {
-    return {
-      ok: false,
-      error: `sandbox image not ready (status=${provider.sandboxImageBuildStatus})`,
-    };
-  }
-  if (!cliAdapterRegistry.has(provider.name)) {
-    return { ok: false, error: `no adapter registered for ${provider.name}` };
-  }
-
-  const adapter = cliAdapterRegistry.get(provider.name);
-  const executable =
-    provider.wrapperPath?.trim() || provider.executablePath?.trim() || adapter.defaultExecutable;
-
-  let loginSpec;
-  try {
-    loginSpec = buildLoginCommand(provider, executable);
-  } catch (err) {
-    if (err instanceof CliLoginUnsupportedError) {
-      return { ok: false, error: err.message };
-    }
-    throw err;
+    throw new Error(`sandbox image not ready (status=${provider.sandboxImageBuildStatus})`);
   }
 
   const hostBinds = await resolveCliAuthHostBinds(provider.name, { writable: true });
@@ -75,35 +66,26 @@ export async function startLoginContainer(
     'login container mounts resolved',
   );
 
-  const envArr = Object.entries(loginSpec.env).map(([k, v]) => `${k}=${v}`);
+  const mergedEnv: Record<string, string> = { ...HEADLESS_AUTH_ENV, ...commandSpec.env };
+  const envArr = Object.entries(mergedEnv).map(([k, v]) => `${k}=${v}`);
 
-  let container;
-  try {
-    container = await docker.createContainer({
-      Image: provider.sandboxImageTag,
-      Cmd: [loginSpec.command, ...loginSpec.args],
-      Env: envArr,
-      Tty: true,
-      OpenStdin: true,
-      StdinOnce: false,
-      AttachStdin: true,
-      AttachStdout: true,
-      AttachStderr: true,
-      WorkingDir: SANDBOX_WORKDIR,
-      User: SANDBOX_USER,
-      HostConfig: {
-        AutoRemove: false,
-        Binds: binds,
-      },
-    });
-    await container.start();
-  } catch (err) {
-    log.error({ err, providerId: provider.id }, 'failed to start login container');
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
+  const dockerContainer = await docker.createContainer({
+    Image: provider.sandboxImageTag,
+    Cmd: [commandSpec.command, ...commandSpec.args],
+    Env: envArr,
+    Tty: true,
+    OpenStdin: true,
+    StdinOnce: false,
+    AttachStdin: true,
+    AttachStdout: true,
+    AttachStderr: true,
+    WorkingDir: SANDBOX_WORKDIR,
+    User: SANDBOX_USER,
+    HostConfig: {
+      AutoRemove: false,
+      Binds: binds,
+    },
+  });
 
   try {
     const inserted = await db
@@ -113,51 +95,42 @@ export async function startLoginContainer(
         purpose: 'cli_login',
         cliProviderId: provider.id,
         runtime: 'dockerode',
-        dockerContainerId: container.id,
+        dockerContainerId: dockerContainer.id,
         name: `haive-login-${provider.name}-${provider.id.slice(0, 8)}`,
         status: 'running',
-        envVars: loginSpec.env,
+        envVars: mergedEnv,
       })
       .returning({ id: schema.containers.id });
     const row = inserted[0];
     if (!row) {
-      await container.remove({ force: true }).catch(() => undefined);
-      return { ok: false, error: 'failed to persist container row' };
+      await dockerContainer.remove({ force: true }).catch(() => undefined);
+      throw new Error('failed to persist container row');
     }
     return {
-      ok: true,
-      containerId: row.id,
-      dockerContainerId: container.id,
+      containerRowId: row.id,
+      dockerContainer,
+      dockerContainerId: dockerContainer.id,
     };
   } catch (err) {
-    await container.remove({ force: true }).catch(() => undefined);
+    await dockerContainer.remove({ force: true }).catch(() => undefined);
     log.error({ err, providerId: provider.id }, 'failed to persist login container row');
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    throw err;
   }
 }
 
-export interface StopLoginContainerResult {
-  ok: boolean;
-  error?: string;
-}
-
-export async function stopLoginContainer(
+/** Remove a login container's docker resource and mark the row destroyed. */
+export async function teardownLoginContainer(
   db: Database,
   containerRowId: string,
-  deps: StartLoginContainerDeps = {},
-): Promise<StopLoginContainerResult> {
-  const docker = deps.docker ?? new Docker();
+  docker: Docker,
+): Promise<void> {
   const row = await db.query.containers.findFirst({
     where: eq(schema.containers.id, containerRowId),
   });
-  if (!row) return { ok: false, error: 'container row not found' };
-  if (row.purpose !== 'cli_login') {
-    return { ok: false, error: 'container is not a cli_login container' };
-  }
+  if (!row) return;
   if (row.dockerContainerId) {
     try {
-      const c = docker.getContainer(row.dockerContainerId);
-      await c.remove({ force: true });
+      await docker.getContainer(row.dockerContainerId).remove({ force: true });
     } catch (err) {
       log.warn({ err, dockerContainerId: row.dockerContainerId }, 'docker remove failed');
     }
@@ -166,5 +139,4 @@ export async function stopLoginContainer(
     .update(schema.containers)
     .set({ status: 'destroyed', destroyedAt: new Date() })
     .where(eq(schema.containers.id, containerRowId));
-  return { ok: true };
 }

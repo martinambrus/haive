@@ -32,7 +32,7 @@ export const CLI_EXEC_JOB_NAMES = {
   PROBE: 'cli-probe',
   BUILD_SANDBOX_IMAGE: 'cli-build-sandbox-image',
   REFRESH_VERSIONS: 'cli-refresh-versions',
-  LOGIN_START: 'cli-login-start',
+  LOGIN_CREATE: 'cli-login-create',
 } as const;
 
 export interface RefreshCliVersionsJobPayload {
@@ -118,14 +118,14 @@ export interface CliProbeResult {
   api?: CliProbePathResult;
 }
 
-export interface CliLoginStartJobPayload {
+export interface CliLoginCreateJobPayload {
   providerId: string;
   userId: string;
 }
 
-export interface CliLoginStartResult {
+export interface CliLoginCreateResult {
   ok: boolean;
-  containerId?: string;
+  containerRowId?: string;
   dockerContainerId?: string;
   error?: string;
 }

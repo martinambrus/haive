@@ -15,8 +15,8 @@ import {
   logger,
   type CliExecInvocationKind,
   type CliExecJobPayload,
-  type CliLoginStartJobPayload,
-  type CliLoginStartResult,
+  type CliLoginCreateJobPayload,
+  type CliLoginCreateResult,
   type CliNetworkPolicy,
   type CliProbeJobPayload,
   type CliProbePathResult,
@@ -68,7 +68,8 @@ import {
   classifyAuthProbeOutput,
   isAuthProbeSupported,
 } from '../cli-adapters/auth-probe.js';
-import { startLoginContainer } from '../sandbox/login-container.js';
+import { createSandboxLoginContainer } from '../sandbox/login-container.js';
+import { buildSetupTokenCommand } from '../cli-adapters/setup-token-command.js';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { getTaskQueue } from './task-queue.js';
@@ -80,7 +81,7 @@ type CliExecQueuePayload =
   | CliProbeJobPayload
   | SandboxImageBuildJobPayload
   | RefreshCliVersionsJobPayload
-  | CliLoginStartJobPayload;
+  | CliLoginCreateJobPayload;
 
 let cliExecQueueInstance: Queue<CliExecQueuePayload> | null = null;
 
@@ -1558,6 +1559,51 @@ export async function handleRefreshCliVersionsJob(
   return refreshAllCliVersions(db);
 }
 
+export async function handleLoginCreateJob(
+  db: Database,
+  payload: CliLoginCreateJobPayload,
+): Promise<CliLoginCreateResult> {
+  const provider = await db.query.cliProviders.findFirst({
+    where: eq(schema.cliProviders.id, payload.providerId),
+  });
+  if (!provider) return { ok: false, error: 'provider not found' };
+  if (provider.userId !== payload.userId) {
+    return { ok: false, error: 'provider not owned by user' };
+  }
+  if (!cliAdapterRegistry.has(provider.name)) {
+    return { ok: false, error: `no adapter registered for ${provider.name}` };
+  }
+
+  const adapter = cliAdapterRegistry.get(provider.name);
+  const executable =
+    provider.wrapperPath?.trim() || provider.executablePath?.trim() || adapter.defaultExecutable;
+
+  let commandSpec;
+  try {
+    commandSpec = buildSetupTokenCommand(provider, executable);
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+
+  try {
+    const Docker = (await import('dockerode')).default;
+    const docker = new Docker();
+    const created = await createSandboxLoginContainer(db, {
+      provider,
+      commandSpec,
+      docker,
+    });
+    return {
+      ok: true,
+      containerRowId: created.containerRowId,
+      dockerContainerId: created.dockerContainerId,
+    };
+  } catch (err) {
+    log.error({ err, providerId: provider.id }, 'login container create failed');
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 const VERSION_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const VERSION_REFRESH_JOB_ID = 'cli-refresh-versions-repeatable';
 
@@ -1587,7 +1633,7 @@ export function startCliExecWorker(
   | CliProbeResult
   | SandboxImageBuildResult
   | RefreshCliVersionsJobResult
-  | CliLoginStartResult
+  | CliLoginCreateResult
   | void
 > {
   const worker = new Worker<
@@ -1595,7 +1641,7 @@ export function startCliExecWorker(
     | CliProbeResult
     | SandboxImageBuildResult
     | RefreshCliVersionsJobResult
-    | CliLoginStartResult
+    | CliLoginCreateResult
     | void
   >(
     QUEUE_NAMES.CLI_EXEC,
@@ -1614,8 +1660,8 @@ export function startCliExecWorker(
       if (job.name === CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS) {
         return handleRefreshCliVersionsJob(db);
       }
-      if (job.name === CLI_EXEC_JOB_NAMES.LOGIN_START) {
-        return startLoginContainer(db, job.data as CliLoginStartJobPayload);
+      if (job.name === CLI_EXEC_JOB_NAMES.LOGIN_CREATE) {
+        return handleLoginCreateJob(db, job.data as CliLoginCreateJobPayload);
       }
       throw new Error(`unknown cli-exec job ${job.name}`);
     },

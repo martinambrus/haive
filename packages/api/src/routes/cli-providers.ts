@@ -1,6 +1,5 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
-import Docker from 'dockerode';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
@@ -15,8 +14,6 @@ import {
   secretsService,
   setCliProviderSecretRequestSchema,
   updateCliProviderRequestSchema,
-  type CliLoginStartJobPayload,
-  type CliLoginStartResult,
   type CliPackageVersionsEntry,
   type CliProbeJobPayload,
   type CliProbeResult,
@@ -388,107 +385,6 @@ cliProviderRoutes.post('/:id/test', async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new HttpError(504, `probe timed out or failed: ${message}`, 'probe_failed');
-  }
-});
-
-const LOGIN_SUPPORTED_PROVIDERS: CliProviderName[] = ['claude-code', 'codex'];
-
-function sharedDocker(): Docker {
-  return new Docker();
-}
-
-cliProviderRoutes.post('/:id/login/start', async (c) => {
-  const userId = c.get('userId');
-  const id = c.req.param('id');
-  const db = getDb();
-  const provider = await db.query.cliProviders.findFirst({
-    where: and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)),
-  });
-  if (!provider) throw new HttpError(404, 'CLI provider not found');
-  if (!LOGIN_SUPPORTED_PROVIDERS.includes(provider.name)) {
-    throw new HttpError(
-      400,
-      `interactive login not supported for ${provider.name}`,
-      'login_unsupported',
-    );
-  }
-
-  const payload: CliLoginStartJobPayload = {
-    providerId: provider.id,
-    userId,
-  };
-  const queue = getCliExecQueue();
-  const events = getCliExecQueueEvents();
-  const job = await queue.add(CLI_EXEC_JOB_NAMES.LOGIN_START, payload, {
-    removeOnComplete: true,
-    removeOnFail: true,
-  });
-  try {
-    const result = (await job.waitUntilFinished(events, 30_000)) as CliLoginStartResult;
-    if (!result.ok) {
-      throw new HttpError(500, result.error ?? 'login start failed', 'login_start_failed');
-    }
-    return c.json({ result });
-  } catch (err) {
-    if (err instanceof HttpError) throw err;
-    const message = err instanceof Error ? err.message : String(err);
-    throw new HttpError(504, `login start timed out: ${message}`, 'login_start_timeout');
-  }
-});
-
-cliProviderRoutes.post('/:id/login/end', async (c) => {
-  const userId = c.get('userId');
-  const id = c.req.param('id');
-  const body = (await c.req.json().catch(() => ({}))) as { containerId?: string };
-  const containerRowId = body.containerId?.trim();
-  if (!containerRowId) {
-    throw new HttpError(400, 'containerId is required', 'missing_container_id');
-  }
-  const db = getDb();
-  const provider = await db.query.cliProviders.findFirst({
-    where: and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)),
-  });
-  if (!provider) throw new HttpError(404, 'CLI provider not found');
-
-  const row = await db.query.containers.findFirst({
-    where: eq(schema.containers.id, containerRowId),
-  });
-  if (!row || row.purpose !== 'cli_login' || row.cliProviderId !== provider.id) {
-    throw new HttpError(404, 'login container not found', 'container_not_found');
-  }
-
-  if (row.dockerContainerId) {
-    try {
-      const dc = sharedDocker().getContainer(row.dockerContainerId);
-      await dc.remove({ force: true });
-    } catch {
-      // best effort: already gone
-    }
-  }
-  await db
-    .update(schema.containers)
-    .set({ status: 'destroyed', destroyedAt: new Date() })
-    .where(eq(schema.containers.id, containerRowId));
-
-  const targetMode: CliProbeTargetMode =
-    provider.authMode === 'subscription' ? 'cli' : provider.authMode === 'api_key' ? 'api' : 'both';
-  const probePayload: CliProbeJobPayload = {
-    providerId: provider.id,
-    userId,
-    targetMode,
-  };
-  const queue = getCliExecQueue();
-  const events = getCliExecQueueEvents();
-  const probeJob = await queue.add(CLI_EXEC_JOB_NAMES.PROBE, probePayload, {
-    removeOnComplete: true,
-    removeOnFail: true,
-  });
-  try {
-    const result = (await probeJob.waitUntilFinished(events, 30_000)) as CliProbeResult;
-    return c.json({ result });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new HttpError(504, `post-login probe failed: ${message}`, 'probe_failed');
   }
 });
 

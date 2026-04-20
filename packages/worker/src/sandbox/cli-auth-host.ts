@@ -1,5 +1,4 @@
-import { stat, mkdir, writeFile, access } from 'node:fs/promises';
-import { constants as fsConstants } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '@haive/shared';
 import type { CliProviderName } from '@haive/shared';
@@ -50,8 +49,8 @@ export async function resolveCliAuthHostBinds(
   const binds: HostCliAuthBind[] = [];
   for (const entry of entries) {
     const hostFsPath = join(hostFsRoot, entry.rel);
-    const ok = await ensureHostPath(hostFsPath, entry.kind);
-    if (!ok) continue;
+    const exists = await hostPathExists(hostFsPath, entry.kind);
+    if (!exists) continue;
     binds.push({
       hostPath: join(hostHomeReal, entry.rel),
       containerPath: join(SANDBOX_USER_HOME, entry.rel),
@@ -61,30 +60,28 @@ export async function resolveCliAuthHostBinds(
   return binds;
 }
 
-async function ensureHostPath(fsPath: string, kind: 'dir' | 'file'): Promise<boolean> {
+/** Check whether a host path exists, has the expected kind, AND is writable
+ *  by the sandbox `node` user (uid 1000). We do NOT create missing paths;
+ *  creation via the worker container produces root-owned artifacts that the
+ *  sandbox cannot write on Windows bind mounts. Root-owned paths are treated
+ *  as absent so they fall through to the Docker named-volume branch which
+ *  inherits node ownership from the image. */
+const SANDBOX_USER_UID = 1000;
+
+async function hostPathExists(fsPath: string, kind: 'dir' | 'file'): Promise<boolean> {
   try {
     const st = await stat(fsPath);
     if (kind === 'dir' && !st.isDirectory()) return false;
     if (kind === 'file' && !st.isFile()) return false;
-    return true;
-  } catch {
-    // fall through to create
-  }
-  try {
-    if (kind === 'dir') {
-      await mkdir(fsPath, { recursive: true });
-    } else {
-      const parent = join(fsPath, '..');
-      await mkdir(parent, { recursive: true });
-      try {
-        await access(fsPath, fsConstants.F_OK);
-      } catch {
-        await writeFile(fsPath, '', { flag: 'wx' });
-      }
+    if (st.uid !== SANDBOX_USER_UID) {
+      log.warn(
+        { fsPath, uid: st.uid, expectedUid: SANDBOX_USER_UID },
+        'host auth path owned by wrong uid; skipping bind and using named volume',
+      );
+      return false;
     }
     return true;
-  } catch (err) {
-    log.warn({ err, fsPath, kind }, 'failed to ensure host auth path');
+  } catch {
     return false;
   }
 }

@@ -385,7 +385,10 @@ function errorMessage(err: unknown): string {
   return String(err);
 }
 
-async function attachContainerStream(docker: Docker, dockerContainerId: string): Promise<Duplex> {
+export async function attachContainerStream(
+  docker: Docker,
+  dockerContainerId: string,
+): Promise<Duplex> {
   const modemOpts = (
     docker as unknown as {
       modem: { socketPath?: string; host?: string; port?: number; protocol?: string };

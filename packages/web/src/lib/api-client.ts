@@ -255,12 +255,6 @@ export interface CliProbeResult {
   api?: CliProbePathResult;
 }
 
-export interface CliLoginStartResult {
-  ok: boolean;
-  containerId: string;
-  dockerContainerId?: string;
-}
-
 export type ContainerStatus = 'creating' | 'running' | 'stopped' | 'destroyed' | 'error';
 
 export interface Container {

@@ -24,9 +24,26 @@ RUN apk add --no-cache \
       git \
       tini
 
+# Pre-create CLI auth mount targets owned by the node user. Docker creates
+# missing volume mountpoints as root regardless of `User:` — if the image
+# already has the path with correct ownership, a named volume mounted there
+# inherits node:node and the CLI (running as uid 1000) can write its auth
+# files + sub-dirs like `.claude/backups`.
+RUN mkdir -p /home/node/.claude \
+             /home/node/.codex \
+             /home/node/.config/claude \
+             /home/node/.config/codex \
+ && echo '{"hasCompletedOnboarding":true,"theme":"dark"}' > /home/node/.claude.json \
+ && chown -R node:node /home/node
+
+# Entrypoint shim restores ~/.claude.json from the .claude/ named-volume copy
+# on every container start. Required because claude-code stores OAuth tokens
+# in a single ~/.claude.json file and named volumes mount dirs only.
+COPY --chmod=0755 restore-claude.sh /usr/local/bin/restore-claude.sh
+
 ENV PATH="/root/.local/bin:$PATH"
 
 WORKDIR /haive/workdir
 
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/restore-claude.sh"]
 CMD ["bash"]
