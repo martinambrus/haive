@@ -26,6 +26,10 @@ interface CliProviderFormProps {
   // the matching notice and gate the sibling test component without knowing
   // anything about the form's internal state.
   onTestBlockChange?: (blockMessage: string | null) => void;
+  // Bumped by the parent after an external event wrote a new secret (e.g. a
+  // successful interactive CLI login). Triggers the secrets-load effect so the
+  // textarea + existingSecrets reflect the server state without a page reload.
+  secretsReloadNonce?: number;
 }
 
 const TEST_BLOCK_DIRTY =
@@ -124,6 +128,7 @@ export function CliProviderForm({
   provider,
   metadata,
   onTestBlockChange,
+  secretsReloadNonce = 0,
 }: CliProviderFormProps) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
@@ -210,7 +215,7 @@ export function CliProviderForm({
     return () => {
       cancelled = true;
     };
-  }, [mode, provider?.id]);
+  }, [mode, provider?.id, secretsReloadNonce]);
 
   useEffect(() => {
     if (mode !== 'edit' || !provider?.id) return;
@@ -652,7 +657,7 @@ export function CliProviderForm({
       <div>
         <Label htmlFor="secrets">Secrets</Label>
         {mode === 'edit' && existingSecrets.length > 0 && (
-          <p className="mb-1 text-xs text-neutral-400">
+          <p className="mb-1 text-xs font-semibold text-yellow-400">
             {existingSecrets.length} secret{existingSecrets.length === 1 ? '' : 's'} configured.
             Values are hidden — leave the value empty to keep unchanged, type a value to replace,
             delete the line to remove.

@@ -15,6 +15,7 @@ export default function EditCliProviderPage() {
   const [meta, setMeta] = useState<CliProviderCatalogEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testBlockMessage, setTestBlockMessage] = useState<string | null>(null);
+  const [secretsReloadNonce, setSecretsReloadNonce] = useState(0);
 
   useEffect(() => {
     Promise.all([
@@ -58,6 +59,7 @@ export default function EditCliProviderPage() {
           provider={provider}
           metadata={meta}
           onTestBlockChange={setTestBlockMessage}
+          secretsReloadNonce={secretsReloadNonce}
         />
       </Card>
 
@@ -73,6 +75,7 @@ export default function EditCliProviderPage() {
           providerName={provider.name}
           providerLabel={provider.label}
           blockMessage={testBlockMessage}
+          onLoginCompleted={() => setSecretsReloadNonce((n) => n + 1)}
         />
       </Card>
     </div>

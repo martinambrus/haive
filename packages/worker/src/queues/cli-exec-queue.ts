@@ -1128,7 +1128,7 @@ export async function handleProbeJob(
   };
 
   if (wantCli) {
-    result.cli = await probeCliPath(db, adapter, provider);
+    result.cli = await probeCliPath(db, adapter, provider, secrets);
   }
 
   if (wantApi) {
@@ -1158,6 +1158,7 @@ async function probeCliPath(
   db: Database,
   adapter: BaseCliAdapter,
   provider: CliProviderRecord,
+  secrets: Record<string, string> = {},
 ): Promise<CliProbePathResult> {
   const startedAt = Date.now();
   const resolvedCommand = resolveProviderExecutable(adapter, provider);
@@ -1221,7 +1222,11 @@ async function probeCliPath(
 
     const authSpec = buildAuthProbeCommand(provider, resolvedCommand);
     const authResult = await spawner(
-      { command: authSpec.command, args: authSpec.args, env: authSpec.env },
+      {
+        command: authSpec.command,
+        args: authSpec.args,
+        env: { ...authSpec.env, ...secrets },
+      },
       { timeoutMs: 25_000 },
     );
     const classification = classifyAuthProbeOutput({

@@ -16,6 +16,9 @@ interface CliProviderTestProps {
   providerName: CliProviderName;
   providerLabel: string;
   blockMessage?: string | null;
+  // Fired after a successful interactive CLI login wrote a new encrypted
+  // secret. Parent uses this to re-fetch the sibling form's secret list.
+  onLoginCompleted?: () => void;
 }
 
 const LOGIN_SUPPORTED: CliProviderName[] = ['claude-code', 'codex'];
@@ -49,6 +52,7 @@ export function CliProviderTest({
   providerName,
   providerLabel,
   blockMessage,
+  onLoginCompleted,
 }: CliProviderTestProps) {
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<CliProbeResult | null>(null);
@@ -81,7 +85,12 @@ export function CliProviderTest({
       providerId,
       providerLabel,
       providerName,
-      onComplete: (res) => setResult(res),
+      onComplete: (res) => {
+        setResult(res);
+        // Login wrote a new CLAUDE_CODE_OAUTH_TOKEN secret; notify the parent
+        // so the sibling form refetches its secret list.
+        onLoginCompleted?.();
+      },
     });
   }
 

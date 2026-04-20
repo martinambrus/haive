@@ -8,10 +8,13 @@ import {
   AUTH_URL_PREFIXES,
   CLI_EXEC_JOB_NAMES,
   TOKEN_PASTE_PROVIDERS,
+  computeKeyFingerprint,
   detectAuthResult,
+  envelopeEncrypt,
   extractDeviceCode,
   extractWrappedUrl,
   logger,
+  secretsService,
   stripAnsi,
   type CliLoginCreateJobPayload,
   type CliLoginCreateResult,
@@ -443,19 +446,21 @@ async function saveOauthTokenAndProbe(
   oauthToken: string,
 ): Promise<void> {
   try {
+    await upsertProviderSecret(session.providerId, 'CLAUDE_CODE_OAUTH_TOKEN', oauthToken);
+    // If a stale copy was ever written to envVars (pre-secrets migration),
+    // scrub it so it doesn't shadow the canonical encrypted secret.
     const db = getDb();
     const existing = await db.query.cliProviders.findFirst({
       where: eq(schema.cliProviders.id, session.providerId),
     });
-    const merged: Record<string, string> = {
-      ...(existing?.envVars ?? {}),
-      CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
-    };
-    await db
-      .update(schema.cliProviders)
-      .set({ envVars: merged, updatedAt: new Date() })
-      .where(eq(schema.cliProviders.id, session.providerId));
-    log.info({ providerId: session.providerId }, 'oauth token saved to envVars');
+    if (existing?.envVars && 'CLAUDE_CODE_OAUTH_TOKEN' in existing.envVars) {
+      const { CLAUDE_CODE_OAUTH_TOKEN: _drop, ...rest } = existing.envVars;
+      await db
+        .update(schema.cliProviders)
+        .set({ envVars: rest, updatedAt: new Date() })
+        .where(eq(schema.cliProviders.id, session.providerId));
+    }
+    log.info({ providerId: session.providerId }, 'oauth token saved to encrypted secret');
     const result = await enqueueProbe(session.providerId, session.userId, authMode);
     log.info(
       {
@@ -491,6 +496,43 @@ async function runProbeAndSave(session: BannerSession, authMode: string): Promis
   } finally {
     void cleanupSession(session);
   }
+}
+
+async function upsertProviderSecret(
+  providerId: string,
+  secretName: string,
+  value: string,
+): Promise<void> {
+  const db = getDb();
+  const masterKek = await secretsService.getMasterKek();
+  const envelope = envelopeEncrypt(value, masterKek);
+  const fingerprint = computeKeyFingerprint(value);
+  const existing = await db.query.cliProviderSecrets.findFirst({
+    where: and(
+      eq(schema.cliProviderSecrets.providerId, providerId),
+      eq(schema.cliProviderSecrets.secretName, secretName),
+    ),
+    columns: { id: true },
+  });
+  if (existing) {
+    await db
+      .update(schema.cliProviderSecrets)
+      .set({
+        encryptedValue: envelope.encryptedValue,
+        encryptedDek: envelope.encryptedDek,
+        fingerprint,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.cliProviderSecrets.id, existing.id));
+    return;
+  }
+  await db.insert(schema.cliProviderSecrets).values({
+    providerId,
+    secretName,
+    encryptedValue: envelope.encryptedValue,
+    encryptedDek: envelope.encryptedDek,
+    fingerprint,
+  });
 }
 
 async function enqueueLoginCreate(
