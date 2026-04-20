@@ -5,8 +5,10 @@ import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/cn';
 
 const SETTINGS_TABS = [
+  { href: '/settings/account', label: 'Account' },
   { href: '/settings/cli-providers', label: 'CLI Providers' },
   { href: '/settings/credentials', label: 'Git Credentials' },
+  { href: '/settings/git-identity', label: 'Git Identity' },
   { href: '/settings/integrations', label: 'Integrations' },
 ];
 
@@ -17,7 +19,9 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
     <div className="flex flex-col gap-6">
       <div>
         <h1 className="text-2xl font-bold text-neutral-50">Settings</h1>
-        <p className="text-sm text-neutral-400">Manage CLI providers and git credentials.</p>
+        <p className="text-sm text-neutral-400">
+          Manage your account, CLI providers, and git integrations.
+        </p>
       </div>
       <nav className="flex gap-1 border-b border-neutral-800">
         {SETTINGS_TABS.map((tab) => {

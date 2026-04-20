@@ -16,6 +16,7 @@ import { githubOauthRoutes } from './routes/github-oauth.js';
 import { filesystemRoutes } from './routes/filesystem.js';
 import { integrationsRoutes } from './routes/integrations.js';
 import { taskRoutes } from './routes/tasks.js';
+import { userSettingsRoutes } from './routes/user-settings.js';
 import { installCliLoginBannerWebSocket } from './routes/cli-login-banner.js';
 import { installTerminalWebSocket } from './routes/terminal.js';
 import { terminalSessionRoutes } from './routes/terminal-sessions.js';
@@ -45,6 +46,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/repo-credentials', repoCredentialsRoutes);
   app.route('/github-oauth', githubOauthRoutes);
   app.route('/integrations', integrationsRoutes);
+  app.route('/user-settings', userSettingsRoutes);
   app.route('/filesystem', filesystemRoutes);
   app.route('/tasks', taskRoutes);
   app.route('/terminal-sessions', terminalSessionRoutes);

@@ -60,6 +60,7 @@ import {
 } from '../cli-executor/index.js';
 import { assembleNativePrompt } from '../sub-agent-emulator/native-mode.js';
 import { resolveProviderSecrets } from '../secrets/provider-secrets.js';
+import { resolveUserGitEnv } from '../secrets/user-git-identity.js';
 import { runInSandbox } from '../sandbox/sandbox-runner.js';
 import { resolveCliAuthMounts } from '../sandbox/cli-auth-volume.js';
 import { resolveCliAuthHostBinds } from '../sandbox/cli-auth-host.js';
@@ -127,9 +128,11 @@ export async function handleCliExecJob(
     .set({ startedAt: new Date() })
     .where(eq(schema.cliInvocations.id, row.id));
 
-  const secrets = payload.cliProviderId
+  const providerSecrets = payload.cliProviderId
     ? await resolveProviderSecrets(db, payload.cliProviderId)
     : {};
+  const gitEnv = await resolveUserGitEnv(db, payload.userId);
+  const secrets: Record<string, string> = { ...gitEnv, ...providerSecrets };
 
   const startedAt = Date.now();
   try {
