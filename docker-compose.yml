@@ -134,8 +134,8 @@ services:
 
   cli-sandbox:
     build:
-      context: .
-      dockerfile: packages/worker/sandbox-image/Dockerfile
+      context: ./packages/worker/sandbox-image
+      dockerfile: Dockerfile
     image: haive-cli-sandbox:latest
     profiles: ["sandbox"]
     command: ["true"]
