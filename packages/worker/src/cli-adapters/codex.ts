@@ -26,7 +26,7 @@ export class CodexAdapter extends BaseCliAdapter {
   ): CliCommandSpec {
     return {
       command: this.resolveExecutable(provider),
-      args: this.mergedArgs(provider, ['exec', prompt]),
+      args: this.mergedArgs(provider, ['exec', '--skip-git-repo-check', prompt]),
       env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
     };

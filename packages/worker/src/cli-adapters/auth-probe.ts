@@ -103,7 +103,7 @@ export function buildAuthProbeCommand(
     case 'codex':
       return {
         command: executable,
-        args: ['exec', AUTH_PROBE_PROMPT],
+        args: ['exec', '--skip-git-repo-check', AUTH_PROBE_PROMPT],
         env,
       };
     default:
