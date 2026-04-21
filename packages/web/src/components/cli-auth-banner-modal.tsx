@@ -166,14 +166,16 @@ export function CliAuthBannerModal({
             <h2 className="text-lg font-semibold text-neutral-50">Sign in — {providerLabel}</h2>
             <p className="text-xs text-neutral-500">{providerName}</p>
           </div>
-          <button
-            type="button"
-            onClick={handleClose}
-            className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
-            aria-label="Close"
-          >
-            Close
-          </button>
+          {phase !== 'success' && (
+            <button
+              type="button"
+              onClick={handleClose}
+              className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
+              aria-label="Close"
+            >
+              Close
+            </button>
+          )}
         </div>
 
         <FormError message={error} />
@@ -232,6 +234,24 @@ export function CliAuthBannerModal({
 
         {(phase === 'awaiting-token' || phase === 'awaiting-approval') && !isTokenPaste && (
           <div className="rounded-md border border-indigo-500/40 bg-indigo-950/30 p-3 text-sm text-indigo-100">
+            {providerName === 'codex' && (
+              <div className="mb-3 rounded border border-amber-500/40 bg-amber-950/30 p-2 text-xs text-amber-100">
+                <p className="font-medium">Before you start:</p>
+                <p className="mt-1 text-amber-200/90">
+                  Codex OAuth requires &quot;Device authorization&quot; enabled on your ChatGPT
+                  account. Enable it at{' '}
+                  <a
+                    href="https://chatgpt.com/#settings/Security"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-medium underline hover:text-amber-50"
+                  >
+                    chatgpt.com/#settings/Security
+                  </a>{' '}
+                  (Security → Device authorization) before approving the device code below.
+                </p>
+              </div>
+            )}
             <p className="font-medium">Complete sign-in:</p>
             <ol className="mt-2 list-decimal space-y-1 pl-5 text-indigo-200/90">
               <li>
@@ -311,7 +331,7 @@ export function CliAuthBannerModal({
             );
           })()}
 
-        {phase !== 'saved' && phase !== 'error' && (
+        {phase !== 'saved' && phase !== 'error' && phase !== 'success' && (
           <div className="flex items-center justify-end gap-2 border-t border-neutral-800 pt-3">
             <Button variant="ghost" onClick={handleClose}>
               Cancel
