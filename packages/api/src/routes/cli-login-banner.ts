@@ -406,6 +406,7 @@ function onStreamData(session: BannerSession, chunk: Buffer, authMode: string): 
   const signal = detectAuthResult(session.cleanBuffer);
   if (signal?.kind === 'success') {
     session.authSuccessSent = true;
+    session.probePending = true;
     log.info({ providerId: session.providerId }, 'auth success detected');
     wsSend(session.ws, { type: 'auth-success' });
     void runProbeAndSave(session, authMode);
@@ -486,6 +487,14 @@ async function saveOauthTokenAndProbe(
 async function runProbeAndSave(session: BannerSession, authMode: string): Promise<void> {
   try {
     const result = await enqueueProbe(session.providerId, session.userId, authMode);
+    log.info(
+      {
+        providerId: session.providerId,
+        authStatus: result?.cli?.authStatus,
+        wsOpen: session.ws.readyState === WebSocket.OPEN,
+      },
+      'probe returned, sending saved',
+    );
     wsSend(session.ws, { type: 'saved', result });
   } catch (err) {
     log.error({ err, providerId: session.providerId }, 'post-login probe failed');
@@ -494,6 +503,7 @@ async function runProbeAndSave(session: BannerSession, authMode: string): Promis
       message: err instanceof Error ? err.message : 'post-login probe failed',
     });
   } finally {
+    session.probePending = false;
     void cleanupSession(session);
   }
 }
