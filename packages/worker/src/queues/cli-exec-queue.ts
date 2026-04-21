@@ -26,6 +26,7 @@ import {
   type RefreshCliVersionsJobResult,
   type SandboxImageBuildJobPayload,
   type SandboxImageBuildResult,
+  type StepErrorHint,
   type TaskJobPayload,
 } from '@haive/shared';
 import { refreshAllCliVersions } from '../cli-versions/index.js';
@@ -63,7 +64,11 @@ import { resolveProviderSecrets } from '../secrets/provider-secrets.js';
 import { resolveUserGitEnv } from '../secrets/user-git-identity.js';
 import { runInSandbox } from '../sandbox/sandbox-runner.js';
 import { resolveCliAuthMounts } from '../sandbox/cli-auth-volume.js';
-import { resolveCliAuthHostBinds } from '../sandbox/cli-auth-host.js';
+import {
+  ensureTaskAuthVolumes,
+  resolveTaskAuthMounts,
+  userAuthVolumeExists,
+} from '../sandbox/task-auth-volume.js';
 import {
   buildAuthProbeCommand,
   classifyAuthProbeOutput,
@@ -168,6 +173,12 @@ export async function handleCliExecJob(
         endedAt: new Date(),
       })
       .where(eq(schema.cliInvocations.id, row.id));
+    if (err instanceof CliLoginRequiredError && payload.taskStepId) {
+      await db
+        .update(schema.taskSteps)
+        .set({ errorHint: err.hint, updatedAt: new Date() })
+        .where(eq(schema.taskSteps.id, payload.taskStepId));
+    }
     await resumeStepIfLinked(payload, false, message);
     throw err;
   }
@@ -255,8 +266,7 @@ async function executeByKind(
         : null;
       let authMounts: DockerVolumeMount[] = [];
       if (providerRow && cliAdapterRegistry.has(providerRow.name)) {
-        const adapter = cliAdapterRegistry.get(providerRow.name);
-        authMounts = resolveAuthMounts(adapter, providerRow);
+        authMounts = await resolveAuthMounts(db, providerRow, payload.taskId);
       }
       const mcpFiles = providerRow
         ? await resolveMcpExtraFiles(
@@ -408,8 +418,6 @@ export async function resolveTaskSandboxWorkdir(db: Database, taskId: string): P
   const output = row?.output as { sandboxWorktreePath?: string } | null;
   return output?.sandboxWorktreePath ?? SANDBOX_WORKDIR;
 }
-
-const HOST_USER_HOME = process.env.HOST_USER_HOME ?? process.env.HOME ?? '/root';
 
 const STATUS_THROTTLE_MS = 2_000;
 const STATUS_STALE_MS = 30_000;
@@ -618,28 +626,66 @@ function describeToolUse(name: string, input?: Record<string, unknown>): string 
   }
 }
 
-export function resolveAuthMounts(
-  adapter: BaseCliAdapter,
+export async function resolveAuthMounts(
+  db: Database,
   provider: CliProviderRecord,
-): DockerVolumeMount[] {
-  const injection = adapter.envInjection(provider);
-  if (!injection.copyPaths.length) return [];
+  taskId: string,
+): Promise<DockerVolumeMount[]> {
+  const providerName = provider.name as CliProviderName;
+  await assertUserAuthReady(db, provider);
+  await ensureTaskAuthVolumes(provider.userId, providerName, taskId);
+  return resolveTaskAuthMounts(providerName, taskId);
+}
 
-  const mounts: DockerVolumeMount[] = [];
-  for (const cp of injection.copyPaths) {
-    // Resolve ~ to the real host home directory (for Docker-in-Docker bind mounts)
-    const src = cp.src.startsWith('~/') ? HOST_USER_HOME + cp.src.slice(1) : cp.src;
-
-    // Remap /root/ destinations to the sandbox user's home
-    const dest = cp.dest.startsWith('/root/')
-      ? SANDBOX_USER_HOME + cp.dest.slice(5)
-      : cp.dest === '/root'
-        ? SANDBOX_USER_HOME
-        : cp.dest;
-
-    mounts.push({ source: src, target: dest, readOnly: true });
+/**
+ * Block CLI execution when a subscription-mode provider has no populated user
+ * auth volume. Since the host `~/.<cli>` is no longer mounted into sandboxes,
+ * an absent user volume means no credentials — the CLI would silently 401.
+ *
+ * When blocking, also flip a stale `auth_status=ok` row to `unknown` so the UI
+ * prompts the user to run the Haive CLI login flow instead of silently failing
+ * future runs.
+ */
+/**
+ * Thrown by `assertUserAuthReady` when a subscription-auth CLI has no
+ * populated user auth volume. Carries a structured hint so the UI can render
+ * an inline "Log in to <provider>" button that triggers the Haive login flow
+ * and auto-retries the step after successful login.
+ */
+export class CliLoginRequiredError extends Error {
+  readonly hint: StepErrorHint;
+  constructor(message: string, hint: StepErrorHint) {
+    super(message);
+    this.name = 'CliLoginRequiredError';
+    this.hint = hint;
   }
-  return mounts;
+}
+
+async function assertUserAuthReady(db: Database, provider: CliProviderRecord): Promise<void> {
+  if (provider.authMode !== 'subscription') return;
+  const providerName = provider.name as CliProviderName;
+  const hasVolume = await userAuthVolumeExists(provider.userId, providerName);
+  if (hasVolume) return;
+
+  if (provider.authStatus === 'ok') {
+    await db
+      .update(schema.cliProviders)
+      .set({
+        authStatus: 'unknown',
+        authMessage: 'User auth volume missing — log in to this CLI from the Haive providers page.',
+        authLastCheckedAt: new Date(),
+      })
+      .where(eq(schema.cliProviders.id, provider.id));
+  }
+
+  throw new CliLoginRequiredError(
+    `${provider.name}: not logged in — click "Log in to ${provider.name}" to populate the auth volume and retry.`,
+    {
+      type: 'cli_login_required',
+      providerId: provider.id,
+      providerName,
+    },
+  );
 }
 
 async function ensureProviderSandboxImage(
@@ -743,36 +789,68 @@ async function executeCliSpec(
   });
   void deps;
 
-  // If stream-json output detected, use extracted result instead of raw stdout
   const streamResult = collector.getResult();
   if (collector.isStreamJson() && streamResult !== null) {
     return {
       exitCode: result.exitCode,
       rawOutput: streamResult,
       parsedOutput: tryJsonParse(streamResult),
-      errorMessage: result.error ?? (result.exitCode !== 0 ? result.stderr.slice(0, 2000) : null),
+      errorMessage: formatCliErrorMessage(
+        result.exitCode,
+        result.stderr,
+        streamResult,
+        result.error,
+      ),
     };
   }
 
-  // Stream-json detected but no success result — surface this as a failure
-  // so the step can fail loudly rather than silently falling back to defaults.
   if (collector.isStreamJson() && streamResult === null) {
     const reason = collector.getNoResultReason() ?? 'LLM emitted no result event';
     return {
       exitCode: result.exitCode,
       rawOutput: result.stdout,
       parsedOutput: null,
-      errorMessage: result.error ?? reason,
+      errorMessage:
+        result.error ??
+        formatCliErrorMessage(result.exitCode, result.stderr, result.stdout, undefined) ??
+        reason,
     };
   }
 
-  // Fallback: plain JSON output from non-streaming CLIs
   return {
     exitCode: result.exitCode,
     rawOutput: result.stdout,
     parsedOutput: tryJsonParse(result.stdout),
-    errorMessage: result.error ?? (result.exitCode !== 0 ? result.stderr.slice(0, 2000) : null),
+    errorMessage: formatCliErrorMessage(
+      result.exitCode,
+      result.stderr,
+      result.stdout,
+      result.error,
+    ),
   };
+}
+
+/**
+ * Build a user-facing error message for a CLI invocation.
+ *
+ * Surfaces content in priority order: spawn error (timeout, crash) → stderr tail
+ * → stdout tail. Stdout fallback catches cases where CLIs like Claude Code or
+ * Z.AI emit the API error on stdout (e.g. "API Error: {...code:500}") and exit
+ * non-zero with empty stderr.
+ */
+export function formatCliErrorMessage(
+  exitCode: number | null,
+  stderr: string,
+  stdout: string,
+  spawnError: string | undefined,
+): string | null {
+  if (spawnError) return spawnError;
+  if (exitCode === 0) return null;
+  const stderrTail = stderr.trim();
+  if (stderrTail.length > 0) return stderrTail.slice(-2000);
+  const stdoutTail = stdout.trim();
+  if (stdoutTail.length > 0) return stdoutTail.slice(-2000);
+  return `cli exited with code ${exitCode ?? 'unknown'}`;
 }
 
 function createSandboxSpawner(
@@ -971,7 +1049,7 @@ async function executeSubAgentNative(
     provider.name as CliProviderName,
     sandboxWorkdir,
   );
-  const authMounts = resolveAuthMounts(adapter, provider);
+  const authMounts = await resolveAuthMounts(db, provider, payload.taskId);
   return executeCliSpec(
     spec,
     deps,
@@ -1017,7 +1095,7 @@ async function executeSubAgentSequential(
     provider.name as CliProviderName,
     sandboxWorkdir,
   );
-  const authMounts = resolveAuthMounts(adapter, provider);
+  const authMounts = await resolveAuthMounts(db, provider, payload.taskId);
   const spawner = createSandboxSpawner(
     provider.wrapperContent,
     sandboxImage,
@@ -1177,19 +1255,7 @@ async function probeCliPath(
   }
   let authMounts: Awaited<ReturnType<typeof resolveCliAuthMounts>> = [];
   if (isAuthProbeSupported(provider.name)) {
-    const hostBinds = await resolveCliAuthHostBinds(provider.name, { writable: true });
-    const hostTargets = new Set(hostBinds.map((b) => b.containerPath));
-    const volumeMounts = resolveCliAuthMounts(provider.userId, provider.name, {
-      writable: false,
-    }).filter((m) => !hostTargets.has(m.target));
-    authMounts = [
-      ...hostBinds.map((b) => ({
-        source: b.hostPath,
-        target: b.containerPath,
-        readOnly: b.readOnly,
-      })),
-      ...volumeMounts,
-    ];
+    authMounts = resolveCliAuthMounts(provider.userId, provider.name, { writable: true });
   }
   const spawner = createSandboxSpawner(
     provider.wrapperContent,

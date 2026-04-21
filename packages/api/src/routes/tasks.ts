@@ -253,6 +253,7 @@ taskRoutes.post('/:id/steps/:stepId/action', async (c) => {
         .set({
           status: 'pending',
           errorMessage: null,
+          errorHint: null,
           endedAt: null,
           updatedAt: now,
         })

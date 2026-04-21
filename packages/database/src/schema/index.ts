@@ -14,6 +14,14 @@ import {
 } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
+/**
+ * Structured hint payload stored in `task_steps.error_hint`. Mirror of the
+ * `StepErrorHint` union in `@haive/shared`; duplicated here to keep
+ * `@haive/database` free of a reverse dependency on shared (shared already
+ * depends on database via the secrets services).
+ */
+type TaskStepErrorHint = { type: 'cli_login_required'; providerId: string; providerName: string };
+
 // --- Enums --------------------------------------------------------------
 
 export const userRoleEnum = pgEnum('user_role', ['admin', 'user']);
@@ -368,6 +376,7 @@ export const taskSteps = pgTable(
     output: jsonb('output').$type<unknown>(),
     statusMessage: text('status_message'),
     errorMessage: text('error_message'),
+    errorHint: jsonb('error_hint').$type<TaskStepErrorHint>(),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),

@@ -64,11 +64,20 @@ export interface DockerRemoveResult {
   error?: string;
 }
 
+export interface DockerVolumeOpResult {
+  ok: boolean;
+  stderr: string;
+  error?: string;
+}
+
 export interface DockerRunner {
   build(opts: DockerBuildOpts): Promise<DockerBuildResult>;
   run(opts: DockerRunOpts): Promise<DockerRunResult>;
   inspect(tag: string): Promise<DockerInspectResult>;
   remove(ref: string): Promise<DockerRemoveResult>;
+  volumeCreate(name: string): Promise<DockerVolumeOpResult>;
+  volumeExists(name: string): Promise<boolean>;
+  volumeRemove(name: string): Promise<DockerVolumeOpResult>;
 }
 
 const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60 * 1000;
@@ -245,5 +254,26 @@ export const defaultDockerRunner: DockerRunner = {
       onStderrChunk: opts.onStderrChunk,
       signal: opts.signal,
     });
+  },
+
+  async volumeCreate(name) {
+    const result = await spawnAndCollect('docker', ['volume', 'create', name], {
+      timeoutMs: 15_000,
+    });
+    return { ok: result.exitCode === 0, stderr: result.stderr, error: result.error };
+  },
+
+  async volumeExists(name) {
+    const result = await spawnAndCollect('docker', ['volume', 'inspect', name], {
+      timeoutMs: 15_000,
+    });
+    return result.exitCode === 0;
+  },
+
+  async volumeRemove(name) {
+    const result = await spawnAndCollect('docker', ['volume', 'rm', '--force', name], {
+      timeoutMs: 30_000,
+    });
+    return { ok: result.exitCode === 0, stderr: result.stderr, error: result.error };
   },
 };

@@ -22,6 +22,7 @@ import {
 } from '../step-engine/index.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
+import { cleanupTaskAuthVolumes } from '../sandbox/task-auth-volume.js';
 import { cleanupRagForTask } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 
@@ -210,6 +211,19 @@ async function cleanupTaskContainers(
     }
   } catch (err) {
     logger.warn({ err, taskId, reason }, 'cleanup-task-containers failed');
+  }
+
+  try {
+    const { removed, failed } = await cleanupTaskAuthVolumes(taskId);
+    if (removed.length > 0 || failed.length > 0) {
+      await appendEvent(db, taskId, null, 'auth_volumes.destroyed', {
+        reason,
+        removed: removed.length,
+        failed: failed.length,
+      });
+    }
+  } catch (err) {
+    logger.warn({ err, taskId, reason }, 'cleanup-task-auth-volumes failed');
   }
 }
 

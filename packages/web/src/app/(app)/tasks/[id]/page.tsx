@@ -7,6 +7,7 @@ import type { FormSchema } from '@haive/shared';
 import {
   api,
   type CliProvider,
+  type CliProviderName,
   type StepAction,
   type StepActionResponse,
   type Task,
@@ -17,6 +18,7 @@ import {
   type StepStatus,
 } from '@/lib/api-client';
 import { Badge, Button, Card, Label } from '@/components/ui';
+import { useCliLogin } from '@/lib/use-cli-login';
 import { FormRenderer, type FormValues } from '@/components/form-renderer';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { TaskOutputs } from '@/components/task-outputs';
@@ -181,6 +183,44 @@ export default function TaskDetailPage() {
     }
   }
 
+  // Post-login auto-retry flow: after the user completes a CLI login triggered
+  // from a `cli_login_required` error hint, we prompt them to confirm retrying
+  // the step so they don't have to hunt for the Retry button themselves.
+  const { requireCliLogin } = useCliLogin();
+  const [pendingLoginRetry, setPendingLoginRetry] = useState<TaskStep | null>(null);
+
+  function openCliLoginForStep(step: TaskStep) {
+    if (step.errorHint?.type !== 'cli_login_required') return;
+    const { providerId, providerName } = step.errorHint;
+    requireCliLogin({
+      providerId,
+      providerLabel: providerName,
+      providerName: providerName as CliProviderName,
+      onComplete: () => setPendingLoginRetry(step),
+    });
+  }
+
+  async function confirmPostLoginRetry() {
+    const step = pendingLoginRetry;
+    if (!step) return;
+    setPendingLoginRetry(null);
+    setStepActionBusy(step.stepId);
+    setStepActionError(null);
+    try {
+      await api.post<StepActionResponse>(`/tasks/${id}/steps/${step.stepId}/action`, {
+        action: 'retry',
+      });
+      await reload();
+    } catch (err) {
+      setStepActionError({
+        stepId: step.stepId,
+        message: (err as Error).message ?? 'retry failed',
+      });
+    } finally {
+      setStepActionBusy(null);
+    }
+  }
+
   async function changeProvider(cliProviderId: string | null) {
     setProviderBusy(true);
     setProviderError(null);
@@ -327,6 +367,7 @@ export default function TaskDetailPage() {
                   stepActionError?.stepId === step.stepId ? stepActionError.message : null
                 }
                 onAction={(action) => runStepAction(step, action)}
+                onCliLogin={() => openCliLoginForStep(step)}
               />
             </div>
           ))}
@@ -445,6 +486,27 @@ export default function TaskDetailPage() {
           ))}
         </div>
       )}
+
+      {pendingLoginRetry && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <Card className="flex max-w-md flex-col gap-4 p-5">
+            <h2 className="text-base font-semibold text-neutral-100">Login successful</h2>
+            <p className="text-sm text-neutral-300">
+              You&apos;re now signed in. Retry step{' '}
+              <span className="font-mono text-xs text-neutral-400">{pendingLoginRetry.stepId}</span>{' '}
+              now?
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" size="sm" onClick={() => setPendingLoginRetry(null)}>
+                Not now
+              </Button>
+              <Button size="sm" onClick={confirmPostLoginRetry}>
+                Retry step
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
     </div>
   );
 }
@@ -486,6 +548,7 @@ interface StepCardProps {
   actionBusy: boolean;
   actionError: string | null;
   onAction: (action: StepAction) => Promise<void>;
+  onCliLogin: () => void;
 }
 
 function StepCard({
@@ -498,6 +561,7 @@ function StepCard({
   actionBusy,
   actionError,
   onAction,
+  onCliLogin,
 }: StepCardProps) {
   const [showOutput, setShowOutput] = useState(false);
   const schema = step.formSchema as FormSchema | null;
@@ -537,6 +601,17 @@ function StepCard({
       {step.errorMessage && (
         <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
           {step.errorMessage}
+        </div>
+      )}
+
+      {step.errorHint?.type === 'cli_login_required' && step.status === 'failed' && (
+        <div className="flex items-center gap-2">
+          <Button size="sm" disabled={actionBusy} onClick={onCliLogin}>
+            Log in to {step.errorHint.providerName}
+          </Button>
+          <span className="text-xs text-neutral-400">
+            We&apos;ll prompt you to retry the step right after you log in.
+          </span>
         </div>
       )}
 

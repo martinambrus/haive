@@ -5,7 +5,6 @@ import { logger } from '@haive/shared';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type { CliCommandSpec, CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveCliAuthMounts } from './cli-auth-volume.js';
-import { resolveCliAuthHostBinds } from './cli-auth-host.js';
 import { SANDBOX_USER, SANDBOX_WORKDIR } from './sandbox-runner.js';
 
 const log = logger.child({ module: 'login-container' });
@@ -52,17 +51,12 @@ export async function createSandboxLoginContainer(
     throw new Error(`sandbox image not ready (status=${provider.sandboxImageBuildStatus})`);
   }
 
-  const hostBinds = await resolveCliAuthHostBinds(provider.name, { writable: true });
-  const hostBoundTargets = new Set(hostBinds.map((b) => b.containerPath));
   const volumeMounts = resolveCliAuthMounts(provider.userId, provider.name, {
     writable: true,
-  }).filter((m) => !hostBoundTargets.has(m.target));
-  const binds = [
-    ...hostBinds.map((b) => `${b.hostPath}:${b.containerPath}${b.readOnly ? ':ro' : ''}`),
-    ...volumeMounts.map((m) => `${m.source}:${m.target}${m.readOnly ? ':ro' : ''}`),
-  ];
+  });
+  const binds = volumeMounts.map((m) => `${m.source}:${m.target}${m.readOnly ? ':ro' : ''}`);
   log.info(
-    { providerId: provider.id, hostBinds: hostBinds.length, volumeMounts: volumeMounts.length },
+    { providerId: provider.id, volumeMounts: volumeMounts.length },
     'login container mounts resolved',
   );
 

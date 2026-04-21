@@ -22,7 +22,7 @@ export function resolveCliAuthMounts(
   }));
 }
 
-function expandTildeToSandbox(p: string): string {
+export function expandTildeToSandbox(p: string): string {
   if (p === '~') return SANDBOX_USER_HOME;
   if (p.startsWith('~/')) return join(SANDBOX_USER_HOME, p.slice(2));
   return p;

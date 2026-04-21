@@ -197,12 +197,10 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
     if (!provider) {
       throw new Error(`CLI provider ${ctx.cliProviderId} not found`);
     }
-    const adapter = cliAdapterRegistry.get(provider.name);
-
     const sandboxImage = await resolveSandboxImageTag(ctx.db, ctx.taskId, provider);
     const sandboxWorkdir = await resolveTaskSandboxWorkdir(ctx.db, ctx.taskId);
     const repoMount = await resolveTaskRepoMount(ctx.db, ctx.taskId);
-    const authMounts = resolveAuthMounts(adapter, provider);
+    const authMounts = await resolveAuthMounts(ctx.db, provider, ctx.taskId);
     const mounts: DockerVolumeMount[] = [...authMounts];
     if (repoMount) mounts.push(repoMount);
 

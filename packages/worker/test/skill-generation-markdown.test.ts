@@ -163,6 +163,52 @@ describe('parseSkillEntries', () => {
     expect(entries[0]!.id).toBe('a');
   });
 
+  it('salvages well-formed skill objects from a malformed JSON fence', () => {
+    // Simulates the Z.AI truncation bug: fence opens, first skill is cut off
+    // mid-sub-skill body, then a second complete skill follows.
+    const raw = [
+      '```json',
+      'locations to avoid conflicts.\\n## Detection"', // leftover fragment — ignored
+      '          ]',
+      '        }',
+      '      ]',
+      '    },',
+      '    {',
+      '      "id": "update-checking",',
+      '      "title": "Update Checking",',
+      '      "description": "Fetches versions from GitHub",',
+      '      "overview": "Reads package.json and updates.json",',
+      '      "subSkills": [',
+      '        {',
+      '          "slug": "s",',
+      '          "name": "update-checking-s",',
+      '          "title": "S",',
+      '          "description": "d",',
+      '          "summary": "sum",',
+      '          "body": "b"',
+      '        }',
+      '      ]',
+      '    }',
+      '  ]',
+      '}',
+      '```',
+    ].join('\n');
+    const entries = parseSkillEntries(raw);
+    expect(entries.map((e) => e.id)).toEqual(['update-checking']);
+  });
+
+  it('deduplicates salvaged skills by id', () => {
+    const raw = [
+      '```json',
+      '{"id":"a","title":"A","description":"d","overview":"o"}',
+      '{"id":"a","title":"A","description":"d","overview":"o2"}',
+      '```',
+    ].join('\n');
+    const entries = parseSkillEntries(raw);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.id).toBe('a');
+  });
+
   it('accepts a skill whose only body field is a non-empty subSkills array', () => {
     const raw = [
       {

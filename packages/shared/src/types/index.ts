@@ -30,6 +30,18 @@ export type CliProviderName =
 
 export type AuthMode = 'subscription' | 'api_key' | 'mixed';
 
+/**
+ * Structured hint attached to a failed task_step so the UI can render
+ * actionable recovery affordances (e.g. a "Log in to CLI" button) instead of
+ * a plain text error. Discriminated on `type` — new kinds can be added without
+ * breaking existing consumers.
+ */
+export type StepErrorHint = {
+  type: 'cli_login_required';
+  providerId: string;
+  providerName: CliProviderName;
+};
+
 export type RepoSource =
   | 'local_path'
   | 'git_https'

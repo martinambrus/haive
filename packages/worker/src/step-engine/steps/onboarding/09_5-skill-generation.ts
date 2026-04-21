@@ -237,9 +237,12 @@ export function parseSkillEntries(raw: unknown): SkillEntry[] {
   const out: SkillEntry[] = [];
   const fenceRe = /```json\s*([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
+  const bodies: string[] = [];
   while ((match = fenceRe.exec(source)) !== null) {
-    const body = match[1];
-    if (!body) continue;
+    if (match[1]) bodies.push(match[1]);
+  }
+  if (bodies.length === 0) bodies.push(source);
+  for (const body of bodies) {
     try {
       const parsed = JSON.parse(body);
       if (Array.isArray(parsed)) {
@@ -256,8 +259,86 @@ export function parseSkillEntries(raw: unknown): SkillEntry[] {
         }
       }
     } catch {
+      // fall through to salvage scan below
+    }
+  }
+  if (out.length === 0) {
+    // Fall back to scanning the entire source — fences inside sub-skill bodies
+    // (e.g. ```javascript) can trip up the non-greedy outer fence regex.
+    const scanTargets = bodies.includes(source) ? bodies : [...bodies, source];
+    for (const body of scanTargets) {
+      for (const candidate of extractBalancedObjects(body)) {
+        try {
+          const parsed = JSON.parse(candidate);
+          if (isValidSkill(parsed)) {
+            out.push(parsed);
+          } else if (
+            typeof parsed === 'object' &&
+            parsed !== null &&
+            Array.isArray((parsed as Record<string, unknown>).skills)
+          ) {
+            for (const item of (parsed as Record<string, unknown>).skills as unknown[]) {
+              if (isValidSkill(item)) out.push(item);
+            }
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
+  return dedupeById(out);
+}
+
+function extractBalancedObjects(source: string): string[] {
+  const out: string[] = [];
+  const candidateRe = /\{\s*"/g;
+  let cursor = 0;
+  while (cursor < source.length) {
+    candidateRe.lastIndex = cursor;
+    const m = candidateRe.exec(source);
+    if (!m) break;
+    const end = findBalancedObjectEnd(source, m.index);
+    if (end < 0) break;
+    out.push(source.slice(m.index, end + 1));
+    cursor = end + 1;
+  }
+  return out;
+}
+
+function findBalancedObjectEnd(source: string, openIdx: number): number {
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = openIdx; i < source.length; i++) {
+    const c = source[i];
+    if (escape) {
+      escape = false;
       continue;
     }
+    if (inString) {
+      if (c === '\\') escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') inString = true;
+    else if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function dedupeById(entries: SkillEntry[]): SkillEntry[] {
+  const seen = new Set<string>();
+  const out: SkillEntry[] = [];
+  for (const e of entries) {
+    const key = typeof e.id === 'string' ? e.id.trim().toLowerCase() : '';
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(e);
   }
   return out;
 }

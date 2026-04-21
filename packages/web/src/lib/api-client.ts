@@ -328,11 +328,18 @@ export interface TaskStep {
   output: unknown;
   statusMessage: string | null;
   errorMessage: string | null;
+  errorHint: StepErrorHint | null;
   startedAt: string | null;
   endedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
+
+export type StepErrorHint = {
+  type: 'cli_login_required';
+  providerId: string;
+  providerName: string;
+};
 
 export interface TaskEvent {
   id: string;

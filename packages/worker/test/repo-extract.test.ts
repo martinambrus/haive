@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import JSZip from 'jszip';
 import { describe, expect, it, afterEach, beforeEach } from 'vitest';
 import { extractArchive } from '../src/repo/clone.js';
 
@@ -72,7 +73,14 @@ describe('extractArchive', () => {
   it('extracts .zip and flattens single top-level directory', async () => {
     await buildFixtureSource(tmpRoot, 'zipped');
     const archivePath = path.join(tmpRoot, 'fixture.zip');
-    await run('zip', ['-qr', archivePath, 'zipped'], tmpRoot);
+    // Build the fixture archive in pure JS so the test doesn't depend on the
+    // `zip` system binary (only `unzip` is installed in the runtime image).
+    const zip = new JSZip();
+    zip.file('zipped/README.md', '# fixture\n');
+    zip.file('zipped/sub/a.txt', 'hello\n');
+    zip.file('zipped/package.json', JSON.stringify({ name: 'fixture' }));
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+    await writeFile(archivePath, zipBuffer);
 
     const dest = path.join(tmpRoot, 'out-zip');
     await extractArchive(archivePath, 'zip', dest);

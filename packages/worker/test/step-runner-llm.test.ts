@@ -341,7 +341,7 @@ describe('advanceStep LLM phase', () => {
     });
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
-      expect(result.error).toMatch(/cli exited null/);
+      expect(result.error).toMatch(/cli exited with code unknown/);
     }
   });
 });

@@ -39,6 +39,9 @@ function makeRunner(opts: { exists?: boolean; removeOk?: boolean } = {}): {
         stderr: opts.removeOk === false ? 'image in use' : '',
       };
     },
+    volumeCreate: async () => ({ ok: true, stderr: '' }),
+    volumeExists: async () => false,
+    volumeRemove: async () => ({ ok: true, stderr: '' }),
   };
   return { runner, inspectCalls, removeCalls };
 }
