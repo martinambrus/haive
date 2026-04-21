@@ -87,10 +87,18 @@ function parseEnvVars(text: string): Record<string, string> {
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean)) {
+    if (line.startsWith('#')) continue;
     const idx = line.indexOf('=');
     if (idx === -1) continue;
-    const key = line.slice(0, idx).trim();
-    const value = line.slice(idx + 1).trim();
+    let key = line.slice(0, idx).trim();
+    let value = line.slice(idx + 1).trim();
+    if (key.startsWith('export ')) key = key.slice('export '.length).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
     if (key) result[key] = value;
   }
   return result;
