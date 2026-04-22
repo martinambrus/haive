@@ -1,14 +1,32 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { DetectResult, FormSchema } from '@haive/shared';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import type { CliProviderName, DetectResult, FormSchema } from '@haive/shared';
+import { getCliProviderMetadata } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
 import type { KbFileSummary } from './09-qa.js';
+
+const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
+
+async function resolveProjectSkillsDir(ctx: StepContext): Promise<string> {
+  if (!ctx.cliProviderId) return DEFAULT_PROJECT_SKILLS_DIR;
+  const row = await ctx.db.query.cliProviders.findFirst({
+    where: eq(schema.cliProviders.id, ctx.cliProviderId),
+    columns: { name: true },
+  });
+  if (!row) return DEFAULT_PROJECT_SKILLS_DIR;
+  return getCliProviderMetadata(row.name as CliProviderName).projectSkillsDir;
+}
 
 interface SkillGenDetect {
   framework: string | null;
   language: string | null;
   kbFiles: KbFileSummary[];
+  /** Repo-relative directory where the active CLI auto-loads project-level
+   *  skills. Resolved from the CLI's catalog metadata at detect-time. */
+  projectSkillsDir: string;
   /** Transient — file tree handed to the LLM prompt; stripped before persisting. */
   __fileTree?: string;
 }
@@ -568,6 +586,7 @@ export function subSkillToMarkdown(parentId: string, sub: SkillSubSkill): string
 
 export function skillsReadmeMarkdown(
   written: { id: string; title: string; description: string }[],
+  skillsDir: string = DEFAULT_PROJECT_SKILLS_DIR,
 ): string {
   const rows = [...written].sort((a, b) => a.id.localeCompare(b.id));
   const lines: string[] = [
@@ -577,7 +596,6 @@ export function skillsReadmeMarkdown(
     '',
     '## Skill Architecture',
     '',
-    '- **AGENTS**: technical/framework expertise (HOW to code). Live in `.claude/agents/`.',
     '- **SKILLS**: business/domain knowledge (WHAT to build). Live here.',
     '- **Progressive disclosure**: metadata (always) -> SKILL.md (when triggered) -> sub-skills (when specific topic needed).',
     '',
@@ -594,7 +612,7 @@ export function skillsReadmeMarkdown(
   lines.push('## Directory Layout');
   lines.push('');
   lines.push('```');
-  lines.push('.claude/skills/');
+  lines.push(`${skillsDir}/`);
   lines.push('  {domain}/');
   lines.push('    SKILL.md                 # domain overview with YAML frontmatter');
   lines.push('    sub-skills/');
@@ -635,7 +653,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '',
     '- **AGENTS** capture technical expertise (HOW to use a framework). They live in `.claude/agents/`. NOT your concern here.',
     '- **SKILLS** capture business/domain capabilities of THIS project — discrete features the code',
-    '  exposes that an agent might need to understand or modify. They live in `.claude/skills/`.',
+    `  exposes that an agent might need to understand or modify. They live in \`${detected.projectSkillsDir}/\`.`,
     '- A skill is a CAPABILITY DOMAIN, NOT a documentation chapter.',
     '',
     '## What a good skill looks like',
@@ -682,7 +700,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '',
     '## Required structure per skill',
     '',
-    'Each skill is a directory `.claude/skills/<id>/` containing:',
+    `Each skill is a directory \`${detected.projectSkillsDir}/<id>/\` containing:`,
     '  - `SKILL.md` — concise overview with YAML frontmatter (the loader)',
     '  - `sub-skills/<slug>.md` — 3 to 8 leaf documents covering distinct facets of the domain',
     '',
@@ -771,6 +789,8 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const framework = envData?.project?.framework ?? null;
     const language = envData?.project?.primaryLanguage ?? null;
 
+    const projectSkillsDir = await resolveProjectSkillsDir(ctx);
+
     await ctx.emitProgress('Listing existing knowledge base...');
     const kbFiles = await listKbFiles(ctx.repoPath);
 
@@ -778,10 +798,10 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const fileTree = await collectShortFileTree(ctx.repoPath);
 
     ctx.logger.info(
-      { framework, language, kbFileCount: kbFiles.length },
+      { framework, language, kbFileCount: kbFiles.length, projectSkillsDir },
       'skill-generation detect complete',
     );
-    return { framework, language, kbFiles, __fileTree: fileTree };
+    return { framework, language, kbFiles, projectSkillsDir, __fileTree: fileTree };
   },
 
   form(_ctx, _detected): FormSchema {
@@ -873,6 +893,10 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const values = args.formValues as { maxSkills?: number };
     const maxSkills = clampMaxSkills(values.maxSkills);
 
+    const detected = args.detected as SkillGenDetect;
+    const skillsDir = detected.projectSkillsDir ?? DEFAULT_PROJECT_SKILLS_DIR;
+    const skillsDirParts = skillsDir.split('/').filter((p) => p.length > 0);
+
     const entries = parseSkillEntries(args.llmOutput ?? null);
     if (entries.length === 0) {
       throw new SkillGenParseError(
@@ -911,7 +935,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     let totalSubSkills = 0;
 
     for (const entry of final) {
-      const dir = path.join(ctx.repoPath, '.claude', 'skills', entry.id);
+      const dir = path.join(ctx.repoPath, ...skillsDirParts, entry.id);
       await mkdir(dir, { recursive: true });
       const filePath = path.join(dir, 'SKILL.md');
       await writeFile(filePath, skillToMarkdown(entry), 'utf8');
@@ -932,9 +956,9 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     }
 
     if (summaryForReadme.length > 0) {
-      const readmePath = path.join(ctx.repoPath, '.claude', 'skills', 'README.md');
+      const readmePath = path.join(ctx.repoPath, ...skillsDirParts, 'README.md');
       await mkdir(path.dirname(readmePath), { recursive: true });
-      await writeFile(readmePath, skillsReadmeMarkdown(summaryForReadme), 'utf8');
+      await writeFile(readmePath, skillsReadmeMarkdown(summaryForReadme, skillsDir), 'utf8');
     }
 
     ctx.logger.info(

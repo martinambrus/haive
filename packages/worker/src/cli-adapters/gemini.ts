@@ -52,10 +52,6 @@ export class GeminiAdapter extends BaseCliAdapter {
   envInjection(_provider: CliProviderRecord): EnvInjection {
     return {
       envVars: {},
-      copyPaths: [
-        { src: '~/.config/gemini', dest: '/root/.config/gemini', mode: 'dir', optional: true },
-        { src: '~/.gemini', dest: '/root/.gemini', mode: 'dir', optional: true },
-      ],
       extraArgs: [],
     };
   }

@@ -1,8 +1,27 @@
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { FormSchema } from '@haive/shared';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import type { CliProviderName, FormSchema } from '@haive/shared';
+import { getCliProviderMetadata } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { pathExists } from './_helpers.js';
+
+const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
+
+async function resolveProjectSkillsDir(ctx: StepContext): Promise<string> {
+  if (!ctx.cliProviderId) return DEFAULT_PROJECT_SKILLS_DIR;
+  const row = await ctx.db.query.cliProviders.findFirst({
+    where: eq(schema.cliProviders.id, ctx.cliProviderId),
+    columns: { name: true },
+  });
+  if (!row) return DEFAULT_PROJECT_SKILLS_DIR;
+  return getCliProviderMetadata(row.name as CliProviderName).projectSkillsDir;
+}
+
+function skillsDirParts(skillsDir: string): string[] {
+  return skillsDir.split('/').filter((p) => p.length > 0);
+}
 
 export interface SkillCheck {
   skillId: string;
@@ -15,6 +34,8 @@ export interface SkillVerificationDetect {
   checks: SkillCheck[];
   missingFileIds: string[];
   brokenStructureIds: string[];
+  /** Repo-relative skills dir resolved from the active CLI's catalog entry. */
+  projectSkillsDir: string;
 }
 
 export interface SkillVerificationApply {
@@ -82,8 +103,8 @@ function stubSkillContent(skillId: string): string {
   return fm + body;
 }
 
-async function listSkillDirs(repo: string): Promise<string[]> {
-  const root = path.join(repo, '.claude', 'skills');
+async function listSkillDirs(repo: string, skillsDir: string): Promise<string[]> {
+  const root = path.join(repo, ...skillsDirParts(skillsDir));
   if (!(await pathExists(root))) return [];
   try {
     const entries = await readdir(root, { withFileTypes: true });
@@ -96,8 +117,8 @@ async function listSkillDirs(repo: string): Promise<string[]> {
   }
 }
 
-async function checkSkill(repo: string, skillId: string): Promise<SkillCheck> {
-  const skillPath = path.join(repo, '.claude', 'skills', skillId, 'SKILL.md');
+async function checkSkill(repo: string, skillsDir: string, skillId: string): Promise<SkillCheck> {
+  const skillPath = path.join(repo, ...skillsDirParts(skillsDir), skillId, 'SKILL.md');
   const issues: string[] = [];
   if (!(await pathExists(skillPath))) {
     return {
@@ -149,13 +170,16 @@ export const skillVerificationStep: StepDefinition<
     index: 12,
     title: 'Skill verification',
     description:
-      'Walks .claude/skills/, verifies each SKILL.md has the expected frontmatter and section structure, and regenerates stub files for skills whose SKILL.md went missing.',
-    requiresCli: false,
+      'Walks the active CLI’s project skills directory, verifies each SKILL.md has the expected frontmatter and section structure, and regenerates stub files for skills whose SKILL.md went missing.',
+    requiresCli: true,
   },
 
   async detect(ctx: StepContext): Promise<SkillVerificationDetect> {
-    const skillIds = await listSkillDirs(ctx.repoPath);
-    const checks = await Promise.all(skillIds.map((id) => checkSkill(ctx.repoPath, id)));
+    const projectSkillsDir = await resolveProjectSkillsDir(ctx);
+    const skillIds = await listSkillDirs(ctx.repoPath, projectSkillsDir);
+    const checks = await Promise.all(
+      skillIds.map((id) => checkSkill(ctx.repoPath, projectSkillsDir, id)),
+    );
     const missingFileIds = checks
       .filter((c) => c.issues.includes('SKILL.md missing'))
       .map((c) => c.skillId);
@@ -168,10 +192,11 @@ export const skillVerificationStep: StepDefinition<
         passed: checks.filter((c) => c.passed).length,
         missing: missingFileIds.length,
         broken: brokenStructureIds.length,
+        projectSkillsDir,
       },
       'skill verification detect complete',
     );
-    return { checks, missingFileIds, brokenStructureIds };
+    return { checks, missingFileIds, brokenStructureIds, projectSkillsDir };
   },
 
   form(_ctx, detected): FormSchema | null {
@@ -198,10 +223,16 @@ export const skillVerificationStep: StepDefinition<
     const values = args.formValues as { regenerateMissing?: boolean };
     const shouldRegenerate = values.regenerateMissing !== false;
     const regenerated: string[] = [];
+    const skillsDir = detected.projectSkillsDir ?? DEFAULT_PROJECT_SKILLS_DIR;
 
     if (shouldRegenerate) {
       for (const skillId of detected.missingFileIds) {
-        const skillPath = path.join(ctx.repoPath, '.claude', 'skills', skillId, 'SKILL.md');
+        const skillPath = path.join(
+          ctx.repoPath,
+          ...skillsDirParts(skillsDir),
+          skillId,
+          'SKILL.md',
+        );
         await writeFile(skillPath, stubSkillContent(skillId), 'utf8');
         regenerated.push(skillId);
       }
@@ -211,7 +242,7 @@ export const skillVerificationStep: StepDefinition<
       ? await Promise.all(
           detected.checks.map((c) =>
             detected.missingFileIds.includes(c.skillId)
-              ? checkSkill(ctx.repoPath, c.skillId)
+              ? checkSkill(ctx.repoPath, skillsDir, c.skillId)
               : Promise.resolve(c),
           ),
         )

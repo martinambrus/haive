@@ -8,16 +8,6 @@ const baseParams = {
 };
 
 describe('resolveImageTag', () => {
-  it('returns null when CLI has no install lines and no extras are present', () => {
-    const result = resolveImageTag({
-      name: 'grok',
-      cliVersion: null,
-      providerId: 'provider-x',
-      sandboxDockerfileExtra: null,
-    });
-    expect(result).toBeNull();
-  });
-
   it('produces a shared, version-pinned tag when only install lines are present', () => {
     const result = resolveImageTag({
       ...baseParams,

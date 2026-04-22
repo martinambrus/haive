@@ -80,16 +80,7 @@ describe('splitSubAgentForProvider', () => {
   });
 
   it('produces a capability matrix for every registered provider', () => {
-    const names: CliProviderName[] = [
-      'claude-code',
-      'codex',
-      'gemini',
-      'amp',
-      'grok',
-      'qwen',
-      'kiro',
-      'zai',
-    ];
+    const names: CliProviderName[] = ['claude-code', 'codex', 'gemini', 'amp', 'zai'];
     const matrix = names.map((name) => {
       const provider = makeProvider({
         id: `p-${name}`,
@@ -105,9 +96,6 @@ describe('splitSubAgentForProvider', () => {
       { name: 'codex', mode: 'sequential' },
       { name: 'gemini', mode: 'sequential' },
       { name: 'amp', mode: 'sequential' },
-      { name: 'grok', mode: 'sequential' },
-      { name: 'qwen', mode: 'sequential' },
-      { name: 'kiro', mode: 'sequential' },
       { name: 'zai', mode: 'native' },
     ]);
   });

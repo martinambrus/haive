@@ -103,9 +103,6 @@ describe('buildMcpConfigForCli', () => {
 
   it('returns null for CLIs without documented MCP support', () => {
     expect(buildMcpConfigForCli('amp', sampleServers)).toBeNull();
-    expect(buildMcpConfigForCli('grok', sampleServers)).toBeNull();
-    expect(buildMcpConfigForCli('qwen', sampleServers)).toBeNull();
-    expect(buildMcpConfigForCli('kiro', sampleServers)).toBeNull();
   });
 
   it('returns null when the server list is empty', () => {
@@ -150,7 +147,7 @@ describe('injectMcpConfig', () => {
     const result = await injectMcpConfig({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       container: container as any,
-      cliProvider: 'grok',
+      cliProvider: 'amp',
       servers: sampleServers,
     });
     expect(result.skipped).toBe(true);

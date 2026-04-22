@@ -48,15 +48,6 @@ export class AmpAdapter extends BaseCliAdapter {
   envInjection(_provider: CliProviderRecord): EnvInjection {
     return {
       envVars: {},
-      copyPaths: [
-        {
-          src: '~/.local/share/amp',
-          dest: '/root/.local/share/amp',
-          mode: 'dir',
-          optional: true,
-        },
-        { src: '~/.config/amp', dest: '/root/.config/amp', mode: 'dir', optional: true },
-      ],
       extraArgs: [],
     };
   }

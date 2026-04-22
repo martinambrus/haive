@@ -64,39 +64,6 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
     autoUpdateDisable: [{ kind: 'env', vars: { AMP_SKIP_UPDATE_CHECK: '1' } }],
     versionPinnable: true,
   },
-  qwen: {
-    install: { kind: 'npm', package: '@qwen-code/qwen-code', binary: 'qwen' },
-    versionSource: { kind: 'npm', package: '@qwen-code/qwen-code' },
-    autoUpdateDisable: [
-      {
-        kind: 'config-file',
-        path: '/root/.qwen/settings.json',
-        content: '{"general":{"enableAutoUpdate":false}}\n',
-      },
-    ],
-    versionPinnable: true,
-  },
-  grok: {
-    install: {
-      kind: 'unsupported',
-      reason: 'No first-party xAI CLI available as of 2026-04',
-    },
-    versionSource: { kind: 'none' },
-    autoUpdateDisable: [],
-    versionPinnable: false,
-  },
-  kiro: {
-    install: { kind: 'curl-script', url: 'https://cli.kiro.dev/install', binary: 'kiro-cli' },
-    versionSource: { kind: 'none' },
-    autoUpdateDisable: [
-      {
-        kind: 'config-file',
-        path: '/root/.kiro/settings/cli.json',
-        content: '{"app":{"disableAutoupdates":true}}\n',
-      },
-    ],
-    versionPinnable: false,
-  },
   zai: {
     install: { kind: 'piggyback', uses: 'claude-code' },
     versionSource: { kind: 'npm', package: '@anthropic-ai/claude-code' },

@@ -79,16 +79,8 @@ export interface SubAgentInvocation {
   synthesis: SubAgentInvocationStep;
 }
 
-export interface EnvCopyPath {
-  src: string;
-  dest: string;
-  mode?: 'file' | 'dir';
-  optional?: boolean;
-}
-
 export interface EnvInjection {
   envVars: Record<string, string>;
-  copyPaths: EnvCopyPath[];
   extraArgs: string[];
 }
 

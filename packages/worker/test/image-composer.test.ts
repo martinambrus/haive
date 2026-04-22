@@ -67,31 +67,12 @@ describe('composeSandboxImage', () => {
     expect(result.dockerfileBody).not.toContain('@anthropic-ai/claude-code@');
   });
 
-  it('emits a curl-script line for curl-script CLIs (kiro)', () => {
-    const result = composeSandboxImage({
-      envTemplateDockerfile: null,
-      provider: { name: 'kiro', cliVersion: null, sandboxDockerfileExtra: null },
-    });
-    expect(result.dockerfileBody).toContain('curl -fsSL https://cli.kiro.dev/install');
-    expect(result.hasCliInstall).toBe(true);
-  });
-
   it('delegates a piggyback CLI (zai) to its target install', () => {
     const result = composeSandboxImage({
       envTemplateDockerfile: null,
       provider: { name: 'zai', cliVersion: '1.0.0', sandboxDockerfileExtra: null },
     });
     expect(result.dockerfileBody).toContain('@anthropic-ai/claude-code@1.0.0');
-  });
-
-  it('omits CLI install lines for an unsupported CLI (grok)', () => {
-    const result = composeSandboxImage({
-      envTemplateDockerfile: null,
-      provider: { name: 'grok', cliVersion: null, sandboxDockerfileExtra: null },
-    });
-    expect(result.hasCliInstall).toBe(false);
-    expect(result.dockerfileBody).not.toContain('RUN npm install');
-    expect(result.dockerfileBody).not.toContain('RUN curl');
   });
 
   it('produces deterministic content-hash tags for identical inputs', () => {

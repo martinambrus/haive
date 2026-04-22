@@ -98,9 +98,6 @@ export function buildMcpConfigForCli(
       };
 
     case 'amp':
-    case 'grok':
-    case 'qwen':
-    case 'kiro':
       return null;
 
     default: {

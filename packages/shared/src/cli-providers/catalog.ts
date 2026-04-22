@@ -8,6 +8,18 @@ export interface EffortScaleMetadata {
   max: string;
 }
 
+/** Per-CLI spec for mounting user-level skills into a task container.
+ *  `host` is the canonical user-home path (tilde-form). `fallbackHost` lets
+ *  us seed from another CLI's skills dir when the canonical one is absent —
+ *  e.g. codex falls back to `~/.claude/skills` so users migrating from
+ *  Claude Code don't lose their skills. `containerPath` is the absolute
+ *  mount target inside the sandbox. */
+export interface UserSkillPath {
+  host: string;
+  fallbackHost?: string;
+  containerPath: string;
+}
+
 export interface CliProviderMetadata {
   name: CliProviderName;
   displayName: string;
@@ -27,6 +39,15 @@ export interface CliProviderMetadata {
    *  must render a selector for it. Adapters that don't support such a knob
    *  set this to null and ignore any stored effortLevel. */
   effortScale: EffortScaleMetadata | null;
+  /** Repo-relative directory where this CLI auto-loads project-level skills.
+   *  Used by onboarding step 09_5 to write skills to the active CLI's native
+   *  path (claude-based CLIs share `.claude/skills`; codex uses `.agents/skills`;
+   *  gemini uses `.gemini/skills`). */
+  projectSkillsDir: string;
+  /** Host → container bind mounts for user-level skills. Empty when the
+   *  CLI's authConfigPaths already cover its skills dir (claude-code, amp,
+   *  zai all share `~/.claude` which contains `skills/`). */
+  userSkillsPaths: readonly UserSkillPath[];
 }
 
 const CLAUDE_LIKE_EFFORT_SCALE: EffortScaleMetadata = {
@@ -52,6 +73,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     authConfigPaths: ['~/.config/claude', '~/.claude'],
     docsUrl: 'https://docs.anthropic.com/en/docs/claude-code',
     effortScale: CLAUDE_LIKE_EFFORT_SCALE,
+    projectSkillsDir: '.claude/skills',
+    userSkillsPaths: [],
   },
   codex: {
     name: 'codex',
@@ -68,6 +91,14 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     defaultModel: 'o3',
     authConfigPaths: ['~/.codex'],
     effortScale: null,
+    projectSkillsDir: '.agents/skills',
+    userSkillsPaths: [
+      {
+        host: '~/.agents/skills',
+        fallbackHost: '~/.claude/skills',
+        containerPath: '/root/.agents/skills',
+      },
+    ],
   },
   gemini: {
     name: 'gemini',
@@ -84,6 +115,14 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     defaultModel: 'gemini-2.5-pro',
     authConfigPaths: ['~/.config/gemini', '~/.gemini'],
     effortScale: null,
+    projectSkillsDir: '.gemini/skills',
+    userSkillsPaths: [
+      {
+        host: '~/.gemini/skills',
+        fallbackHost: '~/.claude/skills',
+        containerPath: '/root/.gemini/skills',
+      },
+    ],
   },
   amp: {
     name: 'amp',
@@ -100,54 +139,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     defaultModel: null,
     authConfigPaths: ['~/.local/share/amp', '~/.config/amp'],
     effortScale: null,
-  },
-  grok: {
-    name: 'grok',
-    displayName: 'xAI Grok',
-    description: 'xAI Grok CLI. OpenAI-compatible API path via api.x.ai. Configurable sub-agents.',
-    defaultExecutable: 'grok',
-    supportsSubagents: true,
-    supportsApi: true,
-    supportsCliAuth: true,
-    supportsMcp: false,
-    supportsPlugins: false,
-    defaultAuthMode: 'mixed',
-    apiKeyEnvName: 'XAI_API_KEY',
-    defaultModel: 'grok-3',
-    authConfigPaths: ['~/.config/grok', '~/.grok'],
-    effortScale: null,
-  },
-  qwen: {
-    name: 'qwen',
-    displayName: 'Alibaba Qwen',
-    description: 'Alibaba Qwen CLI. OpenAI-compatible API via DashScope. Native sub-agent support.',
-    defaultExecutable: 'qwen',
-    supportsSubagents: true,
-    supportsApi: true,
-    supportsCliAuth: true,
-    supportsMcp: false,
-    supportsPlugins: true,
-    defaultAuthMode: 'mixed',
-    apiKeyEnvName: 'DASHSCOPE_API_KEY',
-    defaultModel: 'qwen-max',
-    authConfigPaths: ['~/.qwen'],
-    effortScale: null,
-  },
-  kiro: {
-    name: 'kiro',
-    displayName: 'Kiro',
-    description: 'Kiro CLI. CLI-only. Native sub-agents with task dependencies.',
-    defaultExecutable: 'kiro',
-    supportsSubagents: true,
-    supportsApi: false,
-    supportsCliAuth: true,
-    supportsMcp: false,
-    supportsPlugins: false,
-    defaultAuthMode: 'subscription',
-    apiKeyEnvName: null,
-    defaultModel: null,
-    authConfigPaths: ['~/.kiro'],
-    effortScale: null,
+    projectSkillsDir: '.claude/skills',
+    userSkillsPaths: [],
   },
   zai: {
     name: 'zai',
@@ -164,6 +157,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     defaultModel: 'zai-latest',
     authConfigPaths: ['~/.config/claude', '~/.claude'],
     effortScale: CLAUDE_LIKE_EFFORT_SCALE,
+    projectSkillsDir: '.claude/skills',
+    userSkillsPaths: [],
   },
 };
 

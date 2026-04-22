@@ -3,9 +3,6 @@ import type { BaseCliAdapter } from './base-adapter.js';
 import { ClaudeCodeAdapter } from './claude-code.js';
 import { CodexAdapter } from './codex.js';
 import { GeminiAdapter } from './gemini.js';
-import { GrokAdapter } from './grok.js';
-import { KiroAdapter } from './kiro.js';
-import { QwenAdapter } from './qwen.js';
 import type { CliProviderName } from './types.js';
 import { ZaiAdapter } from './zai.js';
 
@@ -17,9 +14,6 @@ export class CliAdapterRegistry {
     this.register(new CodexAdapter());
     this.register(new GeminiAdapter());
     this.register(new AmpAdapter());
-    this.register(new GrokAdapter());
-    this.register(new QwenAdapter());
-    this.register(new KiroAdapter());
     this.register(new ZaiAdapter());
   }
 

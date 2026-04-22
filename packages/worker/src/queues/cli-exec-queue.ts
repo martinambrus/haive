@@ -67,6 +67,7 @@ import { resolveCliAuthMounts } from '../sandbox/cli-auth-volume.js';
 import {
   ensureTaskAuthVolumes,
   resolveTaskAuthMounts,
+  resolveTaskSkillMounts,
   userAuthVolumeExists,
 } from '../sandbox/task-auth-volume.js';
 import {
@@ -200,9 +201,6 @@ const PROVIDER_LOGIN_HINTS: Record<string, string> = {
   codex: 'codex login',
   gemini: 'gemini auth login',
   amp: 'amp login',
-  grok: 'grok login',
-  qwen: 'qwen login',
-  kiro: 'kiro login',
   zai: 'zai login',
 };
 
@@ -634,7 +632,7 @@ export async function resolveAuthMounts(
   const providerName = provider.name as CliProviderName;
   await assertUserAuthReady(db, provider);
   await ensureTaskAuthVolumes(provider.userId, providerName, taskId);
-  return resolveTaskAuthMounts(providerName, taskId);
+  return [...resolveTaskAuthMounts(providerName, taskId), ...resolveTaskSkillMounts(providerName)];
 }
 
 /**

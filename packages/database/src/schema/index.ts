@@ -32,9 +32,6 @@ export const cliProviderNameEnum = pgEnum('cli_provider_name', [
   'codex',
   'gemini',
   'amp',
-  'grok',
-  'qwen',
-  'kiro',
   'zai',
 ]);
 export const cliAuthModeEnum = pgEnum('cli_auth_mode', ['subscription', 'api_key', 'mixed']);

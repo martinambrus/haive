@@ -88,10 +88,6 @@ export class ZaiAdapter extends BaseCliAdapter {
   envInjection(_provider: CliProviderRecord): EnvInjection {
     return {
       envVars: {},
-      copyPaths: [
-        { src: '~/.config/claude', dest: '/root/.config/claude', mode: 'dir', optional: true },
-        { src: '~/.claude', dest: '/root/.claude', mode: 'dir', optional: true },
-      ],
       extraArgs: [],
     };
   }

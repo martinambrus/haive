@@ -164,18 +164,19 @@ describe('buildAuthProbeCommand', () => {
     expect(spec.args).toContain('--yolo');
   });
 
-  it('throws CliAuthProbeUnsupportedError for amp', () => {
-    expect(() => buildAuthProbeCommand(makeProvider({ id: '4', name: 'amp' }), 'amp')).toThrow(
+  it('throws CliAuthProbeUnsupportedError for zai', () => {
+    expect(() => buildAuthProbeCommand(makeProvider({ id: '4', name: 'zai' }), 'claude')).toThrow(
       CliAuthProbeUnsupportedError,
     );
   });
 });
 
 describe('isAuthProbeSupported', () => {
-  it('is true for claude-code, codex, gemini', () => {
+  it('is true for claude-code, codex, gemini, amp', () => {
     expect(isAuthProbeSupported('claude-code')).toBe(true);
     expect(isAuthProbeSupported('codex')).toBe(true);
     expect(isAuthProbeSupported('gemini')).toBe(true);
-    expect(isAuthProbeSupported('amp')).toBe(false);
+    expect(isAuthProbeSupported('amp')).toBe(true);
+    expect(isAuthProbeSupported('zai')).toBe(false);
   });
 });

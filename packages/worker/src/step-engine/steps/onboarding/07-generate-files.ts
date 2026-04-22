@@ -241,13 +241,10 @@ const DRUPAL_LSP_CONFIG = JSON.stringify(
   2,
 );
 
-/** Plugin base directories per CLI plugin protocol. claude-code/zai use `.claude/plugins`;
- *  qwen auto-converts claude-plugin.json from `.qwen/extensions`. codex/gemini have
- *  different plugin formats not yet packaged here. */
-const DRUPAL_LSP_TARGET_BASES = [
-  '.claude/plugins/drupal-php-lsp',
-  '.qwen/extensions/drupal-php-lsp',
-];
+/** Plugin base directories per CLI plugin protocol. claude-code/zai use
+ *  `.claude/plugins`; codex/gemini/amp have different plugin formats not yet
+ *  packaged here. */
+const DRUPAL_LSP_TARGET_BASES = ['.claude/plugins/drupal-php-lsp'];
 
 const DRUPAL_LSP_FILES: { rel: string; content: string }[] = DRUPAL_LSP_TARGET_BASES.flatMap(
   (base) => [
@@ -520,7 +517,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     }
 
     // Per-CLI rules written to each adapter's native rules file. Providers that
-    // share a target file (codex + amp + kiro -> AGENTS.md, claude-code + zai ->
+    // share a target file (codex + amp + gemini -> AGENTS.md, claude-code + zai ->
     // CLAUDE.md) are merged line-by-line with trim-equal dedup so shared rules
     // appear once. Three modes:
     //   native: file is AGENTS.md, content written under haive:cli-rules marker.

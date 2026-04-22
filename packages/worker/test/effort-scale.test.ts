@@ -39,7 +39,7 @@ describe('effortScale declarations', () => {
     expect(adapter.effortScale!.max).toBe('max');
   });
 
-  it.each<CliProviderName>(['codex', 'gemini', 'amp', 'grok', 'qwen', 'kiro'])(
+  it.each<CliProviderName>(['codex', 'gemini', 'amp'])(
     '%s reports no effort knob (effortScale=null)',
     (name) => {
       const adapter = cliAdapterRegistry.get(name);

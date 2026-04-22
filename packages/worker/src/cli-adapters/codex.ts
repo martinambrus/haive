@@ -52,7 +52,6 @@ export class CodexAdapter extends BaseCliAdapter {
   envInjection(_provider: CliProviderRecord): EnvInjection {
     return {
       envVars: {},
-      copyPaths: [{ src: '~/.codex', dest: '/root/.codex', mode: 'dir', optional: true }],
       extraArgs: [],
     };
   }

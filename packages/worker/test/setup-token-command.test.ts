@@ -28,11 +28,12 @@ function makeProvider(
 }
 
 describe('isCliSetupTokenSupported', () => {
-  it('is true for claude-code, codex, gemini', () => {
+  it('is true for claude-code, codex, gemini, amp', () => {
     expect(isCliSetupTokenSupported('claude-code')).toBe(true);
     expect(isCliSetupTokenSupported('codex')).toBe(true);
     expect(isCliSetupTokenSupported('gemini')).toBe(true);
-    expect(isCliSetupTokenSupported('amp')).toBe(false);
+    expect(isCliSetupTokenSupported('amp')).toBe(true);
+    expect(isCliSetupTokenSupported('zai')).toBe(false);
   });
 });
 
@@ -71,8 +72,14 @@ describe('buildSetupTokenCommand', () => {
     expect(spec.env.NO_BROWSER).toBe('true');
   });
 
-  it('throws CliSetupTokenUnsupportedError for amp', () => {
-    expect(() => buildSetupTokenCommand(makeProvider({ id: '6', name: 'amp' }), 'amp')).toThrow(
+  it('amp → login', () => {
+    const spec = buildSetupTokenCommand(makeProvider({ id: '6', name: 'amp' }), 'amp');
+    expect(spec.command).toBe('amp');
+    expect(spec.args).toEqual(['login']);
+  });
+
+  it('throws CliSetupTokenUnsupportedError for zai', () => {
+    expect(() => buildSetupTokenCommand(makeProvider({ id: '7', name: 'zai' }), 'claude')).toThrow(
       CliSetupTokenUnsupportedError,
     );
   });

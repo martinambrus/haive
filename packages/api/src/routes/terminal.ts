@@ -471,7 +471,6 @@ function inferOauthService(url: string): string | undefined {
     if (host.includes('anthropic') || host.includes('claude')) return 'claude';
     if (host.includes('openai')) return 'codex';
     if (host.includes('google') || host.includes('gemini')) return 'gemini';
-    if (host.includes('x.ai') || host.includes('grok')) return 'grok';
     if (host.includes('sourcegraph') || host.includes('ampcode')) return 'amp';
     return undefined;
   } catch {

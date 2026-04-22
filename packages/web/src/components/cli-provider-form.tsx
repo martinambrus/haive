@@ -751,11 +751,9 @@ export function CliProviderForm({
         <p className="mt-1 text-xs text-neutral-500">
           Rewritten into this CLI&apos;s native rules file on every task onboarding. Target file
           depends on the adapter: <code className="font-mono text-neutral-300">AGENTS.md</code>{' '}
-          (codex, amp, kiro), <code className="font-mono text-neutral-300">CLAUDE.md</code>{' '}
-          (claude-code, zai), <code className="font-mono text-neutral-300">GEMINI.md</code>{' '}
-          (gemini), <code className="font-mono text-neutral-300">QWEN.md</code> (qwen), or{' '}
-          <code className="font-mono text-neutral-300">.grok/GROK.md</code> (grok). When multiple
-          enabled providers share the same file, their rules are merged line-by-line and
+          (codex, amp), <code className="font-mono text-neutral-300">CLAUDE.md</code> (claude-code,
+          zai), or <code className="font-mono text-neutral-300">GEMINI.md</code> (gemini). When
+          multiple enabled providers share the same file, their rules are merged line-by-line and
           deduplicated under a single marker block. Leave empty to skip this CLI.
         </p>
       </div>

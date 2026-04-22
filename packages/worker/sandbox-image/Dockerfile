@@ -6,8 +6,8 @@
 # instead and this image is not referenced.
 #
 # Contents are the bare minimum required for any CLI install layer to
-# succeed: node+npm for npm-kind CLIs, curl+bash for curl-script CLIs
-# (kiro), git for repo operations, tini for signal handling. The PATH
+# succeed: node+npm for npm-kind CLIs, curl+bash kept for future curl-script
+# installs, git for repo operations, tini for signal handling. The PATH
 # override picks up installer-based CLIs that drop into /root/.local/bin.
 #
 # CLI install lines are layered on top at compose time via
