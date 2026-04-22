@@ -22,6 +22,8 @@ export class QwenAdapter extends BaseCliAdapter {
   readonly defaultAuthMode = 'mixed' as const;
   readonly apiKeyEnvName = 'DASHSCOPE_API_KEY';
   readonly defaultModel = 'qwen-max';
+  readonly rulesFile = 'QWEN.md';
+  readonly rulesFileMode = 'import' as const;
 
   buildCliInvocation(
     provider: CliProviderRecord,

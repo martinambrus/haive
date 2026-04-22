@@ -18,6 +18,8 @@ export class CodexAdapter extends BaseCliAdapter {
   readonly defaultAuthMode = 'subscription' as const;
   readonly apiKeyEnvName = 'OPENAI_API_KEY';
   readonly defaultModel = 'o3';
+  readonly rulesFile = 'AGENTS.md';
+  readonly rulesFileMode = 'native' as const;
 
   buildCliInvocation(
     provider: CliProviderRecord,

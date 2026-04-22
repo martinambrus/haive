@@ -9,6 +9,7 @@ import {
   cliProviderNameSchema,
   computeKeyFingerprint,
   createCliProviderRequestSchema,
+  DEFAULT_AGENT_RULES,
   envelopeEncrypt,
   normalizeCliArgsArray,
   secretsService,
@@ -229,6 +230,7 @@ cliProviderRoutes.post('/', async (c) => {
         ? body.sandboxDockerfileExtra
         : null,
       enabled: body.enabled ?? true,
+      rulesContent: body.rulesContent ?? DEFAULT_AGENT_RULES,
     })
     .returning();
 
@@ -287,6 +289,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
     updates.effortLevel = resolveEffortLevelForSave(existing.name, body.effortLevel);
   }
   if (body.enabled !== undefined) updates.enabled = body.enabled;
+  if (body.rulesContent !== undefined) updates.rulesContent = body.rulesContent;
 
   const updated = await db
     .update(schema.cliProviders)
@@ -417,6 +420,7 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
       effortLevel: source.effortLevel,
       sandboxDockerfileExtra: source.sandboxDockerfileExtra,
       enabled: source.enabled,
+      rulesContent: source.rulesContent,
     })
     .returning();
   const created = inserted[0]!;

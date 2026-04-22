@@ -37,6 +37,8 @@ export class ZaiAdapter extends BaseCliAdapter {
   readonly defaultAuthMode = 'mixed' as const;
   readonly apiKeyEnvName = 'ANTHROPIC_API_KEY';
   readonly defaultModel = 'zai-latest';
+  readonly rulesFile = 'CLAUDE.md';
+  readonly rulesFileMode = 'import' as const;
   override readonly effortScale = ZAI_EFFORT_SCALE;
 
   buildCliInvocation(

@@ -8,7 +8,7 @@ export const workflowPrefsStep: StepDefinition<null, { prefs: Record<string, unk
     index: 5,
     title: 'Workflow preferences',
     description:
-      'Captures verification level, auto-commit policy, maximum iteration count and any custom notes that all generated agents should know about.',
+      'Captures verification level, auto-commit policy, and maximum iteration count. Per-CLI rules are configured on each CLI provider in /settings/cli-providers.',
     requiresCli: false,
   },
 
@@ -47,14 +47,6 @@ export const workflowPrefsStep: StepDefinition<null, { prefs: Record<string, unk
           min: 1,
           max: 50,
           step: 1,
-        },
-        {
-          type: 'textarea',
-          id: 'customNotes',
-          label: 'General CLI guidelines (written to AGENTS.md)',
-          description:
-            "Project-wide rules and conventions the CLI must always follow (e.g. coding style, libraries to prefer, do/don't lists). These are appended to AGENTS.md, and CLAUDE.md is set up to import AGENTS.md via a single-line `@AGENTS.md` directive. Existing AGENTS.md / CLAUDE.md content is preserved — your notes are appended.",
-          rows: 6,
         },
       ],
       submitLabel: 'Save workflow preferences',

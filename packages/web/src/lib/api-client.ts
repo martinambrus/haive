@@ -203,6 +203,7 @@ export interface CliProvider {
   wrapperContent: string | null;
   envVars: Record<string, string> | null;
   cliArgs: string[] | null;
+  rulesContent: string;
   supportsSubagents: boolean;
   networkPolicy: CliNetworkPolicy;
   authMode: CliAuthMode;

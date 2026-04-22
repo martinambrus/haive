@@ -5,6 +5,7 @@ import type {
   CliCommandSpec,
   CliProviderName,
   CliProviderRecord,
+  CliRulesFileMode,
   EffortScale,
   EnvInjection,
   InvokeOpts,
@@ -29,6 +30,11 @@ export abstract class BaseCliAdapter {
   abstract readonly defaultAuthMode: CliAuthMode;
   abstract readonly apiKeyEnvName: string | null;
   abstract readonly defaultModel: string | null;
+  /** Path, relative to the repo root, where this CLI looks for its project-level
+   *  rules. For AGENTS.md-native CLIs this is 'AGENTS.md' itself. */
+  abstract readonly rulesFile: string;
+  /** How step 07 should surface rules content to this CLI. See `CliRulesFileMode`. */
+  abstract readonly rulesFileMode: CliRulesFileMode;
   /** Effort/reasoning scale exposed by this CLI, or null when the underlying
    *  CLI has no such knob. Adapters that override this MUST also override
    *  effortEnv() to translate a level into env vars. */

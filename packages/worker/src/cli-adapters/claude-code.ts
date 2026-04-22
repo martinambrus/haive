@@ -37,6 +37,8 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
   readonly defaultAuthMode = 'subscription' as const;
   readonly apiKeyEnvName = 'ANTHROPIC_API_KEY';
   readonly defaultModel = 'claude-sonnet-4-20250514';
+  readonly rulesFile = 'CLAUDE.md';
+  readonly rulesFileMode = 'import' as const;
   override readonly effortScale = CLAUDE_EFFORT_SCALE;
 
   buildCliInvocation(

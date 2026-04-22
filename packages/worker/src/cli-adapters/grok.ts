@@ -18,6 +18,8 @@ export class GrokAdapter extends BaseCliAdapter {
   readonly defaultAuthMode = 'mixed' as const;
   readonly apiKeyEnvName = 'XAI_API_KEY';
   readonly defaultModel = 'grok-3';
+  readonly rulesFile = '.grok/GROK.md';
+  readonly rulesFileMode = 'copy' as const;
 
   buildCliInvocation(
     provider: CliProviderRecord,

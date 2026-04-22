@@ -12,6 +12,8 @@ export class AmpAdapter extends BaseCliAdapter {
   readonly defaultAuthMode = 'subscription' as const;
   readonly apiKeyEnvName = null;
   readonly defaultModel = null;
+  readonly rulesFile = 'AGENTS.md';
+  readonly rulesFileMode = 'native' as const;
 
   buildCliInvocation(
     provider: CliProviderRecord,

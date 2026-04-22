@@ -1,6 +1,10 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import type { DetectResult, FormSchema } from '@haive/shared';
+import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
+import type { CliProviderName } from '../../../cli-adapters/types.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   type AgentSpec,
@@ -30,8 +34,8 @@ export interface GenerateFilesDetect {
     verificationLevel?: string;
     autoCommit?: boolean;
     maxIterations?: number;
-    customNotes?: string;
   };
+  cliProviders: { name: CliProviderName; rulesContent: string }[];
   plannedAgents: string[];
   plannedCommands: string[];
   existingFiles: string[];
@@ -155,9 +159,30 @@ function workflowConfigJson(prefs: GenerateFilesDetect['prefs'], framework: stri
     maxIterations:
       typeof prefs.maxIterations === 'number' && prefs.maxIterations > 0 ? prefs.maxIterations : 5,
     framework: framework ?? null,
-    customNotes: prefs.customNotes ?? '',
   };
   return `${JSON.stringify(config, null, 2)}\n`;
+}
+
+/** Merge an ordered list of rule blocks into one deduplicated block. Keys on
+ *  `line.trim()` so "- foo" and "  - foo  " collapse; first-seen capitalization
+ *  and leading whitespace win. Runs of 3+ blank lines collapse to 2. */
+function dedupLines(blocks: string[]): string {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const block of blocks) {
+    for (const line of block.split('\n')) {
+      const key = line.trim();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(line);
+    }
+  }
+  return (
+    out
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim() + '\n'
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -325,6 +350,27 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const plannedAgents = agents.map((a) => a.id);
     const plannedCommands = BASELINE_COMMANDS.map((c) => c.id);
 
+    const providerRows = await ctx.db
+      .select({
+        name: schema.cliProviders.name,
+        rulesContent: schema.cliProviders.rulesContent,
+        enabled: schema.cliProviders.enabled,
+      })
+      .from(schema.cliProviders)
+      .where(eq(schema.cliProviders.userId, ctx.userId));
+    const cliProviders = providerRows
+      .filter((p) => p.enabled && p.rulesContent.trim().length > 0)
+      .map((p) => ({ name: p.name, rulesContent: p.rulesContent }));
+
+    const rulesFiles = new Set<string>();
+    for (const p of cliProviders) {
+      const adapter = cliAdapterRegistry.get(p.name);
+      rulesFiles.add(adapter.rulesFile);
+      if (adapter.rulesFileMode === 'import') {
+        rulesFiles.add(adapter.rulesFile);
+      }
+    }
+
     const candidates = [
       '.claude/workflow-config.json',
       '.claude/agents/README.md',
@@ -332,6 +378,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       ...BASELINE_COMMANDS.map((c) => `.claude/commands/${c.id}.md`),
       ...(lspLanguages.includes('php-extended') ? DRUPAL_LSP_FILES.map((f) => f.rel) : []),
       ...(mcpSettingsJson.trim().length > 0 ? ['.claude/mcp_settings.json'] : []),
+      ...Array.from(rulesFiles),
     ];
     const existingFiles: string[] = [];
     for (const rel of candidates) {
@@ -357,6 +404,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       lspLanguages,
       mcpSettingsJson,
       prefs,
+      cliProviders,
       plannedAgents,
       plannedCommands,
       existingFiles,
@@ -387,8 +435,6 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const detected = args.detected as GenerateFilesDetect;
     const values = args.formValues as { overwrite?: boolean };
     const overwrite = values.overwrite === true;
-    const customNotes =
-      typeof detected.prefs.customNotes === 'string' ? detected.prefs.customNotes.trim() : '';
     const customBodies = new Map((detected.customAgentSpecs ?? []).map((s) => [s.id, s]));
     const agents = resolveAgents(detected.framework, detected.acceptedAgentIds, customBodies);
 
@@ -408,13 +454,31 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       wroteFiles.push(rel);
     };
 
-    /** Append text to file if not already present, or create if missing. Never overwrites. */
-    const appendOrCreate = async (rel: string, block: string, marker: string): Promise<void> => {
+    /** Append text to file if not already present, or create if missing.
+     *  With paired markers ("<!-- haive:X -->" ... "<!-- /haive:X -->") and the
+     *  step's `overwrite` flag, the content between the markers is replaced in
+     *  place so re-runs refresh the block. Without the end marker, behaviour is
+     *  the legacy "never overwrite" append. */
+    const appendOrCreate = async (
+      rel: string,
+      block: string,
+      marker: string,
+      endMarker?: string,
+    ): Promise<void> => {
       const full = path.join(ctx.repoPath, rel);
       const exists = await pathExists(full);
       if (exists) {
         const current = await readFile(full, 'utf8');
         if (current.includes(marker)) {
+          if (overwrite && endMarker && current.includes(endMarker)) {
+            const start = current.indexOf(marker);
+            const endIdx = current.indexOf(endMarker, start);
+            const end = endIdx + endMarker.length;
+            const replaced = current.slice(0, start) + block.trimEnd() + current.slice(end);
+            await writeFile(full, replaced, 'utf8');
+            wroteFiles.push(rel);
+            return;
+          }
           skippedFiles.push(rel);
           return;
         }
@@ -455,17 +519,36 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       await writeIfAllowed('.claude/mcp_settings.json', detected.mcpSettingsJson + suffix);
     }
 
-    // CLAUDE.md is always set up to import AGENTS.md via a single-line directive.
-    // Existing CLAUDE.md content is preserved — the `@AGENTS.md` line is appended
-    // only if it isn't already present.
-    await appendOrCreate('CLAUDE.md', '@AGENTS.md\n', '@AGENTS.md');
-
-    // AGENTS.md gets the user's CLI guidelines. Existing content preserved; the new
-    // notes are appended under a marker block so re-runs don't duplicate them.
-    if (customNotes.length > 0) {
-      const marker = '<!-- haive:onboarding-notes -->';
-      const block = `${marker}\n## Project guidelines\n\n${customNotes}\n`;
-      await appendOrCreate('AGENTS.md', block, marker);
+    // Per-CLI rules written to each adapter's native rules file. Providers that
+    // share a target file (codex + amp + kiro -> AGENTS.md, claude-code + zai ->
+    // CLAUDE.md) are merged line-by-line with trim-equal dedup so shared rules
+    // appear once. Three modes:
+    //   native: file is AGENTS.md, content written under haive:cli-rules marker.
+    //   import: file gets `@AGENTS.md` line + the same rules block (so the CLI
+    //           follows AGENTS.md via import AND has its own copy available).
+    //   copy:   file gets only the rules block (no import syntax supported).
+    const groups = new Map<string, { mode: 'native' | 'import' | 'copy'; blocks: string[] }>();
+    for (const p of detected.cliProviders) {
+      const adapter = cliAdapterRegistry.get(p.name);
+      const existing = groups.get(adapter.rulesFile);
+      if (existing) {
+        existing.blocks.push(p.rulesContent);
+      } else {
+        groups.set(adapter.rulesFile, {
+          mode: adapter.rulesFileMode,
+          blocks: [p.rulesContent],
+        });
+      }
+    }
+    const rulesStart = '<!-- haive:cli-rules -->';
+    const rulesEnd = '<!-- /haive:cli-rules -->';
+    for (const [rulesFile, group] of groups) {
+      const combined = dedupLines(group.blocks);
+      const rulesBlock = `${rulesStart}\n${combined}${rulesEnd}\n`;
+      if (group.mode === 'import') {
+        await appendOrCreate(rulesFile, '@AGENTS.md\n', '@AGENTS.md');
+      }
+      await appendOrCreate(rulesFile, rulesBlock, rulesStart, rulesEnd);
     }
 
     ctx.logger.info(

@@ -18,6 +18,8 @@ export class GeminiAdapter extends BaseCliAdapter {
   readonly defaultAuthMode = 'subscription' as const;
   readonly apiKeyEnvName = 'GEMINI_API_KEY';
   readonly defaultModel = 'gemini-2.5-pro';
+  readonly rulesFile = 'GEMINI.md';
+  readonly rulesFileMode = 'import' as const;
 
   buildCliInvocation(
     provider: CliProviderRecord,

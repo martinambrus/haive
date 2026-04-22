@@ -225,6 +225,7 @@ export const cliProviders = pgTable(
     authStatus: cliAuthStatusEnum('auth_status').notNull().default('unknown'),
     authLastCheckedAt: timestamp('auth_last_checked_at'),
     authMessage: text('auth_message'),
+    rulesContent: text('rules_content').notNull().default(''),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },

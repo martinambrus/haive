@@ -44,6 +44,7 @@ export const createCliProviderRequestSchema = z.object({
   sandboxDockerfileExtra: z.string().optional(),
   enabled: z.boolean().optional(),
   networkPolicy: cliNetworkPolicySchema.optional(),
+  rulesContent: z.string().optional(),
 });
 
 export const updateCliProviderRequestSchema = createCliProviderRequestSchema.partial();

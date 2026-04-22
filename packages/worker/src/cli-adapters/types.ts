@@ -28,6 +28,14 @@ export interface EffortScale {
   max: string;
 }
 
+/** How step 07 surfaces per-CLI rules content to this CLI:
+ *   - 'native': CLI auto-reads AGENTS.md. Content is appended directly to AGENTS.md.
+ *   - 'import': CLI reads its own file but supports `@AGENTS.md` syntax. The file
+ *     receives an `@AGENTS.md` line plus this CLI's own rules block.
+ *   - 'copy': CLI reads its own file and has no import syntax. The file receives
+ *     only this CLI's own rules block. */
+export type CliRulesFileMode = 'native' | 'import' | 'copy';
+
 export interface CliCommandSpec {
   command: string;
   args: string[];

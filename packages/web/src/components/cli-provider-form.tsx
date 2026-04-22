@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
+import { DEFAULT_AGENT_RULES } from '@haive/shared/constants';
 import {
   api,
   DEFAULT_CLI_NETWORK_POLICY,
@@ -50,6 +51,7 @@ interface FormState {
   envVarsText: string;
   secretsText: string;
   cliArgsText: string;
+  rulesContent: string;
   authMode: CliAuthMode;
   cliVersion: string;
   effortLevel: string;
@@ -120,6 +122,7 @@ function statesEqual(a: FormState, b: FormState): boolean {
     a.envVarsText === b.envVarsText &&
     a.secretsText === b.secretsText &&
     a.cliArgsText === b.cliArgsText &&
+    a.rulesContent === b.rulesContent &&
     a.authMode === b.authMode &&
     a.cliVersion === b.cliVersion &&
     a.effortLevel === b.effortLevel &&
@@ -163,6 +166,7 @@ export function CliProviderForm({
     envVarsText: envVarsToText(provider?.envVars),
     secretsText: '',
     cliArgsText: (provider?.cliArgs ?? []).join('\n'),
+    rulesContent: provider?.rulesContent ?? DEFAULT_AGENT_RULES,
     authMode: provider?.authMode ?? metadata.defaultAuthMode,
     cliVersion:
       provider?.cliVersion ??
@@ -297,6 +301,7 @@ export function CliProviderForm({
       wrapperContent: snapshot.wrapperContent,
       envVars: parseEnvVars(snapshot.envVarsText),
       cliArgs: parseCliArgs(snapshot.cliArgsText),
+      rulesContent: snapshot.rulesContent,
       authMode: snapshot.authMode,
       cliVersion: snapshot.cliVersion || null,
       effortLevel: metadata.effortScale ? snapshot.effortLevel || null : null,
@@ -389,6 +394,7 @@ export function CliProviderForm({
           wrapperContent: state.wrapperContent,
           envVars: parseEnvVars(state.envVarsText),
           cliArgs: parseCliArgs(state.cliArgsText),
+          rulesContent: state.rulesContent,
           authMode: state.authMode,
           cliVersion: state.cliVersion || null,
           effortLevel: metadata.effortScale ? state.effortLevel || null : null,
@@ -729,6 +735,28 @@ export function CliProviderForm({
           <code className="font-mono text-neutral-300">.claude/mcp.json</code>. For long prose
           values, wrap the whole value in a single pair of quotes; no shell escape rules apply
           inside.
+        </p>
+      </div>
+
+      <div>
+        <Label htmlFor="rulesContent">AGENTS.md rules</Label>
+        <textarea
+          id="rulesContent"
+          rows={10}
+          className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
+          value={state.rulesContent}
+          onChange={(e) => update('rulesContent', e.target.value)}
+          placeholder="- Behavioural rule one..."
+        />
+        <p className="mt-1 text-xs text-neutral-500">
+          Rewritten into this CLI&apos;s native rules file on every task onboarding. Target file
+          depends on the adapter: <code className="font-mono text-neutral-300">AGENTS.md</code>{' '}
+          (codex, amp, kiro), <code className="font-mono text-neutral-300">CLAUDE.md</code>{' '}
+          (claude-code, zai), <code className="font-mono text-neutral-300">GEMINI.md</code>{' '}
+          (gemini), <code className="font-mono text-neutral-300">QWEN.md</code> (qwen), or{' '}
+          <code className="font-mono text-neutral-300">.grok/GROK.md</code> (grok). When multiple
+          enabled providers share the same file, their rules are merged line-by-line and
+          deduplicated under a single marker block. Leave empty to skip this CLI.
         </p>
       </div>
 
