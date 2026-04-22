@@ -22,7 +22,24 @@ export class AmpAdapter extends BaseCliAdapter {
   ): CliCommandSpec {
     return {
       command: this.resolveExecutable(provider),
-      args: this.mergedArgs(provider, [prompt]),
+      // amp auto-promotes to execute mode when stdout is redirected, but
+      // requires the prompt to arrive via `-x <message>` or stdin — a bare
+      // positional is treated as the REPL's initial user message, which
+      // doesn't work under non-TTY exec. `--dangerously-allow-all` mirrors
+      // claude's `--dangerously-skip-permissions` so tool calls don't block.
+      // `--stream-json` emits the Claude Code-compatible NDJSON stream that
+      // cli-exec-queue's shared collector parses (tool-use progress + final
+      // result event); plain `-x` returned empty stdout for some prompts.
+      args: this.mergedArgs(provider, [
+        '--dangerously-allow-all',
+        // Blanket allow baked into base image so stream-json mode doesn't
+        // abort on librarian/tool approval requests.
+        '--settings-file',
+        '/etc/haive-amp-settings.json',
+        '-x',
+        prompt,
+        '--stream-json',
+      ]),
       env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
     };

@@ -44,6 +44,15 @@ RUN mkdir -p /home/node/.claude \
  && echo '{"hasCompletedOnboarding":true,"theme":"dark"}' > /home/node/.claude.json \
  && chown -R node:node /home/node
 
+# amp stream-json mode rejects tools that require approval with an
+# "error_during_execution" on the first librarian/* invocation. Wire a
+# blanket allow rule through a baked-in settings file we point amp at via
+# `--settings-file`. Keeping it outside the mounted ~/.config/amp volume
+# means user-level settings.json (if they ever write one) can't clobber it.
+RUN printf '%s\n' '{"amp.permissions":[{"tool":"*","action":"allow"}]}' \
+      > /etc/haive-amp-settings.json \
+ && chmod 0644 /etc/haive-amp-settings.json
+
 # Entrypoint shim restores ~/.claude.json from the .claude/ named-volume copy
 # on every container start. Required because claude-code stores OAuth tokens
 # in a single ~/.claude.json file and named volumes mount dirs only.
