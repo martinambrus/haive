@@ -36,10 +36,12 @@ export const AUTH_URL_PREFIXES: Partial<Record<CliProviderName, string[]>> = {
     'https://login.openai.com/',
     'https://chatgpt.com/',
   ],
+  gemini: ['https://accounts.google.com/o/oauth2/'],
 };
 
 export const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'claude-code',
+  'gemini',
 ]);
 
 export function extractWrappedUrl(raw: string, prefixes: string[]): string | null {
@@ -72,6 +74,17 @@ export function extractDeviceCode(raw: string): string | undefined {
   const spaced = ansiToSpaces(raw);
   const match = spaced.match(DEVICE_CODE_PATTERN);
   return match?.[1];
+}
+
+const GEMINI_URL_PREAMBLE = /please\s+visit\s+the\s+following\s+url\s+to\s+authorize/i;
+
+export function extractGeminiAuthUrl(raw: string): string | null {
+  const clean = stripAnsi(raw);
+  const match = clean.match(GEMINI_URL_PREAMBLE);
+  if (!match || match.index === undefined) return null;
+  const tail = clean.slice(match.index + match[0].length);
+  const prefixes = AUTH_URL_PREFIXES.gemini ?? [];
+  return extractWrappedUrl(tail, prefixes);
 }
 
 export interface AuthResultSignal {

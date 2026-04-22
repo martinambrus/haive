@@ -20,6 +20,7 @@ export interface CliInstallMetadata {
   versionSource: VersionSource;
   autoUpdateDisable: AutoUpdateDisableKnob[];
   versionPinnable: boolean;
+  minWorkingLoginVersion?: string;
 }
 
 export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> = {
@@ -52,6 +53,10 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
       },
     ],
     versionPinnable: true,
+    // In-app OAuth login needs NO_BROWSER=true to print the auth URL to
+    // stdout. Versions 0.18.0..0.18.3 suppress it (google-gemini/gemini-cli#13853).
+    // Fixed in 0.18.4.
+    minWorkingLoginVersion: '0.18.4',
   },
   amp: {
     install: { kind: 'npm', package: '@sourcegraph/amp', binary: 'amp' },

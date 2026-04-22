@@ -9,12 +9,24 @@ export class CliSetupTokenUnsupportedError extends Error {
 }
 
 export function isCliSetupTokenSupported(name: CliProviderName): boolean {
-  return name === 'claude-code' || name === 'codex';
+  return name === 'claude-code' || name === 'codex' || name === 'gemini';
 }
+
+const GEMINI_SETTINGS_JSON =
+  '{"selectedAuthType":"oauth-personal","security":{"auth":{"selectedType":"oauth-personal"}}}';
 
 /** Non-REPL auth command that prints an OAuth URL to stdout:
  *  - claude-code: `claude setup-token` — prints URL, expects pasted token on stdin.
  *  - codex: `codex login --device-auth` — prints URL + short device code, polls for approval.
+ *  - gemini: pre-seed ~/.gemini/settings.json with selectedAuthType=oauth-personal
+ *    (both flat and nested schemas) so the REPL skips the auth picker, then
+ *    exec gemini with NO_BROWSER=true. In a headless TTY container gemini's
+ *    OAuth module takes the `authWithUserCode` branch — prints the authorize
+ *    URL to stdout, then reads the authorization code via readline on stdin.
+ *    The user signs in at Google, copies the code shown on
+ *    codeassist.google.com/authcode, pastes it into the banner modal, and we
+ *    write it to the container's stdin as-if typed at the readline prompt.
+ *    Success is detected by polling for ~/.gemini/{oauth_creds,gemini-credentials}.json.
  *  Other providers: throws CliSetupTokenUnsupportedError.
  */
 export function buildSetupTokenCommand(
@@ -27,6 +39,20 @@ export function buildSetupTokenCommand(
       return { command: executable, args: ['setup-token'], env };
     case 'codex':
       return { command: executable, args: ['login', '--device-auth'], env };
+    case 'gemini': {
+      const script =
+        'mkdir -p "$HOME/.gemini" && ' +
+        `cat > "$HOME/.gemini/settings.json" <<'EOF'\n${GEMINI_SETTINGS_JSON}\nEOF\n` +
+        'exec "$0"';
+      return {
+        command: 'sh',
+        args: ['-c', script, executable],
+        env: {
+          ...env,
+          NO_BROWSER: 'true',
+        },
+      };
+    }
     default:
       throw new CliSetupTokenUnsupportedError(provider.name);
   }

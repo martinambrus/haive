@@ -31,8 +31,10 @@ RUN apk add --no-cache \
 # files + sub-dirs like `.claude/backups`.
 RUN mkdir -p /home/node/.claude \
              /home/node/.codex \
+             /home/node/.gemini \
              /home/node/.config/claude \
              /home/node/.config/codex \
+             /home/node/.config/gemini \
  && echo '{"hasCompletedOnboarding":true,"theme":"dark"}' > /home/node/.claude.json \
  && chown -R node:node /home/node
 

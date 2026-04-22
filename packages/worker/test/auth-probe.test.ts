@@ -56,6 +56,16 @@ describe('classifyAuthProbeOutput', () => {
     expect(result.status).toBe('auth_denied');
   });
 
+  it('detects gemini FatalAuthenticationError as auth_denied', () => {
+    const result = classifyAuthProbeOutput({
+      stdout: '',
+      stderr:
+        'YOLO mode is enabled. All tool calls will be automatically approved.\nError authenticating: FatalAuthenticationError: Manual authorization is required but the current session is non-interactive. Please run the Gemini CLI in an interactive terminal to log in, provide a GEMINI_API_KEY, or ensure Application Default Credentials are configured.',
+      exitCode: 41,
+    });
+    expect(result.status).toBe('auth_denied');
+  });
+
   it('detects ENOTFOUND as network_error', () => {
     const result = classifyAuthProbeOutput({
       stdout: '',
@@ -145,18 +155,27 @@ describe('buildAuthProbeCommand', () => {
     expect(spec.args[0]).toBe('exec');
   });
 
-  it('throws CliAuthProbeUnsupportedError for gemini', () => {
-    expect(() =>
-      buildAuthProbeCommand(makeProvider({ id: '3', name: 'gemini' }), 'gemini'),
-    ).toThrow(CliAuthProbeUnsupportedError);
+  it('builds gemini spec with -p and --yolo', () => {
+    const spec = buildAuthProbeCommand(makeProvider({ id: '3', name: 'gemini' }), 'gemini');
+    expect(spec.command).toBe('gemini');
+    expect(spec.args).toContain('-p');
+    expect(spec.args).toContain('respond with the single word pong');
+    expect(spec.args).toContain('--output-format');
+    expect(spec.args).toContain('--yolo');
+  });
+
+  it('throws CliAuthProbeUnsupportedError for amp', () => {
+    expect(() => buildAuthProbeCommand(makeProvider({ id: '4', name: 'amp' }), 'amp')).toThrow(
+      CliAuthProbeUnsupportedError,
+    );
   });
 });
 
 describe('isAuthProbeSupported', () => {
-  it('is true for claude-code and codex only', () => {
+  it('is true for claude-code, codex, gemini', () => {
     expect(isAuthProbeSupported('claude-code')).toBe(true);
     expect(isAuthProbeSupported('codex')).toBe(true);
-    expect(isAuthProbeSupported('gemini')).toBe(false);
+    expect(isAuthProbeSupported('gemini')).toBe(true);
     expect(isAuthProbeSupported('amp')).toBe(false);
   });
 });

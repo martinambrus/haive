@@ -31,7 +31,7 @@ const PATTERNS: Array<{ pattern: RegExp; status: CliAuthStatus }> = [
   },
   {
     pattern:
-      /authorization[_\s-]?denied|access[_\s-]?denied|permission[_\s-]?denied|forbidden|\b403\b/i,
+      /authorization[_\s-]?denied|access[_\s-]?denied|permission[_\s-]?denied|forbidden|\b403\b|manual\s+authorization\s+is\s+required|fatalauthenticationerror/i,
     status: 'auth_denied',
   },
   {
@@ -50,24 +50,31 @@ const PATTERNS: Array<{ pattern: RegExp; status: CliAuthStatus }> = [
   },
 ];
 
+const FRIENDLY_MESSAGES: Record<CliAuthStatus, string> = {
+  ok: 'authenticated',
+  auth_expired: 'credentials expired — please sign in again',
+  auth_denied: 'authentication required — please sign in',
+  rate_limited: 'rate limited by provider',
+  network_error: 'network error reaching provider',
+  timeout: 'auth probe timed out',
+  unknown_error: 'auth probe failed',
+  unknown: 'auth status unknown',
+};
+
 export function classifyAuthProbeOutput(result: AuthProbeExecResult): AuthProbeClassification {
   if (result.timedOut) {
-    return { status: 'timeout', message: 'auth probe timed out' };
+    return { status: 'timeout', message: FRIENDLY_MESSAGES.timeout };
   }
 
   const haystack = `${result.stdout}\n${result.stderr}`;
 
   if (result.exitCode === 0 && !AUTH_FAILURE_GUARD.test(haystack)) {
-    return { status: 'ok', message: 'auth probe succeeded' };
+    return { status: 'ok', message: FRIENDLY_MESSAGES.ok };
   }
 
   for (const { pattern, status } of PATTERNS) {
-    const match = haystack.match(pattern);
-    if (match) {
-      return {
-        status,
-        message: `matched ${status} pattern: ${match[0]}`,
-      };
+    if (pattern.test(haystack)) {
+      return { status, message: FRIENDLY_MESSAGES[status] };
     }
   }
 
@@ -79,7 +86,7 @@ export function classifyAuthProbeOutput(result: AuthProbeExecResult): AuthProbeC
 }
 
 export function isAuthProbeSupported(name: CliProviderName): boolean {
-  return name === 'claude-code' || name === 'codex';
+  return name === 'claude-code' || name === 'codex' || name === 'gemini';
 }
 
 export function buildAuthProbeCommand(
@@ -104,6 +111,12 @@ export function buildAuthProbeCommand(
       return {
         command: executable,
         args: ['exec', '--skip-git-repo-check', AUTH_PROBE_PROMPT],
+        env,
+      };
+    case 'gemini':
+      return {
+        command: executable,
+        args: ['-p', AUTH_PROBE_PROMPT, '--output-format', 'text', '--yolo'],
         env,
       };
     default:

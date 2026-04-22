@@ -25,6 +25,7 @@ type Phase =
 
 const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'claude-code',
+  'gemini',
 ]);
 
 export function CliAuthBannerModal({
@@ -153,6 +154,8 @@ export function CliAuthBannerModal({
   if (!open) return null;
 
   const isTokenPaste = TOKEN_PASTE_PROVIDERS.has(providerName);
+  const pasteItemLabel = providerName === 'gemini' ? 'authorization code' : 'token';
+  const pasteInputPlaceholder = providerName === 'gemini' ? 'Paste code here' : 'Paste token here';
 
   return (
     <div
@@ -206,13 +209,13 @@ export function CliAuthBannerModal({
                 )}{' '}
                 and finish the OAuth flow.
               </li>
-              <li>Copy the token shown on the confirmation page.</li>
+              <li>Copy the {pasteItemLabel} shown on the confirmation page.</li>
               <li>Paste it below and click Submit.</li>
             </ol>
             <div className="mt-3 flex gap-2">
               <input
                 type="text"
-                placeholder="Paste token here"
+                placeholder={pasteInputPlaceholder}
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
                 onKeyDown={(e) => {

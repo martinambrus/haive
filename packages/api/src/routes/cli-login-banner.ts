@@ -12,6 +12,7 @@ import {
   detectAuthResult,
   envelopeEncrypt,
   extractDeviceCode,
+  extractGeminiAuthUrl,
   extractWrappedUrl,
   logger,
   secretsService,
@@ -28,6 +29,7 @@ import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
 import { getCliExecQueue, getCliExecQueueEvents } from '../queues.js';
 import { attachContainerStream } from './terminal.js';
+import { execInContainer } from './docker-exec.js';
 
 const log = logger.child({ module: 'cli-login-banner-ws' });
 
@@ -40,6 +42,7 @@ const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const SUPPORTED_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'claude-code',
   'codex',
+  'gemini',
 ]);
 
 interface BannerSession {
@@ -47,6 +50,7 @@ interface BannerSession {
   userId: string;
   providerId: string;
   providerName: CliProviderName;
+  authMode: string;
   containerRowId: string;
   dockerContainerId: string;
   stream: Duplex;
@@ -63,6 +67,7 @@ interface BannerSession {
   heartbeat: NodeJS.Timeout;
   timeout: NodeJS.Timeout;
   cleanedUp: boolean;
+  credsPoller: NodeJS.Timeout | null;
 }
 
 const CAPTURE_TIMEOUT_MS = 60_000;
@@ -231,6 +236,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     userId,
     providerId,
     providerName,
+    authMode,
     containerRowId: createResult.containerRowId,
     dockerContainerId: createResult.dockerContainerId,
     stream,
@@ -258,6 +264,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       void cleanupSession(session);
     }, SESSION_TIMEOUT_MS),
     cleanedUp: false,
+    credsPoller: null,
   };
 
   wsSend(ws, {
@@ -267,9 +274,6 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
 
   stream.on('data', (chunk: Buffer) => onStreamData(session, chunk, authMode));
   stream.on('end', () => {
-    // Container exited. If a probe is in flight (token captured, waiting on
-    // probe result) don't tear down yet — saveOauthTokenAndProbe's finally
-    // will call cleanupSession once the probe returns.
     if (session.probePending) {
       log.info({ providerId }, 'stream ended while probe pending; deferring cleanup');
       return;
@@ -325,6 +329,12 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       }
       if (session.providerName === 'claude-code') {
         startCaptureWatchdog(session);
+      } else if (session.providerName === 'gemini') {
+        // Gemini reads the authorization code from stdin via readline; after
+        // the write, poll the container filesystem for the creds file it
+        // writes on success (either legacy oauth_creds.json or the current
+        // encrypted gemini-credentials.json).
+        startGeminiCredsPoller(session);
       }
     } else if (msg.type === 'ping') {
       wsSend(ws, { type: 'pong' });
@@ -353,8 +363,13 @@ function onStreamData(session: BannerSession, chunk: Buffer, authMode: string): 
   }
 
   if (!session.authUrlSent) {
-    const prefixes = AUTH_URL_PREFIXES[session.providerName] ?? ['https://'];
-    const url = extractWrappedUrl(session.rawBuffer, prefixes);
+    let url: string | null = null;
+    if (session.providerName === 'gemini') {
+      url = extractGeminiAuthUrl(session.rawBuffer);
+    } else {
+      const prefixes = AUTH_URL_PREFIXES[session.providerName] ?? ['https://'];
+      url = extractWrappedUrl(session.rawBuffer, prefixes);
+    }
     if (url) {
       session.authUrlSent = true;
       const deviceCode =
@@ -403,6 +418,11 @@ function onStreamData(session: BannerSession, chunk: Buffer, authMode: string): 
     return;
   }
 
+  // Gemini success arrives via the creds-file poller started after the user
+  // pastes the authorization code. The REPL's post-paste stdout is
+  // unreliable, so we deliberately skip detectAuthResult here.
+  if (session.providerName === 'gemini') return;
+
   const signal = detectAuthResult(session.cleanBuffer);
   if (signal?.kind === 'success') {
     session.authSuccessSent = true;
@@ -414,6 +434,71 @@ function onStreamData(session: BannerSession, chunk: Buffer, authMode: string): 
     log.warn({ providerId: session.providerId, msg: signal.message }, 'auth error detected');
     wsSend(session.ws, { type: 'error', message: signal.message });
   }
+}
+
+const GEMINI_POLL_INTERVAL_MS = 500;
+const GEMINI_POLL_MAX_TRIES = 20;
+const GEMINI_CREDS_CHECK = [
+  'sh',
+  '-c',
+  'test -s "$HOME/.gemini/oauth_creds.json" ' +
+    '|| test -s "$HOME/.gemini/gemini-credentials.json" ' +
+    '|| test -s "$HOME/.gemini/tokens.json"',
+];
+
+/** Polls the login container for gemini's creds file after the user pastes
+ *  the authorization code. Fires auth-success + runProbeAndSave when the
+ *  file appears; errors out after GEMINI_POLL_MAX_TRIES × interval.
+ *  Idempotent: repeated calls while the poller is running are no-ops.
+ */
+function startGeminiCredsPoller(session: BannerSession): void {
+  if (session.cleanedUp) return;
+  if (session.credsPoller) return;
+  if (session.authSuccessSent) return;
+  let tries = 0;
+  const poller = setInterval(() => {
+    tries += 1;
+    if (session.cleanedUp) {
+      clearInterval(poller);
+      return;
+    }
+    void execInContainer(session.docker, session.dockerContainerId, GEMINI_CREDS_CHECK)
+      .then((result) => {
+        if (session.cleanedUp || session.authSuccessSent) {
+          clearInterval(poller);
+          session.credsPoller = null;
+          return;
+        }
+        if (result.exitCode === 0) {
+          clearInterval(poller);
+          session.credsPoller = null;
+          session.authSuccessSent = true;
+          session.probePending = true;
+          log.info({ providerId: session.providerId }, 'gemini creds file detected');
+          wsSend(session.ws, { type: 'auth-success' });
+          void runProbeAndSave(session, session.authMode);
+          return;
+        }
+        if (tries >= GEMINI_POLL_MAX_TRIES) {
+          clearInterval(poller);
+          session.credsPoller = null;
+          log.warn(
+            { providerId: session.providerId, tries },
+            'gemini creds file not found before poll timeout',
+          );
+          wsSend(session.ws, {
+            type: 'error',
+            message:
+              'Gemini did not write credentials after the code paste. The code may be wrong or expired — retry the login.',
+          });
+        }
+      })
+      .catch((err) => {
+        log.warn({ err, providerId: session.providerId }, 'gemini creds poll exec failed');
+      });
+  }, GEMINI_POLL_INTERVAL_MS);
+  session.credsPoller = poller;
+  log.info({ providerId: session.providerId }, 'gemini creds poller started');
 }
 
 /** Watchdog that fires if the claude oauth token never appears in stdout. */
@@ -580,6 +665,10 @@ async function cleanupSession(session: BannerSession): Promise<void> {
   if (session.cleanedUp) return;
   session.cleanedUp = true;
   stopCaptureWatchdog(session);
+  if (session.credsPoller) {
+    clearInterval(session.credsPoller);
+    session.credsPoller = null;
+  }
   clearInterval(session.heartbeat);
   clearTimeout(session.timeout);
   try {

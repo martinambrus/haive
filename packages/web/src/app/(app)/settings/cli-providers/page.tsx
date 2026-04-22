@@ -22,7 +22,7 @@ import {
 } from '@/components/ui';
 import { useCliLogin } from '@/lib/use-cli-login';
 
-const LOGIN_SUPPORTED: CliProviderName[] = ['claude-code', 'codex'];
+const LOGIN_SUPPORTED: CliProviderName[] = ['claude-code', 'codex', 'gemini'];
 const LOGIN_RECOVERABLE: CliAuthStatus[] = [
   'auth_expired',
   'auth_denied',
