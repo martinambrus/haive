@@ -70,7 +70,7 @@ export async function handleScan(payload: RepoJobPayload, db: Database): Promise
   logger.info({ repositoryId: payload.repositoryId }, 'Repo scan complete');
 }
 
-function runExtract(cmd: string, args: string[]): Promise<void> {
+function runExtract(cmd: string, args: string[], okExits: number[] = [0]): Promise<void> {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args);
     let stderr = '';
@@ -79,7 +79,13 @@ function runExtract(cmd: string, args: string[]): Promise<void> {
     });
     proc.on('error', reject);
     proc.on('exit', (code) => {
-      if (code === 0) {
+      if (code !== null && okExits.includes(code)) {
+        if (code !== 0) {
+          logger.warn(
+            { cmd, exit: code, stderr: stderr.trim() },
+            'extract completed with warnings',
+          );
+        }
         resolve();
         return;
       }
@@ -110,7 +116,9 @@ export async function extractArchive(
   await rm(dest, { recursive: true, force: true });
   await mkdir(dest, { recursive: true });
   if (format === 'zip') {
-    await runExtract('unzip', ['-q', archivePath, '-d', dest]);
+    // unzip exit 1 = warnings only (e.g. non-ASCII filename header mismatch);
+    // files are still extracted, so treat it as success and log the stderr.
+    await runExtract('unzip', ['-q', '-o', archivePath, '-d', dest], [0, 1]);
   } else if (format === 'tar') {
     await runExtract('tar', ['-xf', archivePath, '-C', dest]);
   } else if (format === 'tar.gz') {
@@ -130,13 +138,12 @@ export async function handleExtract(
   if (!payload.archiveFormat) throw new Error('archiveFormat required for extract job');
 
   const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
-  try {
-    await extractArchive(payload.archivePath, payload.archiveFormat, dest);
-  } finally {
-    await rm(payload.archivePath, { force: true }).catch(() => {});
-  }
-
+  await extractArchive(payload.archivePath, payload.archiveFormat, dest);
   await persistDetection(db, payload.repositoryId, dest);
+  // Only remove the archive after successful extract + detection. Leaving it
+  // in place on failure lets the user (or a retry) look at what actually
+  // arrived on disk instead of silently masking the error.
+  await rm(payload.archivePath, { force: true }).catch(() => {});
   logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo extract complete');
 }
 

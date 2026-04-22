@@ -225,9 +225,11 @@ repoRoutes.post('/upload', async (c) => {
     archivePath,
     archiveFormat: format,
   };
+  // One attempt only: a bad archive will fail the same way on retry, and the
+  // worker deletes the archive on success, so retrying would run against a
+  // missing file and mask the real error.
   await queue.add(REPO_JOB_NAMES.EXTRACT, payload, {
-    attempts: 2,
-    backoff: { type: 'exponential', delay: 5000 },
+    attempts: 1,
     removeOnComplete: 100,
     removeOnFail: 100,
   });
@@ -455,9 +457,11 @@ repoRoutes.post('/upload/:id/complete', async (c) => {
     archivePath: finalPath,
     archiveFormat: row.archiveFormat as ArchiveFormat,
   };
+  // One attempt only: a bad archive will fail the same way on retry, and the
+  // worker deletes the archive on success, so retrying would run against a
+  // missing file and mask the real error.
   await queue.add(REPO_JOB_NAMES.EXTRACT, payload, {
-    attempts: 2,
-    backoff: { type: 'exponential', delay: 5000 },
+    attempts: 1,
     removeOnComplete: 100,
     removeOnFail: 100,
   });
