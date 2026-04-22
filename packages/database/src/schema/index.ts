@@ -5,6 +5,7 @@ import {
   varchar,
   boolean,
   integer,
+  bigint,
   doublePrecision,
   timestamp,
   jsonb,
@@ -293,6 +294,31 @@ export const repositories = pgTable(
   ],
 );
 
+export const repoUploads = pgTable(
+  'repo_uploads',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name'),
+    branch: varchar('branch', { length: 255 }).default('main'),
+    filename: text('filename').notNull(),
+    archiveFormat: varchar('archive_format', { length: 16 }).notNull(),
+    totalSize: bigint('total_size', { mode: 'number' }).notNull(),
+    bytesReceived: bigint('bytes_received', { mode: 'number' }).notNull().default(0),
+    chunkSize: integer('chunk_size').notNull(),
+    archivePath: text('archive_path').notNull(),
+    status: varchar('status', { length: 16 }).notNull().default('uploading'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [
+    index('repo_uploads_user_id_idx').on(table.userId),
+    index('repo_uploads_status_idx').on(table.status),
+  ],
+);
+
 export const repoCredentials = pgTable(
   'repo_credentials',
   {
@@ -563,6 +589,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   cliProviders: many(cliProviders),
   repositories: many(repositories),
   repoCredentials: many(repoCredentials),
+  repoUploads: many(repoUploads),
   tasks: many(tasks),
   envTemplates: many(envTemplates),
   terminalSessions: many(terminalSessions),
@@ -604,6 +631,10 @@ export const repositoriesRelations = relations(repositories, ({ one, many }) => 
 export const repoCredentialsRelations = relations(repoCredentials, ({ one, many }) => ({
   user: one(users, { fields: [repoCredentials.userId], references: [users.id] }),
   repositories: many(repositories),
+}));
+
+export const repoUploadsRelations = relations(repoUploads, ({ one }) => ({
+  user: one(users, { fields: [repoUploads.userId], references: [users.id] }),
 }));
 
 export const tasksRelations = relations(tasks, ({ one, many }) => ({

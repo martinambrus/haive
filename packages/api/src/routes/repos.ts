@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs';
-import { mkdir, rm, stat } from 'node:fs/promises';
+import { mkdir, open, rm, stat, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
@@ -8,6 +8,7 @@ import { eq, and, desc } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   createRepoRequestSchema,
+  initRepoUploadRequestSchema,
   REPO_JOB_NAMES,
   updateRepoExclusionsRequestSchema,
   type ArchiveFormat,
@@ -18,7 +19,13 @@ import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { validateLocalPath, pathExists, isGitRepository } from '../lib/filesystem.js';
 
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+function maxUploadBytes(): number {
+  const raw = process.env.MAX_UPLOAD_BYTES;
+  if (!raw) return 2 * 1024 * 1024 * 1024; // 2 GiB default
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 2 * 1024 * 1024 * 1024;
+  return parsed;
+}
 
 function detectArchiveFormat(filename: string): ArchiveFormat | null {
   const lower = filename.toLowerCase();
@@ -160,8 +167,8 @@ repoRoutes.post('/upload', async (c) => {
   if (archiveField.size === 0) {
     throw new HttpError(400, 'archive is empty');
   }
-  if (archiveField.size > MAX_UPLOAD_BYTES) {
-    throw new HttpError(413, `archive exceeds ${MAX_UPLOAD_BYTES} bytes limit`);
+  if (archiveField.size > maxUploadBytes()) {
+    throw new HttpError(413, `archive exceeds ${maxUploadBytes()} bytes limit`);
   }
   const format = detectArchiveFormat(archiveField.name);
   if (!format) {
@@ -199,8 +206,8 @@ repoRoutes.post('/upload', async (c) => {
     const nodeStream = Readable.fromWeb(body as never);
     await pipeline(nodeStream, createWriteStream(archivePath));
     const written = await stat(archivePath);
-    if (written.size > MAX_UPLOAD_BYTES) {
-      throw new HttpError(413, `archive exceeds ${MAX_UPLOAD_BYTES} bytes limit`);
+    if (written.size > maxUploadBytes()) {
+      throw new HttpError(413, `archive exceeds ${maxUploadBytes()} bytes limit`);
     }
   } catch (err) {
     await rm(archivePath, { force: true }).catch(() => {});
@@ -226,6 +233,256 @@ repoRoutes.post('/upload', async (c) => {
   });
 
   return c.json({ repository: repo }, 201);
+});
+
+function sessionFromRow(row: typeof schema.repoUploads.$inferSelect) {
+  return {
+    id: row.id,
+    filename: row.filename,
+    archiveFormat: row.archiveFormat as ArchiveFormat,
+    totalSize: Number(row.totalSize),
+    bytesReceived: Number(row.bytesReceived),
+    chunkSize: row.chunkSize,
+    status: row.status as 'uploading' | 'complete' | 'cancelled',
+  };
+}
+
+async function loadUploadSession(userId: string, uploadId: string) {
+  const db = getDb();
+  const row = await db.query.repoUploads.findFirst({
+    where: and(eq(schema.repoUploads.id, uploadId), eq(schema.repoUploads.userId, userId)),
+  });
+  if (!row) throw new HttpError(404, 'upload session not found');
+  return row;
+}
+
+repoRoutes.post('/upload/init', async (c) => {
+  const userId = c.get('userId');
+  const db = getDb();
+  const body = initRepoUploadRequestSchema.parse(await c.req.json());
+
+  if (body.totalSize > maxUploadBytes()) {
+    throw new HttpError(413, `archive exceeds ${maxUploadBytes()} bytes limit`);
+  }
+  const format = detectArchiveFormat(body.filename);
+  if (!format) {
+    throw new HttpError(400, 'unsupported archive format (allowed: .zip, .tar, .tar.gz, .tgz)');
+  }
+
+  const uploadDir = path.join(repoStorageRoot(), '_uploads', userId);
+  await mkdir(uploadDir, { recursive: true });
+
+  const inserted = await db
+    .insert(schema.repoUploads)
+    .values({
+      userId,
+      name: body.name?.trim() || null,
+      branch: body.branch?.trim() || 'main',
+      filename: body.filename,
+      archiveFormat: format,
+      totalSize: body.totalSize,
+      bytesReceived: 0,
+      chunkSize: body.chunkSize,
+      archivePath: '',
+      status: 'uploading',
+    })
+    .returning();
+  const session = inserted[0]!;
+
+  const ext = format === 'tar.gz' ? 'tar.gz' : format;
+  const archivePath = path.join(uploadDir, `${session.id}.${ext}.partial`);
+  const fh = await open(archivePath, 'w');
+  await fh.close();
+
+  const updated = await db
+    .update(schema.repoUploads)
+    .set({ archivePath, updatedAt: new Date() })
+    .where(eq(schema.repoUploads.id, session.id))
+    .returning();
+
+  return c.json({ session: sessionFromRow(updated[0]!) }, 201);
+});
+
+repoRoutes.get('/upload/:id', async (c) => {
+  const userId = c.get('userId');
+  const uploadId = c.req.param('id');
+  const row = await loadUploadSession(userId, uploadId);
+  return c.json({ session: sessionFromRow(row) });
+});
+
+repoRoutes.put('/upload/:id/chunk', async (c) => {
+  const userId = c.get('userId');
+  const uploadId = c.req.param('id');
+  const db = getDb();
+
+  const row = await loadUploadSession(userId, uploadId);
+  if (row.status !== 'uploading') {
+    throw new HttpError(409, `session is ${row.status}`);
+  }
+
+  const rangeHeader = c.req.header('content-range');
+  if (!rangeHeader) {
+    throw new HttpError(400, 'Content-Range header is required');
+  }
+  const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(rangeHeader);
+  if (!match) {
+    throw new HttpError(400, 'invalid Content-Range header');
+  }
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  const total = Number(match[3]);
+  if (total !== Number(row.totalSize)) {
+    throw new HttpError(400, 'Content-Range total mismatches session totalSize');
+  }
+  if (start !== Number(row.bytesReceived)) {
+    throw new HttpError(409, `expected start=${row.bytesReceived}, got ${start}`);
+  }
+  const expectedLen = end - start + 1;
+  if (expectedLen <= 0) {
+    throw new HttpError(400, 'invalid chunk range');
+  }
+  if (end + 1 > Number(row.totalSize)) {
+    throw new HttpError(400, 'chunk end exceeds totalSize');
+  }
+
+  const claim = await db
+    .update(schema.repoUploads)
+    .set({ updatedAt: new Date() })
+    .where(
+      and(
+        eq(schema.repoUploads.id, row.id),
+        eq(schema.repoUploads.bytesReceived, start),
+        eq(schema.repoUploads.status, 'uploading'),
+      ),
+    )
+    .returning({ id: schema.repoUploads.id });
+  if (claim.length === 0) {
+    throw new HttpError(409, 'chunk races another writer');
+  }
+
+  const rawBody = c.req.raw.body;
+  if (!rawBody) throw new HttpError(400, 'request body is empty');
+  const nodeStream = Readable.fromWeb(rawBody as never);
+  const writeStream = createWriteStream(row.archivePath, { flags: 'a' });
+  let written = 0;
+  nodeStream.on('data', (buf: Buffer) => {
+    written += buf.length;
+  });
+  try {
+    await pipeline(nodeStream, writeStream);
+  } catch (err) {
+    const fh = await open(row.archivePath, 'r+');
+    try {
+      await fh.truncate(Number(row.bytesReceived));
+    } finally {
+      await fh.close();
+    }
+    throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
+  }
+  if (written !== expectedLen) {
+    const fh = await open(row.archivePath, 'r+');
+    try {
+      await fh.truncate(Number(row.bytesReceived));
+    } finally {
+      await fh.close();
+    }
+    throw new HttpError(400, `chunk body length ${written} != expected ${expectedLen}`);
+  }
+
+  const updated = await db
+    .update(schema.repoUploads)
+    .set({ bytesReceived: end + 1, updatedAt: new Date() })
+    .where(eq(schema.repoUploads.id, row.id))
+    .returning();
+
+  return c.json({ session: sessionFromRow(updated[0]!) });
+});
+
+repoRoutes.post('/upload/:id/complete', async (c) => {
+  const userId = c.get('userId');
+  const uploadId = c.req.param('id');
+  const db = getDb();
+
+  const row = await loadUploadSession(userId, uploadId);
+  if (row.status === 'complete') {
+    throw new HttpError(409, 'session already completed');
+  }
+  if (row.status === 'cancelled') {
+    throw new HttpError(409, 'session cancelled');
+  }
+  if (Number(row.bytesReceived) !== Number(row.totalSize)) {
+    throw new HttpError(409, `incomplete: ${row.bytesReceived}/${row.totalSize} bytes`);
+  }
+
+  const onDisk = await stat(row.archivePath).catch(() => null);
+  if (!onDisk || onDisk.size !== Number(row.totalSize)) {
+    throw new HttpError(409, 'archive size mismatch on disk');
+  }
+
+  const finalPath = row.archivePath.replace(/\.partial$/, '');
+  if (finalPath === row.archivePath) {
+    throw new HttpError(500, 'archive path missing .partial suffix');
+  }
+  await rename(row.archivePath, finalPath);
+
+  const repoName = deriveRepoName({
+    name: row.name ?? undefined,
+    filename: row.filename,
+  });
+  const branch = row.branch && row.branch.length > 0 ? row.branch : 'main';
+
+  const inserted = await db
+    .insert(schema.repositories)
+    .values({
+      userId,
+      name: repoName,
+      source: 'upload',
+      localPath: null,
+      remoteUrl: null,
+      branch,
+      status: 'cloning',
+      credentialsSecretId: null,
+    })
+    .returning();
+  const repo = inserted[0]!;
+
+  const queue = getRepoQueue();
+  const payload: RepoJobPayload = {
+    repositoryId: repo.id,
+    userId,
+    source: 'upload',
+    branch,
+    archivePath: finalPath,
+    archiveFormat: row.archiveFormat as ArchiveFormat,
+  };
+  await queue.add(REPO_JOB_NAMES.EXTRACT, payload, {
+    attempts: 2,
+    backoff: { type: 'exponential', delay: 5000 },
+    removeOnComplete: 100,
+    removeOnFail: 100,
+  });
+
+  await db
+    .update(schema.repoUploads)
+    .set({ status: 'complete', archivePath: finalPath, updatedAt: new Date() })
+    .where(eq(schema.repoUploads.id, row.id));
+
+  return c.json({ repository: repo, session: { id: row.id, status: 'complete' } }, 201);
+});
+
+repoRoutes.delete('/upload/:id', async (c) => {
+  const userId = c.get('userId');
+  const uploadId = c.req.param('id');
+  const db = getDb();
+
+  const row = await loadUploadSession(userId, uploadId);
+  await rm(row.archivePath, { force: true }).catch(() => {});
+  await db
+    .update(schema.repoUploads)
+    .set({ status: 'cancelled', updatedAt: new Date() })
+    .where(eq(schema.repoUploads.id, row.id));
+
+  return c.json({ ok: true });
 });
 
 repoRoutes.get('/:id', async (c) => {

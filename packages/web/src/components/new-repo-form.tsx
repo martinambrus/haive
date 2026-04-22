@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
-import { api, type ApiError, type Repository } from '@/lib/api-client';
+import { api, API_BASE_URL, type ApiError, type Repository } from '@/lib/api-client';
 import {
   Button,
   Input,
@@ -46,6 +46,78 @@ interface GithubRepo {
   pushedAt: string | null;
 }
 
+const UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024; // 5 MiB
+
+interface UploadSession {
+  id: string;
+  filename: string;
+  totalSize: number;
+  bytesReceived: number;
+  chunkSize: number;
+  status: 'uploading' | 'complete' | 'cancelled';
+}
+
+async function chunkedUpload(opts: {
+  file: File;
+  name?: string;
+  branch?: string;
+  onProgress: (pct: number) => void;
+}): Promise<void> {
+  const { file, name, branch, onProgress } = opts;
+
+  const initRes = await fetch(`${API_BASE_URL}/repos/upload/init`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      filename: file.name,
+      totalSize: file.size,
+      chunkSize: UPLOAD_CHUNK_SIZE,
+      ...(name ? { name } : {}),
+      ...(branch ? { branch } : {}),
+    }),
+  });
+  if (!initRes.ok) {
+    const body = (await initRes.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Failed to start upload (HTTP ${initRes.status})`);
+  }
+  const { session: initial } = (await initRes.json()) as { session: UploadSession };
+
+  let offset = initial.bytesReceived;
+  onProgress(file.size === 0 ? 100 : Math.floor((offset / file.size) * 100));
+
+  while (offset < file.size) {
+    const end = Math.min(offset + UPLOAD_CHUNK_SIZE, file.size);
+    const slice = file.slice(offset, end);
+    const res = await fetch(`${API_BASE_URL}/repos/upload/${initial.id}/chunk`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Range': `bytes ${offset}-${end - 1}/${file.size}`,
+      },
+      body: slice,
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(body.error ?? `Chunk upload failed (HTTP ${res.status})`);
+    }
+    const { session } = (await res.json()) as { session: UploadSession };
+    offset = session.bytesReceived;
+    onProgress(Math.floor((offset / file.size) * 100));
+  }
+
+  const completeRes = await fetch(`${API_BASE_URL}/repos/upload/${initial.id}/complete`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!completeRes.ok) {
+    const body = (await completeRes.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Failed to finalize upload (HTTP ${completeRes.status})`);
+  }
+}
+
 const SOURCE_OPTIONS: { value: Source; label: string }[] = [
   { value: 'local_path', label: 'Local directory' },
   { value: 'git_https', label: 'Git (HTTPS)' },
@@ -63,6 +135,7 @@ export function NewRepoForm() {
   const [credentialsId, setCredentialsId] = useState('');
   const [credentials, setCredentials] = useState<CredentialRow[]>([]);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [oauthPhase, setOauthPhase] = useState<OauthPhase>('idle');
@@ -215,22 +288,12 @@ export function NewRepoForm() {
     try {
       if (source === 'upload') {
         if (!uploadFile) throw new Error('Pick an archive file (.zip, .tar, .tar.gz)');
-        const formData = new FormData();
-        if (name.trim()) formData.append('name', name.trim());
-        if (branch.trim()) formData.append('branch', branch.trim());
-        formData.append('archive', uploadFile);
-        const res = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001'}/repos/upload`,
-          {
-            method: 'POST',
-            credentials: 'include',
-            body: formData,
-          },
-        );
-        if (!res.ok) {
-          const body = (await res.json().catch(() => ({}))) as { error?: string };
-          throw new Error(body.error ?? `Upload failed (HTTP ${res.status})`);
-        }
+        await chunkedUpload({
+          file: uploadFile,
+          name: name.trim() || undefined,
+          branch: branch.trim() || undefined,
+          onProgress: (pct) => setUploadProgress(pct),
+        });
       } else {
         const body: Record<string, unknown> = { source };
         if (name.trim()) body.name = name.trim();
@@ -255,6 +318,7 @@ export function NewRepoForm() {
       setError(apiErr.message ?? 'Failed to create repository');
     } finally {
       setPending(false);
+      setUploadProgress(null);
     }
   }
 
@@ -538,13 +602,24 @@ export function NewRepoForm() {
               className="block w-full text-sm text-neutral-300 file:mr-3 file:rounded-md file:border-0 file:bg-indigo-600 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-indigo-500"
             />
             <p className="text-xs text-neutral-500">
-              Supports .zip, .tar, and .tar.gz. The archive is extracted server-side into the repo
-              workspace. Max 100 MB.
+              Supports .zip, .tar, and .tar.gz. Uploads are chunked and resumable on retry. The
+              archive is extracted server-side into the repo workspace.
             </p>
             {uploadFile && (
               <div className="rounded-md border border-indigo-900 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">
                 Selected: <span className="font-mono">{uploadFile.name}</span> (
                 {(uploadFile.size / 1024 / 1024).toFixed(1)} MB)
+              </div>
+            )}
+            {uploadProgress !== null && (
+              <div className="flex flex-col gap-1">
+                <div className="h-2 w-full overflow-hidden rounded-full bg-neutral-800">
+                  <div
+                    className="h-full bg-indigo-500 transition-all"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                </div>
+                <p className="text-xs text-neutral-400">Uploading… {uploadProgress}%</p>
               </div>
             )}
           </div>

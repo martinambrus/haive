@@ -31,7 +31,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
     cors({
       origin: webOrigin,
       credentials: true,
-      allowHeaders: ['Content-Type', 'Authorization'],
+      allowHeaders: ['Content-Type', 'Authorization', 'Content-Range'],
       allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     }),
   );

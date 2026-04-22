@@ -49,6 +49,36 @@ export const updateRepoExclusionsRequestSchema = z.object({
 
 export type UpdateRepoExclusionsRequest = z.infer<typeof updateRepoExclusionsRequestSchema>;
 
+export const archiveFormatSchema = z.enum(['zip', 'tar', 'tar.gz']);
+
+export const initRepoUploadRequestSchema = z.object({
+  name: z.string().max(255).optional(),
+  branch: z.string().max(255).optional(),
+  filename: z.string().min(1).max(512),
+  totalSize: z.number().int().positive(),
+  chunkSize: z
+    .number()
+    .int()
+    .positive()
+    .max(100 * 1024 * 1024),
+});
+
+export type InitRepoUploadRequest = z.infer<typeof initRepoUploadRequestSchema>;
+
+export const repoUploadStatusSchema = z.enum(['uploading', 'complete', 'cancelled']);
+
+export const repoUploadSessionSchema = z.object({
+  id: z.string().uuid(),
+  filename: z.string(),
+  archiveFormat: archiveFormatSchema,
+  totalSize: z.number().int(),
+  bytesReceived: z.number().int(),
+  chunkSize: z.number().int(),
+  status: repoUploadStatusSchema,
+});
+
+export type RepoUploadSession = z.infer<typeof repoUploadSessionSchema>;
+
 export const filesystemListQuerySchema = z.object({
   path: z.string().min(1),
 });
