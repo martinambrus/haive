@@ -21,7 +21,7 @@ interface CliProviderTestProps {
   onLoginCompleted?: () => void;
 }
 
-const LOGIN_SUPPORTED: CliProviderName[] = ['claude-code', 'codex', 'gemini'];
+const LOGIN_SUPPORTED: CliProviderName[] = ['claude-code', 'codex', 'gemini', 'amp'];
 const LOGIN_RECOVERABLE: CliAuthStatus[] = [
   'auth_expired',
   'auth_denied',

@@ -43,6 +43,7 @@ const SUPPORTED_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderNam
   'claude-code',
   'codex',
   'gemini',
+  'amp',
 ]);
 
 interface BannerSession {
@@ -335,6 +336,11 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
         // writes on success (either legacy oauth_creds.json or the current
         // encrypted gemini-credentials.json).
         startGeminiCredsPoller(session);
+      } else if (session.providerName === 'amp') {
+        // Amp reads the paste-back code from stdin and, on success, writes
+        // the API key into $HOME/.config/amp/settings.json. Poll for that
+        // file — the REPL's post-paste stdout is unreliable.
+        startAmpCredsPoller(session);
       }
     } else if (msg.type === 'ping') {
       wsSend(ws, { type: 'pong' });
@@ -423,6 +429,13 @@ function onStreamData(session: BannerSession, chunk: Buffer, authMode: string): 
   // unreliable, so we deliberately skip detectAuthResult here.
   if (session.providerName === 'gemini') return;
 
+  // Amp prints "Login successful!" to stdout and exits within ~200ms of the
+  // paste. That's faster than our 500ms creds-file poll cadence, so if we
+  // relied on the poller alone the stream-end would fire first and the UI
+  // would flip to a blank error state. Let detectAuthResult catch the
+  // stdout signal; the creds poller below is kept as a belt-and-suspenders
+  // fallback and is idempotent against authSuccessSent.
+
   const signal = detectAuthResult(session.cleanBuffer);
   if (signal?.kind === 'success') {
     session.authSuccessSent = true;
@@ -445,6 +458,14 @@ const GEMINI_CREDS_CHECK = [
     '|| test -s "$HOME/.gemini/gemini-credentials.json" ' +
     '|| test -s "$HOME/.gemini/tokens.json"',
 ];
+
+const AMP_POLL_INTERVAL_MS = 500;
+const AMP_POLL_MAX_TRIES = 20;
+// amp stores the login-derived apiKey in the file-based secretStorage at
+// $XDG_DATA_HOME/amp/secrets.json (defaults to $HOME/.local/share/amp/secrets.json).
+// settings.json under ~/.config/amp is for MCP/CLI prefs and is NOT populated
+// by `amp login` — checking it waited 10s then always timed out.
+const AMP_CREDS_CHECK = ['sh', '-c', 'test -s "$HOME/.local/share/amp/secrets.json"'];
 
 /** Polls the login container for gemini's creds file after the user pastes
  *  the authorization code. Fires auth-success + runProbeAndSave when the
@@ -499,6 +520,60 @@ function startGeminiCredsPoller(session: BannerSession): void {
   }, GEMINI_POLL_INTERVAL_MS);
   session.credsPoller = poller;
   log.info({ providerId: session.providerId }, 'gemini creds poller started');
+}
+
+/** Polls the login container for amp's settings.json after the user pastes
+ *  the code. Fires auth-success + runProbeAndSave when the file appears;
+ *  errors out after AMP_POLL_MAX_TRIES × interval. Idempotent.
+ */
+function startAmpCredsPoller(session: BannerSession): void {
+  if (session.cleanedUp) return;
+  if (session.credsPoller) return;
+  if (session.authSuccessSent) return;
+  let tries = 0;
+  const poller = setInterval(() => {
+    tries += 1;
+    if (session.cleanedUp) {
+      clearInterval(poller);
+      return;
+    }
+    void execInContainer(session.docker, session.dockerContainerId, AMP_CREDS_CHECK)
+      .then((result) => {
+        if (session.cleanedUp || session.authSuccessSent) {
+          clearInterval(poller);
+          session.credsPoller = null;
+          return;
+        }
+        if (result.exitCode === 0) {
+          clearInterval(poller);
+          session.credsPoller = null;
+          session.authSuccessSent = true;
+          session.probePending = true;
+          log.info({ providerId: session.providerId }, 'amp settings file detected');
+          wsSend(session.ws, { type: 'auth-success' });
+          void runProbeAndSave(session, session.authMode);
+          return;
+        }
+        if (tries >= AMP_POLL_MAX_TRIES) {
+          clearInterval(poller);
+          session.credsPoller = null;
+          log.warn(
+            { providerId: session.providerId, tries },
+            'amp settings file not found before poll timeout',
+          );
+          wsSend(session.ws, {
+            type: 'error',
+            message:
+              'Amp did not write credentials after the code paste. The code may be wrong or expired — retry the login.',
+          });
+        }
+      })
+      .catch((err) => {
+        log.warn({ err, providerId: session.providerId }, 'amp creds poll exec failed');
+      });
+  }, AMP_POLL_INTERVAL_MS);
+  session.credsPoller = poller;
+  log.info({ providerId: session.providerId }, 'amp creds poller started');
 }
 
 /** Watchdog that fires if the claude oauth token never appears in stdout. */

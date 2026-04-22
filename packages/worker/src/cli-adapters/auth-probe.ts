@@ -40,7 +40,7 @@ const PATTERNS: Array<{ pattern: RegExp; status: CliAuthStatus }> = [
   },
   {
     pattern:
-      /invalid[_\s-]?token|token[_\s-]?expired|sub[_\s-]?expired|credentials[_\s-]?expired|re[-_\s]?auth|not[_\s-]?authenticated|not[_\s-]?logged[_\s-]?in|\bunauthor(ised|ized)\b|\b401\b|please[_\s-]?log[_\s-]?in|please[_\s-]?run[^\n]*\/?login|\/login\b|\blog\s*in\s+(?:required|needed)/i,
+      /invalid[_\s-]?token|(?:invalid|missing)[_\s-]?(?:or[_\s-]+missing[_\s-]+)?api[_\s-]?key|token[_\s-]?expired|sub[_\s-]?expired|credentials[_\s-]?expired|re[-_\s]?auth|not[_\s-]?authenticated|not[_\s-]?logged[_\s-]?in|\bunauthor(ised|ized)\b|\b401\b|please[_\s-]?log[_\s-]?in|please[_\s-]?run[^\n]*\/?login|\/login\b|\blog\s*in\s+(?:required|needed)|run\s+['"]?amp\s+login/i,
     status: 'auth_expired',
   },
   {
@@ -86,7 +86,7 @@ export function classifyAuthProbeOutput(result: AuthProbeExecResult): AuthProbeC
 }
 
 export function isAuthProbeSupported(name: CliProviderName): boolean {
-  return name === 'claude-code' || name === 'codex' || name === 'gemini';
+  return name === 'claude-code' || name === 'codex' || name === 'gemini' || name === 'amp';
 }
 
 export function buildAuthProbeCommand(
@@ -117,6 +117,15 @@ export function buildAuthProbeCommand(
       return {
         command: executable,
         args: ['-p', AUTH_PROBE_PROMPT, '--output-format', 'text', '--yolo'],
+        env,
+      };
+    case 'amp':
+      // `amp usage` hits the Amp API to read the credit balance — fast
+      // (~1s) and auth-discriminating. `amp -x "pong"` in contrast sends a
+      // full LLM round-trip which routinely exceeds the 25s probe budget.
+      return {
+        command: executable,
+        args: ['usage'],
         env,
       };
     default:

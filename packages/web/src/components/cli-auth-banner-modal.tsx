@@ -26,6 +26,7 @@ type Phase =
 const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'claude-code',
   'gemini',
+  'amp',
 ]);
 
 export function CliAuthBannerModal({
@@ -154,8 +155,9 @@ export function CliAuthBannerModal({
   if (!open) return null;
 
   const isTokenPaste = TOKEN_PASTE_PROVIDERS.has(providerName);
-  const pasteItemLabel = providerName === 'gemini' ? 'authorization code' : 'token';
-  const pasteInputPlaceholder = providerName === 'gemini' ? 'Paste code here' : 'Paste token here';
+  const pasteItemLabel = providerName === 'gemini' || providerName === 'amp' ? 'code' : 'token';
+  const pasteInputPlaceholder =
+    providerName === 'gemini' || providerName === 'amp' ? 'Paste code here' : 'Paste token here';
 
   return (
     <div

@@ -37,11 +37,13 @@ export const AUTH_URL_PREFIXES: Partial<Record<CliProviderName, string[]>> = {
     'https://chatgpt.com/',
   ],
   gemini: ['https://accounts.google.com/o/oauth2/'],
+  amp: ['https://ampcode.com/auth/cli-login'],
 };
 
 export const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'claude-code',
   'gemini',
+  'amp',
 ]);
 
 export function extractWrappedUrl(raw: string, prefixes: string[]): string | null {

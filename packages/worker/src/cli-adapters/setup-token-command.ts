@@ -9,7 +9,7 @@ export class CliSetupTokenUnsupportedError extends Error {
 }
 
 export function isCliSetupTokenSupported(name: CliProviderName): boolean {
-  return name === 'claude-code' || name === 'codex' || name === 'gemini';
+  return name === 'claude-code' || name === 'codex' || name === 'gemini' || name === 'amp';
 }
 
 const GEMINI_SETTINGS_JSON =
@@ -27,6 +27,11 @@ const GEMINI_SETTINGS_JSON =
  *    codeassist.google.com/authcode, pastes it into the banner modal, and we
  *    write it to the container's stdin as-if typed at the readline prompt.
  *    Success is detected by polling for ~/.gemini/{oauth_creds,gemini-credentials}.json.
+ *  - amp: `amp login` — prints an ampcode.com/auth/cli-login URL with an
+ *    authToken query param, then reads a paste-back code from stdin. The user
+ *    signs in at ampcode.com, the confirmation page shows a code, they paste
+ *    it into the banner modal, and we forward it to the container's stdin.
+ *    Success is detected by polling for ~/.config/amp/settings.json.
  *  Other providers: throws CliSetupTokenUnsupportedError.
  */
 export function buildSetupTokenCommand(
@@ -53,6 +58,8 @@ export function buildSetupTokenCommand(
         },
       };
     }
+    case 'amp':
+      return { command: executable, args: ['login'], env };
     default:
       throw new CliSetupTokenUnsupportedError(provider.name);
   }

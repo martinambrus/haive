@@ -39,6 +39,8 @@ RUN mkdir -p /home/node/.claude \
              /home/node/.config/claude \
              /home/node/.config/codex \
              /home/node/.config/gemini \
+             /home/node/.config/amp \
+             /home/node/.local/share/amp \
  && echo '{"hasCompletedOnboarding":true,"theme":"dark"}' > /home/node/.claude.json \
  && chown -R node:node /home/node
 

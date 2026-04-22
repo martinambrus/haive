@@ -98,7 +98,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     defaultAuthMode: 'subscription',
     apiKeyEnvName: null,
     defaultModel: null,
-    authConfigPaths: ['~/.config/amp', '~/.amp'],
+    authConfigPaths: ['~/.local/share/amp', '~/.config/amp'],
     effortScale: null,
   },
   grok: {

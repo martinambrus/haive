@@ -32,8 +32,13 @@ export class AmpAdapter extends BaseCliAdapter {
     return {
       envVars: {},
       copyPaths: [
+        {
+          src: '~/.local/share/amp',
+          dest: '/root/.local/share/amp',
+          mode: 'dir',
+          optional: true,
+        },
         { src: '~/.config/amp', dest: '/root/.config/amp', mode: 'dir', optional: true },
-        { src: '~/.amp', dest: '/root/.amp', mode: 'dir', optional: true },
       ],
       extraArgs: [],
     };
