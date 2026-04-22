@@ -41,6 +41,7 @@ const LSP_OPTIONS: { value: string; label: string }[] = [
   { value: 'python', label: 'Pyright (Python)' },
   { value: 'go', label: 'gopls (Go)' },
   { value: 'rust', label: 'rust-analyzer (Rust)' },
+  { value: 'java', label: 'jdtls (Java)' },
 ];
 
 /** Frameworks that use non-standard PHP file extensions (.inc, .module, etc.) */
@@ -66,6 +67,8 @@ function defaultLspForLanguage(lang: string, framework: string, hasPhpExtended: 
       return ['go'];
     case 'rust':
       return ['rust'];
+    case 'java':
+      return ['java'];
     default:
       return [];
   }

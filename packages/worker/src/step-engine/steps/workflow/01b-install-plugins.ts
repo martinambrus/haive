@@ -39,7 +39,15 @@ interface InstallPluginsApply {
 }
 
 function toLspLanguage(value: unknown): LspLanguage | null {
-  const allowed: LspLanguage[] = ['typescript', 'python', 'go', 'rust', 'php', 'php-extended'];
+  const allowed: LspLanguage[] = [
+    'typescript',
+    'python',
+    'go',
+    'rust',
+    'php',
+    'php-extended',
+    'java',
+  ];
   return allowed.includes(value as LspLanguage) ? (value as LspLanguage) : null;
 }
 

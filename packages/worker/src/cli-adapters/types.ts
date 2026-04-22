@@ -90,7 +90,7 @@ export interface ProbeResult {
   error?: string;
 }
 
-export type LspLanguage = 'typescript' | 'python' | 'go' | 'rust' | 'php' | 'php-extended';
+export type LspLanguage = 'typescript' | 'python' | 'go' | 'rust' | 'php' | 'php-extended' | 'java';
 
 export interface PluginInstallOpts {
   repoRoot: string;

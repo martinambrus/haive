@@ -21,6 +21,7 @@ const ZAI_LSP_PLUGINS: Record<string, string> = {
   go: 'gopls',
   rust: 'rust-analyzer',
   php: 'phpactor',
+  java: 'jdtls',
 };
 const ZAI_LSP_MARKETPLACE_REF = 'Piebald-AI/claude-code-lsps';
 const ZAI_LSP_MARKETPLACE_ID = 'claude-code-lsps';
