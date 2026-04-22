@@ -17,9 +17,13 @@
 
 FROM node:24-alpine
 
+# coreutils replaces BusyBox `env` with GNU `env`. Required by CLIs whose
+# binaries ship shebangs like `#!/usr/bin/env -S node ...` (e.g. amp); the
+# `-S` flag is GNU-only and BusyBox env fails with "unrecognized option: S".
 RUN apk add --no-cache \
       bash \
       ca-certificates \
+      coreutils \
       curl \
       git \
       tini
