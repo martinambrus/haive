@@ -79,7 +79,10 @@ function extractEnvDetectData(prev: { detect: unknown; output: unknown }): EnvDe
   );
 }
 
-export const detectionConfirmationStep: StepDefinition<ConfirmationDetect, { confirmed: true }> = {
+export const detectionConfirmationStep: StepDefinition<
+  ConfirmationDetect,
+  { confirmed: true; values: Record<string, unknown> }
+> = {
   metadata: {
     id: '02-detection-confirmation',
     workflowType: 'onboarding',
@@ -247,6 +250,6 @@ export const detectionConfirmationStep: StepDefinition<ConfirmationDetect, { con
 
   async apply(ctx, args) {
     ctx.logger.info({ values: args.formValues }, 'detection confirmed');
-    return { confirmed: true };
+    return { confirmed: true, values: args.formValues };
   },
 };
