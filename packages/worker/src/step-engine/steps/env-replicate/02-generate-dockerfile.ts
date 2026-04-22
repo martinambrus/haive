@@ -134,7 +134,12 @@ type PackageManager =
 
 interface DeclaredDepsShape {
   runtimes?: string[];
-  versions?: { node?: string | null; php?: string | null; python?: string | null };
+  versions?: {
+    node?: string | null;
+    php?: string | null;
+    python?: string | null;
+    java?: string | null;
+  };
   packageManagers?: Partial<Record<string, PackageManager | null>>;
   preinstallDeps?: boolean;
   containerTool?: string;
@@ -222,6 +227,21 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     lines.push('');
   }
 
+  if (runtimes.includes('java')) {
+    const javaVersion = versions.java ?? '17';
+    const javaMajor = javaVersion.split('.')[0];
+    lines.push(`# Java ${javaMajor}`);
+    lines.push('RUN apt-get update \\');
+    lines.push(
+      `    && apt-get install -y --no-install-recommends openjdk-${javaMajor}-jdk-headless maven gradle \\`,
+    );
+    lines.push('    && rm -rf /var/lib/apt/lists/*');
+    lines.push(
+      `ENV JAVA_HOME="/usr/lib/jvm/java-${javaMajor}-openjdk-amd64" PATH="/usr/lib/jvm/java-${javaMajor}-openjdk-amd64/bin:\${PATH}"`,
+    );
+    lines.push('');
+  }
+
   const database = deps.database;
   if (database && database.kind && database.kind !== 'none') {
     lines.push(`# Database client: ${database.kind}`);
@@ -262,6 +282,15 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
           break;
         case 'solargraph':
           lines.push('RUN gem install solargraph');
+          break;
+        case 'jdtls':
+          lines.push(
+            'RUN curl -fsSL https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz -o /tmp/jdtls.tar.gz \\',
+          );
+          lines.push('    && mkdir -p /opt/jdtls \\');
+          lines.push('    && tar -xzf /tmp/jdtls.tar.gz -C /opt/jdtls \\');
+          lines.push('    && rm /tmp/jdtls.tar.gz \\');
+          lines.push('    && ln -s /opt/jdtls/bin/jdtls /usr/local/bin/jdtls');
           break;
       }
     }

@@ -67,6 +67,9 @@ export function buildSmokeChecks(deps: DeclaredDepsShape): SmokeCheck[] {
   if (runtimes.includes('ruby')) {
     checks.push({ id: 'ruby', label: 'Ruby', cmd: ['ruby', '--version'] });
   }
+  if (runtimes.includes('java')) {
+    checks.push({ id: 'java', label: 'Java', cmd: ['java', '--version'] });
+  }
 
   const lsp = deps.lspServers ?? [];
   if (lsp.includes('intelephense') || lsp.includes('intelephense-extended')) {
@@ -92,6 +95,9 @@ export function buildSmokeChecks(deps: DeclaredDepsShape): SmokeCheck[] {
       label: 'rust-analyzer',
       cmd: ['rust-analyzer', '--version'],
     });
+  }
+  if (lsp.includes('jdtls')) {
+    checks.push({ id: 'lsp-jdtls', label: 'jdtls', cmd: ['jdtls', '--version'] });
   }
 
   const dbKind = deps.database?.kind;

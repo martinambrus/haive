@@ -13,6 +13,7 @@ const ONBOARDING_LSP_TO_ENV_KEY: Record<string, LspKey> = {
   rust: 'rust-analyzer',
   php: 'intelephense',
   'php-extended': 'intelephense-extended',
+  java: 'jdtls',
 };
 
 async function loadOnboardingLspKeys(db: Database, repositoryId: string | null): Promise<LspKey[]> {
@@ -42,7 +43,7 @@ async function loadOnboardingLspKeys(db: Database, repositoryId: string | null):
 
 type ContainerTool = 'ddev' | 'docker-compose' | 'docker' | 'none';
 type DatabaseKind = 'postgres' | 'mysql' | 'mariadb' | 'sqlite' | 'none';
-type LanguageKey = 'node' | 'php' | 'python' | 'ruby' | 'go' | 'rust';
+type LanguageKey = 'node' | 'php' | 'python' | 'ruby' | 'go' | 'rust' | 'java';
 type LspKey =
   | 'intelephense'
   | 'intelephense-extended'
@@ -50,7 +51,8 @@ type LspKey =
   | 'pyright'
   | 'gopls'
   | 'rust-analyzer'
-  | 'solargraph';
+  | 'solargraph'
+  | 'jdtls';
 export type PackageManager =
   | 'npm'
   | 'pnpm'
@@ -112,6 +114,7 @@ const LSP_OPTIONS: { value: LspKey; label: string }[] = [
   { value: 'gopls', label: 'gopls (Go)' },
   { value: 'rust-analyzer', label: 'rust-analyzer (Rust)' },
   { value: 'solargraph', label: 'Solargraph (Ruby)' },
+  { value: 'jdtls', label: 'jdtls (Java)' },
 ];
 
 const RUNTIME_OPTIONS: { value: LanguageKey; label: string }[] = [
@@ -121,6 +124,7 @@ const RUNTIME_OPTIONS: { value: LanguageKey; label: string }[] = [
   { value: 'ruby', label: 'Ruby' },
   { value: 'go', label: 'Go' },
   { value: 'rust', label: 'Rust' },
+  { value: 'java', label: 'Java' },
 ];
 
 export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply> = {
@@ -181,6 +185,13 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         label: 'Python version',
         default: findVersion(detected.runtimes, 'python') ?? '3.12',
         placeholder: '3.12',
+      },
+      {
+        type: 'text',
+        id: 'javaVersion',
+        label: 'Java version',
+        default: findVersion(detected.runtimes, 'java') ?? '17',
+        placeholder: '17',
       },
       {
         type: 'select',
@@ -265,6 +276,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         node: values.nodeVersion || null,
         php: values.phpVersion || null,
         python: values.pythonVersion || null,
+        java: values.javaVersion || null,
       },
       packageManagers,
       preinstallDeps: values.preinstallDeps ?? true,
@@ -322,6 +334,7 @@ interface DeclareDepsFormValues extends FormValues {
   nodeVersion: string;
   phpVersion: string;
   pythonVersion: string;
+  javaVersion: string;
   containerTool: ContainerTool;
   databaseKind: DatabaseKind;
   databaseVersion: string;
@@ -432,6 +445,36 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
       packageManager: 'cargo',
     });
     suggestedLsp.add('rust-analyzer');
+  }
+
+  const pomXml = await readTextIfExists(path.join(repoPath, 'pom.xml'));
+  const buildGradle = await readTextIfExists(path.join(repoPath, 'build.gradle'));
+  const buildGradleKts = await readTextIfExists(path.join(repoPath, 'build.gradle.kts'));
+  if (pomXml || buildGradle || buildGradleKts) {
+    let version: string | null = null;
+    if (pomXml) {
+      const m =
+        pomXml.match(/<maven\.compiler\.(?:source|release)>([^<]+)</) ??
+        pomXml.match(/<java\.version>([^<]+)</);
+      version = m?.[1]?.trim() ?? null;
+    }
+    if (!version && buildGradle) {
+      const m =
+        buildGradle.match(/sourceCompatibility\s*=?\s*['"]?(?:JavaVersion\.VERSION_)?([\d_.]+)/) ??
+        buildGradle.match(/targetCompatibility\s*=?\s*['"]?(?:JavaVersion\.VERSION_)?([\d_.]+)/);
+      version = m?.[1]?.replace(/_/g, '.') ?? null;
+    }
+    if (!version && buildGradleKts) {
+      const m = buildGradleKts.match(/JavaVersion\.VERSION_([\d_]+)/);
+      version = m?.[1]?.replace(/_/g, '.') ?? null;
+    }
+    runtimes.push({
+      language: 'java',
+      version,
+      source: pomXml ? 'pom.xml' : buildGradle ? 'build.gradle' : 'build.gradle.kts',
+      packageManager: null,
+    });
+    suggestedLsp.add('jdtls');
   }
 
   const gemfile = await readTextIfExists(path.join(repoPath, 'Gemfile'));
