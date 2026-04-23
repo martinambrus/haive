@@ -55,6 +55,17 @@ const CLAUDE_LIKE_EFFORT_SCALE: EffortScaleMetadata = {
   max: 'max',
 };
 
+// Codex's native reasoning effort levels exposed via `model_reasoning_effort`
+// in config.toml or per-run as `-c model_reasoning_effort="<level>"` on
+// `codex exec`. `xhigh` is model-dependent (GPT-5 family); picking it on an
+// older model will cause the CLI to reject the run, but that's the user's
+// call — we surface the CLI's actual vocabulary rather than remapping onto
+// claude-code's scale.
+const CODEX_EFFORT_SCALE: EffortScaleMetadata = {
+  values: ['minimal', 'low', 'medium', 'high', 'xhigh'],
+  max: 'xhigh',
+};
+
 export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> = {
   'claude-code': {
     name: 'claude-code',
@@ -90,7 +101,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     apiKeyEnvName: 'OPENAI_API_KEY',
     defaultModel: 'o3',
     authConfigPaths: ['~/.codex'],
-    effortScale: null,
+    effortScale: CODEX_EFFORT_SCALE,
     projectSkillsDir: '.agents/skills',
     userSkillsPaths: [
       {

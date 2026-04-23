@@ -39,7 +39,14 @@ describe('effortScale declarations', () => {
     expect(adapter.effortScale!.max).toBe('max');
   });
 
-  it.each<CliProviderName>(['codex', 'gemini', 'amp'])(
+  it('codex exposes the five-level scale with max=xhigh', () => {
+    const adapter = cliAdapterRegistry.get('codex');
+    expect(adapter.effortScale).not.toBeNull();
+    expect(adapter.effortScale!.values).toEqual(['minimal', 'low', 'medium', 'high', 'xhigh']);
+    expect(adapter.effortScale!.max).toBe('xhigh');
+  });
+
+  it.each<CliProviderName>(['gemini', 'amp'])(
     '%s reports no effort knob (effortScale=null)',
     (name) => {
       const adapter = cliAdapterRegistry.get(name);
@@ -56,8 +63,14 @@ describe('effortEnv emission', () => {
     }
   });
 
-  it('codex (no scale) returns an empty env regardless of level', () => {
+  it('codex emits no env (its effort knob is a CLI arg, not an env var)', () => {
     const adapter = cliAdapterRegistry.get('codex');
+    expect(adapter.effortEnv('high')).toEqual({});
+    expect(adapter.effortEnv('xhigh')).toEqual({});
+  });
+
+  it('gemini (no scale) returns an empty env regardless of level', () => {
+    const adapter = cliAdapterRegistry.get('gemini');
     expect(adapter.effortEnv('high')).toEqual({});
     expect(adapter.effortEnv('whatever')).toEqual({});
   });
@@ -100,8 +113,8 @@ describe('mergedEnv resolution through buildCliInvocation', () => {
   });
 
   it('emits no effort env for adapters with effortScale=null', () => {
-    const adapter = cliAdapterRegistry.get('codex');
-    const provider = makeProvider({ id: 'p1', name: 'codex', effortLevel: 'high' });
+    const adapter = cliAdapterRegistry.get('gemini');
+    const provider = makeProvider({ id: 'p1', name: 'gemini', effortLevel: 'high' });
     const spec = adapter.buildCliInvocation(provider, 'hi', {
       cwd: '/w',
       effortLevel: 'max',
@@ -124,5 +137,71 @@ describe('mergedEnv resolution through buildCliInvocation', () => {
     expect(spec.env.FOO).toBe('bar');
     expect(spec.env.BAZ).toBe('qux');
     expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBe('medium');
+  });
+});
+
+describe('codex arg-based effort injection', () => {
+  function findReasoningArg(args: string[]): string | null {
+    const idx = args.indexOf('-c');
+    if (idx === -1) return null;
+    const next = args[idx + 1];
+    return next && next.startsWith('model_reasoning_effort=') ? next : null;
+  }
+
+  it('injects -c model_reasoning_effort="xhigh" by default (scale.max)', () => {
+    const adapter = cliAdapterRegistry.get('codex');
+    const provider = makeProvider({ id: 'p1', name: 'codex' });
+    const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w' });
+    expect(findReasoningArg(spec.args)).toBe('model_reasoning_effort="xhigh"');
+  });
+
+  it('uses provider.effortLevel when set', () => {
+    const adapter = cliAdapterRegistry.get('codex');
+    const provider = makeProvider({ id: 'p1', name: 'codex', effortLevel: 'minimal' });
+    const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w' });
+    expect(findReasoningArg(spec.args)).toBe('model_reasoning_effort="minimal"');
+  });
+
+  it('opts.effortLevel overrides provider.effortLevel', () => {
+    const adapter = cliAdapterRegistry.get('codex');
+    const provider = makeProvider({ id: 'p1', name: 'codex', effortLevel: 'low' });
+    const spec = adapter.buildCliInvocation(provider, 'hi', {
+      cwd: '/w',
+      effortLevel: 'high',
+    });
+    expect(findReasoningArg(spec.args)).toBe('model_reasoning_effort="high"');
+  });
+
+  it('drops invalid levels rather than injecting a poisoned -c arg', () => {
+    const adapter = cliAdapterRegistry.get('codex');
+    const provider = makeProvider({
+      id: 'p1',
+      name: 'codex',
+      effortLevel: 'not-a-real-level',
+    });
+    const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w' });
+    expect(findReasoningArg(spec.args)).toBeNull();
+  });
+
+  it('never emits effort as an env var', () => {
+    const adapter = cliAdapterRegistry.get('codex');
+    const provider = makeProvider({ id: 'p1', name: 'codex', effortLevel: 'high' });
+    const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w' });
+    expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+    expect(spec.env.CODEX_REASONING_EFFORT).toBeUndefined();
+  });
+
+  it('places -c after exec but before --skip-git-repo-check and the prompt', () => {
+    const adapter = cliAdapterRegistry.get('codex');
+    const provider = makeProvider({ id: 'p1', name: 'codex', effortLevel: 'medium' });
+    const spec = adapter.buildCliInvocation(provider, 'the-prompt', { cwd: '/w' });
+    const execIdx = spec.args.indexOf('exec');
+    const cIdx = spec.args.indexOf('-c');
+    const skipIdx = spec.args.indexOf('--skip-git-repo-check');
+    const promptIdx = spec.args.indexOf('the-prompt');
+    expect(execIdx).toBeGreaterThanOrEqual(0);
+    expect(cIdx).toBeGreaterThan(execIdx);
+    expect(skipIdx).toBeGreaterThan(cIdx);
+    expect(promptIdx).toBeGreaterThan(skipIdx);
   });
 });

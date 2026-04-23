@@ -591,8 +591,9 @@ export function CliProviderForm({
             ))}
           </div>
           <p className="mt-1 text-xs text-neutral-500">
-            Forwarded to the CLI as <code className="font-mono">CLAUDE_CODE_EFFORT_LEVEL</code>.
-            Lower levels are faster and cheaper but reduce reasoning depth. Default is{' '}
+            Forwarded to the CLI through its native reasoning/effort knob (env var for Claude-family
+            CLIs, <code className="font-mono">-c model_reasoning_effort</code> for Codex). Lower
+            levels are faster and cheaper but reduce reasoning depth. Default is{' '}
             <code className="font-mono">{metadata.effortScale.max}</code>; tasks that produce
             long-lived configuration (onboarding) warn before starting if this provider is set below
             the maximum.

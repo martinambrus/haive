@@ -109,18 +109,25 @@ export abstract class BaseCliAdapter {
 
   /** Resolution order: explicit InvokeOpts.effortLevel wins, then the
    *  per-provider stored effortLevel, then the adapter's effortScale.max.
-   *  Adapters with effortScale=null always emit no effort env. Unknown
-   *  level values are ignored (no env injected) so a stale DB row cannot
-   *  push an invalid value into the CLI. */
+   *  Adapters with effortScale=null always return null. Unknown level values
+   *  (e.g. a stale DB row) are dropped rather than returned, so a poisoned
+   *  value never reaches the CLI. Shared by env-based effort (claude-code,
+   *  zai) and arg-based effort (codex). */
+  protected resolveEffortLevel(provider: CliProviderRecord, opts: InvokeOpts): string | null {
+    const scale = this.effortScale;
+    if (!scale) return null;
+    const candidate = opts.effortLevel ?? provider.effortLevel ?? scale.max;
+    if (!scale.values.includes(candidate)) return null;
+    return candidate;
+  }
+
   protected resolveEffortEnv(
     provider: CliProviderRecord,
     opts: InvokeOpts,
   ): Record<string, string> {
-    const scale = this.effortScale;
-    if (!scale) return {};
-    const candidate = opts.effortLevel ?? provider.effortLevel ?? scale.max;
-    if (!scale.values.includes(candidate)) return {};
-    return this.effortEnv(candidate);
+    const level = this.resolveEffortLevel(provider, opts);
+    if (!level) return {};
+    return this.effortEnv(level);
   }
 
   protected mergedArgs(provider: CliProviderRecord, base: string[]): string[] {
