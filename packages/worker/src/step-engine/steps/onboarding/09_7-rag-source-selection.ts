@@ -122,13 +122,7 @@ async function buildTree(
     });
   }
 
-  // Sort: framework paths first, then by file count descending
-  nodes.sort((a, b) => {
-    const aFw = frameworkPathSet.has(a.path) ? 0 : 1;
-    const bFw = frameworkPathSet.has(b.path) ? 0 : 1;
-    if (aFw !== bFw) return aFw - bFw;
-    return (b.fileCount ?? 0) - (a.fileCount ?? 0);
-  });
+  nodes.sort((a, b) => a.label.localeCompare(b.label));
 
   return nodes;
 }
