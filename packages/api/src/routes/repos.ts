@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs';
-import { mkdir, open, rm, stat, rename } from 'node:fs/promises';
+import { mkdir, open, readFile, rm, stat, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
@@ -555,7 +555,36 @@ const ONBOARDING_MARKERS = [
   '.claude/workflow-config.json',
 ];
 
-const ONBOARDING_RESET_TARGETS = ['.claude'];
+const ONBOARDING_RESET_DIRS = ['.claude'];
+const ONBOARDING_RESET_FILES = ['.ripgreprc'];
+const ONBOARDING_RULES_FILES = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md'];
+const HAIVE_MARKER_PAIRS: Array<[string, string]> = [
+  ['<!-- haive:project-info -->', '<!-- /haive:project-info -->'],
+  ['<!-- haive:cli-rules -->', '<!-- /haive:cli-rules -->'],
+];
+
+async function stripHaiveContent(full: string): Promise<{ changed: boolean; deleted: boolean }> {
+  const content = await readFile(full, 'utf8');
+  let next = content;
+  for (const [start, end] of HAIVE_MARKER_PAIRS) {
+    while (true) {
+      const s = next.indexOf(start);
+      if (s < 0) break;
+      const e = next.indexOf(end, s);
+      if (e < 0) break;
+      next = next.slice(0, s) + next.slice(e + end.length);
+    }
+  }
+  next = next.replace(/^@AGENTS\.md\s*$/gm, '');
+  const cleaned = next.replace(/\n{3,}/g, '\n\n').trim();
+  if (cleaned === content.trim()) return { changed: false, deleted: false };
+  if (cleaned.length === 0) {
+    await rm(full, { force: true });
+    return { changed: true, deleted: true };
+  }
+  await writeFile(full, cleaned + '\n', 'utf8');
+  return { changed: true, deleted: false };
+}
 
 async function resolveRepoRoot(
   db: ReturnType<typeof getDb>,
@@ -587,21 +616,37 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
   return c.json({ onboarded: missing.length === 0, present, missing });
 });
 
-repoRoutes.delete('/:id/claude-folder', async (c) => {
+repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
   const root = await resolveRepoRoot(db, userId, id);
 
   const removed: string[] = [];
-  for (const rel of ONBOARDING_RESET_TARGETS) {
+  const cleaned: string[] = [];
+
+  for (const rel of ONBOARDING_RESET_DIRS) {
     const full = path.join(root, rel);
     if (await pathExists(full)) {
       await rm(full, { recursive: true, force: true });
       removed.push(rel);
     }
   }
-  return c.json({ ok: true, removed });
+  for (const rel of ONBOARDING_RESET_FILES) {
+    const full = path.join(root, rel);
+    if (await pathExists(full)) {
+      await rm(full, { force: true });
+      removed.push(rel);
+    }
+  }
+  for (const rel of ONBOARDING_RULES_FILES) {
+    const full = path.join(root, rel);
+    if (!(await pathExists(full))) continue;
+    const result = await stripHaiveContent(full);
+    if (result.deleted) removed.push(rel);
+    else if (result.changed) cleaned.push(rel);
+  }
+  return c.json({ ok: true, removed, cleaned });
 });
 
 repoRoutes.delete('/:id', async (c) => {

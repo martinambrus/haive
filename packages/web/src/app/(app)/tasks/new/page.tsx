@@ -98,12 +98,17 @@ export default function NewTaskPage() {
   async function handleResetOnboarding() {
     if (!repositoryId) return;
     const confirmed = window.confirm(
-      'This will permanently delete the .claude/ directory from the repository so onboarding can run again. This cannot be undone. Continue?',
+      'This will permanently remove onboarding artifacts from the repository so onboarding can run again:\n' +
+        '  • delete .claude/ and .ripgreprc\n' +
+        '  • strip haive-managed blocks from AGENTS.md, CLAUDE.md, and GEMINI.md (file removed if empty after)\n\n' +
+        'User-authored content outside those marker blocks is preserved. This cannot be undone. Continue?',
     );
     if (!confirmed) return;
     setResetting(true);
     try {
-      await api.delete<{ ok: boolean; removed: string[] }>(`/repos/${repositoryId}/claude-folder`);
+      await api.delete<{ ok: boolean; removed: string[]; cleaned: string[] }>(
+        `/repos/${repositoryId}/onboarding-artifacts`,
+      );
       await refreshStatus(repositoryId);
     } catch (err) {
       setStatusError((err as Error).message ?? 'Failed to reset onboarding');
