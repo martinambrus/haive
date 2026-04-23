@@ -462,6 +462,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       // --- KB files ---
       const totalKb = detected.kbFiles.length;
       for (let fi = 0; fi < totalKb; fi += 1) {
+        ctx.throwIfCancelled();
         const file = detected.kbFiles[fi]!;
         await ctx.emitProgress(`Indexing KB (${fi + 1}/${totalKb}): ${file.relPath}`);
 
@@ -483,6 +484,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
 
         // Embed and insert in batches
         for (let batchStart = 0; batchStart < chunks.length; batchStart += EMBED_BATCH_SIZE) {
+          ctx.throwIfCancelled();
           const batch = chunks.slice(batchStart, batchStart + EMBED_BATCH_SIZE);
           const texts = batch.map((c) => c.content);
           let embeddings: number[][];
@@ -524,6 +526,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       // --- Code files ---
       const totalCode = detected.codeFiles.length;
       for (let fi = 0; fi < totalCode; fi += 1) {
+        ctx.throwIfCancelled();
         const file = detected.codeFiles[fi]!;
         await ctx.emitProgress(`Indexing code (${fi + 1}/${totalCode}): ${file.relPath}`);
 
@@ -544,6 +547,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         codeFileCount += 1;
 
         for (let batchStart = 0; batchStart < chunks.length; batchStart += EMBED_BATCH_SIZE) {
+          ctx.throwIfCancelled();
           const batch = chunks.slice(batchStart, batchStart + EMBED_BATCH_SIZE);
           const texts = batch.map((c) => c.content);
           let embeddings: number[][];

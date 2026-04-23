@@ -12,7 +12,7 @@ import type {
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveDispatch } from '../orchestrator/dispatcher.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
-import type { StepContext, StepDefinition } from './step-definition.js';
+import { TaskCancelledError, type StepContext, type StepDefinition } from './step-definition.js';
 
 const log = logger.child({ module: 'step-runner' });
 
@@ -206,11 +206,35 @@ async function resolveLlmPhase(
   return { resolved: false, result: { status: 'waiting_cli', row: updated } };
 }
 
+const CANCEL_POLL_INTERVAL_MS = 2_000;
+
 export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceStepResult> {
   const { db, stepDef, taskId } = params;
   const meta = stepDef.metadata;
 
   const row = await upsertRow(db, taskId, stepDef);
+
+  const controller = new AbortController();
+  const throwIfCancelled = (): void => {
+    if (controller.signal.aborted) {
+      throw new TaskCancelledError();
+    }
+  };
+  const pollTimer = setInterval(() => {
+    void (async () => {
+      try {
+        const statusRow = await db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, taskId),
+          columns: { status: true },
+        });
+        if (statusRow?.status === 'cancelled') {
+          controller.abort();
+        }
+      } catch (err) {
+        log.warn({ err, taskId }, 'cancel poll failed');
+      }
+    })();
+  }, CANCEL_POLL_INTERVAL_MS);
 
   const ctx: StepContext = {
     taskId,
@@ -222,6 +246,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     cliProviderId: params.cliProviderId,
     db,
     logger: log.child({ stepId: meta.id, taskId, taskStepId: row.id }),
+    signal: controller.signal,
+    throwIfCancelled,
     async emitProgress(message: string) {
       await updateRow(db, row.id, { statusMessage: message });
     },
@@ -334,8 +360,17 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     return { status: 'done', row: done, output };
   } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err);
-    log.error({ err, stepId: meta.id, taskId }, 'step runner failed');
+    const cancelled = err instanceof TaskCancelledError;
+    const errorMessage = cancelled
+      ? 'task cancelled by user'
+      : err instanceof Error
+        ? err.message
+        : String(err);
+    if (cancelled) {
+      log.info({ stepId: meta.id, taskId }, 'step aborted by task cancel');
+    } else {
+      log.error({ err, stepId: meta.id, taskId }, 'step runner failed');
+    }
     const failed = await updateRow(db, row.id, {
       status: 'failed',
       statusMessage: null,
@@ -343,6 +378,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       endedAt: new Date(),
     }).catch(() => row);
     return { status: 'failed', row: failed, error: errorMessage };
+  } finally {
+    clearInterval(pollTimer);
+    if (!controller.signal.aborted) controller.abort();
   }
 }
 

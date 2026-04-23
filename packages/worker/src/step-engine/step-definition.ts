@@ -14,9 +14,18 @@ export interface StepContext {
   cliProviderId: string | null;
   db: Database;
   logger: Logger;
-  signal?: AbortSignal;
+  signal: AbortSignal;
   /** Update the step's status_message column (shown in UI during running state). */
   emitProgress(message: string): Promise<void>;
+  /** Throws TaskCancelledError when the task has been cancelled. Call inside long loops. */
+  throwIfCancelled(): void;
+}
+
+export class TaskCancelledError extends Error {
+  constructor(message = 'task cancelled') {
+    super(message);
+    this.name = 'TaskCancelledError';
+  }
 }
 
 export interface LlmBuildArgs {
