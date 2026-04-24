@@ -103,8 +103,6 @@ export function renderSquidConfig(input: SquidConfigInput): string {
   lines.push('');
 
   lines.push('cache deny all');
-  lines.push('access_log stdio:/dev/stdout squid');
-  lines.push('cache_log stdio:/dev/stderr');
   lines.push('pid_filename none');
   lines.push('coredump_dir /tmp');
   lines.push('');

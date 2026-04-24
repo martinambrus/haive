@@ -86,8 +86,6 @@ export async function createEgressGateway(opts: EgressGatewayOptions): Promise<E
       networkName,
       '--mount',
       `type=volume,source=${CONFIG_VOLUME},destination=${CONFIG_SANDBOX_ROOT},volume-subpath=${id},readonly`,
-      '--entrypoint',
-      '/usr/sbin/squid',
       SQUID_IMAGE,
       '-N',
       '-d',
