@@ -68,22 +68,7 @@ function yamlKbRefs(refs: AgentKbRefs): string[] {
   return out.length === 1 ? [] : out;
 }
 
-export function buildAgentFileMarkdown(spec: AgentSpec): string {
-  const frontmatter = [
-    '---',
-    `name: ${spec.id}`,
-    `description: ${spec.description}`,
-    `model: ${spec.model ?? 'opus'}`,
-    `color: ${spec.color}`,
-    `field: ${spec.field}`,
-    `expertise: ${spec.expertise ?? 'expert'}`,
-    `allowed-tools: [${spec.tools.join(', ')}]`,
-    'auto-invoke: false',
-    ...(spec.kbReferences ? yamlKbRefs(spec.kbReferences) : []),
-    '---',
-    '',
-  ].join('\n');
-
+function buildAgentBody(spec: AgentSpec): string {
   const body: string[] = [
     `# ${spec.title}`,
     '',
@@ -121,8 +106,52 @@ export function buildAgentFileMarkdown(spec: AgentSpec): string {
     ...spec.antiPatterns.map((a) => `- **DO NOT** ${a}`),
     '',
   ];
+  return body.join('\n');
+}
 
-  return frontmatter + body.join('\n');
+export function buildAgentFileMarkdown(spec: AgentSpec): string {
+  const frontmatter = [
+    '---',
+    `name: ${spec.id}`,
+    `description: ${spec.description}`,
+    `model: ${spec.model ?? 'opus'}`,
+    `color: ${spec.color}`,
+    `field: ${spec.field}`,
+    `expertise: ${spec.expertise ?? 'expert'}`,
+    `allowed-tools: [${spec.tools.join(', ')}]`,
+    'auto-invoke: false',
+    ...(spec.kbReferences ? yamlKbRefs(spec.kbReferences) : []),
+    '---',
+    '',
+  ].join('\n');
+
+  return frontmatter + buildAgentBody(spec);
+}
+
+function tomlBasicString(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function tomlMultilineBasicString(value: string): string {
+  const escaped = value.replace(/\\/g, '\\\\').replace(/"""/g, '\\"\\"\\"');
+  return `"""\n${escaped}\n"""`;
+}
+
+/** Emit a Codex-compatible agent definition as TOML.
+ *  Schema (per https://developers.openai.com/codex/subagents):
+ *    name                   — required, string
+ *    description            — required, string (when/how Codex uses the agent)
+ *    developer_instructions — required, multiline string (system prompt body)
+ *  Optional fields (model, model_reasoning_effort, sandbox_mode, mcp_servers)
+ *  are omitted so the agent inherits from the parent session. */
+export function buildAgentFileToml(spec: AgentSpec): string {
+  const instructions = buildAgentBody(spec);
+  return [
+    `name = ${tomlBasicString(spec.id)}`,
+    `description = ${tomlBasicString(spec.description)}`,
+    `developer_instructions = ${tomlMultilineBasicString(instructions)}`,
+    '',
+  ].join('\n');
 }
 
 export const BASELINE_AGENT_SPECS: AgentSpec[] = [

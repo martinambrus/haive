@@ -48,6 +48,17 @@ export interface CliProviderMetadata {
    *  CLI's authConfigPaths already cover its skills dir (claude-code, amp,
    *  zai all share `~/.claude` which contains `skills/`). */
   userSkillsPaths: readonly UserSkillPath[];
+  /** Repo-relative directory where this CLI auto-loads project-level custom
+   *  agent definitions. Null when the CLI has no file-based custom-agent
+   *  system (amp exposes only the built-in Task tool). Paths are taken from
+   *  each vendor's docs: claude-code/zai use `.claude/agents/`; gemini uses
+   *  `.gemini/agents/`; codex uses `.codex/agents/`. */
+  projectAgentsDir: string | null;
+  /** File format the CLI expects for agent definitions. Claude-family and
+   *  gemini read markdown with YAML frontmatter; codex reads TOML — the
+   *  current generator only emits markdown, so codex agent writes are
+   *  skipped until a TOML emitter exists. Null iff projectAgentsDir is null. */
+  agentFileFormat: 'markdown' | 'toml' | null;
 }
 
 const CLAUDE_LIKE_EFFORT_SCALE: EffortScaleMetadata = {
@@ -86,6 +97,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     effortScale: CLAUDE_LIKE_EFFORT_SCALE,
     projectSkillsDir: '.claude/skills',
     userSkillsPaths: [],
+    projectAgentsDir: '.claude/agents',
+    agentFileFormat: 'markdown',
   },
   codex: {
     name: 'codex',
@@ -110,6 +123,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
         containerPath: '/root/.agents/skills',
       },
     ],
+    projectAgentsDir: '.codex/agents',
+    agentFileFormat: 'toml',
   },
   gemini: {
     name: 'gemini',
@@ -134,6 +149,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
         containerPath: '/root/.gemini/skills',
       },
     ],
+    projectAgentsDir: '.gemini/agents',
+    agentFileFormat: 'markdown',
   },
   amp: {
     name: 'amp',
@@ -152,6 +169,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     effortScale: null,
     projectSkillsDir: '.claude/skills',
     userSkillsPaths: [],
+    projectAgentsDir: null,
+    agentFileFormat: null,
   },
   zai: {
     name: 'zai',
@@ -170,6 +189,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     effortScale: CLAUDE_LIKE_EFFORT_SCALE,
     projectSkillsDir: '.claude/skills',
     userSkillsPaths: [],
+    projectAgentsDir: '.claude/agents',
+    agentFileFormat: 'markdown',
   },
 };
 

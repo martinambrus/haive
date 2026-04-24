@@ -59,6 +59,7 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
     description:
       'Installs CLI plugins (LSP marketplace + drupal-php-lsp) into the task sandbox. Runs once per task because CLI selection can change between tasks.',
     requiresCli: false,
+    providerSensitive: true,
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {

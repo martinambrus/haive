@@ -10,29 +10,43 @@ import type { KbFileSummary } from './09-qa.js';
 
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
 
-async function resolveProjectSkillsDir(ctx: StepContext): Promise<string> {
-  if (!ctx.cliProviderId) return DEFAULT_PROJECT_SKILLS_DIR;
-  const row = await ctx.db.query.cliProviders.findFirst({
-    where: eq(schema.cliProviders.id, ctx.cliProviderId),
-    columns: { name: true },
+async function resolveSkillTargetDirs(ctx: StepContext): Promise<string[]> {
+  const rows = await ctx.db.query.cliProviders.findMany({
+    where: eq(schema.cliProviders.userId, ctx.userId),
+    columns: { name: true, enabled: true },
   });
-  if (!row) return DEFAULT_PROJECT_SKILLS_DIR;
-  return getCliProviderMetadata(row.name as CliProviderName).projectSkillsDir;
+  const targets = new Set<string>();
+  for (const row of rows) {
+    if (!row.enabled) continue;
+    const dir = getCliProviderMetadata(row.name as CliProviderName).projectSkillsDir;
+    if (dir) targets.add(dir);
+  }
+  return targets.size > 0 ? Array.from(targets) : [DEFAULT_PROJECT_SKILLS_DIR];
 }
 
 interface SkillGenDetect {
   framework: string | null;
   language: string | null;
   kbFiles: KbFileSummary[];
-  /** Repo-relative directory where the active CLI auto-loads project-level
-   *  skills. Resolved from the CLI's catalog metadata at detect-time. */
-  projectSkillsDir: string;
+  /** Repo-relative directories where skills should be written. One entry per
+   *  unique `projectSkillsDir` across all *enabled* CLI providers (claude/zai/amp
+   *  collapse to `.claude/skills`; gemini has `.gemini/skills`; codex has
+   *  `.agents/skills`). Apply writes each skill + sub-skills to every target. */
+  skillTargetDirs: string[];
   /** Transient — file tree handed to the LLM prompt; stripped before persisting. */
   __fileTree?: string;
 }
 
 interface SkillGenApply {
-  written: { id: string; filePath: string; subSkillCount: number }[];
+  written: {
+    id: string;
+    /** Canonical path inside the first target dir (kept for backwards compat
+     *  with log/UI consumers). */
+    filePath: string;
+    /** Every target dir this skill was mirrored into. */
+    mirroredDirs: string[];
+    subSkillCount: number;
+  }[];
   totalSubSkills: number;
   droppedFromCap: number;
   rejectedIds: string[];
@@ -646,6 +660,11 @@ function buildPrompt(args: LlmBuildArgs): string {
           .join('\n')
       : '(no knowledge base files yet)';
 
+  const primarySkillsDir = detected.skillTargetDirs[0] ?? DEFAULT_PROJECT_SKILLS_DIR;
+  const mirroredDirsNote =
+    detected.skillTargetDirs.length > 1
+      ? ` (mirrored to ${detected.skillTargetDirs.map((d) => `\`${d}/\``).join(', ')} so every enabled CLI sees the same skills)`
+      : '';
   return [
     'You are a senior software engineer generating Claude Code SKILLS for this specific codebase.',
     '',
@@ -653,7 +672,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '',
     '- **AGENTS** capture technical expertise (HOW to use a framework). They live in `.claude/agents/`. NOT your concern here.',
     '- **SKILLS** capture business/domain capabilities of THIS project — discrete features the code',
-    `  exposes that an agent might need to understand or modify. They live in \`${detected.projectSkillsDir}/\`.`,
+    `  exposes that an agent might need to understand or modify. They live in \`${primarySkillsDir}/\`${mirroredDirsNote}.`,
     '- A skill is a CAPABILITY DOMAIN, NOT a documentation chapter.',
     '',
     '## What a good skill looks like',
@@ -700,7 +719,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '',
     '## Required structure per skill',
     '',
-    `Each skill is a directory \`${detected.projectSkillsDir}/<id>/\` containing:`,
+    `Each skill is a directory \`${primarySkillsDir}/<id>/\` containing:`,
     '  - `SKILL.md` — concise overview with YAML frontmatter (the loader)',
     '  - `sub-skills/<slug>.md` — 3 to 8 leaf documents covering distinct facets of the domain',
     '',
@@ -778,6 +797,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     description:
       'LLM scans the repository and the knowledge base, identifies capability-based domain skills, and writes .claude/skills/<id>/SKILL.md plus sub-skills/<slug>.md files for each.',
     requiresCli: true,
+    providerSensitive: true,
   },
 
   async detect(ctx: StepContext): Promise<SkillGenDetect> {
@@ -789,7 +809,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const framework = envData?.project?.framework ?? null;
     const language = envData?.project?.primaryLanguage ?? null;
 
-    const projectSkillsDir = await resolveProjectSkillsDir(ctx);
+    const skillTargetDirs = await resolveSkillTargetDirs(ctx);
 
     await ctx.emitProgress('Listing existing knowledge base...');
     const kbFiles = await listKbFiles(ctx.repoPath);
@@ -798,10 +818,10 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const fileTree = await collectShortFileTree(ctx.repoPath);
 
     ctx.logger.info(
-      { framework, language, kbFileCount: kbFiles.length, projectSkillsDir },
+      { framework, language, kbFileCount: kbFiles.length, skillTargetDirs },
       'skill-generation detect complete',
     );
-    return { framework, language, kbFiles, projectSkillsDir, __fileTree: fileTree };
+    return { framework, language, kbFiles, skillTargetDirs, __fileTree: fileTree };
   },
 
   form(_ctx, _detected): FormSchema {
@@ -894,8 +914,10 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const maxSkills = clampMaxSkills(values.maxSkills);
 
     const detected = args.detected as SkillGenDetect;
-    const skillsDir = detected.projectSkillsDir ?? DEFAULT_PROJECT_SKILLS_DIR;
-    const skillsDirParts = skillsDir.split('/').filter((p) => p.length > 0);
+    const targetDirs =
+      detected.skillTargetDirs && detected.skillTargetDirs.length > 0
+        ? detected.skillTargetDirs
+        : [DEFAULT_PROJECT_SKILLS_DIR];
 
     const entries = parseSkillEntries(args.llmOutput ?? null);
     if (entries.length === 0) {
@@ -930,35 +952,55 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const droppedFromCap = Math.max(0, accepted.length - maxSkills);
     const final = accepted.slice(0, maxSkills);
 
-    const written: { id: string; filePath: string; subSkillCount: number }[] = [];
+    const written: SkillGenApply['written'] = [];
     const summaryForReadme: { id: string; title: string; description: string }[] = [];
     let totalSubSkills = 0;
 
+    // Render each skill + sub-skill markdown once; mirror to every target dir.
     for (const entry of final) {
-      const dir = path.join(ctx.repoPath, ...skillsDirParts, entry.id);
-      await mkdir(dir, { recursive: true });
-      const filePath = path.join(dir, 'SKILL.md');
-      await writeFile(filePath, skillToMarkdown(entry), 'utf8');
-
+      const skillMd = skillToMarkdown(entry);
       const subs = sanitizeSubSkills(entry);
-      if (subs.length > 0) {
-        const subDir = path.join(dir, 'sub-skills');
-        await mkdir(subDir, { recursive: true });
-        for (const sub of subs) {
-          const subPath = path.join(subDir, `${sub.slug}.md`);
-          await writeFile(subPath, subSkillToMarkdown(entry.id, sub), 'utf8');
-          totalSubSkills += 1;
+      const renderedSubs = subs.map((sub) => ({
+        slug: sub.slug,
+        content: subSkillToMarkdown(entry.id, sub),
+      }));
+
+      let primaryPath = '';
+      for (const targetDir of targetDirs) {
+        const parts = targetDir.split('/').filter((p) => p.length > 0);
+        const dir = path.join(ctx.repoPath, ...parts, entry.id);
+        await mkdir(dir, { recursive: true });
+        const filePath = path.join(dir, 'SKILL.md');
+        await writeFile(filePath, skillMd, 'utf8');
+        if (!primaryPath) primaryPath = filePath;
+
+        if (renderedSubs.length > 0) {
+          const subDir = path.join(dir, 'sub-skills');
+          await mkdir(subDir, { recursive: true });
+          for (const rs of renderedSubs) {
+            const subPath = path.join(subDir, `${rs.slug}.md`);
+            await writeFile(subPath, rs.content, 'utf8');
+          }
         }
       }
 
-      written.push({ id: entry.id, filePath, subSkillCount: subs.length });
+      totalSubSkills += renderedSubs.length;
+      written.push({
+        id: entry.id,
+        filePath: primaryPath,
+        mirroredDirs: targetDirs,
+        subSkillCount: renderedSubs.length,
+      });
       summaryForReadme.push({ id: entry.id, title: entry.title, description: entry.description });
     }
 
     if (summaryForReadme.length > 0) {
-      const readmePath = path.join(ctx.repoPath, ...skillsDirParts, 'README.md');
-      await mkdir(path.dirname(readmePath), { recursive: true });
-      await writeFile(readmePath, skillsReadmeMarkdown(summaryForReadme, skillsDir), 'utf8');
+      for (const targetDir of targetDirs) {
+        const parts = targetDir.split('/').filter((p) => p.length > 0);
+        const readmePath = path.join(ctx.repoPath, ...parts, 'README.md');
+        await mkdir(path.dirname(readmePath), { recursive: true });
+        await writeFile(readmePath, skillsReadmeMarkdown(summaryForReadme, targetDir), 'utf8');
+      }
     }
 
     ctx.logger.info(

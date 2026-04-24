@@ -172,6 +172,7 @@ export const skillVerificationStep: StepDefinition<
     description:
       'Walks the active CLI’s project skills directory, verifies each SKILL.md has the expected frontmatter and section structure, and regenerates stub files for skills whose SKILL.md went missing.',
     requiresCli: true,
+    providerSensitive: true,
   },
 
   async detect(ctx: StepContext): Promise<SkillVerificationDetect> {

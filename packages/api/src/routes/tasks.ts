@@ -1,11 +1,12 @@
 import { open, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { Hono } from 'hono';
-import { and, asc, desc, eq, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   createTaskRequestSchema,
   overrideNextStepRequestSchema,
+  PROVIDER_SENSITIVE_STEP_IDS,
   setCliProviderRequestSchema,
   stepActionRequestSchema,
   submitStepRequestSchema,
@@ -605,7 +606,44 @@ taskRoutes.patch('/:id/cli-provider', async (c) => {
     by: userId,
   });
 
-  return c.json({ ok: true, cliProviderId: body.cliProviderId });
+  // Invalidate cached detect output on provider-sensitive steps so the next
+  // advance re-detects against the new CLI's metadata (skills dir, agents
+  // dir, etc.). Terminal (done/failed/skipped/cancelled) steps are left
+  // alone — rewriting history would be confusing. form_values is preserved
+  // so the user's prior submission flows into the regenerated schema.
+  const invalidated = await db
+    .update(schema.taskSteps)
+    .set({
+      status: 'pending',
+      detectOutput: null,
+      formSchema: null,
+      statusMessage: null,
+      startedAt: null,
+      endedAt: null,
+      errorMessage: null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, id),
+        inArray(schema.taskSteps.stepId, [...PROVIDER_SENSITIVE_STEP_IDS]),
+        inArray(schema.taskSteps.status, ['pending', 'running', 'waiting_form', 'waiting_cli']),
+      ),
+    )
+    .returning({ stepId: schema.taskSteps.stepId });
+
+  if (invalidated.length > 0) {
+    await appendTaskEvent(db, id, null, 'task.provider_sensitive_steps_invalidated', {
+      stepIds: invalidated.map((r) => r.stepId),
+      cliProviderId: body.cliProviderId,
+    });
+  }
+
+  return c.json({
+    ok: true,
+    cliProviderId: body.cliProviderId,
+    invalidatedSteps: invalidated.map((r) => r.stepId),
+  });
 });
 
 taskRoutes.post('/:id/override-next-step', async (c) => {

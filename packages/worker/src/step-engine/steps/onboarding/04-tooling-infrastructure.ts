@@ -86,6 +86,7 @@ export const toolingInfrastructureStep: StepDefinition<
     description:
       'Captures user preferences for RAG storage (Ollama + PostgreSQL), MCP browser testing and LSP language server installation.',
     requiresCli: false,
+    providerSensitive: true,
   },
 
   async detect(ctx: StepContext): Promise<ToolingDetect> {

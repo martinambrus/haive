@@ -20,7 +20,30 @@ export interface StepMetadata {
   description: string;
   requiresCli: boolean;
   requiredCapabilities?: StepCapability[];
+  /** True when `detect()` resolves CLI-specific paths or metadata from the
+   *  CliProviderMetadata catalog. Switching `task.cliProviderId` invalidates
+   *  cached `detectOutput` on these steps so the next advance re-detects.
+   *  Must match the id listed in PROVIDER_SENSITIVE_STEP_IDS — the API package
+   *  reads that constant to know which task_steps rows to invalidate on
+   *  provider change (it does not have access to the worker step registry). */
+  providerSensitive?: boolean;
 }
+
+/** Step IDs whose StepDefinition sets `metadata.providerSensitive = true`.
+ *  Duplicated here because the api package needs this list to invalidate
+ *  cached detectOutput on `PATCH /tasks/:id/cli-provider`, and the worker's
+ *  step registry is not importable from api without a circular dep.
+ *
+ *  Keep in sync with the `providerSensitive: true` flags on StepDefinition
+ *  metadata blocks. A worker startup assertion verifies the match. */
+export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
+  '04-tooling-infrastructure',
+  '07_5-verify-files',
+  '09_5-skill-generation',
+  '09_6-skill-verification',
+  '11-final-review',
+  '01b-install-plugins',
+];
 
 export interface StepRunRecord {
   id: string;

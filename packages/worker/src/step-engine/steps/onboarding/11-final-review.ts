@@ -1,8 +1,32 @@
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { FormSchema } from '@haive/shared';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import type { CliProviderName, FormSchema } from '@haive/shared';
+import { getCliProviderMetadata } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { pathExists } from './_helpers.js';
+
+interface ActiveAgentsTarget {
+  dir: string;
+  ext: '.md' | '.toml';
+}
+
+async function resolveActiveAgentsTarget(ctx: StepContext): Promise<ActiveAgentsTarget | null> {
+  const defaultTarget: ActiveAgentsTarget = { dir: '.claude/agents', ext: '.md' };
+  if (!ctx.cliProviderId) return defaultTarget;
+  const row = await ctx.db.query.cliProviders.findFirst({
+    where: eq(schema.cliProviders.id, ctx.cliProviderId),
+    columns: { name: true },
+  });
+  if (!row) return defaultTarget;
+  const meta = getCliProviderMetadata(row.name as CliProviderName);
+  if (!meta.projectAgentsDir || !meta.agentFileFormat) return null;
+  return {
+    dir: meta.projectAgentsDir,
+    ext: meta.agentFileFormat === 'toml' ? '.toml' : '.md',
+  };
+}
 
 interface ReviewFinding {
   id: string;
@@ -53,16 +77,20 @@ async function countSkillDirs(skillsRoot: string): Promise<number> {
   }
 }
 
-export async function collectReviewFindings(repo: string): Promise<FinalReviewDetect> {
+export async function collectReviewFindings(
+  repo: string,
+  activeAgentsTarget: ActiveAgentsTarget | null = { dir: '.claude/agents', ext: '.md' },
+): Promise<FinalReviewDetect> {
   const kbDir = path.join(repo, '.claude', 'knowledge_base');
   const skillsDir = path.join(repo, '.claude', 'skills');
-  const agentsDir = path.join(repo, '.claude', 'agents');
+  const agentsDir = activeAgentsTarget ? path.join(repo, activeAgentsTarget.dir) : null;
+  const agentExt = activeAgentsTarget?.ext ?? '.md';
   const commandsDir = path.join(repo, '.claude', 'commands');
 
   const [knowledgeBase, skills, agents, commands] = await Promise.all([
     countFiles(kbDir, (n) => n.endsWith('.md')),
     countSkillDirs(skillsDir),
-    countFiles(agentsDir, (n) => n.endsWith('.md')),
+    agentsDir ? countFiles(agentsDir, (n) => n.endsWith(agentExt)) : Promise.resolve(0),
     countFiles(commandsDir, (n) => n.endsWith('.md')),
   ]);
   const findings: ReviewFinding[] = [];
@@ -82,13 +110,19 @@ export async function collectReviewFindings(repo: string): Promise<FinalReviewDe
       detail: 'No .claude/skills/*/SKILL.md files were produced.',
     });
   }
-  if (agents === 0) {
+  if (activeAgentsTarget === null) {
+    findings.push({
+      id: 'agents-not-applicable',
+      severity: 'info',
+      label: 'Active CLI has no file-based agents',
+      detail: 'The active CLI (amp) uses only the built-in Task tool; no agent files expected.',
+    });
+  } else if (agents === 0) {
     findings.push({
       id: 'no-agents',
       severity: 'info',
       label: 'No subagent files',
-      detail:
-        'No .claude/agents/*.md files were produced; agent discovery step may not be ported yet.',
+      detail: `No ${activeAgentsTarget.dir}/*${agentExt} files were produced; agent discovery step may not be ported yet.`,
     });
   }
   if (commands === 0) {
@@ -160,12 +194,14 @@ export const finalReviewStep: StepDefinition<FinalReviewDetect, FinalReviewApply
     description:
       'Summarises everything produced by the onboarding workflow, flags missing artefacts, and writes .claude/onboarding-review.md for the user to read before the post-onboarding step.',
     requiresCli: false,
+    providerSensitive: true,
   },
 
   async detect(ctx: StepContext): Promise<FinalReviewDetect> {
-    const detect = await collectReviewFindings(ctx.repoPath);
+    const agentsTarget = await resolveActiveAgentsTarget(ctx);
+    const detect = await collectReviewFindings(ctx.repoPath, agentsTarget);
     ctx.logger.info(
-      { counts: detect.counts, findings: detect.findings.length },
+      { counts: detect.counts, findings: detect.findings.length, agentsTarget },
       'final review collected',
     );
     return detect;
