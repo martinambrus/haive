@@ -58,7 +58,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       code?: string;
       issues?: { path: string; message: string }[];
     };
-    const error = new Error(body.error ?? `HTTP ${res.status}`) as ApiError;
+    const baseMsg = body.error ?? `HTTP ${res.status}`;
+    const issuesMsg =
+      body.issues && body.issues.length > 0
+        ? `: ${body.issues.map((i) => `${i.path || '(root)'} — ${i.message}`).join('; ')}`
+        : '';
+    const error = new Error(baseMsg + issuesMsg) as ApiError;
     error.status = res.status;
     if (body.code) error.code = body.code;
     if (body.issues) error.issues = body.issues;

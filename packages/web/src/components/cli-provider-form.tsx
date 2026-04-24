@@ -6,6 +6,7 @@ import { DEFAULT_AGENT_RULES } from '@haive/shared/constants';
 import {
   api,
   DEFAULT_CLI_NETWORK_POLICY,
+  type ApiError,
   type CliAuthMode,
   type CliNetworkMode,
   type CliNetworkPolicy,
@@ -143,6 +144,20 @@ export function CliProviderForm({
 }: CliProviderFormProps) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
+  const [issues, setIssues] = useState<ApiError['issues']>(undefined);
+
+  function captureError(err: unknown, fallback: string): void {
+    const e = err as ApiError;
+    setError(e?.message ?? fallback);
+    setIssues(e?.issues);
+  }
+
+  function clearError(): void {
+    setError(null);
+    setIssues(undefined);
+  }
+
+  const networkIssues = (issues ?? []).filter((i) => i.path.startsWith('networkPolicy'));
   const [submitting, setSubmitting] = useState(false);
   const [existingSecrets, setExistingSecrets] = useState<CliProviderSecret[]>([]);
   const [buildState, setBuildState] = useState<BuildState>({
@@ -263,7 +278,7 @@ export function CliProviderForm({
   async function handleRefreshVersions() {
     if (!metadata.versionPinnable) return;
     setRefreshingVersions(true);
-    setError(null);
+    clearError();
     try {
       const { entry } = await api.post<{ entry: CliPackageVersionsEntry }>(
         `/cli-providers/catalog/${metadata.name}/refresh-versions`,
@@ -272,7 +287,7 @@ export function CliProviderForm({
       const newest = entry.versions[0] ?? entry.latestVersion;
       setState((prev) => (prev.cliVersion || !newest ? prev : { ...prev, cliVersion: newest }));
     } catch (err) {
-      setError((err as Error).message ?? 'Failed to refresh versions');
+      captureError(err, 'Failed to refresh versions');
     } finally {
       setRefreshingVersions(false);
     }
@@ -342,7 +357,7 @@ export function CliProviderForm({
   async function handleRebuildImage() {
     if (mode !== 'edit' || !provider?.id) return;
     setBuildRequesting(true);
-    setError(null);
+    clearError();
     // Flip build gating on synchronously with the click so the Test connection
     // button stays disabled through the dirty -> building handoff. Without
     // this, persistEdit clears the dirty flag before the setBuildState call
@@ -354,7 +369,7 @@ export function CliProviderForm({
       }
       await api.post(`/cli-providers/${provider.id}/sandbox-image/build`);
     } catch (err) {
-      setError((err as Error).message ?? 'Failed to start build');
+      captureError(err, 'Failed to start build');
       try {
         const { provider: fresh } = await api.get<{ provider: CliProvider }>(
           `/cli-providers/${provider.id}`,
@@ -375,7 +390,7 @@ export function CliProviderForm({
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    setError(null);
+    clearError();
     setSubmitting(true);
     try {
       if (mode === 'create') {
@@ -423,7 +438,7 @@ export function CliProviderForm({
       router.push('/settings/cli-providers');
       router.refresh();
     } catch (err) {
-      setError((err as Error).message ?? 'Failed to save provider');
+      captureError(err, 'Failed to save provider');
     } finally {
       setSubmitting(false);
     }
@@ -811,6 +826,12 @@ export function CliProviderForm({
             </div>
           </label>
         </div>
+
+        {state.networkMode === 'allowlist' && networkIssues.length > 0 && (
+          <div className="mt-3">
+            <FormError message={networkIssues.map((i) => `${i.path} — ${i.message}`).join('; ')} />
+          </div>
+        )}
 
         {state.networkMode === 'allowlist' && (
           <div className="mt-3 grid gap-3 md:grid-cols-2">
