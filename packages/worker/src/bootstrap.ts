@@ -8,6 +8,7 @@ import {
 } from '@haive/shared';
 import { initDatabase } from './db.js';
 import { initRedis } from './redis.js';
+import { runDataMigrations } from './data-migrations.js';
 import { syncTemplateManifestCache } from './step-engine/template-manifest.js';
 
 export interface BootstrapResult {
@@ -38,6 +39,7 @@ export async function bootstrap(): Promise<BootstrapResult> {
   await mkdir(repoStoragePath, { recursive: true });
 
   await syncTemplateManifestCache(db);
+  await runDataMigrations(db);
 
   logger.info({ repoStoragePath }, 'Worker bootstrap complete');
   return { databaseUrl, redisUrl, repoStoragePath };
