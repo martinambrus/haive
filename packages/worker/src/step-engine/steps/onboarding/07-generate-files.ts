@@ -17,7 +17,7 @@ import {
 } from './_agent-templates.js';
 import { loadPreviousStepOutput, pathExists } from './_helpers.js';
 
-interface CommandSpec {
+export interface CommandSpec {
   id: string;
   title: string;
   description: string;
@@ -143,8 +143,10 @@ function extractProjectInfo(
   };
 }
 
-const PROJECT_INFO_START = '<!-- haive:project-info -->';
-const PROJECT_INFO_END = '<!-- /haive:project-info -->';
+export const PROJECT_INFO_START = '<!-- haive:project-info -->';
+export const PROJECT_INFO_END = '<!-- /haive:project-info -->';
+export const CLI_RULES_START = '<!-- haive:cli-rules -->';
+export const CLI_RULES_END = '<!-- /haive:cli-rules -->';
 
 export function projectInfoMarkdown(info: ProjectInfo): string {
   const lines: string[] = [
@@ -192,7 +194,7 @@ export interface GenerateFilesApply {
   commandCount: number;
 }
 
-const BASELINE_COMMANDS: CommandSpec[] = [
+export const BASELINE_COMMANDS: CommandSpec[] = [
   {
     id: 'workflow',
     title: 'Workflow start',
@@ -266,7 +268,7 @@ const BASELINE_COMMANDS: CommandSpec[] = [
   },
 ];
 
-function commandFileMarkdown(cmd: CommandSpec): string {
+export function commandFileMarkdown(cmd: CommandSpec): string {
   const frontmatter = ['---', `name: ${cmd.id}`, `description: ${cmd.description}`, '---', ''].join(
     '\n',
   );
@@ -298,7 +300,10 @@ export function agentsIndexMarkdown(agents: AgentSpec[], ext: 'md' | 'toml' = 'm
   return lines.join('\n');
 }
 
-function workflowConfigJson(prefs: GenerateFilesDetect['prefs'], framework: string | null): string {
+export function workflowConfigJson(
+  prefs: GenerateFilesDetect['prefs'],
+  framework: string | null,
+): string {
   const config = {
     verificationLevel: prefs.verificationLevel ?? 'standard',
     autoCommit: prefs.autoCommit ?? false,
@@ -312,7 +317,7 @@ function workflowConfigJson(prefs: GenerateFilesDetect['prefs'], framework: stri
 /** Merge an ordered list of rule blocks into one deduplicated block. Keys on
  *  `line.trim()` so "- foo" and "  - foo  " collapse; first-seen capitalization
  *  and leading whitespace win. Runs of 3+ blank lines collapse to 2. */
-function dedupLines(blocks: string[]): string {
+export function dedupLines(blocks: string[]): string {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const block of blocks) {
@@ -392,7 +397,7 @@ const DRUPAL_LSP_CONFIG = JSON.stringify(
  *  packaged here. */
 const DRUPAL_LSP_TARGET_BASES = ['.claude/plugins/drupal-php-lsp'];
 
-const DRUPAL_LSP_FILES: { rel: string; content: string }[] = DRUPAL_LSP_TARGET_BASES.flatMap(
+export const DRUPAL_LSP_FILES: { rel: string; content: string }[] = DRUPAL_LSP_TARGET_BASES.flatMap(
   (base) => [
     { rel: `${base}/.claude-plugin/marketplace.json`, content: DRUPAL_LSP_MARKETPLACE },
     {

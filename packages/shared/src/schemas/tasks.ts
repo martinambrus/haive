@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const workflowTypeSchema = z.enum(['onboarding', 'workflow']);
+export const workflowTypeSchema = z.enum(['onboarding', 'workflow', 'onboarding_upgrade']);
 
 export const taskStatusSchema = z.enum([
   'created',

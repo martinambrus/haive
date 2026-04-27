@@ -8,3 +8,4 @@ export * from './utils/index.js';
 export * from './cli-providers/index.js';
 export * from './sandbox/index.js';
 export * from './step-engine/index.js';
+export * from './templates/index.js';

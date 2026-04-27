@@ -316,29 +316,106 @@ function FieldControl({ field, value, onChange, disabled }: FieldRowProps) {
       );
     case 'multi-select': {
       const current = Array.isArray(value) ? (value as string[]) : [];
+      const options = field.options;
+      const hasGroups = options.some((o) => typeof o.group === 'string' && o.group.length > 0);
+      const quickBtn =
+        'rounded border border-neutral-800 bg-neutral-900 px-2 py-0.5 text-[11px] text-neutral-300 hover:border-indigo-700 hover:bg-indigo-950 disabled:opacity-50';
+
+      const renderCheckbox = (opt: (typeof options)[number]) => {
+        const checked = current.includes(opt.value);
+        return (
+          <label key={opt.value} className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={checked}
+              disabled={disabled}
+              onChange={(e) => {
+                if (e.target.checked) {
+                  onChange([...current, opt.value]);
+                } else {
+                  onChange(current.filter((v) => v !== opt.value));
+                }
+              }}
+            />
+            <span>{opt.label}</span>
+            {opt.badge && <OptionBadge text={opt.badge} color={opt.badgeColor} />}
+          </label>
+        );
+      };
+
+      const distinctGroups: string[] = [];
+      const grouped = new Map<string, typeof options>();
+      if (hasGroups) {
+        for (const opt of options) {
+          const g = opt.group ?? '';
+          let bucket = grouped.get(g);
+          if (!bucket) {
+            bucket = [];
+            grouped.set(g, bucket);
+            distinctGroups.push(g);
+          }
+          bucket.push(opt);
+        }
+      }
+
+      const toggleGroup = (groupValues: string[]) => {
+        const allSelected = groupValues.every((v) => current.includes(v));
+        if (allSelected) {
+          onChange(current.filter((v) => !groupValues.includes(v)));
+        } else {
+          onChange(Array.from(new Set([...current, ...groupValues])));
+        }
+      };
+
       return (
-        <div className="flex flex-col gap-1.5">
-          {field.options.map((opt) => {
-            const checked = current.includes(opt.value);
-            return (
-              <label key={opt.value} className="flex items-center gap-2 text-sm text-neutral-200">
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  disabled={disabled}
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      onChange([...current, opt.value]);
-                    } else {
-                      onChange(current.filter((v) => v !== opt.value));
-                    }
-                  }}
-                />
-                <span>{opt.label}</span>
-                {opt.badge && <OptionBadge text={opt.badge} color={opt.badgeColor} />}
-              </label>
-            );
-          })}
+        <div className="flex flex-col gap-2">
+          {options.length > 1 && (
+            <div className="flex flex-wrap gap-1.5">
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => onChange(options.map((o) => o.value))}
+                className={quickBtn}
+              >
+                Select all ({options.length})
+              </button>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => onChange([])}
+                className={quickBtn}
+              >
+                Deselect all
+              </button>
+            </div>
+          )}
+          {hasGroups ? (
+            <div className="flex flex-col gap-2.5">
+              {distinctGroups.map((g) => {
+                const groupOpts = grouped.get(g) ?? [];
+                const groupValues = groupOpts.map((o) => o.value);
+                const allInGroup = groupValues.every((v) => current.includes(v));
+                return (
+                  <div key={g || '__ungrouped__'} className="flex flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-neutral-300">{g || 'Other'}</span>
+                      <button
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => toggleGroup(groupValues)}
+                        className={quickBtn}
+                      >
+                        {allInGroup ? `Deselect ${groupOpts.length}` : `Select ${groupOpts.length}`}
+                      </button>
+                    </div>
+                    <div className="flex flex-col gap-1 pl-3">{groupOpts.map(renderCheckbox)}</div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1.5">{options.map(renderCheckbox)}</div>
+          )}
         </div>
       );
     }

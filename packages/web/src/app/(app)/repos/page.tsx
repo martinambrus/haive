@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { api, type Repository } from '@/lib/api-client';
 import { Button, Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
+import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
 
 function statusVariant(status: Repository['status']) {
   if (status === 'ready') return 'success' as const;
@@ -199,6 +200,9 @@ function RepoCard(props: RepoCardProps) {
               </Badge>
             ))}
         </div>
+      )}
+      {repo.status === 'ready' && (
+        <UpgradeAvailableBanner repositoryId={repo.id} repositoryName={repo.name} />
       )}
       {expanded && canEdit && (
         <div className="mt-2 border-t border-neutral-800 pt-3">

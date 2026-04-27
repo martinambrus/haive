@@ -118,3 +118,23 @@ Phase 0 scaffold is complete when `pnpm install` and `pnpm docker:dev` boot all 
 - Never run more than 7 concurrent worker tasks; WSL crashes under heavier parallelism.
 - The Docker socket mount in the worker container is effectively root on the host. Document this in the README and offer rootless Docker instructions in Phase 9 hardening.
 - All step content lives in TypeScript modules. Do not pipe legacy markdown into a CLI prompt.
+
+## Onboarding template versioning
+
+Deterministic onboarding artifacts (agent specs, slash commands, `workflow-config.json`, Drupal LSP plugin files, the `agents/README.md` index) are registered as `TemplateItem`s in `packages/worker/src/step-engine/template-manifest.ts`. Every item has:
+
+- `id`: stable slug (e.g. `agent.code-reviewer`, `command.review`, `workflow-config`).
+- `schemaVersion`: integer, bumped only on shape-breaking changes (filename change, new required frontmatter field).
+- `contentHash`: sha256 over the rendered reference output, computed on worker boot from `REFERENCE_CONTEXT` and cached per-manifest.
+- `render(ctx)`: invokes the existing generator and returns `TemplateRendering[]`; multiple renderings per item when an agent fans out across CLI target dirs.
+
+On worker boot, `syncTemplateManifestCache(db)` upserts the manifest into Postgres (`template_manifest_cache`) so the API can compute the current set hash without importing worker-side generators. Per-repo install state lives in `onboarding_artifacts`, one live row per `(repository_id, disk_path)`, soft-deleted via `superseded_at`.
+
+### When changing a template
+
+1. **Body-only change (rewording an agent prompt, fixing a typo, updating a command example):** edit the generator in `_agent-templates.ts` / `07-generate-files.ts`. The manifest's `contentHash` recomputes on worker boot and the upgrade-status endpoint starts reporting the template as changed. **Do not bump `schemaVersion`.**
+2. **Shape change (rename agent id, change `workflow-config.json` schema, change a command's disk path):** bump the item's `schemaVersion` in `template-manifest.ts`. Rollback of upgrades that crossed this bump will refuse to revert and tell the user to redeploy the prior Haive image.
+3. **New template:** add the generator, append to `buildTemplateItems()` in `template-manifest.ts`. First upgrade per-repo will surface it in the `new_artifact` bucket.
+4. **Removed template:** delete the `TemplateItem`. First upgrade per-repo will surface existing artifacts in the `obsolete` bucket.
+
+Out of scope of onboarding-upgrades: `.claude/skills/`, `.claude/knowledge_base/`, `.claude/mcp_settings.json`, `.claude/onboarding-review.md`, custom discovered agents. Skills and KB are refreshed by the `/workflow` code-change phase. `mcp_settings.json` is user-owned — created on first onboarding, never rewritten. The review file is one-shot; each upgrade writes a new `.claude/upgrade-reviews/<task_id>.md`.

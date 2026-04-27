@@ -58,3 +58,6 @@ temp/
 
 # Template source (extracted into TS step modules, no longer vendored)
 orchestration.zip
+
+# Local dev credentials (browser-verification by Claude Code)
+testcreds.txt

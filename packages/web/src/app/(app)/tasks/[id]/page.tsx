@@ -357,7 +357,6 @@ export default function TaskDetailPage() {
             <div key={step.id} data-step-id={step.stepId}>
               <StepCard
                 step={step}
-                taskType={task.type}
                 taskStatus={task.status}
                 submitting={submitting === step.stepId}
                 submitError={submitting === step.stepId ? submitError : null}
@@ -540,7 +539,6 @@ function TabButton({
 
 interface StepCardProps {
   step: TaskStep;
-  taskType: string;
   taskStatus: TaskStatus;
   submitting: boolean;
   submitError: string | null;
@@ -553,7 +551,6 @@ interface StepCardProps {
 
 function StepCard({
   step,
-  taskType,
   taskStatus,
   submitting,
   submitError,
@@ -569,10 +566,6 @@ function StepCard({
   const taskCancelled = taskStatus === 'cancelled';
   const showForm = !taskCancelled && step.status === 'waiting_form' && schema;
   const canRetry = !taskCancelled && step.status === 'failed';
-  const canSkip =
-    !taskCancelled &&
-    taskType !== 'onboarding' &&
-    (step.status === 'failed' || step.status === 'waiting_form');
 
   // Detect tooling step fields for inline connection test buttons
   const hasConnectionFields =
@@ -615,23 +608,11 @@ function StepCard({
         </div>
       )}
 
-      {(canRetry || canSkip) && (
+      {canRetry && (
         <div className="flex flex-wrap gap-2">
-          {canRetry && (
-            <Button size="sm" disabled={actionBusy} onClick={() => onAction('retry')}>
-              {actionBusy ? 'Working...' : 'Retry step'}
-            </Button>
-          )}
-          {canSkip && (
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={actionBusy}
-              onClick={() => onAction('skip')}
-            >
-              {actionBusy ? 'Working...' : 'Skip step'}
-            </Button>
-          )}
+          <Button size="sm" disabled={actionBusy} onClick={() => onAction('retry')}>
+            {actionBusy ? 'Working...' : 'Retry step'}
+          </Button>
         </div>
       )}
 

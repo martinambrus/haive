@@ -2,14 +2,21 @@ import { PROVIDER_SENSITIVE_STEP_IDS } from '@haive/shared';
 import type { StepRegistry } from '../registry.js';
 import { registerEnvReplicateSteps } from './env-replicate/index.js';
 import { registerOnboardingSteps } from './onboarding/index.js';
+import { registerOnboardingUpgradeSteps } from './onboarding-upgrade/index.js';
 import { registerWorkflowSteps } from './workflow/index.js';
 
-export { registerOnboardingSteps, registerEnvReplicateSteps, registerWorkflowSteps };
+export {
+  registerOnboardingSteps,
+  registerEnvReplicateSteps,
+  registerWorkflowSteps,
+  registerOnboardingUpgradeSteps,
+};
 
 export function registerAllSteps(registry: StepRegistry): void {
   registerOnboardingSteps(registry);
   registerEnvReplicateSteps(registry);
   registerWorkflowSteps(registry);
+  registerOnboardingUpgradeSteps(registry);
   assertProviderSensitiveListInSync(registry);
 }
 

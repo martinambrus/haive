@@ -8,6 +8,7 @@ import {
 } from '@haive/shared';
 import { initDatabase } from './db.js';
 import { initRedis } from './redis.js';
+import { syncTemplateManifestCache } from './step-engine/template-manifest.js';
 
 export interface BootstrapResult {
   databaseUrl: string;
@@ -35,6 +36,8 @@ export async function bootstrap(): Promise<BootstrapResult> {
     (await configService.get(CONFIG_KEYS.REPO_STORAGE_PATH)) ??
     '/var/lib/haive/repos';
   await mkdir(repoStoragePath, { recursive: true });
+
+  await syncTemplateManifestCache(db);
 
   logger.info({ repoStoragePath }, 'Worker bootstrap complete');
   return { databaseUrl, redisUrl, repoStoragePath };

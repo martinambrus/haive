@@ -84,6 +84,31 @@ taskRoutes.post('/', async (c) => {
     if (!repo) throw new HttpError(404, 'Repository not found');
   }
 
+  if (body.type === 'onboarding_upgrade') {
+    if (!body.repositoryId) {
+      throw new HttpError(400, 'onboarding_upgrade tasks require a repositoryId');
+    }
+    const priorOnboarding = await db.query.tasks.findFirst({
+      where: and(
+        eq(schema.tasks.repositoryId, body.repositoryId),
+        eq(schema.tasks.userId, userId),
+        eq(schema.tasks.type, 'onboarding'),
+        eq(schema.tasks.status, 'completed'),
+      ),
+      columns: { id: true },
+    });
+    const priorArtifact = await db.query.onboardingArtifacts.findFirst({
+      where: and(
+        eq(schema.onboardingArtifacts.repositoryId, body.repositoryId),
+        isNull(schema.onboardingArtifacts.supersededAt),
+      ),
+      columns: { id: true },
+    });
+    if (!priorOnboarding && !priorArtifact) {
+      throw new HttpError(409, 'No completed onboarding found for this repository; cannot upgrade');
+    }
+  }
+
   if (body.cliProviderId) {
     const provider = await db.query.cliProviders.findFirst({
       where: and(

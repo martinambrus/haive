@@ -3,6 +3,19 @@ export * from './default-agent-rules.js';
 export const APP_NAME = 'Haive';
 export const APP_VERSION = '0.1.0';
 
+/**
+ * Current Haive release version. Prefer `HAIVE_VERSION` env when set (CI
+ * release builds stamp this) so staging/prod images can advertise a newer
+ * version than the source-tree default. Callers should use `getHaiveVersion`
+ * rather than reading process.env directly so web/API/worker stay aligned.
+ */
+export function getHaiveVersion(): string {
+  if (typeof process !== 'undefined' && process.env && process.env.HAIVE_VERSION) {
+    return process.env.HAIVE_VERSION;
+  }
+  return APP_VERSION;
+}
+
 export const QUEUE_NAMES = {
   TASK: 'haive-task',
   CLI_EXEC: 'haive-cli-exec',

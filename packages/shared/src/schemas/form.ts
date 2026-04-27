@@ -27,6 +27,10 @@ export const optionSchema = z.object({
   badge: z.string().optional(),
   /** Badge color variant. Defaults to 'default' (neutral). */
   badgeColor: z.enum(['default', 'amber', 'indigo', 'green']).optional(),
+  /** Optional pretty group label. When set on one or more options in a
+   *  multi-select, the renderer clusters options by group and shows a
+   *  "Select all in <group>" button per distinct group. */
+  group: z.string().optional(),
 });
 
 export const selectFieldSchema = baseField.extend({
