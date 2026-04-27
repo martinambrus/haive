@@ -102,11 +102,36 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const fields: FormSchema['fields'] = [];
 
     const toOptions = (entries: UpgradePlanEntry[]) =>
-      entries.map((e) => ({
-        value: e.entryId,
-        label: e.diskPath,
-        group: templateKindLabel(e.templateKind),
-      }));
+      entries.map((e) => {
+        const opt: {
+          value: string;
+          label: string;
+          group: string;
+          details?: {
+            kind: 'diff';
+            baseline: string | null;
+            current: string;
+            editable: boolean;
+          };
+        } = {
+          value: e.entryId,
+          label: e.diskPath,
+          group: templateKindLabel(e.templateKind),
+        };
+        if (e.newContent !== null) {
+          // Diff baseline = what's actually on disk now (currentContent), so
+          // the user sees the change relative to their current state — not the
+          // prior baseline hash. For new_artifact / user_deleted, currentContent
+          // is null and the renderer treats null as an empty file (all-added).
+          opt.details = {
+            kind: 'diff',
+            baseline: e.currentContent,
+            current: e.newContent,
+            editable: false,
+          };
+        }
+        return opt;
+      });
 
     if (cleanUpdates.length > 0) {
       fields.push({
@@ -145,6 +170,15 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         label: `Conflict: ${c.diskPath}`,
         description:
           'Your copy differs from the prior baseline AND the template changed. Pick one.',
+        details:
+          c.newContent !== null
+            ? {
+                kind: 'diff' as const,
+                baseline: c.currentContent,
+                current: c.newContent,
+                editable: false,
+              }
+            : undefined,
         options: [
           { value: 'apply_theirs', label: 'Overwrite with new template' },
           { value: 'keep_ours', label: 'Keep my edits (do not update)' },

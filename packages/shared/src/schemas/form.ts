@@ -1,10 +1,26 @@
 import { z } from 'zod';
 
+/** Optional auxiliary content the renderer can show next to a field/option.
+ *  Currently the only `kind` is `'diff'`, used by the upgrade form so each
+ *  artifact selection can disclose a baseline-vs-current diff. `editable` is a
+ *  forward-looking flag — the renderer ignores it today (read-only diff only),
+ *  but workflow tasks will use `editable: true` to let users hand-edit the
+ *  proposed content before apply. */
+export const diffDetailsSchema = z.object({
+  kind: z.literal('diff'),
+  baseline: z.string().nullable(),
+  current: z.string(),
+  editable: z.boolean().optional(),
+});
+
+export type DiffDetails = z.infer<typeof diffDetailsSchema>;
+
 const baseField = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
   description: z.string().optional(),
   required: z.boolean().optional(),
+  details: diffDetailsSchema.optional(),
 });
 
 export const textFieldSchema = baseField.extend({
@@ -31,6 +47,10 @@ export const optionSchema = z.object({
    *  multi-select, the renderer clusters options by group and shows a
    *  "Select all in <group>" button per distinct group. */
   group: z.string().optional(),
+  /** Per-option diff disclosure (e.g. the upgrade form attaches a baseline-vs-
+   *  current diff to each artifact option). Field-level `details` is also
+   *  supported on baseField for non-multi-select fields like radios. */
+  details: diffDetailsSchema.optional(),
 });
 
 export const selectFieldSchema = baseField.extend({

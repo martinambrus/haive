@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import type { FormField, FormSchema, LeafFormField } from '@haive/shared';
+import { diffLines } from 'diff';
+import type { DiffDetails, FormField, FormSchema, LeafFormField } from '@haive/shared';
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { cn } from '@/lib/cn';
@@ -148,6 +149,76 @@ const BADGE_COLORS: Record<string, string> = {
   green: 'bg-green-900/60 text-green-300',
 };
 
+interface DiffDisclosureProps {
+  details: DiffDetails;
+}
+
+/** Expandable per-line diff. baseline=null is treated as an empty file
+ *  (renders the full `current` body as additions). The `editable` flag is
+ *  carried through the schema for forward compatibility but ignored here —
+ *  the upgrade form ships read-only diffs today. Workflow tasks will later
+ *  honor `editable: true` to allow inline corrections before apply. */
+function DiffDisclosure({ details }: DiffDisclosureProps) {
+  const { baseline, current } = details;
+  const { lines, added, removed } = useMemo(() => {
+    const parts = diffLines(baseline ?? '', current);
+    let addedCount = 0;
+    let removedCount = 0;
+    const out: Array<{ kind: 'add' | 'remove' | 'context'; text: string }> = [];
+    for (const part of parts) {
+      const partLines = part.value.split('\n');
+      // diffLines emits a trailing '' when the segment ends with \n; drop it
+      // so we don't render a blank diff row.
+      if (partLines.length > 0 && partLines[partLines.length - 1] === '') partLines.pop();
+      const kind: 'add' | 'remove' | 'context' = part.added
+        ? 'add'
+        : part.removed
+          ? 'remove'
+          : 'context';
+      for (const line of partLines) {
+        out.push({ kind, text: line });
+        if (kind === 'add') addedCount += 1;
+        else if (kind === 'remove') removedCount += 1;
+      }
+    }
+    return { lines: out, added: addedCount, removed: removedCount };
+  }, [baseline, current]);
+
+  const summary =
+    baseline === null
+      ? `View new content (${added} line${added === 1 ? '' : 's'})`
+      : `View diff (+${added} / -${removed})`;
+
+  return (
+    <details className="ml-6 mt-1 rounded border border-neutral-800 bg-neutral-950 text-xs">
+      <summary className="cursor-pointer select-none px-2 py-1 text-neutral-400 hover:text-neutral-200">
+        {summary}
+      </summary>
+      <div className="max-h-96 overflow-auto border-t border-neutral-800 font-mono text-[11px] leading-tight">
+        {lines.length === 0 ? (
+          <div className="px-2 py-1 text-neutral-500">No content changes.</div>
+        ) : (
+          lines.map((line, i) => {
+            const cls =
+              line.kind === 'add'
+                ? 'bg-green-950/60 text-green-200'
+                : line.kind === 'remove'
+                  ? 'bg-red-950/60 text-red-200'
+                  : 'text-neutral-500';
+            const prefix = line.kind === 'add' ? '+ ' : line.kind === 'remove' ? '- ' : '  ';
+            return (
+              <div key={i} className={cn('whitespace-pre px-2', cls)}>
+                {prefix}
+                {line.text}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </details>
+  );
+}
+
 function OptionBadge({ text, color }: { text: string; color?: string }) {
   const cls = BADGE_COLORS[color ?? 'default'] ?? BADGE_COLORS.default;
   return (
@@ -243,6 +314,9 @@ function FieldRow({ field, value, onChange, disabled }: FieldRowProps) {
         {field.required && <span className="ml-1 text-red-400">*</span>}
       </Label>
       {field.description && <p className="text-xs text-neutral-200">{field.description}</p>}
+      {field.type !== 'multi-select' && field.details?.kind === 'diff' && (
+        <DiffDisclosure details={field.details} />
+      )}
       <FieldControl field={field} value={value} onChange={onChange} disabled={disabled} />
     </div>
   );
@@ -324,22 +398,25 @@ function FieldControl({ field, value, onChange, disabled }: FieldRowProps) {
       const renderCheckbox = (opt: (typeof options)[number]) => {
         const checked = current.includes(opt.value);
         return (
-          <label key={opt.value} className="flex items-center gap-2 text-sm text-neutral-200">
-            <input
-              type="checkbox"
-              checked={checked}
-              disabled={disabled}
-              onChange={(e) => {
-                if (e.target.checked) {
-                  onChange([...current, opt.value]);
-                } else {
-                  onChange(current.filter((v) => v !== opt.value));
-                }
-              }}
-            />
-            <span>{opt.label}</span>
-            {opt.badge && <OptionBadge text={opt.badge} color={opt.badgeColor} />}
-          </label>
+          <div key={opt.value} className="flex flex-col">
+            <label className="flex items-center gap-2 text-sm text-neutral-200">
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={disabled}
+                onChange={(e) => {
+                  if (e.target.checked) {
+                    onChange([...current, opt.value]);
+                  } else {
+                    onChange(current.filter((v) => v !== opt.value));
+                  }
+                }}
+              />
+              <span>{opt.label}</span>
+              {opt.badge && <OptionBadge text={opt.badge} color={opt.badgeColor} />}
+            </label>
+            {opt.details?.kind === 'diff' && <DiffDisclosure details={opt.details} />}
+          </div>
         );
       };
 
