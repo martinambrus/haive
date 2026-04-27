@@ -53,11 +53,14 @@ describe('renderSquidConfig', () => {
     expect(ipLine).toBe('acl allowed_ips dst 10.0.0.1 10.0.0.2');
   });
 
-  it('disables cache and sends logs to stdio', () => {
+  it('disables cache and lets the squid entrypoint own log routing', () => {
+    // The image entrypoint tails /var/log/squid/*.log to docker stdout, so the
+    // generated config must NOT redirect logs to /dev/stdout itself — that path
+    // bypasses the entrypoint perm setup and squid dies with FATAL on boot.
     const cfg = renderSquidConfig({ domains: [], ips: [] });
     expect(cfg).toContain('cache deny all');
-    expect(cfg).toContain('access_log stdio:/dev/stdout squid');
-    expect(cfg).toContain('cache_log stdio:/dev/stderr');
+    expect(cfg).not.toContain('access_log stdio:');
+    expect(cfg).not.toContain('cache_log stdio:');
   });
 
   it('honors custom port', () => {
