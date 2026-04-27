@@ -31,12 +31,22 @@ export class ZaiAdapter extends BaseCliAdapter {
   readonly defaultExecutable = 'claude';
   readonly supportsSubagents = true;
   readonly supportsApi = true;
-  readonly supportsCliAuth = true;
+  // Z.AI ships no standalone login subcommand — auth is API-key-only via
+  // Z_AI_API_KEY → ANTHROPIC_API_KEY env mapping. Marking supportsCliAuth=true
+  // misled the dispatcher and the auth-volume guard into demanding a login
+  // flow that does not exist.
+  readonly supportsCliAuth = false;
   readonly supportsMcp = true;
   readonly supportsPlugins = true;
-  readonly defaultAuthMode = 'mixed' as const;
-  readonly apiKeyEnvName = 'ANTHROPIC_API_KEY';
-  readonly defaultModel = 'zai-latest';
+  readonly defaultAuthMode = 'api_key' as const;
+  // Z.AI distributes auth as a bearer token, not a long-lived API key. The
+  // claude binary and the Anthropic SDK both accept ANTHROPIC_AUTH_TOKEN as
+  // the credential variable for that flow.
+  readonly apiKeyEnvName = 'ANTHROPIC_AUTH_TOKEN';
+  // Z.AI exposes GLM models. `zai-latest` is not a real model code at the API
+  // layer — sending it returns "Unknown Model". `glm-4.6` is the documented
+  // default; users can override per-task or via ANTHROPIC_DEFAULT_*_MODEL.
+  readonly defaultModel = 'glm-4.6';
   readonly rulesFile = 'CLAUDE.md';
   readonly rulesFileMode = 'import' as const;
   override readonly effortScale = ZAI_EFFORT_SCALE;
@@ -66,17 +76,29 @@ export class ZaiAdapter extends BaseCliAdapter {
   }
 
   override buildApiInvocation(
-    _provider: CliProviderRecord,
+    provider: CliProviderRecord,
     prompt: string,
     opts: InvokeOpts,
   ): ApiCallSpec {
+    const env = provider.envVars ?? {};
+    const baseUrl = env.ANTHROPIC_BASE_URL ?? env.Z_AI_API_URL ?? 'https://api.z.ai/api/anthropic';
+    // claude-binary-style env overrides: surface the same knobs in API mode so
+    // a Z.AI provider configured for the CLI (where the binary translates the
+    // Sonnet/Opus/Haiku tier names into glm-* codes) keeps working when the
+    // dispatcher picks the API path.
+    const envModel =
+      env.Z_AI_MODEL ??
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL ??
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL ??
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL ??
+      env.CLAUDE_MODEL;
     return {
       sdkPackage: '@anthropic-ai/sdk',
-      defaultModel: this.defaultModel,
+      defaultModel: envModel ?? this.defaultModel,
       apiKeyEnvName: this.apiKeyEnvName,
-      baseUrl: 'https://api.zai.com/v1',
+      baseUrl,
       prompt,
-      model: this.effectiveModel(opts),
+      model: opts.modelOverride ?? envModel ?? this.defaultModel,
       maxOutputTokens: this.effectiveMaxTokens(opts),
     };
   }
