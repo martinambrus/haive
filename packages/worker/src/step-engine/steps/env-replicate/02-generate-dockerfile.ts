@@ -170,9 +170,13 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
 
   if (runtimes.includes('node')) {
     const nodeMajor = (versions.node ?? '22').split('.')[0];
-    lines.push(`# Node.js ${nodeMajor}`);
+    lines.push(
+      `# Node.js ${nodeMajor} (build-essential + python3 needed by node-gyp for native modules)`,
+    );
     lines.push(`RUN curl -fsSL https://deb.nodesource.com/setup_${nodeMajor}.x | bash - \\`);
-    lines.push('    && apt-get install -y --no-install-recommends nodejs \\');
+    lines.push(
+      '    && apt-get install -y --no-install-recommends nodejs build-essential python3 pkg-config \\',
+    );
     lines.push('    && rm -rf /var/lib/apt/lists/* \\');
     lines.push('    && corepack enable');
     lines.push('');

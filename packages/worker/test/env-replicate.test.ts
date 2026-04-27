@@ -219,6 +219,9 @@ describe('renderDockerfile', () => {
     expect(out).toContain('# Node.js 22');
     expect(out).toContain('https://deb.nodesource.com/setup_22.x');
     expect(out).toContain('corepack enable');
+    expect(out).toContain('build-essential');
+    expect(out).toContain('python3');
+    expect(out).toContain('pkg-config');
   });
 
   it('adds a PHP install block with the declared version', () => {
