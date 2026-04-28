@@ -5,12 +5,19 @@ import { schema } from '@haive/database';
 import { getHaiveVersion, normalizeContent, sha256Hex } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
+  expandCustomBundlesFor,
   expandManifestFor,
   getTemplateManifest,
   updateApplicableTemplateIds,
   type ExpandedRendering,
   type TemplateRenderContext,
 } from '../../template-manifest.js';
+import {
+  extractBundleItemId,
+  loadBundlesForExpansion,
+  resolveSkillTargets,
+  type BundleWithMeta,
+} from '../../_custom-bundle-loader.js';
 import { pathExists } from '../onboarding/_helpers.js';
 import type { GenerateFilesDetect } from '../onboarding/07-generate-files.js';
 import { computeLineDelta } from './_diff.js';
@@ -70,7 +77,7 @@ export interface UpgradePlanOutput extends UpgradePlanDetect {
   backfilledRows: number;
 }
 
-interface LiveArtifactRow {
+export interface LiveArtifactRow {
   id: string;
   diskPath: string;
   templateId: string;
@@ -80,6 +87,7 @@ interface LiveArtifactRow {
   writtenHash: string;
   formValuesSnapshot: Record<string, unknown> | null;
   sourceStepId: string;
+  bundleItemId: string | null;
 }
 
 async function requireRepositoryId(ctx: StepContext): Promise<string> {
@@ -108,6 +116,7 @@ async function loadLiveArtifacts(
       writtenHash: schema.onboardingArtifacts.writtenHash,
       formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
       sourceStepId: schema.onboardingArtifacts.sourceStepId,
+      bundleItemId: schema.onboardingArtifacts.bundleItemId,
     })
     .from(schema.onboardingArtifacts)
     .where(
@@ -126,6 +135,7 @@ async function loadLiveArtifacts(
     writtenHash: r.writtenHash,
     formValuesSnapshot: (r.formValuesSnapshot ?? null) as Record<string, unknown> | null,
     sourceStepId: r.sourceStepId,
+    bundleItemId: r.bundleItemId,
   }));
 }
 
@@ -218,7 +228,7 @@ async function readDiskContent(
   }
 }
 
-function classifyEntry(args: {
+export function classifyEntry(args: {
   live: LiveArtifactRow | null;
   current: ExpandedRendering | null;
   diskContent: string | null;
@@ -234,8 +244,17 @@ function classifyEntry(args: {
 
   const templateUnchanged = live.templateContentHash === current.templateContentHash;
   const diskMatchesBaseline = diskHash === live.writtenHash;
+  // For custom items, a templateId mismatch means the live row references a
+  // bundle item that has since been replaced (e.g. ZIP re-uploaded → old
+  // items deleted, new ones created with fresh UUIDs). Even when content is
+  // byte-identical, we need apply to rewrite the artifact row so its
+  // templateId/bundle_item_id realigns with the live bundle item — otherwise
+  // upgrade-status keeps reporting drift forever.
+  const customTemplateIdShifted =
+    live.templateId !== current.templateId &&
+    (live.templateId.startsWith('custom.') || current.templateId.startsWith('custom.'));
 
-  if (templateUnchanged) return 'unchanged';
+  if (templateUnchanged && !customTemplateIdShifted) return 'unchanged';
   if (diskMatchesBaseline) return 'clean_update';
   return 'conflict';
 }
@@ -266,7 +285,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       );
     }
 
-    const expanded = expandManifestFor(renderCtx, manifest);
+    const expanded = await unionExpandedFor(ctx, renderCtx, repositoryId);
     const installedTemplateSetHash =
       liveRows.length > 0 ? computeInstalledSetHashFromRows(liveRows) : null;
 
@@ -339,7 +358,6 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
   async apply(ctx, args): Promise<UpgradePlanOutput> {
     const detected = args.detected;
     let backfilledRows = 0;
-    const manifest = getTemplateManifest();
 
     if (detected.ranBackfill) {
       const liveRows = await loadLiveArtifacts(ctx, detected.repositoryId);
@@ -347,7 +365,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       if (!renderCtx) {
         throw new Error('upgrade-plan apply: render context unexpectedly missing during backfill');
       }
-      const expanded = expandManifestFor(renderCtx, manifest);
+      const expanded = await unionExpandedFor(ctx, renderCtx, detected.repositoryId);
 
       const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
       const haiveVersion = getHaiveVersion();
@@ -376,6 +394,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
           sourceStepId: '01-upgrade-plan',
           source: 'backfill' as const,
           haiveVersion,
+          bundleItemId: extractBundleItemId(r.templateId),
         });
       }
       if (rowsToInsert.length > 0) {
@@ -390,16 +409,56 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
 
     // Always refresh applicable_template_ids on plan, regardless of backfill,
     // so legacy repos onboarded before the column existed get populated on
-    // their first upgrade attempt.
-    const applicableExpanded = expandManifestFor(
+    // their first upgrade attempt. Joins the manifest expansion with bundle
+    // expansion so custom items show up in the per-repo applicable set.
+    const applicableExpanded = await unionExpandedFor(
+      ctx,
       detected.renderCtxSnapshot as unknown as TemplateRenderContext,
-      manifest,
+      detected.repositoryId,
     );
     await updateApplicableTemplateIds(ctx.db, detected.repositoryId, applicableExpanded);
 
     return { ...detected, backfilledRows };
   },
 };
+
+/** Union the deterministic Haive-template expansion with the per-repo
+ *  custom-bundle expansion, deduping on diskPath (Haive items take priority
+ *  on collision — should not happen in practice). Wraps the two
+ *  responsibilities so plan/backfill/applicable-set computations all see the
+ *  same combined set without copy-pasting the merge loop. */
+async function unionExpandedFor(
+  ctx: StepContext,
+  renderCtx: TemplateRenderContext,
+  repositoryId: string,
+): Promise<ExpandedRendering[]> {
+  const manifest = getTemplateManifest();
+  const haiveExpanded = expandManifestFor(renderCtx, manifest);
+
+  const bundles: BundleWithMeta[] = await loadBundlesForExpansion(ctx.db, repositoryId, ctx.logger);
+  const skillTargets = await resolveSkillTargets(ctx.db, ctx.userId);
+  const customExpanded = expandCustomBundlesFor(bundles, renderCtx.agentTargets, skillTargets);
+
+  const out: ExpandedRendering[] = [];
+  const seen = new Set<string>();
+  for (const r of haiveExpanded) {
+    if (seen.has(r.diskPath)) continue;
+    seen.add(r.diskPath);
+    out.push(r);
+  }
+  for (const r of customExpanded) {
+    if (seen.has(r.diskPath)) {
+      ctx.logger.warn(
+        { diskPath: r.diskPath, templateId: r.templateId },
+        'upgrade-plan: bundle rendering collides with Haive template, dropping bundle row',
+      );
+      continue;
+    }
+    seen.add(r.diskPath);
+    out.push(r);
+  }
+  return out;
+}
 
 function computeInstalledSetHashFromRows(rows: LiveArtifactRow[]): string {
   const parts = rows

@@ -1,9 +1,9 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CliProviderName, DetectResult, FormSchema } from '@haive/shared';
-import { getCliProviderMetadata } from '@haive/shared';
+import { getCliProviderMetadata, skillEntrySchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
 import type { KbFileSummary } from './09-qa.js';
@@ -33,6 +33,10 @@ interface SkillGenDetect {
    *  collapse to `.claude/skills`; gemini has `.gemini/skills`; codex has
    *  `.agents/skills`). Apply writes each skill + sub-skills to every target. */
   skillTargetDirs: string[];
+  /** Skills imported from custom bundles for this repo. Written to disk first
+   *  in apply(); their IDs are also passed to the LLM so it can avoid
+   *  regenerating any of them. */
+  bundleSkills: SkillEntry[];
   /** Transient — file tree handed to the LLM prompt; stripped before persisting. */
   __fileTree?: string;
 }
@@ -52,74 +56,27 @@ interface SkillGenApply {
   rejectedIds: string[];
 }
 
-interface SkillKeyConcept {
-  term: string;
-  definition: string;
-}
-
-interface SkillNamedBlock {
-  name: string;
-  body: string;
-}
-
-interface SkillPitfall {
-  title: string;
-  body: string;
-}
-
-interface SkillCodeLocation {
-  label: string;
-  path: string;
-}
-
-export interface SkillSubSkill {
-  /** Filename slug — kebab-case, no extension. Becomes `sub-skills/<slug>.md`. */
-  slug: string;
-  /** Full unique frontmatter `name` — by convention `<parent-id>-<slug>`. */
-  name: string;
-  /** H1 title rendered at the top of the sub-skill file. */
-  title: string;
-  /** Activation description shown in sub-skill frontmatter. */
-  description: string;
-  /** Optional grouping shown in parent SKILL.md's `## Sub-Skills` section. */
-  category?: string;
-  /** Short line shown next to the sub-skill link in the parent SKILL.md. */
-  summary: string;
-  /** Full markdown body of the sub-skill file (appears after the Identification block). */
-  body: string;
-  /** Optional extra rows for the Identification block (Parent row is auto-added). */
-  identification?: { label: string; value: string }[];
-}
-
-export interface SkillRelated {
-  /** Path from this skill's dir — e.g. `../statistics/SKILL.md`. */
-  path: string;
-  summary: string;
-}
-
-export interface SkillEntry {
-  id: string;
-  title: string;
-  description: string;
-  /** Fallback catch-all body when structured sections are absent. */
-  instructions?: string;
-  quickStart?: string;
-  overview?: string;
-  keyConcepts?: SkillKeyConcept[];
-  /** Optional markdown table block — rendered under `## Quick Reference`. */
-  quickReference?: string;
-  decisionTree?: string;
-  implementationPatterns?: SkillNamedBlock[];
-  pitfalls?: SkillPitfall[];
-  codeLocations?: SkillCodeLocation[];
-  usage?: string;
-  /** Progressive-disclosure leaves. Each entry writes to `sub-skills/<slug>.md`. */
-  subSkills?: SkillSubSkill[];
-  /** Cross-references to other skills in the same workspace. */
-  relatedSkills?: SkillRelated[];
-  /** Common-patterns block — shown under `## Common Patterns`. */
-  commonPatterns?: SkillNamedBlock[];
-}
+// Skill IR types (SkillEntry, SkillSubSkill, supporting shapes) live in
+// @haive/shared so the bundle parser, web UI, and worker share one source
+// of truth. Re-exported here so existing worker imports keep resolving.
+import type {
+  SkillCodeLocation,
+  SkillEntry,
+  SkillKeyConcept,
+  SkillNamedBlock,
+  SkillPitfall,
+  SkillRelated,
+  SkillSubSkill,
+} from '@haive/shared';
+export type {
+  SkillCodeLocation,
+  SkillEntry,
+  SkillKeyConcept,
+  SkillNamedBlock,
+  SkillPitfall,
+  SkillRelated,
+  SkillSubSkill,
+};
 
 const DEFAULT_MAX_SKILLS = 15;
 const HARD_MAX_SKILLS = 30;
@@ -214,6 +171,42 @@ async function collectShortFileTree(repoPath: string): Promise<string> {
   return capped.length < files.length
     ? tree + `\n[...truncated, ${files.length - capped.length} more files]`
     : tree;
+}
+
+/** Load every skill surfaced by an active custom bundle bound to this repo.
+ *  Bundle skills are written to disk first in apply() and their IDs are
+ *  passed to the LLM so it can avoid regenerating any of them (bundle wins
+ *  on collision). */
+async function loadBundleSkills(ctx: StepContext): Promise<SkillEntry[]> {
+  const taskRow = await ctx.db
+    .select({ repositoryId: schema.tasks.repositoryId })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, ctx.taskId))
+    .limit(1);
+  const repositoryId = taskRow[0]?.repositoryId ?? null;
+  if (!repositoryId) return [];
+
+  const items = await ctx.db
+    .select({
+      sourcePath: schema.customBundleItems.sourcePath,
+      normalizedSpec: schema.customBundleItems.normalizedSpec,
+    })
+    .from(schema.customBundleItems)
+    .innerJoin(schema.customBundles, eq(schema.customBundleItems.bundleId, schema.customBundles.id))
+    .where(
+      and(
+        eq(schema.customBundles.repositoryId, repositoryId),
+        eq(schema.customBundleItems.kind, 'skill'),
+      ),
+    );
+
+  const out: SkillEntry[] = [];
+  for (const item of items) {
+    const parsed = skillEntrySchema.safeParse(item.normalizedSpec);
+    if (!parsed.success) continue;
+    out.push(parsed.data);
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -665,6 +658,19 @@ function buildPrompt(args: LlmBuildArgs): string {
     detected.skillTargetDirs.length > 1
       ? ` (mirrored to ${detected.skillTargetDirs.map((d) => `\`${d}/\``).join(', ')} so every enabled CLI sees the same skills)`
       : '';
+  const bundleSkillIds = (detected.bundleSkills ?? []).map((s) => s.id);
+  const reservedSection =
+    bundleSkillIds.length > 0
+      ? [
+          '## Reserved skill ids (already imported from custom bundles — DO NOT regenerate)',
+          '',
+          ...bundleSkillIds.map((id) => `- ${id}`),
+          '',
+          'These skills are already on disk under the same target dirs. Emit different ids for any',
+          'similar capability, or omit it entirely if the bundle skill already covers the domain.',
+          '',
+        ].join('\n')
+      : '';
   return [
     'You are a senior software engineer generating Claude Code SKILLS for this specific codebase.',
     '',
@@ -699,6 +705,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '',
     kbList,
     '',
+    reservedSection,
     '## Repository overview (partial file tree)',
     '',
     '```',
@@ -814,14 +821,30 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     await ctx.emitProgress('Listing existing knowledge base...');
     const kbFiles = await listKbFiles(ctx.repoPath);
 
+    await ctx.emitProgress('Loading bundle skills...');
+    const bundleSkills = await loadBundleSkills(ctx);
+
     await ctx.emitProgress('Collecting file tree for LLM orientation...');
     const fileTree = await collectShortFileTree(ctx.repoPath);
 
     ctx.logger.info(
-      { framework, language, kbFileCount: kbFiles.length, skillTargetDirs },
+      {
+        framework,
+        language,
+        kbFileCount: kbFiles.length,
+        skillTargetDirs,
+        bundleSkillCount: bundleSkills.length,
+      },
       'skill-generation detect complete',
     );
-    return { framework, language, kbFiles, skillTargetDirs, __fileTree: fileTree };
+    return {
+      framework,
+      language,
+      kbFiles,
+      skillTargetDirs,
+      bundleSkills,
+      __fileTree: fileTree,
+    };
   },
 
   form(_ctx, _detected): FormSchema {
@@ -919,44 +942,57 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
         ? detected.skillTargetDirs
         : [DEFAULT_PROJECT_SKILLS_DIR];
 
-    const entries = parseSkillEntries(args.llmOutput ?? null);
-    if (entries.length === 0) {
+    const bundleSkills = detected.bundleSkills ?? [];
+    const bundleSkillIds = new Set(bundleSkills.map((s) => s.id));
+
+    const llmEntries = parseSkillEntries(args.llmOutput ?? null);
+    if (llmEntries.length === 0 && bundleSkills.length === 0) {
       throw new SkillGenParseError(
-        'LLM produced no valid skill entries — surface failure for retry.',
+        'LLM produced no valid skill entries and no bundle skills present — surface failure for retry.',
       );
     }
 
-    const seenIds = new Set<string>();
+    const seenIds = new Set<string>(bundleSkillIds);
     const rejectedIds: string[] = [];
-    const accepted: SkillEntry[] = [];
-    for (const entry of entries) {
+    const acceptedLlm: SkillEntry[] = [];
+    for (const entry of llmEntries) {
       const cleanId = sanitizeSkillId(entry.id);
       if (!cleanId) {
         rejectedIds.push(String(entry.id));
         continue;
       }
       if (seenIds.has(cleanId)) {
-        rejectedIds.push(`${entry.id} (duplicate of ${cleanId})`);
+        // Bundle wins on collision, or LLM duplicated within its own output.
+        rejectedIds.push(
+          bundleSkillIds.has(cleanId)
+            ? `${entry.id} (already provided by bundle as ${cleanId})`
+            : `${entry.id} (duplicate of ${cleanId})`,
+        );
         continue;
       }
       seenIds.add(cleanId);
-      accepted.push({ ...entry, id: cleanId });
+      acceptedLlm.push({ ...entry, id: cleanId });
     }
 
-    if (accepted.length === 0) {
+    if (acceptedLlm.length === 0 && bundleSkills.length === 0) {
       throw new SkillGenParseError(
         'No skill entries survived id sanitization — surface failure for retry.',
       );
     }
 
-    const droppedFromCap = Math.max(0, accepted.length - maxSkills);
-    const final = accepted.slice(0, maxSkills);
+    // Cap applies to LLM output only; bundle skills are user-supplied and
+    // always written.
+    const droppedFromCap = Math.max(0, acceptedLlm.length - maxSkills);
+    const finalLlm = acceptedLlm.slice(0, maxSkills);
+    const final: SkillEntry[] = [...bundleSkills, ...finalLlm];
 
     const written: SkillGenApply['written'] = [];
     const summaryForReadme: { id: string; title: string; description: string }[] = [];
     let totalSubSkills = 0;
 
     // Render each skill + sub-skill markdown once; mirror to every target dir.
+    // Bundle skills go first so any LLM skill with a colliding id (already
+    // filtered out above) cannot accidentally overwrite the bundle copy.
     for (const entry of final) {
       const skillMd = skillToMarkdown(entry);
       const subs = sanitizeSubSkills(entry);

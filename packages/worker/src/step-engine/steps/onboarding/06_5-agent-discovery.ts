@@ -1,6 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { DetectResult, FormSchema } from '@haive/shared';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import { agentSpecSchema, type DetectResult, type FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import type { AgentColor, AgentSpec } from './_agent-templates.js';
 import {
@@ -16,9 +18,10 @@ export interface AgentCandidate {
   hint: string;
   count: number;
   recommended: boolean;
-  /** 'scan' for deterministic file-pattern matches, 'llm' for AI-suggested. */
-  source?: 'scan' | 'llm';
-  /** Full structured body; set for LLM-generated custom agents only. */
+  /** 'scan' for deterministic file-pattern matches, 'llm' for AI-suggested,
+   *  'bundle' for items pulled in from a custom user bundle. */
+  source?: 'scan' | 'llm' | 'bundle';
+  /** Full structured body; set for LLM-generated and bundle-sourced agents. */
   body?: AgentSpec;
 }
 
@@ -662,6 +665,86 @@ function enrichCandidates(detected: AgentDiscoveryDetect, llmOutput: unknown): A
   return candidates;
 }
 
+/** Load every agent surfaced by an active custom bundle bound to this repo.
+ *  Each item carries its full canonical IR so the form can render it as a
+ *  default-checked candidate and 07-generate-files can pick the spec straight
+ *  out of the apply output. */
+async function loadBundleAgentCandidates(ctx: StepContext): Promise<AgentCandidate[]> {
+  const taskRow = await ctx.db
+    .select({ repositoryId: schema.tasks.repositoryId })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, ctx.taskId))
+    .limit(1);
+  const repositoryId = taskRow[0]?.repositoryId ?? null;
+  if (!repositoryId) return [];
+
+  const bundles = await ctx.db
+    .select({ id: schema.customBundles.id, name: schema.customBundles.name })
+    .from(schema.customBundles)
+    .where(eq(schema.customBundles.repositoryId, repositoryId));
+  if (bundles.length === 0) return [];
+  const bundleNameById = new Map(bundles.map((b) => [b.id, b.name]));
+
+  const items = await ctx.db
+    .select({
+      bundleId: schema.customBundleItems.bundleId,
+      sourcePath: schema.customBundleItems.sourcePath,
+      normalizedSpec: schema.customBundleItems.normalizedSpec,
+    })
+    .from(schema.customBundleItems)
+    .innerJoin(schema.customBundles, eq(schema.customBundleItems.bundleId, schema.customBundles.id))
+    .where(eq(schema.customBundles.repositoryId, repositoryId));
+
+  const out: AgentCandidate[] = [];
+  for (const item of items) {
+    const parsed = agentSpecSchema.safeParse(item.normalizedSpec);
+    if (!parsed.success) {
+      ctx.logger.warn(
+        { sourcePath: item.sourcePath, issues: parsed.error.issues },
+        'agent-discovery: bundle agent failed schema validation, skipping',
+      );
+      continue;
+    }
+    const spec = parsed.data;
+    const bundleName = bundleNameById.get(item.bundleId) ?? 'bundle';
+    out.push({
+      id: spec.id,
+      label: spec.title,
+      hint: spec.description || `from bundle ${bundleName}`,
+      count: 0,
+      recommended: true,
+      source: 'bundle',
+      body: spec,
+    });
+  }
+  return out;
+}
+
+/** Fold bundle-sourced agent candidates into the main candidate list. Bundle
+ *  wins on ID collision: the existing candidate is replaced (its body field
+ *  is upgraded to the bundle IR and source is reset to 'bundle'). New IDs are
+ *  appended. */
+function mergeBundleCandidates(
+  candidates: AgentCandidate[],
+  bundleCandidates: AgentCandidate[],
+  ctx: StepContext,
+): void {
+  const byId = new Map(candidates.map((c, i) => [c.id, i]));
+  for (const bundleCandidate of bundleCandidates) {
+    const existingIdx = byId.get(bundleCandidate.id);
+    if (existingIdx === undefined) {
+      candidates.push(bundleCandidate);
+      byId.set(bundleCandidate.id, candidates.length - 1);
+      continue;
+    }
+    ctx.logger.info(
+      { id: bundleCandidate.id },
+      'agent-discovery: bundle agent overrides scan candidate of same id',
+    );
+    candidates[existingIdx] = bundleCandidate;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Step definition                                                     */
 /* ------------------------------------------------------------------ */
@@ -688,6 +771,10 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
 
     await ctx.emitProgress('Scanning repository for file patterns...');
     const candidates = await discoverAgentCandidates(ctx.repoPath, framework);
+
+    await ctx.emitProgress('Loading bundle agents...');
+    const bundleCandidates = await loadBundleAgentCandidates(ctx);
+    mergeBundleCandidates(candidates, bundleCandidates, ctx);
 
     await ctx.emitProgress('Collecting file tree for LLM analysis...');
     const fileTree = await collectFileTree(ctx.repoPath);
@@ -732,7 +819,11 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
     const options = enriched.map((c) => ({
       value: c.id,
       label: `${c.label}${c.count > 0 ? ` (${c.count} files)` : ''} — ${c.hint}`,
-      ...(c.source === 'llm' ? { badge: 'AI-suggested', badgeColor: 'amber' as const } : {}),
+      ...(c.source === 'llm'
+        ? { badge: 'AI-suggested', badgeColor: 'amber' as const }
+        : c.source === 'bundle'
+          ? { badge: 'From bundle', badgeColor: 'indigo' as const }
+          : {}),
     }));
     // These agents are always pre-selected regardless of LLM recommendations
     const ALWAYS_SELECTED = new Set([

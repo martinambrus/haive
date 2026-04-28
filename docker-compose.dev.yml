@@ -48,12 +48,14 @@ services:
       - haive_node_modules_database:/app/packages/database/node_modules
       - ${HOST_REPO_ROOT:-${HOME}}:/host-fs:ro
       - haive_repos:/var/lib/haive/repos
+      - haive_bundles:/var/lib/haive/bundles
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
     command: sh -c "pnpm --filter @haive/database build && pnpm --filter @haive/shared build && pnpm --filter @haive/api dev"
     environment:
       NODE_ENV: development
       HOST_REPO_ROOT: /host-fs
       REPO_STORAGE_ROOT: /var/lib/haive/repos
+      BUNDLE_STORAGE_ROOT: /var/lib/haive/bundles
       DOCKER_HOST: unix:///var/run/docker.sock
 
   worker:
@@ -68,6 +70,7 @@ services:
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
       - ${HOST_REPO_ROOT:-${HOME}}:/host-fs
       - haive_repos:/var/lib/haive/repos
+      - haive_bundles:/var/lib/haive/bundles
       - haive_wrappers:/var/lib/haive/wrappers
       - haive_squid_configs:/var/lib/haive/squid-configs
     command: sh -c "pnpm --filter @haive/database build && pnpm --filter @haive/shared build && pnpm --filter @haive/worker dev"
@@ -76,6 +79,7 @@ services:
       HOST_REPO_ROOT: /host-fs
       HOST_REPO_ROOT_REAL: ${HOST_REPO_ROOT:-${HOME}}
       HOST_USER_HOME: ${HOME}
+      BUNDLE_STORAGE_ROOT: /var/lib/haive/bundles
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:-haive-cli-sandbox:latest}
       SANDBOX_WRAPPER_HOST_VOLUME: ${SANDBOX_WRAPPER_HOST_VOLUME:-haive_wrappers}
 

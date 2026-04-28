@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   api,
   type TaskFileContent,
@@ -29,6 +29,53 @@ export function TaskOutputs({ taskId }: TaskOutputsProps) {
   const [content, setContent] = useState<TaskFileContent | null>(null);
   const [contentError, setContentError] = useState<string | null>(null);
   const [contentLoading, setContentLoading] = useState(false);
+  const [leftPct, setLeftPct] = useState(33);
+  const [isWide, setIsWide] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const draggingRef = useRef(false);
+
+  // Track wide-screen mode; the resizable splitter only renders at md+ where
+  // the layout is side-by-side. Below md the panes stack and the splitter is
+  // a no-op.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const mq = window.matchMedia('(min-width: 768px)');
+    const update = (): void => setIsWide(mq.matches);
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, []);
+
+  // Global mouse listeners — bound once, gated by `draggingRef` so they cost
+  // nothing when no drag is active.
+  useEffect(() => {
+    const onMove = (e: MouseEvent): void => {
+      if (!draggingRef.current) return;
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect || rect.width === 0) return;
+      const pct = ((e.clientX - rect.left) / rect.width) * 100;
+      setLeftPct(Math.max(25, Math.min(75, pct)));
+    };
+    const onUp = (): void => {
+      if (!draggingRef.current) return;
+      draggingRef.current = false;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, []);
+
+  const startDrag = (e: React.MouseEvent): void => {
+    e.preventDefault();
+    draggingRef.current = true;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+  };
 
   const loadListing = useCallback(
     async (target?: string) => {
@@ -85,8 +132,14 @@ export function TaskOutputs({ taskId }: TaskOutputsProps) {
   const visible = listing ? listing.entries.filter((e) => showHidden || !e.hidden) : [];
 
   return (
-    <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_2fr]">
-      <div className="flex flex-col gap-2">
+    <div
+      ref={containerRef}
+      className="grid gap-4 md:gap-0"
+      style={{
+        gridTemplateColumns: isWide ? `${leftPct}% 6px minmax(0,1fr)` : '1fr',
+      }}
+    >
+      <div className="flex min-w-0 flex-col gap-2 md:pr-4">
         <div className="flex items-center justify-between gap-2">
           <div className="truncate text-xs text-neutral-400" title={listing?.path ?? ''}>
             {listing?.path ?? 'Loading...'}
@@ -147,7 +200,13 @@ export function TaskOutputs({ taskId }: TaskOutputsProps) {
         </div>
         {listingLoading && <div className="text-xs text-neutral-500">Loading...</div>}
       </div>
-      <div className="flex min-h-[200px] flex-col gap-2">
+      <div
+        onMouseDown={startDrag}
+        role="separator"
+        aria-orientation="vertical"
+        className="hidden cursor-col-resize bg-neutral-800 transition-colors hover:bg-indigo-500 md:block"
+      />
+      <div className="flex min-h-[200px] min-w-0 flex-col gap-2 md:pl-4">
         {!selectedFile && (
           <div className="rounded-md border border-neutral-800 bg-neutral-950 p-4 text-sm text-neutral-500">
             Select a file on the left to preview its contents.

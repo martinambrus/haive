@@ -1,33 +1,8 @@
-export type AgentColor = 'blue' | 'purple' | 'green' | 'gold' | 'red' | 'orange';
-export type AgentModel = 'opus' | 'sonnet' | 'haiku';
-export type AgentExpertise = 'expert' | 'senior' | 'mid';
+import type { AgentColor, AgentExpertise, AgentKbRefs, AgentModel, AgentSpec } from '@haive/shared';
 
-export interface AgentKbRefs {
-  patterns?: string;
-  standards?: string;
-  reference?: string;
-}
-
-export interface AgentSpec {
-  id: string;
-  title: string;
-  description: string;
-  color: AgentColor;
-  field: string;
-  tools: string[];
-  /** Reasoning model hint for Claude Code's sub-agent runtime. Defaults to 'opus'. */
-  model?: AgentModel;
-  /** Seniority hint used by agent-routing orchestration. Defaults to 'expert'. */
-  expertise?: AgentExpertise;
-  coreMission: string;
-  responsibilities: string[];
-  whenInvoked: string[];
-  executionSteps: { title: string; body: string }[];
-  outputFormat: string;
-  qualityCriteria: string[];
-  antiPatterns: string[];
-  kbReferences?: AgentKbRefs;
-}
+// Re-export the canonical types so existing worker imports keep working without
+// touching every call site. Source of truth lives in @haive/shared.
+export type { AgentColor, AgentExpertise, AgentKbRefs, AgentModel, AgentSpec };
 
 const SEARCH_ORDER_BLOCK = [
   '## Mandatory Search Order',
@@ -159,7 +134,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     id: 'code-reviewer',
     title: 'Code Reviewer',
     description:
-      'Reviews code changes for correctness, style, security, and maintainability before they land.',
+      'Reviews code changes for correctness, style, security, performance, and maintainability before they land.',
     color: 'red',
     field: 'quality',
     tools: ['Read', 'Grep', 'Glob', 'Bash'],

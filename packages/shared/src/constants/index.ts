@@ -21,12 +21,24 @@ export const QUEUE_NAMES = {
   CLI_EXEC: 'haive-cli-exec',
   ENV_REPLICATE: 'haive-env-replicate',
   REPO: 'haive-repo',
+  BUNDLE: 'haive-bundle',
 } as const;
 
 export const REPO_JOB_NAMES = {
   CLONE: 'clone-repo',
   SCAN: 'scan-repo',
   EXTRACT: 'extract-repo',
+} as const;
+
+export const BUNDLE_JOB_NAMES = {
+  INGEST_ZIP: 'ingest-bundle-zip',
+  INGEST_GIT: 'ingest-bundle-git',
+  RESYNC_GIT: 'resync-bundle-git',
+  /** Daily fetch tick. Runs `git fetch` against every active git bundle and
+   *  updates `last_sync_commit` so the upgrade-status banner can detect
+   *  upstream drift without the user pulling manually. Read-only — pulls
+   *  + re-parses only happen during an explicit upgrade task. */
+  GIT_SYNC_TICK: 'bundle-git-sync-tick',
 } as const;
 
 export const TASK_JOB_NAMES = {

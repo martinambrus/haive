@@ -2,8 +2,15 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { api } from '@/lib/api-client';
 import { Badge, Button } from '@/components/ui';
+
+interface UpgradeStatusBundleChange {
+  bundleId: string;
+  bundleName: string;
+  changedItemCount: number;
+}
 
 interface UpgradeStatusResponse {
   repositoryId: string;
@@ -16,6 +23,9 @@ interface UpgradeStatusResponse {
   currentHaiveVersion: string;
   hasInProgressUpgradeSession: boolean;
   hasPriorUpgrade: boolean;
+  /** Optional per-bundle drift breakdown from the server. Older API versions
+   *  omit it entirely; treat undefined as zero custom drift. */
+  customChanges?: UpgradeStatusBundleChange[];
 }
 
 export interface UpgradeAvailableBannerProps {
@@ -103,25 +113,53 @@ export function UpgradeAvailableBanner({
 
   if (status.hasUpgradeAvailable) {
     const primaryLabel = status.hasInProgressUpgradeSession ? 'Continue upgrade' : 'Review & apply';
+    const bundleChanges = status.customChanges ?? [];
+    const haiveChangedCount = status.changedTemplateIds.filter(
+      (id) => !id.startsWith('custom.'),
+    ).length;
     return (
-      <div className="flex flex-wrap items-center gap-2 rounded border border-indigo-900 bg-indigo-950/40 px-3 py-2 text-sm">
-        <Badge variant={status.hasInProgressUpgradeSession ? 'default' : 'warning'}>
-          {status.hasInProgressUpgradeSession ? 'Upgrade in progress' : 'Upgrade available'}
-        </Badge>
-        <span className="text-neutral-300">
-          {status.changedTemplateIds.length} template(s) changed
-        </span>
-        {versionLine && <span className="text-xs text-neutral-500">{versionLine}</span>}
-        <div className="ml-auto flex gap-2">
-          <Button size="sm" onClick={handleUpgrade} disabled={submitting}>
-            {submitting ? 'Starting...' : primaryLabel}
-          </Button>
-          {status.hasPriorUpgrade && (
-            <Button size="sm" variant="secondary" onClick={handleRollback} disabled={submitting}>
-              Roll back last upgrade
+      <div className="flex flex-col gap-1 rounded border border-indigo-900 bg-indigo-950/40 px-3 py-2 text-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant={status.hasInProgressUpgradeSession ? 'default' : 'warning'}>
+            {status.hasInProgressUpgradeSession ? 'Upgrade in progress' : 'Upgrade available'}
+          </Badge>
+          <span className="text-neutral-300">
+            {haiveChangedCount} template(s) changed
+            {bundleChanges.length > 0 && (
+              <>
+                ; {bundleChanges.reduce((acc, c) => acc + c.changedItemCount, 0)} bundle item(s)
+                across {bundleChanges.length} bundle(s)
+              </>
+            )}
+          </span>
+          {versionLine && <span className="text-xs text-neutral-500">{versionLine}</span>}
+          <div className="ml-auto flex items-center gap-2">
+            <Button size="sm" onClick={handleUpgrade} disabled={submitting}>
+              {submitting ? 'Starting...' : primaryLabel}
             </Button>
-          )}
+            {status.hasPriorUpgrade && (
+              <Button size="sm" variant="secondary" onClick={handleRollback} disabled={submitting}>
+                Roll back last upgrade
+              </Button>
+            )}
+            <Link
+              href={`/repos/${repositoryId}/bundles`}
+              className="text-xs text-indigo-300 hover:underline"
+            >
+              Manage bundles
+            </Link>
+          </div>
         </div>
+        {bundleChanges.length > 0 && (
+          <ul className="mt-1 flex flex-col gap-0.5 text-xs text-neutral-400">
+            {bundleChanges.map((c) => (
+              <li key={c.bundleId}>
+                Bundle <span className="text-neutral-200">{c.bundleName}</span>:{' '}
+                {c.changedItemCount} changed item(s)
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     );
   }
@@ -131,13 +169,16 @@ export function UpgradeAvailableBanner({
       <Badge variant="success">Up to date</Badge>
       <span>Template set {status.currentTemplateSetHash.slice(0, 8)}</span>
       {versionLine && <span>{versionLine}</span>}
-      {status.hasPriorUpgrade && (
-        <div className="ml-auto">
+      <div className="ml-auto flex items-center gap-3">
+        <Link href={`/repos/${repositoryId}/bundles`} className="text-indigo-300 hover:underline">
+          Manage bundles
+        </Link>
+        {status.hasPriorUpgrade && (
           <Button size="sm" variant="secondary" onClick={handleRollback} disabled={submitting}>
             Roll back last upgrade
           </Button>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

@@ -9,6 +9,7 @@ import { errorHandler } from './middleware/error-handler.js';
 import { requestLogger } from './middleware/request-logger.js';
 import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
+import { bundleRoutes } from './routes/bundles.js';
 import { cliProviderRoutes } from './routes/cli-providers.js';
 import { repoRoutes } from './routes/repos.js';
 import { repoCredentialsRoutes } from './routes/repo-credentials.js';
@@ -42,6 +43,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.get('/health', (c) => c.json({ status: 'ok', service: 'haive-api' }));
 
   app.route('/auth', authRoutes);
+  app.route('/bundles', bundleRoutes);
   app.route('/cli-providers', cliProviderRoutes);
   app.route('/repos', repoRoutes);
   app.route('/repo-credentials', repoCredentialsRoutes);

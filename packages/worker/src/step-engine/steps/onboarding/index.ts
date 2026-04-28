@@ -4,6 +4,7 @@ import { ripgrepConfigStep } from './01_5-ripgrep-config.js';
 import { detectionConfirmationStep } from './02-detection-confirmation.js';
 import { toolingInfrastructureStep } from './04-tooling-infrastructure.js';
 import { workflowPrefsStep } from './06-workflow-prefs.js';
+import { customBundlesStep } from './06_3-custom-bundles.js';
 import { agentDiscoveryStep } from './06_5-agent-discovery.js';
 import { generateFilesStep } from './07-generate-files.js';
 import { verifyFilesStep } from './07_5-verify-files.js';
@@ -23,6 +24,7 @@ export {
   detectionConfirmationStep,
   toolingInfrastructureStep,
   workflowPrefsStep,
+  customBundlesStep,
   agentDiscoveryStep,
   generateFilesStep,
   verifyFilesStep,
@@ -43,6 +45,7 @@ export function registerOnboardingSteps(registry: StepRegistry): void {
   registry.register(detectionConfirmationStep);
   registry.register(toolingInfrastructureStep);
   registry.register(workflowPrefsStep);
+  registry.register(customBundlesStep);
   registry.register(agentDiscoveryStep);
   registry.register(generateFilesStep);
   registry.register(verifyFilesStep);

@@ -1,20 +1,27 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { CliProviderName, FormSchema, InstallManifest } from '@haive/shared';
-import { getCliProviderMetadata, getHaiveVersion, normalizeContent } from '@haive/shared';
+import type { CliProviderName, FormSchema } from '@haive/shared';
+import { getCliProviderMetadata, getHaiveVersion } from '@haive/shared';
 import type { Database } from '@haive/database';
 import type { StepDefinition, StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from './_helpers.js';
 import {
+  expandCustomBundlesFor,
   expandManifestFor,
   getTemplateManifest,
   updateApplicableTemplateIds,
+  type ExpandedRendering,
   type TemplateRenderContext,
 } from '../../template-manifest.js';
+import {
+  extractBundleItemId,
+  loadBundlesForExpansion,
+  resolveSkillTargets,
+} from '../../_custom-bundle-loader.js';
+import { writeInstallManifestFromLiveRows } from '../../_install-manifest.js';
 import type { GenerateFilesDetect } from './07-generate-files.js';
 
 const exec = promisify(execFile);
@@ -112,7 +119,37 @@ async function recordOnboardingArtifacts(
   const detect = genPrev.detect as GenerateFilesDetect;
   const renderCtx = buildRenderContext(detect);
   const manifest = getTemplateManifest();
-  const expanded = expandManifestFor(renderCtx, manifest);
+  const haiveExpanded = expandManifestFor(renderCtx, manifest);
+
+  // Custom-bundle expansion runs in parallel with manifest expansion; the two
+  // are concatenated and de-duped on diskPath (Haive items win on collision —
+  // this should not happen in practice since Haive paths and bundle paths
+  // never overlap by convention, but we log+drop just in case).
+  const bundlesForInstall = await loadBundlesForExpansion(ctx.db, repositoryId, ctx.logger);
+  const skillTargets = await resolveSkillTargets(ctx.db, ctx.userId);
+  const customExpanded = expandCustomBundlesFor(
+    bundlesForInstall,
+    detect.agentTargets,
+    skillTargets,
+  );
+  const expanded: ExpandedRendering[] = [];
+  const seenDiskPaths = new Set<string>();
+  for (const r of haiveExpanded) {
+    if (seenDiskPaths.has(r.diskPath)) continue;
+    seenDiskPaths.add(r.diskPath);
+    expanded.push(r);
+  }
+  for (const r of customExpanded) {
+    if (seenDiskPaths.has(r.diskPath)) {
+      ctx.logger.warn(
+        { diskPath: r.diskPath, templateId: r.templateId },
+        'onboarding-artifacts: bundle rendering collides with Haive template, dropping bundle row',
+      );
+      continue;
+    }
+    seenDiskPaths.add(r.diskPath);
+    expanded.push(r);
+  }
 
   if (expanded.length === 0) {
     ctx.logger.info('onboarding-artifacts: manifest produced no renderings for this context');
@@ -136,47 +173,20 @@ async function recordOnboardingArtifacts(
     writtenHash: r.writtenHash,
     writtenContent: r.content,
     formValuesSnapshot: renderCtxSnapshot,
-    sourceStepId: '07-generate-files',
+    sourceStepId: r.templateId.startsWith('custom.') ? '06_3-custom-bundles' : '07-generate-files',
     source: 'onboarding' as const,
     haiveVersion,
+    bundleItemId: extractBundleItemId(r.templateId),
   }));
 
   await ctx.db.insert(schema.onboardingArtifacts).values(rows);
   await updateApplicableTemplateIds(ctx.db, repositoryId, expanded);
 
-  const byTemplate = new Map<
-    string,
-    { id: string; schemaVersion: number; contentHash: string; diskPaths: string[] }
-  >();
-  for (const r of expanded) {
-    const existing = byTemplate.get(r.templateId);
-    if (existing) {
-      existing.diskPaths.push(r.diskPath);
-      continue;
-    }
-    byTemplate.set(r.templateId, {
-      id: r.templateId,
-      schemaVersion: r.templateSchemaVersion,
-      contentHash: r.templateContentHash,
-      diskPaths: [r.diskPath],
-    });
-  }
-  const installManifest: InstallManifest = {
-    schemaVersion: 1,
-    haiveVersion,
-    appliedAt: new Date().toISOString(),
-    lastTaskId: ctx.taskId,
-    templateSetHash: manifest.setHash,
-    templates: Array.from(byTemplate.values())
-      .map((t) => ({ ...t, diskPaths: t.diskPaths.slice().sort() }))
-      .sort((a, b) => a.id.localeCompare(b.id)),
-  };
-
-  const installDir = path.join(ctx.repoPath, '.haive');
-  const installPath = path.join(installDir, 'install.json');
-  await mkdir(installDir, { recursive: true });
-  const content = normalizeContent(`${JSON.stringify(installManifest, null, 2)}\n`);
-  await writeFile(installPath, content, 'utf8');
+  const installManifestWritten = await writeInstallManifestFromLiveRows(
+    ctx,
+    repositoryId,
+    manifest.setHash,
+  );
 
   ctx.logger.info(
     {
@@ -187,7 +197,7 @@ async function recordOnboardingArtifacts(
     'onboarding-artifacts recorded',
   );
 
-  return { rowsWritten: rows.length, installManifestWritten: true, warnings };
+  return { rowsWritten: rows.length, installManifestWritten, warnings };
 }
 
 export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboardingOutput> = {

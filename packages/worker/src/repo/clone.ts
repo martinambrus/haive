@@ -7,14 +7,14 @@ import { logger, type ArchiveFormat, type RepoJobPayload } from '@haive/shared';
 import { detectFromDirectory } from './framework-detect.js';
 import { getDecryptedCredentials } from './credentials.js';
 
-function buildAuthenticatedUrl(url: string, username: string, secret: string): string {
+export function buildAuthenticatedUrl(url: string, username: string, secret: string): string {
   const u = new URL(url);
   u.username = encodeURIComponent(username);
   u.password = encodeURIComponent(secret);
   return u.toString();
 }
 
-function gitClone(url: string, dest: string, branch?: string): Promise<void> {
+export function gitClone(url: string, dest: string, branch?: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const args = ['clone', '--depth', '1'];
     if (branch) args.push('--branch', branch);

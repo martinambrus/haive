@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   TASK_JOB_NAMES,
@@ -42,11 +42,33 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     })
     .from(schema.templateManifestCache);
 
+  // Custom-bundle items live per-repo (not in the global manifest cache), so
+  // they're loaded directly and folded into the current set. Each item
+  // contributes one template entry of the form `custom.<bundleId>.<itemId>`,
+  // mirroring the templateId scheme that 12-post-onboarding / 02-upgrade-
+  // apply write into onboarding_artifacts.
+  const bundleItems = await db
+    .select({
+      itemId: schema.customBundleItems.id,
+      bundleId: schema.customBundleItems.bundleId,
+      schemaVersion: schema.customBundleItems.schemaVersion,
+      contentHash: schema.customBundleItems.contentHash,
+    })
+    .from(schema.customBundleItems)
+    .innerJoin(schema.customBundles, eq(schema.customBundleItems.bundleId, schema.customBundles.id))
+    .where(eq(schema.customBundles.repositoryId, repositoryId));
+  const customCurrent = bundleItems.map((b) => ({
+    templateId: `custom.${b.bundleId}.${b.itemId}`,
+    schemaVersion: b.schemaVersion,
+    contentHash: b.contentHash,
+  }));
+
   const liveArtifacts = await db
     .select({
       templateId: schema.onboardingArtifacts.templateId,
       templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
       templateContentHash: schema.onboardingArtifacts.templateContentHash,
+      bundleItemId: schema.onboardingArtifacts.bundleItemId,
       haiveVersion: schema.onboardingArtifacts.haiveVersion,
       generatedAt: schema.onboardingArtifacts.generatedAt,
     })
@@ -93,10 +115,35 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     .limit(1);
   const hasPriorUpgrade = liveUpgradeRow.length > 0;
 
+  // "Upgrade in progress" iff there is a non-terminal onboarding-upgrade task
+  // for this repo. The earlier heuristic (`hasPriorUpgrade && hasUpgradeAvailable`)
+  // mis-flagged completed tasks whose drift was deliberately left unapplied
+  // by the user as still-running sessions.
+  const inProgressUpgradeTask = await db
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'onboarding_upgrade'),
+        inArray(schema.tasks.status, ['created', 'queued', 'running', 'paused', 'waiting_user']),
+      ),
+    )
+    .limit(1);
+  const hasInProgressUpgradeTask = inProgressUpgradeTask.length > 0;
+
   // "Installed" hash is computed the same way as `currentSetHash` but uses the
   // distinct set of (templateId, schemaVersion, contentHash) tuples present
   // on live artifact rows — multiple rows can reference the same template
   // (e.g. agent template rendered once per CLI).
+  //
+  // Dangling custom artifacts are excluded: when the source bundle item was
+  // deleted in a re-parse (cascade-SET-NULL leaves bundle_item_id null) and
+  // no live bundle item now matches the templateId, the row is user-owned —
+  // the user explicitly kept it after a prior upgrade flagged it obsolete.
+  // Including it in the drift comparison would make the banner perpetually
+  // say "Upgrade available" with the same orphaned items.
+  const liveCustomItemIds = new Set(customCurrent.map((c) => c.templateId));
   const distinctInstalled = new Map<
     string,
     {
@@ -106,6 +153,13 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     }
   >();
   for (const a of liveArtifacts) {
+    if (
+      a.templateId.startsWith('custom.') &&
+      a.bundleItemId === null &&
+      !liveCustomItemIds.has(a.templateId)
+    ) {
+      continue;
+    }
     if (!distinctInstalled.has(a.templateId)) {
       distinctInstalled.set(a.templateId, {
         id: a.templateId,
@@ -127,11 +181,31 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     repo.applicableTemplateIds ?? Array.from(distinctInstalled.keys()),
   );
 
-  const currentByTemplate = new Map(
-    manifestCache.filter((m) => applicableSet.has(m.templateId)).map((m) => [m.templateId, m]),
+  interface CurrentTemplate {
+    templateId: string;
+    schemaVersion: number;
+    contentHash: string;
+  }
+  const currentByTemplate = new Map<string, CurrentTemplate>(
+    manifestCache
+      .filter((m) => applicableSet.has(m.templateId))
+      .map((m) => [
+        m.templateId,
+        { templateId: m.templateId, schemaVersion: m.schemaVersion, contentHash: m.contentHash },
+      ]),
   );
+  // Custom items are always considered applicable to the repo that owns them
+  // (their bundle is bound to this repo by FK) — so they go in regardless of
+  // the applicable_template_ids snapshot. This also lets brand-new bundle
+  // items surface as drift even before the next onboarding/upgrade has had a
+  // chance to refresh the snapshot.
+  for (const c of customCurrent) {
+    currentByTemplate.set(c.templateId, c);
+  }
   const filteredInstalled = new Map(
-    Array.from(distinctInstalled.entries()).filter(([id]) => applicableSet.has(id)),
+    Array.from(distinctInstalled.entries()).filter(
+      ([id]) => applicableSet.has(id) || id.startsWith('custom.'),
+    ),
   );
 
   const installedTemplateSetHash =
@@ -200,6 +274,35 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   const hasUpgradeAvailable =
     installedTemplateSetHash !== currentSetHash && changedTemplateIds.length > 0;
 
+  // Group `custom.<bundleId>.*` changes by bundle so the banner can render
+  // "Bundle X: N changed items" alongside Haive template counts. Bundles with
+  // zero changed items are omitted.
+  const customChangedByBundle = new Map<string, number>();
+  for (const id of changedTemplateIds) {
+    if (!id.startsWith('custom.')) continue;
+    const parts = id.split('.');
+    const bundleId = parts[1];
+    if (!bundleId) continue;
+    customChangedByBundle.set(bundleId, (customChangedByBundle.get(bundleId) ?? 0) + 1);
+  }
+  const customChanges =
+    customChangedByBundle.size > 0
+      ? await Promise.all(
+          Array.from(customChangedByBundle.entries()).map(async ([bundleId, count]) => {
+            const bundle = await db
+              .select({ name: schema.customBundles.name })
+              .from(schema.customBundles)
+              .where(eq(schema.customBundles.id, bundleId))
+              .limit(1);
+            return {
+              bundleId,
+              bundleName: bundle[0]?.name ?? bundleId,
+              changedItemCount: count,
+            };
+          }),
+        )
+      : [];
+
   const res: UpgradeStatusResponse = {
     repositoryId,
     hasUpgradeAvailable,
@@ -209,8 +312,9 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     isOnboarded: true,
     installedHaiveVersion,
     currentHaiveVersion,
-    hasInProgressUpgradeSession: hasPriorUpgrade && hasUpgradeAvailable,
+    hasInProgressUpgradeSession: hasInProgressUpgradeTask,
     hasPriorUpgrade,
+    ...(customChanges.length > 0 ? { customChanges } : {}),
   };
   return c.json(res);
 });

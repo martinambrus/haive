@@ -5,6 +5,7 @@ import { diffLines } from 'diff';
 import type { DiffDetails, FormField, FormSchema, LeafFormField } from '@haive/shared';
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
+import { BundleComposer, type BundleComposerEntry } from '@/components/bundle-composer';
 import { cn } from '@/lib/cn';
 import { validateRequired, type FormValues } from '@/components/form-validation';
 
@@ -20,6 +21,10 @@ interface FormRendererProps {
   onValuesChange?: (values: FormValues) => void;
   /** Render extra content (e.g. test buttons) after a specific field. */
   renderAfterField?: (fieldId: string, values: FormValues) => React.ReactNode;
+  /** Repository the form is being filled for. Required when the schema
+   *  contains a `bundle-composer` field — the composer talks to /api/bundles
+   *  on behalf of this repo. */
+  repositoryId?: string | null;
 }
 
 function defaultValueFor(field: FormField): unknown {
@@ -44,6 +49,14 @@ function defaultValueFor(field: FormField): unknown {
       return '';
     case 'accordion':
       return undefined;
+    case 'bundle-composer':
+      return field.initialBundles.map((b) => ({
+        id: b.id,
+        name: b.name,
+        sourceType: b.sourceType,
+        status: b.status,
+        itemCount: b.itemCount,
+      }));
   }
 }
 
@@ -76,6 +89,7 @@ export function FormRenderer({
   errorMessage,
   onValuesChange,
   renderAfterField,
+  repositoryId,
 }: FormRendererProps) {
   const initial = useMemo(() => buildInitial(schema, initialValues), [schema, initialValues]);
   const [values, setValues] = useState<FormValues>(initial);
@@ -126,6 +140,7 @@ export function FormRenderer({
                 value={values[field.id]}
                 onChange={(value) => update(field.id, value)}
                 disabled={disabled || submitting}
+                repositoryId={repositoryId ?? null}
               />
             )}
             {renderAfterField?.(field.id, values)}
@@ -282,9 +297,10 @@ interface FieldRowProps {
   value: unknown;
   onChange: (value: unknown) => void;
   disabled: boolean;
+  repositoryId?: string | null;
 }
 
-function FieldRow({ field, value, onChange, disabled }: FieldRowProps) {
+function FieldRow({ field, value, onChange, disabled, repositoryId }: FieldRowProps) {
   if (field.type === 'checkbox') {
     return (
       <div className="flex flex-col gap-1">
@@ -317,12 +333,18 @@ function FieldRow({ field, value, onChange, disabled }: FieldRowProps) {
       {field.type !== 'multi-select' && field.details?.kind === 'diff' && (
         <DiffDisclosure details={field.details} />
       )}
-      <FieldControl field={field} value={value} onChange={onChange} disabled={disabled} />
+      <FieldControl
+        field={field}
+        value={value}
+        onChange={onChange}
+        disabled={disabled}
+        repositoryId={repositoryId ?? null}
+      />
     </div>
   );
 }
 
-function FieldControl({ field, value, onChange, disabled }: FieldRowProps) {
+function FieldControl({ field, value, onChange, disabled, repositoryId }: FieldRowProps) {
   const selectClass = cn(
     'h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500',
   );
@@ -586,6 +608,28 @@ function FieldControl({ field, value, onChange, disabled }: FieldRowProps) {
           tree={field.tree}
           value={current}
           onChange={(paths) => onChange(paths)}
+          disabled={disabled}
+        />
+      );
+    }
+    case 'bundle-composer': {
+      const current = Array.isArray(value) ? (value as BundleComposerEntry[]) : [];
+      if (!repositoryId) {
+        return (
+          <p className="text-sm text-amber-300">
+            Bundle composer requires a repository — none associated with this task.
+          </p>
+        );
+      }
+      return (
+        <BundleComposer
+          initialBundles={field.initialBundles}
+          allowAddZip={field.allowAddZip}
+          allowAddGit={field.allowAddGit}
+          credentialOptions={field.credentialOptions}
+          repositoryId={repositoryId}
+          value={current}
+          onChange={(next) => onChange(next)}
           disabled={disabled}
         />
       );

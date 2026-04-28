@@ -358,6 +358,7 @@ export default function TaskDetailPage() {
               <StepCard
                 step={step}
                 taskStatus={task.status}
+                taskRepositoryId={task.repositoryId}
                 submitting={submitting === step.stepId}
                 submitError={submitting === step.stepId ? submitError : null}
                 onSubmit={(values) => submitStep(step, values)}
@@ -540,6 +541,7 @@ function TabButton({
 interface StepCardProps {
   step: TaskStep;
   taskStatus: TaskStatus;
+  taskRepositoryId: string | null;
   submitting: boolean;
   submitError: string | null;
   onSubmit: (values: FormValues) => Promise<void>;
@@ -552,6 +554,7 @@ interface StepCardProps {
 function StepCard({
   step,
   taskStatus,
+  taskRepositoryId,
   submitting,
   submitError,
   onSubmit,
@@ -630,6 +633,7 @@ function StepCard({
             submitting={submitting}
             errorMessage={submitError}
             onSubmit={onSubmit}
+            repositoryId={taskRepositoryId}
             renderAfterField={
               hasConnectionFields
                 ? (fieldId, values) => {

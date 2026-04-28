@@ -27,6 +27,11 @@ import {
   type ProjectInfo,
   workflowConfigJson,
 } from './steps/onboarding/07-generate-files.js';
+import {
+  skillToMarkdown,
+  subSkillToMarkdown,
+  type SkillEntry,
+} from './steps/onboarding/09_5-skill-generation.js';
 
 /**
  * Everything needed to render any deterministic template. Heterogeneous
@@ -327,6 +332,109 @@ export async function syncTemplateManifestCache(db: Database): Promise<void> {
   await db
     .delete(schema.templateManifestCache)
     .where(notInArray(schema.templateManifestCache.templateId, liveIds));
+}
+
+/** Bundle item shape consumed by `expandCustomBundlesFor`. The orchestrator
+ *  loads `custom_bundle_items` rows for the repo, parses `normalizedSpec` via
+ *  the canonical zod schema, and assembles these structures. Decoupling the
+ *  expansion API from the DB row shape keeps tests cheap and avoids
+ *  importing Drizzle types into the manifest module. */
+export interface BundleAgentItem {
+  id: string;
+  kind: 'agent';
+  schemaVersion: number;
+  contentHash: string;
+  spec: AgentSpec;
+}
+
+export interface BundleSkillItem {
+  id: string;
+  kind: 'skill';
+  schemaVersion: number;
+  contentHash: string;
+  spec: SkillEntry;
+}
+
+export type BundleItemForExpansion = BundleAgentItem | BundleSkillItem;
+
+export interface BundleForExpansion {
+  id: string;
+  items: BundleItemForExpansion[];
+}
+
+/** Expand custom-bundle items into one `ExpandedRendering` per `(item, target)`
+ *  tuple. Mirrors `expandManifestFor` so onboarding/upgrade callers can union
+ *  Haive-template renderings with bundle renderings without branching on
+ *  shape. Bundle agents fan out across `agentTargets` exactly like Haive
+ *  agent templates; bundle skills fan out across `skillTargets` and emit one
+ *  rendering for the parent SKILL.md plus one per sub-skill.
+ *
+ *  `templateId` is `custom.<bundleId>.<itemId>` — globally unique across
+ *  bundles, stable across re-parses (item id is the DB row id, not a derived
+ *  slug). `templateContentHash` is the IR hash from `bundle_items.contentHash`
+ *  — same value across all of one item's renderings, so upgrade-status drift
+ *  detection works the same way it does for Haive items. */
+export function expandCustomBundlesFor(
+  bundles: ReadonlyArray<BundleForExpansion>,
+  agentTargets: TemplateRenderContext['agentTargets'],
+  skillTargets: ReadonlyArray<string>,
+): ExpandedRendering[] {
+  const out: ExpandedRendering[] = [];
+  for (const bundle of bundles) {
+    for (const item of bundle.items) {
+      const templateId = `custom.${bundle.id}.${item.id}`;
+      if (item.kind === 'agent') {
+        if (agentTargets.length === 0) continue;
+        for (const target of agentTargets) {
+          const ext = target.format === 'toml' ? 'toml' : 'md';
+          const content =
+            target.format === 'toml'
+              ? buildAgentFileToml(item.spec)
+              : buildAgentFileMarkdown(item.spec);
+          out.push({
+            templateId,
+            templateKind: 'custom-agent',
+            templateSchemaVersion: item.schemaVersion,
+            templateContentHash: item.contentHash,
+            diskPath: `${target.dir}/${item.spec.id}.${ext}`,
+            content,
+            writtenHash: sha256Hex(normalizeContent(content)),
+          });
+        }
+        continue;
+      }
+      // skill
+      if (skillTargets.length === 0) continue;
+      const skillContent = skillToMarkdown(item.spec);
+      const subRenderings = (item.spec.subSkills ?? []).map((sub) => ({
+        slug: sub.slug,
+        content: subSkillToMarkdown(item.spec.id, sub),
+      }));
+      for (const targetDir of skillTargets) {
+        out.push({
+          templateId,
+          templateKind: 'custom-skill',
+          templateSchemaVersion: item.schemaVersion,
+          templateContentHash: item.contentHash,
+          diskPath: `${targetDir}/${item.spec.id}/SKILL.md`,
+          content: skillContent,
+          writtenHash: sha256Hex(normalizeContent(skillContent)),
+        });
+        for (const sub of subRenderings) {
+          out.push({
+            templateId,
+            templateKind: 'custom-skill',
+            templateSchemaVersion: item.schemaVersion,
+            templateContentHash: item.contentHash,
+            diskPath: `${targetDir}/${item.spec.id}/sub-skills/${sub.slug}.md`,
+            content: sub.content,
+            writtenHash: sha256Hex(normalizeContent(sub.content)),
+          });
+        }
+      }
+    }
+  }
+  return out;
 }
 
 /** Persist the set of template_ids that expanded to non-empty renderings for

@@ -129,6 +129,40 @@ export const directoryTreeFieldSchema = baseField.extend({
   defaults: z.array(z.string()).optional(),
 });
 
+/** Pre-existing bundle row surfaced by the form so the composer can render
+ *  edit/remove controls. `itemCount` is the live count from
+ *  `custom_bundle_items` so the user sees what's already ingested without
+ *  having to click into the row. */
+export const bundleComposerInitialSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  sourceType: z.enum(['zip', 'git']),
+  gitUrl: z.string().optional(),
+  gitBranch: z.string().optional(),
+  archiveFilename: z.string().optional(),
+  enabledKinds: z.array(z.enum(['agent', 'skill'])),
+  itemCount: z.number().int().nonnegative(),
+  status: z.enum(['active', 'syncing', 'failed']),
+  lastSyncError: z.string().nullable().optional(),
+});
+
+export type BundleComposerInitial = z.infer<typeof bundleComposerInitialSchema>;
+
+export const bundleComposerCredentialOptionSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+});
+
+export type BundleComposerCredentialOption = z.infer<typeof bundleComposerCredentialOptionSchema>;
+
+export const bundleComposerFieldSchema = baseField.extend({
+  type: z.literal('bundle-composer'),
+  initialBundles: z.array(bundleComposerInitialSchema),
+  allowAddZip: z.boolean(),
+  allowAddGit: z.boolean(),
+  credentialOptions: z.array(bundleComposerCredentialOptionSchema),
+});
+
 export const leafFormFieldSchema = z.discriminatedUnion('type', [
   textFieldSchema,
   textareaFieldSchema,
@@ -141,6 +175,7 @@ export const leafFormFieldSchema = z.discriminatedUnion('type', [
   fileUploadFieldSchema,
   numberFieldSchema,
   directoryTreeFieldSchema,
+  bundleComposerFieldSchema,
 ]);
 
 export type LeafFormField = z.infer<typeof leafFormFieldSchema>;
@@ -171,6 +206,7 @@ export const formFieldSchema = z.discriminatedUnion('type', [
   numberFieldSchema,
   directoryTreeFieldSchema,
   accordionFieldSchema,
+  bundleComposerFieldSchema,
 ]);
 
 export type FormField = z.infer<typeof formFieldSchema>;

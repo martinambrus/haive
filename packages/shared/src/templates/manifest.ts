@@ -13,7 +13,9 @@ export type TemplateKind =
   | 'plugin-file'
   | 'agents-md-block'
   | 'cli-rules-block'
-  | 'mcp-settings';
+  | 'mcp-settings'
+  | 'custom-agent'
+  | 'custom-skill';
 
 /**
  * Source of an `onboarding_artifacts` row. Distinguishes a fresh onboarding
@@ -132,5 +134,16 @@ export interface InstallManifest {
     schemaVersion: number;
     contentHash: string;
     diskPaths: string[];
+  }>;
+  /** Custom bundles installed for this repo. Optional — older install.json
+   *  files written before bundle support shipped omit it; consumers must
+   *  treat `undefined` as "no bundles installed" and not as a schema version
+   *  bump. */
+  bundles?: Array<{
+    id: string;
+    name: string;
+    sourceType: 'zip' | 'git';
+    lastSyncCommit: string | null;
+    itemCount: number;
   }>;
 }

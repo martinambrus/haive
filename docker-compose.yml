@@ -92,11 +92,13 @@ services:
       SMTP_FROM: ${SMTP_FROM:-no-reply@haive.local}
       HOST_REPO_ROOT: /host-fs
       REPO_STORAGE_ROOT: /var/lib/haive/repos
+      BUNDLE_STORAGE_ROOT: /var/lib/haive/bundles
       GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-}
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - ${HOST_REPO_ROOT:-${HOME}}:/host-fs:ro
       - haive_repos:/var/lib/haive/repos
+      - haive_bundles:/var/lib/haive/bundles
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
     networks:
       - haive-network
@@ -123,10 +125,12 @@ services:
       HOST_REPO_ROOT: /host-fs
       HOST_REPO_ROOT_REAL: ${HOST_REPO_ROOT:-${HOME}}
       REPO_STORAGE_ROOT: /var/lib/haive/repos
+      BUNDLE_STORAGE_ROOT: /var/lib/haive/bundles
     volumes:
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
       - ${HOST_REPO_ROOT:-${HOME}}:/host-fs
       - haive_repos:/var/lib/haive/repos
+      - haive_bundles:/var/lib/haive/bundles
       - haive_wrappers:/var/lib/haive/wrappers
       - haive_squid_configs:/var/lib/haive/squid-configs
     networks:
@@ -169,6 +173,8 @@ volumes:
   ollama_data:
   haive_repos:
     name: haive_repos
+  haive_bundles:
+    name: haive_bundles
   haive_wrappers:
     name: haive_wrappers
   haive_squid_configs:

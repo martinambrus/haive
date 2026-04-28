@@ -55,3 +55,20 @@ export interface RepoJobPayload {
   archivePath?: string;
   archiveFormat?: ArchiveFormat;
 }
+
+export type CustomBundleSourceType = 'zip' | 'git';
+export type CustomBundleStatus = 'active' | 'syncing' | 'failed';
+export type CustomBundleItemKind = 'agent' | 'skill';
+export type CustomBundleItemSourceFormat = 'claude-md' | 'codex-toml' | 'gemini-md';
+
+/** Job payload shared by all bundle-queue jobs. The job name discriminates
+ *  between zip ingest, git ingest, and resync — handlers branch on
+ *  `bundle.source_type` after loading the row. */
+export interface BundleJobPayload {
+  bundleId: string;
+  userId: string;
+  /** Set on first ingest (zip path) so the worker can rename the .partial-stripped
+   *  archive into the bundle's storage root before extraction. Null for git jobs. */
+  archivePath?: string;
+  archiveFormat?: ArchiveFormat;
+}

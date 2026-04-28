@@ -2,25 +2,92 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { getHaiveVersion, normalizeContent, sha256Hex, type FormSchema } from '@haive/shared';
+import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
-  getHaiveVersion,
-  normalizeContent,
-  sha256Hex,
-  type FormSchema,
-  type InstallManifest,
-} from '@haive/shared';
-import type { StepDefinition } from '../../step-definition.js';
-import {
+  expandCustomBundlesFor,
   expandManifestFor,
   getTemplateManifest,
   updateApplicableTemplateIds,
+  type ExpandedRendering,
   type TemplateRenderContext,
 } from '../../template-manifest.js';
+import {
+  extractBundleItemId,
+  loadBundlesForExpansion,
+  resolveSkillTargets,
+} from '../../_custom-bundle-loader.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import type { UpgradePlanOutput, UpgradePlanEntry } from './01-upgrade-plan.js';
 
 const CONFLICT_CHOICE_VALUES = ['apply_theirs', 'keep_ours', 'skip'] as const;
 type ConflictChoice = (typeof CONFLICT_CHOICE_VALUES)[number];
+
+/** Action the apply loop should take for a single plan entry. */
+export type ApplyAction = 'apply' | 'delete' | 'untrack' | 'skip';
+
+export interface ApplySelections {
+  selectedUpdates: ReadonlySet<string>;
+  selectedNew: ReadonlySet<string>;
+  selectedReinstate: ReadonlySet<string>;
+  selectedObsoleteRemovals: ReadonlySet<string>;
+  conflictChoices: ReadonlyMap<string, ConflictChoice>;
+}
+
+/** Pure classifier for the apply loop. Splits the per-entry decision out of
+ *  the imperative loop so the four branches (`apply`, `delete`, `untrack`,
+ *  `skip`) can be unit-tested without a DB or file system. The `untrack`
+ *  branch — supersede the artifact row without touching disk — fires when
+ *  the user skipped an obsolete custom-bundle row whose source bundle item
+ *  is gone AND no other entry in the plan rewrites the same diskPath; that
+ *  combination signals the file is now user-owned and should drop out of
+ *  drift tracking on the next upgrade. */
+export function classifyApplyAction(
+  entry: UpgradePlanEntry,
+  allEntries: ReadonlyArray<UpgradePlanEntry>,
+  selections: ApplySelections,
+): ApplyAction {
+  const shouldApply =
+    (entry.bucket === 'clean_update' && selections.selectedUpdates.has(entry.entryId)) ||
+    (entry.bucket === 'new_artifact' && selections.selectedNew.has(entry.entryId)) ||
+    (entry.bucket === 'user_deleted' && selections.selectedReinstate.has(entry.entryId)) ||
+    (entry.bucket === 'conflict' &&
+      selections.conflictChoices.get(entry.entryId) === 'apply_theirs');
+  if (shouldApply) return 'apply';
+
+  const shouldDelete =
+    entry.bucket === 'obsolete' && selections.selectedObsoleteRemovals.has(entry.entryId);
+  if (shouldDelete) return 'delete';
+
+  const shouldUntrackDangling =
+    entry.bucket === 'obsolete' &&
+    !selections.selectedObsoleteRemovals.has(entry.entryId) &&
+    entry.templateId.startsWith('custom.') &&
+    entry.liveArtifactId !== null &&
+    !allEntries.some(
+      (other) =>
+        other !== entry &&
+        other.diskPath === entry.diskPath &&
+        (other.bucket === 'clean_update' ||
+          other.bucket === 'conflict' ||
+          other.bucket === 'new_artifact'),
+    );
+  if (shouldUntrackDangling) return 'untrack';
+
+  return 'skip';
+}
+
+/** Resolve a candidate `bundle_item_id` to either the live row's id or null.
+ *  The bundle_item_id column is FK-enforced; templateIds may reference items
+ *  that have since been deleted (e.g. user replaced the source ZIP). Use this
+ *  helper to guard inserts so we never violate the FK. */
+export function resolveBundleItemId(
+  templateId: string,
+  liveBundleItemIds: ReadonlySet<string>,
+): string | null {
+  const id = extractBundleItemId(templateId);
+  return id && liveBundleItemIds.has(id) ? id : null;
+}
 
 function conflictFieldId(entryId: string): string {
   // radio field ids must not contain characters the renderer treats specially;
@@ -36,6 +103,8 @@ const TEMPLATE_KIND_LABELS: Record<string, string> = {
   'plugin-file': 'Plugin files',
   'agents-md-block': 'AGENTS.md blocks',
   'cli-rules-block': 'CLI rules blocks',
+  'custom-agent': 'Bundle agents',
+  'custom-skill': 'Bundle skills',
 };
 
 function templateKindLabel(kind: string): string {
@@ -240,22 +309,46 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const rowsToSupersede: string[] = [];
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
 
+    // bundle_item_id is FK-enforced. Resolve all candidate ids from entry
+    // templateIds against custom_bundle_items so we can null out linkage for
+    // items that have since been deleted (race with bundle re-ingest).
+    const candidateBundleItemIds = new Set<string>();
     for (const entry of plan.entries) {
-      const shouldApply =
-        (entry.bucket === 'clean_update' && selectedUpdates.has(entry.entryId)) ||
-        (entry.bucket === 'new_artifact' && selectedNew.has(entry.entryId)) ||
-        (entry.bucket === 'user_deleted' && selectedReinstate.has(entry.entryId)) ||
-        (entry.bucket === 'conflict' && conflictChoices.get(entry.entryId) === 'apply_theirs');
+      const id = extractBundleItemId(entry.templateId);
+      if (id) candidateBundleItemIds.add(id);
+    }
+    const liveBundleItemIds = new Set<string>();
+    if (candidateBundleItemIds.size > 0) {
+      const found = await ctx.db
+        .select({ id: schema.customBundleItems.id })
+        .from(schema.customBundleItems)
+        .where(inArray(schema.customBundleItems.id, Array.from(candidateBundleItemIds)));
+      for (const row of found) liveBundleItemIds.add(row.id);
+    }
 
-      const shouldDelete =
-        entry.bucket === 'obsolete' && selectedObsoleteRemovals.has(entry.entryId);
+    const selections: ApplySelections = {
+      selectedUpdates,
+      selectedNew,
+      selectedReinstate,
+      selectedObsoleteRemovals,
+      conflictChoices,
+    };
 
-      if (!shouldApply && !shouldDelete) {
+    for (const entry of plan.entries) {
+      const action = classifyApplyAction(entry, plan.entries, selections);
+
+      if (action === 'skip') {
         skippedCount += 1;
         continue;
       }
 
-      if (shouldDelete) {
+      if (action === 'untrack' && entry.liveArtifactId) {
+        rowsToSupersede.push(entry.liveArtifactId);
+        skippedCount += 1;
+        continue;
+      }
+
+      if (action === 'delete') {
         try {
           await rm(path.join(ctx.repoPath, entry.diskPath), { force: true });
           if (entry.liveArtifactId) rowsToSupersede.push(entry.liveArtifactId);
@@ -298,33 +391,63 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         sourceStepId: '02-upgrade-apply',
         source: 'upgrade' as const,
         haiveVersion,
+        bundleItemId: resolveBundleItemId(entry.templateId, liveBundleItemIds),
       });
     }
 
-    if (rowsToSupersede.length > 0) {
-      const now = new Date();
-      await ctx.db
-        .update(schema.onboardingArtifacts)
-        .set({ supersededAt: now, updatedAt: now })
-        .where(
-          and(
-            inArray(schema.onboardingArtifacts.id, rowsToSupersede),
-            isNull(schema.onboardingArtifacts.supersededAt),
-          ),
-        );
-    }
-
-    if (rowsToInsert.length > 0) {
-      await ctx.db.insert(schema.onboardingArtifacts).values(rowsToInsert);
+    // Defensive supersede + insert. Plan's `liveArtifactId` is what the plan
+    // *thinks* is the live row at each entry's diskPath, but if the plan was
+    // generated under stale state (or with a buggy expansion that classified
+    // a path as `new_artifact` while a live row already existed) the INSERT
+    // would collide on the (repository_id, disk_path) WHERE supersededAt IS
+    // NULL unique idx. So before inserting we supersede ANY live row at the
+    // diskPaths we are about to write, in addition to the explicit ids the
+    // plan attached. Wrapped in a single transaction so a half-applied state
+    // is impossible.
+    const insertPaths = Array.from(new Set(rowsToInsert.map((r) => r.diskPath)));
+    if (rowsToSupersede.length > 0 || insertPaths.length > 0) {
+      await ctx.db.transaction(async (tx) => {
+        const now = new Date();
+        if (rowsToSupersede.length > 0) {
+          await tx
+            .update(schema.onboardingArtifacts)
+            .set({ supersededAt: now, updatedAt: now })
+            .where(
+              and(
+                inArray(schema.onboardingArtifacts.id, rowsToSupersede),
+                isNull(schema.onboardingArtifacts.supersededAt),
+              ),
+            );
+        }
+        if (insertPaths.length > 0) {
+          await tx
+            .update(schema.onboardingArtifacts)
+            .set({ supersededAt: now, updatedAt: now })
+            .where(
+              and(
+                eq(schema.onboardingArtifacts.repositoryId, plan.repositoryId),
+                inArray(schema.onboardingArtifacts.diskPath, insertPaths),
+                isNull(schema.onboardingArtifacts.supersededAt),
+              ),
+            );
+        }
+        if (rowsToInsert.length > 0) {
+          await tx.insert(schema.onboardingArtifacts).values(rowsToInsert);
+        }
+      });
     }
 
     // Refresh applicable_template_ids on the repo from a fresh expansion
     // against the plan's render context — the source of truth for which
-    // templates apply to this repo right now (gating included).
-    const applicableExpanded = expandManifestFor(
-      plan.renderCtxSnapshot as unknown as TemplateRenderContext,
-      manifest,
-    );
+    // templates apply to this repo right now (gating included). Joins Haive
+    // template expansion with custom-bundle expansion so the per-repo
+    // applicable set covers `custom.*` ids as well.
+    const renderCtx = plan.renderCtxSnapshot as unknown as TemplateRenderContext;
+    const haiveApplicable = expandManifestFor(renderCtx, manifest);
+    const bundles = await loadBundlesForExpansion(ctx.db, plan.repositoryId, ctx.logger);
+    const skillTargets = await resolveSkillTargets(ctx.db, ctx.userId);
+    const customApplicable = expandCustomBundlesFor(bundles, renderCtx.agentTargets, skillTargets);
+    const applicableExpanded: ExpandedRendering[] = [...haiveApplicable, ...customApplicable];
     await updateApplicableTemplateIds(ctx.db, plan.repositoryId, applicableExpanded);
 
     // Rewrite .haive/install.json to reflect the post-upgrade state. Query
@@ -356,61 +479,10 @@ function toStringArray(v: unknown): string[] {
 }
 
 async function writeInstallManifest(
-  ctx: import('../../step-definition.js').StepContext,
+  ctx: StepContext,
   repositoryId: string,
   currentSetHash: string,
 ): Promise<boolean> {
-  const liveRows = await ctx.db
-    .select({
-      diskPath: schema.onboardingArtifacts.diskPath,
-      templateId: schema.onboardingArtifacts.templateId,
-      templateSchemaVersion: schema.onboardingArtifacts.templateSchemaVersion,
-      templateContentHash: schema.onboardingArtifacts.templateContentHash,
-    })
-    .from(schema.onboardingArtifacts)
-    .where(
-      and(
-        eq(schema.onboardingArtifacts.repositoryId, repositoryId),
-        isNull(schema.onboardingArtifacts.supersededAt),
-      ),
-    );
-
-  const byTemplate = new Map<
-    string,
-    { id: string; schemaVersion: number; contentHash: string; diskPaths: string[] }
-  >();
-  for (const r of liveRows) {
-    const existing = byTemplate.get(r.templateId);
-    if (existing) {
-      existing.diskPaths.push(r.diskPath);
-      continue;
-    }
-    byTemplate.set(r.templateId, {
-      id: r.templateId,
-      schemaVersion: r.templateSchemaVersion,
-      contentHash: r.templateContentHash,
-      diskPaths: [r.diskPath],
-    });
-  }
-  const installManifest: InstallManifest = {
-    schemaVersion: 1,
-    haiveVersion: getHaiveVersion(),
-    appliedAt: new Date().toISOString(),
-    lastTaskId: ctx.taskId,
-    templateSetHash: currentSetHash,
-    templates: Array.from(byTemplate.values())
-      .map((t) => ({ ...t, diskPaths: t.diskPaths.slice().sort() }))
-      .sort((a, b) => a.id.localeCompare(b.id)),
-  };
-
-  const installDir = path.join(ctx.repoPath, '.haive');
-  const installPath = path.join(installDir, 'install.json');
-  await mkdir(installDir, { recursive: true });
-  const content = normalizeContent(`${JSON.stringify(installManifest, null, 2)}\n`);
-  await writeFile(installPath, content, 'utf8');
-  ctx.logger.info(
-    { installPath: '.haive/install.json', templateCount: byTemplate.size },
-    'upgrade-apply: rewrote install manifest',
-  );
-  return true;
+  const { writeInstallManifestFromLiveRows } = await import('../../_install-manifest.js');
+  return writeInstallManifestFromLiveRows(ctx, repositoryId, currentSetHash);
 }

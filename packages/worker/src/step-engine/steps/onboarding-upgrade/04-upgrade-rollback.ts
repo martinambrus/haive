@@ -1,6 +1,6 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { getHaiveVersion, normalizeContent, type InstallManifest } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -10,6 +10,8 @@ import {
   updateApplicableTemplateIds,
   type TemplateRenderContext,
 } from '../../template-manifest.js';
+import { extractBundleItemId } from '../../_custom-bundle-loader.js';
+import { resolveBundleItemId } from './02-upgrade-apply.js';
 
 function isRollback(ctx: StepContext): Promise<boolean> {
   return ctx.db
@@ -51,10 +53,19 @@ interface RollbackTarget {
   priorFormValuesSnapshot: Record<string, unknown> | null;
 }
 
+/** A new_artifact entry from the prior upgrade — file did not exist before
+ *  the upgrade, so rolling back means deleting it from disk and superseding
+ *  the live row. There is no baseline to restore. */
+interface NewArtifactToUndo {
+  diskPath: string;
+  upgradeArtifactId: string;
+}
+
 interface RollbackDetect {
   repositoryId: string;
   rolledBackFromTaskId: string;
   targets: RollbackTarget[];
+  newArtifactsToUndo: NewArtifactToUndo[];
   warnings: string[];
 }
 
@@ -92,7 +103,11 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     const repositoryId = await requireRepositoryId(ctx);
     const warnings: string[] = [];
 
-    // Find the most recent completed upgrade task (not this rollback one).
+    // Find the most recent completed upgrade task (not this rollback one,
+    // and not any prior rollback task — rollback tasks share the
+    // `onboarding_upgrade` type and are distinguished only by
+    // `metadata.mode='rollback'`. Without this filter, repeated rollback
+    // clicks chain rollback→rollback and find no live rows to revert).
     const priorUpgrade = await ctx.db
       .select({ id: schema.tasks.id })
       .from(schema.tasks)
@@ -102,6 +117,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
           eq(schema.tasks.type, 'onboarding_upgrade'),
           eq(schema.tasks.status, 'completed'),
           ne(schema.tasks.id, ctx.taskId),
+          sql`coalesce(${schema.tasks.metadata}->>'mode', '') <> 'rollback'`,
         ),
       )
       .orderBy(desc(schema.tasks.completedAt))
@@ -132,8 +148,10 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     }
 
     // For each upgrade row, find the immediately-prior (now-superseded) row
-    // for the same disk_path. Take the most-recently-superseded one.
+    // for the same disk_path. Take the most-recently-superseded one. If none
+    // exists, the upgrade introduced a new file — rollback deletes it.
     const targets: RollbackTarget[] = [];
+    const newArtifactsToUndo: NewArtifactToUndo[] = [];
     for (const upgradeRow of upgradeRows) {
       const priorCandidates = await ctx.db
         .select({
@@ -157,7 +175,10 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         .limit(1);
       const prior = priorCandidates[0];
       if (!prior) {
-        warnings.push(`no prior baseline for ${upgradeRow.diskPath}; skipping`);
+        newArtifactsToUndo.push({
+          diskPath: upgradeRow.diskPath,
+          upgradeArtifactId: upgradeRow.id,
+        });
         continue;
       }
       targets.push({
@@ -181,6 +202,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       repositoryId,
       rolledBackFromTaskId: priorTaskId,
       targets,
+      newArtifactsToUndo,
       warnings,
     };
   },
@@ -209,6 +231,24 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
     const upgradeRowIds: string[] = [];
     const haiveVersion = getHaiveVersion();
+
+    // The prior row's templateId may reference a bundle item that has since
+    // been deleted (e.g. user replaced the ZIP). bundleItemId is FK-enforced,
+    // so we resolve all candidate ids against custom_bundle_items first and
+    // only set the linkage for items that still exist.
+    const candidateBundleItemIds = new Set<string>();
+    for (const target of detected.targets) {
+      const id = extractBundleItemId(target.templateId);
+      if (id) candidateBundleItemIds.add(id);
+    }
+    const liveBundleItemIds = new Set<string>();
+    if (candidateBundleItemIds.size > 0) {
+      const found = await ctx.db
+        .select({ id: schema.customBundleItems.id })
+        .from(schema.customBundleItems)
+        .where(inArray(schema.customBundleItems.id, Array.from(candidateBundleItemIds)));
+      for (const row of found) liveBundleItemIds.add(row.id);
+    }
 
     for (const target of detected.targets) {
       const rendering = byTemplateAndPath.get(`${target.templateId}:${target.diskPath}`);
@@ -284,24 +324,61 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         sourceStepId: '04-upgrade-rollback',
         source: 'rollback' as const,
         haiveVersion,
+        bundleItemId: resolveBundleItemId(restoreTemplateId, liveBundleItemIds),
       });
     }
 
-    if (upgradeRowIds.length > 0) {
-      const now = new Date();
-      await ctx.db
-        .update(schema.onboardingArtifacts)
-        .set({ supersededAt: now, updatedAt: now })
-        .where(
-          and(
-            inArray(schema.onboardingArtifacts.id, upgradeRowIds),
-            isNull(schema.onboardingArtifacts.supersededAt),
-          ),
-        );
+    // Undo new_artifact entries: delete the file from disk + supersede the
+    // upgrade row. There's no prior baseline to restore — the file did not
+    // exist before the upgrade. Idempotent on disk: missing file is fine.
+    const undoneNewArtifactIds: string[] = [];
+    for (const item of detected.newArtifactsToUndo) {
+      try {
+        await rm(path.join(ctx.repoPath, item.diskPath), { force: true });
+        undoneNewArtifactIds.push(item.upgradeArtifactId);
+        revertedCount += 1;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        warnings.push(`failed to delete ${item.diskPath}: ${msg}`);
+      }
     }
 
-    if (rowsToInsert.length > 0) {
-      await ctx.db.insert(schema.onboardingArtifacts).values(rowsToInsert);
+    // Defensive: supersede every live row at the diskPaths we are about to
+    // insert (in addition to the explicit upgrade row ids and the new-artifact
+    // undo ids), then insert. Wrapped in a single transaction so a
+    // half-applied state is impossible.
+    const insertPaths = Array.from(new Set(rowsToInsert.map((r) => r.diskPath)));
+    const allRowsToSupersede = [...upgradeRowIds, ...undoneNewArtifactIds];
+    if (allRowsToSupersede.length > 0 || insertPaths.length > 0) {
+      await ctx.db.transaction(async (tx) => {
+        const now = new Date();
+        if (allRowsToSupersede.length > 0) {
+          await tx
+            .update(schema.onboardingArtifacts)
+            .set({ supersededAt: now, updatedAt: now })
+            .where(
+              and(
+                inArray(schema.onboardingArtifacts.id, allRowsToSupersede),
+                isNull(schema.onboardingArtifacts.supersededAt),
+              ),
+            );
+        }
+        if (insertPaths.length > 0) {
+          await tx
+            .update(schema.onboardingArtifacts)
+            .set({ supersededAt: now, updatedAt: now })
+            .where(
+              and(
+                eq(schema.onboardingArtifacts.repositoryId, detected.repositoryId),
+                inArray(schema.onboardingArtifacts.diskPath, insertPaths),
+                isNull(schema.onboardingArtifacts.supersededAt),
+              ),
+            );
+        }
+        if (rowsToInsert.length > 0) {
+          await tx.insert(schema.onboardingArtifacts).values(rowsToInsert);
+        }
+      });
     }
 
     // Refresh applicable_template_ids from a fresh expansion against the

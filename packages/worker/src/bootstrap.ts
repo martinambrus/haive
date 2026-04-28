@@ -15,6 +15,7 @@ export interface BootstrapResult {
   databaseUrl: string;
   redisUrl: string;
   repoStoragePath: string;
+  bundleStoragePath: string;
 }
 
 export async function bootstrap(): Promise<BootstrapResult> {
@@ -38,9 +39,12 @@ export async function bootstrap(): Promise<BootstrapResult> {
     '/var/lib/haive/repos';
   await mkdir(repoStoragePath, { recursive: true });
 
+  const bundleStoragePath = process.env.BUNDLE_STORAGE_ROOT ?? '/var/lib/haive/bundles';
+  await mkdir(bundleStoragePath, { recursive: true });
+
   await syncTemplateManifestCache(db);
   await runDataMigrations(db);
 
-  logger.info({ repoStoragePath }, 'Worker bootstrap complete');
-  return { databaseUrl, redisUrl, repoStoragePath };
+  logger.info({ repoStoragePath, bundleStoragePath }, 'Worker bootstrap complete');
+  return { databaseUrl, redisUrl, repoStoragePath, bundleStoragePath };
 }
