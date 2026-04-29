@@ -162,6 +162,7 @@ async function main(): Promise<void> {
         maxIterations: 3,
         customNotes: 'resume smoke',
       },
+      '06_3-custom-bundles': { bundles: [] },
       '06_5-agent-discovery': { acceptedAgents: [] },
       '07-generate-files': { overwrite: true },
       '08-knowledge-acquisition': {

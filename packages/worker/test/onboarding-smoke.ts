@@ -155,6 +155,9 @@ async function main(): Promise<void> {
         maxIterations: 5,
         customNotes: '',
       },
+      '06_3-custom-bundles': {
+        bundles: [],
+      },
       '06_5-agent-discovery': {
         acceptedAgents: [],
       },
