@@ -89,7 +89,10 @@ test.describe('repos create UI', () => {
     }
   });
 
-  test('remote github_https submit records row with remote_url', async ({ page }) => {
+  test('remote git_https submit records row with remote_url', async ({ page }) => {
+    // Note: the form's "Git (HTTPS)" option is `git_https`. The legacy
+    // `github_https` source enum value still exists in shared/types but the UI
+    // consolidated all https flows (github + gitlab + generic) under git_https.
     const sql = getSql();
     let userId = '';
     const createdRepoIds: string[] = [];
@@ -103,7 +106,7 @@ test.describe('repos create UI', () => {
       const repoName = `e2e-remote-${Date.now().toString(36)}`;
       await page.getByLabel('Display name').fill(repoName);
 
-      await page.locator('#repo-source').selectOption('github_https');
+      await page.locator('#repo-source').selectOption('git_https');
       await expect(page.getByLabel('Repository URL')).toBeVisible();
 
       const remoteUrl = 'https://github.com/octocat/Hello-World.git';
@@ -126,7 +129,7 @@ test.describe('repos create UI', () => {
       `;
       expect(rows).toHaveLength(1);
       createdRepoIds.push(rows[0]!.id);
-      expect(rows[0]!.source).toBe('github_https');
+      expect(rows[0]!.source).toBe('git_https');
       expect(rows[0]!.remote_url).toBe(remoteUrl);
       expect(rows[0]!.branch).toBe('master');
 

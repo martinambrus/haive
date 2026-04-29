@@ -172,7 +172,17 @@ export default function TaskDetailPage() {
   }
 
   async function runStepAction(step: TaskStep, action: StepAction) {
-    const label = action === 'retry' ? 'Retry this step?' : 'Skip this step?';
+    let label: string;
+    if (action === 'skip') {
+      label = 'Skip this step?';
+    } else {
+      const downstreamCount = steps.filter(
+        (s) => s.stepIndex > step.stepIndex && s.status !== 'pending',
+      ).length;
+      label = downstreamCount
+        ? `Retry this step? ${downstreamCount} downstream step(s) will also be reset and re-run.`
+        : 'Retry this step?';
+    }
     if (!confirm(label)) return;
     setStepActionBusy(step.stepId);
     setStepActionError(null);
@@ -481,6 +491,13 @@ const ACTIONABLE_STATUSES: ReadonlySet<StepStatus> = new Set([
   'failed',
 ]);
 
+const RETRYABLE_STEP_STATUSES: ReadonlySet<StepStatus> = new Set([
+  'done',
+  'failed',
+  'skipped',
+  'waiting_form',
+]);
+
 function StepCard({
   step,
   taskStatus,
@@ -504,7 +521,8 @@ function StepCard({
   const initialValues = (step.formValues as FormValues | null) ?? undefined;
   const taskCancelled = taskStatus === 'cancelled';
   const showForm = !taskCancelled && step.status === 'waiting_form' && schema;
-  const canRetry = !taskCancelled && step.status === 'failed';
+  const canRetry = !taskCancelled && RETRYABLE_STEP_STATUSES.has(step.status);
+  const canSkip = !taskCancelled && (step.status === 'failed' || step.status === 'waiting_form');
   const showCliPicker = !taskCancelled && ACTIONABLE_STATUSES.has(step.status);
   const cliPickerId = `cli-${step.stepId}`;
 
@@ -542,13 +560,37 @@ function StepCard({
           {cliError && <span className="text-[11px] text-red-400">{cliError}</span>}
         </div>
       )}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="font-mono text-xs text-neutral-500">#{step.stepIndex}</span>
           <h3 className="text-base font-semibold text-neutral-100">{step.title}</h3>
           <Badge variant={stepStatusVariant(step.status)}>{step.status}</Badge>
         </div>
-        <span className="font-mono text-xs text-neutral-500">{step.stepId}</span>
+        <div className="flex items-center gap-2">
+          {canRetry && (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={actionBusy}
+              onClick={() => onAction('retry')}
+              title="Reset this step and re-run it (downstream steps will also reset)"
+            >
+              {actionBusy ? 'Retrying…' : 'Retry'}
+            </Button>
+          )}
+          {canSkip && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={actionBusy}
+              onClick={() => onAction('skip')}
+              title="Skip this step and continue with the next one"
+            >
+              Skip
+            </Button>
+          )}
+          <span className="font-mono text-xs text-neutral-500">{step.stepId}</span>
+        </div>
       </div>
 
       {step.statusMessage && (step.status === 'running' || step.status === 'waiting_cli') && (
@@ -572,14 +614,6 @@ function StepCard({
           <span className="text-xs text-neutral-400">
             We&apos;ll prompt you to retry the step right after you log in.
           </span>
-        </div>
-      )}
-
-      {canRetry && (
-        <div className="flex flex-wrap gap-2">
-          <Button size="sm" disabled={actionBusy} onClick={() => onAction('retry')}>
-            {actionBusy ? 'Working...' : 'Retry step'}
-          </Button>
         </div>
       )}
 

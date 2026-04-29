@@ -91,15 +91,15 @@ test.describe('step retry/skip UI', () => {
 
       await gotoTaskDetail(page, fixture.taskId);
 
-      const failingCard = page
-        .locator('div')
-        .filter({ hasText: /Failing step/ })
-        .first();
-      await expect(failingCard).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Retry step' })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Skip step' })).toBeVisible();
+      // Scope to the step card — the page also renders a task-level "Retry"
+      // button at the top when the task is failed, which would otherwise
+      // collide with this selector.
+      const stepCard = page.locator('[data-step-id="failing-step"]');
+      const stepRetry = stepCard.getByRole('button', { name: 'Retry', exact: true });
+      await expect(stepCard).toBeVisible();
+      await expect(stepRetry).toBeVisible();
 
-      await page.getByRole('button', { name: 'Retry step' }).click();
+      await stepRetry.click();
 
       const finalStatus = await waitForStepStatus(sql, fixture.failedStepId, 'pending');
       expect(finalStatus).toBe('pending');
@@ -118,8 +118,11 @@ test.describe('step retry/skip UI', () => {
         where task_id = ${fixture.taskId} and event_type = 'step.retry'
       `;
       expect(events).toHaveLength(1);
+      // Payload-shape assertions (priorStatus, cascadedSteps) are covered by
+      // the API-level retry tests; the UI test only verifies that the button
+      // wired up to the action endpoint.
 
-      await expect(page.getByRole('button', { name: 'Retry step' })).toBeHidden({
+      await expect(stepRetry).toBeHidden({
         timeout: 10_000,
       });
     } finally {
@@ -144,9 +147,11 @@ test.describe('step retry/skip UI', () => {
       });
 
       await gotoTaskDetail(page, fixture.taskId);
-      await expect(page.getByRole('button', { name: 'Skip step' })).toBeVisible();
+      const stepCard = page.locator('[data-step-id="failing-step"]');
+      const skipButton = stepCard.getByRole('button', { name: 'Skip', exact: true });
+      await expect(skipButton).toBeVisible();
 
-      await page.getByRole('button', { name: 'Skip step' }).click();
+      await skipButton.click();
 
       const finalStatus = await waitForStepStatus(sql, fixture.failedStepId, 'skipped');
       expect(finalStatus).toBe('skipped');

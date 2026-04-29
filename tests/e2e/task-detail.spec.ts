@@ -3,7 +3,6 @@ import {
   cleanupTaskFixture,
   cleanupUser,
   getSql,
-  readTaskStatus,
   seedTaskFixture,
   type TaskFixture,
 } from './helpers/db.js';
@@ -53,19 +52,28 @@ test.describe('task detail page', () => {
       // error message rendered for failed step
       await expect(page.getByText('kaboom')).toBeVisible();
 
-      // step action buttons present on failed step
-      await expect(page.getByRole('button', { name: 'Retry step' })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Skip step' })).toBeVisible();
+      // step action buttons present on failed step (scoped to the step card,
+      // since "Retry" also appears as the task-level button at the page top)
+      const failingStepCard = page.locator('[data-step-id="failing-step"]');
+      await expect(
+        failingStepCard.getByRole('button', { name: 'Retry', exact: true }),
+      ).toBeVisible();
+      await expect(
+        failingStepCard.getByRole('button', { name: 'Skip', exact: true }),
+      ).toBeVisible();
 
-      // task-level Retry button visible (status=failed)
-      await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
+      // task-level Retry button visible (status=failed). Both step-level and
+      // task-level buttons are labeled "Retry" — match by count rather than
+      // strict locator, since the strict-mode locator now has 2 matches.
+      await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(2);
 
-      // Pause/Resume not visible since task is failed
+      // Pause/Resume are not implemented in the current API/UI.
       await expect(page.getByRole('button', { name: 'Pause' })).toHaveCount(0);
       await expect(page.getByRole('button', { name: 'Resume' })).toHaveCount(0);
 
-      // Cancel not visible since task is in terminal state
-      await expect(page.getByRole('button', { name: 'Cancel' })).toHaveCount(0);
+      // Cancel IS visible for failed tasks — page.tsx exposes Cancel for any
+      // status not in {completed, cancelled} so failed tasks remain abortable.
+      await expect(page.getByRole('button', { name: 'Cancel' })).toBeVisible();
 
       // Tabs present + switch to Activity
       await page.getByRole('button', { name: 'Activity' }).click();
@@ -124,7 +132,10 @@ test.describe('task detail page', () => {
       await page.goto(`/tasks/${fixture.taskId}`);
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
 
-      await page.getByRole('button', { name: 'Retry', exact: true }).click();
+      // The page renders 2 "Retry" buttons (task-level in the page header,
+      // step-level in the failing step card). Click the task-level one — it's
+      // the first match, in the page-header region.
+      await page.getByRole('button', { name: 'Retry', exact: true }).first().click();
 
       // The retry transaction inserts task.retried in task_events and clears
       // errorMessage synchronously. Both are race-proof even when the worker

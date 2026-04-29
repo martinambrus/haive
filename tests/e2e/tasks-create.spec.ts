@@ -194,6 +194,10 @@ test.describe('tasks list and create', () => {
       await page.goto('/tasks');
       await expect(page.getByRole('heading', { level: 1, name: 'Tasks' })).toBeVisible();
 
+      // The page hides completed/cancelled tasks by default. The seed list
+      // includes one completed task, so flip both filters to surface them.
+      await page.getByRole('button', { name: 'Show completed' }).click();
+
       for (const s of seeds) {
         await expect(page.getByRole('heading', { level: 2, name: s.title })).toBeVisible();
       }

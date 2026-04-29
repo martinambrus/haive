@@ -1,7 +1,7 @@
 import { open, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { Hono } from 'hono';
-import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   createTaskRequestSchema,
@@ -259,35 +259,72 @@ taskRoutes.post('/:id/steps/:stepId/action', async (c) => {
   if (!step) throw new HttpError(404, 'Step not found');
 
   if (body.action === 'retry') {
-    if (step.status !== 'failed') {
+    // Retry resets a step (and its downstream) back to pending so the worker
+    // can re-run it. `running`/`waiting_cli` are excluded because cancelling an
+    // in-flight worker job + attached PTY is not supported yet.
+    const RETRYABLE_STEP_STATUSES: ReadonlySet<string> = new Set([
+      'done',
+      'failed',
+      'skipped',
+      'waiting_form',
+    ]);
+    if (!RETRYABLE_STEP_STATUSES.has(step.status)) {
       throw new HttpError(409, `Cannot retry step in status ${step.status}`);
     }
+
+    const downstream = await db
+      .select()
+      .from(schema.taskSteps)
+      .where(and(eq(schema.taskSteps.taskId, id), gt(schema.taskSteps.stepIndex, step.stepIndex)));
+    const blocking = downstream.find((r) => r.status === 'running' || r.status === 'waiting_cli');
+    if (blocking) {
+      throw new HttpError(
+        409,
+        `Cannot retry: downstream step ${blocking.stepId} is ${blocking.status}. Wait for it to settle.`,
+      );
+    }
+
     await db.transaction(async (tx) => {
       const now = new Date();
+      const downstreamToReset = downstream.filter((r) => r.status !== 'pending').map((r) => r.id);
+      const allStepIds = [step.id, ...downstreamToReset];
+
       await tx
         .update(schema.cliInvocations)
         .set({ supersededAt: now })
         .where(
           and(
-            eq(schema.cliInvocations.taskStepId, step.id),
+            inArray(schema.cliInvocations.taskStepId, allStepIds),
             isNull(schema.cliInvocations.supersededAt),
           ),
         );
+      // Clearing formSchema is essential: step-runner only re-renders the form
+      // when persistedSchema is null (step-runner.ts ~L287). Without this, a
+      // retry would re-run the LLM but reuse the stale form schema.
+      // formValues is cleared so the user re-confirms inputs against the
+      // (possibly different) regenerated schema.
       await tx
         .update(schema.taskSteps)
         .set({
           status: 'pending',
+          detectOutput: null,
+          formSchema: null,
+          formValues: null,
+          output: null,
+          statusMessage: null,
           errorMessage: null,
           errorHint: null,
+          startedAt: null,
           endedAt: null,
           updatedAt: now,
         })
-        .where(eq(schema.taskSteps.id, step.id));
+        .where(inArray(schema.taskSteps.id, allStepIds));
       await tx
         .update(schema.tasks)
         .set({
           status: 'running',
           errorMessage: null,
+          completedAt: null,
           currentStepId: stepId,
           currentStepIndex: step.stepIndex,
           updatedAt: now,
@@ -297,7 +334,12 @@ taskRoutes.post('/:id/steps/:stepId/action', async (c) => {
         taskId: id,
         taskStepId: step.id,
         eventType: 'step.retry',
-        payload: { stepId, note: body.note ?? null },
+        payload: {
+          stepId,
+          note: body.note ?? null,
+          priorStatus: step.status,
+          cascadedSteps: downstreamToReset.length,
+        },
       });
     });
     await getTaskQueue().add(
