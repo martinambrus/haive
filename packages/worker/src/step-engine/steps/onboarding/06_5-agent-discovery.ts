@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { jsonrepair } from 'jsonrepair';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { agentSpecSchema, type DetectResult, type FormSchema } from '@haive/shared';
@@ -464,33 +465,103 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
   ].join('\n');
 }
 
-export function parseLlmAgentOutput(
-  raw: string,
+export interface AgentParseDiagnostic {
+  parseError: string;
+  bodyLength: number;
+  errorPosition: number;
+  snippet: string;
+  /** True when the result was salvaged via jsonrepair after strict JSON.parse failed. */
+  repaired?: boolean;
+}
+
+interface ParseAgentBodyOpts {
+  /** When true (post-jsonrepair), reject results where every field is wrong
+   *  shape (e.g. `predefined` came back as a string from a salvaged garbage
+   *  fragment). For strict-parse callers, accept normalised empty defaults. */
+  rejectAllWrongShapes?: boolean;
+}
+
+function parseAgentBody(
+  candidate: string,
+  opts: ParseAgentBodyOpts = {},
 ): { predefined: Record<string, boolean>; custom: LlmAgentSuggestion[] } | null {
+  const obj = JSON.parse(candidate) as Record<string, unknown>;
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const predefinedIsObject =
+    obj.predefined !== undefined &&
+    obj.predefined !== null &&
+    typeof obj.predefined === 'object' &&
+    !Array.isArray(obj.predefined);
+  const customIsArray = Array.isArray(obj.custom);
+  if (opts.rejectAllWrongShapes) {
+    // jsonrepair on garbage like `{"predefined": not-json-here` returns
+    // `{ predefined: "not-json-here" }`. Decline when nothing parsed cleanly.
+    const predefinedAbsent = obj.predefined === undefined;
+    const customAbsent = obj.custom === undefined;
+    const predefinedWrong = !predefinedAbsent && !predefinedIsObject;
+    const customWrong = !customAbsent && !customIsArray;
+    const nothingValid = (predefinedAbsent || predefinedWrong) && (customAbsent || customWrong);
+    if (nothingValid) return null;
+  }
+  return {
+    predefined: predefinedIsObject ? (obj.predefined as Record<string, boolean>) : {},
+    custom: customIsArray ? (obj.custom as LlmAgentSuggestion[]) : [],
+  };
+}
+
+export function parseLlmAgentOutputWithDiagnostic(raw: string): {
+  result: { predefined: Record<string, boolean>; custom: LlmAgentSuggestion[] } | null;
+  diagnostic: AgentParseDiagnostic | null;
+} {
   // Custom agent bodies include an `outputFormat` field that is itself a
-  // triple-backtick fenced Markdown block. That means the outer ```json fence
-  // contains inner ``` sequences inside JSON string values, so a lazy regex
-  // match ends at the first inner ``` and yields truncated/invalid JSON.
-  // Try lazy first (single-block happy path), then greedy that spans to the
-  // final ``` (handles embedded fences).
+  // triple-backtick fenced Markdown block. The outer ```json fence then
+  // legitimately contains inner ``` inside string values, so lazy and greedy
+  // regexes both warrant a try. Order: strict on both first (preferring the
+  // greedy span that matches the full block), then repair as salvage.
   const lazy = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
   const greedy = raw.match(/```(?:json)?\s*([\s\S]*)```/);
-  for (const candidate of [lazy?.[1], greedy?.[1]]) {
+  let lastError: AgentParseDiagnostic | null = null as AgentParseDiagnostic | null;
+
+  for (const candidate of [greedy?.[1], lazy?.[1]]) {
     if (!candidate) continue;
     try {
-      const obj = JSON.parse(candidate) as {
-        predefined?: Record<string, boolean>;
-        custom?: LlmAgentSuggestion[];
+      const result = parseAgentBody(candidate);
+      return { result, diagnostic: null };
+    } catch (strictErr) {
+      const message = strictErr instanceof Error ? strictErr.message : String(strictErr);
+      const pos = parseInt((message.match(/position (\d+)/) ?? [])[1] ?? '0', 10);
+      lastError = {
+        parseError: message,
+        bodyLength: candidate.length,
+        errorPosition: pos,
+        snippet: candidate.slice(Math.max(0, pos - 60), pos + 60),
       };
-      return {
-        predefined: obj.predefined ?? {},
-        custom: Array.isArray(obj.custom) ? obj.custom : [],
-      };
+    }
+  }
+
+  // Strict failed on every layout — jsonrepair as salvage. Try greedy first
+  // (full block), fall back to lazy. Use strict shape-rejection so we don't
+  // accept jsonrepair's coercion of garbage tokens into stringy fields.
+  for (const candidate of [greedy?.[1], lazy?.[1]]) {
+    if (!candidate) continue;
+    try {
+      const repaired = jsonrepair(candidate);
+      const result = parseAgentBody(repaired, { rejectAllWrongShapes: true });
+      if (result) {
+        lastError = lastError ? { ...lastError, repaired: true } : null;
+        return { result, diagnostic: lastError };
+      }
     } catch {
       // try the next candidate
     }
   }
-  return null;
+  return { result: null, diagnostic: lastError };
+}
+
+export function parseLlmAgentOutput(
+  raw: string,
+): { predefined: Record<string, boolean>; custom: LlmAgentSuggestion[] } | null {
+  return parseLlmAgentOutputWithDiagnostic(raw).result;
 }
 
 /* ------------------------------------------------------------------ */
@@ -607,7 +678,11 @@ export function buildAgentSpecFromLlm(
   };
 }
 
-function enrichCandidates(detected: AgentDiscoveryDetect, llmOutput: unknown): AgentCandidate[] {
+function enrichCandidates(
+  detected: AgentDiscoveryDetect,
+  llmOutput: unknown,
+  diagnosticSink?: (diag: AgentParseDiagnostic) => void,
+): AgentCandidate[] {
   const candidates: AgentCandidate[] = detected.candidates.map((c) => ({
     ...c,
     source: c.source ?? ('scan' as const),
@@ -623,13 +698,21 @@ function enrichCandidates(detected: AgentDiscoveryDetect, llmOutput: unknown): A
   ) {
     extracted = (llmOutput as { result: unknown }).result;
   }
-  const llmResult =
-    typeof extracted === 'string'
-      ? parseLlmAgentOutput(extracted)
-      : (extracted as {
-          predefined?: Record<string, boolean>;
-          custom?: LlmAgentSuggestion[];
-        } | null);
+  let llmResult: { predefined: Record<string, boolean>; custom: LlmAgentSuggestion[] } | null;
+  if (typeof extracted === 'string') {
+    const parsed = parseLlmAgentOutputWithDiagnostic(extracted);
+    llmResult = parsed.result;
+    // Surface the diagnostic on hard-fail (no result) AND on repair (so
+    // callers can count safety-net hits even when we did salvage entries).
+    if (parsed.diagnostic && diagnosticSink && (!llmResult || parsed.diagnostic.repaired)) {
+      diagnosticSink(parsed.diagnostic);
+    }
+  } else {
+    llmResult = extracted as {
+      predefined: Record<string, boolean>;
+      custom: LlmAgentSuggestion[];
+    } | null;
+  }
   if (!llmResult) return candidates;
 
   // Update recommendation flags for predefined agents
@@ -812,9 +895,22 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
     timeoutMs: 60 * 60 * 1000,
   },
 
-  form(_ctx, detected, llmOutput): FormSchema {
+  form(ctx, detected, llmOutput): FormSchema {
     // Merge LLM suggestions into candidates before displaying the form
-    const enriched = enrichCandidates(detected, llmOutput);
+    const enriched = enrichCandidates(detected, llmOutput, (diag) =>
+      ctx.logger.warn(
+        {
+          parseError: diag.parseError,
+          bodyLength: diag.bodyLength,
+          errorPosition: diag.errorPosition,
+          snippet: diag.snippet,
+          repaired: diag.repaired === true,
+        },
+        diag.repaired
+          ? 'agent-discovery: strict JSON.parse failed but jsonrepair salvaged the suggestions'
+          : 'agent-discovery: LLM output failed JSON.parse and jsonrepair could not recover',
+      ),
+    );
 
     const options = enriched.map((c) => ({
       value: c.id,

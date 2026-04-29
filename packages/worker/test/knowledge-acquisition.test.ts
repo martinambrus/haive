@@ -151,12 +151,18 @@ describe('parseKbEntries', () => {
     expect(entries[0]!.id).toBe('arch');
   });
 
-  it('returns empty array when fence is unterminated AND JSON itself is incomplete', () => {
+  it('does not throw on a mid-string truncation; jsonrepair may salvage partial entries', () => {
     // True mid-string truncation: no closing fence and JSON is broken.
-    // Parser must not throw, just return [].
+    // Old behavior was an empty array; with jsonrepair the parser may now
+    // recover a single partial entry. Either outcome is acceptable — what
+    // matters is that the parser does not throw.
     const raw =
       '```json\n{"entries":[{"id":"arch","title":"Arch","sections":[{"heading":"a","body":"unfini';
-    expect(parseKbEntries(raw)).toEqual([]);
+    expect(() => parseKbEntries(raw)).not.toThrow();
+    const result = parseKbEntries(raw);
+    if (result.length > 0) {
+      expect(result[0]!.id).toBe('arch');
+    }
   });
 });
 

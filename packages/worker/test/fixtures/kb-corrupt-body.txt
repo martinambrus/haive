@@ -1,0 +1,245 @@
+```json
+{
+  "entries": [
+    {
+      "id": "architecture-overview",
+      "title": "Architecture Overview",
+      "confidence": "high",
+      "sourceFiles": [
+        "src/com/github/martinambrus/rdapi/game/GameInterface.java",
+        "src/com/github/martinambrus/rdapi/game/Game.java",
+        "src/com/github/martinambrus/rdapi/utils/ModLoader.java"
+      ],
+     category": "general",
+      "canonical": "ARCHITECTURE",
+      "sections": [
+        {
+          "heading": "Design Philosophy",
+          "body": "This is a pure API library with no game implementations — modeled after the Bukkit pattern. It provides abstract classes and interfaces that mod authors extend/implement to create RubyDung mods. The produced artifact is `rd-api.jar`, which mod projects add as a compile dependency."
+        },
+        {
+          "heading": "Package Structure",
+          "body": "All source lives under `src/com/github/martinambrus/rdapi/` (non-standard Gradle layout — uses `sourceSets { main.java.srcDirs 'src' }` instead of `src/main/java`).\n\n- **`game/`** — Core game lifecycle: `GameInterface` (interface) and `Game` (abstract base class). The `Game` class provides keyboard event dispatching during `render()`.\n- **`timer/`** — Tick rate management: `TimerInterface`, `TimerHelper` (delayed task execution), and `TimerListener` (callback when TPS changes).\n- **`keyboard/`** — Input handling: single `KeyboardListener` interface with `onKeyPressed(int key)`.\n- **`utils/`** — Infrastructure: `ModLoader` performs runtime JAR loading and mod discovery via reflection."
+        },
+        {
+          "heading": "Extension Points for Mods",
+          "body": "Mods extend `Game` (the abstract class) and are discovered at runtime by `ModLoader`. The discovery contract requires:\n1. The mod's main class name must start with `\"RDMod\"` (checked in `ModLoader.loadMod()` at line 37).\n2. The class must have a public constructor accepting a single `Game` parameter.\n3. The mod is packaged as a JAR file loaded via `URLClassLoader.addURL` reflection hack.\n\nThe `Game` instance passed to the constructor gives mods access to `addKeyboardListener()`, `getTimerInstance()`, and the full game lifecycle (`init`, `destroy`, `run`, `tick`, `render`)."
+        }
+      ]
+    },
+    {
+      "id": "api-reference",
+      "title": "API Reference",
+      "confidence": "high",
+      "sourceFiles": [
+        "src/com/github/martinambrus/rdapi/game/GameInterface.java",
+        "src/com/github/martinambrus/rdapi/game/Game.java",
+        "src/com/github/martinambrus/rdapi/timer/TimerInterface.java",
+        "src/com/github/martinambrus/rdapi/keyboard/KeyboardListener.java",
+        "src/com/github/martinambrus/rdapi/timer/TimerListener.java"
+      ],
+      "category": "general",
+      "canonical": "API_REFERENCE",
+      "sections": [
+        {
+          "heading": "GameInterface",
+          "body": "The core contract for any game implementation. Defined in `game/GameInterface.java`:\n\n```java\npublic interface GameInterface {\n    void init() throws LWJGLException, IOException;\n    void destroy();\n    void run();\n    void tick();\n    boolean render(float a);\n    static void main(String[] args) throws LWJGLException {}\n    void addKeyboardListener(KeyboardListener kl);\n    TimerInterface getTimerInstance();\n}\n```\n\n- `init()` — Called once at startup. Can throw `LWJGLException` (display/keyboard init) and `IOException`.\n- `tick()` — Called every game tick (frequency controlled by `TimerInterface`).\n- `render(float a)` — Called each frame with an interpolation value. Returns `boolean` (always `true` in the default `Game` implementation).\n- `main()` — Static entry point on the interface itself (unusual but valid Java 8)."
+        },
+        {
+          "heading": "Game Abstract Class",
+          "body": "Defined in `game/Game.java`. Partially implements `GameInterface`:\n\n- Maintains an `apiVersion` field (currently `\"0.1.2\"`) returned by `getVersion()`.\n- Holds a `List<KeyboardListener>` and provides `addKeyboardListener()`.\n- `render(float a)` polls LWJGL's `Keyboard.next()` in a loop, dispatching `onKeyPressed` to all registered listeners when a key press event is detected.\n- `init()`, `destroy()`, `run()`, `tick()`, `getTimerInstance()` are left abstract (not overridden)."
+        },
+        {
+          "heading": "Timer API",
+          "body": "`TimerInterface` (in `timer/`) controls game tick rate:\n- `float getTicksPerSecond()` — Current TPS.\n- `void setTicksPerSecond(float tps)` — Change tick rate at runtime.\n- `void advanceTime()` — Advance the internal timer by one tick.\n- `void addTimerListener(TimerListener tl)` — Register for TPS change notifications.\n\n`TimerListener` receives `onTpsChanged(float newTps)` callbacks.\n\n`TimerHelper` provides a static utility: `runTaskDelayed(Runnable, long delayMillis)` — schedules a one-shot task on a new thread after the specified delay."
+        },
+        {
+          "heading": "Keyboard API",
+          "body": "`KeyboardListener` (in `keyboard/`) is a single-method interface:\n```java\nvoid onKeyPressed(int key);\n```\nThe `key` parameter is an LWJGL `Keyboard` key constant (e.g., `Keyboard.KEY_A`). Listeners are registered via `Game.addKeyboardListener()` and invoked during each `render()` call."
+        }
+      ]
+    },
+    {
+      "id": "coding-standards",
+      "title": "Coding Standards",
+      "confidence": "high",
+      "sourceFiles": [
+        "src/com/github/martinambrus/rdapi/game/Game.java",
+        "src/com/github/martinambrus/rdapi/utils/ModLoader.java",
+        "src/com/github/martinambrus/rdapi/timer/TimerHelper.java",
+        "build.gradle"
+      ],
+      "category": "general",
+      "canonical": "CODING_STANDARDS",
+      "sections": [
+        {
+          "heading": "Language and Compatibility",
+          "body": "Java source and target compatibility are both set to **1.8** in `build.gradle`. This means no lambdas-in-interfaces (Java 9+), no `var`, no modules. The codebase uses anonymous inner classes and explicit `new Thread(new Runnable() { ... })` patterns typical of Java 8 style.\n\nNote: the `static` method on `GameInterface` (`main`) uses Java 8's static interface methods, which is valid."
+        },
+        {
+          "heading": "Naming Conventions",
+          "body": "- **Classes**: PascalCase (`TimerHelper`, `KeyboardListener`, `ModLoader`).\n- **Interfaces**: PascalCase without an `I` prefix (`GameInterface`, `TimerInterface`, `TimerListener`). Listener interfaces are named `*Listener`.\n- **Methods**: camelCase (`addKeyboardListener`, `getTicksPerSecond`, `onTpsChanged`).\n- **Variables**: camelCase (`keyboardListeners`, `javaNameSplitted`).\n- **Constants/fields**: No `static final` naming convention enforced — `apiVersion` is private final but not `SCREAMING_SNAKE_CASE`.\n- **Mod naming convention**: Mod entry classes must start with `\"RDMod\"` prefix (enforced by `ModLoader`)."
+        },
+        {
+          "heading": "Code Style Observations",
+          "body": "- Spaces inside parentheses in control flow: `while(Keyboard.next())`, `if ( Keyboard.getEventKeyState() )` — inconsistent but leans toward Allman-influenced spacing.\n- String concatenation and `System.out.print()` for logging (no SLF4J or logging framework).\n- Error handling uses `try-with-resources` for `JarFile` but prints stack traces directly rather than wrapping in domain exceptions.\n- Minimal comments — only one inline comment in `ModLoader` and `TimerHelper`."
+        }
+      ]
+    },
+    {
+      "id": "deployment-and-ci",
+      "title": "Deployment and CI Pipeline",
+      "confidence": "high",
+      "sourceFiles": [
+        ".github/workflows/gradle.yml",
+        "build.gradle",
+        ".gitignore"
+      ],
+      "category": "general",
+      "canonical": "DEPLOYMENT",
+      "sections": [
+        {
+          "heading": "Build Process",
+          "body": "The build is a two-step Gradle process:\n1. `first_time_run` — Downloads LWJGL 2.9.3 from a Dropbox URL via a custom `FileDownloader` task, then extracts the ZIP into `libs/lwjgl-2.9.3/`.\n2. `jar` — Compiles all Java sources and produces `build/libs/rd-api.jar`.\n\nDependencies are loaded from `libs/lwjgl-2.9.3/jar/*.jar` and `libs/*.jar` via `fileTree` — no Maven coordinate for LWJGL, only local JARs.\n\nGradle wrapper is NOT checked in. The CI generates it fresh with `gradle wrapper` (Gradle 8.5, installed via `gradle/actions/setup-gradle@v3.1.0`)."
+        },
+        {
+          "heading": "GitHub Actions CI",
+          "body": "Workflow: `.github/workflows/gradle.yml` (name: `CI`).\n\n- **Triggers**: Push to `master`, PRs against `master`.\n- **Runner**: `ubuntu-latest`.\n- **JDK**: Temurin 8 (`setup-java@v4`).\n- **Gradle**: 8.5 (pinned via hash `417ae3ccd767c252f5661f1ace9f835f9654f2b5`).\n- **Steps**: checkout → setup JDK → setup Gradle → `gradle wrapper` → `chmod +x ./gradlew` → `./gradlew first_time_run` → `./gradlew jar` → upload `build/libs` as artifact named `RDAPI`.\n- **Permissions**: `contents: read` only (no write-back to repo).\n- **No tests**: The CI only builds — there are no test tasks or test source sets."
+        },
+        {
+          "heading": "Distribution",
+          "body": "Releases are distributed via GitHub Releases at `github.com/martinambrus/RDApi/releases`. The CI uploads the JAR as a build artifact, but release publishing appears to be manual. The project is MIT licensed (Copyright 2024 Martin Ambrus)."
+        }
+      ]
+    },
+    {
+      "id": "business-logic-rubydung-modding",
+      "title": "Domain: RubyDung Modding API",
+      "confidence": "high",
+      "sourceFiles": [
+        "README.md",
+        "src/com/github/martinambrus/rdapi/utils/ModLoader.java",
+        "src/com/github/martinambrus/rdapi/game/GameInterface.java"
+      ],
+      "category": "general",
+      "canonical": "BUSINESS_LOGIC",
+      "sections": [
+        {
+          "heading": "Domain Context",
+          "body": "RubyDung was the internal code name for what became Minecraft, circa 2009. This API provides a Bukkit-like modding surface for that early game version. The project is now **deprecated** in favor of [RDForward](https://github.com/martinambrus/RDForward), a Fabric-enabled approach to RubyDung modding.\n\nThe ecosystem includes:\n- **RDApi** (this repo) — The API library.\n- **RDModded** — The actual modded game runtime (`github.com/martinambrus/RDModded`).\n- **RDModTimeSlower** — A sample mod demonstrating API usage (`github.com/martinambrus/RDModTimeSlower`).\n- **RDForward** — The successor project using Fabric toolchain."
+        },
+        {
+          "heading": "Mod Loading Contract",
+          "body": "Mods are discovered and loaded at runtime by `ModLoader`:\n1. A JAR file path is passed to `ModLoader.loadMod(String jarFilePath, Game gameInstance)`.\n2. The JAR is scanned for `.class` files whose simple class name starts with `\"RDMod\"` (inner classes containing `$` are skipped).\n3. The JAR is added to the system classloader via reflective `URLClassLoader.addURL`.\n4. The class is instantiated via `Class.forName()` + constructor lookup for `(Game.class)` parameter.\n5. The constructor is expected to register listeners (keyboard, timer) on the provided `Game` instance.\n\nThis means a mod's lifecycle is: construct → register listeners → receive callbacks. There is no explicit unload or disable mechanism."
+        },
+        {
+          "heading": "Game Lifecycle",
+          "body": "The game follows a standard game loop pattern:\n- `init()` — One-time setup (display, input, resources).\n- `run()` — Main game loop entry.\n- `tick()` — Fixed-rate game logic updates (rate controlled by `TimerInterface`).\n- `render(float a)` — Frame rendering with interpolation. Also dispatches keyboard events.\n- `destroy()` — Cleanup on shutdown.\n\nThe tick rate is adjustable at runtime via `TimerInterface.setTicksPerSecond()`, and listeners are notified of TPS changes through `TimerListener`."
+        }
+      ]
+    },
+    {
+      "id": "lwjgl-2-integration",
+      "title": "LWJGL 2.9.3 Integration",
+      "confidence": "high",
+      "sourceFiles": [
+        "build.gradle",
+        "src/com/github/martinambrus/rdapi/game/Game.java",
+        "src/com/github/martinambrus/rdapi/game/GameInterface.java"
+      ],
+      "category": "tech_pattern",
+      "tech": "lwjgl2",
+      "sections": [
+        {
+          "heading": "Dependency Acquisition",
+          "body": "LWJGL 2.9.3 is **not** pulled from Maven Central. Instead, it's downloaded as a ZIP from a Dropbox URL during the `first_time_run` Gradle task and extracted into `libs/lwjgl-2.9.3/`. The JARs inside that directory are loaded via `fileTree`:\n\n```groovy\ndependencies {\n    implementation fileTree( dir: \"libs/${project.ext.lwjgl_version}/jar\", includes: ['*.jar'] )\n}\n```\n\nThis means the project has no internet dependency resolution for LWJGL after the initial download, but also means the Dropbox link is a single point of failure."
+        },
+        {
+          "heading": "API Surface Used",
+          "body": "Only two LWJGL classes are used in the API:\n- `org.lwjgl.input.Keyboard` — Static polling API: `Keyboard.next()`, `Keyboard.getEventKeyState()`, `Keyboard.getEventKey()`. Used in `Game.render()` to dispatch key events.\n- `org.lwjgl.LWJGLException` — Checked exception thrown by `GameInterface.init()`, representing display/input initialization failures.\n\nThe API does not use LWJGL's display, OpenGL, or audio APIs directly — those would be used by the concrete game implementation (RDModded), not this API layer."
+        }
+      ]
+    },
+    {
+      "id": "reflection-based-mod-loading",
+      "title": "Reflection-Based Mod Loading",
+      "confidence": "high",
+      "sourceFiles": [
+        "src/com/github/martinambrus/rdapi/utils/ModLoader.java"
+      ],
+      "category": "tech_pattern",
+      "tech": "java-reflection-classloading",
+      "sections": [
+        {
+          "heading": "Classloader Injection",
+          "body": "`ModLoader.loadJarFile()` uses reflection to access the protected `URLClassLoader.addURL` method on the current thread's context classloader:\n\n```java\njava.lang.reflect.Method method = java.net.URLClassLoader.class.getDeclaredMethod(\"addURL\", java.net.URL.class);\nmethod.setAccessible(true);\nmethod.invoke(Thread.currentThread().getContextClassLoader(), url);\n```\n\nThis allows dynamically adding mod JARs to the classpath at runtime without a custom classloader hierarchy."
+        },
+        {
+          "heading": "Class Discovery and Instantiation",
+          "body": "`ModLoader.loadMod()` iterates all entries in the mod JAR, filtering for `.class` files whose simple name starts with `\"RDMod\"` and doesn't contain `$` (inner classes). For each match:\n1. The JAR is added to classloader via `loadJarFile()`.\n2. `Class.forName(fullyQualifiedName)` loads the class.\n3. Constructor with `Game.class` parameter is looked up and invoked.\n\nError handling catches `ClassNotFoundException`, `NoSuchMethodException`, `InvocationTargetException`, `IllegalAccessException`, `InstantiationException` — all logged to stdout with stack traces, but mod loading continues for remaining classes (fail-soft)."
+        }
+      ]
+    },
+    {
+      "id": "threading-anti-pattern",
+      "title": "Thread Creation Without Executor",
+      "confidence": "high",
+      "sourceFiles": [
+        "src/com/github/martinambrus/rdapi/timer/TimerHelper.java"
+      ],
+      "category": "anti_pattern",
+      "tech": "java-concurrency",
+      "sections": [
+        {
+          "heading": "Raw Thread Creation",
+          "body": "`TimerHelper.runTaskDelayed()` creates a new `Thread` for every delayed task invocation:\n\n```java\nnew Thread(new Runnable() {\n    @Override\n    public void run() {\n        while (true) {\n            try {\n                long leftToSleep = requested + delayMillis - System.currentTimeMillis();\n                if (leftToSleep > 0) { Thread.sleep(leftToSleep); }\n                break;\n            } catch (InterruptedException ignored) {}\n        }\n        runnable.run();\n    }\n}).start();\n```\n\nProblems with this approach:\n- **No thread reuse**: Each call spawns a new OS thread. Frequent calls exhaust thread resources.\n- **No cancellation**: No mechanism to cancel a scheduled task once submitted.\n- **InterruptedException swallowed**: The while loop ignores interrupts but retries — this is intentional (comment says \"just to ignore interruption\") but could mask shutdown issues.\n- **No error boundary**: If `runnable.run()` throws, the exception is silently lost when the thread terminates."
+        },
+        {
+          "heading": "Recommended Alternative",
+          "body": "For a Java 8 codebase, `java.util.concurrent.ScheduledExecutorService` would be the standard replacement:\n\n```java\nprivate static final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();\n\npublic static ScheduledFuture<?> runTaskDelayed(Runnable runnable, long delayMillis) {\n    return scheduler.schedule(runnable, delayMillis, TimeUnit.MILLISECONDS);\n}\n```\n\nThis provides thread reuse, cancellation via `ScheduledFuture.cancel()`, and proper exception handling. However, since this project is deprecated in favor of RDForward, this pattern is preserved as-is for historical accuracy."
+        }
+      ]
+    },
+    {
+      "id": "testing-standards",
+      "title": "Testing Standards",
+      "confidence": "high",
+      "sourceFiles": [
+        ".github/workflows/gradle.yml",
+        "build.gradle"
+      ],
+      "category": "general",
+      "canonical": "TESTING_STANDARDS",
+      "sections": [
+        {
+          "heading": "Current State: No Tests",
+          "body": "This project has **no test source sets, no test frameworks, and no test execution**. The `build.gradle` only defines a `main` source set pointing to `src/`. There is no `test` source set, no test dependencies (JUnit, TestNG, etc.), and no test task configuration.\n\nThe CI pipeline (`.github/workflows/gradle.yml`) runs only `./gradlew first_time_run` and `./gradlew jar` — no `test` or `check` task."
+        },
+        {
+          "heading": "Rationale",
+          "body": "As a pure API library (interfaces and abstract classes with minimal concrete logic), the testable surface is very small. The only concrete implementations are `Game.render()` (keyboard dispatch), `TimerHelper.runTaskDelayed()` (thread sleep utility), and `ModLoader` (reflection-based JAR loading).\n\nThe project README positions this as a starting point for mod developers, similar to Bukkit, which also had minimal API-level tests. Integration testing would belong in the RDModded game runtime, not in this API artifact."
+        }
+      ]
+    },
+    {
+      "id": "project-status-deprecated",
+      "title": "Project Status: Deprecated in Favor of RDForward",
+      "confidence": "high",
+      "sourceFiles": [
+        "README.md"
+      ],
+      "category": "general",
+      "sections": [
+        {
+          "heading": "Deprecation Notice",
+          "body": "The README's first section is a deprecation warning: the effort has moved to **RDForward** (`github.com/martinambrus/RDForward`), which uses the Fabric modding toolchain instead of this custom reflection-based approach.\n\nThis means:\n- This repository is in maintenance/archival mode.\n- New features should target RDForward, not this API.\n- Bug fixes to this repo are unlikely unless a mod depends on the `rd-api.jar` artifact directly.\n- The API version is frozen at `0.1.2`."
+        },
+        {
+          "heading": "Ecosystem Map",
+          "body": "The RubyDung modding ecosystem consists of:\n- **RDApi** (this repo) — API library JAR (`rd-api.jar`). Provides interfaces, abstract classes, and `ModLoader`.\n- **RDModded** (`github.com/martinambrus/RDModded`) — The actual modded game binary that loads mods using this API.\n- **RDModTimeSlower** (`github.com/martinambrus/RDModTimeSlower`) — Reference mod implementation. Demonstrates the `RDMod*` naming convention and `Game` constructor pattern.\n- **RDForward** (`github.com/martinambrus/RDForward`) — Successor project using Fabric loader, replacing this custom modding API."
+        }
+      ]
+    }
+  ]
+}
+```

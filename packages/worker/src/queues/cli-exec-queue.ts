@@ -479,6 +479,12 @@ interface StreamJsonCollector {
   isStreamJson: () => boolean;
   /** Human-readable reason when the stream ended without a success result. */
   getNoResultReason: () => string | null;
+  /** Concatenation of every text block from assistant events. Lets us cross-check
+   *  the result event's payload against the deltas claude-code actually streamed. */
+  getAssistantText: () => string;
+  /** Count of stream-json lines that failed JSON.parse — non-zero means the
+   *  stream got mangled (chunk corruption, partial flush, mixed protocol). */
+  getMalformedLineCount: () => number;
 }
 
 export function createStreamJsonCollector(
@@ -487,6 +493,8 @@ export function createStreamJsonCollector(
   let buffer = '';
   let resultText: string | null = null;
   let eventCount = 0;
+  let malformedLineCount = 0;
+  let assistantText = '';
   let lastResultSubtype: string | null = null;
   let lastRateLimit: {
     status?: string;
@@ -502,6 +510,7 @@ export function createStreamJsonCollector(
     try {
       event = JSON.parse(trimmed) as Record<string, unknown>;
     } catch {
+      malformedLineCount++;
       return;
     }
     if (typeof event.type !== 'string') return;
@@ -524,23 +533,23 @@ export function createStreamJsonCollector(
       }
     }
 
-    if (!onProgress) return;
-
-    // Extract progress from assistant messages (tool_use blocks)
+    // Always collect assistant text deltas — used as a cross-check against the
+    // result event when downstream parsing fails.
     if (type === 'assistant') {
       const msg = event.message as Record<string, unknown> | undefined;
       const content = msg?.content as unknown[] | undefined;
-      if (!Array.isArray(content)) return;
-      for (const block of content) {
-        const b = block as Record<string, unknown>;
-        if (b.type === 'tool_use') {
-          const toolName = b.name as string;
-          const input = b.input as Record<string, unknown> | undefined;
-          const desc = describeToolUse(toolName, input);
-          if (desc) onProgress(desc);
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          const b = block as Record<string, unknown>;
+          if (b.type === 'text' && typeof b.text === 'string') {
+            assistantText += b.text;
+          } else if (b.type === 'tool_use' && onProgress) {
+            const toolName = b.name as string;
+            const input = b.input as Record<string, unknown> | undefined;
+            const desc = describeToolUse(toolName, input);
+            if (desc) onProgress(desc);
+          }
         }
-        // Skip text blocks — they're final output, not progress.
-        // For tool_use sessions, tool_use blocks provide the real progress.
       }
     }
   }
@@ -576,6 +585,12 @@ export function createStreamJsonCollector(
         return `LLM blocked by rate limit (${lastRateLimit.overageDisabledReason ?? 'overage rejected'})`;
       }
       return 'LLM emitted no result event (stream ended prematurely — likely timeout, session abort, or quota rejection)';
+    },
+    getAssistantText(): string {
+      return assistantText;
+    },
+    getMalformedLineCount(): number {
+      return malformedLineCount;
     },
   };
 }
@@ -808,6 +823,45 @@ async function executeCliSpec(
 
   const streamResult = collector.getResult();
   if (collector.isStreamJson() && streamResult !== null) {
+    const malformedLines = collector.getMalformedLineCount();
+    const assistantText = collector.getAssistantText();
+    // Cross-check: does the result event's payload match the concatenation of
+    // assistant text deltas? Divergence implies claude-code's result-event
+    // synthesis is dropping/duplicating content (a binary bug). Identical
+    // payloads mean the model itself produced what we got.
+    if (assistantText.length > 0 && assistantText !== streamResult) {
+      const sameLength = streamResult.length === assistantText.length;
+      let firstDivergeIdx = -1;
+      const minLen = Math.min(streamResult.length, assistantText.length);
+      for (let i = 0; i < minLen; i++) {
+        if (streamResult[i] !== assistantText[i]) {
+          firstDivergeIdx = i;
+          break;
+        }
+      }
+      if (firstDivergeIdx === -1) firstDivergeIdx = minLen;
+      log.warn(
+        {
+          command: spec.command,
+          resultLen: streamResult.length,
+          assistantTextLen: assistantText.length,
+          sameLength,
+          firstDivergeIdx,
+          malformedLines,
+          resultSnippet: streamResult.slice(
+            Math.max(0, firstDivergeIdx - 40),
+            firstDivergeIdx + 40,
+          ),
+          assistantSnippet: assistantText.slice(
+            Math.max(0, firstDivergeIdx - 40),
+            firstDivergeIdx + 40,
+          ),
+        },
+        'stream-json result event diverges from concatenated assistant deltas',
+      );
+    } else if (malformedLines > 0) {
+      log.warn({ command: spec.command, malformedLines }, 'stream-json had malformed lines');
+    }
     return {
       exitCode: result.exitCode,
       rawOutput: streamResult,

@@ -1,4 +1,8 @@
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
+import { mkdirSync, createWriteStream, type WriteStream } from 'node:fs';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 export interface DockerBuildOpts {
   contextDir: string;
@@ -126,15 +130,42 @@ async function spawnAndCollect(
       else opts.signal.addEventListener('abort', abortHandler, { once: true });
     }
 
+    // Stateful UTF-8 decoders preserve multi-byte sequences across chunk boundaries.
+    // Plain Buffer.toString('utf8') on partial chunks emits U+FFFD replacement chars
+    // which corrupt downstream JSON parsing of stream-json events.
+    const stdoutDecoder = new StringDecoder('utf8');
+    const stderrDecoder = new StringDecoder('utf8');
+
+    // Optional raw-byte capture for debugging stream-json corruption. Writes
+    // unprocessed Buffer chunks to <DEBUG_CLI_STREAM_DIR>/<uuid>.bin so we can
+    // inspect what claude binary actually wrote vs. what we stored.
+    let debugStream: WriteStream | null = null;
+    const debugDir = process.env.DEBUG_CLI_STREAM_DIR;
+    if (debugDir && command === 'docker' && args[0] === 'run') {
+      try {
+        mkdirSync(debugDir, { recursive: true });
+        const path = join(debugDir, `${Date.now()}_${randomUUID()}.bin`);
+        debugStream = createWriteStream(path);
+        debugStream.write(`# command: ${command} ${args.slice(0, 4).join(' ')}\n`);
+      } catch {
+        debugStream = null;
+      }
+    }
+
     child.stdout.on('data', (chunk: Buffer) => {
-      const text = chunk.toString('utf8');
-      stdout += text;
-      opts.onStdoutChunk?.(text);
+      if (debugStream) debugStream.write(chunk);
+      const text = stdoutDecoder.write(chunk);
+      if (text) {
+        stdout += text;
+        opts.onStdoutChunk?.(text);
+      }
     });
     child.stderr.on('data', (chunk: Buffer) => {
-      const text = chunk.toString('utf8');
-      stderr += text;
-      opts.onStderrChunk?.(text);
+      const text = stderrDecoder.write(chunk);
+      if (text) {
+        stderr += text;
+        opts.onStderrChunk?.(text);
+      }
     });
     child.on('error', (err) => {
       errorMessage = err.message;
@@ -142,6 +173,17 @@ async function spawnAndCollect(
     child.on('close', (code) => {
       clearTimeout(timer);
       if (opts.signal) opts.signal.removeEventListener('abort', abortHandler);
+      const tail = stdoutDecoder.end();
+      if (tail) {
+        stdout += tail;
+        opts.onStdoutChunk?.(tail);
+      }
+      const stderrTail = stderrDecoder.end();
+      if (stderrTail) {
+        stderr += stderrTail;
+        opts.onStderrChunk?.(stderrTail);
+      }
+      if (debugStream) debugStream.end();
       resolve({
         exitCode: code,
         stdout,

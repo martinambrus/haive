@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { jsonrepair } from 'jsonrepair';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
@@ -198,52 +199,88 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
 /* LLM output parsing                                                  */
 /* ------------------------------------------------------------------ */
 
-export function parseKbEntries(raw: unknown): KbEntry[] {
-  if (!raw) return [];
+export interface KbParseDiagnostic {
+  parseError: string;
+  bodyLength: number;
+  errorPosition: number;
+  snippet: string;
+  /** True when entries were salvaged via jsonrepair after strict JSON.parse failed.
+   *  Diagnostic is still attached so callers can log how often the safety net trips. */
+  repaired?: boolean;
+  recoveredCount?: number;
+}
+
+export function parseKbEntriesWithDiagnostic(raw: unknown): {
+  entries: KbEntry[];
+  diagnostic: KbParseDiagnostic | null;
+} {
+  if (!raw) return { entries: [], diagnostic: null };
   let text: string;
   if (typeof raw === 'string') {
     text = raw;
   } else if (typeof raw === 'object') {
-    if (Array.isArray(raw)) return raw.filter(isValidEntry);
+    if (Array.isArray(raw)) return { entries: raw.filter(isValidEntry), diagnostic: null };
     const asObj = raw as Record<string, unknown>;
     if (Array.isArray(asObj.entries)) {
-      return (asObj.entries as unknown[]).filter(isValidEntry);
+      return {
+        entries: (asObj.entries as unknown[]).filter(isValidEntry),
+        diagnostic: null,
+      };
     }
     if (typeof asObj.result === 'string') {
-      return parseKbEntries(asObj.result);
+      return parseKbEntriesWithDiagnostic(asObj.result);
     }
-    return [];
+    return { entries: [], diagnostic: null };
   } else {
-    return [];
+    return { entries: [], diagnostic: null };
   }
   const entries: KbEntry[] = [];
+  // eslint-disable-next-line prefer-const -- mutated via recordError closure; TS narrows it to never otherwise
+  let lastError: KbParseDiagnostic | null = null as KbParseDiagnostic | null;
 
-  // Try lazy match first (handles multiple separate JSON blocks),
-  // then fall back to greedy (handles embedded triple backticks in JSON strings).
-  const lazyRe = /```json\s*([\s\S]*?)```/g;
-  const greedyRe = /```json\s*([\s\S]*)```/;
-  // Last-ditch: response truncated without closing fence. callAnthropic now
-  // flags max_tokens upstream, but defend in case an adapter slips a
-  // truncated payload through.
-  const unterminatedRe = /```json\s*([\s\S]*)$/;
+  const recordError = (body: string, err: unknown, repaired?: { recoveredCount: number }): void => {
+    const message = err instanceof Error ? err.message : String(err);
+    const pos = parseInt((message.match(/position (\d+)/) ?? [])[1] ?? '0', 10);
+    lastError = {
+      parseError: message,
+      bodyLength: body.length,
+      errorPosition: pos,
+      snippet: body.slice(Math.max(0, pos - 60), pos + 60),
+      ...(repaired ? { repaired: true, recoveredCount: repaired.recoveredCount } : {}),
+    };
+  };
 
-  let match: RegExpExecArray | null;
-  while ((match = lazyRe.exec(text)) !== null) {
-    collectFromFenceBody(match[1], entries);
+  // Pass 1: strict-only across viable fence layouts. Lazy first (multiple
+  // separate clean JSON blocks), then greedy (one block whose JSON strings
+  // legitimately contain inner ``` markdown samples — strict still parses).
+  // Skipping repair here is essential: repairing each lazy fragment would
+  // "salvage" 1–2 entries and short-circuit the greedy pass that would
+  // recover the full set.
+  for (const m of text.matchAll(/```json\s*([\s\S]*?)```/g)) {
+    collectStrict(m[1], entries);
   }
   if (entries.length === 0) {
-    const greedyMatch = greedyRe.exec(text);
-    if (greedyMatch) {
-      collectFromFenceBody(greedyMatch[1], entries);
-    }
+    const greedy = text.match(/```json\s*([\s\S]*)```/);
+    if (greedy) collectStrict(greedy[1], entries);
+  }
+  // Pass 2: strict failed on every layout. Try jsonrepair on the greedy
+  // body, then on an unterminated fence as a last-ditch effort.
+  if (entries.length === 0) {
+    const greedy = text.match(/```json\s*([\s\S]*)```/);
+    if (greedy) collectRepaired(greedy[1], entries, recordError);
   }
   if (entries.length === 0) {
-    const unterminated = unterminatedRe.exec(text);
-    if (unterminated) {
-      collectFromFenceBody(unterminated[1], entries);
-    }
+    const unterminated = text.match(/```json\s*([\s\S]*)$/);
+    if (unterminated) collectRepaired(unterminated[1], entries, recordError);
   }
-  return entries;
+  // Expose the diagnostic whenever entries are missing OR when a repair was
+  // necessary to obtain them (so callers can count safety-net hits).
+  const expose = entries.length === 0 || lastError?.repaired === true;
+  return { entries, diagnostic: expose ? lastError : null };
+}
+
+export function parseKbEntries(raw: unknown): KbEntry[] {
+  return parseKbEntriesWithDiagnostic(raw).entries;
 }
 
 function isValidEntry(val: unknown): val is KbEntry {
@@ -260,25 +297,57 @@ function isValidEntry(val: unknown): val is KbEntry {
   return true;
 }
 
-function collectFromFenceBody(body: string | undefined, entries: KbEntry[]): void {
+function pushFromParsed(parsed: unknown, entries: KbEntry[]): number {
+  const before = entries.length;
+  if (Array.isArray(parsed)) {
+    for (const item of parsed) if (isValidEntry(item)) entries.push(item);
+  } else if (isValidEntry(parsed)) {
+    entries.push(parsed);
+  } else if (
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    Array.isArray((parsed as Record<string, unknown>).entries)
+  ) {
+    for (const item of (parsed as Record<string, unknown>).entries as unknown[]) {
+      if (isValidEntry(item)) entries.push(item);
+    }
+  }
+  return entries.length - before;
+}
+
+function collectStrict(body: string | undefined, entries: KbEntry[]): void {
   if (!body) return;
   try {
-    const parsed = JSON.parse(body);
-    if (Array.isArray(parsed)) {
-      for (const item of parsed) if (isValidEntry(item)) entries.push(item);
-    } else if (isValidEntry(parsed)) {
-      entries.push(parsed);
-    } else if (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      Array.isArray((parsed as Record<string, unknown>).entries)
-    ) {
-      for (const item of (parsed as Record<string, unknown>).entries as unknown[]) {
-        if (isValidEntry(item)) entries.push(item);
-      }
+    pushFromParsed(JSON.parse(body), entries);
+  } catch {
+    // strict-only pass; salvage happens later
+  }
+}
+
+function collectRepaired(
+  body: string | undefined,
+  entries: KbEntry[],
+  recordError?: (body: string, err: unknown, repaired?: { recoveredCount: number }) => void,
+): void {
+  if (!body) return;
+  let strictErr: unknown;
+  try {
+    pushFromParsed(JSON.parse(body), entries);
+    return;
+  } catch (err) {
+    strictErr = err;
+  }
+  // Strict parse failed — jsonrepair handles the common LLM tail event of a
+  // single dropped quote / missing comma in 20K+ chars of output. The caller
+  // logs the strict-error fingerprint so we can count safety-net hits.
+  try {
+    const repaired = jsonrepair(body);
+    const recoveredCount = pushFromParsed(JSON.parse(repaired), entries);
+    if (recordError) {
+      recordError(body, strictErr, recoveredCount > 0 ? { recoveredCount } : undefined);
     }
   } catch {
-    // invalid JSON — skip
+    if (recordError) recordError(body, strictErr);
   }
 }
 
@@ -435,8 +504,14 @@ function stubMarkdown(title: string): string {
 /* ------------------------------------------------------------------ */
 
 function extractEntries(llmOutput: unknown): KbEntry[] {
-  if (!llmOutput) return [];
-  // Handle Claude Code JSON wrapper { result: "..." }
+  return extractEntriesWithDiagnostic(llmOutput).entries;
+}
+
+function extractEntriesWithDiagnostic(llmOutput: unknown): {
+  entries: KbEntry[];
+  diagnostic: KbParseDiagnostic | null;
+} {
+  if (!llmOutput) return { entries: [], diagnostic: null };
   let source: unknown = llmOutput;
   if (
     typeof llmOutput === 'object' &&
@@ -445,7 +520,7 @@ function extractEntries(llmOutput: unknown): KbEntry[] {
   ) {
     source = (llmOutput as Record<string, unknown>).result;
   }
-  return parseKbEntries(source);
+  return parseKbEntriesWithDiagnostic(source);
 }
 
 function confidenceColor(c?: string): 'green' | 'amber' | 'default' {
@@ -516,8 +591,31 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     timeoutMs: 90 * 60 * 1000, // 90 minutes — large repos need extensive tool_use scanning
   },
 
-  form(_ctx, detected, llmOutput): FormSchema {
-    const entries = extractEntries(llmOutput);
+  form(ctx, detected, llmOutput): FormSchema {
+    const { entries, diagnostic } = extractEntriesWithDiagnostic(llmOutput);
+
+    if (diagnostic?.repaired) {
+      ctx.logger.warn(
+        {
+          parseError: diagnostic.parseError,
+          bodyLength: diagnostic.bodyLength,
+          errorPosition: diagnostic.errorPosition,
+          snippet: diagnostic.snippet,
+          recoveredCount: diagnostic.recoveredCount,
+        },
+        'kb-acquisition: strict JSON.parse failed but jsonrepair salvaged the entries',
+      );
+    } else if (entries.length === 0 && llmOutput && diagnostic) {
+      ctx.logger.warn(
+        {
+          parseError: diagnostic.parseError,
+          bodyLength: diagnostic.bodyLength,
+          errorPosition: diagnostic.errorPosition,
+          snippet: diagnostic.snippet,
+        },
+        'kb-acquisition: LLM output failed JSON.parse and jsonrepair could not recover',
+      );
+    }
 
     if (entries.length > 0) {
       const totalSources = new Set(entries.flatMap((e) => e.sourceFiles ?? [])).size;
@@ -553,7 +651,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       };
     }
 
-    // Fallback: no LLM output available
+    // Fallback: no LLM output available, or LLM emitted unparseable JSON.
     const fw = detected.framework;
     const placeholderHints = [
       'testing strategy',
@@ -563,10 +661,14 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       'code conventions',
       'API design',
     ];
+    const description = diagnostic
+      ? `The AI ran but its JSON output failed to parse (${diagnostic.parseError} — body length ${diagnostic.bodyLength}, error at position ${diagnostic.errorPosition}). List the topics you want documented manually, one per line; stub files will be created for each.`
+      : 'Automatic knowledge discovery was not available. List the topics you want documented in your knowledge base, one per line. Stub files will be created for each topic.';
     return {
-      title: 'Knowledge base — manual topic entry',
-      description:
-        'Automatic knowledge discovery was not available. List the topics you want documented in your knowledge base, one per line. Stub files will be created for each topic.',
+      title: diagnostic
+        ? 'Knowledge base — AI output unparseable'
+        : 'Knowledge base — manual topic entry',
+      description,
       fields: [
         {
           type: 'textarea',
