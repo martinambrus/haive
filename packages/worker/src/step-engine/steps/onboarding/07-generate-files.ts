@@ -120,6 +120,19 @@ function pickString(v: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+const EMPTY_MCP_SETTINGS = '{\n  "mcpServers": {}\n}\n';
+
+/** Resolve `.claude/mcp_settings.json` body. Empty/whitespace input is
+ *  rewritten to an empty-but-valid `{"mcpServers": {}}` stub so CLI
+ *  providers that pass `--mcp-config` don't fail with "Invalid MCP
+ *  configuration: Does not adhere to MCP server configuration schema"
+ *  on a missing file. Non-empty input is preserved verbatim with a
+ *  trailing newline. */
+export function mcpSettingsFileContent(input: string): string {
+  if (input.trim().length === 0) return EMPTY_MCP_SETTINGS;
+  return input.endsWith('\n') ? input : input + '\n';
+}
+
 function extractProjectInfo(
   envData: EnvDetectShape | null,
   confirmed: Record<string, unknown> | null,
@@ -608,7 +621,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       ]),
       ...BASELINE_COMMANDS.map((c) => `.claude/commands/${c.id}.md`),
       ...(lspLanguages.includes('php-extended') ? DRUPAL_LSP_FILES.map((f) => f.rel) : []),
-      ...(mcpSettingsJson.trim().length > 0 ? ['.claude/mcp_settings.json'] : []),
+      '.claude/mcp_settings.json',
       'AGENTS.md',
       ...Array.from(rulesFiles),
     ];
@@ -769,11 +782,10 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       }
     }
 
-    const mcpContent = detected.mcpSettingsJson.trim();
-    if (mcpContent.length > 0) {
-      const suffix = detected.mcpSettingsJson.endsWith('\n') ? '' : '\n';
-      await writeIfAllowed('.claude/mcp_settings.json', detected.mcpSettingsJson + suffix);
-    }
+    await writeIfAllowed(
+      '.claude/mcp_settings.json',
+      mcpSettingsFileContent(detected.mcpSettingsJson),
+    );
 
     // Project info block written to AGENTS.md under the haive:project-info
     // markers. AGENTS.md is the canonical home for project metadata and is
