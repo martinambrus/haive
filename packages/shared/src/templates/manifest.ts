@@ -15,7 +15,8 @@ export type TemplateKind =
   | 'cli-rules-block'
   | 'mcp-settings'
   | 'custom-agent'
-  | 'custom-skill';
+  | 'custom-skill'
+  | 'rtk-config';
 
 /**
  * Source of an `onboarding_artifacts` row. Distinguishes a fresh onboarding

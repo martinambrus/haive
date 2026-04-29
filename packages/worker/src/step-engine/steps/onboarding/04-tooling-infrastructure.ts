@@ -1,3 +1,5 @@
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { buildDefaultMcpServers, buildMcpConfigForCli } from '../../../sandbox/mcp-config.js';
@@ -24,6 +26,10 @@ interface ToolingDetect {
   cliDisplayName: string | null;
   cliSupportsMcp: boolean;
   cliSupportsPlugins: boolean;
+  /** Current value of `repositories.rtk_enabled` for this task's repo. Used
+   *  as the form-field default so a re-run of step 04 reflects the most
+   *  recently saved choice instead of the hard-coded migration default. */
+  rtkEnabled: boolean;
 }
 
 interface EnvDetectData {
@@ -113,6 +119,25 @@ export const toolingInfrastructureStep: StepDefinition<
 
     const cliMeta = await loadCliProviderMetadata(ctx.db, ctx.cliProviderId);
 
+    // Resolve current rtk_enabled by walking task → repository. New repos
+    // default to true via the migration; this read lets a step-04 re-run
+    // reflect the user's last-saved choice rather than the hardcoded default.
+    const taskRow = await ctx.db
+      .select({ repositoryId: schema.tasks.repositoryId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, ctx.taskId))
+      .limit(1);
+    let rtkEnabled = true;
+    const repositoryId = taskRow[0]?.repositoryId ?? null;
+    if (repositoryId) {
+      const repoRow = await ctx.db
+        .select({ rtkEnabled: schema.repositories.rtkEnabled })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId))
+        .limit(1);
+      if (repoRow[0]) rtkEnabled = repoRow[0].rtkEnabled;
+    }
+
     return {
       primaryLanguage: data.project.primaryLanguage,
       framework: data.project.framework ?? 'unknown',
@@ -122,6 +147,7 @@ export const toolingInfrastructureStep: StepDefinition<
       cliDisplayName: cliMeta?.displayName ?? null,
       cliSupportsMcp: cliMeta?.supportsMcp ?? false,
       cliSupportsPlugins: cliMeta?.supportsPlugins ?? false,
+      rtkEnabled,
     };
   },
 
@@ -217,6 +243,14 @@ export const toolingInfrastructureStep: StepDefinition<
             detected.hasPhpExtendedExtensions,
           ),
         },
+        {
+          type: 'checkbox',
+          id: 'rtkEnabled',
+          label: 'Enable RTK token-saving proxy',
+          description:
+            'Routes common dev commands (git, npm, docker, tests, etc.) through rtk so their output is compressed 60–90% before reaching the LLM. The binary is baked into every sandbox; per-CLI hook configs are written into the repo and into the per-task auth volume. Toggle off to remove the configs on the next upgrade-apply.',
+          default: detected.rtkEnabled,
+        },
       ],
       submitLabel: 'Save tooling preferences',
     };
@@ -227,7 +261,32 @@ export const toolingInfrastructureStep: StepDefinition<
     if (tooling.ollamaMode === 'internal') {
       tooling.ollamaUrl = 'http://ollama:11434';
     }
-    ctx.logger.info({ tooling }, 'tooling preferences saved');
+
+    // Persist `rtk_enabled` on the repo row so the choice survives CLI swaps,
+    // upgrade re-runs, and tasks that don't go through step 04. The `tooling`
+    // jsonb keeps a copy too for step-output replay during onboarding-upgrade
+    // backfill (when no live repo row exists yet).
+    const rtkEnabled = Boolean(tooling.rtkEnabled);
+    tooling.rtkEnabled = rtkEnabled;
+
+    const taskRow = await ctx.db
+      .select({ repositoryId: schema.tasks.repositoryId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, ctx.taskId))
+      .limit(1);
+    const repositoryId = taskRow[0]?.repositoryId ?? null;
+    if (repositoryId) {
+      await ctx.db
+        .update(schema.repositories)
+        .set({ rtkEnabled, updatedAt: new Date() })
+        .where(eq(schema.repositories.id, repositoryId));
+    } else {
+      ctx.logger.warn(
+        'tooling-infrastructure: task has no repository_id; rtk_enabled persisted only in step output',
+      );
+    }
+
+    ctx.logger.info({ tooling, rtkEnabled }, 'tooling preferences saved');
     return { tooling };
   },
 };

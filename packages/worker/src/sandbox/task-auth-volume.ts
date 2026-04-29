@@ -11,11 +11,36 @@ import type { CliProviderName } from '@haive/shared';
 import { defaultDockerRunner, type DockerRunner, type DockerVolumeMount } from './docker-runner.js';
 import { expandTildeToSandbox } from './cli-auth-volume.js';
 
+/** Map our CLI provider names to the corresponding `rtk init` flag. Returns
+ *  `undefined` when the provider has no rtk-native init mode (amp today —
+ *  not in rtk's supported agent list, so the project-level RTK.md +
+ *  AGENTS.md @-ref written by step 07 is the only integration). Empty string
+ *  is the bare `rtk init -g` (claude-family). */
+function rtkInitFlagFor(providerName: CliProviderName): string | undefined {
+  switch (providerName) {
+    case 'claude-code':
+    case 'zai':
+      return '';
+    case 'gemini':
+      return '--gemini';
+    case 'codex':
+      return '--codex';
+    case 'amp':
+      return undefined;
+    default:
+      return undefined;
+  }
+}
+
 const log = logger.child({ module: 'task-auth-volume' });
 
 const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? 'haive-cli-sandbox:latest';
 const READY_MARKER = '.haive-ready';
 const HELPER_TIMEOUT_MS = 60_000;
+
+/** Distinct exit code from the rtk seed helper script when the sandbox image
+ *  has no rtk binary on PATH. Exported so tests can assert on the boundary. */
+export const RTK_HELPER_MISSING_BINARY_EXIT = 2;
 
 // Worker bind-mounts user HOME read-only at /host-fs. HOST_REPO_ROOT_REAL is
 // the same directory as seen by the docker daemon (i.e. the absolute host path)
@@ -174,6 +199,83 @@ export function resolveTaskSkillMounts(providerName: CliProviderName): DockerVol
     }
   }
   return mounts;
+}
+
+/**
+ * Inject RTK hook configs into the per-task auth volume(s) for `providerName`.
+ * Uses the rtk binary baked into the sandbox image; calls
+ * `rtk init -g --auto-patch [--gemini|--codex]` so rtk's own merge logic
+ * handles idempotency, JSON deep-merge into a pre-existing settings.json
+ * (claude-code creates one with theme/onboarding state on first login), and
+ * the CLAUDE.md / AGENTS.md `@RTK.md` reference injection.
+ *
+ * No-op when the provider has no rtk-supported flag (amp); callers should
+ * additionally skip this entirely when `repositories.rtk_enabled=false`.
+ *
+ * Idempotent on re-run: rtk's `hook_already_present` check elides duplicate
+ * insertions. Failures are logged but do not throw — rtk seeding is a
+ * best-effort layer over the auth-restore path.
+ */
+export async function seedRtkInTaskVolume(
+  taskId: string,
+  providerName: CliProviderName,
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<void> {
+  const flag = rtkInitFlagFor(providerName);
+  if (flag === undefined) {
+    log.debug({ providerName }, 'rtk seed skipped: provider has no rtk-native flag');
+    return;
+  }
+  const meta = getCliProviderMetadata(providerName);
+  if (meta.authConfigPaths.length === 0) {
+    log.debug({ providerName }, 'rtk seed skipped: provider has no auth config paths');
+    return;
+  }
+
+  const mounts: DockerVolumeMount[] = meta.authConfigPaths.map((raw, idx) => ({
+    source: cliAuthTaskVolumeName(taskId, providerName, idx),
+    target: expandTildeToSandbox(raw),
+    readOnly: false,
+  }));
+
+  // Run as root so we can write regardless of original volume ownership; chown
+  // back to 1000:1000 after so the CLI runtime (which runs as the node user)
+  // can read its own settings file. The missing-binary branch exits with a
+  // distinct code (RTK_HELPER_MISSING_BINARY_EXIT) so the worker can log
+  // "rtk binary missing" instead of falsely claiming success — that mistake
+  // hid stale per-CLI sandbox images during rtk integration testing.
+  const flagArg = flag.length > 0 ? ` ${flag}` : '';
+  const script =
+    `command -v rtk >/dev/null 2>&1 || { echo "rtk: binary missing in sandbox image" >&2; exit ${RTK_HELPER_MISSING_BINARY_EXIT}; }; ` +
+    `HOME=/home/node rtk init -g --auto-patch${flagArg} || echo "rtk init exit=$?" >&2; ` +
+    `chown -R 1000:1000 /home/node 2>/dev/null || true`;
+
+  const result = await runner.run({
+    image: HELPER_IMAGE,
+    cmd: ['sh', '-c', script],
+    mounts,
+    entrypoint: '',
+    user: 'root',
+    timeoutMs: HELPER_TIMEOUT_MS,
+  });
+  if (result.exitCode === RTK_HELPER_MISSING_BINARY_EXIT) {
+    log.warn(
+      { taskId, providerName },
+      'rtk seed skipped: rtk binary missing in sandbox image — rebuild via pnpm sandbox:build and recompose per-CLI images',
+    );
+    return;
+  }
+  if (result.exitCode !== 0) {
+    log.warn(
+      { taskId, providerName, exitCode: result.exitCode, stderr: result.stderr.slice(-500) },
+      'rtk seed helper exited non-zero',
+    );
+    return;
+  }
+  log.info(
+    { taskId, providerName, flag: flag.length > 0 ? flag : '<claude>' },
+    'rtk seeded in task auth volume',
+  );
 }
 
 export async function cleanupTaskAuthVolumes(

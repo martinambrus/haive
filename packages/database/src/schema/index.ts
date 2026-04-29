@@ -313,6 +313,7 @@ export const repositories = pgTable(
      *  Null for repos onboarded before this column existed — API treats null
      *  as "use the live row set as the applicable domain". */
     applicableTemplateIds: text('applicable_template_ids').array(),
+    rtkEnabled: boolean('rtk_enabled').notNull().default(true),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },

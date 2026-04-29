@@ -140,4 +140,73 @@ describe('composeSandboxImage', () => {
     expect(a.tag).toBe(b.tag);
     expect(a.hasExtras).toBe(false);
   });
+
+  describe('baseImageId invalidation', () => {
+    it('produces different tags for the same dockerfile body when baseImageId differs', () => {
+      const before = composeSandboxImage({
+        envTemplateDockerfile: null,
+        provider: claudeCodeProvider,
+        baseImageId: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      });
+      const after = composeSandboxImage({
+        envTemplateDockerfile: null,
+        provider: claudeCodeProvider,
+        baseImageId: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      });
+      expect(before.tag).not.toBe(after.tag);
+      expect(before.dockerfileBody).toBe(after.dockerfileBody);
+    });
+
+    it('falls back to body-only hash when baseImageId is null/omitted', () => {
+      const omitted = composeSandboxImage({
+        envTemplateDockerfile: null,
+        provider: claudeCodeProvider,
+      });
+      const explicitNull = composeSandboxImage({
+        envTemplateDockerfile: null,
+        provider: claudeCodeProvider,
+        baseImageId: null,
+      });
+      expect(omitted.tag).toBe(explicitNull.tag);
+    });
+
+    it('ignores baseImageId when env-template body does not reference the sandbox-core image', () => {
+      const ubuntuTemplate = 'FROM ubuntu:24.04\nRUN apt-get install -y git\n';
+      const a = composeSandboxImage({
+        envTemplateDockerfile: ubuntuTemplate,
+        provider: claudeCodeProvider,
+        baseImageId: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      });
+      const b = composeSandboxImage({
+        envTemplateDockerfile: ubuntuTemplate,
+        provider: claudeCodeProvider,
+        baseImageId: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      });
+      expect(a.tag).toBe(b.tag);
+    });
+
+    it('honors baseImageId when env-template body references the sandbox-core image', () => {
+      const piggybackTemplate = `FROM ${SANDBOX_CORE_IMAGE}\nRUN echo extra\n`;
+      const before = composeSandboxImage({
+        envTemplateDockerfile: piggybackTemplate,
+        provider: claudeCodeProvider,
+        baseImageId: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      });
+      const after = composeSandboxImage({
+        envTemplateDockerfile: piggybackTemplate,
+        provider: claudeCodeProvider,
+        baseImageId: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      });
+      expect(before.tag).not.toBe(after.tag);
+    });
+
+    it('does not embed the baseImageId into the rendered dockerfile body', () => {
+      const result = composeSandboxImage({
+        envTemplateDockerfile: null,
+        provider: claudeCodeProvider,
+        baseImageId: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      });
+      expect(result.dockerfileBody).not.toContain('sha256:aaaaaaaa');
+    });
+  });
 });

@@ -28,6 +28,33 @@ RUN apk add --no-cache \
       git \
       tini
 
+# rtk (Rust Token Killer) — proxies dev commands to compress tool output before
+# it lands in the LLM context. Pinned by tag + sha256; opt-in per-repo via
+# `repositories.rtk_enabled`. Upstream only ships musl for x86_64; aarch64
+# alpine has no musl asset, so we skip cleanly on non-x86_64 (the per-CLI hook
+# entries we still write in those repos will be no-ops since the binary won't
+# resolve on PATH).
+ARG RTK_RELEASE_VERSION=v0.37.2
+ARG RTK_X86_64_MUSL_SHA256=3dfb7a05636a68687ba1c5aa696fa8d5fcb494447ded86d9eb8b88b7100a37c6
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64) \
+        url="https://github.com/rtk-ai/rtk/releases/download/${RTK_RELEASE_VERSION}/rtk-x86_64-unknown-linux-musl.tar.gz"; \
+        sha="${RTK_X86_64_MUSL_SHA256}"; \
+        tmp="/tmp/rtk.tgz"; \
+        curl -fsSL "$url" -o "$tmp"; \
+        echo "${sha}  ${tmp}" | sha256sum -c -; \
+        tar -xzf "$tmp" -C /tmp; \
+        install -m 0755 "$(find /tmp -maxdepth 3 -type f -name rtk -perm -u+x | head -n1)" /usr/local/bin/rtk; \
+        rm -rf "$tmp" /tmp/rtk-*; \
+        /usr/local/bin/rtk --version; \
+        ;; \
+      *) \
+        echo "rtk: skipping install on unsupported arch '$arch' (no musl asset upstream)"; \
+        ;; \
+    esac
+
 # Pre-create CLI auth mount targets owned by the node user. Docker creates
 # missing volume mountpoints as root regardless of `User:` — if the image
 # already has the path with correct ownership, a named volume mounted there

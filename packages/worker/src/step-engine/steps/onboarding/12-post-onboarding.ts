@@ -85,6 +85,8 @@ function buildRenderContext(detect: GenerateFilesDetect): TemplateRenderContext 
     customAgentSpecs: detect.customAgentSpecs,
     agentTargets: detect.agentTargets,
     lspLanguages: detect.lspLanguages,
+    rtkEnabled: detect.rtkEnabled ?? false,
+    enabledCliProviders: detect.enabledCliProviders ?? [],
   };
 }
 

@@ -5,7 +5,11 @@ import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger, type CliProviderName } from '@haive/shared';
-import { composeSandboxImage, type SandboxImageComposition } from './image-composer.js';
+import {
+  composeSandboxImage,
+  SANDBOX_CORE_IMAGE,
+  type SandboxImageComposition,
+} from './image-composer.js';
 import { defaultDockerRunner, type DockerRunner } from './docker-runner.js';
 
 const log = logger.child({ module: 'composed-image-cache' });
@@ -35,9 +39,11 @@ export async function ensureComposedImage(
   });
   if (!envTemplate?.generatedDockerfile || envTemplate.status !== 'ready') return null;
 
+  const baseImageId = await resolveBaseImageId(runner);
   const composition = composeSandboxImage({
     envTemplateDockerfile: envTemplate.generatedDockerfile,
     provider,
+    baseImageId,
   });
 
   const inspected = await runner.inspect(composition.tag);
@@ -49,6 +55,27 @@ export async function ensureComposedImage(
   log.info({ tag: composition.tag, hash: composition.hash }, 'composed image cache miss, building');
   await buildComposedImage(composition, runner);
   return composition.tag;
+}
+
+/**
+ * Resolves the current image ID of `haive-cli-sandbox:latest` so the composer
+ * can mix it into the composition hash. Without this, rebuilding the base
+ * image keeps the same `:latest` tag and the composer happily reuses stale
+ * per-CLI tags (the dockerfile body string is identical even though the
+ * resolved base content has changed). Returns null when the base hasn't been
+ * built yet — the composer treats null as "skip the base-id contribution",
+ * which is the legacy behavior.
+ */
+async function resolveBaseImageId(runner: DockerRunner): Promise<string | null> {
+  const inspected = await runner.inspect(SANDBOX_CORE_IMAGE);
+  if (!inspected.exists) {
+    log.warn(
+      { baseImage: SANDBOX_CORE_IMAGE },
+      'sandbox-core base image not present at compose time — composed cache key will not reflect base rebuilds until the base is built',
+    );
+    return null;
+  }
+  return inspected.imageId;
 }
 
 async function buildComposedImage(

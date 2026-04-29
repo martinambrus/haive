@@ -20,6 +20,16 @@ export interface ComposeInput {
     cliVersion: string | null;
     sandboxDockerfileExtra: string | null;
   };
+  /**
+   * Current image ID (sha256:...) of the SANDBOX_CORE_IMAGE base. When a
+   * dockerfile body references the base by tag (`haive-cli-sandbox:latest`),
+   * the tag itself is mutable — rebuilding the base produces a new image but
+   * keeps the same tag, so a hash over the dockerfile body alone fails to
+   * invalidate composed image tags. Mixing the base ID into the hash forces
+   * a fresh tag on base rebuild. Caller passes `null` (or omits) when the
+   * base image isn't yet built or the env-template doesn't reference it.
+   */
+  baseImageId?: string | null;
 }
 
 export function composeSandboxImage(input: ComposeInput): SandboxImageComposition {
@@ -33,7 +43,13 @@ export function composeSandboxImage(input: ComposeInput): SandboxImageCompositio
   if (extra.length > 0) parts.push(extra);
 
   const dockerfileBody = `${parts.join('\n\n')}\n`;
-  const hash = createHash('sha256').update(dockerfileBody, 'utf8').digest('hex').slice(0, 16);
+
+  const referencesSandboxBase =
+    input.envTemplateDockerfile === null || dockerfileBody.includes(SANDBOX_CORE_IMAGE);
+  const baseIdForHash = referencesSandboxBase && input.baseImageId ? input.baseImageId : '';
+  const hashInput =
+    baseIdForHash.length > 0 ? `${baseIdForHash}\n${dockerfileBody}` : dockerfileBody;
+  const hash = createHash('sha256').update(hashInput, 'utf8').digest('hex').slice(0, 16);
 
   return {
     tag: `haive-sandbox:${hash}`,

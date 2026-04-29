@@ -6,6 +6,7 @@ import {
   hashRenderings,
   normalizeContent,
   sha256Hex,
+  type CliProviderName,
   type ManifestItem,
   type TemplateItem,
   type TemplateManifest,
@@ -32,6 +33,7 @@ import {
   subSkillToMarkdown,
   type SkillEntry,
 } from './steps/onboarding/09_5-skill-generation.js';
+import { buildRtkTemplateItems } from './steps/onboarding/_rtk-templates.js';
 
 /**
  * Everything needed to render any deterministic template. Heterogeneous
@@ -52,6 +54,19 @@ export interface TemplateRenderContext {
   customAgentSpecs: AgentSpec[];
   agentTargets: Array<{ dir: string; format: 'markdown' | 'toml' }>;
   lspLanguages: string[];
+  /** Per-repo opt-in for the RTK token-saving proxy. Read from
+   *  `repositories.rtk_enabled`. Drives whether the rtk-config items in
+   *  `_rtk-templates.ts` emit anything. */
+  rtkEnabled: boolean;
+  /** CLI providers the user currently has enabled. rtk-config items fan out
+   *  per CLI family (claude-code/zai share .claude/, gemini owns .gemini/,
+   *  codex/amp share AGENTS.md). Only the `name` is read today; carrying
+   *  the rules-file metadata too lets future items target other adapters. */
+  enabledCliProviders: Array<{
+    name: CliProviderName;
+    rulesFile: string;
+    rulesFileMode: 'native' | 'import' | 'copy';
+  }>;
 }
 
 const REFERENCE_PROJECT_INFO: ProjectInfo = {
@@ -85,6 +100,8 @@ export const REFERENCE_CONTEXT: TemplateRenderContext = {
   customAgentSpecs: [],
   agentTargets: [{ dir: '.claude/agents', format: 'markdown' }],
   lspLanguages: [],
+  rtkEnabled: false,
+  enabledCliProviders: [],
 };
 
 function findAgentSpec(id: string, framework: string | null): AgentSpec | null {
@@ -233,6 +250,9 @@ function buildTemplateItems(): TemplateItem<TemplateRenderContext>[] {
     items.push(buildCommandTemplateItem(cmd));
   }
   for (const item of DRUPAL_LSP_ITEMS) {
+    items.push(item);
+  }
+  for (const item of buildRtkTemplateItems<TemplateRenderContext>()) {
     items.push(item);
   }
   return items;

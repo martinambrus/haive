@@ -16,6 +16,15 @@ import {
   stubCustomAgent,
 } from './_agent-templates.js';
 import { loadPreviousStepOutput, pathExists } from './_helpers.js';
+import {
+  buildClaudeSettingsJson,
+  buildGeminiSettingsJson,
+  buildRtkMdRefBlock,
+  RTK_REF_MARKER_END,
+  RTK_REF_MARKER_START,
+  RTK_SLIM,
+  RTK_SLIM_CODEX,
+} from './_rtk-templates.js';
 
 export interface CommandSpec {
   id: string;
@@ -67,6 +76,17 @@ export interface GenerateFilesDetect {
   plannedAgents: string[];
   plannedCommands: string[];
   existingFiles: string[];
+  /** Per-repo RTK opt-in. Read from `repositories.rtk_enabled` in detect();
+   *  drives the rtk-config template items in the manifest expansion. */
+  rtkEnabled: boolean;
+  /** Enabled CLI providers with the metadata rtk-config items need to gate
+   *  their fan-out. Only the names are read by current items, but rules-file
+   *  metadata is carried for future per-CLI templates. */
+  enabledCliProviders: Array<{
+    name: CliProviderName;
+    rulesFile: string;
+    rulesFileMode: 'native' | 'import' | 'copy';
+  }>;
 }
 
 type EnvDetectShape = {
@@ -526,6 +546,41 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       }
     }
 
+    // RTK opt-in is per-repo; pull from `repositories.rtk_enabled`. Snapshotting
+    // the value into detect output also lets the lazy-backfill path in
+    // 01-upgrade-plan replay against repos that have since had the row deleted.
+    const rtkTaskRow = await ctx.db
+      .select({ repositoryId: schema.tasks.repositoryId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, ctx.taskId))
+      .limit(1);
+    let rtkEnabled = false;
+    const rtkRepoId = rtkTaskRow[0]?.repositoryId ?? null;
+    if (rtkRepoId) {
+      const repoRow = await ctx.db
+        .select({ rtkEnabled: schema.repositories.rtkEnabled })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, rtkRepoId))
+        .limit(1);
+      if (repoRow[0]) rtkEnabled = repoRow[0].rtkEnabled;
+    }
+
+    // Carry per-CLI rules-file metadata into detect so the rtk-config items
+    // can fan out per CLI without re-querying the adapter registry inside
+    // the manifest expansion. Only enabled providers are included; rules
+    // content presence is ignored here (rtk works whether the user has
+    // populated cli_providers.rules_content or not).
+    const enabledCliProviders = providerRows
+      .filter((p) => p.enabled)
+      .map((p) => {
+        const adapter = cliAdapterRegistry.get(p.name);
+        return {
+          name: p.name,
+          rulesFile: adapter.rulesFile,
+          rulesFileMode: adapter.rulesFileMode,
+        };
+      });
+
     // Per-CLI agent file targets. Claude-code and Zai share `.claude/agents`
     // (markdown + YAML frontmatter); Gemini uses its own `.gemini/agents`
     // (markdown); Codex uses `.codex/agents` (TOML — Codex's own schema);
@@ -587,6 +642,8 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       plannedAgents,
       plannedCommands,
       existingFiles,
+      rtkEnabled,
+      enabledCliProviders,
     };
   },
 
@@ -760,6 +817,48 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
         await appendOrCreate(rulesFile, '@AGENTS.md\n', '@AGENTS.md');
       }
       await appendOrCreate(rulesFile, rulesBlock, rulesStart, rulesEnd);
+    }
+
+    // RTK opt-in: per-CLI hook configs + slim awareness markdown. Mirrors the
+    // rtk-config TemplateItems in `_rtk-templates.ts` 1:1 so step 12's manifest
+    // expansion finds the same files on disk and records them as
+    // onboarding_artifacts. Toggle off → upgrade-plan surfaces these as
+    // `obsolete` and removes them on apply.
+    if (detected.rtkEnabled) {
+      const enabled = detected.enabledCliProviders ?? [];
+      const hasClaudeFamily = enabled.some((p) => p.name === 'claude-code' || p.name === 'zai');
+      const hasGemini = enabled.some((p) => p.name === 'gemini');
+      const hasCodexOrAmp = enabled.some((p) => p.name === 'codex' || p.name === 'amp');
+
+      if (hasClaudeFamily) {
+        await writeIfAllowed('.claude/settings.json', buildClaudeSettingsJson());
+        await writeIfAllowed('.claude/RTK.md', RTK_SLIM);
+        await appendOrCreate(
+          'CLAUDE.md',
+          buildRtkMdRefBlock('@.claude/RTK.md'),
+          RTK_REF_MARKER_START,
+          RTK_REF_MARKER_END,
+        );
+      }
+      if (hasGemini) {
+        await writeIfAllowed('.gemini/settings.json', buildGeminiSettingsJson());
+        await writeIfAllowed('.gemini/RTK.md', RTK_SLIM);
+        await appendOrCreate(
+          'GEMINI.md',
+          buildRtkMdRefBlock('@.gemini/RTK.md'),
+          RTK_REF_MARKER_START,
+          RTK_REF_MARKER_END,
+        );
+      }
+      if (hasCodexOrAmp) {
+        await writeIfAllowed('RTK.md', RTK_SLIM_CODEX);
+        await appendOrCreate(
+          'AGENTS.md',
+          buildRtkMdRefBlock('@RTK.md'),
+          RTK_REF_MARKER_START,
+          RTK_REF_MARKER_END,
+        );
+      }
     }
 
     ctx.logger.info(

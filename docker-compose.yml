@@ -140,6 +140,9 @@ services:
     build:
       context: ./packages/worker/sandbox-image
       dockerfile: Dockerfile
+      args:
+        RTK_RELEASE_VERSION: ${RTK_RELEASE_VERSION:-v0.37.2}
+        RTK_X86_64_MUSL_SHA256: ${RTK_X86_64_MUSL_SHA256:-3dfb7a05636a68687ba1c5aa696fa8d5fcb494447ded86d9eb8b88b7100a37c6}
     image: haive-cli-sandbox:latest
     profiles: ["sandbox"]
     command: ["true"]

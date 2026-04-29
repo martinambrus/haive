@@ -210,6 +210,14 @@ async function resolveRenderContext(
     customAgentSpecs: detect.customAgentSpecs ?? [],
     agentTargets: detect.agentTargets ?? fallbackAgentTargets,
     lspLanguages: detect.lspLanguages ?? [],
+    // Legacy detect outputs (pre-rtk) didn't snapshot these fields; default
+    // to "rtk off, no providers" so backfilled renders don't accidentally
+    // surface rtk artifacts the user never opted into. The live
+    // upgrade-plan path uses the current `repositories.rtk_enabled` value
+    // via step 04 / 07 detect; this fallback is only hit during artifact
+    // reconstruction for repos onboarded before rtk shipped.
+    rtkEnabled: detect.rtkEnabled ?? false,
+    enabledCliProviders: detect.enabledCliProviders ?? [],
   };
 }
 

@@ -105,6 +105,7 @@ const TEMPLATE_KIND_LABELS: Record<string, string> = {
   'cli-rules-block': 'CLI rules blocks',
   'custom-agent': 'Bundle agents',
   'custom-skill': 'Bundle skills',
+  'rtk-config': 'RTK token-saver',
 };
 
 function templateKindLabel(kind: string): string {

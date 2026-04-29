@@ -68,6 +68,7 @@ import {
   ensureTaskAuthVolumes,
   resolveTaskAuthMounts,
   resolveTaskSkillMounts,
+  seedRtkInTaskVolume,
   userAuthVolumeExists,
 } from '../sandbox/task-auth-volume.js';
 import {
@@ -632,6 +633,30 @@ export async function resolveAuthMounts(
   const providerName = provider.name as CliProviderName;
   await assertUserAuthReady(db, provider);
   await ensureTaskAuthVolumes(provider.userId, providerName, taskId);
+
+  // RTK seeding: when this task's repo opted into the token-saving proxy,
+  // run rtk's own init flow inside the per-task auth volume so its hook
+  // entries land in /home/node/.<cli>/settings.json (and the matching
+  // RTK.md / @-ref artifacts). Best-effort — failures are logged inside
+  // the seeder and don't block CLI execution. Project-level files written
+  // by step 07 cover the case where the user's CLI ignores home settings.
+  const taskRow = await db
+    .select({ repositoryId: schema.tasks.repositoryId })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId))
+    .limit(1);
+  const repoId = taskRow[0]?.repositoryId ?? null;
+  if (repoId) {
+    const repoRow = await db
+      .select({ rtkEnabled: schema.repositories.rtkEnabled })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repoId))
+      .limit(1);
+    if (repoRow[0]?.rtkEnabled) {
+      await seedRtkInTaskVolume(taskId, providerName);
+    }
+  }
+
   return [...resolveTaskAuthMounts(providerName, taskId), ...resolveTaskSkillMounts(providerName)];
 }
 
