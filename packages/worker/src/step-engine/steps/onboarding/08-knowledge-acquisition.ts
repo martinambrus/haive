@@ -514,9 +514,6 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     preForm: true,
     buildPrompt: buildKnowledgePrompt,
     timeoutMs: 90 * 60 * 1000, // 90 minutes — large repos need extensive tool_use scanning
-    // KB synthesis emits 5-15 entries with multiple detailed sections each;
-    // 8192 truncates mid-JSON. 32K covers Sonnet/Opus/GLM output budgets.
-    maxOutputTokens: 32_768,
   },
 
   form(_ctx, detected, llmOutput): FormSchema {

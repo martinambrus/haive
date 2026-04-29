@@ -146,7 +146,6 @@ async function resolveLlmPhase(
     },
     invokeOpts: {
       cwd: params.workspacePath,
-      maxOutputTokens: llmSpec.maxOutputTokens,
     },
   });
 
@@ -162,20 +161,13 @@ async function resolveLlmPhase(
     };
   }
 
-  const mode =
-    plan.invocation.kind === 'api'
-      ? 'api'
-      : plan.mode === 'subagent_emulated'
-        ? 'subagent_emulated'
-        : 'cli';
+  const mode = plan.mode === 'subagent_emulated' ? 'subagent_emulated' : 'cli';
   const payloadKind: CliExecInvocationKind =
-    plan.invocation.kind === 'api'
-      ? 'api'
-      : plan.invocation.kind === 'subagent'
-        ? plan.mode === 'subagent_emulated'
-          ? 'subagent_sequential'
-          : 'subagent_native'
-        : 'cli';
+    plan.invocation.kind === 'subagent'
+      ? plan.mode === 'subagent_emulated'
+        ? 'subagent_sequential'
+        : 'subagent_native'
+      : 'cli';
   const inserted = await db
     .insert(schema.cliInvocations)
     .values({

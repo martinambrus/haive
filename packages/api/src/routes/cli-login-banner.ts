@@ -21,7 +21,6 @@ import {
   type CliLoginCreateResult,
   type CliProbeJobPayload,
   type CliProbeResult,
-  type CliProbeTargetMode,
   type CliProviderName,
 } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -51,7 +50,6 @@ interface BannerSession {
   userId: string;
   providerId: string;
   providerName: CliProviderName;
-  authMode: string;
   containerRowId: string;
   dockerContainerId: string;
   stream: Duplex;
@@ -152,7 +150,6 @@ export function installCliLoginBannerWebSocket(
             userId: auth.userId,
             providerId: provider.id,
             providerName: provider.name,
-            authMode: provider.authMode,
             docker,
           }).catch((err) => {
             log.error({ err, providerId }, 'banner session crashed');
@@ -179,12 +176,11 @@ interface RunBannerOpts {
   userId: string;
   providerId: string;
   providerName: CliProviderName;
-  authMode: string;
   docker: Docker;
 }
 
 async function runBannerSession(opts: RunBannerOpts): Promise<void> {
-  const { ws, userId, providerId, providerName, authMode, docker } = opts;
+  const { ws, userId, providerId, providerName, docker } = opts;
 
   wsSend(ws, { type: 'phase', phase: 'starting' });
 
@@ -237,7 +233,6 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     userId,
     providerId,
     providerName,
-    authMode,
     containerRowId: createResult.containerRowId,
     dockerContainerId: createResult.dockerContainerId,
     stream,
@@ -273,7 +268,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     phase: providerName === 'codex' ? 'awaiting-approval' : 'awaiting-token',
   });
 
-  stream.on('data', (chunk: Buffer) => onStreamData(session, chunk, authMode));
+  stream.on('data', (chunk: Buffer) => onStreamData(session, chunk));
   stream.on('end', () => {
     if (session.probePending) {
       log.info({ providerId }, 'stream ended while probe pending; deferring cleanup');
@@ -355,7 +350,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   });
 }
 
-function onStreamData(session: BannerSession, chunk: Buffer, authMode: string): void {
+function onStreamData(session: BannerSession, chunk: Buffer): void {
   const text = chunk.toString('utf8');
   session.rawBuffer = appendCapped(session.rawBuffer, text, RAW_BUFFER_MAX);
   const clean = stripAnsi(text);
@@ -410,7 +405,7 @@ function onStreamData(session: BannerSession, chunk: Buffer, authMode: string): 
         'claude oauth token captured from stdout',
       );
       wsSend(session.ws, { type: 'auth-success' });
-      void saveOauthTokenAndProbe(session, authMode, oauthToken);
+      void saveOauthTokenAndProbe(session, oauthToken);
       return;
     }
     // Only act on explicit error signals; success for claude-code requires
@@ -442,7 +437,7 @@ function onStreamData(session: BannerSession, chunk: Buffer, authMode: string): 
     session.probePending = true;
     log.info({ providerId: session.providerId }, 'auth success detected');
     wsSend(session.ws, { type: 'auth-success' });
-    void runProbeAndSave(session, authMode);
+    void runProbeAndSave(session);
   } else if (signal?.kind === 'error') {
     log.warn({ providerId: session.providerId, msg: signal.message }, 'auth error detected');
     wsSend(session.ws, { type: 'error', message: signal.message });
@@ -497,7 +492,7 @@ function startGeminiCredsPoller(session: BannerSession): void {
           session.probePending = true;
           log.info({ providerId: session.providerId }, 'gemini creds file detected');
           wsSend(session.ws, { type: 'auth-success' });
-          void runProbeAndSave(session, session.authMode);
+          void runProbeAndSave(session);
           return;
         }
         if (tries >= GEMINI_POLL_MAX_TRIES) {
@@ -551,7 +546,7 @@ function startAmpCredsPoller(session: BannerSession): void {
           session.probePending = true;
           log.info({ providerId: session.providerId }, 'amp settings file detected');
           wsSend(session.ws, { type: 'auth-success' });
-          void runProbeAndSave(session, session.authMode);
+          void runProbeAndSave(session);
           return;
         }
         if (tries >= AMP_POLL_MAX_TRIES) {
@@ -601,11 +596,7 @@ function stopCaptureWatchdog(session: BannerSession): void {
 /** Persist the captured long-lived OAuth token into provider.envVars as
  *  CLAUDE_CODE_OAUTH_TOKEN, then re-run the probe so the UI reflects actual
  *  auth state. The probe spec already forwards provider.envVars to claude. */
-async function saveOauthTokenAndProbe(
-  session: BannerSession,
-  authMode: string,
-  oauthToken: string,
-): Promise<void> {
+async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string): Promise<void> {
   try {
     await upsertProviderSecret(session.providerId, 'CLAUDE_CODE_OAUTH_TOKEN', oauthToken);
     // If a stale copy was ever written to envVars (pre-secrets migration),
@@ -622,7 +613,7 @@ async function saveOauthTokenAndProbe(
         .where(eq(schema.cliProviders.id, session.providerId));
     }
     log.info({ providerId: session.providerId }, 'oauth token saved to encrypted secret');
-    const result = await enqueueProbe(session.providerId, session.userId, authMode);
+    const result = await enqueueProbe(session.providerId, session.userId);
     log.info(
       {
         providerId: session.providerId,
@@ -644,9 +635,9 @@ async function saveOauthTokenAndProbe(
   }
 }
 
-async function runProbeAndSave(session: BannerSession, authMode: string): Promise<void> {
+async function runProbeAndSave(session: BannerSession): Promise<void> {
   try {
-    const result = await enqueueProbe(session.providerId, session.userId, authMode);
+    const result = await enqueueProbe(session.providerId, session.userId);
     log.info(
       {
         providerId: session.providerId,
@@ -719,16 +710,10 @@ async function enqueueLoginCreate(
   return (await job.waitUntilFinished(events, 30_000)) as CliLoginCreateResult;
 }
 
-async function enqueueProbe(
-  providerId: string,
-  userId: string,
-  authMode: string,
-): Promise<CliProbeResult> {
+async function enqueueProbe(providerId: string, userId: string): Promise<CliProbeResult> {
   const queue = getCliExecQueue();
   const events = getCliExecQueueEvents();
-  const targetMode: CliProbeTargetMode =
-    authMode === 'subscription' ? 'cli' : authMode === 'api_key' ? 'api' : 'both';
-  const payload: CliProbeJobPayload = { providerId, userId, targetMode };
+  const payload: CliProbeJobPayload = { providerId, userId, targetMode: 'cli' };
   const job = await queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, {
     removeOnComplete: true,
     removeOnFail: true,

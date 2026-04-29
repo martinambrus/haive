@@ -72,7 +72,7 @@ export interface RefreshCliVersionsJobResult {
   errors: { name: string; error: string }[];
 }
 
-export type CliExecInvocationKind = 'cli' | 'api' | 'subagent_native' | 'subagent_sequential';
+export type CliExecInvocationKind = 'cli' | 'subagent_native' | 'subagent_sequential';
 
 export interface CliExecJobPayload {
   invocationId: string;
@@ -85,7 +85,7 @@ export interface CliExecJobPayload {
   timeoutMs?: number;
 }
 
-export type CliProbeTargetMode = 'cli' | 'api' | 'both';
+export type CliProbeTargetMode = 'cli';
 
 export interface CliProbeJobPayload {
   providerId: string;
@@ -142,7 +142,6 @@ export interface CliProbeResult {
   providerId: string;
   targetMode: CliProbeTargetMode;
   cli?: CliProbePathResult;
-  api?: CliProbePathResult;
 }
 
 export interface CliLoginCreateJobPayload {

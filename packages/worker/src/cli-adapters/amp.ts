@@ -5,7 +5,6 @@ export class AmpAdapter extends BaseCliAdapter {
   readonly providerName = 'amp' as const;
   readonly defaultExecutable = 'amp';
   readonly supportsSubagents = false;
-  readonly supportsApi = false;
   readonly supportsCliAuth = true;
   readonly supportsMcp = false;
   readonly supportsPlugins = false;

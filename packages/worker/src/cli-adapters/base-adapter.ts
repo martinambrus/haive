@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 import { normalizeCliArgsArray } from '@haive/shared';
 import type {
-  ApiCallSpec,
   CliAuthMode,
   CliCommandSpec,
   CliProviderName,
@@ -18,13 +17,11 @@ import type {
 } from './types.js';
 
 const DEFAULT_VERSION_TIMEOUT_MS = 5_000;
-const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 
 export abstract class BaseCliAdapter {
   abstract readonly providerName: CliProviderName;
   abstract readonly defaultExecutable: string;
   abstract readonly supportsSubagents: boolean;
-  abstract readonly supportsApi: boolean;
   abstract readonly supportsCliAuth: boolean;
   abstract readonly supportsMcp: boolean;
   abstract readonly supportsPlugins: boolean;
@@ -40,12 +37,6 @@ export abstract class BaseCliAdapter {
    *  CLI has no such knob. Adapters that override this MUST also override
    *  effortEnv() to translate a level into env vars. */
   readonly effortScale: EffortScale | null = null;
-  /** True when the API path (buildApiInvocation) wires `tools` into the
-   *  underlying SDK call so the model can read repo files. CLI mode always
-   *  has tools; API mode only does when explicitly wired. Defaults false so
-   *  the dispatcher routes tool_use steps to CLI mode unless an adapter
-   *  opts in. */
-  readonly apiSupportsToolUse: boolean = false;
 
   async isAvailable(provider: CliProviderRecord): Promise<boolean> {
     const result = await this.probeExecutable(provider);
@@ -62,8 +53,6 @@ export abstract class BaseCliAdapter {
     prompt: string,
     opts: InvokeOpts,
   ): CliCommandSpec;
-
-  buildApiInvocation?(provider: CliProviderRecord, prompt: string, opts: InvokeOpts): ApiCallSpec;
 
   buildSubAgentInvocation(
     _provider: CliProviderRecord,
@@ -150,10 +139,6 @@ export abstract class BaseCliAdapter {
     if (opts.modelOverride) return opts.modelOverride;
     if (this.defaultModel) return this.defaultModel;
     throw new Error(`${this.providerName} has no default model configured`);
-  }
-
-  protected effectiveMaxTokens(opts: InvokeOpts): number {
-    return opts.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
   }
 }
 

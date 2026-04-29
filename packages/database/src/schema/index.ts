@@ -35,18 +35,14 @@ export const cliProviderNameEnum = pgEnum('cli_provider_name', [
   'amp',
   'zai',
 ]);
-export const cliAuthModeEnum = pgEnum('cli_auth_mode', ['subscription', 'api_key', 'mixed']);
+export const cliAuthModeEnum = pgEnum('cli_auth_mode', ['subscription', 'api_key']);
 export const cliSandboxBuildStatusEnum = pgEnum('cli_sandbox_build_status', [
   'idle',
   'building',
   'ready',
   'failed',
 ]);
-export const cliInvocationModeEnum = pgEnum('cli_invocation_mode', [
-  'api',
-  'cli',
-  'subagent_emulated',
-]);
+export const cliInvocationModeEnum = pgEnum('cli_invocation_mode', ['cli', 'subagent_emulated']);
 
 export const repoSourceEnum = pgEnum('repo_source', [
   'local_path',

@@ -29,12 +29,11 @@ describe('zai adapter', () => {
   const adapter = cliAdapterRegistry.get('zai');
   const provider = makeProvider({ id: 'p-zai', name: 'zai' });
 
-  it('declares the claude CLI executable and api-key-only auth', () => {
+  it('declares the claude CLI executable and api-key auth via CLI binary', () => {
     expect(adapter.providerName).toBe('zai');
     expect(adapter.defaultExecutable).toBe('claude');
     expect(adapter.supportsSubagents).toBe(true);
-    expect(adapter.supportsApi).toBe(true);
-    expect(adapter.supportsCliAuth).toBe(false);
+    expect(adapter.supportsCliAuth).toBe(true);
     expect(adapter.defaultAuthMode).toBe('api_key');
     expect(adapter.apiKeyEnvName).toBe('ANTHROPIC_AUTH_TOKEN');
   });
@@ -66,37 +65,34 @@ describe('zai adapter', () => {
     expect(spec.env.Z_AI_API_URL).toBe('https://api.zai.com/v1');
     expect(spec.env.ANTHROPIC_BASE_URL).toBe('https://api.zai.com/v1');
     expect(spec.env.Z_AI_API_KEY).toBe('secret-token');
+    expect(spec.env.ANTHROPIC_AUTH_TOKEN).toBe('secret-token');
     expect(spec.env.ANTHROPIC_API_KEY).toBe('secret-token');
     expect(spec.env.Z_AI_MODEL).toBe('glm-4.6');
     expect(spec.env.CLAUDE_MODEL).toBe('glm-4.6');
   });
 
-  it('leaves ANTHROPIC_* env vars untouched when Z_AI_* are absent', () => {
+  it('defaults ANTHROPIC_BASE_URL to the canonical zai endpoint when unset', () => {
     const zProvider = makeProvider({
       id: 'p-zai-bare',
+      name: 'zai',
+      envVars: { Z_AI_API_KEY: 'only-token' },
+    });
+    const spec = adapter.buildCliInvocation(zProvider, 'hello', opts);
+    expect(spec.env.ANTHROPIC_BASE_URL).toBe('https://api.z.ai/api/anthropic');
+    expect(spec.env.ANTHROPIC_AUTH_TOKEN).toBe('only-token');
+    expect(spec.env.ANTHROPIC_API_KEY).toBe('only-token');
+  });
+
+  it('promotes a bare ANTHROPIC_API_KEY into ANTHROPIC_AUTH_TOKEN for the claude binary', () => {
+    const zProvider = makeProvider({
+      id: 'p-zai-direct',
       name: 'zai',
       envVars: { ANTHROPIC_API_KEY: 'direct-key' },
     });
     const spec = adapter.buildCliInvocation(zProvider, 'hello', opts);
     expect(spec.env.ANTHROPIC_API_KEY).toBe('direct-key');
-    expect(spec.env.ANTHROPIC_BASE_URL).toBeUndefined();
-  });
-
-  it('builds an API invocation against the Anthropic SDK with the canonical zai base URL', () => {
-    const spec = adapter.buildApiInvocation!(provider, 'hello', opts);
-    expect(spec.sdkPackage).toBe('@anthropic-ai/sdk');
-    expect(spec.baseUrl).toBe('https://api.z.ai/api/anthropic');
-    expect(spec.apiKeyEnvName).toBe('ANTHROPIC_AUTH_TOKEN');
-  });
-
-  it('honours ANTHROPIC_BASE_URL / Z_AI_API_URL from envVars in API mode', () => {
-    const customUrlProvider = makeProvider({
-      id: 'p-zai-baseurl',
-      name: 'zai',
-      envVars: { ANTHROPIC_BASE_URL: 'https://example.test/api/anthropic' },
-    });
-    const spec = adapter.buildApiInvocation!(customUrlProvider, 'hello', opts);
-    expect(spec.baseUrl).toBe('https://example.test/api/anthropic');
+    expect(spec.env.ANTHROPIC_AUTH_TOKEN).toBe('direct-key');
+    expect(spec.env.ANTHROPIC_BASE_URL).toBe('https://api.z.ai/api/anthropic');
   });
 
   it('builds a native sub-agent invocation that mirrors claude-code', () => {

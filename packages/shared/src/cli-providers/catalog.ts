@@ -26,7 +26,6 @@ export interface CliProviderMetadata {
   description: string;
   defaultExecutable: string;
   supportsSubagents: boolean;
-  supportsApi: boolean;
   supportsCliAuth: boolean;
   supportsMcp: boolean;
   supportsPlugins: boolean;
@@ -85,7 +84,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
       "Anthropic's first-class CLI for Claude. Native sub-agent support via the Task tool.",
     defaultExecutable: 'claude',
     supportsSubagents: true,
-    supportsApi: true,
     supportsCliAuth: true,
     supportsMcp: true,
     supportsPlugins: true,
@@ -106,7 +104,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     description: "OpenAI's Codex CLI. Native sub-agent orchestration.",
     defaultExecutable: 'codex',
     supportsSubagents: true,
-    supportsApi: true,
     supportsCliAuth: true,
     supportsMcp: true,
     supportsPlugins: false,
@@ -132,7 +129,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     description: 'Google Gemini CLI. Native sub-agents via markdown agent definitions.',
     defaultExecutable: 'gemini',
     supportsSubagents: true,
-    supportsApi: true,
     supportsCliAuth: true,
     supportsMcp: true,
     supportsPlugins: false,
@@ -158,7 +154,6 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     description: 'Sourcegraph Amp CLI. Native sub-agents spawn parallel mini-Amp threads.',
     defaultExecutable: 'amp',
     supportsSubagents: true,
-    supportsApi: false,
     supportsCliAuth: true,
     supportsMcp: false,
     supportsPlugins: false,
@@ -178,8 +173,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     description: 'Z.AI CLI. Wraps the Claude binary with Anthropic-compatible env vars.',
     defaultExecutable: 'claude',
     supportsSubagents: true,
-    supportsApi: true,
-    supportsCliAuth: false,
+    supportsCliAuth: true,
     supportsMcp: true,
     supportsPlugins: true,
     defaultAuthMode: 'api_key',

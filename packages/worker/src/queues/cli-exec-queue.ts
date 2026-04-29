@@ -4,9 +4,6 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Queue, Worker, type Job } from 'bullmq';
 import { and, eq } from 'drizzle-orm';
-import Anthropic from '@anthropic-ai/sdk';
-import OpenAI from 'openai';
-import { GoogleGenAI } from '@google/genai';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
@@ -46,7 +43,6 @@ import { buildDefaultMcpServers, buildMcpConfigForCli } from '../sandbox/mcp-con
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type { BaseCliAdapter } from '../cli-adapters/base-adapter.js';
 import type {
-  ApiCallSpec,
   CliCommandSpec,
   CliProviderRecord,
   SubAgentInvocation,
@@ -293,8 +289,6 @@ async function executeByKind(
         statusUpdater,
       );
     }
-    case 'api':
-      return executeApiSpec(db, payload, secrets);
     case 'subagent_sequential':
       return executeSubAgentSequential(db, payload, secrets, repoMount, sandboxWorkdir);
     case 'subagent_native':
@@ -917,154 +911,6 @@ function createSandboxSpawner(
   };
 }
 
-async function executeApiSpec(
-  db: Database,
-  payload: CliExecJobPayload,
-  secrets: Record<string, string>,
-): Promise<ExecutionOutcome> {
-  const spec = payload.spec as ApiCallSpec;
-
-  let providerEnvVars: Record<string, string> = {};
-  if (payload.cliProviderId) {
-    const provider = await db.query.cliProviders.findFirst({
-      where: eq(schema.cliProviders.id, payload.cliProviderId),
-    });
-    if (provider?.envVars) providerEnvVars = provider.envVars;
-  }
-
-  const apiKey = secrets[spec.apiKeyEnvName] ?? providerEnvVars[spec.apiKeyEnvName];
-  if (!apiKey) {
-    return {
-      exitCode: 1,
-      rawOutput: null,
-      parsedOutput: null,
-      errorMessage: `api key ${spec.apiKeyEnvName} not found in secrets or envVars`,
-    };
-  }
-
-  switch (spec.sdkPackage) {
-    case '@anthropic-ai/sdk':
-      return callAnthropic(spec, apiKey);
-    case 'openai':
-      return callOpenAI(spec, apiKey);
-    case '@google/genai':
-      return callGoogleGenAI(spec, apiKey);
-    default:
-      return {
-        exitCode: 1,
-        rawOutput: null,
-        parsedOutput: null,
-        errorMessage: `unknown sdk package: ${spec.sdkPackage}`,
-      };
-  }
-}
-
-export async function callAnthropic(spec: ApiCallSpec, apiKey: string): Promise<ExecutionOutcome> {
-  const client = new Anthropic(spec.baseUrl ? { apiKey, baseURL: spec.baseUrl } : { apiKey });
-  try {
-    const response = await client.messages.create({
-      model: spec.model || spec.defaultModel,
-      max_tokens: spec.maxOutputTokens,
-      messages: [{ role: 'user', content: spec.prompt }],
-    });
-    const text = response.content
-      .filter((block) => block.type === 'text')
-      .map((block) => (block as { type: 'text'; text: string }).text)
-      .join('\n');
-    if (response.stop_reason === 'max_tokens') {
-      return {
-        exitCode: 1,
-        rawOutput: text,
-        parsedOutput: null,
-        errorMessage: `response truncated at max_tokens (${spec.maxOutputTokens}); raise maxOutputTokens for this step`,
-      };
-    }
-    return {
-      exitCode: 0,
-      rawOutput: text,
-      parsedOutput: tryJsonParse(text),
-      errorMessage: null,
-    };
-  } catch (err) {
-    return {
-      exitCode: 1,
-      rawOutput: null,
-      parsedOutput: null,
-      errorMessage: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-export async function callOpenAI(spec: ApiCallSpec, apiKey: string): Promise<ExecutionOutcome> {
-  const client = new OpenAI(spec.baseUrl ? { apiKey, baseURL: spec.baseUrl } : { apiKey });
-  try {
-    const response = await client.chat.completions.create({
-      model: spec.model || spec.defaultModel,
-      max_tokens: spec.maxOutputTokens,
-      messages: [{ role: 'user', content: spec.prompt }],
-    });
-    const choice = response.choices[0];
-    const text = choice?.message?.content ?? '';
-    if (choice?.finish_reason === 'length') {
-      return {
-        exitCode: 1,
-        rawOutput: text,
-        parsedOutput: null,
-        errorMessage: `response truncated at max_tokens (${spec.maxOutputTokens}); raise maxOutputTokens for this step`,
-      };
-    }
-    return {
-      exitCode: 0,
-      rawOutput: text,
-      parsedOutput: tryJsonParse(text),
-      errorMessage: null,
-    };
-  } catch (err) {
-    return {
-      exitCode: 1,
-      rawOutput: null,
-      parsedOutput: null,
-      errorMessage: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-export async function callGoogleGenAI(
-  spec: ApiCallSpec,
-  apiKey: string,
-): Promise<ExecutionOutcome> {
-  const client = new GoogleGenAI({ apiKey });
-  try {
-    const response = await client.models.generateContent({
-      model: spec.model || spec.defaultModel,
-      contents: spec.prompt,
-    });
-    const text = response.text ?? '';
-    const finishReason = response.candidates?.[0]?.finishReason;
-    if (finishReason === 'MAX_TOKENS') {
-      return {
-        exitCode: 1,
-        rawOutput: text,
-        parsedOutput: null,
-        errorMessage: `response truncated at MAX_TOKENS; raise maxOutputTokens for this step`,
-      };
-    }
-    return {
-      exitCode: 0,
-      rawOutput: text,
-      parsedOutput: tryJsonParse(text),
-      errorMessage: null,
-    };
-  } catch (err) {
-    return {
-      exitCode: 1,
-      rawOutput: null,
-      parsedOutput: null,
-      errorMessage: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
 async function executeSubAgentNative(
   db: Database,
   payload: CliExecJobPayload,
@@ -1227,9 +1073,8 @@ export async function handleProbeJob(
     return {
       ok: false,
       providerId: payload.providerId,
-      targetMode: payload.targetMode,
-      cli: payload.targetMode !== 'api' ? { ok: false, error: 'provider not found' } : undefined,
-      api: payload.targetMode !== 'cli' ? { ok: false, error: 'provider not found' } : undefined,
+      targetMode: 'cli',
+      cli: { ok: false, error: 'provider not found' },
     };
   }
 
@@ -1237,47 +1082,27 @@ export async function handleProbeJob(
     return {
       ok: false,
       providerId: payload.providerId,
-      targetMode: payload.targetMode,
-      cli:
-        payload.targetMode !== 'api'
-          ? { ok: false, error: `no adapter registered for ${provider.name}` }
-          : undefined,
-      api:
-        payload.targetMode !== 'cli'
-          ? { ok: false, error: `no adapter registered for ${provider.name}` }
-          : undefined,
+      targetMode: 'cli',
+      cli: { ok: false, error: `no adapter registered for ${provider.name}` },
     };
   }
   const adapter = cliAdapterRegistry.get(provider.name);
   const secrets = await resolveProviderSecrets(db, payload.providerId);
 
-  const wantCli = payload.targetMode === 'cli' || payload.targetMode === 'both';
-  const wantApi = payload.targetMode === 'api' || payload.targetMode === 'both';
-
+  const cli = await probeCliPath(db, adapter, provider, secrets);
   const result: CliProbeResult = {
-    ok: true,
+    ok: cli.ok === true,
     providerId: payload.providerId,
-    targetMode: payload.targetMode,
+    targetMode: 'cli',
+    cli,
   };
 
-  if (wantCli) {
-    result.cli = await probeCliPath(db, adapter, provider, secrets);
-  }
-
-  if (wantApi) {
-    result.api = await probeApiPath(adapter, provider, secrets);
-  }
-
-  const cliOk = !wantCli || result.cli?.ok === true;
-  const apiOk = !wantApi || result.api?.ok === true;
-  result.ok = cliOk && apiOk;
-
-  if (wantCli && result.cli?.authStatus) {
+  if (cli.authStatus) {
     await db
       .update(schema.cliProviders)
       .set({
-        authStatus: result.cli.authStatus,
-        authMessage: result.cli.authMessage ?? null,
+        authStatus: cli.authStatus,
+        authMessage: cli.authMessage ?? null,
         authLastCheckedAt: new Date(),
         updatedAt: new Date(),
       })
@@ -1389,61 +1214,6 @@ function resolveProviderExecutable(adapter: BaseCliAdapter, provider: CliProvide
   const explicit = provider.executablePath?.trim();
   if (explicit) return explicit;
   return adapter.defaultExecutable;
-}
-
-async function probeApiPath(
-  adapter: BaseCliAdapter,
-  provider: CliProviderRecord,
-  secrets: Record<string, string>,
-): Promise<CliProbePathResult> {
-  const startedAt = Date.now();
-  if (!adapter.supportsApi || !adapter.buildApiInvocation) {
-    return { ok: false, error: `${provider.name} does not support API path` };
-  }
-  try {
-    const spec = adapter.buildApiInvocation(provider, 'Reply with the single word OK.', {
-      maxOutputTokens: 20,
-    });
-    const apiKey = secrets[spec.apiKeyEnvName] ?? provider.envVars?.[spec.apiKeyEnvName];
-    if (!apiKey) {
-      return {
-        ok: false,
-        error: `api key ${spec.apiKeyEnvName} not found in secrets or envVars`,
-        durationMs: Date.now() - startedAt,
-      };
-    }
-    const outcome =
-      spec.sdkPackage === '@anthropic-ai/sdk'
-        ? await callAnthropic(spec, apiKey)
-        : spec.sdkPackage === 'openai'
-          ? await callOpenAI(spec, apiKey)
-          : spec.sdkPackage === '@google/genai'
-            ? await callGoogleGenAI(spec, apiKey)
-            : {
-                exitCode: 1,
-                rawOutput: null,
-                parsedOutput: null,
-                errorMessage: `unknown sdk: ${spec.sdkPackage}`,
-              };
-    if (outcome.exitCode === 0 && outcome.rawOutput) {
-      return {
-        ok: true,
-        detail: outcome.rawOutput.slice(0, 200),
-        durationMs: Date.now() - startedAt,
-      };
-    }
-    return {
-      ok: false,
-      error: outcome.errorMessage ?? 'api call failed',
-      durationMs: Date.now() - startedAt,
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-      durationMs: Date.now() - startedAt,
-    };
-  }
 }
 
 async function markProvidersReady(

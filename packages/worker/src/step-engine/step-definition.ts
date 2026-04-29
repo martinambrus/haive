@@ -43,11 +43,6 @@ export interface LlmInvocationSpec {
   /** Sandbox timeout for the CLI invocation in milliseconds.
    *  Defaults to 2 minutes; tool_use steps that browse the repo need more. */
   timeoutMs?: number;
-  /** Maximum output tokens for API-mode invocations. Defaults to the
-   *  adapter's DEFAULT_MAX_OUTPUT_TOKENS (currently 8192) when unset. Steps
-   *  that synthesize long structured output (e.g. KB entries with multiple
-   *  sections) must override this or risk silent truncation. */
-  maxOutputTokens?: number;
   /** Test-only synthetic LLM output used when HAIVE_TEST_BYPASS_LLM=1.
    *  Steps whose apply() throws on null llmOutput must define this so smoke
    *  tests can exercise the full pipeline without a real CLI provider. */

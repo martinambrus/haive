@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 export const cliProviderNameSchema = z.enum(['claude-code', 'codex', 'gemini', 'amp', 'zai']);
 
-export const cliAuthModeSchema = z.enum(['subscription', 'api_key', 'mixed']);
+export const cliAuthModeSchema = z.enum(['subscription', 'api_key']);
 export const cliSandboxBuildStatusSchema = z.enum(['idle', 'building', 'ready', 'failed']);
 
 export const cliNetworkModeSchema = z.enum(['none', 'full', 'allowlist']);

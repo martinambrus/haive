@@ -136,7 +136,7 @@ export interface FilesystemListing {
 
 export type CliProviderName = 'claude-code' | 'codex' | 'gemini' | 'amp' | 'zai';
 
-export type CliAuthMode = 'subscription' | 'api_key' | 'mixed';
+export type CliAuthMode = 'subscription' | 'api_key';
 export type CliSandboxBuildStatus = 'idle' | 'building' | 'ready' | 'failed';
 
 export type CliNetworkMode = 'none' | 'full' | 'allowlist';
@@ -164,7 +164,6 @@ export interface CliProviderMetadata {
   description: string;
   defaultExecutable: string;
   supportsSubagents: boolean;
-  supportsApi: boolean;
   supportsCliAuth: boolean;
   supportsMcp: boolean;
   supportsPlugins: boolean;

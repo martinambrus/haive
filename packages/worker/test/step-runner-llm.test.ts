@@ -203,14 +203,13 @@ describe('advanceStep LLM phase', () => {
     expect(invInsert!.row.prompt).toContain('prompt with detected=');
   });
 
-  it('forwards llm.maxOutputTokens to the API spec via dispatcher', async () => {
+  it('routes api_key zai providers through the claude CLI binary', async () => {
     const state = freshState();
     const db = makeMockDb(state);
     const enqueued: CliExecJobPayload[] = [];
-    // api_key provider that lacks tool_use → step needs no tool_use → API path.
-    const apiOnlyProvider: CliProviderRecord = {
+    const zaiProvider: CliProviderRecord = {
       ...makeProvider(),
-      id: 'prov-api',
+      id: 'prov-zai',
       name: 'zai',
       authMode: 'api_key',
     } as CliProviderRecord;
@@ -218,7 +217,6 @@ describe('advanceStep LLM phase', () => {
     stepDef.llm = {
       requiredCapabilities: [],
       buildPrompt: (args) => `synth ${JSON.stringify(args.detected)}`,
-      maxOutputTokens: 32_768,
     };
     const result = await advanceStep({
       db,
@@ -226,9 +224,9 @@ describe('advanceStep LLM phase', () => {
       userId: 'user-1',
       repoPath: '/tmp',
       workspacePath: '/tmp',
-      cliProviderId: 'prov-api',
+      cliProviderId: 'prov-zai',
       stepDef,
-      providers: [apiOnlyProvider],
+      providers: [zaiProvider],
       deps: {
         async enqueueCliInvocation(payload) {
           enqueued.push(payload);
@@ -237,9 +235,9 @@ describe('advanceStep LLM phase', () => {
     });
     expect(result.status).toBe('waiting_cli');
     expect(enqueued).toHaveLength(1);
-    expect(enqueued[0]!.kind).toBe('api');
-    const apiSpec = enqueued[0]!.spec as { maxOutputTokens?: number };
-    expect(apiSpec.maxOutputTokens).toBe(32_768);
+    expect(enqueued[0]!.kind).toBe('cli');
+    const cliSpec = enqueued[0]!.spec as { command: string };
+    expect(cliSpec.command).toBe('/usr/bin/claude');
   });
 
   it('runs apply with llmOutput when the latest invocation completed successfully', async () => {

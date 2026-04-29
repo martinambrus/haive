@@ -61,6 +61,7 @@ describe('resolveDispatch', () => {
     });
     expect(plan.providerId).toBe('prov-claude');
     expect(plan.mode).toBe('cli');
+    expect(plan.reason).toBe('cli');
   });
 
   it('emits a native sub-agent invocation for claude-code', () => {
@@ -102,20 +103,21 @@ describe('resolveDispatch', () => {
     }
   });
 
-  it('uses the api path for api_key providers on a plain prompt', () => {
-    const provider = makeProvider({
-      id: 'prov-gemini',
-      name: 'gemini',
+  it('routes api_key providers through the CLI binary so tools are available', () => {
+    const zai = makeProvider({
+      id: 'prov-zai',
+      name: 'zai',
       authMode: 'api_key',
     });
     const plan = resolveDispatch({
-      providers: [provider],
-      input: { kind: 'prompt', prompt: 'what is 2+2', capabilities: [] },
+      providers: [zai],
+      input: { kind: 'prompt', prompt: 'scan repo', capabilities: ['tool_use'] },
       invokeOpts: {},
     });
-    expect(plan.mode).toBe('api');
-    expect(plan.reason).toBe('api_byok');
-    expect(plan.invocation?.kind).toBe('api');
+    expect(plan.providerId).toBe('prov-zai');
+    expect(plan.mode).toBe('cli');
+    expect(plan.reason).toBe('cli');
+    expect(plan.invocation?.kind).toBe('cli');
   });
 
   it('skips disabled providers entirely', () => {
@@ -130,76 +132,6 @@ describe('resolveDispatch', () => {
       invokeOpts: {},
     });
     expect(plan.mode).toBe('skip');
-  });
-
-  it('skips API path for tool_use steps when adapter has not opted in', () => {
-    // zai is api_key auth and has supportsCliAuth=false, so when tool_use is
-    // required and apiSupportsToolUse defaults false, dispatcher must fall
-    // through to the next provider rather than send a tools-less API call.
-    const zai = makeProvider({
-      id: 'prov-zai',
-      name: 'zai',
-      authMode: 'api_key',
-    });
-    const claude = makeProvider({
-      id: 'prov-claude',
-      name: 'claude-code',
-      authMode: 'subscription',
-      supportsSubagents: true,
-    });
-    const plan = resolveDispatch({
-      providers: [zai, claude],
-      input: { kind: 'prompt', prompt: 'scan repo', capabilities: ['tool_use'] },
-      invokeOpts: {},
-    });
-    expect(plan.providerId).toBe('prov-claude');
-    expect(plan.mode).toBe('cli');
-  });
-
-  it('still picks API path for non-tool_use steps on api_key providers', () => {
-    const zai = makeProvider({
-      id: 'prov-zai',
-      name: 'zai',
-      authMode: 'api_key',
-    });
-    const plan = resolveDispatch({
-      providers: [zai],
-      input: { kind: 'prompt', prompt: 'simple synthesis', capabilities: [] },
-      invokeOpts: {},
-    });
-    expect(plan.providerId).toBe('prov-zai');
-    expect(plan.mode).toBe('api');
-  });
-
-  it('returns skip when tool_use is required but no adapter supports it', () => {
-    const zai = makeProvider({
-      id: 'prov-zai',
-      name: 'zai',
-      authMode: 'api_key',
-    });
-    const plan = resolveDispatch({
-      providers: [zai],
-      input: { kind: 'prompt', prompt: 'scan repo', capabilities: ['tool_use'] },
-      invokeOpts: {},
-    });
-    expect(plan.mode).toBe('skip');
-  });
-
-  it('forwards maxOutputTokens through invokeOpts to the API spec', () => {
-    const zai = makeProvider({
-      id: 'prov-zai',
-      name: 'zai',
-      authMode: 'api_key',
-    });
-    const plan = resolveDispatch({
-      providers: [zai],
-      input: { kind: 'prompt', prompt: 'synth', capabilities: [] },
-      invokeOpts: { maxOutputTokens: 32768 },
-    });
-    expect(plan.mode).toBe('api');
-    if (plan.invocation?.kind === 'api') {
-      expect(plan.invocation.spec.maxOutputTokens).toBe(32768);
-    }
   });
 
   it('builds a CliCommandSpec using the resolved executable', () => {

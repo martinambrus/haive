@@ -2,7 +2,6 @@ import type { StepCapability } from '@haive/shared';
 import type { BaseCliAdapter } from '../cli-adapters/base-adapter.js';
 import { CliAdapterRegistry, cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type {
-  ApiCallSpec,
   CliCommandSpec,
   CliProviderRecord,
   InvokeOpts,
@@ -11,7 +10,7 @@ import type {
 } from '../cli-adapters/types.js';
 import { splitSubAgentForProvider } from '../sub-agent-emulator/splitter.js';
 
-export type DispatchMode = 'cli' | 'api' | 'subagent_emulated' | 'skip';
+export type DispatchMode = 'cli' | 'subagent_emulated' | 'skip';
 
 export type DispatchInput =
   | {
@@ -30,20 +29,12 @@ export interface DispatchInvocationCli {
   spec: CliCommandSpec;
 }
 
-export interface DispatchInvocationApi {
-  kind: 'api';
-  spec: ApiCallSpec;
-}
-
 export interface DispatchInvocationSubAgent {
   kind: 'subagent';
   spec: SubAgentInvocation;
 }
 
-export type DispatchInvocation =
-  | DispatchInvocationCli
-  | DispatchInvocationApi
-  | DispatchInvocationSubAgent;
+export type DispatchInvocation = DispatchInvocationCli | DispatchInvocationSubAgent;
 
 export interface DispatchPlan {
   mode: DispatchMode;
@@ -72,15 +63,13 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
   }
 
   const ordered = orderProviders(enabled, req.preferredProviderId ?? null);
-
   const needsSubagents = req.input.capabilities.includes('subagents');
-  const needsToolUse = req.input.capabilities.includes('tool_use');
 
   for (const provider of ordered) {
     if (!registry.has(provider.name)) continue;
     const adapter = registry.get(provider.name);
 
-    const plan = tryBuildPlan(adapter, provider, req, needsSubagents, needsToolUse);
+    const plan = tryBuildPlan(adapter, provider, req, needsSubagents);
     if (plan) return plan;
   }
 
@@ -102,47 +91,9 @@ function tryBuildPlan(
   provider: CliProviderRecord,
   req: DispatchRequest,
   needsSubagents: boolean,
-  needsToolUse: boolean,
 ): DispatchPlan | null {
-  const authMode = provider.authMode;
-  const subscriptionFirst = authMode === 'subscription' || authMode === 'mixed';
-  const apiFirst = authMode === 'api_key' || authMode === 'mixed';
-
-  if (subscriptionFirst && adapter.supportsCliAuth) {
-    const plan = buildCliSidePlan(adapter, provider, req, needsSubagents);
-    if (plan) return plan;
-  }
-
-  if (apiFirst && adapter.supportsApi && adapter.buildApiInvocation) {
-    if (req.input.kind === 'prompt') {
-      if (needsSubagents && !adapter.supportsSubagents) {
-        // API path cannot emulate sub-agents in one call; fall through
-      } else if (needsToolUse && !adapter.apiSupportsToolUse) {
-        // API path doesn't wire tools; tool_use step needs CLI mode; fall through
-      } else {
-        const spec = adapter.buildApiInvocation(provider, req.input.prompt, req.invokeOpts);
-        return {
-          mode: 'api',
-          providerId: provider.id,
-          providerName: provider.name,
-          adapter,
-          provider,
-          invocation: { kind: 'api', spec },
-          reason: 'api_byok',
-        };
-      }
-    }
-  }
-
-  if (subscriptionFirst && adapter.supportsCliAuth) {
-    return null;
-  }
-
-  if (adapter.supportsCliAuth) {
-    return buildCliSidePlan(adapter, provider, req, needsSubagents);
-  }
-
-  return null;
+  if (!adapter.supportsCliAuth) return null;
+  return buildCliSidePlan(adapter, provider, req, needsSubagents);
 }
 
 function buildCliSidePlan(
@@ -163,7 +114,7 @@ function buildCliSidePlan(
       adapter,
       provider,
       invocation: { kind: 'cli', spec },
-      reason: 'cli_subscription',
+      reason: 'cli',
     };
   }
 

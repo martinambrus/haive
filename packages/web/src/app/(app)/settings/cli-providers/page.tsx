@@ -258,8 +258,7 @@ export default function CliProvidersPage() {
                     <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-500">
                       <Badge>{m.defaultAuthMode}</Badge>
                       {m.supportsSubagents && <Badge variant="success">subagents</Badge>}
-                      {m.supportsApi && <Badge>API</Badge>}
-                      {m.supportsCliAuth && <Badge>subscription</Badge>}
+                      {m.supportsCliAuth && <Badge>CLI</Badge>}
                     </div>
                     <div className="mt-4">
                       <Link href={`/settings/cli-providers/new?name=${m.name}`}>

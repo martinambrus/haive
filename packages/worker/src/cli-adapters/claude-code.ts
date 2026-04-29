@@ -1,6 +1,5 @@
 import { BaseCliAdapter } from './base-adapter.js';
 import type {
-  ApiCallSpec,
   CliCommandSpec,
   CliProviderRecord,
   EffortScale,
@@ -30,7 +29,6 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
   readonly providerName = 'claude-code' as const;
   readonly defaultExecutable = 'claude';
   readonly supportsSubagents = true;
-  readonly supportsApi = true;
   readonly supportsCliAuth = true;
   readonly supportsMcp = true;
   readonly supportsPlugins = true;
@@ -58,21 +56,6 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
       ]),
       env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
-    };
-  }
-
-  override buildApiInvocation(
-    _provider: CliProviderRecord,
-    prompt: string,
-    opts: InvokeOpts,
-  ): ApiCallSpec {
-    return {
-      sdkPackage: '@anthropic-ai/sdk',
-      defaultModel: this.defaultModel,
-      apiKeyEnvName: this.apiKeyEnvName,
-      prompt,
-      model: this.effectiveModel(opts),
-      maxOutputTokens: this.effectiveMaxTokens(opts),
     };
   }
 

@@ -20,7 +20,7 @@ export type StepStatus =
 
 export type CliProviderName = 'claude-code' | 'codex' | 'gemini' | 'amp' | 'zai';
 
-export type AuthMode = 'subscription' | 'api_key' | 'mixed';
+export type AuthMode = 'subscription' | 'api_key';
 
 /**
  * Structured hint attached to a failed task_step so the UI can render

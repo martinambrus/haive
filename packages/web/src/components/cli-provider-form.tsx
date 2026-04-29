@@ -517,9 +517,12 @@ export function CliProviderForm({
           value={state.authMode}
           onChange={(e) => update('authMode', e.target.value as CliAuthMode)}
         >
-          {metadata.supportsCliAuth && <option value="subscription">Subscription (CLI)</option>}
-          {metadata.supportsApi && <option value="api_key">API key (BYOK)</option>}
-          {metadata.supportsApi && metadata.supportsCliAuth && <option value="mixed">Mixed</option>}
+          {metadata.defaultAuthMode !== 'api_key' && (
+            <option value="subscription">Subscription (CLI login)</option>
+          )}
+          {metadata.apiKeyEnvName !== null && (
+            <option value="api_key">API key (env-var creds)</option>
+          )}
         </select>
       </div>
 

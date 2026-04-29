@@ -1,6 +1,5 @@
 import { BaseCliAdapter } from './base-adapter.js';
 import type {
-  ApiCallSpec,
   CliCommandSpec,
   CliProviderRecord,
   EffortScale,
@@ -26,26 +25,26 @@ const ZAI_LSP_PLUGINS: Record<string, string> = {
 const ZAI_LSP_MARKETPLACE_REF = 'Piebald-AI/claude-code-lsps';
 const ZAI_LSP_MARKETPLACE_ID = 'claude-code-lsps';
 
+const ZAI_DEFAULT_BASE_URL = 'https://api.z.ai/api/anthropic';
+
 export class ZaiAdapter extends BaseCliAdapter {
   readonly providerName = 'zai' as const;
   readonly defaultExecutable = 'claude';
   readonly supportsSubagents = true;
-  readonly supportsApi = true;
-  // Z.AI ships no standalone login subcommand — auth is API-key-only via
-  // Z_AI_API_KEY → ANTHROPIC_API_KEY env mapping. Marking supportsCliAuth=true
-  // misled the dispatcher and the auth-volume guard into demanding a login
-  // flow that does not exist.
-  readonly supportsCliAuth = false;
+  // Z.AI ships no `claude /login` flow — credentials arrive via env vars
+  // (Z_AI_API_KEY / ANTHROPIC_AUTH_TOKEN). The dispatcher's CLI path is gated
+  // on supportsCliAuth, but assertUserAuthReady short-circuits when authMode
+  // is 'api_key', so re-enabling this no longer forces a login.
+  readonly supportsCliAuth = true;
   readonly supportsMcp = true;
   readonly supportsPlugins = true;
   readonly defaultAuthMode = 'api_key' as const;
-  // Z.AI distributes auth as a bearer token, not a long-lived API key. The
-  // claude binary and the Anthropic SDK both accept ANTHROPIC_AUTH_TOKEN as
-  // the credential variable for that flow.
+  // Z.AI distributes auth as a bearer token; the claude binary accepts it via
+  // ANTHROPIC_AUTH_TOKEN (preferred) or ANTHROPIC_API_KEY (fallback for older
+  // binaries). buildCliInvocation writes both.
   readonly apiKeyEnvName = 'ANTHROPIC_AUTH_TOKEN';
-  // Z.AI exposes GLM models. `zai-latest` is not a real model code at the API
-  // layer — sending it returns "Unknown Model". `glm-4.6` is the documented
-  // default; users can override per-task or via ANTHROPIC_DEFAULT_*_MODEL.
+  // Z.AI exposes GLM models. `glm-4.6` is the documented default; users can
+  // override per-task or via ANTHROPIC_DEFAULT_*_MODEL.
   readonly defaultModel = 'glm-4.6';
   readonly rulesFile = 'CLAUDE.md';
   readonly rulesFileMode = 'import' as const;
@@ -57,8 +56,13 @@ export class ZaiAdapter extends BaseCliAdapter {
     opts: InvokeOpts,
   ): CliCommandSpec {
     const env = this.mergedEnv(provider, opts);
-    if (env.Z_AI_API_URL) env.ANTHROPIC_BASE_URL = env.Z_AI_API_URL;
-    if (env.Z_AI_API_KEY) env.ANTHROPIC_API_KEY = env.Z_AI_API_KEY;
+    const baseUrl = env.Z_AI_API_URL ?? env.ANTHROPIC_BASE_URL ?? ZAI_DEFAULT_BASE_URL;
+    env.ANTHROPIC_BASE_URL = baseUrl;
+    const token = env.Z_AI_API_KEY ?? env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY;
+    if (token) {
+      env.ANTHROPIC_AUTH_TOKEN = token;
+      env.ANTHROPIC_API_KEY = token;
+    }
     if (env.Z_AI_MODEL) env.CLAUDE_MODEL = env.Z_AI_MODEL;
     return {
       command: this.resolveExecutable(provider),
@@ -72,34 +76,6 @@ export class ZaiAdapter extends BaseCliAdapter {
       ]),
       env,
       cwd: opts.cwd,
-    };
-  }
-
-  override buildApiInvocation(
-    provider: CliProviderRecord,
-    prompt: string,
-    opts: InvokeOpts,
-  ): ApiCallSpec {
-    const env = provider.envVars ?? {};
-    const baseUrl = env.ANTHROPIC_BASE_URL ?? env.Z_AI_API_URL ?? 'https://api.z.ai/api/anthropic';
-    // claude-binary-style env overrides: surface the same knobs in API mode so
-    // a Z.AI provider configured for the CLI (where the binary translates the
-    // Sonnet/Opus/Haiku tier names into glm-* codes) keeps working when the
-    // dispatcher picks the API path.
-    const envModel =
-      env.Z_AI_MODEL ??
-      env.ANTHROPIC_DEFAULT_SONNET_MODEL ??
-      env.ANTHROPIC_DEFAULT_OPUS_MODEL ??
-      env.ANTHROPIC_DEFAULT_HAIKU_MODEL ??
-      env.CLAUDE_MODEL;
-    return {
-      sdkPackage: '@anthropic-ai/sdk',
-      defaultModel: envModel ?? this.defaultModel,
-      apiKeyEnvName: this.apiKeyEnvName,
-      baseUrl,
-      prompt,
-      model: opts.modelOverride ?? envModel ?? this.defaultModel,
-      maxOutputTokens: this.effectiveMaxTokens(opts),
     };
   }
 

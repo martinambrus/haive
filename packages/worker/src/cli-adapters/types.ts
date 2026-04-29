@@ -8,7 +8,6 @@ export interface InvokeOpts {
   cwd?: string;
   timeoutMs?: number;
   modelOverride?: string;
-  maxOutputTokens?: number;
   signal?: AbortSignal;
   extraEnv?: Record<string, string>;
   sessionId?: string;
@@ -41,16 +40,6 @@ export interface CliCommandSpec {
   args: string[];
   env: Record<string, string>;
   cwd?: string;
-}
-
-export interface ApiCallSpec {
-  sdkPackage: string;
-  defaultModel: string;
-  apiKeyEnvName: string;
-  baseUrl?: string;
-  prompt: string;
-  model: string;
-  maxOutputTokens: number;
 }
 
 export interface SubAgent {

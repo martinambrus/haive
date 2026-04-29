@@ -105,9 +105,9 @@ export function CliProviderTest({
       <FormError message={error} />
 
       <p className="text-sm text-neutral-400">
-        Runs a fast probe against this provider. For subscription mode it invokes the CLI binary
-        with <code className="font-mono text-neutral-300">--version</code> plus an auth probe; for
-        API mode it sends a tiny ping through the SDK. Mixed mode tests both paths.
+        Runs <code className="font-mono text-neutral-300">--version</code> against the provider's
+        CLI binary inside the sandbox image; subscription-mode CLIs that ship a non-interactive auth
+        check (claude-code, codex, gemini, amp) also get an auth probe.
       </p>
 
       {blockMessage && (
@@ -139,14 +139,6 @@ export function CliProviderTest({
             <PathResultRow
               label="CLI path"
               res={result.cli}
-              providerName={providerName}
-              onLogin={handleLogin}
-            />
-          )}
-          {result.api && (
-            <PathResultRow
-              label="API path"
-              res={result.api}
               providerName={providerName}
               onLogin={handleLogin}
             />

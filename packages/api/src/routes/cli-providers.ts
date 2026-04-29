@@ -18,7 +18,6 @@ import {
   type CliPackageVersionsEntry,
   type CliProbeJobPayload,
   type CliProbeResult,
-  type CliProbeTargetMode,
   type CliProviderName,
   type RefreshCliVersionsJobPayload,
   type SandboxImageBuildJobPayload,
@@ -366,13 +365,10 @@ cliProviderRoutes.post('/:id/test', async (c) => {
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
 
-  const targetMode: CliProbeTargetMode =
-    provider.authMode === 'subscription' ? 'cli' : provider.authMode === 'api_key' ? 'api' : 'both';
-
   const payload: CliProbeJobPayload = {
     providerId: provider.id,
     userId,
-    targetMode,
+    targetMode: 'cli',
   };
 
   const queue = getCliExecQueue();
