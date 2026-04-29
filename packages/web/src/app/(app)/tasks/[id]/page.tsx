@@ -19,6 +19,7 @@ import {
 } from '@/lib/api-client';
 import { Badge, Button, Card, Label } from '@/components/ui';
 import { useCliLogin } from '@/lib/use-cli-login';
+import { shouldClearSubmitting } from '@/lib/submit-state';
 import { FormRenderer, type FormValues } from '@/components/form-renderer';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { TaskOutputs } from '@/components/task-outputs';
@@ -148,12 +149,21 @@ export default function TaskDetailPage() {
     try {
       await api.post(`/tasks/${id}/steps/${step.stepId}/submit`, { values });
       await reload();
+      // Keep button disabled here. The effect below clears `submitting` once the
+      // step's status leaves `waiting_form`, which is when the form unmounts
+      // (success) or is replaced by a retry button (failure). Clearing in a
+      // `finally` re-enabled the button between reload and backend transition.
     } catch (err) {
       setSubmitError((err as Error).message ?? 'Failed to submit step');
-    } finally {
       setSubmitting(null);
     }
   }
+
+  useEffect(() => {
+    if (shouldClearSubmitting(submitting, steps)) {
+      setSubmitting(null);
+    }
+  }, [steps, submitting]);
 
   async function runAction(action: TaskAction) {
     setActionError(null);
