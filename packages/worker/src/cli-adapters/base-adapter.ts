@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { normalizeCliArgsArray } from '@haive/shared';
 import type {
   ApiCallSpec,
   CliAuthMode,
@@ -137,7 +138,11 @@ export abstract class BaseCliAdapter {
   }
 
   protected mergedArgs(provider: CliProviderRecord, base: string[]): string[] {
-    const stored = provider.cliArgs ?? [];
+    // Re-tokenize stored args so DB rows written before
+    // shell-tokenize learnt the `--flag="value"` form (embedded `=` and
+    // wrapping quotes) get healed at spawn time without forcing the user
+    // to re-save the CLI provider. Idempotent on already-normalized input.
+    const stored = normalizeCliArgsArray(provider.cliArgs ?? []);
     return [...stored, ...base];
   }
 

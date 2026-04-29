@@ -1,4 +1,5 @@
 const FLAG_LINE_PATTERN = /^(--?[A-Za-z][A-Za-z0-9-]*)\s+(.+)$/s;
+const FLAG_EQ_QUOTED_PATTERN = /^(--?[A-Za-z][A-Za-z0-9-]*)=(["'])(.*)\2$/s;
 
 function stripOuterMatchingQuotes(s: string): string {
   if (s.length < 2) return s;
@@ -21,7 +22,13 @@ function stripOuterMatchingQuotes(s: string): string {
  *    quotes on the tail is stripped, so `--mcp-config ".claude/mcp.json"`
  *    becomes `['--mcp-config', '.claude/mcp.json']`.
  *
- * 2. Otherwise the whole line is a single argument, verbatim. A single
+ * 2. If the line matches `--flag="value"` or `--flag='value'` (no
+ *    whitespace, value wrapped in matching quotes), split on `=` and
+ *    strip the quotes, matching the `--flag value` form. Bare
+ *    `--flag=value` (no quotes) is left as a single argument so CLIs
+ *    that prefer the `=`-form receive it unchanged.
+ *
+ * 3. Otherwise the whole line is a single argument, verbatim. A single
  *    pair of outer matching quotes is stripped.
  *
  * The tail is never tokenized, so embedded quotes, backslashes, and any
@@ -38,6 +45,12 @@ export function normalizeCliArgsArray(raw: string[]): string[] {
     if (match) {
       out.push(match[1]!);
       out.push(stripOuterMatchingQuotes(match[2]!.trim()));
+      continue;
+    }
+    const eqMatch = trimmed.match(FLAG_EQ_QUOTED_PATTERN);
+    if (eqMatch) {
+      out.push(eqMatch[1]!);
+      out.push(eqMatch[3]!);
       continue;
     }
     out.push(stripOuterMatchingQuotes(trimmed));

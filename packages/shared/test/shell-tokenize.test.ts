@@ -58,6 +58,25 @@ describe('normalizeCliArgsArray', () => {
     expect(normalizeCliArgsArray(['--model=opus-4'])).toEqual(['--model=opus-4']);
   });
 
+  it('splits --flag="value" into separate tokens and strips the quotes', () => {
+    expect(normalizeCliArgsArray(['--mcp-config="./.claude/mcp_settings.json"'])).toEqual([
+      '--mcp-config',
+      './.claude/mcp_settings.json',
+    ]);
+    expect(normalizeCliArgsArray(["--mcp-config='./.claude/mcp_settings.json'"])).toEqual([
+      '--mcp-config',
+      './.claude/mcp_settings.json',
+    ]);
+  });
+
+  it('preserves quoted --flag="value" content with embedded spaces verbatim', () => {
+    expect(normalizeCliArgsArray(['--note="hello world"'])).toEqual(['--note', 'hello world']);
+  });
+
+  it('leaves --flag="unterminated as a single token', () => {
+    expect(normalizeCliArgsArray(['--flag="unterminated'])).toEqual(['--flag="unterminated']);
+  });
+
   it('treats positional arguments with spaces (non-flag lines) as one verbatim arg', () => {
     expect(normalizeCliArgsArray(['value with spaces'])).toEqual(['value with spaces']);
   });
