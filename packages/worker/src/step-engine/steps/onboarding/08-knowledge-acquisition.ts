@@ -222,6 +222,10 @@ export function parseKbEntries(raw: unknown): KbEntry[] {
   // then fall back to greedy (handles embedded triple backticks in JSON strings).
   const lazyRe = /```json\s*([\s\S]*?)```/g;
   const greedyRe = /```json\s*([\s\S]*)```/;
+  // Last-ditch: response truncated without closing fence. callAnthropic now
+  // flags max_tokens upstream, but defend in case an adapter slips a
+  // truncated payload through.
+  const unterminatedRe = /```json\s*([\s\S]*)$/;
 
   let match: RegExpExecArray | null;
   while ((match = lazyRe.exec(text)) !== null) {
@@ -231,6 +235,12 @@ export function parseKbEntries(raw: unknown): KbEntry[] {
     const greedyMatch = greedyRe.exec(text);
     if (greedyMatch) {
       collectFromFenceBody(greedyMatch[1], entries);
+    }
+  }
+  if (entries.length === 0) {
+    const unterminated = unterminatedRe.exec(text);
+    if (unterminated) {
+      collectFromFenceBody(unterminated[1], entries);
     }
   }
   return entries;
@@ -504,6 +514,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     preForm: true,
     buildPrompt: buildKnowledgePrompt,
     timeoutMs: 90 * 60 * 1000, // 90 minutes — large repos need extensive tool_use scanning
+    // KB synthesis emits 5-15 entries with multiple detailed sections each;
+    // 8192 truncates mid-JSON. 32K covers Sonnet/Opus/GLM output budgets.
+    maxOutputTokens: 32_768,
   },
 
   form(_ctx, detected, llmOutput): FormSchema {

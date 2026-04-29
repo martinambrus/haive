@@ -144,7 +144,10 @@ async function resolveLlmPhase(
       prompt,
       capabilities: llmSpec.requiredCapabilities,
     },
-    invokeOpts: { cwd: params.workspacePath },
+    invokeOpts: {
+      cwd: params.workspacePath,
+      maxOutputTokens: llmSpec.maxOutputTokens,
+    },
   });
 
   if (plan.mode === 'skip' || !plan.invocation) {

@@ -74,12 +74,13 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
   const ordered = orderProviders(enabled, req.preferredProviderId ?? null);
 
   const needsSubagents = req.input.capabilities.includes('subagents');
+  const needsToolUse = req.input.capabilities.includes('tool_use');
 
   for (const provider of ordered) {
     if (!registry.has(provider.name)) continue;
     const adapter = registry.get(provider.name);
 
-    const plan = tryBuildPlan(adapter, provider, req, needsSubagents);
+    const plan = tryBuildPlan(adapter, provider, req, needsSubagents, needsToolUse);
     if (plan) return plan;
   }
 
@@ -101,6 +102,7 @@ function tryBuildPlan(
   provider: CliProviderRecord,
   req: DispatchRequest,
   needsSubagents: boolean,
+  needsToolUse: boolean,
 ): DispatchPlan | null {
   const authMode = provider.authMode;
   const subscriptionFirst = authMode === 'subscription' || authMode === 'mixed';
@@ -115,6 +117,8 @@ function tryBuildPlan(
     if (req.input.kind === 'prompt') {
       if (needsSubagents && !adapter.supportsSubagents) {
         // API path cannot emulate sub-agents in one call; fall through
+      } else if (needsToolUse && !adapter.apiSupportsToolUse) {
+        // API path doesn't wire tools; tool_use step needs CLI mode; fall through
       } else {
         const spec = adapter.buildApiInvocation(provider, req.input.prompt, req.invokeOpts);
         return {

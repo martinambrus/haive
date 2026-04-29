@@ -39,6 +39,12 @@ export abstract class BaseCliAdapter {
    *  CLI has no such knob. Adapters that override this MUST also override
    *  effortEnv() to translate a level into env vars. */
   readonly effortScale: EffortScale | null = null;
+  /** True when the API path (buildApiInvocation) wires `tools` into the
+   *  underlying SDK call so the model can read repo files. CLI mode always
+   *  has tools; API mode only does when explicitly wired. Defaults false so
+   *  the dispatcher routes tool_use steps to CLI mode unless an adapter
+   *  opts in. */
+  readonly apiSupportsToolUse: boolean = false;
 
   async isAvailable(provider: CliProviderRecord): Promise<boolean> {
     const result = await this.probeExecutable(provider);

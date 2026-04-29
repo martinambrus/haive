@@ -959,7 +959,7 @@ async function executeApiSpec(
   }
 }
 
-async function callAnthropic(spec: ApiCallSpec, apiKey: string): Promise<ExecutionOutcome> {
+export async function callAnthropic(spec: ApiCallSpec, apiKey: string): Promise<ExecutionOutcome> {
   const client = new Anthropic(spec.baseUrl ? { apiKey, baseURL: spec.baseUrl } : { apiKey });
   try {
     const response = await client.messages.create({
@@ -971,6 +971,14 @@ async function callAnthropic(spec: ApiCallSpec, apiKey: string): Promise<Executi
       .filter((block) => block.type === 'text')
       .map((block) => (block as { type: 'text'; text: string }).text)
       .join('\n');
+    if (response.stop_reason === 'max_tokens') {
+      return {
+        exitCode: 1,
+        rawOutput: text,
+        parsedOutput: null,
+        errorMessage: `response truncated at max_tokens (${spec.maxOutputTokens}); raise maxOutputTokens for this step`,
+      };
+    }
     return {
       exitCode: 0,
       rawOutput: text,
@@ -987,7 +995,7 @@ async function callAnthropic(spec: ApiCallSpec, apiKey: string): Promise<Executi
   }
 }
 
-async function callOpenAI(spec: ApiCallSpec, apiKey: string): Promise<ExecutionOutcome> {
+export async function callOpenAI(spec: ApiCallSpec, apiKey: string): Promise<ExecutionOutcome> {
   const client = new OpenAI(spec.baseUrl ? { apiKey, baseURL: spec.baseUrl } : { apiKey });
   try {
     const response = await client.chat.completions.create({
@@ -995,7 +1003,16 @@ async function callOpenAI(spec: ApiCallSpec, apiKey: string): Promise<ExecutionO
       max_tokens: spec.maxOutputTokens,
       messages: [{ role: 'user', content: spec.prompt }],
     });
-    const text = response.choices[0]?.message?.content ?? '';
+    const choice = response.choices[0];
+    const text = choice?.message?.content ?? '';
+    if (choice?.finish_reason === 'length') {
+      return {
+        exitCode: 1,
+        rawOutput: text,
+        parsedOutput: null,
+        errorMessage: `response truncated at max_tokens (${spec.maxOutputTokens}); raise maxOutputTokens for this step`,
+      };
+    }
     return {
       exitCode: 0,
       rawOutput: text,
@@ -1012,7 +1029,10 @@ async function callOpenAI(spec: ApiCallSpec, apiKey: string): Promise<ExecutionO
   }
 }
 
-async function callGoogleGenAI(spec: ApiCallSpec, apiKey: string): Promise<ExecutionOutcome> {
+export async function callGoogleGenAI(
+  spec: ApiCallSpec,
+  apiKey: string,
+): Promise<ExecutionOutcome> {
   const client = new GoogleGenAI({ apiKey });
   try {
     const response = await client.models.generateContent({
@@ -1020,6 +1040,15 @@ async function callGoogleGenAI(spec: ApiCallSpec, apiKey: string): Promise<Execu
       contents: spec.prompt,
     });
     const text = response.text ?? '';
+    const finishReason = response.candidates?.[0]?.finishReason;
+    if (finishReason === 'MAX_TOKENS') {
+      return {
+        exitCode: 1,
+        rawOutput: text,
+        parsedOutput: null,
+        errorMessage: `response truncated at MAX_TOKENS; raise maxOutputTokens for this step`,
+      };
+    }
     return {
       exitCode: 0,
       rawOutput: text,

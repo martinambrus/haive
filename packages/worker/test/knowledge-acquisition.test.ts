@@ -132,6 +132,32 @@ describe('parseKbEntries', () => {
     expect(parseKbEntries(undefined)).toEqual([]);
     expect(parseKbEntries('```json\n{not valid json}\n```')).toEqual([]);
   });
+
+  it('parses entries from a fence body that has no closing ```', () => {
+    // Defends against API responses truncated mid-stream — JSON itself remains
+    // valid (closing braces present) but the markdown fence is unterminated.
+    const body = JSON.stringify({
+      entries: [
+        {
+          id: 'arch',
+          title: 'Architecture',
+          sections: [{ heading: 'Module', body: 'layered' }],
+        },
+      ],
+    });
+    const raw = '```json\n' + body;
+    const entries = parseKbEntries(raw);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.id).toBe('arch');
+  });
+
+  it('returns empty array when fence is unterminated AND JSON itself is incomplete', () => {
+    // True mid-string truncation: no closing fence and JSON is broken.
+    // Parser must not throw, just return [].
+    const raw =
+      '```json\n{"entries":[{"id":"arch","title":"Arch","sections":[{"heading":"a","body":"unfini';
+    expect(parseKbEntries(raw)).toEqual([]);
+  });
 });
 
 describe('knowledgeAcquisitionStep.apply', () => {

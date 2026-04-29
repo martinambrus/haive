@@ -203,6 +203,45 @@ describe('advanceStep LLM phase', () => {
     expect(invInsert!.row.prompt).toContain('prompt with detected=');
   });
 
+  it('forwards llm.maxOutputTokens to the API spec via dispatcher', async () => {
+    const state = freshState();
+    const db = makeMockDb(state);
+    const enqueued: CliExecJobPayload[] = [];
+    // api_key provider that lacks tool_use → step needs no tool_use → API path.
+    const apiOnlyProvider: CliProviderRecord = {
+      ...makeProvider(),
+      id: 'prov-api',
+      name: 'zai',
+      authMode: 'api_key',
+    } as CliProviderRecord;
+    const stepDef = baseStep();
+    stepDef.llm = {
+      requiredCapabilities: [],
+      buildPrompt: (args) => `synth ${JSON.stringify(args.detected)}`,
+      maxOutputTokens: 32_768,
+    };
+    const result = await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-api',
+      stepDef,
+      providers: [apiOnlyProvider],
+      deps: {
+        async enqueueCliInvocation(payload) {
+          enqueued.push(payload);
+        },
+      },
+    });
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]!.kind).toBe('api');
+    const apiSpec = enqueued[0]!.spec as { maxOutputTokens?: number };
+    expect(apiSpec.maxOutputTokens).toBe(32_768);
+  });
+
   it('runs apply with llmOutput when the latest invocation completed successfully', async () => {
     const state = freshState();
     state.taskStepRow = {
