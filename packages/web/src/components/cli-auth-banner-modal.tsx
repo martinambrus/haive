@@ -29,6 +29,14 @@ const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderN
   'amp',
 ]);
 
+// Some CLIs (notably gemini in folder-trust mode) can swallow stdin before
+// they print the OAuth URL, leaving the modal stuck on "Waiting for sign-in
+// URL...". If the URL hasn't arrived after URL_WAIT_TIMEOUT_MS, we tear the
+// WS down and reconnect, up to MAX_URL_WAIT_ATTEMPTS times. After that we
+// surface a hard error with a manual retry button.
+const MAX_URL_WAIT_ATTEMPTS = 3;
+const URL_WAIT_TIMEOUT_MS = 30_000;
+
 export function CliAuthBannerModal({
   open,
   providerId,
@@ -45,6 +53,7 @@ export function CliAuthBannerModal({
   const [error, setError] = useState<string | null>(null);
   const [savedResult, setSavedResult] = useState<CliProbeResult | null>(null);
   const [retryNonce, setRetryNonce] = useState(0);
+  const [urlAttempt, setUrlAttempt] = useState(1);
 
   useEffect(() => {
     if (!open) return;
@@ -139,6 +148,29 @@ export function CliAuthBannerModal({
     };
   }, [open, providerId, providerName, onLoginComplete, retryNonce]);
 
+  useEffect(() => {
+    if (open) setUrlAttempt(1);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (authUrl) return;
+    if (phase !== 'awaiting-token' && phase !== 'awaiting-approval') return;
+    const timer = setTimeout(() => {
+      if (urlAttempt >= MAX_URL_WAIT_ATTEMPTS) {
+        setPhase('error');
+        setError(
+          `Sign-in URL never arrived after ${MAX_URL_WAIT_ATTEMPTS} attempts. ` +
+            `The CLI may be stuck waiting on stdin or printing the URL in an unrecognized format.`,
+        );
+        return;
+      }
+      setUrlAttempt((n) => n + 1);
+      setRetryNonce((n) => n + 1);
+    }, URL_WAIT_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [open, phase, authUrl, urlAttempt]);
+
   const handleSubmitToken = useCallback(() => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -207,7 +239,10 @@ export function CliAuthBannerModal({
                     Open the sign-in page
                   </a>
                 ) : (
-                  <span className="italic text-indigo-300">Waiting for sign-in URL...</span>
+                  <span className="italic text-indigo-300">
+                    Waiting for sign-in URL
+                    {urlAttempt > 1 ? ` (attempt ${urlAttempt}/${MAX_URL_WAIT_ATTEMPTS})` : ''}...
+                  </span>
                 )}{' '}
                 and finish the OAuth flow.
               </li>
@@ -270,7 +305,10 @@ export function CliAuthBannerModal({
                     Open the sign-in page
                   </a>
                 ) : (
-                  <span className="italic text-indigo-300">Waiting for sign-in URL...</span>
+                  <span className="italic text-indigo-300">
+                    Waiting for sign-in URL
+                    {urlAttempt > 1 ? ` (attempt ${urlAttempt}/${MAX_URL_WAIT_ATTEMPTS})` : ''}...
+                  </span>
                 )}
               </li>
               {deviceCode && (
@@ -328,7 +366,14 @@ export function CliAuthBannerModal({
                       <Button variant="ghost" onClick={handleClose}>
                         Close
                       </Button>
-                      <Button onClick={() => setRetryNonce((n) => n + 1)}>Retry</Button>
+                      <Button
+                        onClick={() => {
+                          setUrlAttempt(1);
+                          setRetryNonce((n) => n + 1);
+                        }}
+                      >
+                        Retry
+                      </Button>
                     </>
                   )}
                 </div>

@@ -71,9 +71,3 @@ export const setCliProviderRequestSchema = z.object({
 });
 
 export type SetCliProviderRequest = z.infer<typeof setCliProviderRequestSchema>;
-
-export const overrideNextStepRequestSchema = z.object({
-  stepId: z.string().min(1).max(128),
-});
-
-export type OverrideNextStepRequest = z.infer<typeof overrideNextStepRequestSchema>;

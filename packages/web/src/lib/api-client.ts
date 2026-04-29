@@ -211,6 +211,10 @@ export interface CliProvider {
   sandboxImageBuildError: string | null;
   sandboxImageBuiltAt: string | null;
   enabled: boolean;
+  isolateAuth: boolean;
+  authStatus: CliAuthStatus;
+  authMessage: string | null;
+  authLastCheckedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

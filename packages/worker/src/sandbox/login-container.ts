@@ -51,9 +51,15 @@ export async function createSandboxLoginContainer(
     throw new Error(`sandbox image not ready (status=${provider.sandboxImageBuildStatus})`);
   }
 
-  const volumeMounts = resolveCliAuthMounts(provider.userId, provider.name, {
-    writable: true,
-  });
+  const volumeMounts = resolveCliAuthMounts(
+    {
+      userId: provider.userId,
+      providerId: provider.id,
+      providerName: provider.name,
+      isolateAuth: provider.isolateAuth,
+    },
+    { writable: true },
+  );
   const binds = volumeMounts.map((m) => `${m.source}:${m.target}${m.readOnly ? ':ro' : ''}`);
   log.info(
     { providerId: provider.id, volumeMounts: volumeMounts.length },

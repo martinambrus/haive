@@ -36,11 +36,24 @@ interface TestState {
   error: string | null;
 }
 
+interface SignOutResult {
+  ok: boolean;
+  removed: string[];
+  failed: { name: string; stderr: string }[];
+}
+
+interface SignOutState {
+  busy: boolean;
+  message: string | null;
+  error: string | null;
+}
+
 export default function CliProvidersPage() {
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
   const [catalog, setCatalog] = useState<CliProviderMetadata[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testStates, setTestStates] = useState<Record<string, TestState>>({});
+  const [signOutStates, setSignOutStates] = useState<Record<string, SignOutState>>({});
   const [cloningIds, setCloningIds] = useState<Record<string, boolean>>({});
   const { requireCliLogin } = useCliLogin();
 
@@ -49,11 +62,16 @@ export default function CliProvidersPage() {
       providerId: p.id,
       providerLabel: p.label,
       providerName: p.name,
-      onComplete: (res) =>
+      onComplete: (res) => {
         setTestStates((s) => ({
           ...s,
           [p.id]: { testing: false, result: res, error: null },
-        })),
+        }));
+        // Server-side probe (run inside saveOauthTokenAndProbe / runProbeAndSave)
+        // already wrote the new authStatus to the row. Refetch so the row's
+        // authStatus updates and the Sign out button can re-appear when ok.
+        void load();
+      },
     });
   }
 
@@ -101,6 +119,48 @@ export default function CliProvidersPage() {
     }
   }
 
+  async function handleSignOut(p: CliProvider) {
+    if (
+      !confirm(
+        `Sign out of ${p.label}? Removes the auth volume(s) for ${p.name}. You'll need to log in again before next use.`,
+      )
+    ) {
+      return;
+    }
+    setSignOutStates((s) => ({
+      ...s,
+      [p.id]: { busy: true, message: null, error: null },
+    }));
+    setTestStates((s) => {
+      const next = { ...s };
+      delete next[p.id];
+      return next;
+    });
+    try {
+      const data = await api.post<{ result: SignOutResult }>(`/cli-providers/${p.id}/sign-out`);
+      const { ok, removed, failed } = data.result;
+      const summary = ok
+        ? removed.length === 0
+          ? 'Already signed out.'
+          : `Removed: ${removed.join(', ')}`
+        : `Failed: ${failed.map((f) => `${f.name} (${f.stderr})`).join('; ')}`;
+      setSignOutStates((s) => ({
+        ...s,
+        [p.id]: { busy: false, message: ok ? summary : null, error: ok ? null : summary },
+      }));
+      if (ok) await load();
+    } catch (err) {
+      setSignOutStates((s) => ({
+        ...s,
+        [p.id]: {
+          busy: false,
+          message: null,
+          error: (err as Error).message ?? 'Sign-out failed',
+        },
+      }));
+    }
+  }
+
   async function handleTest(id: string) {
     setTestStates((s) => ({ ...s, [id]: { testing: true, result: null, error: null } }));
     try {
@@ -109,6 +169,9 @@ export default function CliProvidersPage() {
         ...s,
         [id]: { testing: false, result: data.result, error: null },
       }));
+      // Probe wrote authStatus to the row — refetch so the Sign out button
+      // appears/disappears in response to the new state.
+      await load();
     } catch (err) {
       setTestStates((s) => ({
         ...s,
@@ -152,6 +215,8 @@ export default function CliProvidersPage() {
                     LOGIN_SUPPORTED.includes(p.name) &&
                     cliAuthStatus !== undefined &&
                     LOGIN_RECOVERABLE.includes(cliAuthStatus);
+                  const showSignOut = LOGIN_SUPPORTED.includes(p.name) && p.authStatus === 'ok';
+                  const signOutState = signOutStates[p.id];
                   return (
                     <Card key={p.id}>
                       <div className="flex items-start justify-between gap-4">
@@ -187,6 +252,16 @@ export default function CliProvidersPage() {
                           {showLogin && (
                             <Button variant="secondary" size="sm" onClick={() => handleLogin(p)}>
                               Log in
+                            </Button>
+                          )}
+                          {showSignOut && (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => handleSignOut(p)}
+                              disabled={signOutState?.busy === true}
+                            >
+                              {signOutState?.busy ? 'Signing out...' : 'Sign out'}
                             </Button>
                           )}
                           <Link href={`/settings/cli-providers/${p.id}`}>
@@ -231,6 +306,15 @@ export default function CliProvidersPage() {
                               providerName={p.name}
                               onLogin={() => handleLogin(p)}
                             />
+                          )}
+                        </div>
+                      )}
+                      {(signOutState?.error || signOutState?.message) && (
+                        <div className="mt-3 border-t border-neutral-800 pt-3 text-xs">
+                          {signOutState.error ? (
+                            <p className="font-mono text-red-400">{signOutState.error}</p>
+                          ) : (
+                            <p className="font-mono text-neutral-300">{signOutState.message}</p>
                           )}
                         </div>
                       )}

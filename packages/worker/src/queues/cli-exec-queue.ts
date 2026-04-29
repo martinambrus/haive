@@ -9,6 +9,9 @@ import {
   CLI_EXEC_JOB_NAMES,
   QUEUE_NAMES,
   TASK_JOB_NAMES,
+  cliAuthProviderVolumeName,
+  cliAuthVolumeName,
+  getCliProviderMetadata,
   logger,
   type CliExecInvocationKind,
   type CliExecJobPayload,
@@ -19,6 +22,8 @@ import {
   type CliProbePathResult,
   type CliProbeResult,
   type CliProviderName,
+  type CliSignOutJobPayload,
+  type CliSignOutJobResult,
   type RefreshCliVersionsJobPayload,
   type RefreshCliVersionsJobResult,
   type SandboxImageBuildJobPayload,
@@ -85,7 +90,8 @@ type CliExecQueuePayload =
   | CliProbeJobPayload
   | SandboxImageBuildJobPayload
   | RefreshCliVersionsJobPayload
-  | CliLoginCreateJobPayload;
+  | CliLoginCreateJobPayload
+  | CliSignOutJobPayload;
 
 let cliExecQueueInstance: Queue<CliExecQueuePayload> | null = null;
 
@@ -641,7 +647,15 @@ export async function resolveAuthMounts(
 ): Promise<DockerVolumeMount[]> {
   const providerName = provider.name as CliProviderName;
   await assertUserAuthReady(db, provider);
-  await ensureTaskAuthVolumes(provider.userId, providerName, taskId);
+  await ensureTaskAuthVolumes(
+    {
+      userId: provider.userId,
+      providerId: provider.id,
+      providerName,
+      isolateAuth: provider.isolateAuth,
+    },
+    taskId,
+  );
 
   // RTK seeding: when this task's repo opted into the token-saving proxy,
   // run rtk's own init flow inside the per-task auth volume so its hook
@@ -696,7 +710,12 @@ export class CliLoginRequiredError extends Error {
 async function assertUserAuthReady(db: Database, provider: CliProviderRecord): Promise<void> {
   if (provider.authMode !== 'subscription') return;
   const providerName = provider.name as CliProviderName;
-  const hasVolume = await userAuthVolumeExists(provider.userId, providerName);
+  const hasVolume = await userAuthVolumeExists({
+    userId: provider.userId,
+    providerId: provider.id,
+    providerName,
+    isolateAuth: provider.isolateAuth,
+  });
   if (hasVolume) return;
 
   if (provider.authStatus === 'ok') {
@@ -1186,7 +1205,15 @@ async function probeCliPath(
   }
   let authMounts: Awaited<ReturnType<typeof resolveCliAuthMounts>> = [];
   if (isAuthProbeSupported(provider.name)) {
-    authMounts = resolveCliAuthMounts(provider.userId, provider.name, { writable: true });
+    authMounts = resolveCliAuthMounts(
+      {
+        userId: provider.userId,
+        providerId: provider.id,
+        providerName: provider.name,
+        isolateAuth: provider.isolateAuth,
+      },
+      { writable: true },
+    );
   }
   const spawner = createSandboxSpawner(
     provider.wrapperContent,
@@ -1554,6 +1581,51 @@ export async function handleLoginCreateJob(
   }
 }
 
+export async function handleSignOutJob(
+  db: Database,
+  payload: CliSignOutJobPayload,
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<CliSignOutJobResult> {
+  const provider = await db.query.cliProviders.findFirst({
+    where: eq(schema.cliProviders.id, payload.providerId),
+  });
+  if (!provider) return { ok: false, removed: [], failed: [] };
+  if (provider.userId !== payload.userId) {
+    return { ok: false, removed: [], failed: [] };
+  }
+
+  const meta = getCliProviderMetadata(provider.name);
+  const removed: string[] = [];
+  const failed: { name: string; stderr: string }[] = [];
+  for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
+    const name = provider.isolateAuth
+      ? cliAuthProviderVolumeName(provider.id, provider.name, idx)
+      : cliAuthVolumeName(provider.userId, provider.name, idx);
+    if (!(await runner.volumeExists(name))) continue;
+    const result = await runner.volumeRemove(name);
+    if (result.ok) removed.push(name);
+    else failed.push({ name, stderr: result.stderr });
+  }
+
+  if (failed.length === 0) {
+    await db
+      .update(schema.cliProviders)
+      .set({
+        authStatus: 'unknown',
+        authMessage: null,
+        authLastCheckedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.cliProviders.id, provider.id));
+  }
+
+  log.info(
+    { providerId: provider.id, removedCount: removed.length, failedCount: failed.length },
+    'cli sign-out completed',
+  );
+  return { ok: failed.length === 0, removed, failed };
+}
+
 const VERSION_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const VERSION_REFRESH_JOB_ID = 'cli-refresh-versions-repeatable';
 
@@ -1592,6 +1664,7 @@ export function startCliExecWorker(
     | SandboxImageBuildResult
     | RefreshCliVersionsJobResult
     | CliLoginCreateResult
+    | CliSignOutJobResult
     | void
   >(
     QUEUE_NAMES.CLI_EXEC,
@@ -1612,6 +1685,9 @@ export function startCliExecWorker(
       }
       if (job.name === CLI_EXEC_JOB_NAMES.LOGIN_CREATE) {
         return handleLoginCreateJob(db, job.data as CliLoginCreateJobPayload);
+      }
+      if (job.name === CLI_EXEC_JOB_NAMES.SIGN_OUT) {
+        return handleSignOutJob(db, job.data as CliSignOutJobPayload);
       }
       throw new Error(`unknown cli-exec job ${job.name}`);
     },

@@ -19,6 +19,8 @@ import {
   type CliProbeJobPayload,
   type CliProbeResult,
   type CliProviderName,
+  type CliSignOutJobPayload,
+  type CliSignOutJobResult,
   type RefreshCliVersionsJobPayload,
   type SandboxImageBuildJobPayload,
 } from '@haive/shared';
@@ -229,6 +231,7 @@ cliProviderRoutes.post('/', async (c) => {
         ? body.sandboxDockerfileExtra
         : null,
       enabled: body.enabled ?? true,
+      isolateAuth: body.isolateAuth ?? false,
       rulesContent: body.rulesContent ?? DEFAULT_AGENT_RULES,
     })
     .returning();
@@ -288,6 +291,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
     updates.effortLevel = resolveEffortLevelForSave(existing.name, body.effortLevel);
   }
   if (body.enabled !== undefined) updates.enabled = body.enabled;
+  if (body.isolateAuth !== undefined) updates.isolateAuth = body.isolateAuth;
   if (body.rulesContent !== undefined) updates.rulesContent = body.rulesContent;
 
   const updated = await db
@@ -387,6 +391,33 @@ cliProviderRoutes.post('/:id/test', async (c) => {
   }
 });
 
+cliProviderRoutes.post('/:id/sign-out', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const db = getDb();
+  const provider = await db.query.cliProviders.findFirst({
+    where: and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)),
+    columns: { id: true },
+  });
+  if (!provider) throw new HttpError(404, 'CLI provider not found');
+
+  const payload: CliSignOutJobPayload = { providerId: provider.id, userId };
+  const queue = getCliExecQueue();
+  const events = getCliExecQueueEvents();
+  const job = await queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, {
+    removeOnComplete: true,
+    removeOnFail: 20,
+  });
+
+  try {
+    const result = (await job.waitUntilFinished(events, 30_000)) as CliSignOutJobResult;
+    return c.json({ result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new HttpError(504, `sign-out timed out or failed: ${message}`, 'sign_out_failed');
+  }
+});
+
 cliProviderRoutes.post('/:id/clone', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -416,6 +447,7 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
       effortLevel: source.effortLevel,
       sandboxDockerfileExtra: source.sandboxDockerfileExtra,
       enabled: source.enabled,
+      isolateAuth: source.isolateAuth,
       rulesContent: source.rulesContent,
     })
     .returning();

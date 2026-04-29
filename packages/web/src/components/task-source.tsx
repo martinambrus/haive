@@ -8,7 +8,7 @@ import {
   type TaskFileListing,
 } from '@/lib/api-client';
 
-interface TaskOutputsProps {
+interface TaskSourceProps {
   taskId: string;
 }
 
@@ -19,7 +19,7 @@ function formatSize(bytes: number | null): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export function TaskOutputs({ taskId }: TaskOutputsProps) {
+export function TaskSource({ taskId }: TaskSourceProps) {
   const [path, setPath] = useState<string | null>(null);
   const [listing, setListing] = useState<TaskFileListing | null>(null);
   const [listingError, setListingError] = useState<string | null>(null);

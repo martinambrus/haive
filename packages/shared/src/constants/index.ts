@@ -60,7 +60,19 @@ export const CLI_EXEC_JOB_NAMES = {
   BUILD_SANDBOX_IMAGE: 'cli-build-sandbox-image',
   REFRESH_VERSIONS: 'cli-refresh-versions',
   LOGIN_CREATE: 'cli-login-create',
+  SIGN_OUT: 'cli-sign-out',
 } as const;
+
+export interface CliSignOutJobPayload {
+  providerId: string;
+  userId: string;
+}
+
+export interface CliSignOutJobResult {
+  ok: boolean;
+  removed: string[];
+  failed: { name: string; stderr: string }[];
+}
 
 export interface RefreshCliVersionsJobPayload {
   force?: boolean;

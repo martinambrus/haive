@@ -58,6 +58,7 @@ interface FormState {
   effortLevel: string;
   sandboxDockerfileExtra: string;
   enabled: boolean;
+  isolateAuth: boolean;
   networkMode: CliNetworkMode;
   networkDomainsText: string;
   networkIpsText: string;
@@ -129,6 +130,7 @@ function statesEqual(a: FormState, b: FormState): boolean {
     a.effortLevel === b.effortLevel &&
     a.sandboxDockerfileExtra === b.sandboxDockerfileExtra &&
     a.enabled === b.enabled &&
+    a.isolateAuth === b.isolateAuth &&
     a.networkMode === b.networkMode &&
     a.networkDomainsText === b.networkDomainsText &&
     a.networkIpsText === b.networkIpsText
@@ -191,6 +193,7 @@ export function CliProviderForm({
     effortLevel: metadata.effortScale ? (provider?.effortLevel ?? metadata.effortScale.max) : '',
     sandboxDockerfileExtra: provider?.sandboxDockerfileExtra ?? '',
     enabled: provider?.enabled ?? true,
+    isolateAuth: provider?.isolateAuth ?? false,
     networkMode: (provider?.networkPolicy ?? DEFAULT_CLI_NETWORK_POLICY).mode,
     networkDomainsText: (provider?.networkPolicy?.domains ?? []).join('\n'),
     networkIpsText: (provider?.networkPolicy?.ips ?? []).join('\n'),
@@ -322,6 +325,7 @@ export function CliProviderForm({
       effortLevel: metadata.effortScale ? snapshot.effortLevel || null : null,
       sandboxDockerfileExtra: snapshot.sandboxDockerfileExtra,
       enabled: snapshot.enabled,
+      isolateAuth: snapshot.isolateAuth,
       networkPolicy,
     };
 
@@ -415,6 +419,7 @@ export function CliProviderForm({
           effortLevel: metadata.effortScale ? state.effortLevel || null : null,
           sandboxDockerfileExtra: state.sandboxDockerfileExtra,
           enabled: state.enabled,
+          isolateAuth: state.isolateAuth,
           networkPolicy,
         };
 
@@ -879,6 +884,25 @@ export function CliProviderForm({
           onChange={(e) => update('enabled', e.target.checked)}
         />
         <Label htmlFor="enabled">Enabled</Label>
+      </div>
+
+      <div className="flex items-start gap-2">
+        <input
+          id="isolateAuth"
+          type="checkbox"
+          className="mt-1 h-4 w-4 rounded border-neutral-700 bg-neutral-900 text-indigo-500 focus:ring-indigo-500"
+          checked={state.isolateAuth}
+          onChange={(e) => update('isolateAuth', e.target.checked)}
+        />
+        <div className="flex flex-col">
+          <Label htmlFor="isolateAuth">Isolate auth from other {state.name} providers</Label>
+          <p className="text-xs text-neutral-500">
+            By default, every {state.name} provider for your account shares one auth volume — login
+            once, all of them work. Enable this to give this provider its own credential store, so
+            you can keep two separate accounts side-by-side. Existing logins do not migrate; sign in
+            again after toggling.
+          </p>
+        </div>
       </div>
 
       <div className="flex gap-2">

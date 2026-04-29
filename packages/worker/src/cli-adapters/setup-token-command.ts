@@ -12,8 +12,12 @@ export function isCliSetupTokenSupported(name: CliProviderName): boolean {
   return name === 'claude-code' || name === 'codex' || name === 'gemini' || name === 'amp';
 }
 
+// folderTrust.enabled=false disables gemini's per-folder trust prompt so the
+// sandbox workdir is treated as trusted on every run. Without this, gemini
+// overrides --yolo to "default" approval mode whenever it sees an unfamiliar
+// CWD, breaking both the auth probe and any non-interactive step exec.
 const GEMINI_SETTINGS_JSON =
-  '{"selectedAuthType":"oauth-personal","security":{"auth":{"selectedType":"oauth-personal"}}}';
+  '{"selectedAuthType":"oauth-personal","security":{"auth":{"selectedType":"oauth-personal"},"folderTrust":{"enabled":false}}}';
 
 /** Non-REPL auth command that prints an OAuth URL to stdout:
  *  - claude-code: `claude setup-token` — prints URL, expects pasted token on stdin.
@@ -55,6 +59,12 @@ export function buildSetupTokenCommand(
         env: {
           ...env,
           NO_BROWSER: 'true',
+          // Bypass the folder-trust prompt during login. Without this, gemini
+          // may read stdin for a "Trust this folder?" answer before printing
+          // the OAuth URL, which blocks the login flow indefinitely. The
+          // settings.json above also disables folder-trust, but the env var
+          // takes effect before the file is read.
+          GEMINI_CLI_TRUST_WORKSPACE: 'true',
         },
       };
     }

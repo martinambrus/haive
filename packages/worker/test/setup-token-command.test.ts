@@ -57,19 +57,26 @@ describe('buildSetupTokenCommand', () => {
     const script = spec.args[1] ?? '';
     expect(script).toContain('mkdir -p "$HOME/.gemini"');
     expect(script).toContain('"selectedAuthType":"oauth-personal"');
-    expect(script).toContain('"security":{"auth":{"selectedType":"oauth-personal"}}');
+    expect(script).toContain('"auth":{"selectedType":"oauth-personal"}');
+    expect(script).toContain('"folderTrust":{"enabled":false}');
     expect(script).toContain('exec "$0"');
     expect(spec.args[2]).toBe('gemini');
     expect(spec.env.NO_BROWSER).toBe('true');
+    expect(spec.env.GEMINI_CLI_TRUST_WORKSPACE).toBe('true');
   });
 
-  it('gemini merges provider envVars without overriding NO_BROWSER', () => {
+  it('gemini merges provider envVars without overriding NO_BROWSER or trust workspace', () => {
     const spec = buildSetupTokenCommand(
-      makeProvider({ id: '5', name: 'gemini', envVars: { FOO: 'bar', NO_BROWSER: 'false' } }),
+      makeProvider({
+        id: '5',
+        name: 'gemini',
+        envVars: { FOO: 'bar', NO_BROWSER: 'false', GEMINI_CLI_TRUST_WORKSPACE: 'false' },
+      }),
       'gemini',
     );
     expect(spec.env.FOO).toBe('bar');
     expect(spec.env.NO_BROWSER).toBe('true');
+    expect(spec.env.GEMINI_CLI_TRUST_WORKSPACE).toBe('true');
   });
 
   it('amp → login', () => {

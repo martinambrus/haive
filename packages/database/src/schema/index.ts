@@ -237,6 +237,7 @@ export const cliProviders = pgTable(
     sandboxImageBuildError: text('sandbox_image_build_error'),
     sandboxImageBuiltAt: timestamp('sandbox_image_built_at'),
     enabled: boolean('enabled').notNull().default(true),
+    isolateAuth: boolean('isolate_auth').notNull().default(false),
     authStatus: cliAuthStatusEnum('auth_status').notNull().default('unknown'),
     authLastCheckedAt: timestamp('auth_last_checked_at'),
     authMessage: text('auth_message'),

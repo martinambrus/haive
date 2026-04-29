@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import {
   CLI_PROVIDER_LIST,
+  cliAuthProviderVolumeName,
   cliAuthTaskVolumeName,
   cliAuthVolumeName,
   getCliProviderMetadata,
@@ -10,6 +11,19 @@ import {
 import type { CliProviderName } from '@haive/shared';
 import { defaultDockerRunner, type DockerRunner, type DockerVolumeMount } from './docker-runner.js';
 import { expandTildeToSandbox } from './cli-auth-volume.js';
+
+export interface ProviderAuthCtx {
+  userId: string;
+  providerId: string;
+  providerName: CliProviderName;
+  isolateAuth: boolean;
+}
+
+function userVolumeForCtx(ctx: ProviderAuthCtx, idx: number): string {
+  return ctx.isolateAuth
+    ? cliAuthProviderVolumeName(ctx.providerId, ctx.providerName, idx)
+    : cliAuthVolumeName(ctx.userId, ctx.providerName, idx);
+}
 
 /** Map our CLI provider names to the corresponding `rtk init` flag. Returns
  *  `undefined` when the provider has no rtk-native init mode (amp today —
@@ -55,15 +69,14 @@ function hostRelativeOfTilde(p: string): string | null {
 }
 
 export async function ensureTaskAuthVolumes(
-  userId: string,
-  providerName: CliProviderName,
+  ctx: ProviderAuthCtx,
   taskId: string,
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<void> {
-  const meta = getCliProviderMetadata(providerName);
+  const meta = getCliProviderMetadata(ctx.providerName);
   for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
-    const userVol = cliAuthVolumeName(userId, providerName, idx);
-    const taskVol = cliAuthTaskVolumeName(taskId, providerName, idx);
+    const userVol = userVolumeForCtx(ctx, idx);
+    const taskVol = cliAuthTaskVolumeName(taskId, ctx.providerName, idx);
 
     if (await runner.volumeExists(taskVol)) {
       if (await isTaskVolumeReady(taskVol, runner)) {
@@ -137,15 +150,16 @@ async function isTaskVolumeReady(taskVol: string, runner: DockerRunner): Promise
   return result.exitCode === 0;
 }
 
-/** True when at least one of the provider's per-path user auth volumes exists. */
+/** True when at least one of the provider's per-path user auth volumes exists.
+ *  Branches on `ctx.isolateAuth`: isolated providers check their per-provider
+ *  volume namespace, shared providers check the legacy per-user namespace. */
 export async function userAuthVolumeExists(
-  userId: string,
-  providerName: CliProviderName,
+  ctx: ProviderAuthCtx,
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<boolean> {
-  const meta = getCliProviderMetadata(providerName);
+  const meta = getCliProviderMetadata(ctx.providerName);
   for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
-    const userVol = cliAuthVolumeName(userId, providerName, idx);
+    const userVol = userVolumeForCtx(ctx, idx);
     if (await runner.volumeExists(userVol)) return true;
   }
   return false;

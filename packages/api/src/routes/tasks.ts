@@ -5,7 +5,6 @@ import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   createTaskRequestSchema,
-  overrideNextStepRequestSchema,
   PROVIDER_SENSITIVE_STEP_IDS,
   setCliProviderRequestSchema,
   stepActionRequestSchema,
@@ -669,104 +668,6 @@ taskRoutes.patch('/:id/cli-provider', async (c) => {
     cliProviderId: body.cliProviderId,
     invalidatedSteps: invalidated.map((r) => r.stepId),
   });
-});
-
-taskRoutes.post('/:id/override-next-step', async (c) => {
-  const userId = c.get('userId');
-  const id = c.req.param('id');
-  const body = overrideNextStepRequestSchema.parse(await c.req.json());
-  const db = getDb();
-
-  const task = await db.query.tasks.findFirst({
-    where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-  });
-  if (!task) throw new HttpError(404, 'Task not found');
-  if (task.status === 'completed' || task.status === 'cancelled') {
-    throw new HttpError(409, `Cannot override step on ${task.status} task`);
-  }
-
-  const allSteps = await db
-    .select()
-    .from(schema.taskSteps)
-    .where(eq(schema.taskSteps.taskId, id))
-    .orderBy(asc(schema.taskSteps.stepIndex));
-
-  const target = allSteps.find((s) => s.stepId === body.stepId);
-  if (!target) {
-    throw new HttpError(404, `Step ${body.stepId} not found on task`);
-  }
-
-  const currentIdx = task.currentStepId
-    ? allSteps.findIndex((s) => s.stepId === task.currentStepId)
-    : -1;
-  const targetIdx = allSteps.findIndex((s) => s.stepId === body.stepId);
-  if (currentIdx >= 0 && targetIdx < currentIdx) {
-    throw new HttpError(400, 'Backward overrides are not supported; use step retry instead');
-  }
-
-  await db.transaction(async (tx) => {
-    const now = new Date();
-    for (let i = 0; i < targetIdx; i += 1) {
-      const row = allSteps[i];
-      if (!row) continue;
-      if (row.status === 'done' || row.status === 'skipped') continue;
-      await tx
-        .update(schema.taskSteps)
-        .set({
-          status: 'skipped',
-          errorMessage: null,
-          endedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(schema.taskSteps.id, row.id));
-      await tx.insert(schema.taskEvents).values({
-        taskId: id,
-        taskStepId: row.id,
-        eventType: 'step.skip',
-        payload: { stepId: row.stepId, reason: 'override-next-step' },
-      });
-    }
-    if (target.status !== 'pending') {
-      await tx
-        .update(schema.taskSteps)
-        .set({
-          status: 'pending',
-          errorMessage: null,
-          endedAt: null,
-          updatedAt: now,
-        })
-        .where(eq(schema.taskSteps.id, target.id));
-    }
-    await tx
-      .update(schema.tasks)
-      .set({
-        status: 'running',
-        errorMessage: null,
-        currentStepId: target.stepId,
-        currentStepIndex: target.stepIndex,
-        updatedAt: now,
-      })
-      .where(eq(schema.tasks.id, id));
-    await tx.insert(schema.taskEvents).values({
-      taskId: id,
-      taskStepId: target.id,
-      eventType: 'task.step_override',
-      payload: { targetStepId: target.stepId, by: userId },
-    });
-  });
-
-  await getTaskQueue().add(
-    TASK_JOB_NAMES.ADVANCE_STEP,
-    { taskId: id, userId, stepId: target.stepId } as TaskJobPayload,
-    {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 5000 },
-      removeOnComplete: 100,
-      removeOnFail: 100,
-    },
-  );
-
-  return c.json({ ok: true, currentStepId: target.stepId });
 });
 
 taskRoutes.get('/:id/events', async (c) => {

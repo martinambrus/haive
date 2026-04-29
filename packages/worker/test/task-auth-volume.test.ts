@@ -6,13 +6,28 @@ import {
   RTK_HELPER_MISSING_BINARY_EXIT,
   seedRtkInTaskVolume,
   userAuthVolumeExists,
+  type ProviderAuthCtx,
 } from '../src/sandbox/task-auth-volume.js';
+import type { CliProviderName } from '@haive/shared';
 import type {
   DockerRunner,
   DockerRunOpts,
   DockerRunResult,
   DockerVolumeOpResult,
 } from '../src/sandbox/docker-runner.js';
+
+function ctx(
+  userId: string,
+  providerName: CliProviderName,
+  opts: { providerId?: string; isolateAuth?: boolean } = {},
+): ProviderAuthCtx {
+  return {
+    userId,
+    providerId: opts.providerId ?? 'prov-default',
+    providerName,
+    isolateAuth: opts.isolateAuth ?? false,
+  };
+}
 
 interface MockRunner extends DockerRunner {
   volumeSet: Set<string>;
@@ -99,7 +114,7 @@ describe('ensureTaskAuthVolumes', () => {
   it('creates task volume and copies from user volume when user volume exists', async () => {
     const userVol = 'haive_cli_auth_abc_codex_0';
     const runner = makeRunner({ preExistingVolumes: [userVol] });
-    await ensureTaskAuthVolumes('abc', 'codex', 'task-111', runner);
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-111', runner);
     const taskVol = 'haive_cli_auth_task_task111_codex_0';
     expect(runner.createCalls).toEqual([taskVol]);
     expect(runner.volumeSet.has(taskVol)).toBe(true);
@@ -119,7 +134,7 @@ describe('ensureTaskAuthVolumes', () => {
 
   it('creates empty task volume when user volume absent (no copy)', async () => {
     const runner = makeRunner();
-    await ensureTaskAuthVolumes('abc', 'codex', 'task-222', runner);
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-222', runner);
     const taskVol = 'haive_cli_auth_task_task222_codex_0';
     expect(runner.createCalls).toEqual([taskVol]);
     const copyCall = runner.runCalls.find((c) => c.cmd[0] === 'bash');
@@ -133,7 +148,7 @@ describe('ensureTaskAuthVolumes', () => {
       preExistingVolumes: [taskVol],
       readyVolumes: [taskVol],
     });
-    await ensureTaskAuthVolumes('abc', 'codex', 'task-333', runner);
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-333', runner);
     expect(runner.createCalls).toEqual([]);
     expect(runner.removeCalls).toEqual([]);
     // Only the readiness probe should run.
@@ -145,7 +160,7 @@ describe('ensureTaskAuthVolumes', () => {
   it('recreates task volume when marker missing (crash recovery)', async () => {
     const taskVol = 'haive_cli_auth_task_task444_codex_0';
     const runner = makeRunner({ preExistingVolumes: [taskVol] });
-    await ensureTaskAuthVolumes('abc', 'codex', 'task-444', runner);
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-444', runner);
     expect(runner.removeCalls).toEqual([taskVol]);
     expect(runner.createCalls).toEqual([taskVol]);
     expect(runner.readyVolumes.has(taskVol)).toBe(true);
@@ -154,7 +169,7 @@ describe('ensureTaskAuthVolumes', () => {
   it('creates one volume per authConfigPath index', async () => {
     // claude-code has two auth paths.
     const runner = makeRunner();
-    await ensureTaskAuthVolumes('user-1', 'claude-code', 'task-555', runner);
+    await ensureTaskAuthVolumes(ctx('user-1', 'claude-code'), 'task-555', runner);
     expect(runner.createCalls).toEqual([
       'haive_cli_auth_task_task555_claude-code_0',
       'haive_cli_auth_task_task555_claude-code_1',
@@ -164,7 +179,7 @@ describe('ensureTaskAuthVolumes', () => {
   it('throws when volumeCreate fails', async () => {
     const runner = makeRunner();
     runner.volumeCreate = async () => ({ ok: false, stderr: 'no space' });
-    await expect(ensureTaskAuthVolumes('abc', 'codex', 'task-666', runner)).rejects.toThrow(
+    await expect(ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-666', runner)).rejects.toThrow(
       /Failed to create task auth volume/,
     );
   });
@@ -178,9 +193,39 @@ describe('ensureTaskAuthVolumes', () => {
         return { exitCode: 1, stdout: '', stderr: '', durationMs: 1, timedOut: false };
       },
     });
-    await expect(ensureTaskAuthVolumes('abc', 'codex', 'task-777', runner)).rejects.toThrow(
+    await expect(ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-777', runner)).rejects.toThrow(
       /Task auth volume copy failed/,
     );
+  });
+
+  it('isolated provider sources from per-provider user volume namespace', async () => {
+    const isoUserVol = 'haive_cli_auth_p_provxyz12345_codex_0';
+    const runner = makeRunner({ preExistingVolumes: [isoUserVol] });
+    await ensureTaskAuthVolumes(
+      ctx('abc', 'codex', { providerId: 'prov-xyz-12345', isolateAuth: true }),
+      'task-iso-1',
+      runner,
+    );
+    const taskVol = 'haive_cli_auth_task_taskiso1_codex_0';
+    expect(runner.createCalls).toEqual([taskVol]);
+    const copyCall = runner.runCalls.find((c) => c.cmd[0] === 'bash');
+    const mounts = copyCall?.mounts ?? [];
+    // /src must be the per-provider isolated volume, NOT the user-shared one.
+    expect(mounts.some((m) => m.source === isoUserVol && m.target === '/src')).toBe(true);
+    expect(mounts.some((m) => m.source === 'haive_cli_auth_abc_codex_0')).toBe(false);
+  });
+
+  it('non-isolated provider sources from per-user shared namespace', async () => {
+    const sharedUserVol = 'haive_cli_auth_abc_codex_0';
+    const runner = makeRunner({ preExistingVolumes: [sharedUserVol] });
+    await ensureTaskAuthVolumes(
+      ctx('abc', 'codex', { providerId: 'prov-shared-1', isolateAuth: false }),
+      'task-shared-1',
+      runner,
+    );
+    const copyCall = runner.runCalls.find((c) => c.cmd[0] === 'bash');
+    const mounts = copyCall?.mounts ?? [];
+    expect(mounts.some((m) => m.source === sharedUserVol && m.target === '/src')).toBe(true);
   });
 });
 
@@ -251,12 +296,36 @@ describe('cleanupTaskAuthVolumes', () => {
 describe('userAuthVolumeExists', () => {
   it('returns true when at least one indexed user volume exists', async () => {
     const runner = makeRunner({ preExistingVolumes: ['haive_cli_auth_u1_claude-code_1'] });
-    expect(await userAuthVolumeExists('u1', 'claude-code', runner)).toBe(true);
+    expect(await userAuthVolumeExists(ctx('u1', 'claude-code'), runner)).toBe(true);
   });
 
   it('returns false when no user volume exists for the provider', async () => {
     const runner = makeRunner();
-    expect(await userAuthVolumeExists('u1', 'codex', runner)).toBe(false);
+    expect(await userAuthVolumeExists(ctx('u1', 'codex'), runner)).toBe(false);
+  });
+
+  it('isolated provider checks per-provider namespace, ignores user-shared', async () => {
+    // User-shared volume present but provider runs isolated — shared volume
+    // must not register as "exists" for this provider.
+    const runner = makeRunner({ preExistingVolumes: ['haive_cli_auth_u1_codex_0'] });
+    expect(
+      await userAuthVolumeExists(
+        ctx('u1', 'codex', { providerId: 'prov-iso-1', isolateAuth: true }),
+        runner,
+      ),
+    ).toBe(false);
+  });
+
+  it('isolated provider returns true when its per-provider volume exists', async () => {
+    const runner = makeRunner({
+      preExistingVolumes: ['haive_cli_auth_p_proviso2abcd_codex_0'],
+    });
+    expect(
+      await userAuthVolumeExists(
+        ctx('u1', 'codex', { providerId: 'prov-iso-2-abcd', isolateAuth: true }),
+        runner,
+      ),
+    ).toBe(true);
   });
 });
 

@@ -29,7 +29,12 @@ export class GeminiAdapter extends BaseCliAdapter {
 
   envInjection(_provider: CliProviderRecord): EnvInjection {
     return {
-      envVars: {},
+      // GEMINI_CLI_TRUST_WORKSPACE bypasses the folder-trust prompt for the
+      // current session, ensuring step exec doesn't get downgraded to default
+      // approval mode when running in the sandbox workdir. Belt-and-braces
+      // alongside folderTrust.enabled=false in settings.json — the env var
+      // covers users whose ~/.gemini/settings.json predates that change.
+      envVars: { GEMINI_CLI_TRUST_WORKSPACE: 'true' },
       extraArgs: [],
     };
   }

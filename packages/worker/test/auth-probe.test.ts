@@ -138,6 +138,36 @@ describe('classifyAuthProbeOutput', () => {
     });
     expect(result.status).toBe('auth_expired');
   });
+
+  it('treats gemini folder-trust override warnings as ok when no auth failure', () => {
+    const result = classifyAuthProbeOutput({
+      stdout: '',
+      stderr:
+        'YOLO mode is enabled. All tool calls will be automatically approved. Approval mode overridden to "default" because the current folder is not trusted.',
+      exitCode: 1,
+    });
+    expect(result.status).toBe('ok');
+  });
+
+  it('still flags auth_denied when trust warning coincides with FatalAuthenticationError', () => {
+    const result = classifyAuthProbeOutput({
+      stdout: '',
+      stderr:
+        'YOLO mode is enabled. Approval mode overridden to "default" because the current folder is not trusted.\nError authenticating: FatalAuthenticationError: Manual authorization is required',
+      exitCode: 41,
+    });
+    expect(result.status).toBe('auth_denied');
+  });
+
+  it('classifies gemini "Please set an Auth method" as auth_expired', () => {
+    const result = classifyAuthProbeOutput({
+      stdout: 'YOLO mode is enabled. All tool calls will be automatically approved.',
+      stderr:
+        'Please set an Auth method in your /home/node/.gemini/settings.json or specify one of the following environment variables before running: GEMINI_API_KEY, GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_GENAI_USE_GCA',
+      exitCode: 41,
+    });
+    expect(result.status).toBe('auth_expired');
+  });
 });
 
 describe('buildAuthProbeCommand', () => {
@@ -155,13 +185,14 @@ describe('buildAuthProbeCommand', () => {
     expect(spec.args[0]).toBe('exec');
   });
 
-  it('builds gemini spec with -p and --yolo', () => {
+  it('builds gemini spec with -p and --yolo and trusts workspace via env', () => {
     const spec = buildAuthProbeCommand(makeProvider({ id: '3', name: 'gemini' }), 'gemini');
     expect(spec.command).toBe('gemini');
     expect(spec.args).toContain('-p');
     expect(spec.args).toContain('respond with the single word pong');
     expect(spec.args).toContain('--output-format');
     expect(spec.args).toContain('--yolo');
+    expect(spec.env?.GEMINI_CLI_TRUST_WORKSPACE).toBe('true');
   });
 
   it('throws CliAuthProbeUnsupportedError for zai', () => {
