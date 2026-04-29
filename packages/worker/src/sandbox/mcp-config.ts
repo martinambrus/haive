@@ -1,5 +1,18 @@
 import type { CliProviderName } from '@haive/shared';
 
+const EMPTY_MCP_SETTINGS = '{\n  "mcpServers": {}\n}\n';
+
+/** Resolve `.claude/mcp_settings.json` body for a given user-supplied
+ *  textarea value. Empty/whitespace input is rewritten to an empty-but-valid
+ *  `{"mcpServers": {}}` stub so CLI providers that pass `--mcp-config` don't
+ *  fail with "Invalid MCP configuration: Does not adhere to MCP server
+ *  configuration schema" on a missing or empty file. Non-empty input is
+ *  preserved verbatim with a trailing newline. */
+export function mcpSettingsFileContent(input: string): string {
+  if (input.trim().length === 0) return EMPTY_MCP_SETTINGS;
+  return input.endsWith('\n') ? input : input + '\n';
+}
+
 export interface McpServerSpec {
   name: string;
   command: string;

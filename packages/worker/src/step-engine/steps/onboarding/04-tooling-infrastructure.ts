@@ -1,8 +1,14 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { buildDefaultMcpServers, buildMcpConfigForCli } from '../../../sandbox/mcp-config.js';
+import {
+  buildDefaultMcpServers,
+  buildMcpConfigForCli,
+  mcpSettingsFileContent,
+} from '../../../sandbox/mcp-config.js';
 import { loadCliProviderMetadata, loadPreviousStepOutput } from './_helpers.js';
 import type { EnvDetectApply } from './01-env-detect.js';
 
@@ -261,6 +267,17 @@ export const toolingInfrastructureStep: StepDefinition<
     if (tooling.ollamaMode === 'internal') {
       tooling.ollamaUrl = 'http://ollama:11434';
     }
+
+    // Materialise `.claude/mcp_settings.json` here, before any later
+    // CLI-using step (06_5 agent discovery is the first) runs. CLI providers
+    // wired with `--mcp-config .claude/mcp_settings.json` need the file to
+    // exist with valid JSON; an empty textarea writes the
+    // `{"mcpServers": {}}` stub. Step 07 still rewrites the file under its
+    // overwrite gate for re-runs.
+    const mcpInput = typeof tooling.mcpSettingsJson === 'string' ? tooling.mcpSettingsJson : '';
+    const mcpPath = path.join(ctx.repoPath, '.claude/mcp_settings.json');
+    await mkdir(path.dirname(mcpPath), { recursive: true });
+    await writeFile(mcpPath, mcpSettingsFileContent(mcpInput), 'utf8');
 
     // Persist `rtk_enabled` on the repo row so the choice survives CLI swaps,
     // upgrade re-runs, and tasks that don't go through step 04. The `tooling`

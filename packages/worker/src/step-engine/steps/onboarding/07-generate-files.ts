@@ -6,6 +6,7 @@ import type { DetectResult, FormSchema } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { CliProviderName } from '../../../cli-adapters/types.js';
+import { mcpSettingsFileContent } from '../../../sandbox/mcp-config.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   type AgentSpec,
@@ -118,19 +119,6 @@ function pickString(v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const trimmed = v.trim();
   return trimmed.length > 0 ? trimmed : null;
-}
-
-const EMPTY_MCP_SETTINGS = '{\n  "mcpServers": {}\n}\n';
-
-/** Resolve `.claude/mcp_settings.json` body. Empty/whitespace input is
- *  rewritten to an empty-but-valid `{"mcpServers": {}}` stub so CLI
- *  providers that pass `--mcp-config` don't fail with "Invalid MCP
- *  configuration: Does not adhere to MCP server configuration schema"
- *  on a missing file. Non-empty input is preserved verbatim with a
- *  trailing newline. */
-export function mcpSettingsFileContent(input: string): string {
-  if (input.trim().length === 0) return EMPTY_MCP_SETTINGS;
-  return input.endsWith('\n') ? input : input + '\n';
 }
 
 function extractProjectInfo(

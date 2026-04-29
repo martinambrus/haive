@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mcpSettingsFileContent } from '../src/step-engine/steps/onboarding/07-generate-files.js';
+import { mcpSettingsFileContent } from '../src/sandbox/mcp-config.js';
 
 describe('mcpSettingsFileContent', () => {
   it('returns the empty-stub config when the textarea is empty', () => {
