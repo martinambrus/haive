@@ -235,6 +235,10 @@ async function main(): Promise<void> {
         scope: 'Keep changes confined to the top-right navigation component.',
       },
       '05-phase-0b5-spec-quality': {
+        // Required field — the form-side select default is the same '3'
+        // string but the smoke submits raw form values, so we must include
+        // it explicitly for validateRequired to pass.
+        maxIterations: '3',
         focusAreas: '',
       },
       '06-gate-1-spec-approval': {
