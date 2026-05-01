@@ -51,6 +51,8 @@ export interface SandboxRunnerOptions {
   docker?: DockerRunner;
   extraMounts?: DockerVolumeMount[];
   networkPolicy?: CliNetworkPolicy | null;
+  /** Stamped onto the spawned container as `haive.task.id=<taskId>` so cancel can find and kill it. */
+  taskId?: string;
 }
 
 export interface SandboxRunResult extends DockerRunResult {
@@ -122,7 +124,8 @@ export async function runInSandbox(
         await writeFile(efHostPath, ef.content, 'utf8');
         extraFileDirs.push(efDir);
         mounts.push({
-          source: `${volumeName}/${efId}/extra-${i}`,
+          source: volumeName,
+          subpath: `${efId}/extra-${i}`,
           target: ef.containerPath,
           readOnly: true,
         });
@@ -140,6 +143,7 @@ export async function runInSandbox(
       workdir,
       network,
       user: 'node',
+      labels: options.taskId ? { 'haive.task.id': options.taskId } : undefined,
       timeoutMs: spec.timeoutMs,
       onStdoutChunk: spec.onStdoutChunk,
       onStderrChunk: spec.onStderrChunk,

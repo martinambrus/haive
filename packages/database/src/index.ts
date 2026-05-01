@@ -10,3 +10,4 @@ export function createDatabase(connectionString: string) {
 }
 
 export * as schema from './schema/index.js';
+export type { StepIterationEntry } from './schema/index.js';

@@ -12,3 +12,48 @@ body {
   color: var(--foreground);
   font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
 }
+
+/* Minimal markdown styling for InfoSection bodies (FormRenderer). Targeted
+ * via .haive-md class so we don't pull in the typography plugin. */
+.haive-md {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: rgb(229 229 229);
+}
+.haive-md > * + * { margin-top: 0.75rem; }
+.haive-md h1 { font-size: 1.125rem; font-weight: 600; color: rgb(245 245 245); margin-top: 1rem; }
+.haive-md h2 { font-size: 1rem; font-weight: 600; color: rgb(245 245 245); margin-top: 1rem; }
+.haive-md h3 { font-size: 0.9375rem; font-weight: 600; color: rgb(245 245 245); margin-top: 0.75rem; }
+.haive-md h4, .haive-md h5, .haive-md h6 { font-size: 0.875rem; font-weight: 600; color: rgb(245 245 245); }
+.haive-md p { color: rgb(212 212 212); }
+.haive-md a { color: rgb(129 140 248); text-decoration: underline; }
+.haive-md ul { list-style: disc; padding-left: 1.25rem; }
+.haive-md ol { list-style: decimal; padding-left: 1.25rem; }
+.haive-md li + li { margin-top: 0.25rem; }
+.haive-md code {
+  background: rgb(38 38 38);
+  color: rgb(252 211 77);
+  padding: 0.125rem 0.25rem;
+  border-radius: 0.25rem;
+  font-size: 0.8125rem;
+}
+.haive-md pre {
+  background: rgb(23 23 23);
+  border: 1px solid rgb(38 38 38);
+  border-radius: 0.375rem;
+  padding: 0.625rem 0.75rem;
+  overflow-x: auto;
+  font-size: 0.8125rem;
+}
+.haive-md pre code { background: transparent; padding: 0; color: inherit; }
+.haive-md blockquote {
+  border-left: 3px solid rgb(82 82 82);
+  padding-left: 0.75rem;
+  color: rgb(163 163 163);
+  font-style: italic;
+}
+.haive-md strong { color: rgb(245 245 245); font-weight: 600; }
+.haive-md hr { border-color: rgb(38 38 38); }
+.haive-md table { border-collapse: collapse; }
+.haive-md th, .haive-md td { border: 1px solid rgb(38 38 38); padding: 0.25rem 0.5rem; }
+.haive-md th { background: rgb(23 23 23); font-weight: 600; }

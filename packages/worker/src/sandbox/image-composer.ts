@@ -39,6 +39,15 @@ export function composeSandboxImage(input: ComposeInput): SandboxImageCompositio
 
   const base = resolveBase(input.envTemplateDockerfile);
   const parts: string[] = [base];
+  // Haive-required runtime tools that the user CLI session relies on,
+  // independent of the env-template's project deps. Currently: `uv`/`uvx`
+  // for spawning the `mcp-server-git` MCP server claude-code wires up at
+  // startup. The env-template ships `apt-get` (debian/ubuntu) most of the
+  // time but doesn't know about haive-side MCP requirements; the
+  // sandbox-core base (haive-cli-sandbox) installs `uv` from apk but only
+  // applies when there is no env-template. Inject the install here so
+  // composed images built on top of env-templates get it too.
+  parts.push(buildHaiveRuntimeToolsLayer());
   if (installLines.length > 0) parts.push(installLines.join('\n'));
   if (extra.length > 0) parts.push(extra);
 
@@ -64,4 +73,37 @@ export function composeSandboxImage(input: ComposeInput): SandboxImageCompositio
 function resolveBase(envTemplateDockerfile: string | null): string {
   if (!envTemplateDockerfile) return `FROM ${SANDBOX_CORE_IMAGE}`;
   return envTemplateDockerfile.trimEnd();
+}
+
+/** Idempotent install layer for the haive-side runtime tools the CLI session
+ *  needs but that the env-template won't necessarily ship. Currently:
+ *   - `uv`/`uvx`: spawning the `mcp-server-git` MCP server claude-code wires
+ *     up at startup.
+ *   - `ripgrep`/`rg`: gemini's GrepTool falls back to a slower built-in
+ *     scanner when `rg` is absent and emits a "Ripgrep is not available.
+ *     Falling back to GrepTool" line on every search.
+ *  Auto-detects the package manager so the same line works on alpine (apk)
+ *  and debian/ubuntu (apt). Falls back to the official uv installer when
+ *  neither is present (rg has no upstream tarball install path here, so it
+ *  is skipped silently on bespoke base images). The `command -v` short-
+ *  circuits make re-runs cheap; both tools must be present for the early
+ *  exit. Idempotent on its own line so a change here forces a clean cache
+ *  miss across all composed images. */
+function buildHaiveRuntimeToolsLayer(): string {
+  return [
+    'RUN set -eux; \\',
+    '    if command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1; then exit 0; fi; \\',
+    '    if command -v apk >/dev/null 2>&1; then \\',
+    '        apk add --no-cache uv ripgrep; \\',
+    '    elif command -v apt-get >/dev/null 2>&1; then \\',
+    '        apt-get update; \\',
+    '        apt-get install -y --no-install-recommends curl ca-certificates ripgrep; \\',
+    '        if ! command -v uvx >/dev/null 2>&1; then \\',
+    '            curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh; \\',
+    '        fi; \\',
+    '        rm -rf /var/lib/apt/lists/*; \\',
+    '    else \\',
+    '        echo "haive-runtime-tools: no apk/apt — uv/ripgrep install skipped" >&2; \\',
+    '    fi',
+  ].join('\n');
 }

@@ -132,7 +132,15 @@ export abstract class BaseCliAdapter {
     // wrapping quotes) get healed at spawn time without forcing the user
     // to re-save the CLI provider. Idempotent on already-normalized input.
     const stored = normalizeCliArgsArray(provider.cliArgs ?? []);
-    return [...stored, ...base];
+    // Drop stored tokens that already appear in the adapter's `base` list
+    // — solves duplicate boolean flags like `--dangerously-skip-permissions`
+    // when the user (or the seeded provider config) added the same flag the
+    // adapter hardcodes. Paired flags (e.g. `--model glm-4.7`) survive because
+    // their value tokens differ; the CLI's own last-flag-wins semantics handle
+    // any leftover conflicts.
+    const baseSet = new Set(base);
+    const dedupedStored = stored.filter((tok) => !baseSet.has(tok));
+    return [...dedupedStored, ...base];
   }
 
   protected effectiveModel(opts: InvokeOpts): string {

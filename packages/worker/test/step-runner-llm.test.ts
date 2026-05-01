@@ -53,6 +53,12 @@ function makeMockDb(state: MockState): Database {
             }
             return [row];
           },
+          // recordStepCliPreference uses .values().onConflictDoUpdate()
+          // (no .returning()). The chain still needs to be awaitable to
+          // not throw when the runner records the actually-used provider.
+          onConflictDoUpdate: async (_opts: unknown) => {
+            state.inserts.push({ table: tableName, row: v });
+          },
         }),
       };
     },
@@ -73,6 +79,20 @@ function makeMockDb(state: MockState): Database {
         }),
       };
     },
+    // db.query.<table>.findFirst is the relation-aware Drizzle API used
+    // by helpers like resolvePreferredCli (looks up per-step CLI prefs)
+    // and resolveLoopBudget (reads tasks.step_loop_limits). The mock
+    // returns no preference / no task overrides so the runner falls back
+    // to params.cliProviderId and the loopSpec defaults — matching
+    // production behavior for users who haven't set anything.
+    query: {
+      userStepCliPreferences: { findFirst: async () => undefined },
+      tasks: { findFirst: async () => undefined },
+    },
+    // db.insert(table).values(...).onConflictDoUpdate({...}) is used by
+    // recordStepCliPreference to upsert the per-(user, step) preference
+    // after a successful dispatch. The mock chain mirrors the existing
+    // values().returning() shape and is a no-op for tests.
   } as unknown as Database;
   return db;
 }

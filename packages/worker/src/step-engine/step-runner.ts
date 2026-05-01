@@ -1,6 +1,6 @@
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull, ne, sql } from 'drizzle-orm';
 import type { Database } from '@haive/database';
-import { schema } from '@haive/database';
+import { schema, type StepIterationEntry } from '@haive/database';
 import { logger, validateFormValues } from '@haive/shared';
 import type {
   CliExecInvocationKind,
@@ -12,11 +12,57 @@ import type {
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveDispatch } from '../orchestrator/dispatcher.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
-import { TaskCancelledError, type StepContext, type StepDefinition } from './step-definition.js';
+import {
+  TaskCancelledError,
+  type AgentMiningResult,
+  type StepContext,
+  type StepDefinition,
+  type StepLoopPassRecord,
+} from './step-definition.js';
 
 const log = logger.child({ module: 'step-runner' });
 
 export type TaskStepRow = typeof schema.taskSteps.$inferSelect;
+
+/** Returns the user's preferred CLI provider id for a step, validated as
+ *  enabled. Falls back to the explicit task default when no preference
+ *  exists, or when the preferred provider has been disabled/deleted. */
+async function resolvePreferredCli(
+  db: Database,
+  userId: string,
+  stepId: string,
+  fallback: string | null,
+  providers: { id: string; enabled: boolean }[],
+): Promise<string | null> {
+  const row = await db.query.userStepCliPreferences.findFirst({
+    where: and(
+      eq(schema.userStepCliPreferences.userId, userId),
+      eq(schema.userStepCliPreferences.stepId, stepId),
+    ),
+  });
+  if (!row) return fallback;
+  const provider = providers.find((p) => p.id === row.cliProviderId);
+  if (!provider || !provider.enabled) return fallback;
+  return row.cliProviderId;
+}
+
+/** Records the CLI provider that was actually dispatched for a (user, step)
+ *  pair. The next time this user reaches this step in any task, the runner
+ *  and UI will prefer the same provider. */
+async function recordStepCliPreference(
+  db: Database,
+  userId: string,
+  stepId: string,
+  cliProviderId: string,
+): Promise<void> {
+  await db
+    .insert(schema.userStepCliPreferences)
+    .values({ userId, stepId, cliProviderId })
+    .onConflictDoUpdate({
+      target: [schema.userStepCliPreferences.userId, schema.userStepCliPreferences.stepId],
+      set: { cliProviderId, updatedAt: sql`now()` },
+    });
+}
 
 export interface WorkerDeps {
   enqueueCliInvocation(payload: CliExecJobPayload): Promise<void>;
@@ -48,6 +94,8 @@ type UpdatePatch = Partial<{
   formSchema: unknown;
   formValues: Record<string, unknown> | null;
   output: unknown;
+  iterations: StepIterationEntry[];
+  iterationCount: number;
   statusMessage: string | null;
   errorMessage: string | null;
   startedAt: Date;
@@ -79,6 +127,12 @@ async function resolveLlmPhase(
 
   const llmSpec = stepDef.llm!;
 
+  // Filter out CONSUMED invocations as well as superseded ones. A
+  // consumed row is one whose output the runner has already incorporated
+  // into a prior apply pass — only relevant when the step has a loop hook
+  // (the runner sets consumed_at when it iterates). Without this filter
+  // resolveLlmPhase would forever return iteration N's output instead of
+  // enqueuing iteration N+1.
   const latest = await db
     .select()
     .from(schema.cliInvocations)
@@ -86,6 +140,8 @@ async function resolveLlmPhase(
       and(
         eq(schema.cliInvocations.taskStepId, current.id),
         isNull(schema.cliInvocations.supersededAt),
+        isNull(schema.cliInvocations.consumedAt),
+        ne(schema.cliInvocations.mode, 'agent_mining'),
       ),
     )
     .orderBy(desc(schema.cliInvocations.createdAt))
@@ -135,10 +191,31 @@ async function resolveLlmPhase(
     };
   }
 
-  const prompt = llmSpec.buildPrompt({ detected, formValues: formValues ?? {} });
+  // For loop iterations > 0, prefer the loop's iteration-aware prompt
+  // builder when present so the next pass receives prior findings; fall
+  // back to the standard prompt otherwise. iteration here = passes
+  // already completed (i.e. the upcoming pass's index).
+  const previousIterations = stepIterationsAsRecords(current);
+  const upcomingIteration = previousIterations.length;
+  const prompt =
+    upcomingIteration > 0 && stepDef.loop?.buildIterationPrompt
+      ? stepDef.loop.buildIterationPrompt({
+          detected,
+          formValues: formValues ?? {},
+          iteration: upcomingIteration,
+          previousIterations,
+        })
+      : llmSpec.buildPrompt({ detected, formValues: formValues ?? {} });
+  const preferredProviderId = await resolvePreferredCli(
+    db,
+    params.userId,
+    stepDef.metadata.id,
+    params.cliProviderId ?? null,
+    params.providers,
+  );
   const plan = resolveDispatch({
     providers: params.providers,
-    preferredProviderId: params.cliProviderId ?? null,
+    preferredProviderId,
     input: {
       kind: 'prompt',
       prompt,
@@ -190,6 +267,9 @@ async function resolveLlmPhase(
     spec: plan.invocation.spec,
     timeoutMs: llmSpec.timeoutMs,
   });
+  if (plan.providerId) {
+    await recordStepCliPreference(db, params.userId, stepDef.metadata.id, plan.providerId);
+  }
   const updated = await updateRow(db, current.id, {
     status: 'waiting_cli',
     statusMessage: 'Waiting for AI analysis...',
@@ -197,6 +277,158 @@ async function resolveLlmPhase(
   ctx.logger.info(
     { invocationId: invRow.id, providerId: plan.providerId, mode: plan.mode },
     'cli invocation enqueued',
+  );
+  return { resolved: false, result: { status: 'waiting_cli', row: updated } };
+}
+
+type AgentMiningResolved =
+  | { resolved: true; results: AgentMiningResult[]; current: TaskStepRow }
+  | { resolved: false; result: AdvanceStepResult };
+
+async function resolveAgentMiningPhase(
+  db: Database,
+  stepDef: StepDefinition,
+  current: TaskStepRow,
+  ctx: StepContext,
+  detected: unknown,
+  formValues: FormValues | null,
+  llmOutput: unknown,
+  params: AdvanceStepParams,
+): Promise<AgentMiningResolved> {
+  const spec = stepDef.agentMining!;
+
+  const existing = await db
+    .select()
+    .from(schema.taskStepAgentMinings)
+    .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
+
+  if (existing.length > 0) {
+    const pending = existing.filter((r) => r.status === 'pending' || r.status === 'running');
+    if (pending.length > 0) {
+      return { resolved: false, result: { status: 'waiting_cli', row: current } };
+    }
+    const results: AgentMiningResult[] = existing.map((r) => ({
+      agentId: r.agentId,
+      agentTitle: r.agentTitle,
+      status: r.status === 'done' ? 'done' : 'failed',
+      output: r.output,
+      rawOutput: r.rawOutput,
+      errorMessage: r.errorMessage,
+    }));
+    return { resolved: true, results, current };
+  }
+
+  if (!params.providers || !params.deps) {
+    const failed = await updateRow(db, current.id, {
+      status: 'failed',
+      errorMessage: 'agent mining requires CLI invocation but no providers or deps supplied',
+      endedAt: new Date(),
+    });
+    return {
+      resolved: false,
+      result: { status: 'failed', row: failed, error: failed.errorMessage ?? 'missing deps' },
+    };
+  }
+
+  const dispatches = await spec.selectAgents({
+    ctx,
+    detected,
+    formValues: formValues ?? {},
+    llmOutput,
+  });
+
+  if (dispatches.length === 0) {
+    ctx.logger.warn('agent mining selectAgents returned empty list, skipping mining');
+    return { resolved: true, results: [], current };
+  }
+
+  const preferredProviderId = await resolvePreferredCli(
+    db,
+    params.userId,
+    stepDef.metadata.id,
+    params.cliProviderId ?? null,
+    params.providers,
+  );
+  let recordedProviderId: string | null = null;
+
+  for (const dispatch of dispatches) {
+    const plan = resolveDispatch({
+      providers: params.providers,
+      preferredProviderId,
+      input: {
+        kind: 'prompt',
+        prompt: dispatch.prompt,
+        capabilities: spec.requiredCapabilities,
+      },
+      invokeOpts: { cwd: params.workspacePath },
+    });
+
+    if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
+      await db.insert(schema.taskStepAgentMinings).values({
+        taskStepId: current.id,
+        agentId: dispatch.agentId,
+        agentTitle: dispatch.agentTitle,
+        status: 'failed',
+        errorMessage: `no cli provider available: ${plan.reason}`,
+        endedAt: new Date(),
+      });
+      continue;
+    }
+
+    const inv = await db
+      .insert(schema.cliInvocations)
+      .values({
+        taskId: params.taskId,
+        taskStepId: current.id,
+        cliProviderId: plan.providerId,
+        mode: 'agent_mining',
+        prompt: dispatch.prompt,
+      })
+      .returning();
+    const invRow = inv[0];
+    if (!invRow) throw new Error('failed to insert cli_invocations row for agent mining');
+
+    const mining = await db
+      .insert(schema.taskStepAgentMinings)
+      .values({
+        taskStepId: current.id,
+        agentId: dispatch.agentId,
+        agentTitle: dispatch.agentTitle,
+        cliProviderId: plan.providerId,
+        cliInvocationId: invRow.id,
+        status: 'pending',
+      })
+      .returning();
+    const miningRow = mining[0];
+    if (!miningRow) throw new Error('failed to insert task_step_agent_minings row');
+
+    await params.deps.enqueueCliInvocation({
+      invocationId: invRow.id,
+      taskId: params.taskId,
+      taskStepId: current.id,
+      userId: params.userId,
+      cliProviderId: plan.providerId,
+      kind: 'agent_mining',
+      spec: plan.invocation.spec,
+      timeoutMs: spec.timeoutMs,
+      agentMiningId: miningRow.id,
+    });
+    if (plan.providerId && !recordedProviderId) {
+      recordedProviderId = plan.providerId;
+    }
+  }
+
+  if (recordedProviderId) {
+    await recordStepCliPreference(db, params.userId, stepDef.metadata.id, recordedProviderId);
+  }
+
+  const updated = await updateRow(db, current.id, {
+    status: 'waiting_cli',
+    statusMessage: `Mining knowledge from ${dispatches.length} agent(s)...`,
+  });
+  ctx.logger.info(
+    { dispatched: dispatches.length, agentIds: dispatches.map((d) => d.agentId) },
+    'agent mining fan-out enqueued',
   );
   return { resolved: false, result: { status: 'waiting_cli', row: updated } };
 }
@@ -277,10 +509,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // --- Pre-form LLM phase ---
     let llmOutput: unknown = undefined;
     if (stepDef.llm?.preForm) {
-      const llmResult = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
-      if (!llmResult.resolved) return llmResult.result;
-      llmOutput = llmResult.llmOutput;
-      current = llmResult.current;
+      const skip = stepDef.llm.skipIf?.({ detected, formValues: {} }) ?? false;
+      if (skip) {
+        ctx.logger.info({ phase: 'llm.preForm' }, 'skipping llm phase via skipIf predicate');
+      } else {
+        const llmResult = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
+        if (!llmResult.resolved) return llmResult.result;
+        llmOutput = llmResult.llmOutput;
+        current = llmResult.current;
+      }
     }
 
     // --- Form ---
@@ -326,25 +563,112 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     // --- Post-form LLM phase (default) ---
     if (stepDef.llm && !stepDef.llm.preForm) {
-      const llmResult = await resolveLlmPhase(
+      const skip = stepDef.llm.skipIf?.({ detected, formValues: formValues ?? {} }) ?? false;
+      if (skip) {
+        ctx.logger.info({ phase: 'llm.postForm' }, 'skipping llm phase via skipIf predicate');
+      } else {
+        const llmResult = await resolveLlmPhase(
+          db,
+          stepDef,
+          current,
+          ctx,
+          detected,
+          formValues,
+          params,
+        );
+        if (!llmResult.resolved) return llmResult.result;
+        llmOutput = llmResult.llmOutput;
+        current = llmResult.current;
+      }
+    }
+
+    // --- Agent mining phase (fan-out N CLI jobs, wait for all) ---
+    let agentMiningResults: AgentMiningResult[] | undefined;
+    if (stepDef.agentMining) {
+      const miningResult = await resolveAgentMiningPhase(
         db,
         stepDef,
         current,
         ctx,
         detected,
         formValues,
+        llmOutput,
         params,
       );
-      if (!llmResult.resolved) return llmResult.result;
-      llmOutput = llmResult.llmOutput;
-      current = llmResult.current;
+      if (!miningResult.resolved) return miningResult.result;
+      agentMiningResults = miningResult.results;
+      current = miningResult.current;
     }
 
+    const previousIterations = stepIterationsAsRecords(current);
+    const iteration = previousIterations.length;
     const output = await stepDef.apply(ctx, {
       detected,
       formValues: formValues ?? {},
       llmOutput,
+      agentMiningResults,
+      iteration,
+      previousIterations,
     });
+
+    // --- Loop hook: decide whether another LLM pass is warranted ---
+    if (stepDef.loop) {
+      const budget = (await resolveLoopBudget(db, taskId, current, stepDef)) ?? 1;
+      const continueRequested = await stepDef.loop.shouldContinue({
+        ctx,
+        applyOutput: output,
+        llmOutput,
+        iteration,
+        previousIterations,
+      });
+      const nextIteration = iteration + 1;
+      const exhaustedBudget = continueRequested && nextIteration >= budget;
+      // Mark this pass's invocation consumed so the next resolveLlmPhase
+      // (whether triggered now for the next pass or later for retries)
+      // enqueues a fresh CLI run instead of replaying the same output.
+      await markLatestInvocationConsumed(db, current.id);
+      const newEntry: StepIterationEntry = {
+        iteration,
+        llmOutput,
+        applyOutput: output,
+        continueRequested,
+        recordedAt: new Date().toISOString(),
+        ...(exhaustedBudget ? { exhaustedBudget: true } : {}),
+      };
+      const newIterations = [...(current.iterations ?? []), newEntry] as StepIterationEntry[];
+      current = await updateRow(db, current.id, {
+        iterations: newIterations,
+        iterationCount: newIterations.length,
+        statusMessage: null,
+      });
+      ctx.logger.info(
+        { iteration, continueRequested, budget, exhaustedBudget },
+        'loop pass completed',
+      );
+      if (continueRequested && !exhaustedBudget) {
+        // Re-enter LLM phase to enqueue iteration N+1. This single
+        // recursive resolveLlmPhase call (a) inserts a fresh
+        // cli_invocations row, (b) flips status to waiting_cli, and
+        // (c) returns. The orchestrator picks up where we left off when
+        // that invocation completes.
+        const llmResult = await resolveLlmPhase(
+          db,
+          stepDef,
+          current,
+          ctx,
+          detected,
+          formValues,
+          params,
+        );
+        if (!llmResult.resolved) return llmResult.result;
+        // Shouldn't reach here — resolveLlmPhase always returns
+        // unresolved (waiting_cli) for fresh enqueues.
+        ctx.logger.warn(
+          { iteration: nextIteration },
+          'loop re-enter resolved synchronously; falling through to done',
+        );
+      }
+    }
 
     const done = await updateRow(db, current.id, {
       status: 'done',
@@ -379,6 +703,17 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
   }
 }
 
+const WORKFLOW_TYPE_OFFSETS: Record<string, number> = {
+  onboarding: 0,
+  env_replicate: 0,
+  workflow: 100,
+};
+
+export function computeGlobalStepIndex(workflowType: string, index: number): number {
+  const offset = WORKFLOW_TYPE_OFFSETS[workflowType] ?? 0;
+  return offset + index;
+}
+
 async function upsertRow(
   db: Database,
   taskId: string,
@@ -396,7 +731,7 @@ async function upsertRow(
     .values({
       taskId,
       stepId: meta.id,
-      stepIndex: meta.index,
+      stepIndex: computeGlobalStepIndex(meta.workflowType, meta.index),
       title: meta.title,
       status: 'pending',
     })
@@ -415,4 +750,74 @@ async function updateRow(db: Database, id: string, patch: UpdatePatch): Promise<
   const row = rows[0];
   if (!row) throw new Error(`Task step ${id} not found`);
   return row;
+}
+
+/** Read the step's persisted iterations array as the lighter-weight
+ *  StepLoopPassRecord shape exposed to step modules. Strips bookkeeping
+ *  fields (continueRequested flag stays since loop modules want it). */
+function stepIterationsAsRecords(row: TaskStepRow): StepLoopPassRecord[] {
+  const rows = (row.iterations ?? []) as StepIterationEntry[];
+  return rows.map((entry) => ({
+    iteration: entry.iteration,
+    llmOutput: entry.llmOutput,
+    applyOutput: entry.applyOutput,
+    continueRequested: entry.continueRequested,
+  }));
+}
+
+/** Resolve the max-iterations budget for a loop step. Precedence:
+ *   1. The step's formValues.maxIterations — the in-form selector wins so
+ *      the user can change the budget on retry without touching the task.
+ *   2. tasks.step_loop_limits[stepId] — set at task creation time from
+ *      the new-task form selector.
+ *   3. loopSpec.maxIterations — built-in default when neither override
+ *      exists.
+ *  Returns null if the step has no loop hook at all. */
+async function resolveLoopBudget(
+  db: Database,
+  taskId: string,
+  current: TaskStepRow,
+  stepDef: StepDefinition,
+): Promise<number | null> {
+  if (!stepDef.loop) return null;
+  const formValues = (current.formValues ?? {}) as Record<string, unknown>;
+  const formOverride = formValues.maxIterations;
+  if (typeof formOverride === 'number' && formOverride > 0) return formOverride;
+  if (typeof formOverride === 'string') {
+    const parsed = Number.parseInt(formOverride, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { stepLoopLimits: true },
+  });
+  const limits = (task?.stepLoopLimits ?? {}) as Record<string, number>;
+  const override = limits[stepDef.metadata.id];
+  if (typeof override === 'number' && override > 0) return override;
+  return stepDef.loop.maxIterations;
+}
+
+/** Mark the currently-active LLM invocation row as consumed so the next
+ *  resolveLlmPhase pass enqueues a fresh one. No-op when the step has no
+ *  unconsumed invocation (already-consumed paths or steps without llm). */
+async function markLatestInvocationConsumed(db: Database, taskStepId: string): Promise<void> {
+  const row = await db
+    .select({ id: schema.cliInvocations.id })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        isNull(schema.cliInvocations.supersededAt),
+        isNull(schema.cliInvocations.consumedAt),
+        ne(schema.cliInvocations.mode, 'agent_mining'),
+      ),
+    )
+    .orderBy(desc(schema.cliInvocations.createdAt))
+    .limit(1);
+  const invId = row[0]?.id;
+  if (!invId) return;
+  await db
+    .update(schema.cliInvocations)
+    .set({ consumedAt: new Date() })
+    .where(eq(schema.cliInvocations.id, invId));
 }

@@ -5,6 +5,24 @@ export interface DockerfileCodegenResult {
   supported: boolean;
 }
 
+const ENSURE_NPM_LINE =
+  'RUN if ! command -v npm >/dev/null 2>&1; then ' +
+  'apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && ' +
+  'curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && ' +
+  'apt-get install -y --no-install-recommends nodejs && ' +
+  'rm -rf /var/lib/apt/lists/*; ' +
+  'fi';
+
+const ENSURE_NODE_USER_LINE =
+  'RUN if ! id -u node >/dev/null 2>&1; then ' +
+  'if id -u ubuntu >/dev/null 2>&1; then ' +
+  'usermod -l node -d /home/node -m ubuntu && groupmod -n node ubuntu; ' +
+  'else ' +
+  'groupadd -g 1000 node 2>/dev/null || groupadd node; ' +
+  'useradd -u 1000 -g node -m -s /bin/bash node 2>/dev/null || useradd -g node -m -s /bin/bash node; ' +
+  'fi; ' +
+  'fi';
+
 export function buildProviderInstallLines(
   name: CliProviderName,
   version: string | null,
@@ -19,13 +37,18 @@ export function buildProviderInstallLines(
 
   if (install.kind === 'npm') {
     const pin = version ? `@${version}` : '';
+    lines.push(ENSURE_NPM_LINE);
+    lines.push(ENSURE_NODE_USER_LINE);
     lines.push(`RUN npm install -g ${install.package}${pin} && ${install.binary} --version`);
   } else if (install.kind === 'curl-script') {
+    lines.push(ENSURE_NODE_USER_LINE);
     lines.push(`RUN curl -fsSL ${install.url} | bash`);
   } else if (install.kind === 'piggyback') {
     const target = CLI_INSTALL_METADATA[install.uses];
     if (target.install.kind === 'npm') {
       const pin = version ? `@${version}` : '';
+      lines.push(ENSURE_NPM_LINE);
+      lines.push(ENSURE_NODE_USER_LINE);
       lines.push(
         `RUN npm install -g ${target.install.package}${pin} && ${target.install.binary} --version`,
       );

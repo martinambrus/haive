@@ -9,9 +9,17 @@ import {
 import { startRepoWorker } from './queues/repo-queue.js';
 import { closeTaskQueue, startTaskWorker } from './queues/task-queue.js';
 import { closeRedis } from './redis.js';
+import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
 
 async function main(): Promise<void> {
   const { repoStoragePath, bundleStoragePath } = await bootstrap();
+  // Reap any cli sandbox containers left behind by a prior worker that died
+  // mid-job (tsx watch restart, SIGKILL, OOM). BullMQ will redeliver the
+  // job to this worker once its lock expires; we want a clean slate to
+  // re-spawn fresh containers without name/state collisions.
+  await reapAllCliSandboxes('worker boot').catch((err) => {
+    logger.warn({ err }, 'cli sandbox reap on boot failed');
+  });
 
   const repoWorker = startRepoWorker(repoStoragePath);
   const bundleWorker = startBundleWorker(bundleStoragePath);
@@ -27,14 +35,21 @@ async function main(): Promise<void> {
 
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'Worker shutting down');
+    // Force-close BullMQ workers without waiting for in-flight jobs (CLI execs
+    // can run for minutes; Docker SIGTERM grace is ~10s). Jobs released back
+    // to the queue will be redelivered once the lock expires; the next
+    // worker pid reaps orphan containers on boot.
     await Promise.allSettled([
-      repoWorker.close(),
-      bundleWorker.close(),
-      taskWorker.close(),
-      cliExecWorker.close(),
+      repoWorker.close(true),
+      bundleWorker.close(true),
+      taskWorker.close(true),
+      cliExecWorker.close(true),
       closeTaskQueue(),
       closeCliExecQueue(),
     ]);
+    await reapAllCliSandboxes(`worker ${signal}`).catch((err) => {
+      logger.warn({ err }, 'cli sandbox reap on shutdown failed');
+    });
     await closeRedis();
     process.exit(0);
   };

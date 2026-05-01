@@ -24,6 +24,9 @@ export interface McpConfigFile {
   path: string;
   content: string;
   format: 'json' | 'toml';
+  /** Extra CLI args the caller must append so the binary actually picks up
+   *  the bind-mounted file (e.g. claude-code's `--mcp-config <path>`). */
+  cliArgs?: string[];
 }
 
 export interface BuildDefaultMcpServersOptions {
@@ -80,6 +83,13 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
   return servers;
 }
 
+/** Standalone path for claude-code/zai MCP bind-mount. Avoids `/home/node/.claude.json`
+ *  because that path collides with the image-baked seed (`hasCompletedOnboarding=true,
+ *  theme=dark`); shadowing it with an MCP-only file makes the CLI think onboarding is
+ *  incomplete and hang on first run. Caller must pair this with `--mcp-config <path>
+ *  --strict-mcp-config` so the binary picks up the file and ignores other locations. */
+export const CLAUDE_MCP_CONFIG_PATH = '/haive/mcp.json';
+
 export function buildMcpConfigForCli(
   cliProvider: CliProviderName,
   servers: McpServerSpec[],
@@ -91,9 +101,10 @@ export function buildMcpConfigForCli(
     case 'claude-code':
     case 'zai':
       return {
-        path: `${targetHome}/.claude.json`,
+        path: CLAUDE_MCP_CONFIG_PATH,
         format: 'json',
         content: JSON.stringify({ mcpServers: serversToJsonObject(servers) }, null, 2),
+        cliArgs: ['--mcp-config', CLAUDE_MCP_CONFIG_PATH, '--strict-mcp-config'],
       };
 
     case 'gemini':
@@ -120,7 +131,7 @@ export function buildMcpConfigForCli(
   }
 }
 
-function serversToJsonObject(
+export function serversToJsonObject(
   servers: McpServerSpec[],
 ): Record<string, { command: string; args: string[]; env?: Record<string, string> }> {
   const out: Record<string, { command: string; args: string[]; env?: Record<string, string> }> = {};

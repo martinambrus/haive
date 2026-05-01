@@ -1,13 +1,46 @@
-import type { FormSchema } from '@haive/shared';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
+
+interface KbReference {
+  id: string;
+  title: string;
+  exists: boolean;
+}
 
 interface PrePlanningDetect {
   taskTitle: string;
   taskDescription: string;
   discoverySummary: string;
   relevantKbIds: string[];
+  kbReferences: KbReference[];
+}
+
+function kbHeading(text: string): string | null {
+  const m = /^#\s+(.+)$/m.exec(text);
+  return m?.[1]?.trim() ?? null;
+}
+
+async function resolveKbReferences(repoPath: string, ids: string[]): Promise<KbReference[]> {
+  const dir = path.join(repoPath, '.claude', 'knowledge_base');
+  const out: KbReference[] = [];
+  for (const id of ids) {
+    const full = path.join(dir, `${id}.md`);
+    if (!(await pathExists(full))) {
+      out.push({ id, title: id, exists: false });
+      continue;
+    }
+    try {
+      const text = await readFile(full, 'utf8');
+      out.push({ id, title: kbHeading(text) ?? id, exists: true });
+    } catch {
+      out.push({ id, title: id, exists: false });
+    }
+  }
+  return out;
 }
 
 interface PrePlanningApply {
@@ -109,15 +142,36 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
     const meta = await loadTaskMeta(ctx.db, ctx.taskId);
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '03-phase-0a-discovery');
     const output = (prev?.output as DiscoveryOutput | null) ?? {};
+    const ids = Array.isArray(output.relevantKbIds) ? output.relevantKbIds : [];
+    const kbReferences = await resolveKbReferences(ctx.repoPath, ids);
     return {
       taskTitle: meta.title,
       taskDescription: meta.description,
       discoverySummary: output.summary ?? '',
-      relevantKbIds: Array.isArray(output.relevantKbIds) ? output.relevantKbIds : [],
+      relevantKbIds: ids,
+      kbReferences,
     };
   },
 
   form(_ctx, detected): FormSchema {
+    const infoSections: InfoSection[] = [];
+    if (detected.discoverySummary) {
+      infoSections.push({
+        title: 'Discovery summary',
+        preview: `${detected.discoverySummary.length} chars`,
+        body: detected.discoverySummary,
+      });
+    }
+    if (detected.kbReferences.length > 0) {
+      const lines = detected.kbReferences.map((kb) =>
+        kb.exists ? `- ${kb.id}: ${kb.title}` : `- ${kb.id}: (file not found in repo)`,
+      );
+      infoSections.push({
+        title: 'Relevant knowledge base files',
+        preview: `${detected.kbReferences.length} file(s)`,
+        body: lines.join('\n'),
+      });
+    }
     return {
       title: 'Phase 0b: Pre-planning',
       description: [
@@ -126,10 +180,10 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         detected.taskDescription || '(no description)',
         '',
         detected.discoverySummary
-          ? `Discovery summary available (${detected.discoverySummary.length} chars).`
+          ? 'Discovery summary and KB files available below — expand to inspect.'
           : 'Discovery summary not available.',
-        `Relevant KB IDs: ${detected.relevantKbIds.length}`,
       ].join('\n'),
+      infoSections: infoSections.length > 0 ? infoSections : undefined,
       fields: [
         {
           type: 'textarea',
@@ -145,6 +199,7 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
 
   llm: {
     requiredCapabilities: ['tool_use'],
+    timeoutMs: 60 * 60 * 1000,
     buildPrompt: (args) => {
       const detected = args.detected as PrePlanningDetect;
       const values = args.formValues as { scope?: string };

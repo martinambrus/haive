@@ -233,7 +233,8 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
 
   if (runtimes.includes('java')) {
     const javaVersion = versions.java ?? '17';
-    const javaMajor = javaVersion.split('.')[0];
+    const javaParts = javaVersion.split('.');
+    const javaMajor = javaParts[0] === '1' && javaParts[1] ? javaParts[1] : (javaParts[0] ?? '17');
     lines.push(`# Java ${javaMajor}`);
     lines.push('RUN apt-get update \\');
     lines.push(

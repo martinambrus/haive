@@ -34,6 +34,10 @@ export default function NewTaskPage() {
   const [description, setDescription] = useState('');
   const [repositoryId, setRepositoryId] = useState<string>('');
   const [cliProviderId, setCliProviderId] = useState<string>('');
+  /** Max iterations the spec-quality reviewer will loop through before
+   *  surfacing gate 1, even if findings remain. Default 3 matches the
+   *  loop hook's built-in default. */
+  const [specQualityMaxIterations, setSpecQualityMaxIterations] = useState<number>(3);
 
   const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
@@ -132,6 +136,10 @@ export default function NewTaskPage() {
       return;
     }
     const type: WorkflowType = onboardingStatus.onboarded ? 'workflow' : 'onboarding';
+    if (type === 'workflow' && !description.trim()) {
+      setError('Description is required for workflow tasks');
+      return;
+    }
 
     setError(null);
     setSubmitting(true);
@@ -143,6 +151,9 @@ export default function NewTaskPage() {
       };
       if (description.trim()) body.description = description.trim();
       if (cliProviderId) body.cliProviderId = cliProviderId;
+      if (type === 'workflow') {
+        body.stepLoopLimits = { '05-phase-0b5-spec-quality': specQualityMaxIterations };
+      }
 
       const data = await api.post<{ task: Task }>('/tasks', body);
       router.push(`/tasks/${data.task.id}`);
@@ -291,13 +302,16 @@ export default function NewTaskPage() {
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="description">Description (optional)</Label>
+          <Label htmlFor="description">
+            Description{inferredType === 'workflow' ? '' : ' (optional)'}
+          </Label>
           <textarea
             id="description"
             rows={3}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            placeholder="Short note about this run"
+            placeholder="What should the workflow accomplish? Be specific — this drives knowledge mining and planning."
+            required={inferredType === 'workflow'}
             className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
           />
         </div>
@@ -330,6 +344,30 @@ export default function NewTaskPage() {
             </div>
           )}
         </div>
+
+        {inferredType === 'workflow' && (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="specQualityMaxIterations">Spec-quality review passes</Label>
+            <select
+              id="specQualityMaxIterations"
+              value={specQualityMaxIterations}
+              onChange={(e) => setSpecQualityMaxIterations(Number(e.target.value))}
+              className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+            >
+              <option value={3}>3 (default)</option>
+              <option value={5}>5</option>
+              <option value={10}>10</option>
+              <option value={15}>15</option>
+              <option value={20}>20</option>
+            </select>
+            <p className="text-xs text-neutral-500">
+              The spec quality reviewer loops, amending the draft on each pass until no warn/error
+              findings remain or this budget is hit. Higher values give the LLM more chances to
+              converge but cost more tokens. Gate 1 will flag if the budget was exhausted with
+              issues still open so you can decide whether to approve as-is or re-run.
+            </p>
+          </div>
+        )}
 
         <FormError message={error} />
 

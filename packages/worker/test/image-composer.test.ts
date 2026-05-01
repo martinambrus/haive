@@ -128,6 +128,55 @@ describe('composeSandboxImage', () => {
     expect(a.tag).toBe(b.tag);
   });
 
+  describe('haive runtime tools layer', () => {
+    // Composer always injects an idempotent install layer for tools the
+    // CLI session relies on but env-templates won't necessarily ship —
+    // currently uv (for the mcp-server-git MCP server) and ripgrep (for
+    // gemini's GrepTool, which prints "Ripgrep is not available" otherwise).
+    it('injects the runtime tools layer between base and CLI install lines', () => {
+      const result = composeSandboxImage({
+        envTemplateDockerfile: 'FROM ubuntu:24.04\n',
+        provider: claudeCodeProvider,
+      });
+      const baseIdx = result.dockerfileBody.indexOf('FROM ubuntu:24.04');
+      const layerIdx = result.dockerfileBody.indexOf('command -v uvx');
+      const cliIdx = result.dockerfileBody.indexOf('npm install -g @anthropic-ai/claude-code');
+      expect(baseIdx).toBeGreaterThanOrEqual(0);
+      expect(layerIdx).toBeGreaterThan(baseIdx);
+      expect(cliIdx).toBeGreaterThan(layerIdx);
+    });
+
+    it('installs ripgrep and uv on alpine (apk) bases', () => {
+      const result = composeSandboxImage({
+        envTemplateDockerfile: null,
+        provider: claudeCodeProvider,
+      });
+      expect(result.dockerfileBody).toContain('apk add --no-cache uv ripgrep');
+    });
+
+    it('installs ripgrep on debian/ubuntu (apt) bases and falls through to the official uv installer', () => {
+      const result = composeSandboxImage({
+        envTemplateDockerfile: 'FROM ubuntu:24.04\n',
+        provider: claudeCodeProvider,
+      });
+      expect(result.dockerfileBody).toContain('apt-get install -y --no-install-recommends');
+      expect(result.dockerfileBody).toContain('ripgrep');
+      expect(result.dockerfileBody).toContain('astral.sh/uv/install.sh');
+    });
+
+    it('short-circuits the install when both uvx AND rg are already on PATH', () => {
+      const result = composeSandboxImage({
+        envTemplateDockerfile: null,
+        provider: claudeCodeProvider,
+      });
+      // Both binaries must be present for the early exit; missing rg
+      // alone re-runs the apk/apt install line.
+      expect(result.dockerfileBody).toContain(
+        'command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1; then exit 0',
+      );
+    });
+  });
+
   it('treats empty string extras the same as null extras', () => {
     const a = composeSandboxImage({
       envTemplateDockerfile: null,

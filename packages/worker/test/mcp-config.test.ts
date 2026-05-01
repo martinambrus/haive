@@ -51,24 +51,26 @@ describe('buildDefaultMcpServers', () => {
 });
 
 describe('buildMcpConfigForCli', () => {
-  it('emits claude-code JSON at ~/.claude.json', () => {
+  it('emits claude-code JSON to a standalone path with --mcp-config + --strict-mcp-config flags', () => {
     const config = buildMcpConfigForCli('claude-code', sampleServers);
-    expect(config?.path).toBe('/home/claude/.claude.json');
+    expect(config?.path).toBe('/haive/mcp.json');
     expect(config?.format).toBe('json');
+    expect(config?.cliArgs).toEqual(['--mcp-config', '/haive/mcp.json', '--strict-mcp-config']);
     const parsed = JSON.parse(config!.content);
     expect(parsed.mcpServers.filesystem.command).toBe('npx');
     expect(parsed.mcpServers.git.args).toContain('--repository');
   });
 
-  it('respects a custom targetHome override', () => {
+  it('ignores targetHome for claude-code (path is fixed to avoid colliding with /home/node/.claude.json)', () => {
     const config = buildMcpConfigForCli('claude-code', sampleServers, '/root');
-    expect(config?.path).toBe('/root/.claude.json');
+    expect(config?.path).toBe('/haive/mcp.json');
   });
 
-  it('emits zai config to the same path as claude-code (claude binary wrapper)', () => {
+  it('emits zai config to the same standalone path as claude-code (claude binary wrapper)', () => {
     const config = buildMcpConfigForCli('zai', sampleServers);
-    expect(config?.path).toBe('/home/claude/.claude.json');
+    expect(config?.path).toBe('/haive/mcp.json');
     expect(config?.format).toBe('json');
+    expect(config?.cliArgs).toEqual(['--mcp-config', '/haive/mcp.json', '--strict-mcp-config']);
   });
 
   it('emits gemini JSON to ~/.gemini/settings.json', () => {
@@ -76,6 +78,16 @@ describe('buildMcpConfigForCli', () => {
     expect(config?.path).toBe('/home/claude/.gemini/settings.json');
     const parsed = JSON.parse(config!.content);
     expect(parsed.mcpServers.filesystem).toBeDefined();
+  });
+
+  it('does NOT attach cliArgs for gemini or codex (they auto-discover their config files)', () => {
+    // Only claude-code/zai use the standalone /haive/mcp.json bind-mount and
+    // therefore need --mcp-config to point the binary at it. Gemini reads
+    // settings.json from the auth volume; codex reads ~/.codex/config.toml
+    // automatically. Attaching cliArgs here would erroneously inject a
+    // claude-code flag into the wrong binary.
+    expect(buildMcpConfigForCli('gemini', sampleServers)?.cliArgs).toBeUndefined();
+    expect(buildMcpConfigForCli('codex', sampleServers)?.cliArgs).toBeUndefined();
   });
 
   it('emits codex TOML with [mcp_servers.<name>] sections', () => {
@@ -163,12 +175,12 @@ describe('injectMcpConfig', () => {
       cliProvider: 'claude-code',
       servers: sampleServers,
     });
-    expect(result.written).toBe('/home/claude/.claude.json');
+    expect(result.written).toBe('/haive/mcp.json');
     expect(result.skipped).toBe(false);
     expect(calls).toHaveLength(2);
-    expect(calls[0]?.cmd).toEqual(['mkdir', '-p', '/home/claude']);
+    expect(calls[0]?.cmd).toEqual(['mkdir', '-p', '/haive']);
     expect(calls[1]?.cmd[0]).toBe('sh');
-    expect(calls[1]?.cmd[2]).toContain(`cat > '/home/claude/.claude.json'`);
+    expect(calls[1]?.cmd[2]).toContain(`cat > '/haive/mcp.json'`);
     const parsed = JSON.parse(calls[1]?.stdin ?? '{}');
     expect(parsed.mcpServers.filesystem.command).toBe('npx');
   });

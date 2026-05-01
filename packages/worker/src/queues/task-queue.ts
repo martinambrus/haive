@@ -1,5 +1,5 @@
 import { Queue, Worker, type Job } from 'bullmq';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
@@ -15,6 +15,7 @@ import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
   advanceStep,
+  computeGlobalStepIndex,
   stepRegistry,
   registerAllSteps,
   type AdvanceStepResult,
@@ -22,6 +23,7 @@ import {
 } from '../step-engine/index.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
+import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import { cleanupTaskAuthVolumes } from '../sandbox/task-auth-volume.js';
 import { cleanupRagForTask } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
@@ -196,6 +198,17 @@ async function cleanupTaskContainers(
   taskId: string,
   reason: 'completed' | 'failed' | 'cancelled',
 ): Promise<void> {
+  if (reason === 'cancelled') {
+    try {
+      const killed = await killSandboxContainersByTaskLabel(taskId);
+      if (killed > 0) {
+        await appendEvent(db, taskId, null, 'sandbox_containers.killed', { reason, count: killed });
+      }
+    } catch (err) {
+      logger.warn({ err, taskId, reason }, 'kill-sandbox-containers failed');
+    }
+  }
+
   try {
     let destroyed = 0;
     if (containerCleanupRunner) {
@@ -225,6 +238,97 @@ async function cleanupTaskContainers(
   } catch (err) {
     logger.warn({ err, taskId, reason }, 'cleanup-task-auth-volumes failed');
   }
+
+  if (reason === 'cancelled') {
+    try {
+      await cleanupTaskEnvImage(db, taskId, reason);
+    } catch (err) {
+      logger.warn({ err, taskId, reason }, 'cleanup-task-env-image failed');
+    }
+  }
+}
+
+async function cleanupTaskEnvImage(
+  db: Database,
+  taskId: string,
+  reason: 'completed' | 'failed' | 'cancelled',
+): Promise<void> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { envTemplateId: true },
+  });
+  const envTemplateId = task?.envTemplateId;
+  if (!envTemplateId) return;
+
+  const others = await db
+    .select({ id: schema.tasks.id, status: schema.tasks.status })
+    .from(schema.tasks)
+    .where(and(eq(schema.tasks.envTemplateId, envTemplateId), ne(schema.tasks.id, taskId)));
+  const stillLive = others.some(
+    (t) => t.status !== 'cancelled' && t.status !== 'failed' && t.status !== 'completed',
+  );
+  if (stillLive) return;
+
+  const tpl = await db.query.envTemplates.findFirst({
+    where: eq(schema.envTemplates.id, envTemplateId),
+    columns: { imageTag: true },
+  });
+  if (!tpl?.imageTag) {
+    await db.delete(schema.envTemplates).where(eq(schema.envTemplates.id, envTemplateId));
+    return;
+  }
+
+  const result = await defaultDockerRunner.remove(tpl.imageTag);
+  if (!result.ok) {
+    logger.warn(
+      {
+        taskId,
+        reason,
+        imageTag: tpl.imageTag,
+        envTemplateId,
+        stderr: result.stderr,
+        error: result.error,
+      },
+      'env image removal failed',
+    );
+    return;
+  }
+
+  await db.delete(schema.envTemplates).where(eq(schema.envTemplates.id, envTemplateId));
+  await appendEvent(db, taskId, null, 'env_image.destroyed', {
+    reason,
+    imageTag: tpl.imageTag,
+    envTemplateId,
+  });
+}
+
+async function killSandboxContainersByTaskLabel(taskId: string): Promise<number> {
+  const { spawn } = await import('node:child_process');
+  const list = await new Promise<string>((resolve) => {
+    let stdout = '';
+    const child = spawn('docker', ['ps', '-q', '--filter', `label=haive.task.id=${taskId}`]);
+    child.stdout.on('data', (b: Buffer) => {
+      stdout += b.toString('utf8');
+    });
+    child.on('close', () => resolve(stdout));
+    child.on('error', () => resolve(''));
+    setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve(stdout);
+    }, 10_000);
+  });
+  const ids = list.split(/\s+/).filter((s) => s.length > 0);
+  if (ids.length === 0) return 0;
+  await new Promise<void>((resolve) => {
+    const child = spawn('docker', ['rm', '-f', ...ids]);
+    child.on('close', () => resolve());
+    child.on('error', () => resolve());
+    setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve();
+    }, 30_000);
+  });
+  return ids.length;
 }
 
 async function defaultContainerCleanup(db: Database, taskId: string): Promise<number> {
@@ -293,7 +397,12 @@ async function handleResult(
       const idx = steps.findIndex((s) => s.metadata.id === stepId);
       const next = idx >= 0 ? steps[idx + 1] : undefined;
       if (next) {
-        await markTaskRunningWithStep(db, ctx.taskId, next.metadata.id, next.metadata.index);
+        await markTaskRunningWithStep(
+          db,
+          ctx.taskId,
+          next.metadata.id,
+          computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
+        );
         await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id);
       } else {
         await markTaskCompleted(db, ctx.taskId);
@@ -302,7 +411,12 @@ async function handleResult(
       return;
     }
     case 'waiting_form': {
-      await markTaskWaiting(db, ctx.taskId, stepId, stepDef.metadata.index);
+      await markTaskWaiting(
+        db,
+        ctx.taskId,
+        stepId,
+        computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
+      );
       await appendEvent(db, ctx.taskId, result.row.id, 'step.waiting_form', { stepId });
       return;
     }
@@ -312,7 +426,10 @@ async function handleResult(
         .set({
           status: 'running',
           currentStepId: stepId,
-          currentStepIndex: stepDef.metadata.index,
+          currentStepIndex: computeGlobalStepIndex(
+            stepDef.metadata.workflowType,
+            stepDef.metadata.index,
+          ),
           updatedAt: new Date(),
         })
         .where(eq(schema.tasks.id, ctx.taskId));
@@ -445,6 +562,11 @@ export function startTaskWorker(): Worker<TaskJobPayload> {
     {
       connection: getBullRedis(),
       concurrency: 5,
+      // Task jobs orchestrate step runs which can wait minutes on CLI execs.
+      // Match cli-exec lockDuration so a worker restart doesn't cause job
+      // redelivery + duplicate step processing.
+      lockDuration: 30 * 60 * 1000,
+      maxStalledCount: 10,
     },
   );
 

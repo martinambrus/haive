@@ -44,7 +44,11 @@ import {
   SANDBOX_USER_HOME,
   type SandboxExtraFile,
 } from '../sandbox/sandbox-runner.js';
-import { buildDefaultMcpServers, buildMcpConfigForCli } from '../sandbox/mcp-config.js';
+import {
+  buildDefaultMcpServers,
+  buildMcpConfigForCli,
+  serversToJsonObject,
+} from '../sandbox/mcp-config.js';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type { BaseCliAdapter } from '../cli-adapters/base-adapter.js';
 import type {
@@ -67,6 +71,7 @@ import { runInSandbox } from '../sandbox/sandbox-runner.js';
 import { resolveCliAuthMounts } from '../sandbox/cli-auth-volume.js';
 import {
   ensureTaskAuthVolumes,
+  mergeGeminiMcpIntoSettings,
   resolveTaskAuthMounts,
   resolveTaskSkillMounts,
   seedRtkInTaskVolume,
@@ -81,6 +86,7 @@ import { createSandboxLoginContainer } from '../sandbox/login-container.js';
 import { buildSetupTokenCommand } from '../cli-adapters/setup-token-command.js';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
+import { publishCliChunk, publishCliExit, wrapStreamCallback } from './cli-stream-publisher.js';
 import { getTaskQueue } from './task-queue.js';
 
 const log = logger.child({ module: 'cli-exec-queue' });
@@ -137,6 +143,18 @@ export async function handleCliExecJob(
     .set({ startedAt: new Date() })
     .where(eq(schema.cliInvocations.id, row.id));
 
+  if (payload.agentMiningId) {
+    await db
+      .update(schema.taskStepAgentMinings)
+      .set({
+        status: 'running',
+        startedAt: new Date(),
+        cliInvocationId: row.id,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.taskStepAgentMinings.id, payload.agentMiningId));
+  }
+
   const providerSecrets = payload.cliProviderId
     ? await resolveProviderSecrets(db, payload.cliProviderId)
     : {};
@@ -151,11 +169,14 @@ export async function handleCliExecJob(
     const providerName = await resolveProviderNameForPayload(db, payload);
     const finalErrorMessage = interpretCliFailure(result, providerName);
 
+    await publishCliExit(payload.invocationId, result.exitCode);
+
     await db
       .update(schema.cliInvocations)
       .set({
         exitCode: result.exitCode,
         rawOutput: result.rawOutput,
+        streamLog: result.streamLog ?? null,
         parsedOutput: result.parsedOutput as unknown,
         durationMs,
         errorMessage: finalErrorMessage,
@@ -163,11 +184,27 @@ export async function handleCliExecJob(
       })
       .where(eq(schema.cliInvocations.id, row.id));
 
+    if (payload.agentMiningId) {
+      const failed = result.exitCode !== 0 || (finalErrorMessage?.trim().length ?? 0) > 0;
+      await db
+        .update(schema.taskStepAgentMinings)
+        .set({
+          status: failed ? 'failed' : 'done',
+          output: result.parsedOutput as unknown,
+          rawOutput: result.rawOutput,
+          errorMessage: finalErrorMessage,
+          endedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.taskStepAgentMinings.id, payload.agentMiningId));
+    }
+
     await resumeStepIfLinked(payload, result.exitCode === 0, finalErrorMessage);
   } catch (err) {
     const durationMs = Date.now() - startedAt;
     const message = err instanceof Error ? err.message : String(err);
     log.error({ err, invocationId: payload.invocationId }, 'cli exec failed');
+    await publishCliExit(payload.invocationId, -1);
     await db
       .update(schema.cliInvocations)
       .set({
@@ -177,6 +214,17 @@ export async function handleCliExecJob(
         endedAt: new Date(),
       })
       .where(eq(schema.cliInvocations.id, row.id));
+    if (payload.agentMiningId) {
+      await db
+        .update(schema.taskStepAgentMinings)
+        .set({
+          status: 'failed',
+          errorMessage: message,
+          endedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.taskStepAgentMinings.id, payload.agentMiningId));
+    }
     if (err instanceof CliLoginRequiredError && payload.taskStepId) {
       await db
         .update(schema.taskSteps)
@@ -243,6 +291,12 @@ export interface ExecutionOutcome {
   rawOutput: string | null;
   parsedOutput: unknown;
   errorMessage: string | null;
+  /** Full live-stream transcript (header + every stdout/stderr chunk) the
+   *  same bytes published to the cli-stream Redis channel. Persisted to
+   *  cli_invocations.stream_log for historical replay. Null when the
+   *  execution path doesn't capture a stream (e.g. agent-mining trace
+   *  serialized post-hoc). */
+  streamLog?: string | null;
 }
 
 async function executeByKind(
@@ -254,7 +308,8 @@ async function executeByKind(
   const repoMount = await resolveTaskRepoMount(db, payload.taskId);
   const sandboxWorkdir = await resolveTaskSandboxWorkdir(db, payload.taskId);
   switch (payload.kind) {
-    case 'cli': {
+    case 'cli':
+    case 'agent_mining': {
       const { wrapperContent, sandboxImage, networkPolicy } = await loadProviderRuntimeConfig(
         db,
         payload.cliProviderId,
@@ -269,14 +324,14 @@ async function executeByKind(
       if (providerRow && cliAdapterRegistry.has(providerRow.name)) {
         authMounts = await resolveAuthMounts(db, providerRow, payload.taskId);
       }
-      const mcpFiles = providerRow
+      const mcp = providerRow
         ? await resolveMcpExtraFiles(
             db,
             payload.taskId,
             providerRow.name as CliProviderName,
             sandboxWorkdir,
           )
-        : [];
+        : { files: [], extraArgs: [] };
       const statusUpdater = payload.taskStepId
         ? createStepStatusUpdater(db, payload.taskStepId)
         : undefined;
@@ -290,9 +345,12 @@ async function executeByKind(
         repoMount,
         sandboxWorkdir,
         networkPolicy,
-        mcpFiles,
+        mcp.files,
         authMounts,
         statusUpdater,
+        payload.taskId ?? null,
+        payload.invocationId ?? null,
+        mcp.extraArgs,
       );
     }
     case 'subagent_sequential':
@@ -332,35 +390,56 @@ async function loadProviderRuntimeConfig(
   };
 }
 
+export interface McpResolution {
+  files: SandboxExtraFile[];
+  /** CLI args the caller must append to spec.args so the binary actually
+   *  loads the bind-mounted MCP config (e.g. claude-code's `--mcp-config`). */
+  extraArgs: string[];
+}
+
 export async function resolveMcpExtraFiles(
   db: Database,
   taskId: string,
   providerName: CliProviderName,
   sandboxWorkdir: string,
-): Promise<SandboxExtraFile[]> {
+): Promise<McpResolution> {
+  const empty: McpResolution = { files: [], extraArgs: [] };
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: { envTemplateId: true },
   });
-  if (!task?.envTemplateId) return [];
+  if (!task?.envTemplateId) return empty;
 
   const envTemplate = await db.query.envTemplates.findFirst({
     where: eq(schema.envTemplates.id, task.envTemplateId),
     columns: { declaredDeps: true, status: true },
   });
-  if (!envTemplate || envTemplate.status !== 'ready') return [];
+  if (!envTemplate || envTemplate.status !== 'ready') return empty;
 
   const deps = envTemplate.declaredDeps as Record<string, unknown> | null;
   const servers = buildDefaultMcpServers({
     repoPath: sandboxWorkdir,
     includeChromeDevtools: !!deps?.browserTesting,
   });
-  if (servers.length === 0) return [];
+  if (servers.length === 0) return empty;
+
+  // Gemini reads MCP servers from the SAME settings.json that holds
+  // `selectedAuthType`. Bind-mounting an MCP-only file at that path
+  // overlays — and obscures — the auth volume's settings.json, leaving
+  // the CLI without an auth method. Merge the MCP servers into the
+  // task auth volume in-place instead, so the auth fields survive.
+  if (providerName === 'gemini') {
+    await mergeGeminiMcpIntoSettings(taskId, serversToJsonObject(servers));
+    return empty;
+  }
 
   const config = buildMcpConfigForCli(providerName, servers, SANDBOX_USER_HOME);
-  if (!config) return [];
+  if (!config) return empty;
 
-  return [{ containerPath: config.path, content: config.content }];
+  return {
+    files: [{ containerPath: config.path, content: config.content }],
+    extraArgs: config.cliArgs ?? [],
+  };
 }
 
 const REPO_VOLUME_NAME = 'haive_repos';
@@ -817,9 +896,13 @@ async function executeCliSpec(
   extraFiles: SandboxExtraFile[] = [],
   authMounts: DockerVolumeMount[] = [],
   statusCallback?: (message: string) => void,
+  taskId: string | null = null,
+  invocationId: string | null = null,
+  mcpExtraArgs: string[] = [],
 ): Promise<ExecutionOutcome> {
   const mergedSpec: CliCommandSpec = {
     ...spec,
+    args: mcpExtraArgs.length > 0 ? [...spec.args, ...mcpExtraArgs] : spec.args,
     env: { ...spec.env, ...secrets },
   };
   const spawner: CliSpawner = createSandboxSpawner(
@@ -830,14 +913,35 @@ async function executeCliSpec(
     networkPolicy,
     extraFiles,
     authMounts,
+    taskId,
+    invocationId,
   );
+
+  // Capture exactly what the live WS viewer sees (header + every stdout/
+  // stderr chunk) into a buffer so we can persist it to cli_invocations.
+  // stream_log for historical replay. The spawner's wrapStreamCallback
+  // publishes to Redis AND invokes our tees here, so the buffer matches
+  // the bytes the user saw.
+  const streamBuf: string[] = [];
+  const headerText = formatCliHeader(mergedSpec, sandboxWorkdir);
+  if (invocationId) {
+    await publishCliChunk(invocationId, 'stdout', headerText);
+  }
+  streamBuf.push(headerText);
 
   // Hook stdout for NDJSON stream-json parsing (Claude Code / Zai)
   const collector = createStreamJsonCollector(statusCallback);
   const result = await spawner(mergedSpec, {
     timeoutMs,
-    onStdoutChunk: collector.onChunk,
+    onStdoutChunk: (chunk: string) => {
+      streamBuf.push(chunk);
+      collector.onChunk(chunk);
+    },
+    onStderrChunk: (chunk: string) => {
+      streamBuf.push(chunk);
+    },
   });
+  const streamLog = streamBuf.join('');
   void deps;
 
   const streamResult = collector.getResult();
@@ -891,6 +995,7 @@ async function executeCliSpec(
         streamResult,
         result.error,
       ),
+      streamLog,
     };
   }
 
@@ -904,6 +1009,7 @@ async function executeCliSpec(
         result.error ??
         formatCliErrorMessage(result.exitCode, result.stderr, result.stdout, undefined) ??
         reason,
+      streamLog,
     };
   }
 
@@ -917,6 +1023,7 @@ async function executeCliSpec(
       result.stdout,
       result.error,
     ),
+    streamLog,
   };
 }
 
@@ -943,6 +1050,42 @@ export function formatCliErrorMessage(
   return `cli exited with code ${exitCode ?? 'unknown'}`;
 }
 
+export function quoteArg(arg: string): string {
+  // Pretty-print quoting for the terminal viewer. Output stays a valid
+  // shell-quoted token (copy-paste works) but prefers whichever quote style
+  // keeps the body readable:
+  //   - no special chars     -> bare
+  //   - has `'` only         -> double-quoted (apostrophe doesn't need escape)
+  //   - everything else      -> single-quoted (no inner escaping needed at all)
+  // The previous version always used POSIX `'\''` close-reopen escapes which
+  // are technically correct but visually noisy when the prompt body has
+  // English contractions ("don't", "it's").
+  if (arg === '' || /[\s"'`$\\!<>|&;()[\]*?#~]/.test(arg)) {
+    if (arg.includes("'") && !/[`$\\]/.test(arg)) {
+      // Safe to use double quotes: only `"`, `\`, `$`, backtick require
+      // escaping inside `"..."`, and we just confirmed none of `$ \\ \``
+      // appear. Escape any literal `"` so the wrapping quotes stay matched.
+      return `"${arg.replace(/"/g, '\\"')}"`;
+    }
+    // Single-quoted form. If the arg ALSO contains `'`, fall back to the
+    // POSIX close-escape-reopen idiom — uglier but still copy-pasteable.
+    return `'${arg.replace(/'/g, `'\\''`)}'`;
+  }
+  return arg;
+}
+
+export function formatCliHeader(spec: CliCommandSpec, workdir: string): string {
+  // Echo the full untruncated invocation. Long prompts (a couple of KB
+  // including system-prompt payloads) wrap in xterm but stay in scrollback,
+  // which is the observability win — being able to copy-paste the exact
+  // command is more valuable than keeping the header to a single line.
+  const parts = [spec.command, ...spec.args.map(quoteArg)];
+  const cmdLine = parts.join(' ');
+  // ANSI: dim grey for metadata, cyan `$` prompt, default for the command.
+  // \r\n keeps xterm aligned across line endings.
+  return `\x1b[2m# workdir: ${workdir}\x1b[0m\r\n` + `\x1b[36m$\x1b[0m ${cmdLine}\r\n`;
+}
+
 function createSandboxSpawner(
   wrapperContent: string | null | undefined,
   sandboxImage: string | null = null,
@@ -951,6 +1094,9 @@ function createSandboxSpawner(
   networkPolicy: CliNetworkPolicy | null = null,
   extraFiles: SandboxExtraFile[] = [],
   authMounts: DockerVolumeMount[] = [],
+  taskId: string | null = null,
+  invocationId: string | null = null,
+  mcpExtraArgs: string[] = [],
 ): CliSpawner {
   return async (spec, opts: SpawnOptions = {}): Promise<CliExecutionResult> => {
     const allMounts: DockerVolumeMount[] = [...authMounts];
@@ -959,16 +1105,18 @@ function createSandboxSpawner(
     if (sandboxImage) runnerOptions.image = sandboxImage;
     if (allMounts.length > 0) runnerOptions.extraMounts = allMounts;
     if (networkPolicy) runnerOptions.networkPolicy = networkPolicy;
+    if (taskId) runnerOptions.taskId = taskId;
+    const finalArgs = mcpExtraArgs.length > 0 ? [...spec.args, ...mcpExtraArgs] : spec.args;
     const result = await runInSandbox(
       {
         command: spec.command,
-        args: spec.args,
+        args: finalArgs,
         env: spec.env,
         wrapperContent: wrapperContent ?? undefined,
         extraFiles: extraFiles.length > 0 ? extraFiles : undefined,
         timeoutMs: opts.timeoutMs,
-        onStdoutChunk: opts.onStdoutChunk,
-        onStderrChunk: opts.onStderrChunk,
+        onStdoutChunk: wrapStreamCallback(invocationId, 'stdout', opts.onStdoutChunk),
+        onStderrChunk: wrapStreamCallback(invocationId, 'stderr', opts.onStderrChunk),
         signal: opts.signal,
       },
       runnerOptions,
@@ -1014,7 +1162,7 @@ async function executeSubAgentNative(
     extraEnv: secrets,
   });
   const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
-  const mcpFiles = await resolveMcpExtraFiles(
+  const mcp = await resolveMcpExtraFiles(
     db,
     payload.taskId,
     provider.name as CliProviderName,
@@ -1031,8 +1179,12 @@ async function executeSubAgentNative(
     repoMount,
     sandboxWorkdir,
     provider.networkPolicy,
-    mcpFiles,
+    mcp.files,
     authMounts,
+    undefined,
+    payload.taskId ?? null,
+    payload.invocationId ?? null,
+    mcp.extraArgs,
   );
 }
 
@@ -1060,7 +1212,7 @@ async function executeSubAgentSequential(
   }
 
   const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
-  const mcpFiles = await resolveMcpExtraFiles(
+  const mcp = await resolveMcpExtraFiles(
     db,
     payload.taskId,
     provider.name as CliProviderName,
@@ -1073,8 +1225,11 @@ async function executeSubAgentSequential(
     repoMount,
     sandboxWorkdir,
     provider.networkPolicy,
-    mcpFiles,
+    mcp.files,
     authMounts,
+    payload.taskId ?? null,
+    payload.invocationId ?? null,
+    mcp.extraArgs,
   );
   const result: SubAgentRunResult = await runSequentialSubAgent(
     invocation,
@@ -1119,6 +1274,23 @@ async function resumeStepIfLinked(
 ): Promise<void> {
   if (!payload.taskStepId) return;
   const db = getDb();
+  // If this cli_invocation was superseded (retry-cascade reset the step
+  // mid-CLI), do NOT enqueue an advance — the step has already been reset
+  // and is being driven by the retry's own enqueue. Spurious advances here
+  // re-run detect/form on the freshly-reset step, leaving it in
+  // `waiting_form` alongside the retried-from step (visual "two active
+  // steps" glitch).
+  const inv = await db.query.cliInvocations.findFirst({
+    where: eq(schema.cliInvocations.id, payload.invocationId),
+    columns: { supersededAt: true },
+  });
+  if (inv?.supersededAt) {
+    log.info(
+      { invocationId: payload.invocationId, taskStepId: payload.taskStepId },
+      'cli invocation superseded, skipping resumeStepIfLinked',
+    );
+    return;
+  }
   const stepRow = await db.query.taskSteps.findFirst({
     where: eq(schema.taskSteps.id, payload.taskStepId),
     columns: { stepId: true },
@@ -1694,6 +1866,16 @@ export function startCliExecWorker(
     {
       connection: getBullRedis(),
       concurrency: 3,
+      // CLI execs run for minutes; default 30s lock would expire and cause
+      // BullMQ to redeliver the job to a new worker pid (after a tsx watch
+      // restart, SIGKILL, etc.), spawning a duplicate sandbox container for
+      // the same job. 30 min covers thinking time + restart gaps.
+      lockDuration: 30 * 60 * 1000,
+      // Default maxStalledCount=1 marks a job UnrecoverableError after a
+      // single stall event — too aggressive when worker restarts during
+      // tsx-watch dev. Allow many redeliveries; the boot reaper kills any
+      // orphan container so each redelivery starts fresh.
+      maxStalledCount: 10,
     },
   );
 

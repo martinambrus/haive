@@ -31,15 +31,32 @@ export const resourceLimitsSchema = z
 
 export type ResourceLimits = z.infer<typeof resourceLimitsSchema>;
 
-export const createTaskRequestSchema = z.object({
-  type: workflowTypeSchema,
-  title: z.string().min(1).max(512),
-  description: z.string().optional(),
-  repositoryId: z.string().uuid().optional(),
-  cliProviderId: z.string().uuid().optional(),
-  envTemplateId: z.string().uuid().optional(),
-  resourceLimits: resourceLimitsSchema,
-});
+/** Per-step loop iteration overrides. Map of step id → max iterations.
+ *  Currently exercised by 05-phase-0b5-spec-quality (default 3 if absent).
+ *  Future loop-enabled steps register here too. Values are integers in
+ *  [1, 50]; outside that range is rejected to bound LLM cost. */
+export const stepLoopLimitsSchema = z
+  .record(z.string().min(1), z.number().int().min(1).max(50))
+  .optional();
+
+export type StepLoopLimits = z.infer<typeof stepLoopLimitsSchema>;
+
+export const createTaskRequestSchema = z
+  .object({
+    type: workflowTypeSchema,
+    title: z.string().min(1).max(512),
+    description: z.string().optional(),
+    repositoryId: z.string().uuid().optional(),
+    cliProviderId: z.string().uuid().optional(),
+    envTemplateId: z.string().uuid().optional(),
+    resourceLimits: resourceLimitsSchema,
+    stepLoopLimits: stepLoopLimitsSchema,
+  })
+  .refine(
+    (d) =>
+      d.type !== 'workflow' || (d.description !== undefined && d.description.trim().length > 0),
+    { message: 'description is required for workflow tasks', path: ['description'] },
+  );
 
 export type CreateTaskRequest = z.infer<typeof createTaskRequestSchema>;
 

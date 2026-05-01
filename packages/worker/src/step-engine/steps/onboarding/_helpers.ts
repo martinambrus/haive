@@ -24,7 +24,7 @@ export async function loadPreviousStepOutput(
   db: Database,
   taskId: string,
   stepId: string,
-): Promise<{ detect: unknown; output: unknown } | null> {
+): Promise<{ detect: unknown; output: unknown; iterations: unknown[] } | null> {
   const rows = await db
     .select()
     .from(schema.taskSteps)
@@ -32,7 +32,11 @@ export async function loadPreviousStepOutput(
     .limit(1);
   const row = rows[0];
   if (!row) return null;
-  return { detect: row.detectOutput, output: row.output };
+  return {
+    detect: row.detectOutput,
+    output: row.output,
+    iterations: (row.iterations ?? []) as unknown[],
+  };
 }
 
 export async function pathExists(p: string): Promise<boolean> {

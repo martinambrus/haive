@@ -23,7 +23,7 @@ import { shouldClearSubmitting } from '@/lib/submit-state';
 import { FormRenderer, type FormValues } from '@/components/form-renderer';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { TaskSource } from '@/components/task-source';
-import { Terminal } from '@/components/terminal/Terminal';
+import { StepTerminal } from '@/components/terminal/StepTerminal';
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
 
@@ -55,7 +55,7 @@ function stepStatusVariant(status: StepStatus): BadgeVariant {
   }
 }
 
-type Tab = 'steps' | 'source' | 'terminal' | 'activity';
+type Tab = 'steps' | 'source' | 'activity';
 
 interface TaskDetailResponse {
   task: Task;
@@ -80,8 +80,11 @@ export default function TaskDetailPage() {
     message: string;
   } | null>(null);
   const [providers, setProviders] = useState<CliProvider[]>([]);
-  const [providerBusy, setProviderBusy] = useState(false);
-  const [providerError, setProviderError] = useState<string | null>(null);
+  const [stepProviderBusy, setStepProviderBusy] = useState<string | null>(null);
+  const [stepProviderError, setStepProviderError] = useState<{
+    stepId: string;
+    message: string;
+  } | null>(null);
   const stepsContainerRef = useRef<HTMLDivElement>(null);
   const prevActiveStepRef = useRef<string | null>(null);
 
@@ -172,17 +175,12 @@ export default function TaskDetailPage() {
   }
 
   async function runStepAction(step: TaskStep, action: StepAction) {
-    let label: string;
-    if (action === 'skip') {
-      label = 'Skip this step?';
-    } else {
-      const downstreamCount = steps.filter(
-        (s) => s.stepIndex > step.stepIndex && s.status !== 'pending',
-      ).length;
-      label = downstreamCount
-        ? `Retry this step? ${downstreamCount} downstream step(s) will also be reset and re-run.`
-        : 'Retry this step?';
-    }
+    const downstreamCount = steps.filter(
+      (s) => s.stepIndex > step.stepIndex && s.status !== 'pending',
+    ).length;
+    const label = downstreamCount
+      ? `Retry this step? ${downstreamCount} downstream step(s) will also be reset and re-run.`
+      : 'Retry this step?';
     if (!confirm(label)) return;
     setStepActionBusy(step.stepId);
     setStepActionError(null);
@@ -237,16 +235,19 @@ export default function TaskDetailPage() {
     }
   }
 
-  async function changeProvider(cliProviderId: string | null) {
-    setProviderBusy(true);
-    setProviderError(null);
+  async function changeStepProvider(stepId: string, cliProviderId: string | null) {
+    setStepProviderBusy(stepId);
+    setStepProviderError(null);
     try {
-      await api.patch(`/tasks/${id}/cli-provider`, { cliProviderId });
+      await api.patch(`/tasks/${id}/steps/${stepId}/cli-provider`, { cliProviderId });
       await reload();
     } catch (err) {
-      setProviderError((err as Error).message ?? 'Failed to change provider');
+      setStepProviderError({
+        stepId,
+        message: (err as Error).message ?? 'Failed to change provider',
+      });
     } finally {
-      setProviderBusy(false);
+      setStepProviderBusy(null);
     }
   }
 
@@ -276,7 +277,6 @@ export default function TaskDetailPage() {
 
   const canCancel = !['completed', 'cancelled'].includes(task.status);
   const canRetry = task.status === 'failed';
-  const cliLocked = steps.some((s) => s.status === 'running' || s.status === 'waiting_cli');
 
   return (
     <div className="flex flex-col gap-6">
@@ -326,13 +326,6 @@ export default function TaskDetailPage() {
         <TabButton active={tab === 'source'} onClick={() => setTab('source')}>
           Source
         </TabButton>
-        <TabButton
-          active={tab === 'terminal'}
-          onClick={() => setTab('terminal')}
-          disabled={!task.containerId || task.status !== 'running'}
-        >
-          Terminal
-        </TabButton>
         <TabButton active={tab === 'activity'} onClick={() => setTab('activity')}>
           Activity
         </TabButton>
@@ -349,6 +342,7 @@ export default function TaskDetailPage() {
             <div key={step.id} data-step-id={step.stepId}>
               <StepCard
                 step={step}
+                taskId={task.id}
                 taskStatus={task.status}
                 taskRepositoryId={task.repositoryId}
                 submitting={submitting === step.stepId}
@@ -361,11 +355,12 @@ export default function TaskDetailPage() {
                 onAction={(action) => runStepAction(step, action)}
                 onCliLogin={() => openCliLoginForStep(step)}
                 providers={providers}
-                currentCliProviderId={task.cliProviderId ?? null}
-                cliLocked={cliLocked}
-                cliBusy={providerBusy}
-                cliError={providerError}
-                onChangeCli={changeProvider}
+                taskCliProviderId={task.cliProviderId ?? null}
+                cliBusy={stepProviderBusy === step.stepId}
+                cliError={
+                  stepProviderError?.stepId === step.stepId ? stepProviderError.message : null
+                }
+                onChangeCli={(cliProviderId) => changeStepProvider(step.stepId, cliProviderId)}
               />
             </div>
           ))}
@@ -373,24 +368,6 @@ export default function TaskDetailPage() {
       )}
 
       {tab === 'source' && <TaskSource taskId={id} />}
-
-      {tab === 'terminal' && (
-        <div className="flex flex-col gap-2">
-          {!task.containerId && (
-            <div className="rounded-md border border-neutral-800 bg-neutral-950 p-4 text-sm text-neutral-400">
-              No container attached to this task yet.
-            </div>
-          )}
-          {task.containerId && task.status !== 'running' && (
-            <div className="rounded-md border border-neutral-800 bg-neutral-950 p-4 text-sm text-neutral-400">
-              Task is {task.status}. Terminal is only available while the task is running.
-            </div>
-          )}
-          {task.containerId && task.status === 'running' && (
-            <Terminal containerId={task.containerId} />
-          )}
-        </div>
-      )}
 
       {tab === 'activity' && (
         <div className="flex flex-col gap-2">
@@ -466,6 +443,7 @@ function TabButton({
 
 interface StepCardProps {
   step: TaskStep;
+  taskId: string;
   taskStatus: TaskStatus;
   taskRepositoryId: string | null;
   submitting: boolean;
@@ -476,8 +454,8 @@ interface StepCardProps {
   onAction: (action: StepAction) => Promise<void>;
   onCliLogin: () => void;
   providers: CliProvider[];
-  currentCliProviderId: string | null;
-  cliLocked: boolean;
+  /** Task-level fallback when this step has no per-step preference set. */
+  taskCliProviderId: string | null;
   cliBusy: boolean;
   cliError: string | null;
   onChangeCli: (cliProviderId: string | null) => Promise<void>;
@@ -492,14 +470,18 @@ const ACTIONABLE_STATUSES: ReadonlySet<StepStatus> = new Set([
 ]);
 
 const RETRYABLE_STEP_STATUSES: ReadonlySet<StepStatus> = new Set([
+  'pending',
+  'running',
+  'waiting_form',
+  'waiting_cli',
   'done',
   'failed',
   'skipped',
-  'waiting_form',
 ]);
 
 function StepCard({
   step,
+  taskId,
   taskStatus,
   taskRepositoryId,
   submitting,
@@ -510,8 +492,7 @@ function StepCard({
   onAction,
   onCliLogin,
   providers,
-  currentCliProviderId,
-  cliLocked,
+  taskCliProviderId,
   cliBusy,
   cliError,
   onChangeCli,
@@ -521,10 +502,18 @@ function StepCard({
   const initialValues = (step.formValues as FormValues | null) ?? undefined;
   const taskCancelled = taskStatus === 'cancelled';
   const showForm = !taskCancelled && step.status === 'waiting_form' && schema;
-  const canRetry = !taskCancelled && RETRYABLE_STEP_STATUSES.has(step.status);
-  const canSkip = !taskCancelled && (step.status === 'failed' || step.status === 'waiting_form');
+  // Auto-skipped steps (shouldRun → false, or detect skipReason) have nothing
+  // to retry — they were intentionally bypassed by the runner. Manually-skipped
+  // steps remain retryable in case the user changed their mind.
+  const isAutoSkipped = step.status === 'skipped' && !step.manuallySkipped;
+  const canRetry = !taskCancelled && !isAutoSkipped && RETRYABLE_STEP_STATUSES.has(step.status);
   const showCliPicker = !taskCancelled && ACTIONABLE_STATUSES.has(step.status);
   const cliPickerId = `cli-${step.stepId}`;
+  // Per-step preference wins; otherwise fall back to the task default. Empty
+  // string for "no preference" so the dropdown shows the (none) option.
+  const effectiveCliProviderId = step.preferredCliProviderId ?? taskCliProviderId ?? '';
+  // Per-step lock: only locked while THIS step is running/waiting on CLI.
+  const cliLocked = step.status === 'running' || step.status === 'waiting_cli';
 
   // Detect tooling step fields for inline connection test buttons
   const hasConnectionFields =
@@ -542,7 +531,7 @@ function StepCard({
           <select
             id={cliPickerId}
             disabled={cliLocked || cliBusy}
-            value={currentCliProviderId ?? ''}
+            value={effectiveCliProviderId}
             onChange={(e) => void onChangeCli(e.target.value || null)}
             className="h-8 max-w-xs flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -565,30 +554,35 @@ function StepCard({
           <span className="font-mono text-xs text-neutral-500">#{step.stepIndex}</span>
           <h3 className="text-base font-semibold text-neutral-100">{step.title}</h3>
           <Badge variant={stepStatusVariant(step.status)}>{step.status}</Badge>
+          {step.iterationCount > 0 && (
+            <span
+              className="rounded border border-indigo-700 bg-indigo-950/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-indigo-300"
+              title="Loop passes completed for this step"
+            >
+              iter ×{step.iterationCount}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          {canRetry && (
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={actionBusy}
-              onClick={() => onAction('retry')}
-              title="Reset this step and re-run it (downstream steps will also reset)"
-            >
-              {actionBusy ? 'Retrying…' : 'Retry'}
-            </Button>
-          )}
-          {canSkip && (
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={actionBusy}
-              onClick={() => onAction('skip')}
-              title="Skip this step and continue with the next one"
-            >
-              Skip
-            </Button>
-          )}
+          {canRetry &&
+            (() => {
+              const isActive = step.status === 'running' || step.status === 'waiting_cli';
+              const label = isActive ? 'Stop & retry' : 'Retry';
+              const title = isActive
+                ? 'Stop the running CLI for this step (and any downstream activity), then re-run from this step'
+                : 'Reset this step and re-run it (downstream steps will also reset)';
+              return (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={actionBusy}
+                  onClick={() => onAction('retry')}
+                  title={title}
+                >
+                  {actionBusy ? (isActive ? 'Stopping…' : 'Retrying…') : label}
+                </Button>
+              );
+            })()}
           <span className="font-mono text-xs text-neutral-500">{step.stepId}</span>
         </div>
       </div>
@@ -678,6 +672,14 @@ function StepCard({
             </div>
           )}
         </div>
+      )}
+
+      {step.cliInvocationCount > 0 && (
+        <StepTerminal
+          taskId={taskId}
+          stepRowId={step.id}
+          autoExpand={step.status === 'running' || step.status === 'waiting_cli'}
+        />
       )}
     </Card>
   );

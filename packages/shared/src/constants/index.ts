@@ -84,7 +84,11 @@ export interface RefreshCliVersionsJobResult {
   errors: { name: string; error: string }[];
 }
 
-export type CliExecInvocationKind = 'cli' | 'subagent_native' | 'subagent_sequential';
+export type CliExecInvocationKind =
+  | 'cli'
+  | 'subagent_native'
+  | 'subagent_sequential'
+  | 'agent_mining';
 
 export interface CliExecJobPayload {
   invocationId: string;
@@ -95,6 +99,8 @@ export interface CliExecJobPayload {
   kind: CliExecInvocationKind;
   spec: unknown;
   timeoutMs?: number;
+  /** For kind='agent_mining': the task_step_agent_minings.id row to update with results. */
+  agentMiningId?: string;
 }
 
 export type CliProbeTargetMode = 'cli';

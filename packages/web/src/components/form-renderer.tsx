@@ -2,12 +2,20 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { diffLines } from 'diff';
+import ReactMarkdown from 'react-markdown';
 import type { DiffDetails, FormField, FormSchema, LeafFormField } from '@haive/shared';
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { BundleComposer, type BundleComposerEntry } from '@/components/bundle-composer';
 import { cn } from '@/lib/cn';
 import { validateRequired, type FormValues } from '@/components/form-validation';
+
+/** Heuristic markdown detection — true when the body contains at least one
+ *  heading line or a fenced code block. Avoids false positives on plain "- "
+ *  lists or "**" emphasis which appear in regular text outputs. */
+function looksLikeMarkdown(text: string): boolean {
+  return /^\s*#{1,6}\s+\S/m.test(text) || /^\s*```/m.test(text);
+}
 
 export type { FormValues };
 
@@ -124,6 +132,35 @@ export function FormRenderer({
           <p className="mt-1 whitespace-pre-line text-sm text-neutral-400">{schema.description}</p>
         )}
       </div>
+      {schema.infoSections && schema.infoSections.length > 0 && (
+        <div className="flex flex-col gap-2">
+          {schema.infoSections.map((section, i) => {
+            const isMd = looksLikeMarkdown(section.body);
+            return (
+              <details
+                key={`${section.title}-${i}`}
+                className="rounded-md border border-neutral-800 bg-neutral-950/60"
+              >
+                <summary className="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900">
+                  <span className="font-medium">{section.title}</span>
+                  {section.preview && (
+                    <span className="ml-2 text-xs text-neutral-400">{section.preview}</span>
+                  )}
+                </summary>
+                {isMd ? (
+                  <div className="haive-md max-h-96 overflow-auto border-t border-neutral-800 px-3 py-2">
+                    <ReactMarkdown>{section.body}</ReactMarkdown>
+                  </div>
+                ) : (
+                  <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-t border-neutral-800 px-3 py-2 text-xs text-neutral-300">
+                    {section.body}
+                  </pre>
+                )}
+              </details>
+            );
+          })}
+        </div>
+      )}
       <div className="flex flex-col gap-4">
         {schema.fields.map((field) => (
           <div key={field.id}>

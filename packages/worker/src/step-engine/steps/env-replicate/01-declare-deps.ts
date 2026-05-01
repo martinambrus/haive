@@ -225,6 +225,8 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         type: 'checkbox',
         id: 'preinstallDeps',
         label: 'Install project dependencies at image build time',
+        description:
+          'Bakes the package-manager install (npm/pnpm/composer/pip/etc.) into the Docker image so tasks start with vendored dependencies already in place. Trade-off: the image rebuilds whenever a lockfile changes. Leave off if you prefer a smaller, faster-to-build image and are happy to install deps on each task run.',
         default: detected.runtimes.length > 0,
       },
       {
@@ -470,7 +472,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
     }
     runtimes.push({
       language: 'java',
-      version,
+      version: normalizeJavaVersion(version),
       source: pomXml ? 'pom.xml' : buildGradle ? 'build.gradle' : 'build.gradle.kts',
       packageManager: null,
     });
@@ -598,6 +600,14 @@ function matchYamlField(text: string, field: string): string | null {
 
 function sanitizeVersion(raw: string): string {
   return raw.replace(/^[\^~><=!]+/, '').trim();
+}
+
+function normalizeJavaVersion(raw: string | null): string | null {
+  if (!raw) return raw;
+  const trimmed = raw.trim();
+  const parts = trimmed.split('.');
+  if (parts[0] === '1' && parts[1]) return parts[1];
+  return trimmed;
 }
 
 async function detectNodePackageManager(repoPath: string): Promise<PackageManager> {

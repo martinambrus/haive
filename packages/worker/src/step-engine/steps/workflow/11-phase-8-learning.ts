@@ -196,6 +196,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
 
   llm: {
     requiredCapabilities: ['tool_use'],
+    timeoutMs: 60 * 60 * 1000,
     buildPrompt: (args) => {
       const detected = args.detected as LearningDetect;
       const values = args.formValues as { observations?: string };

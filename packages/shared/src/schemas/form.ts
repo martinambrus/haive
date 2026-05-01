@@ -211,9 +211,26 @@ export const formFieldSchema = z.discriminatedUnion('type', [
 
 export type FormField = z.infer<typeof formFieldSchema>;
 
+/** Read-only expandable info card shown above the form fields. Use for
+ *  context the renderer should preview compactly (preview line) but make
+ *  available in full when the user opts in (body). Body is rendered as
+ *  pre-wrapped text. */
+export const infoSectionSchema = z.object({
+  /** Heading shown next to the disclosure triangle. */
+  title: z.string().min(1),
+  /** Optional one-line preview shown next to the title (e.g. counts, sizes). */
+  preview: z.string().optional(),
+  /** Full content shown when expanded. Markdown not rendered — pre-formatted. */
+  body: z.string(),
+});
+
+export type InfoSection = z.infer<typeof infoSectionSchema>;
+
 export const formSchemaSchema = z.object({
   title: z.string().min(1),
   description: z.string().optional(),
+  /** Optional disclosures rendered between description and fields. */
+  infoSections: z.array(infoSectionSchema).optional(),
   fields: z.array(formFieldSchema),
   submitLabel: z.string().optional(),
 });

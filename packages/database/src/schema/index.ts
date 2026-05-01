@@ -42,7 +42,11 @@ export const cliSandboxBuildStatusEnum = pgEnum('cli_sandbox_build_status', [
   'ready',
   'failed',
 ]);
-export const cliInvocationModeEnum = pgEnum('cli_invocation_mode', ['cli', 'subagent_emulated']);
+export const cliInvocationModeEnum = pgEnum('cli_invocation_mode', [
+  'cli',
+  'subagent_emulated',
+  'agent_mining',
+]);
 
 export const repoSourceEnum = pgEnum('repo_source', [
   'local_path',
@@ -81,6 +85,13 @@ export const stepStatusEnum = pgEnum('step_status', [
   'done',
   'failed',
   'skipped',
+]);
+
+export const agentMiningStatusEnum = pgEnum('agent_mining_status', [
+  'pending',
+  'running',
+  'done',
+  'failed',
 ]);
 
 export const containerRuntimeEnum = pgEnum('container_runtime', ['clawker', 'dockerode']);
@@ -395,6 +406,15 @@ export const tasks = pgTable(
     memoryLimitMb: integer('memory_limit_mb'),
     cpuLimitMilli: integer('cpu_limit_milli'),
     metadata: jsonb('metadata').$type<Record<string, unknown>>(),
+    /** Per-task overrides for the maximum loop iterations a step can run.
+     *  Map of stepId → maxIterations. The runner reads this when a step
+     *  declares a loop hook and falls back to the loopSpec default when
+     *  the step id is absent. Lets the new-task form pick a budget per
+     *  loop step (e.g. spec-quality 5 instead of the default 3). */
+    stepLoopLimits: jsonb('step_loop_limits')
+      .$type<Record<string, number>>()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
     errorMessage: text('error_message'),
     startedAt: timestamp('started_at'),
     completedAt: timestamp('completed_at'),
@@ -424,6 +444,17 @@ export const taskSteps = pgTable(
     formSchema: jsonb('form_schema').$type<unknown>(),
     formValues: jsonb('form_values').$type<Record<string, unknown>>(),
     output: jsonb('output').$type<unknown>(),
+    /** Append-only history of every loop pass this step ran. Each entry
+     *  records the LLM output (if any), the apply output, and whether the
+     *  loop should still continue after that pass. Empty array on steps
+     *  that don't declare a loop hook. */
+    iterations: jsonb('iterations')
+      .$type<StepIterationEntry[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    /** Mirror of jsonb_array_length(iterations) so the runner can branch
+     *  on iteration count without parsing the JSONB blob. */
+    iterationCount: integer('iteration_count').notNull().default(0),
     statusMessage: text('status_message'),
     errorMessage: text('error_message'),
     errorHint: jsonb('error_hint').$type<TaskStepErrorHint>(),
@@ -437,6 +468,23 @@ export const taskSteps = pgTable(
     uniqueIndex('task_steps_task_step_idx').on(table.taskId, table.stepId),
   ],
 );
+
+export interface StepIterationEntry {
+  iteration: number;
+  llmOutput: unknown;
+  applyOutput: unknown;
+  /** True when the loop's shouldContinue predicate was still true after
+   *  this pass — meaning another pass would have run if budget remained.
+   *  False on the final pass (either shouldContinue returned false or the
+   *  iteration budget was exhausted). */
+  continueRequested: boolean;
+  /** Set on the LAST iteration when shouldContinue was still true but no
+   *  more passes were attempted because the iteration budget was hit. The
+   *  user-facing gate uses this to flag "loop budget exhausted, spec may
+   *  still have findings". */
+  exhaustedBudget?: boolean;
+  recordedAt: string;
+}
 
 export const taskEvents = pgTable(
   'task_events',
@@ -471,6 +519,57 @@ export const taskUserInputs = pgTable(
   (table) => [index('task_user_inputs_task_step_id_idx').on(table.taskStepId)],
 );
 
+export const taskStepAgentMinings = pgTable(
+  'task_step_agent_minings',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    taskStepId: uuid('task_step_id')
+      .notNull()
+      .references(() => taskSteps.id, { onDelete: 'cascade' }),
+    agentId: varchar('agent_id', { length: 128 }).notNull(),
+    agentTitle: varchar('agent_title', { length: 256 }),
+    cliProviderId: uuid('cli_provider_id').references(() => cliProviders.id, {
+      onDelete: 'set null',
+    }),
+    status: agentMiningStatusEnum('status').notNull().default('pending'),
+    cliInvocationId: uuid('cli_invocation_id'),
+    output: jsonb('output').$type<unknown>(),
+    rawOutput: text('raw_output'),
+    errorMessage: text('error_message'),
+    startedAt: timestamp('started_at'),
+    endedAt: timestamp('ended_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [
+    index('task_step_agent_minings_task_step_id_idx').on(table.taskStepId),
+    uniqueIndex('task_step_agent_minings_step_agent_idx').on(table.taskStepId, table.agentId),
+  ],
+);
+
+// --- Per-user, per-step CLI provider preferences -----------------------
+// Records which CLI a user last picked for each step id. Step-runner uses
+// this as the preferred provider when dispatching that step. Set by:
+//   - the runner whenever a step's CLI invocation is enqueued (so the
+//     last-actually-used wins, not just the dropdown click)
+//   - the UI dropdown when the user explicitly picks a CLI for a step
+// FK cascade: deleting the user or the cli_provider drops the row.
+
+export const userStepCliPreferences = pgTable(
+  'user_step_cli_preferences',
+  {
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    stepId: varchar('step_id', { length: 128 }).notNull(),
+    cliProviderId: uuid('cli_provider_id')
+      .notNull()
+      .references(() => cliProviders.id, { onDelete: 'cascade' }),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('user_step_cli_pref_pk').on(table.userId, table.stepId)],
+);
+
 // --- CLI Invocations -----------------------------------------------------
 
 export const cliInvocations = pgTable(
@@ -489,6 +588,16 @@ export const cliInvocations = pgTable(
     envVars: jsonb('env_vars').$type<Record<string, string>>(),
     exitCode: integer('exit_code'),
     rawOutput: text('raw_output'),
+    /** Full live-stream transcript: command header + every stdout/stderr
+     *  chunk + the final exit annotation, exactly as the cli-stream WS
+     *  delivered them. Used by the inline per-step terminal viewer for
+     *  historical replay. Null on rows written before this column was
+     *  added; consumers should fall back to rawOutput in that case. */
+    streamLog: text('stream_log'),
+    /** Set when the step-runner has incorporated this invocation's output
+     *  into an apply pass. resolveLlmPhase ignores consumed rows so the
+     *  next pass enqueues a fresh invocation. Null = pending or in-flight. */
+    consumedAt: timestamp('consumed_at'),
     parsedOutput: jsonb('parsed_output').$type<unknown>(),
     tokenUsage: jsonb('token_usage').$type<{
       inputTokens: number;

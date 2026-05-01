@@ -42,6 +42,8 @@ export interface DockerRunOpts {
   network?: string;
   /** Run container as this user (e.g. 'node', '1000:1000'). Omit for image default. */
   user?: string;
+  /** Docker labels to attach. Used so cancel can find and kill containers by task id. */
+  labels?: Record<string, string>;
   timeoutMs?: number;
   onStdoutChunk?: (chunk: string) => void;
   onStderrChunk?: (chunk: string) => void;
@@ -260,7 +262,13 @@ export const defaultDockerRunner: DockerRunner = {
   },
 
   async run(opts) {
-    const args = ['run', '--rm'];
+    const containerName = `haive-cli-${randomUUID()}`;
+    const args = ['run', '--rm', '--name', containerName];
+    if (opts.labels) {
+      for (const [k, v] of Object.entries(opts.labels)) {
+        args.push('--label', `${k}=${v}`);
+      }
+    }
     if (opts.user) args.push('--user', opts.user);
     if (opts.workdir) args.push('-w', opts.workdir);
     if (opts.network) args.push('--network', opts.network);
@@ -290,12 +298,22 @@ export const defaultDockerRunner: DockerRunner = {
       }
     }
     args.push(opts.image, ...opts.cmd);
-    return spawnAndCollect('docker', args, {
+    const result = await spawnAndCollect('docker', args, {
       timeoutMs: opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
       onStdoutChunk: opts.onStdoutChunk,
       onStderrChunk: opts.onStderrChunk,
       signal: opts.signal,
     });
+    // SIGKILL/SIGTERM on the docker CLI client doesn't propagate to the
+    // dockerd-side container; --rm only fires when the container itself
+    // exits. Force-remove the container by name when our wrapper killed
+    // the client (timedOut) or returned with no exit code (signal abort).
+    if (result.timedOut || result.exitCode === null) {
+      await spawnAndCollect('docker', ['rm', '-f', containerName], { timeoutMs: 15_000 }).catch(
+        () => undefined,
+      );
+    }
+    return result;
   },
 
   async volumeCreate(name) {

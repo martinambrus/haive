@@ -1,6 +1,11 @@
 # syntax=docker/dockerfile:1.7
 FROM node:24-alpine AS base
-RUN apk add --no-cache python3 make g++ libc6-compat
+# docker-cli: api shells out to `docker rm -f` to interrupt sandbox CLI
+# containers when the user clicks Stop & Retry on a running step. The
+# socket mount is supplied by docker-compose; the binary must live in the
+# image. Install once in the base layer so dev (`target: deps`) and prod
+# (`production`) both have it.
+RUN apk add --no-cache python3 make g++ libc6-compat docker-cli
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 WORKDIR /app
 

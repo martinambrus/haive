@@ -314,6 +314,11 @@ export interface Task {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Set on GET /tasks/:id when a CLI invocation is currently in flight
+   *  (started, not ended, not superseded). Drives the Terminal tab and the
+   *  live cli-stream WebSocket. Always null on the list endpoint. */
+  activeCliInvocationId?: string | null;
+  activeCliStepId?: string | null;
 }
 
 export interface TaskStep {
@@ -334,6 +339,24 @@ export interface TaskStep {
   endedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Per-(user, step) CLI preference. Set when the user picks a CLI for
+   *  this step from the dropdown, or when the runner records the actually-
+   *  used provider after dispatch. The dropdown defaults to this when
+   *  present; falls back to the task-level cliProviderId otherwise. */
+  preferredCliProviderId: string | null;
+  /** True iff this step was skipped via the user-clicked "Skip" action.
+   *  Auto-skipped steps (shouldRun → false, or detect setting skipReason)
+   *  have this as false. Used to hide the retry button on auto-skips. */
+  manuallySkipped: boolean;
+  /** Number of non-superseded CLI invocations attached to this step. Drives
+   *  whether the inline terminal toggle is rendered — 0 means the step has
+   *  no terminal output to show (deterministic-only or pending steps). */
+  cliInvocationCount: number;
+  /** Number of completed loop passes for steps that declare a loop hook
+   *  (e.g. spec-quality review). Always 0 for non-loop steps. The step
+   *  card surfaces this as an "iteration N/M" badge while the step is
+   *  active so the user sees progress through the loop budget. */
+  iterationCount: number;
 }
 
 export type StepErrorHint = {
@@ -341,6 +364,29 @@ export type StepErrorHint = {
   providerId: string;
   providerName: string;
 };
+
+export type CliInvocationMode = 'cli' | 'agent_mining' | 'subagent_native' | 'subagent_sequential';
+
+export interface CliInvocationSummary {
+  id: string;
+  mode: CliInvocationMode;
+  exitCode: number | null;
+  durationMs: number | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  createdAt: string;
+  errorMessage: string | null;
+  isActive: boolean;
+}
+
+export interface CliInvocationOutput {
+  id: string;
+  rawOutput: string;
+  exitCode: number | null;
+  errorMessage: string | null;
+  durationMs: number | null;
+  isActive: boolean;
+}
 
 export interface TaskEvent {
   id: string;
@@ -353,7 +399,7 @@ export interface TaskEvent {
 
 export type TaskAction = 'cancel' | 'retry';
 
-export type StepAction = 'retry' | 'skip';
+export type StepAction = 'retry';
 
 export interface StepActionResponse {
   ok: boolean;

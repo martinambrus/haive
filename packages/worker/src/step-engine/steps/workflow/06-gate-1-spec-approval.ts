@@ -6,6 +6,8 @@ interface SpecGateDetect {
   specSummary: string;
   qualityScore: number | null;
   qualityFindings: string[];
+  iterationHistory: string[];
+  exhaustedBudget: boolean;
 }
 
 interface SpecGateApply {
@@ -27,6 +29,13 @@ interface QualityFinding {
 interface SpecQualityOutput {
   score?: number;
   findings?: QualityFinding[];
+  spec?: string;
+}
+
+interface IterationEntry {
+  iteration?: number;
+  applyOutput?: SpecQualityOutput;
+  exhaustedBudget?: boolean;
 }
 
 function formatFinding(f: QualityFinding): string {
@@ -34,6 +43,20 @@ function formatFinding(f: QualityFinding): string {
   const sev = f.severity ?? 'info';
   const comment = f.comment ?? '';
   return `[${sev.toUpperCase()}] ${dim}: ${comment}`;
+}
+
+function summariseIteration(entry: IterationEntry): string {
+  const idx = (entry.iteration ?? 0) + 1;
+  const out = entry.applyOutput;
+  const score = typeof out?.score === 'number' ? `${out.score}/10` : '?/10';
+  const fc = Array.isArray(out?.findings) ? out!.findings!.length : 0;
+  const errs = Array.isArray(out?.findings)
+    ? out!.findings!.filter((f) => f.severity === 'error').length
+    : 0;
+  const warns = Array.isArray(out?.findings)
+    ? out!.findings!.filter((f) => f.severity === 'warn').length
+    : 0;
+  return `Iteration ${idx}: score ${score}, ${fc} finding(s) (${errs} error / ${warns} warn)`;
 }
 
 export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply> = {
@@ -52,10 +75,15 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
     const planOutput = (plan?.output as PrePlanningOutput | null) ?? {};
     const qualityOutput = (quality?.output as SpecQualityOutput | null) ?? {};
+    // Step 05 amends the spec across loop iterations; prefer its final
+    // amended body when present, fall back to the original 04 spec/summary.
+    const specBody = qualityOutput.spec ?? planOutput.spec ?? planOutput.summary ?? '';
     const specSummary =
-      planOutput.summary ??
-      planOutput.spec ??
-      'No specification was produced. The pre-planning step may have been skipped.';
+      specBody.length > 0
+        ? specBody
+        : 'No specification was produced. The pre-planning step may have been skipped.';
+    const iterations = (quality?.iterations ?? []) as IterationEntry[];
+    const exhaustedBudget = iterations.some((entry) => entry.exhaustedBudget === true);
     return {
       specSummary: specSummary.slice(0, 4000),
       qualityScore: typeof qualityOutput.score === 'number' ? qualityOutput.score : null,
@@ -64,6 +92,8 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
             typeof f === 'object' && f !== null ? formatFinding(f) : String(f),
           )
         : [],
+      iterationHistory: iterations.map(summariseIteration),
+      exhaustedBudget,
     };
   },
 
@@ -74,11 +104,22 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
       '',
       '=== Quality review ===',
       detected.qualityScore !== null
-        ? `Score: ${detected.qualityScore}/10`
+        ? `Score: ${detected.qualityScore}/10 (final pass)`
         : 'No quality score available.',
       detected.qualityFindings.length > 0
         ? detected.qualityFindings.map((f) => `- ${f}`).join('\n')
         : 'No findings recorded.',
+      ...(detected.iterationHistory.length > 0
+        ? ['', '=== Iteration history ===', ...detected.iterationHistory.map((h) => `- ${h}`)]
+        : []),
+      ...(detected.exhaustedBudget
+        ? [
+            '',
+            '⚠️  Loop budget exhausted: the spec quality reviewer still flagged',
+            '    warn/error issues on the final pass. You can approve as-is, or',
+            '    reject and re-run with a higher iteration budget.',
+          ]
+        : []),
     ].join('\n');
     return {
       title: 'Gate 1: Spec approval',

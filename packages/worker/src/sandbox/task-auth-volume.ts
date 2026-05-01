@@ -292,6 +292,75 @@ export async function seedRtkInTaskVolume(
   );
 }
 
+/** Merge `mcpServers` into the gemini task auth volume's settings.json
+ *  (path index 1 == ~/.gemini). Gemini reads MCP server config from the SAME
+ *  file that holds `selectedAuthType`, so writing the MCP config as an
+ *  extraFile bind-mount overlays — and obscures — the auth-volume's
+ *  settings.json, leaving the CLI without an auth method. Doing the merge
+ *  on-volume preserves the auth fields and any other keys (rtk hooks,
+ *  folderTrust, etc) that earlier seed steps wrote.
+ *
+ *  No-op when servers is empty. Best-effort: failures are logged and the
+ *  spawn proceeds — the user sees the MCP-related error from the CLI rather
+ *  than a hard worker failure. */
+export async function mergeGeminiMcpIntoSettings(
+  taskId: string,
+  mcpServers: Record<string, unknown>,
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<void> {
+  if (Object.keys(mcpServers).length === 0) return;
+  const meta = getCliProviderMetadata('gemini');
+  // Index 1 is `~/.gemini` per shared catalog; skip if absent for some
+  // reason (would mean the catalog drifted).
+  if (meta.authConfigPaths.length < 2) return;
+  const taskVol = cliAuthTaskVolumeName(taskId, 'gemini', 1);
+  if (!(await runner.volumeExists(taskVol))) return;
+
+  // Embed the MCP servers JSON via a heredoc so any prompt-style content
+  // can't accidentally inject shell. node is in the sandbox image and gives
+  // us atomic JSON merge with parse-error tolerance.
+  const mcpJson = JSON.stringify(mcpServers);
+  const script = `
+set -e
+mkdir -p /vol
+cd /vol
+node -e '
+const fs = require("fs");
+const path = "/vol/settings.json";
+let cur = {};
+if (fs.existsSync(path)) {
+  try { cur = JSON.parse(fs.readFileSync(path, "utf8")) || {}; }
+  catch (err) { console.error("settings.json parse failed, replacing:", err.message); cur = {}; }
+}
+const incoming = ${JSON.stringify(mcpJson)};
+const servers = JSON.parse(incoming);
+cur.mcpServers = { ...(cur.mcpServers || {}), ...servers };
+fs.writeFileSync(path, JSON.stringify(cur, null, 2));
+'
+chown 1000:1000 /vol/settings.json
+`;
+
+  const result = await runner.run({
+    image: HELPER_IMAGE,
+    cmd: ['sh', '-c', script],
+    mounts: [{ source: taskVol, target: '/vol', readOnly: false }],
+    entrypoint: '',
+    user: 'root',
+    timeoutMs: HELPER_TIMEOUT_MS,
+  });
+  if (result.exitCode !== 0) {
+    log.warn(
+      { taskId, exitCode: result.exitCode, stderr: result.stderr.slice(-500) },
+      'gemini mcp merge helper exited non-zero',
+    );
+    return;
+  }
+  log.info(
+    { taskId, count: Object.keys(mcpServers).length },
+    'merged mcpServers into gemini settings.json',
+  );
+}
+
 export async function cleanupTaskAuthVolumes(
   taskId: string,
   runner: DockerRunner = defaultDockerRunner,

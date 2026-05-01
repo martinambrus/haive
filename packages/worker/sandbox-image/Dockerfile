@@ -26,7 +26,9 @@ RUN apk add --no-cache \
       coreutils \
       curl \
       git \
-      tini
+      ripgrep \
+      tini \
+      uv
 
 # rtk (Rust Token Killer) — proxies dev commands to compress tool output before
 # it lands in the LLM context. Pinned by tag + sha256; opt-in per-repo via

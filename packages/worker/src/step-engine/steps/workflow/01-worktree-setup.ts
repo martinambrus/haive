@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
@@ -136,17 +136,38 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     await ensureExcludeEntry(ctx.repoPath);
 
     const worktreePath = path.join(ctx.repoPath, WORKTREE_SUBDIR, branchName);
-    const result = await gitRun(ctx.repoPath, [
-      'worktree',
-      'add',
-      '-b',
-      branchName,
-      worktreePath,
-      base,
+    const branchExists = await gitRun(ctx.repoPath, [
+      'show-ref',
+      '--verify',
+      '--quiet',
+      `refs/heads/${branchName}`,
     ]);
-    if (result.code !== 0) {
-      throw new Error(
-        `git worktree add failed (exit ${result.code}): ${result.stderr || result.stdout}`,
+
+    const list = await gitRun(ctx.repoPath, ['worktree', 'list', '--porcelain']);
+    const isRegistered =
+      list.code === 0 && list.stdout.split('\n').some((l) => l === `worktree ${worktreePath}`);
+
+    if (isRegistered) {
+      ctx.logger.info({ worktreePath, branchName }, 'reusing existing worktree');
+    } else {
+      if (await pathExists(worktreePath)) {
+        await gitRun(ctx.repoPath, ['worktree', 'prune']);
+        await rm(worktreePath, { recursive: true, force: true });
+        ctx.logger.warn({ worktreePath }, 'removed orphan worktree directory before re-add');
+      }
+      const addArgs =
+        branchExists.code === 0
+          ? ['worktree', 'add', worktreePath, branchName]
+          : ['worktree', 'add', '-b', branchName, worktreePath, base];
+      const result = await gitRun(ctx.repoPath, addArgs);
+      if (result.code !== 0) {
+        throw new Error(
+          `git worktree add failed (exit ${result.code}): ${result.stderr || result.stdout}`,
+        );
+      }
+      ctx.logger.info(
+        { branchExists: branchExists.code === 0, branchName },
+        'worktree branch resolved',
       );
     }
 
