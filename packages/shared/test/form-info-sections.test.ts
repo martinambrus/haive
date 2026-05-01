@@ -30,6 +30,19 @@ describe('infoSectionSchema', () => {
   it('rejects non-string preview', () => {
     expect(() => infoSectionSchema.parse({ title: 'x', body: 'y', preview: 42 })).toThrow();
   });
+
+  it('accepts an optional defaultOpen flag', () => {
+    const opened = infoSectionSchema.parse({ title: 'x', body: 'y', defaultOpen: true });
+    const closed = infoSectionSchema.parse({ title: 'x', body: 'y', defaultOpen: false });
+    const omitted = infoSectionSchema.parse({ title: 'x', body: 'y' });
+    expect(opened.defaultOpen).toBe(true);
+    expect(closed.defaultOpen).toBe(false);
+    expect(omitted.defaultOpen).toBeUndefined();
+  });
+
+  it('rejects non-boolean defaultOpen', () => {
+    expect(() => infoSectionSchema.parse({ title: 'x', body: 'y', defaultOpen: 'yes' })).toThrow();
+  });
 });
 
 describe('formSchemaSchema with infoSections', () => {

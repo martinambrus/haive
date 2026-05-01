@@ -213,15 +213,21 @@ export type FormField = z.infer<typeof formFieldSchema>;
 
 /** Read-only expandable info card shown above the form fields. Use for
  *  context the renderer should preview compactly (preview line) but make
- *  available in full when the user opts in (body). Body is rendered as
- *  pre-wrapped text. */
+ *  available in full when the user opts in (body). Body is auto-rendered
+ *  as markdown (HTML) when it contains headings or fenced blocks; otherwise
+ *  it falls back to a pre-wrapped text block. */
 export const infoSectionSchema = z.object({
   /** Heading shown next to the disclosure triangle. */
   title: z.string().min(1),
   /** Optional one-line preview shown next to the title (e.g. counts, sizes). */
   preview: z.string().optional(),
-  /** Full content shown when expanded. Markdown not rendered — pre-formatted. */
+  /** Full content shown when expanded. */
   body: z.string(),
+  /** When true, the disclosure renders open on first paint. Use for the
+   *  primary section users should see immediately (e.g. spec summary on
+   *  the gate-1 form). Defaults to closed so secondary context stays out
+   *  of the way. */
+  defaultOpen: z.boolean().optional(),
 });
 
 export type InfoSection = z.infer<typeof infoSectionSchema>;

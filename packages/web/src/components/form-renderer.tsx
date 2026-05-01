@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { diffLines } from 'diff';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { DiffDetails, FormField, FormSchema, LeafFormField } from '@haive/shared';
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
@@ -139,6 +140,7 @@ export function FormRenderer({
             return (
               <details
                 key={`${section.title}-${i}`}
+                open={section.defaultOpen ?? false}
                 className="rounded-md border border-neutral-800 bg-neutral-950/60"
               >
                 <summary className="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900">
@@ -149,7 +151,7 @@ export function FormRenderer({
                 </summary>
                 {isMd ? (
                   <div className="haive-md max-h-96 overflow-auto border-t border-neutral-800 px-3 py-2">
-                    <ReactMarkdown>{section.body}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{section.body}</ReactMarkdown>
                   </div>
                 ) : (
                   <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-t border-neutral-800 px-3 py-2 text-xs text-neutral-300">
