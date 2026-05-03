@@ -164,15 +164,15 @@ describe('composeSandboxImage', () => {
       expect(result.dockerfileBody).toContain('astral.sh/uv/install.sh');
     });
 
-    it('short-circuits the install when both uvx AND rg are already on PATH', () => {
+    it('short-circuits the install when uvx, rg, nano and tmux are already on PATH', () => {
       const result = composeSandboxImage({
         envTemplateDockerfile: null,
         provider: claudeCodeProvider,
       });
-      // Both binaries must be present for the early exit; missing rg
-      // alone re-runs the apk/apt install line.
+      // All four binaries must be present for the early exit; any one
+      // missing re-runs the apk/apt install line.
       expect(result.dockerfileBody).toContain(
-        'command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1; then exit 0',
+        'command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v nano >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then exit 0; fi',
       );
     });
   });
