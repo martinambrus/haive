@@ -146,6 +146,33 @@ describe('envDetectStep', () => {
     expect(data.paths.envFiles).toContain('.env');
   });
 
+  it('derives project name from .git/config origin url when basename is uuid-like', async () => {
+    // Simulate the storage-root layout: <root>/<uuid>/. With no container
+    // config and no DB row, the legacy code would return the UUID basename.
+    const uuid = '9afb49bc-7f8b-4a9f-b32c-fafa32a073f6';
+    const repoPath = path.join(tmpRoot, uuid);
+    await mkdir(path.join(repoPath, '.git'), { recursive: true });
+    await writeFile(
+      path.join(repoPath, '.git', 'config'),
+      [
+        '[core]',
+        '\trepositoryformatversion = 0',
+        '[remote "origin"]',
+        '\turl = git@github.com:acme/cool-project.git',
+        '\tfetch = +refs/heads/*:refs/remotes/origin/*',
+      ].join('\n'),
+    );
+
+    const data = await runDetect(repoPath);
+    expect(data.project.name).toBe('cool-project');
+  });
+
+  it('falls back to dir basename when name is unrecoverable from disk', async () => {
+    // No .git, no container config, no DB — basename is the only signal.
+    const data = await runDetect(tmpRoot);
+    expect(data.project.name).toBe(path.basename(tmpRoot));
+  });
+
   it('falls back to general framework on empty repo and warns', async () => {
     const result = (await envDetectStep.detect!(fakeCtx(tmpRoot))) as DetectResult;
     const data = result.data as unknown as EnvDetectData;

@@ -1,8 +1,72 @@
 import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
+import { eq } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
 import { FRAMEWORK_PATTERNS, type FrameworkName, type DetectResult } from '@haive/shared';
 import type { StepContext, StepDefinition, LlmBuildArgs } from '../../step-definition.js';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const GENERIC_NAMES = new Set([
+  '',
+  'unnamed-repo',
+  'unnamed',
+  'archive',
+  'repo',
+  'project',
+  'unknown',
+]);
+
+function looksLikeBadName(name: string | null | undefined): boolean {
+  if (!name) return true;
+  const trimmed = name.trim().toLowerCase();
+  if (GENERIC_NAMES.has(trimmed)) return true;
+  if (UUID_RE.test(trimmed)) return true;
+  return false;
+}
+
+function deriveNameFromGitUrl(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  const cleaned = trimmed.replace(/\.git\/?$/i, '').replace(/\/+$/, '');
+  const lastSegment = cleaned.split(/[/:]/).pop();
+  return lastSegment ? lastSegment.trim() : null;
+}
+
+async function detectGitRemoteName(repoPath: string): Promise<string | null> {
+  const text = await readTextSafe(path.join(repoPath, '.git', 'config'));
+  if (!text) return null;
+  const originBlockMatch = text.match(/\[remote\s+"origin"\][\s\S]*?(?=\n\[|$)/);
+  const block = originBlockMatch?.[0];
+  if (!block) return null;
+  const urlMatch = block.match(/^\s*url\s*=\s*(.+)$/m);
+  const url = urlMatch?.[1]?.trim();
+  if (!url) return null;
+  return deriveNameFromGitUrl(url);
+}
+
+async function loadRepoNameForTask(
+  db: Database | undefined,
+  taskId: string,
+): Promise<string | null> {
+  // Tests construct StepContext with `db: undefined as never`, so guard
+  // before touching the query proxy.
+  if (!db) return null;
+  try {
+    const taskRow = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { repositoryId: true },
+    });
+    if (!taskRow?.repositoryId) return null;
+    const repo = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, taskRow.repositoryId),
+      columns: { name: true },
+    });
+    return repo?.name ?? null;
+  } catch {
+    return null;
+  }
+}
 
 type ContainerType = 'ddev' | 'docker-compose' | 'lando' | 'vagrant' | 'none';
 
@@ -376,6 +440,7 @@ async function collectEnvFiles(
 /* ------------------------------------------------------------------ */
 
 interface LlmEnrichment {
+  projectName: string | null;
   framework: string | null;
   primaryLanguage: string | null;
   localUrl: string | null;
@@ -418,7 +483,8 @@ function isValidEnrichment(v: Record<string, unknown>): boolean {
   return (
     typeof v === 'object' &&
     v !== null &&
-    (typeof v.framework === 'string' ||
+    (typeof v.projectName === 'string' ||
+      typeof v.framework === 'string' ||
       typeof v.localUrl === 'string' ||
       typeof v.projectDescription === 'string' ||
       typeof v.buildTool === 'string' ||
@@ -428,6 +494,16 @@ function isValidEnrichment(v: Record<string, unknown>): boolean {
 
 function mergeEnrichment(base: EnvDetectData, enrichment: LlmEnrichment): EnvDetectData {
   const merged = { ...base, source: 'llm' as const };
+
+  if (enrichment.projectName && enrichment.projectName.trim().length > 0) {
+    const cleaned = enrichment.projectName.trim();
+    // Only override when the deterministic name is bad (UUID-shaped or
+    // generic placeholder). Otherwise keep the deterministic pick — the
+    // user will see and can edit it in the confirmation form anyway.
+    if (looksLikeBadName(merged.project.name) && !looksLikeBadName(cleaned)) {
+      merged.project = { ...merged.project, name: cleaned };
+    }
+  }
 
   if (enrichment.framework) {
     const fw = enrichment.framework as FrameworkName;
@@ -532,19 +608,21 @@ function buildEnvDetectPrompt(args: LlmBuildArgs): string {
     configContents || '(no config files found)',
     '',
     '## Instructions',
-    '1. Confirm or correct: framework, primaryLanguage',
-    '2. Detect the local development URL (from DDEV config, docker-compose port mappings, .env files, etc.)',
-    '3. Detect database type and version more precisely if possible',
-    '4. Identify the webserver (nginx, apache, etc.) and document root',
-    '5. Identify test frameworks (jest, vitest, phpunit, playwright, cypress, pytest, etc.) from config files or dependencies',
-    '6. Identify build tooling (vite, webpack, esbuild, turbo, nx, etc.)',
-    '7. Write a 1-2 sentence project description based on README or project structure',
-    '8. Detect runtime versions (PHP, Node, Python, etc.) from config files',
+    `1. Project name: the deterministic guess is "${data.project.name}". If that looks like a UUID, random hex, or a generic placeholder (unnamed-repo, archive, repo, project, unknown), derive a better human-readable name from the README title, package.json "name", composer.json "name" (use the part after the slash), or similar metadata. Otherwise emit null to keep the deterministic name.`,
+    '2. Confirm or correct: framework, primaryLanguage',
+    '3. Detect the local development URL (from DDEV config, docker-compose port mappings, .env files, etc.)',
+    '4. Detect database type and version more precisely if possible',
+    '5. Identify the webserver (nginx, apache, etc.) and document root',
+    '6. Identify test frameworks (jest, vitest, phpunit, playwright, cypress, pytest, etc.) from config files or dependencies',
+    '7. Identify build tooling (vite, webpack, esbuild, turbo, nx, etc.)',
+    '8. Write a 1-2 sentence project description based on README or project structure',
+    '9. Detect runtime versions (PHP, Node, Python, etc.) from config files',
     '',
     '## Required output format',
     'Emit exactly ONE JSON object inside a ```json fenced code block with this shape:',
     '```',
     '{',
+    '  "projectName": "<human-readable name or null to keep the deterministic guess>",',
     '  "framework": "<FrameworkName or null if deterministic was correct>",',
     '  "primaryLanguage": "<language or null>",',
     '  "localUrl": "<url or null>",',
@@ -601,7 +679,14 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
   async detect(ctx: StepContext): Promise<DetectResult> {
     const container = await detectContainer(ctx.repoPath);
     const stack = await detectStack(ctx.repoPath, container);
-    const projectName = container.projectName ?? path.basename(path.resolve(ctx.repoPath));
+    const gitRemoteName = await detectGitRemoteName(ctx.repoPath);
+    const dbRepoName = await loadRepoNameForTask(ctx.db, ctx.taskId);
+    const dirBasename = path.basename(path.resolve(ctx.repoPath));
+    const projectName =
+      container.projectName ??
+      (gitRemoteName && !looksLikeBadName(gitRemoteName) ? gitRemoteName : null) ??
+      (dbRepoName && !looksLikeBadName(dbRepoName) ? dbRepoName : null) ??
+      dirBasename;
     const data: EnvDetectData = {
       project: {
         name: projectName,
