@@ -12,6 +12,11 @@ import {
   loadPreviousStepOutput,
   pathExists,
 } from './_helpers.js';
+import {
+  buildTechInventory,
+  renderTechInventoryTable,
+  type TechInventory,
+} from './_tech-inventory.js';
 
 export interface AgentCandidate {
   id: string;
@@ -32,6 +37,8 @@ export interface AgentDiscoveryDetect {
   language: string | null;
   /** Transient — file tree for LLM prompt, stripped before persisting. */
   __fileTree?: string;
+  /** Transient — secondary tech inventory, stripped before persisting. */
+  __techInventory?: TechInventory;
 }
 
 export interface AgentDiscoveryApply {
@@ -344,6 +351,16 @@ async function collectKeyFiles(repoPath: string): Promise<string> {
     'Cargo.toml',
     'Gemfile',
     'go.mod',
+    'build.gradle',
+    'build.gradle.kts',
+    'settings.gradle',
+    'settings.gradle.kts',
+    'gradle.properties',
+    'pom.xml',
+    'mix.exs',
+    'Pipfile',
+    'requirements.txt',
+    'Dockerfile',
   ];
   const parts: string[] = [];
   for (const name of candidates) {
@@ -384,16 +401,58 @@ interface LlmAgentSuggestion {
   body?: LlmCustomAgentBody;
 }
 
+/** Categories whose specialist agent always pays off — non-trivial DSL,
+ *  protocol, or surface that benefits from focused expertise. Used both by
+ *  the LLM prompt (to mark Tier 1 rows) and by the post-LLM safety net (to
+ *  inject any Tier 1 row the LLM dropped). */
+const MANDATORY_CATEGORIES: ReadonlySet<string> = new Set([
+  'build',
+  'framework',
+  'db',
+  'orm',
+  'graphics',
+  'queue',
+  'search',
+  'pdf',
+  'api',
+]);
+
 function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
   const detected = args.detected as AgentDiscoveryDetect;
   const fileTree = detected.__fileTree ?? '(no file tree)';
+  const inventory = detected.__techInventory ?? { items: [], scannedManifests: [] };
 
   const predefinedList = detected.candidates
     .map((c) => `- ${c.id}: ${c.label} — ${c.hint} (${c.count} matching files)`)
     .join('\n');
 
+  const baselineIds = new Set(detected.candidates.map((c) => c.id));
+  const inventoryNotInBaseline = inventory.items.filter(
+    (it) => !baselineIds.has(`${it.name}-specialist`) && !baselineIds.has(it.name),
+  );
+  const inventoryTable = renderTechInventoryTable(inventory);
+  const mandatoryItems = inventoryNotInBaseline.filter((it) =>
+    MANDATORY_CATEGORIES.has(it.category),
+  );
+  const optionalItems = inventoryNotInBaseline.filter(
+    (it) => !MANDATORY_CATEGORIES.has(it.category),
+  );
+  const formatRow = (it: TechInventory['items'][number]): string =>
+    `- ${it.displayName} (${it.category}, ${it.fileCount} files, manifests: ${it.manifests.join(', ') || 'source-only'}) → suggested agent id: \`${it.name}-specialist\``;
+  const mandatoryList =
+    mandatoryItems.length === 0
+      ? '(none — every mandatory-tier technology is already covered by a predefined agent)'
+      : mandatoryItems.map(formatRow).join('\n');
+  const optionalList =
+    optionalItems.length === 0 ? '(none)' : optionalItems.map(formatRow).join('\n');
+
   return [
     'You are analysing a software repository to recommend which Claude Code subagents should be created for it.',
+    '',
+    '## Agents vs skills — IMPORTANT',
+    'AGENTS = technical / framework expertise (how to write a Drupal hook, how to use TCPDF, how to query PostgreSQL with CTEs, how to call LWJGL OpenGL bindings).',
+    'SKILLS = business / domain knowledge (what an "inspection" is, the order-fulfilment state machine, which fields belong to which form).',
+    'You are picking AGENTS only. Do NOT propose agents whose value would come from understanding business entities, workflows, or domain rules — those become skills in a later step.',
     '',
     '## Project info',
     `Framework: ${detected.framework ?? 'unknown'}`,
@@ -410,22 +469,33 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '## Predefined agents (from deterministic scan)',
     predefinedList,
     '',
+    '## Secondary technology inventory (deterministic dep scan + import grep, threshold 5+ files for non-framework categories)',
+    inventoryTable,
+    '',
+    '### Tier 1 — REQUIRED specialists (build / framework / db / orm / graphics / queue / search / pdf / api)',
+    'Each row below is a non-trivial DSL, protocol, or surface that benefits from focused expertise. You MUST emit a `<name>-specialist` custom agent for every row, UNLESS the row is literally covered by one of the predefined agents above (state the overlap explicitly when skipping). Do NOT skip a row by labelling it "boilerplate", "config-only", or "common knowledge" — the deterministic scanner has already enforced a usage threshold; if it is on this list, it is significant enough.',
+    mandatoryList,
+    '',
+    '### Tier 2 — OPTIONAL specialists (http / css / state / auth / logging / testing / other)',
+    'Propose a `<name>-specialist` for any row where the project clearly customises beyond standard usage (custom logging pipelines, complex Tailwind themes, multi-strategy auth). Skip rows where general developer knowledge plus the predefined agents cover it. Briefly note your reasoning when skipping.',
+    optionalList,
+    '',
     '## Instructions',
-    '1. Review the file tree and config files to understand the project structure.',
-    '2. For each predefined agent above, decide if it is relevant to this project (true/false).',
-    '3. Suggest additional custom agents specific to this project that are NOT in the predefined list.',
-    '   Custom agents should cover project-specific concerns like specific frameworks, service layers, or domain patterns you see in the file tree.',
-    '   Only suggest custom agents that genuinely add value — do not pad the list.',
-    '4. For each custom agent, provide a FULL structured body with the following fields, tailored to this repository:',
+    '1. Review the file tree, key config files, and the technology inventory above.',
+    '2. For each predefined agent, decide if it is relevant to this project (true/false).',
+    '3. Apply the Tier 1 / Tier 2 rules above when emitting custom agents. Tier 1 rows that are NOT skipped MUST appear in `custom`.',
+    '4. You MAY suggest additional technical agents not in the inventory if the file tree or config files show another framework/library/tool with non-trivial usage that the inventory missed.',
+    '5. Do NOT propose agents for business domain concepts (entities, workflows, validation rules, UI flows specific to this app). Those become skills.',
+    '6. For each custom agent, provide a FULL structured body with the following fields, tailored to this repository:',
     '   - title: Human-friendly title (Title Case).',
     '   - description: One-line description.',
     '   - color: one of blue, purple, green, gold, red, orange.',
-    '   - field: short domain label (e.g. backend, frontend, quality, security, database).',
+    '   - field: short domain label (e.g. backend, frontend, quality, security, database, graphics, build).',
     '   - tools: subset of [Read, Edit, Write, Grep, Glob, Bash] relevant to the role.',
     '   - coreMission: 1-2 sentences — what this agent exists to do.',
     '   - responsibilities: 3-5 bullets. Each starts with a bolded noun phrase in **double asterisks**, then an em dash, then the explanation.',
     '   - whenInvoked: 2-4 concrete trigger conditions.',
-    '   - executionSteps: 3-5 ordered steps, each as { title, body }. The body is one sentence minimum; ground it in this specific repo.',
+    '   - executionSteps: 3-5 ordered steps, each as { title, body }. The body is one sentence minimum; ground it in this specific repo and this specific technology.',
     '   - outputFormat: a code-block (triple-backtick fenced) showing the structured shape the agent should emit.',
     '   - qualityCriteria: 3-5 bullets describing verifiable post-conditions.',
     '   - antiPatterns: 3-5 bullets describing what this agent MUST NOT do (each a concrete failure mode, not generic advice).',
@@ -678,6 +748,39 @@ export function buildAgentSpecFromLlm(
   };
 }
 
+/** Safety net: ensure every Tier 1 inventory item ends up as a candidate
+ *  even if the LLM dropped it. Existing candidates with the same id (or the
+ *  bare tech name) are left untouched — bundle/scan/llm sources win over
+ *  this synthesised default. */
+export function injectMissingTier1Specialists(
+  candidates: AgentCandidate[],
+  inventory: TechInventory,
+): void {
+  const existingIds = new Set(candidates.map((c) => c.id));
+  for (const it of inventory.items) {
+    if (!MANDATORY_CATEGORIES.has(it.category)) continue;
+    const id = `${it.name}-specialist`;
+    if (existingIds.has(id) || existingIds.has(it.name)) continue;
+    const label = `${it.displayName} specialist`;
+    const hint = `${it.category} expertise for ${it.displayName}`;
+    const body = buildAgentSpecFromLlm(id, label, hint, {
+      title: `${it.displayName} Specialist`,
+      description: `Owns ${it.displayName} (${it.category}) usage in this repository.`,
+      field: it.category,
+    });
+    candidates.push({
+      id,
+      label,
+      hint,
+      count: it.fileCount,
+      recommended: true,
+      source: 'llm',
+      ...(body ? { body } : {}),
+    });
+    existingIds.add(id);
+  }
+}
+
 function enrichCandidates(
   detected: AgentDiscoveryDetect,
   llmOutput: unknown,
@@ -713,36 +816,43 @@ function enrichCandidates(
       custom: LlmAgentSuggestion[];
     } | null;
   }
-  if (!llmResult) return candidates;
+  if (llmResult) {
+    // Update recommendation flags for predefined agents
+    if (llmResult.predefined) {
+      for (const c of candidates) {
+        if (c.id in llmResult.predefined) {
+          c.recommended = llmResult.predefined[c.id]!;
+        }
+      }
+    }
 
-  // Update recommendation flags for predefined agents
-  if (llmResult.predefined) {
-    for (const c of candidates) {
-      if (c.id in llmResult.predefined) {
-        c.recommended = llmResult.predefined[c.id]!;
+    // Add custom agents suggested by LLM
+    if (llmResult.custom) {
+      const existingIds = new Set(candidates.map((c) => c.id));
+      for (const custom of llmResult.custom) {
+        if (!custom.id || existingIds.has(custom.id)) continue;
+        const label = custom.label || custom.id;
+        const hint = custom.hint || 'AI-suggested agent';
+        const body = buildAgentSpecFromLlm(custom.id, label, hint, custom.body);
+        candidates.push({
+          id: custom.id,
+          label,
+          hint,
+          count: 0,
+          recommended: custom.recommended !== false,
+          source: 'llm',
+          ...(body ? { body } : {}),
+        });
+        existingIds.add(custom.id);
       }
     }
   }
 
-  // Add custom agents suggested by LLM
-  if (llmResult.custom) {
-    const existingIds = new Set(candidates.map((c) => c.id));
-    for (const custom of llmResult.custom) {
-      if (!custom.id || existingIds.has(custom.id)) continue;
-      const label = custom.label || custom.id;
-      const hint = custom.hint || 'AI-suggested agent';
-      const body = buildAgentSpecFromLlm(custom.id, label, hint, custom.body);
-      candidates.push({
-        id: custom.id,
-        label,
-        hint,
-        count: 0,
-        recommended: custom.recommended !== false,
-        source: 'llm',
-        ...(body ? { body } : {}),
-      });
-      existingIds.add(custom.id);
-    }
+  /* Tier 1 safety net runs even when the LLM call failed entirely, so the
+     user always sees a build / framework / db / orm / graphics / queue /
+     search / pdf / api specialist for every inventory hit. */
+  if (detected.__techInventory) {
+    injectMissingTier1Specialists(candidates, detected.__techInventory);
   }
 
   return candidates;
@@ -865,8 +975,11 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
     await ctx.emitProgress('Reading key configuration files...');
     const keyFiles = await collectKeyFiles(ctx.repoPath);
 
+    await ctx.emitProgress('Building secondary technology inventory...');
+    const techInventory = await buildTechInventory(ctx.repoPath);
+
     await ctx.emitProgress(
-      `Found ${candidates.length} agent candidates, ${fileTree.split('\n').length} files mapped. Waiting for LLM analysis...`,
+      `Found ${candidates.length} agent candidates, ${fileTree.split('\n').length} files mapped, ${techInventory.items.length} secondary technologies. Waiting for LLM analysis...`,
     );
 
     ctx.logger.info(
@@ -876,6 +989,8 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
         candidateCount: candidates.length,
         recommendedCount: candidates.filter((c) => c.recommended).length,
         fileTreeLines: fileTree.split('\n').length,
+        techInventorySize: techInventory.items.length,
+        techInventoryNames: techInventory.items.map((it) => it.name),
       },
       'agent discovery detect complete',
     );
@@ -885,6 +1000,7 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
       language,
       __fileTree: fileTree,
       __keyFiles: keyFiles,
+      __techInventory: techInventory,
     } as AgentDiscoveryDetect & { __keyFiles: string };
   },
 
@@ -961,6 +1077,7 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
     // Strip transient fields
     delete (detected as unknown as Record<string, unknown>).__fileTree;
     delete (detected as unknown as Record<string, unknown>).__keyFiles;
+    delete (detected as unknown as Record<string, unknown>).__techInventory;
 
     // Apply user selections
     const values = args.formValues as { acceptedAgents?: string[] };
