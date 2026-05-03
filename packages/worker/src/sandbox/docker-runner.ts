@@ -200,7 +200,12 @@ async function spawnAndCollect(
 
 export const defaultDockerRunner: DockerRunner = {
   async build(opts) {
-    const args = ['build', '-t', opts.tag];
+    // --progress=plain emits flat newline-delimited output. Without it docker
+    // CLI defaults to a TTY-aware progress writer that occasionally stalls
+    // when piped into a non-TTY child stdio (the worker spawn case): verbose
+    // dpkg output (e.g. apt-installing nano on a slow mirror) overflows the
+    // pipe and the build hangs with no exit. Plain mode avoids the issue.
+    const args = ['build', '--progress=plain', '-t', opts.tag];
     if (opts.dockerfilePath) {
       args.push('-f', opts.dockerfilePath);
     }

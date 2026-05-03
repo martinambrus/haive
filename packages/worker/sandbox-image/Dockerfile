@@ -26,8 +26,10 @@ RUN apk add --no-cache \
       coreutils \
       curl \
       git \
+      nano \
       ripgrep \
       tini \
+      tmux \
       uv
 
 # rtk (Rust Token Killer) — proxies dev commands to compress tool output before

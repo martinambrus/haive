@@ -22,6 +22,7 @@ import { userSettingsRoutes } from './routes/user-settings.js';
 import { installCliLoginBannerWebSocket } from './routes/cli-login-banner.js';
 import { installCliStreamWebSocket } from './routes/cli-stream.js';
 import { installTerminalWebSocket } from './routes/terminal.js';
+import { installTerminalShellWebSocket } from './routes/terminal-shell.js';
 import { terminalSessionRoutes } from './routes/terminal-sessions.js';
 import { toolingRoutes } from './routes/tooling.js';
 
@@ -71,6 +72,7 @@ async function main(): Promise<void> {
   }) as unknown as Server;
 
   installTerminalWebSocket(server);
+  installTerminalShellWebSocket(server);
   installCliStreamWebSocket(server);
   installCliLoginBannerWebSocket(server);
 }

@@ -82,28 +82,36 @@ function resolveBase(envTemplateDockerfile: string | null): string {
  *   - `ripgrep`/`rg`: gemini's GrepTool falls back to a slower built-in
  *     scanner when `rg` is absent and emits a "Ripgrep is not available.
  *     Falling back to GrepTool" line on every search.
+ *   - `nano`: default editor for the interactive Terminal tab so users can
+ *     edit files directly in the shell. Without it the env-template often
+ *     ships only `vi`/`vim` (or nothing), which is a worse default.
+ *   - `tmux`: every Terminal WS attaches to a single per-container tmux
+ *     session ("haive-task") instead of spawning a fresh `bash -l`. That's
+ *     what gives "navigate-away-and-back" true persistence — env vars,
+ *     cwd, running foreground process, and pane buffer all survive the
+ *     reconnect because the bash + tmux server live independent of any WS.
  *  Auto-detects the package manager so the same line works on alpine (apk)
  *  and debian/ubuntu (apt). Falls back to the official uv installer when
- *  neither is present (rg has no upstream tarball install path here, so it
- *  is skipped silently on bespoke base images). The `command -v` short-
- *  circuits make re-runs cheap; both tools must be present for the early
- *  exit. Idempotent on its own line so a change here forces a clean cache
- *  miss across all composed images. */
+ *  neither is present (rg / nano / tmux have no upstream tarball install
+ *  path here, so they are skipped silently on bespoke base images). The
+ *  `command -v` short-circuits make re-runs cheap; ALL tools must be
+ *  present for the early exit. Idempotent on its own line so a change
+ *  here forces a clean cache miss across all composed images. */
 function buildHaiveRuntimeToolsLayer(): string {
   return [
     'RUN set -eux; \\',
-    '    if command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1; then exit 0; fi; \\',
+    '    if command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v nano >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then exit 0; fi; \\',
     '    if command -v apk >/dev/null 2>&1; then \\',
-    '        apk add --no-cache uv ripgrep; \\',
+    '        apk add --no-cache uv ripgrep nano tmux; \\',
     '    elif command -v apt-get >/dev/null 2>&1; then \\',
     '        apt-get update; \\',
-    '        apt-get install -y --no-install-recommends curl ca-certificates ripgrep; \\',
+    '        apt-get install -y --no-install-recommends curl ca-certificates ripgrep nano tmux; \\',
     '        if ! command -v uvx >/dev/null 2>&1; then \\',
     '            curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh; \\',
     '        fi; \\',
     '        rm -rf /var/lib/apt/lists/*; \\',
     '    else \\',
-    '        echo "haive-runtime-tools: no apk/apt — uv/ripgrep install skipped" >&2; \\',
+    '        echo "haive-runtime-tools: no apk/apt — uv/ripgrep/nano/tmux install skipped" >&2; \\',
     '    fi',
   ].join('\n');
 }

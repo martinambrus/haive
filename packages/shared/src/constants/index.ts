@@ -180,6 +180,85 @@ export const PUBSUB_CHANNELS = {
   TERMINAL: 'haive:terminal',
 } as const;
 
+/** Interactive terminal channels.
+ *
+ *  Architecture: API holds the WebSocket but no docker socket. Worker owns
+ *  docker — it subscribes to TERMINAL_REQUEST_CHANNEL for open/close, spawns
+ *  the per-(user,task,provider) container + PTY, and pipes bytes through
+ *  per-session pub/sub channels. Keeps the project's "single docker-
+ *  privileged service" property intact (see worker README).
+ *
+ *  Channels (sessionId = user_task_provider triple, sanitised):
+ *    terminal:in:{sid}   — browser → shell stdin (raw bytes)
+ *    terminal:out:{sid}  — shell stdout/stderr → browser (raw bytes)
+ *    terminal:ctl:{sid}  — control frames (resize, signal) as JSON
+ *
+ *  Registry (Redis hash, one entry per session):
+ *    terminal:session:{userId}:{taskId}:{providerId} — JSON
+ *      { containerName, sessionId, refcount, lastSeenAt, startedAt }
+ *
+ *  Idle policy: refcount==0 && now-lastSeenAt > TERMINAL_IDLE_GRACE_MS
+ *  → reaper kills container and deletes registry entry. */
+export const TERMINAL_SESSION_PREFIX = 'terminal:session:';
+export const TERMINAL_REQUEST_CHANNEL = 'terminal:request';
+export const TERMINAL_IN_CHANNEL_PREFIX = 'terminal:in:';
+export const TERMINAL_OUT_CHANNEL_PREFIX = 'terminal:out:';
+export const TERMINAL_CTL_CHANNEL_PREFIX = 'terminal:ctl:';
+/** Two minutes of grace after the last WS disconnect before a session's
+ *  container is reaped. Long enough to survive a tab nav-away-and-return,
+ *  short enough that abandoned sessions don't pile up under WSL's container
+ *  ceiling. */
+export const TERMINAL_IDLE_GRACE_MS = 120_000;
+
+/** Reply channel for an open request. API publishes to TERMINAL_REQUEST_CHANNEL
+ *  with a correlationId, then BLPOPs / SUBSCRIBEs this channel for the worker's
+ *  ack. We use a dedicated reply channel rather than reusing TERMINAL_OUT_*
+ *  because the latter is per-session and the sessionId isn't known until the
+ *  worker has minted it. */
+export const TERMINAL_REPLY_CHANNEL_PREFIX = 'terminal:reply:';
+
+/** Wire types for the request channel. The worker dispatches on `op`. */
+export interface TerminalOpenRequest {
+  op: 'open';
+  correlationId: string;
+  userId: string;
+  taskId: string;
+  cliProviderId: string;
+}
+
+export interface TerminalCloseRequest {
+  op: 'close';
+  sessionId: string;
+}
+
+export type TerminalRequest = TerminalOpenRequest | TerminalCloseRequest;
+
+export interface TerminalOpenReply {
+  ok: true;
+  sessionId: string;
+  containerName: string;
+  shell: 'bash' | 'sh';
+}
+
+export interface TerminalOpenError {
+  ok: false;
+  error: string;
+}
+
+export type TerminalOpenResult = TerminalOpenReply | TerminalOpenError;
+
+/** Control frame published by API to terminal:ctl:{sid}. xterm fires resize
+ *  on window resize; the worker forwards new dimensions to the PTY via
+ *  TIOCSWINSZ-equivalent (we just stream the cols/rows to docker exec stdin
+ *  via SIGWINCH on the child). */
+export interface TerminalResizeFrame {
+  type: 'resize';
+  cols: number;
+  rows: number;
+}
+
+export type TerminalControlFrame = TerminalResizeFrame;
+
 export const FRAMEWORK_PATTERNS = {
   wordpress: {
     indicators: ['wp-content/', 'wp-admin/', 'wp-includes/'],

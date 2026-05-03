@@ -24,6 +24,7 @@ import { FormRenderer, type FormValues } from '@/components/form-renderer';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { TaskSource } from '@/components/task-source';
 import { StepTerminal } from '@/components/terminal/StepTerminal';
+import { InteractiveShell } from '@/components/terminal/InteractiveShell';
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
 
@@ -55,7 +56,7 @@ function stepStatusVariant(status: StepStatus): BadgeVariant {
   }
 }
 
-type Tab = 'steps' | 'source' | 'activity';
+type Tab = 'steps' | 'source' | 'terminal' | 'activity';
 
 interface TaskDetailResponse {
   task: Task;
@@ -80,6 +81,7 @@ export default function TaskDetailPage() {
     message: string;
   } | null>(null);
   const [providers, setProviders] = useState<CliProvider[]>([]);
+  const [terminalCliProviderId, setTerminalCliProviderId] = useState<string | null>(null);
   const [stepProviderBusy, setStepProviderBusy] = useState<string | null>(null);
   const [stepProviderError, setStepProviderError] = useState<{
     stepId: string;
@@ -141,6 +143,19 @@ export default function TaskDetailPage() {
       .then((data) => setProviders(data.providers))
       .catch(() => setProviders([]));
   }, []);
+
+  // Default terminal CLI to the task's bound provider when known, else the
+  // first enabled provider. User can switch via the dropdown above the shell.
+  useEffect(() => {
+    if (terminalCliProviderId) return;
+    const taskProvider = task?.cliProviderId ?? null;
+    if (taskProvider && providers.some((p) => p.id === taskProvider)) {
+      setTerminalCliProviderId(taskProvider);
+      return;
+    }
+    const fallback = providers.find((p) => p.enabled)?.id ?? providers[0]?.id ?? null;
+    if (fallback) setTerminalCliProviderId(fallback);
+  }, [providers, task?.cliProviderId, terminalCliProviderId]);
 
   async function submitStep(step: TaskStep, values: FormValues) {
     setSubmitting(step.stepId);
@@ -326,6 +341,9 @@ export default function TaskDetailPage() {
         <TabButton active={tab === 'source'} onClick={() => setTab('source')}>
           Source
         </TabButton>
+        <TabButton active={tab === 'terminal'} onClick={() => setTab('terminal')}>
+          Terminal
+        </TabButton>
         <TabButton active={tab === 'activity'} onClick={() => setTab('activity')}>
           Activity
         </TabButton>
@@ -368,6 +386,16 @@ export default function TaskDetailPage() {
       )}
 
       {tab === 'source' && <TaskSource taskId={id} />}
+
+      {tab === 'terminal' && (
+        <TerminalTab
+          taskId={id}
+          taskStatus={task.status}
+          providers={providers}
+          selectedCliProviderId={terminalCliProviderId}
+          onSelectCliProvider={setTerminalCliProviderId}
+        />
+      )}
 
       {tab === 'activity' && (
         <div className="flex flex-col gap-2">
@@ -438,6 +466,71 @@ function TabButton({
     >
       {children}
     </button>
+  );
+}
+
+interface TerminalTabProps {
+  taskId: string;
+  taskStatus: TaskStatus;
+  providers: CliProvider[];
+  selectedCliProviderId: string | null;
+  onSelectCliProvider: (id: string) => void;
+}
+
+function TerminalTab({
+  taskId,
+  taskStatus,
+  providers,
+  selectedCliProviderId,
+  onSelectCliProvider,
+}: TerminalTabProps) {
+  const terminalDisabled =
+    taskStatus === 'completed' || taskStatus === 'failed' || taskStatus === 'cancelled';
+  const enabledProviders = providers.filter((p) => p.enabled);
+  const usableProviders = enabledProviders.length > 0 ? enabledProviders : providers;
+
+  if (usableProviders.length === 0) {
+    return (
+      <Card className="p-4 text-sm text-neutral-400">
+        No CLI providers configured. Add one in{' '}
+        <Link href="/settings/cli-providers" className="text-indigo-400 underline">
+          Settings → CLI providers
+        </Link>{' '}
+        to launch a shell.
+      </Card>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <label className="flex items-center gap-2 text-xs text-neutral-400">
+          CLI environment
+          <select
+            value={selectedCliProviderId ?? ''}
+            onChange={(e) => onSelectCliProvider(e.target.value)}
+            disabled={terminalDisabled}
+            className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {usableProviders.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label} ({p.name})
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="text-[10px] text-neutral-500">
+          Shell runs inside the same sandbox image used for CLI execs.
+        </span>
+      </div>
+      {selectedCliProviderId && (
+        <InteractiveShell
+          taskId={taskId}
+          cliProviderId={selectedCliProviderId}
+          disabled={terminalDisabled}
+        />
+      )}
+    </div>
   );
 }
 

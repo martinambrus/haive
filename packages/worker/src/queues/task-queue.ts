@@ -1,4 +1,5 @@
 import { Queue, Worker, type Job } from 'bullmq';
+import Docker from 'dockerode';
 import { and, eq, ne } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -12,7 +13,8 @@ import {
 } from '@haive/shared';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { getDb } from '../db.js';
-import { getBullRedis } from '../redis.js';
+import { getBullRedis, getRedis } from '../redis.js';
+import { reapAllSessionsForTask } from '../sandbox/terminal-session-reaper.js';
 import {
   advanceStep,
   computeGlobalStepIndex,
@@ -245,6 +247,22 @@ async function cleanupTaskContainers(
     } catch (err) {
       logger.warn({ err, taskId, reason }, 'cleanup-task-env-image failed');
     }
+  }
+
+  // Force-tear-down any open interactive terminal sessions for this task.
+  // The web UI disables the Terminal tab when status is in a terminal state,
+  // and the WS owner sees its out-channel close as the container is removed
+  // here.
+  try {
+    const reaped = await reapAllSessionsForTask(getRedis(), new Docker(), taskId);
+    if (reaped > 0) {
+      await appendEvent(db, taskId, null, 'terminal_sessions.destroyed', {
+        reason,
+        count: reaped,
+      });
+    }
+  } catch (err) {
+    logger.warn({ err, taskId, reason }, 'cleanup-terminal-sessions failed');
   }
 }
 

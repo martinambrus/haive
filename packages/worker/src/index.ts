@@ -1,5 +1,7 @@
 import { logger } from '@haive/shared';
 import { bootstrap } from './bootstrap.js';
+import { getDb } from './db.js';
+import { getRedis } from './redis.js';
 import { scheduleBundleGitSyncTick, startBundleWorker } from './queues/bundle-queue.js';
 import {
   closeCliExecQueue,
@@ -10,6 +12,8 @@ import { startRepoWorker } from './queues/repo-queue.js';
 import { closeTaskQueue, startTaskWorker } from './queues/task-queue.js';
 import { closeRedis } from './redis.js';
 import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
+import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
+import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 
 async function main(): Promise<void> {
   const { repoStoragePath, bundleStoragePath } = await bootstrap();
@@ -31,6 +35,15 @@ async function main(): Promise<void> {
   await scheduleBundleGitSyncTick().catch((err) => {
     logger.warn({ err }, 'failed to schedule bundle git-sync tick');
   });
+
+  // Terminal subsystem: session manager subscribes to terminal:request and
+  // owns per-WS PTY exec. Reaper sweeps every 30s for refcount==0 entries
+  // older than the grace window. Both are no-ops until an open arrives.
+  const terminalManager = new TerminalSessionManager({ db: getDb(), redis: getRedis() });
+  await terminalManager.start();
+  const terminalReaper = new TerminalSessionReaper({ redis: getRedis() });
+  terminalReaper.start();
+
   logger.info('haive-worker ready');
 
   const shutdown = async (signal: string): Promise<void> => {
@@ -39,6 +52,10 @@ async function main(): Promise<void> {
     // can run for minutes; Docker SIGTERM grace is ~10s). Jobs released back
     // to the queue will be redelivered once the lock expires; the next
     // worker pid reaps orphan containers on boot.
+    terminalReaper.stop();
+    await terminalManager.stop().catch((err) => {
+      logger.warn({ err }, 'terminal manager stop failed');
+    });
     await Promise.allSettled([
       repoWorker.close(true),
       bundleWorker.close(true),
