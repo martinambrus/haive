@@ -41,6 +41,7 @@ function defaultValueFor(field: FormField): unknown {
     case 'text':
     case 'textarea':
     case 'select-with-text':
+    case 'radio-with-textarea':
       return field.default ?? '';
     case 'select':
     case 'radio':
@@ -625,6 +626,16 @@ function FieldControl({ field, value, onChange, disabled, repositoryId }: FieldR
         </div>
       );
     }
+    case 'radio-with-textarea':
+      return (
+        <RadioWithTextareaControl
+          field={field}
+          value={value}
+          onChange={onChange}
+          disabled={disabled}
+          textareaClass={textareaClass}
+        />
+      );
     case 'directory-picker':
       return (
         <Input
@@ -674,4 +685,90 @@ function FieldControl({ field, value, onChange, disabled, repositoryId }: FieldR
       );
     }
   }
+}
+
+type RadioWithTextareaField = Extract<LeafFormField, { type: 'radio-with-textarea' }>;
+
+interface RadioWithTextareaControlProps {
+  field: RadioWithTextareaField;
+  value: unknown;
+  onChange: (value: unknown) => void;
+  disabled: boolean;
+  textareaClass: string;
+}
+
+/** Visible radios + a "Custom answer" radio that reveals a textarea. The
+ *  custom-mode flag lives in local state so clicking the custom radio shows
+ *  the textarea even before the user types anything (an empty submitted value
+ *  alone can't distinguish "nothing picked" from "custom selected, blank"). */
+function RadioWithTextareaControl({
+  field,
+  value,
+  onChange,
+  disabled,
+  textareaClass,
+}: RadioWithTextareaControlProps) {
+  const current = typeof value === 'string' ? value : '';
+  const matchesPredefined = field.predefined.some((opt) => opt.value === current);
+  const [customMode, setCustomMode] = useState<boolean>(
+    () => current.length > 0 && !matchesPredefined,
+  );
+
+  useEffect(() => {
+    if (matchesPredefined && customMode) setCustomMode(false);
+    if (!matchesPredefined && current.length > 0 && !customMode) setCustomMode(true);
+  }, [matchesPredefined, current, customMode]);
+
+  const mode: 'predefined' | 'custom' | 'unset' = matchesPredefined
+    ? 'predefined'
+    : customMode
+      ? 'custom'
+      : 'unset';
+  const customLabel = field.customLabel ?? 'Custom answer';
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {field.predefined.map((opt) => (
+        <label key={opt.value} className="flex items-center gap-2 text-sm text-neutral-200">
+          <input
+            type="radio"
+            name={field.id}
+            value={opt.value}
+            checked={mode === 'predefined' && current === opt.value}
+            disabled={disabled}
+            onChange={() => {
+              setCustomMode(false);
+              onChange(opt.value);
+            }}
+          />
+          <span>{opt.label}</span>
+          {opt.badge && <OptionBadge text={opt.badge} color={opt.badgeColor} />}
+        </label>
+      ))}
+      <label className="flex items-center gap-2 text-sm text-neutral-200">
+        <input
+          type="radio"
+          name={field.id}
+          value="__custom__"
+          checked={mode === 'custom'}
+          disabled={disabled}
+          onChange={() => {
+            setCustomMode(true);
+            if (matchesPredefined) onChange('');
+          }}
+        />
+        <span>{customLabel}</span>
+      </label>
+      {mode === 'custom' && (
+        <textarea
+          rows={field.rows ?? 4}
+          value={current}
+          placeholder={field.placeholder}
+          disabled={disabled}
+          className={textareaClass}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </div>
+  );
 }

@@ -7,6 +7,7 @@ import {
   QaPrepParseError,
   type AgentQuestion,
 } from '../src/step-engine/steps/onboarding/09-qa.js';
+import type { EnrichedAgentQuestion } from '../src/step-engine/steps/onboarding/09_1-qa-suggestions.js';
 import {
   buildResolveForm,
   collectAgentAnswers,
@@ -140,19 +141,21 @@ describe('parseQaPrepOutput', () => {
 /* buildResolveForm                                                    */
 /* ------------------------------------------------------------------ */
 
-const sampleQuestions: AgentQuestion[] = [
+const sampleQuestions: EnrichedAgentQuestion[] = [
   {
     id: 'q1',
     topic: 'Order delivery',
     question: 'How does partial delivery work?',
     context: 'src/order.ts',
     suggestedKbFile: 'BUSINESS_LOGIC.md',
+    suggestedAnswers: ['Partial completes order', 'Partial keeps order open'],
   },
   {
     id: 'q2',
     topic: 'Product scope',
     question: 'What does the default scope hide?',
     context: 'src/products.ts',
+    suggestedAnswers: [],
   },
 ];
 
@@ -178,13 +181,23 @@ describe('buildResolveForm', () => {
     expect(item0.description).toContain('Topic: Order delivery');
     expect(item0.description).toContain('Suggested KB file: BUSINESS_LOGIC.md');
     expect(item0.fields).toHaveLength(1);
-    expect(item0.fields[0]!.id).toBe('agentAnswer__q1');
-    expect(item0.fields[0]!.type).toBe('textarea');
+    const item0Field = item0.fields[0]!;
+    expect(item0Field.id).toBe('agentAnswer__q1');
+    expect(item0Field.type).toBe('radio-with-textarea');
+    if (item0Field.type !== 'radio-with-textarea') throw new Error('not radio-with-textarea');
+    expect(item0Field.predefined.map((p) => p.value)).toEqual([
+      'Partial completes order',
+      'Partial keeps order open',
+    ]);
 
     const item1 = accordion.items[1]!;
     expect(item1.title).toBe('What does the default scope hide?');
     expect(item1.description).not.toContain('Suggested KB file');
-    expect(item1.fields[0]!.id).toBe('agentAnswer__q2');
+    const item1Field = item1.fields[0]!;
+    expect(item1Field.id).toBe('agentAnswer__q2');
+    expect(item1Field.type).toBe('radio-with-textarea');
+    if (item1Field.type !== 'radio-with-textarea') throw new Error('not radio-with-textarea');
+    expect(item1Field.predefined).toEqual([]);
 
     expect(form.fields[1]!.id).toBe('userQuestions');
     expect(form.fields[1]!.type).toBe('textarea');

@@ -83,6 +83,15 @@ export const selectWithTextFieldSchema = baseField.extend({
   placeholder: z.string().optional(),
 });
 
+export const radioWithTextareaFieldSchema = baseField.extend({
+  type: z.literal('radio-with-textarea'),
+  predefined: z.array(optionSchema),
+  customLabel: z.string().optional(),
+  default: z.string().optional(),
+  placeholder: z.string().optional(),
+  rows: z.number().int().positive().optional(),
+});
+
 export const directoryPickerFieldSchema = baseField.extend({
   type: z.literal('directory-picker'),
   rootPath: z.string().optional(),
@@ -171,6 +180,7 @@ export const leafFormFieldSchema = z.discriminatedUnion('type', [
   checkboxFieldSchema,
   radioFieldSchema,
   selectWithTextFieldSchema,
+  radioWithTextareaFieldSchema,
   directoryPickerFieldSchema,
   fileUploadFieldSchema,
   numberFieldSchema,
@@ -201,6 +211,7 @@ export const formFieldSchema = z.discriminatedUnion('type', [
   checkboxFieldSchema,
   radioFieldSchema,
   selectWithTextFieldSchema,
+  radioWithTextareaFieldSchema,
   directoryPickerFieldSchema,
   fileUploadFieldSchema,
   numberFieldSchema,

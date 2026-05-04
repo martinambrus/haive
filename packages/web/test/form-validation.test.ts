@@ -70,6 +70,35 @@ describe('validateRequired', () => {
     expect(validateRequired(s, { a: 'ok', b: 'ok' })).toBeNull();
   });
 
+  it('enforces required radio-with-textarea must be non-empty string (predefined or custom)', () => {
+    const s = schema({
+      type: 'radio-with-textarea',
+      id: 'q',
+      label: 'Q',
+      required: true,
+      predefined: [
+        { value: 'yes', label: 'Yes' },
+        { value: 'no', label: 'No' },
+      ],
+    });
+    expect(validateRequired(s, { q: '' })).toBe('Q is required');
+    expect(validateRequired(s, { q: '   ' })).toBe('Q is required');
+    expect(validateRequired(s, {})).toBe('Q is required');
+    expect(validateRequired(s, { q: 'yes' })).toBeNull();
+    expect(validateRequired(s, { q: 'custom answer text' })).toBeNull();
+  });
+
+  it('skips non-required radio-with-textarea even if empty', () => {
+    const s = schema({
+      type: 'radio-with-textarea',
+      id: 'q',
+      label: 'Q',
+      predefined: [{ value: 'yes', label: 'Yes' }],
+    });
+    expect(validateRequired(s, { q: '' })).toBeNull();
+    expect(validateRequired(s, {})).toBeNull();
+  });
+
   it('returns the first missing field in declaration order', () => {
     const s = schema(
       { type: 'text', id: 'a', label: 'A', required: true },

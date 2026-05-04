@@ -3,7 +3,8 @@ import path from 'node:path';
 import type { FormField, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from './_helpers.js';
-import type { AgentQuestion, KbFileSummary, KnowledgeQaPrepApply } from './09-qa.js';
+import type { KbFileSummary, KnowledgeQaPrepApply } from './09-qa.js';
+import type { EnrichedAgentQuestion, KnowledgeQaSuggestionsApply } from './09_1-qa-suggestions.js';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -29,7 +30,7 @@ export interface UnansweredRecord {
 }
 
 export interface KnowledgeQaResolveDetect {
-  agentQuestions: AgentQuestion[];
+  agentQuestions: EnrichedAgentQuestion[];
   explicitNoQuestions: boolean;
   kbFiles: KbFileSummary[];
 }
@@ -98,16 +99,19 @@ export function buildResolveForm(detected: KnowledgeQaResolveDetect): FormSchema
     ]
       .filter(Boolean)
       .join('\n');
+    const predefined = q.suggestedAnswers.map((text) => ({ value: text, label: text }));
     return {
       title: q.question,
       description: itemDescription,
       fields: [
         {
-          type: 'textarea' as const,
+          type: 'radio-with-textarea' as const,
           id: `${AGENT_ANSWER_PREFIX}${q.id}`,
           label: 'Your answer',
+          predefined,
+          customLabel: 'Custom answer',
+          placeholder: 'Type your answer (or leave blank to skip).',
           rows: 4,
-          placeholder: 'Leave blank to skip this question.',
         },
       ],
     };
@@ -144,12 +148,16 @@ export function splitUserQuestions(raw: unknown): string[] {
 }
 
 interface AgentAnswerPair {
-  question: AgentQuestion;
+  question: EnrichedAgentQuestion;
   answer: string;
 }
 
+/** Reads the user's answer for each agent question. The form value is a single
+ *  string — either one of the question's `suggestedAnswers` (picked via radio)
+ *  or a free-text custom answer. Empty/whitespace strings are treated as
+ *  skipped and excluded from the returned pairs. */
 export function collectAgentAnswers(
-  questions: AgentQuestion[],
+  questions: EnrichedAgentQuestion[],
   values: Record<string, unknown>,
 ): AgentAnswerPair[] {
   const pairs: AgentAnswerPair[] = [];
@@ -481,11 +489,16 @@ export const knowledgeQaResolveStep: StepDefinition<
   async detect(ctx: StepContext): Promise<KnowledgeQaResolveDetect> {
     const prep = await loadPreviousStepOutput(ctx.db, ctx.taskId, '09-qa');
     const prepOutput = (prep?.output ?? null) as KnowledgeQaPrepApply | null;
-    const agentQuestions = prepOutput?.agentQuestions ?? [];
     const explicitNoQuestions = prepOutput?.explicitNoQuestions ?? false;
 
     const prepDetect = (prep?.detect ?? null) as { kbFiles?: KbFileSummary[] } | null;
     const kbFiles = prepDetect?.kbFiles ?? [];
+
+    const enriched = await loadPreviousStepOutput(ctx.db, ctx.taskId, '09_1-qa-suggestions');
+    const enrichedOutput = (enriched?.output ?? null) as KnowledgeQaSuggestionsApply | null;
+    const agentQuestions: EnrichedAgentQuestion[] =
+      enrichedOutput?.enrichedQuestions ??
+      (prepOutput?.agentQuestions ?? []).map((q) => ({ ...q, suggestedAnswers: [] }));
 
     ctx.logger.info(
       { agentQuestionCount: agentQuestions.length, kbFileCount: kbFiles.length },

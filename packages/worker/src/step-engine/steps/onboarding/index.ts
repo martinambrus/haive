@@ -10,6 +10,7 @@ import { generateFilesStep } from './07-generate-files.js';
 import { verifyFilesStep } from './07_5-verify-files.js';
 import { knowledgeAcquisitionStep } from './08-knowledge-acquisition.js';
 import { knowledgeQaPrepStep } from './09-qa.js';
+import { knowledgeQaSuggestionsStep } from './09_1-qa-suggestions.js';
 import { knowledgeQaResolveStep } from './09_2-qa-resolve.js';
 import { skillGenerationStep } from './09_5-skill-generation.js';
 import { skillVerificationStep } from './09_6-skill-verification.js';
@@ -30,6 +31,7 @@ export {
   verifyFilesStep,
   knowledgeAcquisitionStep,
   knowledgeQaPrepStep,
+  knowledgeQaSuggestionsStep,
   knowledgeQaResolveStep,
   skillGenerationStep,
   skillVerificationStep,
@@ -51,6 +53,7 @@ export function registerOnboardingSteps(registry: StepRegistry): void {
   registry.register(verifyFilesStep);
   registry.register(knowledgeAcquisitionStep);
   registry.register(knowledgeQaPrepStep);
+  registry.register(knowledgeQaSuggestionsStep);
   registry.register(knowledgeQaResolveStep);
   registry.register(skillGenerationStep);
   registry.register(skillVerificationStep);

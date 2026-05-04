@@ -59,6 +59,7 @@ function coerceField(field: FormField, raw: unknown, issues: string[]): unknown 
     case 'text':
     case 'textarea':
     case 'select-with-text':
+    case 'radio-with-textarea':
       if (typeof raw !== 'string') {
         issues.push(`${field.id}: expected string`);
         return undefined;
@@ -132,6 +133,7 @@ function defaultFor(field: FormField): unknown {
     case 'radio':
     case 'directory-picker':
     case 'select-with-text':
+    case 'radio-with-textarea':
       return 'default' in field ? (field.default ?? null) : null;
     case 'multi-select':
       return field.defaults ?? [];
