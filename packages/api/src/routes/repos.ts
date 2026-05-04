@@ -17,6 +17,7 @@ import { getDb } from '../db.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
+import { cancelOpenTasksForRepo, enqueueCancelJob } from '../lib/cancel-task.js';
 import { validateLocalPath, pathExists, isGitRepository } from '../lib/filesystem.js';
 
 function maxUploadBytes(): number {
@@ -653,12 +654,41 @@ repoRoutes.delete('/:id', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
-  const result = await db
-    .delete(schema.repositories)
-    .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
-    .returning({ id: schema.repositories.id });
-  if (result.length === 0) throw new HttpError(404, 'Repository not found');
-  return c.json({ ok: true });
+
+  // Cancel any non-terminal tasks pinned to this repo BEFORE the delete so
+  // their CANCEL job tears down sandboxes, terminal sessions, env images,
+  // and auth volumes cleanly. The schema's `set null` cascade would
+  // otherwise orphan running tasks: status untouched, repo gone, sandboxes
+  // pointing at a workdir that no longer exists.
+  const cancelled: Array<{ id: string }> = [];
+  let repoFound = false;
+
+  await db.transaction(async (tx) => {
+    const repoRows = await tx
+      .select({ id: schema.repositories.id })
+      .from(schema.repositories)
+      .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
+    if (repoRows.length === 0) return;
+    repoFound = true;
+
+    const open = await cancelOpenTasksForRepo(tx, id, userId);
+    cancelled.push(...open);
+
+    await tx
+      .delete(schema.repositories)
+      .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
+  });
+
+  if (!repoFound) throw new HttpError(404, 'Repository not found');
+
+  // Enqueue CANCEL jobs AFTER commit. Pre-commit enqueueing would race
+  // with rollback (worker would tear down sandboxes for tasks still marked
+  // running in the DB).
+  for (const t of cancelled) {
+    await enqueueCancelJob(t.id, userId);
+  }
+
+  return c.json({ ok: true, cancelledTasks: cancelled.length });
 });
 
 repoRoutes.post('/:id/refresh-tree', async (c) => {

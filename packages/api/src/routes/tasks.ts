@@ -18,6 +18,7 @@ import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { killTaskSandboxes } from '../lib/sandbox-kill.js';
+import { cancelTaskRow, enqueueCancelJob } from '../lib/cancel-task.js';
 import { getTaskQueue } from '../queues.js';
 
 const MAX_FILE_CONTENT_BYTES = 512 * 1024;
@@ -561,19 +562,8 @@ taskRoutes.post('/:id/action', async (c) => {
       if (task.status === 'completed' || task.status === 'cancelled') {
         return c.json({ ok: true, status: task.status });
       }
-      await db
-        .update(schema.tasks)
-        .set({
-          status: 'cancelled',
-          completedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.tasks.id, id));
-      await appendTaskEvent(db, id, null, 'task.cancelled', { by: userId });
-      await getTaskQueue().add(TASK_JOB_NAMES.CANCEL, { taskId: id, userId } as TaskJobPayload, {
-        removeOnComplete: 50,
-        removeOnFail: 50,
-      });
+      await cancelTaskRow(db, id, { by: userId });
+      await enqueueCancelJob(id, userId);
       return c.json({ ok: true, status: 'cancelled' });
     case 'retry':
       if (task.status !== 'failed') {
