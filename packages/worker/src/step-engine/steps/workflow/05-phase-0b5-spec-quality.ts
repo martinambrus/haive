@@ -14,7 +14,7 @@ interface SpecQualityDetect {
   currentBudget: number;
 }
 
-const SPEC_QUALITY_DEFAULT_BUDGET = 3;
+const SPEC_QUALITY_DEFAULT_BUDGET = 10;
 const SPEC_QUALITY_BUDGET_OPTIONS = [3, 5, 10, 15, 20] as const;
 
 interface QualityFinding {
@@ -269,7 +269,7 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
   },
 
   loop: {
-    maxIterations: 3,
+    maxIterations: SPEC_QUALITY_DEFAULT_BUDGET,
     shouldContinue: ({ applyOutput }) => {
       const out = applyOutput as SpecQualityApply;
       return out.findings.some((f) => f.severity === 'error' || f.severity === 'warn');

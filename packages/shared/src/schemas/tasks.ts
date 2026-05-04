@@ -32,7 +32,7 @@ export const resourceLimitsSchema = z
 export type ResourceLimits = z.infer<typeof resourceLimitsSchema>;
 
 /** Per-step loop iteration overrides. Map of step id → max iterations.
- *  Currently exercised by 05-phase-0b5-spec-quality (default 3 if absent).
+ *  Currently exercised by 05-phase-0b5-spec-quality (default 10 if absent).
  *  Future loop-enabled steps register here too. Values are integers in
  *  [1, 50]; outside that range is rejected to bound LLM cost. */
 export const stepLoopLimitsSchema = z

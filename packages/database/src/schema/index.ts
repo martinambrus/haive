@@ -410,7 +410,7 @@ export const tasks = pgTable(
      *  Map of stepId → maxIterations. The runner reads this when a step
      *  declares a loop hook and falls back to the loopSpec default when
      *  the step id is absent. Lets the new-task form pick a budget per
-     *  loop step (e.g. spec-quality 5 instead of the default 3). */
+     *  loop step (e.g. spec-quality 5 instead of the default 10). */
     stepLoopLimits: jsonb('step_loop_limits')
       .$type<Record<string, number>>()
       .notNull()

@@ -35,9 +35,9 @@ export default function NewTaskPage() {
   const [repositoryId, setRepositoryId] = useState<string>('');
   const [cliProviderId, setCliProviderId] = useState<string>('');
   /** Max iterations the spec-quality reviewer will loop through before
-   *  surfacing gate 1, even if findings remain. Default 3 matches the
+   *  surfacing gate 1, even if findings remain. Default 10 matches the
    *  loop hook's built-in default. */
-  const [specQualityMaxIterations, setSpecQualityMaxIterations] = useState<number>(3);
+  const [specQualityMaxIterations, setSpecQualityMaxIterations] = useState<number>(10);
 
   const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);

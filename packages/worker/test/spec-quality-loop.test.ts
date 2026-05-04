@@ -123,8 +123,8 @@ describe('phase0b5SpecQualityStep.loop', () => {
     };
   }
 
-  it('declares maxIterations default of 3', () => {
-    expect(loop.maxIterations).toBe(3);
+  it('declares maxIterations default of 10', () => {
+    expect(loop.maxIterations).toBe(10);
   });
 
   it('shouldContinue returns true when ANY finding is warn or error', async () => {
