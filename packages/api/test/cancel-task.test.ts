@@ -59,12 +59,43 @@ vi.mock('../src/queues.js', () => ({
   getTaskQueue: () => ({ add: queueAdd }),
 }));
 
-const { cancelTaskRow, enqueueCancelJob, cancelOpenTasksForRepo } =
-  await import('../src/lib/cancel-task.js');
+const {
+  cancelTaskRow,
+  enqueueCancelJob,
+  cancelOpenTasksForRepo,
+  collectInternalRagProjectNamesForRepo,
+  enqueueRepoRagCleanupJob,
+} = await import('../src/lib/cancel-task.js');
 
 beforeEach(() => {
   queueAdd.mockClear();
 });
+
+/** Queue-based tx fake. Each select() chain consumes the next response from
+ *  `responses` in FIFO order. Supports both `.where(...)` direct-await and
+ *  `.where(...).limit(n)` patterns used by `collectInternalRagProjectNamesForRepo`. */
+function makeQueueTx(responses: unknown[][]): { tx: never; consumed: () => number } {
+  let idx = 0;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tx: any = {
+    select: () => ({
+      from: () => ({
+        where: () => {
+          const result = responses[idx] ?? [];
+          idx += 1;
+          // Return a thenable that also supports .limit chaining.
+          const out = {
+            then: (onFulfilled: (v: unknown[]) => unknown, onRejected?: (e: unknown) => unknown) =>
+              Promise.resolve(result).then(onFulfilled, onRejected),
+            limit: () => Promise.resolve(result),
+          };
+          return out;
+        },
+      }),
+    }),
+  };
+  return { tx: tx as never, consumed: () => idx };
+}
 
 afterEach(() => {
   vi.useRealTimers();
@@ -182,5 +213,106 @@ describe('cancelOpenTasksForRepo', () => {
     // the cancel + enqueue path.
     expect(recorded.selectArgs).toEqual({ id: schema.tasks.id });
     expect(recorded.fromArg).toBe(schema.tasks);
+  });
+});
+
+describe('collectInternalRagProjectNamesForRepo', () => {
+  it('returns empty array when the repo has no tasks', async () => {
+    const { tx } = makeQueueTx([[]]);
+    const names = await collectInternalRagProjectNamesForRepo(tx, 'repo-1', 'user-1');
+    expect(names).toEqual([]);
+  });
+
+  it('returns project names only for tasks with ragMode=internal', async () => {
+    // Sequence:
+    //   1. select tasks for repo  -> [{id:'t1'},{id:'t2'},{id:'t3'}]
+    //   2. select step 04 for t1  -> [{output:{tooling:{ragMode:'internal'}}}]
+    //   3. select step 01 for t1  -> [{detectOutput:{data:{project:{name:'Alpha'}}}}]
+    //   4. select step 04 for t2  -> [{output:{tooling:{ragMode:'external'}}}]   (skipped)
+    //   5. select step 04 for t3  -> [{output:{tooling:{ragMode:'internal'}}}]
+    //   6. select step 01 for t3  -> [{detectOutput:{data:{project:{name:'Beta'}}}}]
+    const { tx } = makeQueueTx([
+      [{ id: 't1' }, { id: 't2' }, { id: 't3' }],
+      [{ output: { tooling: { ragMode: 'internal' } } }],
+      [{ detectOutput: { data: { project: { name: 'Alpha' } } } }],
+      [{ output: { tooling: { ragMode: 'external' } } }],
+      [{ output: { tooling: { ragMode: 'internal' } } }],
+      [{ detectOutput: { data: { project: { name: 'Beta' } } } }],
+    ]);
+    const names = await collectInternalRagProjectNamesForRepo(tx, 'repo-1', 'user-1');
+    expect(names.sort()).toEqual(['Alpha', 'Beta']);
+  });
+
+  it('skips ddev-mode tasks (Haive does not own that infra)', async () => {
+    const { tx } = makeQueueTx([
+      [{ id: 't1' }],
+      [{ output: { tooling: { ragMode: 'ddev' } } }],
+      // No env-detect call expected — function should bail before then.
+    ]);
+    const names = await collectInternalRagProjectNamesForRepo(tx, 'repo-1', 'user-1');
+    expect(names).toEqual([]);
+  });
+
+  it('skips none-mode tasks', async () => {
+    const { tx } = makeQueueTx([[{ id: 't1' }], [{ output: { tooling: { ragMode: 'none' } } }]]);
+    const names = await collectInternalRagProjectNamesForRepo(tx, 'repo-1', 'user-1');
+    expect(names).toEqual([]);
+  });
+
+  it('skips a task whose tooling output is missing or malformed', async () => {
+    const { tx } = makeQueueTx([
+      [{ id: 't1' }, { id: 't2' }],
+      [], // no step 04 row at all -> skip t1
+      [{ output: null }], // present but null tooling -> skip t2
+    ]);
+    const names = await collectInternalRagProjectNamesForRepo(tx, 'repo-1', 'user-1');
+    expect(names).toEqual([]);
+  });
+
+  it('dedupes when two internal-mode tasks share a project name', async () => {
+    const { tx } = makeQueueTx([
+      [{ id: 't1' }, { id: 't2' }],
+      [{ output: { tooling: { ragMode: 'internal' } } }],
+      [{ detectOutput: { data: { project: { name: 'RDApi' } } } }],
+      [{ output: { tooling: { ragMode: 'internal' } } }],
+      [{ detectOutput: { data: { project: { name: 'RDApi' } } } }],
+    ]);
+    const names = await collectInternalRagProjectNamesForRepo(tx, 'repo-1', 'user-1');
+    expect(names).toEqual(['RDApi']);
+  });
+
+  it('skips a task with internal mode but missing project name', async () => {
+    const { tx } = makeQueueTx([
+      [{ id: 't1' }],
+      [{ output: { tooling: { ragMode: 'internal' } } }],
+      [{ detectOutput: { data: {} } }], // no project name
+    ]);
+    const names = await collectInternalRagProjectNamesForRepo(tx, 'repo-1', 'user-1');
+    expect(names).toEqual([]);
+  });
+});
+
+describe('enqueueRepoRagCleanupJob', () => {
+  it('does not enqueue when projectNames is empty (no work to do)', async () => {
+    await enqueueRepoRagCleanupJob({
+      repositoryId: 'repo-1',
+      userId: 'user-1',
+      projectNames: [],
+    });
+    expect(queueAdd).not.toHaveBeenCalled();
+  });
+
+  it('enqueues a cleanup-repo-rag job with the full payload', async () => {
+    await enqueueRepoRagCleanupJob({
+      repositoryId: 'repo-1',
+      userId: 'user-1',
+      projectNames: ['Alpha', 'Beta'],
+    });
+    expect(queueAdd).toHaveBeenCalledTimes(1);
+    expect(queueAdd).toHaveBeenCalledWith(
+      'cleanup-repo-rag',
+      { repositoryId: 'repo-1', userId: 'user-1', projectNames: ['Alpha', 'Beta'] },
+      { removeOnComplete: 50, removeOnFail: 50 },
+    );
   });
 });

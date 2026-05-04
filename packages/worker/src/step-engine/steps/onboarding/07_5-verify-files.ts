@@ -107,14 +107,6 @@ export const verifyFilesStep: StepDefinition<
       detail: `found ${skillsCount}`,
     });
 
-    const commandsCount = await countMatching(repo, '.claude/commands/', '.md');
-    checks.push({
-      id: 'commands_dir',
-      label: '.claude/commands has at least 3 markdown files',
-      passed: commandsCount >= 3,
-      detail: `found ${commandsCount}`,
-    });
-
     const kbCount = await countMatching(repo, '.claude/knowledge_base/', '.md');
     checks.push({
       id: 'knowledge_base_dir',

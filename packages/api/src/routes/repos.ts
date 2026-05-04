@@ -17,7 +17,12 @@ import { getDb } from '../db.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import { cancelOpenTasksForRepo, enqueueCancelJob } from '../lib/cancel-task.js';
+import {
+  cancelOpenTasksForRepo,
+  collectInternalRagProjectNamesForRepo,
+  enqueueCancelJob,
+  enqueueRepoRagCleanupJob,
+} from '../lib/cancel-task.js';
 import { validateLocalPath, pathExists, isGitRepository } from '../lib/filesystem.js';
 
 function maxUploadBytes(): number {
@@ -662,6 +667,7 @@ repoRoutes.delete('/:id', async (c) => {
   // pointing at a workdir that no longer exists.
   const cancelled: Array<{ id: string }> = [];
   let repoFound = false;
+  let internalRagProjectNames: string[] = [];
 
   await db.transaction(async (tx) => {
     const repoRows = await tx
@@ -670,6 +676,12 @@ repoRoutes.delete('/:id', async (c) => {
       .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
     if (repoRows.length === 0) return;
     repoFound = true;
+
+    // Capture project names of this repo's internal-mode RAG tasks before
+    // the delete cascades `tasks.repository_id` to NULL. After cascade the
+    // worker can no longer trace tasks back to this repo, so the project
+    // names must travel in the cleanup job payload.
+    internalRagProjectNames = await collectInternalRagProjectNamesForRepo(tx, id, userId);
 
     const open = await cancelOpenTasksForRepo(tx, id, userId);
     cancelled.push(...open);
@@ -688,7 +700,21 @@ repoRoutes.delete('/:id', async (c) => {
     await enqueueCancelJob(t.id, userId);
   }
 
-  return c.json({ ok: true, cancelledTasks: cancelled.length });
+  // Enqueue the per-project RAG cleanup job AFTER commit so the worker's
+  // collision check sees the post-delete state of the tasks table. External
+  // and ddev RAG modes were filtered out at collection time — this only
+  // touches internal-mode databases Haive owns.
+  await enqueueRepoRagCleanupJob({
+    repositoryId: id,
+    userId,
+    projectNames: internalRagProjectNames,
+  });
+
+  return c.json({
+    ok: true,
+    cancelledTasks: cancelled.length,
+    ragProjectsToClean: internalRagProjectNames.length,
+  });
 });
 
 repoRoutes.post('/:id/refresh-tree', async (c) => {

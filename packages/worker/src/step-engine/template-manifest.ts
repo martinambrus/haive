@@ -21,9 +21,6 @@ import {
 } from './steps/onboarding/_agent-templates.js';
 import {
   agentsIndexMarkdown,
-  BASELINE_COMMANDS,
-  commandFileMarkdown,
-  type CommandSpec,
   DRUPAL_LSP_FILES,
   type ProjectInfo,
   workflowConfigJson,
@@ -170,22 +167,6 @@ function resolveAgentsForIndex(ctx: TemplateRenderContext): AgentSpec[] {
   return out;
 }
 
-function buildCommandTemplateItem(cmd: CommandSpec): TemplateItem<TemplateRenderContext> {
-  return {
-    id: `command.${cmd.id}`,
-    kind: 'command',
-    schemaVersion: 1,
-    render(): TemplateRendering[] {
-      return [
-        {
-          diskPath: `.claude/commands/${cmd.id}.md`,
-          content: commandFileMarkdown(cmd),
-        },
-      ];
-    },
-  };
-}
-
 function buildWorkflowConfigItem(): TemplateItem<TemplateRenderContext> {
   return {
     id: 'workflow-config',
@@ -245,9 +226,6 @@ function buildTemplateItems(): TemplateItem<TemplateRenderContext>[] {
   items.push(buildAgentsIndexItem());
   for (const spec of collectKnownAgentSpecs()) {
     items.push(buildAgentTemplateItem(spec));
-  }
-  for (const cmd of BASELINE_COMMANDS) {
-    items.push(buildCommandTemplateItem(cmd));
   }
   for (const item of DRUPAL_LSP_ITEMS) {
     items.push(item);

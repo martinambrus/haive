@@ -70,3 +70,33 @@ describe('buildAgentFileMarkdown frontmatter', () => {
     expect(md).toContain('auto-invoke: false');
   });
 });
+
+describe('buildAgentFileMarkdown body', () => {
+  it('emits the 3-step KB → LSP → GREP search order block', () => {
+    const md = buildAgentFileMarkdown(baseSpec);
+    expect(md).toContain('## Mandatory Search Order');
+    expect(md).toContain('1. KB → 2. LSP → 3. GREP (last resort)');
+    expect(md).toMatch(/1\. \*\*KB \(first\)\*\*/);
+    expect(md).toMatch(/2\. \*\*LSP \(for code navigation\)\*\*/);
+    expect(md).toMatch(/3\. \*\*GREP \(last resort\)\*\*/);
+  });
+
+  it('contains no RAG references in the search-order block', () => {
+    const md = buildAgentFileMarkdown(baseSpec);
+    // The previous template injected a 4-step block referencing
+    // .claude/rag/query.py — that script never ships with onboarding output
+    // (RAG runs server-side under ragMode='internal' in the haive_rag_<project>
+    // DB). Any leak of the old block sends agents to a dead path.
+    expect(md).not.toMatch(/\bRAG\b/);
+    expect(md).not.toContain('rag/query.py');
+    expect(md).not.toContain('hybrid_score');
+    expect(md).not.toContain('.claude/rag/');
+  });
+
+  it('keeps the kb-references frontmatter mention even with RAG removed', () => {
+    // The KB-first instruction still tells agents to read kb-references — the
+    // KB folder is the surviving knowledge surface that ships with onboarding.
+    const md = buildAgentFileMarkdown(baseSpec);
+    expect(md).toContain('kb-references');
+  });
+});

@@ -41,7 +41,6 @@ interface FinalReviewDetect {
     knowledgeBase: number;
     skills: number;
     agents: number;
-    commands: number;
   };
 }
 
@@ -85,13 +84,11 @@ export async function collectReviewFindings(
   const skillsDir = path.join(repo, '.claude', 'skills');
   const agentsDir = activeAgentsTarget ? path.join(repo, activeAgentsTarget.dir) : null;
   const agentExt = activeAgentsTarget?.ext ?? '.md';
-  const commandsDir = path.join(repo, '.claude', 'commands');
 
-  const [knowledgeBase, skills, agents, commands] = await Promise.all([
+  const [knowledgeBase, skills, agents] = await Promise.all([
     countFiles(kbDir, (n) => n.endsWith('.md')),
     countSkillDirs(skillsDir),
     agentsDir ? countFiles(agentsDir, (n) => n.endsWith(agentExt)) : Promise.resolve(0),
-    countFiles(commandsDir, (n) => n.endsWith('.md')),
   ]);
   const findings: ReviewFinding[] = [];
   if (knowledgeBase === 0) {
@@ -125,14 +122,6 @@ export async function collectReviewFindings(
       detail: `No ${activeAgentsTarget.dir}/*${agentExt} files were produced; agent discovery step may not be ported yet.`,
     });
   }
-  if (commands === 0) {
-    findings.push({
-      id: 'no-commands',
-      severity: 'info',
-      label: 'No slash commands',
-      detail: 'No .claude/commands/*.md files were produced.',
-    });
-  }
   if (findings.length === 0) {
     findings.push({
       id: 'ok',
@@ -144,7 +133,7 @@ export async function collectReviewFindings(
 
   return {
     findings,
-    counts: { knowledgeBase, skills, agents, commands },
+    counts: { knowledgeBase, skills, agents },
   };
 }
 
@@ -157,7 +146,6 @@ function defaultReviewMarkdown(detected: FinalReviewDetect, notes: string): stri
     `- Knowledge base entries: ${detected.counts.knowledgeBase}`,
     `- Skills: ${detected.counts.skills}`,
     `- Agents: ${detected.counts.agents}`,
-    `- Commands: ${detected.counts.commands}`,
     '',
     '## Findings',
     '',
@@ -212,7 +200,6 @@ export const finalReviewStep: StepDefinition<FinalReviewDetect, FinalReviewApply
       `Knowledge base entries: ${detected.counts.knowledgeBase}`,
       `Skills: ${detected.counts.skills}`,
       `Agents: ${detected.counts.agents}`,
-      `Commands: ${detected.counts.commands}`,
       '',
       'Findings:',
       ...detected.findings.map((f) => `- [${f.severity}] ${f.label}`),

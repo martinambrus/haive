@@ -8,6 +8,7 @@ import {
   TASK_JOB_NAMES,
   logger,
   type CliExecJobPayload,
+  type RepoRagCleanupPayload,
   type TaskJobPayload,
   type WorkflowType,
 } from '@haive/shared';
@@ -27,7 +28,7 @@ import type { StepDefinition } from '../step-engine/step-definition.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import { cleanupTaskAuthVolumes } from '../sandbox/task-auth-volume.js';
-import { cleanupRagForTask } from '../step-engine/steps/onboarding/_rag-connection.js';
+import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 
 let registered = false;
@@ -545,17 +546,36 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
     .where(eq(schema.tasks.id, payload.taskId));
   await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
-  await cleanupRagForTask(db, payload.taskId);
 }
 
-export function startTaskWorker(): Worker<TaskJobPayload> {
+async function handleCleanupRepoRag(db: Database, payload: RepoRagCleanupPayload): Promise<void> {
+  const result = await cleanupRagForRepository(db, payload);
+  logger.info(
+    {
+      repositoryId: payload.repositoryId,
+      userId: payload.userId,
+      dropped: result.dropped,
+      kept: result.kept,
+    },
+    'repo rag cleanup complete',
+  );
+}
+
+type TaskWorkerPayload = TaskJobPayload | RepoRagCleanupPayload;
+
+export function startTaskWorker(): Worker<TaskWorkerPayload> {
   ensureRegistered();
-  const worker = new Worker<TaskJobPayload>(
+  const worker = new Worker<TaskWorkerPayload>(
     QUEUE_NAMES.TASK,
-    async (job: Job<TaskJobPayload>) => {
+    async (job: Job<TaskWorkerPayload>) => {
       const db = getDb();
-      const payload = job.data;
       try {
+        if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RAG) {
+          await handleCleanupRepoRag(db, job.data as RepoRagCleanupPayload);
+          return;
+        }
+
+        const payload = job.data as TaskJobPayload;
         if (job.name === TASK_JOB_NAMES.START) {
           await handleStartTask(db, payload);
         } else if (job.name === TASK_JOB_NAMES.ADVANCE_STEP) {
@@ -567,13 +587,13 @@ export function startTaskWorker(): Worker<TaskJobPayload> {
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        logger.error({ taskId: payload.taskId, jobName: job.name, err }, 'task job failed');
-        await markTaskFailed(db, payload.taskId, message).catch((cleanupErr) => {
-          logger.warn(
-            { err: cleanupErr, taskId: payload.taskId },
-            'markTaskFailed during catch failed',
-          );
-        });
+        const taskId = (job.data as TaskJobPayload).taskId;
+        logger.error({ taskId, jobName: job.name, err }, 'task job failed');
+        if (taskId && job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RAG) {
+          await markTaskFailed(db, taskId, message).catch((cleanupErr) => {
+            logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
+          });
+        }
         throw err;
       }
     },

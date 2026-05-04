@@ -10,25 +10,20 @@ const SEARCH_ORDER_BLOCK = [
   'Before searching code or answering questions about the codebase, follow this order. Skipping steps is prohibited.',
   '',
   '```',
-  '1. RAG → 2. KB → 3. LSP → 4. GREP (last resort)',
+  '1. KB → 2. LSP → 3. GREP (last resort)',
   '```',
   '',
-  '1. **RAG (first)**',
-  '   - Test availability: `python3 .claude/rag/query.py "search terms" 5`',
-  '   - If results contain `hybrid_score`, RAG is available — use it',
-  '   - If RAG returns results with similarity > 0.7, STOP — do not proceed to KB/LSP/GREP',
-  '   - If the script fails with `ModuleNotFoundError` or CRLF issues, run the repair methods in `.claude/rag/README.md` before declaring RAG unavailable',
-  '',
-  '2. **KB (if RAG insufficient)**',
+  '1. **KB (first)**',
   '   - Read the KB files linked from the `kb-references` frontmatter on this agent',
-  '   - KB holds the same content as RAG in markdown form — use it when RAG is unavailable or incomplete',
+  '   - Start at `.claude/knowledge_base/INDEX.md` and follow topic links',
+  '   - If the KB answers the question, STOP — do not proceed to LSP/GREP',
   '',
-  '3. **LSP (for code navigation)**',
+  '2. **LSP (for code navigation)**',
   '   - Use for `goToDefinition`, `findReferences`, `incomingCalls`, `outgoingCalls`',
-  '   - Only after RAG and KB are exhausted',
+  '   - Only after KB is exhausted, and only when the task involves code navigation',
   '',
-  '4. **GREP (last resort)**',
-  '   - Most token-expensive — use only if RAG unavailable, KB insufficient, and LSP not applicable',
+  '3. **GREP (last resort)**',
+  '   - Most token-expensive — use only if KB insufficient and LSP not applicable',
 ].join('\n');
 
 function firstCharLower(s: string): string {
@@ -158,7 +153,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       },
       {
         title: 'Search for conventions and prior art',
-        body: 'Query RAG/KB for patterns relevant to the touched files. If the change introduces a new pattern, look for existing places that do the same thing differently and flag the inconsistency.',
+        body: 'Query the knowledge base under `.claude/knowledge_base/` for patterns relevant to the touched files. If the change introduces a new pattern, look for existing places that do the same thing differently and flag the inconsistency.',
       },
       {
         title: 'Review per file',
@@ -657,7 +652,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       },
       {
         title: 'Scan for recurring patterns',
-        body: 'Use RAG and grep to find idioms that appear in multiple unrelated files. Single-occurrence patterns are not yet conventions.',
+        body: 'Use the knowledge base and grep to find idioms that appear in multiple unrelated files. Single-occurrence patterns are not yet conventions.',
       },
       {
         title: 'Validate with examples',

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -344,10 +344,6 @@ async function main(): Promise<void> {
     if (agentCount < 10) {
       throw new Error(`expected at least 10 agent files, got ${agentCount}`);
     }
-    const commandCount = await countMarkdownFiles(path.join(fixtureDir, '.claude', 'commands'));
-    if (commandCount < 3) {
-      throw new Error(`expected at least 3 command files, got ${commandCount}`);
-    }
     const kbCount = await countMarkdownFiles(path.join(fixtureDir, '.claude', 'knowledge_base'));
     if (kbCount < 3) {
       throw new Error(`expected at least 3 knowledge base files, got ${kbCount}`);
@@ -402,7 +398,6 @@ async function main(): Promise<void> {
       {
         steps: allSteps.length,
         agentCount,
-        commandCount,
         kbCount,
         skillCount,
         ragTableExists,
@@ -419,7 +414,6 @@ async function main(): Promise<void> {
         steps: allSteps.map((s) => ({ stepId: s.stepId, status: s.status })),
         artefacts: {
           agentCount,
-          commandCount,
           kbCount,
           skillCount,
           hasClaudeMd: true,

@@ -19,12 +19,10 @@ const DEFAULT_COMMIT_MESSAGE = [
 
 const BASE_STAGE_PATHS = [
   '.gitignore',
-  '.claude/commands/',
   '.claude/agents/',
   '.claude/skills/',
   '.claude/knowledge_base/',
   '.claude/workflow/',
-  '.claude/rag/',
   '.claude/mcp_settings.json',
   '.claude/workflow-checkpoint.json',
   '.claude/project-config.yaml',

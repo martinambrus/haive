@@ -25,7 +25,7 @@ interface KnowledgeApply {
   llmAvailable: boolean;
 }
 
-type KbCategory = 'general' | 'tech_pattern' | 'anti_pattern';
+type KbCategory = 'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
 
 interface KbEntry {
   id: string;
@@ -150,6 +150,18 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     'Read at least 10-15 files to get a representative understanding.',
     'For each topic you identify, read the relevant files thoroughly before writing the entry.',
     '',
+    '## Required coverage (mandatory)',
+    '',
+    'Emit ONE entry per canonical root file, AND one tech_pattern + anti_pattern + best_practice + quick_reference entry per major technology this repo actually uses. Do not silently skip a canonical file when it does not apply — emit it with `confidence: "low"` and a single section explaining why it is not applicable (e.g. "Not applicable: this is a pure library with no deployment surface"). Hard floor:',
+    '',
+    '- All 7 canonical root files MUST appear: ARCHITECTURE, API_REFERENCE, CODING_STANDARDS, TESTING_STANDARDS, SECURITY_STANDARDS, DEPLOYMENT, BUSINESS_LOGIC.',
+    '- For each major technology / library / framework identified (e.g. gradle, lwjgl2, java8, node-pty, drupal-entity-api), emit:',
+    '    - one tech_pattern entry (HOW it is used in this repo)',
+    '    - one anti_pattern entry (mistakes specific to that tech in this repo)',
+    '    - one best_practice entry (recommended usage in this repo)',
+    '    - one quick_reference entry (cheat sheet of the most common operations)',
+    '- Topic entries (loose root-level files) are allowed for cross-cutting concerns that do not fit a canonical or tech bucket.',
+    '',
     '## Output format',
     '',
     'Emit exactly ONE JSON object inside a ```json fenced code block:',
@@ -161,9 +173,9 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '      "title": "Human Readable Title",',
     '      "confidence": "high|medium|low",',
     '      "sourceFiles": ["path/to/file1.ts", "path/to/file2.ts"],',
-    '      "category": "general | tech_pattern | anti_pattern",',
+    '      "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference",',
     '      "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit for topic-specific entries)",',
-    '      "tech": "<required when category is tech_pattern or anti_pattern — e.g. node-pty, shell, drupal-entity-api>",',
+    '      "tech": "<required when category is tech_pattern, anti_pattern, best_practice, or quick_reference — e.g. node-pty, gradle, lwjgl2>",',
     '      "sections": [',
     '        { "heading": "Section Name", "body": "Detailed markdown content..." }',
     '      ]',
@@ -175,22 +187,22 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     'Requirements for each entry:',
     '- id: kebab-case, unique, descriptive (e.g. "testing-strategy", "api-authentication", "state-management")',
     '- title: clear human-readable name',
-    '- confidence: "high" if you read the actual files, "medium" if inferred from structure, "low" if speculative',
+    '- confidence: "high" if you read the actual files, "medium" if inferred from structure, "low" if speculative or marked not-applicable',
     '- sourceFiles: list the files you actually read to produce this entry',
     '- category:',
-    '    * "general" for broad project knowledge — maps either to a canonical root file (when `canonical` is set) or a kebab-case root file.',
-    '    * "tech_pattern" for HOW a specific technology/library is used in THIS repo — maps to TECH_PATTERNS/<tech>/INDEX.md.',
-    '    * "anti_pattern" for pitfalls/mistakes with a technology — maps to ANTI_PATTERNS/<tech>-mistakes.md.',
-    '- canonical: optional. Use when the entry matches one of the standard root-level files',
-    '    (ARCHITECTURE, API_REFERENCE, CODING_STANDARDS, TESTING_STANDARDS, SECURITY_STANDARDS, DEPLOYMENT, BUSINESS_LOGIC).',
-    '    Produce AT MOST ONE entry per canonical name. Omit for all other entries.',
-    '- tech: required when category is tech_pattern or anti_pattern. kebab-case (e.g. node-pty, drupal-form-api, rails-ar).',
+    '    * "general" — broad project knowledge. With `canonical` set maps to a canonical root file; without it maps to a kebab-case root file.',
+    '    * "tech_pattern" — HOW a specific technology is used in THIS repo. Routes to TECH_PATTERNS/<tech>/INDEX.md.',
+    '    * "anti_pattern" — pitfalls/mistakes for a technology. Routes to ANTI_PATTERNS/<tech>-mistakes.md.',
+    '    * "best_practice" — recommended usage of a technology in this repo. Routes to BEST_PRACTICES/<tech>-best-practices.md.',
+    '    * "quick_reference" — cheat sheet of common operations for a technology. Routes to QUICK_REFERENCE/<tech>/cheat-sheet.md.',
+    '- canonical: optional. Use when the entry matches one of the standard root-level files (ARCHITECTURE, API_REFERENCE, CODING_STANDARDS, TESTING_STANDARDS, SECURITY_STANDARDS, DEPLOYMENT, BUSINESS_LOGIC). Produce AT MOST ONE entry per canonical name.',
+    '- tech: required when category is tech_pattern, anti_pattern, best_practice, or quick_reference. kebab-case (e.g. node-pty, drupal-form-api, rails-ar, gradle, lwjgl2).',
     '- sections: at least 2 sections per entry with real extracted content, not generic advice.',
     '  - Include actual code patterns, specific config values, real file paths from the project.',
+    '  - Cite repo paths with line ranges (e.g. `build.gradle:13-41`) wherever possible.',
     '  - Write as if explaining to a new team member who needs to understand this area.',
     '',
-    'Aim for 5-15 knowledge entries depending on project complexity. Cover the canonical root files',
-    'first, then add tech_pattern / anti_pattern entries per major technology this repo actually uses.',
+    'Aim for 15-30 knowledge entries depending on project complexity. Cover ALL 7 canonical root files first, then for each major technology emit the four tech entries (pattern, anti-pattern, best-practice, quick-reference).',
     'Do not emit any prose outside the fenced JSON block.',
   ].join('\n');
 }
@@ -407,8 +419,8 @@ export interface RoutedEntry {
   entry: KbEntry;
   /** Path relative to `.claude/knowledge_base/` — includes subdirs. */
   relPath: string;
-  bucket: 'core' | 'tech_pattern' | 'anti_pattern' | 'topic';
-  /** Canonical stem for core entries, tech slug for tech/anti entries, entry id for topic. */
+  bucket: 'core' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference' | 'topic';
+  /** Canonical stem for core entries, tech slug for tech/anti/best/quick entries, entry id for topic. */
   key: string;
 }
 
@@ -453,6 +465,30 @@ export function routeEntries(entries: KbEntry[]): RoutedEntry[] {
         continue;
       }
     }
+    if (category === 'best_practice') {
+      const tech = normalizeTech(entry.tech);
+      if (tech) {
+        push({
+          entry,
+          relPath: `BEST_PRACTICES/${tech}-best-practices.md`,
+          bucket: 'best_practice',
+          key: tech,
+        });
+        continue;
+      }
+    }
+    if (category === 'quick_reference') {
+      const tech = normalizeTech(entry.tech);
+      if (tech) {
+        push({
+          entry,
+          relPath: `QUICK_REFERENCE/${tech}/cheat-sheet.md`,
+          bucket: 'quick_reference',
+          key: tech,
+        });
+        continue;
+      }
+    }
     push({ entry, relPath: `${entry.id}.md`, bucket: 'topic', key: entry.id });
   }
   return out;
@@ -462,6 +498,8 @@ export function kbIndexMarkdown(routed: RoutedEntry[], projectName: string | nul
   const core = routed.filter((r) => r.bucket === 'core');
   const tech = routed.filter((r) => r.bucket === 'tech_pattern');
   const anti = routed.filter((r) => r.bucket === 'anti_pattern');
+  const best = routed.filter((r) => r.bucket === 'best_practice');
+  const quick = routed.filter((r) => r.bucket === 'quick_reference');
   const topic = routed.filter((r) => r.bucket === 'topic');
   const lines: string[] = ['# Knowledge Base Index', ''];
   if (projectName) lines.push(projectName + '.', '');
@@ -476,9 +514,19 @@ export function kbIndexMarkdown(routed: RoutedEntry[], projectName: string | nul
     for (const r of tech) lines.push(`- ${r.relPath} - ${r.entry.title}`);
     lines.push('');
   }
+  if (best.length > 0) {
+    lines.push('## Best Practices', '');
+    for (const r of best) lines.push(`- ${r.relPath} - ${r.entry.title}`);
+    lines.push('');
+  }
   if (anti.length > 0) {
     lines.push('## Anti-Patterns', '');
     for (const r of anti) lines.push(`- ${r.relPath} - ${r.entry.title}`);
+    lines.push('');
+  }
+  if (quick.length > 0) {
+    lines.push('## Quick References', '');
+    for (const r of quick) lines.push(`- ${r.relPath} - ${r.entry.title}`);
     lines.push('');
   }
   if (topic.length > 0) {

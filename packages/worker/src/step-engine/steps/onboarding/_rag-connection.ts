@@ -1,6 +1,6 @@
 import postgres from 'postgres';
-import { and, eq, sql } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { sql } from 'drizzle-orm';
+import { type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 
 const log = logger.child({ module: 'rag-connection' });
@@ -230,73 +230,92 @@ export async function ensureRagSchema(
 }
 
 /* ------------------------------------------------------------------ */
-/* Task cleanup (delete RAG rows for a cancelled/failed task)          */
+/* Repository cleanup                                                  */
 /* ------------------------------------------------------------------ */
 
 /**
- * Delete all RAG rows for a given task. Used during task cancellation.
- * Resolves the RAG connection from onboarding step 04 output, connects,
- * and deletes rows where task_id matches. Silently skips if RAG is not
- * configured or connection fails.
+ * Drop the per-project internal RAG database for each `projectName` after a
+ * repository has been deleted. A database is dropped only when no surviving
+ * task targets the same project name with `ragMode='internal'` — otherwise
+ * another (non-deleted) repo would lose its embeddings.
+ *
+ * External and ddev RAG modes are NEVER touched: they live on infrastructure
+ * Haive does not own (a customer DDEV project, a customer-supplied postgres).
+ * Caller is responsible for filtering `projectNames` to only those that
+ * originated from `ragMode='internal'` tasks of the deleted repo.
  */
-export async function cleanupRagForTask(haiveDb: Database, taskId: string): Promise<number> {
-  try {
-    // Load step 04 tooling prefs from the task
-    const stepRow = await haiveDb
-      .select()
-      .from(schema.taskSteps)
-      .where(
-        and(
-          eq(schema.taskSteps.taskId, taskId),
-          eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
-        ),
-      )
-      .limit(1);
-    const output = stepRow[0]?.output as { tooling?: Record<string, unknown> } | null;
-    if (!output?.tooling) return 0;
+export async function cleanupRagForRepository(
+  haiveDb: Database,
+  payload: { repositoryId: string; userId: string; projectNames: string[] },
+): Promise<{ dropped: string[]; kept: string[] }> {
+  const dropped: string[] = [];
+  const kept: string[] = [];
+  const seen = new Set<string>();
 
-    const t = output.tooling;
-    const ragMode = (t.ragMode as string) ?? 'none';
-    if (ragMode === 'none') return 0;
+  for (const rawName of payload.projectNames) {
+    if (typeof rawName !== 'string' || rawName.trim().length === 0) continue;
+    const projectName = rawName.trim();
+    const dbName = ragDatabaseName(projectName);
+    if (seen.has(dbName)) continue;
+    seen.add(dbName);
 
-    const prefs: RagToolingPrefs = {
-      ragMode: ragMode as RagMode,
-      ragConnectionString: (t.ragConnectionString as string) || null,
-      ollamaUrl: null,
-      embeddingModel: null,
-      embeddingDimensions: typeof t.embeddingDimensions === 'number' ? t.embeddingDimensions : 2560,
-    };
+    // Collision check: a surviving task (any user, any repo) that ran step 04
+    // with ragMode='internal' AND step 01-env-detect with the same project
+    // name keeps the database alive. Repo deletion sets `tasks.repository_id`
+    // to NULL via FK ON DELETE SET NULL, so orphaned tasks of the deleted
+    // repo are still in the table — but they no longer represent a live
+    // consumer. Filter them out via `repository_id IS NOT NULL`.
+    let hasCollision = false;
+    try {
+      const rows = (await haiveDb.execute(sql`
+        SELECT 1
+        FROM task_steps env_step
+        JOIN task_steps tooling_step ON tooling_step.task_id = env_step.task_id
+        JOIN tasks t ON t.id = env_step.task_id
+        WHERE env_step.step_id = '01-env-detect'
+          AND tooling_step.step_id = '04-tooling-infrastructure'
+          AND t.repository_id IS NOT NULL
+          AND env_step.detect_output -> 'data' -> 'project' ->> 'name' = ${projectName}
+          AND tooling_step.output -> 'tooling' ->> 'ragMode' = 'internal'
+        LIMIT 1
+      `)) as unknown as unknown[];
+      hasCollision = Array.isArray(rows) && rows.length > 0;
+    } catch (err) {
+      log.warn({ err, dbName, projectName }, 'collision check failed; keeping rag database');
+      kept.push(dbName);
+      continue;
+    }
 
-    // Get project name from env-detect
-    const envRow = await haiveDb
-      .select()
-      .from(schema.taskSteps)
-      .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, '01-env-detect')))
-      .limit(1);
-    const envDetect = envRow[0]?.detectOutput as { data?: { project?: { name?: string } } } | null;
-    const projectName = envDetect?.data?.project?.name ?? 'default';
-
-    const conn = await resolveRagConnection(prefs, haiveDb, projectName);
-    if (!conn) return 0;
+    if (hasCollision) {
+      log.info(
+        { dbName, projectName, repositoryId: payload.repositoryId },
+        'rag database kept — surviving task references the same project name',
+      );
+      kept.push(dbName);
+      continue;
+    }
 
     try {
-      // Table might not exist yet if task was cancelled early
-      const result = await conn.pg.unsafe(`DELETE FROM ${RAG_TABLE} WHERE task_id = $1`, [taskId]);
-      const count = result.count;
-      if (count > 0) {
-        log.info({ taskId, count }, 'cleaned up RAG rows for cancelled task');
-      }
-      return count;
+      // Terminate any active connections to the per-project DB before drop.
+      // Quote the database name to survive non-identifier characters even
+      // though sanitizeDbName already constrains it.
+      const escaped = dbName.replace(/'/g, "''");
+      await haiveDb.execute(
+        sql.raw(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${escaped}' AND pid <> pg_backend_pid()`,
+        ),
+      );
+      await haiveDb.execute(sql.raw(`DROP DATABASE IF EXISTS "${dbName}"`));
+      log.info(
+        { dbName, projectName, repositoryId: payload.repositoryId },
+        'dropped per-project rag database after repo deletion',
+      );
+      dropped.push(dbName);
     } catch (err) {
-      // Table doesn't exist — nothing to clean
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('does not exist')) return 0;
-      throw err;
-    } finally {
-      await conn.close();
+      log.warn({ err, dbName, projectName }, 'failed to drop rag database (non-fatal)');
+      kept.push(dbName);
     }
-  } catch (err) {
-    log.warn({ err, taskId }, 'rag cleanup for task failed (non-fatal)');
-    return 0;
   }
+
+  return { dropped, kept };
 }

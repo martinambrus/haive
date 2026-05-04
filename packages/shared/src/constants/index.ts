@@ -45,6 +45,11 @@ export const TASK_JOB_NAMES = {
   START: 'start-task',
   ADVANCE_STEP: 'advance-step',
   CANCEL: 'cancel-task',
+  /** Drops the per-project internal RAG database after a repository is
+   *  deleted. Skipped for project names that any surviving repo's tasks still
+   *  reference with ragMode='internal'. External / ddev RAG modes are never
+   *  touched — they live on infra Haive does not own. */
+  CLEANUP_REPO_RAG: 'cleanup-repo-rag',
 } as const;
 
 export interface TaskJobPayload {
@@ -52,6 +57,16 @@ export interface TaskJobPayload {
   userId: string;
   stepId?: string;
   formValues?: Record<string, unknown>;
+}
+
+/** Payload for `TASK_JOB_NAMES.CLEANUP_REPO_RAG`. The worker drops every
+ *  per-project RAG database matching one of `projectNames` UNLESS another
+ *  surviving task (different repository) targets the same project name with
+ *  `ragMode='internal'`. */
+export interface RepoRagCleanupPayload {
+  repositoryId: string;
+  userId: string;
+  projectNames: string[];
 }
 
 export const CLI_EXEC_JOB_NAMES = {
