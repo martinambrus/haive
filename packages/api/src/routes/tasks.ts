@@ -1,5 +1,6 @@
 import { open, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
+import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { and, asc, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -19,6 +20,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { killTaskSandboxes } from '../lib/sandbox-kill.js';
 import { cancelTaskRow, enqueueCancelJob } from '../lib/cancel-task.js';
+import { createTaskArchiveStream } from '../lib/task-archive.js';
 import { getTaskQueue } from '../queues.js';
 
 const MAX_FILE_CONTENT_BYTES = 512 * 1024;
@@ -724,6 +726,21 @@ taskRoutes.get('/:id/cli-invocations/:invocationId/output', async (c) => {
     durationMs: inv.durationMs,
     isActive: inv.endedAt === null,
   });
+});
+
+taskRoutes.get('/:id/files/archive', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const db = getDb();
+  const { root } = await resolveWorkspaceRoot(db, id, userId);
+
+  const { stream, filename } = await createTaskArchiveStream(root, id);
+
+  c.header('Content-Type', 'application/gzip');
+  c.header('Content-Disposition', `attachment; filename="${filename}"`);
+  c.header('Cache-Control', 'no-store');
+
+  return c.body(Readable.toWeb(stream) as ReadableStream);
 });
 
 taskRoutes.get('/:id/files', async (c) => {

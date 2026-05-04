@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   api,
+  API_BASE_URL,
   type TaskFileContent,
   type TaskFileEntry,
   type TaskFileListing,
@@ -31,6 +32,8 @@ export function TaskSource({ taskId }: TaskSourceProps) {
   const [contentLoading, setContentLoading] = useState(false);
   const [leftPct, setLeftPct] = useState(33);
   const [isWide, setIsWide] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
 
@@ -121,6 +124,33 @@ export function TaskSource({ taskId }: TaskSourceProps) {
     if (selectedFile) void openFile(selectedFile);
   }
 
+  async function downloadArchive() {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/tasks/${taskId}/files/archive`, {
+        credentials: 'include',
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `task-${taskId}-source.tar.gz`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setDownloadError((err as Error).message ?? 'Download failed');
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   if (listingError) {
     return (
       <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300">
@@ -156,8 +186,22 @@ export function TaskSource({ taskId }: TaskSourceProps) {
             <button type="button" onClick={refresh} className="text-xs text-indigo-400 underline">
               Refresh
             </button>
+            <button
+              type="button"
+              onClick={() => void downloadArchive()}
+              disabled={downloading}
+              className="text-xs text-indigo-400 underline disabled:cursor-not-allowed disabled:text-neutral-500 disabled:no-underline"
+              title="Download workspace as tar.gz (includes hidden files)"
+            >
+              {downloading ? 'Packing…' : 'Download .tar.gz'}
+            </button>
           </div>
         </div>
+        {downloadError && (
+          <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+            {downloadError}
+          </div>
+        )}
         <div className="max-h-[600px] overflow-y-auto rounded-md border border-neutral-800 bg-neutral-950">
           {listing?.parent && (
             <button
