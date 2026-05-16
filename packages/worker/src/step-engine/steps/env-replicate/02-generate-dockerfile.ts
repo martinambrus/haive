@@ -165,10 +165,27 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   lines.push('    && rm -rf /var/lib/apt/lists/*');
   lines.push('');
 
-  const runtimes = deps.runtimes ?? [];
+  const declaredRuntimes = deps.runtimes ?? [];
   const versions = deps.versions ?? {};
+  const lspServers = deps.lspServers ?? [];
 
-  if (runtimes.includes('node')) {
+  const lspNeedsNode = lspServers.some(
+    (l) => l === 'intelephense' || l === 'intelephense-extended' || l === 'vtsls',
+  );
+  const browserNeedsNode = !!deps.browserTesting;
+  const lspNeedsPython = lspServers.includes('pyright');
+  const lspNeedsGo = lspServers.includes('gopls');
+  const lspNeedsRust = lspServers.includes('rust-analyzer');
+  const lspNeedsRuby = lspServers.includes('solargraph');
+
+  const runtimes = new Set<string>(declaredRuntimes);
+  if (lspNeedsNode || browserNeedsNode) runtimes.add('node');
+  if (lspNeedsPython) runtimes.add('python');
+  if (lspNeedsGo) runtimes.add('go');
+  if (lspNeedsRust) runtimes.add('rust');
+  if (lspNeedsRuby) runtimes.add('ruby');
+
+  if (runtimes.has('node')) {
     const nodeMajor = (versions.node ?? '22').split('.')[0];
     lines.push(
       `# Node.js ${nodeMajor} (build-essential + python3 needed by node-gyp for native modules)`,
@@ -182,10 +199,19 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     lines.push('');
   }
 
-  if (runtimes.includes('php')) {
-    const phpVersion = versions.php ?? '8.3';
+  if (runtimes.has('php')) {
+    const phpVersion = normalizePhpVersion(versions.php ?? '8.3');
+    const isUbuntuBase = /^ubuntu:/i.test(baseImage);
+    const needsSuryPpa = isUbuntuBase && phpVersion !== '8.3';
     lines.push(`# PHP ${phpVersion}`);
     lines.push('RUN apt-get update \\');
+    if (needsSuryPpa) {
+      lines.push(
+        '    && apt-get install -y --no-install-recommends software-properties-common ca-certificates \\',
+      );
+      lines.push('    && add-apt-repository -y ppa:ondrej/php \\');
+      lines.push('    && apt-get update \\');
+    }
     lines.push(
       `    && apt-get install -y --no-install-recommends php${phpVersion}-cli php${phpVersion}-xml php${phpVersion}-mbstring php${phpVersion}-zip \\`,
     );
@@ -194,7 +220,7 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     lines.push('');
   }
 
-  if (runtimes.includes('python')) {
+  if (runtimes.has('python')) {
     const pythonVersion = versions.python ?? '3.12';
     lines.push(`# Python ${pythonVersion}`);
     lines.push('RUN apt-get update \\');
@@ -205,7 +231,7 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     lines.push('');
   }
 
-  if (runtimes.includes('go')) {
+  if (runtimes.has('go')) {
     lines.push('# Go');
     lines.push(
       'RUN curl -fsSL https://go.dev/dl/go1.23.0.linux-amd64.tar.gz | tar -C /usr/local -xz',
@@ -214,7 +240,7 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     lines.push('');
   }
 
-  if (runtimes.includes('rust')) {
+  if (runtimes.has('rust')) {
     lines.push('# Rust');
     lines.push(
       'RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal',
@@ -223,7 +249,7 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     lines.push('');
   }
 
-  if (runtimes.includes('ruby')) {
+  if (runtimes.has('ruby')) {
     lines.push('# Ruby');
     lines.push(
       'RUN apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev && rm -rf /var/lib/apt/lists/*',
@@ -231,7 +257,7 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     lines.push('');
   }
 
-  if (runtimes.includes('java')) {
+  if (runtimes.has('java')) {
     const javaVersion = versions.java ?? '17';
     const javaParts = javaVersion.split('.');
     const javaMajor = javaParts[0] === '1' && javaParts[1] ? javaParts[1] : (javaParts[0] ?? '17');
@@ -262,7 +288,6 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     lines.push('');
   }
 
-  const lspServers = deps.lspServers ?? [];
   if (lspServers.length > 0) {
     lines.push('# Language servers');
     for (const lsp of lspServers) {
@@ -328,6 +353,14 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   lines.push('CMD ["bash"]');
 
   return lines.join('\n') + '\n';
+}
+
+function normalizePhpVersion(raw: string): string {
+  const cleaned = raw.replace(/[^\d.]/g, '').trim();
+  const parts = cleaned.split('.').filter(Boolean);
+  if (parts.length >= 2) return `${parts[0]}.${parts[1]}`;
+  if (parts.length === 1 && parts[0]) return parts[0];
+  return '8.3';
 }
 
 function renderDepInstallBlock(language: string, manager: PackageManager): string[] {

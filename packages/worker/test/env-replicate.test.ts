@@ -232,6 +232,48 @@ describe('renderDockerfile', () => {
     expect(out).toContain('# PHP 8.3');
     expect(out).toContain('php8.3-cli');
     expect(out).toContain('/usr/bin/composer');
+    expect(out).not.toContain('ppa:ondrej/php');
+  });
+
+  it('normalizes PHP version to major.minor for apt package names', () => {
+    const out = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['php'],
+      versions: { php: '5.6.40' },
+    });
+    expect(out).toContain('# PHP 5.6');
+    expect(out).toContain('php5.6-cli');
+    expect(out).toContain('php5.6-mbstring');
+    expect(out).toContain('php5.6-zip');
+    expect(out).not.toContain('php5.6.40-cli');
+  });
+
+  it('adds Ondrej Sury PPA for non-default PHP versions on Ubuntu', () => {
+    const out = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['php'],
+      versions: { php: '7.4' },
+    });
+    expect(out).toContain('add-apt-repository -y ppa:ondrej/php');
+    expect(out).toContain('software-properties-common');
+    expect(out).toContain('php7.4-cli');
+  });
+
+  it('omits Ondrej Sury PPA for default PHP 8.3 on Ubuntu', () => {
+    const out = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['php'],
+      versions: { php: '8.3' },
+    });
+    expect(out).not.toContain('ppa:ondrej/php');
+    expect(out).toContain('php8.3-cli');
+  });
+
+  it('strips caret prefix and patch from composer-style php constraint', () => {
+    const out = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['php'],
+      versions: { php: '^8.1.10' },
+    });
+    expect(out).toContain('# PHP 8.1');
+    expect(out).toContain('php8.1-cli');
+    expect(out).toContain('ppa:ondrej/php');
   });
 
   it('adds the requested LSP language servers', () => {
@@ -241,6 +283,37 @@ describe('renderDockerfile', () => {
     });
     expect(out).toContain('RUN npm install -g intelephense');
     expect(out).toContain('RUN npm install -g @vtsls/language-server typescript');
+  });
+
+  it('installs Node.js when an npm-based LSP is selected without node runtime', () => {
+    const out = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['php'],
+      lspServers: ['intelephense'],
+    });
+    expect(out).toContain('# Node.js');
+    expect(out).toContain('nodejs');
+    expect(out).toContain('RUN npm install -g intelephense');
+    expect(out.indexOf('nodejs')).toBeLessThan(out.indexOf('npm install -g intelephense'));
+  });
+
+  it('installs Python when pyright LSP is selected without python runtime', () => {
+    const out = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['go'],
+      lspServers: ['pyright'],
+    });
+    expect(out).toContain('# Python');
+    expect(out).toContain('python3-pip');
+    expect(out).toContain('RUN pip install --break-system-packages pyright');
+  });
+
+  it('installs Node.js when browserTesting is enabled without node runtime', () => {
+    const out = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['php'],
+      browserTesting: true,
+    });
+    expect(out).toContain('# Node.js');
+    expect(out).toContain('nodejs');
+    expect(out).toContain('RUN npm install -g chrome-devtools-mcp');
   });
 
   it('installs chromium and chrome-devtools-mcp when browserTesting is enabled', () => {
