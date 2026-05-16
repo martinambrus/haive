@@ -710,30 +710,53 @@ function StepCard({
         </div>
       )}
 
-      {showForm && (
-        <div className="border-t border-neutral-800 pt-4">
-          <FormRenderer
-            schema={schema}
-            initialValues={initialValues}
-            submitting={submitting}
-            errorMessage={submitError}
-            onSubmit={onSubmit}
-            repositoryId={taskRepositoryId}
-            renderAfterField={
-              hasConnectionFields
-                ? (fieldId, values) => {
-                    if (fieldId === 'ragConnectionString') {
-                      return <PostgresTestButton formValues={values} />;
-                    }
-                    if (fieldId === 'embeddingModel') {
-                      return <OllamaTestButton formValues={values} />;
-                    }
-                    return null;
-                  }
-                : undefined
-            }
-          />
+      {showForm && schema?.submitAction === 'retry' ? (
+        <div className="flex flex-col gap-3 border-t border-neutral-800 pt-4">
+          <div>
+            <h3 className="text-lg font-semibold text-neutral-50">{schema.title}</h3>
+            {schema.description && (
+              <p className="mt-1 whitespace-pre-line text-sm text-neutral-400">
+                {schema.description}
+              </p>
+            )}
+          </div>
+          {actionError && (
+            <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+              {actionError}
+            </div>
+          )}
+          <div>
+            <Button disabled={actionBusy} onClick={() => onAction('retry')}>
+              {actionBusy ? 'Retrying…' : (schema.submitLabel ?? 'Retry')}
+            </Button>
+          </div>
         </div>
+      ) : (
+        showForm && (
+          <div className="border-t border-neutral-800 pt-4">
+            <FormRenderer
+              schema={schema}
+              initialValues={initialValues}
+              submitting={submitting}
+              errorMessage={submitError}
+              onSubmit={onSubmit}
+              repositoryId={taskRepositoryId}
+              renderAfterField={
+                hasConnectionFields
+                  ? (fieldId, values) => {
+                      if (fieldId === 'ragConnectionString') {
+                        return <PostgresTestButton formValues={values} />;
+                      }
+                      if (fieldId === 'embeddingModel') {
+                        return <OllamaTestButton formValues={values} />;
+                      }
+                      return null;
+                    }
+                  : undefined
+              }
+            />
+          </div>
+        )
       )}
 
       {step.status !== 'waiting_form' && (step.detectOutput !== null || step.output !== null) && (

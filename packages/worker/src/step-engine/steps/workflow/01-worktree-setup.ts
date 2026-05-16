@@ -95,9 +95,10 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       return {
         title: 'Worktree setup',
         description:
-          'No git repository detected at the repo root. Worktrees are mandatory for this workflow — initialise the repo with git before starting the task.',
+          'No git repository detected at the repo root. Worktrees are mandatory for this workflow — open the Terminal tab, run `git init` (and commit your starting state), then click Retry to re-run detection.',
         fields: [],
-        submitLabel: 'Blocked',
+        submitLabel: 'Retry',
+        submitAction: 'retry',
       };
     }
     return {

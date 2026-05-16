@@ -41,7 +41,15 @@ export interface EnsureShellContainerOpts {
   /** MCP servers configured for this user/task. Written into the container
    *  at /haive/mcp.json before the first attach so claude/zai pick it up. */
   mcpServers: McpServerSpec[];
+  /** Extra env vars (provider envVars + decrypted secrets + git identity)
+   *  baked into the container at create time so interactive `claude` /
+   *  `codex` invocations in the shell see the same env the orchestrator
+   *  uses. Skipped when the container is reused — old env stays. Keys
+   *  reserved by the runtime (HOME, TERM) are dropped to keep them stable. */
+  providerEnv?: Record<string, string>;
 }
+
+const RESERVED_ENV_KEYS = new Set(['HOME', 'TERM']);
 
 export interface EnsureShellContainerResult {
   containerName: string;
@@ -59,7 +67,7 @@ export interface EnsureShellContainerResult {
 export async function ensureShellContainer(
   opts: EnsureShellContainerOpts,
 ): Promise<EnsureShellContainerResult> {
-  const { db, docker, userId, taskId, providerId, repoMount, mcpServers } = opts;
+  const { db, docker, userId, taskId, providerId, repoMount, mcpServers, providerEnv } = opts;
 
   const provider = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, providerId),
@@ -148,6 +156,14 @@ export async function ensureShellContainer(
     Binds: binds,
   };
   if (mounts.length > 0) hostConfig.Mounts = mounts;
+  const envList = [`HOME=${SANDBOX_USER_HOME}`, 'TERM=xterm-256color'];
+  if (providerEnv) {
+    for (const [k, v] of Object.entries(providerEnv)) {
+      if (RESERVED_ENV_KEYS.has(k)) continue;
+      if (typeof v !== 'string') continue;
+      envList.push(`${k}=${v}`);
+    }
+  }
   let shellContainer: Docker.Container;
   try {
     shellContainer = await docker.createContainer({
@@ -157,7 +173,7 @@ export async function ensureShellContainer(
       Tty: false,
       User: SANDBOX_USER,
       WorkingDir: SANDBOX_WORKDIR,
-      Env: [`HOME=${SANDBOX_USER_HOME}`, 'TERM=xterm-256color'],
+      Env: envList,
       HostConfig: hostConfig as never,
       Labels: {
         'haive.role': 'terminal-shell',
@@ -199,6 +215,21 @@ export async function ensureShellContainer(
   if (repoMount) {
     await chownWorkdir(docker, containerName, repoMount.target).catch((err) => {
       log.warn({ err, containerName }, 'workdir chown failed — writes may be denied');
+    });
+  }
+
+  // Chown auth mount roots (e.g. ~/.claude, ~/.config/claude) to the
+  // sandbox user. User auth volumes created before the sandbox-image
+  // started pre-creating /home/node/.claude with node:node can have a
+  // root-owned mount root, which makes claude unable to mkdir
+  // ~/.claude/session-env (or any sibling). Idempotent; runs only on
+  // fresh container spawn.
+  for (const m of authMounts) {
+    await chownWorkdir(docker, containerName, m.target).catch((err) => {
+      log.warn(
+        { err, containerName, target: m.target },
+        'auth mount chown failed — claude may hit Permission denied',
+      );
     });
   }
 

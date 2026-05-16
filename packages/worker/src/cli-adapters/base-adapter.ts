@@ -90,6 +90,20 @@ export abstract class BaseCliAdapter {
     return {};
   }
 
+  /** Env vars an interactive shell (terminal tab) should see for this
+   *  provider — provider.envVars + effort + decrypted secrets. Adapters
+   *  that remap keys for their CLI binary (zai aliases ANTHROPIC_AUTH_TOKEN
+   *  off Z_AI_API_KEY) override this so a manual `claude` invocation in
+   *  the shell sees the same env the orchestrator would pass. */
+  buildShellEnv(
+    provider: CliProviderRecord,
+    secrets: Record<string, string>,
+    extraEnv: Record<string, string> = {},
+  ): Record<string, string> {
+    const effort = this.resolveEffortEnv(provider, {});
+    return { ...(provider.envVars ?? {}), ...effort, ...secrets, ...extraEnv };
+  }
+
   protected resolveExecutable(provider: CliProviderRecord): string {
     const wrapper = provider.wrapperPath?.trim();
     if (wrapper) return wrapper;

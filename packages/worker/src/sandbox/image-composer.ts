@@ -75,6 +75,16 @@ function resolveBase(envTemplateDockerfile: string | null): string {
   return envTemplateDockerfile.trimEnd();
 }
 
+/** rtk binary version + sha for env-template-derived composed images.
+ *  MUST stay in sync with the ARG values in
+ *  `packages/worker/sandbox-image/Dockerfile` — both layers download the
+ *  same tarball so behaviour matches whether the base image is the
+ *  haive-cli-sandbox core or a project env-template. The musl binary is
+ *  statically linked, so the same artifact works on Alpine and on
+ *  Debian/Ubuntu env-templates. */
+const RTK_RELEASE_VERSION = 'v0.37.2';
+const RTK_X86_64_MUSL_SHA256 = '3dfb7a05636a68687ba1c5aa696fa8d5fcb494447ded86d9eb8b88b7100a37c6';
+
 /** Idempotent install layer for the haive-side runtime tools the CLI session
  *  needs but that the env-template won't necessarily ship. Currently:
  *   - `uv`/`uvx`: spawning the `mcp-server-git` MCP server claude-code wires
@@ -90,6 +100,11 @@ function resolveBase(envTemplateDockerfile: string | null): string {
  *     what gives "navigate-away-and-back" true persistence — env vars,
  *     cwd, running foreground process, and pane buffer all survive the
  *     reconnect because the bash + tmux server live independent of any WS.
+ *   - `rtk`: token-killer hook binary referenced by every project-level
+ *     `.claude/settings.json` rendered with `rtk_enabled=true`. Without
+ *     it claude/zai run a PreToolUse hook that fails with
+ *     `rtk: not found` on every Bash invocation. Pulled from the same
+ *     pinned musl tarball as the sandbox-core image.
  *  Auto-detects the package manager so the same line works on alpine (apk)
  *  and debian/ubuntu (apt). Falls back to the official uv installer when
  *  neither is present (rg / nano / tmux have no upstream tarball install
@@ -98,11 +113,12 @@ function resolveBase(envTemplateDockerfile: string | null): string {
  *  present for the early exit. Idempotent on its own line so a change
  *  here forces a clean cache miss across all composed images. */
 function buildHaiveRuntimeToolsLayer(): string {
+  const rtkUrl = `https://github.com/rtk-ai/rtk/releases/download/${RTK_RELEASE_VERSION}/rtk-x86_64-unknown-linux-musl.tar.gz`;
   return [
     'RUN set -eux; \\',
-    '    if command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v nano >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then exit 0; fi; \\',
+    '    if command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v nano >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v rtk >/dev/null 2>&1; then exit 0; fi; \\',
     '    if command -v apk >/dev/null 2>&1; then \\',
-    '        apk add --no-cache uv ripgrep nano tmux; \\',
+    '        apk add --no-cache uv ripgrep nano tmux curl ca-certificates; \\',
     '    elif command -v apt-get >/dev/null 2>&1; then \\',
     '        apt-get update; \\',
     '        apt-get install -y --no-install-recommends curl ca-certificates ripgrep nano tmux; \\',
@@ -112,6 +128,22 @@ function buildHaiveRuntimeToolsLayer(): string {
     '        rm -rf /var/lib/apt/lists/*; \\',
     '    else \\',
     '        echo "haive-runtime-tools: no apk/apt — uv/ripgrep/nano/tmux install skipped" >&2; \\',
+    '    fi; \\',
+    '    if ! command -v rtk >/dev/null 2>&1; then \\',
+    '        arch="$(uname -m)"; \\',
+    '        case "$arch" in \\',
+    '          x86_64) \\',
+    `            curl -fsSL "${rtkUrl}" -o /tmp/rtk.tgz; \\`,
+    `            echo "${RTK_X86_64_MUSL_SHA256}  /tmp/rtk.tgz" | sha256sum -c -; \\`,
+    '            tar -xzf /tmp/rtk.tgz -C /tmp; \\',
+    '            install -m 0755 "$(find /tmp -maxdepth 3 -type f -name rtk -perm -u+x | head -n1)" /usr/local/bin/rtk; \\',
+    '            rm -rf /tmp/rtk.tgz /tmp/rtk-*; \\',
+    '            /usr/local/bin/rtk --version; \\',
+    '            ;; \\',
+    '          *) \\',
+    `            echo "rtk: skipping install on unsupported arch '$arch' (no musl asset upstream)" >&2; \\`,
+    '            ;; \\',
+    '        esac; \\',
     '    fi',
   ].join('\n');
 }

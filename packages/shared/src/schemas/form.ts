@@ -250,6 +250,13 @@ export const formSchemaSchema = z.object({
   infoSections: z.array(infoSectionSchema).optional(),
   fields: z.array(formFieldSchema),
   submitLabel: z.string().optional(),
+  /** How the form's primary CTA should behave when clicked:
+   *   - 'submit' (default): submit the form values to the step (POST form).
+   *   - 'retry': trigger a step retry instead — the renderer skips the form
+   *     entirely and shows a single Retry button. Use when `detect` finds
+   *     a precondition unmet (e.g. no git repo) and the only useful next
+   *     action is for the user to fix the precondition and re-run detect. */
+  submitAction: z.enum(['submit', 'retry']).optional(),
 });
 
 export type FormSchema = z.infer<typeof formSchemaSchema>;

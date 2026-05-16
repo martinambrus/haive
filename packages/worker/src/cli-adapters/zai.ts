@@ -83,6 +83,27 @@ export class ZaiAdapter extends BaseCliAdapter {
     return { CLAUDE_CODE_EFFORT_LEVEL: level };
   }
 
+  override buildShellEnv(
+    provider: CliProviderRecord,
+    secrets: Record<string, string>,
+    extraEnv: Record<string, string> = {},
+  ): Record<string, string> {
+    const env = super.buildShellEnv(provider, secrets, extraEnv);
+    const baseUrl = env.Z_AI_API_URL ?? env.ANTHROPIC_BASE_URL ?? ZAI_DEFAULT_BASE_URL;
+    env.ANTHROPIC_BASE_URL = baseUrl;
+    // Interactive `claude` warns when both ANTHROPIC_AUTH_TOKEN and
+    // ANTHROPIC_API_KEY are present. Set only AUTH_TOKEN here; the
+    // non-interactive orchestrator path (buildCliInvocation) still sets
+    // both for compat with older claude binaries.
+    const token = env.Z_AI_API_KEY ?? env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY;
+    if (token) {
+      env.ANTHROPIC_AUTH_TOKEN = token;
+    }
+    delete env.ANTHROPIC_API_KEY;
+    if (env.Z_AI_MODEL) env.CLAUDE_MODEL = env.Z_AI_MODEL;
+    return env;
+  }
+
   envInjection(_provider: CliProviderRecord): EnvInjection {
     return {
       envVars: {},

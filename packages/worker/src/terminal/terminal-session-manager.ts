@@ -22,6 +22,9 @@ import { resolveTaskRepoMount } from '../queues/cli-exec-queue.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type { McpServerSpec } from '../sandbox/mcp-config.js';
 import { buildDefaultMcpServers } from '../sandbox/mcp-config.js';
+import { cliAdapterRegistry } from '../cli-adapters/registry.js';
+import { resolveProviderSecrets } from '../secrets/provider-secrets.js';
+import { resolveUserGitEnv } from '../secrets/user-git-identity.js';
 
 const log = logger.child({ module: 'terminal-session-manager' });
 
@@ -155,6 +158,31 @@ export class TerminalSessionManager {
     }
   }
 
+  /** Resolve the env an interactive shell should see for this provider:
+   *  decrypted secrets + provider.envVars + git identity, run through the
+   *  adapter's `buildShellEnv` so per-CLI aliases (e.g. zai's
+   *  ANTHROPIC_AUTH_TOKEN) land. Empty object on missing provider. */
+  private async resolveProviderShellEnv(
+    userId: string,
+    providerId: string,
+  ): Promise<Record<string, string>> {
+    const provider = await this.db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, providerId),
+    });
+    if (!provider || provider.userId !== userId) return {};
+    const [secrets, gitEnv] = await Promise.all([
+      resolveProviderSecrets(this.db, providerId),
+      resolveUserGitEnv(this.db, userId),
+    ]);
+    const adapter = cliAdapterRegistry.has(provider.name)
+      ? cliAdapterRegistry.get(provider.name)
+      : null;
+    if (!adapter) {
+      return { ...(provider.envVars ?? {}), ...secrets, ...gitEnv };
+    }
+    return adapter.buildShellEnv(provider, secrets, gitEnv);
+  }
+
   private async openSession(req: {
     correlationId: string;
     userId: string;
@@ -172,6 +200,12 @@ export class TerminalSessionManager {
 
     const repoMount = await resolveTaskRepoMount(this.db, req.taskId).catch(() => null);
     const mcpServers = await this.buildMcpServers(req.userId, req.taskId);
+    const providerEnv = await this.resolveProviderShellEnv(req.userId, req.cliProviderId).catch(
+      (err) => {
+        log.warn({ err, providerId: req.cliProviderId }, 'resolveProviderShellEnv failed');
+        return {};
+      },
+    );
 
     const ensureKey = `${req.userId}:${req.taskId}:${req.cliProviderId}`;
     let ensurePromise = this.ensureInFlight.get(ensureKey);
@@ -184,6 +218,7 @@ export class TerminalSessionManager {
         providerId: req.cliProviderId,
         repoMount,
         mcpServers,
+        providerEnv,
       }).finally(() => {
         this.ensureInFlight.delete(ensureKey);
       });
@@ -215,6 +250,17 @@ export class TerminalSessionManager {
     // Hard-coding -x/-y instead leaves the pane stuck at that size and the
     // rest of the xterm renders the empty background pattern.
     const tmuxCommand = ['tmux', 'new-session', '-A', '-s', 'haive-task', ensured.shell, '-l'];
+    // tmux server inherits env from the docker-exec that starts it. On
+    // first attach this list seeds the server; later reconnects attach to
+    // the existing server and inherit its original env (so provider env
+    // changes mid-task don't propagate until container reap). HOME is
+    // left to the container default.
+    const execEnv = ['TERM=xterm-256color'];
+    for (const [k, v] of Object.entries(providerEnv)) {
+      if (k === 'HOME' || k === 'TERM') continue;
+      if (typeof v !== 'string') continue;
+      execEnv.push(`${k}=${v}`);
+    }
     const ptyHandle = await this.docker.getContainer(ensured.containerName).exec({
       Cmd: tmuxCommand,
       AttachStdin: true,
@@ -222,7 +268,7 @@ export class TerminalSessionManager {
       AttachStderr: true,
       Tty: true,
       WorkingDir: '/haive/workdir',
-      Env: ['TERM=xterm-256color'],
+      Env: execEnv,
     });
     const ptyStream = (await ptyHandle.start({
       hijack: true,

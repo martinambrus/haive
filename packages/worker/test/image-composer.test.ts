@@ -164,15 +164,39 @@ describe('composeSandboxImage', () => {
       expect(result.dockerfileBody).toContain('astral.sh/uv/install.sh');
     });
 
-    it('short-circuits the install when uvx, rg, nano and tmux are already on PATH', () => {
+    it('short-circuits the install when uvx, rg, nano, tmux and rtk are already on PATH', () => {
       const result = composeSandboxImage({
         envTemplateDockerfile: null,
         provider: claudeCodeProvider,
       });
-      // All four binaries must be present for the early exit; any one
-      // missing re-runs the apk/apt install line.
+      // All five binaries must be present for the early exit; any one
+      // missing re-runs the apk/apt install or rtk download line.
       expect(result.dockerfileBody).toContain(
-        'command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v nano >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then exit 0; fi',
+        'command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v nano >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v rtk >/dev/null 2>&1; then exit 0; fi',
+      );
+    });
+
+    it('downloads pinned rtk musl tarball with sha256 verification', () => {
+      const result = composeSandboxImage({
+        envTemplateDockerfile: 'FROM ubuntu:24.04\n',
+        provider: claudeCodeProvider,
+      });
+      expect(result.dockerfileBody).toContain(
+        'https://github.com/rtk-ai/rtk/releases/download/v0.37.2/rtk-x86_64-unknown-linux-musl.tar.gz',
+      );
+      expect(result.dockerfileBody).toContain(
+        '3dfb7a05636a68687ba1c5aa696fa8d5fcb494447ded86d9eb8b88b7100a37c6  /tmp/rtk.tgz',
+      );
+      expect(result.dockerfileBody).toContain('install -m 0755');
+    });
+
+    it('skips rtk install on non-x86_64 arches with a logged note', () => {
+      const result = composeSandboxImage({
+        envTemplateDockerfile: 'FROM ubuntu:24.04\n',
+        provider: claudeCodeProvider,
+      });
+      expect(result.dockerfileBody).toContain(
+        "rtk: skipping install on unsupported arch '$arch' (no musl asset upstream)",
       );
     });
   });
