@@ -11,9 +11,9 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   type AgentSpec,
   BASELINE_AGENT_SPECS,
-  buildAgentFileMarkdown,
-  buildAgentFileToml,
+  buildAgentFileForTarget,
   FRAMEWORK_AGENT_SPECS,
+  shouldEmitAgentsReadme,
   stubCustomAgent,
 } from './_agent-templates.js';
 import { loadPreviousStepOutput, pathExists } from './_helpers.js';
@@ -657,11 +657,10 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     for (const target of targets) {
       for (const agent of agents) {
         const ext = target.format === 'toml' ? 'toml' : 'md';
-        const content =
-          target.format === 'toml' ? buildAgentFileToml(agent) : buildAgentFileMarkdown(agent);
+        const content = buildAgentFileForTarget(agent, target);
         await writeIfAllowed(`${target.dir}/${agent.id}.${ext}`, content);
       }
-      if (agents.length > 0) {
+      if (agents.length > 0 && shouldEmitAgentsReadme(target)) {
         const indexExt = target.format === 'toml' ? 'toml' : 'md';
         await writeIfAllowed(`${target.dir}/README.md`, agentsIndexMarkdown(agents, indexExt));
       }

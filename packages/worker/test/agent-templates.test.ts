@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   type AgentSpec,
+  buildAgentFileForTarget,
   buildAgentFileMarkdown,
+  buildAgentFileMarkdownGemini,
+  shouldEmitAgentsReadme,
 } from '../src/step-engine/steps/onboarding/_agent-templates.js';
 
 const baseSpec: AgentSpec = {
@@ -98,5 +101,59 @@ describe('buildAgentFileMarkdown body', () => {
     // KB folder is the surviving knowledge surface that ships with onboarding.
     const md = buildAgentFileMarkdown(baseSpec);
     expect(md).toContain('kb-references');
+  });
+});
+
+describe('buildAgentFileMarkdownGemini frontmatter', () => {
+  it('emits only name + description in frontmatter (no Claude-only keys)', () => {
+    const md = buildAgentFileMarkdownGemini(baseSpec);
+    expect(md).toMatch(
+      /^---\nname: sample-agent\ndescription: Reviews things and reports findings\.\n---\n/,
+    );
+    expect(md).not.toContain('color:');
+    expect(md).not.toContain('field:');
+    expect(md).not.toContain('expertise:');
+    expect(md).not.toContain('allowed-tools:');
+    expect(md).not.toContain('auto-invoke:');
+    expect(md).not.toContain('mcp-tools:');
+    expect(md).not.toContain('kb-references:');
+  });
+
+  it('still emits the shared agent body (search order, mission, etc.)', () => {
+    const md = buildAgentFileMarkdownGemini(baseSpec);
+    expect(md).toContain('## Mandatory Search Order');
+    expect(md).toContain('## Core Mission');
+    expect(md).toContain('Find issues.');
+  });
+});
+
+describe('buildAgentFileForTarget routing', () => {
+  it('routes .gemini/agents to the gemini renderer', () => {
+    const md = buildAgentFileForTarget(baseSpec, { dir: '.gemini/agents', format: 'markdown' });
+    expect(md).not.toContain('color:');
+    expect(md).not.toContain('allowed-tools:');
+  });
+
+  it('routes .claude/agents to the claude renderer', () => {
+    const md = buildAgentFileForTarget(baseSpec, { dir: '.claude/agents', format: 'markdown' });
+    expect(md).toContain('color: red');
+    expect(md).toContain('allowed-tools: [Read, Grep, Bash]');
+  });
+
+  it('routes toml format to the codex TOML renderer', () => {
+    const toml = buildAgentFileForTarget(baseSpec, { dir: '.codex/agents', format: 'toml' });
+    expect(toml).toContain('name = "sample-agent"');
+    expect(toml).toContain('description = ');
+  });
+});
+
+describe('shouldEmitAgentsReadme', () => {
+  it('skips README for .gemini/agents (gemini parses every .md as an agent)', () => {
+    expect(shouldEmitAgentsReadme({ dir: '.gemini/agents' })).toBe(false);
+  });
+
+  it('emits README for .claude/agents and .codex/agents', () => {
+    expect(shouldEmitAgentsReadme({ dir: '.claude/agents' })).toBe(true);
+    expect(shouldEmitAgentsReadme({ dir: '.codex/agents' })).toBe(true);
   });
 });

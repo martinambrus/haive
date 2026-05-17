@@ -15,9 +15,9 @@ import {
 import {
   type AgentSpec,
   BASELINE_AGENT_SPECS,
-  buildAgentFileMarkdown,
-  buildAgentFileToml,
+  buildAgentFileForTarget,
   FRAMEWORK_AGENT_SPECS,
+  shouldEmitAgentsReadme,
 } from './steps/onboarding/_agent-templates.js';
 import {
   agentsIndexMarkdown,
@@ -127,8 +127,7 @@ function buildAgentTemplateItem(spec: AgentSpec): TemplateItem<TemplateRenderCon
       const out: TemplateRendering[] = [];
       for (const target of ctx.agentTargets) {
         const ext = target.format === 'toml' ? 'toml' : 'md';
-        const content =
-          target.format === 'toml' ? buildAgentFileToml(spec) : buildAgentFileMarkdown(spec);
+        const content = buildAgentFileForTarget(spec, target);
         out.push({ diskPath: `${target.dir}/${spec.id}.${ext}`, content });
       }
       return out;
@@ -146,6 +145,7 @@ function buildAgentsIndexItem(): TemplateItem<TemplateRenderContext> {
       if (agents.length === 0 || ctx.agentTargets.length === 0) return [];
       const out: TemplateRendering[] = [];
       for (const target of ctx.agentTargets) {
+        if (!shouldEmitAgentsReadme(target)) continue;
         const content = agentsIndexMarkdown(agents, target.format === 'toml' ? 'toml' : 'md');
         out.push({ diskPath: `${target.dir}/README.md`, content });
       }
@@ -385,10 +385,7 @@ export function expandCustomBundlesFor(
         if (agentTargets.length === 0) continue;
         for (const target of agentTargets) {
           const ext = target.format === 'toml' ? 'toml' : 'md';
-          const content =
-            target.format === 'toml'
-              ? buildAgentFileToml(item.spec)
-              : buildAgentFileMarkdown(item.spec);
+          const content = buildAgentFileForTarget(item.spec, target);
           out.push({
             templateId,
             templateKind: 'custom-agent',
