@@ -430,14 +430,11 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
     try {
       await ctx.emitProgress('Creating RAG schema and indexes...');
       const { usedPgvector } = await ensureRagSchema(conn);
-      const values = args.formValues as { truncateExisting?: boolean };
 
-      if (values.truncateExisting !== false) {
-        await ctx.emitProgress('Clearing existing RAG data...');
-        await conn.pg.unsafe(`DELETE FROM ${RAG_TABLE} WHERE task_id = $1`, [ctx.taskId]);
-      }
-
-      // Resolve repository_id
+      // Resolve repository_id first — the truncate path scopes by repo so
+      // re-onboarding the same repo actually wipes its prior chunks
+      // (pre-fix scoped by task_id, which always-empty for the current task
+      // before the insert started; the wipe was a no-op).
       let repositoryId: string | null = null;
       try {
         const rows = (await ctx.db.execute({
@@ -449,6 +446,18 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         }
       } catch {
         /* non-critical */
+      }
+
+      const values = args.formValues as { truncateExisting?: boolean };
+      if (values.truncateExisting !== false) {
+        await ctx.emitProgress('Clearing existing RAG data...');
+        if (repositoryId) {
+          await conn.pg.unsafe(`DELETE FROM ${RAG_TABLE} WHERE repository_id = $1`, [repositoryId]);
+        } else {
+          // Fallback for repo-less tasks: legacy task_id scope. Rare; happens
+          // only for onboarding tasks whose tasks.repository_id is null.
+          await conn.pg.unsafe(`DELETE FROM ${RAG_TABLE} WHERE task_id = $1`, [ctx.taskId]);
+        }
       }
 
       const useOllama =

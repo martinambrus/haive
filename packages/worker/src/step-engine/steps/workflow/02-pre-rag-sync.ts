@@ -263,7 +263,9 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
       const { usedPgvector } = await ensureRagSchema(conn);
       const useOllama = detected.ollamaReachable && !!prefs.ollamaUrl && !!prefs.embeddingModel;
 
-      // Resolve repository_id
+      // Resolve repository_id — required for dedup. Without it we'd be
+      // re-embedding the same content on every task. Bail early with a
+      // logged warning rather than silently filling the table.
       let repositoryId: string | null = null;
       try {
         const rows = (await ctx.db.execute({
@@ -275,6 +277,20 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
         }
       } catch {
         /* non-critical */
+      }
+      if (!repositoryId) {
+        ctx.logger.warn(
+          { taskId: ctx.taskId },
+          'rag sync skipped: task has no repository_id, dedup not safe',
+        );
+        return {
+          performed: false,
+          reason: 'task has no repository_id',
+          inserted: 0,
+          updated: 0,
+          skipped: 0,
+          deleted: 0,
+        };
       }
 
       let inserted = 0;
@@ -315,11 +331,12 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
           chunks.push(...chunkSection(section));
         }
 
-        // Get existing chunks for this file
+        // Get existing chunks for this file scoped to the repository so
+        // onboarding's ingest is visible to every downstream workflow task.
         const existingRows = (await conn.pg.unsafe(
           `SELECT section_id, chunk_index, chunk_hash FROM ${RAG_TABLE}
-           WHERE task_id = $1 AND source_path = $2`,
-          [ctx.taskId, relPath],
+           WHERE repository_id = $1 AND source_path = $2`,
+          [repositoryId, relPath],
         )) as Array<{ section_id: string; chunk_index: number; chunk_hash: string | null }>;
 
         const existingMap = new Map<string, string | null>();
@@ -346,8 +363,8 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
           if (existingHash !== undefined) {
             // Hash changed — delete old, will insert new
             await conn.pg.unsafe(
-              `DELETE FROM ${RAG_TABLE} WHERE task_id = $1 AND source_path = $2 AND section_id = $3 AND chunk_index = $4`,
-              [ctx.taskId, relPath, chunk.sectionId, chunk.chunkIndex],
+              `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2 AND section_id = $3 AND chunk_index = $4`,
+              [repositoryId, relPath, chunk.sectionId, chunk.chunkIndex],
             );
             toEmbed.push({ chunk, action: 'update' });
           } else {
@@ -362,8 +379,8 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
             const sectionId = key.slice(0, colonPos);
             const chunkIdx = parseInt(key.slice(colonPos + 1), 10);
             await conn.pg.unsafe(
-              `DELETE FROM ${RAG_TABLE} WHERE task_id = $1 AND source_path = $2 AND section_id = $3 AND chunk_index = $4`,
-              [ctx.taskId, relPath, sectionId, chunkIdx],
+              `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2 AND section_id = $3 AND chunk_index = $4`,
+              [repositoryId, relPath, sectionId, chunkIdx],
             );
             deleted += 1;
           }
@@ -429,16 +446,18 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
         }
       }
 
-      // Delete entries for files that no longer exist
+      // Delete entries for files that no longer exist in the repo. Scoped
+      // by repository_id so orphans from prior tasks on the same repo also
+      // get cleaned up.
       const orphanRows = (await conn.pg.unsafe(
-        `SELECT DISTINCT source_path FROM ${RAG_TABLE} WHERE task_id = $1`,
-        [ctx.taskId],
+        `SELECT DISTINCT source_path FROM ${RAG_TABLE} WHERE repository_id = $1`,
+        [repositoryId],
       )) as Array<{ source_path: string }>;
       for (const row of orphanRows) {
         if (!processedPaths.has(row.source_path)) {
           const result = await conn.pg.unsafe(
-            `DELETE FROM ${RAG_TABLE} WHERE task_id = $1 AND source_path = $2`,
-            [ctx.taskId, row.source_path],
+            `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_path = $2`,
+            [repositoryId, row.source_path],
           );
           deleted += result.count;
         }

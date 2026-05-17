@@ -161,6 +161,9 @@ export async function ensureRagSchema(
     // Indexes
     await conn.pg.unsafe(`CREATE INDEX IF NOT EXISTS idx_rag_task_id ON ${RAG_TABLE} (task_id)`);
     await conn.pg.unsafe(
+      `CREATE INDEX IF NOT EXISTS idx_rag_repository_id ON ${RAG_TABLE} (repository_id)`,
+    );
+    await conn.pg.unsafe(
       `CREATE INDEX IF NOT EXISTS idx_rag_source_section ON ${RAG_TABLE} (source_path, section_id, chunk_index)`,
     );
     await conn.pg.unsafe(
@@ -178,6 +181,8 @@ export async function ensureRagSchema(
     } catch (err) {
       log.warn({ err }, 'HNSW index creation failed; vector search will use sequential scan');
     }
+
+    await dedupeAndEnforceRepoUniqueness(conn);
   } else {
     await conn.pg`
       CREATE TABLE IF NOT EXISTS ${conn.pg(RAG_TABLE)} (
@@ -197,11 +202,15 @@ export async function ensureRagSchema(
     `;
     await conn.pg.unsafe(`CREATE INDEX IF NOT EXISTS idx_rag_task_id ON ${RAG_TABLE} (task_id)`);
     await conn.pg.unsafe(
+      `CREATE INDEX IF NOT EXISTS idx_rag_repository_id ON ${RAG_TABLE} (repository_id)`,
+    );
+    await conn.pg.unsafe(
       `CREATE INDEX IF NOT EXISTS idx_rag_source_section ON ${RAG_TABLE} (source_path, section_id, chunk_index)`,
     );
     await conn.pg.unsafe(
       `CREATE INDEX IF NOT EXISTS idx_rag_source_type ON ${RAG_TABLE} (source_type)`,
     );
+    await dedupeAndEnforceRepoUniqueness(conn);
   }
 
   // tsvector auto-update trigger
@@ -227,6 +236,51 @@ export async function ensureRagSchema(
   }
 
   return { usedPgvector, tableName: RAG_TABLE };
+}
+
+/** One-time migration: collapse duplicate chunk rows keyed by
+ *  `(repository_id, source_path, section_id, chunk_index)`, keeping the most
+ *  recently inserted one (highest created_at, ties broken by id). Then enforce
+ *  a partial UNIQUE INDEX so future inserts cannot recreate duplicates. The
+ *  index is partial — rows with `repository_id IS NULL` are allowed to
+ *  coexist, since legacy or repo-less invocations write nulls and a unique
+ *  constraint on null treats every null as distinct anyway.
+ *
+ *  Pre-fix RAG inserts keyed dedup by `task_id`, so every workflow task
+ *  re-ingested the same content under a new task_id, ballooning the table.
+ *  Running this once on a populated DB cuts the row count to the steady-state
+ *  per-repo set; subsequent runs become no-ops because the unique index is
+ *  in place. */
+async function dedupeAndEnforceRepoUniqueness(conn: RagConnection): Promise<void> {
+  try {
+    const deleted = await conn.pg.unsafe(
+      `DELETE FROM ${RAG_TABLE} a
+       USING ${RAG_TABLE} b
+       WHERE a.repository_id IS NOT NULL
+         AND b.repository_id IS NOT NULL
+         AND a.repository_id = b.repository_id
+         AND a.source_path = b.source_path
+         AND a.section_id = b.section_id
+         AND a.chunk_index = b.chunk_index
+         AND (a.created_at < b.created_at
+              OR (a.created_at = b.created_at AND a.id < b.id))`,
+    );
+    if (deleted.count > 0) {
+      log.info({ deleted: deleted.count }, 'collapsed duplicate rag rows by repository_id');
+    }
+  } catch (err) {
+    log.warn({ err }, 'rag dedup migration failed; unique index creation may follow-fail');
+  }
+
+  try {
+    await conn.pg.unsafe(
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_rag_repo_source_section_chunk
+         ON ${RAG_TABLE} (repository_id, source_path, section_id, chunk_index)
+         WHERE repository_id IS NOT NULL`,
+    );
+  } catch (err) {
+    log.warn({ err }, 'rag unique index creation failed — duplicate rows may still slip through');
+  }
 }
 
 /* ------------------------------------------------------------------ */
