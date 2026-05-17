@@ -87,6 +87,11 @@ const BASELINE_AGENT_DEFS: { id: string; label: string; hint: string }[] = [
     label: 'Learning recorder',
     hint: 'records lessons learned from workflow runs',
   },
+  {
+    id: 'integration-tester',
+    label: 'Integration tester',
+    hint: 'browser-tests UI flows + visual theme fit via Chrome DevTools MCP',
+  },
 ];
 
 /* ------------------------------------------------------------------ */

@@ -43,5 +43,10 @@ export const agentSpecSchema = z.object({
   qualityCriteria: z.array(z.string()),
   antiPatterns: z.array(z.string()),
   kbReferences: agentKbRefsSchema.optional(),
+  /** MCP server tools the agent needs at runtime (e.g. `chrome-devtools`).
+   *  Emitted into the Claude Code agent frontmatter as `mcp-tools: [...]`.
+   *  Codex/TOML output omits this — Codex inherits MCP servers from the
+   *  parent session. */
+  mcpTools: z.array(z.string()).optional(),
 });
 export type AgentSpec = z.infer<typeof agentSpecSchema>;
