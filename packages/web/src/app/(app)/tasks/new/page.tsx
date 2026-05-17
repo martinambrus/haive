@@ -1,8 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   api,
   type CliProvider,
@@ -25,6 +25,9 @@ import {
 
 export default function NewTaskPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const queryRepoId = searchParams.get('repositoryId');
+  const presetAppliedRef = useRef(false);
   const [repos, setRepos] = useState<Repository[] | null>(null);
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
   const [catalog, setCatalog] = useState<CliProviderCatalogEntry[] | null>(null);
@@ -94,6 +97,14 @@ export default function NewTaskPage() {
       setStatusLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    if (presetAppliedRef.current || !queryRepoId || !repos) return;
+    presetAppliedRef.current = true;
+    if (repos.some((r) => r.id === queryRepoId && r.status === 'ready')) {
+      setRepositoryId(queryRepoId);
+    }
+  }, [queryRepoId, repos]);
 
   useEffect(() => {
     void refreshStatus(repositoryId);

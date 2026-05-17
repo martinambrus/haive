@@ -179,6 +179,11 @@ function RepoCard(props: RepoCardProps) {
           {repo.statusMessage && <p className="mt-1 text-xs text-red-400">{repo.statusMessage}</p>}
         </div>
         <div className="flex gap-2">
+          {repo.status === 'ready' && (
+            <Link href={`/tasks/new?repositoryId=${repo.id}`}>
+              <Button size="sm">Create task</Button>
+            </Link>
+          )}
           {canEdit && (
             <Button variant="secondary" size="sm" onClick={onExpand}>
               {expanded ? 'Close' : 'Exclusions'}
