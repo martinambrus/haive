@@ -225,7 +225,7 @@ describe('renderDockerfile', () => {
   });
 
   it('adds a PHP install block with the declared version', () => {
-    const out = renderDockerfile('ddev/ddev-webserver:v1.24.0', {
+    const out = renderDockerfile('ddev/ddev-webserver:v1.25.2', {
       runtimes: ['php'],
       versions: { php: '8.3' },
     });
@@ -233,6 +233,26 @@ describe('renderDockerfile', () => {
     expect(out).toContain('php8.3-cli');
     expect(out).toContain('/usr/bin/composer');
     expect(out).not.toContain('ppa:ondrej/php');
+  });
+
+  it('prepends a sury.org keyring refresh BEFORE the first apt-get update for ddev-webserver bases', () => {
+    const out = renderDockerfile('ddev/ddev-webserver:v1.25.2', {
+      runtimes: ['php'],
+      versions: { php: '8.3' },
+    });
+    expect(out).toContain('debsuryorg-archive-keyring.deb');
+    expect(out).toContain('dpkg -i /tmp/sury-keyring.deb');
+    const suryIdx = out.indexOf('debsuryorg-archive-keyring.deb');
+    const firstAptUpdateIdx = out.indexOf('apt-get update');
+    expect(suryIdx).toBeGreaterThan(-1);
+    expect(firstAptUpdateIdx).toBeGreaterThan(-1);
+    expect(suryIdx).toBeLessThan(firstAptUpdateIdx);
+  });
+
+  it('omits the sury refresh step for non-ddev bases (e.g. ubuntu)', () => {
+    const out = renderDockerfile('ubuntu:24.04', { runtimes: ['php'], versions: { php: '8.3' } });
+    expect(out).not.toContain('debsuryorg-archive-keyring.deb');
+    expect(out).not.toContain('sury-keyring.deb');
   });
 
   it('normalizes PHP version to major.minor for apt package names', () => {

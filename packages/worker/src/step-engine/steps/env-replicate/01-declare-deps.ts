@@ -349,7 +349,7 @@ interface DeclareDepsFormValues extends FormValues {
 function computeBaseImage(containerTool: ContainerTool): string {
   switch (containerTool) {
     case 'ddev':
-      return 'ddev/ddev-webserver:v1.24.0';
+      return 'ddev/ddev-webserver:v1.25.2';
     case 'docker-compose':
     case 'docker':
     case 'none':

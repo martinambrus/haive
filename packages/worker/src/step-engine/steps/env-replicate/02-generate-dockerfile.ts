@@ -157,6 +157,20 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   lines.push('ENV DEBIAN_FRONTEND=noninteractive');
   lines.push('');
 
+  if (isDdevWebserverBase(baseImage)) {
+    // ddev-webserver bundles the deb.sury.org PHP repo; sury rotates its
+    // signing key periodically and the FIRST apt-get update aborts with
+    // EXPKEYSIG until the bundled key is replaced. dpkg-installing sury's
+    // official keyring deb refreshes the key and rewrites the source list
+    // to use signed-by, fixing this in-place before any apt-get runs.
+    lines.push('# Refresh sury.org PHP repo signing key (ddev-webserver ships sury preconfigured)');
+    lines.push('RUN curl -fsSL https://packages.sury.org/debsuryorg-archive-keyring.deb \\');
+    lines.push('        -o /tmp/sury-keyring.deb \\');
+    lines.push('    && dpkg -i /tmp/sury-keyring.deb \\');
+    lines.push('    && rm /tmp/sury-keyring.deb');
+    lines.push('');
+  }
+
   const basePackages = ['ca-certificates', 'curl', 'git', 'gnupg', 'bash', 'jq', 'ripgrep'];
   const extras = deps.extraPackages ?? [];
   const allPkgs = Array.from(new Set([...basePackages, ...extras]));
@@ -353,6 +367,10 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   lines.push('CMD ["bash"]');
 
   return lines.join('\n') + '\n';
+}
+
+function isDdevWebserverBase(baseImage: string): boolean {
+  return /^ddev\/ddev-webserver(:|$)/i.test(baseImage);
 }
 
 function normalizePhpVersion(raw: string): string {
