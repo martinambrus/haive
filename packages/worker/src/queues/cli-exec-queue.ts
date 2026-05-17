@@ -1,7 +1,11 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 import { Queue, Worker, type Job } from 'bullmq';
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -306,6 +310,7 @@ async function executeByKind(
   secrets: Record<string, string>,
 ): Promise<ExecutionOutcome> {
   const repoMount = await resolveTaskRepoMount(db, payload.taskId);
+  await ensureRepoMountWritable(repoMount);
   const sandboxWorkdir = await resolveTaskSandboxWorkdir(db, payload.taskId);
   switch (payload.kind) {
     case 'cli':
@@ -483,6 +488,47 @@ export async function resolveTaskRepoMount(
     target: REPO_MOUNT_TARGET,
     subpath: `${task.userId}/${task.repositoryId}`,
   };
+}
+
+const WORKER_REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
+const CHOWN_MARKER_REL = '.haive/.chowned-1000';
+
+/** chown the repo-volume subpath for a task to 1000:1000 (the `node` user
+ *  the sandbox CLI runs as). Named volumes default to root-owned content,
+ *  and the sandbox runs CLIs as `node` (sandbox-runner.ts), so any LLM that
+ *  tries to write into `.claude/`, `.gemini/`, `.codex/`, etc. inside the
+ *  workdir fails with EACCES and may pivot to writing under `/tmp/` instead,
+ *  losing the artifacts. Idempotent: writes a marker file at
+ *  `.haive/.chowned-1000` and skips on subsequent invocations. Bind-mounted
+ *  local-path repos are skipped — they're mounted read-only and chowning
+ *  would mutate the user's host filesystem. */
+async function ensureRepoMountWritable(repoMount: DockerVolumeMount | null): Promise<void> {
+  if (!repoMount) return;
+  if (repoMount.source !== REPO_VOLUME_NAME) return;
+  if (!repoMount.subpath) return;
+
+  const workerVolumePath = join(WORKER_REPO_STORAGE_ROOT, repoMount.subpath);
+  const markerPath = join(workerVolumePath, CHOWN_MARKER_REL);
+
+  try {
+    await access(markerPath);
+    return;
+  } catch {
+    // not yet chowned — fall through
+  }
+
+  try {
+    await execFileAsync('chown', ['-R', '1000:1000', workerVolumePath]);
+    await mkdir(join(workerVolumePath, '.haive'), { recursive: true });
+    await writeFile(markerPath, '', 'utf8');
+    await execFileAsync('chown', ['1000:1000', join(workerVolumePath, '.haive'), markerPath]);
+    log.info({ workerVolumePath }, 'chowned repo volume to node user (1000:1000)');
+  } catch (err) {
+    log.warn(
+      { err, workerVolumePath },
+      'failed to chown repo volume to node user — CLI writes to .claude/.gemini/ may fail',
+    );
+  }
 }
 
 export async function resolveTaskSandboxWorkdir(db: Database, taskId: string): Promise<string> {
