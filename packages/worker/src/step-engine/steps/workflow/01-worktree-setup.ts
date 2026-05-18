@@ -5,8 +5,16 @@ import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { pathExists } from '../onboarding/_helpers.js';
+import { resolveUserGitEnv } from '../../../secrets/user-git-identity.js';
 
 const exec = promisify(execFile);
+
+const FALLBACK_GIT_IDENTITY = {
+  GIT_AUTHOR_NAME: 'Haive',
+  GIT_AUTHOR_EMAIL: 'worker@haive.local',
+  GIT_COMMITTER_NAME: 'Haive',
+  GIT_COMMITTER_EMAIL: 'worker@haive.local',
+};
 
 const WORKTREE_SUBDIR = '.haive/worktrees';
 const EXCLUDE_MARKER = '.haive/';
@@ -35,9 +43,11 @@ function slugify(input: string): string {
 async function gitRun(
   cwd: string,
   args: string[],
+  env?: Record<string, string>,
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   try {
-    const { stdout, stderr } = await exec('git', args, { cwd });
+    const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
+    const { stdout, stderr } = await exec('git', args, opts);
     return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };
@@ -47,6 +57,33 @@ async function gitRun(
       code: typeof e.code === 'number' ? e.code : 1,
     };
   }
+}
+
+async function initGitRepo(
+  ctx: StepContext,
+  initBranch: string,
+  commitMessage: string,
+): Promise<void> {
+  const userEnv = await resolveUserGitEnv(ctx.db, ctx.userId);
+  const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
+
+  const init = await gitRun(ctx.repoPath, ['init', '-b', initBranch]);
+  if (init.code !== 0) {
+    throw new Error(`git init failed (exit ${init.code}): ${init.stderr || init.stdout}`);
+  }
+  const add = await gitRun(ctx.repoPath, ['add', '-A']);
+  if (add.code !== 0) {
+    throw new Error(`git add -A failed (exit ${add.code}): ${add.stderr || add.stdout}`);
+  }
+  const commit = await gitRun(
+    ctx.repoPath,
+    ['commit', '--allow-empty', '-m', commitMessage],
+    commitEnv,
+  );
+  if (commit.code !== 0) {
+    throw new Error(`git commit failed (exit ${commit.code}): ${commit.stderr || commit.stdout}`);
+  }
+  ctx.logger.info({ initBranch }, 'initialized new git repository');
 }
 
 async function ensureExcludeEntry(repoPath: string): Promise<void> {
@@ -95,10 +132,30 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       return {
         title: 'Worktree setup',
         description:
-          'No git repository detected at the repo root. Worktrees are mandatory for this workflow — open the Terminal tab, run `git init` (and commit your starting state), then click Retry to re-run detection.',
-        fields: [],
-        submitLabel: 'Retry',
-        submitAction: 'retry',
+          'No git repository detected at the repo root. Submit to initialize one — Haive will run `git init`, stage every current file, and create an initial commit. Then a worktree will be created for your feature branch. Use the Terminal tab if you need a more complex setup (existing remote, custom .gitignore, etc.) and Retry afterwards.',
+        fields: [
+          {
+            type: 'text',
+            id: 'branchName',
+            label: 'Feature branch name',
+            placeholder: 'feature/my-change',
+            required: true,
+          },
+          {
+            type: 'text',
+            id: 'initBranch',
+            label: 'Initial branch name',
+            default: 'main',
+            description: 'The branch `git init` creates. Also used as the base branch.',
+          },
+          {
+            type: 'text',
+            id: 'commitMessage',
+            label: 'Initial commit message',
+            default: 'Initial commit (via Haive)',
+          },
+        ],
+        submitLabel: 'Initialize git & create worktree',
       };
     }
     return {
@@ -124,15 +181,23 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
   },
 
   async apply(ctx, args): Promise<WorktreeApply> {
-    if (!args.detected.hasGit) {
-      throw new Error(`worktree setup requires a git repository; none detected at ${ctx.repoPath}`);
-    }
     const values = args.formValues as {
       branchName?: string;
       baseBranch?: string;
+      initBranch?: string;
+      commitMessage?: string;
     };
     const branchName = slugify(values.branchName ?? 'feature-task');
-    const base = values.baseBranch ?? 'main';
+    let base: string;
+
+    if (!args.detected.hasGit) {
+      const initBranch = (values.initBranch ?? 'main').trim() || 'main';
+      const commitMessage = (values.commitMessage ?? 'Initial commit (via Haive)').trim();
+      await initGitRepo(ctx, initBranch, commitMessage);
+      base = initBranch;
+    } else {
+      base = values.baseBranch ?? 'main';
+    }
 
     await ensureExcludeEntry(ctx.repoPath);
 
