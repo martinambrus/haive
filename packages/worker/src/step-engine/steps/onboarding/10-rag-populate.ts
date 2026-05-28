@@ -16,6 +16,7 @@ import {
   extractCodeSections,
   chunkSection,
   CODE_EXTENSIONS,
+  isMinifiedPath,
   type RagChunk,
 } from './_rag-chunkers.js';
 import {
@@ -142,6 +143,8 @@ async function collectCodeFiles(
         }
         if (!inSelected) return false;
       }
+      // Skip minified / generated bundles even when their extension matches.
+      if (isMinifiedPath(rel)) return false;
       const ext = path.extname(rel).toLowerCase();
       return codeExts.has(ext);
     },

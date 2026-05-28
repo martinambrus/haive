@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildDefaultMcpServers,
   buildMcpConfigForCli,
+  serversToJsonObject,
   type McpServerSpec,
 } from '../src/sandbox/mcp-config.js';
 import { injectMcpConfig } from '../src/sandbox/mcp-injector.js';
@@ -47,6 +48,55 @@ describe('buildDefaultMcpServers', () => {
       databaseUrl: 'postgres://db',
     });
     expect(servers.map((s) => s.name)).toEqual(['postgres']);
+  });
+});
+
+describe('additive merge of user MCP servers', () => {
+  const haive: McpServerSpec[] = [
+    { name: 'haive-rag', command: 'node', args: ['/haive/haive-rag-mcp.mjs'], env: { X: '1' } },
+  ];
+  const userServers = {
+    'my-custom': { command: 'npx', args: ['-y', 'my-mcp'] },
+    'remote-sse': { type: 'sse', url: 'https://example.com/sse' },
+  };
+
+  it('unions user servers with Haive defaults (JSON)', () => {
+    const out = serversToJsonObject(haive, userServers);
+    expect(Object.keys(out).sort()).toEqual(['haive-rag', 'my-custom', 'remote-sse']);
+    // user url/sse server passes through verbatim
+    expect(out['remote-sse']).toEqual({ type: 'sse', url: 'https://example.com/sse' });
+  });
+
+  it('Haive reserved server wins on name collision', () => {
+    const out = serversToJsonObject(haive, {
+      'haive-rag': { command: 'evil', args: ['x'] },
+    });
+    expect(out['haive-rag']).toEqual({
+      command: 'node',
+      args: ['/haive/haive-rag-mcp.mjs'],
+      env: { X: '1' },
+    });
+  });
+
+  it('claude config bundles both user and Haive servers under --strict', () => {
+    const config = buildMcpConfigForCli('claude-code', haive, '/home/claude', userServers);
+    expect(config?.cliArgs).toContain('--strict-mcp-config');
+    const parsed = JSON.parse(config!.content) as { mcpServers: Record<string, unknown> };
+    expect(Object.keys(parsed.mcpServers).sort()).toEqual(['haive-rag', 'my-custom', 'remote-sse']);
+  });
+
+  it('codex toml includes user stdio servers and skips non-stdio (url) ones', () => {
+    const config = buildMcpConfigForCli('codex', haive, '/home/claude', userServers);
+    expect(config?.content).toContain('[mcp_servers.my-custom]');
+    expect(config?.content).toContain('[mcp_servers.haive-rag]');
+    expect(config?.content).not.toContain('remote-sse');
+  });
+
+  it('writes a config from user servers even when Haive has none', () => {
+    const config = buildMcpConfigForCli('claude-code', [], '/home/claude', userServers);
+    expect(config).not.toBeNull();
+    const parsed = JSON.parse(config!.content) as { mcpServers: Record<string, unknown> };
+    expect(Object.keys(parsed.mcpServers)).toContain('my-custom');
   });
 });
 

@@ -44,6 +44,16 @@ export const CODE_EXTENSIONS: Record<string, string> = {
   '.java': 'java',
 };
 
+/** Minified / generated bundle files. These are machine-generated, single-line,
+ *  and semantically useless to embed — they pollute the RAG index with false
+ *  hits and waste embedding budget. Skipped at collection time even when their
+ *  extension is in CODE_EXTENSIONS. */
+const MINIFIED_RE = /(\.min\.(js|mjs|css)|\.bundle\.(js|css)|[.-]min\.(js|css))$/i;
+
+export function isMinifiedPath(rel: string): boolean {
+  return MINIFIED_RE.test(rel);
+}
+
 /* ------------------------------------------------------------------ */
 /* Hashing / slugify                                                   */
 /* ------------------------------------------------------------------ */

@@ -10,20 +10,25 @@ const SEARCH_ORDER_BLOCK = [
   'Before searching code or answering questions about the codebase, follow this order. Skipping steps is prohibited.',
   '',
   '```',
-  '1. KB → 2. LSP → 3. GREP (last resort)',
+  '1. RAG → 2. KB → 3. LSP → 4. GREP (last resort)',
   '```',
   '',
-  '1. **KB (first)**',
+  '1. **RAG (first)**',
+  '   - Call the `rag_search` MCP tool with a natural-language or code-keyword query',
+  '   - It returns ranked code/KB snippets with their source paths; open the cited files to confirm',
+  '   - If `rag_search` returns relevant hits, use them and STOP — only fall through when it returns nothing relevant',
+  '',
+  '2. **KB**',
   '   - Read the KB files linked from the `kb-references` frontmatter on this agent',
   '   - Start at `.claude/knowledge_base/INDEX.md` and follow topic links',
   '   - If the KB answers the question, STOP — do not proceed to LSP/GREP',
   '',
-  '2. **LSP (for code navigation)**',
+  '3. **LSP (for code navigation)**',
   '   - Use for `goToDefinition`, `findReferences`, `incomingCalls`, `outgoingCalls`',
-  '   - Only after KB is exhausted, and only when the task involves code navigation',
+  '   - Only after RAG and KB are exhausted, and only when the task involves code navigation',
   '',
-  '3. **GREP (last resort)**',
-  '   - Most token-expensive — use only if KB insufficient and LSP not applicable',
+  '4. **GREP (last resort)**',
+  '   - Most token-expensive — use only if RAG and KB are insufficient and LSP not applicable',
 ].join('\n');
 
 function firstCharLower(s: string): string {
@@ -89,9 +94,9 @@ export function buildAgentFileMarkdown(spec: AgentSpec): string {
     `field: ${spec.field}`,
     `expertise: ${spec.expertise ?? 'expert'}`,
     `allowed-tools: [${spec.tools.join(', ')}]`,
-    ...(spec.mcpTools && spec.mcpTools.length > 0
-      ? [`mcp-tools: [${spec.mcpTools.join(', ')}]`]
-      : []),
+    // Every agent gets `rag_search` so the Mandatory Search Order (RAG first)
+    // is callable; any agent-specific MCP tools (e.g. chrome-devtools) merge in.
+    `mcp-tools: [${Array.from(new Set(['rag_search', ...(spec.mcpTools ?? [])])).join(', ')}]`,
     'auto-invoke: false',
     ...(spec.kbReferences ? yamlKbRefs(spec.kbReferences) : []),
     '---',

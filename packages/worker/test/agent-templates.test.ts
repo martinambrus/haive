@@ -72,33 +72,42 @@ describe('buildAgentFileMarkdown frontmatter', () => {
     expect(md).toContain('field: quality');
     expect(md).toContain('auto-invoke: false');
   });
+
+  it('always emits mcp-tools with rag_search so RAG-first is callable', () => {
+    const md = buildAgentFileMarkdown(baseSpec);
+    expect(md).toContain('mcp-tools: [rag_search]');
+  });
+
+  it('merges rag_search with agent-specific mcp tools', () => {
+    const md = buildAgentFileMarkdown({ ...baseSpec, mcpTools: ['chrome-devtools'] });
+    expect(md).toContain('mcp-tools: [rag_search, chrome-devtools]');
+  });
 });
 
 describe('buildAgentFileMarkdown body', () => {
-  it('emits the 3-step KB → LSP → GREP search order block', () => {
+  it('emits the 4-step RAG → KB → LSP → GREP search order block', () => {
     const md = buildAgentFileMarkdown(baseSpec);
     expect(md).toContain('## Mandatory Search Order');
-    expect(md).toContain('1. KB → 2. LSP → 3. GREP (last resort)');
-    expect(md).toMatch(/1\. \*\*KB \(first\)\*\*/);
-    expect(md).toMatch(/2\. \*\*LSP \(for code navigation\)\*\*/);
-    expect(md).toMatch(/3\. \*\*GREP \(last resort\)\*\*/);
+    expect(md).toContain('1. RAG → 2. KB → 3. LSP → 4. GREP (last resort)');
+    expect(md).toMatch(/1\. \*\*RAG \(first\)\*\*/);
+    expect(md).toMatch(/2\. \*\*KB\*\*/);
+    expect(md).toMatch(/3\. \*\*LSP \(for code navigation\)\*\*/);
+    expect(md).toMatch(/4\. \*\*GREP \(last resort\)\*\*/);
   });
 
-  it('contains no RAG references in the search-order block', () => {
+  it('directs agents to the rag_search MCP tool first', () => {
     const md = buildAgentFileMarkdown(baseSpec);
-    // The previous template injected a 4-step block referencing
-    // .claude/rag/query.py — that script never ships with onboarding output
-    // (RAG runs server-side under ragMode='internal' in the haive_rag_<project>
-    // DB). Any leak of the old block sends agents to a dead path.
-    expect(md).not.toMatch(/\bRAG\b/);
+    expect(md).toContain('`rag_search`');
+    // The retrieval path is the server-side MCP tool, never the old shipped
+    // script. Guard against the dead .claude/rag/query.py block resurfacing.
     expect(md).not.toContain('rag/query.py');
     expect(md).not.toContain('hybrid_score');
     expect(md).not.toContain('.claude/rag/');
   });
 
-  it('keeps the kb-references frontmatter mention even with RAG removed', () => {
-    // The KB-first instruction still tells agents to read kb-references — the
-    // KB folder is the surviving knowledge surface that ships with onboarding.
+  it('keeps the kb-references frontmatter mention', () => {
+    // The KB step still tells agents to read kb-references — the KB folder is a
+    // knowledge surface that ships with onboarding.
     const md = buildAgentFileMarkdown(baseSpec);
     expect(md).toContain('kb-references');
   });

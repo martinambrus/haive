@@ -34,6 +34,10 @@
     "./constants": {
       "types": "./dist/constants/index.d.ts",
       "import": "./dist/constants/index.js"
+    },
+    "./rag": {
+      "types": "./dist/rag/index.d.ts",
+      "import": "./dist/rag/index.js"
     }
   },
   "scripts": {
@@ -50,6 +54,7 @@
     "ioredis": "^5.4.2",
     "pino": "^10.3.1",
     "pino-pretty": "^11.3.0",
+    "postgres": "^3.4.5",
     "zod": "^4.3.6"
   },
   "devDependencies": {

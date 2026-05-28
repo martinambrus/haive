@@ -148,6 +148,9 @@ importers:
       pino-pretty:
         specifier: ^11.3.0
         version: 11.3.0
+      postgres:
+        specifier: ^3.4.5
+        version: 3.4.9
       zod:
         specifier: ^4.3.6
         version: 4.3.6

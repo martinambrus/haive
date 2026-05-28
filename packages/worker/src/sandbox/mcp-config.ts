@@ -35,6 +35,15 @@ export interface BuildDefaultMcpServersOptions {
   includeFilesystem?: boolean;
   includeGit?: boolean;
   includeChromeDevtools?: boolean;
+  /** Enable the haive-rag MCP server (project RAG retrieval). Requires
+   *  ragServerPath, ragApiUrl, and ragToken to also be set. */
+  includeRagSearch?: boolean;
+  /** Container path of the bind-mounted haive-rag MCP server script. */
+  ragServerPath?: string;
+  /** Base URL of the Haive API the rag proxy calls (e.g. http://api:3001). */
+  ragApiUrl?: string;
+  /** Task-scoped bearer token the rag proxy presents to the API. */
+  ragToken?: string;
 }
 
 export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): McpServerSpec[] {
@@ -80,6 +89,18 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
     });
   }
 
+  if (opts.includeRagSearch && opts.ragServerPath && opts.ragApiUrl && opts.ragToken) {
+    servers.push({
+      name: 'haive-rag',
+      command: 'node',
+      args: [opts.ragServerPath],
+      env: {
+        RAG_API_URL: opts.ragApiUrl,
+        RAG_TASK_TOKEN: opts.ragToken,
+      },
+    });
+  }
+
   return servers;
 }
 
@@ -90,12 +111,19 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
  *  --strict-mcp-config` so the binary picks up the file and ignores other locations. */
 export const CLAUDE_MCP_CONFIG_PATH = '/haive/mcp.json';
 
+/** User-supplied MCP servers (the `mcpServers` object from the repo's
+ *  `.claude/mcp_settings.json`). Values are passed through verbatim for the JSON
+ *  formats so url/sse servers survive; the codex TOML serializer can only render
+ *  stdio (command-based) entries. */
+export type UserMcpServers = Record<string, unknown>;
+
 export function buildMcpConfigForCli(
   cliProvider: CliProviderName,
   servers: McpServerSpec[],
   targetHome = '/home/claude',
+  userServers: UserMcpServers = {},
 ): McpConfigFile | null {
-  if (servers.length === 0) return null;
+  if (servers.length === 0 && Object.keys(userServers).length === 0) return null;
 
   switch (cliProvider) {
     case 'claude-code':
@@ -103,7 +131,7 @@ export function buildMcpConfigForCli(
       return {
         path: CLAUDE_MCP_CONFIG_PATH,
         format: 'json',
-        content: JSON.stringify({ mcpServers: serversToJsonObject(servers) }, null, 2),
+        content: JSON.stringify({ mcpServers: serversToJsonObject(servers, userServers) }, null, 2),
         cliArgs: ['--mcp-config', CLAUDE_MCP_CONFIG_PATH, '--strict-mcp-config'],
       };
 
@@ -111,14 +139,14 @@ export function buildMcpConfigForCli(
       return {
         path: `${targetHome}/.gemini/settings.json`,
         format: 'json',
-        content: JSON.stringify({ mcpServers: serversToJsonObject(servers) }, null, 2),
+        content: JSON.stringify({ mcpServers: serversToJsonObject(servers, userServers) }, null, 2),
       };
 
     case 'codex':
       return {
         path: `${targetHome}/.codex/config.toml`,
         format: 'toml',
-        content: serversToCodexToml(servers),
+        content: serversToCodexToml(servers, userServers),
       };
 
     case 'amp':
@@ -131,10 +159,19 @@ export function buildMcpConfigForCli(
   }
 }
 
+/** Merge Haive's default servers with the user's custom servers into the
+ *  `mcpServers` object. The union is additive; on a name collision Haive's
+ *  reserved server wins so `haive-rag` (and filesystem/git/chrome-devtools) are
+ *  always available regardless of what the user configured. */
 export function serversToJsonObject(
   servers: McpServerSpec[],
-): Record<string, { command: string; args: string[]; env?: Record<string, string> }> {
-  const out: Record<string, { command: string; args: string[]; env?: Record<string, string> }> = {};
+  userServers: UserMcpServers = {},
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  // User servers first; Haive defaults below override on name collision.
+  for (const [name, def] of Object.entries(userServers)) {
+    if (def && typeof def === 'object') out[name] = def;
+  }
   for (const server of servers) {
     const entry: { command: string; args: string[]; env?: Record<string, string> } = {
       command: server.command,
@@ -148,19 +185,46 @@ export function serversToJsonObject(
   return out;
 }
 
-function serversToCodexToml(servers: McpServerSpec[]): string {
+function codexTomlBlock(
+  name: string,
+  command: string,
+  args: string[],
+  env?: Record<string, string>,
+): string {
+  const lines: string[] = [`[mcp_servers.${name}]`];
+  lines.push(`command = ${tomlString(command)}`);
+  lines.push(`args = [${args.map(tomlString).join(', ')}]`);
+  if (env && Object.keys(env).length > 0) {
+    const envLines = Object.entries(env).map(([key, val]) => `${key} = ${tomlString(val)}`);
+    lines.push('', `[mcp_servers.${name}.env]`, ...envLines);
+  }
+  return lines.join('\n');
+}
+
+function serversToCodexToml(servers: McpServerSpec[], userServers: UserMcpServers = {}): string {
   const blocks: string[] = [];
+  const haiveNames = new Set(servers.map((s) => s.name));
+  // User stdio servers first (skip name collisions with Haive defaults, and
+  // skip non-stdio entries — Codex TOML here only renders command-based servers).
+  for (const [name, defRaw] of Object.entries(userServers)) {
+    if (haiveNames.has(name)) continue;
+    const def = defRaw as { command?: unknown; args?: unknown; env?: unknown };
+    if (typeof def?.command !== 'string') continue;
+    const args = Array.isArray(def.args)
+      ? def.args.filter((a): a is string => typeof a === 'string')
+      : [];
+    const env =
+      def.env && typeof def.env === 'object'
+        ? (Object.fromEntries(
+            Object.entries(def.env as Record<string, unknown>).filter(
+              ([, v]) => typeof v === 'string',
+            ),
+          ) as Record<string, string>)
+        : undefined;
+    blocks.push(codexTomlBlock(name, def.command, args, env));
+  }
   for (const server of servers) {
-    const lines: string[] = [`[mcp_servers.${server.name}]`];
-    lines.push(`command = ${tomlString(server.command)}`);
-    lines.push(`args = [${server.args.map(tomlString).join(', ')}]`);
-    if (server.env && Object.keys(server.env).length > 0) {
-      const envLines = Object.entries(server.env).map(
-        ([key, val]) => `${key} = ${tomlString(val)}`,
-      );
-      lines.push('', `[mcp_servers.${server.name}.env]`, ...envLines);
-    }
-    blocks.push(lines.join('\n'));
+    blocks.push(codexTomlBlock(server.name, server.command, server.args, server.env));
   }
   return `${blocks.join('\n\n')}\n`;
 }

@@ -9,6 +9,7 @@ import {
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
 import { buildFullExtensionSet, type ExtensionInfo } from './_extension-registry.js';
+import { isMinifiedPath } from './_rag-chunkers.js';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -90,6 +91,7 @@ async function buildTree(
       const files = await readdir(abs, { withFileTypes: true });
       for (const f of files) {
         if (f.isDirectory()) continue;
+        if (isMinifiedPath(f.name)) continue;
         const ext = path.extname(f.name).toLowerCase();
         if (extensionSet.has(ext)) fileCount++;
       }
@@ -134,6 +136,7 @@ async function countRootFiles(repoPath: string, extensionSet: Set<string>): Prom
     let count = 0;
     for (const e of entries) {
       if (e.isDirectory()) continue;
+      if (isMinifiedPath(e.name)) continue;
       const ext = path.extname(e.name).toLowerCase();
       if (extensionSet.has(ext)) count++;
     }

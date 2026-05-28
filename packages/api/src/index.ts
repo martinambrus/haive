@@ -16,6 +16,7 @@ import { repoCredentialsRoutes } from './routes/repo-credentials.js';
 import { githubOauthRoutes } from './routes/github-oauth.js';
 import { filesystemRoutes } from './routes/filesystem.js';
 import { integrationsRoutes } from './routes/integrations.js';
+import { ragRoutes } from './routes/rag.js';
 import { taskRoutes } from './routes/tasks.js';
 import { upgradeRoutes } from './routes/upgrades.js';
 import { userSettingsRoutes } from './routes/user-settings.js';
@@ -54,6 +55,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/user-settings', userSettingsRoutes);
   app.route('/filesystem', filesystemRoutes);
   app.route('/tasks', taskRoutes);
+  app.route('/rag', ragRoutes);
   app.route('/terminal-sessions', terminalSessionRoutes);
   app.route('/admin', adminRoutes);
   app.route('/tooling', toolingRoutes);
