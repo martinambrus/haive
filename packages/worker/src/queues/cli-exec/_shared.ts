@@ -1,0 +1,77 @@
+import { Queue } from 'bullmq';
+import { logger, type StepErrorHint } from '@haive/shared';
+import type {
+  CliExecJobPayload,
+  CliProbeJobPayload,
+  SandboxImageBuildJobPayload,
+  RefreshCliVersionsJobPayload,
+  CliLoginCreateJobPayload,
+  CliSignOutJobPayload,
+} from '@haive/shared';
+import { QUEUE_NAMES } from '@haive/shared';
+import { defaultCliSpawner, type CliSpawner } from '../../cli-executor/index.js';
+import { getBullRedis } from '../../redis.js';
+
+export const log: ReturnType<typeof logger.child> = logger.child({ module: 'cli-exec-queue' });
+
+export type CliExecQueuePayload =
+  | CliExecJobPayload
+  | CliProbeJobPayload
+  | SandboxImageBuildJobPayload
+  | RefreshCliVersionsJobPayload
+  | CliLoginCreateJobPayload
+  | CliSignOutJobPayload;
+
+let cliExecQueueInstance: Queue<CliExecQueuePayload> | null = null;
+
+export function getCliExecQueue(): Queue<CliExecQueuePayload> {
+  if (!cliExecQueueInstance) {
+    cliExecQueueInstance = new Queue<CliExecQueuePayload>(QUEUE_NAMES.CLI_EXEC, {
+      connection: getBullRedis(),
+    });
+  }
+  return cliExecQueueInstance;
+}
+
+export async function closeCliExecQueue(): Promise<void> {
+  if (cliExecQueueInstance) {
+    await cliExecQueueInstance.close();
+    cliExecQueueInstance = null;
+  }
+}
+
+export interface CliExecDeps {
+  spawner: CliSpawner;
+}
+
+export const defaultDeps: CliExecDeps = {
+  spawner: defaultCliSpawner,
+};
+
+export interface ExecutionOutcome {
+  exitCode: number | null;
+  rawOutput: string | null;
+  parsedOutput: unknown;
+  errorMessage: string | null;
+  /** Full live-stream transcript (header + every stdout/stderr chunk) the
+   *  same bytes published to the cli-stream Redis channel. Persisted to
+   *  cli_invocations.stream_log for historical replay. Null when the
+   *  execution path doesn't capture a stream (e.g. agent-mining trace
+   *  serialized post-hoc). */
+  streamLog?: string | null;
+}
+
+/**
+ * Thrown by `assertUserAuthReady` when a subscription-auth CLI has no
+ * populated user auth volume. Carries a structured hint so the UI can render
+ * an inline "Log in to <provider>" button that triggers the Haive login flow
+ * and auto-retries the step after successful login.
+ */
+export class CliLoginRequiredError extends Error {
+  readonly hint: StepErrorHint;
+  constructor(message: string, hint: StepErrorHint) {
+    super(message);
+    this.name = 'CliLoginRequiredError';
+    this.hint = hint;
+  }
+}
