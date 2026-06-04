@@ -31,9 +31,11 @@ test.describe('cli providers', () => {
         supportsSubagents: boolean;
       }>;
     };
-    expect(body.providers.length).toBe(5);
+    expect(body.providers.length).toBe(6);
     const names = body.providers.map((p) => p.name);
-    expect(names).toEqual(expect.arrayContaining(['claude-code', 'codex', 'gemini', 'amp', 'zai']));
+    expect(names).toEqual(
+      expect.arrayContaining(['claude-code', 'codex', 'gemini', 'amp', 'zai', 'antigravity']),
+    );
     const claudeCode = body.providers.find((p) => p.name === 'claude-code');
     expect(claudeCode?.supportsSubagents).toBe(true);
   });

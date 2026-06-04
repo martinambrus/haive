@@ -9,33 +9,26 @@ export class CliSetupTokenUnsupportedError extends Error {
 }
 
 export function isCliSetupTokenSupported(name: CliProviderName): boolean {
-  return name === 'claude-code' || name === 'codex' || name === 'gemini' || name === 'amp';
+  return name === 'claude-code' || name === 'codex' || name === 'amp' || name === 'antigravity';
 }
-
-// folderTrust.enabled=false disables gemini's per-folder trust prompt so the
-// sandbox workdir is treated as trusted on every run. Without this, gemini
-// overrides --yolo to "default" approval mode whenever it sees an unfamiliar
-// CWD, breaking both the auth probe and any non-interactive step exec.
-const GEMINI_SETTINGS_JSON =
-  '{"selectedAuthType":"oauth-personal","security":{"auth":{"selectedType":"oauth-personal"},"folderTrust":{"enabled":false}}}';
 
 /** Non-REPL auth command that prints an OAuth URL to stdout:
  *  - claude-code: `claude setup-token` — prints URL, expects pasted token on stdin.
  *  - codex: `codex login --device-auth` — prints URL + short device code, polls for approval.
- *  - gemini: pre-seed ~/.gemini/settings.json with selectedAuthType=oauth-personal
- *    (both flat and nested schemas) so the REPL skips the auth picker, then
- *    exec gemini with NO_BROWSER=true. In a headless TTY container gemini's
- *    OAuth module takes the `authWithUserCode` branch — prints the authorize
- *    URL to stdout, then reads the authorization code via readline on stdin.
- *    The user signs in at Google, copies the code shown on
- *    codeassist.google.com/authcode, pastes it into the banner modal, and we
- *    write it to the container's stdin as-if typed at the readline prompt.
- *    Success is detected by polling for ~/.gemini/{oauth_creds,gemini-credentials}.json.
  *  - amp: `amp login` — prints an ampcode.com/auth/cli-login URL with an
  *    authToken query param, then reads a paste-back code from stdin. The user
  *    signs in at ampcode.com, the confirmation page shows a code, they paste
  *    it into the banner modal, and we forward it to the container's stdin.
  *    Success is detected by polling for ~/.config/amp/settings.json.
+ *  - antigravity: `agy -i <prompt>` (interactive TUI) — agy has no login
+ *    subcommand; first run with no creds prints a Google OAuth URL and reads the
+ *    pasted authorization code on stdin. agy's auth is a full-screen TUI the URL
+ *    extractor can't parse, and `-p` caps the auth wait at ~30s, so for
+ *    antigravity the cli-login-banner runs in terminal-passthrough mode and the
+ *    login modal renders this TUI in an xterm terminal — the user completes the
+ *    OAuth + code paste themselves, unhurried. The login container's headless env
+ *    makes agy print the URL instead of opening a browser. Success = the token
+ *    file ~/.gemini/antigravity-cli/antigravity-oauth-token, detected by the poller.
  *  Other providers: throws CliSetupTokenUnsupportedError.
  */
 export function buildSetupTokenCommand(
@@ -48,28 +41,16 @@ export function buildSetupTokenCommand(
       return { command: executable, args: ['setup-token'], env };
     case 'codex':
       return { command: executable, args: ['login', '--device-auth'], env };
-    case 'gemini': {
-      const script =
-        'mkdir -p "$HOME/.gemini" && ' +
-        `cat > "$HOME/.gemini/settings.json" <<'EOF'\n${GEMINI_SETTINGS_JSON}\nEOF\n` +
-        'exec "$0"';
-      return {
-        command: 'sh',
-        args: ['-c', script, executable],
-        env: {
-          ...env,
-          NO_BROWSER: 'true',
-          // Bypass the folder-trust prompt during login. Without this, gemini
-          // may read stdin for a "Trust this folder?" answer before printing
-          // the OAuth URL, which blocks the login flow indefinitely. The
-          // settings.json above also disables folder-trust, but the env var
-          // takes effect before the file is read.
-          GEMINI_CLI_TRUST_WORKSPACE: 'true',
-        },
-      };
-    }
     case 'amp':
       return { command: executable, args: ['login'], env };
+    case 'antigravity':
+      // Interactive agy (TUI). The cli-login-banner runs this in
+      // terminal-passthrough mode and the login modal renders it in an xterm, so
+      // the user completes the OAuth + code paste interactively at their own pace
+      // (no URL extraction, no 30s -p cap). The login container's HEADLESS_AUTH_ENV
+      // (BROWSER=/bin/false, DISPLAY=) makes agy print the URL rather than open a
+      // browser. The trivial initial prompt drives the first-run auth gate.
+      return { command: executable, args: ['-i', 'respond with the word ready'], env };
     default:
       throw new CliSetupTokenUnsupportedError(provider.name);
   }

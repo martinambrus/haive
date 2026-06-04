@@ -1,6 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Terminal as XTerm } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import { ClipboardAddon } from '@xterm/addon-clipboard';
+import '@xterm/xterm/css/xterm.css';
 import { Button, FormError } from '@/components/ui';
 import { apiWebSocketUrl, type CliProbeResult, type CliProviderName } from '@/lib/api-client';
 
@@ -27,6 +32,7 @@ const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderN
   'claude-code',
   'gemini',
   'amp',
+  'antigravity',
 ]);
 
 // Some CLIs (notably gemini in folder-trust mode) can swallow stdin before
@@ -37,6 +43,11 @@ const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderN
 const MAX_URL_WAIT_ATTEMPTS = 3;
 const URL_WAIT_TIMEOUT_MS = 30_000;
 
+// Debug toggle: when true, antigravity's login modal renders agy's live TUI in
+// an xterm. The normal flow is field-only (the server sizes the PTY so agy emits
+// the OAuth URL without a client terminal). Set true only to inspect the TUI.
+const ANTIGRAVITY_DEBUG_TERMINAL = false;
+
 export function CliAuthBannerModal({
   open,
   providerId,
@@ -46,6 +57,8 @@ export function CliAuthBannerModal({
   onLoginComplete,
 }: CliAuthBannerModalProps) {
   const wsRef = useRef<WebSocket | null>(null);
+  const termRef = useRef<XTerm | null>(null);
+  const termMountRef = useRef<HTMLDivElement | null>(null);
   const [phase, setPhase] = useState<Phase>('connecting');
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [deviceCode, setDeviceCode] = useState<string | null>(null);
@@ -104,6 +117,10 @@ export function CliAuthBannerModal({
           if (!TOKEN_PASTE_PROVIDERS.has(providerName)) setPhase('awaiting-approval');
           else setPhase('awaiting-token');
           break;
+        case 'output':
+          // antigravity debug terminal: write raw agy TUI output to the xterm.
+          if (typeof msg.data === 'string') termRef.current?.write(msg.data);
+          break;
         case 'auth-success':
           setPhase('success');
           break;
@@ -154,6 +171,10 @@ export function CliAuthBannerModal({
 
   useEffect(() => {
     if (!open) return;
+    // antigravity is terminal-driven (agy's TUI needs a real interactive flow);
+    // tearing down + reconnecting the WS every 30s restarts agy mid-init, so the
+    // URL-wait auto-reconnect must not apply to it.
+    if (providerName === 'antigravity') return;
     if (authUrl) return;
     if (phase !== 'awaiting-token' && phase !== 'awaiting-approval') return;
     const timer = setTimeout(() => {
@@ -169,7 +190,82 @@ export function CliAuthBannerModal({
       setRetryNonce((n) => n + 1);
     }, URL_WAIT_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [open, phase, authUrl, urlAttempt]);
+  }, [open, phase, authUrl, urlAttempt, providerName]);
+
+  // antigravity debug terminal: render agy's TUI in an xterm bound to the same
+  // banner WS the modal owns. 'output' frames are written to the term (see
+  // ws.onmessage); keystrokes/resizes are sent back as 'input'/'resize'. Other
+  // providers render no terminal (termRef stays null, the 'output' case no-ops).
+  useEffect(() => {
+    if (!open) return;
+    if (providerName !== 'antigravity' || !ANTIGRAVITY_DEBUG_TERMINAL) return;
+    const mount = termMountRef.current;
+    if (!mount) return;
+
+    const term = new XTerm({
+      cursorBlink: true,
+      fontFamily:
+        'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+      fontSize: 12,
+      theme: { background: '#0a0a0a', foreground: '#e5e5e5', cursor: '#e5e5e5' },
+      convertEol: true,
+      scrollback: 5000,
+    });
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+    term.loadAddon(new WebLinksAddon());
+    term.loadAddon(new ClipboardAddon());
+    term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== 'keydown') return true;
+      if (ev.ctrlKey && ev.shiftKey && (ev.key === 'V' || ev.key === 'v')) {
+        void navigator.clipboard.readText().then((t) => {
+          if (t) term.paste(t);
+        });
+        return false;
+      }
+      return true;
+    });
+    term.open(mount);
+    termRef.current = term;
+
+    const sendFrame = (frame: unknown) => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
+    };
+    const fitAndResize = () => {
+      try {
+        fitAddon.fit();
+        term.refresh(0, term.rows - 1);
+      } catch {
+        // ignore
+      }
+      const { rows, cols } = term;
+      if (rows > 0 && cols > 0) sendFrame({ type: 'resize', rows, cols });
+    };
+    const inputDisposable = term.onData((data) => sendFrame({ type: 'input', data }));
+
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        fitAndResize();
+        term.focus();
+      }),
+    );
+    const ro = new ResizeObserver(() => fitAndResize());
+    ro.observe(mount);
+    window.addEventListener('resize', fitAndResize);
+    const t1 = setTimeout(fitAndResize, 300);
+    const t2 = setTimeout(fitAndResize, 1200);
+
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      window.removeEventListener('resize', fitAndResize);
+      ro.disconnect();
+      inputDisposable.dispose();
+      term.dispose();
+      termRef.current = null;
+    };
+  }, [open, providerName, retryNonce]);
 
   const handleSubmitToken = useCallback(() => {
     const ws = wsRef.current;
@@ -187,9 +283,17 @@ export function CliAuthBannerModal({
   if (!open) return null;
 
   const isTokenPaste = TOKEN_PASTE_PROVIDERS.has(providerName);
-  const pasteItemLabel = providerName === 'gemini' || providerName === 'amp' ? 'code' : 'token';
+  // Debug-only: render agy's live TUI in an xterm. The hidden field flow works
+  // without it now that the server sizes the PTY itself; flip to true to debug.
+  const showTerminal = providerName === 'antigravity' && ANTIGRAVITY_DEBUG_TERMINAL;
+  const pasteItemLabel =
+    providerName === 'gemini' || providerName === 'amp' || providerName === 'antigravity'
+      ? 'code'
+      : 'token';
   const pasteInputPlaceholder =
-    providerName === 'gemini' || providerName === 'amp' ? 'Paste code here' : 'Paste token here';
+    providerName === 'gemini' || providerName === 'amp' || providerName === 'antigravity'
+      ? 'Paste code here'
+      : 'Paste token here';
 
   return (
     <div
@@ -197,7 +301,7 @@ export function CliAuthBannerModal({
       role="dialog"
       aria-modal="true"
     >
-      <div className="flex w-full max-w-2xl flex-col gap-4 overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950 p-5 shadow-xl">
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col gap-4 overflow-y-auto rounded-lg border border-neutral-800 bg-neutral-950 p-5 shadow-xl">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 className="text-lg font-semibold text-neutral-50">Sign in — {providerLabel}</h2>
@@ -216,6 +320,19 @@ export function CliAuthBannerModal({
         </div>
 
         <FormError message={error} />
+
+        {showTerminal && phase !== 'saved' && phase !== 'success' && (
+          <div className="flex flex-col gap-1">
+            <p className="text-xs text-neutral-400">
+              Antigravity sign-in (live terminal). Read the URL below, finish OAuth in your browser,
+              then type or paste the code here (Ctrl+Shift+V to paste) and press Enter.
+            </p>
+            <div
+              ref={termMountRef}
+              className="h-72 w-full overflow-hidden rounded border border-neutral-800 bg-[#0a0a0a] p-2"
+            />
+          </div>
+        )}
 
         {(phase === 'connecting' || phase === 'starting') && (
           <BannerRow tone="info">

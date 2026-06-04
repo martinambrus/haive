@@ -531,6 +531,27 @@ export function CliProviderForm({
         </select>
       </div>
 
+      {state.name === 'antigravity' && state.authMode === 'subscription' && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-950/30 p-3 text-xs text-amber-300">
+          <p className="font-semibold">Data retention / training warning</p>
+          <p className="mt-1">
+            Antigravity&apos;s &quot;Continue with Google&quot; sign-in uses Google&apos;s consumer
+            terms, under which your prompts and the code in your repositories may be retained and
+            used to train Google&apos;s models. Haive does not offer an API-key alternative for this
+            provider yet, so this applies to every Antigravity task.{' '}
+            <a
+              href="https://policies.google.com/terms"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline underline-offset-2 hover:text-amber-100"
+            >
+              Review Google&apos;s terms
+            </a>
+            .
+          </p>
+        </div>
+      )}
+
       <div>
         <Label htmlFor="cliVersion">CLI version</Label>
         {!metadata.installSupported ? (

@@ -51,6 +51,7 @@ function buildSequentialForProvider(name: CliProviderName, spec: SubAgentSpec): 
     case 'codex':
     case 'gemini':
     case 'zai':
+    case 'antigravity':
       return buildCodexSequentialInvocation(spec);
     case 'claude-code':
       return buildCodexSequentialInvocation(spec);

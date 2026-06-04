@@ -70,4 +70,18 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
     autoUpdateDisable: [{ kind: 'env', vars: { DISABLE_AUTOUPDATER: '1' } }],
     versionPinnable: true,
   },
+  antigravity: {
+    install: {
+      kind: 'curl-script',
+      url: 'https://antigravity.google/cli/install.sh',
+      binary: 'agy',
+    },
+    // Manifest-based downloader, no plain registry to pin against.
+    versionSource: { kind: 'none' },
+    // agy self-updates in the background; disable it in the pinned sandbox
+    // image. Env name per Antigravity docs (runtime-unconfirmed; a wrong name
+    // is harmless — it just sets an unused env var).
+    autoUpdateDisable: [{ kind: 'env', vars: { AGY_CLI_DISABLE_AUTO_UPDATE: 'true' } }],
+    versionPinnable: false,
+  },
 };

@@ -41,8 +41,18 @@ const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const SUPPORTED_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'claude-code',
   'codex',
-  'gemini',
   'amp',
+  'antigravity',
+]);
+
+// Providers whose login is driven by the user inside an interactive terminal
+// (the login modal renders the CLI's TUI in xterm) rather than URL-extraction +
+// paste. For these we stream raw container output to the client, forward
+// keystrokes to stdin, and detect success purely via the creds-file poller.
+// agy's auth is a full-screen TUI whose URL can't be machine-extracted and its
+// -p mode caps the auth wait at ~30s, so the user must drive it directly.
+const TERMINAL_LOGIN_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
+  'antigravity',
 ]);
 
 interface BannerSession {
@@ -67,6 +77,10 @@ interface BannerSession {
   timeout: NodeJS.Timeout;
   cleanedUp: boolean;
   credsPoller: NodeJS.Timeout | null;
+  urlDebugged: boolean;
+  firstChunkLogged: boolean;
+  menuAdvanceTimer: NodeJS.Timeout | null;
+  menuAdvanceCount: number;
 }
 
 const CAPTURE_TIMEOUT_MS = 60_000;
@@ -261,12 +275,39 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     }, SESSION_TIMEOUT_MS),
     cleanedUp: false,
     credsPoller: null,
+    urlDebugged: false,
+    firstChunkLogged: false,
+    menuAdvanceTimer: null,
+    menuAdvanceCount: 0,
   };
 
   wsSend(ws, {
     type: 'phase',
     phase: providerName === 'codex' ? 'awaiting-approval' : 'awaiting-token',
   });
+
+  if (TERMINAL_LOGIN_PROVIDERS.has(providerName)) {
+    // Start polling for the creds file now — success is the token write, not
+    // anything parsed from the stream.
+    startAntigravityCredsPoller(session);
+    // agy's TUI only renders (and prints the OAuth URL) once its PTY has a real
+    // winsize. The container is created Tty:true with NO size, so until a resize
+    // arrives agy sits at a 0x0 PTY and emits nothing — which is exactly why the
+    // field-only flow hung at "Waiting for sign-in URL...". Push a fixed sane
+    // size right after start, and once more after agy has opened the PTY, so the
+    // hidden flow works without any client xterm attached. (When the debug xterm
+    // IS shown it will also send its own resize frames; these are harmless.)
+    const sizeTerminalPty = () => {
+      session.docker
+        .getContainer(session.dockerContainerId)
+        .resize({ h: 40, w: 120 })
+        .catch((err: unknown) => {
+          log.warn({ err, providerId: session.providerId }, 'initial pty resize failed');
+        });
+    };
+    setTimeout(sizeTerminalPty, 250);
+    setTimeout(sizeTerminalPty, 1200);
+  }
 
   stream.on('data', (chunk: Buffer) => onStreamData(session, chunk));
   stream.on('end', () => {
@@ -293,7 +334,33 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     } catch {
       return;
     }
-    const msg = parsed as { type?: string; token?: string };
+    const msg = parsed as {
+      type?: string;
+      token?: string;
+      data?: string;
+      rows?: number;
+      cols?: number;
+    };
+    if (msg.type === 'input' && typeof msg.data === 'string') {
+      // Terminal-login keystrokes (incl. the pasted auth code + Enter) -> stdin.
+      try {
+        session.stream.write(msg.data);
+      } catch (err) {
+        log.warn({ err, providerId: session.providerId }, 'terminal input write failed');
+      }
+      return;
+    }
+    if (msg.type === 'resize' && typeof msg.rows === 'number' && typeof msg.cols === 'number') {
+      try {
+        await session.docker.getContainer(session.dockerContainerId).resize({
+          h: msg.rows,
+          w: msg.cols,
+        });
+      } catch (err) {
+        log.warn({ err, providerId: session.providerId }, 'terminal resize failed');
+      }
+      return;
+    }
     if (msg.type === 'token-input' && typeof msg.token === 'string' && msg.token.trim()) {
       const token = msg.token.trim();
       log.info(
@@ -336,6 +403,11 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
         // the API key into $HOME/.config/amp/settings.json. Poll for that
         // file — the REPL's post-paste stdout is unreliable.
         startAmpCredsPoller(session);
+      } else if (session.providerName === 'antigravity') {
+        // agy reads the pasted authorization code on stdin and writes its OAuth
+        // token to ~/.gemini/antigravity-cli/antigravity-oauth-token on success.
+        // Poll for that file — the post-paste agy TUI output is unreliable.
+        startAntigravityCredsPoller(session);
       }
     } else if (msg.type === 'ping') {
       wsSend(ws, { type: 'pong' });
@@ -352,6 +424,75 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
 
 function onStreamData(session: BannerSession, chunk: Buffer): void {
   const text = chunk.toString('utf8');
+
+  if (TERMINAL_LOGIN_PROVIDERS.has(session.providerName)) {
+    // Interactive login (agy). DEBUG: raw output is forwarded so the modal can
+    // render agy's TUI in an xterm (visibility into the auth-method menu / URL).
+    // In parallel we still try to extract the OAuth URL (clickable link + field
+    // UX) and auto-advance the menu. We skip detectAuthResult (agy's TUI text
+    // would false-positive); success is the creds-file poller.
+    if (!session.firstChunkLogged) {
+      session.firstChunkLogged = true;
+      log.info(
+        { providerId: session.providerId, len: text.length },
+        'antigravity first stream chunk',
+      );
+    }
+    wsSend(session.ws, { type: 'output', data: text });
+    if (!session.authUrlSent) {
+      session.rawBuffer = appendCapped(session.rawBuffer, text, RAW_BUFFER_MAX);
+      const prefixes = AUTH_URL_PREFIXES[session.providerName] ?? ['https://'];
+      const url = extractWrappedUrl(session.rawBuffer, prefixes);
+      if (url && url.length > (prefixes[0]?.length ?? 0) + 8) {
+        session.authUrlSent = true;
+        log.info(
+          { providerId: session.providerId, urlLen: url.length, urlHead: url.slice(0, 80) },
+          'antigravity auth url extracted',
+        );
+        wsSend(session.ws, { type: 'auth-url', url });
+      } else {
+        if (!session.urlDebugged && session.rawBuffer.includes('oauth2')) {
+          // Could not extract despite the URL being on screen — log how it renders
+          // so the extractor can be refined (one-shot per session).
+          session.urlDebugged = true;
+          const clean = stripAnsi(session.rawBuffer).replace(/\s+/g, ' ');
+          const idx = clean.indexOf('oauth2');
+          log.info(
+            {
+              providerId: session.providerId,
+              sample: clean.slice(Math.max(0, idx - 30), idx + 220),
+            },
+            'antigravity oauth2 present but URL not extracted (debug sample)',
+          );
+        }
+        // agy's first-run TUI shows an auth-method menu (Google Account
+        // highlighted) that needs a single Enter before it prints the OAuth URL.
+        // The login modal is field-based — it sends no keystrokes — so without
+        // this the session sits forever at "Waiting for sign-in URL...". When
+        // agy's output pauses (it is idle at a prompt) and no URL has appeared
+        // yet, auto-send Enter to advance. Debouncing means we only press Enter
+        // while agy is waiting, never mid-render; and we stop the moment the URL
+        // shows (authUrlSent / oauth2 in buffer), so we never submit an empty
+        // line at the later "paste code" prompt. Capped to avoid runaway.
+        if (session.menuAdvanceTimer) clearTimeout(session.menuAdvanceTimer);
+        if (session.menuAdvanceCount < 6) {
+          session.menuAdvanceTimer = setTimeout(() => {
+            if (session.cleanedUp || session.authUrlSent || session.rawBuffer.includes('oauth2')) {
+              return;
+            }
+            session.menuAdvanceCount += 1;
+            try {
+              session.stream.write('\r');
+            } catch {
+              // stream may have closed mid-tick; ignore
+            }
+          }, 1500);
+        }
+      }
+    }
+    return;
+  }
+
   session.rawBuffer = appendCapped(session.rawBuffer, text, RAW_BUFFER_MAX);
   const clean = stripAnsi(text);
   session.cleanBuffer = appendCapped(session.cleanBuffer, clean, CLEAN_BUFFER_MAX);
@@ -419,10 +560,10 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
     return;
   }
 
-  // Gemini success arrives via the creds-file poller started after the user
-  // pastes the authorization code. The REPL's post-paste stdout is
-  // unreliable, so we deliberately skip detectAuthResult here.
-  if (session.providerName === 'gemini') return;
+  // Gemini and Antigravity success arrives via the creds-file poller started
+  // after the user pastes the authorization code. The post-paste stdout (gemini
+  // REPL / agy TUI) is unreliable, so we deliberately skip detectAuthResult here.
+  if (session.providerName === 'gemini' || session.providerName === 'antigravity') return;
 
   // Amp prints "Login successful!" to stdout and exits within ~200ms of the
   // paste. That's faster than our 500ms creds-file poll cadence, so if we
@@ -461,6 +602,20 @@ const AMP_POLL_MAX_TRIES = 20;
 // settings.json under ~/.config/amp is for MCP/CLI prefs and is NOT populated
 // by `amp login` — checking it waited 10s then always timed out.
 const AMP_CREDS_CHECK = ['sh', '-c', 'test -s "$HOME/.local/share/amp/secrets.json"'];
+
+const ANTIGRAVITY_POLL_INTERVAL_MS = 1000;
+// Interactive login: the user reads the URL and completes the whole OAuth (incl.
+// 2FA / consent) at their own pace AFTER the poller starts, so poll for most of
+// the session rather than the ~20s used for paste-back flows. 540 x 1000ms = 9
+// min; the 10-min SESSION_TIMEOUT_MS is the hard backstop that tears the session
+// (and poller) down.
+const ANTIGRAVITY_POLL_MAX_TRIES = 540;
+// agy writes its OAuth token here on successful sign-in (verified on agy 1.0.5).
+const ANTIGRAVITY_CREDS_CHECK = [
+  'sh',
+  '-c',
+  'test -s "$HOME/.gemini/antigravity-cli/antigravity-oauth-token"',
+];
 
 /** Polls the login container for gemini's creds file after the user pastes
  *  the authorization code. Fires auth-success + runProbeAndSave when the
@@ -569,6 +724,59 @@ function startAmpCredsPoller(session: BannerSession): void {
   }, AMP_POLL_INTERVAL_MS);
   session.credsPoller = poller;
   log.info({ providerId: session.providerId }, 'amp creds poller started');
+}
+
+/** Polls the login container for agy's OAuth token file after the user pastes
+ *  the authorization code. Fires auth-success + runProbeAndSave when the file
+ *  appears; errors out after ANTIGRAVITY_POLL_MAX_TRIES × interval. Idempotent. */
+function startAntigravityCredsPoller(session: BannerSession): void {
+  if (session.cleanedUp) return;
+  if (session.credsPoller) return;
+  if (session.authSuccessSent) return;
+  let tries = 0;
+  const poller = setInterval(() => {
+    tries += 1;
+    if (session.cleanedUp) {
+      clearInterval(poller);
+      return;
+    }
+    void execInContainer(session.docker, session.dockerContainerId, ANTIGRAVITY_CREDS_CHECK)
+      .then((result) => {
+        if (session.cleanedUp || session.authSuccessSent) {
+          clearInterval(poller);
+          session.credsPoller = null;
+          return;
+        }
+        if (result.exitCode === 0) {
+          clearInterval(poller);
+          session.credsPoller = null;
+          session.authSuccessSent = true;
+          session.probePending = true;
+          log.info({ providerId: session.providerId }, 'antigravity creds file detected');
+          wsSend(session.ws, { type: 'auth-success' });
+          void runProbeAndSave(session);
+          return;
+        }
+        if (tries >= ANTIGRAVITY_POLL_MAX_TRIES) {
+          clearInterval(poller);
+          session.credsPoller = null;
+          log.warn(
+            { providerId: session.providerId, tries },
+            'antigravity token file not found before poll timeout',
+          );
+          wsSend(session.ws, {
+            type: 'error',
+            message:
+              'Antigravity did not write credentials after the code paste. The code may be wrong or expired — retry the login.',
+          });
+        }
+      })
+      .catch((err) => {
+        log.warn({ err, providerId: session.providerId }, 'antigravity creds poll exec failed');
+      });
+  }, ANTIGRAVITY_POLL_INTERVAL_MS);
+  session.credsPoller = poller;
+  log.info({ providerId: session.providerId }, 'antigravity creds poller started');
 }
 
 /** Watchdog that fires if the claude oauth token never appears in stdout. */
@@ -728,6 +936,10 @@ async function cleanupSession(session: BannerSession): Promise<void> {
   if (session.credsPoller) {
     clearInterval(session.credsPoller);
     session.credsPoller = null;
+  }
+  if (session.menuAdvanceTimer) {
+    clearTimeout(session.menuAdvanceTimer);
+    session.menuAdvanceTimer = null;
   }
   clearInterval(session.heartbeat);
   clearTimeout(session.timeout);

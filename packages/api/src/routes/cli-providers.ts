@@ -91,6 +91,32 @@ function resolveEffortLevelForSave(name: CliProviderName, requested: string | nu
   return scale.values.includes(requested) ? requested : null;
 }
 
+// Reject auth modes the selected provider does not offer, mirroring the web
+// form's option gating: the subscription option is shown only when
+// defaultAuthMode !== 'api_key', and the api_key option only when apiKeyEnvName
+// is set. This stops a stale or hand-crafted client from persisting an
+// api-key-only provider (e.g. gemini, zai) back into subscription mode.
+export function assertAuthModeSupported(
+  name: CliProviderName,
+  authMode: 'subscription' | 'api_key',
+): void {
+  const meta = CLI_PROVIDER_CATALOG[name];
+  if (authMode === 'subscription' && meta.defaultAuthMode === 'api_key') {
+    throw new HttpError(
+      400,
+      `${meta.displayName} does not support subscription (CLI login) authentication`,
+      'auth_mode_unsupported',
+    );
+  }
+  if (authMode === 'api_key' && meta.apiKeyEnvName === null) {
+    throw new HttpError(
+      400,
+      `${meta.displayName} does not support API-key authentication`,
+      'auth_mode_unsupported',
+    );
+  }
+}
+
 async function enqueueBuildForProvider(providerId: string, userId: string): Promise<void> {
   const db = getDb();
   await db
@@ -204,6 +230,7 @@ cliProviderRoutes.post('/', async (c) => {
   const userId = c.get('userId');
   const body = createCliProviderRequestSchema.parse(await c.req.json());
   const meta = CLI_PROVIDER_CATALOG[body.name];
+  assertAuthModeSupported(body.name, body.authMode);
 
   const db = getDb();
   const resolvedVersion = await resolveCliVersionForSave(
@@ -254,6 +281,10 @@ cliProviderRoutes.patch('/:id', async (c) => {
 
   if (body.name && body.name !== existing.name) {
     throw new HttpError(400, 'Provider name cannot be changed', 'name_immutable');
+  }
+
+  if (body.authMode !== undefined) {
+    assertAuthModeSupported(existing.name, body.authMode);
   }
 
   const updates: Partial<typeof schema.cliProviders.$inferInsert> = { updatedAt: new Date() };

@@ -38,12 +38,15 @@ export const AUTH_URL_PREFIXES: Partial<Record<CliProviderName, string[]>> = {
   ],
   gemini: ['https://accounts.google.com/o/oauth2/'],
   amp: ['https://ampcode.com/auth/cli-login'],
+  // Antigravity (agy) prints the same Google OAuth endpoint as gemini.
+  antigravity: ['https://accounts.google.com/o/oauth2/'],
 };
 
 export const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'claude-code',
   'gemini',
   'amp',
+  'antigravity',
 ]);
 
 export function extractWrappedUrl(raw: string, prefixes: string[]): string | null {

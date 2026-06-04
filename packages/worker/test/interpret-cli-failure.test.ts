@@ -38,6 +38,14 @@ describe('interpretCliFailure', () => {
     expect(msg).toMatch(/codex login/);
   });
 
+  it('points gemini at the GEMINI_API_KEY secret instead of a CLI login', () => {
+    const result = outcome({ rawOutput: 'Unauthorized 401' });
+    const msg = interpretCliFailure(result, 'gemini');
+    expect(msg).toMatch(/CLI authentication failed/);
+    expect(msg).toMatch(/GEMINI_API_KEY/);
+    expect(msg).not.toMatch(/gemini auth login/);
+  });
+
   it('falls back to generic hint when provider name is null', () => {
     const result = outcome({ rawOutput: 'Unauthorized' });
     const msg = interpretCliFailure(result, null);

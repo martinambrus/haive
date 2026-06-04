@@ -18,7 +18,7 @@ export type StepStatus =
   | 'failed'
   | 'skipped';
 
-export type CliProviderName = 'claude-code' | 'codex' | 'gemini' | 'amp' | 'zai';
+export type CliProviderName = 'claude-code' | 'codex' | 'gemini' | 'amp' | 'zai' | 'antigravity';
 
 export type AuthMode = 'subscription' | 'api_key';
 

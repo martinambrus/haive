@@ -114,3 +114,25 @@ describe('zai adapter', () => {
     expect(inv.synthesis.expectJsonOutput).toBe(true);
   });
 });
+
+describe('antigravity adapter', () => {
+  const adapter = cliAdapterRegistry.get('antigravity');
+  const provider = makeProvider({ id: 'p-agy', name: 'antigravity' });
+
+  it('declares the agy binary, subscription auth (no api key), and native AGENTS.md rules', () => {
+    expect(adapter.providerName).toBe('antigravity');
+    expect(adapter.defaultExecutable).toBe('agy');
+    expect(adapter.supportsSubagents).toBe(true);
+    expect(adapter.supportsCliAuth).toBe(true);
+    expect(adapter.defaultAuthMode).toBe('subscription');
+    expect(adapter.apiKeyEnvName).toBeNull();
+    expect(adapter.rulesFile).toBe('AGENTS.md');
+    expect(adapter.rulesFileMode).toBe('native');
+  });
+
+  it('builds a non-interactive agy invocation: --dangerously-skip-permissions -p <prompt>', () => {
+    const spec = adapter.buildCliInvocation(provider, 'hello', opts);
+    expect(spec.command).toBe('agy');
+    expect(spec.args).toEqual(['--dangerously-skip-permissions', '-p', 'hello']);
+  });
+});

@@ -42,7 +42,12 @@ export function buildProviderInstallLines(
     lines.push(`RUN npm install -g ${install.package}${pin} && ${install.binary} --version`);
   } else if (install.kind === 'curl-script') {
     lines.push(ENSURE_NODE_USER_LINE);
-    lines.push(`RUN curl -fsSL ${install.url} | bash`);
+    // Install to a global, on-PATH dir via the installer's --dir flag. The
+    // installer defaults to $HOME/.local/bin, which during the image build is
+    // root's home and is not reachable by the sandbox's `node` user; --dir puts
+    // the binary in /usr/local/bin (matching the npm -g install location) so
+    // node can run it. (Requires the install script to accept --dir; agy does.)
+    lines.push(`RUN curl -fsSL ${install.url} | bash -s -- --dir /usr/local/bin`);
   } else if (install.kind === 'piggyback') {
     const target = CLI_INSTALL_METADATA[install.uses];
     if (target.install.kind === 'npm') {

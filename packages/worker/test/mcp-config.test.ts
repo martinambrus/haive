@@ -130,6 +130,15 @@ describe('buildMcpConfigForCli', () => {
     expect(parsed.mcpServers.filesystem).toBeDefined();
   });
 
+  it('emits antigravity JSON to ~/.gemini/antigravity-cli/mcp_config.json with no cliArgs', () => {
+    const config = buildMcpConfigForCli('antigravity', sampleServers);
+    expect(config?.path).toBe('/home/claude/.gemini/antigravity-cli/mcp_config.json');
+    expect(config?.format).toBe('json');
+    expect(config?.cliArgs).toBeUndefined();
+    const parsed = JSON.parse(config!.content);
+    expect(parsed.mcpServers.filesystem).toBeDefined();
+  });
+
   it('does NOT attach cliArgs for gemini or codex (they auto-discover their config files)', () => {
     // Only claude-code/zai use the standalone /haive/mcp.json bind-mount and
     // therefore need --mcp-config to point the binary at it. Gemini reads

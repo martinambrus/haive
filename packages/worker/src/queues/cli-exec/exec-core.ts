@@ -45,10 +45,21 @@ const AUTH_FAILURE_PATTERNS: RegExp[] = [
 const PROVIDER_LOGIN_HINTS: Record<string, string> = {
   'claude-code': 'claude /login',
   codex: 'codex login',
-  gemini: 'gemini auth login',
   amp: 'amp login',
   zai: 'zai login',
 };
+
+// Providers authenticated by an API-key secret rather than an interactive CLI
+// login. On auth failure the hint points at the Haive-stored secret, since
+// there is no login command to run. Gemini is BYOK-only after its subscription
+// login path was removed.
+const PROVIDER_API_KEY_HINTS: Record<string, string> = {
+  gemini: 'GEMINI_API_KEY',
+};
+
+// Providers whose login happens inside Haive (interactive OAuth on the providers
+// page), not via a terminal command. On auth failure, point users there.
+const PROVIDER_HAIVE_LOGIN: ReadonlySet<string> = new Set(['antigravity']);
 
 export function interpretCliFailure(
   result: ExecutionOutcome,
@@ -61,10 +72,15 @@ export function interpretCliFailure(
   const looksLikeAuth = AUTH_FAILURE_PATTERNS.some((p) => p.test(haystack));
   if (!looksLikeAuth) return existing;
 
+  const apiKeyName = providerName ? PROVIDER_API_KEY_HINTS[providerName] : null;
   const loginCmd = providerName ? PROVIDER_LOGIN_HINTS[providerName] : null;
-  const hint = loginCmd
-    ? `run \`${loginCmd}\` in your terminal and then retry this step`
-    : 're-authenticate your CLI in your terminal and then retry this step';
+  const hint = apiKeyName
+    ? `check or replace the \`${apiKeyName}\` secret for this provider in Haive settings and then retry this step`
+    : providerName && PROVIDER_HAIVE_LOGIN.has(providerName)
+      ? `log in to ${providerName} from the Haive providers page (Test connection then Log in) and then retry this step`
+      : loginCmd
+        ? `run \`${loginCmd}\` in your terminal and then retry this step`
+        : 're-authenticate your CLI in your terminal and then retry this step';
   const detail = existing && existing.trim().length > 0 ? ` (${existing.trim()})` : '';
   return `CLI authentication failed — ${hint}.${detail}`;
 }

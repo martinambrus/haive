@@ -22,7 +22,8 @@ export interface AuthProbeExecResult {
 }
 
 const AUTH_PROBE_PROMPT = 'respond with the single word pong';
-const AUTH_FAILURE_GUARD = /invalid[_\s-]?token|unauthor(ised|ized)|\b401\b/i;
+const AUTH_FAILURE_GUARD =
+  /invalid[_\s-]?token|unauthor(ised|ized)|\b401\b|authentication[_\s-]?required/i;
 
 // Gemini's folder-trust feature, when enabled, overrides --yolo to "default"
 // and prints a warning whenever the CWD is not in trustedFolders.json. The
@@ -66,6 +67,13 @@ const PATTERNS: Array<{ pattern: RegExp; status: CliAuthStatus }> = [
   // the UI offers a re-login button instead of "unknown_error".
   {
     pattern: AUTH_METHOD_MISSING_PATTERN,
+    status: 'auth_expired',
+  },
+  // Antigravity (agy) prints "Authentication required. Please visit the URL to
+  // log in" when its OAuth token is missing or expired — and exits 0, so it is
+  // also in AUTH_FAILURE_GUARD above to stop an exit-0 probe being misread as ok.
+  {
+    pattern: /authentication[_\s-]?required/i,
     status: 'auth_expired',
   },
   {
@@ -115,7 +123,13 @@ export function classifyAuthProbeOutput(result: AuthProbeExecResult): AuthProbeC
 }
 
 export function isAuthProbeSupported(name: CliProviderName): boolean {
-  return name === 'claude-code' || name === 'codex' || name === 'gemini' || name === 'amp';
+  return (
+    name === 'claude-code' ||
+    name === 'codex' ||
+    name === 'gemini' ||
+    name === 'amp' ||
+    name === 'antigravity'
+  );
 }
 
 export function buildAuthProbeCommand(
@@ -159,6 +173,16 @@ export function buildAuthProbeCommand(
       return {
         command: executable,
         args: ['usage'],
+        env,
+      };
+    case 'antigravity':
+      // agy has no --output-format; plain -p prints the response.
+      // --dangerously-skip-permissions keeps it non-interactive. Missing/expired
+      // creds print "Authentication required..." (caught as auth_expired); a
+      // fully unpopulated login is blocked earlier by assertUserAuthReady.
+      return {
+        command: executable,
+        args: ['-p', AUTH_PROBE_PROMPT, '--dangerously-skip-permissions'],
         env,
       };
     default:

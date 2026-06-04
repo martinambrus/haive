@@ -1,43 +1,48 @@
-# haive-cli-sandbox:latest -- sandbox-core
+# haive-cli-sandbox:latest -- sandbox-core (glibc / debian base)
 #
 # Minimal fallback base used by the image-composer when a task has no
 # env-template (i.e. env-replicate did not run). When an env-template
 # IS present, the composer uses the env-template Dockerfile as base
 # instead and this image is not referenced.
 #
-# Contents are the bare minimum required for any CLI install layer to
-# succeed: node+npm for npm-kind CLIs, curl+bash kept for future curl-script
-# installs, git for repo operations, tini for signal handling. The PATH
-# override picks up installer-based CLIs that drop into /root/.local/bin.
+# glibc base (node:24-bookworm-slim) rather than Alpine/musl: npm-based CLIs run
+# on node (fine on either libc), but native CLIs can be glibc-only. Antigravity's
+# `agy` is a dynamically linked glibc binary with no musl build, so it cannot run
+# on Alpine; debian glibc lets both kinds work. amp's `#!/usr/bin/env -S` shebang
+# also works here because debian ships GNU coreutils/env by default.
 #
 # CLI install lines are layered on top at compose time via
 # packages/worker/src/sandbox/image-composer.ts using codegen from
 # @haive/shared's CLI_INSTALL_METADATA. Auto-updaters are disabled per
 # CLI so pinned versions cannot drift at runtime.
 
-FROM node:24-alpine
+FROM node:24-bookworm-slim
 
-# coreutils replaces BusyBox `env` with GNU `env`. Required by CLIs whose
-# binaries ship shebangs like `#!/usr/bin/env -S node ...` (e.g. amp); the
-# `-S` flag is GNU-only and BusyBox env fails with "unrecognized option: S".
-RUN apk add --no-cache \
-      bash \
+# Base tooling. bash + GNU coreutils/env are already present on debian.
+# uv has no apt package and is installed via its official installer below.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
       ca-certificates \
-      coreutils \
       curl \
       git \
       nano \
       ripgrep \
       tini \
       tmux \
-      uv
+ && rm -rf /var/lib/apt/lists/*
+
+# uv (Astral) — provides `uvx`, used by the git MCP server. Installed to
+# /usr/local/bin so it is on PATH for the node user (the installer otherwise
+# drops into $HOME/.local/bin).
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+ && uv --version
 
 # rtk (Rust Token Killer) — proxies dev commands to compress tool output before
 # it lands in the LLM context. Pinned by tag + sha256; opt-in per-repo via
-# `repositories.rtk_enabled`. Upstream only ships musl for x86_64; aarch64
-# alpine has no musl asset, so we skip cleanly on non-x86_64 (the per-CLI hook
-# entries we still write in those repos will be no-ops since the binary won't
-# resolve on PATH).
+# `repositories.rtk_enabled`. Upstream ships a static musl x86_64 binary, which
+# runs on glibc too; aarch64 has no asset, so we skip cleanly on non-x86_64 (the
+# per-CLI hook entries we still write in those repos will be no-ops since the
+# binary won't resolve on PATH).
 ARG RTK_RELEASE_VERSION=v0.37.2
 ARG RTK_X86_64_MUSL_SHA256=3dfb7a05636a68687ba1c5aa696fa8d5fcb494447ded86d9eb8b88b7100a37c6
 RUN set -eux; \
@@ -63,10 +68,12 @@ RUN set -eux; \
 # missing volume mountpoints as root regardless of `User:` — if the image
 # already has the path with correct ownership, a named volume mounted there
 # inherits node:node and the CLI (running as uid 1000) can write its auth
-# files + sub-dirs like `.claude/backups`.
+# files + sub-dirs like `.claude/backups`. node:24-bookworm-slim already
+# provides the node user/group at uid/gid 1000.
 RUN mkdir -p /home/node/.claude \
              /home/node/.codex \
              /home/node/.gemini \
+             /home/node/.gemini/antigravity-cli \
              /home/node/.config/claude \
              /home/node/.config/codex \
              /home/node/.config/gemini \
@@ -93,5 +100,5 @@ ENV PATH="/root/.local/bin:$PATH"
 
 WORKDIR /haive/workdir
 
-ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/restore-claude.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/restore-claude.sh"]
 CMD ["bash"]

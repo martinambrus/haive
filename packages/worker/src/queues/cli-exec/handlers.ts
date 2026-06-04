@@ -400,6 +400,38 @@ export async function handleLoginCreateJob(
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 
+  // Ensure the per-user auth volume(s) are owned by the sandbox user (uid 1000)
+  // before the login container (which runs as `node`) mounts them. Docker
+  // creates fresh named-volume mountpoints root-owned, which blocks native CLIs
+  // such as agy from writing their credential files on first login. Mirrors the
+  // chown ensureTaskAuthVolumes performs for per-task volumes; creates the empty
+  // volume node-owned if it does not exist yet. Best-effort: failures are logged.
+  const authHelperImage = process.env.SANDBOX_IMAGE ?? 'haive-cli-sandbox:latest';
+  const authMeta = getCliProviderMetadata(provider.name);
+  for (let idx = 0; idx < authMeta.authConfigPaths.length; idx += 1) {
+    const vol = provider.isolateAuth
+      ? cliAuthProviderVolumeName(provider.id, provider.name, idx)
+      : cliAuthVolumeName(provider.userId, provider.name, idx);
+    try {
+      const chownRes = await defaultDockerRunner.run({
+        image: authHelperImage,
+        cmd: ['sh', '-c', 'chown -R 1000:1000 /v'],
+        mounts: [{ source: vol, target: '/v', readOnly: false }],
+        entrypoint: '',
+        user: 'root',
+        timeoutMs: 30_000,
+      });
+      if (chownRes.exitCode !== 0) {
+        log.warn(
+          { vol, exitCode: chownRes.exitCode, stderr: chownRes.stderr.slice(-200) },
+          'login auth volume chown exited non-zero',
+        );
+      }
+    } catch (err) {
+      log.warn({ err, vol }, 'login auth volume chown failed');
+    }
+  }
+
   try {
     const Docker = (await import('dockerode')).default;
     const docker = new Docker();

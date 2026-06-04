@@ -134,7 +134,7 @@ export interface FilesystemListing {
   entries: FilesystemEntry[];
 }
 
-export type CliProviderName = 'claude-code' | 'codex' | 'gemini' | 'amp' | 'zai';
+export type CliProviderName = 'claude-code' | 'codex' | 'gemini' | 'amp' | 'zai' | 'antigravity';
 
 export type CliAuthMode = 'subscription' | 'api_key';
 export type CliSandboxBuildStatus = 'idle' | 'building' | 'ready' | 'failed';

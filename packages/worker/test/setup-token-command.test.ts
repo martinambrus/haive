@@ -28,11 +28,12 @@ function makeProvider(
 }
 
 describe('isCliSetupTokenSupported', () => {
-  it('is true for claude-code, codex, gemini, amp', () => {
+  it('is true for claude-code, codex, amp, antigravity; false for gemini (BYOK-only) and zai', () => {
     expect(isCliSetupTokenSupported('claude-code')).toBe(true);
     expect(isCliSetupTokenSupported('codex')).toBe(true);
-    expect(isCliSetupTokenSupported('gemini')).toBe(true);
     expect(isCliSetupTokenSupported('amp')).toBe(true);
+    expect(isCliSetupTokenSupported('antigravity')).toBe(true);
+    expect(isCliSetupTokenSupported('gemini')).toBe(false);
     expect(isCliSetupTokenSupported('zai')).toBe(false);
   });
 });
@@ -50,39 +51,23 @@ describe('buildSetupTokenCommand', () => {
     expect(spec.args).toEqual(['login', '--device-auth']);
   });
 
-  it('gemini seeds settings + execs binary via sh -c', () => {
-    const spec = buildSetupTokenCommand(makeProvider({ id: '3', name: 'gemini' }), 'gemini');
-    expect(spec.command).toBe('sh');
-    expect(spec.args[0]).toBe('-c');
-    const script = spec.args[1] ?? '';
-    expect(script).toContain('mkdir -p "$HOME/.gemini"');
-    expect(script).toContain('"selectedAuthType":"oauth-personal"');
-    expect(script).toContain('"auth":{"selectedType":"oauth-personal"}');
-    expect(script).toContain('"folderTrust":{"enabled":false}');
-    expect(script).toContain('exec "$0"');
-    expect(spec.args[2]).toBe('gemini');
-    expect(spec.env.NO_BROWSER).toBe('true');
-    expect(spec.env.GEMINI_CLI_TRUST_WORKSPACE).toBe('true');
-  });
-
-  it('gemini merges provider envVars without overriding NO_BROWSER or trust workspace', () => {
-    const spec = buildSetupTokenCommand(
-      makeProvider({
-        id: '5',
-        name: 'gemini',
-        envVars: { FOO: 'bar', NO_BROWSER: 'false', GEMINI_CLI_TRUST_WORKSPACE: 'false' },
-      }),
-      'gemini',
-    );
-    expect(spec.env.FOO).toBe('bar');
-    expect(spec.env.NO_BROWSER).toBe('true');
-    expect(spec.env.GEMINI_CLI_TRUST_WORKSPACE).toBe('true');
+  it('throws CliSetupTokenUnsupportedError for gemini (BYOK-only, no CLI login)', () => {
+    expect(() =>
+      buildSetupTokenCommand(makeProvider({ id: '3', name: 'gemini' }), 'gemini'),
+    ).toThrow(CliSetupTokenUnsupportedError);
   });
 
   it('amp → login', () => {
     const spec = buildSetupTokenCommand(makeProvider({ id: '6', name: 'amp' }), 'amp');
     expect(spec.command).toBe('amp');
     expect(spec.args).toEqual(['login']);
+  });
+
+  it('antigravity → interactive agy (-i) for terminal-passthrough login', () => {
+    const spec = buildSetupTokenCommand(makeProvider({ id: '8', name: 'antigravity' }), 'agy');
+    expect(spec.command).toBe('agy');
+    expect(spec.args).toContain('-i');
+    expect(spec.args).not.toContain('-p');
   });
 
   it('throws CliSetupTokenUnsupportedError for zai', () => {

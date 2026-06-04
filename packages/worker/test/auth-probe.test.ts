@@ -168,6 +168,16 @@ describe('classifyAuthProbeOutput', () => {
     });
     expect(result.status).toBe('auth_expired');
   });
+
+  it('classifies antigravity "Authentication required" as auth_expired even on exit 0', () => {
+    const result = classifyAuthProbeOutput({
+      stdout:
+        'Authentication required. Please visit the URL to log in:\nhttps://accounts.google.com/o/oauth2/auth?client_id=...',
+      stderr: '',
+      exitCode: 0,
+    });
+    expect(result.status).toBe('auth_expired');
+  });
 });
 
 describe('buildAuthProbeCommand', () => {
@@ -195,6 +205,14 @@ describe('buildAuthProbeCommand', () => {
     expect(spec.env?.GEMINI_CLI_TRUST_WORKSPACE).toBe('true');
   });
 
+  it('builds antigravity spec with -p and --dangerously-skip-permissions', () => {
+    const spec = buildAuthProbeCommand(makeProvider({ id: '5', name: 'antigravity' }), 'agy');
+    expect(spec.command).toBe('agy');
+    expect(spec.args).toContain('-p');
+    expect(spec.args).toContain('respond with the single word pong');
+    expect(spec.args).toContain('--dangerously-skip-permissions');
+  });
+
   it('throws CliAuthProbeUnsupportedError for zai', () => {
     expect(() => buildAuthProbeCommand(makeProvider({ id: '4', name: 'zai' }), 'claude')).toThrow(
       CliAuthProbeUnsupportedError,
@@ -203,11 +221,12 @@ describe('buildAuthProbeCommand', () => {
 });
 
 describe('isAuthProbeSupported', () => {
-  it('is true for claude-code, codex, gemini, amp', () => {
+  it('is true for claude-code, codex, gemini, amp, antigravity; false for zai', () => {
     expect(isAuthProbeSupported('claude-code')).toBe(true);
     expect(isAuthProbeSupported('codex')).toBe(true);
     expect(isAuthProbeSupported('gemini')).toBe(true);
     expect(isAuthProbeSupported('amp')).toBe(true);
+    expect(isAuthProbeSupported('antigravity')).toBe(true);
     expect(isAuthProbeSupported('zai')).toBe(false);
   });
 });

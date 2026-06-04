@@ -21,7 +21,7 @@ interface CliProviderTestProps {
   onLoginCompleted?: () => void;
 }
 
-const LOGIN_SUPPORTED: CliProviderName[] = ['claude-code', 'codex', 'gemini', 'amp'];
+const LOGIN_SUPPORTED: CliProviderName[] = ['claude-code', 'codex', 'amp', 'antigravity'];
 const LOGIN_RECOVERABLE: CliAuthStatus[] = [
   'auth_expired',
   'auth_denied',
@@ -106,8 +106,8 @@ export function CliProviderTest({
 
       <p className="text-sm text-neutral-400">
         Runs <code className="font-mono text-neutral-300">--version</code> against the provider's
-        CLI binary inside the sandbox image; subscription-mode CLIs that ship a non-interactive auth
-        check (claude-code, codex, gemini, amp) also get an auth probe.
+        CLI binary inside the sandbox image; CLIs that ship a non-interactive auth check
+        (claude-code, codex, gemini, amp) also get an auth probe.
       </p>
 
       {blockMessage && (

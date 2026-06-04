@@ -129,10 +129,13 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     description: 'Google Gemini CLI. Native sub-agents via markdown agent definitions.',
     defaultExecutable: 'gemini',
     supportsSubagents: true,
+    // BYOK/API-key only (no subscription CLI login). Kept true like zai so the
+    // dispatcher's CLI path stays available; defaultAuthMode='api_key' is what
+    // removes the subscription option from the UI/API.
     supportsCliAuth: true,
     supportsMcp: true,
     supportsPlugins: false,
-    defaultAuthMode: 'subscription',
+    defaultAuthMode: 'api_key',
     apiKeyEnvName: 'GEMINI_API_KEY',
     defaultModel: 'gemini-2.5-pro',
     authConfigPaths: ['~/.config/gemini', '~/.gemini'],
@@ -184,6 +187,35 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectSkillsDir: '.claude/skills',
     userSkillsPaths: [],
     projectAgentsDir: '.claude/agents',
+    agentFileFormat: 'markdown',
+  },
+  antigravity: {
+    name: 'antigravity',
+    displayName: 'Google Antigravity',
+    description:
+      'Google Antigravity CLI (agy). Subscription coding via Continue-with-Google sign-in.',
+    defaultExecutable: 'agy',
+    // agy is a full agentic CLI with native subagents (dispatched as a single
+    // native invocation, not sequential emulation).
+    supportsSubagents: true,
+    supportsCliAuth: true,
+    supportsMcp: true,
+    supportsPlugins: true,
+    defaultAuthMode: 'subscription',
+    // No simple API-key env; BYOK would be GCP ADC, out of scope for v1.
+    apiKeyEnvName: null,
+    defaultModel: null,
+    // OAuth token persists as a file under this dir
+    // (antigravity-oauth-token); captured by the auth volume.
+    authConfigPaths: ['~/.gemini/antigravity-cli'],
+    docsUrl: 'https://antigravity.google/docs/cli-getting-started',
+    effortScale: null,
+    // Workspace skills/agents dirs confirmed against the agy binary
+    // (.agents/skills, .agents/agents); agy reads AGENTS.md and imports
+    // claude/gemini-style markdown agent definitions.
+    projectSkillsDir: '.agents/skills',
+    userSkillsPaths: [],
+    projectAgentsDir: '.agents/agents',
     agentFileFormat: 'markdown',
   },
 };

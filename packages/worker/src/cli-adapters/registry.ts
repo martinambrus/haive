@@ -1,4 +1,5 @@
 import { AmpAdapter } from './amp.js';
+import { AntigravityAdapter } from './antigravity.js';
 import type { BaseCliAdapter } from './base-adapter.js';
 import { ClaudeCodeAdapter } from './claude-code.js';
 import { CodexAdapter } from './codex.js';
@@ -15,6 +16,7 @@ export class CliAdapterRegistry {
     this.register(new GeminiAdapter());
     this.register(new AmpAdapter());
     this.register(new ZaiAdapter());
+    this.register(new AntigravityAdapter());
   }
 
   private register(adapter: BaseCliAdapter): void {

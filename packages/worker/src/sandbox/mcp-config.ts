@@ -152,6 +152,20 @@ export function buildMcpConfigForCli(
     case 'amp':
       return null;
 
+    case 'antigravity':
+      // Antigravity reads MCP servers from a dedicated file (separate from its
+      // auth token), per docs at ~/.gemini/antigravity-cli/mcp_config.json.
+      // NOTE: a real agy run also created ~/.gemini/config/mcp_config.json —
+      // confirm the actual read path during MCP testing. For task runs this is
+      // written into the auth volume (resolveMcpExtraFiles) rather than
+      // bind-mounted, to avoid a file mount nested inside the antigravity-cli
+      // auth-volume mount.
+      return {
+        path: `${targetHome}/.gemini/antigravity-cli/mcp_config.json`,
+        format: 'json',
+        content: JSON.stringify({ mcpServers: serversToJsonObject(servers, userServers) }, null, 2),
+      };
+
     default: {
       const _exhaustive: never = cliProvider;
       return _exhaustive;
