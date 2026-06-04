@@ -105,4 +105,20 @@ The post-2.1.110 harness regression causes jump-to-conclusion behaviour: hypothe
 - Always use tasks to break down a planned feature or refactor into steps. This should prevent loosing track of the plan during conversation compaction.
 
 - If you're adjusting small part of code, such as an invalid/wrong regex or something similarly small, which can be tested on a previously failed input, always try to safely test the fix on the original input to verify the fix is working.
+
+- Read the call graph before the code. Before changing any function, method, hook, or endpoint, first find its callers and usages (search references) to learn the contract it must honor: who calls it, with what inputs, and what they expect back. Map the callers, then read and change the body. A fix that satisfies the function but breaks a caller is a regression, not a fix.
+
+- After reaching a conclusion, take an adversarial position and ask yourself at least 3 questions that could disprove it before acting on it. Example: an API call returns 403 — before concluding there is no access, verify the credentials used were correct and that the request shape matches the API's documented auth route (there may be more than one auth route, each taking different inputs).
+
+- When asked which approach to take, state a single specific recommendation and the reason; do not return a menu of equal options or hedge with "it depends". Update that position visibly and immediately when better evidence or a stronger argument appears: say plainly that you are switching to X because Y.
+
+- DB-only changes must be deployable. If a change lives only in the database (config edits, data fixes, settings applied via a CLI, SQL, or an admin UI), never leave it as a manual or local-only step. Capture it as the framework's update mechanism (Drupal hook_update_N, Laravel/Rails/Django migration, etc.) or a standalone idempotent script that runs on production via a normal deploy step. Guard it so re-running is a no-op.
+
+- Write the rollback before the change. For any migration, destructive, or hard-to-reverse change, state the undo path in plain English first. Prefer small, reversible steps; split risky migrations into an additive phase first and a destructive phase later so each can be undone alone. If a change cannot be safely undone, stop, say so, and redesign until it can.
+
+- Simplicity first: write the minimum code that solves the problem, nothing speculative. No features beyond what was asked, no abstractions for single-use code, no configurability that was not requested, and no error handling for impossible scenarios. If you write 200 lines and it could be 50, rewrite it.
+
+- Surgical changes: touch only what you must. Do not improve adjacent code, comments, or formatting; do not refactor what is not broken; match the existing style even if you would do it differently. Remove only the imports, variables, and functions your own changes made unused; do not delete pre-existing dead code unless asked, mention it instead. Keep each change the smallest unit still worth reviewing, prefer several small focused commits over one large batch, and never bundle a refactor, a bug fix, and a feature into one change.
+
+- Goal-driven execution: turn each task into a verifiable goal before starting. "Add validation" becomes "write tests for invalid inputs, then make them pass"; "fix the bug" becomes "write a test that reproduces it, then make it pass"; "refactor X" becomes "ensure tests pass before and after". For multi-step tasks, state a brief plan with a verification check for each step.
 `;
