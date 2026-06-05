@@ -5,6 +5,12 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { FRAMEWORK_PATTERNS, type FrameworkName, type DetectResult } from '@haive/shared';
 import type { StepContext, StepDefinition, LlmBuildArgs } from '../../step-definition.js';
+import {
+  buildTechInventory,
+  renderTechInventoryTable,
+  type TechInventory,
+} from './_tech-inventory.js';
+import { buildFileTree, detectLanguages } from '../../../repo/framework-detect.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const GENERIC_NAMES = new Set([
@@ -45,10 +51,16 @@ async function detectGitRemoteName(repoPath: string): Promise<string | null> {
   return deriveNameFromGitUrl(url);
 }
 
-async function loadRepoNameForTask(
+interface RepoMeta {
+  name: string | null;
+  detectedLanguages: Record<string, number> | null;
+  fileTree: string[] | null;
+}
+
+async function loadRepoMetaForTask(
   db: Database | undefined,
   taskId: string,
-): Promise<string | null> {
+): Promise<RepoMeta | null> {
   // Tests construct StepContext with `db: undefined as never`, so guard
   // before touching the query proxy.
   if (!db) return null;
@@ -60,9 +72,14 @@ async function loadRepoNameForTask(
     if (!taskRow?.repositoryId) return null;
     const repo = await db.query.repositories.findFirst({
       where: eq(schema.repositories.id, taskRow.repositoryId),
-      columns: { name: true },
+      columns: { name: true, detectedLanguages: true, fileTree: true },
     });
-    return repo?.name ?? null;
+    if (!repo) return null;
+    return {
+      name: repo.name ?? null,
+      detectedLanguages: repo.detectedLanguages ?? null,
+      fileTree: repo.fileTree ?? null,
+    };
   } catch {
     return null;
   }
@@ -124,6 +141,85 @@ const STACK_INDICATORS: { file: string; language: string }[] = [
   { file: 'build.gradle', language: 'java' },
   { file: 'mix.exs', language: 'elixir' },
 ];
+
+// Languages that are rarely a project's "primary" language on their own —
+// markup, styling and data formats. Excluded when inferring primaryLanguage
+// from the file-count histogram so a CSS/HTML-heavy app isn't mislabelled.
+const NON_PRIMARY_LANGUAGES = new Set([
+  'CSS',
+  'SCSS',
+  'LESS',
+  'HTML',
+  'JSON',
+  'YAML',
+  'Markdown',
+  'SQL',
+  'Shell',
+  'XML',
+]);
+
+// Server-side languages preferred over JS/TS when both are present, so a PHP
+// backend with a vendored JavaScript frontend (whose file count can dominate)
+// is still reported as PHP.
+const SERVER_LANGUAGES = new Set([
+  'PHP',
+  'Python',
+  'Ruby',
+  'Go',
+  'Rust',
+  'Java',
+  'Kotlin',
+  'C#',
+  'Elixir',
+  'Scala',
+  'Swift',
+  'C',
+  'C++',
+]);
+
+/** Infer a lowercase primary language from a linguist-style
+ *  {languageName: fileCount} histogram (as produced at repo ingest). Returns
+ *  null when the histogram carries no usable signal. Used as a fallback when
+ *  no root manifest (composer.json, package.json, ...) reveals the language. */
+export function pickPrimaryLanguage(
+  histogram: Record<string, number> | null | undefined,
+): string | null {
+  if (!histogram) return null;
+  const entries = Object.entries(histogram).filter(
+    ([lang, count]) => count > 0 && !NON_PRIMARY_LANGUAGES.has(lang),
+  );
+  if (entries.length === 0) return null;
+  const servers = entries.filter(([lang]) => SERVER_LANGUAGES.has(lang));
+  const pool = servers.length > 0 ? servers : entries;
+  pool.sort((a, b) => b[1] - a[1]);
+  const winner = pool[0]?.[0];
+  return winner ? winner.toLowerCase() : null;
+}
+
+// Map the tech-inventory catalog db slug onto the vocabulary the container
+// detector and the confirmation form already use.
+const DB_NAME_TO_TYPE: Record<string, string> = {
+  postgresql: 'postgres',
+  mysql: 'mysql',
+  sqlite: 'sqlite',
+  mongodb: 'mongodb',
+  redis: 'redis',
+};
+
+/** Pick a database type from a tech inventory (source + manifest scan).
+ *  Prefers a real database over redis (a cache), ranked by file usage. Returns
+ *  null when no db tech was found. Used when container orchestration config
+ *  (docker-compose / ddev / lando) did not reveal a database. */
+export function pickDatabaseFromInventory(inventory: TechInventory | null): string | null {
+  if (!inventory) return null;
+  const dbItems = inventory.items.filter((it) => it.category === 'db');
+  if (dbItems.length === 0) return null;
+  const nonRedis = dbItems.filter((it) => it.name !== 'redis');
+  const pool = nonRedis.length > 0 ? nonRedis : dbItems;
+  pool.sort((a, b) => b.fileCount - a.fileCount);
+  const top = pool[0];
+  return top ? (DB_NAME_TO_TYPE[top.name] ?? top.name) : null;
+}
 
 const TEST_DIR_CANDIDATES = [
   'test',
@@ -485,6 +581,8 @@ function isValidEnrichment(v: Record<string, unknown>): boolean {
     v !== null &&
     (typeof v.projectName === 'string' ||
       typeof v.framework === 'string' ||
+      typeof v.primaryLanguage === 'string' ||
+      typeof v.databaseType === 'string' ||
       typeof v.localUrl === 'string' ||
       typeof v.projectDescription === 'string' ||
       typeof v.buildTool === 'string' ||
@@ -521,12 +619,17 @@ function mergeEnrichment(base: EnvDetectData, enrichment: LlmEnrichment): EnvDet
     merged.localUrl = enrichment.localUrl;
   }
   if (enrichment.databaseType) {
+    const dbVersion = enrichment.databaseVersion ?? merged.stack.database.version;
     merged.stack = {
       ...merged.stack,
-      database: {
-        type: enrichment.databaseType,
-        version: enrichment.databaseVersion ?? merged.stack.database.version,
-      },
+      database: { type: enrichment.databaseType, version: dbVersion },
+    };
+    // The confirmation form (02) and file generation (07) read the db from
+    // container.databaseType, so keep it in sync or the value never surfaces.
+    merged.container = {
+      ...merged.container,
+      databaseType: enrichment.databaseType,
+      databaseVersion: enrichment.databaseVersion ?? merged.container.databaseVersion,
     };
   }
   if (enrichment.webserver) {
@@ -559,6 +662,8 @@ async function collectConfigFileContents(repoPath: string): Promise<string> {
     'docker-compose.yaml',
     '.lando.yml',
     'README.md',
+    'README',
+    'README.txt',
     '.env.example',
     '.env.dist',
     'Makefile',
@@ -579,11 +684,73 @@ async function collectConfigFileContents(repoPath: string): Promise<string> {
   return parts.join('\n\n');
 }
 
+// Source files whose names suggest database wiring or schema — surfaced to the
+// LLM so it can pin down db type/version even when no manifest/container config
+// exists. Matches e.g. database.php, db.inc, wp-config.php, settings.py, *.sql.
+const DB_HINT_FILE_RE =
+  /(?:^|\/)(?:database|db|config|configuration|connect(?:ion)?|settings|wp-config)[^/]*\.(?:php|inc|module|install|py|rb|js|ts|env)$|\.sql$/i;
+
+async function collectSourceSamples(repoPath: string, fileTree: string[]): Promise<string> {
+  const hits = fileTree.filter((p) => DB_HINT_FILE_RE.test(p)).slice(0, 2);
+  const parts: string[] = [];
+  for (const rel of hits) {
+    const content = await readTextSafe(path.join(repoPath, rel));
+    if (content !== null) {
+      const truncated =
+        content.length > 2500 ? content.slice(0, 2500) + '\n[...truncated]' : content;
+      parts.push(`--- ${rel} ---\n${truncated}`);
+    }
+  }
+  return parts.join('\n\n');
+}
+
+function renderLanguageHistogram(histogram: Record<string, number> | null): string {
+  if (!histogram) return '(unknown)';
+  const entries = Object.entries(histogram)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return '(none)';
+  return entries.map(([lang, count]) => `${lang}: ${count}`).join(', ');
+}
+
+function renderFileTreeSummary(fileTree: string[], limit = 200): string {
+  if (fileTree.length === 0) return '(empty)';
+  const shown = fileTree.slice(0, limit);
+  const suffix = fileTree.length > limit ? `\n[...${fileTree.length - limit} more files]` : '';
+  return shown.join('\n') + suffix;
+}
+
+interface RepoIntel {
+  histogram: Record<string, number> | null;
+  fileTree: string[];
+  techInventory: TechInventory | null;
+  sourceSamples: string;
+}
+
+function buildRepoIntelSection(intel: RepoIntel): string {
+  return [
+    '## Repository intelligence',
+    '',
+    '### Detected languages (file counts)',
+    renderLanguageHistogram(intel.histogram),
+    '',
+    '### Secondary technologies (source + manifest scan)',
+    intel.techInventory ? renderTechInventoryTable(intel.techInventory) : '(none)',
+    '',
+    '### File tree (truncated)',
+    renderFileTreeSummary(intel.fileTree),
+    '',
+    '### Key source samples',
+    intel.sourceSamples || '(none)',
+  ].join('\n');
+}
+
 function buildEnvDetectPrompt(args: LlmBuildArgs): string {
   const detected = args.detected as DetectResult;
   const data = detected.data as unknown as EnvDetectData;
   const configContents =
     ((detected.data as Record<string, unknown>).__configContents as string) ?? '';
+  const repoIntel = ((detected.data as Record<string, unknown>).__repoIntel as string) ?? '';
 
   return [
     'You are analysing a software repository to detect its development environment.',
@@ -607,11 +774,13 @@ function buildEnvDetectPrompt(args: LlmBuildArgs): string {
     '## Config file contents',
     configContents || '(no config files found)',
     '',
+    repoIntel,
+    '',
     '## Instructions',
     `1. Project name: the deterministic guess is "${data.project.name}". If that looks like a UUID, random hex, or a generic placeholder (unnamed-repo, archive, repo, project, unknown), derive a better human-readable name from the README title, package.json "name", composer.json "name" (use the part after the slash), or similar metadata. Otherwise emit null to keep the deterministic name.`,
-    '2. Confirm or correct: framework, primaryLanguage',
+    '2. Confirm or correct: framework, primaryLanguage. Use the "Detected languages" file counts and the file tree above — the dominant server-side language is usually the primary language even when there is no manifest (e.g. a PHP app with no composer.json). Emit primaryLanguage as a lowercase token (php, javascript, python, ...).',
     '3. Detect the local development URL (from DDEV config, docker-compose port mappings, .env files, etc.)',
-    '4. Detect database type and version more precisely if possible',
+    '4. Detect database type and version. Infer from the secondary-technologies table and the key source samples (e.g. mysqli_*/mysql_* or PDO mysql -> mysql; pg_* -> postgres) even when no container config declares a database.',
     '5. Identify the webserver (nginx, apache, etc.) and document root',
     '6. Identify test frameworks (jest, vitest, phpunit, playwright, cypress, pytest, etc.) from config files or dependencies',
     '7. Identify build tooling (vite, webpack, esbuild, turbo, nx, etc.)',
@@ -678,9 +847,36 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
 
   async detect(ctx: StepContext): Promise<DetectResult> {
     const container = await detectContainer(ctx.repoPath);
+
+    // Shared repo intelligence: reuse the language histogram + file tree
+    // computed at ingest (fall back to scanning disk when absent), plus a
+    // source/manifest tech scan. Drives the deterministic fallbacks below and
+    // is embedded into the LLM prompt.
+    const meta = await loadRepoMetaForTask(ctx.db, ctx.taskId);
+    const fileTree = meta?.fileTree ?? (await buildFileTree(ctx.repoPath).catch(() => []));
+    const histogram =
+      meta?.detectedLanguages ?? (fileTree.length > 0 ? detectLanguages(fileTree) : null);
+    const techInventory = await buildTechInventory(ctx.repoPath).catch(() => null);
+
+    // DB fallback: when container orchestration config revealed no database,
+    // infer it from source/manifest usage. Setting it on container.databaseType
+    // lets detectStack derive stack.database and the confirmation form show it.
+    if (!container.databaseType) {
+      const dbFromSource = pickDatabaseFromInventory(techInventory);
+      if (dbFromSource) container.databaseType = dbFromSource;
+    }
+
     const stack = await detectStack(ctx.repoPath, container);
+
+    // Language fallback: when no root manifest revealed a language, infer the
+    // primary language from the file-count histogram.
+    if (!stack.language) {
+      const langFromHistogram = pickPrimaryLanguage(histogram);
+      if (langFromHistogram) stack.language = langFromHistogram;
+    }
+
     const gitRemoteName = await detectGitRemoteName(ctx.repoPath);
-    const dbRepoName = await loadRepoNameForTask(ctx.db, ctx.taskId);
+    const dbRepoName = meta?.name ?? null;
     const dirBasename = path.basename(path.resolve(ctx.repoPath));
     const projectName =
       container.projectName ??
@@ -703,16 +899,22 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
       source: 'deterministic',
     };
 
-    // Collect config file contents for the LLM prompt
+    // Collect config file contents + repo intelligence for the LLM prompt.
     const configContents = await collectConfigFileContents(ctx.repoPath);
+    const sourceSamples = await collectSourceSamples(ctx.repoPath, fileTree);
+    const repoIntel = buildRepoIntelSection({ histogram, fileTree, techInventory, sourceSamples });
 
     const warnings: string[] = [];
-    if (data.stack.indicators.length === 0) {
+    if (!stack.language) {
       warnings.push('no language indicators detected');
     }
     return {
       summary: buildSummary(data),
-      data: { ...(data as unknown as Record<string, unknown>), __configContents: configContents },
+      data: {
+        ...(data as unknown as Record<string, unknown>),
+        __configContents: configContents,
+        __repoIntel: repoIntel,
+      },
       warnings,
     };
   },
@@ -726,8 +928,9 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
   async apply(ctx, args): Promise<EnvDetectApply> {
     const detectResult = args.detected as DetectResult;
     const rawData = { ...detectResult.data } as Record<string, unknown>;
-    // Remove the transient config contents before persisting
+    // Remove the transient prompt-only fields before persisting
     delete rawData.__configContents;
+    delete rawData.__repoIntel;
     let data = rawData as unknown as EnvDetectData;
 
     // Merge LLM enrichment if available

@@ -4,7 +4,11 @@ import os from 'node:os';
 import { describe, expect, it, afterEach, beforeEach } from 'vitest';
 import type { DetectResult } from '@haive/shared';
 import { logger } from '@haive/shared';
-import { envDetectStep } from '../src/step-engine/steps/onboarding/01-env-detect.js';
+import {
+  envDetectStep,
+  pickPrimaryLanguage,
+  pickDatabaseFromInventory,
+} from '../src/step-engine/steps/onboarding/01-env-detect.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
 interface EnvDetectData {
@@ -190,5 +194,142 @@ describe('envDetectStep', () => {
     const { stat } = await import('node:fs/promises');
     const claudeStat = await stat(path.join(tmpRoot, '.claude', 'knowledge_base'));
     expect(claudeStat.isDirectory()).toBe(true);
+  });
+});
+
+describe('pickPrimaryLanguage', () => {
+  it('prefers a server language over higher-count vendored JavaScript', () => {
+    expect(pickPrimaryLanguage({ JavaScript: 218, PHP: 122, CSS: 80, HTML: 41 })).toBe('php');
+  });
+
+  it('lowercases the winning language name', () => {
+    expect(pickPrimaryLanguage({ TypeScript: 10, JSON: 3 })).toBe('typescript');
+  });
+
+  it('returns javascript for a pure frontend histogram', () => {
+    expect(pickPrimaryLanguage({ JavaScript: 50, CSS: 30, HTML: 20 })).toBe('javascript');
+  });
+
+  it('ignores markup/style/data-only histograms', () => {
+    expect(pickPrimaryLanguage({ CSS: 30, HTML: 20, JSON: 5 })).toBeNull();
+  });
+
+  it('returns null for empty or missing input', () => {
+    expect(pickPrimaryLanguage({})).toBeNull();
+    expect(pickPrimaryLanguage(null)).toBeNull();
+  });
+});
+
+describe('pickDatabaseFromInventory', () => {
+  function dbItem(name: string, fileCount: number) {
+    return {
+      name,
+      displayName: name,
+      category: 'db' as const,
+      manifests: [],
+      matchedKeys: [],
+      fileCount,
+    };
+  }
+
+  it('maps the catalog slug onto the container vocabulary', () => {
+    expect(
+      pickDatabaseFromInventory({ items: [dbItem('postgresql', 4)], scannedManifests: [] }),
+    ).toBe('postgres');
+  });
+
+  it('prefers a real database over redis even when redis has more usage', () => {
+    const inv = { items: [dbItem('redis', 9), dbItem('mysql', 3)], scannedManifests: [] };
+    expect(pickDatabaseFromInventory(inv)).toBe('mysql');
+  });
+
+  it('falls back to redis when it is the only db tech', () => {
+    expect(pickDatabaseFromInventory({ items: [dbItem('redis', 5)], scannedManifests: [] })).toBe(
+      'redis',
+    );
+  });
+
+  it('returns null when there are no db items', () => {
+    expect(pickDatabaseFromInventory({ items: [], scannedManifests: [] })).toBeNull();
+    expect(pickDatabaseFromInventory(null)).toBeNull();
+  });
+});
+
+describe('manifest-less detection (the rs_final case)', () => {
+  it('infers php + mysql from source when there is no composer.json or container config', async () => {
+    // A pre-Composer PHP app: no manifest, no docker-compose — only .php source
+    // that talks to MySQL via the legacy mysql_* API.
+    await writeFile(
+      path.join(tmpRoot, 'index.php'),
+      "<?php\n$link = mysql_connect('localhost', 'u', 'p');\n",
+    );
+    await writeFile(
+      path.join(tmpRoot, 'database.php'),
+      '<?php\nfunction q($sql) { return mysql_query($sql); }\n',
+    );
+    await writeFile(
+      path.join(tmpRoot, 'functions.php'),
+      "<?php\n$r = mysql_query('SELECT VERSION()');\n",
+    );
+
+    const data = await runDetect(tmpRoot);
+    expect(data.project.primaryLanguage).toBe('php');
+    expect(data.container.databaseType).toBe('mysql');
+  });
+});
+
+describe('apply LLM enrichment merge', () => {
+  interface ApplyResult {
+    source: string;
+    enrichedData: {
+      project: { primaryLanguage: string };
+      container: { databaseType: string | null };
+      stack: { database: { type: string | null } };
+    };
+  }
+
+  const baseData = {
+    project: {
+      name: 'rs_final',
+      framework: 'general',
+      primaryLanguage: 'unknown',
+      description: null,
+    },
+    container: {
+      type: 'none',
+      configFile: null,
+      projectName: null,
+      frameworkHint: null,
+      databaseType: null,
+      databaseVersion: null,
+      webserver: null,
+      docroot: null,
+      runtimeVersions: {},
+    },
+    stack: {
+      language: null,
+      framework: 'general',
+      database: { type: null, version: null },
+      runtimeVersions: {},
+      indicators: [],
+    },
+    paths: { testPaths: [], envFiles: [], customCodePaths: { include: [], exclude: [] } },
+    localUrl: null,
+    testFrameworks: [],
+    buildTool: null,
+    source: 'deterministic',
+  };
+
+  it('honours a language+db-only enrichment and writes db to container.databaseType', async () => {
+    const result = (await envDetectStep.apply(fakeCtx(tmpRoot), {
+      detected: { summary: '', data: { ...baseData }, warnings: [] } as unknown as DetectResult,
+      llmOutput: '```json\n{ "primaryLanguage": "php", "databaseType": "mysql" }\n```',
+      formValues: {},
+    })) as ApplyResult;
+
+    expect(result.source).toBe('llm');
+    expect(result.enrichedData.project.primaryLanguage).toBe('php');
+    expect(result.enrichedData.container.databaseType).toBe('mysql');
+    expect(result.enrichedData.stack.database.type).toBe('mysql');
   });
 });
