@@ -373,10 +373,10 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     if (!provider.enabled) throw new HttpError(409, 'CLI provider is disabled');
     await db
       .insert(schema.userStepCliPreferences)
-      .values({ userId, stepId, cliProviderId: body.cliProviderId })
+      .values({ userId, stepId, cliProviderId: body.cliProviderId, explicit: true })
       .onConflictDoUpdate({
         target: [schema.userStepCliPreferences.userId, schema.userStepCliPreferences.stepId],
-        set: { cliProviderId: body.cliProviderId, updatedAt: new Date() },
+        set: { cliProviderId: body.cliProviderId, explicit: true, updatedAt: new Date() },
       });
   } else {
     await db

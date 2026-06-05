@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, ne } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema, type StepIterationEntry } from '@haive/database';
 import { logger, validateFormValues } from '@haive/shared';
@@ -24,9 +24,10 @@ const log = logger.child({ module: 'step-runner' });
 
 export type TaskStepRow = typeof schema.taskSteps.$inferSelect;
 
-/** Returns the user's preferred CLI provider id for a step, validated as
- *  enabled. Falls back to the explicit task default when no preference
- *  exists, or when the preferred provider has been disabled/deleted. */
+/** Returns the user's explicit per-step CLI override (set via the task UI),
+ *  validated as enabled. Falls back to the task default when no explicit
+ *  override exists or the override's provider is disabled/deleted. Legacy
+ *  auto-recorded rows (explicit=false) are ignored so the task provider wins. */
 async function resolvePreferredCli(
   db: Database,
   userId: string,
@@ -38,30 +39,13 @@ async function resolvePreferredCli(
     where: and(
       eq(schema.userStepCliPreferences.userId, userId),
       eq(schema.userStepCliPreferences.stepId, stepId),
+      eq(schema.userStepCliPreferences.explicit, true),
     ),
   });
   if (!row) return fallback;
   const provider = providers.find((p) => p.id === row.cliProviderId);
   if (!provider || !provider.enabled) return fallback;
   return row.cliProviderId;
-}
-
-/** Records the CLI provider that was actually dispatched for a (user, step)
- *  pair. The next time this user reaches this step in any task, the runner
- *  and UI will prefer the same provider. */
-async function recordStepCliPreference(
-  db: Database,
-  userId: string,
-  stepId: string,
-  cliProviderId: string,
-): Promise<void> {
-  await db
-    .insert(schema.userStepCliPreferences)
-    .values({ userId, stepId, cliProviderId })
-    .onConflictDoUpdate({
-      target: [schema.userStepCliPreferences.userId, schema.userStepCliPreferences.stepId],
-      set: { cliProviderId, updatedAt: sql`now()` },
-    });
 }
 
 export interface WorkerDeps {
@@ -267,9 +251,6 @@ async function resolveLlmPhase(
     spec: plan.invocation.spec,
     timeoutMs: llmSpec.timeoutMs,
   });
-  if (plan.providerId) {
-    await recordStepCliPreference(db, params.userId, stepDef.metadata.id, plan.providerId);
-  }
   const updated = await updateRow(db, current.id, {
     status: 'waiting_cli',
     statusMessage: 'Waiting for AI analysis...',
@@ -349,8 +330,6 @@ async function resolveAgentMiningPhase(
     params.cliProviderId ?? null,
     params.providers,
   );
-  let recordedProviderId: string | null = null;
-
   for (const dispatch of dispatches) {
     const plan = resolveDispatch({
       providers: params.providers,
@@ -413,13 +392,6 @@ async function resolveAgentMiningPhase(
       timeoutMs: spec.timeoutMs,
       agentMiningId: miningRow.id,
     });
-    if (plan.providerId && !recordedProviderId) {
-      recordedProviderId = plan.providerId;
-    }
-  }
-
-  if (recordedProviderId) {
-    await recordStepCliPreference(db, params.userId, stepDef.metadata.id, recordedProviderId);
   }
 
   const updated = await updateRow(db, current.id, {

@@ -132,6 +132,10 @@ export const userStepCliPreferences = pgTable(
     cliProviderId: uuid('cli_provider_id')
       .notNull()
       .references(() => cliProviders.id, { onDelete: 'cascade' }),
+    /** True only for overrides the user set explicitly via the task UI.
+     *  Legacy auto-recorded rows default to false and are ignored by the
+     *  runner and UI so the task-level provider choice is honored. */
+    explicit: boolean('explicit').notNull().default(false),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
   (table) => [uniqueIndex('user_step_cli_pref_pk').on(table.userId, table.stepId)],

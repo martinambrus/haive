@@ -53,6 +53,9 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
       and(
         eq(schema.userStepCliPreferences.userId, userId),
         inArray(schema.userStepCliPreferences.stepId, stepIds),
+        // Only explicit per-step overrides surface in the UI; legacy
+        // auto-recorded rows (explicit=false) fall back to the task default.
+        eq(schema.userStepCliPreferences.explicit, true),
       ),
     );
   const byStep = new Map(prefs.map((p) => [p.stepId, p.cliProviderId]));
