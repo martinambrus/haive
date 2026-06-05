@@ -52,7 +52,7 @@ const THRESHOLD = 5;
 /* Baseline agents (always offered, recommended by default)            */
 /* ------------------------------------------------------------------ */
 
-const BASELINE_AGENT_DEFS: { id: string; label: string; hint: string }[] = [
+export const BASELINE_AGENT_DEFS: { id: string; label: string; hint: string }[] = [
   {
     id: 'code-reviewer',
     label: 'Code reviewer',
@@ -91,6 +91,31 @@ const BASELINE_AGENT_DEFS: { id: string; label: string; hint: string }[] = [
     id: 'integration-tester',
     label: 'Integration tester',
     hint: 'browser-tests UI flows + visual theme fit via Chrome DevTools MCP',
+  },
+  {
+    id: 'code-tracer',
+    label: 'Code tracer',
+    hint: 'maps callers, callees, and the blast radius of a change',
+  },
+  {
+    id: 'peer-reviewer',
+    label: 'Peer reviewer',
+    hint: 'constructive code-quality review with severities and positives',
+  },
+  {
+    id: 'security-code-reviewer',
+    label: 'Security code reviewer',
+    hint: 'diff-focused security review: injection, access control, data exposure',
+  },
+  {
+    id: 'pattern-replicator',
+    label: 'Pattern replicator',
+    hint: 'extracts an existing pattern so new code matches it ("implement X like Y")',
+  },
+  {
+    id: 'markdown-humanizer',
+    label: 'Markdown humanizer',
+    hint: 'rewrites dense docs into clear prose, preserving language and grammar',
   },
 ];
 
