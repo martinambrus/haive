@@ -116,6 +116,8 @@ export interface Repository {
   excludedPaths: string[] | null;
   selectedPaths: string[] | null;
   sizeBytes: number | null;
+  openTaskCount: number;
+  activeTaskCount: number;
   createdAt: string;
 }
 

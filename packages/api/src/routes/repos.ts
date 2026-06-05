@@ -4,7 +4,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
-import { eq, and, desc } from 'drizzle-orm';
+import { eq, and, desc, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   createRepoRequestSchema,
@@ -81,7 +81,41 @@ repoRoutes.get('/', async (c) => {
     where: eq(schema.repositories.userId, userId),
     orderBy: [desc(schema.repositories.createdAt)],
   });
-  return c.json({ repositories: rows });
+
+  // Per-repo task counts for the list badges. "Open" = non-terminal, matching
+  // cancelOpenTasksForRepo. "Active" = open tasks not blocked on the user
+  // (everything except waiting_user). Grouped once by (repo, status) and
+  // folded in JS so the list stays a single round-trip plus this aggregate.
+  const taskCounts = await db
+    .select({
+      repositoryId: schema.tasks.repositoryId,
+      status: schema.tasks.status,
+      n: sql<number>`count(*)::int`,
+    })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.userId, userId),
+        notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
+      ),
+    )
+    .groupBy(schema.tasks.repositoryId, schema.tasks.status);
+
+  const countsByRepo = new Map<string, { open: number; active: number }>();
+  for (const row of taskCounts) {
+    if (!row.repositoryId) continue;
+    const entry = countsByRepo.get(row.repositoryId) ?? { open: 0, active: 0 };
+    entry.open += row.n;
+    if (row.status !== 'waiting_user') entry.active += row.n;
+    countsByRepo.set(row.repositoryId, entry);
+  }
+
+  const repositories = rows.map((repo) => {
+    const counts = countsByRepo.get(repo.id) ?? { open: 0, active: 0 };
+    return { ...repo, openTaskCount: counts.open, activeTaskCount: counts.active };
+  });
+
+  return c.json({ repositories });
 });
 
 repoRoutes.post('/', async (c) => {

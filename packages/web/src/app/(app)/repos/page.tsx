@@ -172,6 +172,12 @@ function RepoCard(props: RepoCardProps) {
                 {excludedCount} excluded path{excludedCount === 1 ? '' : 's'}
               </Badge>
             )}
+            {repo.openTaskCount > 0 && (
+              <Badge>
+                {repo.openTaskCount} open task{repo.openTaskCount === 1 ? '' : 's'}
+                {repo.activeTaskCount > 0 && ` (${repo.activeTaskCount} active)`}
+              </Badge>
+            )}
           </div>
           <p className="mt-1 text-xs text-neutral-500">
             {repo.localPath ?? repo.remoteUrl ?? '(no path)'}
