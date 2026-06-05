@@ -58,6 +58,14 @@ export interface RagPopulateApply {
   usedPgvector: boolean;
   ragMode: RagMode;
   usedOllama: boolean;
+  /** How the index was populated this run. */
+  mode: 'incremental' | 'full';
+  /** Chunks actually embedded + (up)serted this run. */
+  chunksEmbedded: number;
+  /** Chunks skipped because their content hash was unchanged (incremental). */
+  chunksSkipped: number;
+  /** Stale chunks deleted because their source disappeared (incremental). */
+  chunksDeleted: number;
 }
 
 /* ------------------------------------------------------------------ */
@@ -194,7 +202,19 @@ function loadToolingPrefs(output: unknown): RagToolingPrefs {
 /* INSERT helper                                                       */
 /* ------------------------------------------------------------------ */
 
-async function insertChunk(
+// ON CONFLICT suffix for upsert (incremental mode). Targets the partial unique
+// index uq_rag_repo_source_section_chunk; the content_tsv trigger fires on
+// UPDATE too, so BM25 stays correct.
+const UPSERT_VECTOR =
+  ' ON CONFLICT (repository_id, source_path, section_id, chunk_index) WHERE repository_id IS NOT NULL' +
+  ' DO UPDATE SET task_id = EXCLUDED.task_id, source_type = EXCLUDED.source_type,' +
+  ' chunk_hash = EXCLUDED.chunk_hash, content = EXCLUDED.content, vector = EXCLUDED.vector';
+const UPSERT_JSON =
+  ' ON CONFLICT (repository_id, source_path, section_id, chunk_index) WHERE repository_id IS NOT NULL' +
+  ' DO UPDATE SET task_id = EXCLUDED.task_id, source_type = EXCLUDED.source_type,' +
+  ' chunk_hash = EXCLUDED.chunk_hash, content = EXCLUDED.content, embedding_json = EXCLUDED.embedding_json';
+
+export async function insertChunk(
   conn: RagConnection,
   usedPgvector: boolean,
   taskId: string,
@@ -206,12 +226,13 @@ async function insertChunk(
   chunkHash: string,
   content: string,
   embedding: number[],
+  upsert: boolean,
 ): Promise<void> {
   if (usedPgvector) {
     const literal = vectorLiteral(embedding);
     await conn.pg.unsafe(
       `INSERT INTO ${RAG_TABLE} (task_id, repository_id, source_type, source_path, section_id, chunk_index, chunk_hash, content, vector)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector)${upsert ? UPSERT_VECTOR : ''}`,
       [
         taskId,
         repositoryId,
@@ -228,7 +249,7 @@ async function insertChunk(
     const json = JSON.stringify(embedding);
     await conn.pg.unsafe(
       `INSERT INTO ${RAG_TABLE} (task_id, repository_id, source_type, source_path, section_id, chunk_index, chunk_hash, content, embedding_json)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)${upsert ? UPSERT_JSON : ''}`,
       [
         taskId,
         repositoryId,
@@ -242,6 +263,202 @@ async function insertChunk(
       ],
     );
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Incremental population helpers                                      */
+/* ------------------------------------------------------------------ */
+
+interface ExistingChunk {
+  sourcePath: string;
+  sectionId: string;
+  chunkIndex: number;
+  hash: string;
+}
+
+interface IncrementalSync {
+  /** key -> existing chunk record, for this repo. */
+  existing: Map<string, ExistingChunk>;
+  /** keys seen this run, accumulated across KB + code so stale rows can be
+   *  deleted afterward. */
+  seen: Set<string>;
+}
+
+/** Stable composite key for a chunk row. Paths and section ids never contain
+ *  NUL, so it round-trips unambiguously. */
+export function chunkKey(sourcePath: string, sectionId: string, chunkIndex: number): string {
+  return `${sourcePath} ${sectionId} ${chunkIndex}`;
+}
+
+/** Keys present in the existing index but not re-seen this run — their source
+ *  chunk disappeared (file/section removed or shrank) and must be deleted. */
+export function computeStaleKeys(
+  existingKeys: Iterable<string>,
+  seen: ReadonlySet<string>,
+): string[] {
+  const stale: string[] = [];
+  for (const k of existingKeys) if (!seen.has(k)) stale.push(k);
+  return stale;
+}
+
+/** Resolve the populate mode. Incremental is the default; legacy callers that
+ *  pass `truncateExisting: true` (smoke tests) map to full. Incremental needs
+ *  repo scope (the partial unique index only covers non-null repository_id), so
+ *  a repo-less task always uses full. */
+export function resolvePopulateMode(
+  formValues: unknown,
+  repositoryId: string | null,
+): 'incremental' | 'full' {
+  if (!repositoryId) return 'full';
+  const v = (formValues ?? {}) as { populateMode?: string; truncateExisting?: boolean };
+  if (v.populateMode === 'full' || v.populateMode === 'incremental') return v.populateMode;
+  if (v.truncateExisting === true) return 'full';
+  return 'incremental';
+}
+
+async function loadExistingChunkHashes(
+  conn: RagConnection,
+  repositoryId: string,
+): Promise<Map<string, ExistingChunk>> {
+  const rows = (await conn.pg.unsafe(
+    `SELECT source_path, section_id, chunk_index, chunk_hash FROM ${RAG_TABLE} WHERE repository_id = $1`,
+    [repositoryId],
+  )) as unknown as Array<{
+    source_path: string;
+    section_id: string;
+    chunk_index: number;
+    chunk_hash: string;
+  }>;
+  const map = new Map<string, ExistingChunk>();
+  for (const r of rows) {
+    map.set(chunkKey(r.source_path, r.section_id, r.chunk_index), {
+      sourcePath: r.source_path,
+      sectionId: r.section_id,
+      chunkIndex: r.chunk_index,
+      hash: r.chunk_hash,
+    });
+  }
+  return map;
+}
+
+/** Dimension of the existing embeddings for a repo, or null when none/unknown.
+ *  Used to force a full rebuild if the embedding model's dimension changed. */
+async function existingVectorDims(
+  conn: RagConnection,
+  usedPgvector: boolean,
+  repositoryId: string,
+): Promise<number | null> {
+  try {
+    const col = usedPgvector ? 'vector_dims(vector)' : 'jsonb_array_length(embedding_json)';
+    const guard = usedPgvector ? 'vector IS NOT NULL' : 'embedding_json IS NOT NULL';
+    const rows = (await conn.pg.unsafe(
+      `SELECT ${col} AS dims FROM ${RAG_TABLE} WHERE repository_id = $1 AND ${guard} LIMIT 1`,
+      [repositoryId],
+    )) as unknown as Array<{ dims: number | null }>;
+    const d = rows[0]?.dims;
+    return typeof d === 'number' ? d : null;
+  } catch {
+    return null;
+  }
+}
+
+async function deleteStaleChunks(
+  conn: RagConnection,
+  repositoryId: string,
+  stale: ExistingChunk[],
+): Promise<number> {
+  let deleted = 0;
+  const BATCH = 200;
+  for (let i = 0; i < stale.length; i += BATCH) {
+    const batch = stale.slice(i, i + BATCH);
+    const params: (string | number)[] = [repositoryId];
+    const tuples = batch.map((c, j) => {
+      const base = 2 + j * 3;
+      params.push(c.sourcePath, c.sectionId, c.chunkIndex);
+      return `($${base}, $${base + 1}, $${base + 2})`;
+    });
+    const res = (await conn.pg.unsafe(
+      `DELETE FROM ${RAG_TABLE} WHERE repository_id = $1 AND (source_path, section_id, chunk_index) IN (${tuples.join(', ')})`,
+      params,
+    )) as unknown as { count?: number };
+    deleted += typeof res?.count === 'number' ? res.count : batch.length;
+  }
+  return deleted;
+}
+
+/** Embed + store one file's chunks. In incremental mode (sync != null) chunks
+ *  whose content hash already matches the index are skipped (no re-embed) and
+ *  the rest are upserted; in full mode every chunk is inserted. Returns how many
+ *  were embedded vs skipped. */
+async function embedAndStore(opts: {
+  ctx: StepContext;
+  conn: RagConnection;
+  usedPgvector: boolean;
+  taskId: string;
+  repositoryId: string | null;
+  sourceType: 'kb' | 'code';
+  filePath: string;
+  chunks: RagChunk[];
+  useOllama: boolean;
+  ollamaUrl: string | null;
+  embeddingModel: string | null;
+  embeddingDimensions: number;
+  sync: IncrementalSync | null;
+}): Promise<{ embedded: number; skipped: number }> {
+  const { sync } = opts;
+  const toEmbed: RagChunk[] = [];
+  let skipped = 0;
+  for (const chunk of opts.chunks) {
+    if (sync) {
+      const key = chunkKey(opts.filePath, chunk.sectionId, chunk.chunkIndex);
+      sync.seen.add(key);
+      if (sync.existing.get(key)?.hash === chunk.chunkHash) {
+        skipped += 1;
+        continue;
+      }
+    }
+    toEmbed.push(chunk);
+  }
+
+  let embedded = 0;
+  for (let batchStart = 0; batchStart < toEmbed.length; batchStart += EMBED_BATCH_SIZE) {
+    opts.ctx.throwIfCancelled();
+    const batch = toEmbed.slice(batchStart, batchStart + EMBED_BATCH_SIZE);
+    const texts = batch.map((c) => c.content);
+    let embeddings: number[][];
+    if (opts.useOllama) {
+      try {
+        embeddings = await ollamaEmbed(opts.ollamaUrl!, opts.embeddingModel!, texts);
+      } catch (err) {
+        opts.ctx.logger.warn(
+          { err, file: opts.filePath, batchStart },
+          'Ollama failed; hash fallback',
+        );
+        embeddings = texts.map((t) => hashEmbed(t, opts.embeddingDimensions));
+      }
+    } else {
+      embeddings = texts.map((t) => hashEmbed(t, opts.embeddingDimensions));
+    }
+    for (let i = 0; i < batch.length; i += 1) {
+      const chunk = batch[i]!;
+      await insertChunk(
+        opts.conn,
+        opts.usedPgvector,
+        opts.taskId,
+        opts.repositoryId,
+        opts.sourceType,
+        opts.filePath,
+        chunk.sectionId,
+        chunk.chunkIndex,
+        chunk.chunkHash,
+        chunk.content,
+        embeddings[i]!,
+        sync !== null,
+      );
+      embedded += 1;
+    }
+  }
+  return { embedded, skipped };
 }
 
 /* ------------------------------------------------------------------ */
@@ -377,10 +594,21 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       description: statusParts.join('\n'),
       fields: [
         {
-          type: 'checkbox',
-          id: 'truncateExisting',
-          label: 'Delete existing RAG rows for this task before inserting new ones',
-          default: true,
+          type: 'radio',
+          id: 'populateMode',
+          label: 'Population mode',
+          options: [
+            {
+              value: 'incremental',
+              label: 'Incremental — only re-embed new/changed chunks, drop removed ones (fast)',
+            },
+            {
+              value: 'full',
+              label: 'Full rebuild — re-embed everything (use after changing the embedding model)',
+            },
+          ],
+          default: 'incremental',
+          required: true,
         },
       ],
       submitLabel: 'Populate index',
@@ -402,6 +630,10 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         usedPgvector: false,
         ragMode: 'none',
         usedOllama: false,
+        mode: 'full',
+        chunksEmbedded: 0,
+        chunksSkipped: 0,
+        chunksDeleted: 0,
       };
     }
 
@@ -427,6 +659,10 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         usedPgvector: false,
         ragMode: detected.ragMode,
         usedOllama: false,
+        mode: 'full',
+        chunksEmbedded: 0,
+        chunksSkipped: 0,
+        chunksDeleted: 0,
       };
     }
 
@@ -451,16 +687,34 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         /* non-critical */
       }
 
-      const values = args.formValues as { truncateExisting?: boolean };
-      if (values.truncateExisting !== false) {
+      // Resolve populate mode. Incremental (default) skips re-embedding chunks
+      // whose content is unchanged; full rebuilds from scratch. Legacy
+      // truncateExisting:true maps to full; a changed embedding dimension also
+      // forces full (mixing dims would corrupt search).
+      let mode = resolvePopulateMode(args.formValues, repositoryId);
+      if (mode === 'incremental' && repositoryId) {
+        const existingDims = await existingVectorDims(conn, usedPgvector, repositoryId);
+        if (existingDims !== null && existingDims !== detected.embeddingDimensions) {
+          ctx.logger.warn(
+            { existingDims, requested: detected.embeddingDimensions },
+            'rag embedding dimensions changed — forcing full rebuild',
+          );
+          mode = 'full';
+        }
+      }
+
+      let sync: IncrementalSync | null = null;
+      if (mode === 'full') {
         await ctx.emitProgress('Clearing existing RAG data...');
         if (repositoryId) {
           await conn.pg.unsafe(`DELETE FROM ${RAG_TABLE} WHERE repository_id = $1`, [repositoryId]);
         } else {
-          // Fallback for repo-less tasks: legacy task_id scope. Rare; happens
-          // only for onboarding tasks whose tasks.repository_id is null.
+          // Fallback for repo-less tasks: legacy task_id scope.
           await conn.pg.unsafe(`DELETE FROM ${RAG_TABLE} WHERE task_id = $1`, [ctx.taskId]);
         }
+      } else {
+        await ctx.emitProgress('Loading existing RAG index for incremental update...');
+        sync = { existing: await loadExistingChunkHashes(conn, repositoryId!), seen: new Set() };
       }
 
       const useOllama =
@@ -470,6 +724,8 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       let codeChunkCount = 0;
       let kbFileCount = 0;
       let codeFileCount = 0;
+      let chunksEmbedded = 0;
+      let chunksSkipped = 0;
 
       // --- KB files ---
       const totalKb = detected.kbFiles.length;
@@ -493,46 +749,24 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         }
         if (chunks.length === 0) continue;
         kbFileCount += 1;
-
-        // Embed and insert in batches
-        for (let batchStart = 0; batchStart < chunks.length; batchStart += EMBED_BATCH_SIZE) {
-          ctx.throwIfCancelled();
-          const batch = chunks.slice(batchStart, batchStart + EMBED_BATCH_SIZE);
-          const texts = batch.map((c) => c.content);
-          let embeddings: number[][];
-
-          if (useOllama) {
-            try {
-              embeddings = await ollamaEmbed(detected.ollamaUrl!, detected.embeddingModel!, texts);
-            } catch (err) {
-              ctx.logger.warn(
-                { err, file: file.relPath, batchStart },
-                'Ollama failed; hash fallback',
-              );
-              embeddings = texts.map((t) => hashEmbed(t, detected.embeddingDimensions));
-            }
-          } else {
-            embeddings = texts.map((t) => hashEmbed(t, detected.embeddingDimensions));
-          }
-
-          for (let i = 0; i < batch.length; i += 1) {
-            const chunk = batch[i]!;
-            await insertChunk(
-              conn,
-              usedPgvector,
-              ctx.taskId,
-              repositoryId,
-              'kb',
-              file.relPath,
-              chunk.sectionId,
-              chunk.chunkIndex,
-              chunk.chunkHash,
-              chunk.content,
-              embeddings[i]!,
-            );
-            kbChunkCount += 1;
-          }
-        }
+        kbChunkCount += chunks.length;
+        const kbRes = await embedAndStore({
+          ctx,
+          conn,
+          usedPgvector,
+          taskId: ctx.taskId,
+          repositoryId,
+          sourceType: 'kb',
+          filePath: file.relPath,
+          chunks,
+          useOllama,
+          ollamaUrl: detected.ollamaUrl,
+          embeddingModel: detected.embeddingModel,
+          embeddingDimensions: detected.embeddingDimensions,
+          sync,
+        });
+        chunksEmbedded += kbRes.embedded;
+        chunksSkipped += kbRes.skipped;
       }
 
       // --- Code files ---
@@ -557,57 +791,54 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         }
         if (chunks.length === 0) continue;
         codeFileCount += 1;
+        codeChunkCount += chunks.length;
+        const codeRes = await embedAndStore({
+          ctx,
+          conn,
+          usedPgvector,
+          taskId: ctx.taskId,
+          repositoryId,
+          sourceType: 'code',
+          filePath: file.relPath,
+          chunks,
+          useOllama,
+          ollamaUrl: detected.ollamaUrl,
+          embeddingModel: detected.embeddingModel,
+          embeddingDimensions: detected.embeddingDimensions,
+          sync,
+        });
+        chunksEmbedded += codeRes.embedded;
+        chunksSkipped += codeRes.skipped;
+      }
 
-        for (let batchStart = 0; batchStart < chunks.length; batchStart += EMBED_BATCH_SIZE) {
-          ctx.throwIfCancelled();
-          const batch = chunks.slice(batchStart, batchStart + EMBED_BATCH_SIZE);
-          const texts = batch.map((c) => c.content);
-          let embeddings: number[][];
-
-          if (useOllama) {
-            try {
-              embeddings = await ollamaEmbed(detected.ollamaUrl!, detected.embeddingModel!, texts);
-            } catch (err) {
-              ctx.logger.warn(
-                { err, file: file.relPath, batchStart },
-                'Ollama failed; hash fallback',
-              );
-              embeddings = texts.map((t) => hashEmbed(t, detected.embeddingDimensions));
-            }
-          } else {
-            embeddings = texts.map((t) => hashEmbed(t, detected.embeddingDimensions));
-          }
-
-          for (let i = 0; i < batch.length; i += 1) {
-            const chunk = batch[i]!;
-            await insertChunk(
-              conn,
-              usedPgvector,
-              ctx.taskId,
-              repositoryId,
-              'code',
-              file.relPath,
-              chunk.sectionId,
-              chunk.chunkIndex,
-              chunk.chunkHash,
-              chunk.content,
-              embeddings[i]!,
-            );
-            codeChunkCount += 1;
-          }
+      let chunksDeleted = 0;
+      if (sync) {
+        const staleKeys = computeStaleKeys(sync.existing.keys(), sync.seen);
+        if (staleKeys.length > 0) {
+          await ctx.emitProgress(`Removing ${staleKeys.length} stale chunk(s)...`);
+          chunksDeleted = await deleteStaleChunks(
+            conn,
+            repositoryId!,
+            staleKeys.map((k) => sync!.existing.get(k)!),
+          );
         }
       }
 
       await ctx.emitProgress(
-        `RAG populate complete: ${kbChunkCount} KB chunks from ${kbFileCount} files, ${codeChunkCount} code chunks from ${codeFileCount} files.`,
+        `RAG ${mode} complete: embedded ${chunksEmbedded}, skipped ${chunksSkipped}, deleted ${chunksDeleted} ` +
+          `(${kbChunkCount} KB chunks from ${kbFileCount} files, ${codeChunkCount} code chunks from ${codeFileCount} files).`,
       );
 
       ctx.logger.info(
         {
+          mode,
           kbChunkCount,
           codeChunkCount,
           kbFileCount,
           codeFileCount,
+          chunksEmbedded,
+          chunksSkipped,
+          chunksDeleted,
           usedPgvector,
           usedOllama: useOllama,
           ragMode: detected.ragMode,
@@ -624,6 +855,10 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         usedPgvector,
         ragMode: detected.ragMode,
         usedOllama: useOllama,
+        mode,
+        chunksEmbedded,
+        chunksSkipped,
+        chunksDeleted,
       };
     } finally {
       await conn.close();
