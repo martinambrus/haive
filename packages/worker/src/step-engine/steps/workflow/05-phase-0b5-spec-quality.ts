@@ -23,7 +23,13 @@ interface QualityFinding {
   comment: string;
 }
 
+type SpecVerdict = 'APPROVED' | 'NEEDS_REVISION' | 'BLOCKING_AMBIGUITY';
+
 interface SpecQualityApply {
+  /** Reviewer verdict driving the loop + gate 1: APPROVED stops as done,
+   *  NEEDS_REVISION continues the amend loop, BLOCKING_AMBIGUITY stops and
+   *  surfaces to the user (intent must be clarified; the writer cannot fix it). */
+  verdict: SpecVerdict;
   score: number;
   findings: QualityFinding[];
   source: 'llm' | 'stub';
@@ -62,6 +68,7 @@ function coerceSeverity(value: unknown): QualityFinding['severity'] {
 }
 
 export interface SpecQualityParseResult {
+  verdict: SpecVerdict;
   score: number;
   findings: QualityFinding[];
   amendedSpec: string | null;
@@ -79,6 +86,7 @@ export function parseSpecQualityOutput(raw: unknown): SpecQualityParseResult | n
         asObj.score,
         asObj.findings,
         typeof asObj.amendedSpec === 'string' ? asObj.amendedSpec : null,
+        asObj.verdict,
       );
     }
     return null;
@@ -101,6 +109,7 @@ export function parseSpecQualityOutput(raw: unknown): SpecQualityParseResult | n
         obj.score as number,
         obj.findings as unknown[],
         typeof obj.amendedSpec === 'string' ? (obj.amendedSpec as string) : null,
+        obj.verdict,
       );
     }
   } catch {
@@ -109,10 +118,20 @@ export function parseSpecQualityOutput(raw: unknown): SpecQualityParseResult | n
   return null;
 }
 
+function coerceVerdict(value: unknown, hasFixable: boolean): SpecVerdict {
+  if (value === 'APPROVED' || value === 'NEEDS_REVISION' || value === 'BLOCKING_AMBIGUITY') {
+    return value;
+  }
+  // Derive when the model omitted an explicit verdict: warn/error findings mean
+  // there is something to revise, otherwise the spec is clean enough to approve.
+  return hasFixable ? 'NEEDS_REVISION' : 'APPROVED';
+}
+
 function normaliseResult(
   score: number,
   findings: unknown[],
   amendedSpec: string | null,
+  rawVerdict: unknown,
 ): SpecQualityParseResult {
   const clamped = Math.max(0, Math.min(10, Math.round(score)));
   const items: QualityFinding[] = [];
@@ -127,7 +146,13 @@ function normaliseResult(
       comment,
     });
   }
-  return { score: clamped, findings: items, amendedSpec };
+  const hasFixable = items.some((f) => f.severity === 'warn' || f.severity === 'error');
+  return {
+    verdict: coerceVerdict(rawVerdict, hasFixable),
+    score: clamped,
+    findings: items,
+    amendedSpec,
+  };
 }
 
 function stubSpecQuality(): { score: number; findings: QualityFinding[] } {
@@ -155,6 +180,31 @@ function latestSpec(originalSpec: string, previous: StepLoopPassRecord[]): strin
   return originalSpec;
 }
 
+const VERDICT_RANK: Record<SpecVerdict, number> = {
+  APPROVED: 2,
+  NEEDS_REVISION: 1,
+  BLOCKING_AMBIGUITY: 0,
+};
+
+/** Rank an apply result so the regression guard can keep the better of two
+ *  passes: verdict dominates (APPROVED beats NEEDS_REVISION beats
+ *  BLOCKING_AMBIGUITY), score (0-10) breaks ties. */
+function iterationRank(out: SpecQualityApply): number {
+  const score = Math.max(0, Math.min(10, out.score));
+  return VERDICT_RANK[out.verdict] * 100 + score;
+}
+
+/** Highest-ranked prior loop pass, or null on the first pass. */
+function bestPriorIteration(previous: StepLoopPassRecord[]): SpecQualityApply | null {
+  let best: SpecQualityApply | null = null;
+  for (const p of previous) {
+    const out = p.applyOutput as SpecQualityApply | undefined;
+    if (!out || typeof out.score !== 'number' || typeof out.verdict !== 'string') continue;
+    if (!best || iterationRank(out) > iterationRank(best)) best = out;
+  }
+  return best;
+}
+
 /** Renders prior findings as a markdown bullet list to feed the next
  *  iteration's prompt. Helps the LLM target the same issues for amendment
  *  rather than drift onto unrelated dimensions each pass. */
@@ -167,18 +217,37 @@ function formatPriorFindings(previous: StepLoopPassRecord[]): string {
 }
 
 const SPEC_QUALITY_PROMPT_RULES = [
-  'You are the spec quality review phase of an engineering workflow.',
-  `Evaluate the draft specification against these dimensions: ${QUALITY_DIMENSIONS.join(', ')}.`,
+  'You are the spec quality review phase of an engineering workflow. Review the draft',
+  'specification as a senior engineer would before a human approves it.',
+  `Score the spec against these dimensions: ${QUALITY_DIMENSIONS.join(', ')}.`,
+  '',
+  'Ambiguity hunt — scan the whole spec and raise a finding for each instance of: vague',
+  'verbs ("improve", "optimize", "handle properly"); actorless passive voice; unconditioned',
+  'conditionals ("if needed", "as appropriate"); unnamed references ("the form", "the table"',
+  'without naming which); untestable acceptance criteria; implicit assumptions of an unstated',
+  'rule; and internal contradictions.',
+  '',
+  'Codebase cross-check — for every file, function, or "follow the pattern from X" claim in',
+  'the spec, use your read tools (Read, Grep, Glob) to confirm it actually exists and does',
+  'what the spec says. A reference to code that does not exist is a BLOCKING_AMBIGUITY.',
+  '',
   'Emit ONE JSON object inside a ```json fenced code block with the shape:',
   '{',
+  '  "verdict": "APPROVED" | "NEEDS_REVISION" | "BLOCKING_AMBIGUITY",',
   '  "score": <integer 0-10>,',
-  '  "findings": [ { "dimension": "<name>", "severity": "info|warn|error", "comment": "<text>" } ],',
+  '  "findings": [ { "dimension": "<dimension or \\"ambiguity\\">", "severity": "info|warn|error", "comment": "<text; cite the spec section or file:line>" } ],',
   '  "amendedSpec": "<full revised spec body, or omit when no fixable issues remain>"',
   '}',
-  'Score reflects overall readiness for gate 1 approval. Cite concrete gaps in findings.',
-  'When any finding has severity "warn" or "error", you MUST also emit `amendedSpec`',
-  'with the full corrected spec body that addresses those findings — do not return',
-  'a diff or partial snippet. Omit `amendedSpec` only when no warn/error findings remain.',
+  '',
+  'Verdict rules:',
+  '- APPROVED: no warn/error findings and no relevant dimension left unaddressed.',
+  '- NEEDS_REVISION: fixable gaps exist and you CAN correct them now — you MUST emit',
+  '  `amendedSpec` with the FULL corrected spec body (never a diff or partial snippet).',
+  "- BLOCKING_AMBIGUITY: the spec's intent itself is unclear (references missing code, or",
+  '  "which X?" with several candidates) so a human must clarify — do NOT amend; put the',
+  '  blocking questions in findings.',
+  'Score reflects overall readiness for gate 1. Cite a concrete spec section or file:line in',
+  'every finding.',
 ] as const;
 
 export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQualityApply> = {
@@ -271,8 +340,11 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
   loop: {
     maxIterations: SPEC_QUALITY_DEFAULT_BUDGET,
     shouldContinue: ({ applyOutput }) => {
+      // Keep amending only while the reviewer says NEEDS_REVISION. APPROVED is
+      // done; BLOCKING_AMBIGUITY stops the loop so the user clarifies intent at
+      // gate 1 rather than the writer looping on an un-fixable spec.
       const out = applyOutput as SpecQualityApply;
-      return out.findings.some((f) => f.severity === 'error' || f.severity === 'warn');
+      return out.verdict === 'NEEDS_REVISION';
     },
     buildIterationPrompt: ({ detected, formValues, iteration, previousIterations }) => {
       const det = detected as SpecQualityDetect;
@@ -299,23 +371,43 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
     const workingSpec = latestSpec(detected.spec, args.previousIterations);
     const parsed = parseSpecQualityOutput(args.llmOutput ?? null);
     if (parsed) {
-      const finalSpec = parsed.amendedSpec ?? workingSpec;
+      const current: SpecQualityApply = {
+        verdict: parsed.verdict,
+        score: parsed.score,
+        findings: parsed.findings,
+        source: 'llm',
+        spec: parsed.amendedSpec ?? workingSpec,
+      };
+      // Regression guard: a re-run or later iteration that ranks worse than a
+      // prior pass must not lose the better earlier result. Rank by verdict then
+      // score. This is the per-step fix for "a worse re-run wins" — it leaves the
+      // global latest-wins resolver untouched.
+      const best = bestPriorIteration(args.previousIterations);
+      if (best && iterationRank(best) > iterationRank(current)) {
+        ctx.logger.info(
+          {
+            iteration: args.iteration,
+            verdict: current.verdict,
+            score: current.score,
+            keptVerdict: best.verdict,
+            keptScore: best.score,
+          },
+          'spec quality review regressed — keeping the higher-ranked prior iteration',
+        );
+        return best;
+      }
       ctx.logger.info(
         {
           iteration: args.iteration,
-          score: parsed.score,
-          findings: parsed.findings.length,
+          verdict: current.verdict,
+          score: current.score,
+          findings: current.findings.length,
           amended: parsed.amendedSpec !== null,
           source: 'llm',
         },
         'spec quality review parsed',
       );
-      return {
-        score: parsed.score,
-        findings: parsed.findings,
-        source: 'llm',
-        spec: finalSpec,
-      };
+      return current;
     }
     const stub = stubSpecQuality();
     ctx.logger.info(
@@ -327,6 +419,12 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
       },
       'spec quality review stubbed',
     );
-    return { score: stub.score, findings: stub.findings, source: 'stub', spec: workingSpec };
+    return {
+      verdict: 'NEEDS_REVISION',
+      score: stub.score,
+      findings: stub.findings,
+      source: 'stub',
+      spec: workingSpec,
+    };
   },
 };

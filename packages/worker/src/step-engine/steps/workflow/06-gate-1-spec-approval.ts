@@ -11,6 +11,7 @@ interface SpecGateDetect {
    *  paragraphs are present. */
   specSummary: string;
   qualityScore: number | null;
+  qualityVerdict: string | null;
   qualityFindings: string[];
   iterationHistory: string[];
   exhaustedBudget: boolean;
@@ -33,6 +34,7 @@ interface QualityFinding {
 }
 
 interface SpecQualityOutput {
+  verdict?: string;
   score?: number;
   findings?: QualityFinding[];
   spec?: string;
@@ -54,6 +56,7 @@ function formatFinding(f: QualityFinding): string {
 function summariseIteration(entry: IterationEntry): string {
   const idx = (entry.iteration ?? 0) + 1;
   const out = entry.applyOutput;
+  const verdict = typeof out?.verdict === 'string' ? out.verdict : '?';
   const score = typeof out?.score === 'number' ? `${out.score}/10` : '?/10';
   const fc = Array.isArray(out?.findings) ? out!.findings!.length : 0;
   const errs = Array.isArray(out?.findings)
@@ -62,7 +65,7 @@ function summariseIteration(entry: IterationEntry): string {
   const warns = Array.isArray(out?.findings)
     ? out!.findings!.filter((f) => f.severity === 'warn').length
     : 0;
-  return `Iteration ${idx}: score ${score}, ${fc} finding(s) (${errs} error / ${warns} warn)`;
+  return `Iteration ${idx}: ${verdict}, score ${score}, ${fc} finding(s) (${errs} error / ${warns} warn)`;
 }
 
 /** Pick the first chunk of meaningful prose from a markdown spec body so
@@ -116,6 +119,9 @@ function buildSummarySection(detected: SpecGateDetect): string {
     lines.push('');
   }
   lines.push('## Quality review');
+  if (detected.qualityVerdict) {
+    lines.push(`**Verdict:** ${detected.qualityVerdict}`);
+  }
   lines.push(
     detected.qualityScore !== null
       ? `**Score:** ${detected.qualityScore}/10 _(final pass)_`
@@ -132,6 +138,14 @@ function buildSummarySection(detected: SpecGateDetect): string {
     lines.push('');
     lines.push('## Iteration history');
     for (const h of detected.iterationHistory) lines.push(`- ${h}`);
+  }
+  if (detected.qualityVerdict === 'BLOCKING_AMBIGUITY') {
+    lines.push('');
+    lines.push(
+      "> ⚠️ **Blocking ambiguity** — the spec quality reviewer could not resolve the spec's " +
+        'intent (see findings above). Clarify the flagged questions and reject to re-run, ' +
+        'rather than approving an ambiguous spec.',
+    );
   }
   if (detected.exhaustedBudget) {
     lines.push('');
@@ -169,6 +183,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
       specBody,
       specSummary: buildSpecSummary(specBody),
       qualityScore: typeof qualityOutput.score === 'number' ? qualityOutput.score : null,
+      qualityVerdict: typeof qualityOutput.verdict === 'string' ? qualityOutput.verdict : null,
       qualityFindings: Array.isArray(qualityOutput.findings)
         ? qualityOutput.findings.map((f) =>
             typeof f === 'object' && f !== null ? formatFinding(f) : String(f),

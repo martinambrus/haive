@@ -10,14 +10,24 @@ import {
   resetTemplateManifestCache,
 } from '../src/step-engine/template-manifest.js';
 
-// The legacy "Standard Agents (Always Generated)" set ported into Haive's
-// baseline. integration-tester was already a baseline; these 5 are the new ones.
+// Legacy agents ported into Haive's baseline (integration-tester was already a
+// baseline). First wave: workflow/review agents. Second wave: the adversarial-QA
+// suite + business-requirements-writer + spec-quality-reviewer.
 const PORTED_AGENTS = [
   'code-tracer',
   'peer-reviewer',
   'security-code-reviewer',
   'pattern-replicator',
   'markdown-humanizer',
+  'auth-bandit',
+  'chaos-creator',
+  'edge-case-breaker',
+  'injection-infector',
+  'logic-lunatic',
+  'workflow-disruptor',
+  'business-requirements-writer',
+  'spec-quality-reviewer',
+  'accessibility-specialist',
 ];
 
 describe('ported baseline agents', () => {

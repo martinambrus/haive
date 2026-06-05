@@ -28,6 +28,11 @@ interface SkillGenDetect {
   framework: string | null;
   language: string | null;
   kbFiles: KbFileSummary[];
+  /** Business-capability names derived deterministically from BUSINESS_LOGIC.md
+   *  H2 sections. Fed to the prompt as a coverage checklist and used to enforce
+   *  a minimum skill count so a single under-producing LLM pass cannot collapse
+   *  to one skill. Empty when no BUSINESS_LOGIC.md exists. */
+  requiredDomains: string[];
   /** Repo-relative directories where skills should be written. One entry per
    *  unique `projectSkillsDir` across all *enabled* CLI providers (claude/zai/amp
    *  collapse to `.claude/skills`; gemini has `.gemini/skills`; codex has
@@ -121,6 +126,32 @@ async function listKbFiles(repoRoot: string): Promise<KbFileSummary[]> {
   const out: KbFileSummary[] = [];
   await collectKbDir(kbDir, kbDir, out);
   out.sort((a, b) => a.relPath.localeCompare(b.relPath));
+  return out;
+}
+
+// Section headings that are document scaffolding rather than business
+// capabilities — excluded when deriving required skill domains.
+const NON_DOMAIN_SECTION_RE =
+  /^(overview|index|introduction|intro|summary|table of contents|contents|notes?|references?|see also|glossary|source files?|files?|file list|directory (layout|structure)|structure)$/i;
+
+/** Deterministically derive the project's business-capability domains from the
+ *  knowledge base — the H2 sections of BUSINESS_LOGIC.md. Each section is a
+ *  capability that should map to a skill. Returns [] when BUSINESS_LOGIC.md is
+ *  absent, so callers degrade gracefully. */
+export function deriveRequiredDomains(kbFiles: KbFileSummary[]): string[] {
+  const biz = kbFiles.find(
+    (f) => /(^|\/)business[_-]?logic\.md$/i.test(f.relPath) || /business[_-]?logic/i.test(f.id),
+  );
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const heading of biz?.sectionHeadings ?? []) {
+    const name = heading.trim();
+    if (!name || NON_DOMAIN_SECTION_RE.test(name)) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
   return out;
 }
 
@@ -671,6 +702,20 @@ function buildPrompt(args: LlmBuildArgs): string {
           '',
         ].join('\n')
       : '';
+  const requiredDomainsSection =
+    detected.requiredDomains.length > 0
+      ? [
+          '## Business capabilities to cover (from BUSINESS_LOGIC.md)',
+          '',
+          'These are the distinct business capabilities this project exposes. Emit ONE skill for EACH',
+          'capability below (one capability = one skill) unless a reserved bundle skill already covers it.',
+          'These ARE capability domains (not documentation chapters) — name each skill for the capability',
+          'and ground it in the relevant code, not just the KB text.',
+          '',
+          ...detected.requiredDomains.map((d) => `- ${d}`),
+          '',
+        ].join('\n')
+      : '';
   return [
     'You are a senior software engineer generating Claude Code SKILLS for this specific codebase.',
     '',
@@ -706,6 +751,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     kbList,
     '',
     reservedSection,
+    requiredDomainsSection,
     '## Repository overview (partial file tree)',
     '',
     '```',
@@ -855,6 +901,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
 
     await ctx.emitProgress('Listing existing knowledge base...');
     const kbFiles = await listKbFiles(ctx.repoPath);
+    const requiredDomains = deriveRequiredDomains(kbFiles);
 
     await ctx.emitProgress('Loading bundle skills...');
     const bundleSkills = await loadBundleSkills(ctx);
@@ -867,6 +914,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
         framework,
         language,
         kbFileCount: kbFiles.length,
+        requiredDomainCount: requiredDomains.length,
         skillTargetDirs,
         bundleSkillCount: bundleSkills.length,
       },
@@ -876,6 +924,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       framework,
       language,
       kbFiles,
+      requiredDomains,
       skillTargetDirs,
       bundleSkills,
       __fileTree: fileTree,
@@ -1012,6 +1061,22 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     if (acceptedLlm.length === 0 && bundleSkills.length === 0) {
       throw new SkillGenParseError(
         'No skill entries survived id sanitization — surface failure for retry.',
+      );
+    }
+
+    // Floor: the prompt asks for >=3 skills, but a single weak LLM pass can
+    // collapse to one (and silently win on a step re-run). When the project
+    // clearly has >=3 business capabilities (from BUSINESS_LOGIC.md), enforce
+    // the minimum so the step retries instead of shipping a one-skill result.
+    // The capability checklist in the prompt drives coverage toward the full
+    // domain set; this guard only blocks egregious under-production.
+    const requiredDomains = detected.requiredDomains ?? [];
+    const minSkills = requiredDomains.length >= 3 ? 3 : 0;
+    const producedCount = acceptedLlm.length + bundleSkills.length;
+    if (minSkills > 0 && producedCount < minSkills) {
+      throw new SkillGenParseError(
+        `Only ${producedCount} skill(s) produced but the project has ${requiredDomains.length} ` +
+          `business capabilities (minimum ${minSkills}) — surface failure for retry with fuller coverage.`,
       );
     }
 

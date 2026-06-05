@@ -117,6 +117,51 @@ export const BASELINE_AGENT_DEFS: { id: string; label: string; hint: string }[] 
     label: 'Markdown humanizer',
     hint: 'rewrites dense docs into clear prose, preserving language and grammar',
   },
+  {
+    id: 'auth-bandit',
+    label: 'Auth bandit',
+    hint: 'adversarial auth-bypass, privilege-escalation, and IDOR testing',
+  },
+  {
+    id: 'chaos-creator',
+    label: 'Chaos creator',
+    hint: 'resilience testing: partial failures, timeouts, graceful degradation',
+  },
+  {
+    id: 'edge-case-breaker',
+    label: 'Edge case breaker',
+    hint: 'boundary, null, type-confusion, and extreme-input testing',
+  },
+  {
+    id: 'injection-infector',
+    label: 'Injection infector',
+    hint: 'SQL/XSS/command/template injection hunting',
+  },
+  {
+    id: 'logic-lunatic',
+    label: 'Logic lunatic',
+    hint: 'business-logic abuse and workflow-bypass testing',
+  },
+  {
+    id: 'workflow-disruptor',
+    label: 'Workflow disruptor',
+    hint: 'race conditions, state corruption, and concurrency testing',
+  },
+  {
+    id: 'business-requirements-writer',
+    label: 'Business requirements writer',
+    hint: 'non-technical requirements doc, written in the input language',
+  },
+  {
+    id: 'spec-quality-reviewer',
+    label: 'Spec quality reviewer',
+    hint: '14-dimension spec audit with ambiguity hunt and a clear verdict',
+  },
+  {
+    id: 'accessibility-specialist',
+    label: 'Accessibility specialist',
+    hint: 'WCAG/ARIA/semantic-HTML audit and accessibility requirements',
+  },
 ];
 
 /* ------------------------------------------------------------------ */

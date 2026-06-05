@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { logger } from '@haive/shared';
 import {
   parseSpecQualityOutput,
   phase0b5SpecQualityStep,
@@ -102,6 +103,24 @@ describe('parseSpecQualityOutput', () => {
     expect(result?.findings[0]?.severity).toBe('error');
     expect(result?.amendedSpec).toBe('fixed body');
   });
+
+  it('parses an explicit verdict and derives one when omitted', () => {
+    expect(
+      parseSpecQualityOutput(
+        '```json\n{"verdict":"BLOCKING_AMBIGUITY","score":2,"findings":[]}\n```',
+      )?.verdict,
+    ).toBe('BLOCKING_AMBIGUITY');
+    // Omitted verdict + a warn/error finding -> NEEDS_REVISION.
+    expect(
+      parseSpecQualityOutput(
+        '```json\n{"score":5,"findings":[{"severity":"warn","comment":"x"}]}\n```',
+      )?.verdict,
+    ).toBe('NEEDS_REVISION');
+    // Omitted verdict + clean findings -> APPROVED.
+    expect(parseSpecQualityOutput('```json\n{"score":9,"findings":[]}\n```')?.verdict).toBe(
+      'APPROVED',
+    );
+  });
 });
 
 describe('phase0b5SpecQualityStep.loop', () => {
@@ -110,8 +129,12 @@ describe('phase0b5SpecQualityStep.loop', () => {
   // would produce in real execution.
   const loop = phase0b5SpecQualityStep.loop!;
 
-  function applyOutput(findings: Array<{ severity: 'info' | 'warn' | 'error' }>) {
+  function applyOutput(
+    findings: Array<{ severity: 'info' | 'warn' | 'error' }>,
+    verdict: 'APPROVED' | 'NEEDS_REVISION' | 'BLOCKING_AMBIGUITY' = 'NEEDS_REVISION',
+  ) {
     return {
+      verdict,
       score: 5,
       findings: findings.map((f, i) => ({
         dimension: `dim_${i}`,
@@ -127,7 +150,7 @@ describe('phase0b5SpecQualityStep.loop', () => {
     expect(loop.maxIterations).toBe(10);
   });
 
-  it('shouldContinue returns true when ANY finding is warn or error', async () => {
+  it('shouldContinue continues only while the verdict is NEEDS_REVISION', async () => {
     const args = {
       ctx: {} as never,
       llmOutput: null,
@@ -135,35 +158,27 @@ describe('phase0b5SpecQualityStep.loop', () => {
       previousIterations: [],
     };
     expect(
-      await loop.shouldContinue({ ...args, applyOutput: applyOutput([{ severity: 'warn' }]) }),
-    ).toBe(true);
-    expect(
-      await loop.shouldContinue({ ...args, applyOutput: applyOutput([{ severity: 'error' }]) }),
-    ).toBe(true);
-    expect(
       await loop.shouldContinue({
         ...args,
-        applyOutput: applyOutput([
-          { severity: 'info' },
-          { severity: 'warn' },
-          { severity: 'info' },
-        ]),
+        applyOutput: applyOutput([{ severity: 'warn' }], 'NEEDS_REVISION'),
       }),
     ).toBe(true);
   });
 
-  it('shouldContinue returns false when only info findings (or none) remain', async () => {
+  it('shouldContinue stops on APPROVED and BLOCKING_AMBIGUITY', async () => {
     const args = {
       ctx: {} as never,
       llmOutput: null,
       iteration: 1,
       previousIterations: [],
     };
-    expect(await loop.shouldContinue({ ...args, applyOutput: applyOutput([]) })).toBe(false);
+    expect(await loop.shouldContinue({ ...args, applyOutput: applyOutput([], 'APPROVED') })).toBe(
+      false,
+    );
     expect(
       await loop.shouldContinue({
         ...args,
-        applyOutput: applyOutput([{ severity: 'info' }, { severity: 'info' }]),
+        applyOutput: applyOutput([{ severity: 'error' }], 'BLOCKING_AMBIGUITY'),
       }),
     ).toBe(false);
   });
@@ -229,5 +244,53 @@ describe('phase0b5SpecQualityStep.loop', () => {
       previousIterations,
     });
     expect(prompt).toContain('FALLBACK BODY');
+  });
+});
+
+describe('phase0b5SpecQualityStep.apply regression guard', () => {
+  const fakeCtx = { logger: logger.child({ test: 'spec-quality' }) } as never;
+
+  it('keeps the higher-ranked prior iteration when the current pass regresses', async () => {
+    const prior = {
+      verdict: 'NEEDS_REVISION' as const,
+      score: 8,
+      findings: [{ dimension: 'd', severity: 'warn' as const, comment: 'x' }],
+      source: 'llm' as const,
+      spec: 'PRIOR BODY',
+    };
+    const previousIterations: StepLoopPassRecord[] = [
+      { iteration: 0, llmOutput: null, applyOutput: prior, continueRequested: true },
+    ];
+    const result = (await phase0b5SpecQualityStep.apply(fakeCtx, {
+      detected: { spec: 'ORIGINAL', specSummary: '', specLength: 8, currentBudget: 3 },
+      llmOutput: { verdict: 'NEEDS_REVISION', score: 4, findings: [] },
+      formValues: {},
+      iteration: 1,
+      previousIterations,
+    } as never)) as { verdict: string; score: number; spec: string };
+    expect(result.score).toBe(8);
+    expect(result.spec).toBe('PRIOR BODY');
+  });
+
+  it('accepts the current pass when it ranks higher (APPROVED beats a NEEDS_REVISION prior)', async () => {
+    const prior = {
+      verdict: 'NEEDS_REVISION' as const,
+      score: 9,
+      findings: [],
+      source: 'llm' as const,
+      spec: 'PRIOR',
+    };
+    const previousIterations: StepLoopPassRecord[] = [
+      { iteration: 0, llmOutput: null, applyOutput: prior, continueRequested: true },
+    ];
+    const result = (await phase0b5SpecQualityStep.apply(fakeCtx, {
+      detected: { spec: 'ORIGINAL', specSummary: '', specLength: 8, currentBudget: 3 },
+      llmOutput: { verdict: 'APPROVED', score: 6, findings: [], amendedSpec: 'NEW BODY' },
+      formValues: {},
+      iteration: 1,
+      previousIterations,
+    } as never)) as { verdict: string; score: number; spec: string };
+    expect(result.verdict).toBe('APPROVED');
+    expect(result.spec).toBe('NEW BODY');
   });
 });
