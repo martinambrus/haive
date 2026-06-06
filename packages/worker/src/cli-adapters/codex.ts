@@ -44,7 +44,18 @@ export class CodexAdapter extends BaseCliAdapter {
     const reasoningArgs = level ? ['-c', `model_reasoning_effort="${level}"`] : [];
     return {
       command: this.resolveExecutable(provider),
-      args: this.mergedArgs(provider, ['exec', ...reasoningArgs, '--skip-git-repo-check', prompt]),
+      // Haive runs every CLI inside an isolated per-task Docker container, so
+      // Codex's own bwrap/Landlock sandbox is both redundant and unable to
+      // start: nested unprivileged user namespaces are blocked, so it fails
+      // every `bash -lc` with "No permissions to create a new namespace" and
+      // degrades to read-only MCP. Bypass it — the container is the boundary.
+      args: this.mergedArgs(provider, [
+        'exec',
+        '--dangerously-bypass-approvals-and-sandbox',
+        ...reasoningArgs,
+        '--skip-git-repo-check',
+        prompt,
+      ]),
       env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
     };
