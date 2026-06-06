@@ -44,6 +44,34 @@ function matchesStatus(status: TaskStatus, filter: string): boolean {
 const FILTER_SELECT_CLASS =
   'h-9 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500';
 
+// Persist the user's last manually-chosen filter so returning to a bare
+// /tasks restores it instead of resetting to "All". Deep-links from the
+// repositories page carry ?repositoryId/?status and bypass this.
+const FILTER_STORAGE_KEY = 'haive:tasks-filter';
+
+type SavedFilter = { repositoryId: string; status: string };
+
+function readSavedFilter(): SavedFilter | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(FILTER_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SavedFilter>;
+    return { repositoryId: parsed.repositoryId ?? '', status: parsed.status ?? '' };
+  } catch {
+    return null;
+  }
+}
+
+function writeSavedFilter(filter: SavedFilter): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(filter));
+  } catch {
+    // storage disabled or over quota — remembering the filter is best-effort
+  }
+}
+
 export default function TasksPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -68,12 +96,35 @@ export default function TasksPage() {
     return () => clearInterval(timer);
   }, []);
 
+  // Restore the last manually-chosen filter on a fresh, unfiltered visit
+  // (e.g. arriving from the nav). Repo-badge deep-links include params and
+  // win, so they skip this. Mount-only by design.
+  useEffect(() => {
+    if (searchParams.has('repositoryId') || searchParams.has('status')) return;
+    const saved = readSavedFilter();
+    if (!saved || (!saved.repositoryId && !saved.status)) return;
+    const params = new URLSearchParams();
+    if (saved.repositoryId) params.set('repositoryId', saved.repositoryId);
+    if (saved.status) params.set('status', saved.status);
+    router.replace(`/tasks?${params.toString()}`, { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function setFilter(key: 'repositoryId' | 'status', value: string) {
     const params = new URLSearchParams(searchParams.toString());
     if (value) params.set(key, value);
     else params.delete(key);
+    writeSavedFilter({
+      repositoryId: params.get('repositoryId') ?? '',
+      status: params.get('status') ?? '',
+    });
     const qs = params.toString();
     router.replace(qs ? `/tasks?${qs}` : '/tasks', { scroll: false });
+  }
+
+  function clearFilters() {
+    writeSavedFilter({ repositoryId: '', status: '' });
+    router.replace('/tasks', { scroll: false });
   }
 
   // Repos that own at least one task, for the repository dropdown. Derived from
@@ -160,11 +211,7 @@ export default function TasksPage() {
       {tasks && tasks.length > 0 && visible.length === 0 && (
         <div className="flex items-center gap-3 text-sm text-neutral-500">
           <span>No tasks match the current filters.</span>
-          <button
-            type="button"
-            onClick={() => router.replace('/tasks', { scroll: false })}
-            className="text-indigo-400 underline"
-          >
+          <button type="button" onClick={clearFilters} className="text-indigo-400 underline">
             Clear filters
           </button>
         </div>
