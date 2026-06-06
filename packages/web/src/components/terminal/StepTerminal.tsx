@@ -146,7 +146,7 @@ function InvocationPanel({ taskId, invocation, label }: InvocationPanelProps) {
   }, [taskId, invocation.id, invocation.isActive]);
 
   return (
-    <div className="flex flex-col gap-1.5 rounded border border-neutral-800 p-2">
+    <div data-cli-terminal className="flex flex-col gap-1.5 rounded border border-neutral-800 p-2">
       <div className="flex flex-wrap items-center gap-2 text-[11px] text-neutral-400">
         {label && <span className="font-medium text-neutral-200">{label}</span>}
         <span className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 uppercase tracking-wider">

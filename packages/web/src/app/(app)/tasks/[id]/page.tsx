@@ -93,6 +93,7 @@ export default function TaskDetailPage() {
   } | null>(null);
   const stepsContainerRef = useRef<HTMLDivElement>(null);
   const prevActiveStepRef = useRef<string | null>(null);
+  const scrollTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const reload = useCallback(async () => {
     try {
@@ -126,20 +127,61 @@ export default function TaskDetailPage() {
     if (tab === 'activity') void reloadEvents();
   }, [tab, reloadEvents]);
 
-  // Auto-scroll to active step when it changes
+  // Auto-scroll to the active step when it changes. For a step that shows a
+  // terminal (running / waiting_cli with at least one CLI run) scroll to the
+  // END of the last terminal so its output is fully in view, rather than the
+  // step header which would hide it. Other steps scroll to the header so the
+  // form / status stays visible.
   useEffect(() => {
+    const container = stepsContainerRef.current;
     const activeStep = steps.find(
       (s) => s.status === 'waiting_form' || s.status === 'running' || s.status === 'waiting_cli',
     );
     const activeId = activeStep?.stepId ?? null;
-    if (activeId && activeId !== prevActiveStepRef.current && stepsContainerRef.current) {
-      const el = stepsContainerRef.current.querySelector(`[data-step-id="${activeId}"]`);
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (activeId && activeId !== prevActiveStepRef.current && container) {
+      scrollTimersRef.current.forEach(clearTimeout);
+      scrollTimersRef.current = [];
+
+      const scrollToHeader = () => {
+        container
+          .querySelector(`[data-step-id="${activeId}"]`)
+          ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      };
+      const scrollToLastTerminal = (): boolean => {
+        const stepEl = container.querySelector(`[data-step-id="${activeId}"]`);
+        const terminals = stepEl?.querySelectorAll('[data-cli-terminal]');
+        if (!terminals || terminals.length === 0) return false;
+        const last = terminals[terminals.length - 1];
+        if (!last) return false;
+        last.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        return true;
+      };
+
+      const showsTerminal =
+        (activeStep?.cliInvocationCount ?? 0) > 0 &&
+        (activeStep?.status === 'running' || activeStep?.status === 'waiting_cli');
+
+      if (!showsTerminal) {
+        scrollToHeader();
+      } else if (!scrollToLastTerminal()) {
+        // Terminal panels mount after an async invocations fetch, so the first
+        // attempt can run before they exist — retry until they're in the DOM.
+        const attempt = () => {
+          if (scrollToLastTerminal()) {
+            scrollTimersRef.current.forEach(clearTimeout);
+            scrollTimersRef.current = [];
+          }
+        };
+        [200, 500, 900].forEach((delay) => {
+          scrollTimersRef.current.push(setTimeout(attempt, delay));
+        });
       }
     }
     prevActiveStepRef.current = activeId;
   }, [steps]);
+
+  // Clear any pending scroll retries on unmount.
+  useEffect(() => () => scrollTimersRef.current.forEach(clearTimeout), []);
 
   useEffect(() => {
     api
