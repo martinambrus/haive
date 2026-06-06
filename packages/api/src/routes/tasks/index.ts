@@ -5,6 +5,7 @@ import {
   createTaskRequestSchema,
   logger,
   PROVIDER_SENSITIVE_STEP_IDS,
+  renameTaskRequestSchema,
   setCliProviderRequestSchema,
   taskActionRequestSchema,
   TASK_JOB_NAMES,
@@ -151,6 +152,29 @@ taskRoutes.get('/:id', async (c) => {
     activeCliStepId: active?.taskStepId ?? null,
   };
   return c.json({ task: taskWithActive, steps });
+});
+
+taskRoutes.patch('/:id', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const body = renameTaskRequestSchema.parse(await c.req.json());
+  const db = getDb();
+
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
+    columns: { id: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+
+  const updated = await db
+    .update(schema.tasks)
+    .set({ title: body.title, updatedAt: new Date() })
+    .where(eq(schema.tasks.id, id))
+    .returning();
+
+  await appendTaskEvent(db, id, null, 'task.renamed', { title: body.title, by: userId });
+
+  return c.json({ task: updated[0] });
 });
 
 taskRoutes.post('/:id/action', async (c) => {

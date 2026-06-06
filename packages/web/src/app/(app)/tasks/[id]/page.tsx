@@ -17,7 +17,7 @@ import {
   type TaskStep,
   type StepStatus,
 } from '@/lib/api-client';
-import { Badge, Button, Card } from '@/components/ui';
+import { Badge, Button, Card, Input } from '@/components/ui';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
 import { FormRenderer, type FormValues } from '@/components/form-renderer';
@@ -71,6 +71,10 @@ export default function TaskDetailPage() {
   const [steps, setSteps] = useState<TaskStep[]>([]);
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('steps');
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -266,6 +270,36 @@ export default function TaskDetailPage() {
     }
   }
 
+  function startRename() {
+    if (!task) return;
+    setTitleDraft(task.title);
+    setRenameError(null);
+    setRenaming(true);
+  }
+
+  async function saveRename() {
+    const next = titleDraft.trim();
+    if (!next) {
+      setRenameError('Title cannot be empty');
+      return;
+    }
+    if (task && next === task.title) {
+      setRenaming(false);
+      return;
+    }
+    setRenameBusy(true);
+    setRenameError(null);
+    try {
+      await api.patch(`/tasks/${id}`, { title: next });
+      await reload();
+      setRenaming(false);
+    } catch (err) {
+      setRenameError((err as Error).message ?? 'Failed to rename task');
+    } finally {
+      setRenameBusy(false);
+    }
+  }
+
   if (error) {
     return (
       <div className="flex flex-col gap-4">
@@ -301,10 +335,43 @@ export default function TaskDetailPage() {
             Back to tasks
           </Link>
           <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold text-neutral-50">{task.title}</h1>
-            <Badge variant={taskStatusVariant(task.status)}>{task.status}</Badge>
-            <Badge>{task.type}</Badge>
+            {renaming ? (
+              <>
+                <Input
+                  value={titleDraft}
+                  onChange={(e) => setTitleDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void saveRename();
+                    else if (e.key === 'Escape') setRenaming(false);
+                  }}
+                  maxLength={512}
+                  autoFocus
+                  className="w-80 text-lg"
+                />
+                <Button size="sm" disabled={renameBusy} onClick={() => void saveRename()}>
+                  {renameBusy ? 'Saving…' : 'Save'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={renameBusy}
+                  onClick={() => setRenaming(false)}
+                >
+                  Cancel
+                </Button>
+              </>
+            ) : (
+              <>
+                <h1 className="text-2xl font-bold text-neutral-50">{task.title}</h1>
+                <Badge variant={taskStatusVariant(task.status)}>{task.status}</Badge>
+                <Badge>{task.type}</Badge>
+                <Button size="sm" variant="secondary" onClick={startRename}>
+                  Rename
+                </Button>
+              </>
+            )}
           </div>
+          {renameError && <p className="mt-1 text-xs text-red-400">{renameError}</p>}
           {task.description && <p className="text-sm text-neutral-400">{task.description}</p>}
           {task.errorMessage && <p className="text-sm text-red-400">Error: {task.errorMessage}</p>}
         </div>
