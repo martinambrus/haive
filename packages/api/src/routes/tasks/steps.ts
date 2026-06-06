@@ -66,9 +66,20 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     throw new HttpError(409, `Step is in status ${step.status}, not waiting_form`);
   }
 
+  const now = new Date();
+  // Close the idle (waiting-for-input) period: fold the time since the step
+  // entered waiting_form into idle_ms so the active-work timer excludes it.
+  const closedIdleMs = step.waitingStartedAt
+    ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
+    : 0;
   await db
     .update(schema.taskSteps)
-    .set({ formValues: body.values, updatedAt: new Date() })
+    .set({
+      formValues: body.values,
+      idleMs: step.idleMs + closedIdleMs,
+      waitingStartedAt: null,
+      updatedAt: now,
+    })
     .where(eq(schema.taskSteps.id, step.id));
 
   await appendTaskEvent(db, id, step.id, 'step.form_submitted', {
@@ -170,6 +181,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           errorHint: null,
           startedAt: null,
           endedAt: null,
+          idleMs: 0,
+          waitingStartedAt: null,
           updatedAt: now,
         })
         .where(inArray(schema.taskSteps.id, allStepIds));
@@ -215,12 +228,17 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     }
     const result = await db.transaction(async (tx) => {
       const now = new Date();
+      const closedIdleMs = step.waitingStartedAt
+        ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
+        : 0;
       await tx
         .update(schema.taskSteps)
         .set({
           status: 'skipped',
           errorMessage: null,
           endedAt: now,
+          idleMs: step.idleMs + closedIdleMs,
+          waitingStartedAt: null,
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
@@ -403,6 +421,8 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
         startedAt: null,
         endedAt: null,
         errorMessage: null,
+        idleMs: 0,
+        waitingStartedAt: null,
         updatedAt: new Date(),
       })
       .where(eq(schema.taskSteps.id, step.id));

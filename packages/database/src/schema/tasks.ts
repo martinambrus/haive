@@ -151,6 +151,12 @@ export const taskSteps = pgTable(
     errorHint: jsonb('error_hint').$type<TaskStepErrorHint>(),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
+    /** Accumulated time (ms) the step spent idle waiting for user input
+     *  (waiting_form). Subtracted from wall-clock to report active work time. */
+    idleMs: integer('idle_ms').notNull().default(0),
+    /** Timestamp the current idle period began; set while the step is in
+     *  waiting_form, cleared and folded into idle_ms on resume. */
+    waitingStartedAt: timestamp('waiting_started_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },

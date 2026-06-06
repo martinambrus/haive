@@ -492,6 +492,7 @@ export default function TaskDetailPage() {
               />
             </div>
           ))}
+          <TaskTotalTime task={task} steps={steps} />
         </div>
       )}
 
@@ -682,6 +683,106 @@ const RETRYABLE_STEP_STATUSES: ReadonlySet<StepStatus> = new Set([
   'skipped',
 ]);
 
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m ${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+// Per-step ACTIVE-work timer: wall-clock since start minus idle (time spent
+// waiting for user input). While the step is in waiting_form the open wait is
+// subtracted live, which freezes the displayed value; it resumes ticking once
+// the form is submitted. Fixed once the step ends, nothing before it starts.
+// Only the in-progress card re-renders each second via its own interval.
+function StepDuration({
+  startedAt,
+  endedAt,
+  idleMs,
+  waitingStartedAt,
+  status,
+}: {
+  startedAt: string | null;
+  endedAt: string | null;
+  idleMs: number;
+  waitingStartedAt: string | null;
+  status: StepStatus;
+}) {
+  const ticking = !!startedAt && !endedAt;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!ticking) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [ticking]);
+  if (!startedAt) return null;
+  const start = new Date(startedAt).getTime();
+  const end = endedAt ? new Date(endedAt).getTime() : now;
+  const openWaitMs =
+    !endedAt && status === 'waiting_form' && waitingStartedAt
+      ? Math.max(0, now - new Date(waitingStartedAt).getTime())
+      : 0;
+  const workMs = Math.max(0, end - start - idleMs - openWaitMs);
+  const waiting = !endedAt && status === 'waiting_form';
+  const color = endedAt ? 'text-neutral-500' : waiting ? 'text-amber-300' : 'text-indigo-300';
+  return (
+    <span
+      className={`font-mono text-xs ${color}`}
+      title={
+        endedAt
+          ? 'Active work time'
+          : waiting
+            ? 'Work time (paused — waiting for input)'
+            : 'Active work so far'
+      }
+    >
+      {formatDuration(workMs)}
+      {waiting ? ' (waiting)' : ''}
+    </span>
+  );
+}
+
+// End-of-task summary: active work time (wall-clock minus all steps' idle,
+// including any wait left open by a cancel) and the raw wall-clock time.
+// Renders nothing until the task has ended (completedAt set).
+function TaskTotalTime({ task, steps }: { task: Task; steps: TaskStep[] }) {
+  if (!task.startedAt || !task.completedAt) return null;
+  const startMs = new Date(task.startedAt).getTime();
+  const endMs = new Date(task.completedAt).getTime();
+  const wallMs = Math.max(0, endMs - startMs);
+  const idleMs = steps.reduce((sum, s) => {
+    const openWait = s.waitingStartedAt
+      ? Math.max(0, endMs - new Date(s.waitingStartedAt).getTime())
+      : 0;
+    return sum + (s.idleMs ?? 0) + openWait;
+  }, 0);
+  const workMs = Math.max(0, wallMs - idleMs);
+  return (
+    <Card className="flex items-center justify-between gap-3 py-3">
+      <div className="flex flex-col">
+        <span className="text-sm font-medium text-neutral-200">Total time</span>
+        <span className="text-xs text-neutral-500">
+          {new Date(task.startedAt).toLocaleString()} →{' '}
+          {new Date(task.completedAt).toLocaleString()}
+        </span>
+      </div>
+      <div className="flex items-center gap-6">
+        <div className="flex flex-col items-end">
+          <span className="font-mono text-lg text-indigo-300">{formatDuration(workMs)}</span>
+          <span className="text-[10px] uppercase tracking-wider text-neutral-500">work</span>
+        </div>
+        <div className="flex flex-col items-end">
+          <span className="font-mono text-lg text-neutral-100">{formatDuration(wallMs)}</span>
+          <span className="text-[10px] uppercase tracking-wider text-neutral-500">wall clock</span>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function StepCard({
   step,
   taskId,
@@ -757,6 +858,13 @@ function StepCard({
           <span className="font-mono text-xs text-neutral-500">#{step.stepIndex}</span>
           <h3 className="text-base font-semibold text-neutral-100">{step.title}</h3>
           <Badge variant={stepStatusVariant(step.status)}>{step.status}</Badge>
+          <StepDuration
+            startedAt={step.startedAt}
+            endedAt={step.endedAt}
+            idleMs={step.idleMs}
+            waitingStartedAt={step.waitingStartedAt}
+            status={step.status}
+          />
           {step.iterationCount > 0 && (
             <span
               className="rounded border border-indigo-700 bg-indigo-950/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-indigo-300"

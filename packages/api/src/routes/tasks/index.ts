@@ -335,6 +335,8 @@ taskRoutes.patch('/:id/cli-provider', async (c) => {
       startedAt: null,
       endedAt: null,
       errorMessage: null,
+      idleMs: 0,
+      waitingStartedAt: null,
       updatedAt: new Date(),
     })
     .where(

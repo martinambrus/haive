@@ -363,6 +363,12 @@ export interface TaskStep {
    *  card surfaces this as an "iteration N/M" badge while the step is
    *  active so the user sees progress through the loop budget. */
   iterationCount: number;
+  /** Accumulated idle time (ms) the step spent waiting for user input,
+   *  excluded from the active-work timer. */
+  idleMs: number;
+  /** Start of the current open idle period while the step is waiting for
+   *  input (waiting_form); null otherwise. */
+  waitingStartedAt: string | null;
 }
 
 export type StepErrorHint = {

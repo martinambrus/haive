@@ -436,6 +436,12 @@ async function handleResult(
         stepId,
         computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
       );
+      // Stamp the start of the idle (waiting-for-input) period so the step's
+      // active-work timer can exclude it. Folded into idle_ms on form submit.
+      await db
+        .update(schema.taskSteps)
+        .set({ waitingStartedAt: new Date(), updatedAt: new Date() })
+        .where(eq(schema.taskSteps.id, result.row.id));
       await appendEvent(db, ctx.taskId, result.row.id, 'step.waiting_form', { stepId });
       return;
     }
