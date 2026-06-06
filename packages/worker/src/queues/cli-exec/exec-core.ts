@@ -61,12 +61,25 @@ const PROVIDER_API_KEY_HINTS: Record<string, string> = {
 // page), not via a terminal command. On auth failure, point users there.
 const PROVIDER_HAIVE_LOGIN: ReadonlySet<string> = new Set(['antigravity']);
 
+// Exit codes that mean the process was terminated rather than exiting on its
+// own: 130 (SIGINT), 137 (SIGKILL — task cancel and step stop-&-retry force-
+// remove the container, which surfaces as 137), 143 (SIGTERM). Together with a
+// null exit code (the spawn killing the client on timeout/abort) these are the
+// "we stopped it" signals. A terminated run is never an auth failure, and its
+// partial output — often the model mid-analysis of the repo — must not reach
+// the auth heuristic below, which false-matches any codebase that discusses
+// login / tokens / 401 / unauthorized.
+const TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137, 143]);
+
 export function interpretCliFailure(
   result: ExecutionOutcome,
   providerName: string | null,
 ): string | null {
   const existing = result.errorMessage ?? null;
   if (result.exitCode === 0) return existing;
+  if (result.exitCode === null || TERMINATION_EXIT_CODES.has(result.exitCode)) {
+    return 'CLI process was stopped before it finished (cancelled or timed out).';
+  }
 
   const haystack = [existing ?? '', result.rawOutput ?? ''].join('\n');
   const looksLikeAuth = AUTH_FAILURE_PATTERNS.some((p) => p.test(haystack));
@@ -81,8 +94,18 @@ export function interpretCliFailure(
       : loginCmd
         ? `run \`${loginCmd}\` in your terminal and then retry this step`
         : 're-authenticate your CLI in your terminal and then retry this step';
-  const detail = existing && existing.trim().length > 0 ? ` (${existing.trim()})` : '';
+  const detail = formatAuthDetail(existing);
   return `CLI authentication failed — ${hint}.${detail}`;
+}
+
+// Keep the auth headline readable: the full CLI output stays on the
+// invocation's rawOutput / stream_log for the terminal viewer, so the message
+// only needs a short excerpt, not a multi-KB stdout dump.
+function formatAuthDetail(existing: string | null): string {
+  const trimmed = existing?.trim();
+  if (!trimmed) return '';
+  const capped = trimmed.length > 300 ? `${trimmed.slice(0, 300)}…` : trimmed;
+  return ` (${capped})`;
 }
 
 export async function executeByKind(

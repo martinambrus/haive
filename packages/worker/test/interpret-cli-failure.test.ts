@@ -56,6 +56,36 @@ describe('interpretCliFailure', () => {
     const result = outcome({ errorMessage: 'rate limit exceeded' });
     expect(interpretCliFailure(result, 'claude-code')).toBe('rate limit exceeded');
   });
+
+  it('treats a killed process (exit 137) as stopped, not auth — even with auth-looking output', () => {
+    const result = outcome({
+      exitCode: 137,
+      rawOutput: 'analysis: the CMS login flow returns 401 Unauthorized when the token is invalid',
+    });
+    const msg = interpretCliFailure(result, 'claude-code');
+    expect(msg).toMatch(/stopped before it finished/);
+    expect(msg).not.toMatch(/authentication failed/i);
+    expect(msg).not.toMatch(/claude \/login/);
+  });
+
+  it('treats a null exit code (timeout/abort) as stopped', () => {
+    const result = outcome({ exitCode: null, rawOutput: 'please login again' });
+    expect(interpretCliFailure(result, 'claude-code')).toMatch(/stopped before it finished/);
+  });
+
+  it('treats SIGTERM (exit 143) as stopped', () => {
+    expect(interpretCliFailure(outcome({ exitCode: 143 }), 'codex')).toMatch(/stopped/);
+  });
+
+  it('caps the auth detail excerpt instead of dumping the whole blob', () => {
+    const result = outcome({
+      exitCode: 1,
+      errorMessage: 'authentication_error ' + 'y'.repeat(2000),
+    });
+    const msg = interpretCliFailure(result, 'claude-code');
+    expect(msg).toMatch(/CLI authentication failed/);
+    expect(msg!.length).toBeLessThan(500);
+  });
 });
 
 describe('formatCliErrorMessage', () => {
