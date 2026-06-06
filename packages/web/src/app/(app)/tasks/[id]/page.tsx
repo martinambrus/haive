@@ -365,6 +365,7 @@ export default function TaskDetailPage() {
                 <h1 className="text-2xl font-bold text-neutral-50">{task.title}</h1>
                 <Badge variant={taskStatusVariant(task.status)}>{task.status}</Badge>
                 <Badge>{task.type}</Badge>
+                {task.repository && <Badge variant="info">repo: {task.repository.name}</Badge>}
                 <Button size="sm" variant="secondary" onClick={startRename}>
                   Rename
                 </Button>

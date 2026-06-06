@@ -113,6 +113,9 @@ export default function TasksPage() {
                       <h2 className="text-lg font-semibold text-neutral-50">{task.title}</h2>
                       <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
                       <Badge>{TYPE_LABELS[task.type]}</Badge>
+                      {task.repository && (
+                        <Badge variant="info">repo: {task.repository.name}</Badge>
+                      )}
                     </div>
                     <span className="text-xs text-neutral-500">
                       {new Date(task.createdAt).toLocaleString()}

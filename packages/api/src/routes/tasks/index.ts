@@ -37,6 +37,7 @@ taskRoutes.get('/', async (c) => {
   const rows = await db.query.tasks.findMany({
     where: eq(schema.tasks.userId, userId),
     orderBy: [desc(schema.tasks.createdAt)],
+    with: { repository: { columns: { id: true, name: true } } },
   });
   return c.json({ tasks: rows });
 });
@@ -135,6 +136,7 @@ taskRoutes.get('/:id', async (c) => {
   const db = getDb();
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
+    with: { repository: { columns: { id: true, name: true } } },
   });
   if (!task) throw new HttpError(404, 'Task not found');
   const stepRows = await db
