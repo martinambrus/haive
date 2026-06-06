@@ -1,7 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { useEffect, useMemo, useState } from 'react';
 import { api, type Task, type TaskStatus } from '@/lib/api-client';
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 
@@ -27,11 +28,30 @@ const TYPE_LABELS: Record<string, string> = {
   env_replicate: 'Env replicate', // legacy tasks only
 };
 
+// Status filter tokens shared by the dropdown and the repositories-page badge
+// links. 'open' = non-terminal; 'active' = open minus waiting_user — the same
+// sets the repo list counts with.
+const OPEN_STATUSES = new Set(['created', 'queued', 'running', 'paused', 'waiting_user']);
+const ACTIVE_STATUSES = new Set(['created', 'queued', 'running', 'paused']);
+
+function matchesStatus(status: TaskStatus, filter: string): boolean {
+  if (!filter) return true;
+  if (filter === 'open') return OPEN_STATUSES.has(status);
+  if (filter === 'active') return ACTIVE_STATUSES.has(status);
+  return status === filter;
+}
+
+const FILTER_SELECT_CLASS =
+  'h-9 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500';
+
 export default function TasksPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const repoFilter = searchParams.get('repositoryId') ?? '';
+  const statusFilter = searchParams.get('status') ?? '';
+
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [showCancelled, setShowCancelled] = useState(false);
-  const [showCompleted, setShowCompleted] = useState(false);
 
   async function reload() {
     try {
@@ -48,30 +68,67 @@ export default function TasksPage() {
     return () => clearInterval(timer);
   }, []);
 
+  function setFilter(key: 'repositoryId' | 'status', value: string) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (value) params.set(key, value);
+    else params.delete(key);
+    const qs = params.toString();
+    router.replace(qs ? `/tasks?${qs}` : '/tasks', { scroll: false });
+  }
+
+  // Repos that own at least one task, for the repository dropdown. Derived from
+  // the full (unfiltered) task list so the options stay stable as filters change.
+  const repoOptions = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const t of tasks ?? []) {
+      if (t.repository) byId.set(t.repository.id, t.repository.name);
+    }
+    return Array.from(byId, ([id, name]) => ({ id, name })).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+  }, [tasks]);
+
+  const visible = (tasks ?? []).filter(
+    (t) => (!repoFilter || t.repositoryId === repoFilter) && matchesStatus(t.status, statusFilter),
+  );
+
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-neutral-50">Tasks</h1>
           <p className="text-sm text-neutral-400">
             Deterministic step engine runs. Status refreshes every few seconds.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant={showCompleted ? 'primary' : 'secondary'}
-            size="sm"
-            onClick={() => setShowCompleted((v) => !v)}
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            aria-label="Filter by repository"
+            value={repoFilter}
+            onChange={(e) => setFilter('repositoryId', e.target.value)}
+            className={FILTER_SELECT_CLASS}
           >
-            {showCompleted ? 'Hide completed' : 'Show completed'}
-          </Button>
-          <Button
-            variant={showCancelled ? 'primary' : 'secondary'}
-            size="sm"
-            onClick={() => setShowCancelled((v) => !v)}
+            <option value="">All repositories</option>
+            {repoOptions.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.name}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Filter by status"
+            value={statusFilter}
+            onChange={(e) => setFilter('status', e.target.value)}
+            className={FILTER_SELECT_CLASS}
           >
-            {showCancelled ? 'Hide cancelled' : 'Show cancelled'}
-          </Button>
+            <option value="">All statuses</option>
+            <option value="open">Open</option>
+            <option value="active">Active</option>
+            <option value="waiting_user">Waiting on you</option>
+            <option value="completed">Completed</option>
+            <option value="failed">Failed</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
           <Link href="/tasks/new">
             <Button>New task</Button>
           </Link>
@@ -100,38 +157,44 @@ export default function TasksPage() {
         </Card>
       )}
 
-      {tasks && tasks.length > 0 && (
+      {tasks && tasks.length > 0 && visible.length === 0 && (
+        <div className="flex items-center gap-3 text-sm text-neutral-500">
+          <span>No tasks match the current filters.</span>
+          <button
+            type="button"
+            onClick={() => router.replace('/tasks', { scroll: false })}
+            className="text-indigo-400 underline"
+          >
+            Clear filters
+          </button>
+        </div>
+      )}
+
+      {tasks && visible.length > 0 && (
         <div className="grid gap-3">
-          {tasks
-            .filter((task) => showCancelled || task.status !== 'cancelled')
-            .filter((task) => showCompleted || task.status !== 'completed')
-            .map((task) => (
-              <Link key={task.id} href={`/tasks/${task.id}`} className="block">
-                <Card className="flex flex-col gap-2 transition-colors hover:border-indigo-700">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <h2 className="text-lg font-semibold text-neutral-50">{task.title}</h2>
-                      <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
-                      <Badge>{TYPE_LABELS[task.type]}</Badge>
-                      {task.repository && (
-                        <Badge variant="info">repo: {task.repository.name}</Badge>
-                      )}
-                    </div>
-                    <span className="text-xs text-neutral-500">
-                      {new Date(task.createdAt).toLocaleString()}
-                    </span>
+          {visible.map((task) => (
+            <Link key={task.id} href={`/tasks/${task.id}`} className="block">
+              <Card className="flex flex-col gap-2 transition-colors hover:border-indigo-700">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-lg font-semibold text-neutral-50">{task.title}</h2>
+                    <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
+                    <Badge>{TYPE_LABELS[task.type]}</Badge>
+                    {task.repository && <Badge variant="info">repo: {task.repository.name}</Badge>}
                   </div>
-                  {task.description && (
-                    <p className="text-xs text-neutral-400">{task.description}</p>
-                  )}
-                  <div className="flex items-center gap-3 text-xs text-neutral-500">
-                    <span>Step index: {task.currentStepIndex}</span>
-                    {task.currentStepId && <span>Current: {task.currentStepId}</span>}
-                    {task.errorMessage && <span className="text-red-400">{task.errorMessage}</span>}
-                  </div>
-                </Card>
-              </Link>
-            ))}
+                  <span className="text-xs text-neutral-500">
+                    {new Date(task.createdAt).toLocaleString()}
+                  </span>
+                </div>
+                {task.description && <p className="text-xs text-neutral-400">{task.description}</p>}
+                <div className="flex items-center gap-3 text-xs text-neutral-500">
+                  <span>Step index: {task.currentStepIndex}</span>
+                  {task.currentStepId && <span>Current: {task.currentStepId}</span>}
+                  {task.errorMessage && <span className="text-red-400">{task.errorMessage}</span>}
+                </div>
+              </Card>
+            </Link>
+          ))}
         </div>
       )}
     </div>

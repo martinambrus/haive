@@ -173,10 +173,21 @@ function RepoCard(props: RepoCardProps) {
               </Badge>
             )}
             {repo.openTaskCount > 0 && (
-              <Badge>
-                {repo.openTaskCount} open task{repo.openTaskCount === 1 ? '' : 's'}
-                {repo.activeTaskCount > 0 && ` (${repo.activeTaskCount} active)`}
-              </Badge>
+              <Link href={`/tasks?repositoryId=${repo.id}&status=open`}>
+                <Badge className="cursor-pointer transition-colors hover:bg-neutral-700">
+                  {repo.openTaskCount} open task{repo.openTaskCount === 1 ? '' : 's'}
+                </Badge>
+              </Link>
+            )}
+            {repo.activeTaskCount > 0 && (
+              <Link href={`/tasks?repositoryId=${repo.id}&status=active`}>
+                <Badge
+                  variant="info"
+                  className="cursor-pointer transition-colors hover:bg-sky-800/60"
+                >
+                  {repo.activeTaskCount} active
+                </Badge>
+              </Link>
             )}
           </div>
           <p className="mt-1 text-xs text-neutral-500">
