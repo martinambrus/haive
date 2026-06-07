@@ -122,6 +122,30 @@ export function classifyAuthProbeOutput(result: AuthProbeExecResult): AuthProbeC
   };
 }
 
+// `amp usage` prints one line per workspace: "<name>: $<balance> remaining - <url>".
+// Execute mode (`amp -x`) — the only mode haive ever uses — consumes paid credits
+// and fails outright once the spendable balance hits $0, even though the account
+// is fully authenticated and the ad-supported Amp Free tier still works
+// interactively. The probe can foresee this, so we surface a non-blocking warning
+// while leaving auth_status = ok (the credentials really are valid).
+//
+// We sum every "$<n> remaining" figure in the output; a positive total anywhere
+// means the account can still execute, so we stay quiet. Only a non-positive total
+// (or, defensively, an unparseable output → no match → no warning) is flagged,
+// so a working paid account is never falsely warned.
+export function detectAmpCreditsWarning(usageOutput: string): string | null {
+  const matches = [...usageOutput.matchAll(/\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s+remaining/gi)];
+  if (matches.length === 0) return null;
+  const total = matches.reduce((sum, m) => sum + Number((m[1] ?? '0').replace(/,/g, '')), 0);
+  if (total > 0) return null;
+  return (
+    'amp reports $0 spendable balance. Haive runs every step non-interactively (amp -x), ' +
+    'which consumes paid credits only — the ad-supported Amp Free tier cannot execute in ' +
+    'non-interactive contexts. Tasks using this provider will fail until you add credits at ' +
+    'https://ampcode.com/pay.'
+  );
+}
+
 export function isAuthProbeSupported(name: CliProviderName): boolean {
   return (
     name === 'claude-code' ||

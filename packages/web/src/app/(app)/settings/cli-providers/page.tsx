@@ -419,9 +419,16 @@ function TestPathLine({
           button to start an interactive login.
         </span>
       ) : (
-        <pre className="flex-1 whitespace-pre-wrap break-words font-mono text-neutral-400">
-          {res.ok ? (res.detail ?? '') : (res.error ?? '')}
-        </pre>
+        <div className="flex flex-1 flex-col gap-1">
+          <pre className="whitespace-pre-wrap break-words font-mono text-neutral-400">
+            {res.ok ? (res.detail ?? '') : (res.error ?? '')}
+          </pre>
+          {res.warning && (
+            <p className="rounded-md border border-amber-500/40 bg-amber-950/30 p-2 text-amber-300">
+              {res.warning}
+            </p>
+          )}
+        </div>
       )}
     </div>
   );

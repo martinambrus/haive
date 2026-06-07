@@ -248,6 +248,9 @@ export interface CliProbePathResult {
   durationMs?: number;
   authStatus?: CliAuthStatus;
   authMessage?: string;
+  // Non-blocking advisory surfaced even when authStatus is `ok` (e.g. amp with
+  // $0 balance — authenticated, but cannot run the non-interactive `amp -x`).
+  warning?: string;
 }
 
 export interface CliProbeResult {

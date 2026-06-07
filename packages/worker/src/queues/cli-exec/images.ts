@@ -12,6 +12,7 @@ import { resolveCliAuthMounts } from '../../sandbox/cli-auth-volume.js';
 import {
   buildAuthProbeCommand,
   classifyAuthProbeOutput,
+  detectAmpCreditsWarning,
   isAuthProbeSupported,
 } from '../../cli-adapters/auth-probe.js';
 import { log } from './_shared.js';
@@ -162,12 +163,16 @@ export async function probeCliPath(
     });
     const durationMs = Date.now() - startedAt;
     if (classification.status === 'ok') {
+      // Credentials are valid; still flag foreseeable run-time blockers (e.g. an
+      // amp account with $0 balance that can't run the non-interactive `amp -x`).
+      const warning = provider.name === 'amp' ? detectAmpCreditsWarning(authResult.stdout) : null;
       return {
         ok: true,
         detail: versionDetail,
         durationMs,
         authStatus: 'ok',
         authMessage: classification.message,
+        ...(warning ? { warning } : {}),
       };
     }
     return {

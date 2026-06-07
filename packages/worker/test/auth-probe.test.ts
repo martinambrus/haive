@@ -3,6 +3,7 @@ import {
   buildAuthProbeCommand,
   CliAuthProbeUnsupportedError,
   classifyAuthProbeOutput,
+  detectAmpCreditsWarning,
   isAuthProbeSupported,
 } from '../src/cli-adapters/auth-probe.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
@@ -27,6 +28,36 @@ function makeProvider(
     updatedAt: overrides.updatedAt ?? now,
   } as CliProviderRecord;
 }
+
+describe('detectAmpCreditsWarning', () => {
+  // Verbatim `amp usage` output from a real free account that failed `amp -x`.
+  const ZERO_BALANCE =
+    'Signed in as martin.ambrus.bb@gmail.com\n' +
+    'Workspace activit: $0 remaining - https://ampcode.com/workspaces/activit\n';
+
+  it('warns on a $0 spendable balance', () => {
+    const warning = detectAmpCreditsWarning(ZERO_BALANCE);
+    expect(warning).toMatch(/add credits/i);
+    expect(warning).toMatch(/ampcode\.com\/pay/);
+  });
+
+  it('warns on $0.00 with decimals', () => {
+    expect(detectAmpCreditsWarning('Workspace x: $0.00 remaining')).not.toBeNull();
+  });
+
+  it('stays silent when a positive balance remains', () => {
+    expect(detectAmpCreditsWarning('Workspace x: $10.00 remaining - url')).toBeNull();
+  });
+
+  it('stays silent for multi-workspace output with any positive balance', () => {
+    const out = 'Workspace a: $0 remaining\nWorkspace b: $5 remaining';
+    expect(detectAmpCreditsWarning(out)).toBeNull();
+  });
+
+  it('stays silent (fails open) when no balance line is present', () => {
+    expect(detectAmpCreditsWarning('Signed in as someone@example.com')).toBeNull();
+  });
+});
 
 describe('classifyAuthProbeOutput', () => {
   it('returns ok when exit code is 0 and no auth tokens matched', () => {

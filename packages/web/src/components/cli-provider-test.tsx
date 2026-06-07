@@ -198,6 +198,11 @@ function PathResultRow({
               <span className="font-semibold text-neutral-300">auth:</span> {res.authMessage}
             </p>
           )}
+          {res.warning && (
+            <p className="mt-2 rounded-md border border-amber-500/40 bg-amber-950/30 p-2 text-xs text-amber-300">
+              {res.warning}
+            </p>
+          )}
           {res.ok && res.detail && (
             <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-neutral-300">
               {res.detail}
