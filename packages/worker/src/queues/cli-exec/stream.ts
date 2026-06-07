@@ -28,6 +28,7 @@ export function createStreamJsonCollector(
   let malformedLineCount = 0;
   let assistantText = '';
   let lastResultSubtype: string | null = null;
+  let lastResultError: string | null = null;
   let lastRateLimit: {
     status?: string;
     overageStatus?: string;
@@ -59,6 +60,11 @@ export function createStreamJsonCollector(
     // Extract final result
     if (type === 'result') {
       if (typeof subtype === 'string') lastResultSubtype = subtype;
+      // Some CLIs (e.g. amp) put a human-readable failure reason on the result
+      // event's `error` field — surface it instead of the bare subtype.
+      if (typeof event.error === 'string' && event.error.trim()) {
+        lastResultError = event.error.trim();
+      }
       if (subtype === 'success' && typeof event.result === 'string') {
         resultText = event.result;
         return;
@@ -111,7 +117,8 @@ export function createStreamJsonCollector(
       if (resultText !== null) return null;
       if (eventCount === 0) return null;
       if (lastResultSubtype && lastResultSubtype !== 'success') {
-        return `LLM stream ended with result subtype "${lastResultSubtype}"`;
+        const base = `LLM stream ended with result subtype "${lastResultSubtype}"`;
+        return lastResultError ? `${base}: ${lastResultError}` : base;
       }
       if (lastRateLimit?.overageStatus === 'rejected' && lastRateLimit.isUsingOverage) {
         return `LLM blocked by rate limit (${lastRateLimit.overageDisabledReason ?? 'overage rejected'})`;

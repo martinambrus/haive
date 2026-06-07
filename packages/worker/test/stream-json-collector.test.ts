@@ -50,6 +50,22 @@ describe('createStreamJsonCollector.getNoResultReason', () => {
     expect(c.getNoResultReason()).toMatch(/error_max_turns/);
   });
 
+  it("surfaces the result event's error text alongside the subtype (e.g. amp credits)", () => {
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init' },
+      {
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        error: 'Execute mode (amp -x) and the Amp SDK require paid credits.',
+      },
+    ]);
+    const reason = c.getNoResultReason();
+    expect(reason).toMatch(/error_during_execution/);
+    expect(reason).toMatch(/require paid credits/);
+  });
+
   it('flags an overage-rejected rate-limit event while the user is already in overage', () => {
     const c = createStreamJsonCollector();
     feed(c, [
