@@ -54,7 +54,19 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
         'stream-json',
         '--verbose',
       ]),
-      env: this.mergedEnv(provider, opts),
+      env: {
+        // Claude Code caps a single response at 32000 output tokens by default
+        // and hard-fails when a step exceeds it (skill generation emits many
+        // sub-skill bodies in one JSON blob and blows past 32K). Raise to 128000
+        // — onboarding runs Claude Code on Opus (verified: claude-opus-4-8[1m]),
+        // whose 128K output ceiling this matches. It is a ceiling, not a target,
+        // so smaller-output steps are unaffected. NOTE: 128K is Opus-only — if
+        // Claude Code is switched to a 64K model (Sonnet 4.6 / Haiku 4.5) every
+        // request would 400; drop this to 64000 via the provider's envVars then
+        // (it wins because mergedEnv spreads last).
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS: '128000',
+        ...this.mergedEnv(provider, opts),
+      },
       cwd: opts.cwd,
     };
   }
