@@ -669,6 +669,23 @@ function buildPrompt(args: LlmBuildArgs): string {
   const values = args.formValues as { maxSkills?: number; domainHints?: string };
   const maxSkills = clampMaxSkills(values.maxSkills);
   const hints = typeof values.domainHints === 'string' ? values.domainHints.trim() : '';
+  const requiredDomains = detected.requiredDomains ?? [];
+  // When BUSINESS_LOGIC.md yields >=3 capabilities the project is provably
+  // non-trivial, so the prompt demands full coverage and drops the "produce
+  // fewer if small / never pad" hedges that otherwise license the LLM to
+  // under-produce and trip apply()'s rejection floor. minSkills mirrors that
+  // floor (apply() rejects producedCount < 3 when requiredDomains.length >= 3).
+  const hasCapabilityList = requiredDomains.length >= 3;
+  const minSkills = hasCapabilityList ? 3 : 0;
+  const requiredDomainsLead = hasCapabilityList
+    ? `This project has ${requiredDomains.length} confirmed, distinct business capabilities (listed below). ` +
+      `Emit AT LEAST ONE skill for EACH of them — cover all ${requiredDomains.length}. They ARE capability ` +
+      'domains, not documentation chapters; name each skill for the capability and ground it in the relevant ' +
+      'code, not just the KB text. Skip one only if a reserved bundle skill above already covers it.'
+    : 'These are the distinct business capabilities this project exposes. Emit ONE skill for EACH capability ' +
+      'below (one capability = one skill) unless a reserved bundle skill already covers it. These ARE ' +
+      'capability domains (not documentation chapters) — name each skill for the capability and ground it ' +
+      'in the relevant code, not just the KB text.';
 
   const fileTree = detected.__fileTree ?? '(no file tree available)';
   const kbList =
@@ -703,17 +720,22 @@ function buildPrompt(args: LlmBuildArgs): string {
         ].join('\n')
       : '';
   const requiredDomainsSection =
-    detected.requiredDomains.length > 0
+    requiredDomains.length > 0
       ? [
           '## Business capabilities to cover (from BUSINESS_LOGIC.md)',
           '',
-          'These are the distinct business capabilities this project exposes. Emit ONE skill for EACH',
-          'capability below (one capability = one skill) unless a reserved bundle skill already covers it.',
-          'These ARE capability domains (not documentation chapters) — name each skill for the capability',
-          'and ground it in the relevant code, not just the KB text.',
+          requiredDomainsLead,
           '',
-          ...detected.requiredDomains.map((d) => `- ${d}`),
+          ...requiredDomains.map((d) => `- ${d}`),
           '',
+          ...(hasCapabilityList
+            ? [
+                'The orchestrator HARD-REJECTS the result and wastes this entire run if you emit fewer than ' +
+                  `${minSkills} skills, so under-covering these capabilities guarantees failure. Covering all ` +
+                  `${requiredDomains.length} is the goal.`,
+                '',
+              ]
+            : []),
         ].join('\n')
       : '';
   return [
@@ -738,8 +760,10 @@ function buildPrompt(args: LlmBuildArgs): string {
     '  index, security-standards, anything ending in `-skill`, anything matching a',
     '  knowledge-base filename verbatim.',
     '',
-    'Note: KB files like `BUSINESS_LOGIC.md`, `ARCHITECTURE.md` are REFERENCE MATERIAL that you',
-    'CONSULT to understand the project. They are NOT skills. Do not propose a skill per KB file.',
+    'Note: KB files like `BUSINESS_LOGIC.md`, `ARCHITECTURE.md` are REFERENCE MATERIAL you CONSULT to',
+    'understand the project — do not NAME a skill after a KB file (api-reference, architecture) or emit one',
+    'skill per KB file. This is about skill NAMES, not coverage: the business capabilities listed below are',
+    'valid skill domains and MUST still each be covered even though they are sourced from BUSINESS_LOGIC.md.',
     '',
     '## Project context',
     '',
@@ -767,8 +791,9 @@ function buildPrompt(args: LlmBuildArgs): string {
     '   or feature flag often corresponds to a skill domain.',
     '3. Identify CAPABILITY-BASED skill domains. Each domain should be something a future agent',
     '   would need to understand WHEN modifying or extending that part of the code.',
-    `4. Produce between 3 and ${maxSkills} skills. Quality over quantity. If the codebase is small,`,
-    '   produce fewer skills.',
+    hasCapabilityList
+      ? `4. Produce one skill per listed business capability above — at least ${minSkills}, up to ${maxSkills}. Cover every capability; do not stop early. Quality matters, but under-covering the listed capabilities fails the run.`
+      : `4. Produce between 3 and ${maxSkills} skills. Quality over quantity. If the codebase is small, produce fewer skills.`,
     '',
     '## Required structure per skill',
     '',
@@ -857,7 +882,9 @@ function buildPrompt(args: LlmBuildArgs): string {
     '  orchestrator handles all file writes. Calling write_file / edit_file / shell',
     '  `cat > ...` / `mkdir` / `cp` is a hard failure even if the JSON is also valid.',
     '- Do NOT propose generic skills like "general-knowledge", "project-overview", "documentation".',
-    '- If the codebase has fewer than 3 distinct capability domains, emit fewer skills — never pad.',
+    hasCapabilityList
+      ? `- The ${requiredDomains.length} business capabilities listed above are all real — emit a skill for each; never collapse them to save effort. Never pad with generic filler beyond the genuine capability set.`
+      : '- If the codebase has fewer than 3 distinct capability domains, emit fewer skills — never pad.',
   ]
     .filter((line) => line !== '')
     .concat([''])
