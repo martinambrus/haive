@@ -745,21 +745,29 @@ function StepDuration({
   );
 }
 
-// End-of-task summary: active work time (wall-clock minus all steps' idle,
-// including any wait left open by a cancel) and the raw wall-clock time.
-// Renders nothing until the task has ended (completedAt set).
+// End-of-task summary: active work time (the sum of every step's active-work
+// span, so the gaps between steps and idle waits are excluded) alongside the
+// raw wall-clock time. Renders nothing until the task has ended (completedAt set).
 function TaskTotalTime({ task, steps }: { task: Task; steps: TaskStep[] }) {
   if (!task.startedAt || !task.completedAt) return null;
   const startMs = new Date(task.startedAt).getTime();
   const endMs = new Date(task.completedAt).getTime();
   const wallMs = Math.max(0, endMs - startMs);
-  const idleMs = steps.reduce((sum, s) => {
-    const openWait = s.waitingStartedAt
-      ? Math.max(0, endMs - new Date(s.waitingStartedAt).getTime())
-      : 0;
-    return sum + (s.idleMs ?? 0) + openWait;
+  // Work = the sum of every step's active-work span (the same figure
+  // StepDuration shows per step), NOT wall-clock minus idle. Wall clock also
+  // spans the gaps *between* steps — time the task sat idle waiting for the
+  // user to act, or the host slept, with nothing running — which must not count
+  // as work.
+  const workMs = steps.reduce((sum, s) => {
+    if (!s.startedAt) return sum;
+    const stepStart = new Date(s.startedAt).getTime();
+    const stepEnd = s.endedAt ? new Date(s.endedAt).getTime() : endMs;
+    const openWait =
+      !s.endedAt && s.waitingStartedAt
+        ? Math.max(0, endMs - new Date(s.waitingStartedAt).getTime())
+        : 0;
+    return sum + Math.max(0, stepEnd - stepStart - (s.idleMs ?? 0) - openWait);
   }, 0);
-  const workMs = Math.max(0, wallMs - idleMs);
   return (
     <Card className="flex items-center justify-between gap-3 py-3">
       <div className="flex flex-col">
