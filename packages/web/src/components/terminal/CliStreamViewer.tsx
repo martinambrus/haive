@@ -74,6 +74,12 @@ export function CliStreamViewer({
   useEffect(() => {
     if (!mountRef.current) return;
 
+    // Tracks teardown so async callbacks (deferred fit, resize, WS frames) never
+    // touch the terminal after dispose. xterm throws an uncaught
+    // "this._renderer.value is undefined" from its internal render path when a
+    // fit/refresh/write lands on a disposed terminal.
+    let disposed = false;
+
     const term = new XTerm({
       cursorBlink: false,
       disableStdin: true,
@@ -126,8 +132,11 @@ export function CliStreamViewer({
     });
 
     term.open(mountRef.current);
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
+    let fitRaf1 = 0;
+    let fitRaf2 = 0;
+    fitRaf1 = requestAnimationFrame(() => {
+      fitRaf2 = requestAnimationFrame(() => {
+        if (disposed) return;
         try {
           fitAddon.fit();
           term.refresh(0, term.rows - 1);
@@ -138,6 +147,7 @@ export function CliStreamViewer({
     });
 
     const handleResize = () => {
+      if (disposed) return;
       try {
         fitAddon.fit();
         term.refresh(0, term.rows - 1);
@@ -159,13 +169,15 @@ export function CliStreamViewer({
       }
       setHasOutput(true);
       return () => {
+        disposed = true;
+        cancelAnimationFrame(fitRaf1);
+        cancelAnimationFrame(fitRaf2);
         window.removeEventListener('resize', handleResize);
         resizeObserver.disconnect();
         term.dispose();
       };
     }
 
-    let disposed = false;
     const ws = new WebSocket(apiWebSocketUrl(`/cli-stream/${invocationId}`));
     setState('connecting');
 
@@ -174,6 +186,7 @@ export function CliStreamViewer({
     };
 
     ws.onmessage = (ev) => {
+      if (disposed) return;
       let parsed: { type: string; [k: string]: unknown } | null = null;
       try {
         parsed = JSON.parse(typeof ev.data === 'string' ? ev.data : ev.data.toString());
@@ -235,6 +248,8 @@ export function CliStreamViewer({
 
     return () => {
       disposed = true;
+      cancelAnimationFrame(fitRaf1);
+      cancelAnimationFrame(fitRaf2);
       clearInterval(keepalive);
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();

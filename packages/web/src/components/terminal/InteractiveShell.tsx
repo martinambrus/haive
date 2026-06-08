@@ -74,8 +74,12 @@ export function InteractiveShell({
       return true;
     });
     term.open(mountRef.current);
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
+    let disposed = false;
+    let fitRaf1 = 0;
+    let fitRaf2 = 0;
+    fitRaf1 = requestAnimationFrame(() => {
+      fitRaf2 = requestAnimationFrame(() => {
+        if (disposed) return;
         try {
           fitAddon.fit();
           term.refresh(0, term.rows - 1);
@@ -86,7 +90,6 @@ export function InteractiveShell({
       });
     });
 
-    let disposed = false;
     const wsUrl = apiWebSocketUrl(`/terminal-shell/${taskId}/${cliProviderId}`);
     const ws = new WebSocket(wsUrl);
     setState('connecting');
@@ -111,6 +114,7 @@ export function InteractiveShell({
     });
 
     const handleResize = () => {
+      if (disposed) return;
       try {
         fitAddon.fit();
         term.refresh(0, term.rows - 1);
@@ -128,6 +132,7 @@ export function InteractiveShell({
     };
 
     ws.onmessage = (ev) => {
+      if (disposed) return;
       let parsed: { type: string; [k: string]: unknown } | null = null;
       try {
         parsed = JSON.parse(typeof ev.data === 'string' ? ev.data : ev.data.toString());
@@ -186,6 +191,8 @@ export function InteractiveShell({
 
     return () => {
       disposed = true;
+      cancelAnimationFrame(fitRaf1);
+      cancelAnimationFrame(fitRaf2);
       clearInterval(keepalive);
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();

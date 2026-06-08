@@ -227,12 +227,16 @@ export function CliAuthBannerModal({
     });
     term.open(mount);
     termRef.current = term;
+    let disposed = false;
+    let fitRaf1 = 0;
+    let fitRaf2 = 0;
 
     const sendFrame = (frame: unknown) => {
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
     };
     const fitAndResize = () => {
+      if (disposed) return;
       try {
         fitAddon.fit();
         term.refresh(0, term.rows - 1);
@@ -244,12 +248,13 @@ export function CliAuthBannerModal({
     };
     const inputDisposable = term.onData((data) => sendFrame({ type: 'input', data }));
 
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() => {
+    fitRaf1 = requestAnimationFrame(() => {
+      fitRaf2 = requestAnimationFrame(() => {
+        if (disposed) return;
         fitAndResize();
         term.focus();
-      }),
-    );
+      });
+    });
     const ro = new ResizeObserver(() => fitAndResize());
     ro.observe(mount);
     window.addEventListener('resize', fitAndResize);
@@ -257,6 +262,9 @@ export function CliAuthBannerModal({
     const t2 = setTimeout(fitAndResize, 1200);
 
     return () => {
+      disposed = true;
+      cancelAnimationFrame(fitRaf1);
+      cancelAnimationFrame(fitRaf2);
       clearTimeout(t1);
       clearTimeout(t2);
       window.removeEventListener('resize', fitAndResize);
