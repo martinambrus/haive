@@ -10,6 +10,7 @@ import {
   renderTechInventoryTable,
   type TechInventory,
 } from './_tech-inventory.js';
+import { extractFencedJson } from '../_fenced-json.js';
 import { buildFileTree, detectLanguages } from '../../../repo/framework-detect.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -563,9 +564,7 @@ function parseEnrichment(raw: unknown): LlmEnrichment | null {
   } else {
     return null;
   }
-  const fenceRe = /```json\s*([\s\S]*?)```/;
-  const match = fenceRe.exec(text);
-  const body = match?.[1] ?? text;
+  const body = extractFencedJson(text) ?? text;
   try {
     const parsed = JSON.parse(body) as Record<string, unknown>;
     return isValidEnrichment(parsed) ? (parsed as unknown as LlmEnrichment) : null;

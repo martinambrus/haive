@@ -1,4 +1,5 @@
 import type { AgentPersona } from './_agent-loader.js';
+import { extractFencedJson } from '../_fenced-json.js';
 
 export interface AgentSelectorPromptArgs {
   taskTitle: string;
@@ -69,8 +70,7 @@ function extractSelection(raw: unknown): { selected: string[]; rationale: string
 }
 
 function parseJsonFromText(text: string): Record<string, unknown> | null {
-  const fence = /```json\s*([\s\S]*?)```/i.exec(text);
-  const body = fence?.[1] ?? text;
+  const body = extractFencedJson(text) ?? text;
   try {
     const parsed = JSON.parse(body);
     return typeof parsed === 'object' && parsed !== null

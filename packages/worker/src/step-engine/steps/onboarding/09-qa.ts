@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { DetectResult } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
+import { extractFencedJson } from '../_fenced-json.js';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -253,14 +254,13 @@ export function parseQaPrepOutput(raw: unknown): KnowledgeQaPrepApply {
     throw new QaPrepParseError('LLM output is empty or not parseable');
   }
 
-  const fenceRe = /```json\s*([\s\S]*?)```/;
-  const match = fenceRe.exec(text);
-  if (!match || !match[1]) {
+  const body = extractFencedJson(text);
+  if (!body) {
     throw new QaPrepParseError('No ```json fenced block found in LLM output');
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(match[1]);
+    parsed = JSON.parse(body);
   } catch (err) {
     throw new QaPrepParseError(
       `JSON parse error in LLM output: ${err instanceof Error ? err.message : String(err)}`,

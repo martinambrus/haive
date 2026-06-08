@@ -7,6 +7,7 @@ import type {
   StepContext,
   StepDefinition,
 } from '../../step-definition.js';
+import { extractFencedJson } from '../_fenced-json.js';
 import { pathExists } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { loadAgentPersonas, type AgentPersona } from './_agent-loader.js';
@@ -84,8 +85,7 @@ function parseMiningOutput(raw: unknown): MiningJson | null {
   if (!raw) return null;
   let obj: Record<string, unknown> | null = null;
   if (typeof raw === 'string') {
-    const fence = /```json\s*([\s\S]*?)```/i.exec(raw);
-    const body = fence?.[1] ?? raw;
+    const body = extractFencedJson(raw) ?? raw;
     try {
       const parsed = JSON.parse(body);
       if (typeof parsed === 'object' && parsed !== null) obj = parsed as Record<string, unknown>;

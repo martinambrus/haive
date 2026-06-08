@@ -1,5 +1,6 @@
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
+import { extractFencedJson } from '../_fenced-json.js';
 import type { AgentQuestion, KnowledgeQaPrepApply } from './09-qa.js';
 
 /* ------------------------------------------------------------------ */
@@ -107,13 +108,12 @@ export function parseQaSuggestionsOutput(raw: unknown): SuggestionEntry[] {
   }
   let parsed: unknown;
   if (typeof source === 'string') {
-    const fenceRe = /```json\s*([\s\S]*?)```/;
-    const match = fenceRe.exec(source);
-    if (!match || !match[1]) {
+    const body = extractFencedJson(source);
+    if (!body) {
       throw new QaSuggestionsParseError('No ```json fenced block found in LLM output');
     }
     try {
-      parsed = JSON.parse(match[1]);
+      parsed = JSON.parse(body);
     } catch (err) {
       throw new QaSuggestionsParseError(
         `JSON parse error in LLM output: ${err instanceof Error ? err.message : String(err)}`,
