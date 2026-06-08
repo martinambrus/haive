@@ -200,6 +200,11 @@ function bestPriorIteration(previous: StepLoopPassRecord[]): SpecQualityApply | 
   for (const p of previous) {
     const out = p.applyOutput as SpecQualityApply | undefined;
     if (!out || typeof out.score !== 'number' || typeof out.verdict !== 'string') continue;
+    // Stubs are parse-failure placeholders with a fixed neutral score (5), not real
+    // assessments. They must never win the regression guard: a genuine NEEDS_REVISION
+    // can score below 5, and resurrecting the stub over it freezes the loop on the
+    // stub forever (1 info finding, no amendment) until the budget is exhausted.
+    if (out.source === 'stub') continue;
     if (!best || iterationRank(out) > iterationRank(best)) best = out;
   }
   return best;

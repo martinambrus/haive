@@ -327,4 +327,40 @@ describe('phase0b5SpecQualityStep.apply regression guard', () => {
     expect(result.verdict).toBe('APPROVED');
     expect(result.spec).toBe('NEW BODY');
   });
+
+  it('discards stub iterations so a lower-scored real review still wins (regression)', async () => {
+    // The task behind the fenced-JSON fix accumulated stub iterations (parse
+    // failures) at the stub's fixed score 5. Once parsing worked, the real review
+    // scored 4 (NEEDS_REVISION); the guard must not resurrect a stub over it, or the
+    // loop stays frozen on "1 info finding, no amendment" until the budget is spent.
+    const stub = {
+      verdict: 'NEEDS_REVISION' as const,
+      score: 5,
+      findings: [{ dimension: 'general', severity: 'info' as const, comment: 'stub' }],
+      source: 'stub' as const,
+      spec: 'ORIGINAL',
+    };
+    const previousIterations: StepLoopPassRecord[] = Array.from({ length: 3 }, (_, i) => ({
+      iteration: i,
+      llmOutput: null,
+      applyOutput: stub,
+      continueRequested: true,
+    }));
+    const result = (await phase0b5SpecQualityStep.apply(fakeCtx, {
+      detected: { spec: 'ORIGINAL', specSummary: '', specLength: 8, currentBudget: 5 },
+      llmOutput: {
+        verdict: 'NEEDS_REVISION',
+        score: 4,
+        findings: [{ dimension: 'goal_clarity', severity: 'warn', comment: 'real' }],
+        amendedSpec: 'AMENDED',
+      },
+      formValues: {},
+      iteration: 3,
+      previousIterations,
+    } as never)) as { score: number; spec: string; source: string; findings: unknown[] };
+    expect(result.source).toBe('llm');
+    expect(result.score).toBe(4);
+    expect(result.spec).toBe('AMENDED');
+    expect(result.findings).toHaveLength(1);
+  });
 });
