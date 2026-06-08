@@ -82,3 +82,39 @@ export const envTemplateFilesRelations = relations(envTemplateFiles, ({ one }) =
     references: [envTemplates.id],
   }),
 }));
+
+// --- Reusable dependency presets (env-replicate step 1) ------------------
+// A named snapshot of the `01-declare-deps` form inputs, scoped per repository,
+// so the user can prefill the dependency form on future runs instead of
+// re-entering all 12 fields by hand. Distinct from `env_templates` above,
+// which is the per-task environment state (declared deps + dockerfile + build
+// status). Upsert target is (repository_id, name); cascade on repo delete.
+
+export const envDepPresets = pgTable(
+  'env_dep_presets',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    repositoryId: uuid('repository_id')
+      .notNull()
+      .references(() => repositories.id, { onDelete: 'cascade' }),
+    name: varchar('name', { length: 255 }).notNull(),
+    values: jsonb('values').$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [
+    index('env_dep_presets_repository_id_idx').on(table.repositoryId),
+    uniqueIndex('env_dep_presets_repo_name_idx').on(table.repositoryId, table.name),
+  ],
+);
+
+export const envDepPresetsRelations = relations(envDepPresets, ({ one }) => ({
+  user: one(users, { fields: [envDepPresets.userId], references: [users.id] }),
+  repository: one(repositories, {
+    fields: [envDepPresets.repositoryId],
+    references: [repositories.id],
+  }),
+}));

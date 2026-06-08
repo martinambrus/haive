@@ -121,6 +121,17 @@ export interface Repository {
   createdAt: string;
 }
 
+/** A reusable, per-repository snapshot of the env-replicate step-1
+ *  (`01-declare-deps`) form inputs. `values` is the raw FormValues object the
+ *  step's form produced; it re-seeds the dependency form when applied. */
+export interface EnvDepPreset {
+  id: string;
+  name: string;
+  values: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface FilesystemEntry {
   name: string;
   path: string;

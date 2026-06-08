@@ -1,0 +1,89 @@
+import { Hono } from 'hono';
+import { z } from 'zod';
+import { and, desc, eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import { envDepPresetUpsertSchema } from '@haive/shared';
+import { getDb } from '../db.js';
+import { requireAuth } from '../middleware/auth.js';
+import { HttpError, type AppEnv } from '../context.js';
+
+export const envDepPresetRoutes = new Hono<AppEnv>();
+envDepPresetRoutes.use('*', requireAuth);
+
+/** Throw 404 unless the repository exists AND belongs to the requesting user.
+ *  Presets are per-repository, so every read/write must prove repo ownership
+ *  before touching preset rows. */
+async function assertRepoOwned(
+  db: ReturnType<typeof getDb>,
+  repositoryId: string,
+  userId: string,
+): Promise<void> {
+  const repo = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
+    columns: { id: true },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+}
+
+const presetColumns = {
+  id: schema.envDepPresets.id,
+  name: schema.envDepPresets.name,
+  values: schema.envDepPresets.values,
+  createdAt: schema.envDepPresets.createdAt,
+  updatedAt: schema.envDepPresets.updatedAt,
+} as const;
+
+envDepPresetRoutes.get('/', async (c) => {
+  const userId = c.get('userId');
+  const repositoryId = z.string().uuid().parse(c.req.query('repositoryId'));
+  const db = getDb();
+  await assertRepoOwned(db, repositoryId, userId);
+
+  const presets = await db
+    .select(presetColumns)
+    .from(schema.envDepPresets)
+    .where(
+      and(
+        eq(schema.envDepPresets.repositoryId, repositoryId),
+        eq(schema.envDepPresets.userId, userId),
+      ),
+    )
+    .orderBy(desc(schema.envDepPresets.updatedAt));
+
+  return c.json({ presets });
+});
+
+envDepPresetRoutes.post('/', async (c) => {
+  const userId = c.get('userId');
+  const body = envDepPresetUpsertSchema.parse(await c.req.json());
+  const db = getDb();
+  await assertRepoOwned(db, body.repositoryId, userId);
+
+  const inserted = await db
+    .insert(schema.envDepPresets)
+    .values({
+      userId,
+      repositoryId: body.repositoryId,
+      name: body.name,
+      values: body.values,
+    })
+    .onConflictDoUpdate({
+      target: [schema.envDepPresets.repositoryId, schema.envDepPresets.name],
+      set: { values: body.values, updatedAt: new Date() },
+    })
+    .returning(presetColumns);
+
+  return c.json({ preset: inserted[0] }, 201);
+});
+
+envDepPresetRoutes.delete('/:id', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const db = getDb();
+  const result = await db
+    .delete(schema.envDepPresets)
+    .where(and(eq(schema.envDepPresets.id, id), eq(schema.envDepPresets.userId, userId)))
+    .returning({ id: schema.envDepPresets.id });
+  if (result.length === 0) throw new HttpError(404, 'Template not found');
+  return c.json({ ok: true });
+});

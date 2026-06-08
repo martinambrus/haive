@@ -8,6 +8,7 @@ import {
   api,
   type CliProvider,
   type CliProviderName,
+  type EnvDepPreset,
   type StepAction,
   type StepActionResponse,
   type Task,
@@ -833,6 +834,111 @@ function StepCard({
     schema?.fields.some((f) => f.id === 'ragMode') &&
     schema?.fields.some((f) => f.id === 'ollamaUrl');
 
+  // --- Per-repository dependency templates (env-replicate step 1 only) ----
+  // Save the filled-in 01-declare-deps form as a named, repo-scoped template
+  // and re-apply it on later runs to prefill all fields. The save controls
+  // (checkbox + name) are deliberately page-local state — they must never
+  // enter FormValues, which the submit route persists verbatim.
+  const isDeclareDeps = step.stepId === '01-declare-deps';
+  const [presets, setPresets] = useState<EnvDepPreset[]>([]);
+  const [selectedPresetId, setSelectedPresetId] = useState('');
+  const [appliedValues, setAppliedValues] = useState<FormValues | undefined>(undefined);
+  const [formKey, setFormKey] = useState(0);
+  const [saveAsTemplate, setSaveAsTemplate] = useState(false);
+  const [templateName, setTemplateName] = useState('');
+  const [presetError, setPresetError] = useState<string | null>(null);
+  const [deletingTemplate, setDeletingTemplate] = useState(false);
+
+  const refreshPresets = useCallback(async () => {
+    if (!isDeclareDeps || !taskRepositoryId) return;
+    try {
+      const data = await api.get<{ presets: EnvDepPreset[] }>(
+        `/env-dep-presets?repositoryId=${taskRepositoryId}`,
+      );
+      setPresets(data.presets);
+    } catch {
+      setPresets([]);
+    }
+  }, [isDeclareDeps, taskRepositoryId]);
+
+  useEffect(() => {
+    if (isDeclareDeps && showForm && taskRepositoryId) void refreshPresets();
+  }, [isDeclareDeps, showForm, taskRepositoryId, refreshPresets]);
+
+  // Picking a template remounts FormRenderer (via formKey) so its initial
+  // values re-seed from the template; "— none —" reverts to the step's own
+  // detected/saved values.
+  function applyPreset(id: string) {
+    setSelectedPresetId(id);
+    const preset = id ? presets.find((p) => p.id === id) : null;
+    setAppliedValues(preset ? (preset.values as FormValues) : undefined);
+    setFormKey((k) => k + 1);
+  }
+
+  async function deleteSelectedPreset() {
+    if (!selectedPresetId) return;
+    const preset = presets.find((p) => p.id === selectedPresetId);
+    if (!confirm(`Delete template "${preset?.name ?? ''}"?`)) return;
+    setDeletingTemplate(true);
+    try {
+      await api.delete(`/env-dep-presets/${selectedPresetId}`);
+      setSelectedPresetId('');
+      await refreshPresets();
+    } finally {
+      setDeletingTemplate(false);
+    }
+  }
+
+  // Wraps the normal step submit: when "Save as template" is ticked, persist
+  // the template first (aborting on a blank name), then submit the step.
+  async function handleDeclareDepsSubmit(values: FormValues) {
+    if (saveAsTemplate) {
+      const name = templateName.trim();
+      if (!name) {
+        setPresetError('Template name is required');
+        return;
+      }
+      if (!taskRepositoryId) {
+        setPresetError('No repository associated with this task');
+        return;
+      }
+      try {
+        await api.post('/env-dep-presets', { repositoryId: taskRepositoryId, name, values });
+        await refreshPresets();
+      } catch (err) {
+        setPresetError((err as Error).message ?? 'Failed to save template');
+        return;
+      }
+    }
+    setPresetError(null);
+    await onSubmit(values);
+  }
+
+  const renderAfterFieldFn = (fieldId: string, values: FormValues): React.ReactNode => {
+    if (hasConnectionFields) {
+      if (fieldId === 'ragConnectionString') return <PostgresTestButton formValues={values} />;
+      if (fieldId === 'embeddingModel') return <OllamaTestButton formValues={values} />;
+    }
+    if (isDeclareDeps && fieldId === 'extraPackages') {
+      return (
+        <SaveAsTemplateControls
+          checked={saveAsTemplate}
+          onToggle={(v) => {
+            setSaveAsTemplate(v);
+            setPresetError(null);
+          }}
+          name={templateName}
+          onNameChange={(v) => {
+            setTemplateName(v);
+            setPresetError(null);
+          }}
+          error={presetError}
+        />
+      );
+    }
+    return null;
+  };
+
   return (
     <Card className="flex flex-col gap-3">
       {showCliPicker && (
@@ -959,26 +1065,58 @@ function StepCard({
         </div>
       ) : (
         showForm && (
-          <div className="border-t border-neutral-800 pt-4">
+          <div className="flex flex-col gap-4 border-t border-neutral-800 pt-4">
+            {isDeclareDeps && taskRepositoryId && (
+              <div className="flex flex-col gap-1.5">
+                <label
+                  htmlFor={`tpl-${step.stepId}`}
+                  className="text-sm font-medium text-neutral-200"
+                >
+                  Apply saved template
+                </label>
+                <div className="flex items-center gap-2">
+                  <select
+                    id={`tpl-${step.stepId}`}
+                    value={selectedPresetId}
+                    onChange={(e) => applyPreset(e.target.value)}
+                    className="h-10 flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                  >
+                    <option value="">— none —</option>
+                    {presets.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedPresetId && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={deletingTemplate}
+                      onClick={() => void deleteSelectedPreset()}
+                    >
+                      {deletingTemplate ? 'Deleting…' : 'Delete'}
+                    </Button>
+                  )}
+                </div>
+                {presets.length === 0 && (
+                  <p className="text-xs text-neutral-500">
+                    No saved templates for this repository yet.
+                  </p>
+                )}
+              </div>
+            )}
             <FormRenderer
+              key={isDeclareDeps ? `${step.stepId}-${formKey}` : undefined}
               schema={schema}
-              initialValues={initialValues}
+              initialValues={isDeclareDeps ? (appliedValues ?? initialValues) : initialValues}
               submitting={submitting}
               errorMessage={submitError}
-              onSubmit={onSubmit}
+              onSubmit={isDeclareDeps ? handleDeclareDepsSubmit : onSubmit}
               repositoryId={taskRepositoryId}
               renderAfterField={
-                hasConnectionFields
-                  ? (fieldId, values) => {
-                      if (fieldId === 'ragConnectionString') {
-                        return <PostgresTestButton formValues={values} />;
-                      }
-                      if (fieldId === 'embeddingModel') {
-                        return <OllamaTestButton formValues={values} />;
-                      }
-                      return null;
-                    }
-                  : undefined
+                hasConnectionFields || isDeclareDeps ? renderAfterFieldFn : undefined
               }
             />
           </div>
@@ -1024,5 +1162,43 @@ function StepCard({
         />
       )}
     </Card>
+  );
+}
+
+// "Save as template" controls injected next to the Save dependencies submit
+// button (env-replicate step 1). Ticking the checkbox reveals a required name
+// input; the existing submit then also saves the template. State lives in the
+// parent StepCard so it never becomes part of the submitted FormValues.
+function SaveAsTemplateControls({
+  checked,
+  onToggle,
+  name,
+  onNameChange,
+  error,
+}: {
+  checked: boolean;
+  onToggle: (value: boolean) => void;
+  name: string;
+  onNameChange: (value: string) => void;
+  error: string | null;
+}) {
+  return (
+    <div className="mt-3 flex flex-col gap-2 border-t border-neutral-800 pt-3">
+      <label className="flex items-center gap-2 text-sm text-neutral-200">
+        <input type="checkbox" checked={checked} onChange={(e) => onToggle(e.target.checked)} />
+        <span>Save as template</span>
+      </label>
+      {checked && (
+        <div className="flex flex-col gap-1 pl-6">
+          <Input
+            value={name}
+            placeholder="Template name"
+            maxLength={255}
+            onChange={(e) => onNameChange(e.target.value)}
+          />
+          {error && <p className="text-xs text-red-400">{error}</p>}
+        </div>
+      )}
+    </div>
   );
 }

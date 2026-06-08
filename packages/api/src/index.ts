@@ -11,6 +11,7 @@ import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
 import { bundleRoutes } from './routes/bundles.js';
 import { cliProviderRoutes } from './routes/cli-providers.js';
+import { envDepPresetRoutes } from './routes/env-dep-presets.js';
 import { repoRoutes } from './routes/repos.js';
 import { repoCredentialsRoutes } from './routes/repo-credentials.js';
 import { githubOauthRoutes } from './routes/github-oauth.js';
@@ -48,6 +49,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/auth', authRoutes);
   app.route('/bundles', bundleRoutes);
   app.route('/cli-providers', cliProviderRoutes);
+  app.route('/env-dep-presets', envDepPresetRoutes);
   app.route('/repos', repoRoutes);
   app.route('/repo-credentials', repoCredentialsRoutes);
   app.route('/github-oauth', githubOauthRoutes);
