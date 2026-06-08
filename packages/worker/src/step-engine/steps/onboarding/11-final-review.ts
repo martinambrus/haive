@@ -163,11 +163,20 @@ function defaultReviewMarkdown(detected: FinalReviewDetect, notes: string): stri
   return lines.join('\n');
 }
 
-function llmReviewMarkdown(raw: unknown, fallback: string): string {
+function stripOuterFence(raw: string): string {
+  // Unwrap only when the ENTIRE payload is a single ```/```markdown/```md fenced
+  // block. The old non-greedy inner match truncated a review that legitimately
+  // contains its own ``` code samples at the first inner fence; stripping just the
+  // outer wrapper leaves inner code blocks intact.
+  const trimmed = raw.trim();
+  const open = /^```(?:markdown|md)?[ \t]*\n/.exec(trimmed);
+  if (!open || !trimmed.endsWith('```')) return trimmed;
+  return trimmed.slice(open[0].length, -3).trim();
+}
+
+export function llmReviewMarkdown(raw: unknown, fallback: string): string {
   if (typeof raw !== 'string' || raw.trim().length === 0) return fallback;
-  const fenceMatch = /```(?:markdown|md)?\s*([\s\S]*?)```/.exec(raw);
-  const inner = fenceMatch?.[1];
-  const body = (inner ?? raw).trim();
+  const body = stripOuterFence(raw);
   if (body.length === 0) return fallback;
   if (body.startsWith('#')) return `${body}\n`;
   return `# Onboarding final review\n\n${body}\n`;
