@@ -6,6 +6,7 @@ import { schema } from '@haive/database';
 import { agentSpecSchema, type DetectResult, type FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import type { AgentColor, AgentSpec } from './_agent-templates.js';
+import { extractFencedJson } from '../_fenced-json.js';
 import {
   countFilesMatching,
   listFilesMatching,
@@ -667,7 +668,7 @@ export function parseLlmAgentOutputWithDiagnostic(raw: string): {
   const greedy = raw.match(/```(?:json)?\s*([\s\S]*)```/);
   let lastError: AgentParseDiagnostic | null = null as AgentParseDiagnostic | null;
 
-  for (const candidate of [greedy?.[1], lazy?.[1]]) {
+  for (const candidate of [extractFencedJson(raw), greedy?.[1], lazy?.[1]]) {
     if (!candidate) continue;
     try {
       const result = parseAgentBody(candidate);
@@ -687,7 +688,7 @@ export function parseLlmAgentOutputWithDiagnostic(raw: string): {
   // Strict failed on every layout — jsonrepair as salvage. Try greedy first
   // (full block), fall back to lazy. Use strict shape-rejection so we don't
   // accept jsonrepair's coercion of garbage tokens into stringy fields.
-  for (const candidate of [greedy?.[1], lazy?.[1]]) {
+  for (const candidate of [extractFencedJson(raw), greedy?.[1], lazy?.[1]]) {
     if (!candidate) continue;
     try {
       const repaired = jsonrepair(candidate);
