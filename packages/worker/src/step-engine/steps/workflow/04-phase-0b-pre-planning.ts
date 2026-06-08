@@ -4,6 +4,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
+import { extractFencedJson } from '../_fenced-json.js';
 
 interface KbReference {
   id: string;
@@ -71,8 +72,7 @@ export function parsePrePlanningOutput(raw: unknown): {
   } else {
     return null;
   }
-  const fenceMatch = /```json\s*([\s\S]*?)```/.exec(text);
-  const body = fenceMatch?.[1];
+  const body = extractFencedJson(text);
   if (!body) return null;
   try {
     const parsed = JSON.parse(body);

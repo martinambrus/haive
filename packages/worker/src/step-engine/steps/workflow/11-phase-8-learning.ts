@@ -4,6 +4,7 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
+import { extractFencedJson } from '../_fenced-json.js';
 
 interface LearningDetect {
   taskTitle: string;
@@ -65,8 +66,7 @@ export function parseLearningOutput(raw: unknown): LearningEntry[] | null {
   } else {
     return null;
   }
-  const fenceMatch = /```json\s*([\s\S]*?)```/.exec(text);
-  const body = fenceMatch?.[1];
+  const body = extractFencedJson(text);
   if (!body) return null;
   try {
     const parsed = JSON.parse(body);

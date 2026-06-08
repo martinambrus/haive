@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { FormField, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from './_helpers.js';
+import { extractFencedJson } from '../_fenced-json.js';
 import type { KbFileSummary, KnowledgeQaPrepApply } from './09-qa.js';
 import type { EnrichedAgentQuestion, KnowledgeQaSuggestionsApply } from './09_1-qa-suggestions.js';
 
@@ -288,13 +289,12 @@ export function parseQaResolveOutput(raw: unknown): ParsedResolve {
   }
   let parsed: unknown;
   if (typeof source === 'string') {
-    const fenceRe = /```json\s*([\s\S]*?)```/;
-    const match = fenceRe.exec(source);
-    if (!match || !match[1]) {
+    const body = extractFencedJson(source);
+    if (!body) {
       throw new QaResolveParseError('No ```json fenced block found in LLM output');
     }
     try {
-      parsed = JSON.parse(match[1]);
+      parsed = JSON.parse(body);
     } catch (err) {
       throw new QaResolveParseError(
         `JSON parse error in LLM output: ${err instanceof Error ? err.message : String(err)}`,
