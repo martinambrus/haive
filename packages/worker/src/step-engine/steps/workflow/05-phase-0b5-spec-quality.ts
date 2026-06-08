@@ -3,6 +3,7 @@ import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { extractFencedJson } from '../_fenced-json.js';
 
 interface SpecQualityDetect {
   specSummary: string;
@@ -93,8 +94,7 @@ export function parseSpecQualityOutput(raw: unknown): SpecQualityParseResult | n
   } else {
     return null;
   }
-  const fenceMatch = /```json\s*([\s\S]*?)```/.exec(text);
-  const body = fenceMatch?.[1];
+  const body = extractFencedJson(text);
   if (!body) return null;
   try {
     const parsed = JSON.parse(body);

@@ -6,6 +6,7 @@ import type { CliProviderName, DetectResult, FormSchema } from '@haive/shared';
 import { getCliProviderMetadata, skillEntrySchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
+import { extractFencedJsonObjects } from '../_fenced-json.js';
 import type { KbFileSummary } from './09-qa.js';
 
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
@@ -323,7 +324,7 @@ export function parseSkillEntries(raw: unknown): SkillEntry[] {
     // (e.g. ```javascript) can trip up the non-greedy outer fence regex.
     const scanTargets = bodies.includes(source) ? bodies : [...bodies, source];
     for (const body of scanTargets) {
-      for (const candidate of extractBalancedObjects(body)) {
+      for (const candidate of extractFencedJsonObjects(body)) {
         try {
           const parsed = JSON.parse(candidate);
           if (isValidSkill(parsed)) {
@@ -344,47 +345,6 @@ export function parseSkillEntries(raw: unknown): SkillEntry[] {
     }
   }
   return dedupeById(out);
-}
-
-function extractBalancedObjects(source: string): string[] {
-  const out: string[] = [];
-  const candidateRe = /\{\s*"/g;
-  let cursor = 0;
-  while (cursor < source.length) {
-    candidateRe.lastIndex = cursor;
-    const m = candidateRe.exec(source);
-    if (!m) break;
-    const end = findBalancedObjectEnd(source, m.index);
-    if (end < 0) break;
-    out.push(source.slice(m.index, end + 1));
-    cursor = end + 1;
-  }
-  return out;
-}
-
-function findBalancedObjectEnd(source: string, openIdx: number): number {
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  for (let i = openIdx; i < source.length; i++) {
-    const c = source[i];
-    if (escape) {
-      escape = false;
-      continue;
-    }
-    if (inString) {
-      if (c === '\\') escape = true;
-      else if (c === '"') inString = false;
-      continue;
-    }
-    if (c === '"') inString = true;
-    else if (c === '{') depth++;
-    else if (c === '}') {
-      depth--;
-      if (depth === 0) return i;
-    }
-  }
-  return -1;
 }
 
 function dedupeById(entries: SkillEntry[]): SkillEntry[] {

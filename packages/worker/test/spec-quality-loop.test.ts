@@ -57,6 +57,40 @@ describe('parseSpecQualityOutput', () => {
     expect(result?.amendedSpec).toBe('## Goal\nfoo\n## Acceptance criteria\n- bar\n');
   });
 
+  it('parses JSON whose amendedSpec contains nested ``` code fences (regression)', () => {
+    // Reproduces the loop trap: the reviewer returns the full revised spec in
+    // amendedSpec, which itself is markdown with ``` code fences. A non-greedy
+    // /```json([\s\S]*?)```/ stopped at the first inner fence and truncated the
+    // JSON, so every pass fell to the stub (NEEDS_REVISION) and looped to budget.
+    const amended = [
+      '## Config',
+      '```yaml',
+      'key: value',
+      '```',
+      '```php',
+      '<?php echo 1;',
+      '```',
+    ].join('\n');
+    const raw = [
+      'Now I have enough data. Let me compile the verdict.',
+      '```json',
+      JSON.stringify({
+        verdict: 'NEEDS_REVISION',
+        score: 3,
+        findings: [{ dimension: 'goal_clarity', severity: 'warn', comment: 'tighten' }],
+        amendedSpec: amended,
+      }),
+      '```',
+      'trailing prose with a stray ``` fence',
+    ].join('\n');
+    const result = parseSpecQualityOutput(raw);
+    expect(result).not.toBeNull();
+    expect(result?.verdict).toBe('NEEDS_REVISION');
+    expect(result?.score).toBe(3);
+    expect(result?.findings).toHaveLength(1);
+    expect(result?.amendedSpec).toBe(amended);
+  });
+
   it('clamps score to [0, 10] and rounds non-integer values', () => {
     const high = parseSpecQualityOutput('```json\n{"score": 99.9, "findings": []}\n```');
     expect(high?.score).toBe(10);
