@@ -100,7 +100,31 @@ async function main(): Promise<void> {
           stepId: 'last-step',
           stepIndex: 2,
           title: 'Last step',
-          status: 'pending',
+          // A downstream loop step that already ran. Retrying an upstream step
+          // must clear its loop counter/iterations, not carry them forward.
+          status: 'done',
+          iterationCount: 3,
+          iterations: [
+            {
+              iteration: 0,
+              llmOutput: null,
+              applyOutput: { source: 'stub' },
+              continueRequested: true,
+            },
+            {
+              iteration: 1,
+              llmOutput: null,
+              applyOutput: { source: 'stub' },
+              continueRequested: true,
+            },
+            {
+              iteration: 2,
+              llmOutput: null,
+              applyOutput: { source: 'stub' },
+              continueRequested: true,
+            },
+          ],
+          endedAt: now,
         },
       ])
       .returning();
@@ -136,6 +160,24 @@ async function main(): Promise<void> {
       throw new Error(`expected currentStepId=failing-step, got ${taskAfterRetry.currentStepId}`);
     }
 
+    // Retrying an upstream step must reset downstream loop state, not carry it
+    // forward. last-step ran 3 loop passes; after the cascade it must be a clean
+    // pending step (iterationCount 0, empty iterations) so its loop starts fresh.
+    const lastAfterRetry = await db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, lastStep.id),
+    });
+    if (lastAfterRetry?.status !== 'pending') {
+      throw new Error(`expected downstream reset to pending, got ${lastAfterRetry?.status}`);
+    }
+    if (lastAfterRetry.iterationCount !== 0) {
+      throw new Error(`expected downstream iterationCount 0, got ${lastAfterRetry.iterationCount}`);
+    }
+    if (lastAfterRetry.iterations.length !== 0) {
+      throw new Error(
+        `expected downstream iterations cleared, got ${lastAfterRetry.iterations.length}`,
+      );
+    }
+
     // 2. Mark failing-step failed again, then skip it
     await db
       .update(schema.taskSteps)
@@ -168,13 +210,15 @@ async function main(): Promise<void> {
       throw new Error(`expected currentStepId=middle-step, got ${taskAfterSkip?.currentStepId}`);
     }
 
-    // 3. Retry on a non-failed step is rejected
-    const noRetry = await app.request(`/tasks/${task.id}/steps/middle-step/action`, {
+    // 3. Retry is allowed on any status by design (see steps.ts: "Any status is
+    //    retryable"). Retrying a pending step is a no-op-shaped reset back to
+    //    pending, not a 409.
+    const retryPending = await app.request(`/tasks/${task.id}/steps/middle-step/action`, {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'retry' }),
     });
-    assertStatus('POST /retry on pending', noRetry.status, 409);
+    assertStatus('POST /retry on pending', retryPending.status, 200);
 
     // 4. Unknown action rejected at schema level
     const badAction = await app.request(`/tasks/${task.id}/steps/middle-step/action`, {

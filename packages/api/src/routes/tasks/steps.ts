@@ -176,6 +176,12 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           formSchema: null,
           formValues: null,
           output: null,
+          // Loop state must reset too. Leaving a stale iterationCount/iterations
+          // makes a retried loop step (e.g. spec quality) resume at the old count —
+          // past its budget — and carry the prior passes forward instead of starting
+          // a clean loop.
+          iterations: [],
+          iterationCount: 0,
           statusMessage: null,
           errorMessage: null,
           errorHint: null,
