@@ -157,6 +157,11 @@ export const taskSteps = pgTable(
     /** Timestamp the current idle period began; set while the step is in
      *  waiting_form, cleared and folded into idle_ms on resume. */
     waitingStartedAt: timestamp('waiting_started_at'),
+    /** Focused-and-visible time (ms) the user actively spent on this step while
+     *  it waited for input (waiting_form). The active-viewing subset of idle_ms,
+     *  measured client-side and posted in increments; pauses while the agent
+     *  works. Lets the UI report effort = active work + user active time. */
+    userActiveMs: integer('user_active_ms').notNull().default(0),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },

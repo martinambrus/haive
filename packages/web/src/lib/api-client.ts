@@ -93,6 +93,21 @@ export const api = {
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
 };
 
+/** Post an increment of a step's user-active time. Uses `keepalive` so the
+ *  final flush survives a tab close / navigation, and bypasses the `request`
+ *  wrapper (no 401-refresh/throw): this is best-effort telemetry, so failures
+ *  are swallowed rather than surfaced. */
+export function postUserActive(taskId: string, stepId: string, deltaMs: number): void {
+  if (deltaMs <= 0) return;
+  void fetch(`${API_BASE}/tasks/${taskId}/steps/${stepId}/user-active`, {
+    method: 'POST',
+    credentials: 'include',
+    keepalive: true,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deltaMs }),
+  }).catch(() => {});
+}
+
 export interface User {
   id: string;
   email: string;
@@ -383,6 +398,10 @@ export interface TaskStep {
   /** Start of the current open idle period while the step is waiting for
    *  input (waiting_form); null otherwise. */
   waitingStartedAt: string | null;
+  /** Focused-and-visible time (ms) the user actively spent on this step while
+   *  it waited for input — the active-viewing subset of idleMs, measured in the
+   *  browser and posted in increments. Pauses while the agent works. */
+  userActiveMs: number;
 }
 
 export type StepErrorHint = {

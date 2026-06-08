@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormSchema } from '@haive/shared';
 import {
   api,
+  postUserActive,
   type CliProvider,
   type CliProviderName,
   type EnvDepPreset,
@@ -203,6 +204,15 @@ export default function TaskDetailPage() {
     const fallback = providers.find((p) => p.enabled)?.id ?? providers[0]?.id ?? null;
     if (fallback) setTerminalCliProviderId(fallback);
   }, [providers, task?.cliProviderId, terminalCliProviderId]);
+
+  // The single step (if any) currently blocked on user input. Its focused-and-
+  // visible time is tracked as "user active time"; everything else pauses.
+  const activeWaitingStep = steps.find((s) => s.status === 'waiting_form') ?? null;
+  const userActive = useUserActiveTimer(
+    id,
+    activeWaitingStep?.stepId ?? null,
+    activeWaitingStep?.userActiveMs ?? 0,
+  );
 
   async function submitStep(step: TaskStep, values: FormValues) {
     setSubmitting(step.stepId);
@@ -474,6 +484,9 @@ export default function TaskDetailPage() {
                 taskId={task.id}
                 taskStatus={task.status}
                 taskRepositoryId={task.repositoryId}
+                userActiveDisplayMs={
+                  userActive.activeStepId === step.stepId ? userActive.displayMs : step.userActiveMs
+                }
                 submitting={submitting === step.stepId}
                 submitError={submitting === step.stepId ? submitError : null}
                 onSubmit={(values) => submitStep(step, values)}
@@ -651,6 +664,9 @@ interface StepCardProps {
   taskId: string;
   taskStatus: TaskStatus;
   taskRepositoryId: string | null;
+  /** Live display total of this step's user-active time (committed + pending
+   *  for the active step; the plain server value for the rest). */
+  userActiveDisplayMs: number;
   submitting: boolean;
   submitError: string | null;
   onSubmit: (values: FormValues) => Promise<void>;
@@ -692,6 +708,106 @@ function formatDuration(ms: number): string {
   if (minutes < 60) return `${minutes}m ${seconds}s`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
+}
+
+// "User active time": the time the user actively spends on a step while it
+// waits for input (waiting_form) AND the tab is visible AND the window is
+// focused. It is the focused subset of idle time and pauses whenever the agent
+// works (we only count while a step is waiting_form). The browser is the only
+// place that knows focus/visibility, so we measure locally and post increments
+// to the server (postUserActive). Returns the active step id and a live display
+// total for it. `baseMs` is that step's server-side total, read once at
+// activation; `committed + pending` is then driven locally so flushes don't make
+// the live timer jump backwards.
+function useUserActiveTimer(
+  taskId: string,
+  activeWaitingStepId: string | null,
+  baseMs: number,
+): { activeStepId: string | null; displayMs: number } {
+  const [pendingMs, setPendingMs] = useState(0);
+  const committedRef = useRef(baseMs); // server total we've locally accounted for
+  const pendingRef = useRef(0); // measured, not yet flushed
+  const lastTickRef = useRef(Date.now());
+  const lastFlushRef = useRef(Date.now());
+  const activeStepRef = useRef<string | null>(activeWaitingStepId);
+  const baseRef = useRef(baseMs);
+  baseRef.current = baseMs; // latest; consumed only at the next activation
+
+  const flush = useCallback(() => {
+    const stepId = activeStepRef.current;
+    const ms = Math.round(pendingRef.current);
+    if (stepId && ms > 0) {
+      pendingRef.current = 0;
+      committedRef.current += ms; // account locally so the display doesn't dip
+      setPendingMs(0); // keep state in lock-step with pendingRef (no double count)
+      lastFlushRef.current = Date.now();
+      postUserActive(taskId, stepId, ms);
+    }
+  }, [taskId]);
+
+  // Activation: when the waiting step changes, flush the prior step's pending,
+  // then seed the committed total from the new step's server value.
+  useEffect(() => {
+    if (activeStepRef.current !== activeWaitingStepId) {
+      flush();
+      activeStepRef.current = activeWaitingStepId;
+      committedRef.current = baseRef.current;
+      pendingRef.current = 0;
+      setPendingMs(0);
+      lastTickRef.current = Date.now();
+    }
+  }, [activeWaitingStepId, flush]);
+
+  useEffect(() => {
+    const counting = () =>
+      !!activeStepRef.current && document.visibilityState === 'visible' && document.hasFocus();
+
+    const sample = () => {
+      const now = Date.now();
+      const elapsed = now - lastTickRef.current;
+      lastTickRef.current = now;
+      // Drop large gaps (throttled background tab, machine asleep) — not active.
+      if (counting() && elapsed > 0 && elapsed < 5000) {
+        pendingRef.current += elapsed;
+        setPendingMs(pendingRef.current);
+      }
+    };
+
+    const tick = () => {
+      sample();
+      // Safety flush so a crash loses at most ~60s; ordinary stops flush sooner.
+      if (Date.now() - lastFlushRef.current >= 60_000) flush();
+    };
+    const onVisibility = () => {
+      sample();
+      if (document.visibilityState === 'hidden') flush();
+    };
+    const onBlur = () => {
+      sample();
+      flush();
+    };
+    // Returning focus must not retro-count the away gap.
+    const onFocus = () => {
+      lastTickRef.current = Date.now();
+    };
+
+    const interval = setInterval(tick, 1000);
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('focus', onFocus);
+      flush();
+    };
+  }, [flush]);
+
+  return {
+    activeStepId: activeWaitingStepId,
+    displayMs: committedRef.current + pendingMs,
+  };
 }
 
 // Per-step ACTIVE-work timer: wall-clock since start minus idle (time spent
@@ -746,6 +862,21 @@ function StepDuration({
   );
 }
 
+// Per-step "user active time": the time you actively spent on this step (tab
+// visible + window focused) while it waited for input. Hidden when zero so it
+// only appears on steps that actually gated on you.
+function UserActiveDuration({ ms }: { ms: number }) {
+  if (ms < 1000) return null;
+  return (
+    <span
+      className="font-mono text-xs text-emerald-300"
+      title="Your active time on this step (page focused while it waited for input)"
+    >
+      user {formatDuration(ms)}
+    </span>
+  );
+}
+
 // End-of-task summary: active work time (the sum of every step's active-work
 // span, so the gaps between steps and idle waits are excluded) alongside the
 // raw wall-clock time. Renders nothing until the task has ended (completedAt set).
@@ -769,6 +900,11 @@ function TaskTotalTime({ task, steps }: { task: Task; steps: TaskStep[] }) {
         : 0;
     return sum + Math.max(0, stepEnd - stepStart - (s.idleMs ?? 0) - openWait);
   }, 0);
+  // User = time you actively spent at gates (focused while a step waited for
+  // input). Effort = agent work + your active time — the real task effort,
+  // which agent-only "work" undercounts.
+  const userMs = steps.reduce((sum, s) => sum + (s.userActiveMs ?? 0), 0);
+  const effortMs = workMs + userMs;
   return (
     <Card className="flex items-center justify-between gap-3 py-3">
       <div className="flex flex-col">
@@ -784,6 +920,21 @@ function TaskTotalTime({ task, steps }: { task: Task; steps: TaskStep[] }) {
           <span className="text-[10px] uppercase tracking-wider text-neutral-500">work</span>
         </div>
         <div className="flex flex-col items-end">
+          <span className="font-mono text-lg text-emerald-300">{formatDuration(userMs)}</span>
+          <span className="text-[10px] uppercase tracking-wider text-neutral-500">user</span>
+        </div>
+        <div className="flex flex-col items-end">
+          <span className="font-mono text-lg font-semibold text-neutral-50">
+            {formatDuration(effortMs)}
+          </span>
+          <span
+            className="text-[10px] uppercase tracking-wider text-neutral-400"
+            title="Agent work + your active time = real task effort"
+          >
+            effort
+          </span>
+        </div>
+        <div className="flex flex-col items-end">
           <span className="font-mono text-lg text-neutral-100">{formatDuration(wallMs)}</span>
           <span className="text-[10px] uppercase tracking-wider text-neutral-500">wall clock</span>
         </div>
@@ -797,6 +948,7 @@ function StepCard({
   taskId,
   taskStatus,
   taskRepositoryId,
+  userActiveDisplayMs,
   submitting,
   submitError,
   onSubmit,
@@ -979,6 +1131,7 @@ function StepCard({
             waitingStartedAt={step.waitingStartedAt}
             status={step.status}
           />
+          <UserActiveDuration ms={userActiveDisplayMs} />
           {step.iterationCount > 0 && (
             <span
               className="rounded border border-indigo-700 bg-indigo-950/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-indigo-300"

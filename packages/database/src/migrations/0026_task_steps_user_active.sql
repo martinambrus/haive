@@ -1,0 +1,12 @@
+-- Per-step "user active time": the focused-and-visible subset of idle_ms — time
+-- the user actively spent on a step while it waited for input (waiting_form),
+-- measured client-side (only the browser knows tab visibility / window focus)
+-- and posted in increments. Pauses while the agent works. Lets the UI report
+-- effort = active work + user active time, rather than agent time alone.
+--
+-- Deploy note: the apply path is `drizzle-kit push --force` from the schema
+-- (db-migrate one-shot); this file is the idempotent parity/rollback record.
+--
+-- Rollback:
+--   ALTER TABLE "task_steps" DROP COLUMN "user_active_ms";
+ALTER TABLE "task_steps" ADD COLUMN IF NOT EXISTS "user_active_ms" integer NOT NULL DEFAULT 0;

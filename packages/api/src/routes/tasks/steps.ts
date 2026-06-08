@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
-import { and, asc, desc, eq, gt, inArray, isNull } from 'drizzle-orm';
+import { z } from 'zod';
+import { and, asc, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   logger,
@@ -40,6 +41,41 @@ stepRoutes.get('/:id/steps', async (c) => {
   const withSkip = await enrichStepsWithSkipFlag(db, id, enriched);
   const steps = await enrichStepsWithCliInvocationCount(db, id, withSkip);
   return c.json({ steps });
+});
+
+// Increment a step's user-active time. The browser measures the focused-and-
+// visible time the user spends while the step waits for input (waiting_form)
+// and posts it here in small increments. deltaMs is clamped per request to
+// bound clock jumps / abuse (the client flushes roughly every 10s). No status
+// guard: a flush can legitimately land just after the step leaves waiting_form.
+const userActiveRequestSchema = z.object({
+  deltaMs: z.number().int().min(0).max(60_000),
+});
+
+stepRoutes.post('/:id/steps/:stepId/user-active', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const stepId = c.req.param('stepId');
+  const { deltaMs } = userActiveRequestSchema.parse(await c.req.json());
+  const db = getDb();
+
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
+    columns: { id: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+
+  if (deltaMs > 0) {
+    await db
+      .update(schema.taskSteps)
+      .set({
+        userActiveMs: sql`${schema.taskSteps.userActiveMs} + ${deltaMs}`,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.stepId, stepId)));
+  }
+
+  return c.json({ ok: true });
 });
 
 stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
@@ -189,6 +225,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           endedAt: null,
           idleMs: 0,
           waitingStartedAt: null,
+          userActiveMs: 0,
           updatedAt: now,
         })
         .where(inArray(schema.taskSteps.id, allStepIds));
@@ -429,6 +466,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
         errorMessage: null,
         idleMs: 0,
         waitingStartedAt: null,
+        userActiveMs: 0,
         updatedAt: new Date(),
       })
       .where(eq(schema.taskSteps.id, step.id));
