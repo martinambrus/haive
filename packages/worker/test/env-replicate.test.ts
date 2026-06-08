@@ -3,7 +3,10 @@ import path from 'node:path';
 import os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { scanRepoForDeps } from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
-import { renderDockerfile } from '../src/step-engine/steps/env-replicate/02-generate-dockerfile.js';
+import {
+  dockerfileTargetsUnbuildablePhp,
+  renderDockerfile,
+} from '../src/step-engine/steps/env-replicate/02-generate-dockerfile.js';
 
 let tmpRoot: string;
 
@@ -357,5 +360,74 @@ describe('renderDockerfile', () => {
     });
     expect(out).toContain('vim');
     expect(out).toContain('htop');
+  });
+
+  it('bumps sub-5.6 PHP to 5.6 and warns on the ddev base (the original php5.5 build failure)', () => {
+    const out = renderDockerfile('ddev/ddev-webserver:v1.25.2', {
+      runtimes: ['php'],
+      versions: { php: '5.5' },
+    });
+    // The apt package that could never resolve must be gone...
+    expect(out).not.toContain('php5.5-cli');
+    expect(out).not.toContain('php5.5-');
+    // ...replaced by the installable 5.6 floor...
+    expect(out).toContain('# PHP 5.6');
+    expect(out).toContain('php5.6-cli');
+    expect(out).toContain('php5.6-mbstring');
+    // ...with a visible warning naming the requested version and a legacy escape hatch.
+    expect(out).toContain('# WARNING: PHP 5.5 is end-of-life');
+    expect(out).toContain('legacy PHP image (e.g. FROM php:5.5-cli)');
+  });
+
+  it('bumps sub-5.6 PHP to 5.6 and adds the Ondrej PPA on the ubuntu base', () => {
+    const out = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['php'],
+      versions: { php: '5.4' },
+    });
+    expect(out).not.toContain('php5.4-cli');
+    expect(out).toContain('# WARNING: PHP 5.4 is end-of-life');
+    expect(out).toContain('php5.6-cli');
+    expect(out).toContain('add-apt-repository -y ppa:ondrej/php');
+  });
+
+  it('leaves PHP 5.6 and above unchanged with no warning', () => {
+    const out = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['php'],
+      versions: { php: '5.6' },
+    });
+    expect(out).toContain('php5.6-cli');
+    expect(out).not.toContain('# WARNING');
+  });
+});
+
+describe('dockerfileTargetsUnbuildablePhp', () => {
+  it('flags an apt install of a sub-5.6 PHP package (the broken saved Dockerfile)', () => {
+    const saved = [
+      'FROM ddev/ddev-webserver:v1.25.2',
+      '# PHP 5.5',
+      'RUN apt-get update \\',
+      '    && apt-get install -y --no-install-recommends php5.5-cli php5.5-xml php5.5-mbstring php5.5-zip \\',
+      '    && rm -rf /var/lib/apt/lists/*',
+    ].join('\n');
+    expect(dockerfileTargetsUnbuildablePhp(saved)).toBe(true);
+    expect(dockerfileTargetsUnbuildablePhp('RUN apt-get install php5.4-mbstring')).toBe(true);
+  });
+
+  it('does NOT flag installable PHP versions (5.6+)', () => {
+    expect(dockerfileTargetsUnbuildablePhp('RUN apt-get install php5.6-cli')).toBe(false);
+    expect(dockerfileTargetsUnbuildablePhp('RUN apt-get install php7.4-cli')).toBe(false);
+    expect(dockerfileTargetsUnbuildablePhp('RUN apt-get install php8.3-cli')).toBe(false);
+  });
+
+  it('does NOT flag a freshly re-rendered Dockerfile, so re-render cannot loop', () => {
+    // The fixed output floors to php5.6 and only mentions the requested 5.5 in
+    // a "FROM php:5.5-cli" comment (colon form), which must not be treated as
+    // an unbuildable apt package.
+    const fixed = renderDockerfile('ddev/ddev-webserver:v1.25.2', {
+      runtimes: ['php'],
+      versions: { php: '5.5' },
+    });
+    expect(fixed).toContain('FROM php:5.5-cli'); // the escape-hatch comment is present
+    expect(dockerfileTargetsUnbuildablePhp(fixed)).toBe(false); // ...but not flagged
   });
 });

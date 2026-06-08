@@ -43,7 +43,17 @@ export const generateDockerfileStep: StepDefinition<
       );
     }
     const declaredDeps = (row.declaredDeps ?? {}) as Record<string, unknown>;
-    const dockerfile = row.generatedDockerfile ?? renderDockerfile(row.baseImage, declaredDeps);
+    // Reuse a previously-saved Dockerfile, EXCEPT when it still targets a PHP
+    // version no apt repo can install (the pre-fix php<5.6 output). Such a
+    // Dockerfile can never build, so re-render from declared deps — which now
+    // floors PHP to 5.6 — so the step self-heals on retry instead of the user
+    // having to hand-edit it. A re-rendered Dockerfile is buildable, so this
+    // does not loop.
+    const saved = row.generatedDockerfile;
+    const dockerfile =
+      saved && !dockerfileTargetsUnbuildablePhp(saved)
+        ? saved
+        : renderDockerfile(row.baseImage, declaredDeps);
     return {
       envTemplateId: row.id,
       baseImage: row.baseImage,
@@ -214,9 +224,24 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   }
 
   if (runtimes.has('php')) {
-    const phpVersion = normalizePhpVersion(versions.php ?? '8.3');
+    const requestedPhp = normalizePhpVersion(versions.php ?? '8.3');
+    const phpVersion = clampPhpToInstallable(requestedPhp);
+    const bumped = phpVersion !== requestedPhp;
     const isUbuntuBase = /^ubuntu:/i.test(baseImage);
     const needsSuryPpa = isUbuntuBase && phpVersion !== '8.3';
+    if (bumped) {
+      // PHP < 5.6 is EOL and carried by no maintained apt repo (ondrej/sury
+      // both floor at 5.6, as does DDEV), so the apt install would fail. Floor
+      // to 5.6 — a near-perfectly-compatible bump for 5.5-era code — and leave
+      // a visible note so the user can switch to a legacy base image if they
+      // truly need the exact version.
+      lines.push(`# WARNING: PHP ${requestedPhp} is end-of-life and unavailable from any apt repo`);
+      lines.push('#          (ondrej/sury and DDEV both floor at PHP 5.6). Using PHP 5.6 instead.');
+      lines.push('#          For an exact legacy build, replace the FROM line above with a');
+      lines.push(
+        `#          legacy PHP image (e.g. FROM php:${requestedPhp}-cli) and adjust extensions.`,
+      );
+    }
     lines.push(`# PHP ${phpVersion}`);
     lines.push('RUN apt-get update \\');
     if (needsSuryPpa) {
@@ -379,6 +404,31 @@ function normalizePhpVersion(raw: string): string {
   if (parts.length >= 2) return `${parts[0]}.${parts[1]}`;
   if (parts.length === 1 && parts[0]) return parts[0];
   return '8.3';
+}
+
+// PHP 5.6 is the lowest version any maintained apt repo provides (ondrej PPA
+// and deb.sury.org both floor at 5.6, matching DDEV's own minimum), so anything
+// older cannot be apt-installed onto the Ubuntu or ddev-webserver bases. Floor
+// to 5.6 so the generated Dockerfile actually builds; the caller emits a
+// warning comment when this kicks in. Expects a normalized "maj" or "maj.min".
+function clampPhpToInstallable(version: string): string {
+  const parts = version.split('.');
+  const major = Number.parseInt(parts[0] ?? '', 10);
+  const minor = Number.parseInt(parts[1] ?? '', 10);
+  if (!Number.isFinite(major)) return version;
+  const belowFloor = major < 5 || (major === 5 && (!Number.isFinite(minor) || minor < 6));
+  return belowFloor ? '5.6' : version;
+}
+
+// True when a Dockerfile asks apt to install a PHP package below the 5.6 floor
+// (e.g. "php5.5-cli", "php5.4-mbstring") — the pre-fix generator output that no
+// repo can resolve. Drives self-healing re-render in detect(). Deliberately
+// matches only the apt package form "phpX.Y-<ext>": the colon form
+// "php:5.5-cli" used in the warning comment's legacy escape hatch is NOT
+// matched, so a re-rendered (already-floored) Dockerfile is never flagged and
+// the re-render cannot loop.
+export function dockerfileTargetsUnbuildablePhp(dockerfile: string): boolean {
+  return /\bphp(5\.[0-5]|[0-4]\.\d+)-[a-z]/.test(dockerfile);
 }
 
 function renderDepInstallBlock(language: string, manager: PackageManager): string[] {
