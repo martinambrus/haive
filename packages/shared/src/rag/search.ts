@@ -12,8 +12,15 @@ export interface RagSearchConfig {
   /** RRF constant k. Larger = flatter rank weighting. 60 is the common default. */
   rrfK: number;
   /** Minimum dense cosine similarity for a row to be eligible when it has NO
-   *  lexical match. Rows with any lexical match (ts > 0) bypass this floor. */
+   *  lexical match. Rows with any lexical match (ts > 0) bypass this floor.
+   *  This is the floor for KB / non-code chunks. */
   denseFloor: number;
+  /** Dense floor for `source_type='code'` chunks. Code embeds further from
+   *  natural-language queries than prose KB, so it needs a lower floor to clear
+   *  the gate; KB stays at `denseFloor` so weak prose matches aren't admitted.
+   *  Starting point — recalibrate with worker/scripts/rag-eval.ts against the
+   *  new rag_query_log stats. */
+  codeDenseFloor: number;
   /** Number of fused results returned to the agent. */
   topK: number;
   /** Display-only weighted-sum weights (the `hybrid` field). Not used for
@@ -26,6 +33,7 @@ export const DEFAULT_RAG_SEARCH_CONFIG: RagSearchConfig = {
   candidatePool: 50,
   rrfK: 60,
   denseFloor: 0.3,
+  codeDenseFloor: 0.2,
   topK: 8,
   denseWeight: 0.7,
   lexWeight: 0.3,
@@ -142,7 +150,9 @@ export async function ragHybridSearch(
       JOIN ${RAG_TABLE} e ON e.id = c.id
       LEFT JOIN dense d ON d.id = c.id
       LEFT JOIN lex l ON l.id = c.id
-      WHERE COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q))) >= $5
+      WHERE COALESCE(d.dense_sim, 1 - (e.vector <=> (SELECT qv FROM q)))
+              >= (CASE WHEN e.source_type = 'code' THEN $9::double precision
+                       ELSE $5::double precision END)
          OR COALESCE(l.ts, 0) > 0
       ORDER BY rrf DESC
       LIMIT $8
@@ -156,6 +166,7 @@ export async function ragHybridSearch(
         cfg.denseWeight,
         cfg.lexWeight,
         cfg.topK,
+        cfg.codeDenseFloor,
       ],
     )) as unknown as RawRow[];
   } else {

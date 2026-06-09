@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, asc, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   logger,
@@ -41,6 +41,53 @@ stepRoutes.get('/:id/steps', async (c) => {
   const withSkip = await enrichStepsWithSkipFlag(db, id, enriched);
   const steps = await enrichStepsWithCliInvocationCount(db, id, withSkip);
   return c.json({ steps });
+});
+
+// RAG query telemetry for a step: the rag_search calls made during the step's
+// run window (attributed by created_at — the rag token is task-scoped, not
+// step-scoped). Drives the "Show RAG stats" panel on the discovery step card.
+stepRoutes.get('/:id/steps/:stepId/rag-queries', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const stepId = c.req.param('stepId');
+  const db = getDb();
+
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
+    columns: { id: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+
+  const step = await db.query.taskSteps.findFirst({
+    where: and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.stepId, stepId)),
+    columns: { startedAt: true, endedAt: true },
+  });
+  if (!step?.startedAt) return c.json({ queries: [] });
+  const end = step.endedAt ?? new Date();
+
+  const queries = await db
+    .select({
+      id: schema.ragQueryLog.id,
+      query: schema.ragQueryLog.query,
+      topK: schema.ragQueryLog.topK,
+      hitCount: schema.ragQueryLog.hitCount,
+      kbHits: schema.ragQueryLog.kbHits,
+      codeHits: schema.ragQueryLog.codeHits,
+      maxRrf: schema.ragQueryLog.maxRrf,
+      maxDense: schema.ragQueryLog.maxDense,
+      createdAt: schema.ragQueryLog.createdAt,
+    })
+    .from(schema.ragQueryLog)
+    .where(
+      and(
+        eq(schema.ragQueryLog.taskId, id),
+        gte(schema.ragQueryLog.createdAt, step.startedAt),
+        lte(schema.ragQueryLog.createdAt, end),
+      ),
+    )
+    .orderBy(asc(schema.ragQueryLog.createdAt));
+
+  return c.json({ queries });
 });
 
 // Increment a step's user-active time. The browser measures the focused-and-

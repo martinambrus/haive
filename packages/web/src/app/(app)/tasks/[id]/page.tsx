@@ -10,6 +10,7 @@ import {
   type CliProvider,
   type CliProviderName,
   type EnvDepPreset,
+  type RagQueryEntry,
   type StepAction,
   type StepActionResponse,
   type Task,
@@ -963,6 +964,8 @@ function StepCard({
   onChangeCli,
 }: StepCardProps) {
   const [showOutput, setShowOutput] = useState(false);
+  const [showRagStats, setShowRagStats] = useState(false);
+  const isDiscovery = step.stepId === '03-phase-0a-discovery';
   const schema = step.formSchema as FormSchema | null;
   const initialValues = (step.formValues as FormValues | null) ?? undefined;
   const taskCancelled = taskStatus === 'cancelled';
@@ -1307,6 +1310,17 @@ function StepCard({
         </div>
       )}
 
+      {isDiscovery && step.startedAt && (
+        <button
+          type="button"
+          onClick={() => setShowRagStats((v) => !v)}
+          className="self-start text-xs text-indigo-400 underline"
+        >
+          {showRagStats ? 'Hide' : 'Show'} RAG stats
+        </button>
+      )}
+      {isDiscovery && showRagStats && <RagStatsPanel taskId={taskId} stepId={step.stepId} />}
+
       {step.cliInvocationCount > 0 && (
         <StepTerminal
           taskId={taskId}
@@ -1315,6 +1329,88 @@ function StepCard({
         />
       )}
     </Card>
+  );
+}
+
+// Lazy-loaded RAG retrieval stats for the discovery step: the rag_search calls
+// made during the step, with the KB-vs-code hit split + top scores. `code`
+// being non-zero is the signal that code (not just KB) is actually retrieved.
+function RagStatsPanel({ taskId, stepId }: { taskId: string; stepId: string }) {
+  const [queries, setQueries] = useState<RagQueryEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<{ queries: RagQueryEntry[] }>(`/tasks/${taskId}/steps/${stepId}/rag-queries`)
+      .then((d) => {
+        if (!cancelled) setQueries(d.queries);
+      })
+      .catch((e) => {
+        if (!cancelled) setError((e as Error).message ?? 'Failed to load RAG stats');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId, stepId]);
+
+  if (error) return <p className="text-xs text-red-400">{error}</p>;
+  if (!queries) return <p className="text-xs text-neutral-500">Loading RAG stats…</p>;
+  if (queries.length === 0)
+    return <p className="text-xs text-neutral-500">No RAG queries recorded for this step.</p>;
+
+  const totalHits = queries.reduce((s, q) => s + q.hitCount, 0);
+  const totalKb = queries.reduce((s, q) => s + q.kbHits, 0);
+  const totalCode = queries.reduce((s, q) => s + q.codeHits, 0);
+  const withHits = queries.filter((q) => q.hitCount > 0).length;
+  // Effectiveness: how often RAG returned anything, and the KB-vs-code split of
+  // the chunks it returned. codePct is the remainder so the two always sum to 100%.
+  const ragUsedPct = queries.length ? Math.round((withHits / queries.length) * 100) : 0;
+  const totalChunks = totalKb + totalCode;
+  const kbPct = totalChunks ? Math.round((totalKb / totalChunks) * 100) : 0;
+  const codePct = totalChunks ? 100 - kbPct : 0;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-neutral-300">
+        <span>{queries.length} queries</span>
+        <span>{withHits} returned hits</span>
+        <span>{totalHits} hits total</span>
+        <span className="text-indigo-300">KB: {totalKb}</span>
+        <span className="text-emerald-300">code: {totalCode}</span>
+      </div>
+      <div className="max-h-80 overflow-auto rounded border border-neutral-800">
+        <table className="w-full text-left text-[11px]">
+          <thead className="sticky top-0 bg-neutral-900 text-neutral-400">
+            <tr>
+              <th className="px-2 py-1 font-medium">Query</th>
+              <th className="px-2 py-1 text-right font-medium">hits</th>
+              <th className="px-2 py-1 text-right font-medium">kb</th>
+              <th className="px-2 py-1 text-right font-medium">code</th>
+              <th className="px-2 py-1 text-right font-medium">top rrf</th>
+              <th className="px-2 py-1 text-right font-medium">top dense</th>
+            </tr>
+          </thead>
+          <tbody className="text-neutral-300">
+            {queries.map((q) => (
+              <tr key={q.id} className="border-t border-neutral-800 align-top">
+                <td className="px-2 py-1 font-mono">{q.query}</td>
+                <td className="px-2 py-1 text-right">{q.hitCount}</td>
+                <td className="px-2 py-1 text-right text-indigo-300">{q.kbHits}</td>
+                <td className="px-2 py-1 text-right text-emerald-300">{q.codeHits}</td>
+                <td className="px-2 py-1 text-right font-mono">{q.maxRrf.toFixed(4)}</td>
+                <td className="px-2 py-1 text-right font-mono">{q.maxDense.toFixed(3)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-xs text-neutral-400">
+        RAG effective <span className="text-neutral-200">{ragUsedPct}%</span> of the time · of
+        retrieved chunks <span className="text-indigo-300">{kbPct}% KB</span> /{' '}
+        <span className="text-emerald-300">{codePct}% code</span>
+      </p>
+    </div>
   );
 }
 

@@ -410,6 +410,21 @@ export type StepErrorHint = {
   providerName: string;
 };
 
+/** One rag_search call's telemetry, surfaced in the discovery step's RAG stats
+ *  panel. `codeHits` is the headline signal — whether code (not just KB) is
+ *  being retrieved. */
+export interface RagQueryEntry {
+  id: string;
+  query: string;
+  topK: number | null;
+  hitCount: number;
+  kbHits: number;
+  codeHits: number;
+  maxRrf: number;
+  maxDense: number;
+  createdAt: string;
+}
+
 export type CliInvocationMode = 'cli' | 'agent_mining' | 'subagent_native' | 'subagent_sequential';
 
 export interface CliInvocationSummary {

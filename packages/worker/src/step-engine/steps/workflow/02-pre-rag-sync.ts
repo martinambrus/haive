@@ -58,6 +58,11 @@ const SOURCE_PREFIXES = ['.claude/knowledge_base/'];
 const CODE_IGNORE_DIRS = new Set([
   'node_modules',
   '.git',
+  // Haive's own per-task git worktrees live under <repo>/.haive/worktrees/. They
+  // are full copies of the repo, so indexing them would re-ingest every file a
+  // second time under a `.haive/worktrees/<branch>/` prefix — doubling the index
+  // and never matching onboarding's clean paths. Exclude the whole tree.
+  '.haive',
   'vendor',
   '__pycache__',
   '.next',
@@ -265,19 +270,14 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
 
       // Resolve repository_id — required for dedup. Without it we'd be
       // re-embedding the same content on every task. Bail early with a
-      // logged warning rather than silently filling the table.
-      let repositoryId: string | null = null;
-      try {
-        const rows = (await ctx.db.execute({
-          sql: `SELECT repository_id FROM tasks WHERE id = $1 LIMIT 1`,
-          params: [ctx.taskId],
-        } as never)) as unknown;
-        if (Array.isArray(rows) && rows.length > 0) {
-          repositoryId = (rows[0] as { repository_id?: string }).repository_id ?? null;
-        }
-      } catch {
-        /* non-critical */
-      }
+      // logged warning rather than silently filling the table. Uses the same
+      // drizzle query detect() relies on; an earlier raw ctx.db.execute({sql,
+      // params}) call silently failed (wrong driver shape) and always skipped.
+      const taskRow = await ctx.db.query.tasks.findFirst({
+        where: eq(schema.tasks.id, ctx.taskId),
+        columns: { repositoryId: true },
+      });
+      const repositoryId = taskRow?.repositoryId ?? null;
       if (!repositoryId) {
         ctx.logger.warn(
           { taskId: ctx.taskId },
@@ -330,6 +330,41 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
         for (const section of sections) {
           chunks.push(...chunkSection(section));
         }
+
+        // Claim legacy onboarding rows (repository_id IS NULL) for this file
+        // into the repo scope so the dedup below matches them instead of
+        // re-ingesting duplicates. Older onboarding runs — and 10-rag-populate
+        // before its repo-lookup fix — left repository_id NULL on every row.
+        //
+        // First collapse duplicate NULL rows for this chunk key. Re-onboarding
+        // with a null repository_id skipped the per-repo wipe, so the same chunk
+        // can appear multiple times as NULL; adopting more than one into the
+        // repo scope would violate the partial unique index. Keep one per key.
+        await conn.pg.unsafe(
+          `DELETE FROM ${RAG_TABLE} a USING ${RAG_TABLE} b
+             WHERE a.repository_id IS NULL AND b.repository_id IS NULL
+               AND a.source_path = $1 AND b.source_path = $1
+               AND a.section_id = b.section_id AND a.chunk_index = b.chunk_index
+               AND a.ctid > b.ctid`,
+          [relPath],
+        );
+        // Then drop any NULL row whose key already exists under the repo (would
+        // also violate the unique index on adopt), then adopt the rest. Scoped
+        // to this source_path and idempotent — a no-op once no NULL rows remain.
+        await conn.pg.unsafe(
+          `DELETE FROM ${RAG_TABLE} n
+             WHERE n.repository_id IS NULL AND n.source_path = $2
+               AND EXISTS (
+                 SELECT 1 FROM ${RAG_TABLE} r
+                 WHERE r.repository_id = $1 AND r.source_path = n.source_path
+                   AND r.section_id = n.section_id AND r.chunk_index = n.chunk_index)`,
+          [repositoryId, relPath],
+        );
+        await conn.pg.unsafe(
+          `UPDATE ${RAG_TABLE} SET repository_id = $1
+             WHERE repository_id IS NULL AND source_path = $2`,
+          [repositoryId, relPath],
+        );
 
         // Get existing chunks for this file scoped to the repository so
         // onboarding's ingest is visible to every downstream workflow task.
@@ -409,7 +444,9 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
               const literal = vectorLiteral(embeddings[i]!);
               await conn.pg.unsafe(
                 `INSERT INTO ${RAG_TABLE} (task_id, repository_id, source_type, source_path, section_id, chunk_index, chunk_hash, content, vector)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector)`,
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector)
+                 ON CONFLICT (repository_id, source_path, section_id, chunk_index) WHERE repository_id IS NOT NULL
+                 DO UPDATE SET task_id = EXCLUDED.task_id, source_type = EXCLUDED.source_type, chunk_hash = EXCLUDED.chunk_hash, content = EXCLUDED.content, vector = EXCLUDED.vector`,
                 [
                   ctx.taskId,
                   repositoryId,
@@ -426,7 +463,9 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
               const json = JSON.stringify(embeddings[i]!);
               await conn.pg.unsafe(
                 `INSERT INTO ${RAG_TABLE} (task_id, repository_id, source_type, source_path, section_id, chunk_index, chunk_hash, content, embedding_json)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+                 ON CONFLICT (repository_id, source_path, section_id, chunk_index) WHERE repository_id IS NOT NULL
+                 DO UPDATE SET task_id = EXCLUDED.task_id, source_type = EXCLUDED.source_type, chunk_hash = EXCLUDED.chunk_hash, content = EXCLUDED.content, embedding_json = EXCLUDED.embedding_json`,
                 [
                   ctx.taskId,
                   repositoryId,

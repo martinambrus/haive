@@ -7,3 +7,4 @@ export * from './env.js';
 export * from './onboarding.js';
 export * from './bundles.js';
 export * from './terminal.js';
+export * from './rag.js';

@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
@@ -77,6 +79,9 @@ const SOURCE_PREFIXES = ['.claude/knowledge_base/'];
 const CODE_IGNORE_DIRS = new Set([
   'node_modules',
   '.git',
+  // Haive's per-task git worktrees (<repo>/.haive/worktrees/) are full repo
+  // copies — never index them as project source.
+  '.haive',
   'vendor',
   '__pycache__',
   '.next',
@@ -674,18 +679,17 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       // re-onboarding the same repo actually wipes its prior chunks
       // (pre-fix scoped by task_id, which always-empty for the current task
       // before the insert started; the wipe was a no-op).
-      let repositoryId: string | null = null;
-      try {
-        const rows = (await ctx.db.execute({
-          sql: `SELECT repository_id FROM tasks WHERE id = $1 LIMIT 1`,
-          params: [ctx.taskId],
-        } as never)) as unknown;
-        if (Array.isArray(rows) && rows.length > 0) {
-          repositoryId = (rows[0] as { repository_id?: string }).repository_id ?? null;
-        }
-      } catch {
-        /* non-critical */
-      }
+      // NB: a prior raw ctx.db.execute({sql,params}) call here failed at runtime
+      // (wrong postgres-js driver shape, swallowed by catch) and left
+      // repository_id NULL on every inserted row — which broke the truncate
+      // path AND left rows unscoped so the workflow RAG sync (02-pre-rag-sync)
+      // could not dedup against them and re-ingested duplicates. Use the same
+      // drizzle query the rest of the codebase uses.
+      const taskRow = await ctx.db.query.tasks.findFirst({
+        where: eq(schema.tasks.id, ctx.taskId),
+        columns: { repositoryId: true },
+      });
+      const repositoryId = taskRow?.repositoryId ?? null;
 
       // Resolve populate mode. Incremental (default) skips re-embedding chunks
       // whose content is unchanged; full rebuilds from scratch. Legacy
