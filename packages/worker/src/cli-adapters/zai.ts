@@ -49,6 +49,9 @@ export class ZaiAdapter extends BaseCliAdapter {
   readonly rulesFile = 'CLAUDE.md';
   readonly rulesFileMode = 'import' as const;
   override readonly effortScale = ZAI_EFFORT_SCALE;
+  // Default Z.AI host; a custom Z_AI_API_URL/ANTHROPIC_BASE_URL is added per
+  // provider via egressDomains.
+  override readonly defaultEgressDomains = ['api.z.ai'];
 
   buildCliInvocation(
     provider: CliProviderRecord,

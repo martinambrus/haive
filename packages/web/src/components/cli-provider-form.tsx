@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { DEFAULT_AGENT_RULES } from '@haive/shared/constants';
 import {
   api,
+  CLI_DEFAULT_EGRESS_DOMAINS,
   DEFAULT_CLI_NETWORK_POLICY,
   type ApiError,
   type CliAuthMode,
@@ -62,6 +63,7 @@ interface FormState {
   networkMode: CliNetworkMode;
   networkDomainsText: string;
   networkIpsText: string;
+  egressDomainsText: string;
 }
 
 function parseLinesList(text: string): string[] {
@@ -133,7 +135,8 @@ function statesEqual(a: FormState, b: FormState): boolean {
     a.isolateAuth === b.isolateAuth &&
     a.networkMode === b.networkMode &&
     a.networkDomainsText === b.networkDomainsText &&
-    a.networkIpsText === b.networkIpsText
+    a.networkIpsText === b.networkIpsText &&
+    a.egressDomainsText === b.egressDomainsText
   );
 }
 
@@ -197,6 +200,7 @@ export function CliProviderForm({
     networkMode: (provider?.networkPolicy ?? DEFAULT_CLI_NETWORK_POLICY).mode,
     networkDomainsText: (provider?.networkPolicy?.domains ?? []).join('\n'),
     networkIpsText: (provider?.networkPolicy?.ips ?? []).join('\n'),
+    egressDomainsText: (provider?.egressDomains ?? []).join('\n'),
   });
 
   // Full snapshot of the last known saved form state. Any field that diverges
@@ -327,6 +331,7 @@ export function CliProviderForm({
       enabled: snapshot.enabled,
       isolateAuth: snapshot.isolateAuth,
       networkPolicy,
+      egressDomains: parseLinesList(snapshot.egressDomainsText),
     };
 
     await api.patch(`/cli-providers/${provider.id}`, payload);
@@ -421,6 +426,7 @@ export function CliProviderForm({
           enabled: state.enabled,
           isolateAuth: state.isolateAuth,
           networkPolicy,
+          egressDomains: parseLinesList(state.egressDomainsText),
         };
 
         const { provider: created } = await api.post<{ provider: CliProvider }>(
@@ -832,8 +838,9 @@ export function CliProviderForm({
             <div>
               <div className="font-medium">No network</div>
               <div className="text-xs text-neutral-500">
-                Container is started with <code className="font-mono">--network=none</code>. CLI
-                cannot reach the internet or any external service.
+                No general internet egress. Only the CLI&apos;s own model/auth domains (set below)
+                are reachable, through a proxy, so the agent can still reach its LLM — nothing else
+                is.
               </div>
             </div>
           </label>
@@ -892,6 +899,33 @@ export function CliProviderForm({
               />
               <p className="mt-1 text-xs text-neutral-500">One IP or CIDR per line.</p>
             </div>
+          </div>
+        )}
+
+        {(state.networkMode === 'none' || state.networkMode === 'allowlist') && (
+          <div className="mt-3 border-t border-neutral-800 pt-3">
+            <Label htmlFor="egressDomains">CLI model / auth domains</Label>
+            {(CLI_DEFAULT_EGRESS_DOMAINS[state.name] ?? []).length > 0 && (
+              <p className="mt-1 text-xs text-neutral-500">
+                Always allowed for {state.name} (built in):{' '}
+                <code className="font-mono text-neutral-300">
+                  {(CLI_DEFAULT_EGRESS_DOMAINS[state.name] ?? []).join(', ')}
+                </code>
+              </p>
+            )}
+            <textarea
+              id="egressDomains"
+              rows={3}
+              className="mt-2 block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
+              value={state.egressDomainsText}
+              onChange={(e) => update('egressDomainsText', e.target.value)}
+              placeholder="custom-model-host.example.com"
+            />
+            <p className="mt-1 text-xs text-neutral-500">
+              Extra hosts the CLI needs for its own model/auth servers (e.g. a custom base URL), on
+              top of the built-in defaults. Routed through the proxy so the agent&apos;s LLM works
+              under No network / Allowlist. One hostname per line; same wildcard rules as above.
+            </p>
           </div>
         )}
       </div>

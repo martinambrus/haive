@@ -54,7 +54,12 @@ function classifyDomain(domain: string): DomainClassification {
   }
   if (domain.includes('*')) return { dstdomain: [], dstRegex: null };
   if (domain.startsWith('.')) return { dstdomain: [domain], dstRegex: null };
-  return { dstdomain: [domain, `.${domain}`], dstRegex: null };
+  // Leading-dot form ONLY: squid's `.example.com` already matches the apex AND
+  // all subdomains, so also emitting the bare `example.com` is a redundant
+  // overlap squid rejects as FATAL ("'.example.com' is a subdomain of
+  // 'example.com'"). This also dedupes cleanly when both `example.com` and
+  // `*.example.com` are listed (both -> `.example.com`).
+  return { dstdomain: [`.${domain}`], dstRegex: null };
 }
 
 export function renderSquidConfig(input: SquidConfigInput): string {

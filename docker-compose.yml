@@ -102,6 +102,9 @@ services:
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
     networks:
       - haive-network
+      # Dedicated network shared with the per-task sandboxes so agent rag_search
+      # can reach the API by name, without exposing postgres/redis to sandboxes.
+      - haive-sandbox
 
   worker:
     build:
@@ -120,7 +123,7 @@ services:
       REDIS_URL: redis://redis:6379
       CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
       CLAWKER_BIN: ${CLAWKER_BIN:-/usr/local/bin/clawker}
-      SANDBOX_NETWORK: ${SANDBOX_NETWORK:-haive-network}
+      SANDBOX_NETWORK: ${SANDBOX_NETWORK:-haive-sandbox}
       DOCKER_HOST: unix:///var/run/docker.sock
       HOST_REPO_ROOT: /host-fs
       HOST_REPO_ROOT_REAL: ${HOST_REPO_ROOT:-${HOME}}
@@ -168,6 +171,14 @@ networks:
   haive-network:
     driver: bridge
     name: haive-network
+  # Sandbox<->API only: the api and the per-task sandboxes join this; postgres,
+  # redis, etc. do NOT, so agent code can reach rag_search but not the queues/DB.
+  # internal = no NAT/internet, so it provides ONLY api access — internet is
+  # governed by the sandbox's policy network (default bridge / squid / none).
+  haive-sandbox:
+    driver: bridge
+    name: haive-sandbox
+    internal: true
 
 volumes:
   postgres_data:

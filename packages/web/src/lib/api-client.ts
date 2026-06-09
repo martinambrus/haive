@@ -181,6 +181,20 @@ export const DEFAULT_CLI_NETWORK_POLICY: CliNetworkPolicy = {
   ips: [],
 };
 
+/** Display-only mirror of each adapter's BaseCliAdapter.defaultEgressDomains
+ *  (the worker is authoritative and re-merges these server-side regardless).
+ *  Shown in the provider form so users see which model/auth hosts are
+ *  auto-allowed under network policy `none`/`allowlist`. Keep in sync with the
+ *  worker cli-adapters when default domains change. */
+export const CLI_DEFAULT_EGRESS_DOMAINS: Record<CliProviderName, string[]> = {
+  'claude-code': ['api.anthropic.com'],
+  codex: ['api.openai.com', 'chatgpt.com'],
+  gemini: ['generativelanguage.googleapis.com', 'oauth2.googleapis.com'],
+  amp: ['ampcode.com', '*.ampcode.com'],
+  zai: ['api.z.ai'],
+  antigravity: [],
+};
+
 export interface EffortScaleMetadata {
   values: readonly string[];
   max: string;
@@ -230,6 +244,7 @@ export interface CliProvider {
   rulesContent: string;
   supportsSubagents: boolean;
   networkPolicy: CliNetworkPolicy;
+  egressDomains: string[];
   authMode: CliAuthMode;
   cliVersion: string | null;
   effortLevel: string | null;

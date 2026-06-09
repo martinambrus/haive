@@ -251,6 +251,7 @@ cliProviderRoutes.post('/', async (c) => {
       cliArgs: body.cliArgs ? normalizeCliArgsArray(body.cliArgs) : null,
       supportsSubagents: meta.supportsSubagents,
       networkPolicy: body.networkPolicy ?? { mode: 'full', domains: [], ips: [] },
+      egressDomains: body.egressDomains ?? [],
       authMode: body.authMode,
       cliVersion: resolvedVersion,
       effortLevel: resolveEffortLevelForSave(body.name, body.effortLevel ?? null),
@@ -302,6 +303,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
   if (body.cliArgs !== undefined) updates.cliArgs = normalizeCliArgsArray(body.cliArgs);
   if (body.authMode !== undefined) updates.authMode = body.authMode;
   if (body.networkPolicy !== undefined) updates.networkPolicy = body.networkPolicy;
+  if (body.egressDomains !== undefined) updates.egressDomains = body.egressDomains;
 
   let imageInputsChanged = false;
   if (body.cliVersion !== undefined) {
@@ -473,6 +475,7 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
       cliArgs: source.cliArgs,
       supportsSubagents: source.supportsSubagents,
       networkPolicy: source.networkPolicy,
+      egressDomains: source.egressDomains,
       authMode: source.authMode,
       cliVersion: source.cliVersion,
       effortLevel: source.effortLevel,

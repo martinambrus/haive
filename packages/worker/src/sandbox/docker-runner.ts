@@ -40,6 +40,11 @@ export interface DockerRunOpts {
   workdir?: string;
   entrypoint?: string | null;
   network?: string;
+  /** Extra networks to attach AFTER create, before start (docker run takes only
+   *  one --network). Triggers a create -> network connect -> start -a flow.
+   *  Used to give the sandbox an internal api-only NIC regardless of its policy
+   *  network. Empty/undefined keeps the plain `docker run` path. */
+  connectNetworks?: string[];
   /** Run container as this user (e.g. 'node', '1000:1000'). Omit for image default. */
   user?: string;
   /** Docker labels to attach. Used so cancel can find and kill containers by task id. */
@@ -268,21 +273,21 @@ export const defaultDockerRunner: DockerRunner = {
 
   async run(opts) {
     const containerName = `haive-cli-${randomUUID()}`;
-    const args = ['run', '--rm', '--name', containerName];
+    const flagArgs: string[] = [];
     if (opts.labels) {
       for (const [k, v] of Object.entries(opts.labels)) {
-        args.push('--label', `${k}=${v}`);
+        flagArgs.push('--label', `${k}=${v}`);
       }
     }
-    if (opts.user) args.push('--user', opts.user);
-    if (opts.workdir) args.push('-w', opts.workdir);
-    if (opts.network) args.push('--network', opts.network);
+    if (opts.user) flagArgs.push('--user', opts.user);
+    if (opts.workdir) flagArgs.push('-w', opts.workdir);
+    if (opts.network) flagArgs.push('--network', opts.network);
     if (opts.entrypoint !== undefined) {
-      args.push('--entrypoint', opts.entrypoint ?? '');
+      flagArgs.push('--entrypoint', opts.entrypoint ?? '');
     }
     if (opts.env) {
       for (const [key, value] of Object.entries(opts.env)) {
-        args.push('-e', `${key}=${value}`);
+        flagArgs.push('-e', `${key}=${value}`);
       }
     }
     if (opts.mounts) {
@@ -295,29 +300,69 @@ export const defaultDockerRunner: DockerRunner = {
             `volume-subpath=${m.subpath}`,
           ];
           if (m.readOnly) parts.push('readonly');
-          args.push('--mount', parts.join(','));
+          flagArgs.push('--mount', parts.join(','));
         } else {
           const suffix = m.readOnly ? ':ro' : '';
-          args.push('-v', `${m.source}:${m.target}${suffix}`);
+          flagArgs.push('-v', `${m.source}:${m.target}${suffix}`);
         }
       }
     }
-    args.push(opts.image, ...opts.cmd);
-    const result = await spawnAndCollect('docker', args, {
+
+    // SIGKILL/SIGTERM on the docker CLI client doesn't propagate to the
+    // dockerd-side container; --rm only fires when the container itself exits.
+    // Force-remove by name when our wrapper killed the client (timedOut) or the
+    // run returned no exit code (signal abort), or a setup step failed.
+    const forceRemove = () =>
+      spawnAndCollect('docker', ['rm', '-f', containerName], { timeoutMs: 15_000 }).catch(
+        () => undefined,
+      );
+
+    // Plain path: a single `docker run`.
+    if (!opts.connectNetworks?.length) {
+      const result = await spawnAndCollect(
+        'docker',
+        ['run', '--rm', '--name', containerName, ...flagArgs, opts.image, ...opts.cmd],
+        {
+          timeoutMs: opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
+          onStdoutChunk: opts.onStdoutChunk,
+          onStderrChunk: opts.onStderrChunk,
+          signal: opts.signal,
+        },
+      );
+      if (result.timedOut || result.exitCode === null) await forceRemove();
+      return result;
+    }
+
+    // Multi-network path: `docker run` takes only one --network, so a second NIC
+    // (the internal api-only network) requires create -> network connect -> start
+    // (mirrors the squid gateway in egress-gateway.ts).
+    const created = await spawnAndCollect(
+      'docker',
+      ['create', '--rm', '--name', containerName, ...flagArgs, opts.image, ...opts.cmd],
+      { timeoutMs: 30_000 },
+    );
+    if (created.exitCode !== 0) {
+      await forceRemove();
+      return created;
+    }
+    for (const net of opts.connectNetworks) {
+      const connected = await spawnAndCollect(
+        'docker',
+        ['network', 'connect', net, containerName],
+        { timeoutMs: 15_000 },
+      );
+      if (connected.exitCode !== 0) {
+        await forceRemove();
+        return connected;
+      }
+    }
+    const result = await spawnAndCollect('docker', ['start', '--attach', containerName], {
       timeoutMs: opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
       onStdoutChunk: opts.onStdoutChunk,
       onStderrChunk: opts.onStderrChunk,
       signal: opts.signal,
     });
-    // SIGKILL/SIGTERM on the docker CLI client doesn't propagate to the
-    // dockerd-side container; --rm only fires when the container itself
-    // exits. Force-remove the container by name when our wrapper killed
-    // the client (timedOut) or returned with no exit code (signal abort).
-    if (result.timedOut || result.exitCode === null) {
-      await spawnAndCollect('docker', ['rm', '-f', containerName], { timeoutMs: 15_000 }).catch(
-        () => undefined,
-      );
-    }
+    if (result.timedOut || result.exitCode === null) await forceRemove();
     return result;
   },
 

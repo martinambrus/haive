@@ -13,6 +13,7 @@ export class AmpAdapter extends BaseCliAdapter {
   readonly defaultModel = null;
   readonly rulesFile = 'AGENTS.md';
   readonly rulesFileMode = 'native' as const;
+  override readonly defaultEgressDomains = ['ampcode.com', '*.ampcode.com'];
 
   buildCliInvocation(
     provider: CliProviderRecord,

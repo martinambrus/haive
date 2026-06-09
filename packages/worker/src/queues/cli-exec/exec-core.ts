@@ -120,11 +120,8 @@ export async function executeByKind(
   switch (payload.kind) {
     case 'cli':
     case 'agent_mining': {
-      const { wrapperContent, sandboxImage, networkPolicy } = await loadProviderRuntimeConfig(
-        db,
-        payload.cliProviderId,
-        payload.taskId,
-      );
+      const { wrapperContent, sandboxImage, networkPolicy, egressDomains } =
+        await loadProviderRuntimeConfig(db, payload.cliProviderId, payload.taskId);
       const providerRow = payload.cliProviderId
         ? await db.query.cliProviders.findFirst({
             where: eq(schema.cliProviders.id, payload.cliProviderId),
@@ -140,6 +137,8 @@ export async function executeByKind(
             payload.taskId,
             providerRow.name as CliProviderName,
             sandboxWorkdir,
+            // Knowledge-mining invocations get a rag-only MCP surface.
+            payload.kind === 'agent_mining',
           )
         : { files: [], extraArgs: [] };
       const statusUpdater = payload.taskStepId
@@ -155,6 +154,7 @@ export async function executeByKind(
         repoMount,
         sandboxWorkdir,
         networkPolicy,
+        egressDomains,
         mcp.files,
         authMounts,
         statusUpdater,
@@ -184,6 +184,7 @@ export async function executeCliSpec(
   repoMount: DockerVolumeMount | null = null,
   sandboxWorkdir: string = SANDBOX_WORKDIR,
   networkPolicy: CliNetworkPolicy | null = null,
+  egressDomains: string[] = [],
   extraFiles: SandboxExtraFile[] = [],
   authMounts: DockerVolumeMount[] = [],
   statusCallback?: (message: string) => void,
@@ -202,6 +203,7 @@ export async function executeCliSpec(
     repoMount,
     sandboxWorkdir,
     networkPolicy,
+    egressDomains,
     extraFiles,
     authMounts,
     taskId,
@@ -383,6 +385,7 @@ export function createSandboxSpawner(
   repoMount: DockerVolumeMount | null = null,
   sandboxWorkdir: string = SANDBOX_WORKDIR,
   networkPolicy: CliNetworkPolicy | null = null,
+  egressDomains: string[] = [],
   extraFiles: SandboxExtraFile[] = [],
   authMounts: DockerVolumeMount[] = [],
   taskId: string | null = null,
@@ -396,6 +399,7 @@ export function createSandboxSpawner(
     if (sandboxImage) runnerOptions.image = sandboxImage;
     if (allMounts.length > 0) runnerOptions.extraMounts = allMounts;
     if (networkPolicy) runnerOptions.networkPolicy = networkPolicy;
+    if (egressDomains.length > 0) runnerOptions.egressDomains = egressDomains;
     if (taskId) runnerOptions.taskId = taskId;
     const finalArgs = mcpExtraArgs.length > 0 ? [...spec.args, ...mcpExtraArgs] : spec.args;
     const result = await runInSandbox(

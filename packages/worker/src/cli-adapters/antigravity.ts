@@ -28,6 +28,10 @@ export class AntigravityAdapter extends BaseCliAdapter {
   // codex/amp; step 07 merges the rules blocks).
   readonly rulesFile = 'AGENTS.md';
   readonly rulesFileMode = 'native' as const;
+  // agy's inference/auth endpoints aren't derivable from the CLI's flags; the
+  // user must add them per provider (Settings → network) to run under
+  // allowlist/none. Empty default keeps the base behavior explicit.
+  override readonly defaultEgressDomains: readonly string[] = [];
 
   buildCliInvocation(
     provider: CliProviderRecord,

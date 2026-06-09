@@ -8,7 +8,11 @@ import { runSequentialSubAgent, type SubAgentRunResult } from '../../cli-executo
 import { assembleNativePrompt } from '../../sub-agent-emulator/native-mode.js';
 import { type CliExecDeps, type ExecutionOutcome } from './_shared.js';
 import { createSandboxSpawner, executeCliSpec } from './exec-core.js';
-import { resolveAuthMounts, resolveMcpExtraFiles } from './resolvers.js';
+import {
+  resolveAuthMounts,
+  resolveEffectiveEgressDomains,
+  resolveMcpExtraFiles,
+} from './resolvers.js';
 import { resolveSandboxImageTag } from './images.js';
 
 export async function executeSubAgentNative(
@@ -58,6 +62,7 @@ export async function executeSubAgentNative(
     repoMount,
     sandboxWorkdir,
     provider.networkPolicy,
+    resolveEffectiveEgressDomains(provider),
     mcp.files,
     authMounts,
     undefined,
@@ -104,6 +109,7 @@ export async function executeSubAgentSequential(
     repoMount,
     sandboxWorkdir,
     provider.networkPolicy,
+    resolveEffectiveEgressDomains(provider),
     mcp.files,
     authMounts,
     payload.taskId ?? null,

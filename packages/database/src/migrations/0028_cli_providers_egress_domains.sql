@@ -1,0 +1,12 @@
+-- Per-provider extra egress domains for the CLI's own model/auth servers. These
+-- are merged at runtime with the adapter-declared defaults and fed into the squid
+-- egress gateway so the CLI can reach its LLM even under network policy
+-- `none`/`allowlist`. Stores only the user's extras; defaults are re-applied in
+-- the worker, so clearing this can never strand the CLI from its model.
+--
+-- Deploy note: applied via `drizzle-kit push --force` from the schema; this file
+-- is the idempotent parity/rollback record.
+--
+-- Rollback:
+--   ALTER TABLE "cli_providers" DROP COLUMN IF EXISTS "egress_domains";
+ALTER TABLE "cli_providers" ADD COLUMN IF NOT EXISTS "egress_domains" jsonb NOT NULL DEFAULT '[]'::jsonb;

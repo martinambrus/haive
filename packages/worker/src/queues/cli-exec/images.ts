@@ -120,6 +120,8 @@ export async function probeCliPath(
     null,
     SANDBOX_WORKDIR,
     null,
+    // egressDomains: a --version probe needs no model egress.
+    [],
     [],
     authMounts,
   );

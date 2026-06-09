@@ -26,6 +26,7 @@ import {
 } from '../../sandbox/mcp-config.js';
 import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
 import { signRagToken } from '@haive/shared/rag';
+import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliProviderRecord } from '../../cli-adapters/types.js';
 import {
   ensureTaskAuthVolumes,
@@ -56,6 +57,23 @@ interface ProviderRuntimeConfig {
   wrapperContent: string | null;
   sandboxImage: string | null;
   networkPolicy: CliNetworkPolicy | null;
+  /** Effective egress allow-set for the CLI's own model/auth servers: the
+   *  adapter's declared defaults ∪ the provider's user-added extras. */
+  egressDomains: string[];
+}
+
+/** Effective egress = adapter-declared model/auth domains ∪ the provider's
+ *  user-added extras. Defaults are always re-applied, so a future default
+ *  addition auto-applies and clearing the extras can't strand the CLI from its
+ *  model. Shared by the cli/agent_mining path and both sub-agent paths. */
+export function resolveEffectiveEgressDomains(provider: {
+  name: CliProviderName;
+  egressDomains?: string[] | null;
+}): string[] {
+  const defaults = cliAdapterRegistry.has(provider.name)
+    ? cliAdapterRegistry.get(provider.name).defaultEgressDomains
+    : [];
+  return [...new Set([...defaults, ...(provider.egressDomains ?? [])])];
 }
 
 export async function loadProviderRuntimeConfig(
@@ -64,17 +82,20 @@ export async function loadProviderRuntimeConfig(
   taskId?: string | null,
 ): Promise<ProviderRuntimeConfig> {
   if (!providerId) {
-    return { wrapperContent: null, sandboxImage: null, networkPolicy: null };
+    return { wrapperContent: null, sandboxImage: null, networkPolicy: null, egressDomains: [] };
   }
   const row = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, providerId),
   });
-  if (!row) return { wrapperContent: null, sandboxImage: null, networkPolicy: null };
+  if (!row) {
+    return { wrapperContent: null, sandboxImage: null, networkPolicy: null, egressDomains: [] };
+  }
   const sandboxImage = await resolveSandboxImageTag(db, taskId ?? null, row);
   return {
     wrapperContent: row.wrapperContent ?? null,
     sandboxImage,
     networkPolicy: row.networkPolicy,
+    egressDomains: resolveEffectiveEgressDomains(row),
   };
 }
 
@@ -94,15 +115,43 @@ async function resolveRagMcpConfig(
   taskId: string,
 ): Promise<{ enabled: boolean; apiUrl: string; token: string }> {
   const disabled = { enabled: false, apiUrl: '', token: '' };
-  const toolingStep = await db.query.taskSteps.findFirst({
+  const readRagMode = (output: unknown): string | undefined =>
+    (output as { tooling?: { ragMode?: string } } | null)?.tooling?.ragMode;
+
+  // ragMode from the task's OWN step-04 output, else the repo's most recent
+  // onboarding step-04 output. Workflow tasks have no 04-tooling-infrastructure
+  // step of their own, so without this fallback RAG retrieval would never be
+  // wired for them even when onboarding configured it (mirrors the repo
+  // fallback in loadUserMcpServers below).
+  const ownStep = await db.query.taskSteps.findFirst({
     where: and(
       eq(schema.taskSteps.taskId, taskId),
       eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
     ),
     columns: { output: true },
   });
-  const ragMode = (toolingStep?.output as { tooling?: { ragMode?: string } } | null)?.tooling
-    ?.ragMode;
+  let ragMode = readRagMode(ownStep?.output);
+  if (!ragMode) {
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { repositoryId: true },
+    });
+    if (task?.repositoryId) {
+      const rows = await db
+        .select({ output: schema.taskSteps.output })
+        .from(schema.taskSteps)
+        .innerJoin(schema.tasks, eq(schema.taskSteps.taskId, schema.tasks.id))
+        .where(
+          and(
+            eq(schema.tasks.repositoryId, task.repositoryId),
+            eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
+          ),
+        )
+        .orderBy(desc(schema.taskSteps.createdAt))
+        .limit(1);
+      ragMode = readRagMode(rows[0]?.output);
+    }
+  }
   if (!ragMode || ragMode === 'none') return disabled;
 
   const secret = process.env.CONFIG_ENCRYPTION_KEY;
@@ -174,6 +223,10 @@ export async function resolveMcpExtraFiles(
   taskId: string,
   providerName: CliProviderName,
   sandboxWorkdir: string,
+  /** Restrict the MCP surface to the haive-rag server only — no chrome-devtools
+   *  and no user MCP servers. Used for knowledge-mining invocations, which are
+   *  read-only analysis and should reach nothing but rag_search. */
+  ragOnly = false,
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
 
@@ -183,7 +236,7 @@ export async function resolveMcpExtraFiles(
     where: eq(schema.tasks.id, taskId),
     columns: { envTemplateId: true },
   });
-  if (task?.envTemplateId) {
+  if (!ragOnly && task?.envTemplateId) {
     const envTemplate = await db.query.envTemplates.findFirst({
       where: eq(schema.envTemplates.id, task.envTemplateId),
       columns: { declaredDeps: true, status: true },
@@ -207,8 +260,9 @@ export async function resolveMcpExtraFiles(
 
   // User's custom MCP servers (.claude/mcp_settings.json) merged additively so
   // the generated --strict-mcp-config bundle doesn't shadow them. Haive's
-  // reserved servers win on name collision (see serversToJsonObject).
-  const userServers = await loadUserMcpServers(db, taskId);
+  // reserved servers win on name collision (see serversToJsonObject). Skipped
+  // entirely for rag-only (mining) invocations so they reach nothing but RAG.
+  const userServers = ragOnly ? {} : await loadUserMcpServers(db, taskId);
 
   if (servers.length === 0 && Object.keys(userServers).length === 0) return empty;
 

@@ -63,6 +63,11 @@ export const cliProviders = pgTable(
       .$type<{ mode: 'none' | 'full' | 'allowlist'; domains: string[]; ips: string[] }>()
       .notNull()
       .default({ mode: 'full', domains: [], ips: [] }),
+    // User-added egress domains for the CLI's own model/auth servers, merged at
+    // runtime with the adapter's declared defaults. Lets the CLI reach its LLM
+    // even under network policy `none`/`allowlist`. Stores only the extras; the
+    // adapter defaults are always re-applied so this can never strand the CLI.
+    egressDomains: jsonb('egress_domains').$type<string[]>().notNull().default([]),
     authMode: cliAuthModeEnum('auth_mode').notNull().default('subscription'),
     cliVersion: text('cli_version'),
     effortLevel: text('effort_level'),

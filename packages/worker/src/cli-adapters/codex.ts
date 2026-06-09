@@ -29,6 +29,7 @@ export class CodexAdapter extends BaseCliAdapter {
   readonly rulesFile = 'AGENTS.md';
   readonly rulesFileMode = 'native' as const;
   override readonly effortScale = CODEX_EFFORT_SCALE;
+  override readonly defaultEgressDomains = ['api.openai.com', 'chatgpt.com'];
 
   buildCliInvocation(
     provider: CliProviderRecord,

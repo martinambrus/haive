@@ -37,6 +37,12 @@ export abstract class BaseCliAdapter {
    *  CLI has no such knob. Adapters that override this MUST also override
    *  effortEnv() to translate a level into env vars. */
   readonly effortScale: EffortScale | null = null;
+  /** Domains the CLI must reach for its OWN model/auth servers (e.g.
+   *  api.anthropic.com). Merged at runtime with the provider's user-added
+   *  egressDomains and fed into the egress gateway so the CLI works under
+   *  network policy `none`/`allowlist`. Empty = adapter declares none (the
+   *  user must add them per provider). */
+  readonly defaultEgressDomains: readonly string[] = [];
 
   async isAvailable(provider: CliProviderRecord): Promise<boolean> {
     const result = await this.probeExecutable(provider);

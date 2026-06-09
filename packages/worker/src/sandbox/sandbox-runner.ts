@@ -51,6 +51,11 @@ export interface SandboxRunnerOptions {
   docker?: DockerRunner;
   extraMounts?: DockerVolumeMount[];
   networkPolicy?: CliNetworkPolicy | null;
+  /** Egress allow-set for the CLI's own model/auth servers (adapter defaults ∪
+   *  provider extras). Under `allowlist` these are added to the user's domains;
+   *  under `none` they become the ONLY domains the squid gateway permits. Empty
+   *  under `none` keeps the no-internet fast path (no gateway). */
+  egressDomains?: string[];
   /** Stamped onto the spawned container as `haive.task.id=<taskId>` so cancel can find and kill it. */
   taskId?: string;
 }
@@ -96,11 +101,19 @@ export async function runInSandbox(
   const extraFileDirs: string[] = [];
 
   try {
+    const egress = options.egressDomains ?? [];
     if (policy?.mode === 'allowlist') {
+      // Allowlist: the user's domains plus the CLI's own model/auth domains, so
+      // the agent reaches its model without the user hand-listing the host.
       gateway = await createEgressGateway({
-        domains: policy.domains,
+        domains: [...new Set([...policy.domains, ...egress])],
         ips: policy.ips,
       });
+    } else if (policy?.mode === 'none' && egress.length > 0) {
+      // `none` blocks all internet, but the CLI still needs its model/auth
+      // servers. Spin up the same squid gateway allowing ONLY those domains; the
+      // internal api network is attached as a 2nd NIC (resolveApiConnectNetworks).
+      gateway = await createEgressGateway({ domains: [...new Set(egress)], ips: [] });
     }
 
     if (spec.wrapperContent && spec.wrapperContent.trim().length > 0) {
@@ -142,6 +155,7 @@ export async function runInSandbox(
       mounts,
       workdir,
       network,
+      connectNetworks: resolveApiConnectNetworks(policy, gateway),
       user: 'node',
       labels: options.taskId ? { 'haive.task.id': options.taskId } : undefined,
       timeoutMs: spec.timeoutMs,
@@ -170,13 +184,33 @@ export async function runInSandbox(
   }
 }
 
+/** The sandbox's PRIMARY network, which governs internet egress per policy:
+ *  allowlist / none-with-egress → the squid gateway net; full → default bridge;
+ *  none-without-egress → SANDBOX_NETWORK itself (Docker forbids a 2nd network on
+ *  a 'none'-mode container, so the internal api net IS the sole network — api
+ *  access, no internet). The internal api net is attached as a 2nd NIC in every
+ *  case EXCEPT that last one (see resolveApiConnectNetworks). */
 function resolveDockerNetwork(
   policy: CliNetworkPolicy | null,
   gateway: EgressGateway | null,
 ): string | undefined {
-  if (gateway) return gateway.networkName;
-  if (policy?.mode === 'none') return 'none';
-  return undefined;
+  if (gateway) return gateway.networkName; // allowlist: squid egress (proxied internet)
+  if (policy?.mode === 'none') return process.env.SANDBOX_NETWORK || 'none';
+  return undefined; // 'full' / null: default bridge (NAT internet)
+}
+
+/** The internal api-only network attached as a SECOND NIC so the sandbox can
+ *  reach rag_search's API target regardless of its internet policy — postgres/
+ *  redis are NOT on it. Skipped only for a gateway-less 'none' run, where
+ *  SANDBOX_NETWORK is already the sole (primary) network; a gatewayed 'none'
+ *  (CLI egress domains set) attaches it as a second NIC like every other policy.
+ *  Also empty when SANDBOX_NETWORK is unset. */
+function resolveApiConnectNetworks(
+  policy: CliNetworkPolicy | null,
+  gateway: EgressGateway | null,
+): string[] {
+  if (policy?.mode === 'none' && !gateway) return [];
+  return process.env.SANDBOX_NETWORK ? [process.env.SANDBOX_NETWORK] : [];
 }
 
 function mergeProxyEnv(
@@ -185,7 +219,9 @@ function mergeProxyEnv(
 ): Record<string, string> | undefined {
   if (!gateway) return base;
   const proxyUrl = gateway.proxyUrl;
-  const noProxy = 'localhost,127.0.0.1,::1';
+  // `api` is reached directly over the internal sandbox<->API network, never via
+  // the squid proxy (which only allows the user's allowlisted domains).
+  const noProxy = 'localhost,127.0.0.1,::1,api';
   return {
     ...(base ?? {}),
     HTTP_PROXY: proxyUrl,

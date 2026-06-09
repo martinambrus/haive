@@ -38,6 +38,7 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
   readonly rulesFile = 'CLAUDE.md';
   readonly rulesFileMode = 'import' as const;
   override readonly effortScale = CLAUDE_EFFORT_SCALE;
+  override readonly defaultEgressDomains = ['api.anthropic.com'];
 
   buildCliInvocation(
     provider: CliProviderRecord,

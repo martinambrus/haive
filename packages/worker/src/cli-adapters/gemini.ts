@@ -18,6 +18,10 @@ export class GeminiAdapter extends BaseCliAdapter {
   readonly defaultModel = 'gemini-2.5-pro';
   readonly rulesFile = 'GEMINI.md';
   readonly rulesFileMode = 'import' as const;
+  override readonly defaultEgressDomains = [
+    'generativelanguage.googleapis.com',
+    'oauth2.googleapis.com',
+  ];
 
   buildCliInvocation(
     provider: CliProviderRecord,
