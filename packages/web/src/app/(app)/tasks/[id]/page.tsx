@@ -380,6 +380,13 @@ export default function TaskDetailPage() {
 
   const canCancel = !['completed', 'cancelled'].includes(task.status);
   const canRetry = task.status === 'failed';
+  // A failed task failed AT a step. The top-level Retry must re-run that step
+  // (reset it + downstream, re-execute), which is exactly the per-step Retry —
+  // NOT the task-level `start` action, which re-walks from the first step and
+  // stalls on the still-failed step without re-executing it. Fall back to the
+  // task-level retry only when nothing is marked failed (e.g. an orchestrator-
+  // level failure before any step ran).
+  const failedStep = steps.find((s) => s.status === 'failed');
 
   return (
     <div className="flex flex-col gap-6">
@@ -432,7 +439,10 @@ export default function TaskDetailPage() {
         </div>
         <div className="flex flex-wrap gap-2">
           {canRetry && (
-            <Button size="sm" onClick={() => runAction('retry')}>
+            <Button
+              size="sm"
+              onClick={() => (failedStep ? runStepAction(failedStep, 'retry') : runAction('retry'))}
+            >
               Retry
             </Button>
           )}
