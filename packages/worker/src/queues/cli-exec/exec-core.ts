@@ -336,11 +336,30 @@ export function formatCliErrorMessage(
 ): string | null {
   if (spawnError) return spawnError;
   if (exitCode === 0) return null;
-  const stderrTail = stderr.trim();
+  const stderrTail = stripBenignConfigNoise(stderr);
   if (stderrTail.length > 0) return stderrTail.slice(-2000);
   const stdoutTail = stdout.trim();
   if (stdoutTail.length > 0) return stdoutTail.slice(-2000);
   return `cli exited with code ${exitCode ?? 'unknown'}`;
+}
+
+// claude-code prints a benign advisory to STDERR when its `.claude.json` seed is
+// absent ("Claude configuration file not found … A backup file exists … restore
+// by running: cp …"). It then continues with a fallback, so this is noise, not a
+// failure cause. On a real failure the genuine error (e.g. "API Error: Unable to
+// connect to API (ConnectionRefused)") lands on STDOUT, but this advisory was the
+// stderr tail and masked it. Strip the advisory lines so the real error — or the
+// stdout fallback below — surfaces. The full text stays in rawOutput/streamLog.
+const CONFIG_NOISE_LINE =
+  /^(Claude configuration file not found at:|A backup file exists at:|You can manually restore it by running:)/;
+
+function stripBenignConfigNoise(stderr: string): string {
+  if (!stderr.includes('Claude configuration file not found')) return stderr.trim();
+  return stderr
+    .split('\n')
+    .filter((line) => !CONFIG_NOISE_LINE.test(line.trim()))
+    .join('\n')
+    .trim();
 }
 
 export function quoteArg(arg: string): string {
