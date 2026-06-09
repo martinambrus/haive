@@ -45,10 +45,15 @@ export function computeTaskTiming(steps: TaskTimingStep[], nowMs: number): TaskT
     const ended = toMs(s.endedAt);
     const end = ended ?? nowMs;
     const waitStart = toMs(s.waitingStartedAt);
+    // A step sitting in waiting_form is accruing idle time right now; count the
+    // ongoing wait so idle ticks live and is excluded from work below. On submit
+    // the server folds this same span into idle_ms and clears waitingStartedAt,
+    // so there is no double-count across the transition.
     const openWait =
       ended === null && s.status === 'waiting_form' && waitStart !== null
         ? Math.max(0, nowMs - waitStart)
         : 0;
+    idleMs += openWait;
     workMs += Math.max(0, end - start - stepIdle - openWait);
   }
   return { workMs, idleMs, userActiveMs };

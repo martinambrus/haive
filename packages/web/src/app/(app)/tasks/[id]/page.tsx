@@ -551,7 +551,7 @@ export default function TaskDetailPage() {
               />
             </div>
           ))}
-          <TaskTotalTime task={task} steps={steps} />
+          <TaskTotalTime task={task} steps={steps} userActive={userActive} />
         </div>
       )}
 
@@ -915,7 +915,15 @@ function UserActiveDuration({ ms }: { ms: number }) {
 // Task time summary: agent work, idle (time waiting on you), your active time at
 // gates, total effort, and wall clock. Shown live while the task runs (ticks each
 // second) and frozen once it ends. Renders nothing until the task has started.
-function TaskTotalTime({ task, steps }: { task: Task; steps: TaskStep[] }) {
+function TaskTotalTime({
+  task,
+  steps,
+  userActive,
+}: {
+  task: Task;
+  steps: TaskStep[];
+  userActive: { activeStepId: string | null; displayMs: number };
+}) {
   const ticking = !!task.startedAt && !task.completedAt;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -932,8 +940,21 @@ function TaskTotalTime({ task, steps }: { task: Task; steps: TaskStep[] }) {
   // idle is time spent waiting on you; user is the focused subset of idle.
   // Effort = agent work + your active time — the real task effort, which
   // agent-only "work" undercounts. Open steps use endMs (now while running).
-  const { workMs, idleMs, userActiveMs } = computeTaskTiming(steps, endMs);
+  // Override the active waiting step's stored user-active time with the live
+  // local timer so "user" (and effort) tick each second at a gate instead of
+  // lagging until the next server flush. idle + wall tick via the now state and
+  // computeTaskTiming's open-wait handling; work correctly pauses at the gate.
+  const liveSteps = userActive.activeStepId
+    ? steps.map((s) =>
+        s.stepId === userActive.activeStepId ? { ...s, userActiveMs: userActive.displayMs } : s,
+      )
+    : steps;
+  const { workMs, idleMs, userActiveMs } = computeTaskTiming(liveSteps, endMs);
   const effortMs = workMs + userActiveMs;
+  // While running, show seconds even past 1h so the live values visibly tick:
+  // the 1s interval advances them, but the compact h/m format hides sub-minute
+  // changes (a multi-hour task looks frozen). Completed tasks stay compact.
+  const fmt = (ms: number) => formatDuration(ms, { alwaysSeconds: !task.completedAt });
   return (
     <Card className="flex items-center justify-between gap-3 py-3">
       <div className="flex flex-col">
@@ -945,21 +966,19 @@ function TaskTotalTime({ task, steps }: { task: Task; steps: TaskStep[] }) {
       </div>
       <div className="flex items-center gap-6">
         <div className="flex flex-col items-end">
-          <span className="font-mono text-lg text-indigo-300">{formatDuration(workMs)}</span>
+          <span className="font-mono text-lg text-indigo-300">{fmt(workMs)}</span>
           <span className="text-[10px] uppercase tracking-wider text-neutral-500">work</span>
         </div>
         <div className="flex flex-col items-end">
-          <span className="font-mono text-lg text-amber-300">{formatDuration(idleMs)}</span>
+          <span className="font-mono text-lg text-amber-300">{fmt(idleMs)}</span>
           <span className="text-[10px] uppercase tracking-wider text-neutral-500">idle</span>
         </div>
         <div className="flex flex-col items-end">
-          <span className="font-mono text-lg text-emerald-300">{formatDuration(userActiveMs)}</span>
+          <span className="font-mono text-lg text-emerald-300">{fmt(userActiveMs)}</span>
           <span className="text-[10px] uppercase tracking-wider text-neutral-500">user</span>
         </div>
         <div className="flex flex-col items-end">
-          <span className="font-mono text-lg font-semibold text-neutral-50">
-            {formatDuration(effortMs)}
-          </span>
+          <span className="font-mono text-lg font-semibold text-neutral-50">{fmt(effortMs)}</span>
           <span
             className="text-[10px] uppercase tracking-wider text-neutral-400"
             title="Agent work + your active time = real task effort"
@@ -968,7 +987,7 @@ function TaskTotalTime({ task, steps }: { task: Task; steps: TaskStep[] }) {
           </span>
         </div>
         <div className="flex flex-col items-end">
-          <span className="font-mono text-lg text-neutral-100">{formatDuration(wallMs)}</span>
+          <span className="font-mono text-lg text-neutral-100">{fmt(wallMs)}</span>
           <span className="text-[10px] uppercase tracking-wider text-neutral-500">wall clock</span>
         </div>
       </div>
