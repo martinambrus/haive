@@ -10,9 +10,12 @@ describe('renderSquidConfig', () => {
     expect(cfg).not.toContain('allowed_ips');
   });
 
-  it('emits dstdomain ACL with both bare and leading-dot forms', () => {
+  it('emits a single leading-dot dstdomain form for a bare domain', () => {
     const cfg = renderSquidConfig({ domains: ['api.anthropic.com'], ips: [] });
-    expect(cfg).toContain('acl allowed_domains dstdomain .api.anthropic.com api.anthropic.com');
+    // Leading-dot only: squid's `.api.anthropic.com` matches the apex AND every
+    // subdomain, and also emitting the bare form is a FATAL overlap squid rejects.
+    expect(cfg).toContain('acl allowed_domains dstdomain .api.anthropic.com');
+    expect(cfg).not.toContain('dstdomain .api.anthropic.com api.anthropic.com');
     expect(cfg).toContain('http_access allow allowed_domains');
   });
 
@@ -48,7 +51,7 @@ describe('renderSquidConfig', () => {
       ips: ['10.0.0.2', '10.0.0.1', '10.0.0.1'],
     });
     const domainLine = cfg.split('\n').find((l) => l.startsWith('acl allowed_domains'));
-    expect(domainLine).toBe('acl allowed_domains dstdomain .a.com .b.com a.com b.com');
+    expect(domainLine).toBe('acl allowed_domains dstdomain .a.com .b.com');
     const ipLine = cfg.split('\n').find((l) => l.startsWith('acl allowed_ips'));
     expect(ipLine).toBe('acl allowed_ips dst 10.0.0.1 10.0.0.2');
   });
@@ -88,9 +91,7 @@ describe('renderSquidConfig', () => {
       ips: [],
     });
     const dstLine = cfg.split('\n').find((l) => l.startsWith('acl allowed_domains'));
-    expect(dstLine).toBe(
-      'acl allowed_domains dstdomain .api.anthropic.com .npmjs.org api.anthropic.com',
-    );
+    expect(dstLine).toBe('acl allowed_domains dstdomain .api.anthropic.com .npmjs.org');
     const regexLine = cfg.split('\n').find((l) => l.startsWith('acl allowed_domain_regex'));
     expect(regexLine).toBe('acl allowed_domain_regex dstdom_regex ^example\\.[^.]+$');
     expect(cfg).toContain('http_access allow allowed_domains');
@@ -114,6 +115,6 @@ describe('renderSquidConfig', () => {
   it('does not duplicate the dstdomain form when *.example.com and example.com are both listed', () => {
     const cfg = renderSquidConfig({ domains: ['example.com', '*.example.com'], ips: [] });
     const dstLine = cfg.split('\n').find((l) => l.startsWith('acl allowed_domains'));
-    expect(dstLine).toBe('acl allowed_domains dstdomain .example.com example.com');
+    expect(dstLine).toBe('acl allowed_domains dstdomain .example.com');
   });
 });

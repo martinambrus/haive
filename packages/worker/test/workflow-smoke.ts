@@ -241,6 +241,11 @@ async function main(): Promise<void> {
         maxIterations: '3',
         focusAreas: '',
       },
+      '05a-resolve-spec-warnings': {
+        // Checkpoint before gate-1; only surfaces when the reviewer left findings.
+        // "continue" sends the approved spec on as-is (no agent, no terminal edits).
+        action: 'continue',
+      },
       '06-gate-1-spec-approval': {
         decision: 'approve',
         feedback: 'Smoke run; proceeding with stub spec.',
