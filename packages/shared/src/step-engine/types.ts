@@ -11,6 +11,14 @@ export interface DetectResult {
 
 export type FormValues = Record<string, unknown>;
 
+/** A named CLI role within a step (e.g. spec-quality's reviewer/corrector). When
+ *  a step declares roles, the UI renders one provider dropdown per role and the
+ *  loop resolves a provider per role/iteration instead of one per step. */
+export interface CliRoleDescriptor {
+  id: string;
+  label: string;
+}
+
 export interface StepMetadata {
   id: string;
   /** User-facing WorkflowType or internal registry key (e.g. 'env_replicate'). */
@@ -20,6 +28,10 @@ export interface StepMetadata {
   description: string;
   requiresCli: boolean;
   requiredCapabilities?: StepCapability[];
+  /** When set, this step uses multiple CLIs by role (one provider per role).
+   *  Mirror the entry in STEP_CLI_ROLES below so api/web can render the
+   *  per-role dropdowns without importing the worker step registry. */
+  cliRoles?: readonly CliRoleDescriptor[];
   /** True when `detect()` resolves CLI-specific paths or metadata from the
    *  CliProviderMetadata catalog. Switching `task.cliProviderId` invalidates
    *  cached `detectOutput` on these steps so the next advance re-detects.
@@ -36,6 +48,17 @@ export interface StepMetadata {
  *
  *  Keep in sync with the `providerSensitive: true` flags on StepDefinition
  *  metadata blocks. A worker startup assertion verifies the match. */
+/** Per-step CLI roles, keyed by step id. Duplicated here (like
+ *  PROVIDER_SENSITIVE_STEP_IDS) because the api/web packages need it to render
+ *  per-role provider dropdowns and the worker step registry is not importable
+ *  from them. Keep in sync with each StepDefinition's `metadata.cliRoles`. */
+export const STEP_CLI_ROLES: Record<string, readonly CliRoleDescriptor[]> = {
+  '05-phase-0b5-spec-quality': [
+    { id: 'reviewer', label: 'Reviewer' },
+    { id: 'corrector', label: 'Corrector' },
+  ],
+};
+
 export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
   '04-tooling-infrastructure',
   '07_5-verify-files',

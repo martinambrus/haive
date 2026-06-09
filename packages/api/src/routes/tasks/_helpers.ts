@@ -1,6 +1,7 @@
 import { relative, resolve } from 'node:path';
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { STEP_CLI_ROLES, type CliRoleDescriptor } from '@haive/shared';
 import { getDb } from '../../db.js';
 import { HttpError } from '../../context.js';
 
@@ -43,23 +44,69 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
   db: ReturnType<typeof getDb>,
   userId: string,
   steps: T[],
-): Promise<(T & { preferredCliProviderId: string | null })[]> {
+): Promise<
+  (T & {
+    preferredCliProviderId: string | null;
+    /** Present only for multi-CLI steps (STEP_CLI_ROLES); drives the per-role
+     *  dropdowns and their currently-selected providers in the UI. */
+    cliRoles?: readonly CliRoleDescriptor[];
+    cliRoleProviders?: Record<string, string | null>;
+  })[]
+> {
   const stepIds = [...new Set(steps.map((s) => s.stepId))];
-  if (stepIds.length === 0) return steps.map((s) => ({ ...s, preferredCliProviderId: null }));
-  const prefs = await db
-    .select()
-    .from(schema.userStepCliPreferences)
-    .where(
-      and(
-        eq(schema.userStepCliPreferences.userId, userId),
-        inArray(schema.userStepCliPreferences.stepId, stepIds),
-        // Only explicit per-step overrides surface in the UI; legacy
-        // auto-recorded rows (explicit=false) fall back to the task default.
-        eq(schema.userStepCliPreferences.explicit, true),
-      ),
-    );
-  const byStep = new Map(prefs.map((p) => [p.stepId, p.cliProviderId]));
-  return steps.map((s) => ({ ...s, preferredCliProviderId: byStep.get(s.stepId) ?? null }));
+  const byStep = new Map<string, string>();
+  const roleByStep = new Map<string, Map<string, string>>();
+  if (stepIds.length > 0) {
+    const prefs = await db
+      .select()
+      .from(schema.userStepCliPreferences)
+      .where(
+        and(
+          eq(schema.userStepCliPreferences.userId, userId),
+          inArray(schema.userStepCliPreferences.stepId, stepIds),
+          // Only explicit per-step overrides surface in the UI; legacy
+          // auto-recorded rows (explicit=false) fall back to the task default.
+          eq(schema.userStepCliPreferences.explicit, true),
+        ),
+      );
+    for (const p of prefs) byStep.set(p.stepId, p.cliProviderId);
+
+    // Per-role prefs, only for steps that declare CLI roles.
+    const roleStepIds = stepIds.filter((sid) => STEP_CLI_ROLES[sid]);
+    if (roleStepIds.length > 0) {
+      const rolePrefs = await db
+        .select()
+        .from(schema.userStepCliRolePreferences)
+        .where(
+          and(
+            eq(schema.userStepCliRolePreferences.userId, userId),
+            inArray(schema.userStepCliRolePreferences.stepId, roleStepIds),
+            eq(schema.userStepCliRolePreferences.explicit, true),
+          ),
+        );
+      for (const p of rolePrefs) {
+        const m = roleByStep.get(p.stepId) ?? new Map<string, string>();
+        m.set(p.role, p.cliProviderId);
+        roleByStep.set(p.stepId, m);
+      }
+    }
+  }
+  return steps.map((s) => {
+    const roles = STEP_CLI_ROLES[s.stepId];
+    const roleProviders = roleByStep.get(s.stepId) ?? new Map<string, string>();
+    return {
+      ...s,
+      preferredCliProviderId: byStep.get(s.stepId) ?? null,
+      ...(roles
+        ? {
+            cliRoles: roles,
+            cliRoleProviders: Object.fromEntries(
+              roles.map((r) => [r.id, roleProviders.get(r.id) ?? null]),
+            ),
+          }
+        : {}),
+    };
+  });
 }
 
 export async function findActiveCliInvocation(

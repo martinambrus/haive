@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
 import { api, type Task, type TaskStatus } from '@/lib/api-client';
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
+import { formatDuration } from '@/lib/format-duration';
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
 
@@ -239,6 +240,28 @@ export default function TasksPage() {
                   {task.currentStepId && <span>Current: {task.currentStepId}</span>}
                   {task.errorMessage && <span className="text-red-400">{task.errorMessage}</span>}
                 </div>
+                {task.timing && task.startedAt && (
+                  <div className="flex flex-wrap items-center gap-3 font-mono text-xs">
+                    <span className="text-neutral-300" title="Wall clock since the task started">
+                      wall {formatDuration(task.timing.wallMs)}
+                    </span>
+                    <span
+                      className="text-indigo-400"
+                      title="Agent active work time (idle waits and gaps excluded)"
+                    >
+                      work {formatDuration(task.timing.workMs)}
+                    </span>
+                    <span className="text-amber-400" title="Time the task sat waiting on you">
+                      idle {formatDuration(task.timing.idleMs)}
+                    </span>
+                    <span
+                      className="text-emerald-400"
+                      title="Your active time at gates (focused while it waited)"
+                    >
+                      user {formatDuration(task.timing.userActiveMs)}
+                    </span>
+                  </div>
+                )}
               </Card>
             </Link>
           ))}

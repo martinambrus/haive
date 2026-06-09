@@ -74,7 +74,7 @@ export const taskActionRequestSchema = z.object({
 
 export type TaskAction = z.infer<typeof taskActionSchema>;
 
-export const stepActionSchema = z.enum(['retry', 'skip']);
+export const stepActionSchema = z.enum(['retry', 'skip', 'resume']);
 
 export const stepActionRequestSchema = z.object({
   action: stepActionSchema,
@@ -85,6 +85,10 @@ export type StepAction = z.infer<typeof stepActionSchema>;
 
 export const setCliProviderRequestSchema = z.object({
   cliProviderId: z.string().uuid().nullable(),
+  /** Which CLI role this preference targets. Omitted / 'default' uses the
+   *  single per-step provider (legacy path); named roles (e.g. 'reviewer',
+   *  'corrector') are stored per (user, step, role) for multi-CLI steps. */
+  role: z.string().max(32).optional(),
 });
 
 export type SetCliProviderRequest = z.infer<typeof setCliProviderRequestSchema>;

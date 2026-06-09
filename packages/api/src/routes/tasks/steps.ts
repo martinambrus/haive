@@ -6,6 +6,7 @@ import {
   logger,
   setCliProviderRequestSchema,
   stepActionRequestSchema,
+  STEP_CLI_ROLES,
   submitStepRequestSchema,
   TASK_JOB_NAMES,
   type TaskJobPayload,
@@ -312,6 +313,80 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     return c.json({ ok: true, status: 'pending' });
   }
 
+  if (body.action === 'resume') {
+    // Resume a multi-iteration loop step from the pass that FAILED, keeping every
+    // completed pass (unlike retry, which resets to pass 0). The user picks a
+    // different CLI first (e.g. when one runs out of credits); resume re-dispatches
+    // the failed pass with the now-selected provider. Only for a loop step that has
+    // already completed ≥1 pass — otherwise there is nothing to preserve, use retry.
+    // Resume is for loop steps: one that already completed ≥1 pass, OR a loop
+    // step that failed on its very first pass (e.g. the CLI ran out of credits
+    // before any pass finished). The latter has iterationCount 0 but is still
+    // resumable — supersede the failed invocation and re-dispatch pass 0 with the
+    // newly-picked CLI. A non-loop step (no cliRoles) at iterationCount 0 has
+    // nothing to preserve — use Retry.
+    const isLoopStep = (STEP_CLI_ROLES[stepId]?.length ?? 0) > 0;
+    if (step.iterationCount <= 0 && !isLoopStep) {
+      throw new HttpError(
+        409,
+        'Resume is only available for a multi-iteration step — use Retry instead',
+        'not_resumable',
+      );
+    }
+    if (step.status === 'running' || step.status === 'waiting_cli') {
+      const killed = await killTaskSandboxes(id);
+      logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for resume');
+    }
+    const now = new Date();
+    // Supersede ONLY the failed pass's invocation (latest non-superseded,
+    // non-consumed). Prior passes are already consumed; with this superseded,
+    // resolveLlmPhase sees no live invocation and re-enqueues pass N afresh.
+    await db
+      .update(schema.cliInvocations)
+      .set({ supersededAt: now })
+      .where(
+        and(
+          eq(schema.cliInvocations.taskStepId, step.id),
+          isNull(schema.cliInvocations.supersededAt),
+          isNull(schema.cliInvocations.consumedAt),
+        ),
+      );
+    // Preserve detectOutput / formSchema / formValues / iterations / iterationCount
+    // / output so advanceStep skips detect + form and the loop resumes at
+    // upcomingIteration = iterations.length with the now-selected provider.
+    await db
+      .update(schema.taskSteps)
+      .set({
+        status: 'running',
+        errorMessage: null,
+        errorHint: null,
+        endedAt: null,
+        statusMessage: null,
+        updatedAt: now,
+      })
+      .where(eq(schema.taskSteps.id, step.id));
+    await db
+      .update(schema.tasks)
+      .set({ status: 'running', errorMessage: null, updatedAt: now })
+      .where(and(eq(schema.tasks.id, id), inArray(schema.tasks.status, ['failed', 'queued'])));
+    await appendTaskEvent(db, id, step.id, 'step.resume', {
+      stepId,
+      fromIteration: step.iterationCount,
+      note: body.note ?? null,
+    });
+    await getTaskQueue().add(
+      TASK_JOB_NAMES.ADVANCE_STEP,
+      { taskId: id, userId, stepId } as TaskJobPayload,
+      {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: 100,
+        removeOnFail: 100,
+      },
+    );
+    return c.json({ ok: true, status: 'running', resumedFromIteration: step.iterationCount });
+  }
+
   if (body.action === 'skip') {
     if (step.status !== 'failed' && step.status !== 'waiting_form') {
       throw new HttpError(409, `Cannot skip step in status ${step.status}`);
@@ -429,8 +504,13 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
       endedAt: schema.cliInvocations.endedAt,
       createdAt: schema.cliInvocations.createdAt,
       errorMessage: schema.cliInvocations.errorMessage,
+      // Provider that ran this invocation, so the terminal badge can show which
+      // CLI/model it was — important for multi-CLI loop steps (spec-quality).
+      providerLabel: schema.cliProviders.label,
+      providerName: schema.cliProviders.name,
     })
     .from(schema.cliInvocations)
+    .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
     .where(
       and(
         eq(schema.cliInvocations.taskStepId, step.id),
@@ -463,11 +543,56 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
 
   const step = await db.query.taskSteps.findFirst({
     where: and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.stepId, stepId)),
-    columns: { id: true, status: true },
+    columns: { id: true, status: true, iterationCount: true },
   });
   if (!step) throw new HttpError(404, 'Step not found');
   if (step.status === 'running' || step.status === 'waiting_cli') {
     throw new HttpError(409, `Cannot change provider while step is ${step.status}`);
+  }
+
+  // Named roles (e.g. reviewer/corrector) are stored per (user, step, role) and
+  // resolved per loop iteration at dispatch time — no re-detect needed, unlike a
+  // default-provider change below.
+  const role = body.role ?? 'default';
+  if (role !== 'default') {
+    if (body.cliProviderId) {
+      const provider = await db.query.cliProviders.findFirst({
+        where: and(
+          eq(schema.cliProviders.id, body.cliProviderId),
+          eq(schema.cliProviders.userId, userId),
+        ),
+      });
+      if (!provider) throw new HttpError(404, 'CLI provider not found');
+      if (!provider.enabled) throw new HttpError(409, 'CLI provider is disabled');
+      await db
+        .insert(schema.userStepCliRolePreferences)
+        .values({ userId, stepId, role, cliProviderId: body.cliProviderId, explicit: true })
+        .onConflictDoUpdate({
+          target: [
+            schema.userStepCliRolePreferences.userId,
+            schema.userStepCliRolePreferences.stepId,
+            schema.userStepCliRolePreferences.role,
+          ],
+          set: { cliProviderId: body.cliProviderId, explicit: true, updatedAt: new Date() },
+        });
+    } else {
+      await db
+        .delete(schema.userStepCliRolePreferences)
+        .where(
+          and(
+            eq(schema.userStepCliRolePreferences.userId, userId),
+            eq(schema.userStepCliRolePreferences.stepId, stepId),
+            eq(schema.userStepCliRolePreferences.role, role),
+          ),
+        );
+    }
+    await appendTaskEvent(db, id, step.id, 'step.cli_role_provider_changed', {
+      stepId,
+      role,
+      cliProviderId: body.cliProviderId,
+      by: userId,
+    });
+    return c.json({ ok: true, stepId, role, cliProviderId: body.cliProviderId });
   }
 
   if (body.cliProviderId) {
@@ -498,9 +623,14 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   }
 
   // Invalidate the step's cached detect/form so the next advance re-detects
-  // against the newly-preferred CLI's metadata. Skipped if step is terminal.
+  // against the newly-preferred CLI's metadata. Skipped if step is terminal, and
+  // for a mid-loop step (iterationCount > 0) so swapping the CLI before Resume
+  // keeps the completed passes + the form instead of restarting the step.
   let invalidated = false;
-  if (step.status === 'pending' || step.status === 'waiting_form' || step.status === 'failed') {
+  if (
+    step.iterationCount === 0 &&
+    (step.status === 'pending' || step.status === 'waiting_form' || step.status === 'failed')
+  ) {
     await db
       .update(schema.taskSteps)
       .set({

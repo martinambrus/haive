@@ -172,11 +172,14 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
   async detect(ctx: StepContext): Promise<SpecGateDetect> {
     const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
     const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
+    const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
     const planOutput = (plan?.output as PrePlanningOutput | null) ?? {};
     const qualityOutput = (quality?.output as SpecQualityOutput | null) ?? {};
-    // Step 05 amends the spec across loop iterations; prefer its final
-    // amended body when present, fall back to the original 04 spec/summary.
-    const specBody = qualityOutput.spec ?? planOutput.spec ?? planOutput.summary ?? '';
+    const resolvedOutput = (resolved?.output as { spec?: string } | null) ?? {};
+    // Prefer the post-checkpoint spec (05a: user/agent warning fixes), then the
+    // 05 amended body, then the original 04 spec/summary.
+    const specBody =
+      resolvedOutput.spec ?? qualityOutput.spec ?? planOutput.spec ?? planOutput.summary ?? '';
     const iterations = (quality?.iterations ?? []) as IterationEntry[];
     const exhaustedBudget = iterations.some((entry) => entry.exhaustedBudget === true);
     return {

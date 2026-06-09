@@ -4,6 +4,10 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormSchema } from '@haive/shared';
+// Import the pure timing helper from its dedicated subpath, NOT the package
+// barrel — the barrel pulls server-only utils (ioredis -> dns) that break the
+// browser bundle. timing.ts has no imports, so this subpath is browser-safe.
+import { computeTaskTiming } from '@haive/shared/timing';
 import {
   api,
   postUserActive,
@@ -23,11 +27,13 @@ import {
 import { Badge, Button, Card, Input } from '@/components/ui';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
+import { formatDuration } from '@/lib/format-duration';
 import { FormRenderer, type FormValues } from '@/components/form-renderer';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { TaskSource } from '@/components/task-source';
 import { StepTerminal } from '@/components/terminal/StepTerminal';
 import { InteractiveShell } from '@/components/terminal/InteractiveShell';
+import { autoScrollTerminalsEnabled } from '@/lib/terminal-autoscroll';
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
 
@@ -95,7 +101,10 @@ export default function TaskDetailPage() {
     message: string;
   } | null>(null);
   const stepsContainerRef = useRef<HTMLDivElement>(null);
-  const prevActiveStepRef = useRef<string | null>(null);
+  // Composite "what we last scrolled for" = `${activeStepId}|head|term`. Tracks
+  // both the active step AND whether its terminal had appeared, so the scroll
+  // re-runs when the terminal mounts (not only when the active step changes).
+  const prevScrollKeyRef = useRef<string | null>(null);
   const scrollTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const reload = useCallback(async () => {
@@ -141,7 +150,19 @@ export default function TaskDetailPage() {
       (s) => s.status === 'waiting_form' || s.status === 'running' || s.status === 'waiting_cli',
     );
     const activeId = activeStep?.stepId ?? null;
-    if (activeId && activeId !== prevActiveStepRef.current && container) {
+    const showsTerminal =
+      (activeStep?.cliInvocationCount ?? 0) > 0 &&
+      (activeStep?.status === 'running' || activeStep?.status === 'waiting_cli');
+    const auto = autoScrollTerminalsEnabled();
+    // Re-run when the active step changes OR (with auto-scroll on) when that
+    // step's terminal first appears: cliInvocationCount flips 0 -> >0 a moment
+    // after the step starts running. Without the terminal trigger we'd only ever
+    // scroll to the header — at the instant a step becomes active its terminal /
+    // checkbox aren't in the DOM yet, and the old effect never re-ran once they
+    // were. Keyed on `head` unless auto is on AND the terminal is up, so a user
+    // who turned auto-scroll off keeps the scroll-to-header-once behavior.
+    const scrollKey = activeId ? `${activeId}|${showsTerminal && auto ? 'term' : 'head'}` : null;
+    if (scrollKey && scrollKey !== prevScrollKeyRef.current && container) {
       scrollTimersRef.current.forEach(clearTimeout);
       scrollTimersRef.current = [];
 
@@ -152,6 +173,13 @@ export default function TaskDetailPage() {
       };
       const scrollToLastTerminal = (): boolean => {
         const stepEl = container.querySelector(`[data-step-id="${activeId}"]`);
+        // Prefer the auto-scroll toggle (just below the newest run) so the
+        // checkbox stays visible; fall back to the last run panel.
+        const toggle = stepEl?.querySelector('[data-cli-autoscroll]');
+        if (toggle) {
+          toggle.scrollIntoView({ behavior: 'smooth', block: 'end' });
+          return true;
+        }
         const terminals = stepEl?.querySelectorAll('[data-cli-terminal]');
         if (!terminals || terminals.length === 0) return false;
         const last = terminals[terminals.length - 1];
@@ -160,11 +188,7 @@ export default function TaskDetailPage() {
         return true;
       };
 
-      const showsTerminal =
-        (activeStep?.cliInvocationCount ?? 0) > 0 &&
-        (activeStep?.status === 'running' || activeStep?.status === 'waiting_cli');
-
-      if (!showsTerminal) {
+      if (!showsTerminal || !auto) {
         scrollToHeader();
       } else if (!scrollToLastTerminal()) {
         // Terminal panels mount after an async invocations fetch, so the first
@@ -180,7 +204,7 @@ export default function TaskDetailPage() {
         });
       }
     }
-    prevActiveStepRef.current = activeId;
+    prevScrollKeyRef.current = scrollKey;
   }, [steps]);
 
   // Clear any pending scroll retries on unmount.
@@ -251,9 +275,14 @@ export default function TaskDetailPage() {
     const downstreamCount = steps.filter(
       (s) => s.stepIndex > step.stepIndex && s.status !== 'pending',
     ).length;
-    const label = downstreamCount
-      ? `Retry this step? ${downstreamCount} downstream step(s) will also be reset and re-run.`
-      : 'Retry this step?';
+    const label =
+      action === 'resume'
+        ? step.iterationCount > 0
+          ? `Resume this step from the last completed pass (${step.iterationCount} kept) with the currently-selected CLI?`
+          : `Resume this step's first pass with the currently-selected CLI?`
+        : downstreamCount
+          ? `Retry this step? ${downstreamCount} downstream step(s) will also be reset and re-run.`
+          : 'Retry this step?';
     if (!confirm(label)) return;
     setStepActionBusy(step.stepId);
     setStepActionError(null);
@@ -308,11 +337,14 @@ export default function TaskDetailPage() {
     }
   }
 
-  async function changeStepProvider(stepId: string, cliProviderId: string | null) {
+  async function changeStepProvider(stepId: string, cliProviderId: string | null, role?: string) {
     setStepProviderBusy(stepId);
     setStepProviderError(null);
     try {
-      await api.patch(`/tasks/${id}/steps/${stepId}/cli-provider`, { cliProviderId });
+      await api.patch(`/tasks/${id}/steps/${stepId}/cli-provider`, {
+        cliProviderId,
+        ...(role ? { role } : {}),
+      });
       await reload();
     } catch (err) {
       setStepProviderError({
@@ -513,7 +545,9 @@ export default function TaskDetailPage() {
                 cliError={
                   stepProviderError?.stepId === step.stepId ? stepProviderError.message : null
                 }
-                onChangeCli={(cliProviderId) => changeStepProvider(step.stepId, cliProviderId)}
+                onChangeCli={(cliProviderId, role) =>
+                  changeStepProvider(step.stepId, cliProviderId, role)
+                }
               />
             </div>
           ))}
@@ -690,7 +724,7 @@ interface StepCardProps {
   taskCliProviderId: string | null;
   cliBusy: boolean;
   cliError: string | null;
-  onChangeCli: (cliProviderId: string | null) => Promise<void>;
+  onChangeCli: (cliProviderId: string | null, role?: string) => Promise<void>;
 }
 
 const ACTIONABLE_STATUSES: ReadonlySet<StepStatus> = new Set([
@@ -710,16 +744,6 @@ const RETRYABLE_STEP_STATUSES: ReadonlySet<StepStatus> = new Set([
   'failed',
   'skipped',
 ]);
-
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  if (minutes < 60) return `${minutes}m ${seconds}s`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
-}
 
 // "User active time": the time the user actively spends on a step while it
 // waits for input (waiting_form) AND the tab is visible AND the window is
@@ -888,41 +912,35 @@ function UserActiveDuration({ ms }: { ms: number }) {
   );
 }
 
-// End-of-task summary: active work time (the sum of every step's active-work
-// span, so the gaps between steps and idle waits are excluded) alongside the
-// raw wall-clock time. Renders nothing until the task has ended (completedAt set).
+// Task time summary: agent work, idle (time waiting on you), your active time at
+// gates, total effort, and wall clock. Shown live while the task runs (ticks each
+// second) and frozen once it ends. Renders nothing until the task has started.
 function TaskTotalTime({ task, steps }: { task: Task; steps: TaskStep[] }) {
-  if (!task.startedAt || !task.completedAt) return null;
+  const ticking = !!task.startedAt && !task.completedAt;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!ticking) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [ticking]);
+  if (!task.startedAt) return null;
   const startMs = new Date(task.startedAt).getTime();
-  const endMs = new Date(task.completedAt).getTime();
+  const endMs = task.completedAt ? new Date(task.completedAt).getTime() : now;
   const wallMs = Math.max(0, endMs - startMs);
-  // Work = the sum of every step's active-work span (the same figure
-  // StepDuration shows per step), NOT wall-clock minus idle. Wall clock also
-  // spans the gaps *between* steps — time the task sat idle waiting for the
-  // user to act, or the host slept, with nothing running — which must not count
-  // as work.
-  const workMs = steps.reduce((sum, s) => {
-    if (!s.startedAt) return sum;
-    const stepStart = new Date(s.startedAt).getTime();
-    const stepEnd = s.endedAt ? new Date(s.endedAt).getTime() : endMs;
-    const openWait =
-      !s.endedAt && s.waitingStartedAt
-        ? Math.max(0, endMs - new Date(s.waitingStartedAt).getTime())
-        : 0;
-    return sum + Math.max(0, stepEnd - stepStart - (s.idleMs ?? 0) - openWait);
-  }, 0);
-  // User = time you actively spent at gates (focused while a step waited for
-  // input). Effort = agent work + your active time — the real task effort,
-  // which agent-only "work" undercounts.
-  const userMs = steps.reduce((sum, s) => sum + (s.userActiveMs ?? 0), 0);
-  const effortMs = workMs + userMs;
+  // Work / idle / user from the shared helper (the same numbers the server sends
+  // to the tasks listing). Work excludes idle waits and the gaps between steps;
+  // idle is time spent waiting on you; user is the focused subset of idle.
+  // Effort = agent work + your active time — the real task effort, which
+  // agent-only "work" undercounts. Open steps use endMs (now while running).
+  const { workMs, idleMs, userActiveMs } = computeTaskTiming(steps, endMs);
+  const effortMs = workMs + userActiveMs;
   return (
     <Card className="flex items-center justify-between gap-3 py-3">
       <div className="flex flex-col">
         <span className="text-sm font-medium text-neutral-200">Total time</span>
         <span className="text-xs text-neutral-500">
           {new Date(task.startedAt).toLocaleString()} →{' '}
-          {new Date(task.completedAt).toLocaleString()}
+          {task.completedAt ? new Date(task.completedAt).toLocaleString() : '(running)'}
         </span>
       </div>
       <div className="flex items-center gap-6">
@@ -931,7 +949,11 @@ function TaskTotalTime({ task, steps }: { task: Task; steps: TaskStep[] }) {
           <span className="text-[10px] uppercase tracking-wider text-neutral-500">work</span>
         </div>
         <div className="flex flex-col items-end">
-          <span className="font-mono text-lg text-emerald-300">{formatDuration(userMs)}</span>
+          <span className="font-mono text-lg text-amber-300">{formatDuration(idleMs)}</span>
+          <span className="text-[10px] uppercase tracking-wider text-neutral-500">idle</span>
+        </div>
+        <div className="flex flex-col items-end">
+          <span className="font-mono text-lg text-emerald-300">{formatDuration(userActiveMs)}</span>
           <span className="text-[10px] uppercase tracking-wider text-neutral-500">user</span>
         </div>
         <div className="flex flex-col items-end">
@@ -992,6 +1014,25 @@ function StepCard({
   const effectiveCliProviderId = step.preferredCliProviderId ?? taskCliProviderId ?? '';
   // Per-step lock: only locked while THIS step is running/waiting on CLI.
   const cliLocked = step.status === 'running' || step.status === 'waiting_cli';
+  // Multi-CLI alternating steps (cliRoles) count one user-facing round per N
+  // passes (N = role count: review + correct = 2). Show rounds, not raw passes.
+  const loopPassesPerRound = step.cliRoles?.length ?? 1;
+  const iterBadgeLabel =
+    loopPassesPerRound > 1
+      ? `round ×${Math.ceil(step.iterationCount / loopPassesPerRound)}`
+      : `iter ×${step.iterationCount}`;
+  const cliSelectClass =
+    'h-8 max-w-xs rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-50';
+  const cliOptions = (
+    <>
+      <option value="">(none — deterministic only)</option>
+      {providers.map((p) => (
+        <option key={p.id} value={p.id} disabled={!p.enabled}>
+          {p.label} ({p.name}){!p.enabled ? ' — disabled' : ''}
+        </option>
+      ))}
+    </>
+  );
 
   // Detect tooling step fields for inline connection test buttons
   const hasConnectionFields =
@@ -1107,24 +1148,44 @@ function StepCard({
   return (
     <Card className="flex flex-col gap-3">
       {showCliPicker && (
-        <div className="flex flex-wrap items-center gap-2 border-b border-neutral-800 pb-3">
-          <label htmlFor={cliPickerId} className="text-xs font-medium text-neutral-400">
-            CLI
-          </label>
-          <select
-            id={cliPickerId}
-            disabled={cliLocked || cliBusy}
-            value={effectiveCliProviderId}
-            onChange={(e) => void onChangeCli(e.target.value || null)}
-            className="h-8 max-w-xs flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <option value="">(none — deterministic only)</option>
-            {providers.map((p) => (
-              <option key={p.id} value={p.id} disabled={!p.enabled}>
-                {p.label} ({p.name}){!p.enabled ? ' — disabled' : ''}
-              </option>
-            ))}
-          </select>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-neutral-800 pb-3">
+          {step.cliRoles && step.cliRoles.length > 0 ? (
+            // Multi-CLI step (e.g. spec-quality): one dropdown per role.
+            step.cliRoles.map((roleDesc) => (
+              <div key={roleDesc.id} className="flex items-center gap-2">
+                <label
+                  htmlFor={`${cliPickerId}-${roleDesc.id}`}
+                  className="text-xs font-medium text-neutral-400"
+                >
+                  {roleDesc.label}
+                </label>
+                <select
+                  id={`${cliPickerId}-${roleDesc.id}`}
+                  disabled={cliLocked || cliBusy}
+                  value={step.cliRoleProviders?.[roleDesc.id] ?? taskCliProviderId ?? ''}
+                  onChange={(e) => void onChangeCli(e.target.value || null, roleDesc.id)}
+                  className={cliSelectClass}
+                >
+                  {cliOptions}
+                </select>
+              </div>
+            ))
+          ) : (
+            <>
+              <label htmlFor={cliPickerId} className="text-xs font-medium text-neutral-400">
+                CLI
+              </label>
+              <select
+                id={cliPickerId}
+                disabled={cliLocked || cliBusy}
+                value={effectiveCliProviderId}
+                onChange={(e) => void onChangeCli(e.target.value || null)}
+                className={`${cliSelectClass} flex-1`}
+              >
+                {cliOptions}
+              </select>
+            </>
+          )}
           {cliLocked && (
             <span className="text-[11px] text-neutral-500">locked while step running</span>
           )}
@@ -1148,9 +1209,13 @@ function StepCard({
           {step.iterationCount > 0 && (
             <span
               className="rounded border border-indigo-700 bg-indigo-950/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-indigo-300"
-              title="Loop passes completed for this step"
+              title={
+                loopPassesPerRound > 1
+                  ? 'Review/correct rounds completed for this step'
+                  : 'Loop passes completed for this step'
+              }
             >
-              iter ×{step.iterationCount}
+              {iterBadgeLabel}
             </span>
           )}
         </div>
@@ -1174,6 +1239,21 @@ function StepCard({
                 </Button>
               );
             })()}
+          {step.status === 'failed' &&
+            (step.iterationCount > 0 || (step.cliRoles?.length ?? 0) > 0) && (
+              <Button
+                size="sm"
+                disabled={actionBusy}
+                onClick={() => onAction('resume')}
+                title="Continue this multi-pass step from where it failed. If a CLI ran out of credits, pick a different one above first. Completed passes are kept; a first-pass failure re-runs from the start with the new CLI."
+              >
+                {actionBusy
+                  ? 'Resuming…'
+                  : step.iterationCount > 0
+                    ? `Resume (keep ${step.iterationCount} pass${step.iterationCount === 1 ? '' : 'es'})`
+                    : 'Resume (new CLI)'}
+              </Button>
+            )}
           <span className="font-mono text-xs text-neutral-500">{step.stepId}</span>
         </div>
       </div>
@@ -1336,6 +1416,7 @@ function StepCard({
           taskId={taskId}
           stepRowId={step.id}
           autoExpand={step.status === 'running' || step.status === 'waiting_cli'}
+          statusMessage={step.statusMessage}
         />
       )}
     </Card>

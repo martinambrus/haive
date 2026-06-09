@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { logger } from '@haive/shared';
 import {
+  parseCorrectorOutput,
   parseSpecQualityOutput,
   phase0b5SpecQualityStep,
 } from '../src/step-engine/steps/workflow/05-phase-0b5-spec-quality.js';
@@ -144,12 +145,18 @@ describe('parseSpecQualityOutput', () => {
         '```json\n{"verdict":"BLOCKING_AMBIGUITY","score":2,"findings":[]}\n```',
       )?.verdict,
     ).toBe('BLOCKING_AMBIGUITY');
-    // Omitted verdict + a warn/error finding -> NEEDS_REVISION.
+    // Omitted verdict + an ERROR finding -> NEEDS_REVISION (a real gap to fix).
     expect(
       parseSpecQualityOutput(
-        '```json\n{"score":5,"findings":[{"severity":"warn","comment":"x"}]}\n```',
+        '```json\n{"score":5,"findings":[{"severity":"error","comment":"x"}]}\n```',
       )?.verdict,
     ).toBe('NEEDS_REVISION');
+    // Omitted verdict + only warn (non-blocking) -> APPROVED; the loop must not chase it.
+    expect(
+      parseSpecQualityOutput(
+        '```json\n{"score":7,"findings":[{"severity":"warn","comment":"x"}]}\n```',
+      )?.verdict,
+    ).toBe('APPROVED');
     // Omitted verdict + clean findings -> APPROVED.
     expect(parseSpecQualityOutput('```json\n{"score":9,"findings":[]}\n```')?.verdict).toBe(
       'APPROVED',
@@ -157,15 +164,38 @@ describe('parseSpecQualityOutput', () => {
   });
 });
 
+describe('parseCorrectorOutput', () => {
+  it('returns null for empty / unparseable / non-stringy input', () => {
+    expect(parseCorrectorOutput(null)).toBeNull();
+    expect(parseCorrectorOutput('no fence here')).toBeNull();
+    expect(parseCorrectorOutput(42)).toBeNull();
+  });
+
+  it('extracts amendedSpec from a fenced block', () => {
+    const raw = [
+      '```json',
+      JSON.stringify({ amendedSpec: 'NEW BODY', accepted: ['a'] }),
+      '```',
+    ].join('\n');
+    expect(parseCorrectorOutput(raw)?.amendedSpec).toBe('NEW BODY');
+  });
+
+  it('accepts an object payload directly', () => {
+    expect(parseCorrectorOutput({ amendedSpec: 'X' })?.amendedSpec).toBe('X');
+  });
+
+  it('returns amendedSpec null when the key is absent', () => {
+    expect(parseCorrectorOutput('```json\n{"accepted":[]}\n```')?.amendedSpec).toBeNull();
+  });
+});
+
 describe('phase0b5SpecQualityStep.loop', () => {
-  // Loop hook lives directly on the step definition; assertions below
-  // exercise it with synthetic apply outputs that mirror what the runner
-  // would produce in real execution.
   const loop = phase0b5SpecQualityStep.loop!;
 
-  function applyOutput(
+  function reviewOutput(
     findings: Array<{ severity: 'info' | 'warn' | 'error' }>,
     verdict: 'APPROVED' | 'NEEDS_REVISION' | 'BLOCKING_AMBIGUITY' = 'NEEDS_REVISION',
+    spec = 'irrelevant',
   ) {
     return {
       verdict,
@@ -175,54 +205,75 @@ describe('phase0b5SpecQualityStep.loop', () => {
         severity: f.severity,
         comment: 'x',
       })),
-      source: 'llm' as const,
-      spec: 'irrelevant',
+      source: 'review' as const,
+      spec,
     };
   }
 
-  it('declares maxIterations default of 10', () => {
-    expect(loop.maxIterations).toBe(10);
+  it('declares a default budget of 5 rounds at 2 passes per round', () => {
+    expect(loop.maxIterations).toBe(5);
+    expect(loop.passesPerRound).toBe(2);
   });
 
-  it('shouldContinue continues only while the verdict is NEEDS_REVISION', async () => {
-    const args = {
-      ctx: {} as never,
-      llmOutput: null,
-      iteration: 0,
-      previousIterations: [],
-    };
+  it('resolveRole alternates reviewer (even) and corrector (odd)', () => {
+    expect(loop.resolveRole!(0)).toBe('reviewer');
+    expect(loop.resolveRole!(1)).toBe('corrector');
+    expect(loop.resolveRole!(2)).toBe('reviewer');
+    expect(loop.resolveRole!(3)).toBe('corrector');
+  });
+
+  it('after a review (even) continues only while the verdict is NEEDS_REVISION', async () => {
+    const base = { ctx: {} as never, llmOutput: null, previousIterations: [] };
     expect(
       await loop.shouldContinue({
-        ...args,
-        applyOutput: applyOutput([{ severity: 'warn' }], 'NEEDS_REVISION'),
+        ...base,
+        iteration: 0,
+        applyOutput: reviewOutput([{ severity: 'warn' }]),
       }),
     ).toBe(true);
-  });
-
-  it('shouldContinue stops on APPROVED and BLOCKING_AMBIGUITY', async () => {
-    const args = {
-      ctx: {} as never,
-      llmOutput: null,
-      iteration: 1,
-      previousIterations: [],
-    };
-    expect(await loop.shouldContinue({ ...args, applyOutput: applyOutput([], 'APPROVED') })).toBe(
-      false,
-    );
     expect(
       await loop.shouldContinue({
-        ...args,
-        applyOutput: applyOutput([{ severity: 'error' }], 'BLOCKING_AMBIGUITY'),
+        ...base,
+        iteration: 2,
+        applyOutput: reviewOutput([], 'APPROVED'),
+      }),
+    ).toBe(false);
+    expect(
+      await loop.shouldContinue({
+        ...base,
+        iteration: 2,
+        applyOutput: reviewOutput([{ severity: 'error' }], 'BLOCKING_AMBIGUITY'),
       }),
     ).toBe(false);
   });
 
-  it('buildIterationPrompt includes the latest amended spec from prior iterations', () => {
+  it('after a correction (odd) always re-reviews regardless of the carried verdict', async () => {
+    const base = { ctx: {} as never, llmOutput: null, previousIterations: [] };
+    expect(
+      await loop.shouldContinue({
+        ...base,
+        iteration: 1,
+        applyOutput: {
+          verdict: 'NEEDS_REVISION',
+          score: 5,
+          findings: [],
+          source: 'correct' as const,
+          spec: 'x',
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it('corrector prompt (odd) carries the latest review findings + the working spec', () => {
     const previousIterations: StepLoopPassRecord[] = [
       {
         iteration: 0,
         llmOutput: null,
-        applyOutput: { ...applyOutput([{ severity: 'warn' }]), spec: 'AMENDED V1 BODY' },
+        applyOutput: reviewOutput(
+          [{ severity: 'error' }, { severity: 'warn' }],
+          'NEEDS_REVISION',
+          'WORKING BODY',
+        ),
         continueRequested: true,
       },
     ];
@@ -232,42 +283,51 @@ describe('phase0b5SpecQualityStep.loop', () => {
       iteration: 1,
       previousIterations,
     });
-    // The amended body from iteration 0 should win over the original spec
-    expect(prompt).toContain('AMENDED V1 BODY');
-    expect(prompt).not.toContain('ORIGINAL');
-    expect(prompt).toContain('iteration 2');
+    expect(prompt).toContain('CORRECTION phase');
+    expect(prompt).toContain('blindly trust');
+    expect(prompt).toContain('Findings from iteration 1');
+    expect(prompt).toContain('[error]');
+    expect(prompt).toContain('WORKING BODY');
   });
 
-  it('buildIterationPrompt surfaces prior findings as bullets in the prompt', () => {
+  it('reviewer prompt (even re-review) assesses the latest corrected spec, amending nothing', () => {
     const previousIterations: StepLoopPassRecord[] = [
       {
         iteration: 0,
         llmOutput: null,
+        applyOutput: { ...reviewOutput([{ severity: 'warn' }]), spec: '' },
+        continueRequested: true,
+      },
+      {
+        iteration: 1,
+        llmOutput: null,
         applyOutput: {
-          ...applyOutput([{ severity: 'error' }, { severity: 'warn' }]),
-          spec: 'body',
+          verdict: 'NEEDS_REVISION',
+          score: 5,
+          findings: [],
+          source: 'correct' as const,
+          spec: 'CORRECTED BODY',
         },
         continueRequested: true,
       },
     ];
     const prompt = loop.buildIterationPrompt!({
-      detected: { spec: 'body', specSummary: '', specLength: 0, currentBudget: 3 },
+      detected: { spec: 'ORIGINAL', specSummary: '', specLength: 0, currentBudget: 3 },
       formValues: {},
-      iteration: 1,
+      iteration: 2,
       previousIterations,
     });
-    expect(prompt).toContain('Findings from iteration 1');
-    expect(prompt).toContain('[error]');
-    expect(prompt).toContain('[warn]');
+    expect(prompt).toContain('REVIEW phase');
+    expect(prompt).toContain('CORRECTED BODY');
+    expect(prompt).not.toContain('ORIGINAL');
   });
 
-  it('buildIterationPrompt falls back to the original spec when no prior amend is present', () => {
+  it('buildIterationPrompt falls back to the original spec when no prior body is present', () => {
     const previousIterations: StepLoopPassRecord[] = [
       {
         iteration: 0,
         llmOutput: null,
-        // applyOutput.spec is empty so latestSpec walks back to detected.spec
-        applyOutput: { ...applyOutput([{ severity: 'warn' }]), spec: '' },
+        applyOutput: { ...reviewOutput([{ severity: 'warn' }]), spec: '' },
         continueRequested: true,
       },
     ];
@@ -281,58 +341,87 @@ describe('phase0b5SpecQualityStep.loop', () => {
   });
 });
 
-describe('phase0b5SpecQualityStep.apply regression guard', () => {
+describe('phase0b5SpecQualityStep.apply', () => {
   const fakeCtx = { logger: logger.child({ test: 'spec-quality' }) } as never;
 
-  it('keeps the higher-ranked prior iteration when the current pass regresses', async () => {
-    const prior = {
-      verdict: 'NEEDS_REVISION' as const,
-      score: 8,
+  function reviewPass(
+    score: number,
+    verdict: 'APPROVED' | 'NEEDS_REVISION' | 'BLOCKING_AMBIGUITY' = 'NEEDS_REVISION',
+    spec = 'PRIOR BODY',
+  ) {
+    return {
+      verdict,
+      score,
       findings: [{ dimension: 'd', severity: 'warn' as const, comment: 'x' }],
-      source: 'llm' as const,
-      spec: 'PRIOR BODY',
+      source: 'review' as const,
+      spec,
     };
+  }
+  function correctPass(spec: string, score = 5) {
+    return {
+      verdict: 'NEEDS_REVISION' as const,
+      score,
+      findings: [],
+      source: 'correct' as const,
+      spec,
+    };
+  }
+
+  it('review pass: keeps the higher-ranked prior review when the current regresses', async () => {
     const previousIterations: StepLoopPassRecord[] = [
-      { iteration: 0, llmOutput: null, applyOutput: prior, continueRequested: true },
+      {
+        iteration: 0,
+        llmOutput: null,
+        applyOutput: reviewPass(8, 'NEEDS_REVISION', 'PRIOR BODY'),
+        continueRequested: true,
+      },
+      {
+        iteration: 1,
+        llmOutput: null,
+        applyOutput: correctPass('PRIOR BODY', 8),
+        continueRequested: true,
+      },
     ];
     const result = (await phase0b5SpecQualityStep.apply(fakeCtx, {
-      detected: { spec: 'ORIGINAL', specSummary: '', specLength: 8, currentBudget: 3 },
+      detected: { spec: 'ORIGINAL', specSummary: '', specLength: 8, currentBudget: 5 },
       llmOutput: { verdict: 'NEEDS_REVISION', score: 4, findings: [] },
       formValues: {},
-      iteration: 1,
+      iteration: 2,
       previousIterations,
-    } as never)) as { verdict: string; score: number; spec: string };
+    } as never)) as { verdict: string; score: number; spec: string; source: string };
+    expect(result.source).toBe('review');
     expect(result.score).toBe(8);
     expect(result.spec).toBe('PRIOR BODY');
   });
 
-  it('accepts the current pass when it ranks higher (APPROVED beats a NEEDS_REVISION prior)', async () => {
-    const prior = {
-      verdict: 'NEEDS_REVISION' as const,
-      score: 9,
-      findings: [],
-      source: 'llm' as const,
-      spec: 'PRIOR',
-    };
+  it('review pass: accepts the current review when it ranks higher (APPROVED beats NEEDS_REVISION)', async () => {
     const previousIterations: StepLoopPassRecord[] = [
-      { iteration: 0, llmOutput: null, applyOutput: prior, continueRequested: true },
+      {
+        iteration: 0,
+        llmOutput: null,
+        applyOutput: reviewPass(9, 'NEEDS_REVISION', 'WORKING'),
+        continueRequested: true,
+      },
+      {
+        iteration: 1,
+        llmOutput: null,
+        applyOutput: correctPass('WORKING', 9),
+        continueRequested: true,
+      },
     ];
     const result = (await phase0b5SpecQualityStep.apply(fakeCtx, {
-      detected: { spec: 'ORIGINAL', specSummary: '', specLength: 8, currentBudget: 3 },
-      llmOutput: { verdict: 'APPROVED', score: 6, findings: [], amendedSpec: 'NEW BODY' },
+      detected: { spec: 'ORIGINAL', specSummary: '', specLength: 8, currentBudget: 5 },
+      llmOutput: { verdict: 'APPROVED', score: 6, findings: [] },
       formValues: {},
-      iteration: 1,
+      iteration: 2,
       previousIterations,
-    } as never)) as { verdict: string; score: number; spec: string };
+    } as never)) as { verdict: string; spec: string };
     expect(result.verdict).toBe('APPROVED');
-    expect(result.spec).toBe('NEW BODY');
+    // A review never amends; it approves the latest corrected working spec.
+    expect(result.spec).toBe('WORKING');
   });
 
-  it('discards stub iterations so a lower-scored real review still wins (regression)', async () => {
-    // The task behind the fenced-JSON fix accumulated stub iterations (parse
-    // failures) at the stub's fixed score 5. Once parsing worked, the real review
-    // scored 4 (NEEDS_REVISION); the guard must not resurrect a stub over it, or the
-    // loop stays frozen on "1 info finding, no amendment" until the budget is spent.
+  it('review pass: stub + correct passes never win the guard, so a lower-scored real review wins', async () => {
     const stub = {
       verdict: 'NEEDS_REVISION' as const,
       score: 5,
@@ -340,27 +429,71 @@ describe('phase0b5SpecQualityStep.apply regression guard', () => {
       source: 'stub' as const,
       spec: 'ORIGINAL',
     };
-    const previousIterations: StepLoopPassRecord[] = Array.from({ length: 3 }, (_, i) => ({
-      iteration: i,
-      llmOutput: null,
-      applyOutput: stub,
-      continueRequested: true,
-    }));
+    const previousIterations: StepLoopPassRecord[] = [
+      { iteration: 0, llmOutput: null, applyOutput: stub, continueRequested: true },
+      {
+        iteration: 1,
+        llmOutput: null,
+        applyOutput: correctPass('CORRECTED', 5),
+        continueRequested: true,
+      },
+    ];
     const result = (await phase0b5SpecQualityStep.apply(fakeCtx, {
       detected: { spec: 'ORIGINAL', specSummary: '', specLength: 8, currentBudget: 5 },
       llmOutput: {
         verdict: 'NEEDS_REVISION',
         score: 4,
         findings: [{ dimension: 'goal_clarity', severity: 'warn', comment: 'real' }],
-        amendedSpec: 'AMENDED',
       },
       formValues: {},
-      iteration: 3,
+      iteration: 2,
       previousIterations,
     } as never)) as { score: number; spec: string; source: string; findings: unknown[] };
-    expect(result.source).toBe('llm');
+    expect(result.source).toBe('review');
     expect(result.score).toBe(4);
-    expect(result.spec).toBe('AMENDED');
+    expect(result.spec).toBe('CORRECTED');
     expect(result.findings).toHaveLength(1);
+  });
+
+  it('correct pass: produces the amended spec and carries the latest review verdict/score forward', async () => {
+    const previousIterations: StepLoopPassRecord[] = [
+      {
+        iteration: 0,
+        llmOutput: null,
+        applyOutput: reviewPass(6, 'NEEDS_REVISION', 'ORIGINAL'),
+        continueRequested: true,
+      },
+    ];
+    const result = (await phase0b5SpecQualityStep.apply(fakeCtx, {
+      detected: { spec: 'ORIGINAL', specSummary: '', specLength: 8, currentBudget: 5 },
+      llmOutput: { amendedSpec: 'AMENDED BODY', accepted: ['x'], rejected: [] },
+      formValues: {},
+      iteration: 1,
+      previousIterations,
+    } as never)) as { verdict: string; score: number; spec: string; source: string };
+    expect(result.source).toBe('correct');
+    expect(result.spec).toBe('AMENDED BODY');
+    expect(result.verdict).toBe('NEEDS_REVISION');
+    expect(result.score).toBe(6);
+  });
+
+  it('correct pass: keeps the working spec when the corrector output is unparseable', async () => {
+    const previousIterations: StepLoopPassRecord[] = [
+      {
+        iteration: 0,
+        llmOutput: null,
+        applyOutput: reviewPass(6, 'NEEDS_REVISION', 'WORKING'),
+        continueRequested: true,
+      },
+    ];
+    const result = (await phase0b5SpecQualityStep.apply(fakeCtx, {
+      detected: { spec: 'ORIGINAL', specSummary: '', specLength: 8, currentBudget: 5 },
+      llmOutput: 'no json here',
+      formValues: {},
+      iteration: 1,
+      previousIterations,
+    } as never)) as { spec: string; source: string };
+    expect(result.source).toBe('correct');
+    expect(result.spec).toBe('WORKING');
   });
 });

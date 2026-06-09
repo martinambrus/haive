@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  computeTaskTiming,
   createTaskRequestSchema,
   logger,
   PROVIDER_SENSITIVE_STEP_IDS,
@@ -39,7 +40,40 @@ taskRoutes.get('/', async (c) => {
     orderBy: [desc(schema.tasks.createdAt)],
     with: { repository: { columns: { id: true, name: true } } },
   });
-  return c.json({ tasks: rows });
+  // Per-task time breakdown for the listing (wall/work/idle/user). The task rows
+  // carry no steps, so pull every step of the listed tasks in one query and fold
+  // them with the same computeTaskTiming the detail page uses. Snapshot at `now`;
+  // the listing's 3s poll keeps running tasks current.
+  const now = Date.now();
+  const taskIds = rows.map((r) => r.id);
+  const stepRows = taskIds.length
+    ? await db
+        .select({
+          taskId: schema.taskSteps.taskId,
+          startedAt: schema.taskSteps.startedAt,
+          endedAt: schema.taskSteps.endedAt,
+          idleMs: schema.taskSteps.idleMs,
+          userActiveMs: schema.taskSteps.userActiveMs,
+          waitingStartedAt: schema.taskSteps.waitingStartedAt,
+          status: schema.taskSteps.status,
+        })
+        .from(schema.taskSteps)
+        .where(inArray(schema.taskSteps.taskId, taskIds))
+    : [];
+  const stepsByTask = new Map<string, (typeof stepRows)[number][]>();
+  for (const s of stepRows) {
+    const list = stepsByTask.get(s.taskId);
+    if (list) list.push(s);
+    else stepsByTask.set(s.taskId, [s]);
+  }
+  const tasks = rows.map((t) => {
+    const { workMs, idleMs, userActiveMs } = computeTaskTiming(stepsByTask.get(t.id) ?? [], now);
+    const startMs = t.startedAt ? t.startedAt.getTime() : null;
+    const endMs = t.completedAt ? t.completedAt.getTime() : now;
+    const wallMs = startMs === null ? 0 : Math.max(0, endMs - startMs);
+    return { ...t, timing: { wallMs, workMs, idleMs, userActiveMs } };
+  });
+  return c.json({ tasks });
 });
 
 taskRoutes.post('/', async (c) => {
@@ -230,13 +264,63 @@ taskRoutes.post('/:id/cancel-active-cli', async (c) => {
     columns: { id: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
-  // The CLI process inside the killed container exits non-zero; the worker's
-  // executeCliSpec finalizes the cli_invocations row and the step transitions
-  // to `failed`. From there the user can hit Retry. We deliberately do NOT
-  // reset the step here — that's a separate action.
+
+  // Best-effort: force-remove any live sandbox container(s) for the task.
   const killed = await killTaskSandboxes(id);
-  logger.info({ taskId: id, killed }, 'cancel-active-cli killed sandboxes');
-  return c.json({ ok: true, killed });
+
+  // Then finalize the active invocation(s) and fail their step + the task
+  // DIRECTLY, so cancel unsticks the UI immediately and does not depend on the
+  // worker noticing. This is essential when no container was found (killed=0) —
+  // e.g. it was already reaped by a worker restart and the cli-exec job is stuck
+  // on its 30-min lock. Marking the row ended+superseded also makes a later
+  // redelivery of that job a no-op (see handleCliExecJob).
+  const now = new Date();
+  const active = await db
+    .select()
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskId, id),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
+  for (const inv of active) {
+    await db
+      .update(schema.cliInvocations)
+      .set({
+        exitCode: 137,
+        errorMessage: 'CLI cancelled by user',
+        endedAt: now,
+        supersededAt: now,
+      })
+      .where(eq(schema.cliInvocations.id, inv.id));
+    if (inv.taskStepId) {
+      await db
+        .update(schema.taskSteps)
+        .set({
+          status: 'failed',
+          errorMessage: 'CLI cancelled by user',
+          endedAt: now,
+          statusMessage: null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.taskSteps.id, inv.taskStepId),
+            inArray(schema.taskSteps.status, ['running', 'waiting_cli']),
+          ),
+        );
+    }
+  }
+  if (active.length > 0) {
+    await db
+      .update(schema.tasks)
+      .set({ status: 'failed', errorMessage: 'CLI cancelled by user', updatedAt: now })
+      .where(and(eq(schema.tasks.id, id), inArray(schema.tasks.status, ['running', 'queued'])));
+  }
+  logger.info({ taskId: id, killed, cancelled: active.length }, 'cancel-active-cli');
+  return c.json({ ok: true, killed, cancelled: active.length });
 });
 
 /** Static replay endpoint for an ended CLI invocation. Live invocations should

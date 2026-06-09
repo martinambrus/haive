@@ -6,6 +6,7 @@ import { preRagSyncStep } from './02-pre-rag-sync.js';
 import { phase0aDiscoveryStep } from './03-phase-0a-discovery.js';
 import { phase0bPrePlanningStep } from './04-phase-0b-pre-planning.js';
 import { phase0b5SpecQualityStep } from './05-phase-0b5-spec-quality.js';
+import { resolveSpecWarningsStep } from './05a-resolve-spec-warnings.js';
 import { gate1SpecApprovalStep } from './06-gate-1-spec-approval.js';
 import { phase2ImplementStep } from './07-phase-2-implement.js';
 import { phase5VerifyStep } from './08-phase-5-verify.js';
@@ -23,6 +24,7 @@ export {
   phase0aDiscoveryStep,
   phase0bPrePlanningStep,
   phase0b5SpecQualityStep,
+  resolveSpecWarningsStep,
   gate1SpecApprovalStep,
   phase2ImplementStep,
   phase5VerifyStep,
@@ -41,6 +43,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(phase0aDiscoveryStep);
   registry.register(phase0bPrePlanningStep);
   registry.register(phase0b5SpecQualityStep);
+  registry.register(resolveSpecWarningsStep);
   registry.register(gate1SpecApprovalStep);
   registry.register(phase2ImplementStep);
   registry.register(phase5VerifyStep);

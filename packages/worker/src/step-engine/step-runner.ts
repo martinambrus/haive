@@ -34,7 +34,25 @@ async function resolvePreferredCli(
   stepId: string,
   fallback: string | null,
   providers: { id: string; enabled: boolean }[],
+  role: string = 'default',
 ): Promise<string | null> {
+  // Named roles (e.g. reviewer/corrector) first consult the per-role table; an
+  // unset/disabled role falls through to the step's single 'default' pref, then
+  // to the task provider, so partially-configured multi-CLI steps still run.
+  if (role !== 'default') {
+    const roleRow = await db.query.userStepCliRolePreferences.findFirst({
+      where: and(
+        eq(schema.userStepCliRolePreferences.userId, userId),
+        eq(schema.userStepCliRolePreferences.stepId, stepId),
+        eq(schema.userStepCliRolePreferences.role, role),
+        eq(schema.userStepCliRolePreferences.explicit, true),
+      ),
+    });
+    if (roleRow) {
+      const p = providers.find((p) => p.id === roleRow.cliProviderId);
+      if (p && p.enabled) return roleRow.cliProviderId;
+    }
+  }
   const row = await db.query.userStepCliPreferences.findFirst({
     where: and(
       eq(schema.userStepCliPreferences.userId, userId),
@@ -190,12 +208,16 @@ async function resolveLlmPhase(
           previousIterations,
         })
       : llmSpec.buildPrompt({ detected, formValues: formValues ?? {} });
+  // Multi-CLI loop steps pick a role per iteration (e.g. reviewer vs corrector);
+  // the resolved provider differs per role. Non-loop steps resolve 'default'.
+  const role = stepDef.loop?.resolveRole?.(upcomingIteration) ?? 'default';
   const preferredProviderId = await resolvePreferredCli(
     db,
     params.userId,
     stepDef.metadata.id,
     params.cliProviderId ?? null,
     params.providers,
+    role,
   );
   const plan = resolveDispatch({
     providers: params.providers,
@@ -752,21 +774,29 @@ async function resolveLoopBudget(
   stepDef: StepDefinition,
 ): Promise<number | null> {
   if (!stepDef.loop) return null;
+  // The configured budget is in ROUNDS; multiply by passesPerRound to get the
+  // actual LLM-pass cap the loop enforces (default 1 → rounds == passes).
+  const perRound = stepDef.loop.passesPerRound ?? 1;
   const formValues = (current.formValues ?? {}) as Record<string, unknown>;
   const formOverride = formValues.maxIterations;
-  if (typeof formOverride === 'number' && formOverride > 0) return formOverride;
-  if (typeof formOverride === 'string') {
+  let rounds: number | null = null;
+  if (typeof formOverride === 'number' && formOverride > 0) {
+    rounds = formOverride;
+  } else if (typeof formOverride === 'string') {
     const parsed = Number.parseInt(formOverride, 10);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    if (Number.isFinite(parsed) && parsed > 0) rounds = parsed;
   }
-  const task = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { stepLoopLimits: true },
-  });
-  const limits = (task?.stepLoopLimits ?? {}) as Record<string, number>;
-  const override = limits[stepDef.metadata.id];
-  if (typeof override === 'number' && override > 0) return override;
-  return stepDef.loop.maxIterations;
+  if (rounds === null) {
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { stepLoopLimits: true },
+    });
+    const limits = (task?.stepLoopLimits ?? {}) as Record<string, number>;
+    const override = limits[stepDef.metadata.id];
+    if (typeof override === 'number' && override > 0) rounds = override;
+  }
+  if (rounds === null) rounds = stepDef.loop.maxIterations;
+  return rounds * perRound;
 }
 
 /** Mark the currently-active LLM invocation row as consumed so the next

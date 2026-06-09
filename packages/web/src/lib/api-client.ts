@@ -369,6 +369,17 @@ export interface Task {
    *  live cli-stream WebSocket. Always null on the list endpoint. */
   activeCliInvocationId?: string | null;
   activeCliStepId?: string | null;
+  /** Per-task time breakdown attached by the list endpoint (GET /tasks): wall
+   *  clock, agent work, idle (time waiting on you), and your active time at
+   *  gates. A snapshot at request time; the listing's poll keeps running tasks
+   *  current. Absent on the create response. The detail page ignores this and
+   *  computes its own live figures from the steps it already holds. */
+  timing?: {
+    wallMs: number;
+    workMs: number;
+    idleMs: number;
+    userActiveMs: number;
+  } | null;
 }
 
 export interface TaskStep {
@@ -394,6 +405,11 @@ export interface TaskStep {
    *  used provider after dispatch. The dropdown defaults to this when
    *  present; falls back to the task-level cliProviderId otherwise. */
   preferredCliProviderId: string | null;
+  /** Multi-CLI steps (e.g. spec-quality) expose role descriptors and the
+   *  currently-selected provider per role; the step card renders one dropdown
+   *  per role instead of the single CLI dropdown. */
+  cliRoles?: { id: string; label: string }[];
+  cliRoleProviders?: Record<string, string | null>;
   /** True iff this step was skipped via the user-clicked "Skip" action.
    *  Auto-skipped steps (shouldRun → false, or detect setting skipReason)
    *  have this as false. Used to hide the retry button on auto-skips. */
@@ -452,6 +468,10 @@ export interface CliInvocationSummary {
   createdAt: string;
   errorMessage: string | null;
   isActive: boolean;
+  /** Label + name of the CLI provider that ran this invocation (null for legacy
+   *  rows / deleted providers). Shown on the terminal badge. */
+  providerLabel: string | null;
+  providerName: string | null;
 }
 
 export interface CliInvocationOutput {
@@ -474,7 +494,7 @@ export interface TaskEvent {
 
 export type TaskAction = 'cancel' | 'retry';
 
-export type StepAction = 'retry';
+export type StepAction = 'retry' | 'resume';
 
 export interface StepActionResponse {
   ok: boolean;

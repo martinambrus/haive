@@ -38,6 +38,10 @@
     "./rag": {
       "types": "./dist/rag/index.d.ts",
       "import": "./dist/rag/index.js"
+    },
+    "./timing": {
+      "types": "./dist/step-engine/timing.d.ts",
+      "import": "./dist/step-engine/timing.js"
     }
   },
   "scripts": {

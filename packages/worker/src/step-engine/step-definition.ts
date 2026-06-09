@@ -135,6 +135,16 @@ export interface StepLoopSpec<TApply = unknown> {
     iteration: number;
     previousIterations: StepLoopPassRecord[];
   }): string;
+  /** Optional. Returns the CLI role to use for the given iteration so the runner
+   *  resolves a per-role provider (e.g. spec-quality: even iterations review,
+   *  odd iterations correct). Null/omitted uses the step's single 'default'
+   *  provider. Must match a role id in `metadata.cliRoles`. */
+  resolveRole?(iteration: number): string | null;
+  /** Number of LLM passes that make up one user-facing "round" for budgeting and
+   *  display — e.g. spec-quality runs 2 passes per round (review + correct). The
+   *  form budget (maxIterations) and the UI counter are expressed in ROUNDS; the
+   *  runner multiplies by this to get the actual pass cap. Default 1. */
+  passesPerRound?: number;
 }
 
 export interface StepDefinition<TDetect = unknown, TApply = unknown> {

@@ -110,9 +110,13 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
 
   async detect(ctx: StepContext): Promise<ImplementDetect> {
     const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
+    const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
+    const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
     const gate = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06-gate-1-spec-approval');
     const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const planOutput = (plan?.output as PrePlanningOutput | null) ?? {};
+    const qualityOutput = (quality?.output as { spec?: string } | null) ?? {};
+    const resolvedOutput = (resolved?.output as { spec?: string } | null) ?? {};
     const gateOutput = (gate?.output as Gate1Output | null) ?? {};
     const worktreeOutput = (worktree?.output as { sandboxWorktreePath?: string } | null) ?? {};
     if (!worktreeOutput.sandboxWorktreePath) {
@@ -122,7 +126,9 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     }
     return {
       specSummary: planOutput.summary ?? '',
-      spec: planOutput.spec ?? '',
+      // Implement from the spec the user APPROVED at gate 1: the post-checkpoint
+      // spec (05a user/agent fixes), then the 05 amended body, then the 04 draft.
+      spec: resolvedOutput.spec ?? qualityOutput.spec ?? planOutput.spec ?? '',
       sandboxWorkspacePath: worktreeOutput.sandboxWorktreePath,
       gateFeedback: gateOutput.feedback ?? '',
     };

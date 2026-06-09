@@ -146,6 +146,29 @@ export const userStepCliPreferences = pgTable(
   (table) => [uniqueIndex('user_step_cli_pref_pk').on(table.userId, table.stepId)],
 );
 
+// --- Per-(user, step, role) CLI preferences for multi-CLI steps -----------
+// Additive sibling of userStepCliPreferences for steps that use more than one
+// CLI by role (e.g. spec-quality's reviewer vs corrector). The single-provider
+// table above remains the `default` role; named roles live here. One live row
+// per (user, step, role); only explicit=true rows are honored.
+
+export const userStepCliRolePreferences = pgTable(
+  'user_step_cli_role_preferences',
+  {
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    stepId: varchar('step_id', { length: 128 }).notNull(),
+    role: varchar('role', { length: 32 }).notNull(),
+    cliProviderId: uuid('cli_provider_id')
+      .notNull()
+      .references(() => cliProviders.id, { onDelete: 'cascade' }),
+    explicit: boolean('explicit').notNull().default(false),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('user_step_cli_role_pref_pk').on(table.userId, table.stepId, table.role)],
+);
+
 export const cliProvidersRelations = relations(cliProviders, ({ one, many }) => ({
   user: one(users, { fields: [cliProviders.userId], references: [users.id] }),
   secrets: many(cliProviderSecrets),

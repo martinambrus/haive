@@ -59,6 +59,17 @@ export async function handleCliExecJob(
     log.warn({ invocationId: payload.invocationId }, 'cli invocation row missing');
     return;
   }
+  // A redelivered job whose invocation was already finalized — cancelled by the
+  // user (cancel-active-cli sets ended+superseded) or superseded by a step retry
+  // — must NOT re-run: that would spawn a fresh sandbox and burn a CLI call for a
+  // row the user already stopped.
+  if (row.endedAt || row.supersededAt) {
+    log.info(
+      { invocationId: payload.invocationId },
+      'cli invocation already finalized; skipping redelivery',
+    );
+    return;
+  }
 
   await db
     .update(schema.cliInvocations)
