@@ -100,6 +100,7 @@ type UpdatePatch = Partial<{
   iterationCount: number;
   statusMessage: string | null;
   errorMessage: string | null;
+  aiFixContext: { priorError: string; priorOutput: string } | null;
   startedAt: Date;
   endedAt: Date;
 }>;
@@ -280,6 +281,139 @@ async function resolveLlmPhase(
   ctx.logger.info(
     { invocationId: invRow.id, providerId: plan.providerId, mode: plan.mode },
     'cli invocation enqueued',
+  );
+  return { resolved: false, result: { status: 'waiting_cli', row: updated } };
+}
+
+/** AI-assisted retry: when the retry_ai action set `aiFixContext` on the step,
+ *  run a diagnose-and-fix agent once (reusing the cli-invocation lifecycle), then
+ *  clear the marker so apply re-runs against the fixed workspace. Designed for
+ *  deterministic steps (the agent fixes the repo/env; the step re-runs itself). */
+async function resolveAiFixPhase(
+  db: Database,
+  stepDef: StepDefinition,
+  current: TaskStepRow,
+  ctx: StepContext,
+  params: AdvanceStepParams,
+): Promise<
+  { resolved: true; current: TaskStepRow } | { resolved: false; result: AdvanceStepResult }
+> {
+  const fixCtx = current.aiFixContext as { priorError: string; priorOutput: string } | null;
+  if (!fixCtx) return { resolved: true, current };
+
+  const latest = await db
+    .select()
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, current.id),
+        isNull(schema.cliInvocations.supersededAt),
+        isNull(schema.cliInvocations.consumedAt),
+        ne(schema.cliInvocations.mode, 'agent_mining'),
+      ),
+    )
+    .orderBy(desc(schema.cliInvocations.createdAt))
+    .limit(1);
+  const invocation = latest[0];
+
+  if (invocation && invocation.endedAt !== null) {
+    // The fix agent finished (whether or not it succeeded). Consume it + clear
+    // the marker, then let apply re-run against whatever the agent changed. If
+    // the fix didn't help, apply fails again and re-surfaces the error.
+    await markLatestInvocationConsumed(db, current.id);
+    const updated = await updateRow(db, current.id, { aiFixContext: null });
+    return { resolved: true, current: updated };
+  }
+  if (invocation && invocation.endedAt === null) {
+    return { resolved: false, result: { status: 'waiting_cli', row: current } };
+  }
+
+  if (!params.providers || !params.deps) {
+    const failed = await updateRow(db, current.id, {
+      status: 'failed',
+      errorMessage: 'retry_ai requires a CLI provider but none is available',
+      aiFixContext: null,
+      endedAt: new Date(),
+    });
+    return {
+      resolved: false,
+      result: { status: 'failed', row: failed, error: failed.errorMessage ?? 'no provider' },
+    };
+  }
+
+  const prompt = [
+    'A workflow step just failed. Diagnose the root cause and FIX it by editing files in the workspace so the step can succeed when it re-runs.',
+    `Step: ${stepDef.metadata.id} (${stepDef.metadata.title}).`,
+    '',
+    `Failure error:\n${fixCtx.priorError || '(none recorded)'}`,
+    fixCtx.priorOutput ? `\nOutput tail:\n${fixCtx.priorOutput}` : '',
+    '',
+    'Make minimal, correct edits. The step re-runs automatically after you finish — do NOT run it yourself. When done, stop.',
+  ].join('\n');
+
+  const preferredProviderId = await resolvePreferredCli(
+    db,
+    params.userId,
+    stepDef.metadata.id,
+    params.cliProviderId ?? null,
+    params.providers,
+    'default',
+  );
+  const plan = resolveDispatch({
+    providers: params.providers,
+    preferredProviderId,
+    input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
+    invokeOpts: { cwd: params.workspacePath },
+  });
+  if (plan.mode === 'skip' || !plan.invocation) {
+    const failed = await updateRow(db, current.id, {
+      status: 'failed',
+      errorMessage: `retry_ai: no cli provider available: ${plan.reason}`,
+      aiFixContext: null,
+      endedAt: new Date(),
+    });
+    return {
+      resolved: false,
+      result: { status: 'failed', row: failed, error: failed.errorMessage ?? plan.reason },
+    };
+  }
+
+  const fixMode = plan.mode === 'subagent_emulated' ? 'subagent_emulated' : 'cli';
+  const payloadKind: CliExecInvocationKind =
+    plan.invocation.kind === 'subagent'
+      ? plan.mode === 'subagent_emulated'
+        ? 'subagent_sequential'
+        : 'subagent_native'
+      : 'cli';
+  const inserted = await db
+    .insert(schema.cliInvocations)
+    .values({
+      taskId: params.taskId,
+      taskStepId: current.id,
+      cliProviderId: plan.providerId,
+      mode: fixMode,
+      prompt,
+    })
+    .returning();
+  const invRow = inserted[0];
+  if (!invRow) throw new Error('failed to insert ai-fix cli_invocations row');
+  await params.deps.enqueueCliInvocation({
+    invocationId: invRow.id,
+    taskId: params.taskId,
+    taskStepId: current.id,
+    userId: params.userId,
+    cliProviderId: plan.providerId,
+    kind: payloadKind,
+    spec: plan.invocation.spec,
+    timeoutMs: 30 * 60 * 1000,
+  });
+  const updated = await updateRow(db, current.id, {
+    status: 'waiting_cli',
+    statusMessage: 'AI diagnosing the failure…',
+  });
+  ctx.logger.info(
+    { invocationId: invRow.id, providerId: plan.providerId },
+    'ai-fix agent enqueued',
   );
   return { resolved: false, result: { status: 'waiting_cli', row: updated } };
 }
@@ -553,6 +687,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         formValues,
         status: 'running',
       });
+    }
+
+    // --- AI-fix phase (retry_ai recovery) ---
+    // When retry_ai set a fix marker, run a diagnose-and-fix agent once, then
+    // re-run apply against the fixed workspace.
+    if (current.aiFixContext) {
+      const fixResult = await resolveAiFixPhase(db, stepDef, current, ctx, params);
+      if (!fixResult.resolved) return fixResult.result;
+      current = fixResult.current;
     }
 
     // --- Post-form LLM phase (default) ---

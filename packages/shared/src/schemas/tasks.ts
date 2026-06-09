@@ -49,6 +49,9 @@ export const createTaskRequestSchema = z
     repositoryId: z.string().uuid().optional(),
     cliProviderId: z.string().uuid().optional(),
     envTemplateId: z.string().uuid().optional(),
+    /** Optional DB dump (uploaded via the chunked db-dumps endpoint) to import
+     *  into the task's ephemeral environment before migrations run. */
+    dbUploadId: z.string().uuid().optional(),
     resourceLimits: resourceLimitsSchema,
     stepLoopLimits: stepLoopLimitsSchema,
   })
@@ -74,7 +77,7 @@ export const taskActionRequestSchema = z.object({
 
 export type TaskAction = z.infer<typeof taskActionSchema>;
 
-export const stepActionSchema = z.enum(['retry', 'skip', 'resume']);
+export const stepActionSchema = z.enum(['retry', 'retry_ai', 'skip', 'resume', 'abort']);
 
 export const stepActionRequestSchema = z.object({
   action: stepActionSchema,

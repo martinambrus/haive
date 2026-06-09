@@ -28,6 +28,7 @@ import type { StepDefinition } from '../step-engine/step-definition.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import { cleanupTaskAuthVolumes } from '../sandbox/task-auth-volume.js';
+import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 
@@ -227,6 +228,21 @@ async function cleanupTaskContainers(
     }
   } catch (err) {
     logger.warn({ err, taskId, reason }, 'cleanup-task-containers failed');
+  }
+
+  // Per-task DDEV nested-Docker runners. Keep them alive on 'failed' so recovery
+  // (retry / retry-with-AI / skip) can act on the SAME env + already-imported DB;
+  // tear down only on a definitive end (completed / cancelled, incl. abort which
+  // cancels). `-v` drops the runner's anon /var/lib/docker volume too.
+  if (reason !== 'failed') {
+    try {
+      const killed = await killTaskDdevRunners(taskId);
+      if (killed > 0) {
+        await appendEvent(db, taskId, null, 'ddev_runners.destroyed', { reason, count: killed });
+      }
+    } catch (err) {
+      logger.warn({ err, taskId, reason }, 'cleanup-ddev-runners failed');
+    }
   }
 
   try {

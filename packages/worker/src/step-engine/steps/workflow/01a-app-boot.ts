@@ -140,6 +140,10 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
     const deps = envTemplate.declaredDeps as Record<string, unknown> | null;
     if (!deps) return false;
     const containerTool = (deps.containerTool as string) ?? 'none';
+    // DDEV is owned by the dedicated nested-Docker env step (01c-ddev-env):
+    // running `ddev start` here on the worker hits the shared host daemon, which
+    // cannot bind-mount the named-volume repo. Skip ddev so it doesn't double-run.
+    if (containerTool === 'ddev') return false;
     if (containerTool !== 'none') return true;
     const scripts = await readPackageScripts(ctx.workspacePath);
     return pickDevScript(scripts) !== null;

@@ -128,6 +128,17 @@ taskRoutes.post('/', async (c) => {
     if (!provider) throw new HttpError(404, 'CLI provider not found');
   }
 
+  if (body.dbUploadId) {
+    const dump = await db.query.dbUploads.findFirst({
+      where: and(eq(schema.dbUploads.id, body.dbUploadId), eq(schema.dbUploads.userId, userId)),
+      columns: { id: true, status: true },
+    });
+    if (!dump) throw new HttpError(404, 'DB dump upload not found');
+    if (dump.status !== 'complete') {
+      throw new HttpError(409, `DB dump upload is ${dump.status}, not complete`);
+    }
+  }
+
   const metadata: Record<string, unknown> | null = null;
 
   const inserted = await db
@@ -139,6 +150,7 @@ taskRoutes.post('/', async (c) => {
       description: body.description ?? null,
       repositoryId: body.repositoryId ?? null,
       cliProviderId: body.cliProviderId ?? null,
+      dbUploadId: body.dbUploadId ?? null,
       memoryLimitMb: body.resourceLimits?.memoryLimitMb ?? null,
       cpuLimitMilli: body.resourceLimits?.cpuLimitMilli ?? null,
       stepLoopLimits: body.stepLoopLimits ?? {},

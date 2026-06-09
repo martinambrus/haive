@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   api,
+  API_BASE_URL,
   type CliProvider,
   type CliProviderCatalogEntry,
   type OnboardingStatus,
@@ -22,6 +23,63 @@ import {
   Input,
   Label,
 } from '@/components/ui';
+
+const DUMP_CHUNK_SIZE = 5 * 1024 * 1024; // 5 MiB
+
+// Chunked upload of a DB dump (mirrors the repo archive upload). Returns the
+// dbUploadId to attach to the task; the dump is imported + deleted later by the
+// task's env-boot/import step.
+async function chunkedUploadDbDump(opts: {
+  file: File;
+  onProgress: (pct: number) => void;
+}): Promise<string> {
+  const { file, onProgress } = opts;
+  const initRes = await fetch(`${API_BASE_URL}/db-dumps/upload/init`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename: file.name, totalSize: file.size, chunkSize: DUMP_CHUNK_SIZE }),
+  });
+  if (!initRes.ok) {
+    const b = (await initRes.json().catch(() => ({}))) as { error?: string };
+    throw new Error(b.error ?? `Failed to start dump upload (HTTP ${initRes.status})`);
+  }
+  const { session: initial } = (await initRes.json()) as {
+    session: { id: string; bytesReceived: number };
+  };
+  let offset = initial.bytesReceived;
+  onProgress(file.size === 0 ? 100 : Math.floor((offset / file.size) * 100));
+  while (offset < file.size) {
+    const end = Math.min(offset + DUMP_CHUNK_SIZE, file.size);
+    const slice = file.slice(offset, end);
+    const res = await fetch(`${API_BASE_URL}/db-dumps/upload/${initial.id}/chunk`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Range': `bytes ${offset}-${end - 1}/${file.size}`,
+      },
+      body: slice,
+    });
+    if (!res.ok) {
+      const b = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(b.error ?? `Dump chunk failed (HTTP ${res.status})`);
+    }
+    const { session } = (await res.json()) as { session: { bytesReceived: number } };
+    offset = session.bytesReceived;
+    onProgress(Math.floor((offset / file.size) * 100));
+  }
+  const completeRes = await fetch(`${API_BASE_URL}/db-dumps/upload/${initial.id}/complete`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!completeRes.ok) {
+    const b = (await completeRes.json().catch(() => ({}))) as { error?: string };
+    throw new Error(b.error ?? `Failed to finalize dump upload (HTTP ${completeRes.status})`);
+  }
+  return initial.id;
+}
 
 export default function NewTaskPage() {
   const router = useRouter();
@@ -50,6 +108,9 @@ export default function NewTaskPage() {
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dumpFile, setDumpFile] = useState<File | null>(null);
+  const [dumpProgress, setDumpProgress] = useState(0);
+  const [dumpUploading, setDumpUploading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -164,6 +225,22 @@ export default function NewTaskPage() {
       if (cliProviderId) body.cliProviderId = cliProviderId;
       if (type === 'workflow') {
         body.stepLoopLimits = { '05-phase-0b5-spec-quality': specQualityMaxIterations };
+      }
+
+      if (type === 'workflow' && dumpFile) {
+        setDumpUploading(true);
+        try {
+          body.dbUploadId = await chunkedUploadDbDump({
+            file: dumpFile,
+            onProgress: setDumpProgress,
+          });
+        } catch (err) {
+          setError((err as Error).message ?? 'DB dump upload failed');
+          setDumpUploading(false);
+          setSubmitting(false);
+          return;
+        }
+        setDumpUploading(false);
       }
 
       const data = await api.post<{ task: Task }>('/tasks', body);
@@ -384,6 +461,30 @@ export default function NewTaskPage() {
               converge but cost more tokens. Gate 1 will flag if the budget was exhausted with
               issues still open so you can decide whether to approve as-is or re-run.
             </p>
+          </div>
+        )}
+
+        {inferredType === 'workflow' && (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="dbDump">Database dump (optional)</Label>
+            <input
+              id="dbDump"
+              type="file"
+              accept=".sql,.sql.gz,.dump"
+              onChange={(e) => {
+                setDumpFile(e.target.files?.[0] ?? null);
+                setDumpProgress(0);
+              }}
+              className="block w-full text-sm text-neutral-300 file:mr-3 file:rounded-md file:border-0 file:bg-neutral-800 file:px-3 file:py-1.5 file:text-sm file:text-neutral-100 hover:file:bg-neutral-700"
+            />
+            <p className="text-xs text-neutral-500">
+              Uploaded before the task runs and imported into the temporary environment, so
+              migrations run against your real data. Accepts .sql, .sql.gz, .dump. Deleted
+              immediately after import.
+            </p>
+            {dumpUploading && (
+              <p className="text-xs text-indigo-300">Uploading dump… {dumpProgress}%</p>
+            )}
           </div>
         )}
 

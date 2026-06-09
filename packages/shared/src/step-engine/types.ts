@@ -39,6 +39,10 @@ export interface StepMetadata {
    *  reads that constant to know which task_steps rows to invalidate on
    *  provider change (it does not have access to the worker step registry). */
   providerSensitive?: boolean;
+  /** When true, the user-facing Skip step action is permitted for this step.
+   *  Skip is otherwise disabled across the workflow; only steps that opt in
+   *  (currently 06a-db-migrate) may be skipped. The API skip handler enforces this. */
+  allowSkip?: boolean;
 }
 
 /** Step IDs whose StepDefinition sets `metadata.providerSensitive = true`.
@@ -58,6 +62,12 @@ export const STEP_CLI_ROLES: Record<string, readonly CliRoleDescriptor[]> = {
     { id: 'corrector', label: 'Corrector' },
   ],
 };
+
+/** Step ids whose StepDefinition sets `metadata.allowSkip = true`. The user
+ *  Skip action is permitted ONLY on these; the API skip handler enforces it
+ *  (the api can't import the worker step registry). Keep in sync with the
+ *  `allowSkip: true` flags on StepDefinition metadata. */
+export const SKIPPABLE_STEP_IDS: readonly string[] = ['06a-db-migrate'];
 
 export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
   '04-tooling-infrastructure',

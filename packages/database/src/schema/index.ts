@@ -1,6 +1,7 @@
 export * from './auth.js';
 export * from './cli-providers.js';
 export * from './repos.js';
+export * from './db-dumps.js';
 export * from './tasks.js';
 export * from './containers.js';
 export * from './env.js';

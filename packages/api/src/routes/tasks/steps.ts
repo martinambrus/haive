@@ -5,6 +5,7 @@ import { schema } from '@haive/database';
 import {
   logger,
   setCliProviderRequestSchema,
+  SKIPPABLE_STEP_IDS,
   stepActionRequestSchema,
   STEP_CLI_ROLES,
   submitStepRequestSchema,
@@ -14,6 +15,7 @@ import {
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
+import { cancelTaskRow, enqueueCancelJob } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   appendTaskEvent,
@@ -387,7 +389,77 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     return c.json({ ok: true, status: 'running', resumedFromIteration: step.iterationCount });
   }
 
+  if (body.action === 'retry_ai') {
+    // AI-assisted retry: keep the step's detect/form/values (like resume), but
+    // record the failure context + a marker so the worker dispatches a
+    // diagnose-and-fix agent before re-running apply.
+    if (step.status !== 'failed') {
+      throw new HttpError(409, 'retry_ai is only available on a failed step');
+    }
+    const now = new Date();
+    const lastInv = await db
+      .select({ rawOutput: schema.cliInvocations.rawOutput })
+      .from(schema.cliInvocations)
+      .where(
+        and(
+          eq(schema.cliInvocations.taskStepId, step.id),
+          isNull(schema.cliInvocations.supersededAt),
+        ),
+      )
+      .orderBy(desc(schema.cliInvocations.createdAt))
+      .limit(1);
+    const aiFixContext = {
+      priorError: step.errorMessage ?? '',
+      priorOutput: (lastInv[0]?.rawOutput ?? '').slice(-2000),
+    };
+    // Supersede the failed pass's invocation, then preserve detect/form/values
+    // and set the fix marker so advanceStep runs the fix agent next.
+    await db
+      .update(schema.cliInvocations)
+      .set({ supersededAt: now })
+      .where(
+        and(
+          eq(schema.cliInvocations.taskStepId, step.id),
+          isNull(schema.cliInvocations.supersededAt),
+          isNull(schema.cliInvocations.consumedAt),
+        ),
+      );
+    await db
+      .update(schema.taskSteps)
+      .set({
+        status: 'running',
+        errorMessage: null,
+        errorHint: null,
+        endedAt: null,
+        statusMessage: null,
+        aiFixContext,
+        updatedAt: now,
+      })
+      .where(eq(schema.taskSteps.id, step.id));
+    await db
+      .update(schema.tasks)
+      .set({ status: 'running', errorMessage: null, updatedAt: now })
+      .where(and(eq(schema.tasks.id, id), inArray(schema.tasks.status, ['failed', 'queued'])));
+    await appendTaskEvent(db, id, step.id, 'step.retry_ai', { stepId, note: body.note ?? null });
+    await getTaskQueue().add(
+      TASK_JOB_NAMES.ADVANCE_STEP,
+      { taskId: id, userId, stepId } as TaskJobPayload,
+      {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: 100,
+        removeOnFail: 100,
+      },
+    );
+    return c.json({ ok: true, status: 'running' });
+  }
+
   if (body.action === 'skip') {
+    // Skip is disabled across the workflow except on the steps that opt in
+    // (metadata.allowSkip) — currently only the DB-migration step.
+    if (!SKIPPABLE_STEP_IDS.includes(stepId)) {
+      throw new HttpError(409, 'This step cannot be skipped');
+    }
     if (step.status !== 'failed' && step.status !== 'waiting_form') {
       throw new HttpError(409, `Cannot skip step in status ${step.status}`);
     }
@@ -471,6 +543,16 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       });
     }
     return c.json({ ok: true, status: 'skipped', nextStepId: null });
+  }
+
+  if (body.action === 'abort') {
+    // Give up on this step → cancel the task. The definitive teardown (incl. the
+    // per-task DDEV runner, which survives a plain failure so recovery can reuse
+    // it). The step stays failed; the task goes terminal.
+    await cancelTaskRow(db, id, { by: userId });
+    await enqueueCancelJob(id, userId);
+    await appendTaskEvent(db, id, step.id, 'step.abort', { stepId, note: body.note ?? null });
+    return c.json({ ok: true, status: 'cancelled' });
   }
 
   throw new HttpError(400, 'Unknown step action');

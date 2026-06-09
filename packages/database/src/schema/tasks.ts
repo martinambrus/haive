@@ -14,6 +14,7 @@ import {
 import { relations, sql } from 'drizzle-orm';
 import { users } from './auth.js';
 import { repositories } from './repos.js';
+import { dbUploads } from './db-dumps.js';
 import { cliProviders } from './cli-providers.js';
 import { envTemplates } from './env.js';
 import { containers } from './containers.js';
@@ -86,6 +87,9 @@ export const tasks = pgTable(
     envTemplateId: uuid('env_template_id').references(() => envTemplates.id, {
       onDelete: 'set null',
     }),
+    dbUploadId: uuid('db_upload_id').references(() => dbUploads.id, {
+      onDelete: 'set null',
+    }),
     type: workflowTypeEnum('type').notNull(),
     title: varchar('title', { length: 512 }).notNull(),
     description: text('description'),
@@ -149,6 +153,10 @@ export const taskSteps = pgTable(
     statusMessage: text('status_message'),
     errorMessage: text('error_message'),
     errorHint: jsonb('error_hint').$type<TaskStepErrorHint>(),
+    /** Set by the retry_ai action: the prior failure context for the
+     *  diagnose-and-fix agent. The step-runner dispatches a fix agent when this
+     *  is present, then clears it and re-runs apply against the fixed workspace. */
+    aiFixContext: jsonb('ai_fix_context').$type<{ priorError: string; priorOutput: string }>(),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
     /** Accumulated time (ms) the step spent idle waiting for user input

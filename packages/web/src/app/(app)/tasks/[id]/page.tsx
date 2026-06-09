@@ -276,13 +276,19 @@ export default function TaskDetailPage() {
       (s) => s.stepIndex > step.stepIndex && s.status !== 'pending',
     ).length;
     const label =
-      action === 'resume'
-        ? step.iterationCount > 0
-          ? `Resume this step from the last completed pass (${step.iterationCount} kept) with the currently-selected CLI?`
-          : `Resume this step's first pass with the currently-selected CLI?`
-        : downstreamCount
-          ? `Retry this step? ${downstreamCount} downstream step(s) will also be reset and re-run.`
-          : 'Retry this step?';
+      action === 'retry_ai'
+        ? 'Spawn an AI agent to diagnose and fix this failure, then re-run the step?'
+        : action === 'abort'
+          ? 'Abort this step and cancel the task? The environment will be torn down.'
+          : action === 'skip'
+            ? 'Skip this step and continue to the next step?'
+            : action === 'resume'
+              ? step.iterationCount > 0
+                ? `Resume this step from the last completed pass (${step.iterationCount} kept) with the currently-selected CLI?`
+                : `Resume this step's first pass with the currently-selected CLI?`
+              : downstreamCount
+                ? `Retry this step? ${downstreamCount} downstream step(s) will also be reset and re-run.`
+                : 'Retry this step?';
     if (!confirm(label)) return;
     setStepActionBusy(step.stepId);
     setStepActionError(null);
@@ -1258,6 +1264,17 @@ function StepCard({
                 </Button>
               );
             })()}
+          {step.status === 'failed' && (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={actionBusy}
+              onClick={() => onAction('retry_ai')}
+              title="Spawn an AI agent to diagnose and fix the failure, then re-run this step automatically. Uses the step's CLI provider."
+            >
+              Retry with AI
+            </Button>
+          )}
           {step.status === 'failed' &&
             (step.iterationCount > 0 || (step.cliRoles?.length ?? 0) > 0) && (
               <Button
@@ -1273,6 +1290,28 @@ function StepCard({
                     : 'Resume (new CLI)'}
               </Button>
             )}
+          {step.status === 'failed' && step.stepId === '06a-db-migrate' && (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={actionBusy}
+              onClick={() => onAction('skip')}
+              title="Skip database migrations and continue. Only available on this step."
+            >
+              Skip
+            </Button>
+          )}
+          {step.status === 'failed' && (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={actionBusy}
+              onClick={() => onAction('abort')}
+              title="Give up on this step and cancel the task (tears down the environment)."
+            >
+              Abort
+            </Button>
+          )}
           <span className="font-mono text-xs text-neutral-500">{step.stepId}</span>
         </div>
       </div>

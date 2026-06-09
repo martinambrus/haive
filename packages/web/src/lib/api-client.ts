@@ -494,7 +494,7 @@ export interface TaskEvent {
 
 export type TaskAction = 'cancel' | 'retry';
 
-export type StepAction = 'retry' | 'resume';
+export type StepAction = 'retry' | 'retry_ai' | 'resume' | 'skip' | 'abort';
 
 export interface StepActionResponse {
   ok: boolean;
