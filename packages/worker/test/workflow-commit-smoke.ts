@@ -235,6 +235,7 @@ async function main(): Promise<void> {
         scope: 'Keep changes confined to a single file for smoke purposes.',
       },
       '05-phase-0b5-spec-quality': { maxIterations: '3', focusAreas: '' },
+      '05a-resolve-spec-warnings': { action: 'continue' },
       '06-gate-1-spec-approval': {
         decision: 'approve',
         feedback: 'Smoke approval.',

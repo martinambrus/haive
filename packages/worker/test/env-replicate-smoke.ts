@@ -220,6 +220,7 @@ async function main(): Promise<void> {
       '03-phase-0a-discovery': { extraContext: '' },
       '04-phase-0b-pre-planning': { scope: 'env-replicate smoke scope.' },
       '05-phase-0b5-spec-quality': { maxIterations: '3', focusAreas: '' },
+      '05a-resolve-spec-warnings': { action: 'continue' },
       '06-gate-1-spec-approval': { decision: 'approve', feedback: 'env smoke.' },
       '07-phase-2-implement': { instructions: '' },
       '08-phase-5-verify': { runTest: false, runLint: false, runTypecheck: false },

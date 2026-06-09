@@ -262,6 +262,7 @@ async function main(): Promise<void> {
         scope: 'envwrap smoke workflow prelude verification.',
       },
       '05-phase-0b5-spec-quality': { maxIterations: '3', focusAreas: '' },
+      '05a-resolve-spec-warnings': { action: 'continue' },
       '06-gate-1-spec-approval': {
         decision: 'approve',
         feedback: 'envwrap smoke stub approval.',
