@@ -167,4 +167,70 @@ describe('runSequentialSubAgent', () => {
     expect(result.collected.scan).toEqual({ __rawOutput: 'not valid json' });
     expect(result.collected.labels).toEqual({ ok: true });
   });
+
+  it('unwraps codex JSONL sub-step output and sums token usage', async () => {
+    const jsonl = (text: string, input: number, output: number) =>
+      [
+        JSON.stringify({ type: 'thread.started' }),
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } }),
+        JSON.stringify({
+          type: 'turn.completed',
+          usage: { input_tokens: input, output_tokens: output },
+        }),
+      ].join('\n') + '\n';
+    const spawner = mockSpawner({
+      scan: { stdout: jsonl('<<<JSON>>>{"found":3}<<<ENDJSON>>>', 100, 10) },
+      label: { stdout: jsonl('```json\n{"labels":["a"]}\n```', 50, 5) },
+      'final report': { stdout: jsonl('Done!', 20, 2) },
+    });
+    const buildCli = (prompt: string): CliCommandSpec => ({
+      command: 'codex',
+      args: ['exec', '--json', prompt],
+      env: {},
+      outputFormat: 'codex-jsonl',
+    });
+    const result = await runSequentialSubAgent(sequentialInvocation, buildCli, spawner);
+    expect(result.exitCode).toBe(0);
+    expect(result.collected).toEqual({ scan: { found: 3 }, labels: { labels: ['a'] } });
+    expect(result.synthesis).toBe('Done!');
+    expect(result.tokenUsage).toEqual({ inputTokens: 170, outputTokens: 17, totalTokens: 187 });
+  });
+
+  it('unwraps gemini JSON envelopes and falls back to raw stdout for plain output', async () => {
+    const gem = (response: string, prompt: number, candidates: number) =>
+      JSON.stringify({
+        response,
+        stats: {
+          models: {
+            'gemini-2.5-pro': {
+              tokens: {
+                prompt,
+                candidates,
+                total: prompt + candidates,
+                cached: 0,
+                thoughts: 0,
+                tool: 0,
+              },
+            },
+          },
+        },
+      });
+    const spawner = mockSpawner({
+      scan: { stdout: gem('<<<JSON>>>{"found":1}<<<ENDJSON>>>', 10, 2) },
+      // Older binary ignoring the flag: plain stdout still parses as today.
+      label: { stdout: '{"labels":["x"]}' },
+      'final report': { stdout: gem('All good', 5, 1) },
+    });
+    // mockSpawner matches on the LAST arg — keep the prompt last.
+    const buildCli = (prompt: string): CliCommandSpec => ({
+      command: 'gemini',
+      args: ['--output-format', 'json', '-p', prompt],
+      env: {},
+      outputFormat: 'gemini-json',
+    });
+    const result = await runSequentialSubAgent(sequentialInvocation, buildCli, spawner);
+    expect(result.collected).toEqual({ scan: { found: 1 }, labels: { labels: ['x'] } });
+    expect(result.synthesis).toBe('All good');
+    expect(result.tokenUsage).toEqual({ inputTokens: 15, outputTokens: 3, totalTokens: 18 });
+  });
 });

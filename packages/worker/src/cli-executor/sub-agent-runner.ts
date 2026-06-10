@@ -1,9 +1,12 @@
+import type { CliTokenUsage } from '@haive/shared';
 import type {
   CliCommandSpec,
   SubAgentInvocation,
   SubAgentInvocationStep,
 } from '../cli-adapters/types.js';
 import type { CliExecutionResult, CliSpawner, SpawnOptions } from './runner.js';
+import { extractCodexJsonlOutput } from './codex-jsonl.js';
+import { extractGeminiJsonOutput, sumTokenUsage } from './usage-extract.js';
 
 export interface SubAgentStepTrace {
   id: string;
@@ -13,6 +16,7 @@ export interface SubAgentStepTrace {
   durationMs: number;
   parsed: unknown;
   error?: string;
+  tokenUsage?: CliTokenUsage | null;
 }
 
 export interface SubAgentRunResult {
@@ -20,6 +24,8 @@ export interface SubAgentRunResult {
   synthesis: unknown;
   trace: SubAgentStepTrace[];
   exitCode: number;
+  /** Whole-invocation usage: sum of every sub-step (incl. synthesis). */
+  tokenUsage: CliTokenUsage | null;
 }
 
 export type PromptToCliSpec = (prompt: string) => CliCommandSpec;
@@ -36,16 +42,19 @@ export async function runSequentialSubAgent(
 
   const collected: Record<string, unknown> = {};
   const trace: SubAgentStepTrace[] = [];
+  let tokenUsage: CliTokenUsage | null = null;
 
   for (const step of invocation.steps) {
     const traceEntry = await runOneStep(step, buildCli, spawner, opts);
     trace.push(traceEntry);
+    tokenUsage = sumTokenUsage(tokenUsage, traceEntry.tokenUsage ?? null);
     if (traceEntry.exitCode !== 0 || traceEntry.error) {
       return {
         collected,
         synthesis: null,
         trace,
         exitCode: traceEntry.exitCode ?? 1,
+        tokenUsage,
       };
     }
     if (step.collectInto) {
@@ -61,12 +70,14 @@ export async function runSequentialSubAgent(
     opts,
   );
   trace.push(synthesisTrace);
+  tokenUsage = sumTokenUsage(tokenUsage, synthesisTrace.tokenUsage ?? null);
 
   return {
     collected,
     synthesis: synthesisTrace.parsed,
     trace,
     exitCode: synthesisTrace.exitCode ?? 1,
+    tokenUsage,
   };
 }
 
@@ -78,7 +89,24 @@ async function runOneStep(
 ): Promise<SubAgentStepTrace> {
   const spec = buildCli(step.prompt);
   const result: CliExecutionResult = await spawner(spec, opts);
-  const parsed = safeParse(step.expectJsonOutput, result.stdout);
+  // Structured-output CLIs wrap the answer (codex: JSONL events; gemini: a
+  // {response, stats} doc). Unwrap to the model's text BEFORE fence parsing
+  // and capture token usage. Zero events / non-envelope output falls back to
+  // raw stdout — exactly the legacy behavior for older binaries.
+  let text = result.stdout;
+  let tokenUsage: CliTokenUsage | null = null;
+  if (spec.outputFormat === 'codex-jsonl') {
+    const extracted = extractCodexJsonlOutput(result.stdout);
+    if (extracted.eventCount > 0 && extracted.text !== null) text = extracted.text;
+    tokenUsage = extracted.tokenUsage;
+  } else if (spec.outputFormat === 'gemini-json') {
+    const extracted = extractGeminiJsonOutput(result.stdout);
+    if (extracted) {
+      text = extracted.responseText;
+      tokenUsage = extracted.tokenUsage;
+    }
+  }
+  const parsed = safeParse(step.expectJsonOutput, text);
   return {
     id: step.id,
     exitCode: result.exitCode,
@@ -86,6 +114,7 @@ async function runOneStep(
     stderr: result.stderr,
     durationMs: result.durationMs,
     parsed,
+    tokenUsage,
     ...(result.error ? { error: result.error } : {}),
   };
 }

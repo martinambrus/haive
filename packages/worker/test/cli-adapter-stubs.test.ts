@@ -136,3 +136,39 @@ describe('antigravity adapter', () => {
     expect(spec.args).toEqual(['--dangerously-skip-permissions', '-p', 'hello']);
   });
 });
+
+describe('adapter outputFormat declarations', () => {
+  const cases: [name: string, expected: string | undefined][] = [
+    ['claude-code', 'claude-stream-json'],
+    ['zai', 'claude-stream-json'],
+    ['amp', 'claude-stream-json'],
+    ['codex', 'codex-jsonl'],
+    ['gemini', 'gemini-json'],
+    ['antigravity', undefined],
+  ];
+  for (const [name, expected] of cases) {
+    it(`${name} declares outputFormat ${expected ?? '(none)'}`, () => {
+      const adapter = cliAdapterRegistry.get(name as never);
+      const provider = makeProvider({ id: `p-${name}`, name: name as never });
+      const spec = adapter.buildCliInvocation(provider, 'hello', opts);
+      expect(spec.outputFormat).toBe(expected);
+    });
+  }
+
+  it('codex places --json immediately after the exec subcommand', () => {
+    const adapter = cliAdapterRegistry.get('codex');
+    const provider = makeProvider({ id: 'p-codex', name: 'codex' });
+    const spec = adapter.buildCliInvocation(provider, 'hello', opts);
+    const execIdx = spec.args.indexOf('exec');
+    expect(execIdx).toBeGreaterThanOrEqual(0);
+    expect(spec.args[execIdx + 1]).toBe('--json');
+    expect(spec.args[spec.args.length - 1]).toBe('hello');
+  });
+
+  it('gemini requests JSON output mode', () => {
+    const adapter = cliAdapterRegistry.get('gemini');
+    const provider = makeProvider({ id: 'p-gemini', name: 'gemini' });
+    const spec = adapter.buildCliInvocation(provider, 'hello', opts);
+    expect(spec.args).toEqual(['-p', 'hello', '--output-format', 'json']);
+  });
+});

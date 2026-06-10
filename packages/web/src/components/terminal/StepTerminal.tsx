@@ -231,6 +231,15 @@ function InvocationPanel({ taskId, invocation, label, idx, statusMessage }: Invo
           durationMs={invocation.durationMs}
           isActive={invocation.isActive}
         />
+        {invocation.tokenUsage && (
+          <span
+            className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5"
+            title={`Token usage (provider-native semantics): total ${invocation.tokenUsage.totalTokens.toLocaleString()}${invocation.tokenUsage.cacheReadTokens ? `, cache read ${invocation.tokenUsage.cacheReadTokens.toLocaleString()}` : ''}`}
+          >
+            in {formatTokens(invocation.tokenUsage.inputTokens)} / out{' '}
+            {formatTokens(invocation.tokenUsage.outputTokens)} tok
+          </span>
+        )}
         {invocation.startedAt && <span>{new Date(invocation.startedAt).toLocaleTimeString()}</span>}
       </div>
       {replayError && (
@@ -259,6 +268,12 @@ function InvocationPanel({ taskId, invocation, label, idx, statusMessage }: Invo
       )}
     </div>
   );
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
 }
 
 // Per-invocation runtime: ticks every second while the CLI runs, then freezes at

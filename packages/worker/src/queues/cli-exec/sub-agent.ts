@@ -133,6 +133,7 @@ export async function executeSubAgentSequential(
     rawOutput: JSON.stringify(result.trace),
     parsedOutput: { collected: result.collected, synthesis: result.synthesis },
     errorMessage: failed ? describeFailedSubAgent(result) : null,
+    tokenUsage: result.tokenUsage,
   };
 }
 

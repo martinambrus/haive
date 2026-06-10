@@ -586,6 +586,7 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
       endedAt: schema.cliInvocations.endedAt,
       createdAt: schema.cliInvocations.createdAt,
       errorMessage: schema.cliInvocations.errorMessage,
+      tokenUsage: schema.cliInvocations.tokenUsage,
       // Provider that ran this invocation, so the terminal badge can show which
       // CLI/model it was — important for multi-CLI loop steps (spec-quality).
       providerLabel: schema.cliProviders.label,

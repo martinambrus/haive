@@ -42,6 +42,7 @@ export class AmpAdapter extends BaseCliAdapter {
       ]),
       env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
+      outputFormat: 'claude-stream-json',
     };
   }
 

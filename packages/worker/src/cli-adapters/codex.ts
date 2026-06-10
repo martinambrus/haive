@@ -50,8 +50,13 @@ export class CodexAdapter extends BaseCliAdapter {
       // start: nested unprivileged user namespaces are blocked, so it fails
       // every `bash -lc` with "No permissions to create a new namespace" and
       // degrades to read-only MCP. Bypass it — the container is the boundary.
+      // `--json` switches stdout to a JSONL event stream so token usage
+      // (turn.completed events) can be captured; the final answer text is the
+      // last agent_message item. Placed right after `exec` so it binds to the
+      // subcommand.
       args: this.mergedArgs(provider, [
         'exec',
+        '--json',
         '--dangerously-bypass-approvals-and-sandbox',
         ...reasoningArgs,
         '--skip-git-repo-check',
@@ -59,6 +64,7 @@ export class CodexAdapter extends BaseCliAdapter {
       ]),
       env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
+      outputFormat: 'codex-jsonl',
     };
   }
 

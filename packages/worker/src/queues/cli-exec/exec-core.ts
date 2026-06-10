@@ -11,6 +11,8 @@ import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-ru
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliCommandSpec } from '../../cli-adapters/types.js';
 import {
+  createCodexJsonlCollector,
+  extractGeminiJsonOutput,
   type CliExecutionResult,
   type CliSpawner,
   type SpawnOptions,
@@ -222,13 +224,20 @@ export async function executeCliSpec(
   }
   streamBuf.push(headerText);
 
-  // Hook stdout for NDJSON stream-json parsing (Claude Code / Zai)
+  // Hook stdout for structured-output parsing. Codex's JSONL events carry
+  // string `type` fields that would satisfy the claude collector's event
+  // heuristic while never producing a result event — so the codex collector
+  // REPLACES the claude collector (mutually exclusive), it does not run
+  // alongside it.
+  const outputFormat = mergedSpec.outputFormat;
   const collector = createStreamJsonCollector(statusCallback);
+  const codexCollector = outputFormat === 'codex-jsonl' ? createCodexJsonlCollector() : null;
   const result = await spawner(mergedSpec, {
     timeoutMs,
     onStdoutChunk: (chunk: string) => {
       streamBuf.push(chunk);
-      collector.onChunk(chunk);
+      if (codexCollector) codexCollector.onChunk(chunk);
+      else collector.onChunk(chunk);
     },
     onStderrChunk: (chunk: string) => {
       streamBuf.push(chunk);
@@ -236,6 +245,43 @@ export async function executeCliSpec(
   });
   const streamLog = streamBuf.join('');
   void deps;
+
+  if (codexCollector && codexCollector.isJsonl()) {
+    const codexText = codexCollector.getResult();
+    const tokenUsage = codexCollector.getTokenUsage();
+    if (codexText !== null) {
+      // rawOutput = the model's answer text — the step parsers' fenced-JSON
+      // contract (parsedOutput ?? rawOutput) is preserved.
+      return {
+        exitCode: result.exitCode,
+        rawOutput: codexText,
+        parsedOutput: tryJsonParse(codexText),
+        errorMessage: formatCliErrorMessage(
+          result.exitCode,
+          result.stderr,
+          codexText,
+          result.error,
+        ),
+        tokenUsage,
+        streamLog,
+      };
+    }
+    // JSONL stream without an agent message — partial usage is still recorded.
+    return {
+      exitCode: result.exitCode,
+      rawOutput: result.stdout,
+      parsedOutput: null,
+      errorMessage:
+        result.error ??
+        formatCliErrorMessage(result.exitCode, result.stderr, result.stdout, undefined) ??
+        codexCollector.getNoResultReason() ??
+        'codex emitted no agent message',
+      tokenUsage,
+      streamLog,
+    };
+  }
+  // codexCollector with zero events: old binary ignored --json — fall through
+  // to the plain path below, byte-for-byte legacy behavior (usage null).
 
   const streamResult = collector.getResult();
   if (collector.isStreamJson() && streamResult !== null) {
@@ -288,6 +334,7 @@ export async function executeCliSpec(
         streamResult,
         result.error,
       ),
+      tokenUsage: collector.getTokenUsage(),
       streamLog,
     };
   }
@@ -302,8 +349,32 @@ export async function executeCliSpec(
         result.error ??
         formatCliErrorMessage(result.exitCode, result.stderr, result.stdout, undefined) ??
         reason,
+      // Tokens were burned even without a result event (e.g. error_max_turns).
+      tokenUsage: collector.getTokenUsage(),
       streamLog,
     };
+  }
+
+  if (outputFormat === 'gemini-json') {
+    // Gemini JSON mode wraps the answer: {response, stats}. Unwrap so the
+    // step parsers see the model's text; extraction failure (older binary,
+    // ignored flag, crash output) falls through to the legacy plain return.
+    const extracted = extractGeminiJsonOutput(result.stdout);
+    if (extracted) {
+      return {
+        exitCode: result.exitCode,
+        rawOutput: extracted.responseText,
+        parsedOutput: tryJsonParse(extracted.responseText),
+        errorMessage: formatCliErrorMessage(
+          result.exitCode,
+          result.stderr,
+          extracted.responseText,
+          result.error,
+        ),
+        tokenUsage: extracted.tokenUsage,
+        streamLog,
+      };
+    }
   }
 
   return {
@@ -316,6 +387,7 @@ export async function executeCliSpec(
       result.stdout,
       result.error,
     ),
+    tokenUsage: collector.getTokenUsage(),
     streamLog,
   };
 }

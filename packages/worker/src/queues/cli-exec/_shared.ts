@@ -1,5 +1,5 @@
 import { Queue } from 'bullmq';
-import { logger, type StepErrorHint } from '@haive/shared';
+import { logger, type CliTokenUsage, type StepErrorHint } from '@haive/shared';
 import type {
   CliExecJobPayload,
   CliProbeJobPayload,
@@ -53,6 +53,10 @@ export interface ExecutionOutcome {
   rawOutput: string | null;
   parsedOutput: unknown;
   errorMessage: string | null;
+  /** Token usage extracted from the CLI's structured output (see
+   *  CliTokenUsage in @haive/shared). Undefined/null when the CLI reported
+   *  nothing (plain-text output, legacy payloads, antigravity). */
+  tokenUsage?: CliTokenUsage | null;
   /** Full live-stream transcript (header + every stdout/stderr chunk) the
    *  same bytes published to the cli-stream Redis channel. Persisted to
    *  cli_invocations.stream_log for historical replay. Null when the

@@ -1,6 +1,9 @@
 /* ------------------------------------------------------------------ */
-/* NDJSON stream-json parser for Claude Code / Zai                     */
+/* NDJSON stream-json parser for Claude Code / Zai / Amp               */
 /* ------------------------------------------------------------------ */
+
+import type { CliTokenUsage } from '@haive/shared';
+import { normalizeClaudeUsage, sumTokenUsage } from '../../cli-executor/usage-extract.js';
 
 interface StreamJsonCollector {
   /** Feed raw stdout chunks. Parses NDJSON lines, emits progress, collects result. */
@@ -17,6 +20,10 @@ interface StreamJsonCollector {
   /** Count of stream-json lines that failed JSON.parse — non-zero means the
    *  stream got mangled (chunk corruption, partial flush, mixed protocol). */
   getMalformedLineCount: () => number;
+  /** Token usage: the result event's usage when present (claude/zai — wins,
+   *  never summed with assistant usages), else the sum of assistant-event
+   *  usages (amp emits no result usage). Null when nothing reported. */
+  getTokenUsage: () => CliTokenUsage | null;
 }
 
 export function createStreamJsonCollector(
@@ -29,6 +36,9 @@ export function createStreamJsonCollector(
   let assistantText = '';
   let lastResultSubtype: string | null = null;
   let lastResultError: string | null = null;
+  let resultUsage: CliTokenUsage | null = null;
+  let assistantUsageSum: CliTokenUsage | null = null;
+  let costUsd: number | null = null;
   let lastRateLimit: {
     status?: string;
     overageStatus?: string;
@@ -60,6 +70,13 @@ export function createStreamJsonCollector(
     // Extract final result
     if (type === 'result') {
       if (typeof subtype === 'string') lastResultSubtype = subtype;
+      // Usage rides the result event on ANY subtype (an error_max_turns run
+      // still burned tokens) — capture before the success early-return.
+      const usage = normalizeClaudeUsage(event.usage);
+      if (usage) resultUsage = usage;
+      if (typeof event.total_cost_usd === 'number' && Number.isFinite(event.total_cost_usd)) {
+        costUsd = event.total_cost_usd;
+      }
       // Some CLIs (e.g. amp) put a human-readable failure reason on the result
       // event's `error` field — surface it instead of the bare subtype.
       if (typeof event.error === 'string' && event.error.trim()) {
@@ -75,6 +92,10 @@ export function createStreamJsonCollector(
     // result event when downstream parsing fails.
     if (type === 'assistant') {
       const msg = event.message as Record<string, unknown> | undefined;
+      // Amp's usage placement is undocumented — accept both message.usage and
+      // a top-level usage, preferring message.usage, counted ONCE per event.
+      const usage = normalizeClaudeUsage(msg?.usage ?? event.usage);
+      if (usage) assistantUsageSum = sumTokenUsage(assistantUsageSum, usage);
       const content = msg?.content as unknown[] | undefined;
       if (Array.isArray(content)) {
         for (const block of content) {
@@ -130,6 +151,17 @@ export function createStreamJsonCollector(
     },
     getMalformedLineCount(): number {
       return malformedLineCount;
+    },
+    getTokenUsage(): CliTokenUsage | null {
+      if (buffer.trim()) {
+        processLine(buffer);
+        buffer = '';
+      }
+      // The result event's usage is authoritative and already cumulative —
+      // never add assistant sums to it (double-count guard).
+      const base = resultUsage ?? assistantUsageSum;
+      if (!base) return null;
+      return costUsd !== null ? { ...base, costUsd } : base;
     },
   };
 }

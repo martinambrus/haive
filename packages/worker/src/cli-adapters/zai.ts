@@ -79,6 +79,7 @@ export class ZaiAdapter extends BaseCliAdapter {
       ]),
       env,
       cwd: opts.cwd,
+      outputFormat: 'claude-stream-json',
     };
   }
 

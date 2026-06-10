@@ -303,10 +303,15 @@ export const cliInvocations = pgTable(
      *  next pass enqueues a fresh invocation. Null = pending or in-flight. */
     consumedAt: timestamp('consumed_at'),
     parsedOutput: jsonb('parsed_output').$type<unknown>(),
+    /** Keep in sync with `CliTokenUsage` in @haive/shared — this package
+     *  cannot import shared (circular; see the StepErrorHint note above). */
     tokenUsage: jsonb('token_usage').$type<{
       inputTokens: number;
       outputTokens: number;
       totalTokens: number;
+      cacheReadTokens?: number;
+      cacheCreationTokens?: number;
+      costUsd?: number;
     }>(),
     durationMs: integer('duration_ms'),
     containerId: varchar('container_id', { length: 255 }),

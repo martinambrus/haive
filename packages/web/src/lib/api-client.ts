@@ -482,6 +482,17 @@ export interface CliInvocationSummary {
    *  rows / deleted providers). Shown on the terminal badge. */
   providerLabel: string | null;
   providerName: string | null;
+  /** Token usage extracted from the CLI's structured output. Null for plain
+   *  CLIs (antigravity), failed extractions, and rows written before capture
+   *  existed. Semantics are provider-native. */
+  tokenUsage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+    costUsd?: number;
+  } | null;
 }
 
 export interface CliInvocationOutput {

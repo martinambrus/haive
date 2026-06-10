@@ -34,6 +34,26 @@ export type StepErrorHint = {
   providerName: CliProviderName;
 };
 
+/** Per-invocation token usage captured from a CLI's structured output.
+ *  Semantics are PROVIDER-NATIVE (later stats should normalize by provider):
+ *  - claude-code/zai: inputTokens EXCLUDES cache reads/creation (raw API
+ *    fields); totalTokens = input + output + cacheRead + cacheCreation.
+ *    zai's costUsd is unreliable — the claude binary prices GLM traffic
+ *    against Anthropic's price table; stored anyway for raw observability.
+ *  - codex: inputTokens INCLUDES cached (OpenAI semantics); cacheReadTokens
+ *    mirrors cached_input_tokens; totalTokens = input + output.
+ *  - gemini: inputTokens = prompt (cached included); outputTokens =
+ *    candidates + thoughts (thinking tokens are billed model output);
+ *    totalTokens = the stats total (includes tool tokens). */
+export interface CliTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  costUsd?: number;
+}
+
 export type RepoSource =
   | 'local_path'
   | 'git_https'

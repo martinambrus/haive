@@ -30,9 +30,14 @@ export class GeminiAdapter extends BaseCliAdapter {
   ): CliCommandSpec {
     return {
       command: this.resolveExecutable(provider),
-      args: this.mergedArgs(provider, ['-p', prompt]),
+      // JSON output mode wraps the answer in {response, stats}; exec-core
+      // unwraps `response` for the step parsers and reads token usage from
+      // `stats.models`. Older binaries that ignore the flag fall back to the
+      // plain-text path.
+      args: this.mergedArgs(provider, ['-p', prompt, '--output-format', 'json']),
       env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
+      outputFormat: 'gemini-json',
     };
   }
 

@@ -8,3 +8,5 @@ export * from './cli-exec/images.js';
 export * from './cli-exec/exec-core.js';
 export * from './cli-exec/sub-agent.js';
 export * from './cli-exec/handlers.js';
+export * from '../cli-executor/codex-jsonl.js';
+export * from '../cli-executor/usage-extract.js';
