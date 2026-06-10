@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import { and, asc, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -311,10 +313,42 @@ function mergeFixPrompt(issue: DagIssueRow): string {
     'Your working directory is the integration worktree, MID-MERGE — the conflict markers are live in the files.',
     `Conflicting branch: ${issue.branchName} (${issue.title}).`,
     '',
-    "Resolve EVERY conflict correctly and semantically: combine both sides as the implementation intends; don't drop either side's work.",
-    'Then stage the resolved files (git add -A) and COMPLETE the merge (git commit --no-edit).',
-    'Do NOT run tests or any other commands. When the merge commit is created, stop.',
+    'Resolve EVERY conflict by EDITING the conflicted files: remove the <<<<<<< / ======= / >>>>>>> markers',
+    "and combine both sides as the implementation intends; don't drop either side's work.",
+    'Do NOT run git — it is unavailable in this environment; the orchestrator stages and commits the merge',
+    'after you finish. Do NOT run tests or any other commands.',
+    'When every conflict marker is gone from the files, stop.',
   ].join('\n');
+}
+
+/** Complete a mid-merge in the integration worktree after the fix agent edited
+ *  the conflicted files. The agent cannot run git (the worktree's absolute
+ *  gitdir path does not exist inside the sandbox), so the executor verifies no
+ *  conflict markers remain in the previously-unmerged paths, stages, and
+ *  commits. Returns true when the merge commit landed. */
+async function completeMergeHostSide(
+  integration: IntegrationWorktree,
+  gitEnv: Record<string, string>,
+): Promise<boolean> {
+  // Fast path: already committed (e.g. an environment where git did work).
+  if (await mergeCommitted(integration.path)) return true;
+  const head = await gitRun(integration.path, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+  if (head.code !== 0) return false; // merge no longer open and not committed
+  const unmerged = await gitRun(integration.path, ['diff', '--name-only', '--diff-filter=U']);
+  const files = unmerged.stdout
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const f of files) {
+    const content = await readFile(path.join(integration.path, f), 'utf8').catch(() => null);
+    if (content === null) continue; // deleted as part of the resolution
+    if (/^(<{7}|>{7})( |$)/m.test(content)) return false; // markers remain
+  }
+  const add = await gitRun(integration.path, ['add', '-A']);
+  if (add.code !== 0) return false;
+  const commit = await gitRun(integration.path, ['commit', '--no-edit'], gitEnv);
+  if (commit.code !== 0) return false;
+  return mergeCommitted(integration.path);
 }
 
 interface MergeArgs {
@@ -458,8 +492,10 @@ async function runLevelMerge(
       .set({ consumedAt: new Date() })
       .where(eq(schema.cliInvocations.id, inv.id));
     const target = mergeable.find((i) => i.issueKey === state.activeConflict);
-    const committed = await mergeCommitted(integration.path);
     if (target) {
+      // The fix agent only edited the conflicted files; finish the merge here
+      // (verify markers gone, stage, commit) — git is unavailable in the sandbox.
+      const committed = await completeMergeHostSide(integration, gitEnv);
       if (committed) {
         await db
           .update(schema.taskDagIssues)

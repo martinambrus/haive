@@ -46,8 +46,8 @@ function buildCoderPrompt(issue: DagCoderContext, upstreamDebt: string): string 
       : '',
     upstreamDebt ? `\n${upstreamDebt}` : '',
     '',
-    'When finished, COMMIT your changes to the current branch (git add -A && git commit -m ...).',
-    'Then emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
+    'Do NOT run git — it is unavailable in this environment; the orchestrator commits your work after you finish.',
+    'When finished, emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
     `{ "issue_id": "${issue.issueKey}", "outcome": "completed|completed_with_debt|failed_unrecoverable", "files_modified": ["path/one"], "debt_items": [], "concerns": "<notes or empty>" }`,
   ]
     .filter(Boolean)

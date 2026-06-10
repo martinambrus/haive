@@ -225,10 +225,10 @@ async function main(): Promise<void> {
           .where(eq(schema.cliInvocations.id, payload.invocationId));
         return;
       }
-      // Merge-fix agent: resolve + complete the merge.
+      // Merge-fix agent: EDIT the conflicted file only — a real sandboxed agent
+      // cannot run git (worktree gitdir path is invalid there); the executor
+      // completes the merge host-side.
       await writeFile(path.join(integrationWorktree, CONFLICT_FILE), 'resolved: 001 + 002\n');
-      git(integrationWorktree, ['add', '-A']);
-      git(integrationWorktree, ['commit', '--no-edit']);
       await db
         .update(schema.cliInvocations)
         .set({ exitCode: 0, rawOutput: 'merge resolved', endedAt: new Date() })
