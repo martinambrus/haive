@@ -106,6 +106,10 @@ export const tasks = pgTable(
      *  implementation. Chosen on the new-task form; default off so existing
      *  tasks and direct-insert fixtures skip the step. */
     simplifyCode: boolean('simplify_code').notNull().default(false),
+    /** Phase 7: adversarial QA level (08d-adversarial-qa). null/'none' = off;
+     *  'poc'|'standard'|'enterprise' fan out 2/4/6 adversarial agents. Chosen on
+     *  the new-task form; default off so existing tasks + fixtures skip the step. */
+    adversarialQaLevel: text('adversarial_qa_level'),
     /** Per-task overrides for the maximum loop iterations a step can run.
      *  Map of stepId → maxIterations. The runner reads this when a step
      *  declares a loop hook and falls back to the loopSpec default when

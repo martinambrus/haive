@@ -55,6 +55,9 @@ export const createTaskRequestSchema = z
     /** Phase 3.5: run an AI code-simplification pass (plus a conditional fixup
      *  pass) over the implementation before verification. Workflow tasks only. */
     simplifyCode: z.boolean().optional(),
+    /** Phase 7: adversarial QA level. Fans out 2/4/6 adversarial agents before
+     *  gate 2. Workflow tasks only; omitted/'none' = off. */
+    adversarialQaLevel: z.enum(['none', 'poc', 'standard', 'enterprise']).optional(),
     resourceLimits: resourceLimitsSchema,
     stepLoopLimits: stepLoopLimitsSchema,
   })

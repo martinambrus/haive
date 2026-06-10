@@ -100,6 +100,9 @@ export default function NewTaskPage() {
    *  loop hook's built-in default. */
   const [specQualityMaxIterations, setSpecQualityMaxIterations] = useState<number>(10);
   const [simplifyCode, setSimplifyCode] = useState(true);
+  const [adversarialQaLevel, setAdversarialQaLevel] = useState<
+    'none' | 'poc' | 'standard' | 'enterprise'
+  >('none');
 
   const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
@@ -227,6 +230,7 @@ export default function NewTaskPage() {
       if (type === 'workflow') {
         body.stepLoopLimits = { '05-phase-0b5-spec-quality': specQualityMaxIterations };
         body.simplifyCode = simplifyCode;
+        body.adversarialQaLevel = adversarialQaLevel;
       }
 
       if (type === 'workflow' && dumpFile) {
@@ -462,6 +466,30 @@ export default function NewTaskPage() {
               findings remain or this budget is hit. Higher values give the LLM more chances to
               converge but cost more tokens. Gate 1 will flag if the budget was exhausted with
               issues still open so you can decide whether to approve as-is or re-run.
+            </p>
+          </div>
+        )}
+
+        {inferredType === 'workflow' && (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="adversarialQaLevel">Adversarial QA (Phase 7)</Label>
+            <select
+              id="adversarialQaLevel"
+              value={adversarialQaLevel}
+              onChange={(e) =>
+                setAdversarialQaLevel(e.target.value as 'none' | 'poc' | 'standard' | 'enterprise')
+              }
+              className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+            >
+              <option value="none">None (default)</option>
+              <option value="poc">POC — 2 agents (edge cases)</option>
+              <option value="standard">Standard — 4 agents (OWASP)</option>
+              <option value="enterprise">Enterprise — 6 agents (exhaustive)</option>
+            </select>
+            <p className="text-xs text-neutral-500">
+              After code review, adversarial agents actively try to break the change (edge cases,
+              auth, injection, logic flaws — proof-of-concept only, no destructive actions).
+              Findings surface at Gate 2. Costs more tokens at higher levels.
             </p>
           </div>
         )}

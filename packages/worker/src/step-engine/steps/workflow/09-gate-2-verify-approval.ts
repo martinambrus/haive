@@ -37,6 +37,27 @@ interface VerifyGateDetect {
     securityFindings: string[];
     positives: string[];
   } | null;
+  /** Phase 7 adversarial QA result (null when the step didn't run). */
+  adversarial: {
+    level: string;
+    blocking: boolean;
+    counts: { critical: number; high: number; total: number };
+    findings: string[];
+  } | null;
+}
+
+interface Phase8dOutput {
+  ran?: boolean;
+  level?: string;
+  blocking?: boolean;
+  counts?: { critical?: number; high?: number; total?: number };
+  findings?: {
+    severity?: string;
+    category?: string;
+    location?: string;
+    impact?: string;
+    fix?: string;
+  }[];
 }
 
 interface Phase8cOutput {
@@ -200,6 +221,25 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       };
     }
 
+    // Phase 7 adversarial QA: surface findings; blocking on any critical/high.
+    const phase8d = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08d-adversarial-qa');
+    const pd = phase8d?.output as Phase8dOutput | null;
+    let adversarial: VerifyGateDetect['adversarial'] = null;
+    if (pd?.ran) {
+      adversarial = {
+        level: pd.level ?? 'poc',
+        blocking: pd.blocking === true,
+        counts: {
+          critical: pd.counts?.critical ?? 0,
+          high: pd.counts?.high ?? 0,
+          total: pd.counts?.total ?? 0,
+        },
+        findings: (pd.findings ?? []).map((f) =>
+          `[${f.severity ?? '?'}] ${f.category ?? ''} ${f.location ?? ''} ${f.impact ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+        ),
+      };
+    }
+
     return {
       testResults: fmtResult('tests', output.test),
       lintResults: fmtResult('lint', output.lint),
@@ -209,6 +249,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       testManagement,
       browser,
       codeReview,
+      adversarial,
     };
   },
 
@@ -227,6 +268,11 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const codeReviewLine = cr
       ? `Code review: peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.blocking ? ' — BLOCKING' : ''}`
       : '';
+    const aq = detected.adversarial;
+    const adversarialOk = aq === null || !aq.blocking;
+    const adversarialLine = aq
+      ? `Adversarial QA (${aq.level}): ${aq.counts.total} findings (${aq.counts.critical} critical, ${aq.counts.high} high)${aq.blocking ? ' — BLOCKING' : ''}`
+      : '';
     const summary = [
       detected.testResults,
       detected.lintResults,
@@ -240,6 +286,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         : '',
       browserLine,
       codeReviewLine,
+      adversarialLine,
       detected.testManagement ? detected.testManagement.line : '',
     ]
       .filter(Boolean)
@@ -333,6 +380,23 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       });
     }
 
+    if (aq) {
+      const lines: string[] = [
+        `**Level:** ${aq.level}`,
+        `**Findings:** ${aq.counts.total} (${aq.counts.critical} critical, ${aq.counts.high} high)`,
+      ];
+      if (aq.findings.length > 0) {
+        lines.push('', '## Findings');
+        for (const f of aq.findings) lines.push(`- ${f}`);
+      }
+      infoSections.push({
+        title: 'Adversarial QA',
+        preview: `${aq.counts.total} findings${aq.blocking ? ' • BLOCKING' : ''}`,
+        body: lines.join('\n'),
+        defaultOpen: aq.blocking,
+      });
+    }
+
     return {
       title: 'Gate 2: Verification approval',
       description: summary,
@@ -347,7 +411,12 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             { value: 'reject', label: 'Reject — iterate on the implementation' },
           ],
           default:
-            detected.allPassed && validationOk && testsOk && browserOk && codeReviewOk
+            detected.allPassed &&
+            validationOk &&
+            testsOk &&
+            browserOk &&
+            codeReviewOk &&
+            adversarialOk
               ? 'approve'
               : 'reject',
           required: true,

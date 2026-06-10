@@ -19,6 +19,7 @@ import { phase5VerifyStep } from './08-phase-5-verify.js';
 import { browserVerifyStep } from './08a-browser-verify.js';
 import { testManagementStep } from './08b-test-management.js';
 import { codeReviewStep } from './08c-code-review.js';
+import { adversarialQaStep } from './08d-adversarial-qa.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
 import { gate3CommitStep } from './10-gate-3-commit.js';
 import { phase8LearningStep } from './11-phase-8-learning.js';
@@ -45,6 +46,7 @@ export {
   browserVerifyStep,
   testManagementStep,
   codeReviewStep,
+  adversarialQaStep,
   gate2VerifyApprovalStep,
   gate3CommitStep,
   phase8LearningStep,
@@ -72,6 +74,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(browserVerifyStep);
   registry.register(testManagementStep);
   registry.register(codeReviewStep);
+  registry.register(adversarialQaStep);
   registry.register(gate2VerifyApprovalStep);
   registry.register(gate3CommitStep);
   registry.register(phase8LearningStep);
