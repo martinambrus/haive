@@ -1,7 +1,12 @@
 # syntax=docker/dockerfile:1.7
 FROM node:24-alpine AS base
 RUN apk add --no-cache python3 make g++ libc6-compat
-RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+# corepack downloads pnpm from the npm registry with no retry; a transient
+# ECONNRESET fails the whole build (seen in CI), so retry up to 3 times.
+RUN corepack enable && \
+    for i in 1 2 3; do \
+      corepack prepare pnpm@9.15.4 --activate && break || { [ "$i" = 3 ] && exit 1; sleep 5; }; \
+    done
 WORKDIR /app
 
 FROM base AS deps

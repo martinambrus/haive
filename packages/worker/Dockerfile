@@ -8,7 +8,12 @@ RUN apk add --no-cache \
 # Host-mounted repos have a different UID than the worker process; bypass git's
 # safe.directory ownership check so repo ops don't fail with "dubious ownership".
 RUN git config --system --add safe.directory '*'
-RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+# corepack downloads pnpm from the npm registry with no retry; a transient
+# ECONNRESET fails the whole build (seen in CI), so retry up to 3 times.
+RUN corepack enable && \
+    for i in 1 2 3; do \
+      corepack prepare pnpm@9.15.4 --activate && break || { [ "$i" = 3 ] && exit 1; sleep 5; }; \
+    done
 
 # clawker (sandbox runtime). Pin a tagged release via build arg; default empty
 # leaves the binary uninstalled so Phase 0 scaffold builds without an external
