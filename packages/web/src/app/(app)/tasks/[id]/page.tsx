@@ -32,6 +32,7 @@ import { FormRenderer, type FormValues } from '@/components/form-renderer';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { TaskSource } from '@/components/task-source';
 import { StepTerminal } from '@/components/terminal/StepTerminal';
+import { BrowserVncPanel } from '@/components/terminal/BrowserVncPanel';
 import { InteractiveShell } from '@/components/terminal/InteractiveShell';
 import { autoScrollTerminalsEnabled } from '@/lib/terminal-autoscroll';
 
@@ -1477,6 +1478,11 @@ function StepCard({
           statusMessage={step.statusMessage}
         />
       )}
+
+      {step.stepId === '08a-browser-verify' &&
+        (step.formValues as { mode?: string } | null)?.mode === 'interactive' && (
+          <BrowserVncPanel taskId={taskId} />
+        )}
     </Card>
   );
 }

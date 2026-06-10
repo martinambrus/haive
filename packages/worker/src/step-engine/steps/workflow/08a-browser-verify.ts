@@ -11,6 +11,7 @@ import {
   ddevExec,
   runnerExec,
   ensureDdevStarted,
+  startBrowserDesktop,
 } from '../../../sandbox/ddev-runner.js';
 
 const exec = promisify(execFile);
@@ -215,6 +216,25 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
           : 'Launches headless Chrome to validate the running application.',
       ].join('\n'),
       fields: [
+        ...(detected.ddevMode
+          ? [
+              {
+                type: 'radio' as const,
+                id: 'mode',
+                label: 'Validation mode',
+                options: [
+                  { value: 'headless', label: 'Headless — automated check only' },
+                  {
+                    value: 'interactive',
+                    label:
+                      'Interactive — headed Chrome on the DDEV desktop; watch and click along in the Browser panel below the terminal (e.g. to dismiss native Chrome popups)',
+                  },
+                ],
+                default: 'headless',
+                required: true,
+              },
+            ]
+          : []),
         {
           type: 'text',
           id: 'appUrl',
@@ -254,12 +274,14 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     if (!detected.available) return skipped;
 
     const values = args.formValues as {
+      mode?: string;
       appUrl?: string;
       checkConsoleErrors?: boolean;
       checkNetworkErrors?: boolean;
     };
     const appUrlOverride = (values.appUrl ?? '').trim();
-    ctx.logger.info({ ddevMode: detected.ddevMode }, 'running browser validation');
+    const interactive = values.mode === 'interactive';
+    ctx.logger.info({ ddevMode: detected.ddevMode, interactive }, 'running browser validation');
 
     let rawOutput: string;
     let appUrl: string;
@@ -271,11 +293,24 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       await ctx.emitProgress('Ensuring the DDEV environment is up…');
       const handle = await ensureDdevStarted(ctx.taskId, detected.repoSubpath);
       appUrl = appUrlOverride || (await ddevPrimaryUrl(handle)) || 'http://localhost';
-      await ctx.emitProgress('Running browser validation…');
-      const res = await runnerExec(handle, `node /opt/browser-check.js '${appUrl}'`, {
-        timeoutMs: 90_000,
-      });
-      rawOutput = res.output;
+      if (interactive) {
+        // Headed Chrome on the runner's virtual desktop: the user watches and
+        // interacts via the web Browser (noVNC) panel while the probe runs the
+        // same checks over CDP — and the browser STAYS OPEN afterwards.
+        await ctx.emitProgress('Starting the browser desktop…');
+        await startBrowserDesktop(handle);
+        await ctx.emitProgress('Running browser validation (interactive)…');
+        const res = await runnerExec(handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
+          timeoutMs: 90_000,
+        });
+        rawOutput = res.output;
+      } else {
+        await ctx.emitProgress('Running browser validation…');
+        const res = await runnerExec(handle, `node /opt/browser-check.js '${appUrl}'`, {
+          timeoutMs: 90_000,
+        });
+        rawOutput = res.output;
+      }
     } else {
       appUrl = appUrlOverride || detected.appUrl || 'http://localhost';
       try {

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { logger } from '@haive/shared';
+import { ddevRunnerName, logger } from '@haive/shared';
 
 // Per-task DDEV environment via nested Docker (DinD). DDEV can't run against the
 // shared host daemon here (repos live in the haive_repos NAMED VOLUME, which the
@@ -33,10 +33,12 @@ let cachedTag: string | null = null;
 async function resolveImageTag(): Promise<string> {
   if (cachedTag) return cachedTag;
   const dir = runnerContextDir();
-  const [dockerfile, entrypoint, browserCheck] = await Promise.all([
+  const [dockerfile, entrypoint, browserCheck, probeConnect, desktopSh] = await Promise.all([
     readFile(path.join(dir, 'Dockerfile'), 'utf8'),
     readFile(path.join(dir, 'entrypoint.sh'), 'utf8'),
     readFile(path.join(dir, 'browser-check.js'), 'utf8'),
+    readFile(path.join(dir, 'browser-probe-connect.js'), 'utf8'),
+    readFile(path.join(dir, 'start-browser-desktop.sh'), 'utf8'),
   ]);
   const hash = createHash('sha256')
     .update(dockerfile)
@@ -44,6 +46,10 @@ async function resolveImageTag(): Promise<string> {
     .update(entrypoint)
     .update('\0')
     .update(browserCheck)
+    .update('\0')
+    .update(probeConnect)
+    .update('\0')
+    .update(desktopSh)
     .digest('hex')
     .slice(0, 12);
   cachedTag = `haive-ddev-runner:${hash}`;
@@ -74,7 +80,8 @@ export async function ensureDdevRunnerImage(): Promise<string> {
 }
 
 function runnerName(taskId: string): string {
-  return `haive-ddev-${taskId.slice(0, 8)}`;
+  // Shared with the api (it dials the runner by this DNS name for the VNC bridge).
+  return ddevRunnerName(taskId);
 }
 
 export interface DdevRunnerHandle {
@@ -122,6 +129,22 @@ export async function startDdevRunner(params: {
     ],
     { timeout: 60_000 },
   );
+
+  // Second NIC on the internal sandbox network (same one sandboxes + the api
+  // join), so the api's VNC bridge and sandboxed CLIs reach the runner by DNS
+  // name. The default bridge stays primary — the runner needs internet for
+  // nested-daemon image pulls and the sandbox network is internal-only.
+  const sandboxNetwork = process.env.SANDBOX_NETWORK;
+  if (sandboxNetwork) {
+    await exec('docker', ['network', 'connect', sandboxNetwork, name], { timeout: 15_000 }).catch(
+      (err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/already exists in network/.test(msg)) {
+          log.warn({ err: msg, name, sandboxNetwork }, 'ddev runner network connect failed');
+        }
+      },
+    );
+  }
 
   let up = false;
   for (let i = 0; i < 60; i++) {
@@ -203,6 +226,17 @@ export async function runnerExec(
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };
     return { exitCode: e.code ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}` };
+  }
+}
+
+/** Start (idempotently) the headed-browser desktop inside the runner: Xvfb +
+ *  VNC + the CDP forward + headed Chromium (see start-browser-desktop.sh). The
+ *  web noVNC panel attaches via the api bridge; agents drive the same browser
+ *  over CDP at <runner>:9223. Throws when the desktop fails to come up. */
+export async function startBrowserDesktop(handle: DdevRunnerHandle): Promise<void> {
+  const res = await runnerExec(handle, 'start-browser-desktop.sh', { timeoutMs: 60_000 });
+  if (res.exitCode !== 0) {
+    throw new Error(`browser desktop failed to start: ${res.output.slice(-1000)}`);
   }
 }
 

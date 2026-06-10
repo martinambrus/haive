@@ -22,6 +22,7 @@ import { ragRoutes } from './routes/rag.js';
 import { taskRoutes } from './routes/tasks.js';
 import { upgradeRoutes } from './routes/upgrades.js';
 import { userSettingsRoutes } from './routes/user-settings.js';
+import { installBrowserVncWebSocket } from './routes/browser-vnc.js';
 import { installCliLoginBannerWebSocket } from './routes/cli-login-banner.js';
 import { installCliStreamWebSocket } from './routes/cli-stream.js';
 import { installTerminalWebSocket } from './routes/terminal.js';
@@ -81,6 +82,7 @@ async function main(): Promise<void> {
   installTerminalShellWebSocket(server);
   installCliStreamWebSocket(server);
   installCliLoginBannerWebSocket(server);
+  installBrowserVncWebSocket(server);
 }
 
 const invokedAsScript =

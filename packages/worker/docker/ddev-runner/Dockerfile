@@ -32,14 +32,22 @@ RUN curl -fsSL https://apt.fury.io/drud/gpg.key | gpg --dearmor -o /etc/apt/keyr
     && apt-get update && apt-get install -y --no-install-recommends ddev mkcert \
     && rm -rf /var/lib/apt/lists/*
 
-# Headless-Chrome browser testing inside the runner (08a-browser-verify): node +
-# chromium + puppeteer-core, with the check script baked in. puppeteer-core is
-# installed under /opt so `node /opt/browser-check.js` resolves it from there.
-RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm chromium \
+# Browser testing inside the runner (08a-browser-verify): node + chromium +
+# puppeteer-core, with the check scripts baked in. puppeteer-core is installed
+# under /opt so `node /opt/browser-check.js` resolves it from there. The X stack
+# (xvfb + x11vnc + socat + fonts) powers the interactive mode: a headed Chromium
+# on a virtual display the user watches/drives through the web noVNC panel,
+# while agents drive the same browser over CDP (socat exposes the
+# localhost-only headed CDP port to the internal sandbox network).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      nodejs npm chromium xvfb x11vnc socat fonts-dejavu procps \
     && rm -rf /var/lib/apt/lists/*
 COPY browser-check.js /opt/browser-check.js
+COPY browser-probe-connect.js /opt/browser-probe-connect.js
 RUN cd /opt && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1
 ENV CHROME_PATH=/usr/bin/chromium
+COPY start-browser-desktop.sh /usr/local/bin/start-browser-desktop.sh
+RUN chmod +x /usr/local/bin/start-browser-desktop.sh
 
 RUN useradd -m -u 1000 -s /bin/bash -G docker,sudo ddev \
     && echo 'ddev ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ddev \

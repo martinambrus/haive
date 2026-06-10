@@ -227,6 +227,15 @@ export const TERMINAL_CTL_CHANNEL_PREFIX = 'terminal:ctl:';
  *  worker live-retunes the cli-exec queue concurrency without a restart. Body is
  *  the new clamped integer as a string. */
 export const CONFIG_CONCURRENCY_CHANNEL = 'config:concurrency:changed';
+/** Name of a task's per-task DDEV runner container (the nested-Docker DDEV
+ *  environment the worker launches). Shared because the api dials the runner by
+ *  this DNS name on the internal sandbox network (browser-VNC bridge) while the
+ *  worker creates/destroys it. */
+export function ddevRunnerName(taskId: string): string {
+  return `haive-ddev-${taskId.slice(0, 8)}`;
+}
+/** VNC (RFB) port of the headed-browser desktop inside the DDEV runner. */
+export const DDEV_RUNNER_VNC_PORT = 5900;
 /** Two minutes of grace after the last WS disconnect before a session's
  *  container is reaped. Long enough to survive a tab nav-away-and-return,
  *  short enough that abandoned sessions don't pile up under WSL's container
