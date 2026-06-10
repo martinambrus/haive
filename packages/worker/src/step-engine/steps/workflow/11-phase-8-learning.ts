@@ -201,6 +201,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       const detected = args.detected as LearningDetect;
       const values = args.formValues as { observations?: string };
       return [
+        'If a `.claude/agents/learning-recorder.md` agent definition exists in the repo, follow it;',
+        'otherwise follow the protocol below.',
         'You are the learning capture phase of an engineering workflow.',
         'Emit ONE JSON object inside a ```json fenced code block with the shape:',
         '{ "entries": [ { "id": "<kebab-case>", "title": "<short>", "body": "<markdown>" } ] }',

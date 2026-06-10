@@ -270,6 +270,8 @@ function formatPriorFindings(previous: StepLoopPassRecord[]): string {
 }
 
 const REVIEW_RULES = [
+  'If a `.claude/agents/spec-quality-reviewer.md` agent definition exists in the repo, follow it;',
+  'otherwise follow the protocol below.',
   'You are the REVIEW phase of a spec quality workflow. A SEPARATE corrector agent',
   'applies the fixes — your job is ONLY to review, never to amend the spec.',
   'Review the draft specification as a senior engineer would before a human approves it.',
