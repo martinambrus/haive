@@ -119,6 +119,14 @@ export const tasks = pgTable(
       .$type<Record<string, number>>()
       .notNull()
       .default(sql`'{}'::jsonb`),
+    /** Auto-continue: when true (default) the runner auto-submits info-only
+     *  forms and gate-1 pre-answers so the workflow runs hands-free between
+     *  gates; when false EVERY step pauses for a Continue confirmation. */
+    autoContinue: boolean('auto_continue').notNull().default(true),
+    /** Gate-1 "run configuration" answers applied to later steps' forms.
+     *  Record<stepId, Record<fieldId, value>>. Written by 06-gate-1 apply();
+     *  null until a task's gate-1 records it. */
+    preAnswers: jsonb('pre_answers').$type<Record<string, Record<string, unknown>>>(),
     errorMessage: text('error_message'),
     startedAt: timestamp('started_at'),
     completedAt: timestamp('completed_at'),

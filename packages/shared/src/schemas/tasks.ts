@@ -62,6 +62,9 @@ export const createTaskRequestSchema = z
      *  investigation (root cause + lesson) into the knowledge base. Stored in
      *  tasks.metadata.category. Workflow tasks only. */
     isBugFix: z.boolean().optional(),
+    /** Auto-continue: auto-submit info-only forms and gate-1 pre-answers so the
+     *  workflow runs hands-free between gates. Defaults to true. */
+    autoContinue: z.boolean().optional(),
     resourceLimits: resourceLimitsSchema,
     stepLoopLimits: stepLoopLimitsSchema,
   })
@@ -106,8 +109,13 @@ export const setCliProviderRequestSchema = z.object({
 
 export type SetCliProviderRequest = z.infer<typeof setCliProviderRequestSchema>;
 
-export const renameTaskRequestSchema = z.object({
-  title: z.string().trim().min(1).max(512),
-});
+export const renameTaskRequestSchema = z
+  .object({
+    title: z.string().trim().min(1).max(512).optional(),
+    autoContinue: z.boolean().optional(),
+  })
+  .refine((d) => d.title !== undefined || d.autoContinue !== undefined, {
+    message: 'title or autoContinue is required',
+  });
 
 export type RenameTaskRequest = z.infer<typeof renameTaskRequestSchema>;

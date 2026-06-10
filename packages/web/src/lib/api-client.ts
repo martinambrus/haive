@@ -351,6 +351,10 @@ export interface Task {
   title: string;
   description: string | null;
   status: TaskStatus;
+  /** Auto-continue: the runner auto-submits info-only forms and gate-1
+   *  pre-answers so the workflow runs hands-free between gates. Toggleable
+   *  from the task header. */
+  autoContinue: boolean;
   currentStepId: string | null;
   currentStepIndex: number;
   containerId: string | null;

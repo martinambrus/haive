@@ -5,8 +5,10 @@ import { logger, validateFormValues } from '@haive/shared';
 import type {
   CliExecInvocationKind,
   CliExecJobPayload,
+  FormField,
   FormSchema,
   FormValues,
+  LeafFormField,
   StepStatus,
 } from '@haive/shared';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
@@ -657,23 +659,73 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     }
 
     // --- Form ---
+    // Auto-continue flag + gate-1 pre-answers for this step. One indexed PK
+    // lookup; a missing row (unit-test fixtures) behaves like autoContinue=true
+    // with no pre-answers, i.e. today's behavior.
+    const taskFlags = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { autoContinue: true, preAnswers: true },
+    });
+    const autoContinue = taskFlags?.autoContinue ?? true;
+    const stepPreAnswer = (taskFlags?.preAnswers ?? {})[meta.id];
+
     let persistedSchema: FormSchema | null = (current.formSchema as FormSchema | null) ?? null;
     if (!persistedSchema && stepDef.form) {
       persistedSchema = stepDef.form(ctx, detected, llmOutput);
+      // Pre-answers render as pre-filled defaults whenever this form DOES stop
+      // (manual mode, or auto mode falling back after a validation miss).
+      if (persistedSchema && stepPreAnswer) {
+        persistedSchema = overlayPreAnswerDefaults(persistedSchema, stepPreAnswer);
+      }
       current = await updateRow(db, current.id, {
         formSchema: persistedSchema ?? null,
         statusMessage: null,
       });
     }
 
+    // Manual mode: EVERY step pauses before apply. Formless steps get a
+    // synthesized confirm-only schema so the existing waiting_form plumbing
+    // (submit endpoint, events, idle bookkeeping, web renderer) works
+    // unchanged; submitting it posts {} which validates against zero fields.
+    if (!persistedSchema && !autoContinue && !current.formValues && !params.formValues) {
+      persistedSchema = synthesizeConfirmSchema(meta.title, meta.description);
+      current = await updateRow(db, current.id, { formSchema: persistedSchema });
+    }
+
     let formValues = current.formValues as FormValues | null;
     if (persistedSchema && !formValues && !params.formValues) {
-      current = await updateRow(db, current.id, { status: 'waiting_form' });
-      return {
-        status: 'waiting_form',
-        row: current,
-        formSchema: persistedSchema,
-      };
+      // Auto mode: (a) a gate-1 pre-answer for this step, else (b) {} for
+      // zero-field info forms → try to auto-submit. A validation failure falls
+      // through to waiting_form (never fails the step) — e.g. a pre-answered
+      // browser mode that the runtime schema no longer offers. submitAction
+      // 'retry' forms signal a broken precondition and are never auto-passed.
+      if (autoContinue && (persistedSchema.submitAction ?? 'submit') === 'submit') {
+        const candidate = stepPreAnswer ?? (persistedSchema.fields.length === 0 ? {} : undefined);
+        if (candidate !== undefined) {
+          const validation = validateFormValues(persistedSchema, candidate);
+          if (validation.success) {
+            formValues = validation.data;
+            current = await updateRow(db, current.id, { formValues, status: 'running' });
+            ctx.logger.info(
+              { source: stepPreAnswer ? 'pre_answer' : 'zero_field' },
+              'auto-continue: form auto-submitted',
+            );
+          } else {
+            ctx.logger.warn(
+              { issues: validation.issues },
+              'auto-continue: pre-answer failed validation; waiting for user',
+            );
+          }
+        }
+      }
+      if (!formValues) {
+        current = await updateRow(db, current.id, { status: 'waiting_form' });
+        return {
+          status: 'waiting_form',
+          row: current,
+          formSchema: persistedSchema,
+        };
+      }
     }
 
     if (persistedSchema && params.formValues) {
@@ -984,4 +1036,65 @@ async function markLatestInvocationConsumed(db: Database, taskStepId: string): P
     .update(schema.cliInvocations)
     .set({ consumedAt: new Date() })
     .where(eq(schema.cliInvocations.id, invId));
+}
+
+/** Writes a gate-1 pre-answer value into a leaf field's default so a form
+ *  that still stops renders pre-filled. Values that don't fit the field
+ *  (wrong type, option no longer offered) are left out rather than forced. */
+function overlayLeafDefault(field: LeafFormField, pre: Record<string, unknown>): LeafFormField {
+  if (!(field.id in pre)) return field;
+  const v = pre[field.id];
+  switch (field.type) {
+    case 'checkbox':
+      return typeof v === 'boolean' ? { ...field, default: v } : field;
+    case 'text':
+    case 'textarea':
+    case 'select-with-text':
+    case 'radio-with-textarea':
+      return typeof v === 'string' ? { ...field, default: v } : field;
+    case 'select':
+    case 'radio':
+      return typeof v === 'string' && field.options.some((o) => o.value === v)
+        ? { ...field, default: v }
+        : field;
+    case 'multi-select': {
+      if (!Array.isArray(v) || v.some((x) => typeof x !== 'string')) return field;
+      const allowed = new Set(field.options.map((o) => o.value));
+      return { ...field, defaults: (v as string[]).filter((x) => allowed.has(x)) };
+    }
+    case 'number':
+      return typeof v === 'number' && Number.isFinite(v) ? { ...field, default: v } : field;
+    default:
+      return field;
+  }
+}
+
+function overlayPreAnswerDefaults(schema: FormSchema, pre: Record<string, unknown>): FormSchema {
+  return {
+    ...schema,
+    fields: schema.fields.map(
+      (field): FormField =>
+        field.type === 'accordion'
+          ? {
+              ...field,
+              items: field.items.map((item) => ({
+                ...item,
+                fields: item.fields.map((leaf) => overlayLeafDefault(leaf, pre)),
+              })),
+            }
+          : overlayLeafDefault(field, pre),
+    ),
+  };
+}
+
+/** Confirm-only schema for manual mode (task.autoContinue=false): formless
+ *  steps pause on this so the user can review the run before apply. Submitting
+ *  posts {} which validates against zero fields. */
+function synthesizeConfirmSchema(title: string, description: string): FormSchema {
+  return {
+    title,
+    description,
+    fields: [],
+    submitLabel: 'Continue',
+  };
 }

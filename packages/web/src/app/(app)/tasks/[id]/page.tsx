@@ -87,6 +87,7 @@ export default function TaskDetailPage() {
   const [titleDraft, setTitleDraft] = useState('');
   const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
+  const [autoContinueBusy, setAutoContinueBusy] = useState(false);
   const [tab, setTab] = useState<Tab>('steps');
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -411,6 +412,22 @@ export default function TaskDetailPage() {
     }
   }
 
+  async function toggleAutoContinue() {
+    if (!task || autoContinueBusy) return;
+    const next = !task.autoContinue;
+    setAutoContinueBusy(true);
+    // Optimistic flip; the 2s poll reconciles with the server either way.
+    setTask((t) => (t ? { ...t, autoContinue: next } : t));
+    try {
+      await api.patch(`/tasks/${id}`, { autoContinue: next });
+    } catch (err) {
+      setTask((t) => (t ? { ...t, autoContinue: !next } : t));
+      setActionError((err as Error).message ?? 'Failed to update auto-continue');
+    } finally {
+      setAutoContinueBusy(false);
+    }
+  }
+
   if (error) {
     return (
       <div className="flex flex-col gap-4">
@@ -578,6 +595,9 @@ export default function TaskDetailPage() {
                 onChangeCli={(cliProviderId, role) =>
                   changeStepProvider(step.stepId, cliProviderId, role)
                 }
+                autoContinue={task.autoContinue}
+                autoContinueBusy={autoContinueBusy}
+                onToggleAutoContinue={() => void toggleAutoContinue()}
               />
             </div>
           ))}
@@ -755,6 +775,11 @@ interface StepCardProps {
   cliBusy: boolean;
   cliError: string | null;
   onChangeCli: (cliProviderId: string | null, role?: string) => Promise<void>;
+  /** Task-level auto-continue flag, shown as a checkbox on every step card so
+   *  it can be flipped at any point in the run. */
+  autoContinue: boolean;
+  autoContinueBusy: boolean;
+  onToggleAutoContinue: () => void;
 }
 
 const ACTIONABLE_STATUSES: ReadonlySet<StepStatus> = new Set([
@@ -1043,6 +1068,9 @@ function StepCard({
   cliBusy,
   cliError,
   onChangeCli,
+  autoContinue,
+  autoContinueBusy,
+  onToggleAutoContinue,
 }: StepCardProps) {
   const [showOutput, setShowOutput] = useState(false);
   const [showRagStats, setShowRagStats] = useState(false);
@@ -1196,9 +1224,9 @@ function StepCard({
 
   return (
     <Card className="flex flex-col gap-3">
-      {showCliPicker && (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-neutral-800 pb-3">
-          {step.cliRoles && step.cliRoles.length > 0 ? (
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-neutral-800 pb-3">
+        {showCliPicker &&
+          (step.cliRoles && step.cliRoles.length > 0 ? (
             // Multi-CLI step (e.g. spec-quality): one dropdown per role.
             step.cliRoles.map((roleDesc) => (
               <div key={roleDesc.id} className="flex items-center gap-2">
@@ -1234,14 +1262,28 @@ function StepCard({
                 {cliOptions}
               </select>
             </>
-          )}
-          {cliLocked && (
-            <span className="text-[11px] text-neutral-500">locked while step running</span>
-          )}
-          {cliBusy && <span className="text-[11px] text-neutral-500">saving...</span>}
-          {cliError && <span className="text-[11px] text-red-400">{cliError}</span>}
-        </div>
-      )}
+          ))}
+        {showCliPicker && cliLocked && (
+          <span className="text-[11px] text-neutral-500">locked while step running</span>
+        )}
+        {showCliPicker && cliBusy && (
+          <span className="text-[11px] text-neutral-500">saving...</span>
+        )}
+        {showCliPicker && cliError && <span className="text-[11px] text-red-400">{cliError}</span>}
+        <label
+          className="ml-auto flex cursor-pointer items-center gap-1.5 text-xs text-neutral-300"
+          title="Auto-submit info-only steps and the Gate 1 run configuration so the workflow runs hands-free between gates. Untick to confirm every step with a Continue button. Task-wide; applies from the next step decision."
+        >
+          <input
+            type="checkbox"
+            checked={autoContinue}
+            disabled={autoContinueBusy}
+            onChange={onToggleAutoContinue}
+            className="h-3.5 w-3.5 rounded border-neutral-700 bg-neutral-950"
+          />
+          Auto-continue
+        </label>
+      </div>
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="font-mono text-xs text-neutral-500">#{step.stepIndex}</span>

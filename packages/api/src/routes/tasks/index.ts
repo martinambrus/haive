@@ -159,6 +159,7 @@ taskRoutes.post('/', async (c) => {
       memoryLimitMb: body.resourceLimits?.memoryLimitMb ?? null,
       cpuLimitMilli: body.resourceLimits?.cpuLimitMilli ?? null,
       stepLoopLimits: body.stepLoopLimits ?? {},
+      autoContinue: body.autoContinue ?? true,
       metadata,
       status: 'created',
     })
@@ -215,17 +216,44 @@ taskRoutes.patch('/:id', async (c) => {
 
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true },
+    columns: { id: true, status: true, currentStepId: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
 
+  const patch: Partial<typeof schema.tasks.$inferInsert> = {};
+  if (body.title !== undefined) patch.title = body.title;
+  if (body.autoContinue !== undefined) patch.autoContinue = body.autoContinue;
+
   const updated = await db
     .update(schema.tasks)
-    .set({ title: body.title, updatedAt: new Date() })
+    .set({ ...patch, updatedAt: new Date() })
     .where(eq(schema.tasks.id, id))
     .returning();
 
-  await appendTaskEvent(db, id, null, 'task.renamed', { title: body.title, by: userId });
+  if (body.title !== undefined) {
+    await appendTaskEvent(db, id, null, 'task.renamed', { title: body.title, by: userId });
+  }
+  if (body.autoContinue !== undefined) {
+    await appendTaskEvent(db, id, null, 'task.auto_continue_changed', {
+      autoContinue: body.autoContinue,
+      by: userId,
+    });
+    // Flipping auto-continue ON while the task waits on a form gives the
+    // runner a chance to auto-pass it (pre-answered or zero-field steps);
+    // a step that still needs input just re-enters waiting_form.
+    if (body.autoContinue === true && task.status === 'waiting_user' && task.currentStepId) {
+      await getTaskQueue().add(
+        TASK_JOB_NAMES.ADVANCE_STEP,
+        { taskId: id, userId, stepId: task.currentStepId } as TaskJobPayload,
+        {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 },
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        },
+      );
+    }
+  }
 
   return c.json({ task: updated[0] });
 });
