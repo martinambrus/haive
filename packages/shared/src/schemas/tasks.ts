@@ -52,6 +52,9 @@ export const createTaskRequestSchema = z
     /** Optional DB dump (uploaded via the chunked db-dumps endpoint) to import
      *  into the task's ephemeral environment before migrations run. */
     dbUploadId: z.string().uuid().optional(),
+    /** Phase 3.5: run an AI code-simplification pass (plus a conditional fixup
+     *  pass) over the implementation before verification. Workflow tasks only. */
+    simplifyCode: z.boolean().optional(),
     resourceLimits: resourceLimitsSchema,
     stepLoopLimits: stepLoopLimitsSchema,
   })

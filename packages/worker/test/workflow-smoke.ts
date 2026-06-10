@@ -178,6 +178,9 @@ async function main(): Promise<void> {
           'Users have asked for an explicit logout button in the top-right navigation. Keep the change minimal.',
         status: 'created',
         metadata: null,
+        // Walk the Phase 3.5 simplification step (bypass stub takes the
+        // no-changes path). workflow-commit-smoke leaves it off to cover the skip.
+        simplifyCode: true,
       })
       .returning();
     if (!task) throw new Error('task insert failed');
@@ -346,6 +349,7 @@ async function main(): Promise<void> {
       '05-phase-0b5-spec-quality',
       '06-gate-1-spec-approval',
       '07-phase-2-implement',
+      '07a-code-simplify',
       '08-phase-5-verify',
       '09-gate-2-verify-approval',
       '10-gate-3-commit',

@@ -61,6 +61,10 @@ export const STEP_CLI_ROLES: Record<string, readonly CliRoleDescriptor[]> = {
     { id: 'reviewer', label: 'Reviewer' },
     { id: 'corrector', label: 'Corrector' },
   ],
+  '07a-code-simplify': [
+    { id: 'simplifier', label: 'Simplifier' },
+    { id: 'fixup', label: 'Fixup verifier' },
+  ],
 };
 
 /** Step ids whose StepDefinition sets `metadata.allowSkip = true`. The user

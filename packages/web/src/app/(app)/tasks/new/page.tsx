@@ -99,6 +99,7 @@ export default function NewTaskPage() {
    *  surfacing gate 1, even if findings remain. Default 10 matches the
    *  loop hook's built-in default. */
   const [specQualityMaxIterations, setSpecQualityMaxIterations] = useState<number>(10);
+  const [simplifyCode, setSimplifyCode] = useState(true);
 
   const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
@@ -225,6 +226,7 @@ export default function NewTaskPage() {
       if (cliProviderId) body.cliProviderId = cliProviderId;
       if (type === 'workflow') {
         body.stepLoopLimits = { '05-phase-0b5-spec-quality': specQualityMaxIterations };
+        body.simplifyCode = simplifyCode;
       }
 
       if (type === 'workflow' && dumpFile) {
@@ -460,6 +462,25 @@ export default function NewTaskPage() {
               findings remain or this budget is hit. Higher values give the LLM more chances to
               converge but cost more tokens. Gate 1 will flag if the budget was exhausted with
               issues still open so you can decide whether to approve as-is or re-run.
+            </p>
+          </div>
+        )}
+
+        {inferredType === 'workflow' && (
+          <div className="flex flex-col gap-1.5">
+            <label className="flex items-center gap-2 text-sm text-neutral-100">
+              <input
+                type="checkbox"
+                checked={simplifyCode}
+                onChange={(e) => setSimplifyCode(e.target.checked)}
+                className="h-4 w-4 rounded border-neutral-700 bg-neutral-950"
+              />
+              AI code simplification pass after implementation (Phase 3.5)
+            </label>
+            <p className="text-xs text-neutral-500">
+              A simplifier agent reviews the implemented code and reduces unnecessary complexity
+              without changing functionality; if it edits anything, one fixup agent verifies the
+              spec still holds. Single pass, before verification.
             </p>
           </div>
         )}

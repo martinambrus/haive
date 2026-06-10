@@ -151,6 +151,7 @@ taskRoutes.post('/', async (c) => {
       repositoryId: body.repositoryId ?? null,
       cliProviderId: body.cliProviderId ?? null,
       dbUploadId: body.dbUploadId ?? null,
+      simplifyCode: body.simplifyCode ?? false,
       memoryLimitMb: body.resourceLimits?.memoryLimitMb ?? null,
       cpuLimitMilli: body.resourceLimits?.cpuLimitMilli ?? null,
       stepLoopLimits: body.stepLoopLimits ?? {},

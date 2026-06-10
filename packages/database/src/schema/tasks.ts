@@ -5,6 +5,7 @@ import {
   varchar,
   integer,
   doublePrecision,
+  boolean,
   jsonb,
   timestamp,
   uniqueIndex,
@@ -101,6 +102,10 @@ export const tasks = pgTable(
     memoryLimitMb: integer('memory_limit_mb'),
     cpuLimitMilli: integer('cpu_limit_milli'),
     metadata: jsonb('metadata').$type<Record<string, unknown>>(),
+    /** Phase 3.5: run the AI code-simplification pass (07a-code-simplify) after
+     *  implementation. Chosen on the new-task form; default off so existing
+     *  tasks and direct-insert fixtures skip the step. */
+    simplifyCode: boolean('simplify_code').notNull().default(false),
     /** Per-task overrides for the maximum loop iterations a step can run.
      *  Map of stepId → maxIterations. The runner reads this when a step
      *  declares a loop hook and falls back to the loopSpec default when
