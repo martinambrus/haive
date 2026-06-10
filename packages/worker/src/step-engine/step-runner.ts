@@ -19,6 +19,7 @@ import {
   type StepDefinition,
   type StepLoopPassRecord,
 } from './step-definition.js';
+import { resolveDagPhase } from './dag-executor.js';
 
 const log = logger.child({ module: 'step-runner' });
 
@@ -28,7 +29,7 @@ export type TaskStepRow = typeof schema.taskSteps.$inferSelect;
  *  validated as enabled. Falls back to the task default when no explicit
  *  override exists or the override's provider is disabled/deleted. Legacy
  *  auto-recorded rows (explicit=false) are ignored so the task provider wins. */
-async function resolvePreferredCli(
+export async function resolvePreferredCli(
   db: Database,
   userId: string,
   stepId: string,
@@ -735,6 +736,14 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       if (!miningResult.resolved) return miningResult.result;
       agentMiningResults = miningResult.results;
       current = miningResult.current;
+    }
+
+    // --- DAG execution phase (multi-level coder fan-out; parks waiting_cli per
+    // level until every level checkpoints, then apply finalizes the step) ---
+    if (stepDef.dagExecute) {
+      const dagResult = await resolveDagPhase(db, stepDef, current, ctx, params);
+      if (!dagResult.resolved) return dagResult.result;
+      current = dagResult.current;
     }
 
     const previousIterations = stepIterationsAsRecords(current);

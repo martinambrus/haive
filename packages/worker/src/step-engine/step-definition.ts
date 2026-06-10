@@ -86,6 +86,33 @@ export interface AgentMiningSpec {
   timeoutMs?: number;
 }
 
+/** Per-coder context the DAG executor passes to a step's coder-prompt builder. */
+export interface DagCoderContext {
+  issueKey: string;
+  title: string;
+  description: string;
+  specSections: string[];
+  acceptanceCriteria: string[];
+  provides: string;
+  /** The coder's cwd inside the sandbox (its own git worktree). */
+  sandboxWorktreePath: string;
+}
+
+/** Declared by the DAG-executor step. The runner drives the persisted DAG one
+ *  dependency level per ADVANCE_STEP re-entry (resolveDagPhase): create N
+ *  worktrees, fan out one coder per issue (bounded by the cli-exec queue), wait
+ *  for the level (a waiting_cli barrier), merge, checkpoint, advance. The step
+ *  only supplies the coder prompt + capabilities; the orchestration lives in the
+ *  runner so it has the dispatcher + provider list. */
+export interface DagExecuteSpec {
+  requiredCapabilities: StepCapability[];
+  /** Build one coder's prompt. `upstreamDebt` is a pre-formatted block of notes
+   *  from completed lower-level issues (empty string when none). */
+  buildCoderPrompt(issue: DagCoderContext, upstreamDebt: string): string;
+  /** Sandbox timeout per coder invocation. Defaults to the step-runner default. */
+  timeoutMs?: number;
+}
+
 export interface StepApplyArgs<TDetect = unknown> {
   detected: TDetect;
   formValues: FormValues;
@@ -160,5 +187,10 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
    *  once and finalizes. Mutually compatible with agentMining? — agent
    *  mining still runs once at the start of each pass. */
   loop?: StepLoopSpec<TApply>;
+  /** Marks this step as the DAG executor. The runner drives the persisted DAG
+   *  (resolveDagPhase) after the form/llm phases and before apply — parking the
+   *  step in waiting_cli per level until every level checkpoints, then apply
+   *  finalizes. See packages/worker/src/step-engine/dag-executor.ts. */
+  dagExecute?: DagExecuteSpec;
   apply(ctx: StepContext, args: StepApplyArgs<TDetect>): Promise<TApply>;
 }

@@ -4,6 +4,7 @@ export * from './repos.js';
 export * from './db-dumps.js';
 export * from './bundles.js';
 export * from './tasks.js';
+export * from './dag.js';
 export * from './cli-providers.js';
 export * from './user-settings.js';
 export * from './upgrades.js';

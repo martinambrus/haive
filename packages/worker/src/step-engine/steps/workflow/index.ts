@@ -10,6 +10,8 @@ import { phase0b5SpecQualityStep } from './05-phase-0b5-spec-quality.js';
 import { resolveSpecWarningsStep } from './05a-resolve-spec-warnings.js';
 import { gate1SpecApprovalStep } from './06-gate-1-spec-approval.js';
 import { dbMigrateStep } from './06a-db-migrate.js';
+import { sprintPlanningStep } from './06b-sprint-planning.js';
+import { dagExecuteStep } from './06c-dag-execute.js';
 import { phase2ImplementStep } from './07-phase-2-implement.js';
 import { phase5VerifyStep } from './08-phase-5-verify.js';
 import { browserVerifyStep } from './08a-browser-verify.js';
@@ -30,6 +32,8 @@ export {
   resolveSpecWarningsStep,
   gate1SpecApprovalStep,
   dbMigrateStep,
+  sprintPlanningStep,
+  dagExecuteStep,
   phase2ImplementStep,
   phase5VerifyStep,
   browserVerifyStep,
@@ -51,6 +55,8 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(resolveSpecWarningsStep);
   registry.register(gate1SpecApprovalStep);
   registry.register(dbMigrateStep);
+  registry.register(sprintPlanningStep);
+  registry.register(dagExecuteStep);
   registry.register(phase2ImplementStep);
   registry.register(phase5VerifyStep);
   registry.register(browserVerifyStep);

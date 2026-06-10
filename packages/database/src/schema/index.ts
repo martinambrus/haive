@@ -3,6 +3,7 @@ export * from './cli-providers.js';
 export * from './repos.js';
 export * from './db-dumps.js';
 export * from './tasks.js';
+export * from './task-dag.js';
 export * from './containers.js';
 export * from './env.js';
 export * from './onboarding.js';

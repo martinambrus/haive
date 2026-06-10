@@ -108,6 +108,14 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     requiresCli: false,
   },
 
+  async shouldRun(ctx: StepContext): Promise<boolean> {
+    // Skip when 2c sprint planning chose DAG mode — 06c-dag-execute implements
+    // instead. Runs for single mode or when 06b is absent (legacy tasks).
+    const sprint = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06b-sprint-planning');
+    const mode = (sprint?.output as { mode?: string } | null)?.mode;
+    return mode !== 'dag';
+  },
+
   async detect(ctx: StepContext): Promise<ImplementDetect> {
     const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
     const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
