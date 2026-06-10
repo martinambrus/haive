@@ -10,6 +10,7 @@ const SETTINGS_TABS = [
   { href: '/settings/credentials', label: 'Git Credentials' },
   { href: '/settings/git-identity', label: 'Git Identity' },
   { href: '/settings/integrations', label: 'Integrations' },
+  { href: '/settings/notifications', label: 'Notifications' },
 ];
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {

@@ -43,3 +43,16 @@ export const gitIdentityResponseSchema = z.object({
 
 export type AccountResponse = z.infer<typeof accountResponseSchema>;
 export type GitIdentityResponse = z.infer<typeof gitIdentityResponseSchema>;
+
+export const notificationSettingsUpdateSchema = z.object({
+  soundEnabled: z.boolean(),
+});
+
+export const notificationSettingsResponseSchema = z.object({
+  soundEnabled: z.boolean(),
+  hasCustomSound: z.boolean(),
+  soundFilename: z.string().nullable(),
+});
+
+export type NotificationSettingsUpdate = z.infer<typeof notificationSettingsUpdateSchema>;
+export type NotificationSettingsResponse = z.infer<typeof notificationSettingsResponseSchema>;

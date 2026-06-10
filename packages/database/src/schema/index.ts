@@ -10,3 +10,4 @@ export * from './onboarding.js';
 export * from './bundles.js';
 export * from './terminal.js';
 export * from './rag.js';
+export * from './user-settings.js';

@@ -342,6 +342,12 @@ export type StepStatus =
   | 'failed'
   | 'skipped';
 
+export interface NotificationSettings {
+  soundEnabled: boolean;
+  hasCustomSound: boolean;
+  soundFilename: string | null;
+}
+
 export interface Task {
   id: string;
   userId: string;
