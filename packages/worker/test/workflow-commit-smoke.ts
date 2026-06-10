@@ -231,6 +231,7 @@ async function main(): Promise<void> {
       },
       '02-pre-rag-sync': { runSync: false },
       '03-phase-0a-discovery': { extraContext: '' },
+      '03b-business-requirements': { decision: 'approve', feedback: '' },
       '04-phase-0b-pre-planning': {
         scope: 'Keep changes confined to a single file for smoke purposes.',
       },

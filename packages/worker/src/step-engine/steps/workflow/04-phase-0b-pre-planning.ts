@@ -16,6 +16,7 @@ interface PrePlanningDetect {
   taskTitle: string;
   taskDescription: string;
   discoverySummary: string;
+  businessRequirements: string;
   relevantKbIds: string[];
   kbReferences: KbReference[];
 }
@@ -144,10 +145,15 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
     const output = (prev?.output as DiscoveryOutput | null) ?? {};
     const ids = Array.isArray(output.relevantKbIds) ? output.relevantKbIds : [];
     const kbReferences = await resolveKbReferences(ctx.repoPath, ids);
+    // Approved business requirements (03b) ground the technical spec when present.
+    const bizReq = await loadPreviousStepOutput(ctx.db, ctx.taskId, '03b-business-requirements');
+    const businessRequirements =
+      (bizReq?.output as { requirements?: string } | null)?.requirements ?? '';
     return {
       taskTitle: meta.title,
       taskDescription: meta.description,
       discoverySummary: output.summary ?? '',
+      businessRequirements,
       relevantKbIds: ids,
       kbReferences,
     };
@@ -204,6 +210,8 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
       const detected = args.detected as PrePlanningDetect;
       const values = args.formValues as { scope?: string };
       return [
+        'If a `.claude/agents/technical-spec-writer.md` agent definition exists in the repo, follow',
+        'it; otherwise follow the protocol below.',
         'You are the pre-planning phase of an engineering workflow.',
         'Produce a concise draft specification for the task below.',
         'Emit ONE JSON object inside a ```json fenced code block with the shape:',
@@ -217,6 +225,9 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         '',
         '=== Discovery summary ===',
         detected.discoverySummary || '(none)',
+        ...(detected.businessRequirements
+          ? ['', '=== Approved business requirements ===', detected.businessRequirements]
+          : []),
         '',
         `Relevant KB ids: ${detected.relevantKbIds.join(', ') || '(none)'}`,
       ].join('\n');

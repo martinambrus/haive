@@ -5,6 +5,7 @@ import { appBootStep } from './01a-app-boot.js';
 import { ddevEnvStep } from './01c-ddev-env.js';
 import { preRagSyncStep } from './02-pre-rag-sync.js';
 import { phase0aDiscoveryStep } from './03-phase-0a-discovery.js';
+import { businessRequirementsStep } from './03b-business-requirements.js';
 import { phase0bPrePlanningStep } from './04-phase-0b-pre-planning.js';
 import { phase0b5SpecQualityStep } from './05-phase-0b5-spec-quality.js';
 import { resolveSpecWarningsStep } from './05a-resolve-spec-warnings.js';
@@ -32,6 +33,7 @@ export {
   ddevEnvStep,
   preRagSyncStep,
   phase0aDiscoveryStep,
+  businessRequirementsStep,
   phase0bPrePlanningStep,
   phase0b5SpecQualityStep,
   resolveSpecWarningsStep,
@@ -60,6 +62,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(ddevEnvStep);
   registry.register(preRagSyncStep);
   registry.register(phase0aDiscoveryStep);
+  registry.register(businessRequirementsStep);
   registry.register(phase0bPrePlanningStep);
   registry.register(phase0b5SpecQualityStep);
   registry.register(resolveSpecWarningsStep);

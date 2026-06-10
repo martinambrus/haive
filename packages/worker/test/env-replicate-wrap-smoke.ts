@@ -258,6 +258,7 @@ async function main(): Promise<void> {
       },
       '02-pre-rag-sync': { runSync: false },
       '03-phase-0a-discovery': { extraContext: '' },
+      '03b-business-requirements': { decision: 'approve', feedback: '' },
       '04-phase-0b-pre-planning': {
         scope: 'envwrap smoke workflow prelude verification.',
       },
@@ -348,6 +349,7 @@ async function main(): Promise<void> {
       '01-worktree-setup',
       '02-pre-rag-sync',
       '03-phase-0a-discovery',
+      '03b-business-requirements',
       '04-phase-0b-pre-planning',
       '05-phase-0b5-spec-quality',
       '06-gate-1-spec-approval',

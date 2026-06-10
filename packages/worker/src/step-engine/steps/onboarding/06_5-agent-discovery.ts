@@ -169,6 +169,11 @@ export const BASELINE_AGENT_DEFS: { id: string; label: string; hint: string }[] 
     label: 'Accessibility specialist',
     hint: 'WCAG/ARIA/semantic-HTML audit and accessibility requirements',
   },
+  {
+    id: 'technical-spec-writer',
+    label: 'Technical spec writer',
+    hint: 'consolidates findings into an actionable technical spec with acceptance criteria',
+  },
 ];
 
 /* ------------------------------------------------------------------ */

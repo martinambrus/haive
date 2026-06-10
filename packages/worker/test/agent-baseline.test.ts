@@ -28,6 +28,7 @@ const PORTED_AGENTS = [
   'business-requirements-writer',
   'spec-quality-reviewer',
   'accessibility-specialist',
+  'technical-spec-writer',
 ];
 
 describe('ported baseline agents', () => {
