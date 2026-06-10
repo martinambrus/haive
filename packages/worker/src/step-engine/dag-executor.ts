@@ -2,7 +2,15 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { and, asc, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { dagIssueResultSchema, reviewerOutputSchema, type ReviewerOutput } from '@haive/shared';
+import {
+  dagIssueResultSchema,
+  reviewerOutputSchema,
+  advisorOutputSchema,
+  replannerOutputSchema,
+  type ReviewerOutput,
+  type AdvisorOutput,
+  type ReplannerOutput,
+} from '@haive/shared';
 import type { StepCapability } from '@haive/shared';
 import { resolveDispatch } from '../orchestrator/dispatcher.js';
 import { resolveUserGitEnv } from '../secrets/user-git-identity.js';
@@ -586,7 +594,7 @@ function parseReviewerOutput(inv: typeof schema.cliInvocations.$inferSelect): Re
 async function spawnReviewAgent(
   ra: ReviewArgs,
   issue: DagIssueRow,
-  role: 'reviewer' | 'coder',
+  role: 'reviewer' | 'coder' | 'issue_advisor',
   iteration: number,
   prompt: string,
   capabilities: StepCapability[],
@@ -597,7 +605,7 @@ async function spawnReviewAgent(
     ra.stepDef.metadata.id,
     ra.params.cliProviderId ?? null,
     ra.providers,
-    role === 'reviewer' ? 'reviewer' : 'coder',
+    role,
   );
   const plan = resolveDispatch({
     providers: ra.providers,
@@ -787,6 +795,388 @@ async function resolveReviewPhase(
   return { status: 'waiting', row };
 }
 
+// --- Middle/outer escalation (issue-advisor + replanner) ------------------
+
+const MAX_ADVISOR_INVOCATIONS = 2;
+const MAX_REPLANNER_INVOCATIONS = 2;
+const REPLAN_FAIL_RATIO = 0.8;
+
+interface EscalationArgs extends ReviewArgs {
+  plan: DagPlanRow;
+}
+
+function advisorPrompt(issue: DagIssueRow): string {
+  return [
+    `Issue ${issue.issueKey} (${issue.title}) failed its review loop after ${issue.innerIteration} fix attempt(s).`,
+    issue.reviewerVerdict
+      ? `Latest reviewer verdict: ${JSON.stringify(issue.reviewerVerdict).slice(0, 2000)}`
+      : '',
+    'Decide how to proceed. Emit ONE JSON object inside a ```json fenced code block:',
+    '{ "action": "RETRY_APPROACH|RETRY_MODIFIED|SPLIT|ACCEPT_WITH_DEBT|ESCALATE_TO_REPLAN", "reasoning": "...", "retry_context": "<RETRY_*: guidance for the next attempt>", "drop_criteria": ["<RETRY_MODIFIED: criteria to drop>"], "sub_issues": [{ "title": "...", "description": "..." }] }',
+    'RETRY_APPROACH: try again with new guidance. RETRY_MODIFIED: relax/drop some criteria then retry. SPLIT: break into sub-issues. ACCEPT_WITH_DEBT: accept as-is with documented gaps. ESCALATE_TO_REPLAN: the plan itself is wrong.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function replannerPrompt(plan: DagPlanRow, failed: DagIssueRow[]): string {
+  return [
+    `The DAG has broad failure: ${failed.length} issue(s) could not be implemented (${failed
+      .map((f) => f.issueKey)
+      .join(', ')}).`,
+    `Current dependency levels: ${JSON.stringify(plan.levels)}`,
+    'Decide how to proceed. Emit ONE JSON object inside a ```json fenced code block:',
+    '{ "action": "CONTINUE|MODIFY_DAG|REDUCE_SCOPE|ABORT", "reasoning": "...", "skip_downstream": ["<issue ids to skip>"], "new_levels": [["ISSUE-..."]] }',
+    'CONTINUE: skip the failed issues, proceed. REDUCE_SCOPE: drop low-priority issues. MODIFY_DAG: restructure (provide new_levels). ABORT: stop the workflow with a failure report.',
+  ].join('\n');
+}
+
+function parseAdvisor(inv: typeof schema.cliInvocations.$inferSelect): AdvisorOutput {
+  let c: unknown =
+    inv.parsedOutput && typeof inv.parsedOutput === 'object' ? inv.parsedOutput : null;
+  if (!c && typeof inv.rawOutput === 'string') {
+    const b = extractFencedJson(inv.rawOutput);
+    c = b ? safeJsonParse(b) : null;
+  }
+  const p = advisorOutputSchema.safeParse(c);
+  return p.success
+    ? p.data
+    : {
+        action: 'ACCEPT_WITH_DEBT',
+        reasoning: 'advisor output unparseable',
+        drop_criteria: [],
+        sub_issues: [],
+      };
+}
+
+function parseReplanner(inv: typeof schema.cliInvocations.$inferSelect): ReplannerOutput {
+  let c: unknown =
+    inv.parsedOutput && typeof inv.parsedOutput === 'object' ? inv.parsedOutput : null;
+  if (!c && typeof inv.rawOutput === 'string') {
+    const b = extractFencedJson(inv.rawOutput);
+    c = b ? safeJsonParse(b) : null;
+  }
+  const p = replannerOutputSchema.safeParse(c);
+  return p.success
+    ? p.data
+    : {
+        action: 'CONTINUE',
+        reasoning: 'replanner output unparseable',
+        skip_downstream: [],
+        new_levels: [],
+      };
+}
+
+async function pushDebt(db: Database, issue: DagIssueRow, items: unknown[]): Promise<void> {
+  const existing = (issue.debtItems ?? []) as unknown[];
+  await db
+    .update(schema.taskDagIssues)
+    .set({ debtItems: [...existing, ...items], updatedAt: new Date() })
+    .where(eq(schema.taskDagIssues.id, issue.id));
+}
+
+async function skipIssue(db: Database, issue: DagIssueRow): Promise<void> {
+  await db
+    .update(schema.taskDagIssues)
+    .set({
+      resolution: 'skipped',
+      reviewStatus: 'skipped',
+      endedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.taskDagIssues.id, issue.id));
+}
+
+/** Fold one finished issue-advisor run into the issue + return the action taken
+ *  ('retry' spawned a fix coder, 'split' added sub-issues, 'accept' resolved with
+ *  debt, 'escalate' left it for the replanner). */
+async function ingestAdvisor(
+  ea: EscalationArgs,
+  issue: DagIssueRow,
+  run: typeof schema.dagAgentRuns.$inferSelect,
+  inv: typeof schema.cliInvocations.$inferSelect,
+): Promise<'retry' | 'split' | 'accept' | 'escalate'> {
+  await ea.db
+    .update(schema.dagAgentRuns)
+    .set({
+      status: 'done',
+      consumedAt: new Date(),
+      endedAt: new Date(),
+      rawOutput: inv.rawOutput ?? null,
+    })
+    .where(eq(schema.dagAgentRuns.id, run.id));
+  const out = parseAdvisor(inv);
+  await ea.db
+    .update(schema.taskDagIssues)
+    .set({
+      advisorInvocations: issue.advisorInvocations + 1,
+      lastAdvisorAction: out.action,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.taskDagIssues.id, issue.id));
+
+  if (out.action === 'ACCEPT_WITH_DEBT') {
+    await acceptWithDebt(ea.db, issue, [{ type: 'advisor_accept', reasoning: out.reasoning }]);
+    return 'accept';
+  }
+  if (out.action === 'ESCALATE_TO_REPLAN') return 'escalate'; // stays failed_unrecoverable
+  if (out.action === 'SPLIT') {
+    const subs =
+      out.sub_issues.length > 0
+        ? out.sub_issues
+        : [{ title: `${issue.title} (retry)`, description: '' }];
+    let idx = 0;
+    for (const sub of subs) {
+      idx += 1;
+      await ea.db.insert(schema.taskDagIssues).values({
+        dagPlanId: issue.dagPlanId,
+        taskId: ea.taskId,
+        issueKey: `${issue.issueKey}-S${idx}`,
+        level: issue.level,
+        title: sub.title,
+        description: sub.description,
+        acceptanceCriteria: (issue.acceptanceCriteria ?? []) as string[],
+        parentIssueId: issue.id,
+        outcome: 'pending',
+      });
+    }
+    await ea.db
+      .update(schema.taskDagIssues)
+      .set({ resolution: 'split', reviewStatus: 'split', updatedAt: new Date() })
+      .where(eq(schema.taskDagIssues.id, issue.id));
+    return 'split';
+  }
+  // RETRY_APPROACH / RETRY_MODIFIED → reset to a fresh fix-coder pass.
+  let criteria = (issue.acceptanceCriteria ?? []) as string[];
+  if (out.action === 'RETRY_MODIFIED' && out.drop_criteria.length > 0) {
+    criteria = criteria.filter((c) => !out.drop_criteria.includes(c));
+    await pushDebt(
+      ea.db,
+      issue,
+      out.drop_criteria.map((c) => ({ type: 'dropped_criterion', criterion: c })),
+    );
+  }
+  const newIter = issue.innerIteration + 1;
+  await ea.db
+    .update(schema.taskDagIssues)
+    .set({
+      resolution: null,
+      reviewStatus: null,
+      acceptanceCriteria: criteria,
+      retryContext: { note: out.retry_context ?? '' },
+      innerIteration: newIter,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.taskDagIssues.id, issue.id));
+  const ok = await spawnReviewAgent(
+    ea,
+    { ...issue, acceptanceCriteria: criteria },
+    'coder',
+    newIter,
+    fixCoderPrompt(issue, [
+      { retry_context: out.retry_context ?? '', findings: issue.reviewerVerdict },
+    ]),
+    ['tool_use', 'file_write'],
+  );
+  if (!ok) await setResolution(ea.db, issue, 'failed_unrecoverable');
+  return 'retry';
+}
+
+async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promise<boolean> {
+  const prompt = replannerPrompt(ea.plan, failed);
+  const preferred = await resolvePreferredCli(
+    ea.db,
+    ea.params.userId,
+    ea.stepDef.metadata.id,
+    ea.params.cliProviderId ?? null,
+    ea.providers,
+    'replanner',
+  );
+  const plan = resolveDispatch({
+    providers: ea.providers,
+    preferredProviderId: preferred,
+    input: { kind: 'prompt', prompt, capabilities: ['tool_use'] },
+    invokeOpts: { cwd: ea.params.workspacePath },
+  });
+  if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return false;
+  const inv = await ea.db
+    .insert(schema.cliInvocations)
+    .values({
+      taskId: ea.taskId,
+      taskStepId: ea.current.id,
+      cliProviderId: plan.providerId,
+      mode: 'cli',
+      prompt,
+    })
+    .returning({ id: schema.cliInvocations.id });
+  const invId = inv[0]?.id;
+  if (!invId) return false;
+  await ea.db
+    .update(schema.taskDagPlans)
+    .set({ replannerInvocationId: invId, updatedAt: new Date() })
+    .where(eq(schema.taskDagPlans.id, ea.plan.id));
+  await ea.deps.enqueueCliInvocation({
+    invocationId: invId,
+    taskId: ea.taskId,
+    taskStepId: ea.current.id,
+    userId: ea.params.userId,
+    cliProviderId: plan.providerId,
+    kind: 'cli',
+    spec: plan.invocation.spec,
+    timeoutMs: REVIEW_TIMEOUT_MS,
+  });
+  return true;
+}
+
+async function ingestReplanner(
+  ea: EscalationArgs,
+  inv: typeof schema.cliInvocations.$inferSelect,
+  failed: DagIssueRow[],
+): Promise<'continue' | 'abort'> {
+  const out = parseReplanner(inv);
+  await ea.db
+    .update(schema.cliInvocations)
+    .set({ consumedAt: new Date() })
+    .where(eq(schema.cliInvocations.id, inv.id));
+  await ea.db
+    .update(schema.taskDagPlans)
+    .set({
+      replannerInvocations: ea.plan.replannerInvocations + 1,
+      lastReplannerAction: out.action,
+      replannerInvocationId: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.taskDagPlans.id, ea.plan.id));
+  if (out.action === 'ABORT') return 'abort';
+  // CONTINUE / REDUCE_SCOPE / MODIFY_DAG → skip the failed issues and proceed.
+  // (MODIFY_DAG's full level-restructure is intentionally conservative here: the
+  // failed work is skipped rather than re-sequenced, which is always safe.)
+  for (const issue of failed) await skipIssue(ea.db, issue);
+  return 'continue';
+}
+
+async function reReadLevelIssues(ea: EscalationArgs): Promise<DagIssueRow[]> {
+  return (await ea.db
+    .select()
+    .from(schema.taskDagIssues)
+    .where(
+      and(
+        eq(schema.taskDagIssues.dagPlanId, ea.plan.id),
+        eq(schema.taskDagIssues.level, ea.level.level),
+      ),
+    )) as DagIssueRow[];
+}
+
+/** Handle a level's failed issues: issue-advisor (middle loop) then replanner
+ *  (outer loop). Returns 'ok' (no failures left → merge), 'waiting' (an agent is
+ *  in flight), 'reloop' (state changed; re-process the level), or 'aborted'. */
+async function resolveEscalationPhase(
+  ea: EscalationArgs,
+): Promise<{ status: 'ok' | 'waiting' | 'reloop' | 'aborted'; row: TaskStepRow; error?: string }> {
+  // A plan-level replanner in flight?
+  if (ea.plan.replannerInvocationId) {
+    const inv = await ea.db.query.cliInvocations.findFirst({
+      where: eq(schema.cliInvocations.id, ea.plan.replannerInvocationId),
+    });
+    if (!inv || inv.endedAt === null) return { status: 'waiting', row: ea.current };
+    const failedNow = ea.issues.filter((i) => i.resolution === 'failed_unrecoverable');
+    const action = await ingestReplanner(ea, inv, failedNow);
+    if (action === 'abort') {
+      const msg = `DAG aborted by replanner at level ${ea.level.level}: ${failedNow
+        .map((f) => f.issueKey)
+        .join(', ')}`;
+      const row = await setStepStatus(ea.db, ea.current.id, {
+        status: 'failed',
+        errorMessage: msg,
+        endedAt: new Date(),
+      });
+      return { status: 'aborted', row, error: msg };
+    }
+    return { status: 'reloop', row: ea.current };
+  }
+
+  const failed = ea.issues.filter((i) => i.resolution === 'failed_unrecoverable');
+  if (failed.length === 0) return { status: 'ok', row: ea.current };
+
+  // Middle loop: issue-advisor per failed (not-yet-escalated) issue.
+  let inFlight = false;
+  let reloop = false;
+  for (const issue of failed) {
+    if (issue.lastAdvisorAction === 'ESCALATE_TO_REPLAN') continue;
+    const runs = await ea.db
+      .select()
+      .from(schema.dagAgentRuns)
+      .where(
+        and(
+          eq(schema.dagAgentRuns.dagIssueId, issue.id),
+          eq(schema.dagAgentRuns.role, 'issue_advisor'),
+        ),
+      )
+      .orderBy(desc(schema.dagAgentRuns.createdAt))
+      .limit(1);
+    const latest = runs[0];
+    if (latest && !latest.consumedAt && latest.cliInvocationId) {
+      const inv = await ea.db.query.cliInvocations.findFirst({
+        where: eq(schema.cliInvocations.id, latest.cliInvocationId),
+      });
+      if (!inv || inv.endedAt === null) {
+        inFlight = true;
+        continue;
+      }
+      const action = await ingestAdvisor(ea, issue, latest, inv);
+      if (action === 'retry') inFlight = true;
+      else if (action === 'split') reloop = true;
+      continue;
+    }
+    if (issue.advisorInvocations < MAX_ADVISOR_INVOCATIONS) {
+      const ok = await spawnReviewAgent(
+        ea,
+        issue,
+        'issue_advisor',
+        issue.advisorInvocations,
+        advisorPrompt(issue),
+        ['tool_use'],
+      );
+      if (ok) inFlight = true;
+      else await acceptWithDebt(ea.db, issue, [{ type: 'no_advisor_provider' }]);
+    } else {
+      await acceptWithDebt(ea.db, issue, [{ type: 'advisor_exhausted' }]);
+    }
+  }
+  if (inFlight) {
+    const row = await setStepStatus(ea.db, ea.current.id, {
+      status: 'waiting_cli',
+      statusMessage: 'Advising failed issues…',
+    });
+    return { status: 'waiting', row };
+  }
+  if (reloop) return { status: 'reloop', row: ea.current };
+
+  // Outer loop: replanner when failures are broad / escalated.
+  const fresh = await reReadLevelIssues(ea);
+  const stillFailed = fresh.filter((i) => i.resolution === 'failed_unrecoverable');
+  if (stillFailed.length === 0) return { status: 'reloop', row: ea.current };
+  const escalated = stillFailed.some((i) => i.lastAdvisorAction === 'ESCALATE_TO_REPLAN');
+  const ratioTrigger = stillFailed.length / Math.max(1, fresh.length) >= REPLAN_FAIL_RATIO;
+  const trigger = escalated || stillFailed.length >= 2 || ratioTrigger;
+  if (!trigger || ea.plan.replannerInvocations >= MAX_REPLANNER_INVOCATIONS) {
+    for (const issue of stillFailed)
+      await acceptWithDebt(ea.db, issue, [{ type: 'unresolved_after_escalation' }]);
+    return { status: 'reloop', row: ea.current };
+  }
+  const ok = await spawnReplanner(ea, stillFailed);
+  if (!ok) {
+    for (const issue of stillFailed)
+      await acceptWithDebt(ea.db, issue, [{ type: 'no_replanner_provider' }]);
+    return { status: 'reloop', row: ea.current };
+  }
+  const row = await setStepStatus(ea.db, ea.current.id, {
+    status: 'waiting_cli',
+    statusMessage: 'Replanning the DAG…',
+  });
+  return { status: 'waiting', row };
+}
+
 export async function resolveDagPhase(
   db: Database,
   stepDef: StepDefinition,
@@ -813,10 +1203,11 @@ export async function resolveDagPhase(
   const providers = params.providers;
   const deps = params.deps;
 
-  const plan = (await db.query.taskDagPlans.findFirst({
+  const planExists = await db.query.taskDagPlans.findFirst({
     where: eq(schema.taskDagPlans.taskId, ctx.taskId),
-  })) as DagPlanRow | undefined;
-  if (!plan || plan.mode !== 'dag') {
+    columns: { id: true, mode: true },
+  });
+  if (!planExists || planExists.mode !== 'dag') {
     // No DAG to run (shouldRun gates on mode==='dag'); finalize trivially.
     return { resolved: true, current };
   }
@@ -830,6 +1221,12 @@ export async function resolveDagPhase(
   // iteration re-reads the rows, so a crash resumes from the persisted state.
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    // Re-read the plan each iteration — the escalation phase mutates plan fields
+    // (replannerInvocationId, replannerInvocations, debtAggregate) in the DB, so
+    // a stale in-memory copy would loop forever on a 'reloop'.
+    const plan = (await db.query.taskDagPlans.findFirst({
+      where: eq(schema.taskDagPlans.taskId, ctx.taskId),
+    })) as DagPlanRow;
     const levels = (await db
       .select()
       .from(schema.taskDagLevels)
@@ -1023,11 +1420,11 @@ export async function resolveDagPhase(
       continue; // all ingested — re-read + proceed to merge/checkpoint
     }
 
-    // (D) All coders terminal. Slice 3: any unrecoverable failure fails the step
-    // (recovery actions surface; Slices 5-6 add review + escalation).
-    const failed = issues.filter((i) => i.outcome === 'failed_unrecoverable');
-    if (failed.length > 0) {
-      const msg = `DAG level ${curLevel.level} failed: ${failed.map((f) => f.issueKey).join(', ')}`;
+    // (D) Coder failures. With the escalation path (review on) mark them so the
+    // issue-advisor can act; otherwise fail the step (recovery via retry/retry_ai).
+    const coderFailed = issues.filter((i) => i.outcome === 'failed_unrecoverable');
+    if (coderFailed.length > 0 && !plan.reviewEnabled) {
+      const msg = `DAG level ${curLevel.level} failed: ${coderFailed.map((f) => f.issueKey).join(', ')}`;
       const updated = await setStepStatus(db, current.id, {
         status: 'failed',
         errorMessage: msg,
@@ -1035,11 +1432,30 @@ export async function resolveDagPhase(
       });
       return { resolved: false, result: { status: 'failed', row: updated, error: msg } };
     }
+    for (const f of coderFailed) {
+      if (plan.reviewEnabled && f.resolution === null) {
+        await db
+          .update(schema.taskDagIssues)
+          .set({ resolution: 'failed_unrecoverable', updatedAt: new Date() })
+          .where(eq(schema.taskDagIssues.id, f.id));
+      }
+    }
 
-    // (D.5) Inner review loop (coder<->reviewer) when enabled → per-issue
-    // resolution. A blocking verdict / exhausted budget fails the step (Slice 6
-    // will escalate to the issue-advisor/replanner instead).
+    // (D.5 / D.6) Review loop then escalation (when enabled). Review resolves each
+    // completed issue; escalation (issue-advisor -> replanner) handles failures.
+    // A 'reloop' re-processes the level after a retry / split / skip.
     if (plan.reviewEnabled) {
+      const reReadLevel = async () =>
+        (await db
+          .select()
+          .from(schema.taskDagIssues)
+          .where(
+            and(
+              eq(schema.taskDagIssues.dagPlanId, plan.id),
+              eq(schema.taskDagIssues.level, curLevel.level),
+            ),
+          )) as DagIssueRow[];
+
       const review = await resolveReviewPhase({
         db,
         issues,
@@ -1055,27 +1471,32 @@ export async function resolveDagPhase(
         return { resolved: false, result: { status: 'waiting_cli', row: review.row } };
       }
       current = review.row;
-      issues = (await db
-        .select()
-        .from(schema.taskDagIssues)
-        .where(
-          and(
-            eq(schema.taskDagIssues.dagPlanId, plan.id),
-            eq(schema.taskDagIssues.level, curLevel.level),
-          ),
-        )) as DagIssueRow[];
-      const reviewFailed = issues.filter((i) => i.resolution === 'failed_unrecoverable');
-      if (reviewFailed.length > 0) {
-        const msg = `DAG level ${curLevel.level} review blocked: ${reviewFailed
-          .map((f) => f.issueKey)
-          .join(', ')}`;
-        const updated = await setStepStatus(db, current.id, {
-          status: 'failed',
-          errorMessage: msg,
-          endedAt: new Date(),
-        });
-        return { resolved: false, result: { status: 'failed', row: updated, error: msg } };
+      issues = await reReadLevel();
+
+      const escalation = await resolveEscalationPhase({
+        db,
+        issues,
+        level: curLevel,
+        current,
+        params,
+        stepDef,
+        providers,
+        deps,
+        taskId: ctx.taskId,
+        plan,
+      });
+      if (escalation.status === 'waiting') {
+        return { resolved: false, result: { status: 'waiting_cli', row: escalation.row } };
       }
+      if (escalation.status === 'aborted') {
+        return {
+          resolved: false,
+          result: { status: 'failed', row: escalation.row, error: escalation.error ?? 'aborted' },
+        };
+      }
+      if (escalation.status === 'reloop') continue;
+      current = escalation.row;
+      issues = await reReadLevel();
     }
 
     // (E) Commit each issue's work, then merge — git-first, conflicts held for
@@ -1122,6 +1543,26 @@ export async function resolveDagPhase(
         updatedAt: new Date(),
       })
       .where(eq(schema.taskDagLevels.id, curLevel.id));
+
+    // Aggregate accumulated debt by severity across the whole DAG (for the summary).
+    const debtRows = (await db
+      .select({ debtItems: schema.taskDagIssues.debtItems })
+      .from(schema.taskDagIssues)
+      .where(eq(schema.taskDagIssues.dagPlanId, plan.id))) as { debtItems: unknown[] }[];
+    const agg = { high: 0, medium: 0, low: 0, total: 0 };
+    for (const r of debtRows) {
+      for (const d of (r.debtItems ?? []) as Array<{ severity?: string }>) {
+        const sev: 'high' | 'medium' | 'low' =
+          d?.severity === 'high' || d?.severity === 'medium' ? d.severity : 'low';
+        agg[sev] += 1;
+        agg.total += 1;
+      }
+    }
+    await db
+      .update(schema.taskDagPlans)
+      .set({ debtAggregate: agg, updatedAt: new Date() })
+      .where(eq(schema.taskDagPlans.id, plan.id));
+
     ctx.logger.info({ level: curLevel.level, planId: plan.id }, 'dag level checkpointed');
   }
 }

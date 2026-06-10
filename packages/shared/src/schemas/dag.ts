@@ -82,3 +82,36 @@ export const reviewerOutputSchema = z.object({
     .default([]),
 });
 export type ReviewerOutput = z.infer<typeof reviewerOutputSchema>;
+
+/** The issue-advisor's decision for an issue that failed the inner review loop
+ *  (Phase 3 middle loop). */
+export const advisorOutputSchema = z.object({
+  action: z.enum([
+    'RETRY_APPROACH',
+    'RETRY_MODIFIED',
+    'SPLIT',
+    'ACCEPT_WITH_DEBT',
+    'ESCALATE_TO_REPLAN',
+  ]),
+  reasoning: z.string().default(''),
+  /** RETRY_APPROACH/RETRY_MODIFIED: extra guidance injected into the re-run. */
+  retry_context: z.string().optional(),
+  /** RETRY_MODIFIED: acceptance criteria to drop (recorded as debt). */
+  drop_criteria: z.array(z.string()).default([]),
+  /** SPLIT: sub-issues to add at the current level. */
+  sub_issues: z
+    .array(z.object({ title: z.string(), description: z.string().default('') }))
+    .default([]),
+});
+export type AdvisorOutput = z.infer<typeof advisorOutputSchema>;
+
+/** The replanner's decision for a level with broad failure (Phase 3 outer loop). */
+export const replannerOutputSchema = z.object({
+  action: z.enum(['CONTINUE', 'MODIFY_DAG', 'REDUCE_SCOPE', 'ABORT']),
+  reasoning: z.string().default(''),
+  /** CONTINUE/REDUCE_SCOPE: issue ids to skip. */
+  skip_downstream: z.array(z.string()).default([]),
+  /** MODIFY_DAG: the new dependency-wave structure (issue ids per level). */
+  new_levels: z.array(z.array(z.string())).default([]),
+});
+export type ReplannerOutput = z.infer<typeof replannerOutputSchema>;

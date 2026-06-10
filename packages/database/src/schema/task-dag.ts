@@ -82,6 +82,19 @@ export const taskDagPlans = pgTable(
     /** When true, each issue's implementation is reviewed by a reviewer agent
      *  (coder<->reviewer inner loop) before merge. Chosen at the 2c gate. */
     reviewEnabled: boolean('review_enabled').notNull().default(false),
+    // --- Outer-loop escalation (replanner) + debt aggregate (Slice 6) ---
+    replannerInvocations: integer('replanner_invocations').notNull().default(0),
+    lastReplannerAction: varchar('last_replanner_action', { length: 32 }),
+    /** Active replanner invocation while one is in flight (plan-level agent). */
+    replannerInvocationId: uuid('replanner_invocation_id'),
+    escalationLog: jsonb('escalation_log')
+      .$type<unknown[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    debtAggregate: jsonb('debt_aggregate')
+      .$type<Record<string, number>>()
+      .notNull()
+      .default(sql`'{}'::jsonb`),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
