@@ -23,8 +23,13 @@
     "smoke:sub-agent": "tsx test/sub-agent-smoke.ts",
     "smoke:container-cleanup": "tsx test/container-cleanup-smoke.ts",
     "smoke:worker-kill-resume": "tsx test/worker-kill-resume-smoke.ts",
-    "smoke:all": "pnpm smoke:onboarding && pnpm smoke:onboarding-full && pnpm smoke:drupal7 && pnpm smoke:workflow && pnpm smoke:workflow-commit && pnpm smoke:env-replicate && pnpm smoke:env-replicate-wrap && pnpm smoke:sub-agent && pnpm smoke:container-cleanup && pnpm smoke:worker-kill-resume",
-    "smoke:ci": "pnpm smoke:onboarding && pnpm smoke:onboarding-full && pnpm smoke:drupal7 && pnpm smoke:workflow && pnpm smoke:workflow-commit && pnpm smoke:env-replicate && pnpm smoke:env-replicate-wrap && pnpm smoke:container-cleanup && pnpm smoke:worker-kill-resume",
+    "smoke:dag": "tsx test/dag-execute-smoke.ts",
+    "smoke:dag-conflict": "tsx test/dag-merge-conflict-smoke.ts",
+    "smoke:dag-auto-resolve": "tsx test/dag-auto-resolve-smoke.ts",
+    "smoke:dag-review": "tsx test/dag-review-smoke.ts",
+    "smoke:dag-escalation": "tsx test/dag-escalation-smoke.ts",
+    "smoke:all": "pnpm smoke:onboarding && pnpm smoke:onboarding-full && pnpm smoke:drupal7 && pnpm smoke:workflow && pnpm smoke:workflow-commit && pnpm smoke:env-replicate && pnpm smoke:env-replicate-wrap && pnpm smoke:sub-agent && pnpm smoke:container-cleanup && pnpm smoke:worker-kill-resume && pnpm smoke:dag && pnpm smoke:dag-conflict && pnpm smoke:dag-auto-resolve && pnpm smoke:dag-review && pnpm smoke:dag-escalation",
+    "smoke:ci": "pnpm smoke:onboarding && pnpm smoke:onboarding-full && pnpm smoke:drupal7 && pnpm smoke:workflow && pnpm smoke:workflow-commit && pnpm smoke:env-replicate && pnpm smoke:env-replicate-wrap && pnpm smoke:container-cleanup && pnpm smoke:worker-kill-resume && pnpm smoke:dag && pnpm smoke:dag-conflict && pnpm smoke:dag-auto-resolve && pnpm smoke:dag-review && pnpm smoke:dag-escalation",
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
