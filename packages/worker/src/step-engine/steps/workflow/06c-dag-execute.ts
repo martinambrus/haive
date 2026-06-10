@@ -30,6 +30,12 @@ function buildCoderPrompt(issue: DagCoderContext, upstreamDebt: string): string 
     'Implement ONLY this issue (a vertical slice: implementation + its tests together).',
     'Match the existing code style and conventions. Do not invent requirements.',
     '',
+    'Before implementing, search for the existing patterns this issue touches, in this order:',
+    '1. `rag_search` FIRST — query the haive-rag tool for the symbols/components/patterns involved',
+    '   (semantic + lexical search over the indexed code AND knowledge base); prefer it over blind grepping.',
+    '2. If rag_search is unavailable or returns nothing useful, READ the relevant `.claude/knowledge_base/` files.',
+    '3. If still not enough, Grep / Read the codebase directly for the symbols you need.',
+    '',
     issue.description ? `Description: ${issue.description}` : '',
     issue.provides ? `Deliverable: ${issue.provides}` : '',
     issue.specSections.length > 0
