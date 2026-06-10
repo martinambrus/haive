@@ -4,7 +4,8 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { pathExists } from '../onboarding/_helpers.js';
-import { startDdevRunner, ddevExec } from '../../../sandbox/ddev-runner.js';
+import { resolveDdevWorkspace } from './_task-meta.js';
+import { ensureDdevStarted, ddevExec } from '../../../sandbox/ddev-runner.js';
 
 // Boots the project's DDEV environment in a per-task nested-Docker runner and
 // imports the uploaded DB dump (then deletes it). Gated on the repo actually
@@ -45,18 +46,21 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
-    return pathExists(ddevConfigPath(ctx.workspacePath));
+    const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
+    return ws ? pathExists(ddevConfigPath(ws.workspace)) : false;
   },
 
   async detect(ctx: StepContext): Promise<DdevEnvDetect> {
-    const ddevConfigured = await pathExists(ddevConfigPath(ctx.workspacePath));
+    // All work runs in the worktree, so the `.ddev` config + the runner project
+    // dir must point there, not the repo root. See resolveDdevWorkspace.
+    const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
+    const ddevConfigured = ws ? await pathExists(ddevConfigPath(ws.workspace)) : false;
+    const repoSubpath = ws?.repoSubpath ?? null;
 
     const task = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { userId: true, repositoryId: true, dbUploadId: true },
+      columns: { dbUploadId: true },
     });
-
-    const repoSubpath = task?.repositoryId ? `${task.userId}/${task.repositoryId}` : null;
 
     let dbUploadId: string | null = null;
     let dumpWorkerPath: string | null = null;
@@ -87,12 +91,7 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
     }
 
     await ctx.emitProgress('Starting DDEV environment (nested Docker)…');
-    const handle = await startDdevRunner({ taskId: ctx.taskId, repoSubpath: d.repoSubpath });
-
-    const start = await ddevExec(handle, 'start', { timeoutMs: 900_000 });
-    if (start.exitCode !== 0) {
-      throw new Error(`ddev start failed: ${start.output.slice(-1500)}`);
-    }
+    const handle = await ensureDdevStarted(ctx.taskId, d.repoSubpath);
 
     let imported = false;
     if (d.dumpRunnerPath && d.dbUploadId) {
@@ -113,6 +112,11 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
     }
 
     ctx.logger.info({ taskId: ctx.taskId, imported }, 'ddev env ready');
-    return { started: true, imported, skipped: false, output: start.output.slice(-1000) };
+    return {
+      started: true,
+      imported,
+      skipped: false,
+      output: imported ? 'DDEV started; database dump imported' : 'DDEV started',
+    };
   },
 };

@@ -32,6 +32,15 @@ RUN curl -fsSL https://apt.fury.io/drud/gpg.key | gpg --dearmor -o /etc/apt/keyr
     && apt-get update && apt-get install -y --no-install-recommends ddev mkcert \
     && rm -rf /var/lib/apt/lists/*
 
+# Headless-Chrome browser testing inside the runner (08a-browser-verify): node +
+# chromium + puppeteer-core, with the check script baked in. puppeteer-core is
+# installed under /opt so `node /opt/browser-check.js` resolves it from there.
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm chromium \
+    && rm -rf /var/lib/apt/lists/*
+COPY browser-check.js /opt/browser-check.js
+RUN cd /opt && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1
+ENV CHROME_PATH=/usr/bin/chromium
+
 RUN useradd -m -u 1000 -s /bin/bash -G docker,sudo ddev \
     && echo 'ddev ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ddev \
     && chmod 0440 /etc/sudoers.d/ddev

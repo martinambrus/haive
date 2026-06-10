@@ -1,10 +1,9 @@
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
-import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { pathExists } from '../onboarding/_helpers.js';
+import { resolveDdevWorkspace } from './_task-meta.js';
 import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
 
 // Runs the framework's DB migrations inside the task's DDEV environment, after
@@ -96,19 +95,19 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
-    return pathExists(ddevConfigPath(ctx.workspacePath));
+    const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
+    return ws ? pathExists(ddevConfigPath(ws.workspace)) : false;
   },
 
   async detect(ctx: StepContext): Promise<MigrateDetect> {
-    const framework = await detectFramework(ctx.workspacePath);
-    const task = await ctx.db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, ctx.taskId),
-      columns: { userId: true, repositoryId: true },
-    });
+    // Detect the framework + target the runner against the worktree (migration
+    // files + the 01c-booted runner both live there), not the repo root.
+    const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
+    const framework = ws ? await detectFramework(ws.workspace) : 'unknown';
     return {
       framework,
       migrationCommand: commandFor(framework),
-      repoSubpath: task?.repositoryId ? `${task.userId}/${task.repositoryId}` : null,
+      repoSubpath: ws?.repoSubpath ?? null,
     };
   },
 

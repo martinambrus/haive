@@ -33,14 +33,17 @@ let cachedTag: string | null = null;
 async function resolveImageTag(): Promise<string> {
   if (cachedTag) return cachedTag;
   const dir = runnerContextDir();
-  const [dockerfile, entrypoint] = await Promise.all([
+  const [dockerfile, entrypoint, browserCheck] = await Promise.all([
     readFile(path.join(dir, 'Dockerfile'), 'utf8'),
     readFile(path.join(dir, 'entrypoint.sh'), 'utf8'),
+    readFile(path.join(dir, 'browser-check.js'), 'utf8'),
   ]);
   const hash = createHash('sha256')
     .update(dockerfile)
     .update('\0')
     .update(entrypoint)
+    .update('\0')
+    .update(browserCheck)
     .digest('hex')
     .slice(0, 12);
   cachedTag = `haive-ddev-runner:${hash}`;
@@ -156,6 +159,50 @@ export async function ddevExec(
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };
     return { exitCode: e.code ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(0, 8000) };
+  }
+}
+
+/** Ensure the task's DDEV env is up and `ddev start`-ed, booting it if not.
+ *  Idempotent: returns the existing handle when DDEV is already running (so a
+ *  prior `import-db` is preserved); otherwise launches the runner + `ddev start`
+ *  and THROWS if start fails. Callers treat a throw as a step failure — e.g. a
+ *  task that just implemented `.ddev` (01c skipped early), where the browser-
+ *  verify step boots the new config and a boot failure routes back to the dev. */
+export async function ensureDdevStarted(
+  taskId: string,
+  repoSubpath: string,
+): Promise<DdevRunnerHandle> {
+  const existing = runnerHandleForTask(taskId, repoSubpath);
+  const describe = await ddevExec(existing, 'describe -j', { timeoutMs: 15_000 });
+  if (describe.exitCode === 0 && describe.output.includes('primary_url')) {
+    return existing; // already running — don't re-boot (preserves an imported DB)
+  }
+  const handle = await startDdevRunner({ taskId, repoSubpath });
+  const start = await ddevExec(handle, 'start', { timeoutMs: 900_000 });
+  if (start.exitCode !== 0) {
+    throw new Error(`ddev start failed: ${start.output.slice(-1500)}`);
+  }
+  return handle;
+}
+
+/** Run an arbitrary command inside the runner as the non-root `ddev` user (e.g.
+ *  the baked-in headless-Chrome browser check). Returns combined output + exit
+ *  code. Unlike ddevExec this does NOT prefix `ddev` or cd into the project. */
+export async function runnerExec(
+  handle: DdevRunnerHandle,
+  command: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<{ exitCode: number; output: string }> {
+  try {
+    const { stdout, stderr } = await exec(
+      'docker',
+      ['exec', '-u', 'ddev', handle.container, 'bash', '-lc', command],
+      { timeout: opts.timeoutMs ?? 120_000, maxBuffer: 10 * 1024 * 1024 },
+    );
+    return { exitCode: 0, output: `${stdout}${stderr}` };
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; code?: number };
+    return { exitCode: e.code ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}` };
   }
 }
 
