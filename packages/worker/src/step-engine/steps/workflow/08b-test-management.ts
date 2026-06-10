@@ -412,6 +412,8 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
       return [
         "You are the test-management phase of an engineering workflow. Keep the project's",
         'automated tests in sync with the change that was just implemented and verified.',
+        'If a `.claude/agents/test-writer.md` agent definition exists in the repo, follow its',
+        'conventions for how to write/maintain tests; otherwise follow the protocol below.',
         '',
         `Workspace: ${d.sandboxWorktreePath}`,
         'Your current working directory has the workspace mounted; work on the files there.',
@@ -461,6 +463,8 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
       const run = last?.testRun;
       return [
         'The related tests were run after your test changes and FAILED. Fix them.',
+        'If a `.claude/agents/test-writer.md` agent definition exists in the repo, follow its',
+        'conventions; otherwise follow the protocol below.',
         '',
         `Workspace: ${d.sandboxWorktreePath}`,
         'Your current working directory has the workspace mounted; work on the files there.',
