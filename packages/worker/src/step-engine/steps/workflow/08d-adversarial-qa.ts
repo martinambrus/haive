@@ -19,8 +19,9 @@ import { loadAppBootOutput } from './_task-meta.js';
 // findings. Proof-of-concept only: no persistence, no data deletion, no prod
 // disruption. Findings surface at gate 2. Formless; gated by shouldRun.
 //
-// These adversarial agents are NOT onboarded into target repos, so each prompt
-// embeds its persona inline (unlike 08c, which can defer to .claude/agents/*).
+// Each prompt defers to the repo's onboarded adversarial agent definition
+// (.claude/agents/<id>.md — Haive onboards all six) when present, and embeds a
+// condensed persona inline as the fallback, the same convention as 08a/08b/08c.
 
 const QA_TIMEOUT_MS = 45 * 60 * 1000;
 
@@ -157,6 +158,8 @@ const SAFETY = [
 
 function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
   return [
+    `If a \`.claude/agents/${a.id}.md\` agent definition exists in the repo, follow it;`,
+    'otherwise follow the persona below.',
     `You are ${a.title}, an adversarial QA agent. Your job is to BREAK the implemented change.`,
     a.persona,
     '',
@@ -302,7 +305,12 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
         }
       }
     }
-    const findings = [...byLocation.values(), ...unlocated];
+    // Consolidate: sort by severity (critical → low), like the legacy phase-7b consolidator.
+    const findings = [...byLocation.values(), ...unlocated].sort(
+      (a, b) =>
+        (rank[(b.severity ?? '').toLowerCase()] ?? 0) -
+        (rank[(a.severity ?? '').toLowerCase()] ?? 0),
+    );
     const critical = findings.filter((f) => (f.severity ?? '').toLowerCase() === 'critical').length;
     const high = findings.filter((f) => (f.severity ?? '').toLowerCase() === 'high').length;
     const blocking = critical + high > 0;
