@@ -189,7 +189,7 @@ async function main(): Promise<void> {
       .returning();
     if (!invocation) throw new Error('cli invocation insert failed');
 
-    state.worker = startCliExecWorker({ spawner: createFakeSpawner() });
+    state.worker = await startCliExecWorker({ spawner: createFakeSpawner() });
 
     const queue = getCliExecQueue();
     await queue.add(CLI_EXEC_JOB_NAMES.INVOKE, {

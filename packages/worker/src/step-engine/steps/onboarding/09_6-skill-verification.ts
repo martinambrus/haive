@@ -3,8 +3,9 @@ import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CliProviderName, FormSchema } from '@haive/shared';
-import { getCliProviderMetadata } from '@haive/shared';
+import { getCliProviderMetadata, mapWithConcurrency } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { resolveParallelCap } from '../../_parallel-cap.js';
 import { pathExists } from './_helpers.js';
 
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
@@ -178,8 +179,8 @@ export const skillVerificationStep: StepDefinition<
   async detect(ctx: StepContext): Promise<SkillVerificationDetect> {
     const projectSkillsDir = await resolveProjectSkillsDir(ctx);
     const skillIds = await listSkillDirs(ctx.repoPath, projectSkillsDir);
-    const checks = await Promise.all(
-      skillIds.map((id) => checkSkill(ctx.repoPath, projectSkillsDir, id)),
+    const checks = await mapWithConcurrency(skillIds, await resolveParallelCap(), (id) =>
+      checkSkill(ctx.repoPath, projectSkillsDir, id),
     );
     const missingFileIds = checks
       .filter((c) => c.issues.includes('SKILL.md missing'))
@@ -240,12 +241,10 @@ export const skillVerificationStep: StepDefinition<
     }
 
     const finalChecks = shouldRegenerate
-      ? await Promise.all(
-          detected.checks.map((c) =>
-            detected.missingFileIds.includes(c.skillId)
-              ? checkSkill(ctx.repoPath, skillsDir, c.skillId)
-              : Promise.resolve(c),
-          ),
+      ? await mapWithConcurrency(detected.checks, await resolveParallelCap(), (c) =>
+          detected.missingFileIds.includes(c.skillId)
+            ? checkSkill(ctx.repoPath, skillsDir, c.skillId)
+            : Promise.resolve(c),
         )
       : detected.checks;
 

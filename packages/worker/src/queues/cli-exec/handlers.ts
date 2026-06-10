@@ -7,9 +7,13 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
+  CONFIG_CONCURRENCY_CHANNEL,
+  CONFIG_KEYS,
   QUEUE_NAMES,
   cliAuthProviderVolumeName,
   cliAuthVolumeName,
+  configService,
+  createRedisConnection,
   getCliProviderMetadata,
   type CliExecJobPayload,
   type CliLoginCreateJobPayload,
@@ -529,16 +533,35 @@ export async function scheduleCliVersionRefresh(): Promise<void> {
   );
 }
 
-export function startCliExecWorker(
+/** Floor the parallel-agent cap at 1 (BullMQ requires concurrency >= 1). No upper
+ *  limit — the host operator sets it to whatever their machine can handle. */
+function clampParallelCap(n: number): number {
+  if (!Number.isFinite(n)) return 3;
+  return Math.max(1, Math.floor(n));
+}
+
+export async function startCliExecWorker(
   deps: CliExecDeps = defaultDeps,
-): Worker<
-  CliExecQueuePayload,
-  | CliProbeResult
-  | SandboxImageBuildResult
-  | RefreshCliVersionsJobResult
-  | CliLoginCreateResult
-  | void
+): Promise<
+  Worker<
+    CliExecQueuePayload,
+    | CliProbeResult
+    | SandboxImageBuildResult
+    | RefreshCliVersionsJobResult
+    | CliLoginCreateResult
+    | void
+  >
 > {
+  // Max parallel agent/CLI invocations — admin-tunable (clamped 1..7). Falls back
+  // to 3 when config isn't initialized (e.g. focused smoke tests).
+  let concurrency = 3;
+  try {
+    concurrency = clampParallelCap(
+      await configService.getNumber(CONFIG_KEYS.MAX_PARALLEL_AGENTS, 3),
+    );
+  } catch {
+    /* config not initialized — keep the default */
+  }
   const worker = new Worker<
     CliExecQueuePayload,
     | CliProbeResult
@@ -574,7 +597,7 @@ export function startCliExecWorker(
     },
     {
       connection: getBullRedis(),
-      concurrency: 3,
+      concurrency,
       // CLI execs run for minutes; default 30s lock would expire and cause
       // BullMQ to redeliver the job to a new worker pid (after a tsx watch
       // restart, SIGKILL, etc.), spawning a duplicate sandbox container for
@@ -595,5 +618,30 @@ export function startCliExecWorker(
     log.warn({ jobId: job?.id, name: job?.name, err }, 'cli-exec job failed');
   });
 
+  // Live-retune concurrency when the admin changes MAX_PARALLEL_AGENTS, so a
+  // bigger host can raise parallelism without a worker restart (BullMQ v5 honors
+  // the runtime setter; lowering lets in-flight jobs drain). The boot read above
+  // is the always-correct fallback on restart.
+  const redisUrl = process.env.REDIS_URL;
+  if (redisUrl) {
+    const sub = createRedisConnection(redisUrl);
+    sub.on('message', (_channel, message) => {
+      const next = clampParallelCap(Number.parseInt(message, 10));
+      try {
+        (worker as { concurrency: number }).concurrency = next;
+        log.info({ concurrency: next }, 'cli-exec concurrency retuned');
+      } catch (err) {
+        log.warn({ err, next }, 'cli-exec concurrency retune failed (restart to apply)');
+      }
+    });
+    sub.subscribe(CONFIG_CONCURRENCY_CHANNEL).catch((err) => {
+      log.warn({ err }, 'cli-exec concurrency subscribe failed');
+    });
+    worker.on('closing', () => {
+      void sub.quit().catch(() => {});
+    });
+  }
+
+  log.info({ concurrency }, 'cli-exec worker started');
   return worker;
 }

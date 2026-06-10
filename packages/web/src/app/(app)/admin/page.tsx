@@ -24,15 +24,21 @@ export default function AdminPage() {
   const [error, setError] = useState<string | null>(null);
   const [busyUserId, setBusyUserId] = useState<string | null>(null);
   const [tempPassword, setTempPassword] = useState<{ userId: string; value: string } | null>(null);
+  const [maxParallel, setMaxParallel] = useState<number | null>(null);
+  const [maxParallelInput, setMaxParallelInput] = useState('');
+  const [savingConcurrency, setSavingConcurrency] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [usersData, healthData] = await Promise.all([
+      const [usersData, healthData, concurrencyData] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
+        api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
+      setMaxParallel(concurrencyData.maxParallelAgents);
+      setMaxParallelInput(String(concurrencyData.maxParallelAgents));
       setError(null);
     } catch (err) {
       const e = err as { status?: number; message?: string };
@@ -74,6 +80,27 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Action failed');
     } finally {
       setBusyUserId(null);
+    }
+  }
+
+  async function saveConcurrency() {
+    const value = Number.parseInt(maxParallelInput, 10);
+    if (!Number.isInteger(value) || value < 1) {
+      setError('Max parallel agents must be an integer of at least 1.');
+      return;
+    }
+    setSavingConcurrency(true);
+    try {
+      const result = await api.put<{ maxParallelAgents: number }>('/admin/config/concurrency', {
+        maxParallelAgents: value,
+      });
+      setMaxParallel(result.maxParallelAgents);
+      setMaxParallelInput(String(result.maxParallelAgents));
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update concurrency');
+    } finally {
+      setSavingConcurrency(false);
     }
   }
 
@@ -158,6 +185,39 @@ export default function AdminPage() {
               </li>
             ))}
           </ul>
+        </Card>
+      )}
+
+      {maxParallel !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Performance</CardTitle>
+            <CardDescription>
+              Max parallel agents — caps concurrent CLI/agent invocations (cli-exec queue + DAG
+              coders). Set to what your machine can handle; higher means more parallelism and load.
+              Applies immediately; persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <div className="flex items-end gap-2">
+            <label className="flex flex-col gap-1 text-xs text-neutral-400">
+              Max parallel agents
+              <input
+                type="number"
+                min={1}
+                value={maxParallelInput}
+                onChange={(e) => setMaxParallelInput(e.target.value)}
+                className="w-24 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+              />
+            </label>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={savingConcurrency || maxParallelInput === String(maxParallel)}
+              onClick={() => void saveConcurrency()}
+            >
+              {savingConcurrency ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
         </Card>
       )}
 

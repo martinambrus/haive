@@ -223,6 +223,10 @@ export const TERMINAL_REQUEST_CHANNEL = 'terminal:request';
 export const TERMINAL_IN_CHANNEL_PREFIX = 'terminal:in:';
 export const TERMINAL_OUT_CHANNEL_PREFIX = 'terminal:out:';
 export const TERMINAL_CTL_CHANNEL_PREFIX = 'terminal:ctl:';
+/** Pub/sub channel the api publishes to when MAX_PARALLEL_AGENTS changes, so the
+ *  worker live-retunes the cli-exec queue concurrency without a restart. Body is
+ *  the new clamped integer as a string. */
+export const CONFIG_CONCURRENCY_CHANNEL = 'config:concurrency:changed';
 /** Two minutes of grace after the last WS disconnect before a session's
  *  container is reaped. Long enough to survive a tab nav-away-and-return,
  *  short enough that abandoned sessions don't pile up under WSL's container

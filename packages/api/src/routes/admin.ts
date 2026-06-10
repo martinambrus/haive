@@ -3,7 +3,13 @@ import { z } from 'zod';
 import { Hono } from 'hono';
 import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { configService, decryptEmail, logger } from '@haive/shared';
+import {
+  CONFIG_CONCURRENCY_CHANNEL,
+  CONFIG_KEYS,
+  configService,
+  decryptEmail,
+  logger,
+} from '@haive/shared';
 import { getDb } from '../db.js';
 import { hashPassword } from '../auth/password.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
@@ -195,4 +201,23 @@ adminRoutes.get('/health', async (c) => {
     })),
     timestamp: now.toISOString(),
   });
+});
+
+const concurrencySchema = z.object({
+  // Floor of 1 (BullMQ needs concurrency >= 1); no upper limit — set per host.
+  maxParallelAgents: z.number().int().min(1),
+});
+
+adminRoutes.get('/config/concurrency', async (c) => {
+  const maxParallelAgents = await configService.getNumber(CONFIG_KEYS.MAX_PARALLEL_AGENTS, 3);
+  return c.json({ maxParallelAgents });
+});
+
+adminRoutes.put('/config/concurrency', async (c) => {
+  const { maxParallelAgents } = concurrencySchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.MAX_PARALLEL_AGENTS, String(maxParallelAgents));
+  // Live-retune the worker's cli-exec queue concurrency without a restart.
+  await configService.getRedis().publish(CONFIG_CONCURRENCY_CHANNEL, String(maxParallelAgents));
+  log.info({ maxParallelAgents }, 'max parallel agents updated');
+  return c.json({ maxParallelAgents });
 });

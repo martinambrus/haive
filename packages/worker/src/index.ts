@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   const repoWorker = startRepoWorker(repoStoragePath);
   const bundleWorker = startBundleWorker(bundleStoragePath);
   const taskWorker = startTaskWorker();
-  const cliExecWorker = startCliExecWorker();
+  const cliExecWorker = await startCliExecWorker();
   await scheduleCliVersionRefresh().catch((err) => {
     logger.warn({ err }, 'failed to schedule cli version refresh');
   });

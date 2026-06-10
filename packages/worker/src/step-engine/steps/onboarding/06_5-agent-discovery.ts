@@ -3,9 +3,15 @@ import path from 'node:path';
 import { jsonrepair } from 'jsonrepair';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { agentSpecSchema, type DetectResult, type FormSchema } from '@haive/shared';
+import {
+  agentSpecSchema,
+  mapWithConcurrency,
+  type DetectResult,
+  type FormSchema,
+} from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import type { AgentColor, AgentSpec } from './_agent-templates.js';
+import { resolveParallelCap } from '../../_parallel-cap.js';
 import { extractFencedJson } from '../_fenced-json.js';
 import {
   countFilesMatching,
@@ -339,8 +345,10 @@ export async function discoverAgentCandidates(
     seen.add(p.id);
     return true;
   });
-  const scanResults = await Promise.all(
-    uniquePatterns.map(async (p) => ({ id: p.id, count: await scanPattern(repo, p) })),
+  const scanResults = await mapWithConcurrency(
+    uniquePatterns,
+    await resolveParallelCap(),
+    async (p) => ({ id: p.id, count: await scanPattern(repo, p) }),
   );
   const countById = new Map(scanResults.map((r) => [r.id, r.count]));
 
