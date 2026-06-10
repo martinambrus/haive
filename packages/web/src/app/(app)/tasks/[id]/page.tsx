@@ -109,6 +109,22 @@ export default function TaskDetailPage() {
   // re-runs when the terminal mounts (not only when the active step changes).
   const prevScrollKeyRef = useRef<string | null>(null);
   const scrollTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const titleRowRef = useRef<HTMLDivElement>(null);
+  const [titleStripVisible, setTitleStripVisible] = useState(false);
+
+  // Show the fixed title strip while the real header is scrolled out of view.
+  // Keyed on task presence, not the task object — the 2s poll replaces the
+  // object every tick and would re-create the observer.
+  const hasTask = task !== null;
+  useEffect(() => {
+    const el = titleRowRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      setTitleStripVisible(entry ? !entry.isIntersecting : false);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasTask]);
 
   const reload = useCallback(async () => {
     try {
@@ -431,12 +447,17 @@ export default function TaskDetailPage() {
 
   return (
     <div className="flex flex-col gap-6">
+      {titleStripVisible && (
+        <div className="fixed left-64 right-0 top-0 z-30 border-b border-neutral-800 bg-neutral-950/90 px-8 py-2 backdrop-blur">
+          <p className="truncate text-sm font-semibold text-indigo-300">{task.title}</p>
+        </div>
+      )}
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
           <Link href="/tasks" className="text-xs text-indigo-400 underline">
             Back to tasks
           </Link>
-          <div className="flex items-center gap-2">
+          <div ref={titleRowRef} className="flex items-center gap-2">
             {renaming ? (
               <>
                 <Input
