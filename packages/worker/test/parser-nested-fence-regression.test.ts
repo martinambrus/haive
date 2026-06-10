@@ -14,6 +14,21 @@ const fencedBody = [
   '```sql',
   'SELECT 1;',
   '```',
+  '```mermaid',
+  'graph LR',
+  '  A --> B',
+  '```',
+  '```before',
+  'old',
+  '```',
+  '```after',
+  'new',
+  '```',
+  '## Comprehension Quiz',
+  '### Q1: ok?',
+  '- [x] yes',
+  '- [ ] no',
+  '> Explanation: because.',
 ].join('\n');
 
 function wrap(obj: unknown): string {

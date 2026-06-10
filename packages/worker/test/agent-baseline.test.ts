@@ -82,4 +82,23 @@ describe('ported baseline agents', () => {
       expect(ids).toContain(`agent.${id}`);
     }
   });
+
+  it('spec presentation conventions are baked into the spec agents', () => {
+    const writer = BASELINE_AGENT_SPECS.find((s) => s.id === 'technical-spec-writer')!;
+    const writerMd = buildAgentFileForTarget(writer, {
+      dir: '.claude/agents',
+      format: 'markdown',
+    });
+    expect(writerMd).toContain('## Comprehension Quiz (REQUIRED final section)');
+    expect(writerMd).toContain('```mermaid');
+    expect(writerMd).toContain('`before`');
+
+    const reviewer = BASELINE_AGENT_SPECS.find((s) => s.id === 'spec-quality-reviewer')!;
+    const reviewerMd = buildAgentFileForTarget(reviewer, {
+      dir: '.claude/agents',
+      format: 'markdown',
+    });
+    expect(reviewerMd).toContain('warn finding');
+    expect(reviewerMd).toContain('## Comprehension Quiz');
+  });
 });

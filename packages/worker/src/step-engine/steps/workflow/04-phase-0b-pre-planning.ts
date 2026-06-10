@@ -93,7 +93,7 @@ export function parsePrePlanningOutput(raw: unknown): {
   return null;
 }
 
-function stubPrePlanning(detect: PrePlanningDetect): { summary: string; spec: string } {
+export function stubPrePlanning(detect: PrePlanningDetect): { summary: string; spec: string } {
   const title = detect.taskTitle || '(untitled task)';
   const description = detect.taskDescription || '(no description provided)';
   const summary = [
@@ -125,6 +125,44 @@ function stubPrePlanning(detect: PrePlanningDetect): { summary: string; spec: st
     '',
     '## Acceptance criteria',
     '- (to be filled in before gate 1)',
+    // The presentation-convention sections below keep the stub aligned with
+    // the prompt contract so bypass smokes and dev flows exercise the same
+    // renderer shapes (table, mermaid, quiz) a real LLM spec produces. All
+    // lines are static — interpolating the description into task-list items
+    // would break the quiz shape on multi-line input.
+    '',
+    '## Files to change',
+    '',
+    '| File | Change |',
+    '| --- | --- |',
+    '| (to be determined) | (stub spec) |',
+    '',
+    '```mermaid',
+    'graph LR',
+    '  A[Task] --> B[Draft spec]',
+    '  B --> C[Quality review]',
+    '  C --> D[Gate 1 approval]',
+    '```',
+    '',
+    '## Comprehension Quiz',
+    '',
+    '### Q1: What is the goal of this task?',
+    '- [x] Deliver the change described in the Goal section above',
+    '- [ ] Refactor unrelated subsystems',
+    '- [ ] No goal has been defined yet',
+    '> Explanation: See the Goal section at the top of this spec.',
+    '',
+    '### Q2: What happens to this draft spec next?',
+    '- [ ] It goes straight to implementation',
+    '- [x] It passes the spec-quality review loop, then Gate 1 approval',
+    '- [ ] It is discarded',
+    '> Explanation: Phase 0b.5 reviews the spec before the Gate 1 approval step.',
+    '',
+    '### Q3: Which input grounds the claims in this spec?',
+    '- [ ] The git commit history',
+    '- [ ] CI logs',
+    '- [x] The discovery summary from phase 0a',
+    '> Explanation: See the Discovery context section.',
   ];
   return { summary, spec: specLines.join('\n') };
 }
@@ -219,6 +257,24 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         '{ "summary": "<short rationale>", "spec": "<markdown spec body>" }',
         'The spec body must include sections: Goal, Approach, Risks, Acceptance criteria.',
         'Ground every claim in the discovery summary — do not invent details.',
+        '',
+        'Presentation conventions for the spec body (the Haive web renderer detects and upgrades these):',
+        '1. REQUIRED final section `## Comprehension Quiz` with 3-5 questions that test understanding',
+        '   of THIS change (goal, affected components, risks) — never generic trivia. Each question',
+        '   uses EXACTLY this GFM shape (machine-detected):',
+        '   ### Q1: <question text>',
+        '   - [ ] <wrong answer>',
+        '   - [x] <correct answer>',
+        '   - [ ] <wrong answer>',
+        '   > Explanation: <one or two sentences citing the spec section that answers it>',
+        '   Exactly one [x] per question; VARY the position of the correct option across questions.',
+        '2. ENCOURAGED: one or two ```mermaid fenced diagrams where component interaction explains the',
+        '   change better than prose (e.g. `graph LR` of the 2-3 affected components and the data flow,',
+        '   or a sequence diagram for a new flow). Keep each diagram under 15 nodes.',
+        '3. Use a GFM table for the files-to-change overview. File-level code excerpts go in normal',
+        '   fenced code blocks (the renderer auto-collapses blocks longer than ~12 lines).',
+        '4. For before/after comparisons (UI, API, config), emit two ADJACENT fenced blocks whose',
+        '   info-strings are exactly `before` and `after` — the renderer shows them side-by-side.',
         '',
         `Task title: ${detected.taskTitle || '(untitled)'}`,
         `Task description: ${detected.taskDescription || '(none)'}`,

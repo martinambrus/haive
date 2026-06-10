@@ -70,6 +70,31 @@ describe('buildSpecSummary', () => {
     expect(out.length).toBeLessThanOrEqual(1500 + 5); // +newlines
     expect(out.split('\n').length).toBeLessThanOrEqual(5);
   });
+
+  it('never reaches an end-of-spec comprehension quiz', () => {
+    const md = [
+      '# Spec: realistic',
+      '',
+      'Goal paragraph one.',
+      'Goal paragraph two.',
+      'Goal paragraph three.',
+      'Goal paragraph four.',
+      'Goal paragraph five.',
+      'Goal paragraph six.',
+      '',
+      '## Approach',
+      'Do the thing.',
+      '',
+      '## Comprehension Quiz',
+      '### Q1: ok?',
+      '- [x] yes',
+      '- [ ] no',
+    ].join('\n');
+    const out = buildSpecSummary(md);
+    expect(out).toContain('Goal paragraph one.');
+    expect(out).not.toContain('Comprehension Quiz');
+    expect(out).not.toContain('[x]');
+  });
 });
 
 function detectedStub(ddevMode: boolean) {

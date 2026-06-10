@@ -57,3 +57,33 @@ body {
 .haive-md table { border-collapse: collapse; }
 .haive-md th, .haive-md td { border: 1px solid rgb(38 38 38); padding: 0.25rem 0.5rem; }
 .haive-md th { background: rgb(23 23 23); font-weight: 600; }
+
+/* Markdown-view enhancements: animated disclosures, collapsed code blocks,
+ * mermaid sizing. Scoped under .haive-md / .haive-mermaid so the form-level
+ * <details> (infoSections, accordions) outside markdown bodies are untouched. */
+@keyframes haive-details-open {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+.haive-md details > summary {
+  cursor: pointer;
+  user-select: none;
+  color: rgb(163 163 163);
+  font-size: 0.75rem;
+}
+.haive-md details > summary:hover { color: rgb(229 229 229); }
+.haive-md details[open] > *:not(summary) { animation: haive-details-open 160ms ease-out; }
+.haive-reveal { animation: haive-details-open 160ms ease-out; }
+.haive-md .haive-code-details {
+  border: 1px solid rgb(38 38 38);
+  border-radius: 0.375rem;
+  padding: 0.375rem 0.625rem;
+  background: rgb(17 17 17);
+}
+.haive-md .haive-code-details[open] { padding-bottom: 0.625rem; }
+.haive-md .haive-code-details > pre { margin-top: 0.5rem; }
+.haive-mermaid svg { max-width: 100%; height: auto; }
+@media (prefers-reduced-motion: reduce) {
+  .haive-md details[open] > *:not(summary),
+  .haive-reveal { animation: none; }
+}

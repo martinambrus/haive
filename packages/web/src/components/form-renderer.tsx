@@ -2,21 +2,13 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { diffLines } from 'diff';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import type { DiffDetails, FormField, FormSchema, LeafFormField } from '@haive/shared';
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { BundleComposer, type BundleComposerEntry } from '@/components/bundle-composer';
+import { MarkdownView, looksLikeMarkdown } from '@/components/markdown/markdown-view';
 import { cn } from '@/lib/cn';
 import { validateRequired, type FormValues } from '@/components/form-validation';
-
-/** Heuristic markdown detection — true when the body contains at least one
- *  heading line or a fenced code block. Avoids false positives on plain "- "
- *  lists or "**" emphasis which appear in regular text outputs. */
-function looksLikeMarkdown(text: string): boolean {
-  return /^\s*#{1,6}\s+\S/m.test(text) || /^\s*```/m.test(text);
-}
 
 export type { FormValues };
 
@@ -151,8 +143,8 @@ export function FormRenderer({
                   )}
                 </summary>
                 {isMd ? (
-                  <div className="haive-md max-h-96 overflow-auto border-t border-neutral-800 px-3 py-2">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{section.body}</ReactMarkdown>
+                  <div className="border-t border-neutral-800">
+                    <MarkdownView body={section.body} enhanced />
                   </div>
                 ) : (
                   <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-t border-neutral-800 px-3 py-2 text-xs text-neutral-300">

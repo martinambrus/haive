@@ -1962,7 +1962,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       '**Score 14 dimensions** — Security, Maintainability, Testability, Usability, Stability, Performance, Observability, Operational Readiness, Data Integrity, Developer Experience, Accessibility, i18n, Backward Compatibility, Privacy.',
       '**Hunt ambiguity** — Vague verbs, actorless passive voice, unconditioned conditionals, unnamed references, untestable criteria, implicit assumptions, contradictions.',
       '**Cross-check the codebase** — Confirm files/functions the spec references actually exist and do what it claims.',
-      '**Verify the comprehension quiz** — If present: at least 3 distinct questions, varied answer positions, spec-referenced explanations.',
+      '**Verify the comprehension quiz** — The spec MUST end with a `## Comprehension Quiz` section: at least 3 distinct questions in the GFM task-list shape (exactly one `[x]` per question), varied answer positions, spec-referenced explanations. A missing or malformed quiz is a warn finding (non-blocking).',
       '**Return a verdict** — APPROVED, NEEDS_REVISION, or BLOCKING_AMBIGUITY with prescriptive findings.',
     ],
     whenInvoked: [
@@ -1973,7 +1973,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Read the spec',
-        body: 'Read the full draft spec: files to change, implementation pattern, acceptance criteria, dimension coverage, and any comprehension quiz.',
+        body: 'Read the full draft spec: files to change, implementation pattern, acceptance criteria, dimension coverage, and the comprehension quiz (required final section; missing = warn finding).',
       },
       {
         title: 'Cross-check against code',
@@ -2139,7 +2139,21 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       '## Acceptance Criteria (functional + non-functional, each testable)',
       '## Out of Scope',
       '## Open Questions',
+      '## Comprehension Quiz (REQUIRED final section)',
       '```',
+      '',
+      'Presentation conventions (the Haive web renderer detects and upgrades these automatically):',
+      '- Comprehension Quiz: 3-5 questions in EXACTLY this GFM shape — `### Q1: <question text>`,',
+      '  then task-list options `- [ ] <wrong>` / `- [x] <correct>` (exactly one `[x]`, varied',
+      '  position across questions), then `> Explanation: <1-2 sentences citing the spec section',
+      '  that answers it>`. Questions test understanding of THIS change (goal, affected components,',
+      '  risks) — never trivia.',
+      '- Files-to-change overview: a GFM table.',
+      '- Diagrams: one or two small ```mermaid fenced blocks (<15 nodes) where component',
+      '  interaction or a new flow explains the change better than prose.',
+      '- Before/after comparisons: two ADJACENT fenced blocks with info-strings exactly `before`',
+      '  and `after` — rendered side-by-side.',
+      '- Long code excerpts: normal fenced blocks (auto-collapsed beyond ~12 lines).',
     ].join('\n'),
     qualityCriteria: [
       'Every modified file is explicitly listed with the precise change',
@@ -2148,6 +2162,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       'Review Dimensions Coverage is complete — every dimension addressed or marked N/A with a reason',
       'No code written — only what to write',
       'Every claim about existing code is grounded in a file read or a rag_search hit',
+      'Comprehension Quiz present as the final section: 3-5 questions, exactly one [x] each, varied correct positions, explanations citing spec sections',
     ],
     antiPatterns: [
       'Leave vague instructions like "improve the code"',
@@ -2155,6 +2170,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       'Write the spec without reviewing the discovery/mining findings',
       'Invent files, functions, or behavior not grounded in the codebase',
       'Write implementation code instead of specifying what to write',
+      'Omit the Comprehension Quiz, or write quiz questions about trivia instead of this change',
     ],
     kbReferences: {
       standards: 'CODING_STANDARDS.md',
