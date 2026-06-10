@@ -28,6 +28,36 @@ interface VerifyGateDetect {
     checklistMarkdown: string | null;
     skipped: boolean;
   } | null;
+  /** Phase 6 code review result (null when the step didn't run / no reviews). */
+  codeReview: {
+    peerVerdict: string;
+    securityVerdict: string;
+    blocking: boolean;
+    peerFindings: string[];
+    securityFindings: string[];
+    positives: string[];
+  } | null;
+}
+
+interface Phase8cOutput {
+  reviewed?: boolean;
+  blocking?: boolean;
+  peer?: {
+    verdict?: string;
+    findings?: { severity?: string; path?: string; lines?: string; issue?: string; fix?: string }[];
+    positives?: string[];
+  };
+  security?: {
+    verdict?: string;
+    findings?: {
+      severity?: string;
+      path?: string;
+      line?: string | number;
+      issue?: string;
+      attack?: string;
+      fix?: string;
+    }[];
+  };
 }
 
 interface Phase5aOutput {
@@ -150,6 +180,26 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       };
     }
 
+    // Phase 6 code review: peer + security verdicts, blocking on
+    // REQUEST_CHANGES / VULNERABLE / critical-high security findings.
+    const phase8c = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08c-code-review');
+    const pc = phase8c?.output as Phase8cOutput | null;
+    let codeReview: VerifyGateDetect['codeReview'] = null;
+    if (pc?.reviewed) {
+      codeReview = {
+        peerVerdict: pc.peer?.verdict ?? 'DISCUSS',
+        securityVerdict: pc.security?.verdict ?? 'NEEDS_FIXES',
+        blocking: pc.blocking === true,
+        peerFindings: (pc.peer?.findings ?? []).map((f) =>
+          `[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+        ),
+        securityFindings: (pc.security?.findings ?? []).map((f) =>
+          `[${f.severity ?? '?'}] ${f.path ?? ''}${f.line ? `:${f.line}` : ''} ${f.issue ?? ''}${f.attack ? ` (attack: ${f.attack})` : ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+        ),
+        positives: pc.peer?.positives ?? [],
+      };
+    }
+
     return {
       testResults: fmtResult('tests', output.test),
       lintResults: fmtResult('lint', output.lint),
@@ -158,6 +208,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       validation,
       testManagement,
       browser,
+      codeReview,
     };
   },
 
@@ -171,6 +222,11 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const browserLine = b
       ? `Browser testing (${b.method}): ${b.method === 'manual' ? 'checklist generated — verify below' : b.passed ? 'PASS' : 'FAIL'}${b.visualVerdict && b.visualVerdict !== 'SKIPPED' ? ` • visual ${b.visualVerdict}` : ''}`
       : '';
+    const cr = detected.codeReview;
+    const codeReviewOk = cr === null || !cr.blocking;
+    const codeReviewLine = cr
+      ? `Code review: peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.blocking ? ' — BLOCKING' : ''}`
+      : '';
     const summary = [
       detected.testResults,
       detected.lintResults,
@@ -183,6 +239,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         ? `Pre-test validation: ${v.verdict}${v.exhaustedBudget ? ' (fix budget exhausted)' : ''}`
         : '',
       browserLine,
+      codeReviewLine,
       detected.testManagement ? detected.testManagement.line : '',
     ]
       .filter(Boolean)
@@ -251,6 +308,31 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       });
     }
 
+    if (cr) {
+      const lines: string[] = [
+        `**Peer review:** ${cr.peerVerdict}`,
+        `**Security review:** ${cr.securityVerdict}`,
+      ];
+      if (cr.securityFindings.length > 0) {
+        lines.push('', '## Security findings');
+        for (const f of cr.securityFindings) lines.push(`- ${f}`);
+      }
+      if (cr.peerFindings.length > 0) {
+        lines.push('', '## Peer findings');
+        for (const f of cr.peerFindings) lines.push(`- ${f}`);
+      }
+      if (cr.positives.length > 0) {
+        lines.push('', '## Positives');
+        for (const p of cr.positives) lines.push(`- ${p}`);
+      }
+      infoSections.push({
+        title: 'Code review',
+        preview: `peer ${cr.peerVerdict} • security ${cr.securityVerdict}${cr.blocking ? ' • BLOCKING' : ''}`,
+        body: lines.join('\n'),
+        defaultOpen: cr.blocking,
+      });
+    }
+
     return {
       title: 'Gate 2: Verification approval',
       description: summary,
@@ -265,7 +347,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             { value: 'reject', label: 'Reject — iterate on the implementation' },
           ],
           default:
-            detected.allPassed && validationOk && testsOk && browserOk ? 'approve' : 'reject',
+            detected.allPassed && validationOk && testsOk && browserOk && codeReviewOk
+              ? 'approve'
+              : 'reject',
           required: true,
         },
         {

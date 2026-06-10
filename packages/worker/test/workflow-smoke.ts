@@ -358,6 +358,7 @@ async function main(): Promise<void> {
       '07b-phase-4-validate',
       '08-phase-5-verify',
       '08b-test-management',
+      '08c-code-review',
       '09-gate-2-verify-approval',
       '10-gate-3-commit',
       '11-phase-8-learning',
