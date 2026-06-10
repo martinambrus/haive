@@ -692,8 +692,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     // --- AI-fix phase (retry_ai recovery) ---
     // When retry_ai set a fix marker, run a diagnose-and-fix agent once, then
-    // re-run apply against the fixed workspace.
-    if (current.aiFixContext) {
+    // re-run apply against the fixed workspace. The DAG executor is exempt: it
+    // owns aiFixContext to resolve a merge conflict inside the integration
+    // worktree (the generic agent would run at the repo root and would also
+    // mis-consume a completed coder invocation). See resolveDagPhase.
+    if (current.aiFixContext && !stepDef.dagExecute) {
       const fixResult = await resolveAiFixPhase(db, stepDef, current, ctx, params);
       if (!fixResult.resolved) return fixResult.result;
       current = fixResult.current;

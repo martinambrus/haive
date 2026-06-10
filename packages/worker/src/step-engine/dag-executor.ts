@@ -8,8 +8,14 @@ import { resolveUserGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { loadPreviousStepOutput, pathExists } from './steps/onboarding/_helpers.js';
 import type { DagCoderContext, StepContext, StepDefinition } from './step-definition.js';
+import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
-import type { AdvanceStepParams, AdvanceStepResult, TaskStepRow } from './step-runner.js';
+import type {
+  AdvanceStepParams,
+  AdvanceStepResult,
+  TaskStepRow,
+  WorkerDeps,
+} from './step-runner.js';
 
 // Drives the persisted DAG (Phase 3) one dependency level per ADVANCE_STEP
 // re-entry. All decisions are a pure function of the task_dag_* rows so a crash
@@ -79,15 +85,25 @@ interface IntegrationWorktree {
   path: string;
   /** The feature branch issue branches fork from and merge into. */
   branch: string;
+  /** Sandbox cwd for the merge-conflict fix agent (the same worktree). */
+  sandboxPath: string;
 }
 
 async function loadIntegrationWorktree(db: Database, taskId: string): Promise<IntegrationWorktree> {
   const wt = await loadPreviousStepOutput(db, taskId, '01-worktree-setup');
-  const out = wt?.output as { worktreePath?: string; branchName?: string } | null;
+  const out = wt?.output as {
+    worktreePath?: string;
+    branchName?: string;
+    sandboxWorktreePath?: string;
+  } | null;
   if (!out?.worktreePath || !out.branchName) {
     throw new Error('06c-dag-execute requires 01-worktree-setup to have produced a worktree');
   }
-  return { path: out.worktreePath, branch: out.branchName };
+  return {
+    path: out.worktreePath,
+    branch: out.branchName,
+    sandboxPath: out.sandboxWorktreePath ?? out.worktreePath,
+  };
 }
 
 /** A sibling worktree dir + branch for one issue. Sibling (not nested) of the
@@ -237,37 +253,262 @@ async function commitIssueWork(
   }
 }
 
-/** Merge this level's issue branches into the integration branch (Slice 3:
- *  clean merges only; a conflict throws and fails the step — Slice 4 replaces
- *  this with held conflicts + retry_ai resolution). */
-async function mergeLevel(
-  db: Database,
-  integration: IntegrationWorktree,
-  issues: DagIssueRow[],
-  gitEnv: Record<string, string>,
-): Promise<void> {
-  for (const issue of issues) {
-    if (issue.outcome !== 'completed' && issue.outcome !== 'completed_with_debt') continue;
-    if (issue.mergeStatus === 'clean') continue;
-    if (!issue.branchName) continue;
+const MERGE_FIX_TIMEOUT_MS = 30 * 60 * 1000;
+
+interface LevelMergeState {
+  /** issueKey whose merge-fix agent is currently in flight (null = none). */
+  activeConflict: string | null;
+  fixInvocationId: string | null;
+  /** Per-issueKey count of LLM resolution attempts. */
+  conflictRetries: Record<string, number>;
+}
+
+function readMergeState(level: DagLevelRow): LevelMergeState {
+  const ms = (level.mergeState ?? null) as Partial<LevelMergeState> | null;
+  return {
+    activeConflict: ms?.activeConflict ?? null,
+    fixInvocationId: ms?.fixInvocationId ?? null,
+    conflictRetries: ms?.conflictRetries ?? {},
+  };
+}
+
+async function saveMergeState(db: Database, levelId: string, ms: LevelMergeState): Promise<void> {
+  await db
+    .update(schema.taskDagLevels)
+    .set({ mergeState: ms, phase: 'merging', updatedAt: new Date() })
+    .where(eq(schema.taskDagLevels.id, levelId));
+}
+
+async function clearAiFix(db: Database, stepRowId: string): Promise<void> {
+  await db
+    .update(schema.taskSteps)
+    .set({ aiFixContext: null, updatedAt: new Date() })
+    .where(eq(schema.taskSteps.id, stepRowId));
+}
+
+/** True once the live merge in the integration worktree is committed with no
+ *  unmerged paths (MERGE_HEAD gone). */
+async function mergeCommitted(integrationPath: string): Promise<boolean> {
+  const head = await gitRun(integrationPath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+  if (head.code === 0) return false; // merge still open (not committed)
+  const status = await gitRun(integrationPath, ['status', '--porcelain']);
+  const unmerged = status.stdout.split('\n').some((l) => /^(DD|AU|UD|UA|DU|AA|UU) /.test(l));
+  return !unmerged;
+}
+
+function mergeFixPrompt(issue: DagIssueRow): string {
+  return [
+    'A git merge conflict occurred while merging an implemented issue branch into the integration branch.',
+    'Your working directory is the integration worktree, MID-MERGE — the conflict markers are live in the files.',
+    `Conflicting branch: ${issue.branchName} (${issue.title}).`,
+    '',
+    "Resolve EVERY conflict correctly and semantically: combine both sides as the implementation intends; don't drop either side's work.",
+    'Then stage the resolved files (git add -A) and COMPLETE the merge (git commit --no-edit).',
+    'Do NOT run tests or any other commands. When the merge commit is created, stop.',
+  ].join('\n');
+}
+
+interface MergeArgs {
+  db: Database;
+  integration: IntegrationWorktree;
+  level: DagLevelRow;
+  issues: DagIssueRow[];
+  gitEnv: Record<string, string>;
+  current: TaskStepRow;
+  params: AdvanceStepParams;
+  stepDef: StepDefinition;
+  providers: CliProviderRecord[];
+  deps: WorkerDeps;
+  /** When true, conflicts auto-dispatch the fix agent + loop (bounded) instead
+   *  of halting for a manual "Retry with LLM". */
+  autoResolve: boolean;
+}
+
+/** Max auto-resolve attempts per conflicting branch before falling back to a
+ *  manual halt (so an unresolvable conflict can't loop forever / burn tokens). */
+const MAX_AUTO_CONFLICT_RETRIES = 4;
+
+async function haltConflicts(
+  m: MergeArgs,
+  conflicts: DagIssueRow[],
+  reason?: string,
+): Promise<{ status: 'halt'; row: TaskStepRow; error: string }> {
+  const branches = conflicts.map((c) => c.branchName ?? c.issueKey).join(', ');
+  const msg = reason
+    ? `Merge halted — ${reason}: ${branches}`
+    : `Merge halted — ${conflicts.length} branch(es) conflict. Resolve with "Retry with LLM": ${branches}`;
+  const row = await setStepStatus(m.db, m.current.id, {
+    status: 'failed',
+    errorMessage: msg,
+    endedAt: new Date(),
+  });
+  return { status: 'halt', row, error: msg };
+}
+
+/** Recreate the live conflict for `target` and dispatch one merge-fix agent into
+ *  the integration worktree. Returns 'waiting' (agent in flight) or 'halt' (no
+ *  provider). Shared by manual retry_ai and auto-resolve. */
+async function startConflictFix(
+  m: MergeArgs,
+  state: LevelMergeState,
+  target: DagIssueRow,
+): Promise<
+  { status: 'waiting'; row: TaskStepRow } | { status: 'halt'; row: TaskStepRow; error: string }
+> {
+  await gitRun(m.integration.path, ['merge', '--no-ff', '--no-edit', target.branchName!], m.gitEnv);
+  const invId = await dispatchMergeFixAgent(m, target);
+  if (!invId) {
+    await gitRun(m.integration.path, ['merge', '--abort']);
+    await clearAiFix(m.db, m.current.id);
+    return haltConflicts(m, [target], 'no CLI provider for merge resolution');
+  }
+  state.activeConflict = target.issueKey;
+  state.fixInvocationId = invId;
+  state.conflictRetries[target.issueKey] = (state.conflictRetries[target.issueKey] ?? 0) + 1;
+  await saveMergeState(m.db, m.level.id, state);
+  await clearAiFix(m.db, m.current.id);
+  const waiting = await setStepStatus(m.db, m.current.id, {
+    status: 'waiting_cli',
+    statusMessage: `Resolving merge conflict on ${target.issueKey} with AI…`,
+  });
+  return { status: 'waiting', row: waiting };
+}
+
+async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<string | null> {
+  const { db, params, stepDef, current, integration, providers, deps } = m;
+  const prompt = mergeFixPrompt(issue);
+  const preferred = await resolvePreferredCli(
+    db,
+    params.userId,
+    stepDef.metadata.id,
+    params.cliProviderId ?? null,
+    providers,
+    'default',
+  );
+  const plan = resolveDispatch({
+    providers,
+    preferredProviderId: preferred,
+    input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
+    invokeOpts: { cwd: integration.sandboxPath },
+  });
+  if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return null;
+  const inv = await db
+    .insert(schema.cliInvocations)
+    .values({
+      taskId: params.taskId,
+      taskStepId: current.id,
+      cliProviderId: plan.providerId,
+      mode: 'cli',
+      prompt,
+    })
+    .returning({ id: schema.cliInvocations.id });
+  const invId = inv[0]?.id;
+  if (!invId) return null;
+  await deps.enqueueCliInvocation({
+    invocationId: invId,
+    taskId: params.taskId,
+    taskStepId: current.id,
+    userId: params.userId,
+    cliProviderId: plan.providerId,
+    kind: 'cli',
+    spec: plan.invocation.spec,
+    timeoutMs: MERGE_FIX_TIMEOUT_MS,
+  });
+  return invId;
+}
+
+/** Merge a level's issue branches into the integration branch, git-first. Clean
+ *  branches merge and proceed; a conflicting branch is HELD (mergeStatus
+ *  'conflict') and the step halts until "Retry with LLM" (retry_ai) drives ONE
+ *  conflict's resolution per click via a fix agent in the integration worktree.
+ *  Returns 'ok' (all merged), 'waiting' (a fix agent is in flight), or 'halt'
+ *  (conflicts remain → step failed until the next retry). */
+async function runLevelMerge(
+  m: MergeArgs,
+): Promise<{ status: 'ok' | 'halt' | 'waiting'; row: TaskStepRow; error?: string }> {
+  const { db, integration, level, issues, gitEnv } = m;
+  const mergeable = issues.filter(
+    (i) =>
+      (i.outcome === 'completed' || i.outcome === 'completed_with_debt') && i.branchName !== null,
+  );
+  const state = readMergeState(level);
+
+  // 1. A fix agent is in flight — ingest its result.
+  if (state.fixInvocationId) {
+    const inv = await db.query.cliInvocations.findFirst({
+      where: eq(schema.cliInvocations.id, state.fixInvocationId),
+    });
+    if (!inv || inv.endedAt === null) return { status: 'waiting', row: m.current };
+    await db
+      .update(schema.cliInvocations)
+      .set({ consumedAt: new Date() })
+      .where(eq(schema.cliInvocations.id, inv.id));
+    const target = mergeable.find((i) => i.issueKey === state.activeConflict);
+    const committed = await mergeCommitted(integration.path);
+    if (target) {
+      if (committed) {
+        await db
+          .update(schema.taskDagIssues)
+          .set({ mergeStatus: 'resolved', mergedAt: new Date(), updatedAt: new Date() })
+          .where(eq(schema.taskDagIssues.id, target.id));
+        target.mergeStatus = 'resolved';
+      } else {
+        await gitRun(integration.path, ['merge', '--abort']);
+        // leave mergeStatus='conflict' for another retry
+      }
+    }
+    state.activeConflict = null;
+    state.fixInvocationId = null;
+    await saveMergeState(db, level.id, state);
+    await clearAiFix(db, m.current.id);
+    m.current = await setStepStatus(db, m.current.id, { status: 'running' });
+    // fall through to the merge pass + halt/ok decision
+  } else if (m.current.aiFixContext) {
+    // 2. retry_ai (manual) — dispatch a fix agent for the first held conflict.
+    const target = mergeable.find((i) => i.mergeStatus === 'conflict');
+    if (target) return startConflictFix(m, state, target);
+    await clearAiFix(db, m.current.id);
+  }
+
+  // 3. Merge pass: merge still-pending branches (mergeStatus null) in order.
+  for (const issue of mergeable) {
+    if (issue.mergeStatus !== null) continue; // clean | resolved | conflict already decided
     const merge = await gitRun(
       integration.path,
-      ['merge', '--no-ff', '--no-edit', issue.branchName],
+      ['merge', '--no-ff', '--no-edit', issue.branchName!],
       gitEnv,
     );
-    if (merge.code !== 0) {
+    if (merge.code === 0) {
+      await db
+        .update(schema.taskDagIssues)
+        .set({ mergeStatus: 'clean', mergedAt: new Date(), updatedAt: new Date() })
+        .where(eq(schema.taskDagIssues.id, issue.id));
+      issue.mergeStatus = 'clean';
+    } else {
       await gitRun(integration.path, ['merge', '--abort']);
-      throw new Error(
-        `merge conflict on ${issue.branchName} (conflict resolution lands in Slice 4): ${
-          merge.stderr || merge.stdout
-        }`.slice(0, 1500),
-      );
+      await db
+        .update(schema.taskDagIssues)
+        .set({ mergeStatus: 'conflict', updatedAt: new Date() })
+        .where(eq(schema.taskDagIssues.id, issue.id));
+      issue.mergeStatus = 'conflict';
     }
-    await db
-      .update(schema.taskDagIssues)
-      .set({ mergeStatus: 'clean', mergedAt: new Date(), updatedAt: new Date() })
-      .where(eq(schema.taskDagIssues.id, issue.id));
   }
+
+  // 4. Conflicts remain → auto-resolve (bounded) or halt for manual retry_ai.
+  const conflicts = mergeable.filter((i) => i.mergeStatus === 'conflict');
+  if (conflicts.length === 0) return { status: 'ok', row: m.current };
+  if (m.autoResolve) {
+    const target = conflicts.find(
+      (c) => (state.conflictRetries[c.issueKey] ?? 0) < MAX_AUTO_CONFLICT_RETRIES,
+    );
+    if (target) return startConflictFix(m, state, target);
+    return haltConflicts(
+      m,
+      conflicts,
+      `auto-resolution exhausted after ${MAX_AUTO_CONFLICT_RETRIES} attempts per branch`,
+    );
+  }
+  return haltConflicts(m, conflicts);
 }
 
 async function cleanupLevelWorktrees(ctx: StepContext, issues: DagIssueRow[]): Promise<void> {
@@ -526,18 +767,48 @@ export async function resolveDagPhase(
       return { resolved: false, result: { status: 'failed', row: updated, error: msg } };
     }
 
-    // (E) Commit each issue's work, then merge the branches into integration.
+    // (E) Commit each issue's work, then merge — git-first, conflicts held for
+    // "Retry with LLM" (the step halts until every branch merges).
     await ctx.emitProgress(`Merging level ${curLevel.level}…`);
     for (const issue of issues) {
-      if (issue.worktreePath) await commitIssueWork(ctx, issue.worktreePath, issue, gitEnv);
+      if (issue.worktreePath && issue.mergeStatus === null) {
+        await commitIssueWork(ctx, issue.worktreePath, issue, gitEnv);
+      }
     }
-    await mergeLevel(db, integration, issues, gitEnv);
+    const merge = await runLevelMerge({
+      db,
+      integration,
+      level: curLevel,
+      issues,
+      gitEnv,
+      current,
+      params,
+      stepDef,
+      providers,
+      deps,
+      autoResolve: plan.autoResolveConflicts,
+    });
+    if (merge.status === 'waiting') {
+      return { resolved: false, result: { status: 'waiting_cli', row: merge.row } };
+    }
+    if (merge.status === 'halt') {
+      return {
+        resolved: false,
+        result: { status: 'failed', row: merge.row, error: merge.error ?? 'merge halted' },
+      };
+    }
+    current = merge.row;
 
     // (F) Cleanup worktrees + checkpoint, then advance to the next level.
     await cleanupLevelWorktrees(ctx, issues);
     await db
       .update(schema.taskDagLevels)
-      .set({ phase: 'checkpointed', checkpointedAt: new Date(), updatedAt: new Date() })
+      .set({
+        phase: 'checkpointed',
+        checkpointedAt: new Date(),
+        mergeState: null,
+        updatedAt: new Date(),
+      })
       .where(eq(schema.taskDagLevels.id, curLevel.id));
     ctx.logger.info({ level: curLevel.level, planId: plan.id }, 'dag level checkpointed');
   }

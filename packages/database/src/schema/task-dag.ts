@@ -4,6 +4,7 @@ import {
   text,
   varchar,
   integer,
+  boolean,
   jsonb,
   timestamp,
   uniqueIndex,
@@ -67,6 +68,10 @@ export const taskDagPlans = pgTable(
     planJson: jsonb('plan_json').$type<unknown>(),
     /** Bumped each time the gate's "Modify Plan" re-runs the planner. */
     replanCount: integer('replan_count').notNull().default(0),
+    /** When true, 06c auto-dispatches the LLM merge-fix agent for every
+     *  conflicting branch and loops (bounded) until all merge — instead of
+     *  halting for a manual "Retry with LLM". Chosen at the 2c gate. */
+    autoResolveConflicts: boolean('auto_resolve_conflicts').notNull().default(false),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },

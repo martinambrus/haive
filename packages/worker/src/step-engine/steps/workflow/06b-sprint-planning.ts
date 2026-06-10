@@ -157,6 +157,7 @@ async function persistPlan(
   ctx: StepContext,
   plan: SprintPlan,
   mode: 'single' | 'dag',
+  autoResolve: boolean,
 ): Promise<string> {
   await ctx.db
     .delete(schema.taskDagPlans)
@@ -171,6 +172,7 @@ async function persistPlan(
       maxParallel: plan.max_parallel,
       levels: plan.levels,
       planJson: plan,
+      autoResolveConflicts: autoResolve,
     })
     .returning({ id: schema.taskDagPlans.id });
   const row = inserted[0];
@@ -303,6 +305,13 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
           default: 'proceed',
           required: true,
         },
+        {
+          type: 'checkbox',
+          id: 'autoResolveConflicts',
+          label:
+            'Auto-resolve merge conflicts with AI — run uninterrupted, do not pause for manual resolution',
+          default: false,
+        },
       ],
       submitLabel: 'Confirm plan',
     };
@@ -310,8 +319,12 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
 
   async apply(ctx, args): Promise<SprintPlanningApply> {
     const plan = parseSprintPlan(args.llmOutput ?? null);
-    const values = (args.formValues ?? {}) as { decision?: string };
+    const values = (args.formValues ?? {}) as {
+      decision?: string;
+      autoResolveConflicts?: boolean;
+    };
     const overrideSingle = values.decision === 'use_single_agent';
+    const autoResolve = values.autoResolveConflicts === true;
     const mode: 'single' | 'dag' =
       plan.mode === 'dag' && !overrideSingle && plan.issues.length > 0 ? 'dag' : 'single';
 
@@ -321,7 +334,7 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
     let issueCount = 0;
     let levelCount = 0;
     if (mode === 'dag') {
-      planId = await persistPlan(ctx, plan, mode);
+      planId = await persistPlan(ctx, plan, mode, autoResolve);
       const counts = await fanOutDag(ctx, planId, plan);
       issueCount = counts.issueCount;
       levelCount = counts.levelCount;
