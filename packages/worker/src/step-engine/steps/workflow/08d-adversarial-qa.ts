@@ -11,6 +11,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { extractFencedJson } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput } from './_task-meta.js';
+import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 
 // Phase 7 — Adversarial QA (legacy phase7-adversarial-qa.md). Opt-in per task
 // (tasks.adversarial_qa_level: poc|standard|enterprise). After code review and
@@ -178,6 +179,8 @@ function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
     '',
     '=== Spec (the intended behavior) ===',
     d.spec || '(no spec recorded)',
+    '',
+    INSIGHTS_INSTRUCTION,
   ]
     .filter(Boolean)
     .join('\n');

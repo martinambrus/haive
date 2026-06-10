@@ -2,6 +2,7 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { extractFencedJson } from '../_fenced-json.js';
+import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 
 interface ImplementDetect {
   specSummary: string;
@@ -193,6 +194,8 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         '',
         '=== Spec ===',
         detected.spec || '(empty spec — default to minimal safe change)',
+        '',
+        INSIGHTS_INSTRUCTION,
       ].join('\n');
     },
   },

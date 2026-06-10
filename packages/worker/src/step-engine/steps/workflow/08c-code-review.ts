@@ -10,6 +10,7 @@ import type {
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { extractFencedJson } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
+import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 
 // Phase 6 — Code review (legacy phase6-code-review.md). After test management
 // and before gate 2, two reviewers run IN PARALLEL via agent mining: a
@@ -189,6 +190,8 @@ function reviewAssignment(d: CodeReviewDetect): string {
     '',
     '=== Spec (what the change must deliver) ===',
     d.spec || '(no spec recorded)',
+    '',
+    INSIGHTS_INSTRUCTION,
   ]
     .filter(Boolean)
     .join('\n');

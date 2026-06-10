@@ -5,6 +5,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { extractFencedJson } from '../_fenced-json.js';
+import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 
 interface KbReference {
   id: string;
@@ -230,6 +231,8 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
           : []),
         '',
         `Relevant KB ids: ${detected.relevantKbIds.join(', ') || '(none)'}`,
+        '',
+        INSIGHTS_INSTRUCTION,
       ].join('\n');
     },
   },
