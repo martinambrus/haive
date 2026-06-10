@@ -252,7 +252,13 @@ export default function TaskDetailPage() {
 
   // The single step (if any) currently blocked on user input. Its focused-and-
   // visible time is tracked as "user active time"; everything else pauses.
-  const activeWaitingStep = steps.find((s) => s.status === 'waiting_form') ?? null;
+  // A terminal task can leave a step parked in waiting_form (e.g. cancelled
+  // mid-gate) — nothing waits on the user anymore, so don't count or post.
+  const taskEnded =
+    task?.status === 'completed' || task?.status === 'failed' || task?.status === 'cancelled';
+  const activeWaitingStep = taskEnded
+    ? null
+    : (steps.find((s) => s.status === 'waiting_form') ?? null);
   const userActive = useUserActiveTimer(
     id,
     activeWaitingStep?.stepId ?? null,
@@ -461,6 +467,15 @@ export default function TaskDetailPage() {
   // task-level retry only when nothing is marked failed (e.g. an orchestrator-
   // level failure before any step ran).
   const failedStep = steps.find((s) => s.status === 'failed');
+  // The step the run is currently parked on — the only card that offers the
+  // auto-continue checkbox (passed steps can't be auto-continued anymore).
+  const currentStep = steps.find(
+    (s) =>
+      s.status === 'waiting_form' ||
+      s.status === 'running' ||
+      s.status === 'waiting_cli' ||
+      s.status === 'failed',
+  );
 
   return (
     <div className="flex flex-col gap-6">
@@ -569,10 +584,13 @@ export default function TaskDetailPage() {
           )}
           {steps.map((step) => (
             <div key={step.id} data-step-id={step.stepId}>
+              {/* currentStep: the step the run is parked on — auto-continue is
+                  only offered there; passed steps can't be auto-continued. */}
               <StepCard
                 step={step}
                 taskId={task.id}
                 taskStatus={task.status}
+                taskCompletedAt={task.completedAt}
                 taskRepositoryId={task.repositoryId}
                 userActiveDisplayMs={
                   userActive.activeStepId === step.stepId ? userActive.displayMs : step.userActiveMs
@@ -597,6 +615,7 @@ export default function TaskDetailPage() {
                 }
                 autoContinue={task.autoContinue}
                 autoContinueBusy={autoContinueBusy}
+                showAutoContinue={step.id === currentStep?.id}
                 onToggleAutoContinue={() => void toggleAutoContinue()}
               />
             </div>
@@ -758,6 +777,8 @@ interface StepCardProps {
   step: TaskStep;
   taskId: string;
   taskStatus: TaskStatus;
+  /** Caps step timers when the task ended without the step itself ending. */
+  taskCompletedAt: string | null;
   taskRepositoryId: string | null;
   /** Live display total of this step's user-active time (committed + pending
    *  for the active step; the plain server value for the rest). */
@@ -775,10 +796,11 @@ interface StepCardProps {
   cliBusy: boolean;
   cliError: string | null;
   onChangeCli: (cliProviderId: string | null, role?: string) => Promise<void>;
-  /** Task-level auto-continue flag, shown as a checkbox on every step card so
-   *  it can be flipped at any point in the run. */
+  /** Task-level auto-continue flag, shown as a checkbox on the CURRENT step
+   *  card only (passed steps can't be auto-continued anymore). */
   autoContinue: boolean;
   autoContinueBusy: boolean;
+  showAutoContinue: boolean;
   onToggleAutoContinue: () => void;
 }
 
@@ -905,20 +927,25 @@ function useUserActiveTimer(
 // subtracted live, which freezes the displayed value; it resumes ticking once
 // the form is submitted. Fixed once the step ends, nothing before it starts.
 // Only the in-progress card re-renders each second via its own interval.
+// A cancelled/failed task can leave its open step without endedAt — the task's
+// completedAt then caps the timer so it stops ticking.
 function StepDuration({
   startedAt,
   endedAt,
   idleMs,
   waitingStartedAt,
   status,
+  taskCompletedAt,
 }: {
   startedAt: string | null;
   endedAt: string | null;
   idleMs: number;
   waitingStartedAt: string | null;
   status: StepStatus;
+  taskCompletedAt: string | null;
 }) {
-  const ticking = !!startedAt && !endedAt;
+  const stepEndedAt = endedAt ?? taskCompletedAt;
+  const ticking = !!startedAt && !stepEndedAt;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!ticking) return;
@@ -927,19 +954,19 @@ function StepDuration({
   }, [ticking]);
   if (!startedAt) return null;
   const start = new Date(startedAt).getTime();
-  const end = endedAt ? new Date(endedAt).getTime() : now;
+  const end = stepEndedAt ? new Date(stepEndedAt).getTime() : now;
   const openWaitMs =
-    !endedAt && status === 'waiting_form' && waitingStartedAt
+    !stepEndedAt && status === 'waiting_form' && waitingStartedAt
       ? Math.max(0, now - new Date(waitingStartedAt).getTime())
       : 0;
   const workMs = Math.max(0, end - start - idleMs - openWaitMs);
-  const waiting = !endedAt && status === 'waiting_form';
-  const color = endedAt ? 'text-neutral-500' : waiting ? 'text-amber-300' : 'text-indigo-300';
+  const waiting = !stepEndedAt && status === 'waiting_form';
+  const color = stepEndedAt ? 'text-neutral-500' : waiting ? 'text-amber-300' : 'text-indigo-300';
   return (
     <span
       className={`font-mono text-xs ${color}`}
       title={
-        endedAt
+        stepEndedAt
           ? 'Active work time'
           : waiting
             ? 'Work time (paused — waiting for input)'
@@ -1054,6 +1081,7 @@ function StepCard({
   step,
   taskId,
   taskStatus,
+  taskCompletedAt,
   taskRepositoryId,
   userActiveDisplayMs,
   submitting,
@@ -1070,6 +1098,7 @@ function StepCard({
   onChangeCli,
   autoContinue,
   autoContinueBusy,
+  showAutoContinue,
   onToggleAutoContinue,
 }: StepCardProps) {
   const [showOutput, setShowOutput] = useState(false);
@@ -1224,66 +1253,72 @@ function StepCard({
 
   return (
     <Card className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-neutral-800 pb-3">
-        {showCliPicker &&
-          (step.cliRoles && step.cliRoles.length > 0 ? (
-            // Multi-CLI step (e.g. spec-quality): one dropdown per role.
-            step.cliRoles.map((roleDesc) => (
-              <div key={roleDesc.id} className="flex items-center gap-2">
-                <label
-                  htmlFor={`${cliPickerId}-${roleDesc.id}`}
-                  className="text-xs font-medium text-neutral-400"
-                >
-                  {roleDesc.label}
+      {(showCliPicker || showAutoContinue) && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-neutral-800 pb-3">
+          {showCliPicker &&
+            (step.cliRoles && step.cliRoles.length > 0 ? (
+              // Multi-CLI step (e.g. spec-quality): one dropdown per role.
+              step.cliRoles.map((roleDesc) => (
+                <div key={roleDesc.id} className="flex items-center gap-2">
+                  <label
+                    htmlFor={`${cliPickerId}-${roleDesc.id}`}
+                    className="text-xs font-medium text-neutral-400"
+                  >
+                    {roleDesc.label}
+                  </label>
+                  <select
+                    id={`${cliPickerId}-${roleDesc.id}`}
+                    disabled={cliLocked || cliBusy}
+                    value={step.cliRoleProviders?.[roleDesc.id] ?? taskCliProviderId ?? ''}
+                    onChange={(e) => void onChangeCli(e.target.value || null, roleDesc.id)}
+                    className={cliSelectClass}
+                  >
+                    {cliOptions}
+                  </select>
+                </div>
+              ))
+            ) : (
+              <>
+                <label htmlFor={cliPickerId} className="text-xs font-medium text-neutral-400">
+                  CLI
                 </label>
                 <select
-                  id={`${cliPickerId}-${roleDesc.id}`}
+                  id={cliPickerId}
                   disabled={cliLocked || cliBusy}
-                  value={step.cliRoleProviders?.[roleDesc.id] ?? taskCliProviderId ?? ''}
-                  onChange={(e) => void onChangeCli(e.target.value || null, roleDesc.id)}
-                  className={cliSelectClass}
+                  value={effectiveCliProviderId}
+                  onChange={(e) => void onChangeCli(e.target.value || null)}
+                  className={`${cliSelectClass} flex-1`}
                 >
                   {cliOptions}
                 </select>
-              </div>
-            ))
-          ) : (
-            <>
-              <label htmlFor={cliPickerId} className="text-xs font-medium text-neutral-400">
-                CLI
-              </label>
-              <select
-                id={cliPickerId}
-                disabled={cliLocked || cliBusy}
-                value={effectiveCliProviderId}
-                onChange={(e) => void onChangeCli(e.target.value || null)}
-                className={`${cliSelectClass} flex-1`}
-              >
-                {cliOptions}
-              </select>
-            </>
-          ))}
-        {showCliPicker && cliLocked && (
-          <span className="text-[11px] text-neutral-500">locked while step running</span>
-        )}
-        {showCliPicker && cliBusy && (
-          <span className="text-[11px] text-neutral-500">saving...</span>
-        )}
-        {showCliPicker && cliError && <span className="text-[11px] text-red-400">{cliError}</span>}
-        <label
-          className="ml-auto flex cursor-pointer items-center gap-1.5 text-xs text-neutral-300"
-          title="Auto-submit info-only steps and the Gate 1 run configuration so the workflow runs hands-free between gates. Untick to confirm every step with a Continue button. Task-wide; applies from the next step decision."
-        >
-          <input
-            type="checkbox"
-            checked={autoContinue}
-            disabled={autoContinueBusy}
-            onChange={onToggleAutoContinue}
-            className="h-3.5 w-3.5 rounded border-neutral-700 bg-neutral-950"
-          />
-          Auto-continue
-        </label>
-      </div>
+              </>
+            ))}
+          {showCliPicker && cliLocked && (
+            <span className="text-[11px] text-neutral-500">locked while step running</span>
+          )}
+          {showCliPicker && cliBusy && (
+            <span className="text-[11px] text-neutral-500">saving...</span>
+          )}
+          {showCliPicker && cliError && (
+            <span className="text-[11px] text-red-400">{cliError}</span>
+          )}
+          {showAutoContinue && (
+            <label
+              className="ml-auto flex cursor-pointer items-center gap-1.5 text-xs text-neutral-300"
+              title="Auto-submit info-only steps and the Gate 1 run configuration so the workflow runs hands-free between gates. Untick to confirm every step with a Continue button. Task-wide; applies from the next step decision."
+            >
+              <input
+                type="checkbox"
+                checked={autoContinue}
+                disabled={autoContinueBusy}
+                onChange={onToggleAutoContinue}
+                className="h-3.5 w-3.5 rounded border-neutral-700 bg-neutral-950"
+              />
+              Auto-continue
+            </label>
+          )}
+        </div>
+      )}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="font-mono text-xs text-neutral-500">#{step.stepIndex}</span>
@@ -1295,6 +1330,7 @@ function StepCard({
             idleMs={step.idleMs}
             waitingStartedAt={step.waitingStartedAt}
             status={step.status}
+            taskCompletedAt={taskCompletedAt}
           />
           <UserActiveDuration ms={userActiveDisplayMs} />
           {step.iterationCount > 0 && (
