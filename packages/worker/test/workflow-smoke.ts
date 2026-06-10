@@ -350,6 +350,7 @@ async function main(): Promise<void> {
       '06-gate-1-spec-approval',
       '07-phase-2-implement',
       '07a-code-simplify',
+      '07b-phase-4-validate',
       '08-phase-5-verify',
       '09-gate-2-verify-approval',
       '10-gate-3-commit',

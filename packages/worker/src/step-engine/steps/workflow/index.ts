@@ -14,6 +14,7 @@ import { sprintPlanningStep } from './06b-sprint-planning.js';
 import { dagExecuteStep } from './06c-dag-execute.js';
 import { phase2ImplementStep } from './07-phase-2-implement.js';
 import { codeSimplifyStep } from './07a-code-simplify.js';
+import { phase4ValidateStep } from './07b-phase-4-validate.js';
 import { phase5VerifyStep } from './08-phase-5-verify.js';
 import { browserVerifyStep } from './08a-browser-verify.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
@@ -37,6 +38,7 @@ export {
   dagExecuteStep,
   phase2ImplementStep,
   codeSimplifyStep,
+  phase4ValidateStep,
   phase5VerifyStep,
   browserVerifyStep,
   gate2VerifyApprovalStep,
@@ -61,6 +63,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(dagExecuteStep);
   registry.register(phase2ImplementStep);
   registry.register(codeSimplifyStep);
+  registry.register(phase4ValidateStep);
   registry.register(phase5VerifyStep);
   registry.register(browserVerifyStep);
   registry.register(gate2VerifyApprovalStep);

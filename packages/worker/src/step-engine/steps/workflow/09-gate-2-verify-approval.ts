@@ -1,4 +1,4 @@
-import type { FormSchema } from '@haive/shared';
+import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 
@@ -7,6 +7,25 @@ interface VerifyGateDetect {
   lintResults: string;
   typecheckResults: string;
   allPassed: boolean;
+  /** Phase 4 pre-test validation result (null when the step didn't run). */
+  validation: {
+    verdict: string;
+    summary: string;
+    openIssues: string[];
+    failedDimensions: string[];
+    fixesApplied: number;
+    exhaustedBudget: boolean;
+    report: string;
+  } | null;
+}
+
+interface Phase4Output {
+  verdict?: string;
+  summary?: string;
+  issues?: { severity?: string; file?: string; description?: string; fix?: string }[];
+  dimensions?: { name?: string; status?: string; note?: string }[];
+  fixesApplied?: string[];
+  report?: string;
 }
 
 interface VerifyGateApply {
@@ -42,15 +61,41 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
   async detect(ctx: StepContext): Promise<VerifyGateDetect> {
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08-phase-5-verify');
     const output = (prev?.output as VerifyOutput | null) ?? {};
+
+    // Phase 4 pre-test validation: surface the verdict (the legacy "escalate to
+    // user" lands here — exhausted budget / open issues / unparseable output).
+    const phase4 = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07b-phase-4-validate');
+    const p4 = phase4?.output as Phase4Output | null;
+    let validation: VerifyGateDetect['validation'] = null;
+    if (p4?.verdict) {
+      const iterations = (phase4?.iterations ?? []) as { exhaustedBudget?: boolean }[];
+      validation = {
+        verdict: p4.verdict,
+        summary: p4.summary ?? '',
+        openIssues: (p4.issues ?? []).map((i) =>
+          `[${i.severity ?? 'unspecified'}] ${i.file ?? ''} ${i.description ?? ''}`.trim(),
+        ),
+        failedDimensions: (p4.dimensions ?? [])
+          .filter((d) => d.status === 'FAIL')
+          .map((d) => `${d.name}${d.note ? `: ${d.note}` : ''}`),
+        fixesApplied: (p4.fixesApplied ?? []).length,
+        exhaustedBudget: iterations.some((e) => e.exhaustedBudget === true),
+        report: (p4.report ?? '').slice(0, 8000),
+      };
+    }
+
     return {
       testResults: fmtResult('tests', output.test),
       lintResults: fmtResult('lint', output.lint),
       typecheckResults: fmtResult('typecheck', output.typecheck),
       allPassed: output.passed === true,
+      validation,
     };
   },
 
   form(_ctx, detected): FormSchema {
+    const v = detected.validation;
+    const validationOk = v === null || v.verdict === 'VALID';
     const summary = [
       detected.testResults,
       detected.lintResults,
@@ -59,10 +104,55 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       detected.allPassed
         ? 'All verification checks passed.'
         : 'One or more verification checks failed.',
-    ].join('\n');
+      v
+        ? `Pre-test validation: ${v.verdict}${v.exhaustedBudget ? ' (fix budget exhausted)' : ''}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const infoSections: InfoSection[] = [];
+    if (v) {
+      const lines: string[] = [`**Verdict:** ${v.verdict}`];
+      if (v.summary) lines.push('', v.summary);
+      if (v.fixesApplied > 0)
+        lines.push('', `**Fixes applied by the fix loop:** ${v.fixesApplied}`);
+      if (v.exhaustedBudget) {
+        lines.push(
+          '',
+          '> ⚠️ **Fix budget exhausted** — the validator still reported issues on its final pass.',
+          '> Review the open issues below before approving.',
+        );
+      }
+      if (v.verdict === 'UNPARSEABLE') {
+        lines.push(
+          '',
+          "> ⚠️ The validator's output could not be parsed — review the report excerpt below.",
+        );
+      }
+      if (v.failedDimensions.length > 0) {
+        lines.push('', '## Failed review dimensions');
+        for (const d of v.failedDimensions) lines.push(`- ${d}`);
+      }
+      if (v.openIssues.length > 0) {
+        lines.push('', '## Open issues');
+        for (const i of v.openIssues) lines.push(`- ${i}`);
+      }
+      if (v.report) {
+        lines.push('', '## Validator report (excerpt)', '', v.report);
+      }
+      infoSections.push({
+        title: 'Pre-test validation',
+        preview: v.verdict + (v.exhaustedBudget ? ' • budget exhausted' : ''),
+        body: lines.join('\n'),
+        defaultOpen: !validationOk,
+      });
+    }
+
     return {
       title: 'Gate 2: Verification approval',
       description: summary,
+      ...(infoSections.length > 0 ? { infoSections } : {}),
       fields: [
         {
           type: 'radio',
@@ -72,7 +162,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             { value: 'approve', label: 'Approve — proceed to commit gate' },
             { value: 'reject', label: 'Reject — iterate on the implementation' },
           ],
-          default: detected.allPassed ? 'approve' : 'reject',
+          default: detected.allPassed && validationOk ? 'approve' : 'reject',
           required: true,
         },
         {

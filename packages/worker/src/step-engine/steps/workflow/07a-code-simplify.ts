@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -7,6 +5,7 @@ import { STEP_CLI_ROLES } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { extractFencedJson } from '../_fenced-json.js';
+import { collectImplementationFiles } from './_impl-changes.js';
 
 // Phase 3.5 — Code simplification (legacy phase3_5-code-simplification.md). A
 // simplifier agent reviews the just-implemented code in the integration worktree
@@ -17,8 +16,6 @@ import { extractFencedJson } from '../_fenced-json.js';
 // "plugin installed" gate — Haive has no user-scope plugin registry). Agents
 // edit files only (git is unavailable in the sandbox); 10-gate-3-commit picks
 // the edits up via `git add -A` later.
-
-const exec = promisify(execFile);
 
 const ROLE_SIMPLIFIER = 'simplifier';
 const ROLE_FIXUP = 'fixup';
@@ -86,20 +83,6 @@ export function parseFixupOutput(raw: unknown): { fixesNeeded: boolean; fixesMad
   const parsed = fixupOutputSchema.safeParse(fencedCandidate(raw));
   if (!parsed.success) return { fixesNeeded: false, fixesMade: [] };
   return { fixesNeeded: parsed.data.fixes_needed, fixesMade: parsed.data.fixes_made };
-}
-
-async function dirtyWorktreeFiles(worktreePath: string): Promise<string[]> {
-  try {
-    const { stdout } = await exec('git', ['status', '--porcelain'], { cwd: worktreePath });
-    return stdout
-      .toString()
-      .split('\n')
-      .map((l) => l.slice(3).trim())
-      .filter(Boolean)
-      .map((name) => (name.includes(' -> ') ? name.split(' -> ')[1]! : name));
-  } catch {
-    return [];
-  }
 }
 
 /** The pass-0 simplifier result carried into the fixup pass / final output. */
@@ -213,28 +196,11 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
         (plan?.output as { spec?: string } | null)?.spec) ||
       '';
 
-    // Files the implementation touched: single-agent output, else the DAG union.
-    const files = new Set<string>();
-    const implement = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-phase-2-implement');
-    const touched = (implement?.output as { filesTouched?: string[] } | null)?.filesTouched;
-    for (const f of touched ?? []) files.add(f);
-    if (files.size === 0) {
-      const issues = await ctx.db
-        .select({ filesModified: schema.taskDagIssues.filesModified })
-        .from(schema.taskDagIssues)
-        .where(eq(schema.taskDagIssues.taskId, ctx.taskId));
-      for (const row of issues) {
-        for (const f of (row.filesModified ?? []) as string[]) files.add(f);
-      }
-    }
-    // Single-agent work is still uncommitted at this point — pick it up from git.
-    for (const f of await dirtyWorktreeFiles(wt.worktreePath)) files.add(f);
-
     return {
       worktreePath: wt.worktreePath,
       sandboxWorktreePath: wt.sandboxWorktreePath,
       spec,
-      implementationFiles: [...files].slice(0, 100),
+      implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
     };
   },
 
