@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { dagIssueResultSchema } from '@haive/shared';
+import { dagIssueResultSchema, reviewerOutputSchema, type ReviewerOutput } from '@haive/shared';
+import type { StepCapability } from '@haive/shared';
 import { resolveDispatch } from '../orchestrator/dispatcher.js';
 import { resolveUserGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
@@ -322,6 +323,9 @@ interface MergeArgs {
   /** When true, conflicts auto-dispatch the fix agent + loop (bounded) instead
    *  of halting for a manual "Retry with LLM". */
   autoResolve: boolean;
+  /** When true, an issue is mergeable only after review resolved it (approved /
+   *  completed_with_debt); otherwise the coder outcome gates the merge. */
+  reviewEnabled: boolean;
 }
 
 /** Max auto-resolve attempts per conflicting branch before falling back to a
@@ -427,10 +431,12 @@ async function runLevelMerge(
   m: MergeArgs,
 ): Promise<{ status: 'ok' | 'halt' | 'waiting'; row: TaskStepRow; error?: string }> {
   const { db, integration, level, issues, gitEnv } = m;
-  const mergeable = issues.filter(
-    (i) =>
-      (i.outcome === 'completed' || i.outcome === 'completed_with_debt') && i.branchName !== null,
-  );
+  const mergeable = issues.filter((i) => {
+    if (i.branchName === null) return false;
+    return m.reviewEnabled
+      ? i.resolution === 'approved' || i.resolution === 'completed_with_debt'
+      : i.outcome === 'completed' || i.outcome === 'completed_with_debt';
+  });
   const state = readMergeState(level);
 
   // 1. A fix agent is in flight — ingest its result.
@@ -518,6 +524,269 @@ async function cleanupLevelWorktrees(ctx: StepContext, issues: DagIssueRow[]): P
   }
 }
 
+// --- Inner review loop (coder <-> reviewer, per issue) --------------------
+
+const REVIEW_TIMEOUT_MS = 30 * 60 * 1000;
+const MAX_REVIEW_ITERS = 5;
+const STUCK_LIMIT = 3;
+
+interface ReviewArgs {
+  db: Database;
+  issues: DagIssueRow[];
+  level: DagLevelRow;
+  current: TaskStepRow;
+  params: AdvanceStepParams;
+  stepDef: StepDefinition;
+  providers: CliProviderRecord[];
+  deps: WorkerDeps;
+  taskId: string;
+}
+
+function reviewerPrompt(issue: DagIssueRow): string {
+  const criteria = (issue.acceptanceCriteria ?? []) as string[];
+  return [
+    `You are reviewing the implementation of ${issue.issueKey}: ${issue.title}`,
+    'Your working directory is the issue worktree containing the implementation.',
+    'Review it as a senior engineer would before merge; verify each acceptance criterion against the code.',
+    criteria.length > 0 ? `Acceptance criteria:\n- ${criteria.join('\n- ')}` : '',
+    '',
+    'Emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
+    '{ "verdict": "approve|fix_required|block", "criteria_results": [{ "criterion": "...", "passed": true, "note": "" }], "issues": [{ "severity": "high|medium|low", "file": "path", "description": "...", "suggestion": "..." }] }',
+    'approve = ready to merge. fix_required = non-blocking issues a fix coder can address. block = a fundamental problem that cannot be approved.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function fixCoderPrompt(issue: DagIssueRow, reviewIssues: unknown[]): string {
+  return [
+    `You are addressing reviewer findings for ${issue.issueKey}: ${issue.title}`,
+    'Your working directory is the issue worktree. Validate each finding against the actual code and fix the real ones by editing files; ignore findings that are wrong or out of scope. Match the existing style.',
+    `Reviewer findings:\n${JSON.stringify(reviewIssues).slice(0, 4000)}`,
+    '',
+    'When done, emit ONE JSON object inside a ```json fenced code block:',
+    `{ "issue_id": "${issue.issueKey}", "outcome": "completed|completed_with_debt|failed_unrecoverable", "files_modified": [], "debt_items": [], "concerns": "" }`,
+  ].join('\n');
+}
+
+function parseReviewerOutput(inv: typeof schema.cliInvocations.$inferSelect): ReviewerOutput {
+  let candidate: unknown =
+    inv.parsedOutput && typeof inv.parsedOutput === 'object' ? inv.parsedOutput : null;
+  if (!candidate && typeof inv.rawOutput === 'string') {
+    const body = extractFencedJson(inv.rawOutput);
+    candidate = body ? safeJsonParse(body) : null;
+  }
+  const parsed = reviewerOutputSchema.safeParse(candidate);
+  // Unparseable reviewer output → approve (don't block the pipeline on a parse miss).
+  return parsed.success ? parsed.data : { verdict: 'approve', criteria_results: [], issues: [] };
+}
+
+/** Dispatch one review-loop agent (reviewer or fix-coder) into the issue
+ *  worktree, recording a dag_agent_runs row. Returns false if no provider. */
+async function spawnReviewAgent(
+  ra: ReviewArgs,
+  issue: DagIssueRow,
+  role: 'reviewer' | 'coder',
+  iteration: number,
+  prompt: string,
+  capabilities: StepCapability[],
+): Promise<boolean> {
+  const preferred = await resolvePreferredCli(
+    ra.db,
+    ra.params.userId,
+    ra.stepDef.metadata.id,
+    ra.params.cliProviderId ?? null,
+    ra.providers,
+    role === 'reviewer' ? 'reviewer' : 'coder',
+  );
+  const plan = resolveDispatch({
+    providers: ra.providers,
+    preferredProviderId: preferred,
+    input: { kind: 'prompt', prompt, capabilities },
+    invokeOpts: { cwd: issue.sandboxWorktreePath ?? undefined },
+  });
+  if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return false;
+  const inv = await ra.db
+    .insert(schema.cliInvocations)
+    .values({
+      taskId: ra.taskId,
+      taskStepId: ra.current.id,
+      cliProviderId: plan.providerId,
+      mode: 'cli',
+      prompt,
+    })
+    .returning({ id: schema.cliInvocations.id });
+  const invId = inv[0]?.id;
+  if (!invId) return false;
+  await ra.db.insert(schema.dagAgentRuns).values({
+    dagIssueId: issue.id,
+    taskId: ra.taskId,
+    role,
+    iteration,
+    status: 'running',
+    cliInvocationId: invId,
+    startedAt: new Date(),
+  });
+  await ra.deps.enqueueCliInvocation({
+    invocationId: invId,
+    taskId: ra.taskId,
+    taskStepId: ra.current.id,
+    userId: ra.params.userId,
+    cliProviderId: plan.providerId,
+    kind: 'cli',
+    spec: plan.invocation.spec,
+    timeoutMs: REVIEW_TIMEOUT_MS,
+  });
+  return true;
+}
+
+async function setResolution(
+  db: Database,
+  issue: DagIssueRow,
+  resolution: 'approved' | 'failed_unrecoverable',
+): Promise<void> {
+  await db
+    .update(schema.taskDagIssues)
+    .set({ resolution, reviewStatus: resolution, endedAt: new Date(), updatedAt: new Date() })
+    .where(eq(schema.taskDagIssues.id, issue.id));
+}
+
+async function acceptWithDebt(
+  db: Database,
+  issue: DagIssueRow,
+  reviewIssues: unknown[],
+): Promise<void> {
+  const existing = (issue.debtItems ?? []) as unknown[];
+  await db
+    .update(schema.taskDagIssues)
+    .set({
+      debtItems: [...existing, ...reviewIssues],
+      outcome: 'completed_with_debt',
+      resolution: 'completed_with_debt',
+      reviewStatus: 'completed_with_debt',
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.taskDagIssues.id, issue.id));
+}
+
+/** Fold one finished review-loop agent into the issue state, spawning the next
+ *  agent (a fix-coder after a reviewer's fix_required, or a re-review after a
+ *  fix-coder) until the issue resolves. */
+async function ingestReviewRun(
+  ra: ReviewArgs,
+  issue: DagIssueRow,
+  run: typeof schema.dagAgentRuns.$inferSelect,
+  inv: typeof schema.cliInvocations.$inferSelect,
+): Promise<void> {
+  await ra.db
+    .update(schema.dagAgentRuns)
+    .set({
+      status: 'done',
+      consumedAt: new Date(),
+      endedAt: new Date(),
+      rawOutput: inv.rawOutput ?? null,
+    })
+    .where(eq(schema.dagAgentRuns.id, run.id));
+
+  if (run.role === 'reviewer') {
+    const verdict = parseReviewerOutput(inv);
+    if (verdict.verdict === 'approve') return setResolution(ra.db, issue, 'approved');
+    if (verdict.verdict === 'block') return setResolution(ra.db, issue, 'failed_unrecoverable');
+    // fix_required
+    const newStuck = issue.stuckCount + 1;
+    const newIter = issue.innerIteration + 1;
+    if (newStuck >= STUCK_LIMIT) return acceptWithDebt(ra.db, issue, verdict.issues);
+    if (newIter >= MAX_REVIEW_ITERS) return setResolution(ra.db, issue, 'failed_unrecoverable');
+    await ra.db
+      .update(schema.taskDagIssues)
+      .set({
+        stuckCount: newStuck,
+        innerIteration: newIter,
+        reviewStatus: 'fix_required',
+        reviewerVerdict: verdict,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.taskDagIssues.id, issue.id));
+    const ok = await spawnReviewAgent(
+      ra,
+      issue,
+      'coder',
+      newIter,
+      fixCoderPrompt(issue, verdict.issues),
+      ['tool_use', 'file_write'],
+    );
+    if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
+    return;
+  }
+  // fix-coder finished → re-review.
+  const ok = await spawnReviewAgent(
+    ra,
+    issue,
+    'reviewer',
+    issue.innerIteration,
+    reviewerPrompt(issue),
+    ['tool_use'],
+  );
+  if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
+}
+
+/** Per-issue coder<->reviewer inner loop for a level. Returns 'ok' once every
+ *  reviewable issue has a resolution, else 'waiting' while agents are in flight.
+ *  A blocking verdict sets the issue's resolution to failed_unrecoverable;
+ *  resolveDagPhase decides what to do with that. */
+async function resolveReviewPhase(
+  ra: ReviewArgs,
+): Promise<{ status: 'ok' | 'waiting'; row: TaskStepRow }> {
+  const needReview = ra.issues.filter(
+    (i) =>
+      (i.outcome === 'completed' || i.outcome === 'completed_with_debt') && i.resolution === null,
+  );
+  if (needReview.length === 0) return { status: 'ok', row: ra.current };
+
+  for (const issue of needReview) {
+    const runs = await ra.db
+      .select()
+      .from(schema.dagAgentRuns)
+      .where(eq(schema.dagAgentRuns.dagIssueId, issue.id))
+      .orderBy(desc(schema.dagAgentRuns.createdAt))
+      .limit(1);
+    const latest = runs[0];
+    if (!latest) {
+      const ok = await spawnReviewAgent(ra, issue, 'reviewer', 0, reviewerPrompt(issue), [
+        'tool_use',
+      ]);
+      if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
+      continue;
+    }
+    if (latest.consumedAt || !latest.cliInvocationId) continue;
+    const inv = await ra.db.query.cliInvocations.findFirst({
+      where: eq(schema.cliInvocations.id, latest.cliInvocationId),
+    });
+    if (!inv || inv.endedAt === null) continue; // in flight
+    await ingestReviewRun(ra, issue, latest, inv);
+  }
+
+  const fresh = (await ra.db
+    .select()
+    .from(schema.taskDagIssues)
+    .where(
+      and(
+        eq(schema.taskDagIssues.dagPlanId, ra.level.dagPlanId),
+        eq(schema.taskDagIssues.level, ra.level.level),
+      ),
+    )) as DagIssueRow[];
+  const stillReviewing = fresh.filter(
+    (i) =>
+      (i.outcome === 'completed' || i.outcome === 'completed_with_debt') && i.resolution === null,
+  );
+  if (stillReviewing.length === 0) return { status: 'ok', row: ra.current };
+  const row = await setStepStatus(ra.db, ra.current.id, {
+    status: 'waiting_cli',
+    statusMessage: 'Reviewing implementations…',
+  });
+  return { status: 'waiting', row };
+}
+
 export async function resolveDagPhase(
   db: Database,
   stepDef: StepDefinition,
@@ -572,7 +841,7 @@ export async function resolveDagPhase(
       return { resolved: true, current };
     }
 
-    const issues = (await db
+    let issues = (await db
       .select()
       .from(schema.taskDagIssues)
       .where(
@@ -767,6 +1036,48 @@ export async function resolveDagPhase(
       return { resolved: false, result: { status: 'failed', row: updated, error: msg } };
     }
 
+    // (D.5) Inner review loop (coder<->reviewer) when enabled → per-issue
+    // resolution. A blocking verdict / exhausted budget fails the step (Slice 6
+    // will escalate to the issue-advisor/replanner instead).
+    if (plan.reviewEnabled) {
+      const review = await resolveReviewPhase({
+        db,
+        issues,
+        level: curLevel,
+        current,
+        params,
+        stepDef,
+        providers,
+        deps,
+        taskId: ctx.taskId,
+      });
+      if (review.status === 'waiting') {
+        return { resolved: false, result: { status: 'waiting_cli', row: review.row } };
+      }
+      current = review.row;
+      issues = (await db
+        .select()
+        .from(schema.taskDagIssues)
+        .where(
+          and(
+            eq(schema.taskDagIssues.dagPlanId, plan.id),
+            eq(schema.taskDagIssues.level, curLevel.level),
+          ),
+        )) as DagIssueRow[];
+      const reviewFailed = issues.filter((i) => i.resolution === 'failed_unrecoverable');
+      if (reviewFailed.length > 0) {
+        const msg = `DAG level ${curLevel.level} review blocked: ${reviewFailed
+          .map((f) => f.issueKey)
+          .join(', ')}`;
+        const updated = await setStepStatus(db, current.id, {
+          status: 'failed',
+          errorMessage: msg,
+          endedAt: new Date(),
+        });
+        return { resolved: false, result: { status: 'failed', row: updated, error: msg } };
+      }
+    }
+
     // (E) Commit each issue's work, then merge — git-first, conflicts held for
     // "Retry with LLM" (the step halts until every branch merges).
     await ctx.emitProgress(`Merging level ${curLevel.level}…`);
@@ -787,6 +1098,7 @@ export async function resolveDagPhase(
       providers,
       deps,
       autoResolve: plan.autoResolveConflicts,
+      reviewEnabled: plan.reviewEnabled,
     });
     if (merge.status === 'waiting') {
       return { resolved: false, result: { status: 'waiting_cli', row: merge.row } };

@@ -158,6 +158,7 @@ async function persistPlan(
   plan: SprintPlan,
   mode: 'single' | 'dag',
   autoResolve: boolean,
+  reviewEnabled: boolean,
 ): Promise<string> {
   await ctx.db
     .delete(schema.taskDagPlans)
@@ -173,6 +174,7 @@ async function persistPlan(
       levels: plan.levels,
       planJson: plan,
       autoResolveConflicts: autoResolve,
+      reviewEnabled,
     })
     .returning({ id: schema.taskDagPlans.id });
   const row = inserted[0];
@@ -312,6 +314,12 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
             'Auto-resolve merge conflicts with AI — run uninterrupted, do not pause for manual resolution',
           default: false,
         },
+        {
+          type: 'checkbox',
+          id: 'reviewEnabled',
+          label: 'Review each issue with an AI reviewer before merge (coder ↔ reviewer loop)',
+          default: true,
+        },
       ],
       submitLabel: 'Confirm plan',
     };
@@ -322,9 +330,11 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
     const values = (args.formValues ?? {}) as {
       decision?: string;
       autoResolveConflicts?: boolean;
+      reviewEnabled?: boolean;
     };
     const overrideSingle = values.decision === 'use_single_agent';
     const autoResolve = values.autoResolveConflicts === true;
+    const reviewEnabled = values.reviewEnabled !== false; // default on for dag
     const mode: 'single' | 'dag' =
       plan.mode === 'dag' && !overrideSingle && plan.issues.length > 0 ? 'dag' : 'single';
 
@@ -334,7 +344,7 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
     let issueCount = 0;
     let levelCount = 0;
     if (mode === 'dag') {
-      planId = await persistPlan(ctx, plan, mode, autoResolve);
+      planId = await persistPlan(ctx, plan, mode, autoResolve, reviewEnabled);
       const counts = await fanOutDag(ctx, planId, plan);
       issueCount = counts.issueCount;
       levelCount = counts.levelCount;

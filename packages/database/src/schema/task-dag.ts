@@ -34,6 +34,13 @@ export const dagIssueOutcomeEnum = pgEnum('dag_issue_outcome', [
   'failed_unrecoverable',
 ]);
 
+export const dagAgentRoleEnum = pgEnum('dag_agent_role', [
+  'coder',
+  'reviewer',
+  'issue_advisor',
+  'replanner',
+]);
+
 // --- Plan (one row per 2c decision) --------------------------------------
 
 export const taskDagPlans = pgTable(
@@ -72,6 +79,9 @@ export const taskDagPlans = pgTable(
      *  conflicting branch and loops (bounded) until all merge — instead of
      *  halting for a manual "Retry with LLM". Chosen at the 2c gate. */
     autoResolveConflicts: boolean('auto_resolve_conflicts').notNull().default(false),
+    /** When true, each issue's implementation is reviewed by a reviewer agent
+     *  (coder<->reviewer inner loop) before merge. Chosen at the 2c gate. */
+    reviewEnabled: boolean('review_enabled').notNull().default(false),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
@@ -192,6 +202,38 @@ export const taskDagIssues = pgTable(
   ],
 );
 
+// --- Agent runs (per-issue reviewer / fix-coder / advisor / replanner) --------
+
+export const dagAgentRuns = pgTable(
+  'dag_agent_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    dagIssueId: uuid('dag_issue_id')
+      .notNull()
+      .references(() => taskDagIssues.id, { onDelete: 'cascade' }),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    role: dagAgentRoleEnum('role').notNull(),
+    /** Inner-loop iteration this run belongs to (0-based). */
+    iteration: integer('iteration').notNull().default(0),
+    status: varchar('status', { length: 16 }).notNull().default('pending'),
+    cliInvocationId: uuid('cli_invocation_id'),
+    output: jsonb('output').$type<unknown>(),
+    rawOutput: text('raw_output'),
+    /** Set when the executor has folded this run's result into the issue state. */
+    consumedAt: timestamp('consumed_at'),
+    startedAt: timestamp('started_at'),
+    endedAt: timestamp('ended_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [
+    index('dag_agent_runs_issue_idx').on(table.dagIssueId),
+    index('dag_agent_runs_task_idx').on(table.taskId),
+  ],
+);
+
 export const taskDagPlansRelations = relations(taskDagPlans, ({ one, many }) => ({
   task: one(tasks, { fields: [taskDagPlans.taskId], references: [tasks.id] }),
   step: one(taskSteps, { fields: [taskDagPlans.taskStepId], references: [taskSteps.id] }),
@@ -203,7 +245,15 @@ export const taskDagLevelsRelations = relations(taskDagLevels, ({ one }) => ({
   plan: one(taskDagPlans, { fields: [taskDagLevels.dagPlanId], references: [taskDagPlans.id] }),
 }));
 
-export const taskDagIssuesRelations = relations(taskDagIssues, ({ one }) => ({
+export const taskDagIssuesRelations = relations(taskDagIssues, ({ one, many }) => ({
   plan: one(taskDagPlans, { fields: [taskDagIssues.dagPlanId], references: [taskDagPlans.id] }),
   task: one(tasks, { fields: [taskDagIssues.taskId], references: [tasks.id] }),
+  agentRuns: many(dagAgentRuns),
+}));
+
+export const dagAgentRunsRelations = relations(dagAgentRuns, ({ one }) => ({
+  issue: one(taskDagIssues, {
+    fields: [dagAgentRuns.dagIssueId],
+    references: [taskDagIssues.id],
+  }),
 }));

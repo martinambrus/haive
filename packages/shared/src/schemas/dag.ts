@@ -55,3 +55,30 @@ export const dagIssueResultSchema = z.object({
   concerns: z.string().default(''),
 });
 export type DagIssueResult = z.infer<typeof dagIssueResultSchema>;
+
+/** A reviewer's verdict on an issue's implementation (Phase 3 inner loop).
+ *  approve = ready to merge; fix_required = non-blocking issues a fix coder can
+ *  address; block = a fundamental problem the loop can't fix. */
+export const reviewerOutputSchema = z.object({
+  verdict: z.enum(['approve', 'fix_required', 'block']),
+  criteria_results: z
+    .array(
+      z.object({
+        criterion: z.string(),
+        passed: z.boolean(),
+        note: z.string().optional(),
+      }),
+    )
+    .default([]),
+  issues: z
+    .array(
+      z.object({
+        severity: z.enum(['high', 'medium', 'low']).optional(),
+        file: z.string().optional(),
+        description: z.string(),
+        suggestion: z.string().optional(),
+      }),
+    )
+    .default([]),
+});
+export type ReviewerOutput = z.infer<typeof reviewerOutputSchema>;
