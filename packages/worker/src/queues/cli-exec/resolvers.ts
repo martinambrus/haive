@@ -25,6 +25,7 @@ import {
   serversToJsonObject,
 } from '../../sandbox/mcp-config.js';
 import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
+import { runnerBrowserCdpUrl } from '../../sandbox/ddev-runner.js';
 import { signRagToken } from '@haive/shared/rag';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliProviderRecord } from '../../cli-adapters/types.js';
@@ -249,9 +250,18 @@ export async function resolveMcpExtraFiles(
 
   const rag = await resolveRagMcpConfig(db, taskId);
 
+  // When chrome-devtools is on AND the task's runner has a live headed browser
+  // (interactive/mcp testing), connect the agent to THAT visible browser instead
+  // of self-launching an isolated headless one — so it co-drives what the user
+  // watches in the VNC panel.
+  const chromeDevtoolsBrowserUrl = includeChromeDevtools
+    ? ((await runnerBrowserCdpUrl(taskId)) ?? undefined)
+    : undefined;
+
   const servers = buildDefaultMcpServers({
     repoPath: sandboxWorkdir,
     includeChromeDevtools,
+    chromeDevtoolsBrowserUrl,
     includeRagSearch: rag.enabled,
     ragServerPath: RAG_MCP_SERVER_PATH,
     ragApiUrl: rag.apiUrl,

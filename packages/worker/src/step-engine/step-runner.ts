@@ -195,6 +195,13 @@ async function resolveLlmPhase(
     };
   }
 
+  // Optional async setup the invocation depends on (e.g. 08a starting the
+  // runner's headed browser so chrome-devtools MCP can connect). Idempotent;
+  // a throw here fails the step like any dispatch error.
+  if (llmSpec.prepare) {
+    await llmSpec.prepare({ ctx, detected, formValues: formValues ?? {} });
+  }
+
   // For loop iterations > 0, prefer the loop's iteration-aware prompt
   // builder when present so the next pass receives prior findings; fall
   // back to the standard prompt otherwise. iteration here = passes

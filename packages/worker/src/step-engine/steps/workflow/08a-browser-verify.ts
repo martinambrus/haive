@@ -1,10 +1,14 @@
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { z } from 'zod';
+import { STEP_CLI_ROLES } from '@haive/shared';
 import type { FormSchema } from '@haive/shared';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
+import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
-import { pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { extractFencedJson } from '../_fenced-json.js';
+import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput, resolveDdevWorkspace } from './_task-meta.js';
 import {
   runnerHandleForTask,
@@ -16,6 +20,14 @@ import {
 
 const exec = promisify(execFile);
 
+type BrowserMode = 'headless' | 'interactive' | 'mcp' | 'manual' | 'skip';
+const ROLE_TESTER = 'tester';
+const ROLE_FIXER = 'fixer';
+
+function roleForIteration(iteration: number): string {
+  return iteration % 2 === 0 ? ROLE_TESTER : ROLE_FIXER;
+}
+
 interface BrowserVerifyDetect {
   available: boolean;
   skipReason: string | null;
@@ -26,11 +38,20 @@ interface BrowserVerifyDetect {
    *  check runs INSIDE the runner (where <name>.ddev.site resolves). */
   ddevMode: boolean;
   repoSubpath: string | null;
+  /** Spec + changed files for the MCP tester / manual-checklist prompts. */
+  spec: string;
+  implementationFiles: string[];
+}
+
+interface TestFailure {
+  description: string;
+  evidence?: string;
 }
 
 interface BrowserVerifyApply {
   ran: boolean;
   skipped: boolean;
+  method: BrowserMode;
   appUrl: string | null;
   consoleErrors: string[];
   consoleWarnings: string[];
@@ -38,7 +59,114 @@ interface BrowserVerifyApply {
   pageTitle: string | null;
   passed: boolean;
   output: string;
+  // MCP / manual extras (empty/null for the probe modes).
+  failures: TestFailure[];
+  visualVerdict: string | null;
+  checklistMarkdown: string | null;
+  fixesApplied: string[];
+  /** Internal loop bookkeeping (the runner re-applies per pass). */
+  source: 'probe' | 'tester' | 'fixer' | 'manual' | 'skip';
 }
+
+const testerOutputSchema = z.object({
+  passed: z.boolean(),
+  failures: z
+    .array(z.object({ description: z.string(), evidence: z.string().optional() }))
+    .default([]),
+  visual_verdict: z.enum(['STYLED', 'NEEDS_POLISH', 'UNSTYLED', 'SKIPPED']).optional(),
+  notes: z.string().default(''),
+});
+
+const fixerOutputSchema = z.object({
+  fixes_made: z.array(z.string()).default([]),
+  notes: z.string().default(''),
+});
+
+const checklistOutputSchema = z.object({
+  checklist_markdown: z.string().default(''),
+});
+
+function fencedCandidate(raw: unknown): unknown {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  if (typeof raw !== 'string') return null;
+  const body = extractFencedJson(raw);
+  if (!body) return null;
+  try {
+    return JSON.parse(body);
+  } catch {
+    return null;
+  }
+}
+
+/** Parse the MCP tester verdict; null when unparseable (caller treats a parse
+ *  miss as a FAILED test so a broken tester never silently passes). */
+export function parseBrowserTestOutput(raw: unknown): {
+  passed: boolean;
+  failures: TestFailure[];
+  visualVerdict: string | null;
+  notes: string;
+} | null {
+  const parsed = testerOutputSchema.safeParse(fencedCandidate(raw));
+  if (!parsed.success) return null;
+  return {
+    passed: parsed.data.passed,
+    failures: parsed.data.failures,
+    visualVerdict: parsed.data.visual_verdict ?? null,
+    notes: parsed.data.notes,
+  };
+}
+
+export function parseFixerOutput(raw: unknown): { fixesMade: string[]; notes: string } {
+  const parsed = fixerOutputSchema.safeParse(fencedCandidate(raw));
+  if (!parsed.success) return { fixesMade: [], notes: '' };
+  return { fixesMade: parsed.data.fixes_made, notes: parsed.data.notes };
+}
+
+export function parseChecklistOutput(raw: unknown): string {
+  const parsed = checklistOutputSchema.safeParse(fencedCandidate(raw));
+  if (parsed.success && parsed.data.checklist_markdown.trim())
+    return parsed.data.checklist_markdown;
+  // Fall back to the raw text (the agent may have written plain markdown).
+  return typeof raw === 'string' ? raw.slice(0, 16_000) : '';
+}
+
+/** Latest tester (or probe) pass — its failures drive the fixer + final output. */
+function latestTester(previous: StepLoopPassRecord[]): BrowserVerifyApply | null {
+  for (let i = previous.length - 1; i >= 0; i -= 1) {
+    const out = previous[i]?.applyOutput as BrowserVerifyApply | undefined;
+    if (out && out.source === 'tester') return out;
+  }
+  return null;
+}
+
+function accumulatedFixes(previous: StepLoopPassRecord[]): string[] {
+  const last = previous[previous.length - 1]?.applyOutput as BrowserVerifyApply | undefined;
+  return last?.fixesApplied ?? [];
+}
+
+const SEARCH_LADDER = [
+  'When you need existing patterns or context, search in this order:',
+  '1. `rag_search` FIRST (semantic + lexical over the indexed code and knowledge base),',
+  '2. then the relevant `.claude/knowledge_base/` files,',
+  '3. then Grep / Read the codebase directly.',
+] as const;
+
+// Condensed Visual Inspection Protocol (the onboarded integration-tester agent
+// carries the full version; this is the in-prompt fallback so any provider runs
+// it even without that file).
+const VISUAL_PROTOCOL = [
+  'VISUAL INSPECTION PROTOCOL (mandatory for UI changes): for every UI element this change',
+  'touched, use the chrome-devtools MCP `evaluate_script` for cheap text/JSON checks:',
+  '- Visibility: actually rendered (not display:none/visibility:hidden/opacity:0/offscreen/zero-size).',
+  '- Contrast: text meets WCAG AA against its computed background.',
+  '- Sibling-style consistency: same visual group shares font/color/spacing/control styling.',
+  '- Offscreen controls: no interactive element clipped by overflow or outside the viewport.',
+  '- Console errors: no JS errors or uncaught rejections during the flow.',
+  'Take screenshots ONLY on a suspected anomaly, saved compressed (webp) to',
+  '.claude/tasks/<task>/screenshots/. A visibility/contrast/consistency failure is a BLOCKING test',
+  'failure, same as a functional one.',
+] as const;
 
 interface BrowserReport {
   pageTitle: string | null;
@@ -129,6 +257,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     title: 'Phase 5a: Browser validation',
     description: 'Validates the running application via headless Chrome.',
     requiresCli: false,
+    cliRoles: STEP_CLI_ROLES['08a-browser-verify'],
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
@@ -156,6 +285,8 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       repoSubpath: null as string | null,
       appBooted: false,
       appUrl: null as string | null,
+      spec: '',
+      implementationFiles: [] as string[],
     };
 
     if (!browserTesting) {
@@ -166,8 +297,19 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       };
     }
 
+    // Spec (05a → 05 → 04 precedence) + changed files for the tester/manual prompts.
+    const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
+    const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
+    const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
+    const spec =
+      ((resolved?.output as { spec?: string } | null)?.spec ??
+        (quality?.output as { spec?: string } | null)?.spec ??
+        (plan?.output as { spec?: string } | null)?.spec) ||
+      '';
+
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
     if (ws && (await pathExists(ddevConfigPath(ws.workspace)))) {
+      const implementationFiles = await collectImplementationFiles(ctx, ws.workspace);
       // DDEV path: the runner targets the worktree (where `.ddev` lives). It may
       // not be up yet (a task that just implemented .ddev, where 01c skipped
       // early) — apply boots it via ensureDdevStarted and fails hard if it can't.
@@ -181,6 +323,8 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         appUrl: url,
         available: true,
         skipReason: null,
+        spec,
+        implementationFiles,
       };
     }
 
@@ -202,6 +346,8 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       appUrl: boot?.appUrl ?? null,
       available: true,
       skipReason: null,
+      spec,
+      implementationFiles: await collectImplementationFiles(ctx, ctx.workspacePath),
     };
   },
 
@@ -216,25 +362,35 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
           : 'Launches headless Chrome to validate the running application.',
       ].join('\n'),
       fields: [
-        ...(detected.ddevMode
-          ? [
-              {
-                type: 'radio' as const,
-                id: 'mode',
-                label: 'Validation mode',
-                options: [
-                  { value: 'headless', label: 'Headless — automated check only' },
+        {
+          type: 'radio' as const,
+          id: 'mode',
+          label: 'Testing method',
+          options: [
+            { value: 'headless', label: 'Headless probe — automated page-load check only' },
+            ...(detected.ddevMode
+              ? [
+                  {
+                    value: 'mcp',
+                    label:
+                      'Automated agent testing — the integration-tester drives the visible browser via Chrome DevTools (visual + functional); watch and assist in the Browser panel below',
+                  },
                   {
                     value: 'interactive',
                     label:
-                      'Interactive — headed Chrome on the DDEV desktop; watch and click along in the Browser panel below the terminal (e.g. to dismiss native Chrome popups)',
+                      'Interactive probe — headed Chrome on the DDEV desktop; watch and click along in the Browser panel (e.g. to dismiss native Chrome popups)',
                   },
-                ],
-                default: 'headless',
-                required: true,
-              },
-            ]
-          : []),
+                ]
+              : []),
+            {
+              value: 'manual',
+              label: 'Manual checklist — generate a testing checklist to verify by hand',
+            },
+            { value: 'skip', label: 'Skip browser testing' },
+          ],
+          default: 'headless',
+          required: true,
+        },
         {
           type: 'text',
           id: 'appUrl',
@@ -258,20 +414,115 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     };
   },
 
+  llm: {
+    requiredCapabilities: ['tool_use', 'file_write'],
+    timeoutMs: 30 * 60 * 1000,
+    // Only the agent modes dispatch a CLI; the probe modes + skip resolve in apply.
+    skipIf: ({ formValues }) => {
+      const mode = (formValues as { mode?: string }).mode;
+      return mode !== 'mcp' && mode !== 'manual';
+    },
+    // mcp mode needs the runner's headed browser up so chrome-devtools connects
+    // to the SAME browser the user watches. Idempotent (pgrep-guarded).
+    prepare: async ({ ctx, detected, formValues }) => {
+      const d = detected as BrowserVerifyDetect;
+      if ((formValues as { mode?: string }).mode !== 'mcp') return;
+      if (!d.ddevMode || !d.repoSubpath) return;
+      await ctx.emitProgress('Starting the browser desktop for agent testing…');
+      const handle = await ensureDdevStarted(ctx.taskId, d.repoSubpath);
+      await startBrowserDesktop(handle);
+    },
+    buildPrompt: (args) => {
+      const d = args.detected as BrowserVerifyDetect;
+      const mode = (args.formValues as { mode?: string; appUrl?: string }).mode;
+      const appUrl = (args.formValues as { appUrl?: string }).appUrl || d.appUrl || 'the app URL';
+      if (mode === 'manual') return buildChecklistPrompt(d, appUrl);
+      return buildTesterPrompt(d, appUrl);
+    },
+    bypassStub: (args) => {
+      const mode = (args.formValues as { mode?: string }).mode;
+      if (mode === 'manual') return { checklist_markdown: '# Test checklist\n- [ ] bypass stub' };
+      return { passed: true, failures: [], visual_verdict: 'SKIPPED', notes: 'bypass stub' };
+    },
+  },
+
+  loop: {
+    // mcp mode only: tester <-> fixer up to 10 rounds (legacy cap), then gate-2
+    // escalates. Manual/probe modes never set passed=false from a tester pass,
+    // so shouldContinue stays false and they run a single pass.
+    maxIterations: 10,
+    passesPerRound: 2,
+    resolveRole: roleForIteration,
+    shouldContinue: ({ applyOutput, iteration }) => {
+      if (roleForIteration(iteration) === ROLE_FIXER) return true; // after a fix, re-test
+      const out = applyOutput as BrowserVerifyApply;
+      return out.method === 'mcp' && out.source === 'tester' && out.passed === false;
+    },
+    buildIterationPrompt: ({ detected, formValues, iteration, previousIterations }) => {
+      const d = detected as BrowserVerifyDetect;
+      const appUrl = (formValues as { appUrl?: string }).appUrl || d.appUrl || 'the app URL';
+      if (roleForIteration(iteration) === ROLE_FIXER) {
+        const prior = latestTester(previousIterations);
+        return buildFixerPrompt(d, prior?.failures ?? []);
+      }
+      return buildTesterPrompt(d, appUrl); // re-test after a fix
+    },
+  },
+
   async apply(ctx, args): Promise<BrowserVerifyApply> {
     const detected = args.detected;
-    const skipped: BrowserVerifyApply = {
-      ran: false,
-      skipped: true,
-      appUrl: null,
+    const mode = ((args.formValues as { mode?: string }).mode ?? 'headless') as BrowserMode;
+    const baseApply = {
       consoleErrors: [],
       consoleWarnings: [],
       networkErrors: [],
       pageTitle: null,
+      failures: [] as TestFailure[],
+      visualVerdict: null as string | null,
+      checklistMarkdown: null as string | null,
+      fixesApplied: [] as string[],
+    };
+    const skipped: BrowserVerifyApply = {
+      ...baseApply,
+      ran: false,
+      skipped: true,
+      method: mode,
+      appUrl: null,
       passed: false,
       output: detected.skipReason ?? 'skipped',
+      source: 'skip',
     };
     if (!detected.available) return skipped;
+
+    // User chose to skip browser testing (legacy Option C).
+    if (mode === 'skip') {
+      ctx.logger.info('browser testing skipped by user');
+      return { ...skipped, ran: true, skipped: true, output: 'skipped by user', passed: true };
+    }
+
+    // Manual checklist (legacy Option B): the agent generated it; gate-2 is the
+    // confirmation. A checklist is not a pass/fail — record it, pass through.
+    if (mode === 'manual') {
+      const checklist = parseChecklistOutput(args.llmOutput ?? null);
+      ctx.logger.info({ length: checklist.length }, 'manual test checklist generated');
+      return {
+        ...baseApply,
+        ran: true,
+        skipped: false,
+        method: 'manual',
+        appUrl: detected.appUrl,
+        checklistMarkdown: checklist,
+        passed: true,
+        output: '',
+        source: 'manual',
+      };
+    }
+
+    // MCP agent testing (legacy Option A): tester/fixer loop.
+    if (mode === 'mcp') {
+      return applyMcp(ctx, args, detected);
+    }
+    // Probe modes (headless / interactive) fall through to the probe below.
 
     const values = args.formValues as {
       mode?: string;
@@ -333,8 +584,10 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         ...skipped,
         ran: true,
         skipped: false,
+        method: mode,
         appUrl,
         output: `no report parsed: ${rawOutput.slice(-1500)}`,
+        source: 'probe',
       };
     }
 
@@ -355,8 +608,10 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     );
 
     return {
+      ...baseApply,
       ran: true,
       skipped: false,
+      method: mode,
       appUrl,
       consoleErrors: report.consoleErrors,
       consoleWarnings: report.consoleWarnings,
@@ -364,6 +619,156 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       pageTitle: report.pageTitle,
       passed,
       output: '',
+      source: 'probe',
     };
   },
 };
+
+// --- MCP tester loop apply -------------------------------------------------
+
+async function applyMcp(
+  ctx: StepContext,
+  args: { iteration: number; llmOutput?: unknown; previousIterations: StepLoopPassRecord[] },
+  detected: BrowserVerifyDetect,
+): Promise<BrowserVerifyApply> {
+  const base = {
+    consoleErrors: [],
+    consoleWarnings: [],
+    networkErrors: [],
+    pageTitle: null,
+    appUrl: detected.appUrl,
+    ran: true,
+    skipped: false,
+    method: 'mcp' as BrowserMode,
+  };
+
+  // Fixer pass: record fixes, carry the prior tester verdict forward (still
+  // failing until the next tester pass re-scores).
+  if (roleForIteration(args.iteration) === ROLE_FIXER) {
+    const fix = parseFixerOutput(args.llmOutput ?? null);
+    const prior = latestTester(args.previousIterations);
+    ctx.logger.info({ fixes: fix.fixesMade.length }, 'browser-test fixer pass complete');
+    return {
+      ...base,
+      failures: prior?.failures ?? [],
+      visualVerdict: prior?.visualVerdict ?? null,
+      checklistMarkdown: null,
+      fixesApplied: [...accumulatedFixes(args.previousIterations), ...fix.fixesMade],
+      passed: false,
+      output: '',
+      source: 'fixer',
+    };
+  }
+
+  // Tester pass: parse the verdict. A parse miss = FAILED (never silently pass).
+  const verdict = parseBrowserTestOutput(args.llmOutput ?? null);
+  const fixesSoFar = accumulatedFixes(args.previousIterations);
+  if (!verdict) {
+    ctx.logger.warn('browser tester output unparseable — treating as failed');
+    return {
+      ...base,
+      failures: [{ description: 'Tester output could not be parsed; review the raw report.' }],
+      visualVerdict: null,
+      checklistMarkdown: null,
+      fixesApplied: fixesSoFar,
+      passed: false,
+      output: typeof args.llmOutput === 'string' ? args.llmOutput.slice(-2000) : '',
+      source: 'tester',
+    };
+  }
+  const visualFail = verdict.visualVerdict === 'UNSTYLED';
+  const passed = verdict.passed && !visualFail;
+  ctx.logger.info(
+    { passed, failures: verdict.failures.length, visual: verdict.visualVerdict },
+    'browser tester pass complete',
+  );
+  return {
+    ...base,
+    failures: verdict.failures,
+    visualVerdict: verdict.visualVerdict,
+    checklistMarkdown: null,
+    fixesApplied: fixesSoFar,
+    passed,
+    output: verdict.notes,
+    source: 'tester',
+  };
+}
+
+// --- Prompt builders -------------------------------------------------------
+
+function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string): string {
+  return [
+    'You are the browser integration-tester. Test the implemented feature in a REAL browser using',
+    'the chrome-devtools MCP tools (the browser is already running — connect to it).',
+    `Application URL: ${appUrl}`,
+    'If a `.claude/agents/integration-tester.md` agent definition exists in the repo, follow it;',
+    'otherwise follow the protocol below.',
+    d.implementationFiles.length > 0
+      ? `Changed files (focus your testing here):\n- ${d.implementationFiles.join('\n- ')}`
+      : '',
+    '',
+    'Test the spec acceptance criteria end-to-end from the user perspective. MCP clicks are REAL',
+    'tests — if an interaction fails, it is a bug.',
+    '',
+    ...VISUAL_PROTOCOL,
+    '',
+    'Do NOT run git. Do NOT edit application code in this pass (a separate fix pass does that).',
+    ...SEARCH_LADDER,
+    '',
+    'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
+    '{ "passed": true|false, "failures": [{ "description": "...", "evidence": "file:line or screenshot path" }], "visual_verdict": "STYLED|NEEDS_POLISH|UNSTYLED|SKIPPED", "notes": "" }',
+    'passed=false if ANY functional OR blocking visual check failed. visual_verdict SKIPPED for',
+    'backend-only changes.',
+    '',
+    '=== Spec (acceptance criteria) ===',
+    d.spec || '(no spec recorded)',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function buildFixerPrompt(d: BrowserVerifyDetect, failures: TestFailure[]): string {
+  return [
+    'Browser testing found failures in the implemented feature. Fix them by editing the code',
+    'directly.',
+    failures.length > 0
+      ? `Failures to fix:\n${failures.map((f, n) => `${n + 1}. ${f.description}${f.evidence ? ` (evidence: ${f.evidence})` : ''}`).join('\n')}`
+      : '(the tester reported a failure without a list — re-read its report and fix what is broken)',
+    '',
+    'Make ONLY the fixes needed for these failures — do not add unrelated changes. Do NOT run git',
+    'and do NOT run the tests yourself (the tester re-verifies next).',
+    ...SEARCH_LADDER,
+    '',
+    'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
+    '{ "fixes_made": ["<each fix>"], "notes": "<caveats or empty>" }',
+    '',
+    '=== Spec (the expected behavior) ===',
+    d.spec || '(no spec recorded)',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function buildChecklistPrompt(d: BrowserVerifyDetect, appUrl: string): string {
+  return [
+    'Generate a structured MANUAL testing checklist for the implemented feature, for a human to',
+    'verify by hand in the browser.',
+    `Application URL: ${appUrl}`,
+    d.implementationFiles.length > 0
+      ? `Changed files:\n- ${d.implementationFiles.join('\n- ')}`
+      : '',
+    '',
+    'Cover: 1) pre-test setup (URL, credentials, prerequisites), 2) happy-path tests (step by step),',
+    '3) edge cases, 4) error scenarios, 5) visual/UI checks, 6) data validation. Each test has a',
+    '`- [ ]` checkbox, clear step-by-step instructions, and an expected result.',
+    ...SEARCH_LADDER,
+    '',
+    'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
+    '{ "checklist_markdown": "<the full checklist as markdown>" }',
+    '',
+    '=== Spec (acceptance criteria) ===',
+    d.spec || '(no spec recorded)',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}

@@ -19,6 +19,25 @@ interface VerifyGateDetect {
   } | null;
   /** Phase 5b test management summary line (null when the step didn't run). */
   testManagement: { line: string; testsPassed: boolean | null } | null;
+  /** Phase 5a browser testing result (null when the step didn't run). */
+  browser: {
+    method: string;
+    passed: boolean;
+    failures: string[];
+    visualVerdict: string | null;
+    checklistMarkdown: string | null;
+    skipped: boolean;
+  } | null;
+}
+
+interface Phase5aOutput {
+  ran?: boolean;
+  skipped?: boolean;
+  method?: string;
+  passed?: boolean;
+  failures?: { description?: string; evidence?: string }[];
+  visualVerdict?: string | null;
+  checklistMarkdown?: string | null;
 }
 
 interface Phase5bOutput {
@@ -113,6 +132,24 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       };
     }
 
+    // Phase 5a browser testing: surface the verdict (mcp fail / manual checklist
+    // to confirm); skipped/headless probe contributes nothing blocking.
+    const phase5a = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-verify');
+    const pa = phase5a?.output as Phase5aOutput | null;
+    let browser: VerifyGateDetect['browser'] = null;
+    if (pa?.ran && pa.method && pa.method !== 'skip') {
+      browser = {
+        method: pa.method,
+        passed: pa.passed !== false,
+        failures: (pa.failures ?? []).map((f) =>
+          `${f.description ?? ''}${f.evidence ? ` (${f.evidence})` : ''}`.trim(),
+        ),
+        visualVerdict: pa.visualVerdict ?? null,
+        checklistMarkdown: pa.checklistMarkdown ?? null,
+        skipped: pa.skipped === true,
+      };
+    }
+
     return {
       testResults: fmtResult('tests', output.test),
       lintResults: fmtResult('lint', output.lint),
@@ -120,6 +157,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       allPassed: output.passed === true,
       validation,
       testManagement,
+      browser,
     };
   },
 
@@ -128,6 +166,11 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const validationOk = v === null || v.verdict === 'VALID';
     const testsOk =
       detected.testManagement === null || detected.testManagement.testsPassed !== false;
+    const b = detected.browser;
+    const browserOk = b === null || b.passed;
+    const browserLine = b
+      ? `Browser testing (${b.method}): ${b.method === 'manual' ? 'checklist generated — verify below' : b.passed ? 'PASS' : 'FAIL'}${b.visualVerdict && b.visualVerdict !== 'SKIPPED' ? ` • visual ${b.visualVerdict}` : ''}`
+      : '';
     const summary = [
       detected.testResults,
       detected.lintResults,
@@ -139,6 +182,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       v
         ? `Pre-test validation: ${v.verdict}${v.exhaustedBudget ? ' (fix budget exhausted)' : ''}`
         : '',
+      browserLine,
       detected.testManagement ? detected.testManagement.line : '',
     ]
       .filter(Boolean)
@@ -182,6 +226,31 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       });
     }
 
+    if (b) {
+      const lines: string[] = [`**Method:** ${b.method}`];
+      if (b.method === 'manual' && b.checklistMarkdown) {
+        lines.push(
+          '',
+          '> Verify the checklist below by hand. Approve = all passed; Reject = issues found.',
+          '',
+          b.checklistMarkdown.slice(0, 12_000),
+        );
+      } else {
+        lines.push('', `**Result:** ${b.passed ? 'PASS' : 'FAIL'}`);
+        if (b.visualVerdict) lines.push(`**Visual verdict:** ${b.visualVerdict}`);
+        if (b.failures.length > 0) {
+          lines.push('', '## Failures');
+          for (const f of b.failures) lines.push(`- ${f}`);
+        }
+      }
+      infoSections.push({
+        title: 'Browser testing',
+        preview: b.method === 'manual' ? 'manual checklist' : b.passed ? 'PASS' : 'FAIL',
+        body: lines.join('\n'),
+        defaultOpen: !browserOk || b.method === 'manual',
+      });
+    }
+
     return {
       title: 'Gate 2: Verification approval',
       description: summary,
@@ -195,7 +264,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             { value: 'approve', label: 'Approve — proceed to commit gate' },
             { value: 'reject', label: 'Reject — iterate on the implementation' },
           ],
-          default: detected.allPassed && validationOk && testsOk ? 'approve' : 'reject',
+          default:
+            detected.allPassed && validationOk && testsOk && browserOk ? 'approve' : 'reject',
           required: true,
         },
         {

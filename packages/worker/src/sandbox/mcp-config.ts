@@ -35,6 +35,11 @@ export interface BuildDefaultMcpServersOptions {
   includeFilesystem?: boolean;
   includeGit?: boolean;
   includeChromeDevtools?: boolean;
+  /** When set, chrome-devtools connects to this already-running browser's CDP
+   *  endpoint (the headed Chrome on the task's DDEV runner desktop) instead of
+   *  launching its own isolated headless instance — so the agent drives the
+   *  SAME browser the user watches/assists via the VNC panel. */
+  chromeDevtoolsBrowserUrl?: string;
   /** Enable the haive-rag MCP server (project RAG retrieval). Requires
    *  ragServerPath, ragApiUrl, and ragToken to also be set. */
   includeRagSearch?: boolean;
@@ -76,17 +81,19 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
   }
 
   if (opts.includeChromeDevtools) {
-    servers.push({
-      name: 'chrome-devtools',
-      command: 'npx',
-      args: [
-        '-y',
-        'chrome-devtools-mcp@latest',
-        '--channel=stable',
-        '--isolated=true',
-        '--viewport=1920x1080',
-      ],
-    });
+    // Connect to the runner's visible browser when its CDP URL is provided
+    // (interactive/co-driven testing); otherwise self-launch an isolated
+    // headless instance (the default automated path).
+    const chromeArgs = opts.chromeDevtoolsBrowserUrl
+      ? ['-y', 'chrome-devtools-mcp@latest', `--browser-url=${opts.chromeDevtoolsBrowserUrl}`]
+      : [
+          '-y',
+          'chrome-devtools-mcp@latest',
+          '--channel=stable',
+          '--isolated=true',
+          '--viewport=1920x1080',
+        ];
+    servers.push({ name: 'chrome-devtools', command: 'npx', args: chromeArgs });
   }
 
   if (opts.includeRagSearch && opts.ragServerPath && opts.ragApiUrl && opts.ragToken) {

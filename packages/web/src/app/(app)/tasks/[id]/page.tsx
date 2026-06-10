@@ -1480,9 +1480,9 @@ function StepCard({
       )}
 
       {step.stepId === '08a-browser-verify' &&
-        (step.formValues as { mode?: string } | null)?.mode === 'interactive' && (
-          <BrowserVncPanel taskId={taskId} />
-        )}
+        ['interactive', 'mcp'].includes(
+          (step.formValues as { mode?: string } | null)?.mode ?? '',
+        ) && <BrowserVncPanel taskId={taskId} />}
     </Card>
   );
 }

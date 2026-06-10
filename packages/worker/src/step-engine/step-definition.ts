@@ -52,6 +52,12 @@ export interface LlmInvocationSpec {
    *  Steps whose apply() throws on null llmOutput must define this so smoke
    *  tests can exercise the full pipeline without a real CLI provider. */
   bypassStub?: (args: LlmBuildArgs) => unknown;
+  /** Optional async side-effect run right before each CLI dispatch (after the
+   *  form, with ctx). Use for environment setup the invocation depends on —
+   *  e.g. 08a starts the runner's headed-browser desktop so the chrome-devtools
+   *  MCP can connect to it. Idempotent; awaited each dispatch (incl. loop
+   *  passes). Skipped under HAIVE_TEST_BYPASS_LLM. */
+  prepare?: (args: LlmBuildArgs & { ctx: StepContext }) => Promise<void>;
 }
 
 export interface AgentMiningDispatch {

@@ -240,6 +240,22 @@ export async function startBrowserDesktop(handle: DdevRunnerHandle): Promise<voi
   }
 }
 
+/** If the runner's headed-browser desktop is up (CDP answering on the socat
+ *  forward), return the DNS URL sandboxed CLIs use to connect chrome-devtools to
+ *  that SAME visible browser; else null (caller self-launches an isolated one).
+ *  One cheap docker-exec curl — only called when chrome-devtools is enabled. */
+export async function runnerBrowserCdpUrl(taskId: string): Promise<string | null> {
+  const name = ddevRunnerName(taskId);
+  try {
+    await exec('docker', ['exec', name, 'curl', '-fsS', 'http://127.0.0.1:9223/json/version'], {
+      timeout: 8_000,
+    });
+    return `http://${name}:9223`;
+  } catch {
+    return null;
+  }
+}
+
 /** Tear down every DinD runner for a task (container + its anon docker volume).
  *  Safe to call for any task; returns the number removed. */
 export async function killTaskDdevRunners(taskId: string): Promise<number> {
