@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { usePageTitle } from '@/lib/use-page-title';
 import {
   api,
   type AdminHealthResponse,
@@ -19,6 +20,7 @@ import {
 } from '@/components/ui';
 
 export default function AdminPage() {
+  usePageTitle('Admin console');
   const [users, setUsers] = useState<AdminUser[] | null>(null);
   const [health, setHealth] = useState<AdminHealthResponse | null>(null);
   const [error, setError] = useState<string | null>(null);

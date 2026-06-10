@@ -35,6 +35,7 @@ import { StepTerminal } from '@/components/terminal/StepTerminal';
 import { BrowserVncPanel } from '@/components/terminal/BrowserVncPanel';
 import { InteractiveShell } from '@/components/terminal/InteractiveShell';
 import { autoScrollTerminalsEnabled } from '@/lib/terminal-autoscroll';
+import { usePageTitle } from '@/lib/use-page-title';
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
 
@@ -78,6 +79,7 @@ export default function TaskDetailPage() {
   const id = params.id;
 
   const [task, setTask] = useState<Task | null>(null);
+  usePageTitle(task ? task.title : 'Task');
   const [steps, setSteps] = useState<TaskStep[]>([]);
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [error, setError] = useState<string | null>(null);

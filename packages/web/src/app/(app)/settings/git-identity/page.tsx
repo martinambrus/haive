@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { api, type ApiError } from '@/lib/api-client';
+import { usePageTitle } from '@/lib/use-page-title';
 import {
   Button,
   Card,
@@ -19,6 +20,7 @@ interface GitIdentity {
 }
 
 export default function GitIdentityPage() {
+  usePageTitle('Git Identity');
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [gitName, setGitName] = useState('');

@@ -3,10 +3,12 @@
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { Terminal } from '@/components/terminal/Terminal';
+import { usePageTitle } from '@/lib/use-page-title';
 
 export default function ContainerTerminalPage() {
   const params = useParams<{ id: string }>();
   const containerId = params.id;
+  usePageTitle('Container terminal');
 
   return (
     <div className="flex flex-col gap-4">

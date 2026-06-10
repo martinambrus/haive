@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, type Task, type TaskStatus } from '@/lib/api-client';
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { formatDuration } from '@/lib/format-duration';
+import { usePageTitle } from '@/lib/use-page-title';
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
 
@@ -74,6 +75,7 @@ function writeSavedFilter(filter: SavedFilter): void {
 }
 
 export default function TasksPage() {
+  usePageTitle('Tasks');
   const router = useRouter();
   const searchParams = useSearchParams();
   const repoFilter = searchParams.get('repositoryId') ?? '';

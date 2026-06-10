@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { api } from '@/lib/api-client';
 import { BundleComposer, type BundleComposerEntry } from '@/components/bundle-composer';
+import { usePageTitle } from '@/lib/use-page-title';
 
 interface RepositorySummary {
   id: string;
@@ -23,6 +24,7 @@ export default function ManageBundlesPage() {
   const [repo, setRepo] = useState<RepositorySummary | null>(null);
   const [credentialOptions, setCredentialOptions] = useState<CredentialOption[]>([]);
   const [error, setError] = useState<string | null>(null);
+  usePageTitle(repo ? `Bundles — ${repo.name}` : 'Bundles');
 
   useEffect(() => {
     let cancelled = false;

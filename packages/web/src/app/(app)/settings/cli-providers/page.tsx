@@ -21,6 +21,7 @@ import {
   FormError,
 } from '@/components/ui';
 import { useCliLogin } from '@/lib/use-cli-login';
+import { usePageTitle } from '@/lib/use-page-title';
 
 const LOGIN_SUPPORTED: CliProviderName[] = ['claude-code', 'codex', 'amp', 'antigravity'];
 const LOGIN_RECOVERABLE: CliAuthStatus[] = [
@@ -49,6 +50,7 @@ interface SignOutState {
 }
 
 export default function CliProvidersPage() {
+  usePageTitle('CLI Providers');
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
   const [catalog, setCatalog] = useState<CliProviderMetadata[] | null>(null);
   const [error, setError] = useState<string | null>(null);

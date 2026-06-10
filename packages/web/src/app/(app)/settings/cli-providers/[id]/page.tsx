@@ -7,6 +7,7 @@ import { api, type CliProvider, type CliProviderCatalogEntry } from '@/lib/api-c
 import { Card, CardDescription, CardHeader, CardTitle, FormError } from '@/components/ui';
 import { CliProviderForm } from '@/components/cli-provider-form';
 import { CliProviderTest } from '@/components/cli-provider-test';
+import { usePageTitle } from '@/lib/use-page-title';
 
 export default function EditCliProviderPage() {
   const params = useParams<{ id: string }>();
@@ -16,6 +17,7 @@ export default function EditCliProviderPage() {
   const [error, setError] = useState<string | null>(null);
   const [testBlockMessage, setTestBlockMessage] = useState<string | null>(null);
   const [secretsReloadNonce, setSecretsReloadNonce] = useState(0);
+  usePageTitle(provider ? provider.label : 'CLI Provider');
 
   useEffect(() => {
     Promise.all([

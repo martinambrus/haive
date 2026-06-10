@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, type Repository } from '@/lib/api-client';
 import { Button, Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
 import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
+import { usePageTitle } from '@/lib/use-page-title';
 
 function statusVariant(status: Repository['status']) {
   if (status === 'ready') return 'success' as const;
@@ -27,6 +28,7 @@ function normalizeExclusion(value: string): string {
 }
 
 export default function ReposPage() {
+  usePageTitle('Repositories');
   const [repos, setRepos] = useState<Repository[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expandedRepoId, setExpandedRepoId] = useState<string | null>(null);

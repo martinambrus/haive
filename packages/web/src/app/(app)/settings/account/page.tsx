@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { api, type ApiError } from '@/lib/api-client';
+import { usePageTitle } from '@/lib/use-page-title';
 import {
   Button,
   Card,
@@ -20,6 +21,7 @@ interface AccountData {
 }
 
 export default function AccountPage() {
+  usePageTitle('Account');
   const [account, setAccount] = useState<AccountData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 

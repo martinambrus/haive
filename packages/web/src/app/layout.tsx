@@ -3,7 +3,10 @@ import type { ReactNode } from 'react';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Haive',
+  title: {
+    template: '%s · Haive',
+    default: 'Haive',
+  },
   description: 'Deterministic multi-CLI orchestration and AI agentic workflow utility',
 };
 

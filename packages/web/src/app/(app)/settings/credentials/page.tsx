@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { api, type ApiError } from '@/lib/api-client';
 import { Button, Card, CardHeader, CardTitle, CardDescription, FormError } from '@/components/ui';
 import { CredentialModal } from '@/components/credential-modal';
+import { usePageTitle } from '@/lib/use-page-title';
 
 interface CredentialRow {
   id: string;
@@ -13,6 +14,7 @@ interface CredentialRow {
 }
 
 export default function CredentialsPage() {
+  usePageTitle('Git Credentials');
   const [credentials, setCredentials] = useState<CredentialRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);

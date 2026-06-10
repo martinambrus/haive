@@ -1,5 +1,8 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Card, CardHeader, CardTitle, CardDescription, Button } from '@/components/ui';
+
+export const metadata: Metadata = { title: 'Dashboard' };
 
 export default function DashboardPage() {
   return (

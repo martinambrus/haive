@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { api, type CliProviderCatalogEntry, type CliProviderName } from '@/lib/api-client';
 import { Card, CardDescription, CardHeader, CardTitle, FormError } from '@/components/ui';
 import { CliProviderForm } from '@/components/cli-provider-form';
+import { usePageTitle } from '@/lib/use-page-title';
 
 export default function NewCliProviderPage() {
   const router = useRouter();
@@ -13,6 +14,7 @@ export default function NewCliProviderPage() {
 
   const [meta, setMeta] = useState<CliProviderCatalogEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
+  usePageTitle(meta ? `Add ${meta.displayName}` : 'Add CLI provider');
 
   useEffect(() => {
     if (!name) {

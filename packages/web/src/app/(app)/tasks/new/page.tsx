@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { usePageTitle } from '@/lib/use-page-title';
 import {
   api,
   API_BASE_URL,
@@ -82,6 +83,7 @@ async function chunkedUploadDbDump(opts: {
 }
 
 export default function NewTaskPage() {
+  usePageTitle('New task');
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryRepoId = searchParams.get('repositoryId');

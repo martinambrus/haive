@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { api, type ApiError } from '@/lib/api-client';
+import { usePageTitle } from '@/lib/use-page-title';
 import {
   Badge,
   Button,
@@ -15,6 +16,7 @@ import {
 } from '@/components/ui';
 
 export default function IntegrationsPage() {
+  usePageTitle('Integrations');
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [clientId, setClientId] = useState('');
   const [saving, setSaving] = useState(false);
