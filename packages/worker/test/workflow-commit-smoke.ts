@@ -246,6 +246,11 @@ async function main(): Promise<void> {
         runLint: false,
         runTypecheck: false,
       },
+      '08b-test-management': {
+        // Fixture has scripts.test, so the step surfaces; skip = no agent work.
+        action: 'skip',
+        runTests: false,
+      },
       '09-gate-2-verify-approval': {
         decision: 'approve',
         feedback: 'Smoke approval.',

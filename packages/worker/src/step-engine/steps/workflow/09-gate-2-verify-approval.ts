@@ -17,6 +17,17 @@ interface VerifyGateDetect {
     exhaustedBudget: boolean;
     report: string;
   } | null;
+  /** Phase 5b test management summary line (null when the step didn't run). */
+  testManagement: { line: string; testsPassed: boolean | null } | null;
+}
+
+interface Phase5bOutput {
+  action?: string;
+  testsCreated?: string[];
+  testsUpdated?: string[];
+  testsDeleted?: string[];
+  testRun?: { ran?: boolean; passed?: boolean } | null;
+  testsPassed?: boolean | null;
 }
 
 interface Phase4Output {
@@ -84,18 +95,39 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       };
     }
 
+    // Phase 5b test management: one summary line + escalation on failed runs.
+    const phase5b = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08b-test-management');
+    const p5 = phase5b?.output as Phase5bOutput | null;
+    let testManagement: VerifyGateDetect['testManagement'] = null;
+    if (p5?.action) {
+      const counts = `created ${(p5.testsCreated ?? []).length}, updated ${(p5.testsUpdated ?? []).length}, deleted ${(p5.testsDeleted ?? []).length}`;
+      const runState =
+        p5.testsPassed === true
+          ? 'related tests PASS'
+          : p5.testsPassed === false
+            ? 'related tests FAIL'
+            : 'tests not run';
+      testManagement = {
+        line: `Test management (${p5.action}): ${counts}; ${runState}`,
+        testsPassed: p5.testsPassed ?? null,
+      };
+    }
+
     return {
       testResults: fmtResult('tests', output.test),
       lintResults: fmtResult('lint', output.lint),
       typecheckResults: fmtResult('typecheck', output.typecheck),
       allPassed: output.passed === true,
       validation,
+      testManagement,
     };
   },
 
   form(_ctx, detected): FormSchema {
     const v = detected.validation;
     const validationOk = v === null || v.verdict === 'VALID';
+    const testsOk =
+      detected.testManagement === null || detected.testManagement.testsPassed !== false;
     const summary = [
       detected.testResults,
       detected.lintResults,
@@ -107,6 +139,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       v
         ? `Pre-test validation: ${v.verdict}${v.exhaustedBudget ? ' (fix budget exhausted)' : ''}`
         : '',
+      detected.testManagement ? detected.testManagement.line : '',
     ]
       .filter(Boolean)
       .join('\n');
@@ -162,7 +195,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             { value: 'approve', label: 'Approve — proceed to commit gate' },
             { value: 'reject', label: 'Reject — iterate on the implementation' },
           ],
-          default: detected.allPassed && validationOk ? 'approve' : 'reject',
+          default: detected.allPassed && validationOk && testsOk ? 'approve' : 'reject',
           required: true,
         },
         {

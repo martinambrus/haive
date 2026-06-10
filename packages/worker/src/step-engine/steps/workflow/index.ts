@@ -17,6 +17,7 @@ import { codeSimplifyStep } from './07a-code-simplify.js';
 import { phase4ValidateStep } from './07b-phase-4-validate.js';
 import { phase5VerifyStep } from './08-phase-5-verify.js';
 import { browserVerifyStep } from './08a-browser-verify.js';
+import { testManagementStep } from './08b-test-management.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
 import { gate3CommitStep } from './10-gate-3-commit.js';
 import { phase8LearningStep } from './11-phase-8-learning.js';
@@ -41,6 +42,7 @@ export {
   phase4ValidateStep,
   phase5VerifyStep,
   browserVerifyStep,
+  testManagementStep,
   gate2VerifyApprovalStep,
   gate3CommitStep,
   phase8LearningStep,
@@ -66,6 +68,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(phase4ValidateStep);
   registry.register(phase5VerifyStep);
   registry.register(browserVerifyStep);
+  registry.register(testManagementStep);
   registry.register(gate2VerifyApprovalStep);
   registry.register(gate3CommitStep);
   registry.register(phase8LearningStep);

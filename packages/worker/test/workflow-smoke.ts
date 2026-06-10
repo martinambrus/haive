@@ -261,6 +261,11 @@ async function main(): Promise<void> {
         runLint: false,
         runTypecheck: false,
       },
+      '08b-test-management': {
+        // Fixture has scripts.test, so the step surfaces; skip = no agent work.
+        action: 'skip',
+        runTests: false,
+      },
       '09-gate-2-verify-approval': {
         decision: 'approve',
         feedback: 'Verification skipped; stub approval.',
@@ -352,6 +357,7 @@ async function main(): Promise<void> {
       '07a-code-simplify',
       '07b-phase-4-validate',
       '08-phase-5-verify',
+      '08b-test-management',
       '09-gate-2-verify-approval',
       '10-gate-3-commit',
       '11-phase-8-learning',
