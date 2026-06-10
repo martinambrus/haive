@@ -36,6 +36,7 @@ interface PeerFinding {
   path?: string;
   lines?: string;
   issue: string;
+  snippet?: string;
   fix?: string;
 }
 interface SecurityFinding {
@@ -45,6 +46,7 @@ interface SecurityFinding {
   line?: string | number;
   cwe?: string;
   issue: string;
+  snippet?: string;
   attack?: string;
   fix?: string;
 }
@@ -66,6 +68,7 @@ const peerSchema = z.object({
         path: z.string().optional(),
         lines: z.string().optional(),
         issue: z.string(),
+        snippet: z.string().optional(),
         fix: z.string().optional(),
       }),
     )
@@ -84,6 +87,7 @@ const securitySchema = z.object({
         line: z.union([z.string(), z.number()]).optional(),
         cwe: z.string().optional(),
         issue: z.string(),
+        snippet: z.string().optional(),
         attack: z.string().optional(),
         fix: z.string().optional(),
       }),
@@ -157,8 +161,10 @@ const PEER_PERSONA = [
   'Review each changed file in FULL for: correctness (does it do what the spec says, edge/error',
   'cases), maintainability (duplication, oversized functions, unnecessary coupling), and',
   'convention adherence (existing repo patterns + knowledge base). Acknowledge genuine strengths.',
-  'Every finding needs a file + line and a concrete fix; mark critical issues critical (never',
-  'soften to a suggestion). Do NOT edit code; do NOT run git beyond reading the diff.',
+  'Every finding needs a file + line, the offending code snippet, and a concrete fix (with a code',
+  'example where it helps); mark critical issues critical (never soften to a suggestion). Report',
+  'EVERY finding in full — never just counts. Do NOT edit code and do NOT run git (it is',
+  'unavailable here — work from the changed-files list and read them directly).',
 ] as const;
 
 const SECURITY_PERSONA = [
@@ -167,15 +173,16 @@ const SECURITY_PERSONA = [
   'verify sanitization at each step. Check injection (SQL/NoSQL/XSS/command/template),',
   'access-control on every privileged path, secret handling, and data exposure. Report EVERY',
   'finding in full — including pre-existing, low-severity, and dead-code ones — each with',
-  'file:line, an attack scenario, and a fix, so the author can decide with full information.',
-  'Do NOT edit code; do NOT run git beyond reading the diff.',
+  'file:line, the offending code snippet, an attack scenario, and a fix, so the author can decide',
+  'with full information. Report EVERY finding in full — never just counts. Do NOT edit code and do',
+  'NOT run git (it is unavailable here — work from the changed-files list and read them directly).',
 ] as const;
 
 function reviewAssignment(d: CodeReviewDetect): string {
   return [
     d.implementationFiles.length > 0
-      ? `Changed files to review:\n- ${d.implementationFiles.join('\n- ')}`
-      : 'Determine the changed files from the workspace (git diff).',
+      ? `Changed files to review (read each in full):\n- ${d.implementationFiles.join('\n- ')}`
+      : 'Determine the recently-changed files from the workspace and read each in full.',
     d.debtBlock ? `\n${d.debtBlock}` : '',
     '',
     ...SEARCH_LADDER,
@@ -196,7 +203,7 @@ function buildPeerPrompt(d: CodeReviewDetect): string {
     reviewAssignment(d),
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
-    '{ "verdict": "APPROVE|REQUEST_CHANGES|DISCUSS", "findings": [{ "severity": "critical|warning|suggestion", "path": "file", "lines": "start-end", "issue": "...", "fix": "..." }], "positives": ["..."] }',
+    '{ "verdict": "APPROVE|REQUEST_CHANGES|DISCUSS", "findings": [{ "severity": "critical|warning|suggestion", "path": "file", "lines": "start-end", "issue": "...", "snippet": "<offending code>", "fix": "..." }], "positives": ["..."] }',
   ].join('\n');
 }
 
@@ -209,7 +216,7 @@ function buildSecurityPrompt(d: CodeReviewDetect): string {
     reviewAssignment(d),
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
-    '{ "verdict": "SECURE|NEEDS_FIXES|VULNERABLE", "findings": [{ "severity": "critical|high|medium|low", "in_scope": "yes|no", "path": "file", "line": 0, "cwe": "id or n/a", "issue": "...", "attack": "...", "fix": "..." }] }',
+    '{ "verdict": "SECURE|NEEDS_FIXES|VULNERABLE", "findings": [{ "severity": "critical|high|medium|low", "in_scope": "yes|no", "path": "file", "line": 0, "cwe": "id or n/a", "issue": "...", "snippet": "<vulnerable code>", "attack": "...", "fix": "..." }] }',
   ].join('\n');
 }
 
