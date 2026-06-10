@@ -283,7 +283,7 @@ async function main(): Promise<void> {
         commitMessage: '',
       },
       '11-phase-8-learning': {
-        observations: 'envwrap smoke: prelude+workflow end-to-end.',
+        reviewerNote: 'envwrap smoke: prelude+workflow end-to-end.',
         writeFiles: true,
       },
       '12-worktree-cleanup': { removeWorktree: false },

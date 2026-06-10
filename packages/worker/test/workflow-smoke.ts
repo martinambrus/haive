@@ -279,7 +279,7 @@ async function main(): Promise<void> {
         commitMessage: '',
       },
       '11-phase-8-learning': {
-        observations: 'Smoke test: stub pipeline end-to-end.',
+        reviewerNote: 'Smoke test: stub pipeline end-to-end.',
         writeFiles: true,
       },
       '12-worktree-cleanup': {

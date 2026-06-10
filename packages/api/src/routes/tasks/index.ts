@@ -139,7 +139,7 @@ taskRoutes.post('/', async (c) => {
     }
   }
 
-  const metadata: Record<string, unknown> | null = null;
+  const metadata: Record<string, unknown> | null = body.isBugFix ? { category: 'bugfix' } : null;
 
   const inserted = await db
     .insert(schema.tasks)

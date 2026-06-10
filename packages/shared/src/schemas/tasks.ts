@@ -58,6 +58,10 @@ export const createTaskRequestSchema = z
     /** Phase 7: adversarial QA level. Fans out 2/4/6 adversarial agents before
      *  gate 2. Workflow tasks only; omitted/'none' = off. */
     adversarialQaLevel: z.enum(['none', 'poc', 'standard', 'enterprise']).optional(),
+    /** Marks the task as a bug fix → the learning step also authors a durable
+     *  investigation (root cause + lesson) into the knowledge base. Stored in
+     *  tasks.metadata.category. Workflow tasks only. */
+    isBugFix: z.boolean().optional(),
     resourceLimits: resourceLimitsSchema,
     stepLoopLimits: stepLoopLimitsSchema,
   })

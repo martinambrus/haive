@@ -261,7 +261,7 @@ async function main(): Promise<void> {
         commitMessage,
       },
       '11-phase-8-learning': {
-        observations: 'Real-commit smoke.',
+        reviewerNote: 'Real-commit smoke.',
         writeFiles: true,
       },
       '12-worktree-cleanup': { removeWorktree: false },

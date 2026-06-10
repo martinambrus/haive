@@ -100,6 +100,7 @@ export default function NewTaskPage() {
    *  loop hook's built-in default. */
   const [specQualityMaxIterations, setSpecQualityMaxIterations] = useState<number>(10);
   const [simplifyCode, setSimplifyCode] = useState(true);
+  const [isBugFix, setIsBugFix] = useState(false);
   const [adversarialQaLevel, setAdversarialQaLevel] = useState<
     'none' | 'poc' | 'standard' | 'enterprise'
   >('none');
@@ -230,6 +231,7 @@ export default function NewTaskPage() {
       if (type === 'workflow') {
         body.stepLoopLimits = { '05-phase-0b5-spec-quality': specQualityMaxIterations };
         body.simplifyCode = simplifyCode;
+        body.isBugFix = isBugFix;
         body.adversarialQaLevel = adversarialQaLevel;
       }
 
@@ -509,6 +511,25 @@ export default function NewTaskPage() {
               A simplifier agent reviews the implemented code and reduces unnecessary complexity
               without changing functionality; if it edits anything, one fixup agent verifies the
               spec still holds. Single pass, before verification.
+            </p>
+          </div>
+        )}
+
+        {inferredType === 'workflow' && (
+          <div className="flex flex-col gap-1.5">
+            <label className="flex items-center gap-2 text-sm text-neutral-100">
+              <input
+                type="checkbox"
+                checked={isBugFix}
+                onChange={(e) => setIsBugFix(e.target.checked)}
+                className="h-4 w-4 rounded border-neutral-700 bg-neutral-950"
+              />
+              This is a bug fix
+            </label>
+            <p className="text-xs text-neutral-500">
+              At the learning step, an agent also writes a durable investigation (root cause + the
+              lesson) into the knowledge base, so future runs find it via search. You review the
+              draft before it is written.
             </p>
           </div>
         )}

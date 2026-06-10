@@ -218,6 +218,7 @@ async function main(): Promise<void> {
       },
       '02-pre-rag-sync': { runSync: false },
       '03-phase-0a-discovery': { extraContext: '' },
+      '03b-business-requirements': { decision: 'approve', feedback: '' },
       '04-phase-0b-pre-planning': { scope: 'env-replicate smoke scope.' },
       '05-phase-0b5-spec-quality': { maxIterations: '3', focusAreas: '' },
       '05a-resolve-spec-warnings': { action: 'continue' },
@@ -226,7 +227,7 @@ async function main(): Promise<void> {
       '08-phase-5-verify': { runTest: false, runLint: false, runTypecheck: false },
       '09-gate-2-verify-approval': { decision: 'approve', feedback: 'env smoke verify.' },
       '10-gate-3-commit': { commit: false, commitMessage: '' },
-      '11-phase-8-learning': { observations: 'env smoke observations.', writeFiles: true },
+      '11-phase-8-learning': { reviewerNote: 'env smoke note.', writeFiles: true },
       '12-worktree-cleanup': { removeWorktree: false },
     };
 
