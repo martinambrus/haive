@@ -29,6 +29,7 @@ import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import { cleanupTaskAuthVolumes } from '../sandbox/task-auth-volume.js';
 import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
+import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 
@@ -242,6 +243,16 @@ async function cleanupTaskContainers(
       }
     } catch (err) {
       logger.warn({ err, taskId, reason }, 'cleanup-ddev-runners failed');
+    }
+    // Per-task app-runners (non-DDEV runtime). Same keep-alive-on-'failed'
+    // semantics as the DDEV runner so recovery can reuse the running app.
+    try {
+      const killedApps = await killTaskAppRunners(taskId);
+      if (killedApps > 0) {
+        await appendEvent(db, taskId, null, 'app_runners.destroyed', { reason, count: killedApps });
+      }
+    } catch (err) {
+      logger.warn({ err, taskId, reason }, 'cleanup-app-runners failed');
     }
   }
 

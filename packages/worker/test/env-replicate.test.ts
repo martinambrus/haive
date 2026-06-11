@@ -339,11 +339,13 @@ describe('renderDockerfile', () => {
     expect(out).toContain('RUN npm install -g chrome-devtools-mcp');
   });
 
-  it('installs chromium and chrome-devtools-mcp when browserTesting is enabled', () => {
+  it('installs the headed-browser desktop stack when browserTesting is enabled', () => {
     const out = renderDockerfile('ubuntu:24.04', { browserTesting: true });
-    expect(out).toContain('# Chrome + chrome-devtools-mcp');
     expect(out).toContain('chromium');
+    expect(out).toContain('x11vnc');
+    expect(out).toContain('socat');
     expect(out).toContain('chrome-devtools-mcp');
+    expect(out).toContain('puppeteer-core');
   });
 
   it('installs postgresql-client when a postgres database is declared', () => {
