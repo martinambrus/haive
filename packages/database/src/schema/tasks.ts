@@ -42,6 +42,9 @@ export const workflowTypeEnum = pgEnum('workflow_type', [
   'workflow',
   'env_replicate',
   'onboarding_upgrade',
+  // Repo-anchored global-KB enrichment: expands a user skeleton into a
+  // version-scoped global KB draft by reading the chosen repo (plan §5.1/§5.3).
+  'kb_author',
 ]);
 export const taskStatusEnum = pgEnum('task_status', [
   'created',

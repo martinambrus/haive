@@ -1,7 +1,13 @@
 import { z } from 'zod';
 import { Hono } from 'hono';
 import { and, desc, eq, type SQL } from 'drizzle-orm';
-import { GLOBAL_KB_JOB_NAMES, type GlobalKbSyncJobPayload } from '@haive/shared';
+import { schema } from '@haive/database';
+import {
+  GLOBAL_KB_JOB_NAMES,
+  TASK_JOB_NAMES,
+  type GlobalKbSyncJobPayload,
+  type TaskJobPayload,
+} from '@haive/shared';
 import {
   globalKbEntries,
   withGlobalKb,
@@ -9,7 +15,7 @@ import {
   type GlobalKbStatus,
 } from '@haive/shared/global-kb';
 import { getDb } from '../db.js';
-import { getGlobalKbSyncQueue } from '../queues.js';
+import { getGlobalKbSyncQueue, getTaskQueue } from '../queues.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -28,6 +34,7 @@ const CATEGORIES = [
 const facetsSchema = z
   .object({
     framework: z.array(z.string()).optional(),
+    frameworkMajor: z.array(z.string()).optional(),
     language: z.array(z.string()).optional(),
     phpMajor: z.array(z.string()).optional(),
     nodeMajor: z.array(z.string()).optional(),
@@ -68,10 +75,95 @@ async function enqueueSync(
   );
 }
 
+const enrichSchema = z.object({
+  title: z.string().min(1).max(300),
+  body: z.string().min(1),
+  category: z.enum(CATEGORIES),
+  facets: facetsSchema.optional(),
+  namespace: z.string().min(1).max(120).optional(),
+  repositoryId: z.string().uuid(),
+  cliProviderId: z.string().uuid(),
+});
+
 export const globalKbRoutes = new Hono<AppEnv>();
 
 globalKbRoutes.use('*', requireAuth);
 globalKbRoutes.use('*', requireAdmin);
+
+// Repo-anchored AI enrichment (plan §5.1/§5.3): create a `skeleton` entry, then a
+// kb_author task that reads the chosen repo with the chosen CLI to expand the
+// skeleton into a version-scoped `draft`. The user reviews + activates the draft.
+globalKbRoutes.post('/enrich', async (c) => {
+  const parsed = enrichSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) throw new HttpError(400, 'invalid enrich request', 'invalid_body');
+  const data = parsed.data;
+  const userId = c.get('userId');
+  const db = getDb();
+
+  const repo = await db.query.repositories.findFirst({
+    where: and(
+      eq(schema.repositories.id, data.repositoryId),
+      eq(schema.repositories.userId, userId),
+    ),
+    columns: { id: true },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+  const provider = await db.query.cliProviders.findFirst({
+    where: and(
+      eq(schema.cliProviders.id, data.cliProviderId),
+      eq(schema.cliProviders.userId, userId),
+    ),
+    columns: { id: true },
+  });
+  if (!provider) throw new HttpError(404, 'CLI provider not found');
+
+  const entry = await withGlobalKb(db, async ({ db: gdb, settings }) => {
+    const [row] = await gdb
+      .insert(globalKbEntries)
+      .values({
+        namespace: data.namespace || settings.namespace,
+        userId,
+        title: data.title,
+        seedText: data.body,
+        body: data.body,
+        category: data.category,
+        facets: (data.facets ?? {}) as GlobalKbFacets,
+        status: 'skeleton',
+        source: 'user',
+        embedStatus: 'pending',
+      })
+      .returning();
+    return row!;
+  });
+
+  const [task] = await db
+    .insert(schema.tasks)
+    .values({
+      userId,
+      type: 'kb_author',
+      title: `Enrich: ${data.title}`.slice(0, 512),
+      repositoryId: data.repositoryId,
+      cliProviderId: data.cliProviderId,
+      metadata: { globalKbEntryId: entry.id },
+      autoContinue: true,
+      status: 'created',
+    })
+    .returning();
+  if (!task) throw new HttpError(500, 'failed to create enrichment task');
+
+  await getTaskQueue().add(
+    TASK_JOB_NAMES.START,
+    { taskId: task.id, userId } satisfies TaskJobPayload,
+    {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 5000 },
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    },
+  );
+
+  return c.json({ entry, taskId: task.id }, 201);
+});
 
 globalKbRoutes.get('/entries', async (c) => {
   const namespace = c.req.query('namespace');

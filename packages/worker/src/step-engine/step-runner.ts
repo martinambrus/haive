@@ -915,6 +915,7 @@ const WORKFLOW_TYPE_OFFSETS: Record<string, number> = {
   onboarding: 0,
   env_replicate: 0,
   workflow: 100,
+  kb_author: 300,
 };
 
 export function computeGlobalStepIndex(workflowType: string, index: number): number {

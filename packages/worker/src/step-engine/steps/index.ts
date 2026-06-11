@@ -4,12 +4,14 @@ import { registerEnvReplicateSteps } from './env-replicate/index.js';
 import { registerOnboardingSteps } from './onboarding/index.js';
 import { registerOnboardingUpgradeSteps } from './onboarding-upgrade/index.js';
 import { registerWorkflowSteps } from './workflow/index.js';
+import { registerKbAuthorSteps } from './kb-author/index.js';
 
 export {
   registerOnboardingSteps,
   registerEnvReplicateSteps,
   registerWorkflowSteps,
   registerOnboardingUpgradeSteps,
+  registerKbAuthorSteps,
 };
 
 export function registerAllSteps(registry: StepRegistry): void {
@@ -17,6 +19,7 @@ export function registerAllSteps(registry: StepRegistry): void {
   registerEnvReplicateSteps(registry);
   registerWorkflowSteps(registry);
   registerOnboardingUpgradeSteps(registry);
+  registerKbAuthorSteps(registry);
   assertProviderSensitiveListInSync(registry);
 }
 

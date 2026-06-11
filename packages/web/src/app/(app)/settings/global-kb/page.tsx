@@ -1,7 +1,14 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { api, type ApiError, type GlobalKbEntry, type GlobalKbFacets } from '@/lib/api-client';
+import {
+  api,
+  type ApiError,
+  type CliProvider,
+  type GlobalKbEntry,
+  type GlobalKbFacets,
+  type Repository,
+} from '@/lib/api-client';
 import { usePageTitle } from '@/lib/use-page-title';
 import {
   Badge,
@@ -107,6 +114,20 @@ export default function GlobalKbPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [draftsOnly, setDraftsOnly] = useState(false);
+  const [repos, setRepos] = useState<Repository[]>([]);
+  const [providers, setProviders] = useState<CliProvider[]>([]);
+  const [enrich, setEnrich] = useState({
+    title: '',
+    category: 'tech_pattern' as GlobalKbEntry['category'],
+    skeleton: '',
+    framework: '',
+    frameworkMajor: '',
+    language: '',
+    repoId: '',
+    cliProviderId: '',
+  });
+  const [enrichBusy, setEnrichBusy] = useState(false);
+  const [enrichError, setEnrichError] = useState<string | null>(null);
 
   async function refresh() {
     try {
@@ -122,6 +143,14 @@ export default function GlobalKbPage() {
 
   useEffect(() => {
     void refresh();
+    void api
+      .get<{ repositories: Repository[] }>('/repos')
+      .then((r) => setRepos(r.repositories))
+      .catch(() => {});
+    void api
+      .get<{ providers: CliProvider[] }>('/cli-providers')
+      .then((r) => setProviders(r.providers))
+      .catch(() => {});
   }, []);
 
   function editEntry(e: GlobalKbEntry) {
@@ -215,6 +244,40 @@ export default function GlobalKbPage() {
     }
   }
 
+  async function runEnrich() {
+    if (!enrich.title.trim() || !enrich.skeleton.trim()) {
+      setEnrichError('Title and skeleton are required.');
+      return;
+    }
+    if (!enrich.repoId || !enrich.cliProviderId) {
+      setEnrichError('Pick a repository and a CLI.');
+      return;
+    }
+    setEnrichBusy(true);
+    setEnrichError(null);
+    const facets: GlobalKbFacets = {};
+    if (parseList(enrich.framework).length) facets.framework = parseList(enrich.framework);
+    if (parseList(enrich.frameworkMajor).length)
+      facets.frameworkMajor = parseList(enrich.frameworkMajor);
+    if (parseList(enrich.language).length) facets.language = parseList(enrich.language);
+    try {
+      await api.post('/global-kb/enrich', {
+        title: enrich.title,
+        category: enrich.category,
+        body: enrich.skeleton,
+        facets,
+        repositoryId: enrich.repoId,
+        cliProviderId: enrich.cliProviderId,
+      });
+      setEnrich({ ...enrich, title: '', skeleton: '' });
+      await refresh();
+    } catch (err) {
+      setEnrichError((err as ApiError).message ?? 'Enrichment failed to start');
+    } finally {
+      setEnrichBusy(false);
+    }
+  }
+
   if (adminOnly) {
     return (
       <div className="flex flex-col gap-2">
@@ -237,6 +300,132 @@ export default function GlobalKbPage() {
           retrieve active entries via rag_search, version-scoped by the facets below.
         </p>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Enrich with AI</CardTitle>
+          <CardDescription>
+            Paste a rough skeleton and pick a repository + CLI. The CLI reads that repo&apos;s
+            module code, extracts the major versions, and (if its egress allows) researches online
+            docs to expand the skeleton into a draft you review below.
+          </CardDescription>
+        </CardHeader>
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="enrich-title">Title</Label>
+            <Input
+              id="enrich-title"
+              value={enrich.title}
+              onChange={(e) => setEnrich({ ...enrich, title: e.target.value })}
+              placeholder="e.g. Lazy-loading images via the Lazy module"
+            />
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="enrich-repo">Repository</Label>
+              <select
+                id="enrich-repo"
+                value={enrich.repoId}
+                onChange={(e) => setEnrich({ ...enrich, repoId: e.target.value })}
+                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+              >
+                <option value="">Select…</option>
+                {repos.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="enrich-cli">CLI</Label>
+              <select
+                id="enrich-cli"
+                value={enrich.cliProviderId}
+                onChange={(e) => setEnrich({ ...enrich, cliProviderId: e.target.value })}
+                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+              >
+                <option value="">Select…</option>
+                {providers.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label || p.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="enrich-category">Category</Label>
+              <select
+                id="enrich-category"
+                value={enrich.category}
+                onChange={(e) =>
+                  setEnrich({ ...enrich, category: e.target.value as GlobalKbEntry['category'] })
+                }
+                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+              >
+                {CATEGORIES.map((cc) => (
+                  <option key={cc} value={cc}>
+                    {cc.replace(/_/g, ' ')}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="enrich-skel">Skeleton</Label>
+            <textarea
+              id="enrich-skel"
+              value={enrich.skeleton}
+              onChange={(e) => setEnrich({ ...enrich, skeleton: e.target.value })}
+              rows={5}
+              placeholder="rough bullets — what to document, which module, any specifics"
+              className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+            />
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="enrich-fw">Framework (hint)</Label>
+              <Input
+                id="enrich-fw"
+                value={enrich.framework}
+                onChange={(e) => setEnrich({ ...enrich, framework: e.target.value })}
+                placeholder="drupal"
+                className="w-40"
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="enrich-fwm">Framework major</Label>
+              <Input
+                id="enrich-fwm"
+                value={enrich.frameworkMajor}
+                onChange={(e) => setEnrich({ ...enrich, frameworkMajor: e.target.value })}
+                placeholder="11"
+                className="w-32"
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="enrich-lang">Language</Label>
+              <Input
+                id="enrich-lang"
+                value={enrich.language}
+                onChange={(e) => setEnrich({ ...enrich, language: e.target.value })}
+                placeholder="php"
+                className="w-32"
+              />
+            </div>
+          </div>
+          <FormError message={enrichError} />
+          <div>
+            <Button disabled={enrichBusy} onClick={() => void runEnrich()}>
+              {enrichBusy ? 'Starting…' : 'Enrich with AI'}
+            </Button>
+          </div>
+          <p className="text-xs text-neutral-500">
+            A background task reads the repo and writes a draft (status: enriching → draft). It
+            appears below; refresh to see updates.
+          </p>
+        </div>
+      </Card>
 
       <Card>
         <CardHeader>
