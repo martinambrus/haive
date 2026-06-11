@@ -5,7 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { api, API_BASE_URL, type NotificationSettings, type Task } from '@/lib/api-client';
 import { playChime } from './chime';
 import { ToastStack, type AttentionToast } from './toast-stack';
-import { detectTransitions, snapshotStatuses, type TaskTransitionEvent } from './transitions';
+import { detectTransitions, snapshotIdentities, type TaskTransitionEvent } from './transitions';
 
 const POLL_MS = 5_000;
 const SETTINGS_CHANGED_EVENT = 'haive:notification-settings-changed';
@@ -13,12 +13,15 @@ const SETTINGS_CHANGED_EVENT = 'haive:notification-settings-changed';
 const SEEN_PREFIX = 'haive:notif-seen:';
 const SEEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Per-episode dedupe key: (task, status, step). localStorage (not
+/** Per-episode dedupe key: (task, status, step, occurrence). localStorage (not
  *  sessionStorage) so a handled episode stays handled across tabs AND sessions
  *  — opening a new tab never re-fires an already-seen waiting notification.
- *  currentStepId distinguishes gates so each genuinely-new wait notifies once. */
+ *  currentStepId distinguishes gates; updatedAt distinguishes wait OCCURRENCES
+ *  so the same gate re-notifies after a restart/retry (a new wait carries a new
+ *  updatedAt), while a new tab on the still-ongoing wait shares the key and
+ *  stays deduped. */
 function seenKey(e: TaskTransitionEvent): string {
-  return `${SEEN_PREFIX}${e.taskId}:${e.status}:${e.currentStepId ?? ''}`;
+  return `${SEEN_PREFIX}${e.taskId}:${e.status}:${e.currentStepId ?? ''}:${e.updatedAt}`;
 }
 
 function hasSeen(e: TaskTransitionEvent): boolean {
@@ -171,7 +174,7 @@ export function NotificationProvider() {
 
       if (!isCurrent) {
         const toast: AttentionToast = {
-          key: `${e.taskId}:${e.status}`,
+          key: `${e.taskId}:${e.status}:${e.currentStepId ?? ''}`,
           taskId: e.taskId,
           title: e.title,
           status: e.status,
@@ -217,7 +220,7 @@ export function NotificationProvider() {
         const data = await api.get<{ tasks: Task[] }>('/tasks');
         if (cancelled) return;
         const events = detectTransitions(prevRef.current, data.tasks);
-        prevRef.current = snapshotStatuses(data.tasks);
+        prevRef.current = snapshotIdentities(data.tasks);
         for (const event of events) handleEvent(event);
       } catch {
         // offline or auth refresh in flight — try again next tick
