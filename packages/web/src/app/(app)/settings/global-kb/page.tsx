@@ -115,6 +115,18 @@ interface GlobalKbConfig {
   connectionStringSet: boolean;
 }
 
+/** Ollama endpoints, mirroring onboarding step 04: internal = the bundled haive
+ *  compose service; external default = an Ollama running on the host. */
+const INTERNAL_OLLAMA_URL = 'http://ollama:11434';
+const DEFAULT_EXTERNAL_OLLAMA_URL = 'http://host.docker.internal:11434';
+const DEFAULT_EMBED_MODEL = 'qwen3-embedding:4b';
+
+/** A saved ollamaUrl maps back to a mode: the bundled URL (or empty) is internal,
+ *  anything else is an external server the user pointed at. */
+function deriveOllamaMode(url: string): 'internal' | 'external' {
+  return url && url !== INTERNAL_OLLAMA_URL ? 'external' : 'internal';
+}
+
 export default function GlobalKbPage() {
   usePageTitle('Global KB');
   const [entries, setEntries] = useState<GlobalKbEntry[] | null>(null);
@@ -143,8 +155,9 @@ export default function GlobalKbPage() {
     enabled: true,
     mode: 'internal' as 'internal' | 'external',
     namespace: 'default',
+    ollamaMode: 'internal' as 'internal' | 'external',
     ollamaUrl: '',
-    embedModel: '',
+    embedModel: DEFAULT_EMBED_MODEL,
     embedDimensions: 2560,
     connectionString: '',
   });
@@ -160,6 +173,7 @@ export default function GlobalKbPage() {
         enabled: cc.enabled,
         mode: cc.mode,
         namespace: cc.namespace,
+        ollamaMode: deriveOllamaMode(cc.ollamaUrl),
         ollamaUrl: cc.ollamaUrl,
         embedModel: cc.embedModel,
         embedDimensions: cc.embedDimensions,
@@ -171,6 +185,13 @@ export default function GlobalKbPage() {
     }
   }
 
+  // Internal mode has no URL field; collapse the mode back to a concrete URL
+  // (mirrors onboarding 04's apply) for both save and the Ollama test.
+  const effectiveOllamaUrl =
+    cfg.ollamaMode === 'internal'
+      ? INTERNAL_OLLAMA_URL
+      : cfg.ollamaUrl.trim() || DEFAULT_EXTERNAL_OLLAMA_URL;
+
   async function saveConfig() {
     setCfgBusy(true);
     setCfgMsg(null);
@@ -179,7 +200,7 @@ export default function GlobalKbPage() {
         enabled: cfg.enabled,
         mode: cfg.mode,
         namespace: cfg.namespace,
-        ollamaUrl: cfg.ollamaUrl,
+        ollamaUrl: effectiveOllamaUrl,
         embedModel: cfg.embedModel,
         embedDimensions: cfg.embedDimensions,
       };
@@ -421,21 +442,47 @@ export default function GlobalKbPage() {
           )}
           <div className="flex flex-wrap gap-3">
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="cfg-ollama">Embedding Ollama URL</Label>
-              <Input
-                id="cfg-ollama"
-                value={cfg.ollamaUrl}
-                onChange={(e) => setCfg({ ...cfg, ollamaUrl: e.target.value })}
-                placeholder="http://ollama:11434"
-              />
+              <Label htmlFor="cfg-ollama-mode">Ollama server</Label>
+              <select
+                id="cfg-ollama-mode"
+                value={cfg.ollamaMode}
+                onChange={(e) => {
+                  const ollamaMode = e.target.value as 'internal' | 'external';
+                  setCfg((p) => ({
+                    ...p,
+                    ollamaMode,
+                    // Prefill the host default when leaving internal, but keep an
+                    // already-configured external URL untouched.
+                    ollamaUrl:
+                      ollamaMode === 'external' && deriveOllamaMode(p.ollamaUrl) === 'internal'
+                        ? DEFAULT_EXTERNAL_OLLAMA_URL
+                        : p.ollamaUrl,
+                  }));
+                }}
+                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+              >
+                <option value="internal">Use Haive internal Ollama service</option>
+                <option value="external">Use an external Ollama server</option>
+              </select>
             </div>
+            {cfg.ollamaMode === 'external' && (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="cfg-ollama">External Ollama URL</Label>
+                <Input
+                  id="cfg-ollama"
+                  value={cfg.ollamaUrl}
+                  onChange={(e) => setCfg({ ...cfg, ollamaUrl: e.target.value })}
+                  placeholder="http://host.docker.internal:11434"
+                />
+              </div>
+            )}
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="cfg-model">Embedding model</Label>
               <Input
                 id="cfg-model"
                 value={cfg.embedModel}
                 onChange={(e) => setCfg({ ...cfg, embedModel: e.target.value })}
-                placeholder="nomic-embed-text"
+                placeholder="qwen3-embedding:4b"
               />
             </div>
             <div className="flex flex-col gap-1.5">
@@ -451,6 +498,11 @@ export default function GlobalKbPage() {
               />
             </div>
           </div>
+          {cfg.ollamaMode === 'internal' && (
+            <p className="text-xs text-neutral-500">
+              Internal mode uses {INTERNAL_OLLAMA_URL} automatically.
+            </p>
+          )}
           <div className="flex items-center gap-3">
             <Button disabled={cfgBusy} onClick={() => void saveConfig()}>
               {cfgBusy ? 'Saving…' : 'Save connection'}

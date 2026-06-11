@@ -15,6 +15,11 @@ export type GlobalKbMode = 'internal' | 'external';
  *  the main Postgres host just like a per-project `haive_rag_<project>` DB. */
 export const GLOBAL_KB_DB_NAME = 'haive_kb_global';
 
+/** Default embedding model + dimensions when unset, matching the per-repo RAG
+ *  defaults in onboarding step 04 so a global KB embeds with the same model. */
+const DEFAULT_EMBED_MODEL = 'qwen3-embedding:4b';
+const DEFAULT_EMBED_DIMENSIONS = 2560;
+
 /** Instance-level global KB settings resolved from ConfigService + SecretsService. */
 export interface GlobalKbSettings {
   enabled: boolean;
@@ -48,7 +53,7 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
     configService.get(CONFIG_KEYS.GLOBAL_KB_NAMESPACE),
     configService.get(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL),
     configService.get(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL),
-    configService.getNumber(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, 2560),
+    configService.getNumber(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, DEFAULT_EMBED_DIMENSIONS),
   ]);
   const connectionString = await secretsService.get(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
   return {
@@ -57,7 +62,7 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
     namespace: namespace || 'default',
     connectionString: connectionString || null,
     ollamaUrl: ollamaUrl || null,
-    embedModel: embedModel || null,
+    embedModel: embedModel || DEFAULT_EMBED_MODEL,
     embeddingDimensions,
   };
 }
