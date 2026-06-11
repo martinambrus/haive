@@ -1,6 +1,20 @@
+import path from 'node:path';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
+import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
+import {
+  ensureDdevStarted,
+  startBrowserDesktop,
+  runnerExec,
+  ddevPrimaryUrl,
+} from '../../../sandbox/ddev-runner.js';
+import {
+  ensureAppRunnerStarted,
+  appRunnerExec,
+  startBrowserDesktop as startAppBrowserDesktop,
+} from '../../../sandbox/app-runner.js';
 
 interface VerifyGateDetect {
   testResults: string;
@@ -44,6 +58,11 @@ interface VerifyGateDetect {
     counts: { critical: number; high: number; total: number };
     findings: string[];
   } | null;
+  /** In-page live browser for this gate: the per-task DDEV headed-browser
+   *  desktop, brought up (idempotent) and pointed at the app URL so the user can
+   *  test right here while the user-active timer keeps running. null when this
+   *  isn't a DDEV + browser-testing task; available:false if bring-up failed. */
+  liveBrowser: { available: boolean; appUrl: string | null; reason?: string } | null;
 }
 
 interface Phase8dOutput {
@@ -86,6 +105,7 @@ interface Phase5aOutput {
   skipped?: boolean;
   method?: string;
   passed?: boolean;
+  appUrl?: string | null;
   failures?: { description?: string; evidence?: string }[];
   visualVerdict?: string | null;
   checklistMarkdown?: string | null;
@@ -240,6 +260,59 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       };
     }
 
+    // Live in-page browser for this gate: bring up the per-task headed-browser
+    // desktop (idempotent) and point it at the app URL so the user tests here,
+    // keeping the user-active timer running. Works for both runtimes — the DDEV
+    // runner and the non-DDEV app-runner. Best-effort: any failure leaves the
+    // gate fully functional, just without the browser panel.
+    let liveBrowser: VerifyGateDetect['liveBrowser'] = null;
+    try {
+      const envTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
+      const deps = (envTemplate?.declaredDeps as Record<string, unknown>) ?? {};
+      const browserTesting = envTemplate?.status === 'ready' && !!deps.browserTesting;
+      const containerTool = (deps.containerTool as string) ?? 'none';
+      if (browserTesting && containerTool === 'ddev') {
+        const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
+        if (ws && (await pathExists(path.join(ws.workspace, '.ddev', 'config.yaml')))) {
+          const handle = await ensureDdevStarted(ctx.taskId, ws.repoSubpath);
+          await startBrowserDesktop(handle);
+          const appUrl = pa?.appUrl || (await ddevPrimaryUrl(handle)) || 'http://localhost';
+          liveBrowser = { available: true, appUrl };
+          const nav = await runnerExec(handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
+            timeoutMs: 30_000,
+          });
+          if (nav.exitCode !== 0)
+            ctx.logger.warn({ appUrl }, 'gate-2 browser navigate returned non-zero');
+        }
+      } else if (browserTesting) {
+        // Non-DDEV: the app + desktop run in the per-task app-runner container.
+        const boot = await loadAppBootOutput(ctx.db, ctx.taskId);
+        if (boot?.containerized && boot.runtimeContainer && envTemplate?.imageTag) {
+          const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
+          if (ws) {
+            const handle = await ensureAppRunnerStarted(
+              ctx.taskId,
+              ws.repoSubpath,
+              envTemplate.imageTag,
+            );
+            await startAppBrowserDesktop(handle);
+            const appUrl = boot.appUrl || `http://localhost:${boot.port ?? 3000}`;
+            liveBrowser = { available: true, appUrl };
+            const nav = await appRunnerExec(
+              handle,
+              `node /opt/browser/browser-probe-connect.js '${appUrl}'`,
+              { timeoutMs: 30_000 },
+            );
+            if (nav.exitCode !== 0)
+              ctx.logger.warn({ appUrl }, 'gate-2 browser navigate returned non-zero');
+          }
+        }
+      }
+    } catch (err) {
+      ctx.logger.warn({ err }, 'gate-2 live browser bring-up failed');
+      liveBrowser = { available: false, appUrl: null, reason: (err as Error).message };
+    }
+
     return {
       testResults: fmtResult('tests', output.test),
       lintResults: fmtResult('lint', output.lint),
@@ -250,6 +323,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       browser,
       codeReview,
       adversarial,
+      liveBrowser,
     };
   },
 

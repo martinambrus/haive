@@ -4,17 +4,19 @@ import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { DDEV_RUNNER_VNC_PORT, ddevRunnerName, logger } from '@haive/shared';
+import { DDEV_RUNNER_VNC_PORT, ddevRunnerName, appRunnerName, logger } from '@haive/shared';
 import { getDb } from '../db.js';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
 
 // Bridges the web noVNC panel to the headed-browser desktop inside a task's
-// DDEV runner: RFB-over-WebSocket on the client side, raw TCP to
-// <haive-ddev-taskId8>:5900 over the internal sandbox network (the api joins it
-// in docker-compose). This is websockify-in-api: pipe bytes both ways. Auth is
-// the same cookie-JWT upgrade check the terminal proxy uses, plus task
-// ownership; the runner's VNC itself is passwordless and never host-published.
+// runtime container: RFB-over-WebSocket on the client side, raw TCP to
+// <container>:5900 over the internal sandbox network (the api joins it in
+// docker-compose). The target is the DDEV runner for DDEV projects, else the
+// non-DDEV app-runner — resolved from the task's env-template containerTool.
+// This is websockify-in-api: pipe bytes both ways. Auth is the same cookie-JWT
+// upgrade check the terminal proxy uses, plus task ownership; the desktop's VNC
+// itself is passwordless and never host-published.
 
 const log = logger.child({ module: 'browser-vnc-ws' });
 const WS_PATH_PREFIX = '/browser-vnc/';
@@ -50,8 +52,9 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
+        const desktopHost = await resolveDesktopContainer(taskId);
         wss.handleUpgrade(req, socket, head, (ws) => {
-          runVncBridge(ws, ddevRunnerName(taskId), vncPort, taskId);
+          runVncBridge(ws, desktopHost, vncPort, taskId);
         });
       } catch (err) {
         log.error({ err, url: rawUrl }, 'vnc upgrade handler failed');
@@ -108,6 +111,26 @@ function extractTaskId(rawUrl: string, prefix: string): string | null {
   const withoutQuery = rawUrl.split('?')[0] ?? rawUrl;
   const id = withoutQuery.slice(prefix.length).replace(/\/+$/, '');
   return /^[0-9a-f-]{36}$/.test(id) ? id : null;
+}
+
+/** Which container hosts the task's browser desktop: the DDEV runner for DDEV
+ *  projects, else the non-DDEV app-runner. Resolved from the task's env-template
+ *  containerTool; defaults to the DDEV runner when unknown. */
+async function resolveDesktopContainer(taskId: string): Promise<string> {
+  const db = getDb();
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { envTemplateId: true },
+  });
+  if (task?.envTemplateId) {
+    const env = await db.query.envTemplates.findFirst({
+      where: eq(schema.envTemplates.id, task.envTemplateId),
+      columns: { declaredDeps: true },
+    });
+    const tool = (env?.declaredDeps as { containerTool?: string } | null)?.containerTool;
+    if (tool && tool !== 'ddev') return appRunnerName(taskId);
+  }
+  return ddevRunnerName(taskId);
 }
 
 async function taskBelongsToUser(taskId: string, userId: string): Promise<boolean> {
