@@ -119,7 +119,6 @@ export default function GlobalKbPage() {
   usePageTitle('Global KB');
   const [entries, setEntries] = useState<GlobalKbEntry[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [adminOnly, setAdminOnly] = useState(false);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -201,9 +200,7 @@ export default function GlobalKbPage() {
       setEntries(res.entries);
       setLoadError(null);
     } catch (err) {
-      const e = err as ApiError;
-      if (e.status === 403) setAdminOnly(true);
-      else setLoadError(e.message ?? 'Failed to load global KB');
+      setLoadError((err as ApiError).message ?? 'Failed to load global KB');
     }
   }
 
@@ -349,17 +346,6 @@ export default function GlobalKbPage() {
     } finally {
       setEnrichBusy(false);
     }
-  }
-
-  if (adminOnly) {
-    return (
-      <div className="flex flex-col gap-2">
-        <h2 className="text-lg font-semibold text-neutral-50">Global KB</h2>
-        <p className="text-sm text-neutral-400">
-          The global knowledge base is admin-only. Ask an administrator for access.
-        </p>
-      </div>
-    );
   }
 
   const shown = (entries ?? []).filter((e) => (draftsOnly ? e.status === 'draft' : true));

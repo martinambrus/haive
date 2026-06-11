@@ -21,13 +21,15 @@ import {
 } from '@haive/shared/global-kb';
 import { getDb } from '../db.js';
 import { getGlobalKbSyncQueue, getTaskQueue } from '../queues.js';
-import { requireAuth, requireAdmin } from '../middleware/auth.js';
+import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
-// Global KB is instance/namespace-scoped (not per-user), so authoring is
-// admin-only by default (plan §2 Authorization note). The corpus lives in a
-// SEPARATE database reached via withGlobalKb; getDb() is the main DB, needed only
-// to CREATE the dedicated DB in internal mode.
+// Global KB is instance/namespace-scoped (not per-user). haive is self-hosted
+// single-operator — every signed-in user manages their own repos, tasks and
+// settings — so the shared global KB is managed by any authenticated user too
+// (requireAuth only, no admin role). The corpus lives in a SEPARATE database
+// reached via withGlobalKb; getDb() is the main DB, needed only to CREATE the
+// dedicated DB in internal mode.
 const CATEGORIES = [
   'general',
   'tech_pattern',
@@ -101,7 +103,6 @@ const enrichSchema = z.object({
 export const globalKbRoutes = new Hono<AppEnv>();
 
 globalKbRoutes.use('*', requireAuth);
-globalKbRoutes.use('*', requireAdmin);
 
 // --- Global KB connection settings (instance-level: provider mode, external
 // connection string, namespace, pinned embed model). Backed by ConfigService +
