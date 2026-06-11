@@ -65,7 +65,7 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
     if (!invocations) return;
     const anyActive = invocations.some((i) => i.isActive);
     if (!anyActive) return;
-    const t = setInterval(() => void reload(), 4000);
+    const t = setInterval(() => void reload(), 2000);
     return () => clearInterval(t);
   }, [expanded, invocations, reload]);
 

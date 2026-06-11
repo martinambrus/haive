@@ -5,6 +5,7 @@ import {
   type CliExecJobPayload,
   type CliNetworkPolicy,
   type CliProviderName,
+  type CliTokenUsage,
 } from '@haive/shared';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
@@ -32,6 +33,11 @@ import {
   tryJsonParse,
 } from './resolvers.js';
 import { executeSubAgentNative, executeSubAgentSequential } from './sub-agent.js';
+import { makeUsageSnapshotPersister } from './running-usage.js';
+
+/** Throttle for persisting running token-usage snapshots during a CLI stream.
+ *  ~40 writes/min/invocation at most — cheap, safe under the 7-task cap. */
+const RUNNING_USAGE_INTERVAL_MS = 1500;
 
 const AUTH_FAILURE_PATTERNS: RegExp[] = [
   /\b401\b/,
@@ -163,6 +169,7 @@ export async function executeByKind(
         payload.taskId ?? null,
         payload.invocationId ?? null,
         mcp.extraArgs,
+        makeUsageSnapshotPersister(db, payload.invocationId),
       );
     }
     case 'subagent_sequential':
@@ -193,6 +200,7 @@ export async function executeCliSpec(
   taskId: string | null = null,
   invocationId: string | null = null,
   mcpExtraArgs: string[] = [],
+  onUsageSnapshot?: (usage: CliTokenUsage | null) => void,
 ): Promise<ExecutionOutcome> {
   const mergedSpec: CliCommandSpec = {
     ...spec,
@@ -232,17 +240,41 @@ export async function executeCliSpec(
   const outputFormat = mergedSpec.outputFormat;
   const collector = createStreamJsonCollector(statusCallback);
   const codexCollector = outputFormat === 'codex-jsonl' ? createCodexJsonlCollector() : null;
-  const result = await spawner(mergedSpec, {
-    timeoutMs,
-    onStdoutChunk: (chunk: string) => {
-      streamBuf.push(chunk);
-      if (codexCollector) codexCollector.onChunk(chunk);
-      else collector.onChunk(chunk);
-    },
-    onStderrChunk: (chunk: string) => {
-      streamBuf.push(chunk);
-    },
-  });
+
+  // While the CLI streams, persist a running token-usage snapshot on a throttle
+  // so the task page + terminal polls show a live, growing count before the
+  // invocation completes. getTokenUsage() returns the running total mid-stream;
+  // we skip when it hasn't changed. Cleared before returning (incl. on throw);
+  // the final authoritative tokenUsage is written on completion (handlers.ts).
+  let usageTimer: ReturnType<typeof setInterval> | null = null;
+  if (onUsageSnapshot) {
+    let lastUsageJson = '';
+    usageTimer = setInterval(() => {
+      const usage = (codexCollector ?? collector).getTokenUsage();
+      if (!usage) return;
+      const json = JSON.stringify(usage);
+      if (json === lastUsageJson) return;
+      lastUsageJson = json;
+      onUsageSnapshot(usage);
+    }, RUNNING_USAGE_INTERVAL_MS);
+  }
+
+  let result: CliExecutionResult;
+  try {
+    result = await spawner(mergedSpec, {
+      timeoutMs,
+      onStdoutChunk: (chunk: string) => {
+        streamBuf.push(chunk);
+        if (codexCollector) codexCollector.onChunk(chunk);
+        else collector.onChunk(chunk);
+      },
+      onStderrChunk: (chunk: string) => {
+        streamBuf.push(chunk);
+      },
+    });
+  } finally {
+    if (usageTimer) clearInterval(usageTimer);
+  }
   const streamLog = streamBuf.join('');
   void deps;
 

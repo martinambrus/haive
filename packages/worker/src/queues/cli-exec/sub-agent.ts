@@ -14,6 +14,7 @@ import {
   resolveMcpExtraFiles,
 } from './resolvers.js';
 import { resolveSandboxImageTag } from './images.js';
+import { makeUsageSnapshotPersister } from './running-usage.js';
 
 export async function executeSubAgentNative(
   db: Database,
@@ -69,6 +70,7 @@ export async function executeSubAgentNative(
     payload.taskId ?? null,
     payload.invocationId ?? null,
     mcp.extraArgs,
+    makeUsageSnapshotPersister(db, payload.invocationId),
   );
 }
 
