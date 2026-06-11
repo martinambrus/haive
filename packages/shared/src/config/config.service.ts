@@ -73,10 +73,11 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.APP_URL]: 'http://localhost:3000',
   [CONFIG_KEYS.MAINTENANCE_MODE]: 'false',
   [CONFIG_KEYS.MAINTENANCE_MESSAGE]: 'Maintenance in progress. Please check back shortly.',
-  // Global KB defaults: feature off, Haive-hosted internal DB, single shared
-  // corpus, per-repo default embedding dims. Ollama URL / model stay unset
-  // (null) until configured → query falls back to deterministic hash embedding.
-  [CONFIG_KEYS.GLOBAL_KB_ENABLED]: 'false',
+  // Global KB defaults: feature ON (no backward-compat concern; kept as a
+  // kill-switch), Haive-hosted internal DB, single shared corpus, per-repo
+  // default embedding dims. Ollama URL / model stay unset (null) until
+  // configured → query falls back to deterministic hash embedding.
+  [CONFIG_KEYS.GLOBAL_KB_ENABLED]: 'true',
   [CONFIG_KEYS.GLOBAL_KB_MODE]: 'internal',
   [CONFIG_KEYS.GLOBAL_KB_NAMESPACE]: 'default',
   [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS]: '2560',

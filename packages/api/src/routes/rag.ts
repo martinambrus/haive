@@ -1,8 +1,9 @@
 import { Hono } from 'hono';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { logger } from '@haive/shared';
+import { CONFIG_KEYS, configService, logger } from '@haive/shared';
 import {
+  DEFAULT_RAG_SEARCH_CONFIG,
   embedQuery,
   ragHybridSearch,
   resolveRagConnection,
@@ -12,6 +13,7 @@ import {
   type RagSearchHit,
   type RagToolingPrefs,
 } from '@haive/shared/rag';
+import { extractProjectFacets, withGlobalKb, type ProjectFacetSet } from '@haive/shared/global-kb';
 import { getDb } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -38,15 +40,16 @@ function prefsFromTooling(output: unknown): RagToolingPrefs {
   };
 }
 
-/** Resolve RAG prefs (ragMode/connection) + project name for a task. Workflow
- *  tasks have no 04-tooling-infrastructure / 01-env-detect steps of their own,
- *  so fall back to the repo's most recent onboarding run (mirrors the
- *  02-pre-rag-sync detect resolution). Without this, ragMode resolves to 'none'
- *  and projectName to 'default' → empty hits / wrong DB for every workflow task. */
+/** Resolve RAG prefs (ragMode/connection) + project name + the project FACET SET
+ *  for a task. Workflow tasks have no 04-tooling-infrastructure / 01-env-detect
+ *  steps of their own, so fall back to the repo's most recent onboarding run
+ *  (mirrors the 02-pre-rag-sync detect resolution). Without this, ragMode
+ *  resolves to 'none' and projectName to 'default' → empty hits / wrong DB for
+ *  every workflow task. The facet set scopes the GLOBAL KB at query time. */
 async function resolveTaskRagContext(
   db: ReturnType<typeof getDb>,
   taskId: string,
-): Promise<{ prefs: RagToolingPrefs; projectName: string }> {
+): Promise<{ prefs: RagToolingPrefs; projectName: string; facets: ProjectFacetSet }> {
   let toolingOutput = (
     await db.query.taskSteps.findFirst({
       where: and(
@@ -107,11 +110,16 @@ async function resolveTaskRagContext(
   const projectName =
     (envDetect as { data?: { project?: { name?: string } } } | null)?.data?.project?.name ??
     'default';
-  return { prefs: prefsFromTooling(toolingOutput), projectName };
+  return {
+    prefs: prefsFromTooling(toolingOutput),
+    projectName,
+    facets: extractProjectFacets(envDetect),
+  };
 }
 
 /** Best-effort telemetry: one rag_query_log row per search (incl. zero-hit
- *  queries) with the KB-vs-code split + top scores. Never fails the search. */
+ *  queries) with the KB-vs-code split, the global-vs-local split, and top
+ *  scores. Never fails the search. */
 async function logRagQuery(
   db: ReturnType<typeof getDb>,
   taskId: string,
@@ -127,6 +135,7 @@ async function logRagQuery(
       hitCount: hits.length,
       kbHits: hits.filter((h) => h.sourceType === 'kb').length,
       codeHits: hits.filter((h) => h.sourceType === 'code').length,
+      globalHits: hits.filter((h) => h.scope === 'global').length,
       maxRrf: hits.reduce((m, h) => Math.max(m, h.rrf), 0),
       maxDense: hits.reduce((m, h) => Math.max(m, h.denseSim), 0),
     });
@@ -135,9 +144,21 @@ async function logRagQuery(
   }
 }
 
+/** Merge per-repo (local) and global hits, guaranteeing the global KB a slot
+ *  budget (up to half of topK) so relevant house standards always surface
+ *  without drowning repo-specific code. Tunable; recalibrate with rag-eval. */
+function mergeHits(local: RagSearchHit[], global: RagSearchHit[], topK: number): RagSearchHit[] {
+  const byRrf = (a: RagSearchHit, b: RagSearchHit): number => b.rrf - a.rrf;
+  const globalCap = Math.floor(topK / 2);
+  const selGlobal = [...global].sort(byRrf).slice(0, globalCap);
+  const remaining = Math.max(0, topK - selGlobal.length);
+  const selLocal = [...local].sort(byRrf).slice(0, remaining);
+  return [...selLocal, ...selGlobal].sort(byRrf);
+}
+
 /** RAG retrieval for sandbox CLI agents via the haive-rag MCP proxy.
  *  Auth is a task-scoped bearer token (not a user session): the proxy holds
- *  no DB credentials and can only query its own task's project. */
+ *  no DB credentials and can only query its own task's project + the global KB. */
 export const ragRoutes = new Hono<AppEnv>();
 
 ragRoutes.post('/search', async (c) => {
@@ -160,28 +181,61 @@ ragRoutes.post('/search', async (c) => {
     typeof body?.top_k === 'number' && Number.isInteger(body.top_k) && body.top_k > 0
       ? Math.min(body.top_k, 50)
       : undefined;
+  const effectiveTopK = topK ?? DEFAULT_RAG_SEARCH_CONFIG.topK;
 
   const db = getDb();
+  const { prefs, projectName, facets } = await resolveTaskRagContext(db, taskId);
 
-  const { prefs, projectName } = await resolveTaskRagContext(db, taskId);
-  if (prefs.ragMode === 'none') return c.json({ hits: [] });
-
-  let conn: RagConnection | null = null;
-  try {
-    conn = await resolveRagConnection(prefs, db, projectName);
-    if (!conn) return c.json({ hits: [] });
-    const vec = await embedQuery(query, {
-      ollamaUrl: prefs.ollamaUrl,
-      model: prefs.embeddingModel,
-      dimensions: prefs.embeddingDimensions,
-    });
-    const hits = await ragHybridSearch(conn, vec, query, topK ? { topK } : {});
-    await logRagQuery(db, taskId, query, topK ?? null, hits);
-    return c.json({ hits });
-  } catch (err) {
-    log.error({ err, taskId, projectName }, 'rag search failed');
-    throw new HttpError(500, 'rag search failed');
-  } finally {
-    if (conn) await conn.close().catch(() => {});
+  // --- Local (per-repo) search: unchanged behaviour. ragMode 'none' contributes
+  // no local hits; a local failure is still a hard 500 (no facet filter here, so
+  // the per-repo SQL is identical to before). ---
+  let localHits: RagSearchHit[] = [];
+  if (prefs.ragMode !== 'none') {
+    let conn: RagConnection | null = null;
+    try {
+      conn = await resolveRagConnection(prefs, db, projectName);
+      if (conn) {
+        const vec = await embedQuery(query, {
+          ollamaUrl: prefs.ollamaUrl,
+          model: prefs.embeddingModel,
+          dimensions: prefs.embeddingDimensions,
+        });
+        const hits = await ragHybridSearch(conn, vec, query, topK ? { topK } : {});
+        localHits = hits.map((h) => ({ ...h, scope: 'local' as const }));
+      }
+    } catch (err) {
+      log.error({ err, taskId, projectName }, 'local rag search failed');
+      throw new HttpError(500, 'rag search failed');
+    } finally {
+      if (conn) await conn.close().catch(() => {});
+    }
   }
+
+  // --- Global KB search: flag-gated, facet-scoped, and fully isolated — its
+  // failure must never break per-repo retrieval (plan §6.4). ---
+  let globalHits: RagSearchHit[] = [];
+  const globalEnabled = await configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_ENABLED, true);
+  if (globalEnabled) {
+    try {
+      globalHits = await withGlobalKb(db, async ({ conn, settings }) => {
+        const gvec = await embedQuery(query, {
+          ollamaUrl: settings.ollamaUrl,
+          model: settings.embedModel,
+          dimensions: settings.embeddingDimensions,
+        });
+        const hits = await ragHybridSearch(conn, gvec, query, topK ? { topK } : {}, {
+          namespace: settings.namespace,
+          facets,
+        });
+        return hits.map((h) => ({ ...h, scope: 'global' as const }));
+      });
+    } catch (err) {
+      log.warn({ err, taskId }, 'global KB search failed; returning local-only');
+      globalHits = [];
+    }
+  }
+
+  const hits = mergeHits(localHits, globalHits, effectiveTopK);
+  await logRagQuery(db, taskId, query, topK ?? null, hits);
+  return c.json({ hits });
 });

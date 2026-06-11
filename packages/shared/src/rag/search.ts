@@ -54,7 +54,31 @@ export interface RagSearchHit {
   hybrid: number;
   /** Reciprocal-rank-fusion score — the actual ranking signal. */
   rrf: number;
+  /** Which store the hit came from. Set by the /rag/search route when merging
+   *  per-repo (local) and global KB results; undefined for a single-store call. */
+  scope?: 'local' | 'global';
 }
+
+/** Optional metadata filter for the GLOBAL KB store: restricts candidates to a
+ *  namespace and to chunks whose version/variant facets are compatible with the
+ *  current project (plan §3.3/§3.4). Omitted for per-repo searches, which then
+ *  run the original SQL byte-for-byte. */
+export interface RagFacetFilter {
+  namespace: string;
+  /** Per-dimension allowed values for the CURRENT project. A chunk matches a
+   *  dimension iff it does not constrain that dimension OR its set overlaps the
+   *  project's; an empty project array excludes chunks that constrain it. */
+  facets: Record<string, string[]>;
+}
+
+const FACET_FILTER_DIMENSIONS = [
+  'framework',
+  'language',
+  'phpMajor',
+  'nodeMajor',
+  'packages',
+  'tags',
+] as const;
 
 interface RawRow {
   source_path: string;
@@ -83,6 +107,35 @@ async function hasVectorColumn(conn: RagConnection): Promise<boolean> {
   return rows.length > 0;
 }
 
+/** Build a Postgres text[] array literal from string values, e.g.
+ *  ['drupal','drupal7'] -> {"drupal","drupal7"}, [] -> {}. Passed as a bound
+ *  param and cast `$n::text[]` so we never rely on driver array binding. */
+function pgTextArrayLiteral(values: string[]): string {
+  if (!values || values.length === 0) return '{}';
+  const escaped = values.map((v) => `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
+  return `{${escaped.join(',')}}`;
+}
+
+/** Namespace + per-dimension facet predicate shared by the dense and lexical
+ *  candidate CTEs, plus its positional params beginning at `$startIdx`. The same
+ *  param indexes are referenced from both CTEs (Postgres allows reuse). */
+function buildFacetClause(
+  filter: RagFacetFilter,
+  startIdx: number,
+): { core: string; params: string[] } {
+  const params: string[] = [filter.namespace];
+  const parts: string[] = [`namespace = $${startIdx}`];
+  let n = startIdx + 1;
+  for (const dim of FACET_FILTER_DIMENSIONS) {
+    params.push(pgTextArrayLiteral(filter.facets[dim] ?? []));
+    parts.push(
+      `(NOT (facets ? '${dim}') OR jsonb_array_length(facets->'${dim}') = 0 OR (facets->'${dim}') ?| $${n}::text[])`,
+    );
+    n += 1;
+  }
+  return { core: parts.join('\n          AND '), params };
+}
+
 /** Hybrid dense + lexical retrieval over a project RAG database.
  *
  *  Ranking uses Reciprocal Rank Fusion of the dense (pgvector cosine) and
@@ -91,12 +144,18 @@ async function hasVectorColumn(conn: RagConnection): Promise<boolean> {
  *  ranker still earns its full dense RRF contribution, so relevant code can
  *  never be capped below a gate by a zero lexical score. The gate is a relevance
  *  FLOOR on results (denseFloor OR any lexical match), not a "score < X -> grep"
- *  rule — callers should treat a non-empty result as "use RAG". */
+ *  rule — callers should treat a non-empty result as "use RAG".
+ *
+ *  `filter` is the GLOBAL-KB-only namespace + facet predicate (plan §3.4). It is
+ *  applied INSIDE the dense and lexical candidate CTEs (before LIMIT) so the
+ *  candidate pool is not starved by post-filtering. Omit it for per-repo
+ *  searches: the SQL is then identical to the original. */
 export async function ragHybridSearch(
   conn: RagConnection,
   queryVec: number[],
   queryText: string,
   config: Partial<RagSearchConfig> = {},
+  filter?: RagFacetFilter,
 ): Promise<RagSearchHit[]> {
   const cfg = { ...DEFAULT_RAG_SEARCH_CONFIG, ...config };
   const usePgvector = await hasVectorColumn(conn);
@@ -105,6 +164,10 @@ export async function ragHybridSearch(
 
   if (usePgvector) {
     const qv = vectorLiteral(queryVec);
+    // Base params are $1..$9; facet params (if any) start at $10.
+    const fc = filter ? buildFacetClause(filter, 10) : null;
+    const denseWhere = fc ? `WHERE ${fc.core}` : '';
+    const lexFacet = fc ? `\n          AND ${fc.core}` : '';
     rows = (await conn.pg.unsafe(
       `
       WITH q AS (
@@ -115,6 +178,7 @@ export async function ragHybridSearch(
                row_number() OVER (ORDER BY vector <=> (SELECT qv FROM q)) AS d_rank,
                1 - (vector <=> (SELECT qv FROM q)) AS dense_sim
         FROM ${RAG_TABLE}
+        ${denseWhere}
         ORDER BY vector <=> (SELECT qv FROM q)
         LIMIT $3
       ),
@@ -125,7 +189,7 @@ export async function ragHybridSearch(
                ) AS l_rank,
                ts_rank_cd(content_tsv, (SELECT qq FROM q)) AS ts
         FROM ${RAG_TABLE}
-        WHERE content_tsv @@ (SELECT qq FROM q)
+        WHERE content_tsv @@ (SELECT qq FROM q)${lexFacet}
         ORDER BY ts DESC
         LIMIT $3
       ),
@@ -167,10 +231,14 @@ export async function ragHybridSearch(
         cfg.lexWeight,
         cfg.topK,
         cfg.codeDenseFloor,
+        ...(fc?.params ?? []),
       ],
     )) as unknown as RawRow[];
   } else {
     // jsonb-fallback store has no vector column: lexical-only ranking.
+    // Base params are $1..$3; facet params (if any) start at $4.
+    const fc = filter ? buildFacetClause(filter, 4) : null;
+    const lexFacet = fc ? ` AND ${fc.core}` : '';
     rows = (await conn.pg.unsafe(
       `
       WITH q AS (SELECT plainto_tsquery('english', $1) AS qq)
@@ -185,11 +253,11 @@ export async function ragHybridSearch(
           ORDER BY ts_rank_cd(content_tsv, (SELECT qq FROM q)) DESC
         )) AS rrf
       FROM ${RAG_TABLE}
-      WHERE content_tsv @@ (SELECT qq FROM q)
+      WHERE content_tsv @@ (SELECT qq FROM q)${lexFacet}
       ORDER BY rrf DESC
       LIMIT $3
       `,
-      [queryText, cfg.rrfK, cfg.topK],
+      [queryText, cfg.rrfK, cfg.topK, ...(fc?.params ?? [])],
     )) as unknown as RawRow[];
   }
 

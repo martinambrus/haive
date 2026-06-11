@@ -31,7 +31,7 @@ function error(id, code, message) {
 const TOOL = {
   name: 'rag_search',
   description:
-    'Semantic + lexical (hybrid) search over this project\'s indexed code and knowledge base. Use this FIRST when looking for where something is implemented, defined, or configured, before grep. Returns ranked code/KB snippets with source paths.',
+    'Semantic + lexical (hybrid) search over this project\'s indexed code and knowledge base PLUS the global cross-project KB (house standards / boilerplate, version-scoped to this stack). Use this FIRST when looking for where something is implemented, defined, or configured, or how we conventionally set things up, before grep. Returns ranked snippets tagged [local] (this repo) or [global] (house standard) with source paths.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -71,7 +71,8 @@ async function ragSearch(args) {
     return { isError: false, text: 'No RAG results. Fall through to KB/LSP/GREP.' };
   }
   const lines = hits.map((h, i) => {
-    const loc = h.sourcePath + (h.sectionId ? ' #' + h.sectionId : '');
+    const scope = h.scope === 'global' ? '[global] ' : h.scope === 'local' ? '[local] ' : '';
+    const loc = scope + h.sourcePath + (h.sectionId ? ' #' + h.sectionId : '');
     const score = typeof h.rrf === 'number' ? h.rrf.toFixed(4) : '?';
     return (
       '### ' + (i + 1) + '. ' + loc + '  (rrf=' + score + ', dense=' +
