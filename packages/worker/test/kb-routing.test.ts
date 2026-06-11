@@ -2,7 +2,30 @@ import { describe, expect, it } from 'vitest';
 import {
   kbIndexMarkdown,
   routeEntries,
+  routePlacement,
 } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
+
+describe('routePlacement', () => {
+  it('routes a canonical placement to UPPERCASE.md at the KB root', () => {
+    expect(routePlacement({ path: 'old/arch.md', canonical: 'ARCHITECTURE' })).toBe(
+      'ARCHITECTURE.md',
+    );
+  });
+
+  it('routes a tech placement into the matching bucket (tech slug normalised)', () => {
+    expect(routePlacement({ path: 'x.md', category: 'tech_pattern', tech: 'Node PTY' })).toBe(
+      'TECH_PATTERNS/node-pty/INDEX.md',
+    );
+    expect(routePlacement({ path: 'x.md', category: 'anti_pattern', tech: 'shell' })).toBe(
+      'ANTI_PATTERNS/shell-mistakes.md',
+    );
+  });
+
+  it('returns null when there is no canonical/tech target (leave the file in place)', () => {
+    expect(routePlacement({ path: 'x.md' })).toBeNull();
+    expect(routePlacement({ path: 'x.md', category: 'tech_pattern' })).toBeNull();
+  });
+});
 
 function entry(over: Record<string, unknown>) {
   return {

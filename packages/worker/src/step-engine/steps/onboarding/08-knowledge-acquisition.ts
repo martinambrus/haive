@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { jsonrepair } from 'jsonrepair';
 import type { DetectResult, FormSchema } from '@haive/shared';
@@ -17,10 +17,19 @@ interface KnowledgeDetect {
   __fileTree?: string;
   /** Transient — README excerpt for LLM prompt context. */
   __readmeExcerpt?: string;
+  /** Transient — pre-existing KB files (from a prior orchestration) the LLM
+   *  should reuse + re-place rather than regenerate. Stripped before persisting. */
+  __existingKb?: ExistingKbFile[];
+}
+
+interface ExistingKbFile {
+  /** Path under `.claude/knowledge_base/`, e.g. `ARCHITECTURE.md` or `old/notes.md`. */
+  relPath: string;
+  title: string;
 }
 
 interface KnowledgeApply {
-  written: { id: string; filePath: string; source: 'llm' | 'stub' }[];
+  written: { id: string; filePath: string; source: 'llm' | 'stub' | 'existing' }[];
   topicCount: number;
   llmAvailable: boolean;
 }
@@ -91,6 +100,32 @@ async function readReadmeExcerpt(repoPath: string): Promise<string | null> {
   return null;
 }
 
+/** Pre-existing knowledge-base files (e.g. copied in from a prior orchestration)
+ *  that the LLM should reuse + re-place rather than regenerate. Empty when the KB
+ *  dir is absent — then the step behaves exactly as a fresh from-scratch mining.
+ *  Reuses listFilesMatching + readFile (already imported); deliberately
+ *  self-contained so it doesn't couple to the skill/qa steps. */
+async function scanExistingKb(repoPath: string): Promise<ExistingKbFile[]> {
+  const kbDir = path.join(repoPath, '.claude', 'knowledge_base');
+  if (!(await pathExists(kbDir))) return [];
+  const rels = await listFilesMatching(kbDir, (rel, isDir) => !isDir && rel.endsWith('.md'), 6);
+  const out: ExistingKbFile[] = [];
+  for (const rel of rels) {
+    if (rel === 'INDEX.md') continue; // generated index, not content
+    let title = rel;
+    try {
+      const text = await readFile(path.join(kbDir, rel), 'utf8');
+      const m = text.match(/^#\s+(.+)$/m);
+      if (m?.[1]) title = m[1].trim();
+    } catch {
+      /* keep the relPath as the title */
+    }
+    out.push({ relPath: rel, title });
+  }
+  out.sort((a, b) => a.relPath.localeCompare(b.relPath));
+  return out;
+}
+
 /* ------------------------------------------------------------------ */
 /* LLM prompt                                                          */
 /* ------------------------------------------------------------------ */
@@ -101,6 +136,23 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     (detected as unknown as Record<string, string>).__fileTree ?? '(no file tree available)';
   const readme =
     (detected as unknown as Record<string, string>).__readmeExcerpt ?? '(no README found)';
+  const existingKb = detected.__existingKb ?? [];
+  const existingKbLines =
+    existingKb.length > 0
+      ? [
+          '## Existing knowledge base (reuse + re-place — do NOT regenerate)',
+          '',
+          'These knowledge_base files already exist (e.g. copied in from a prior',
+          'orchestration). READ each one with your tools. For each, decide its correct',
+          'slot in the canonical layout described below and emit a `placements` entry',
+          'mapping its path to that slot — its content is MOVED verbatim, so do NOT',
+          'rewrite or summarize it. Treat the topics these files cover as ALREADY DONE:',
+          'emit `entries` ONLY for topics that no existing file covers (genuine gaps).',
+          '',
+          ...existingKb.map((f) => `- ${f.relPath} — ${f.title}`),
+          '',
+        ]
+      : [];
 
   return [
     'You are a senior software architect performing a deep knowledge audit of a codebase.',
@@ -118,6 +170,7 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '## README excerpt',
     readme,
     '',
+    ...existingKbLines,
     '## Instructions',
     '',
     'Use your file-reading tools to deeply explore this repository. Do NOT rely only on the partial file tree above.',
@@ -152,6 +205,8 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '',
     '## Required coverage (mandatory)',
     '',
+    'If an existing KB file already covers a canonical or tech topic (you mapped it via `placements`), that topic is already satisfied — do NOT also emit an entry for it.',
+    '',
     'Emit ONE entry per canonical root file, AND one tech_pattern + anti_pattern + best_practice + quick_reference entry per major technology this repo actually uses. Do not silently skip a canonical file when it does not apply — emit it with `confidence: "low"` and a single section explaining why it is not applicable (e.g. "Not applicable: this is a pure library with no deployment surface"). Hard floor:',
     '',
     '- All 7 canonical root files MUST appear: ARCHITECTURE, API_REFERENCE, CODING_STANDARDS, TESTING_STANDARDS, SECURITY_STANDARDS, DEPLOYMENT, BUSINESS_LOGIC.',
@@ -180,6 +235,9 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '        { "heading": "Section Name", "body": "Detailed markdown content..." }',
     '      ]',
     '    }',
+    '  ],',
+    '  "placements": [',
+    '    { "path": "<existing knowledge_base file path from the list above>", "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit)", "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference", "tech": "<tech slug, required when category is a tech bucket>" }',
     '  ]',
     '}',
     '```',
@@ -201,6 +259,10 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '  - Include actual code patterns, specific config values, real file paths from the project.',
     '  - Cite repo paths with line ranges (e.g. `build.gradle:13-41`) wherever possible.',
     '  - Write as if explaining to a new team member who needs to understand this area.',
+    '- placements: for each EXISTING knowledge_base file listed above, one object with its',
+    '  current `path` plus the canonical/category/tech slot it belongs in (content is moved',
+    '  verbatim). Omit BOTH canonical and tech to leave a file exactly where it is. Empty',
+    '  array when there are no existing files.',
     '',
     'Aim for 15-30 knowledge entries depending on project complexity. Cover ALL 7 canonical root files first, then for each major technology emit the four tech entries (pattern, anti-pattern, best-practice, quick-reference).',
     'Do not emit any prose outside the fenced JSON block.',
@@ -293,6 +355,55 @@ export function parseKbEntriesWithDiagnostic(raw: unknown): {
 
 export function parseKbEntries(raw: unknown): KbEntry[] {
   return parseKbEntriesWithDiagnostic(raw).entries;
+}
+
+export interface KbPlacement {
+  /** relPath under `.claude/knowledge_base/` of an existing file to re-place. */
+  path: string;
+  canonical?: string;
+  category?: KbCategory;
+  tech?: string;
+}
+
+function isValidPlacement(val: unknown): val is KbPlacement {
+  if (!val || typeof val !== 'object') return false;
+  const p = (val as Record<string, unknown>).path;
+  return typeof p === 'string' && p.length > 0;
+}
+
+/** Best-effort extraction of the `placements` array (existing-KB re-placements).
+ *  Kept SEPARATE from the entries parser — whose fence handling is deliberately
+ *  tuned (see project memory) — so it can't regress it; mirrors the same fence
+ *  layouts + jsonrepair safety net. */
+export function parseKbPlacements(raw: unknown): KbPlacement[] {
+  if (!raw) return [];
+  if (typeof raw === 'object') {
+    const o = raw as Record<string, unknown>;
+    if (Array.isArray(o.placements)) return (o.placements as unknown[]).filter(isValidPlacement);
+    if (typeof o.result === 'string') return parseKbPlacements(o.result);
+    return [];
+  }
+  if (typeof raw !== 'string') return [];
+  const out: KbPlacement[] = [];
+  const collect = (body: string | undefined): void => {
+    if (!body || out.length > 0) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      try {
+        parsed = JSON.parse(jsonrepair(body));
+      } catch {
+        return;
+      }
+    }
+    const arr = (parsed as Record<string, unknown> | null)?.placements;
+    if (Array.isArray(arr)) for (const p of arr) if (isValidPlacement(p)) out.push(p);
+  };
+  for (const m of raw.matchAll(/```json\s*([\s\S]*?)```/g)) collect(m[1]);
+  if (out.length === 0) collect(raw.match(/```json\s*([\s\S]*)```/)?.[1]);
+  if (out.length === 0) collect(raw.match(/```json\s*([\s\S]*)$/)?.[1]);
+  return out;
 }
 
 function isValidEntry(val: unknown): val is KbEntry {
@@ -537,6 +648,39 @@ export function kbIndexMarkdown(routed: RoutedEntry[], projectName: string | nul
   return lines.join('\n');
 }
 
+/** Destination relPath (under .claude/knowledge_base/) for re-placing an existing
+ *  file, mirroring routeEntries' canonical/tech routing. Null when the placement
+ *  names no canonical/tech target — the file is then left exactly where it is. */
+export function routePlacement(p: KbPlacement): string | null {
+  const canonical = normalizeCanonical(p.canonical);
+  if (canonical) return `${canonical}.md`;
+  const tech = normalizeTech(p.tech);
+  if (tech) {
+    switch (p.category) {
+      case 'tech_pattern':
+        return `TECH_PATTERNS/${tech}/INDEX.md`;
+      case 'anti_pattern':
+        return `ANTI_PATTERNS/${tech}-mistakes.md`;
+      case 'best_practice':
+        return `BEST_PRACTICES/${tech}-best-practices.md`;
+      case 'quick_reference':
+        return `QUICK_REFERENCE/${tech}/cheat-sheet.md`;
+    }
+  }
+  return null;
+}
+
+/** Index bucket for an on-disk KB file, inferred from its relPath — so INDEX.md
+ *  can be rebuilt from the final directory contents (existing + re-placed + new). */
+function bucketFromRelPath(relPath: string): RoutedEntry['bucket'] {
+  if (relPath.startsWith('TECH_PATTERNS/')) return 'tech_pattern';
+  if (relPath.startsWith('ANTI_PATTERNS/')) return 'anti_pattern';
+  if (relPath.startsWith('BEST_PRACTICES/')) return 'best_practice';
+  if (relPath.startsWith('QUICK_REFERENCE/')) return 'quick_reference';
+  if (!relPath.includes('/') && CANONICAL_STEMS.has(relPath.replace(/\.md$/, ''))) return 'core';
+  return 'topic';
+}
+
 function stubMarkdown(title: string): string {
   return [
     `# ${title}`,
@@ -615,6 +759,13 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     await ctx.emitProgress('Reading README...');
     const readmeExcerpt = await readReadmeExcerpt(ctx.repoPath);
 
+    const existingKb = await scanExistingKb(ctx.repoPath);
+    if (existingKb.length > 0) {
+      await ctx.emitProgress(
+        `Found ${existingKb.length} existing KB file(s) — the AI will reuse and re-place them.`,
+      );
+    }
+
     await ctx.emitProgress(
       `Project context gathered (${fileTree.split('\n').length} files mapped). Waiting for AI analysis...`,
     );
@@ -629,6 +780,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       projectName,
       __fileTree: fileTree,
       __readmeExcerpt: readmeExcerpt ?? undefined,
+      __existingKb: existingKb.length > 0 ? existingKb : undefined,
     };
   },
 
@@ -641,6 +793,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
 
   form(ctx, detected, llmOutput): FormSchema {
     const { entries, diagnostic } = extractEntriesWithDiagnostic(llmOutput);
+    const placements = parseKbPlacements(llmOutput);
 
     if (diagnostic?.repaired) {
       ctx.logger.warn(
@@ -685,7 +838,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
 
       return {
         title: 'Knowledge base — AI discoveries',
-        description: `AI analyzed ${totalSources} source files and discovered ${entries.length} knowledge topics. Review and select the ones to include in your knowledge base.`,
+        description: `AI analyzed ${totalSources} source files and discovered ${entries.length} knowledge topics.${placements.length > 0 ? ` ${placements.length} existing KB file(s) will be re-placed into the canonical layout and preserved.` : ''} Review and select the ones to include in your knowledge base.`,
         fields: [
           {
             type: 'multi-select',
@@ -696,6 +849,24 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
           },
         ],
         submitLabel: 'Generate knowledge base',
+      };
+    }
+
+    // The LLM mapped existing KB files to re-place but emitted no new topics —
+    // existing KB already covers the project. Confirm; allow optional extras.
+    if (placements.length > 0) {
+      return {
+        title: 'Knowledge base — existing files reused',
+        description: `The AI mapped ${placements.length} existing KB file(s) to re-place into the canonical layout and found no new topics to add. Submit to apply, or list any extra topics to document (one per line).`,
+        fields: [
+          {
+            type: 'textarea',
+            id: 'manualTopics',
+            label: 'Additional topics (optional, one per line)',
+            rows: 6,
+          },
+        ],
+        submitLabel: 'Apply knowledge base',
       };
     }
 
@@ -740,30 +911,61 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // Strip transient fields
     delete (detected as unknown as Record<string, unknown>).__fileTree;
     delete (detected as unknown as Record<string, unknown>).__readmeExcerpt;
+    delete (detected as unknown as Record<string, unknown>).__existingKb;
 
     const kbDir = path.join(ctx.repoPath, '.claude', 'knowledge_base');
     await mkdir(kbDir, { recursive: true });
 
     const entries = extractEntries(args.llmOutput ?? null);
-    const llmAvailable = entries.length > 0;
-    const written: { id: string; filePath: string; source: 'llm' | 'stub' }[] = [];
-    const routedForIndex: RoutedEntry[] = [];
+    const placements = parseKbPlacements(args.llmOutput ?? null);
+    const llmAvailable = entries.length > 0 || placements.length > 0;
+    const written: { id: string; filePath: string; source: 'llm' | 'stub' | 'existing' }[] = [];
 
-    if (llmAvailable) {
-      // LLM path: filter to user-selected entries, then route into the canonical
-      // KB layout (core / TECH_PATTERNS / ANTI_PATTERNS / topic).
+    // 1. Re-place existing KB files into the canonical layout (verbatim moves).
+    //    Existing content is never regenerated; first writer wins per destination.
+    const existing = await scanExistingKb(ctx.repoPath);
+    const existingByPath = new Map(existing.map((f) => [f.relPath, f]));
+    const takenDest = new Set<string>();
+    for (const p of placements) {
+      const src = existingByPath.get(p.path);
+      if (!src) continue;
+      const dest = routePlacement(p) ?? src.relPath; // null → leave in place
+      if (takenDest.has(dest)) continue;
+      takenDest.add(dest);
+      if (dest === src.relPath) continue; // already where it belongs
+      try {
+        const content = await readFile(path.join(kbDir, src.relPath), 'utf8');
+        const destPath = path.join(kbDir, dest);
+        await mkdir(path.dirname(destPath), { recursive: true });
+        await writeFile(destPath, content, 'utf8');
+        await rm(path.join(kbDir, src.relPath), { force: true });
+        written.push({ id: src.relPath, filePath: destPath, source: 'existing' });
+      } catch (err) {
+        ctx.logger.warn({ err, path: p.path, dest }, 'kb placement move failed');
+      }
+    }
+
+    // 2. Fill gaps: write the user-selected new entries, but never overwrite an
+    //    existing/re-placed file (preserve wins). Falls back to manual stubs only
+    //    when the LLM produced nothing at all (no entries AND no placements).
+    if (entries.length > 0) {
       const selected = new Set(values.selectedTopics ?? []);
-      const selectedEntries = entries.filter((e) => selected.has(e.id));
-      const routed = routeEntries(selectedEntries);
+      const routed = routeEntries(entries.filter((e) => selected.has(e.id)));
       for (const r of routed) {
         const filePath = path.join(kbDir, r.relPath);
+        if (await pathExists(filePath)) {
+          ctx.logger.info(
+            { relPath: r.relPath },
+            'kb gap entry skipped — preserving existing file',
+          );
+          continue;
+        }
         await mkdir(path.dirname(filePath), { recursive: true });
         await writeFile(filePath, entryToMarkdown(r.entry), 'utf8');
         written.push({ id: r.entry.id, filePath, source: 'llm' });
-        routedForIndex.push(r);
       }
-    } else {
-      // Fallback path: write stubs from manual topic list at the KB root (flat).
+    } else if (placements.length === 0) {
+      // Fallback: write stubs from the manual topic list at the KB root (flat).
       const raw = typeof values.manualTopics === 'string' ? values.manualTopics : '';
       const topics = raw
         .split('\n')
@@ -775,26 +977,36 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
           .replace(/[^a-z0-9]+/g, '-')
           .replace(/^-|-$/g, '');
         if (!id) continue;
-        const relPath = `${id}.md`;
-        const filePath = path.join(kbDir, relPath);
+        const filePath = path.join(kbDir, `${id}.md`);
+        if (await pathExists(filePath)) continue;
         await writeFile(filePath, stubMarkdown(title), 'utf8');
         written.push({ id, filePath, source: 'stub' });
-        routedForIndex.push({
-          entry: { id, title, sections: [] },
-          relPath,
-          bucket: 'topic',
-          key: id,
-        });
       }
     }
 
-    if (routedForIndex.length > 0) {
-      const indexPath = path.join(kbDir, 'INDEX.md');
-      await writeFile(indexPath, kbIndexMarkdown(routedForIndex, detected.projectName), 'utf8');
+    // 3. Rebuild INDEX.md from the full on-disk KB (re-placed + preserved + new).
+    const finalFiles = await scanExistingKb(ctx.repoPath);
+    if (finalFiles.length > 0) {
+      const routedForIndex: RoutedEntry[] = finalFiles.map((f) => ({
+        entry: { id: f.relPath.replace(/\.md$/, ''), title: f.title, sections: [] },
+        relPath: f.relPath,
+        bucket: bucketFromRelPath(f.relPath),
+        key: f.relPath,
+      }));
+      await writeFile(
+        path.join(kbDir, 'INDEX.md'),
+        kbIndexMarkdown(routedForIndex, detected.projectName),
+        'utf8',
+      );
     }
 
     ctx.logger.info(
-      { written: written.length, llmAvailable, topicCount: entries.length },
+      {
+        written: written.length,
+        placements: placements.length,
+        llmAvailable,
+        topicCount: entries.length,
+      },
       'knowledge base written',
     );
     return { written, topicCount: entries.length, llmAvailable };

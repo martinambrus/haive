@@ -8,6 +8,7 @@ import type { StepContext } from '../src/step-engine/step-definition.js';
 import {
   knowledgeAcquisitionStep,
   parseKbEntries,
+  parseKbPlacements,
 } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
 
 let tmpRoot: string;
@@ -254,5 +255,103 @@ describe('knowledgeAcquisitionStep.apply', () => {
       llmOutput: entries,
     });
     expect(result.written.map((w) => w.id)).toEqual(['a', 'c']);
+  });
+});
+
+describe('parseKbPlacements', () => {
+  it('parses placements from a fenced JSON object', () => {
+    const raw = [
+      '```json',
+      JSON.stringify({
+        entries: [],
+        placements: [
+          { path: 'old/arch.md', canonical: 'ARCHITECTURE' },
+          { path: 'old/pty.md', category: 'tech_pattern', tech: 'node-pty' },
+        ],
+      }),
+      '```',
+    ].join('\n');
+    const out = parseKbPlacements(raw);
+    expect(out).toHaveLength(2);
+    expect(out[0]!.path).toBe('old/arch.md');
+  });
+
+  it('drops malformed placement items and returns [] when none are present', () => {
+    expect(parseKbPlacements(null)).toEqual([]);
+    const raw = [
+      '```json',
+      JSON.stringify({ placements: [{ nope: 1 }, { path: 'a.md' }] }),
+      '```',
+    ].join('\n');
+    expect(parseKbPlacements(raw)).toHaveLength(1);
+  });
+});
+
+describe('knowledgeAcquisitionStep.apply — existing KB reuse', () => {
+  it('re-places an existing file into its canonical slot (verbatim) and fills gaps', async () => {
+    const ctx = makeCtx(tmpRoot);
+    const kbDir = path.join(tmpRoot, '.claude', 'knowledge_base');
+    await mkdir(kbDir, { recursive: true });
+    const original = '# Legacy Architecture\n\nHand-written notes.\n';
+    await writeFile(path.join(kbDir, 'old-arch.md'), original, 'utf8');
+    const raw = [
+      '```json',
+      JSON.stringify({
+        entries: [
+          {
+            id: 'deployment',
+            title: 'Deployment',
+            canonical: 'DEPLOYMENT',
+            sections: [{ heading: 'CI', body: 'GitHub Actions.' }],
+          },
+        ],
+        placements: [{ path: 'old-arch.md', canonical: 'ARCHITECTURE' }],
+      }),
+      '```',
+    ].join('\n');
+    const result = await knowledgeAcquisitionStep.apply(ctx, {
+      detected: { framework: null, language: null },
+      formValues: { selectedTopics: ['deployment'] },
+      llmOutput: raw,
+    });
+    // existing file moved verbatim to ARCHITECTURE.md, source removed
+    expect(await readFile(path.join(kbDir, 'ARCHITECTURE.md'), 'utf8')).toBe(original);
+    await expect(readFile(path.join(kbDir, 'old-arch.md'), 'utf8')).rejects.toThrow();
+    // gap entry written
+    expect(await readFile(path.join(kbDir, 'DEPLOYMENT.md'), 'utf8')).toContain('# Deployment');
+    // index lists both
+    const index = await readFile(path.join(kbDir, 'INDEX.md'), 'utf8');
+    expect(index).toContain('ARCHITECTURE.md');
+    expect(index).toContain('DEPLOYMENT.md');
+    expect(result.written.some((w) => w.source === 'existing')).toBe(true);
+  });
+
+  it('never overwrites an existing file when a gap entry targets the same slot', async () => {
+    const ctx = makeCtx(tmpRoot);
+    const kbDir = path.join(tmpRoot, '.claude', 'knowledge_base');
+    await mkdir(kbDir, { recursive: true });
+    const kept = '# Kept\n\nOriginal, do not clobber.\n';
+    await writeFile(path.join(kbDir, 'ARCHITECTURE.md'), kept, 'utf8');
+    const raw = [
+      '```json',
+      JSON.stringify({
+        entries: [
+          {
+            id: 'arch',
+            title: 'Arch',
+            canonical: 'ARCHITECTURE',
+            sections: [{ heading: 'x', body: 'regenerated content' }],
+          },
+        ],
+        placements: [],
+      }),
+      '```',
+    ].join('\n');
+    await knowledgeAcquisitionStep.apply(ctx, {
+      detected: { framework: null, language: null },
+      formValues: { selectedTopics: ['arch'] },
+      llmOutput: raw,
+    });
+    expect(await readFile(path.join(kbDir, 'ARCHITECTURE.md'), 'utf8')).toBe(kept);
   });
 });
