@@ -29,7 +29,7 @@ interface ExistingKbFile {
 }
 
 interface KnowledgeApply {
-  written: { id: string; filePath: string; source: 'llm' | 'stub' | 'existing' }[];
+  written: { id: string; filePath: string; source: 'llm' | 'stub' | 'existing' | 'updated' }[];
   topicCount: number;
   llmAvailable: boolean;
 }
@@ -143,11 +143,15 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
           '## Existing knowledge base (reuse + re-place — do NOT regenerate)',
           '',
           'These knowledge_base files already exist (e.g. copied in from a prior',
-          'orchestration). READ each one with your tools. For each, decide its correct',
-          'slot in the canonical layout described below and emit a `placements` entry',
-          'mapping its path to that slot — its content is MOVED verbatim, so do NOT',
-          'rewrite or summarize it. Treat the topics these files cover as ALREADY DONE:',
-          'emit `entries` ONLY for topics that no existing file covers (genuine gaps).',
+          'orchestration). READ each one with your tools, then for EACH file choose ONE:',
+          '  - KEEP it verbatim: emit a `placements` entry mapping its path to its correct',
+          '    slot in the canonical layout below (content is MOVED unchanged); OR',
+          '  - IMPROVE it: if the file is STALE or INCOMPLETE versus the current code, emit an',
+          '    `updates` entry for that path with improved `sections`. When improving you MUST',
+          '    preserve all still-correct content, revise ONLY what is outdated, and add',
+          '    genuinely new findings — never drop correct sections or rewrite from scratch.',
+          '  Prefer KEEP unless a file is genuinely stale; either way it lands at its canonical',
+          '  slot. Emit `entries` ONLY for topics that no existing file covers (genuine gaps).',
           '',
           ...existingKb.map((f) => `- ${f.relPath} — ${f.title}`),
           '',
@@ -238,6 +242,9 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '  ],',
     '  "placements": [',
     '    { "path": "<existing knowledge_base file path from the list above>", "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit)", "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference", "tech": "<tech slug, required when category is a tech bucket>" }',
+    '  ],',
+    '  "updates": [',
+    '    { "path": "<existing knowledge_base file to IMPROVE>", "title": "...", "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit)", "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference", "tech": "<tech slug when a tech bucket>", "sections": [ { "heading": "Section", "body": "improved markdown — preserve correct content, revise stale parts, add new findings" } ] }',
     '  ]',
     '}',
     '```',
@@ -259,10 +266,13 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '  - Include actual code patterns, specific config values, real file paths from the project.',
     '  - Cite repo paths with line ranges (e.g. `build.gradle:13-41`) wherever possible.',
     '  - Write as if explaining to a new team member who needs to understand this area.',
-    '- placements: for each EXISTING knowledge_base file listed above, one object with its',
-    '  current `path` plus the canonical/category/tech slot it belongs in (content is moved',
-    '  verbatim). Omit BOTH canonical and tech to leave a file exactly where it is. Empty',
-    '  array when there are no existing files.',
+    '- placements: for each ACCURATE existing file, one object with its current `path` plus',
+    '  the canonical/category/tech slot it belongs in (content moved verbatim). Omit BOTH',
+    '  canonical and tech to leave a file exactly where it is.',
+    '- updates: for each STALE or incomplete existing file, one object with its `path`, the',
+    '  canonical/category/tech slot, and improved `sections` (preserve correct content,',
+    '  revise outdated parts, add new findings). Use placements OR updates for a file, never',
+    '  both. Both arrays are empty when there are no existing files.',
     '',
     'Aim for 15-30 knowledge entries depending on project complexity. Cover ALL 7 canonical root files first, then for each major technology emit the four tech entries (pattern, anti-pattern, best-practice, quick-reference).',
     'Do not emit any prose outside the fenced JSON block.',
@@ -399,6 +409,66 @@ export function parseKbPlacements(raw: unknown): KbPlacement[] {
     }
     const arr = (parsed as Record<string, unknown> | null)?.placements;
     if (Array.isArray(arr)) for (const p of arr) if (isValidPlacement(p)) out.push(p);
+  };
+  for (const m of raw.matchAll(/```json\s*([\s\S]*?)```/g)) collect(m[1]);
+  if (out.length === 0) collect(raw.match(/```json\s*([\s\S]*)```/)?.[1]);
+  if (out.length === 0) collect(raw.match(/```json\s*([\s\S]*)$/)?.[1]);
+  return out;
+}
+
+export interface KbUpdate {
+  /** relPath under `.claude/knowledge_base/` of the existing file to improve. */
+  path: string;
+  title: string;
+  canonical?: string;
+  category?: KbCategory;
+  tech?: string;
+  confidence?: 'high' | 'medium' | 'low';
+  sourceFiles?: string[];
+  sections: { heading: string; body: string }[];
+}
+
+function isValidUpdate(val: unknown): val is KbUpdate {
+  if (!val || typeof val !== 'object') return false;
+  const v = val as Record<string, unknown>;
+  if (typeof v.path !== 'string' || v.path.length === 0) return false;
+  if (typeof v.title !== 'string') return false;
+  if (!Array.isArray(v.sections) || v.sections.length === 0) return false;
+  for (const s of v.sections as unknown[]) {
+    if (!s || typeof s !== 'object') return false;
+    const section = s as Record<string, unknown>;
+    if (typeof section.heading !== 'string' || typeof section.body !== 'string') return false;
+  }
+  return true;
+}
+
+/** Best-effort extraction of the `updates` array — improved replacements for stale
+ *  existing KB files. Separate from the entries parser (deliberately tuned), like
+ *  parseKbPlacements; mirrors the same fence layouts + jsonrepair safety net. */
+export function parseKbUpdates(raw: unknown): KbUpdate[] {
+  if (!raw) return [];
+  if (typeof raw === 'object') {
+    const o = raw as Record<string, unknown>;
+    if (Array.isArray(o.updates)) return (o.updates as unknown[]).filter(isValidUpdate);
+    if (typeof o.result === 'string') return parseKbUpdates(o.result);
+    return [];
+  }
+  if (typeof raw !== 'string') return [];
+  const out: KbUpdate[] = [];
+  const collect = (body: string | undefined): void => {
+    if (!body || out.length > 0) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      try {
+        parsed = JSON.parse(jsonrepair(body));
+      } catch {
+        return;
+      }
+    }
+    const arr = (parsed as Record<string, unknown> | null)?.updates;
+    if (Array.isArray(arr)) for (const u of arr) if (isValidUpdate(u)) out.push(u);
   };
   for (const m of raw.matchAll(/```json\s*([\s\S]*?)```/g)) collect(m[1]);
   if (out.length === 0) collect(raw.match(/```json\s*([\s\S]*)```/)?.[1]);
@@ -794,6 +864,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
   form(ctx, detected, llmOutput): FormSchema {
     const { entries, diagnostic } = extractEntriesWithDiagnostic(llmOutput);
     const placements = parseKbPlacements(llmOutput);
+    const updates = parseKbUpdates(llmOutput);
 
     if (diagnostic?.repaired) {
       ctx.logger.warn(
@@ -838,7 +909,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
 
       return {
         title: 'Knowledge base — AI discoveries',
-        description: `AI analyzed ${totalSources} source files and discovered ${entries.length} knowledge topics.${placements.length > 0 ? ` ${placements.length} existing KB file(s) will be re-placed into the canonical layout and preserved.` : ''} Review and select the ones to include in your knowledge base.`,
+        description: `AI analyzed ${totalSources} source files and discovered ${entries.length} knowledge topics.${placements.length > 0 || updates.length > 0 ? ` Existing KB: ${[placements.length > 0 ? `${placements.length} re-placed verbatim` : '', updates.length > 0 ? `${updates.length} improved with new findings` : ''].filter(Boolean).join(', ')}.` : ''} Review and select the ones to include in your knowledge base.`,
         fields: [
           {
             type: 'multi-select',
@@ -852,12 +923,18 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       };
     }
 
-    // The LLM mapped existing KB files to re-place but emitted no new topics —
-    // existing KB already covers the project. Confirm; allow optional extras.
-    if (placements.length > 0) {
+    // The LLM mapped existing KB files to re-place and/or improve but emitted no
+    // new topics — existing KB already covers the project. Confirm; allow extras.
+    if (placements.length > 0 || updates.length > 0) {
+      const summary = [
+        placements.length > 0 ? `re-place ${placements.length} existing file(s) verbatim` : '',
+        updates.length > 0 ? `improve ${updates.length} stale file(s) with new findings` : '',
+      ]
+        .filter(Boolean)
+        .join(' and ');
       return {
         title: 'Knowledge base — existing files reused',
-        description: `The AI mapped ${placements.length} existing KB file(s) to re-place into the canonical layout and found no new topics to add. Submit to apply, or list any extra topics to document (one per line).`,
+        description: `The AI will ${summary} (into the canonical layout) and found no new topics to add. Submit to apply, or list any extra topics to document (one per line).`,
         fields: [
           {
             type: 'textarea',
@@ -918,20 +995,59 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
 
     const entries = extractEntries(args.llmOutput ?? null);
     const placements = parseKbPlacements(args.llmOutput ?? null);
-    const llmAvailable = entries.length > 0 || placements.length > 0;
-    const written: { id: string; filePath: string; source: 'llm' | 'stub' | 'existing' }[] = [];
+    const updates = parseKbUpdates(args.llmOutput ?? null);
+    const llmAvailable = entries.length > 0 || placements.length > 0 || updates.length > 0;
+    const written: {
+      id: string;
+      filePath: string;
+      source: 'llm' | 'stub' | 'existing' | 'updated';
+    }[] = [];
 
-    // 1. Re-place existing KB files into the canonical layout (verbatim moves).
-    //    Existing content is never regenerated; first writer wins per destination.
+    // 1. Re-place / improve existing KB files into the canonical layout. Updates
+    //    win over placements for the same file; first writer wins per destination.
     const existing = await scanExistingKb(ctx.repoPath);
     const existingByPath = new Map(existing.map((f) => [f.relPath, f]));
     const takenDest = new Set<string>();
+    const handledSrc = new Set<string>();
+
+    // 1a. Updates (auto-applied): write the improved content to the canonical
+    //     slot, replacing the stale file. Preserve-correct-content is enforced by
+    //     the prompt; git tracks the rewrite as the review/rollback.
+    for (const u of updates) {
+      const src = existingByPath.get(u.path);
+      if (!src) continue;
+      const dest = routePlacement(u) ?? src.relPath;
+      if (takenDest.has(dest)) continue;
+      takenDest.add(dest);
+      handledSrc.add(src.relPath);
+      try {
+        const destPath = path.join(kbDir, dest);
+        await mkdir(path.dirname(destPath), { recursive: true });
+        await writeFile(
+          destPath,
+          entryToMarkdown({
+            id: u.path,
+            title: u.title,
+            sections: u.sections,
+            sourceFiles: u.sourceFiles,
+          }),
+          'utf8',
+        );
+        if (dest !== src.relPath) await rm(path.join(kbDir, src.relPath), { force: true });
+        written.push({ id: src.relPath, filePath: destPath, source: 'updated' });
+      } catch (err) {
+        ctx.logger.warn({ err, path: u.path, dest }, 'kb update write failed');
+      }
+    }
+
+    // 1b. Placements: move the (accurate) existing file verbatim to its slot.
     for (const p of placements) {
       const src = existingByPath.get(p.path);
-      if (!src) continue;
+      if (!src || handledSrc.has(src.relPath)) continue;
       const dest = routePlacement(p) ?? src.relPath; // null → leave in place
       if (takenDest.has(dest)) continue;
       takenDest.add(dest);
+      handledSrc.add(src.relPath);
       if (dest === src.relPath) continue; // already where it belongs
       try {
         const content = await readFile(path.join(kbDir, src.relPath), 'utf8');
@@ -964,8 +1080,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         await writeFile(filePath, entryToMarkdown(r.entry), 'utf8');
         written.push({ id: r.entry.id, filePath, source: 'llm' });
       }
-    } else if (placements.length === 0) {
-      // Fallback: write stubs from the manual topic list at the KB root (flat).
+    } else {
+      // No LLM gap entries: write stubs from any manual topics the user entered
+      // (manual fallback, or the "additional topics" box on the reuse-confirm form).
       const raw = typeof values.manualTopics === 'string' ? values.manualTopics : '';
       const topics = raw
         .split('\n')

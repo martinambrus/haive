@@ -9,6 +9,7 @@ import {
   knowledgeAcquisitionStep,
   parseKbEntries,
   parseKbPlacements,
+  parseKbUpdates,
 } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
 
 let tmpRoot: string;
@@ -353,5 +354,112 @@ describe('knowledgeAcquisitionStep.apply — existing KB reuse', () => {
       llmOutput: raw,
     });
     expect(await readFile(path.join(kbDir, 'ARCHITECTURE.md'), 'utf8')).toBe(kept);
+  });
+});
+
+describe('parseKbUpdates', () => {
+  it('parses updates (improved content for stale files) from a fenced JSON object', () => {
+    const raw = [
+      '```json',
+      JSON.stringify({
+        entries: [],
+        updates: [
+          {
+            path: 'old/arch.md',
+            title: 'Architecture',
+            canonical: 'ARCHITECTURE',
+            sections: [{ heading: 'Modules', body: 'Updated layering.' }],
+          },
+        ],
+      }),
+      '```',
+    ].join('\n');
+    const out = parseKbUpdates(raw);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.path).toBe('old/arch.md');
+    expect(out[0]!.sections[0]!.heading).toBe('Modules');
+  });
+
+  it('drops update items missing path/title/sections and returns [] when none', () => {
+    expect(parseKbUpdates(null)).toEqual([]);
+    const raw = [
+      '```json',
+      JSON.stringify({
+        updates: [
+          { path: 'a.md' },
+          { title: 'no path', sections: [{ heading: 'h', body: 'b' }] },
+          { path: 'ok.md', title: 'OK', sections: [{ heading: 'h', body: 'b' }] },
+        ],
+      }),
+      '```',
+    ].join('\n');
+    expect(parseKbUpdates(raw)).toHaveLength(1);
+  });
+});
+
+describe('knowledgeAcquisitionStep.apply — improve stale KB files', () => {
+  it('writes improved content to the canonical slot and removes the stale source', async () => {
+    const ctx = makeCtx(tmpRoot);
+    const kbDir = path.join(tmpRoot, '.claude', 'knowledge_base');
+    await mkdir(kbDir, { recursive: true });
+    await writeFile(path.join(kbDir, 'old-arch.md'), '# Stale Architecture\n\nOutdated.\n', 'utf8');
+    const raw = [
+      '```json',
+      JSON.stringify({
+        entries: [],
+        placements: [],
+        updates: [
+          {
+            path: 'old-arch.md',
+            title: 'Architecture',
+            canonical: 'ARCHITECTURE',
+            sections: [{ heading: 'Modules', body: 'Current layered design.' }],
+          },
+        ],
+      }),
+      '```',
+    ].join('\n');
+    const result = await knowledgeAcquisitionStep.apply(ctx, {
+      detected: { framework: null, language: null },
+      formValues: {},
+      llmOutput: raw,
+    });
+    const arch = await readFile(path.join(kbDir, 'ARCHITECTURE.md'), 'utf8');
+    expect(arch).toContain('# Architecture');
+    expect(arch).toContain('Current layered design.');
+    expect(arch).not.toContain('Outdated.'); // stale content replaced
+    await expect(readFile(path.join(kbDir, 'old-arch.md'), 'utf8')).rejects.toThrow();
+    expect(result.written.some((w) => w.source === 'updated')).toBe(true);
+  });
+
+  it('lets an update win over a placement for the same file', async () => {
+    const ctx = makeCtx(tmpRoot);
+    const kbDir = path.join(tmpRoot, '.claude', 'knowledge_base');
+    await mkdir(kbDir, { recursive: true });
+    await writeFile(path.join(kbDir, 'dep.md'), '# Old Deploy\n\nverbatim-marker.\n', 'utf8');
+    const raw = [
+      '```json',
+      JSON.stringify({
+        entries: [],
+        placements: [{ path: 'dep.md', canonical: 'DEPLOYMENT' }],
+        updates: [
+          {
+            path: 'dep.md',
+            title: 'Deployment',
+            canonical: 'DEPLOYMENT',
+            sections: [{ heading: 'CI', body: 'Improved pipeline.' }],
+          },
+        ],
+      }),
+      '```',
+    ].join('\n');
+    await knowledgeAcquisitionStep.apply(ctx, {
+      detected: { framework: null, language: null },
+      formValues: {},
+      llmOutput: raw,
+    });
+    const dep = await readFile(path.join(kbDir, 'DEPLOYMENT.md'), 'utf8');
+    expect(dep).toContain('Improved pipeline.'); // update applied
+    expect(dep).not.toContain('verbatim-marker.'); // not the verbatim placement
   });
 });
