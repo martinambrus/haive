@@ -12,11 +12,16 @@ import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput, resolveDdevWorkspace } from './_task-meta.js';
 import {
   runnerHandleForTask,
-  ddevExec,
   runnerExec,
   ensureDdevStarted,
   startBrowserDesktop,
+  ddevPrimaryUrl,
 } from '../../../sandbox/ddev-runner.js';
+import {
+  ensureAppRunnerStarted,
+  appRunnerExec,
+  startBrowserDesktop as startAppBrowserDesktop,
+} from '../../../sandbox/app-runner.js';
 
 const exec = promisify(execFile);
 
@@ -37,6 +42,12 @@ interface BrowserVerifyDetect {
   /** When true the app runs in the per-task DDEV runner, so the headless-Chrome
    *  check runs INSIDE the runner (where <name>.ddev.site resolves). */
   ddevMode: boolean;
+  /** When true the app runs in the per-task (non-DDEV) app-runner container,
+   *  which hosts the headed-browser desktop just like the DDEV runner. mcp mode
+   *  stays DDEV-only; this enables headless + interactive here. */
+  appRunnerMode: boolean;
+  /** The env-replicate image tag, needed to (re)start the app-runner. */
+  envImageTag: string | null;
   repoSubpath: string | null;
   /** Spec + changed files for the MCP tester / manual-checklist prompts. */
   spec: string;
@@ -209,25 +220,6 @@ function ddevConfigPath(workspace: string): string {
   return path.join(workspace, '.ddev', 'config.yaml');
 }
 
-/** The DDEV project's primary URL, via `ddev describe -j` inside the runner. */
-async function ddevPrimaryUrl(
-  handle: ReturnType<typeof runnerHandleForTask>,
-): Promise<string | null> {
-  const res = await ddevExec(handle, 'describe -j', { timeoutMs: 30_000 });
-  if (res.exitCode !== 0) return null;
-  const start = res.output.indexOf('{');
-  const end = res.output.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  try {
-    const parsed = JSON.parse(res.output.slice(start, end + 1)) as {
-      raw?: { primary_url?: string };
-    };
-    return parsed.raw?.primary_url ?? null;
-  } catch {
-    return null;
-  }
-}
-
 /** Pull the single-line JSON report the browser check prints, ignoring any
  *  surrounding noise (ddev/docker exec banners, stderr). */
 function extractReport(output: string): BrowserReport | null {
@@ -282,6 +274,8 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     const base = {
       browserTesting,
       ddevMode: false,
+      appRunnerMode: false,
+      envImageTag: null as string | null,
       repoSubpath: null as string | null,
       appBooted: false,
       appUrl: null as string | null,
@@ -318,6 +312,8 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       return {
         browserTesting: true,
         ddevMode: true,
+        appRunnerMode: false,
+        envImageTag: null,
         repoSubpath: ws.repoSubpath,
         appBooted: url !== null,
         appUrl: url,
@@ -328,7 +324,10 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       };
     }
 
-    // Legacy path: rely on 01a-app-boot.
+    // Legacy / non-DDEV path: rely on 01a-app-boot. A non-DDEV app may run in its
+    // per-task app-runner container (01a containerized path), which hosts the
+    // headed-browser desktop when the env image was built with browser testing —
+    // so headless + interactive run INSIDE that container, like the DDEV runner.
     const boot = await loadAppBootOutput(ctx.db, ctx.taskId);
     const appBooted = boot !== null && boot.booted && !boot.skipped;
     if (!appBooted) {
@@ -338,10 +337,16 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         skipReason: 'Application was not booted (app-boot step skipped or failed)',
       };
     }
+    const appRunnerMode = boot?.containerized === true && !!boot.runtimeContainer;
+    const appRunnerWs = appRunnerMode
+      ? await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath)
+      : null;
     return {
       browserTesting: true,
       ddevMode: false,
-      repoSubpath: null,
+      appRunnerMode,
+      envImageTag: appRunnerMode ? (envTemplate?.imageTag ?? null) : null,
+      repoSubpath: appRunnerWs?.repoSubpath ?? null,
       appBooted: true,
       appUrl: boot?.appUrl ?? null,
       available: true,
@@ -359,7 +364,9 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         `App URL: ${detected.appUrl ?? '(unknown)'}`,
         detected.ddevMode
           ? 'Launches headless Chrome INSIDE the DDEV runner to validate the running app.'
-          : 'Launches headless Chrome to validate the running application.',
+          : detected.appRunnerMode
+            ? 'Launches headless Chrome INSIDE the app-runner container to validate the running app.'
+            : 'Launches headless Chrome to validate the running application.',
       ].join('\n'),
       fields: [
         {
@@ -375,10 +382,14 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
                     label:
                       'Automated agent testing — the integration-tester drives the visible browser via Chrome DevTools (visual + functional); watch and assist in the Browser panel below',
                   },
+                ]
+              : []),
+            ...(detected.ddevMode || detected.appRunnerMode
+              ? [
                   {
                     value: 'interactive',
                     label:
-                      'Interactive probe — headed Chrome on the DDEV desktop; watch and click along in the Browser panel (e.g. to dismiss native Chrome popups)',
+                      'Interactive probe — headed Chrome on the runtime desktop; watch and click along in the Browser panel (e.g. to dismiss native Chrome popups)',
                   },
                 ]
               : []),
@@ -558,6 +569,34 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       } else {
         await ctx.emitProgress('Running browser validation…');
         const res = await runnerExec(handle, `node /opt/browser-check.js '${appUrl}'`, {
+          timeoutMs: 90_000,
+        });
+        rawOutput = res.output;
+      }
+    } else if (detected.appRunnerMode && detected.repoSubpath && detected.envImageTag) {
+      // Non-DDEV: the app + the headed-browser desktop live in the per-task
+      // app-runner container, so the probe runs INSIDE it (browser hits the app
+      // on localhost). Probe scripts were injected at /opt/browser by the runner.
+      await ctx.emitProgress('Ensuring the app-runner is up…');
+      const handle = await ensureAppRunnerStarted(
+        ctx.taskId,
+        detected.repoSubpath,
+        detected.envImageTag,
+      );
+      appUrl = appUrlOverride || detected.appUrl || 'http://localhost';
+      if (interactive) {
+        await ctx.emitProgress('Starting the browser desktop…');
+        await startAppBrowserDesktop(handle);
+        await ctx.emitProgress('Running browser validation (interactive)…');
+        const res = await appRunnerExec(
+          handle,
+          `node /opt/browser/browser-probe-connect.js '${appUrl}'`,
+          { timeoutMs: 90_000 },
+        );
+        rawOutput = res.output;
+      } else {
+        await ctx.emitProgress('Running browser validation…');
+        const res = await appRunnerExec(handle, `node /opt/browser/browser-check.js '${appUrl}'`, {
           timeoutMs: 90_000,
         });
         rawOutput = res.output;

@@ -7,6 +7,12 @@ type VncState = 'idle' | 'connecting' | 'connected' | 'error';
 
 interface BrowserVncPanelProps {
   taskId: string;
+  /** Header label; defaults to the interactive-validation wording. */
+  title?: string;
+  /** When this flips true (e.g. the owning step finished), collapse and drop the
+   *  connection so a redundant VNC session isn't held open behind later steps.
+   *  The user can still re-open it. */
+  autoCollapse?: boolean;
 }
 
 /**
@@ -17,8 +23,9 @@ interface BrowserVncPanelProps {
  * click things agents can't reach (native Chrome popups). noVNC is imported
  * lazily in the browser only — it touches window at module load.
  */
-export function BrowserVncPanel({ taskId }: BrowserVncPanelProps) {
+export function BrowserVncPanel({ taskId, title, autoCollapse }: BrowserVncPanelProps) {
   const [expanded, setExpanded] = useState(true);
+  const [maximized, setMaximized] = useState(false);
   const [state, setState] = useState<VncState>('idle');
   const [message, setMessage] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -66,11 +73,55 @@ export function BrowserVncPanel({ taskId }: BrowserVncPanelProps) {
 
   useEffect(() => () => disconnect(), [disconnect]);
 
+  // Collapse + disconnect once the owning step finishes (e.g. 08a after the
+  // workflow moves on), so it doesn't hold a redundant VNC session open behind
+  // later steps. Fires once on the false→true edge; re-opening stays manual.
+  useEffect(() => {
+    if (autoCollapse) {
+      disconnect();
+      setExpanded(false);
+    }
+  }, [autoCollapse, disconnect]);
+
+  // Maximize = full-page overlay in the SAME window so the user keeps testing
+  // without blurring the tab (the user-active timer keeps running). The
+  // container div stays the same mounted element across toggles, so the RFB
+  // session survives; noVNC rescales via scaleViewport. The resize nudge prompts
+  // that rescale once the container's new size has settled.
+  const nudgeResize = () => {
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 50);
+  };
+  const toggleMaximize = useCallback(() => {
+    setMaximized((v) => !v);
+    nudgeResize();
+  }, []);
+  const enterFullscreen = useCallback(() => {
+    void containerRef.current
+      ?.requestFullscreen?.()
+      .then(nudgeResize)
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!maximized) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMaximized(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [maximized]);
+
   return (
-    <div className="flex flex-col gap-1 rounded-md border border-neutral-800 bg-neutral-950 p-2">
+    <div
+      className={
+        maximized
+          ? 'fixed inset-0 z-50 flex flex-col gap-1 border border-neutral-800 bg-neutral-950 p-2'
+          : 'flex flex-col gap-1 rounded-md border border-neutral-800 bg-neutral-950 p-2'
+      }
+    >
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold text-neutral-300">
-          Browser (interactive validation)
+          {title ?? 'Browser (interactive validation)'}
           {state === 'connected' && <span className="ml-2 text-emerald-400">● live</span>}
           {state === 'connecting' && <span className="ml-2 text-neutral-500">connecting…</span>}
         </span>
@@ -84,10 +135,31 @@ export function BrowserVncPanel({ taskId }: BrowserVncPanelProps) {
               Retry
             </button>
           )}
+          {expanded && (
+            <>
+              <button
+                type="button"
+                onClick={enterFullscreen}
+                className="text-xs text-indigo-400 underline"
+              >
+                Fullscreen
+              </button>
+              <button
+                type="button"
+                onClick={toggleMaximize}
+                className="text-xs text-indigo-400 underline"
+              >
+                {maximized ? 'Restore' : 'Maximize'}
+              </button>
+            </>
+          )}
           <button
             type="button"
             onClick={() => {
-              if (expanded) disconnect();
+              if (expanded) {
+                disconnect();
+                setMaximized(false);
+              }
               setExpanded((v) => !v);
             }}
             className="text-xs text-indigo-400 underline"
@@ -100,8 +172,13 @@ export function BrowserVncPanel({ taskId }: BrowserVncPanelProps) {
       {expanded && (
         <div
           ref={containerRef}
-          className="h-[480px] w-full overflow-hidden rounded bg-black"
-          // noVNC manages its own canvas inside this container.
+          className={
+            maximized
+              ? 'min-h-0 w-full flex-1 overflow-hidden rounded bg-black'
+              : 'h-[480px] w-full overflow-hidden rounded bg-black'
+          }
+          // noVNC manages its own canvas here; stays mounted across maximize
+          // toggles so the RFB session survives.
         />
       )}
     </div>

@@ -76,6 +76,14 @@ export interface AppBootOutput {
   bootCommand: string | null;
   appUrl: string | null;
   healthCheckPassed: boolean;
+  /** True when the app was launched inside its per-task app-runner container
+   *  (the non-DDEV single-process path) rather than on the worker host. */
+  containerized?: boolean;
+  /** The app-runner container name when containerized (else null). The Phase 3
+   *  runtime resolver + the VNC bridge dial this. */
+  runtimeContainer?: string | null;
+  /** Port the app listens on inside the runtime container (containerized). */
+  port?: number | null;
 }
 
 export async function loadAppBootOutput(

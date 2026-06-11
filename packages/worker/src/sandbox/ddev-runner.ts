@@ -185,6 +185,24 @@ export async function ddevExec(
   }
 }
 
+/** The DDEV project's primary URL, via `ddev describe -j` inside the runner.
+ *  Null when the project isn't running or the output can't be parsed. */
+export async function ddevPrimaryUrl(handle: DdevRunnerHandle): Promise<string | null> {
+  const res = await ddevExec(handle, 'describe -j', { timeoutMs: 30_000 });
+  if (res.exitCode !== 0) return null;
+  const start = res.output.indexOf('{');
+  const end = res.output.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(res.output.slice(start, end + 1)) as {
+      raw?: { primary_url?: string };
+    };
+    return parsed.raw?.primary_url ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Ensure the task's DDEV env is up and `ddev start`-ed, booting it if not.
  *  Idempotent: returns the existing handle when DDEV is already running (so a
  *  prior `import-db` is preserved); otherwise launches the runner + `ddev start`

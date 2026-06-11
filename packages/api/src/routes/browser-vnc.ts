@@ -4,17 +4,19 @@ import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { DDEV_RUNNER_VNC_PORT, ddevRunnerName, logger } from '@haive/shared';
+import { DDEV_RUNNER_VNC_PORT, ddevRunnerName, appRunnerName, logger } from '@haive/shared';
 import { getDb } from '../db.js';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
 
 // Bridges the web noVNC panel to the headed-browser desktop inside a task's
-// DDEV runner: RFB-over-WebSocket on the client side, raw TCP to
-// <haive-ddev-taskId8>:5900 over the internal sandbox network (the api joins it
-// in docker-compose). This is websockify-in-api: pipe bytes both ways. Auth is
-// the same cookie-JWT upgrade check the terminal proxy uses, plus task
-// ownership; the runner's VNC itself is passwordless and never host-published.
+// runtime container: RFB-over-WebSocket on the client side, raw TCP to
+// <container>:5900 over the internal sandbox network (the api joins it in
+// docker-compose). The target is the DDEV runner for DDEV projects, else the
+// non-DDEV app-runner — resolved from the task's env-template containerTool.
+// This is websockify-in-api: pipe bytes both ways. Auth is the same cookie-JWT
+// upgrade check the terminal proxy uses, plus task ownership; the desktop's VNC
+// itself is passwordless and never host-published.
 
 const log = logger.child({ module: 'browser-vnc-ws' });
 const WS_PATH_PREFIX = '/browser-vnc/';
@@ -50,8 +52,9 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
+        const desktopHost = await resolveDesktopContainer(taskId, vncPort);
         wss.handleUpgrade(req, socket, head, (ws) => {
-          runVncBridge(ws, ddevRunnerName(taskId), vncPort, taskId);
+          runVncBridge(ws, desktopHost, vncPort, taskId);
         });
       } catch (err) {
         log.error({ err, url: rawUrl }, 'vnc upgrade handler failed');
@@ -108,6 +111,35 @@ function extractTaskId(rawUrl: string, prefix: string): string | null {
   const withoutQuery = rawUrl.split('?')[0] ?? rawUrl;
   const id = withoutQuery.slice(prefix.length).replace(/\/+$/, '');
   return /^[0-9a-f-]{36}$/.test(id) ? id : null;
+}
+
+/** Probe whether <host>:<port> accepts a TCP connection within `timeoutMs`. */
+function probeTcp(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = net.connect({ host, port });
+    let done = false;
+    const finish = (ok: boolean): void => {
+      if (done) return;
+      done = true;
+      sock.destroy();
+      resolve(ok);
+    };
+    sock.setTimeout(timeoutMs);
+    sock.on('connect', () => finish(true));
+    sock.on('timeout', () => finish(false));
+    sock.on('error', () => finish(false));
+  });
+}
+
+/** The container hosting the task's live browser desktop. The DDEV runner wins
+ *  whenever it's up — 08a / Gate 2 use it whenever `.ddev` is present, including
+ *  an add-DDEV task whose env template was non-DDEV — else the non-DDEV
+ *  app-runner. Resolved by probing the VNC port so it mirrors the runtime the
+ *  workflow actually selected, not just the template value. */
+async function resolveDesktopContainer(taskId: string, port: number): Promise<string> {
+  const ddev = ddevRunnerName(taskId);
+  if (await probeTcp(ddev, port)) return ddev;
+  return appRunnerName(taskId);
 }
 
 async function taskBelongsToUser(taskId: string, userId: string): Promise<boolean> {

@@ -236,6 +236,17 @@ export function ddevRunnerName(taskId: string): string {
 }
 /** VNC (RFB) port of the headed-browser desktop inside the DDEV runner. */
 export const DDEV_RUNNER_VNC_PORT = 5900;
+/** Name of a task's per-task app-runner container — the non-DDEV runtime that
+ *  runs the app AND hosts the headed-browser desktop, built from the repo's
+ *  env-replicate image. Shared because the api dials it by this DNS name on the
+ *  internal sandbox network (browser-VNC bridge) while the worker creates and
+ *  destroys it. */
+export function appRunnerName(taskId: string): string {
+  return `haive-app-${taskId.slice(0, 8)}`;
+}
+/** Docker label marking a container as a per-task app-runner, so task-end
+ *  cleanup can find and remove it (mirrors the DDEV runner's haive.ddev label). */
+export const APP_RUNNER_LABEL = 'haive.apprunner';
 /** Two minutes of grace after the last WS disconnect before a session's
  *  container is reaped. Long enough to survive a tab nav-away-and-return,
  *  short enough that abandoned sessions don't pile up under WSL's container

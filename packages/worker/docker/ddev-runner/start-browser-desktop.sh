@@ -34,8 +34,10 @@ if ! pgrep -f "chromium.*remote-debugging-port=${CDP_LOCAL}" >/dev/null 2>&1; th
     --disable-session-crashed-bubble \
     --disable-infobars \
     --password-store=basic \
+    --no-sandbox \
+    --disable-dev-shm-usage \
     --remote-debugging-port="${CDP_LOCAL}" \
-    --user-data-dir=/home/ddev/.chrome-profile \
+    --user-data-dir="${CHROME_PROFILE_DIR:-$HOME/.chrome-profile}" \
     --window-size=1920,1080 \
     --start-maximized \
     about:blank >/tmp/chromium.log 2>&1 &

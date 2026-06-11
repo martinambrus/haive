@@ -367,11 +367,25 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   }
 
   if (deps.browserTesting) {
-    lines.push('# Chrome + chrome-devtools-mcp');
+    // Headed-browser desktop stack so the per-task app-runner can run the app
+    // AND serve a live noVNC view (08a-browser-verify + Gate 2), the same way
+    // the DDEV runner does: Chromium on an Xvfb display, x11vnc for the VNC
+    // bridge, socat to expose the localhost-only CDP port, puppeteer-core for
+    // the probe scripts. chrome-devtools-mcp powers the agent (mcp) mode. The
+    // worker injects the desktop launcher + probe scripts into the running
+    // container via `docker cp` (they can't be COPYed here — the env-image build
+    // context is the repo, not the worker's docker assets).
+    lines.push('# Browser testing: headed Chromium + Xvfb/x11vnc/socat + puppeteer-core');
     lines.push('RUN apt-get update \\');
-    lines.push('    && apt-get install -y --no-install-recommends chromium xvfb \\');
+    lines.push(
+      '    && apt-get install -y --no-install-recommends chromium xvfb x11vnc socat procps fonts-dejavu \\',
+    );
     lines.push('    && rm -rf /var/lib/apt/lists/*');
     lines.push('RUN npm install -g chrome-devtools-mcp');
+    lines.push(
+      'RUN mkdir -p /opt/browser && cd /opt/browser && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1',
+    );
+    lines.push('ENV CHROME_PATH=/usr/bin/chromium');
     lines.push('');
   }
 
