@@ -9,12 +9,18 @@ export interface TaskSnapshot {
   title: string;
   /** TaskStatus, kept as plain string so the helper stays decoupled. */
   status: string;
+  /** The step the task is paused on (a gate / waiting_form). Used to key a
+   *  notification episode so each distinct gate notifies once. */
+  currentStepId: string | null;
 }
 
 export interface TaskTransitionEvent {
   taskId: string;
   title: string;
   status: NotifiableStatus;
+  /** Step the task is paused on, threaded so the provider keys a distinct
+   *  notification episode per gate (each gate notifies once). */
+  currentStepId: string | null;
   /** True when this event came from the first poll of the session (the task
    *  was already waiting before the watcher mounted). The provider dedupes
    *  these via sessionStorage so each browser session surfaces them at most
@@ -44,12 +50,24 @@ export function detectTransitions(
     if (!isNotifiable(task.status)) continue;
     if (prev === null) {
       if (task.status === 'waiting_user') {
-        events.push({ taskId: task.id, title: task.title, status: task.status, baseline: true });
+        events.push({
+          taskId: task.id,
+          title: task.title,
+          status: task.status,
+          currentStepId: task.currentStepId,
+          baseline: true,
+        });
       }
       continue;
     }
     if (prev.get(task.id) !== task.status) {
-      events.push({ taskId: task.id, title: task.title, status: task.status, baseline: false });
+      events.push({
+        taskId: task.id,
+        title: task.title,
+        status: task.status,
+        currentStepId: task.currentStepId,
+        baseline: false,
+      });
     }
   }
   return events;

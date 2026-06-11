@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { detectTransitions, snapshotStatuses } from './transitions';
 
-const task = (id: string, status: string, title = `Task ${id}`) => ({ id, title, status });
+const task = (
+  id: string,
+  status: string,
+  title = `Task ${id}`,
+  currentStepId: string | null = null,
+) => ({ id, title, status, currentStepId });
 
 describe('detectTransitions', () => {
   it('first poll surfaces only already-waiting tasks as baseline events', () => {
@@ -12,7 +17,7 @@ describe('detectTransitions', () => {
       task('d', 'running'),
     ]);
     expect(events).toEqual([
-      { taskId: 'a', title: 'Task a', status: 'waiting_user', baseline: true },
+      { taskId: 'a', title: 'Task a', status: 'waiting_user', currentStepId: null, baseline: true },
     ]);
   });
 
@@ -65,7 +70,19 @@ describe('detectTransitions', () => {
   it('carries the task payload verbatim', () => {
     const prev = new Map([['a', 'running']]);
     const [event] = detectTransitions(prev, [task('a', 'failed', 'My fix')]);
-    expect(event).toEqual({ taskId: 'a', title: 'My fix', status: 'failed', baseline: false });
+    expect(event).toEqual({
+      taskId: 'a',
+      title: 'My fix',
+      status: 'failed',
+      currentStepId: null,
+      baseline: false,
+    });
+  });
+
+  it('carries currentStepId so each gate keys a distinct episode', () => {
+    const prev = new Map([['a', 'running']]);
+    const [event] = detectTransitions(prev, [task('a', 'waiting_user', 'Task a', '09-gate-2')]);
+    expect(event!.currentStepId).toBe('09-gate-2');
   });
 });
 

@@ -10,25 +10,51 @@ import { detectTransitions, snapshotStatuses, type TaskTransitionEvent } from '.
 const POLL_MS = 5_000;
 const SETTINGS_CHANGED_EVENT = 'haive:notification-settings-changed';
 
-function sessionKey(e: TaskTransitionEvent): string {
-  return `haive:notified:${e.taskId}:${e.status}`;
+const SEEN_PREFIX = 'haive:notif-seen:';
+const SEEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Per-episode dedupe key: (task, status, step). localStorage (not
+ *  sessionStorage) so a handled episode stays handled across tabs AND sessions
+ *  — opening a new tab never re-fires an already-seen waiting notification.
+ *  currentStepId distinguishes gates so each genuinely-new wait notifies once. */
+function seenKey(e: TaskTransitionEvent): string {
+  return `${SEEN_PREFIX}${e.taskId}:${e.status}:${e.currentStepId ?? ''}`;
 }
 
-function hasSessionFlag(e: TaskTransitionEvent): boolean {
+function hasSeen(e: TaskTransitionEvent): boolean {
   if (typeof window === 'undefined') return false;
   try {
-    return window.sessionStorage.getItem(sessionKey(e)) !== null;
+    return window.localStorage.getItem(seenKey(e)) !== null;
   } catch {
     return false;
   }
 }
 
-function setSessionFlag(e: TaskTransitionEvent): void {
+function markSeen(e: TaskTransitionEvent): void {
   if (typeof window === 'undefined') return;
   try {
-    window.sessionStorage.setItem(sessionKey(e), '1');
+    window.localStorage.setItem(seenKey(e), String(Date.now()));
   } catch {
-    // storage disabled — baseline dedupe degrades to per-page-load
+    // storage disabled — dedupe degrades to per-poll (fires on each transition)
+  }
+}
+
+/** Drop seen-entries past the TTL so the store can't grow unbounded (a handled
+ *  episode never needs its flag once the task has moved on). Runs once on mount. */
+function pruneSeen(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const now = Date.now();
+    const stale: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k || !k.startsWith(SEEN_PREFIX)) continue;
+      const ts = Number(window.localStorage.getItem(k));
+      if (!Number.isFinite(ts) || now - ts > SEEN_TTL_MS) stale.push(k);
+    }
+    for (const k of stale) window.localStorage.removeItem(k);
+  } catch {
+    // ignore
   }
 }
 
@@ -127,16 +153,21 @@ export function NotificationProvider() {
 
   const handleEvent = useCallback(
     (e: TaskTransitionEvent) => {
+      // Already surfaced/handled (in any tab or a prior session) — never repeat.
+      if (hasSeen(e)) return;
+
       // '/tasks/new' yields 'new', which never equals a task uuid — safe.
       const m = /^\/tasks\/([^/]+)$/.exec(pathRef.current ?? '');
       const currentTaskId = m?.[1] ?? null;
       const isCurrent = e.taskId === currentTaskId;
-      const focused = document.visibilityState === 'visible' && document.hasFocus();
-
-      if (e.baseline && hasSessionFlag(e)) return;
-      if (e.status === 'waiting_user') setSessionFlag(e);
-
-      if (isCurrent && focused) return;
+      // Tab VISIBILITY (not hasFocus): focus inside the embedded cross-origin
+      // VNC/browser iframe at a gate makes hasFocus() false, which would defeat
+      // the "you're looking at it" suppression — visibilityState has no such hole.
+      const viewing = isCurrent && document.visibilityState === 'visible';
+      if (viewing) {
+        markSeen(e); // looking at it now → don't nag for this episode anywhere
+        return;
+      }
 
       if (!isCurrent) {
         const toast: AttentionToast = {
@@ -151,10 +182,13 @@ export function NotificationProvider() {
       if (e.status !== 'completed' && settingsRef.current.soundEnabled) {
         playSound();
       }
+      // OS notification only when the browser window isn't focused (the user is
+      // elsewhere). hasFocus() is the right signal here — distinct from the
+      // visibility check above that gates the "viewing this task" suppression.
       if (
         typeof Notification !== 'undefined' &&
         Notification.permission === 'granted' &&
-        !focused
+        !document.hasFocus()
       ) {
         try {
           const n = new Notification(`Haive — ${e.title}`, {
@@ -170,11 +204,13 @@ export function NotificationProvider() {
           // notification construction can throw on some platforms — ignore
         }
       }
+      markSeen(e); // surfaced once — other tabs/sessions skip it from here on
     },
     [playSound, router],
   );
 
   useEffect(() => {
+    pruneSeen();
     let cancelled = false;
     const poll = async () => {
       try {
