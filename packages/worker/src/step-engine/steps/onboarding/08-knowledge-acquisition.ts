@@ -4,6 +4,8 @@ import { jsonrepair } from 'jsonrepair';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
+import type { GlobalKbFacets } from '@haive/shared/global-kb';
+import { promoteToGlobalKbDraft } from '../_global-kb-promote.js';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -29,9 +31,15 @@ interface ExistingKbFile {
 }
 
 interface KnowledgeApply {
-  written: { id: string; filePath: string; source: 'llm' | 'stub' | 'existing' | 'updated' }[];
+  written: {
+    id: string;
+    filePath: string;
+    source: 'llm' | 'stub' | 'existing' | 'updated' | 'global';
+  }[];
   topicCount: number;
   llmAvailable: boolean;
+  /** Count of entries promoted to the global KB as drafts (not written to disk). */
+  globalPromoted: number;
 }
 
 type KbCategory = 'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
@@ -50,6 +58,13 @@ interface KbEntry {
   /** Required when `category` is `tech_pattern` or `anti_pattern`. The technology or
    *  framework the pattern covers — becomes the subdir / filename stem. */
   tech?: string;
+  /** Routing decision (plan §5.4). `global` promotes the entry to the cross-repo
+   *  KB as a draft instead of writing it into this repo's
+   *  `.claude/knowledge_base/`. Defaults to `local`. */
+  scope?: 'local' | 'global';
+  /** Version/variant facets for a `global` entry (defaulted from the detected
+   *  stack when the LLM omits them). Ignored for `local` entries. */
+  facets?: GlobalKbFacets;
 }
 
 /* ------------------------------------------------------------------ */
@@ -235,6 +250,8 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '      "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference",',
     '      "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit for topic-specific entries)",',
     '      "tech": "<required when category is tech_pattern, anti_pattern, best_practice, or quick_reference — e.g. node-pty, gradle, lwjgl2>",',
+    '      "scope": "local | global",',
+    '      "facets": { "framework": ["<token>"], "language": ["<lang>"], "phpMajor": ["<n>"], "nodeMajor": ["<n>"] },',
     '      "sections": [',
     '        { "heading": "Section Name", "body": "Detailed markdown content..." }',
     '      ]',
@@ -262,6 +279,8 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '    * "quick_reference" — cheat sheet of common operations for a technology. Routes to QUICK_REFERENCE/<tech>/cheat-sheet.md.',
     '- canonical: optional. Use when the entry matches one of the standard root-level files (ARCHITECTURE, API_REFERENCE, CODING_STANDARDS, TESTING_STANDARDS, SECURITY_STANDARDS, DEPLOYMENT, BUSINESS_LOGIC). Produce AT MOST ONE entry per canonical name.',
     '- tech: required when category is tech_pattern, anti_pattern, best_practice, or quick_reference. kebab-case (e.g. node-pty, drupal-form-api, rails-ar, gradle, lwjgl2).',
+    `- scope: "local" (default) for knowledge SPECIFIC to THIS repository — its architecture, file paths, business logic, conventions. "global" for reusable HOUSE STANDARDS that apply to any project of this stack — framework anti-patterns, boilerplate, "never use X", how a technology is conventionally set up. When unsure, choose "local".`,
+    `- facets: ONLY for scope="global". They scope which projects later retrieve the entry. Default to this project's stack — framework=["${detected.framework ?? ''}"], language=["${detected.language ?? ''}"]. Drop framework when the standard applies to every version of it (e.g. all Drupal); set phpMajor/nodeMajor (e.g. "8", "20") when it is version-specific. Omitted dimensions apply to all.`,
     '- sections: at least 2 sections per entry with real extracted content, not generic advice.',
     '  - Include actual code patterns, specific config values, real file paths from the project.',
     '  - Cite repo paths with line ranges (e.g. `build.gradle:13-41`) wherever possible.',
@@ -547,6 +566,15 @@ function collectRepaired(
 /* ------------------------------------------------------------------ */
 /* Markdown generation                                                 */
 /* ------------------------------------------------------------------ */
+
+/** Facets for a promoted global entry: the LLM's facets win, with framework /
+ *  language filled from the detected stack when the LLM omitted them. */
+function defaultGlobalFacets(entry: KbEntry, detected: KnowledgeDetect): GlobalKbFacets {
+  const f: GlobalKbFacets = { ...(entry.facets ?? {}) };
+  if (!f.framework?.length && detected.framework) f.framework = [detected.framework];
+  if (!f.language?.length && detected.language) f.language = [detected.language.toLowerCase()];
+  return f;
+}
 
 function entryToMarkdown(entry: KbEntry): string {
   const lines: string[] = [`# ${entry.title}`, ''];
@@ -900,7 +928,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
             : `${sectionCount} sections`;
         return {
           value: e.id,
-          label: `${e.title} — ${detail}`,
+          label: `${e.scope === 'global' ? '[global] ' : ''}${e.title} — ${detail}`,
           badge: confidenceLabel(e.confidence),
           badgeColor: confidenceColor(e.confidence),
         };
@@ -1000,8 +1028,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     const written: {
       id: string;
       filePath: string;
-      source: 'llm' | 'stub' | 'existing' | 'updated';
+      source: 'llm' | 'stub' | 'existing' | 'updated' | 'global';
     }[] = [];
+    let globalPromoted = 0;
 
     // 1. Re-place / improve existing KB files into the canonical layout. Updates
     //    win over placements for the same file; first writer wins per destination.
@@ -1066,7 +1095,33 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     //    when the LLM produced nothing at all (no entries AND no placements).
     if (entries.length > 0) {
       const selected = new Set(values.selectedTopics ?? []);
-      const routed = routeEntries(entries.filter((e) => selected.has(e.id)));
+      const chosen = entries.filter((e) => selected.has(e.id));
+
+      // Global-routed entries become DRAFT rows in the cross-repo KB and are
+      // NEVER written to .claude/knowledge_base/, so they are never indexed into
+      // this repo's RAG (the "don't pollute the local DB" requirement, §5.4).
+      for (const e of chosen.filter((entry) => entry.scope === 'global')) {
+        const id = await promoteToGlobalKbDraft(
+          ctx.db,
+          {
+            userId: ctx.userId,
+            taskId: ctx.taskId,
+            title: e.title,
+            body: entryToMarkdown(e),
+            category: e.category ?? 'general',
+            facets: defaultGlobalFacets(e, detected),
+          },
+          ctx.logger,
+        );
+        if (id) {
+          globalPromoted += 1;
+          written.push({ id: e.id, filePath: `global-kb:${id}`, source: 'global' });
+        }
+      }
+
+      // Local entries: written into the canonical repo KB layout (unchanged),
+      // never overwriting an existing/re-placed file.
+      const routed = routeEntries(chosen.filter((entry) => entry.scope !== 'global'));
       for (const r of routed) {
         const filePath = path.join(kbDir, r.relPath);
         if (await pathExists(filePath)) {
@@ -1126,6 +1181,6 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       },
       'knowledge base written',
     );
-    return { written, topicCount: entries.length, llmAvailable };
+    return { written, topicCount: entries.length, llmAvailable, globalPromoted };
   },
 };

@@ -7,6 +7,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { extractFencedJson } from '../_fenced-json.js';
+import { promoteToGlobalKbDraft } from '../_global-kb-promote.js';
 
 interface LearningDetect {
   taskTitle: string;
@@ -29,6 +30,10 @@ interface Investigation {
   title: string;
   rootCause: string;
   lesson: string;
+  /** Routing decision (plan §5.4). `global` promotes the investigation to the
+   *  cross-repo KB as a draft instead of writing it into this repo's
+   *  knowledge_base/investigations/. Defaults to `local`. */
+  scope?: 'local' | 'global';
 }
 
 interface LearningApply {
@@ -74,8 +79,9 @@ export function parseInvestigation(raw: unknown): Investigation | null {
   const title = typeof i.title === 'string' ? i.title : '';
   const rootCause = typeof i.root_cause === 'string' ? i.root_cause : '';
   const lesson = typeof i.lesson === 'string' ? i.lesson : '';
+  const scope: 'local' | 'global' = i.scope === 'global' ? 'global' : 'local';
   if (!title || !rootCause) return null;
-  return { title, rootCause, lesson };
+  return { title, rootCause, lesson, scope };
 }
 
 interface ImplementOutput {
@@ -267,11 +273,11 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         'You are the learning capture phase of an engineering workflow.',
         'Emit ONE JSON object inside a ```json fenced code block with the shape:',
         detected.isBugFix
-          ? '{ "entries": [ { "id": "<kebab-case>", "title": "<short>", "body": "<markdown>" } ], "investigation": { "title": "<short>", "root_cause": "<why/how the bug happened>", "lesson": "<durable lesson for future runs>" } }'
+          ? '{ "entries": [ { "id": "<kebab-case>", "title": "<short>", "body": "<markdown>" } ], "investigation": { "title": "<short>", "root_cause": "<why/how the bug happened>", "lesson": "<durable lesson for future runs>", "scope": "local | global" } }'
           : '{ "entries": [ { "id": "<kebab-case>", "title": "<short>", "body": "<markdown>" } ] }',
         'Each entry must be a reusable lesson grounded in the workflow run. Avoid generic advice.',
         detected.isBugFix
-          ? 'This task was a BUG FIX: ALSO produce an `investigation` — the root cause (why/how the bug existed, grounded in the implementation) and the durable lesson for future work.'
+          ? 'This task was a BUG FIX: ALSO produce an `investigation` — the root cause (why/how the bug existed, grounded in the implementation) and the durable lesson for future work. Set its `scope` to "global" ONLY when the lesson is a reusable house standard for any project of this stack (not specific to this repo); otherwise "local".'
           : '',
         '',
         `Task title: ${detected.taskTitle || '(untitled)'}`,
@@ -342,6 +348,13 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
                 label: 'Write the bug investigation to .claude/knowledge_base/investigations/',
                 default: true,
               },
+              {
+                type: 'checkbox' as const,
+                id: 'promoteInvestigationGlobal',
+                label:
+                  'Promote it to the GLOBAL KB (cross-repo house standard) instead of this repo',
+                default: investigation.scope === 'global',
+              },
             ]
           : []),
         {
@@ -359,6 +372,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const values = args.formValues as {
       writeFiles?: boolean;
       writeInvestigation?: boolean;
+      promoteInvestigationGlobal?: boolean;
       reviewerNote?: string;
     };
     const reviewerNote = values.reviewerNote ?? '';
@@ -375,13 +389,33 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       ? parseInvestigation(args.llmOutput ?? null)
       : null;
     if (investigation && values.writeInvestigation !== false) {
-      investigationWritten = await writeInvestigation(
-        ctx.repoPath,
-        investigation,
-        args.detected.taskTitle,
-        reviewerNote,
-        new Date().toISOString(),
-      );
+      if (investigation.scope === 'global' || values.promoteInvestigationGlobal) {
+        // Promote as a draft to the cross-repo KB instead of writing it into this
+        // repo's knowledge_base/investigations/ (which the local RAG indexes), so
+        // the local store stays clean. Facets are left empty — the user scopes the
+        // draft in Settings -> Global KB before activating it.
+        const id = await promoteToGlobalKbDraft(
+          ctx.db,
+          {
+            userId: ctx.userId,
+            taskId: ctx.taskId,
+            title: investigation.title,
+            body: `# ${investigation.title}\n\n## Root cause\n${investigation.rootCause}\n\n## Lesson\n${investigation.lesson}`,
+            category: 'anti_pattern',
+            facets: {},
+          },
+          ctx.logger,
+        );
+        investigationWritten = id ? `global-kb:${id}` : null;
+      } else {
+        investigationWritten = await writeInvestigation(
+          ctx.repoPath,
+          investigation,
+          args.detected.taskTitle,
+          reviewerNote,
+          new Date().toISOString(),
+        );
+      }
     }
 
     ctx.logger.info(
