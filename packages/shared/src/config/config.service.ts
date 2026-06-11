@@ -40,6 +40,16 @@ export const CONFIG_KEYS = {
 
   MAINTENANCE_MODE: 'config:deployment:maintenanceMode',
   MAINTENANCE_MESSAGE: 'config:deployment:maintenanceMessage',
+
+  // Global cross-task KB (separate DB; see plan luminous-weaving-archive.md §4).
+  // Non-secret settings only; the external connection string is a SecretsService
+  // secret (SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING), never plaintext config.
+  GLOBAL_KB_ENABLED: 'config:globalKb:enabled',
+  GLOBAL_KB_MODE: 'config:globalKb:mode',
+  GLOBAL_KB_NAMESPACE: 'config:globalKb:namespace',
+  GLOBAL_KB_OLLAMA_URL: 'config:globalKb:ollamaUrl',
+  GLOBAL_KB_EMBED_MODEL: 'config:globalKb:embedModel',
+  GLOBAL_KB_EMBED_DIMS: 'config:globalKb:embedDims',
 } as const;
 
 const DEFAULT_CONFIG: Record<string, string> = {
@@ -63,6 +73,13 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.APP_URL]: 'http://localhost:3000',
   [CONFIG_KEYS.MAINTENANCE_MODE]: 'false',
   [CONFIG_KEYS.MAINTENANCE_MESSAGE]: 'Maintenance in progress. Please check back shortly.',
+  // Global KB defaults: feature off, Haive-hosted internal DB, single shared
+  // corpus, per-repo default embedding dims. Ollama URL / model stay unset
+  // (null) until configured → query falls back to deterministic hash embedding.
+  [CONFIG_KEYS.GLOBAL_KB_ENABLED]: 'false',
+  [CONFIG_KEYS.GLOBAL_KB_MODE]: 'internal',
+  [CONFIG_KEYS.GLOBAL_KB_NAMESPACE]: 'default',
+  [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS]: '2560',
 };
 
 export class ConfigService {

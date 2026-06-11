@@ -39,6 +39,10 @@
       "types": "./dist/rag/index.d.ts",
       "import": "./dist/rag/index.js"
     },
+    "./global-kb": {
+      "types": "./dist/global-kb/index.d.ts",
+      "import": "./dist/global-kb/index.js"
+    },
     "./timing": {
       "types": "./dist/step-engine/timing.d.ts",
       "import": "./dist/step-engine/timing.js"
