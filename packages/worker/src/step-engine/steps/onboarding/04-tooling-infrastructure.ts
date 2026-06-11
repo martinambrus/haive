@@ -173,6 +173,13 @@ export const toolingInfrastructureStep: StepDefinition<
       title: 'Tooling and infrastructure',
       description:
         'Configure RAG storage, Ollama embeddings, MCP browser testing and LSP language server preferences for this project.',
+      infoSections: [
+        {
+          title: 'Shared global knowledge base (set up once)',
+          body: '### Global KB\n\nThe RAG storage below is the **per-repository** vector DB for THIS project. Separately, Haive keeps one instance-wide **global knowledge base** of house standards that every project retrieves from (version-scoped to its stack). Configure its database connection + embedding model once at **[Settings → Global KB](/settings/global-kb)** — open it to choose internal vs an external/central DB and to set the embedding model (otherwise it falls back to weak hash embeddings).',
+          defaultOpen: true,
+        },
+      ],
       fields: [
         {
           type: 'select',

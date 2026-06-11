@@ -105,6 +105,16 @@ const STATUS_VARIANT: Record<string, 'success' | 'error' | 'warning' | 'default'
   archived: 'default',
 };
 
+interface GlobalKbConfig {
+  enabled: boolean;
+  mode: 'internal' | 'external';
+  namespace: string;
+  ollamaUrl: string;
+  embedModel: string;
+  embedDimensions: number;
+  connectionStringSet: boolean;
+}
+
 export default function GlobalKbPage() {
   usePageTitle('Global KB');
   const [entries, setEntries] = useState<GlobalKbEntry[] | null>(null);
@@ -130,6 +140,60 @@ export default function GlobalKbPage() {
   });
   const [enrichBusy, setEnrichBusy] = useState(false);
   const [enrichError, setEnrichError] = useState<string | null>(null);
+  const [cfg, setCfg] = useState({
+    enabled: true,
+    mode: 'internal' as 'internal' | 'external',
+    namespace: 'default',
+    ollamaUrl: '',
+    embedModel: '',
+    embedDimensions: 2560,
+    connectionString: '',
+  });
+  const [cfgSet, setCfgSet] = useState(false);
+  const [cfgBusy, setCfgBusy] = useState(false);
+  const [cfgMsg, setCfgMsg] = useState<string | null>(null);
+
+  async function loadConfig() {
+    try {
+      const cc = await api.get<GlobalKbConfig>('/global-kb/config');
+      setCfg((p) => ({
+        ...p,
+        enabled: cc.enabled,
+        mode: cc.mode,
+        namespace: cc.namespace,
+        ollamaUrl: cc.ollamaUrl,
+        embedModel: cc.embedModel,
+        embedDimensions: cc.embedDimensions,
+        connectionString: '',
+      }));
+      setCfgSet(cc.connectionStringSet);
+    } catch {
+      /* admin-only or unavailable */
+    }
+  }
+
+  async function saveConfig() {
+    setCfgBusy(true);
+    setCfgMsg(null);
+    try {
+      const payload: Record<string, unknown> = {
+        enabled: cfg.enabled,
+        mode: cfg.mode,
+        namespace: cfg.namespace,
+        ollamaUrl: cfg.ollamaUrl,
+        embedModel: cfg.embedModel,
+        embedDimensions: cfg.embedDimensions,
+      };
+      if (cfg.connectionString.trim()) payload.connectionString = cfg.connectionString.trim();
+      await api.put('/global-kb/config', payload);
+      await loadConfig();
+      setCfgMsg('Saved.');
+    } catch (err) {
+      setCfgMsg((err as ApiError).message ?? 'Save failed');
+    } finally {
+      setCfgBusy(false);
+    }
+  }
 
   async function refresh() {
     try {
@@ -145,6 +209,7 @@ export default function GlobalKbPage() {
 
   useEffect(() => {
     void refresh();
+    void loadConfig();
     void api
       .get<{ repositories: Repository[] }>('/repos')
       .then((r) => setRepos(r.repositories))
@@ -308,6 +373,110 @@ export default function GlobalKbPage() {
           retrieve active entries via rag_search, version-scoped by the facets below.
         </p>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Connection</CardTitle>
+          <CardDescription>
+            Where the global KB lives and how it embeds — this is the second, instance-wide DB
+            (separate from each repo&apos;s RAG DB set during onboarding). Internal = a dedicated DB
+            on this Haive host; external = a central/remote Postgres shared across machines. Set an
+            embedding model or retrieval falls back to weak hash embeddings.
+          </CardDescription>
+        </CardHeader>
+        <div className="flex flex-col gap-3">
+          <label className="flex items-center gap-2 text-sm text-neutral-100">
+            <input
+              type="checkbox"
+              checked={cfg.enabled}
+              onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })}
+              className="h-4 w-4 rounded border-neutral-700 bg-neutral-950"
+            />
+            Enabled (tasks retrieve global entries)
+          </label>
+          <div className="flex flex-wrap gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="cfg-mode">Provider</Label>
+              <select
+                id="cfg-mode"
+                value={cfg.mode}
+                onChange={(e) =>
+                  setCfg({ ...cfg, mode: e.target.value as 'internal' | 'external' })
+                }
+                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+              >
+                <option value="internal">internal (Haive-hosted)</option>
+                <option value="external">external (central/remote)</option>
+              </select>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="cfg-namespace">Namespace</Label>
+              <Input
+                id="cfg-namespace"
+                value={cfg.namespace}
+                onChange={(e) => setCfg({ ...cfg, namespace: e.target.value })}
+                className="w-40"
+              />
+            </div>
+          </div>
+          {cfg.mode === 'external' && (
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="cfg-conn">
+                External connection string{cfgSet ? ' (set — leave blank to keep)' : ''}
+              </Label>
+              <Input
+                id="cfg-conn"
+                type="password"
+                value={cfg.connectionString}
+                onChange={(e) => setCfg({ ...cfg, connectionString: e.target.value })}
+                placeholder="postgres://user:pass@host:5432/db"
+              />
+            </div>
+          )}
+          <div className="flex flex-wrap gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="cfg-ollama">Embedding Ollama URL</Label>
+              <Input
+                id="cfg-ollama"
+                value={cfg.ollamaUrl}
+                onChange={(e) => setCfg({ ...cfg, ollamaUrl: e.target.value })}
+                placeholder="http://ollama:11434"
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="cfg-model">Embedding model</Label>
+              <Input
+                id="cfg-model"
+                value={cfg.embedModel}
+                onChange={(e) => setCfg({ ...cfg, embedModel: e.target.value })}
+                placeholder="nomic-embed-text"
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="cfg-dims">Dimensions</Label>
+              <Input
+                id="cfg-dims"
+                type="number"
+                value={cfg.embedDimensions}
+                onChange={(e) =>
+                  setCfg({ ...cfg, embedDimensions: Number(e.target.value) || 2560 })
+                }
+                className="w-32"
+              />
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <Button disabled={cfgBusy} onClick={() => void saveConfig()}>
+              {cfgBusy ? 'Saving…' : 'Save connection'}
+            </Button>
+            {cfgMsg && <span className="text-xs text-neutral-400">{cfgMsg}</span>}
+          </div>
+          <p className="text-xs text-neutral-500">
+            Changing the embedding model/dimensions changes the vector space — re-activate entries
+            to re-embed them.
+          </p>
+        </div>
+      </Card>
 
       <Card>
         <CardHeader>

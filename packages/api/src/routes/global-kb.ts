@@ -3,13 +3,18 @@ import { Hono } from 'hono';
 import { and, desc, eq, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  CONFIG_KEYS,
   GLOBAL_KB_JOB_NAMES,
+  SECRET_KEYS,
   TASK_JOB_NAMES,
+  configService,
+  secretsService,
   type GlobalKbSyncJobPayload,
   type TaskJobPayload,
 } from '@haive/shared';
 import {
   globalKbEntries,
+  resolveGlobalKbSettings,
   withGlobalKb,
   type GlobalKbFacets,
   type GlobalKbStatus,
@@ -97,6 +102,63 @@ export const globalKbRoutes = new Hono<AppEnv>();
 
 globalKbRoutes.use('*', requireAuth);
 globalKbRoutes.use('*', requireAdmin);
+
+// --- Global KB connection settings (instance-level: provider mode, external
+// connection string, namespace, pinned embed model). Backed by ConfigService +
+// SecretsService; resolveGlobalKbSettings is the same resolver the worker sync +
+// query path use, so the UI edits exactly what they read. ---
+function configResponse(s: Awaited<ReturnType<typeof resolveGlobalKbSettings>>) {
+  return {
+    enabled: s.enabled,
+    mode: s.mode,
+    namespace: s.namespace,
+    ollamaUrl: s.ollamaUrl ?? '',
+    embedModel: s.embedModel ?? '',
+    embedDimensions: s.embeddingDimensions,
+    connectionStringSet: !!s.connectionString,
+  };
+}
+
+const configSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    mode: z.enum(['internal', 'external']).optional(),
+    namespace: z.string().min(1).max(120).optional(),
+    ollamaUrl: z.string().optional(),
+    embedModel: z.string().optional(),
+    embedDimensions: z.number().int().positive().max(8192).optional(),
+    connectionString: z.string().optional(),
+  })
+  .strict();
+
+globalKbRoutes.get('/config', async (c) => {
+  return c.json(configResponse(await resolveGlobalKbSettings()));
+});
+
+globalKbRoutes.put('/config', async (c) => {
+  const parsed = configSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) throw new HttpError(400, 'invalid global KB config', 'invalid_body');
+  const d = parsed.data;
+  if (d.enabled !== undefined)
+    await configService.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled));
+  if (d.mode !== undefined) await configService.set(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode);
+  if (d.namespace !== undefined)
+    await configService.set(CONFIG_KEYS.GLOBAL_KB_NAMESPACE, d.namespace);
+  if (d.ollamaUrl !== undefined)
+    await configService.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, d.ollamaUrl);
+  if (d.embedModel !== undefined)
+    await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel);
+  if (d.embedDimensions !== undefined)
+    await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, String(d.embedDimensions));
+  if (d.connectionString !== undefined && d.connectionString.trim().length > 0) {
+    await secretsService.set(
+      SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
+      d.connectionString.trim(),
+      'Global KB external connection string',
+    );
+  }
+  return c.json(configResponse(await resolveGlobalKbSettings()));
+});
 
 // Repo-anchored AI enrichment (plan §5.1/§5.3): create a `skeleton` entry, then a
 // kb_author task that reads the chosen repo with the chosen CLI to expand the
