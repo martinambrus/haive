@@ -125,6 +125,8 @@ export default function GlobalKbPage() {
     language: '',
     repoId: '',
     cliProviderId: '',
+    egressMode: 'none' as 'none' | 'allowlist' | 'full',
+    egressDomains: '',
   });
   const [enrichBusy, setEnrichBusy] = useState(false);
   const [enrichError, setEnrichError] = useState<string | null>(null);
@@ -268,6 +270,12 @@ export default function GlobalKbPage() {
         facets,
         repositoryId: enrich.repoId,
         cliProviderId: enrich.cliProviderId,
+        egress: {
+          mode: enrich.egressMode,
+          ...(enrich.egressMode === 'allowlist'
+            ? { domains: parseList(enrich.egressDomains) }
+            : {}),
+        },
       });
       setEnrich({ ...enrich, title: '', skeleton: '' });
       await refresh();
@@ -370,7 +378,36 @@ export default function GlobalKbPage() {
                 ))}
               </select>
             </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="enrich-egress">Web access</Label>
+              <select
+                id="enrich-egress"
+                value={enrich.egressMode}
+                onChange={(e) =>
+                  setEnrich({
+                    ...enrich,
+                    egressMode: e.target.value as 'none' | 'allowlist' | 'full',
+                  })
+                }
+                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+              >
+                <option value="none">repo only (no web)</option>
+                <option value="allowlist">specific domains</option>
+                <option value="full">full internet</option>
+              </select>
+            </div>
           </div>
+          {enrich.egressMode === 'allowlist' && (
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="enrich-egress-domains">Allowed domains</Label>
+              <Input
+                id="enrich-egress-domains"
+                value={enrich.egressDomains}
+                onChange={(e) => setEnrich({ ...enrich, egressDomains: e.target.value })}
+                placeholder="comma-separated, e.g. drupal.org, api.drupal.org"
+              />
+            </div>
+          )}
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="enrich-skel">Skeleton</Label>
             <textarea

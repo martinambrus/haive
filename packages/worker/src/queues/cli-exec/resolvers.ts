@@ -95,9 +95,30 @@ export async function loadProviderRuntimeConfig(
   return {
     wrapperContent: row.wrapperContent ?? null,
     sandboxImage,
-    networkPolicy: row.networkPolicy,
+    networkPolicy: await resolveTaskEgressOverride(db, taskId, row.networkPolicy),
     egressDomains: resolveEffectiveEgressDomains(row),
   };
+}
+
+/** Per-task egress override (plan §5.3). A task may carry `metadata.egress` (a
+ *  CliNetworkPolicy) to override its provider's default network policy for THIS
+ *  task only — used by kb_author enrichment so the author picks repo-only /
+ *  specific-domains / full web access per article. Strictly opt-in: when absent,
+ *  the provider policy is returned unchanged, so no other task's behaviour
+ *  shifts. The provider's egressDomains (model/auth) are still applied on top, so
+ *  the CLI can always reach its own model even under a 'none' override. */
+async function resolveTaskEgressOverride(
+  db: Database,
+  taskId: string | null | undefined,
+  providerPolicy: CliNetworkPolicy | null,
+): Promise<CliNetworkPolicy | null> {
+  if (!taskId) return providerPolicy;
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { metadata: true },
+  });
+  const override = (task?.metadata as { egress?: CliNetworkPolicy } | null)?.egress;
+  return override ?? providerPolicy;
 }
 
 export interface McpResolution {

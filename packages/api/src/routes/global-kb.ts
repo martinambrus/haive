@@ -83,6 +83,14 @@ const enrichSchema = z.object({
   namespace: z.string().min(1).max(120).optional(),
   repositoryId: z.string().uuid(),
   cliProviderId: z.string().uuid(),
+  // Per-article egress for the enrichment run (plan §5.3): none = repo + the
+  // CLI's own model only; allowlist = + the listed domains; full = open internet.
+  egress: z
+    .object({
+      mode: z.enum(['none', 'allowlist', 'full']),
+      domains: z.array(z.string()).optional(),
+    })
+    .optional(),
 });
 
 export const globalKbRoutes = new Hono<AppEnv>();
@@ -144,7 +152,12 @@ globalKbRoutes.post('/enrich', async (c) => {
       title: `Enrich: ${data.title}`.slice(0, 512),
       repositoryId: data.repositoryId,
       cliProviderId: data.cliProviderId,
-      metadata: { globalKbEntryId: entry.id },
+      metadata: {
+        globalKbEntryId: entry.id,
+        ...(data.egress
+          ? { egress: { mode: data.egress.mode, domains: data.egress.domains ?? [], ips: [] } }
+          : {}),
+      },
       autoContinue: true,
       status: 'created',
     })
