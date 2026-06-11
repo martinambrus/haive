@@ -37,6 +37,11 @@ const FACET_FIELDS = [
   { key: 'language', label: 'Languages', hint: 'e.g. php, javascript' },
   { key: 'phpMajor', label: 'PHP major', hint: 'e.g. 8 — only matches PHP 8 projects' },
   { key: 'nodeMajor', label: 'Node major', hint: 'e.g. 20' },
+  {
+    key: 'packages',
+    label: 'Packages',
+    hint: 'name@major, e.g. drupal/paragraphs@8 or next@14',
+  },
   { key: 'tags', label: 'Tags', hint: 'free-form scope tags' },
 ] as const;
 
@@ -58,6 +63,7 @@ const EMPTY_FACETS: Record<FacetKey, string> = {
   language: '',
   phpMajor: '',
   nodeMajor: '',
+  packages: '',
   tags: '',
 };
 
@@ -132,6 +138,7 @@ export default function GlobalKbPage() {
         language: (e.facets.language ?? []).join(', '),
         phpMajor: (e.facets.phpMajor ?? []).join(', '),
         nodeMajor: (e.facets.nodeMajor ?? []).join(', '),
+        packages: (e.facets.packages ?? []).join(', '),
         tags: (e.facets.tags ?? []).join(', '),
       },
     });

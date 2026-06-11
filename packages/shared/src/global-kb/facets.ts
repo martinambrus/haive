@@ -37,7 +37,12 @@ export function majorOf(version: string | null | undefined): string | null {
 }
 
 interface EnvDetectDataish {
-  project?: { framework?: string; frameworkMajor?: string; primaryLanguage?: string };
+  project?: {
+    framework?: string;
+    frameworkMajor?: string;
+    packages?: string[];
+    primaryLanguage?: string;
+  };
   stack?: { language?: string | null; runtimeVersions?: Record<string, string> };
 }
 
@@ -70,6 +75,11 @@ export function extractProjectFacets(envDetect: unknown): ProjectFacetSet {
   if (php) facets.phpMajor.push(php);
   const node = majorOf(rv.node);
   if (node) facets.nodeMajor.push(node);
+
+  const packages = data.project?.packages;
+  if (Array.isArray(packages)) {
+    for (const p of packages) if (typeof p === 'string' && p) facets.packages.push(p);
+  }
 
   return facets;
 }

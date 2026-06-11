@@ -111,6 +111,10 @@ interface StackDetection {
   database: { type: string | null; version: string | null };
   runtimeVersions: Record<string, string>;
   indicators: string[];
+  /** Direct manifest dependencies as `name@major` (composer + npm). Generic,
+   *  deterministic per-package version scoping for the global KB — no per-package
+   *  code, works for any dependency in a parsed manifest. */
+  packages: string[];
 }
 
 interface PathsDetection {
@@ -126,6 +130,8 @@ interface EnvDetectData {
     /** Major version of the framework (e.g. "11" for Drupal 11). Drives the
      *  global KB `frameworkMajor` facet at query time. */
     frameworkMajor?: string | null;
+    /** Direct manifest dependencies as `name@major`; drives the `packages` facet. */
+    packages?: string[];
     primaryLanguage: string;
     description: string | null;
   };
@@ -423,6 +429,25 @@ function extractFrameworkMajor(
   return null;
 }
 
+/** Direct manifest dependencies as `name@major`. Generic and deterministic — any
+ *  package in a parsed manifest, no per-package code. Composer platform reqs
+ *  (php, ext-*, lib-*) are skipped (not packages). Bounded to direct deps so the
+ *  project facet set stays small. */
+function manifestPackages(
+  composerDeps: Record<string, string>,
+  packageDeps: Record<string, string>,
+): string[] {
+  const out: string[] = [];
+  const add = (name: string, constraint: string): void => {
+    if (name === 'php' || name.startsWith('ext-') || name.startsWith('lib-')) return;
+    const major = firstMajor(constraint);
+    if (major) out.push(`${name}@${major}`);
+  };
+  for (const [name, c] of Object.entries(composerDeps)) add(name, c);
+  for (const [name, c] of Object.entries(packageDeps)) add(name, c);
+  return out;
+}
+
 async function detectStack(
   repoPath: string,
   container: ContainerDetection,
@@ -509,6 +534,7 @@ async function detectStack(
 
   if (!framework) framework = 'general';
   const frameworkMajor = extractFrameworkMajor(framework, composerDeps, packageDeps);
+  const packages = manifestPackages(composerDeps, packageDeps);
 
   const dbType = container.databaseType;
   const dbVersion = container.databaseVersion;
@@ -520,6 +546,7 @@ async function detectStack(
     database: { type: dbType, version: dbVersion },
     runtimeVersions,
     indicators,
+    packages,
   };
 }
 
@@ -931,6 +958,7 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
         name: projectName,
         framework: stack.framework ?? 'general',
         frameworkMajor: stack.frameworkMajor,
+        packages: stack.packages,
         primaryLanguage: stack.language ?? 'unknown',
         description: null,
       },
