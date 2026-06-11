@@ -9,6 +9,7 @@ const SETTINGS_TABS = [
   { href: '/settings/cli-providers', label: 'CLI Providers' },
   { href: '/settings/credentials', label: 'Git Credentials' },
   { href: '/settings/git-identity', label: 'Git Identity' },
+  { href: '/settings/global-kb', label: 'Global KB' },
   { href: '/settings/integrations', label: 'Integrations' },
   { href: '/settings/notifications', label: 'Notifications' },
 ];

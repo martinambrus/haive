@@ -478,6 +478,37 @@ export interface RagQueryEntry {
   createdAt: string;
 }
 
+export interface GlobalKbFacets {
+  framework?: string[];
+  language?: string[];
+  phpMajor?: string[];
+  nodeMajor?: string[];
+  packages?: string[];
+  tags?: string[];
+}
+
+/** A global (cross-repository) knowledge base entry. Admin-managed; retrieved by
+ *  tasks via rag_search, version-scoped by `facets`. */
+export interface GlobalKbEntry {
+  id: string;
+  namespace: string;
+  userId: string | null;
+  title: string;
+  seedText: string | null;
+  body: string;
+  category: 'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
+  facets: GlobalKbFacets;
+  status: 'skeleton' | 'enriching' | 'draft' | 'active' | 'archived';
+  source: 'user' | 'promoted';
+  sourceTaskId: string | null;
+  sourceRepoId: string | null;
+  contentHash: string | null;
+  embedStatus: 'pending' | 'embedded' | 'failed' | 'stale';
+  createdAt: string;
+  updatedAt: string;
+  supersededAt: string | null;
+}
+
 export type CliInvocationMode = 'cli' | 'agent_mining' | 'subagent_native' | 'subagent_sequential';
 
 export interface CliInvocationSummary {
