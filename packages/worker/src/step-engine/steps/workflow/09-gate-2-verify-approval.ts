@@ -270,10 +270,14 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       const envTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
       const deps = (envTemplate?.declaredDeps as Record<string, unknown>) ?? {};
       const browserTesting = envTemplate?.status === 'ready' && !!deps.browserTesting;
-      const containerTool = (deps.containerTool as string) ?? 'none';
-      if (browserTesting && containerTool === 'ddev') {
+      if (browserTesting) {
+        // Select the runtime the same way 08a does — by `.ddev` presence, not
+        // the template's containerTool — so an add-DDEV task (template non-DDEV
+        // but the implementation added `.ddev`) brings up the DDEV runner here
+        // too, matching where 08a started the desktop.
         const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-        if (ws && (await pathExists(path.join(ws.workspace, '.ddev', 'config.yaml')))) {
+        const isDdev = !!ws && (await pathExists(path.join(ws.workspace, '.ddev', 'config.yaml')));
+        if (isDdev && ws) {
           const handle = await ensureDdevStarted(ctx.taskId, ws.repoSubpath);
           await startBrowserDesktop(handle);
           const appUrl = pa?.appUrl || (await ddevPrimaryUrl(handle)) || 'http://localhost';
@@ -283,13 +287,10 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           });
           if (nav.exitCode !== 0)
             ctx.logger.warn({ appUrl }, 'gate-2 browser navigate returned non-zero');
-        }
-      } else if (browserTesting) {
-        // Non-DDEV: the app + desktop run in the per-task app-runner container.
-        const boot = await loadAppBootOutput(ctx.db, ctx.taskId);
-        if (boot?.containerized && boot.runtimeContainer && envTemplate?.imageTag) {
-          const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-          if (ws) {
+        } else if (ws) {
+          // Non-DDEV: the app + desktop run in the per-task app-runner container.
+          const boot = await loadAppBootOutput(ctx.db, ctx.taskId);
+          if (boot?.containerized && boot.runtimeContainer && envTemplate?.imageTag) {
             const handle = await ensureAppRunnerStarted(
               ctx.taskId,
               ws.repoSubpath,

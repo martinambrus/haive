@@ -52,7 +52,7 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
-        const desktopHost = await resolveDesktopContainer(taskId);
+        const desktopHost = await resolveDesktopContainer(taskId, vncPort);
         wss.handleUpgrade(req, socket, head, (ws) => {
           runVncBridge(ws, desktopHost, vncPort, taskId);
         });
@@ -113,24 +113,33 @@ function extractTaskId(rawUrl: string, prefix: string): string | null {
   return /^[0-9a-f-]{36}$/.test(id) ? id : null;
 }
 
-/** Which container hosts the task's browser desktop: the DDEV runner for DDEV
- *  projects, else the non-DDEV app-runner. Resolved from the task's env-template
- *  containerTool; defaults to the DDEV runner when unknown. */
-async function resolveDesktopContainer(taskId: string): Promise<string> {
-  const db = getDb();
-  const task = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { envTemplateId: true },
+/** Probe whether <host>:<port> accepts a TCP connection within `timeoutMs`. */
+function probeTcp(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = net.connect({ host, port });
+    let done = false;
+    const finish = (ok: boolean): void => {
+      if (done) return;
+      done = true;
+      sock.destroy();
+      resolve(ok);
+    };
+    sock.setTimeout(timeoutMs);
+    sock.on('connect', () => finish(true));
+    sock.on('timeout', () => finish(false));
+    sock.on('error', () => finish(false));
   });
-  if (task?.envTemplateId) {
-    const env = await db.query.envTemplates.findFirst({
-      where: eq(schema.envTemplates.id, task.envTemplateId),
-      columns: { declaredDeps: true },
-    });
-    const tool = (env?.declaredDeps as { containerTool?: string } | null)?.containerTool;
-    if (tool && tool !== 'ddev') return appRunnerName(taskId);
-  }
-  return ddevRunnerName(taskId);
+}
+
+/** The container hosting the task's live browser desktop. The DDEV runner wins
+ *  whenever it's up — 08a / Gate 2 use it whenever `.ddev` is present, including
+ *  an add-DDEV task whose env template was non-DDEV — else the non-DDEV
+ *  app-runner. Resolved by probing the VNC port so it mirrors the runtime the
+ *  workflow actually selected, not just the template value. */
+async function resolveDesktopContainer(taskId: string, port: number): Promise<string> {
+  const ddev = ddevRunnerName(taskId);
+  if (await probeTcp(ddev, port)) return ddev;
+  return appRunnerName(taskId);
 }
 
 async function taskBelongsToUser(taskId: string, userId: string): Promise<boolean> {

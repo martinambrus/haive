@@ -233,6 +233,12 @@ async function waitForPortInRunner(
   return false;
 }
 
+/** POSIX-safe single-quote: wraps a string for use as one shell word, so a
+ *  user/LLM command with env prefixes or spaces survives interpolation intact. */
+function shSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
 function parseRunRecipe(raw: unknown): RunRecipe | null {
   if (!raw) return null;
   let obj: unknown = raw;
@@ -538,10 +544,13 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
         }
 
         await ctx.emitProgress('Launching the app…');
-        // Background the server inside the container so it outlives this exec.
+        // Background the server (nohup + disown) so it outlives this exec, and
+        // run it through `bash -lc` so env-prefixed commands like
+        // `PORT=3000 npm run dev` parse correctly — bare `nohup PORT=3000 …`
+        // would try to exec the assignment token as a program.
         await appRunnerExec(
           handle,
-          `cd ${handle.projectDir} && nohup ${bootCommand} > /tmp/haive-app.log 2>&1 & disown`,
+          `cd ${handle.projectDir} && nohup bash -lc ${shSingleQuote(bootCommand)} > /tmp/haive-app.log 2>&1 & disown`,
           { timeoutMs: 30_000 },
         );
         await ctx.emitProgress('Waiting for the app to respond…');
