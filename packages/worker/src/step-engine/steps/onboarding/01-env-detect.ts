@@ -11,6 +11,7 @@ import {
   type TechInventory,
 } from './_tech-inventory.js';
 import { extractFencedJson } from '../_fenced-json.js';
+import { matchYamlField, matchYamlBlockField } from '../_ddev-config.js';
 import { buildFileTree, detectLanguages } from '../../../repo/framework-detect.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -250,22 +251,6 @@ async function readTextSafe(p: string): Promise<string | null> {
   } catch {
     return null;
   }
-}
-
-function matchYamlField(text: string, key: string): string | null {
-  const re = new RegExp(`^${key}:\\s*"?([^"\\n]+)"?\\s*$`, 'm');
-  const m = text.match(re);
-  return m && m[1] ? m[1].trim() : null;
-}
-
-function matchYamlBlockField(text: string, block: string, key: string): string | null {
-  const blockRe = new RegExp(`^${block}:\\s*\\n((?:[ \\t]+.+\\n?)+)`, 'm');
-  const blockMatch = text.match(blockRe);
-  if (!blockMatch || !blockMatch[1]) return null;
-  const inner = blockMatch[1];
-  const fieldRe = new RegExp(`^[ \\t]+${key}:\\s*"?([^"\\n]+)"?\\s*$`, 'm');
-  const m = inner.match(fieldRe);
-  return m && m[1] ? m[1].trim() : null;
 }
 
 async function detectContainer(repoPath: string): Promise<ContainerDetection> {

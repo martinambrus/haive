@@ -203,6 +203,36 @@ export async function ddevPrimaryUrl(handle: DdevRunnerHandle): Promise<string |
   }
 }
 
+/** `ddev restart` — re-reads `.ddev/config.yaml` and applies changes (php_version,
+ *  webserver, docroot, …) to the already-running project. Idempotent; the db data
+ *  volume is preserved when the db version is unchanged. Long timeout because a
+ *  new php_version pulls a fresh web image. */
+export async function ddevRestart(
+  handle: DdevRunnerHandle,
+): Promise<{ exitCode: number; output: string }> {
+  return ddevExec(handle, 'restart', { timeoutMs: 900_000 });
+}
+
+/** `ddev snapshot --name=<name>` — db backup taken before a destructive migrate.
+ *  Restore with `ddev snapshot restore <name>`. */
+export async function ddevSnapshot(
+  handle: DdevRunnerHandle,
+  name: string,
+): Promise<{ exitCode: number; output: string }> {
+  return ddevExec(handle, `snapshot --name=${name}`, { timeoutMs: 600_000 });
+}
+
+/** `ddev utility migrate-database <type>:<version>` — converts the existing DB to a
+ *  new dbtype/dbversion IN PLACE (MySQL/MariaDB only; rejects Postgres). The original
+ *  dump was consumed at 01c, so this — preceded by ddevSnapshot — is the only safe
+ *  path for a mid-task DB version change. */
+export async function ddevMigrateDatabase(
+  handle: DdevRunnerHandle,
+  target: string,
+): Promise<{ exitCode: number; output: string }> {
+  return ddevExec(handle, `utility migrate-database ${target}`, { timeoutMs: 1_800_000 });
+}
+
 /** Ensure the task's DDEV env is up and `ddev start`-ed, booting it if not.
  *  Idempotent: returns the existing handle when DDEV is already running (so a
  *  prior `import-db` is preserved); otherwise launches the runner + `ddev start`

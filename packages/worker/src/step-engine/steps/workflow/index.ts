@@ -16,6 +16,7 @@ import { dagExecuteStep } from './06c-dag-execute.js';
 import { phase2ImplementStep } from './07-phase-2-implement.js';
 import { codeSimplifyStep } from './07a-code-simplify.js';
 import { phase4ValidateStep } from './07b-phase-4-validate.js';
+import { ddevReconcileStep } from './07c-ddev-reconcile.js';
 import { phase5VerifyStep } from './08-phase-5-verify.js';
 import { browserVerifyStep } from './08a-browser-verify.js';
 import { testManagementStep } from './08b-test-management.js';
@@ -45,6 +46,7 @@ export {
   phase2ImplementStep,
   codeSimplifyStep,
   phase4ValidateStep,
+  ddevReconcileStep,
   phase5VerifyStep,
   browserVerifyStep,
   testManagementStep,
@@ -75,6 +77,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(phase2ImplementStep);
   registry.register(codeSimplifyStep);
   registry.register(phase4ValidateStep);
+  registry.register(ddevReconcileStep);
   registry.register(phase5VerifyStep);
   registry.register(browserVerifyStep);
   registry.register(testManagementStep);
