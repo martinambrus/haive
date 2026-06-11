@@ -1,7 +1,7 @@
 import { relative, resolve } from 'node:path';
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { STEP_CLI_ROLES, type CliRoleDescriptor } from '@haive/shared';
+import { STEP_CLI_ROLES, type CliRoleDescriptor, type CliTokenUsage } from '@haive/shared';
 import { getDb } from '../../db.js';
 import { HttpError } from '../../context.js';
 
@@ -131,33 +131,63 @@ export async function findActiveCliInvocation(
   return rows[0] ?? null;
 }
 
-/** Annotate each step with the count of non-superseded CLI invocations
- *  attached to it. The web UI uses this to suppress the inline terminal
- *  toggle on steps that have never spawned a CLI (deterministic-only steps,
- *  pending steps), so the chevron only appears where it has something to
- *  reveal. Single GROUP BY keeps it O(1) round-trips regardless of step
- *  count. */
-export async function enrichStepsWithCliInvocationCount<T extends { id: string }>(
+/** Annotate each step with the count of non-superseded CLI invocations attached
+ *  to it AND the summed token usage across those invocations. The count drives
+ *  the inline-terminal toggle (hidden on steps that never spawned a CLI); the
+ *  token sum is surfaced per step and aggregated into the task total client-side.
+ *  Uses the same `supersededAt IS NULL` filter as the per-step invocation panel,
+ *  so a step's token total reconciles with the invocations shown there. Single
+ *  GROUP BY keeps it O(1) round-trips regardless of step count. */
+export async function enrichStepsWithCliStats<T extends { id: string }>(
   db: ReturnType<typeof getDb>,
   taskId: string,
   steps: T[],
-): Promise<(T & { cliInvocationCount: number })[]> {
+): Promise<(T & { cliInvocationCount: number; tokenUsage: CliTokenUsage | null })[]> {
   if (steps.length === 0) return [];
+  const tu = schema.cliInvocations.tokenUsage;
   const rows = await db
     .select({
       taskStepId: schema.cliInvocations.taskStepId,
       count: sql<number>`count(*)::int`,
+      inputTokens: sql<number>`coalesce(sum((${tu} ->> 'inputTokens')::numeric), 0)::int`,
+      outputTokens: sql<number>`coalesce(sum((${tu} ->> 'outputTokens')::numeric), 0)::int`,
+      totalTokens: sql<number>`coalesce(sum((${tu} ->> 'totalTokens')::numeric), 0)::int`,
+      cacheReadTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheReadTokens')::numeric), 0)::int`,
+      cacheCreationTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheCreationTokens')::numeric), 0)::int`,
+      costUsd: sql<number>`coalesce(sum((${tu} ->> 'costUsd')::numeric), 0)::double precision`,
     })
     .from(schema.cliInvocations)
     .where(
       and(eq(schema.cliInvocations.taskId, taskId), isNull(schema.cliInvocations.supersededAt)),
     )
     .groupBy(schema.cliInvocations.taskStepId);
-  const byStep = new Map<string, number>();
+
+  const byStep = new Map<string, { count: number; tokenUsage: CliTokenUsage | null }>();
   for (const row of rows) {
-    if (row.taskStepId) byStep.set(row.taskStepId, row.count);
+    if (!row.taskStepId) continue;
+    const inputTokens = Number(row.inputTokens) || 0;
+    const outputTokens = Number(row.outputTokens) || 0;
+    const totalTokens = Number(row.totalTokens) || 0;
+    const cacheReadTokens = Number(row.cacheReadTokens) || 0;
+    const cacheCreationTokens = Number(row.cacheCreationTokens) || 0;
+    const costUsd = Number(row.costUsd) || 0;
+    const hasTokens = totalTokens > 0 || inputTokens > 0 || outputTokens > 0 || costUsd > 0;
+    const tokenUsage: CliTokenUsage | null = hasTokens
+      ? {
+          inputTokens,
+          outputTokens,
+          totalTokens,
+          ...(cacheReadTokens > 0 ? { cacheReadTokens } : {}),
+          ...(cacheCreationTokens > 0 ? { cacheCreationTokens } : {}),
+          ...(costUsd > 0 ? { costUsd } : {}),
+        }
+      : null;
+    byStep.set(row.taskStepId, { count: row.count, tokenUsage });
   }
-  return steps.map((s) => ({ ...s, cliInvocationCount: byStep.get(s.id) ?? 0 }));
+  return steps.map((s) => {
+    const stat = byStep.get(s.id);
+    return { ...s, cliInvocationCount: stat?.count ?? 0, tokenUsage: stat?.tokenUsage ?? null };
+  });
 }
 
 export async function enrichStepsWithSkipFlag<T extends { id: string; status: string }>(

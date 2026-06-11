@@ -28,6 +28,7 @@ import { Badge, Button, Card, Input } from '@/components/ui';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration } from '@/lib/format-duration';
+import { formatTokens } from '@/lib/format-tokens';
 import { FormRenderer, type FormValues } from '@/components/form-renderer';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { TaskSource } from '@/components/task-source';
@@ -994,6 +995,23 @@ function UserActiveDuration({ ms }: { ms: number }) {
   );
 }
 
+// Per-step CLI token usage: summed across the step's non-superseded invocations
+// (reconciles with the per-invocation terminal panel). Hidden when the step ran
+// no token-bearing CLI so deterministic steps stay clean.
+function StepTokens({ tokenUsage }: { tokenUsage: TaskStep['tokenUsage'] }) {
+  if (!tokenUsage || tokenUsage.totalTokens <= 0) return null;
+  const { inputTokens, outputTokens, totalTokens, cacheReadTokens, costUsd } = tokenUsage;
+  const title =
+    `CLI tokens (provider-native): in ${inputTokens.toLocaleString()} / out ${outputTokens.toLocaleString()} / total ${totalTokens.toLocaleString()}` +
+    (cacheReadTokens ? `, cache read ${cacheReadTokens.toLocaleString()}` : '') +
+    (costUsd ? `, ~$${costUsd.toFixed(2)}` : '');
+  return (
+    <span className="font-mono text-xs text-sky-300" title={title}>
+      {formatTokens(totalTokens)} tok
+    </span>
+  );
+}
+
 // Task time summary: agent work, idle (time waiting on you), your active time at
 // gates, total effort, and wall clock. Shown live while the task runs (ticks each
 // second) and frozen once it ends. Renders nothing until the task has started.
@@ -1033,6 +1051,12 @@ function TaskTotalTime({
     : steps;
   const { workMs, idleMs, userActiveMs } = computeTaskTiming(liveSteps, endMs);
   const effortMs = workMs + userActiveMs;
+  // CLI tokens summed across steps (the server already summed each step over its
+  // non-superseded invocations), so this total equals the sum of the per-step
+  // figures shown on the cards.
+  const totalTokens = steps.reduce((sum, s) => sum + (s.tokenUsage?.totalTokens ?? 0), 0);
+  const inputTokens = steps.reduce((sum, s) => sum + (s.tokenUsage?.inputTokens ?? 0), 0);
+  const outputTokens = steps.reduce((sum, s) => sum + (s.tokenUsage?.outputTokens ?? 0), 0);
   // While running, show seconds even past 1h so the live values visibly tick:
   // the 1s interval advances them, but the compact h/m format hides sub-minute
   // changes (a multi-hour task looks frozen). Completed tasks stay compact.
@@ -1072,6 +1096,17 @@ function TaskTotalTime({
           <span className="font-mono text-lg text-neutral-100">{fmt(wallMs)}</span>
           <span className="text-[10px] uppercase tracking-wider text-neutral-500">wall clock</span>
         </div>
+        {totalTokens > 0 && (
+          <div className="flex flex-col items-end">
+            <span
+              className="font-mono text-lg text-sky-300"
+              title={`CLI tokens (provider-native): in ${inputTokens.toLocaleString()} / out ${outputTokens.toLocaleString()} / total ${totalTokens.toLocaleString()}`}
+            >
+              {formatTokens(totalTokens)}
+            </span>
+            <span className="text-[10px] uppercase tracking-wider text-neutral-500">tokens</span>
+          </div>
+        )}
       </div>
     </Card>
   );
@@ -1332,6 +1367,7 @@ function StepCard({
             status={step.status}
             taskCompletedAt={taskCompletedAt}
           />
+          <StepTokens tokenUsage={step.tokenUsage} />
           <UserActiveDuration ms={userActiveDisplayMs} />
           {step.iterationCount > 0 && (
             <span

@@ -5,6 +5,7 @@ import { api, type CliInvocationOutput, type CliInvocationSummary } from '@/lib/
 import { CliStreamViewer } from './CliStreamViewer';
 import { useAutoScrollTerminals } from '@/lib/terminal-autoscroll';
 import { formatDuration } from '@/lib/format-duration';
+import { formatTokens } from '@/lib/format-tokens';
 
 interface StepTerminalProps {
   taskId: string;
@@ -268,12 +269,6 @@ function InvocationPanel({ taskId, invocation, label, idx, statusMessage }: Invo
       )}
     </div>
   );
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
 }
 
 // Per-invocation runtime: ticks every second while the CLI runs, then freezes at

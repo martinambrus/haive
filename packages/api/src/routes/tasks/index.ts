@@ -20,7 +20,7 @@ import { cancelTaskRow, enqueueCancelJob } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   appendTaskEvent,
-  enrichStepsWithCliInvocationCount,
+  enrichStepsWithCliStats,
   enrichStepsWithCliPreferences,
   enrichStepsWithSkipFlag,
   findActiveCliInvocation,
@@ -198,7 +198,7 @@ taskRoutes.get('/:id', async (c) => {
     .orderBy(asc(schema.taskSteps.stepIndex));
   const enriched = await enrichStepsWithCliPreferences(db, userId, stepRows);
   const withSkip = await enrichStepsWithSkipFlag(db, id, enriched);
-  const steps = await enrichStepsWithCliInvocationCount(db, id, withSkip);
+  const steps = await enrichStepsWithCliStats(db, id, withSkip);
   const active = await findActiveCliInvocation(db, id);
   const taskWithActive = {
     ...task,

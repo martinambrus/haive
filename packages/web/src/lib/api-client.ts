@@ -428,6 +428,18 @@ export interface TaskStep {
    *  whether the inline terminal toggle is rendered — 0 means the step has
    *  no terminal output to show (deterministic-only or pending steps). */
   cliInvocationCount: number;
+  /** Summed token usage across this step's non-superseded CLI invocations
+   *  (provider-native semantics; same filter as cliInvocationCount, so it
+   *  reconciles with the per-invocation terminal panel). null when the step
+   *  ran no token-bearing CLI (deterministic-only / pending steps). */
+  tokenUsage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+    costUsd?: number;
+  } | null;
   /** Number of completed loop passes for steps that declare a loop hook
    *  (e.g. spec-quality review). Always 0 for non-loop steps. The step
    *  card surfaces this as an "iteration N/M" badge while the step is
