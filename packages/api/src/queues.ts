@@ -9,6 +9,7 @@ let taskQueue: Queue | null = null;
 let cliExecQueue: Queue | null = null;
 let cliExecQueueEvents: QueueEvents | null = null;
 let bundleQueue: Queue | null = null;
+let globalKbSyncQueue: Queue | null = null;
 
 export function getRepoQueue(): Queue {
   if (!repoQueue) {
@@ -45,6 +46,13 @@ export function getBundleQueue(): Queue {
   return bundleQueue;
 }
 
+export function getGlobalKbSyncQueue(): Queue {
+  if (!globalKbSyncQueue) {
+    globalKbSyncQueue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
+  }
+  return globalKbSyncQueue;
+}
+
 export async function closeQueues(): Promise<void> {
   await Promise.allSettled([
     repoQueue?.close(),
@@ -52,10 +60,12 @@ export async function closeQueues(): Promise<void> {
     cliExecQueue?.close(),
     cliExecQueueEvents?.close(),
     bundleQueue?.close(),
+    globalKbSyncQueue?.close(),
   ]);
   repoQueue = null;
   taskQueue = null;
   cliExecQueue = null;
   cliExecQueueEvents = null;
   bundleQueue = null;
+  globalKbSyncQueue = null;
 }

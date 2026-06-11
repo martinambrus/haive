@@ -3,6 +3,7 @@ import { bootstrap } from './bootstrap.js';
 import { getDb } from './db.js';
 import { getRedis } from './redis.js';
 import { scheduleBundleGitSyncTick, startBundleWorker } from './queues/bundle-queue.js';
+import { startGlobalKbSyncWorker } from './queues/global-kb-sync-queue.js';
 import {
   closeCliExecQueue,
   scheduleCliVersionRefresh,
@@ -29,6 +30,7 @@ async function main(): Promise<void> {
   const bundleWorker = startBundleWorker(bundleStoragePath);
   const taskWorker = startTaskWorker();
   const cliExecWorker = await startCliExecWorker();
+  const globalKbSyncWorker = startGlobalKbSyncWorker();
   await scheduleCliVersionRefresh().catch((err) => {
     logger.warn({ err }, 'failed to schedule cli version refresh');
   });
@@ -61,6 +63,7 @@ async function main(): Promise<void> {
       bundleWorker.close(true),
       taskWorker.close(true),
       cliExecWorker.close(true),
+      globalKbSyncWorker.close(true),
       closeTaskQueue(),
       closeCliExecQueue(),
     ]);

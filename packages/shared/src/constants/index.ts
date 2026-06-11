@@ -22,6 +22,7 @@ export const QUEUE_NAMES = {
   ENV_REPLICATE: 'haive-env-replicate',
   REPO: 'haive-repo',
   BUNDLE: 'haive-bundle',
+  GLOBAL_KB_SYNC: 'haive-global-kb-sync',
 } as const;
 
 export const REPO_JOB_NAMES = {
@@ -40,6 +41,20 @@ export const BUNDLE_JOB_NAMES = {
    *  + re-parses only happen during an explicit upgrade task. */
   GIT_SYNC_TICK: 'bundle-git-sync-tick',
 } as const;
+
+export const GLOBAL_KB_JOB_NAMES = {
+  SYNC_ENTRY: 'sync-global-kb-entry',
+} as const;
+
+/** Payload for `GLOBAL_KB_JOB_NAMES.SYNC_ENTRY`. The worker reconciles the global
+ *  vector store to the entry's current state: `upsert` re-embeds an active entry
+ *  (or removes its chunks if it is no longer active), `delete` removes the
+ *  entry's chunks (used when the source row itself is gone). */
+export interface GlobalKbSyncJobPayload {
+  entryId: string;
+  namespace: string;
+  reason: 'upsert' | 'delete';
+}
 
 export const TASK_JOB_NAMES = {
   START: 'start-task',
