@@ -20,14 +20,15 @@ describe('extractProjectFacets', () => {
   it('reads the detect-column shape ({ data: EnvDetectData })', () => {
     const facets = extractProjectFacets({
       data: {
-        project: { framework: 'drupal7', primaryLanguage: 'php' },
-        stack: { runtimeVersions: { php: '7.4', node: '18.2' } },
+        project: { framework: 'drupal', frameworkMajor: '11', primaryLanguage: 'php' },
+        stack: { runtimeVersions: { php: '8.3', node: '20.1' } },
       },
     });
-    expect(facets.framework).toEqual(['drupal7']);
+    expect(facets.framework).toEqual(['drupal']);
+    expect(facets.frameworkMajor).toEqual(['11']);
     expect(facets.language).toEqual(['php']);
-    expect(facets.phpMajor).toEqual(['7']);
-    expect(facets.nodeMajor).toEqual(['18']);
+    expect(facets.phpMajor).toEqual(['8']);
+    expect(facets.nodeMajor).toEqual(['20']);
   });
 
   it('reads the apply-output shape ({ enrichedData: EnvDetectData })', () => {

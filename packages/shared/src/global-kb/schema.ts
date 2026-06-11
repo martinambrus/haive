@@ -15,6 +15,9 @@ import type postgres from 'postgres';
  *  empty/absent dimension means "applies to all" for that dimension (§3.1). */
 export interface GlobalKbFacets {
   framework?: string[];
+  /** Major version of the framework, e.g. ["11"] for Drupal 11 — distinguishes
+   *  same-family majors that `framework` alone cannot (Drupal 11 vs 12). */
+  frameworkMajor?: string[];
   language?: string[];
   phpMajor?: string[];
   nodeMajor?: string[];

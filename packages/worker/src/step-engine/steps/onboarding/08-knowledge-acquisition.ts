@@ -13,6 +13,7 @@ import { promoteToGlobalKbDraft } from '../_global-kb-promote.js';
 
 interface KnowledgeDetect {
   framework: string | null;
+  frameworkMajor: string | null;
   language: string | null;
   projectName: string | null;
   /** Transient — file tree for LLM prompt, stripped before persisting. */
@@ -572,6 +573,9 @@ function collectRepaired(
 function defaultGlobalFacets(entry: KbEntry, detected: KnowledgeDetect): GlobalKbFacets {
   const f: GlobalKbFacets = { ...(entry.facets ?? {}) };
   if (!f.framework?.length && detected.framework) f.framework = [detected.framework];
+  if (!f.frameworkMajor?.length && detected.frameworkMajor) {
+    f.frameworkMajor = [detected.frameworkMajor];
+  }
   if (!f.language?.length && detected.language) f.language = [detected.language.toLowerCase()];
   return f;
 }
@@ -845,9 +849,17 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     await ctx.emitProgress('Loading project metadata...');
     const envPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
     const envData = (envPrev?.detect as DetectResult | null)?.data as
-      | { project?: { framework?: string; primaryLanguage?: string; name?: string } }
+      | {
+          project?: {
+            framework?: string;
+            frameworkMajor?: string | null;
+            primaryLanguage?: string;
+            name?: string;
+          };
+        }
       | undefined;
     const framework = envData?.project?.framework ?? null;
+    const frameworkMajor = envData?.project?.frameworkMajor ?? null;
     const language = envData?.project?.primaryLanguage ?? null;
     const projectName = envData?.project?.name ?? null;
 
@@ -874,6 +886,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     );
     return {
       framework,
+      frameworkMajor,
       language,
       projectName,
       __fileTree: fileTree,

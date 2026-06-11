@@ -104,6 +104,10 @@ interface ContainerDetection {
 interface StackDetection {
   language: string | null;
   framework: FrameworkName | null;
+  /** Major version of the framework, parsed deterministically from the manifest
+   *  (composer drupal/core, package.json next, ...). Distinguishes same-family
+   *  majors (Drupal 11 vs 12) that `framework` alone cannot. Null when unknown. */
+  frameworkMajor: string | null;
   database: { type: string | null; version: string | null };
   runtimeVersions: Record<string, string>;
   indicators: string[];
@@ -119,6 +123,9 @@ interface EnvDetectData {
   project: {
     name: string;
     framework: FrameworkName;
+    /** Major version of the framework (e.g. "11" for Drupal 11). Drives the
+     *  global KB `frameworkMajor` facet at query time. */
+    frameworkMajor?: string | null;
     primaryLanguage: string;
     description: string | null;
   };
@@ -369,6 +376,53 @@ function detectPhpFramework(composer: ComposerJsonShape): FrameworkName {
   return 'general';
 }
 
+/** Leading integer of a version constraint as the major token: "^11.0" -> "11",
+ *  "~10.3" -> "10", ">=9.5 <11" -> "9". Null when there is no integer. Major-only
+ *  by design — minors churn, majors are API-stable (the user's stated tradeoff). */
+function firstMajor(constraint: string | undefined): string | null {
+  if (!constraint) return null;
+  const m = constraint.match(/\d+/);
+  return m ? m[0] : null;
+}
+
+/** Manifest dependency keys that hold each framework's version, keyed by the
+ *  FrameworkName env-detect classifies into. Deterministic coverage is BOUNDED
+ *  by the frameworks we recognize — not arbitrary user input — so each line maps
+ *  one known framework to its version dep. Frameworks not listed (general /
+ *  nodejs / python / wordpress / ...) get no frameworkMajor; the kb-author LLM
+ *  fills the major for arbitrary stacks at authoring time. Extend by adding a
+ *  line. */
+const FRAMEWORK_VERSION_KEYS: Partial<
+  Record<FrameworkName, { from: 'composer' | 'package'; keys: string[] }>
+> = {
+  drupal: {
+    from: 'composer',
+    keys: ['drupal/core', 'drupal/core-recommended', 'drupal/recommended-project'],
+  },
+  laravel: { from: 'composer', keys: ['laravel/framework'] },
+  nextjs: { from: 'package', keys: ['next'] },
+};
+
+/** Deterministic framework MAJOR from the repo manifests. drupal7 is implicit;
+ *  otherwise look up the framework's version dep and take its leading integer.
+ *  Null for frameworks without a registered key (the LLM handles those when
+ *  authoring an entry against a specific repo). */
+function extractFrameworkMajor(
+  framework: FrameworkName,
+  composerDeps: Record<string, string>,
+  packageDeps: Record<string, string>,
+): string | null {
+  if (framework === 'drupal7') return '7';
+  const spec = FRAMEWORK_VERSION_KEYS[framework];
+  if (!spec) return null;
+  const deps = spec.from === 'composer' ? composerDeps : packageDeps;
+  for (const key of spec.keys) {
+    const major = firstMajor(deps[key]);
+    if (major) return major;
+  }
+  return null;
+}
+
 async function detectStack(
   repoPath: string,
   container: ContainerDetection,
@@ -377,6 +431,8 @@ async function detectStack(
   const runtimeVersions: Record<string, string> = { ...container.runtimeVersions };
   let language: string | null = null;
   let framework: FrameworkName | null = null;
+  let packageDeps: Record<string, string> = {};
+  let composerDeps: Record<string, string> = {};
 
   for (const { file, language: lang } of STACK_INDICATORS) {
     if (await pathExists(path.join(repoPath, file))) {
@@ -390,6 +446,7 @@ async function detectStack(
     if (text) {
       try {
         const pkg = JSON.parse(text) as PackageJsonShape;
+        packageDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
         framework = detectNodeFramework(pkg);
       } catch {
         framework = 'nodejs';
@@ -404,17 +461,17 @@ async function detectStack(
     let phpFramework: FrameworkName = 'general';
     if (text) {
       try {
-        phpFramework = detectPhpFramework(JSON.parse(text) as ComposerJsonShape);
+        const composer = JSON.parse(text) as ComposerJsonShape;
+        composerDeps = { ...(composer.require ?? {}), ...(composer['require-dev'] ?? {}) };
+        phpFramework = detectPhpFramework(composer);
       } catch {
         /* ignore parse error */
       }
     }
     if (phpFramework === 'drupal') {
-      if (await pathExists(path.join(repoPath, 'includes', 'bootstrap.inc'))) {
-        framework = 'drupal7';
-      } else {
-        framework = 'drupal';
-      }
+      framework = (await pathExists(path.join(repoPath, 'includes', 'bootstrap.inc')))
+        ? 'drupal7'
+        : 'drupal';
     } else if (phpFramework === 'laravel') {
       framework = 'laravel';
     } else if (!framework) {
@@ -451,6 +508,7 @@ async function detectStack(
   }
 
   if (!framework) framework = 'general';
+  const frameworkMajor = extractFrameworkMajor(framework, composerDeps, packageDeps);
 
   const dbType = container.databaseType;
   const dbVersion = container.databaseVersion;
@@ -458,6 +516,7 @@ async function detectStack(
   return {
     language,
     framework,
+    frameworkMajor,
     database: { type: dbType, version: dbVersion },
     runtimeVersions,
     indicators,
@@ -871,6 +930,7 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
       project: {
         name: projectName,
         framework: stack.framework ?? 'general',
+        frameworkMajor: stack.frameworkMajor,
         primaryLanguage: stack.language ?? 'unknown',
         description: null,
       },

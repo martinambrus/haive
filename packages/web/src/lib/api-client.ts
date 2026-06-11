@@ -480,6 +480,7 @@ export interface RagQueryEntry {
 
 export interface GlobalKbFacets {
   framework?: string[];
+  frameworkMajor?: string[];
   language?: string[];
   phpMajor?: string[];
   nodeMajor?: string[];

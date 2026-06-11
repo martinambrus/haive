@@ -4,6 +4,7 @@
 
 export interface ProjectFacetSet {
   framework: string[];
+  frameworkMajor: string[];
   language: string[];
   phpMajor: string[];
   nodeMajor: string[];
@@ -16,7 +17,15 @@ export interface ProjectFacetSet {
 }
 
 export function emptyProjectFacetSet(): ProjectFacetSet {
-  return { framework: [], language: [], phpMajor: [], nodeMajor: [], packages: [], tags: [] };
+  return {
+    framework: [],
+    frameworkMajor: [],
+    language: [],
+    phpMajor: [],
+    nodeMajor: [],
+    packages: [],
+    tags: [],
+  };
 }
 
 /** Major-version token from a version string: '8.3' -> '8', '^7.4.1' -> '7',
@@ -28,7 +37,7 @@ export function majorOf(version: string | null | undefined): string | null {
 }
 
 interface EnvDetectDataish {
-  project?: { framework?: string; primaryLanguage?: string };
+  project?: { framework?: string; frameworkMajor?: string; primaryLanguage?: string };
   stack?: { language?: string | null; runtimeVersions?: Record<string, string> };
 }
 
@@ -47,6 +56,11 @@ export function extractProjectFacets(envDetect: unknown): ProjectFacetSet {
 
   const framework = data.project?.framework;
   if (typeof framework === 'string' && framework) facets.framework.push(framework);
+
+  const frameworkMajor = data.project?.frameworkMajor;
+  if (typeof frameworkMajor === 'string' && frameworkMajor) {
+    facets.frameworkMajor.push(frameworkMajor);
+  }
 
   const lang = data.project?.primaryLanguage ?? data.stack?.language ?? null;
   if (typeof lang === 'string' && lang) facets.language.push(lang.toLowerCase());

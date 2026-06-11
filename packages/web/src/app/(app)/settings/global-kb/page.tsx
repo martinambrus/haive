@@ -29,6 +29,11 @@ const FACET_FIELDS = [
     label: 'Frameworks',
     hint: 'e.g. drupal (current) or drupal7 (D7-only). Empty = all.',
   },
+  {
+    key: 'frameworkMajor',
+    label: 'Framework major',
+    hint: 'e.g. 11 — only Drupal 11, not 12. Empty = all majors.',
+  },
   { key: 'language', label: 'Languages', hint: 'e.g. php, javascript' },
   { key: 'phpMajor', label: 'PHP major', hint: 'e.g. 8 — only matches PHP 8 projects' },
   { key: 'nodeMajor', label: 'Node major', hint: 'e.g. 20' },
@@ -49,6 +54,7 @@ interface FormState {
 
 const EMPTY_FACETS: Record<FacetKey, string> = {
   framework: '',
+  frameworkMajor: '',
   language: '',
   phpMajor: '',
   nodeMajor: '',
@@ -122,6 +128,7 @@ export default function GlobalKbPage() {
       body: e.body,
       facets: {
         framework: (e.facets.framework ?? []).join(', '),
+        frameworkMajor: (e.facets.frameworkMajor ?? []).join(', '),
         language: (e.facets.language ?? []).join(', '),
         phpMajor: (e.facets.phpMajor ?? []).join(', '),
         nodeMajor: (e.facets.nodeMajor ?? []).join(', '),

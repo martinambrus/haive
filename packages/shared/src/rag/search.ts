@@ -73,6 +73,7 @@ export interface RagFacetFilter {
 
 const FACET_FILTER_DIMENSIONS = [
   'framework',
+  'frameworkMajor',
   'language',
   'phpMajor',
   'nodeMajor',
