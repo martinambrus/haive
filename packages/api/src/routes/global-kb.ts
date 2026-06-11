@@ -14,11 +14,13 @@ import {
 } from '@haive/shared';
 import {
   globalKbEntries,
+  resolveGlobalKbConnection,
   resolveGlobalKbSettings,
   withGlobalKb,
   type GlobalKbFacets,
   type GlobalKbStatus,
 } from '@haive/shared/global-kb';
+import { ollamaEmbed, probeOllama } from '@haive/shared/rag';
 import { getDb } from '../db.js';
 import { getGlobalKbSyncQueue, getTaskQueue } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -159,6 +161,96 @@ globalKbRoutes.put('/config', async (c) => {
     );
   }
   return c.json(configResponse(await resolveGlobalKbSettings()));
+});
+
+// --- Connection tests (the UI "Test" buttons). Both exercise the exact paths
+// the worker sync/query use, so a green result means the real embed/store path
+// works with the entered settings. ---
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  // Handle a late rejection (after the timeout already won the race) so it never
+  // surfaces as an unhandledRejection.
+  void p.catch(() => {});
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
+const testOllamaSchema = z
+  .object({
+    ollamaUrl: z.string().min(1),
+    model: z.string().min(1),
+    dimensions: z.number().int().positive().max(8192),
+  })
+  .strict();
+
+globalKbRoutes.post('/test-ollama', async (c) => {
+  const parsed = testOllamaSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) throw new HttpError(400, 'invalid test request', 'invalid_body');
+  const { ollamaUrl, model, dimensions } = parsed.data;
+  if (!(await probeOllama(ollamaUrl))) {
+    return c.json({ ok: false, message: `Ollama unreachable at ${ollamaUrl}` });
+  }
+  try {
+    const [vec] = await ollamaEmbed(ollamaUrl, model, ['healthcheck']);
+    const dims = vec?.length ?? 0;
+    const dimsMatch = dims === dimensions;
+    return c.json({
+      ok: dimsMatch,
+      message: dimsMatch
+        ? `OK — ${model} returns ${dims} dims`
+        : `Reachable, but ${model} returns ${dims} dims (config expects ${dimensions})`,
+    });
+  } catch (err) {
+    return c.json({
+      ok: false,
+      message: `Reachable, but model "${model}" failed: ${(err as Error).message}`,
+    });
+  }
+});
+
+const testDbSchema = z
+  .object({
+    mode: z.enum(['internal', 'external']).optional(),
+    connectionString: z.string().optional(),
+  })
+  .strict();
+
+globalKbRoutes.post('/test-db', async (c) => {
+  const parsed = testDbSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) throw new HttpError(400, 'invalid test request', 'invalid_body');
+  const saved = await resolveGlobalKbSettings();
+  const mode = parsed.data.mode ?? saved.mode;
+  // For external, prefer the freshly-typed connection string (lets the user test
+  // before saving); fall back to the stored secret when the field is left blank.
+  const connectionString =
+    mode === 'external'
+      ? parsed.data.connectionString?.trim() || saved.connectionString
+      : saved.connectionString;
+  if (mode === 'external' && !connectionString) {
+    return c.json({ ok: false, message: 'No external connection string to test' });
+  }
+  let conn: Awaited<ReturnType<typeof resolveGlobalKbConnection>> | null = null;
+  try {
+    conn = await resolveGlobalKbConnection({ ...saved, mode, connectionString }, getDb());
+    const pg = conn.pg;
+    await withTimeout(
+      (async () => {
+        await pg`select 1`;
+      })(),
+      8000,
+      'connection timed out',
+    );
+    return c.json({
+      ok: true,
+      message: mode === 'internal' ? 'Internal global KB DB reachable' : 'External DB reachable',
+    });
+  } catch (err) {
+    return c.json({ ok: false, message: (err as Error).message });
+  } finally {
+    if (conn) await conn.close().catch(() => {});
+  }
 });
 
 // Repo-anchored AI enrichment (plan §5.1/§5.3): create a `skeleton` entry, then a

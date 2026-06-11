@@ -164,6 +164,16 @@ export default function GlobalKbPage() {
   const [cfgSet, setCfgSet] = useState(false);
   const [cfgBusy, setCfgBusy] = useState(false);
   const [cfgMsg, setCfgMsg] = useState<string | null>(null);
+  const [dbTest, setDbTest] = useState<{ busy: boolean; ok: boolean | null; msg: string | null }>({
+    busy: false,
+    ok: null,
+    msg: null,
+  });
+  const [ollamaTest, setOllamaTest] = useState<{
+    busy: boolean;
+    ok: boolean | null;
+    msg: string | null;
+  }>({ busy: false, ok: null, msg: null });
 
   async function loadConfig() {
     try {
@@ -212,6 +222,33 @@ export default function GlobalKbPage() {
       setCfgMsg((err as ApiError).message ?? 'Save failed');
     } finally {
       setCfgBusy(false);
+    }
+  }
+
+  async function testDb() {
+    setDbTest({ busy: true, ok: null, msg: null });
+    try {
+      const r = await api.post<{ ok: boolean; message: string }>('/global-kb/test-db', {
+        mode: cfg.mode,
+        connectionString: cfg.connectionString.trim() || undefined,
+      });
+      setDbTest({ busy: false, ok: r.ok, msg: r.message });
+    } catch (err) {
+      setDbTest({ busy: false, ok: false, msg: (err as ApiError).message ?? 'Test failed' });
+    }
+  }
+
+  async function testOllama() {
+    setOllamaTest({ busy: true, ok: null, msg: null });
+    try {
+      const r = await api.post<{ ok: boolean; message: string }>('/global-kb/test-ollama', {
+        ollamaUrl: effectiveOllamaUrl,
+        model: cfg.embedModel,
+        dimensions: cfg.embedDimensions,
+      });
+      setOllamaTest({ busy: false, ok: r.ok, msg: r.message });
+    } catch (err) {
+      setOllamaTest({ busy: false, ok: false, msg: (err as ApiError).message ?? 'Test failed' });
     }
   }
 
@@ -440,6 +477,21 @@ export default function GlobalKbPage() {
               />
             </div>
           )}
+          <div className="flex items-center gap-3">
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={dbTest.busy}
+              onClick={() => void testDb()}
+            >
+              {dbTest.busy ? 'Testing…' : 'Test DB connection'}
+            </Button>
+            {dbTest.msg && (
+              <span className={`text-xs ${dbTest.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                {dbTest.msg}
+              </span>
+            )}
+          </div>
           <div className="flex flex-wrap gap-3">
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="cfg-ollama-mode">Ollama server</Label>
@@ -503,6 +555,21 @@ export default function GlobalKbPage() {
               Internal mode uses {INTERNAL_OLLAMA_URL} automatically.
             </p>
           )}
+          <div className="flex items-center gap-3">
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={ollamaTest.busy}
+              onClick={() => void testOllama()}
+            >
+              {ollamaTest.busy ? 'Testing…' : 'Test Ollama'}
+            </Button>
+            {ollamaTest.msg && (
+              <span className={`text-xs ${ollamaTest.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                {ollamaTest.msg}
+              </span>
+            )}
+          </div>
           <div className="flex items-center gap-3">
             <Button disabled={cfgBusy} onClick={() => void saveConfig()}>
               {cfgBusy ? 'Saving…' : 'Save connection'}
