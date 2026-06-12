@@ -3,7 +3,7 @@
 /* ------------------------------------------------------------------ */
 
 import type { CliTokenUsage } from '@haive/shared';
-import { normalizeClaudeUsage, sumTokenUsage } from '../../cli-executor/usage-extract.js';
+import { normalizeClaudeUsage } from '../../cli-executor/usage-extract.js';
 
 interface StreamJsonCollector {
   /** Feed raw stdout chunks. Parses NDJSON lines, emits progress, collects result. */
@@ -37,7 +37,16 @@ export function createStreamJsonCollector(
   let lastResultSubtype: string | null = null;
   let lastResultError: string | null = null;
   let resultUsage: CliTokenUsage | null = null;
-  let assistantUsageSum: CliTokenUsage | null = null;
+  // Live fallback (mid-stream snapshots, before the authoritative `result` event
+  // arrives): sum fresh input/output across assistant turns. Cache is asymmetric:
+  // each Anthropic turn re-reports the FULL cached prefix it read, so cache_read
+  // is taken as the running MAX (summing it inflates the live total several-fold);
+  // cache_creation is a distinct one-time write per turn, so it is summed.
+  let assistantInputSum = 0;
+  let assistantOutputSum = 0;
+  let assistantCacheReadMax = 0;
+  let assistantCacheCreationSum = 0;
+  let sawAssistantUsage = false;
   let costUsd: number | null = null;
   let lastRateLimit: {
     status?: string;
@@ -95,7 +104,13 @@ export function createStreamJsonCollector(
       // Amp's usage placement is undocumented — accept both message.usage and
       // a top-level usage, preferring message.usage, counted ONCE per event.
       const usage = normalizeClaudeUsage(msg?.usage ?? event.usage);
-      if (usage) assistantUsageSum = sumTokenUsage(assistantUsageSum, usage);
+      if (usage) {
+        sawAssistantUsage = true;
+        assistantInputSum += usage.inputTokens;
+        assistantOutputSum += usage.outputTokens;
+        assistantCacheReadMax = Math.max(assistantCacheReadMax, usage.cacheReadTokens ?? 0);
+        assistantCacheCreationSum += usage.cacheCreationTokens ?? 0;
+      }
       const content = msg?.content as unknown[] | undefined;
       if (Array.isArray(content)) {
         for (const block of content) {
@@ -157,9 +172,25 @@ export function createStreamJsonCollector(
         processLine(buffer);
         buffer = '';
       }
-      // The result event's usage is authoritative and already cumulative —
-      // never add assistant sums to it (double-count guard).
-      const base = resultUsage ?? assistantUsageSum;
+      // The result event's usage is authoritative and already cumulative — prefer
+      // it outright. Before it arrives (live snapshots), build the fallback from
+      // summed input/output + the LAST turn's cache (see the accumulator note).
+      let assistantUsage: CliTokenUsage | null = null;
+      if (sawAssistantUsage) {
+        assistantUsage = {
+          inputTokens: assistantInputSum,
+          outputTokens: assistantOutputSum,
+          totalTokens:
+            assistantInputSum +
+            assistantOutputSum +
+            assistantCacheReadMax +
+            assistantCacheCreationSum,
+        };
+        if (assistantCacheReadMax > 0) assistantUsage.cacheReadTokens = assistantCacheReadMax;
+        if (assistantCacheCreationSum > 0)
+          assistantUsage.cacheCreationTokens = assistantCacheCreationSum;
+      }
+      const base = resultUsage ?? assistantUsage;
       if (!base) return null;
       return costUsd !== null ? { ...base, costUsd } : base;
     },

@@ -145,6 +145,50 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     });
   });
 
+  it('does not inflate live cache_read across turns (max, not sum); cache_creation sums', () => {
+    // Each Anthropic assistant turn re-reports the FULL cached prefix it read, so
+    // summing cache_read per turn over-counts several-fold on the live snapshot
+    // (1000+1500+1800=4300) before the result event reconciles it. cache_read must
+    // be the running MAX (1800); cache_creation is a distinct per-turn write (summed).
+    const c = createStreamJsonCollector();
+    feed(c, [
+      {
+        type: 'assistant',
+        message: {
+          usage: {
+            input_tokens: 5,
+            output_tokens: 10,
+            cache_read_input_tokens: 1000,
+            cache_creation_input_tokens: 800,
+          },
+          content: [],
+        },
+      },
+      {
+        type: 'assistant',
+        message: {
+          usage: { input_tokens: 7, output_tokens: 20, cache_read_input_tokens: 1500 },
+          content: [],
+        },
+      },
+      {
+        type: 'assistant',
+        message: {
+          usage: { input_tokens: 2, output_tokens: 30, cache_read_input_tokens: 1800 },
+          content: [],
+        },
+      },
+      { type: 'result', subtype: 'success', result: 'done' },
+    ]);
+    expect(c.getTokenUsage()).toEqual({
+      inputTokens: 14,
+      outputTokens: 60,
+      totalTokens: 14 + 60 + 1800 + 800,
+      cacheReadTokens: 1800,
+      cacheCreationTokens: 800,
+    });
+  });
+
   it('accepts a top-level assistant usage placement, counted once', () => {
     const c = createStreamJsonCollector();
     feed(c, [
