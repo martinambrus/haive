@@ -126,8 +126,8 @@ export function GlobalKbStatusPanel({
         </Button>
       </div>
       <p className="text-xs text-neutral-500">
-        The global knowledge base holds reusable house standards shared across every project. It is
-        optional and set up once — this onboarding does not require it.
+        Optional, but valuable: anything you add — the modules you standardize on, the patterns you
+        repeat, the mistakes you learned to avoid — is reused by every future project. Set up once.
       </p>
     </div>
   );

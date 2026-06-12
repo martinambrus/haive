@@ -41,7 +41,7 @@ export const globalKbStep: StepDefinition<GlobalKbStepDetect, { acknowledged: bo
     return {
       title: 'Global knowledge base',
       description:
-        'Haive keeps one instance-wide knowledge base of reusable house standards that every project retrieves from (version-scoped to its stack), separate from the per-repository RAG configured in the previous step. It is optional and set up once.',
+        'Haive keeps one instance-wide knowledge base of reusable house standards that every project retrieves from (version-scoped to its stack) — separate from the per-repository RAG in the previous step. It is where your hard-won, cross-project know-how lives: e.g. "never use the Panels module", "lazy-load images via the Lazy module", preferred boilerplate versions, or your house PHP / coding conventions. It is optional, but feeding it the findings and experience you have gained makes every future project start smarter — well worth a minute when you have something to share.',
       fields: [
         {
           type: 'global-kb-status',
