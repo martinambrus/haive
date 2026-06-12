@@ -251,12 +251,8 @@ function InvocationPanel({ taskId, invocation, label, idx, statusMessage }: Invo
                   ` = total ${tu.totalTokens.toLocaleString()}`
                 }
               >
-                {formatTokens(tu.totalTokens)} tok
-                <span className="text-neutral-500">
-                  {' '}
-                  · in {formatTokens(tu.inputTokens)} / out {formatTokens(tu.outputTokens)}
-                  {cache > 0 ? ` / cache ${formatTokens(cache)}` : ''}
-                </span>
+                in {formatTokens(tu.inputTokens)} / out {formatTokens(tu.outputTokens)}
+                {cache > 0 ? ` / cache ${formatTokens(cache)}` : ''} tok
               </span>
             );
           })()}
