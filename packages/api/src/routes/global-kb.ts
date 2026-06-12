@@ -326,6 +326,14 @@ globalKbRoutes.post('/enrich', async (c) => {
     .returning();
   if (!task) throw new HttpError(500, 'failed to create enrichment task');
 
+  // Link the entry back to its task so the UI can offer a "watch task" link.
+  await withGlobalKb(db, async ({ db: gdb }) => {
+    await gdb
+      .update(globalKbEntries)
+      .set({ sourceTaskId: task.id })
+      .where(eq(globalKbEntries.id, entry.id));
+  });
+
   await getTaskQueue().add(
     TASK_JOB_NAMES.START,
     { taskId: task.id, userId } satisfies TaskJobPayload,

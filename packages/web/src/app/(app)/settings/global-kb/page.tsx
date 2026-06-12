@@ -223,6 +223,22 @@ export default function GlobalKbPage() {
       .catch(() => {});
   }, []);
 
+  // Auto-refresh while anything is still enriching so the list flips to active on
+  // its own (no manual reload), then stops once everything has settled.
+  const hasTransient = (entries ?? []).some(
+    (e) => e.status === 'enriching' || e.status === 'skeleton',
+  );
+  useEffect(() => {
+    if (!hasTransient) return;
+    const t = setInterval(() => {
+      void api
+        .get<{ entries: GlobalKbEntry[] }>('/global-kb/entries')
+        .then((res) => setEntries(res.entries))
+        .catch(() => {});
+    }, 4000);
+    return () => clearInterval(t);
+  }, [hasTransient]);
+
   async function activate(e: GlobalKbEntry) {
     setBusy(true);
     try {
@@ -576,6 +592,13 @@ export default function GlobalKbPage() {
         </div>
       </div>
 
+      <p className="text-xs text-neutral-500">
+        AI-added rules activate automatically when enrichment finishes.{' '}
+        <span className="text-neutral-300">Activate</span> publishes a pending auto-promoted draft
+        into retrieval; <span className="text-neutral-300">Archive</span> removes a rule from
+        retrieval.
+      </p>
+
       <FormError message={loadError} />
 
       {entries === null ? (
@@ -584,42 +607,70 @@ export default function GlobalKbPage() {
         <p className="text-sm text-neutral-500">No entries yet.</p>
       ) : (
         <div className="flex flex-col gap-2">
-          {shown.map((e) => (
-            <Card key={e.id}>
-              <div className="flex flex-col gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium text-neutral-50">{e.title}</span>
-                  <Badge variant={STATUS_VARIANT[e.status] ?? 'default'}>{e.status}</Badge>
-                  <Badge variant="default">{e.category.replace(/_/g, ' ')}</Badge>
-                  {e.source === 'promoted' && <Badge variant="info">promoted</Badge>}
-                  {e.status === 'active' && e.embedStatus !== 'embedded' && (
-                    <Badge variant={e.embedStatus === 'failed' ? 'error' : 'default'}>
-                      {e.embedStatus}
-                    </Badge>
-                  )}
+          {shown.map((e) => {
+            const enriching = e.status === 'enriching' || e.status === 'skeleton';
+            return (
+              <Card key={e.id}>
+                <div className="flex flex-col gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-neutral-50">{e.title}</span>
+                    {enriching ? (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-300">
+                        <span className="h-3 w-3 animate-spin rounded-full border-2 border-sky-400/40 border-t-sky-300" />
+                        {e.status === 'skeleton' ? 'queued' : 'enriching'}
+                      </span>
+                    ) : (
+                      <Badge variant={STATUS_VARIANT[e.status] ?? 'default'}>{e.status}</Badge>
+                    )}
+                    <Badge variant="default">{e.category.replace(/_/g, ' ')}</Badge>
+                    {e.source === 'promoted' && <Badge variant="info">promoted</Badge>}
+                    {e.status === 'active' && e.embedStatus !== 'embedded' && (
+                      <Badge variant={e.embedStatus === 'failed' ? 'error' : 'default'}>
+                        {e.embedStatus}
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="text-xs text-neutral-400">{facetsSummary(e.facets)}</p>
+                  <p className="line-clamp-2 text-sm text-neutral-300">{e.body}</p>
+                  <div className="flex items-center gap-3">
+                    {e.sourceTaskId && (
+                      <a
+                        href={`/tasks/${e.sourceTaskId}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs font-medium text-indigo-400 hover:text-indigo-300"
+                      >
+                        {enriching ? 'Watch task ↗' : 'View task ↗'}
+                      </a>
+                    )}
+                    {enriching ? (
+                      <span className="text-xs text-neutral-500">
+                        Reading the repo in the background — activates automatically when done.
+                      </span>
+                    ) : (
+                      <>
+                        {e.status === 'draft' && (
+                          <Button size="sm" disabled={busy} onClick={() => void activate(e)}>
+                            Activate
+                          </Button>
+                        )}
+                        {(e.status === 'draft' || e.status === 'active') && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            disabled={busy}
+                            onClick={() => void archive(e)}
+                          >
+                            Archive
+                          </Button>
+                        )}
+                      </>
+                    )}
+                  </div>
                 </div>
-                <p className="text-xs text-neutral-400">{facetsSummary(e.facets)}</p>
-                <p className="line-clamp-2 text-sm text-neutral-300">{e.body}</p>
-                <div className="flex gap-2">
-                  {e.status !== 'active' && (
-                    <Button size="sm" disabled={busy} onClick={() => void activate(e)}>
-                      Activate
-                    </Button>
-                  )}
-                  {e.status !== 'archived' && (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      disabled={busy}
-                      onClick={() => void archive(e)}
-                    >
-                      Archive
-                    </Button>
-                  )}
-                </div>
-              </div>
-            </Card>
-          ))}
+              </Card>
+            );
+          })}
         </div>
       )}
     </div>
