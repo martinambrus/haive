@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   api,
   type ApiError,
@@ -86,6 +86,9 @@ export default function GlobalKbPage() {
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [frameworkFilter, setFrameworkFilter] = useState('all');
   const [page, setPage] = useState(1);
+  const [debouncedQ, setDebouncedQ] = useState('');
+  const [total, setTotal] = useState(0);
+  const [frameworks, setFrameworks] = useState<string[]>([]);
   const [selected, setSelected] = useState<GlobalKbEntry | null>(null);
   const [repos, setRepos] = useState<Repository[]>([]);
   const [providers, setProviders] = useState<CliProvider[]>([]);
@@ -216,18 +219,34 @@ export default function GlobalKbPage() {
     }
   }
 
-  async function refresh() {
+  // Fetch one page from the server. Search + filters run in SQL, so the browser
+  // only ever holds the current page (never the whole body-laden corpus).
+  const load = useCallback(async () => {
     try {
-      const res = await api.get<{ entries: GlobalKbEntry[] }>('/global-kb/entries');
+      const params = new URLSearchParams();
+      params.set('page', String(page));
+      params.set('pageSize', String(PER_PAGE));
+      if (debouncedQ) params.set('q', debouncedQ);
+      if (statusFilter !== 'all') params.set('status', statusFilter);
+      if (categoryFilter !== 'all') params.set('category', categoryFilter);
+      if (frameworkFilter !== 'all') params.set('framework', frameworkFilter);
+      const res = await api.get<{ entries: GlobalKbEntry[]; total: number; frameworks: string[] }>(
+        `/global-kb/entries?${params.toString()}`,
+      );
       setEntries(res.entries);
+      setTotal(res.total);
+      setFrameworks(res.frameworks);
       setLoadError(null);
+      // Deleting the last row on the last page can leave us past the end — clamp.
+      if (res.entries.length === 0 && page > 1 && res.total > 0) {
+        setPage(Math.max(1, Math.ceil(res.total / PER_PAGE)));
+      }
     } catch (err) {
       setLoadError((err as ApiError).message ?? 'Failed to load global KB');
     }
-  }
+  }, [page, debouncedQ, statusFilter, categoryFilter, frameworkFilter]);
 
   useEffect(() => {
-    void refresh();
     void loadConfig();
     void api
       .get<{ repositories: Repository[] }>('/repos')
@@ -239,33 +258,39 @@ export default function GlobalKbPage() {
       .catch(() => {});
   }, []);
 
-  // Auto-refresh while anything is still enriching so the list flips to active on
-  // its own (no manual reload), then stops once everything has settled.
+  // Debounce the search box so each keystroke doesn't hit the API.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(q), 300);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  // Reset to the first page whenever the query/filters change.
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedQ, statusFilter, categoryFilter, frameworkFilter]);
+
+  // Fetch whenever the query/filters/page change.
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Keep polling the current page while anything is still enriching so it flips
+  // to active on its own, then stops once everything has settled.
   const hasTransient = (entries ?? []).some(
     (e) => e.status === 'enriching' || e.status === 'skeleton',
   );
   useEffect(() => {
     if (!hasTransient) return;
-    const t = setInterval(() => {
-      void api
-        .get<{ entries: GlobalKbEntry[] }>('/global-kb/entries')
-        .then((res) => setEntries(res.entries))
-        .catch(() => {});
-    }, 4000);
+    const t = setInterval(() => void load(), 4000);
     return () => clearInterval(t);
-  }, [hasTransient]);
-
-  // Filters change the result set — jump back to the first page.
-  useEffect(() => {
-    setPage(1);
-  }, [q, statusFilter, categoryFilter, frameworkFilter]);
+  }, [hasTransient, load]);
 
   async function activate(e: GlobalKbEntry) {
     setBusy(true);
     try {
       await api.patch(`/global-kb/entries/${e.id}`, { status: 'active' });
       setSelected((s) => (s?.id === e.id ? null : s));
-      await refresh();
+      await load();
     } catch (err) {
       setLoadError((err as ApiError).message ?? 'Activate failed');
     } finally {
@@ -279,7 +304,7 @@ export default function GlobalKbPage() {
     try {
       await api.delete(`/global-kb/entries/${e.id}`);
       setSelected((s) => (s?.id === e.id ? null : s));
-      await refresh();
+      await load();
     } catch (err) {
       setLoadError((err as ApiError).message ?? 'Delete failed');
     } finally {
@@ -311,7 +336,7 @@ export default function GlobalKbPage() {
         },
       });
       setEnrich({ ...enrich, notes: '' });
-      await refresh();
+      await load();
     } catch (err) {
       setEnrichError((err as ApiError).message ?? 'Enrichment failed to start');
     } finally {
@@ -319,26 +344,13 @@ export default function GlobalKbPage() {
     }
   }
 
-  const all = entries ?? [];
-  const frameworkToken = (f: GlobalKbFacets): string[] => {
-    const fw = f.framework ?? [];
-    const maj = f.frameworkMajor ?? [];
-    return fw.map((name) => (maj.length ? `${name} ${maj[0]}` : name));
-  };
-  const frameworkOptions = Array.from(new Set(all.flatMap((e) => frameworkToken(e.facets)))).sort();
-  const needle = q.trim().toLowerCase();
-  const filtered = all.filter((e) => {
-    if (statusFilter !== 'all' && e.status !== statusFilter) return false;
-    if (categoryFilter !== 'all' && e.category !== categoryFilter) return false;
-    if (frameworkFilter !== 'all' && !frameworkToken(e.facets).includes(frameworkFilter)) {
-      return false;
-    }
-    if (needle && !`${e.title} ${e.body}`.toLowerCase().includes(needle)) return false;
-    return true;
-  });
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
-  const safePage = Math.min(page, pageCount);
-  const paged = filtered.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
+  const rows = entries ?? [];
+  const pageCount = Math.max(1, Math.ceil(total / PER_PAGE));
+  const filtersActive =
+    debouncedQ !== '' ||
+    statusFilter !== 'all' ||
+    categoryFilter !== 'all' ||
+    frameworkFilter !== 'all';
 
   return (
     <div className="flex flex-col gap-4">
@@ -616,7 +628,7 @@ export default function GlobalKbPage() {
       <div className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="mr-auto text-sm font-semibold text-neutral-200">
-            Entries{entries ? ` (${filtered.length})` : ''}
+            Entries{entries ? ` (${total})` : ''}
           </h3>
           <Input
             value={q}
@@ -646,14 +658,14 @@ export default function GlobalKbPage() {
               </option>
             ))}
           </select>
-          {frameworkOptions.length > 0 && (
+          {frameworks.length > 0 && (
             <select
               value={frameworkFilter}
               onChange={(e) => setFrameworkFilter(e.target.value)}
               className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
             >
               <option value="all">any stack</option>
-              {frameworkOptions.map((f) => (
+              {frameworks.map((f) => (
                 <option key={f} value={f}>
                   {f}
                 </option>
@@ -672,13 +684,13 @@ export default function GlobalKbPage() {
 
       {entries === null ? (
         <p className="text-sm text-neutral-500">Loading…</p>
-      ) : filtered.length === 0 ? (
+      ) : rows.length === 0 ? (
         <p className="text-sm text-neutral-500">
-          {all.length === 0 ? 'No entries yet.' : 'No entries match the filters.'}
+          {filtersActive ? 'No entries match the filters.' : 'No entries yet.'}
         </p>
       ) : (
         <div className="flex flex-col gap-2">
-          {paged.map((e) => {
+          {rows.map((e) => {
             const enriching = e.status === 'enriching' || e.status === 'skeleton';
             return (
               <Card
@@ -776,18 +788,18 @@ export default function GlobalKbPage() {
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={safePage <= 1}
+                disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
               >
                 Prev
               </Button>
               <span className="text-xs text-neutral-500">
-                page {safePage} of {pageCount}
+                page {page} of {pageCount}
               </span>
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={safePage >= pageCount}
+                disabled={page >= pageCount}
                 onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
               >
                 Next

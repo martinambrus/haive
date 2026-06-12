@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Hono } from 'hono';
-import { and, desc, eq, type SQL } from 'drizzle-orm';
+import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -17,6 +17,7 @@ import {
   resolveGlobalKbConnection,
   resolveGlobalKbSettings,
   withGlobalKb,
+  type GlobalKbCategory,
   type GlobalKbFacets,
   type GlobalKbStatus,
 } from '@haive/shared/global-kb';
@@ -348,18 +349,65 @@ globalKbRoutes.post('/enrich', async (c) => {
   return c.json({ entry, taskId: task.id }, 201);
 });
 
+// Server-side paginated browse. Only one page of rows ever reaches the client,
+// so the full-body corpus is never shipped/held in the browser. Search + filters
+// run in SQL; the distinct framework list (for the filter dropdown) is computed
+// from facets only (tiny — no bodies).
 globalKbRoutes.get('/entries', async (c) => {
-  const namespace = c.req.query('namespace');
   const status = c.req.query('status');
-  const entries = await withGlobalKb(getDb(), async ({ db }) => {
+  const category = c.req.query('category');
+  const framework = c.req.query('framework');
+  const q = c.req.query('q')?.trim();
+  const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1')) || 1);
+  const pageSize = Math.min(
+    50,
+    Math.max(1, Math.floor(Number(c.req.query('pageSize') ?? '12')) || 12),
+  );
+
+  const result = await withGlobalKb(getDb(), async ({ db }) => {
     const conds: SQL[] = [];
-    if (namespace) conds.push(eq(globalKbEntries.namespace, namespace));
     if (status) conds.push(eq(globalKbEntries.status, status as GlobalKbStatus));
-    const base = db.select().from(globalKbEntries);
-    const filtered = conds.length ? base.where(and(...conds)) : base;
-    return filtered.orderBy(desc(globalKbEntries.updatedAt));
+    if (category) conds.push(eq(globalKbEntries.category, category as GlobalKbCategory));
+    if (framework) {
+      conds.push(sql`jsonb_exists(${globalKbEntries.facets} -> 'framework', ${framework})`);
+    }
+    if (q) {
+      const like = `%${q}%`;
+      conds.push(
+        sql`(${globalKbEntries.title} ilike ${like} or ${globalKbEntries.body} ilike ${like})`,
+      );
+    }
+    const where = conds.length ? and(...conds) : undefined;
+
+    const totalRows = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(globalKbEntries)
+      .where(where);
+    const total = totalRows[0]?.n ?? 0;
+
+    const entries = await db
+      .select()
+      .from(globalKbEntries)
+      .where(where)
+      .orderBy(desc(globalKbEntries.updatedAt))
+      .limit(pageSize)
+      .offset((page - 1) * pageSize);
+
+    const facetRows = await db.select({ facets: globalKbEntries.facets }).from(globalKbEntries);
+    const frameworks = Array.from(
+      new Set(facetRows.flatMap((r) => r.facets?.framework ?? [])),
+    ).sort();
+
+    return { entries, total, frameworks };
   });
-  return c.json({ entries });
+
+  return c.json({
+    entries: result.entries,
+    total: result.total,
+    page,
+    pageSize,
+    frameworks: result.frameworks,
+  });
 });
 
 globalKbRoutes.get('/entries/:id', async (c) => {
