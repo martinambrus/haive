@@ -47,6 +47,7 @@ export async function ensureGlobalKbSchema(
       source_task_id uuid,
       source_repo_id uuid,
       content_hash TEXT,
+      topic_key TEXT,
       embed_status TEXT NOT NULL DEFAULT 'pending' CHECK (embed_status IN ('pending','embedded','failed','stale')),
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW(),
@@ -58,6 +59,11 @@ export async function ensureGlobalKbSchema(
   );
   await conn.pg.unsafe(
     `CREATE INDEX IF NOT EXISTS idx_global_kb_entries_embed_status ON ${ENTRIES_TABLE} (embed_status)`,
+  );
+  // Cross-repo dedup key (category:tech). Additive column for pre-existing DBs.
+  await conn.pg.unsafe(`ALTER TABLE ${ENTRIES_TABLE} ADD COLUMN IF NOT EXISTS topic_key TEXT`);
+  await conn.pg.unsafe(
+    `CREATE INDEX IF NOT EXISTS idx_global_kb_entries_ns_topic_key ON ${ENTRIES_TABLE} (namespace, topic_key)`,
   );
 
   // 2. Global vector table — the per-project ai_rag_embeddings shape PLUS

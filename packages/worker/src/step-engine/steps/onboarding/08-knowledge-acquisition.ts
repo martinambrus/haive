@@ -5,7 +5,11 @@ import type { DetectResult, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
 import type { GlobalKbCategory, GlobalKbFacets } from '@haive/shared/global-kb';
-import { clearTaskPromotedDrafts, promoteToGlobalKbDraft } from '../_global-kb-promote.js';
+import {
+  clearTaskPromotedDrafts,
+  globalKbTopicKey,
+  promoteToGlobalKbDraft,
+} from '../_global-kb-promote.js';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -631,6 +635,26 @@ export function isGlobalRoutedPlacement(p: KbPlacement): boolean {
   );
 }
 
+/** Best-effort tech slug from an existing KB file path, used for the cross-repo
+ *  dedup key when the placement carries no explicit `tech`. */
+export function placementTech(relPath: string): string | null {
+  if (relPath.startsWith('QUICK_REFERENCE/')) {
+    const seg = relPath.slice('QUICK_REFERENCE/'.length).split('/')[0] ?? '';
+    return seg.replace(/\.md$/i, '') || null;
+  }
+  for (const [prefix, suffix] of [
+    ['ANTI_PATTERNS/', '-mistakes'],
+    ['BEST_PRACTICES/', '-best-practices'],
+  ] as const) {
+    if (relPath.startsWith(prefix)) {
+      let stem = relPath.slice(prefix.length).replace(/\.md$/i, '');
+      if (stem.endsWith(suffix)) stem = stem.slice(0, -suffix.length);
+      return stem || null;
+    }
+  }
+  return null;
+}
+
 function entryToMarkdown(entry: KbEntry): string {
   const lines: string[] = [`# ${entry.title}`, ''];
   for (const s of entry.sections) {
@@ -1178,24 +1202,34 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         handledSrc.add(src.relPath);
         try {
           const content = await readFile(path.join(kbDir, src.relPath), 'utf8');
-          const id = await promoteToGlobalKbDraft(
+          const category = p.category
+            ? (p.category as GlobalKbCategory)
+            : inferCategoryFromPath(src.relPath);
+          const promo = await promoteToGlobalKbDraft(
             ctx.db,
             {
               userId: ctx.userId,
               taskId: ctx.taskId,
               title: titleFromMarkdown(content, src.relPath),
               body: content,
-              category: p.category
-                ? (p.category as GlobalKbCategory)
-                : inferCategoryFromPath(src.relPath),
+              category,
               facets: detectedDefaultFacets(detected),
+              topicKey:
+                globalKbTopicKey(category, p.tech ?? placementTech(src.relPath)) ?? undefined,
             },
             ctx.logger,
           );
-          if (id) {
+          if (promo && !promo.deduped) {
             await rm(path.join(kbDir, src.relPath), { force: true });
             globalPromoted += 1;
-            written.push({ id: src.relPath, filePath: `global-kb:${id}`, source: 'global' });
+            written.push({ id: src.relPath, filePath: `global-kb:${promo.id}`, source: 'global' });
+          } else if (promo?.deduped) {
+            // Topic already covered by another project — keep this repo's local
+            // copy (no data loss) rather than moving it.
+            ctx.logger.info(
+              { path: src.relPath, existingId: promo.id },
+              'kb re-route deduped (topic already in global KB); kept local copy',
+            );
           }
         } catch (err) {
           ctx.logger.warn({ err, path: p.path }, 'kb global re-route failed');
@@ -1230,21 +1264,23 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       // NEVER written to .claude/knowledge_base/, so they are never indexed into
       // this repo's RAG (the "don't pollute the local DB" requirement, §5.4).
       for (const e of chosen.filter((entry) => entry.scope === 'global')) {
-        const id = await promoteToGlobalKbDraft(
+        const category = e.category ?? 'general';
+        const promo = await promoteToGlobalKbDraft(
           ctx.db,
           {
             userId: ctx.userId,
             taskId: ctx.taskId,
             title: e.title,
             body: entryToMarkdown(e),
-            category: e.category ?? 'general',
+            category,
             facets: defaultGlobalFacets(e, detected),
+            topicKey: globalKbTopicKey(category, e.tech) ?? undefined,
           },
           ctx.logger,
         );
-        if (id) {
+        if (promo && !promo.deduped) {
           globalPromoted += 1;
-          written.push({ id: e.id, filePath: `global-kb:${id}`, source: 'global' });
+          written.push({ id: e.id, filePath: `global-kb:${promo.id}`, source: 'global' });
         }
       }
 

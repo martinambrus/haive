@@ -397,7 +397,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         // repo's knowledge_base/investigations/ (which the local RAG indexes), so
         // the local store stays clean. Facets are left empty — the user scopes the
         // draft in Settings -> Global KB before activating it.
-        const id = await promoteToGlobalKbDraft(
+        const promo = await promoteToGlobalKbDraft(
           ctx.db,
           {
             userId: ctx.userId,
@@ -409,7 +409,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           },
           ctx.logger,
         );
-        investigationWritten = id ? `global-kb:${id}` : null;
+        investigationWritten = promo ? `global-kb:${promo.id}` : null;
       } else {
         investigationWritten = await writeInvestigation(
           ctx.repoPath,

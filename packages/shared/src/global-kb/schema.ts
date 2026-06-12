@@ -63,6 +63,8 @@ export const globalKbEntries = pgTable('global_kb_entries', {
   sourceRepoId: uuid('source_repo_id'),
   // sha256 of body+facets; drives re-embed when content changes.
   contentHash: text('content_hash'),
+  // Cross-repo dedup key (category:tech); null when no tech is derivable.
+  topicKey: text('topic_key'),
   embedStatus: text('embed_status').$type<GlobalKbEmbedStatus>().notNull().default('pending'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),

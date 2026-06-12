@@ -4,10 +4,12 @@ import {
   isGlobalRoutedPlacement,
   kbIndexMarkdown,
   parseKbPlacements,
+  placementTech,
   routeEntries,
   routePlacement,
   titleFromMarkdown,
 } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
+import { globalKbTopicKey } from '../src/step-engine/steps/_global-kb-promote.js';
 
 describe('routePlacement', () => {
   it('routes a canonical placement to UPPERCASE.md at the KB root', () => {
@@ -284,5 +286,23 @@ describe('re-route helpers', () => {
     expect(
       isGlobalRoutedPlacement({ path: 'ARCHITECTURE.md', category: 'general', scope: 'global' }),
     ).toBe(true);
+  });
+});
+
+describe('cross-repo dedup key', () => {
+  it('globalKbTopicKey is category:alphanumeric-tech, or null without a tech', () => {
+    expect(globalKbTopicKey('anti_pattern', 'drupal11')).toBe('anti_pattern:drupal11');
+    expect(globalKbTopicKey('best_practice', 'jQuery 1.2')).toBe('best_practice:jquery12');
+    expect(globalKbTopicKey('quick_reference', 'NauSYS-API')).toBe('quick_reference:nausysapi');
+    expect(globalKbTopicKey('anti_pattern', null)).toBeNull();
+    expect(globalKbTopicKey('anti_pattern', '')).toBeNull();
+  });
+
+  it('placementTech derives the tech slug from a KB file path', () => {
+    expect(placementTech('ANTI_PATTERNS/drupal11-mistakes.md')).toBe('drupal11');
+    expect(placementTech('BEST_PRACTICES/jquery-1-2-best-practices.md')).toBe('jquery-1-2');
+    expect(placementTech('QUICK_REFERENCE/nausys-api/endpoints.md')).toBe('nausys-api');
+    expect(placementTech('QUICK_REFERENCE/drupal7.md')).toBe('drupal7');
+    expect(placementTech('ARCHITECTURE.md')).toBeNull();
   });
 });
