@@ -148,6 +148,9 @@ export default function GlobalKbPage() {
     ok: boolean | null;
     msg: string | null;
   }>({ busy: false, ok: null, msg: null });
+  const [cfgLoaded, setCfgLoaded] = useState(false);
+  const [connExpanded, setConnExpanded] = useState(true);
+  const connChecked = useRef(false);
 
   async function loadConfig() {
     try {
@@ -164,6 +167,7 @@ export default function GlobalKbPage() {
         connectionString: '',
       }));
       setCfgSet(cc.connectionStringSet);
+      setCfgLoaded(true);
     } catch {
       /* admin-only or unavailable */
     }
@@ -175,6 +179,40 @@ export default function GlobalKbPage() {
     cfg.ollamaMode === 'internal'
       ? INTERNAL_OLLAMA_URL
       : cfg.ollamaUrl.trim() || DEFAULT_EXTERNAL_OLLAMA_URL;
+  const connOk = cfg.enabled && dbTest.ok === true && ollamaTest.ok === true;
+
+  // On first load, validate the connection so the card can collapse when it's
+  // healthy (it rarely changes) and expand — with the failures shown inline —
+  // when it needs attention.
+  useEffect(() => {
+    if (!cfgLoaded || connChecked.current) return;
+    connChecked.current = true;
+    void (async () => {
+      const fail = (e: unknown) => ({
+        ok: false,
+        message: (e as ApiError).message ?? 'Test failed',
+      });
+      const [dbR, olR] = await Promise.all([
+        api
+          .post<{ ok: boolean; message: string }>('/global-kb/test-db', {
+            mode: cfg.mode,
+            connectionString: cfg.connectionString.trim() || undefined,
+          })
+          .catch(fail),
+        api
+          .post<{ ok: boolean; message: string }>('/global-kb/test-ollama', {
+            ollamaUrl: effectiveOllamaUrl,
+            model: cfg.embedModel,
+            dimensions: cfg.embedDimensions,
+          })
+          .catch(fail),
+      ]);
+      setDbTest({ busy: false, ok: dbR.ok, msg: dbR.message });
+      setOllamaTest({ busy: false, ok: olR.ok, msg: olR.message });
+      setConnExpanded(!(cfg.enabled && dbR.ok && olR.ok));
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfgLoaded]);
 
   async function saveConfig() {
     setCfgBusy(true);
@@ -371,167 +409,189 @@ export default function GlobalKbPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Connection</CardTitle>
-          <CardDescription>
-            Where the global KB lives and how it embeds — this is the second, instance-wide DB
-            (separate from each repo&apos;s RAG DB set during onboarding). Internal = a dedicated DB
-            on this Haive host; external = a central/remote Postgres shared across machines. Set an
-            embedding model or retrieval falls back to weak hash embeddings.
-          </CardDescription>
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex flex-col gap-1">
+              <CardTitle>Connection</CardTitle>
+              <CardDescription>
+                Where the global KB lives and how it embeds — this is the second, instance-wide DB
+                (separate from each repo&apos;s RAG DB set during onboarding). Internal = a
+                dedicated DB on this Haive host; external = a central/remote Postgres shared across
+                machines. Set an embedding model or retrieval falls back to weak hash embeddings.
+              </CardDescription>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {!connExpanded && (
+                <span className={`text-xs ${connOk ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {connOk ? '✓ connected' : '⚠ needs attention'}
+                </span>
+              )}
+              <Button size="sm" variant="ghost" onClick={() => setConnExpanded((v) => !v)}>
+                {connExpanded ? 'Collapse' : 'Edit'}
+              </Button>
+            </div>
+          </div>
         </CardHeader>
-        <div className="flex flex-col gap-3">
-          <label className="flex items-center gap-2 text-sm text-neutral-100">
-            <input
-              type="checkbox"
-              checked={cfg.enabled}
-              onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })}
-              className="h-4 w-4 rounded border-neutral-700 bg-neutral-950"
-            />
-            Enabled (tasks retrieve global entries)
-          </label>
-          <div className="flex flex-wrap gap-3">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="cfg-mode">Provider</Label>
-              <select
-                id="cfg-mode"
-                value={cfg.mode}
-                onChange={(e) =>
-                  setCfg({ ...cfg, mode: e.target.value as 'internal' | 'external' })
-                }
-                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
-              >
-                <option value="internal">internal (Haive-hosted)</option>
-                <option value="external">external (central/remote)</option>
-              </select>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="cfg-namespace">Namespace</Label>
-              <Input
-                id="cfg-namespace"
-                value={cfg.namespace}
-                onChange={(e) => setCfg({ ...cfg, namespace: e.target.value })}
-                className="w-40"
+        {connExpanded ? (
+          <div className="flex flex-col gap-3">
+            <label className="flex items-center gap-2 text-sm text-neutral-100">
+              <input
+                type="checkbox"
+                checked={cfg.enabled}
+                onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })}
+                className="h-4 w-4 rounded border-neutral-700 bg-neutral-950"
               />
-            </div>
-          </div>
-          {cfg.mode === 'external' && (
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="cfg-conn">
-                External connection string{cfgSet ? ' (set — leave blank to keep)' : ''}
-              </Label>
-              <Input
-                id="cfg-conn"
-                type="password"
-                value={cfg.connectionString}
-                onChange={(e) => setCfg({ ...cfg, connectionString: e.target.value })}
-                placeholder="postgres://user:pass@host:5432/db"
-              />
-            </div>
-          )}
-          <div className="flex items-center gap-3">
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={dbTest.busy}
-              onClick={() => void testDb()}
-            >
-              {dbTest.busy ? 'Testing…' : 'Test DB connection'}
-            </Button>
-            {dbTest.msg && (
-              <span className={`text-xs ${dbTest.ok ? 'text-emerald-400' : 'text-red-400'}`}>
-                {dbTest.msg}
-              </span>
-            )}
-          </div>
-          <div className="flex flex-wrap gap-3">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="cfg-ollama-mode">Ollama server</Label>
-              <select
-                id="cfg-ollama-mode"
-                value={cfg.ollamaMode}
-                onChange={(e) => {
-                  const ollamaMode = e.target.value as 'internal' | 'external';
-                  setCfg((p) => ({
-                    ...p,
-                    ollamaMode,
-                    // Prefill the host default when leaving internal, but keep an
-                    // already-configured external URL untouched.
-                    ollamaUrl:
-                      ollamaMode === 'external' && deriveOllamaMode(p.ollamaUrl) === 'internal'
-                        ? DEFAULT_EXTERNAL_OLLAMA_URL
-                        : p.ollamaUrl,
-                  }));
-                }}
-                className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
-              >
-                <option value="internal">Use Haive internal Ollama service</option>
-                <option value="external">Use an external Ollama server</option>
-              </select>
-            </div>
-            {cfg.ollamaMode === 'external' && (
+              Enabled (tasks retrieve global entries)
+            </label>
+            <div className="flex flex-wrap gap-3">
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="cfg-ollama">External Ollama URL</Label>
+                <Label htmlFor="cfg-mode">Provider</Label>
+                <select
+                  id="cfg-mode"
+                  value={cfg.mode}
+                  onChange={(e) =>
+                    setCfg({ ...cfg, mode: e.target.value as 'internal' | 'external' })
+                  }
+                  className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                >
+                  <option value="internal">internal (Haive-hosted)</option>
+                  <option value="external">external (central/remote)</option>
+                </select>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="cfg-namespace">Namespace</Label>
                 <Input
-                  id="cfg-ollama"
-                  value={cfg.ollamaUrl}
-                  onChange={(e) => setCfg({ ...cfg, ollamaUrl: e.target.value })}
-                  placeholder="http://host.docker.internal:11434"
+                  id="cfg-namespace"
+                  value={cfg.namespace}
+                  onChange={(e) => setCfg({ ...cfg, namespace: e.target.value })}
+                  className="w-40"
+                />
+              </div>
+            </div>
+            {cfg.mode === 'external' && (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="cfg-conn">
+                  External connection string{cfgSet ? ' (set — leave blank to keep)' : ''}
+                </Label>
+                <Input
+                  id="cfg-conn"
+                  type="password"
+                  value={cfg.connectionString}
+                  onChange={(e) => setCfg({ ...cfg, connectionString: e.target.value })}
+                  placeholder="postgres://user:pass@host:5432/db"
                 />
               </div>
             )}
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="cfg-model">Embedding model</Label>
-              <Input
-                id="cfg-model"
-                value={cfg.embedModel}
-                onChange={(e) => setCfg({ ...cfg, embedModel: e.target.value })}
-                placeholder="qwen3-embedding:4b"
-              />
+            <div className="flex items-center gap-3">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={dbTest.busy}
+                onClick={() => void testDb()}
+              >
+                {dbTest.busy ? 'Testing…' : 'Test DB connection'}
+              </Button>
+              {dbTest.msg && (
+                <span className={`text-xs ${dbTest.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {dbTest.msg}
+                </span>
+              )}
             </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="cfg-dims">Dimensions</Label>
-              <Input
-                id="cfg-dims"
-                type="number"
-                value={cfg.embedDimensions}
-                onChange={(e) =>
-                  setCfg({ ...cfg, embedDimensions: Number(e.target.value) || 2560 })
-                }
-                className="w-32"
-              />
+            <div className="flex flex-wrap gap-3">
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="cfg-ollama-mode">Ollama server</Label>
+                <select
+                  id="cfg-ollama-mode"
+                  value={cfg.ollamaMode}
+                  onChange={(e) => {
+                    const ollamaMode = e.target.value as 'internal' | 'external';
+                    setCfg((p) => ({
+                      ...p,
+                      ollamaMode,
+                      // Prefill the host default when leaving internal, but keep an
+                      // already-configured external URL untouched.
+                      ollamaUrl:
+                        ollamaMode === 'external' && deriveOllamaMode(p.ollamaUrl) === 'internal'
+                          ? DEFAULT_EXTERNAL_OLLAMA_URL
+                          : p.ollamaUrl,
+                    }));
+                  }}
+                  className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+                >
+                  <option value="internal">Use Haive internal Ollama service</option>
+                  <option value="external">Use an external Ollama server</option>
+                </select>
+              </div>
+              {cfg.ollamaMode === 'external' && (
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="cfg-ollama">External Ollama URL</Label>
+                  <Input
+                    id="cfg-ollama"
+                    value={cfg.ollamaUrl}
+                    onChange={(e) => setCfg({ ...cfg, ollamaUrl: e.target.value })}
+                    placeholder="http://host.docker.internal:11434"
+                  />
+                </div>
+              )}
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="cfg-model">Embedding model</Label>
+                <Input
+                  id="cfg-model"
+                  value={cfg.embedModel}
+                  onChange={(e) => setCfg({ ...cfg, embedModel: e.target.value })}
+                  placeholder="qwen3-embedding:4b"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="cfg-dims">Dimensions</Label>
+                <Input
+                  id="cfg-dims"
+                  type="number"
+                  value={cfg.embedDimensions}
+                  onChange={(e) =>
+                    setCfg({ ...cfg, embedDimensions: Number(e.target.value) || 2560 })
+                  }
+                  className="w-32"
+                />
+              </div>
             </div>
-          </div>
-          {cfg.ollamaMode === 'internal' && (
-            <p className="text-xs text-neutral-500">
-              Internal mode uses {INTERNAL_OLLAMA_URL} automatically.
-            </p>
-          )}
-          <div className="flex items-center gap-3">
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={ollamaTest.busy}
-              onClick={() => void testOllama()}
-            >
-              {ollamaTest.busy ? 'Testing…' : 'Test Ollama'}
-            </Button>
-            {ollamaTest.msg && (
-              <span className={`text-xs ${ollamaTest.ok ? 'text-emerald-400' : 'text-red-400'}`}>
-                {ollamaTest.msg}
-              </span>
+            {cfg.ollamaMode === 'internal' && (
+              <p className="text-xs text-neutral-500">
+                Internal mode uses {INTERNAL_OLLAMA_URL} automatically.
+              </p>
             )}
+            <div className="flex items-center gap-3">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={ollamaTest.busy}
+                onClick={() => void testOllama()}
+              >
+                {ollamaTest.busy ? 'Testing…' : 'Test Ollama'}
+              </Button>
+              {ollamaTest.msg && (
+                <span className={`text-xs ${ollamaTest.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {ollamaTest.msg}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              <Button disabled={cfgBusy} onClick={() => void saveConfig()}>
+                {cfgBusy ? 'Saving…' : 'Save connection'}
+              </Button>
+              {cfgMsg && <span className="text-xs text-neutral-400">{cfgMsg}</span>}
+            </div>
+            <p className="text-xs text-neutral-500">
+              Changing the embedding model/dimensions changes the vector space — re-activate entries
+              to re-embed them.
+            </p>
           </div>
-          <div className="flex items-center gap-3">
-            <Button disabled={cfgBusy} onClick={() => void saveConfig()}>
-              {cfgBusy ? 'Saving…' : 'Save connection'}
-            </Button>
-            {cfgMsg && <span className="text-xs text-neutral-400">{cfgMsg}</span>}
-          </div>
-          <p className="text-xs text-neutral-500">
-            Changing the embedding model/dimensions changes the vector space — re-activate entries
-            to re-embed them.
+        ) : (
+          <p className="text-xs text-neutral-400">
+            {cfg.mode === 'internal' ? 'Internal DB' : 'External DB'} ·{' '}
+            {cfg.embedModel || 'no model'} · {cfg.embedDimensions} dims ·{' '}
+            {cfg.enabled ? 'enabled' : 'disabled'}
           </p>
-        </div>
+        )}
       </Card>
 
       <Card id="add-house-rule">
