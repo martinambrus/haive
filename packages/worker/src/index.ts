@@ -10,7 +10,7 @@ import {
   startCliExecWorker,
 } from './queues/cli-exec-queue.js';
 import { startRepoWorker } from './queues/repo-queue.js';
-import { closeTaskQueue, startTaskWorker } from './queues/task-queue.js';
+import { closeTaskQueue, reconcileOrphanedCliSteps, startTaskWorker } from './queues/task-queue.js';
 import { closeRedis } from './redis.js';
 import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
@@ -31,6 +31,11 @@ async function main(): Promise<void> {
   const taskWorker = startTaskWorker();
   const cliExecWorker = await startCliExecWorker();
   const globalKbSyncWorker = startGlobalKbSyncWorker();
+  // Recover steps a prior worker orphaned mid-CLI (their sandboxes were reaped
+  // above): fail or resume them so they never hang in waiting_cli after a restart.
+  await reconcileOrphanedCliSteps(getDb()).catch((err) => {
+    logger.warn({ err }, 'orphaned-cli-step reconciliation on boot failed');
+  });
   await scheduleCliVersionRefresh().catch((err) => {
     logger.warn({ err }, 'failed to schedule cli version refresh');
   });

@@ -1,6 +1,6 @@
 import { Queue, Worker, type Job } from 'bullmq';
 import Docker from 'dockerode';
-import { and, eq, inArray, ne } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
@@ -601,6 +601,59 @@ async function handleAdvanceStep(db: Database, payload: TaskJobPayload): Promise
     deps: workerDeps,
   });
   await handleResult(db, ctx, payload.stepId, result);
+}
+
+/** Recover steps orphaned by a prior worker that died mid-CLI. On boot no worker
+ *  is alive and any sandbox was just reaped, so a step still in `waiting_cli` will
+ *  never resume on its own: resolveLlmPhase sees an invocation with endedAt=null
+ *  and waits forever. Mark that dead invocation ended (which also makes any
+ *  re-delivered cli-exec job a no-op — handlers skip ended invocations) and
+ *  re-drive the step: one whose CLI DID finish + record resumes (exit 0 → apply
+ *  → advance), an orphaned one fails (retryable). `waiting_form` user gates and
+ *  `running` steps (recovered by advance-step stalled re-delivery) are untouched. */
+export async function reconcileOrphanedCliSteps(db: Database): Promise<void> {
+  const stuck = await db
+    .select({
+      taskId: schema.taskSteps.taskId,
+      stepId: schema.taskSteps.stepId,
+      userId: schema.tasks.userId,
+    })
+    .from(schema.taskSteps)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+    .where(and(eq(schema.taskSteps.status, 'waiting_cli'), eq(schema.tasks.status, 'running')));
+  if (stuck.length === 0) return;
+  logger.warn({ count: stuck.length }, 'reconciling waiting_cli steps orphaned by worker restart');
+  for (const s of stuck) {
+    try {
+      const [inv] = await db
+        .select({ id: schema.cliInvocations.id })
+        .from(schema.cliInvocations)
+        .innerJoin(schema.taskSteps, eq(schema.taskSteps.id, schema.cliInvocations.taskStepId))
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, s.taskId),
+            eq(schema.taskSteps.stepId, s.stepId),
+            isNull(schema.cliInvocations.endedAt),
+            isNull(schema.cliInvocations.supersededAt),
+          ),
+        )
+        .orderBy(desc(schema.cliInvocations.startedAt))
+        .limit(1);
+      if (inv) {
+        await db
+          .update(schema.cliInvocations)
+          .set({
+            endedAt: new Date(),
+            errorMessage: 'CLI invocation orphaned by a worker restart (worker exited mid-run)',
+          })
+          .where(eq(schema.cliInvocations.id, inv.id));
+      }
+      await enqueueAdvance(s.taskId, s.userId, s.stepId);
+      logger.info({ taskId: s.taskId, stepId: s.stepId }, 'reconciled orphaned waiting_cli step');
+    } catch (err) {
+      logger.error({ err, taskId: s.taskId, stepId: s.stepId }, 'reconcile orphaned step failed');
+    }
+  }
 }
 
 async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<void> {
