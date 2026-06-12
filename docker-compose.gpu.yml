@@ -1,0 +1,14 @@
+# GPU override for Ollama. Included automatically by scripts/dev-up.sh (pnpm
+# docker:dev) only when an NVIDIA GPU AND the nvidia container runtime are present.
+# Kept out of the base + dev compose so the stack boots on any host (CPU Ollama);
+# this layers GPU access on top. A multi-billion-parameter embedding model is far
+# faster on GPU. Requires the NVIDIA Container Toolkit on the host.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
