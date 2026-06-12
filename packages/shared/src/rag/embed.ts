@@ -4,8 +4,15 @@ import { createHash } from 'node:crypto';
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
-export const OLLAMA_TIMEOUT_MS = 30_000;
+export const OLLAMA_TIMEOUT_MS = 60_000;
 export const EMBED_BATCH_SIZE = 8;
+/** Sent on every embed so Ollama keeps the model resident between batches (and
+ *  after warmup) instead of unloading it (default 5m) and reloading cold. */
+export const OLLAMA_KEEP_ALIVE = '30m';
+/** Generous timeout for the one-off warmup call: a cold multi-billion-parameter
+ *  embedding model on CPU can take far longer to LOAD than a normal embed's
+ *  timeout, so the load must be given room to finish once. */
+export const OLLAMA_WARMUP_TIMEOUT_MS = 300_000;
 
 /* ------------------------------------------------------------------ */
 /* Ollama connectivity                                                 */
@@ -30,7 +37,7 @@ export async function ollamaEmbed(
   const resp = await fetch(`${url}/api/embed`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, input: inputs }),
+    body: JSON.stringify({ model, input: inputs, keep_alive: OLLAMA_KEEP_ALIVE }),
     signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
   });
   if (!resp.ok) {
@@ -42,6 +49,29 @@ export async function ollamaEmbed(
     throw new Error('Ollama returned no embeddings');
   }
   return data.embeddings;
+}
+
+/** Preload an embedding model so it is resident before a populate run. A cold
+ *  model can take longer to load than a single embed's timeout — without this,
+ *  every batch would abort and fall back to (weak) hash embeddings. Loads it once
+ *  with a generous timeout and a long keep_alive; subsequent embeds are warm and
+ *  fast. Best-effort: returns false on any failure (caller proceeds regardless). */
+export async function warmOllamaModel(
+  url: string,
+  model: string,
+  timeoutMs: number = OLLAMA_WARMUP_TIMEOUT_MS,
+): Promise<boolean> {
+  try {
+    const resp = await fetch(`${url}/api/embed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, input: 'warmup', keep_alive: OLLAMA_KEEP_ALIVE }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return resp.ok;
+  } catch {
+    return false;
+  }
 }
 
 /* ------------------------------------------------------------------ */

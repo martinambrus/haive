@@ -22,6 +22,7 @@ import {
 import {
   probeOllama,
   ollamaEmbed,
+  warmOllamaModel,
   hashEmbed,
   vectorLiteral,
   EMBED_BATCH_SIZE,
@@ -267,6 +268,16 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
       await ctx.emitProgress('Ensuring RAG schema...');
       const { usedPgvector } = await ensureRagSchema(conn);
       const useOllama = detected.ollamaReachable && !!prefs.ollamaUrl && !!prefs.embeddingModel;
+      if (useOllama) {
+        // Warm the embedding model once so a cold (slow-to-load) model does not
+        // time out every batch into hash fallback; keep_alive keeps it resident.
+        await ctx.emitProgress('Warming embedding model (first load can take a minute)...');
+        const warmed = await warmOllamaModel(prefs.ollamaUrl!, prefs.embeddingModel!);
+        ctx.logger.info(
+          { model: prefs.embeddingModel, warmed },
+          warmed ? 'embedding model warmed' : 'embedding model warmup failed (will hash-fallback)',
+        );
+      }
 
       // Resolve repository_id — required for dedup. Without it we'd be
       // re-embedding the same content on every task. Bail early with a

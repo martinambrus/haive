@@ -6,6 +6,7 @@ export {
   EMBED_BATCH_SIZE,
   probeOllama,
   ollamaEmbed,
+  warmOllamaModel,
   hashEmbed,
   vectorLiteral,
   embedQuery,

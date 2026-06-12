@@ -24,6 +24,7 @@ import {
 import {
   probeOllama,
   ollamaEmbed,
+  warmOllamaModel,
   hashEmbed,
   vectorLiteral,
   EMBED_BATCH_SIZE,
@@ -723,6 +724,19 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
 
       const useOllama =
         detected.ollamaReachable && !!detected.ollamaUrl && !!detected.embeddingModel;
+
+      // Warm the embedding model ONCE before the per-file loop. A cold model (esp.
+      // a multi-billion-parameter embedding model on CPU) can take longer to load
+      // than a single embed's timeout, so otherwise every batch aborts → slow hash
+      // fallback. keep_alive (set in ollamaEmbed) then keeps it resident all run.
+      if (useOllama) {
+        await ctx.emitProgress('Warming embedding model (first load can take a minute)...');
+        const warmed = await warmOllamaModel(detected.ollamaUrl!, detected.embeddingModel!);
+        ctx.logger.info(
+          { model: detected.embeddingModel, warmed },
+          warmed ? 'embedding model warmed' : 'embedding model warmup failed (will hash-fallback)',
+        );
+      }
 
       let kbChunkCount = 0;
       let codeChunkCount = 0;
