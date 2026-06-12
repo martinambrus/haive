@@ -5,7 +5,7 @@ import type { DetectResult, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
 import type { GlobalKbFacets } from '@haive/shared/global-kb';
-import { promoteToGlobalKbDraft } from '../_global-kb-promote.js';
+import { clearTaskPromotedDrafts, promoteToGlobalKbDraft } from '../_global-kb-promote.js';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -1113,6 +1113,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       // Global-routed entries become DRAFT rows in the cross-repo KB and are
       // NEVER written to .claude/knowledge_base/, so they are never indexed into
       // this repo's RAG (the "don't pollute the local DB" requirement, §5.4).
+      // Idempotent re-runs (Retry): drop this task's prior promoted drafts first
+      // so a retry replaces rather than duplicates them (no-op when KB is off).
+      await clearTaskPromotedDrafts(ctx.db, ctx.taskId, ctx.logger);
       for (const e of chosen.filter((entry) => entry.scope === 'global')) {
         const id = await promoteToGlobalKbDraft(
           ctx.db,

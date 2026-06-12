@@ -1,7 +1,8 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   globalKbEntries,
+  resolveGlobalKbSettings,
   withGlobalKb,
   type GlobalKbCategory,
   type GlobalKbFacets,
@@ -59,5 +60,40 @@ export async function promoteToGlobalKbDraft(
   } catch (err) {
     log.warn({ err, title: promotion.title }, 'global KB promotion failed (skipped)');
     return null;
+  }
+}
+
+/** Delete the DRAFT promotions a prior run of this task created, so re-running a
+ *  promoting step (a Retry) REPLACES rather than DUPLICATES them. Call once
+ *  before re-promoting. Only `status='draft' source='promoted'` rows for this
+ *  task are removed — entries the user already activated (curated KB) are left
+ *  untouched, and drafts hold no vectors so deleting the row is enough. No-ops
+ *  when the global KB is disabled (so a normal run never opens the store).
+ *  Best-effort: any failure is logged and returns 0 so it can never fail the
+ *  orchestration step. Returns the number of drafts removed. */
+export async function clearTaskPromotedDrafts(
+  db: Database,
+  taskId: string,
+  log: PromoteLogger,
+): Promise<number> {
+  try {
+    const settings = await resolveGlobalKbSettings();
+    if (!settings.enabled) return 0;
+    return await withGlobalKb(db, async ({ db: gdb }) => {
+      const removed = await gdb
+        .delete(globalKbEntries)
+        .where(
+          and(
+            eq(globalKbEntries.sourceTaskId, taskId),
+            eq(globalKbEntries.status, 'draft'),
+            eq(globalKbEntries.source, 'promoted'),
+          ),
+        )
+        .returning({ id: globalKbEntries.id });
+      return removed.length;
+    });
+  } catch (err) {
+    log.warn({ err, taskId }, 'global KB draft cleanup failed (skipped)');
+    return 0;
   }
 }

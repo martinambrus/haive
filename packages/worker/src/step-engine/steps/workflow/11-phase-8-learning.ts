@@ -7,7 +7,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { extractFencedJson } from '../_fenced-json.js';
-import { promoteToGlobalKbDraft } from '../_global-kb-promote.js';
+import { clearTaskPromotedDrafts, promoteToGlobalKbDraft } from '../_global-kb-promote.js';
 
 interface LearningDetect {
   taskTitle: string;
@@ -384,6 +384,9 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         ? await writeLearningEntries(ctx.repoPath, entries, reviewerNote)
         : [];
 
+    // Idempotent re-runs (Retry): replace this task's prior promoted drafts so a
+    // retry never duplicates them (no-op when the global KB is off).
+    await clearTaskPromotedDrafts(ctx.db, ctx.taskId, ctx.logger);
     let investigationWritten: string | null = null;
     const investigation = args.detected.isBugFix
       ? parseInvestigation(args.llmOutput ?? null)
