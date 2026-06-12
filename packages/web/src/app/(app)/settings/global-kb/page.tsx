@@ -681,8 +681,28 @@ export default function GlobalKbPage() {
           {paged.map((e) => {
             const enriching = e.status === 'enriching' || e.status === 'skeleton';
             return (
-              <Card key={e.id}>
-                <div className="flex flex-col gap-2">
+              <Card
+                key={e.id}
+                className={
+                  enriching
+                    ? 'p-4'
+                    : 'cursor-pointer p-4 transition-colors hover:border-neutral-700'
+                }
+                onClick={enriching ? undefined : () => setSelected(e)}
+                role={enriching ? undefined : 'button'}
+                tabIndex={enriching ? undefined : 0}
+                onKeyDown={
+                  enriching
+                    ? undefined
+                    : (ev) => {
+                        if (ev.key === 'Enter' || ev.key === ' ') {
+                          ev.preventDefault();
+                          setSelected(e);
+                        }
+                      }
+                }
+              >
+                <div className="flex flex-col gap-1.5">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium text-neutral-50">{e.title}</span>
                     {enriching ? (
@@ -700,32 +720,17 @@ export default function GlobalKbPage() {
                         {e.embedStatus}
                       </Badge>
                     )}
-                  </div>
-                  <p className="text-xs text-neutral-400">{facetsSummary(e.facets)}</p>
-                  <div className="flex flex-wrap items-center gap-3">
                     {!enriching && (
-                      <Button size="sm" variant="secondary" onClick={() => setSelected(e)}>
-                        View
-                      </Button>
-                    )}
-                    {e.sourceTaskId && (
-                      <a
-                        href={`/tasks/${e.sourceTaskId}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs font-medium text-indigo-400 hover:text-indigo-300"
-                      >
-                        {enriching ? 'Watch task ↗' : 'View task ↗'}
-                      </a>
-                    )}
-                    {enriching ? (
-                      <span className="text-xs text-neutral-500">
-                        Reading the repo in the background — activates automatically when done.
-                      </span>
-                    ) : (
-                      <>
+                      <div className="ml-auto flex items-center gap-2">
                         {e.status === 'draft' && (
-                          <Button size="sm" disabled={busy} onClick={() => void activate(e)}>
+                          <Button
+                            size="sm"
+                            disabled={busy}
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              void activate(e);
+                            }}
+                          >
                             Activate
                           </Button>
                         )}
@@ -733,11 +738,33 @@ export default function GlobalKbPage() {
                           size="sm"
                           variant="destructive"
                           disabled={busy}
-                          onClick={() => void remove(e)}
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            void remove(e);
+                          }}
                         >
                           Delete
                         </Button>
-                      </>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <p className="text-xs text-neutral-400">{facetsSummary(e.facets)}</p>
+                    {e.sourceTaskId && (
+                      <a
+                        href={`/tasks/${e.sourceTaskId}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(ev) => ev.stopPropagation()}
+                        className="text-xs font-medium text-indigo-400 hover:text-indigo-300"
+                      >
+                        {enriching ? 'Watch task ↗' : 'View task ↗'}
+                      </a>
+                    )}
+                    {enriching && (
+                      <span className="text-xs text-neutral-500">
+                        Reading the repo in the background — activates automatically when done.
+                      </span>
                     )}
                   </div>
                 </div>
