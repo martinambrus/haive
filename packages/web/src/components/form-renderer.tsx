@@ -6,6 +6,7 @@ import type { DiffDetails, FormField, FormSchema, LeafFormField } from '@haive/s
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { BundleComposer, type BundleComposerEntry } from '@/components/bundle-composer';
+import { GlobalKbStatusPanel } from '@/components/global-kb-status-panel';
 import { MarkdownView, looksLikeMarkdown } from '@/components/markdown/markdown-view';
 import { cn } from '@/lib/cn';
 import { validateRequired, type FormValues } from '@/components/form-validation';
@@ -676,6 +677,13 @@ function FieldControl({ field, value, onChange, disabled, repositoryId }: FieldR
         />
       );
     }
+    case 'global-kb-status':
+      return (
+        <GlobalKbStatusPanel
+          repositoryId={field.repositoryId ?? null}
+          cliProviderId={field.cliProviderId ?? null}
+        />
+      );
   }
 }
 

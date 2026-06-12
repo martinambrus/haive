@@ -36,10 +36,6 @@ interface ToolingDetect {
    *  as the form-field default so a re-run of step 04 reflects the most
    *  recently saved choice instead of the hard-coded migration default. */
   rtkEnabled: boolean;
-  /** Threaded into the "Settings → Global KB" link so opening it pre-fills the
-   *  "Add a house rule" repo + CLI with this task's. */
-  repositoryId: string | null;
-  cliProviderId: string | null;
 }
 
 interface EnvDetectData {
@@ -158,8 +154,6 @@ export const toolingInfrastructureStep: StepDefinition<
       cliSupportsMcp: cliMeta?.supportsMcp ?? false,
       cliSupportsPlugins: cliMeta?.supportsPlugins ?? false,
       rtkEnabled,
-      repositoryId,
-      cliProviderId: ctx.cliProviderId,
     };
   },
 
@@ -175,26 +169,10 @@ export const toolingInfrastructureStep: StepDefinition<
     );
     const ragDefault = detected.containerType === 'ddev' ? 'ddev' : 'internal';
 
-    // Carry this task's repo + CLI into the Global KB link so "Add a house rule"
-    // arrives pre-filled (the link opens in a new tab, so this task is not lost).
-    const gkbParams = new URLSearchParams();
-    if (detected.repositoryId) gkbParams.set('repo', detected.repositoryId);
-    if (detected.cliProviderId) gkbParams.set('cli', detected.cliProviderId);
-    const gkbHref = gkbParams.toString()
-      ? `/settings/global-kb?${gkbParams.toString()}`
-      : '/settings/global-kb';
-
     return {
       title: 'Tooling and infrastructure',
       description:
         'Configure RAG storage, Ollama embeddings, MCP browser testing and LSP language server preferences for this project.',
-      infoSections: [
-        {
-          title: 'Shared global knowledge base (set up once)',
-          body: `### Global KB\n\nThe RAG storage below is the **per-repository** vector DB for THIS project. Separately, Haive keeps one instance-wide **global knowledge base** of house standards that every project retrieves from (version-scoped to its stack). Configure its database connection + embedding model once at **[Settings → Global KB](${gkbHref})** — open it to choose internal vs an external/central DB and to set the embedding model (otherwise it falls back to weak hash embeddings).`,
-          defaultOpen: true,
-        },
-      ],
       fields: [
         {
           type: 'select',

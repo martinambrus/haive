@@ -117,6 +117,13 @@ export default function GlobalKbPage() {
         cliProviderId: cli ?? p.cliProviderId,
       }));
     }
+    // Arriving via the onboarding "Add Global House KB" button (#add) → scroll to
+    // the authoring card once the page has laid out.
+    if (window.location.hash === '#add') {
+      setTimeout(() => {
+        document.getElementById('add-house-rule')?.scrollIntoView({ behavior: 'smooth' });
+      }, 150);
+    }
   }, []);
   const [cfg, setCfg] = useState({
     enabled: true,
@@ -527,7 +534,7 @@ export default function GlobalKbPage() {
         </div>
       </Card>
 
-      <Card>
+      <Card id="add-house-rule">
         <CardHeader>
           <CardTitle>Add a house rule</CardTitle>
           <CardDescription>

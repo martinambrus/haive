@@ -172,6 +172,15 @@ export const bundleComposerFieldSchema = baseField.extend({
   credentialOptions: z.array(bundleComposerCredentialOptionSchema),
 });
 
+/** Display-only panel: the renderer live-validates the instance-level global KB
+ *  (enabled / DB / Ollama) and shows status + an Add/Fix action button. Carries
+ *  the task's repo + CLI so the "Add a house rule" link can pre-fill them. */
+export const globalKbStatusFieldSchema = baseField.extend({
+  type: z.literal('global-kb-status'),
+  repositoryId: z.string().nullable().optional(),
+  cliProviderId: z.string().nullable().optional(),
+});
+
 export const leafFormFieldSchema = z.discriminatedUnion('type', [
   textFieldSchema,
   textareaFieldSchema,
@@ -186,6 +195,7 @@ export const leafFormFieldSchema = z.discriminatedUnion('type', [
   numberFieldSchema,
   directoryTreeFieldSchema,
   bundleComposerFieldSchema,
+  globalKbStatusFieldSchema,
 ]);
 
 export type LeafFormField = z.infer<typeof leafFormFieldSchema>;
@@ -218,6 +228,7 @@ export const formFieldSchema = z.discriminatedUnion('type', [
   directoryTreeFieldSchema,
   accordionFieldSchema,
   bundleComposerFieldSchema,
+  globalKbStatusFieldSchema,
 ]);
 
 export type FormField = z.infer<typeof formFieldSchema>;
