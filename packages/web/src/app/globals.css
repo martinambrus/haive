@@ -87,3 +87,37 @@ body {
   .haive-md details[open] > *:not(summary),
   .haive-reveal { animation: none; }
 }
+
+/* Syntax highlighting for fenced code (rehype-highlight / highlight.js): a
+ * compact dark theme scoped to markdown bodies, in the app's palette. Inline
+ * code (no .hljs) keeps its amber style above. */
+.haive-md .hljs { color: rgb(229 229 229); }
+.haive-md .hljs-comment,
+.haive-md .hljs-quote { color: rgb(115 115 115); font-style: italic; }
+.haive-md .hljs-keyword,
+.haive-md .hljs-selector-tag,
+.haive-md .hljs-literal,
+.haive-md .hljs-type,
+.haive-md .hljs-name,
+.haive-md .hljs-tag { color: rgb(192 132 252); }
+.haive-md .hljs-built_in,
+.haive-md .hljs-class .hljs-title,
+.haive-md .hljs-title.class_ { color: rgb(94 234 212); }
+.haive-md .hljs-string,
+.haive-md .hljs-attr,
+.haive-md .hljs-regexp,
+.haive-md .hljs-addition { color: rgb(134 239 172); }
+.haive-md .hljs-number,
+.haive-md .hljs-symbol,
+.haive-md .hljs-bullet { color: rgb(251 191 36); }
+.haive-md .hljs-title,
+.haive-md .hljs-title.function_,
+.haive-md .hljs-section { color: rgb(96 165 250); }
+.haive-md .hljs-meta { color: rgb(148 163 184); }
+.haive-md .hljs-variable,
+.haive-md .hljs-template-variable,
+.haive-md .hljs-params,
+.haive-md .hljs-property { color: rgb(229 231 235); }
+.haive-md .hljs-deletion { color: rgb(252 165 165); }
+.haive-md .hljs-emphasis { font-style: italic; }
+.haive-md .hljs-strong { font-weight: 600; }

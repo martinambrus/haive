@@ -3,6 +3,7 @@
 import { useMemo, useRef } from 'react';
 import ReactMarkdown, { type Components, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeHighlight from 'rehype-highlight';
 import type { Element, ElementContent } from 'hast';
 import { cn } from '@/lib/cn';
 import { segmentMarkdownBody, type Segment } from './markdown-segments';
@@ -166,7 +167,12 @@ export function MarkdownView({
           return <BeforeAfterBlock key={i} before={segment.before} after={segment.after} />;
         }
         return (
-          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+          <ReactMarkdown
+            key={i}
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}
+            components={MD_COMPONENTS}
+          >
             {segment.text}
           </ReactMarkdown>
         );
