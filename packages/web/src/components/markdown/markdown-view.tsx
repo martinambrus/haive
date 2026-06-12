@@ -11,11 +11,14 @@ import { QuizBlock } from './quiz-block';
 import { MermaidBlock } from './mermaid-block';
 import { BeforeAfterBlock, BeforeAfterPanel } from './before-after-block';
 
-/** Heuristic markdown detection — true when the body contains at least one
- *  heading line or a fenced code block. Avoids false positives on plain "- "
- *  lists or "**" emphasis which appear in regular text outputs. */
+/** Heuristic markdown detection — true when the body has a heading line, a fenced
+ *  code block, or a Markdown link `[text](url)`. Stays conservative on plain "- "
+ *  lists / "**" emphasis (which appear in regular text outputs) to avoid false
+ *  positives; a full link with parens is specific enough to be safe. */
 export function looksLikeMarkdown(text: string): boolean {
-  return /^\s*#{1,6}\s+\S/m.test(text) || /^\s*```/m.test(text);
+  return (
+    /^\s*#{1,6}\s+\S/m.test(text) || /^\s*```/m.test(text) || /\[[^\]\n]+\]\([^)\s]+\)/.test(text)
+  );
 }
 
 /** Fenced code blocks longer than this render collapsed inside <details>. */
