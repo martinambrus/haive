@@ -163,10 +163,17 @@ export function NotificationProvider() {
       const m = /^\/tasks\/([^/]+)$/.exec(pathRef.current ?? '');
       const currentTaskId = m?.[1] ?? null;
       const isCurrent = e.taskId === currentTaskId;
-      // Tab VISIBILITY (not hasFocus): focus inside the embedded cross-origin
-      // VNC/browser iframe at a gate makes hasFocus() false, which would defeat
-      // the "you're looking at it" suppression — visibilityState has no such hole.
-      const viewing = isCurrent && document.visibilityState === 'visible';
+      // "Viewing" = the user is genuinely looking at THIS task: its tab is
+      // rendered AND its window has focus. visibilityState alone is `visible` for
+      // a task left open in a SEPARATE window/monitor while another window is on
+      // top — which wrongly suppressed the very alert the user is waiting for
+      // (their reported case: restart a task in window A, work in window B, never
+      // get notified). Require hasFocus() too. At a waiting_user gate the focused
+      // element is the same-origin form, so the cross-origin VNC-iframe focus
+      // quirk (which only matters during a running terminal, not a gate) does not
+      // apply; and the OS-notification branch below already pivots on hasFocus(),
+      // so the two stay consistent.
+      const viewing = isCurrent && document.visibilityState === 'visible' && document.hasFocus();
       if (viewing) {
         markSeen(e); // looking at it now → don't nag for this episode anywhere
         return;
