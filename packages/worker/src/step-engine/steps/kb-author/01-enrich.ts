@@ -1,30 +1,28 @@
-import { eq } from 'drizzle-orm';
+import { and, desc, eq, inArray, ne } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { globalKbEntries, withGlobalKb, type GlobalKbFacets } from '@haive/shared/global-kb';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { extractFencedJson } from '../_fenced-json.js';
+import { syncGlobalKbEntry } from '../../../queues/global-kb-sync-queue.js';
 
-// Repo-anchored global-KB enrichment (plan §5.1/§5.3). The task is created by the
-// global-kb enrich endpoint with a repositoryId + cliProviderId and
-// metadata.globalKbEntryId pointing at a `skeleton` entry. The generic task
-// machinery mounts the repo into the sandbox and dispatches the chosen CLI when
-// this step's llm phase runs, so the model can READ the repo's module code and
-// extract real examples + the MAJOR version. The result lands as a `draft` the
-// user reviews + activates in Settings → Global KB. Form-less: detect → llm →
-// apply, hands-free (mirrors 01-env-detect).
+// Repo-anchored global-KB authoring (plan serialized-crunching-aurora). The task
+// is created by the global-kb enrich endpoint with a repositoryId + cliProviderId
+// and metadata.globalKbEntryId pointing at a `skeleton` entry whose body is the
+// author's free-text notes. The generic task machinery mounts the repo and
+// dispatches the chosen CLI when this step's llm phase runs, so the model READS
+// the repo's code to derive EVERYTHING itself — title, category, version facets
+// and the article body — and decides whether the rule already exists (update) or
+// is new (insert). The result is auto-activated and embedded immediately (no
+// review step). Form-less: detect -> llm -> apply, hands-free.
 
-interface KbAuthorDetect {
-  entryId: string | null;
-  title: string;
-  seedText: string;
-  facets: GlobalKbFacets;
-}
-
-interface KbAuthorApply {
-  entryId: string | null;
-  status: 'draft' | 'skipped';
-  sections: number;
-}
+const CATEGORIES = [
+  'general',
+  'tech_pattern',
+  'anti_pattern',
+  'best_practice',
+  'quick_reference',
+] as const;
+type Category = (typeof CATEGORIES)[number];
 
 const FACET_DIMS = [
   'framework',
@@ -36,6 +34,41 @@ const FACET_DIMS = [
   'tags',
 ] as const;
 
+/** Cap on existing entries fed to the model for de-dup. House standards are a
+ *  small corpus; if it ever grows past this we log rather than silently drop. */
+const EXISTING_LIMIT = 200;
+
+interface ExistingEntry {
+  id: string;
+  title: string;
+  category: string;
+  facets: GlobalKbFacets;
+  excerpt: string;
+}
+
+interface KbAuthorDetect {
+  entryId: string | null;
+  namespace: string;
+  seedText: string;
+  existing: ExistingEntry[];
+}
+
+interface KbAuthorApply {
+  entryId: string | null;
+  status: 'active' | 'skipped';
+  mode: 'new' | 'update';
+  sections: number;
+}
+
+interface Enrichment {
+  mode?: string;
+  targetId?: string;
+  title?: string;
+  category?: string;
+  facets?: GlobalKbFacets;
+  body?: string;
+}
+
 async function loadEntryId(ctx: StepContext): Promise<string | null> {
   const task = await ctx.db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
@@ -45,62 +78,88 @@ async function loadEntryId(ctx: StepContext): Promise<string | null> {
   return md?.globalKbEntryId ?? null;
 }
 
+function firstLine(text: string): string {
+  return (
+    text
+      .split('\n')
+      .map((s) => s.trim())
+      .find(Boolean) ?? ''
+  );
+}
+
 function buildEnrichPrompt(detected: KbAuthorDetect): string {
-  const stack = FACET_DIMS.map((d) => {
-    const v = detected.facets[d];
-    return Array.isArray(v) && v.length ? `${d}: ${v.join(', ')}` : '';
-  })
-    .filter(Boolean)
-    .join('; ');
+  const existing = detected.existing.length
+    ? detected.existing
+        .map((e) => {
+          const stack = [...(e.facets.framework ?? []), ...(e.facets.frameworkMajor ?? [])].join(
+            ' ',
+          );
+          return [
+            `- id: ${e.id}`,
+            `  title: ${e.title}`,
+            `  category: ${e.category}`,
+            stack ? `  stack: ${stack}` : '',
+            `  excerpt: ${e.excerpt.replace(/\s+/g, ' ').trim()}`,
+          ]
+            .filter(Boolean)
+            .join('\n');
+        })
+        .join('\n')
+    : '(none yet)';
   return [
-    'You are documenting a reusable house standard for a global, cross-project knowledge base.',
-    "You are running inside a sandbox with THIS project's repository checked out at the current",
-    'working directory. You have file tools to read it, and — only if network egress is permitted —',
+    'You document reusable house standards for a global, cross-project knowledge base.',
+    "You run inside a sandbox with THIS project's repository checked out at the working",
+    'directory. You have file tools to read it, and — only if network egress is permitted —',
     'web access. Do not assume internet access; if a fetch fails, rely on the repository alone.',
     '',
-    '## Title',
-    detected.title,
+    "## The author's notes (free text — the house rule to capture)",
+    detected.seedText || '(empty)',
     '',
-    '## Target stack (from the author)',
-    stack || '(unspecified)',
-    '',
-    '## Skeleton to expand into a complete, concrete entry',
-    detected.seedText || '(empty — derive the topic from the title)',
+    '## Existing house rules (for de-duplication)',
+    existing,
     '',
     '## Your task',
-    '1. READ the relevant module / library / code in THIS repository that the skeleton refers to.',
-    '   Cite real file paths and copy concrete, working examples (config, code) from the repo — not',
-    '   generic advice.',
-    '2. Determine the MAJOR version of the framework and any relevant module from the repo manifests',
-    '   (composer.json drupal/core, package.json, lockfiles). MAJOR versions only (e.g. 11, not 11.2).',
-    '3. If you have web access, research the official documentation / module README to fill gaps and',
-    '   add accurate usage. If you have no web access, rely on the repository only.',
-    '4. Produce a complete, self-contained markdown article another engineer could follow.',
+    '1. READ the relevant module / library / code in THIS repository that the notes refer to.',
+    '   Cite real file paths and copy concrete, working examples from the repo, not generic advice.',
+    '2. From the repo manifests (composer.json drupal/core, package.json, lockfiles) determine the',
+    '   framework and its MAJOR version + any relevant packages. MAJOR only (e.g. 11, not 11.2).',
+    '3. If web access is available, consult official docs / module READMEs (including any URLs the',
+    '   author wrote) to fill gaps. Otherwise rely on the repository.',
+    '4. Decide whether this rule already exists above. If it is the SAME rule (same topic / module /',
+    '   scope) as one listed, set mode="update" and targetId to that id — you will REPLACE it with a',
+    '   complete, improved article that incorporates the new notes. Otherwise set mode="new".',
+    `5. Derive a concise TITLE, the best CATEGORY (one of: ${CATEGORIES.join(', ')}), the version`,
+    '   FACETS, and write the full, self-contained markdown article BODY.',
     '',
     '## Output — emit EXACTLY ONE fenced ```json block and nothing else:',
     '```json',
     '{',
-    '  "body": "<the full markdown article>",',
+    '  "mode": "new" | "update",',
+    '  "targetId": "<the existing id when mode=update; omit otherwise>",',
+    '  "title": "<concise title>",',
+    '  "category": "<one of the categories listed above>",',
     '  "facets": {',
     '    "framework": ["<e.g. drupal>"],',
     '    "frameworkMajor": ["<e.g. 11>"],',
     '    "language": ["<e.g. php>"],',
     '    "packages": ["<name@major, e.g. drupal/paragraphs@8>"]',
-    '  }',
+    '  },',
+    '  "body": "<the full markdown article>"',
     '}',
     '```',
-    'Set facets to the versions you actually found in the repository. Omit a dimension that does not',
-    'apply. Major versions only.',
+    'Set facets to the versions you actually found in the repository; omit a dimension that does not',
+    'apply (an omitted dimension means the rule applies to all values). Major versions only.',
   ].join('\n');
 }
 
-function parseEnrichment(raw: unknown): { body?: string; facets?: GlobalKbFacets } | null {
+export function parseEnrichment(raw: unknown): Enrichment | null {
   let text: string | null = null;
   if (typeof raw === 'string') {
     text = raw;
   } else if (raw && typeof raw === 'object') {
     const o = raw as Record<string, unknown>;
-    if (typeof o.body === 'string') return { body: o.body, facets: o.facets as GlobalKbFacets };
+    // Already-structured output (e.g. the bypass stub) — take it as-is.
+    if (typeof o.body === 'string') return o as Enrichment;
     if (typeof o.result === 'string') text = o.result;
     else if (typeof o.text === 'string') text = o.text;
     else text = JSON.stringify(o);
@@ -108,25 +167,39 @@ function parseEnrichment(raw: unknown): { body?: string; facets?: GlobalKbFacets
   if (!text) return null;
   const json = extractFencedJson(text) ?? text;
   try {
-    return JSON.parse(json) as { body?: string; facets?: GlobalKbFacets };
+    return JSON.parse(json) as Enrichment;
   } catch {
     return null;
   }
 }
 
-/** Author facets are the intent; the LLM read the actual repo, so its values win
- *  per dimension when present, otherwise keep the author's. */
-function mergeFacets(seed: GlobalKbFacets, llm?: GlobalKbFacets): GlobalKbFacets {
+/** Sanitize the LLM's facets to clean string sets per known dimension. */
+export function cleanFacets(llm?: GlobalKbFacets): GlobalKbFacets {
   const out: GlobalKbFacets = {};
   for (const d of FACET_DIMS) {
-    const l = llm?.[d];
-    const s = seed?.[d];
-    const v = Array.isArray(l) && l.length ? l : s;
+    const v = llm?.[d];
     if (Array.isArray(v) && v.length) {
       out[d] = [...new Set(v.filter((x) => typeof x === 'string' && x).map(String))];
     }
   }
   return out;
+}
+
+export function normCategory(c?: string): Category {
+  return (CATEGORIES as readonly string[]).includes(c ?? '') ? (c as Category) : 'general';
+}
+
+/** Decide where the article is written: an existing entry the model matched
+ *  (honored only when its targetId is one we actually showed it) or the fresh
+ *  skeleton. */
+export function resolveWriteTarget(
+  parsed: Enrichment | null,
+  skeletonId: string,
+  existingIds: ReadonlySet<string>,
+): { isUpdate: boolean; targetId: string } {
+  const isUpdate =
+    parsed?.mode === 'update' && !!parsed.targetId && existingIds.has(parsed.targetId);
+  return { isUpdate, targetId: isUpdate ? parsed!.targetId! : skeletonId };
 }
 
 export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> = {
@@ -136,29 +209,59 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
     index: 0,
     title: 'Knowledge base enrichment',
     description:
-      'Expands a skeleton into a version-scoped global KB draft by reading the chosen repository (and, if egress allows, online docs) with a chosen CLI.',
+      'Reads the chosen repository to turn free-text house-rule notes into a version-scoped global KB entry — deriving the title, category and facets, then inserting a new entry or updating a matching one and activating it.',
     requiresCli: true,
   },
 
   async detect(ctx): Promise<KbAuthorDetect> {
     const entryId = await loadEntryId(ctx);
     if (!entryId) throw new Error('kb_author task is missing metadata.globalKbEntryId');
-    const entry = await withGlobalKb(ctx.db, async ({ db }) =>
-      db.query.globalKbEntries.findFirst({ where: eq(globalKbEntries.id, entryId) }),
-    );
-    if (!entry) throw new Error(`global KB entry ${entryId} not found`);
-    await withGlobalKb(ctx.db, async ({ db }) => {
+    return withGlobalKb(ctx.db, async ({ db }) => {
+      const entry = await db.query.globalKbEntries.findFirst({
+        where: eq(globalKbEntries.id, entryId),
+      });
+      if (!entry) throw new Error(`global KB entry ${entryId} not found`);
       await db
         .update(globalKbEntries)
         .set({ status: 'enriching', updatedAt: new Date() })
         .where(eq(globalKbEntries.id, entryId));
+      const rows = await db
+        .select({
+          id: globalKbEntries.id,
+          title: globalKbEntries.title,
+          category: globalKbEntries.category,
+          facets: globalKbEntries.facets,
+          body: globalKbEntries.body,
+        })
+        .from(globalKbEntries)
+        .where(
+          and(
+            inArray(globalKbEntries.status, ['active', 'draft']),
+            ne(globalKbEntries.id, entryId),
+          ),
+        )
+        .orderBy(desc(globalKbEntries.updatedAt))
+        .limit(EXISTING_LIMIT + 1);
+      if (rows.length > EXISTING_LIMIT) {
+        ctx.logger.warn(
+          { count: rows.length },
+          `global KB de-dup context capped at ${EXISTING_LIMIT} entries`,
+        );
+      }
+      const existing: ExistingEntry[] = rows.slice(0, EXISTING_LIMIT).map((r) => ({
+        id: r.id,
+        title: r.title,
+        category: r.category,
+        facets: r.facets ?? {},
+        excerpt: (r.body ?? '').slice(0, 400),
+      }));
+      return {
+        entryId,
+        namespace: entry.namespace,
+        seedText: entry.seedText ?? entry.body,
+        existing,
+      };
     });
-    return {
-      entryId,
-      title: entry.title,
-      seedText: entry.seedText ?? entry.body,
-      facets: entry.facets ?? {},
-    };
   },
 
   llm: {
@@ -167,35 +270,81 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
     timeoutMs: 30 * 60 * 1000,
     bypassStub: (args) => {
       const d = args.detected as KbAuthorDetect;
-      return { body: `# ${d.title}\n\n${d.seedText}`, facets: d.facets };
+      const title = firstLine(d.seedText).slice(0, 80) || 'Untitled house rule';
+      return {
+        mode: 'new',
+        title,
+        category: 'general',
+        facets: {},
+        body: `# ${title}\n\n${d.seedText}`,
+      };
     },
   },
 
   async apply(ctx, args): Promise<KbAuthorApply> {
     const detected = args.detected as KbAuthorDetect;
-    if (!detected.entryId) return { entryId: null, status: 'skipped', sections: 0 };
+    if (!detected.entryId) return { entryId: null, status: 'skipped', mode: 'new', sections: 0 };
+    const skeletonId = detected.entryId;
 
     const parsed = parseEnrichment(args.llmOutput ?? null);
+    const title =
+      parsed?.title?.trim() || firstLine(detected.seedText).slice(0, 80) || 'Untitled house rule';
+    const category = normCategory(parsed?.category);
+    const facets = cleanFacets(parsed?.facets);
     const body =
       parsed?.body && parsed.body.trim().length > 0
         ? parsed.body
-        : `# ${detected.title}\n\n${detected.seedText}`;
-    const facets = mergeFacets(detected.facets, parsed?.facets);
+        : `# ${title}\n\n${detected.seedText}`;
 
-    await withGlobalKb(ctx.db, async ({ db }) => {
-      await db
+    // The model may flag this as an update of an existing rule; only honor a
+    // targetId we actually showed it (else fall back to inserting the skeleton).
+    const existingIds = new Set(detected.existing.map((e) => e.id));
+    const { isUpdate, targetId } = resolveWriteTarget(parsed, skeletonId, existingIds);
+
+    const namespace = await withGlobalKb(ctx.db, async ({ db }) => {
+      const now = new Date();
+      if (isUpdate) {
+        // Fold the new article into the matched entry; retire the transient skeleton.
+        await db
+          .update(globalKbEntries)
+          .set({ status: 'archived', supersededAt: now, updatedAt: now })
+          .where(eq(globalKbEntries.id, skeletonId));
+      }
+      const [row] = await db
         .update(globalKbEntries)
-        .set({ body, facets, status: 'draft', embedStatus: 'pending', updatedAt: new Date() })
-        .where(eq(globalKbEntries.id, detected.entryId!));
+        .set({
+          title,
+          category,
+          facets,
+          body,
+          status: 'active',
+          embedStatus: 'pending',
+          updatedAt: now,
+        })
+        .where(eq(globalKbEntries.id, targetId))
+        .returning({ namespace: globalKbEntries.namespace });
+      return row?.namespace ?? detected.namespace;
     });
 
+    // Auto-activate: embed now (no manual Activate step) so the entry is
+    // retrievable immediately. Mirrors the API's enqueueSync, run inline.
+    try {
+      await syncGlobalKbEntry({ entryId: targetId, namespace, reason: 'upsert' });
+    } catch (err) {
+      ctx.logger.warn(
+        { err, entryId: targetId },
+        'global KB embed after enrich failed; entry is active but unembedded',
+      );
+    }
+
     ctx.logger.info(
-      { entryId: detected.entryId, enriched: !!parsed?.body },
-      'kb enrichment complete → draft',
+      { entryId: targetId, mode: isUpdate ? 'update' : 'new', enriched: !!parsed?.body },
+      'kb enrichment complete → active',
     );
     return {
-      entryId: detected.entryId,
-      status: 'draft',
+      entryId: targetId,
+      status: 'active',
+      mode: isUpdate ? 'update' : 'new',
       sections: (body.match(/^##\s/gm) ?? []).length,
     };
   },

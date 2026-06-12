@@ -85,10 +85,9 @@ async function enqueueSync(
 }
 
 const enrichSchema = z.object({
-  title: z.string().min(1).max(300),
-  body: z.string().min(1),
-  category: z.enum(CATEGORIES),
-  facets: facetsSchema.optional(),
+  // Free-text house rules — the only content input. The kb_author task derives
+  // the title, category and version facets itself by reading the chosen repo.
+  seedText: z.string().min(1),
   namespace: z.string().min(1).max(120).optional(),
   repositoryId: z.string().uuid(),
   cliProviderId: z.string().uuid(),
@@ -280,17 +279,25 @@ globalKbRoutes.post('/enrich', async (c) => {
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
 
+  const firstLine =
+    data.seedText
+      .split('\n')
+      .map((s) => s.trim())
+      .find(Boolean) ?? '';
+  const placeholderTitle = firstLine.slice(0, 80) || 'Untitled house rule';
+
   const entry = await withGlobalKb(db, async ({ db: gdb, settings }) => {
     const [row] = await gdb
       .insert(globalKbEntries)
       .values({
         namespace: data.namespace || settings.namespace,
         userId,
-        title: data.title,
-        seedText: data.body,
-        body: data.body,
-        category: data.category,
-        facets: (data.facets ?? {}) as GlobalKbFacets,
+        // Placeholders; the kb_author LLM overwrites title/category/facets/body.
+        title: placeholderTitle,
+        seedText: data.seedText,
+        body: data.seedText,
+        category: 'general',
+        facets: {},
         status: 'skeleton',
         source: 'user',
         embedStatus: 'pending',
@@ -304,7 +311,7 @@ globalKbRoutes.post('/enrich', async (c) => {
     .values({
       userId,
       type: 'kb_author',
-      title: `Enrich: ${data.title}`.slice(0, 512),
+      title: `Enrich: ${firstLine || data.seedText}`.slice(0, 512),
       repositoryId: data.repositoryId,
       cliProviderId: data.cliProviderId,
       metadata: {
