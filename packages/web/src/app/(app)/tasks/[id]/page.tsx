@@ -1084,9 +1084,9 @@ function TaskTotalTime({
           <span className="text-[10px] uppercase tracking-wider text-neutral-500">user</span>
         </div>
         <div className="flex flex-col items-end">
-          <span className="font-mono text-lg font-semibold text-neutral-50">{fmt(effortMs)}</span>
+          <span className="font-mono text-lg font-semibold text-rose-300">{fmt(effortMs)}</span>
           <span
-            className="text-[10px] uppercase tracking-wider text-neutral-400"
+            className="text-[10px] uppercase tracking-wider text-rose-400/80"
             title="Agent work + your active time = real task effort"
           >
             effort
