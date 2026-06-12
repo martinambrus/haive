@@ -288,11 +288,11 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '  - Write as if explaining to a new team member who needs to understand this area.',
     '- placements: for each ACCURATE existing file, one object with its current `path` plus',
     '  the canonical/category/tech slot it belongs in (content moved verbatim). Omit BOTH',
-    '  canonical and tech to leave a file exactly where it is. Set `scope: "global"` on a',
-    '  placement when that existing file is a reusable HOUSE STANDARD about a framework /',
-    '  library / plugin (same rule as entry scope — e.g. an ANTI_PATTERNS, BEST_PRACTICES or',
-    '  QUICK_REFERENCE file for a third-party technology): it is MOVED to the shared Global KB',
-    '  as a draft and removed from this repo. Default "local" (keep it in this repo).',
+    '  canonical and tech to leave a file exactly where it is. ANTI_PATTERNS, BEST_PRACTICES',
+    '  and QUICK_REFERENCE files are house standards about a third-party framework / library /',
+    '  plugin and are routed to the shared Global KB by DEFAULT (moved out of this repo as a',
+    '  draft). Set `scope: "local"` on such a placement ONLY when it is specific to THIS repo;',
+    '  tech_pattern and general/canonical files always stay local.',
     '- updates: for each STALE or incomplete existing file, one object with its `path`, the',
     '  canonical/category/tech slot, and improved `sections` (preserve correct content,',
     '  revise outdated parts, add new findings). Use placements OR updates for a file, never',
@@ -613,6 +613,22 @@ export function inferCategoryFromPath(relPath: string): GlobalKbCategory {
   if (relPath.startsWith('QUICK_REFERENCE/')) return 'quick_reference';
   if (relPath.startsWith('TECH_PATTERNS/')) return 'tech_pattern';
   return 'general';
+}
+
+/** Whether an existing-file placement routes to the Global KB. anti_pattern /
+ *  best_practice / quick_reference files are house standards ABOUT a third-party
+ *  technology, so they default to global — the per-file LLM scope tag proved
+ *  unreliable (it catches some and misses others, and varies run to run). The
+ *  LLM or user can force `scope: 'local'` to keep one in the repo. tech_pattern
+ *  (how THIS repo uses a tech) and general/canonical files stay local. */
+export function isGlobalRoutedPlacement(p: KbPlacement): boolean {
+  if (p.scope === 'global') return true;
+  if (p.scope === 'local') return false;
+  return (
+    p.category === 'anti_pattern' ||
+    p.category === 'best_practice' ||
+    p.category === 'quick_reference'
+  );
 }
 
 function entryToMarkdown(entry: KbEntry): string {
@@ -969,7 +985,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // list so the user controls the (destructive) move BEFORE apply: ticked → moved
     // to a Global KB draft + deleted locally; unticked → kept here (re-placed
     // verbatim). Drives both the reroute field and the message breakdown below.
-    const globalPlacements = placements.filter((p) => p.scope === 'global');
+    const globalPlacements = placements.filter(isGlobalRoutedPlacement);
     const localPlacementCount = placements.length - globalPlacements.length;
     const rerouteField: FormSchema['fields'][number] | null =
       globalPlacements.length > 0
@@ -1155,10 +1171,10 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     for (const p of placements) {
       const src = existingByPath.get(p.path);
       if (!src || handledSrc.has(src.relPath)) continue;
-      if (p.scope === 'global' && rerouteSet.has(p.path)) {
-        // Re-route: the LLM judged this existing local file a reusable house
-        // standard AND the user kept it ticked → MOVE it to the Global KB as a
-        // draft (deduped above) and delete the local copy so it never feeds RAG.
+      if (isGlobalRoutedPlacement(p) && rerouteSet.has(p.path)) {
+        // Re-route: a reusable house-standard file (tech-bucket default or LLM
+        // global) the user kept ticked → MOVE it to the Global KB as a draft
+        // (deduped above) and delete the local copy so it never feeds RAG.
         handledSrc.add(src.relPath);
         try {
           const content = await readFile(path.join(kbDir, src.relPath), 'utf8');

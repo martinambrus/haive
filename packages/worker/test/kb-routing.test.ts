@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   inferCategoryFromPath,
+  isGlobalRoutedPlacement,
   kbIndexMarkdown,
   parseKbPlacements,
   routeEntries,
@@ -251,5 +252,37 @@ describe('re-route helpers', () => {
     expect(out).toHaveLength(2);
     expect(out[0]!.scope).toBe('global');
     expect(out[1]!.scope).toBeUndefined();
+  });
+
+  it('isGlobalRoutedPlacement defaults anti/best/quick to global, keeps tech_pattern/general local', () => {
+    expect(
+      isGlobalRoutedPlacement({ path: 'ANTI_PATTERNS/x-mistakes.md', category: 'anti_pattern' }),
+    ).toBe(true);
+    expect(
+      isGlobalRoutedPlacement({ path: 'BEST_PRACTICES/x.md', category: 'best_practice' }),
+    ).toBe(true);
+    expect(
+      isGlobalRoutedPlacement({
+        path: 'QUICK_REFERENCE/x/cheat-sheet.md',
+        category: 'quick_reference',
+      }),
+    ).toBe(true);
+    expect(
+      isGlobalRoutedPlacement({ path: 'TECH_PATTERNS/x/INDEX.md', category: 'tech_pattern' }),
+    ).toBe(false);
+    expect(isGlobalRoutedPlacement({ path: 'ARCHITECTURE.md', category: 'general' })).toBe(false);
+  });
+
+  it('isGlobalRoutedPlacement honours an explicit scope override either way', () => {
+    expect(
+      isGlobalRoutedPlacement({
+        path: 'BEST_PRACTICES/x.md',
+        category: 'best_practice',
+        scope: 'local',
+      }),
+    ).toBe(false);
+    expect(
+      isGlobalRoutedPlacement({ path: 'ARCHITECTURE.md', category: 'general', scope: 'global' }),
+    ).toBe(true);
   });
 });
