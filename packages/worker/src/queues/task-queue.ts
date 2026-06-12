@@ -1,6 +1,6 @@
 import { Queue, Worker, type Job } from 'bullmq';
 import Docker from 'dockerode';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, eq, inArray, ne } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
@@ -541,6 +541,37 @@ async function handleAdvanceStep(db: Database, payload: TaskJobPayload): Promise
   const stepDef = stepRegistry.get(payload.stepId);
   if (!stepDef) {
     await markTaskFailed(db, ctx.taskId, `unknown step id ${payload.stepId}`);
+    return;
+  }
+
+  // Concurrency guard: only one step of a task may execute at a time. A stale or
+  // re-delivered advance-step — e.g. a queued job that survived a Retry/reset and
+  // is replayed on worker restart — must NOT run a step while another is already
+  // active; that is exactly how two steps end up running in parallel. handleResult
+  // marks the prior step terminal BEFORE enqueuing the next, so a legitimate
+  // hand-off never sees another active step here. Skipping returns normally, so
+  // the stale job completes (leaves the queue) and is never re-delivered.
+  const otherActive = await db
+    .select({ stepId: schema.taskSteps.stepId, status: schema.taskSteps.status })
+    .from(schema.taskSteps)
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, ctx.taskId),
+        ne(schema.taskSteps.stepId, payload.stepId),
+        inArray(schema.taskSteps.status, ['running', 'waiting_cli', 'waiting_form']),
+      ),
+    )
+    .limit(1);
+  if (otherActive[0]) {
+    logger.warn(
+      {
+        taskId: ctx.taskId,
+        stepId: payload.stepId,
+        activeStepId: otherActive[0].stepId,
+        activeStatus: otherActive[0].status,
+      },
+      'advance-step skipped: another step is already active (stale/duplicate job)',
+    );
     return;
   }
 
