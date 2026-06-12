@@ -234,7 +234,7 @@ function InvocationPanel({ taskId, invocation, label, idx, statusMessage }: Invo
         />
         {invocation.tokenUsage && (
           <span
-            className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5"
+            className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 text-sky-300"
             title={`Token usage (provider-native semantics): total ${invocation.tokenUsage.totalTokens.toLocaleString()}${invocation.tokenUsage.cacheReadTokens ? `, cache read ${invocation.tokenUsage.cacheReadTokens.toLocaleString()}` : ''}`}
           >
             in {formatTokens(invocation.tokenUsage.inputTokens)} / out{' '}
