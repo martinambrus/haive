@@ -965,6 +965,33 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       );
     }
 
+    // Existing files the LLM flagged for the cross-repo KB. Shown as a deselectable
+    // list so the user controls the (destructive) move BEFORE apply: ticked → moved
+    // to a Global KB draft + deleted locally; unticked → kept here (re-placed
+    // verbatim). Drives both the reroute field and the message breakdown below.
+    const globalPlacements = placements.filter((p) => p.scope === 'global');
+    const localPlacementCount = placements.length - globalPlacements.length;
+    const rerouteField: FormSchema['fields'][number] | null =
+      globalPlacements.length > 0
+        ? {
+            type: 'multi-select',
+            id: 'rerouteGlobal',
+            label:
+              'Move these existing files to the shared Global KB (untick to keep in this repo)',
+            options: globalPlacements.map((p) => ({ value: p.path, label: p.path })),
+            defaults: globalPlacements.map((p) => p.path),
+          }
+        : null;
+    const existingKbBits = [
+      globalPlacements.length > 0
+        ? `${globalPlacements.length} proposed to move to the Global KB`
+        : '',
+      localPlacementCount > 0 ? `${localPlacementCount} re-placed verbatim` : '',
+      updates.length > 0 ? `${updates.length} improved with new findings` : '',
+    ]
+      .filter(Boolean)
+      .join(', ');
+
     if (entries.length > 0) {
       const totalSources = new Set(entries.flatMap((e) => e.sourceFiles ?? [])).size;
       const options = entries.map((e) => {
@@ -985,7 +1012,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
 
       return {
         title: 'Knowledge base — AI discoveries',
-        description: `AI discovered ${entries.length} new knowledge topic${entries.length === 1 ? '' : 's'}${totalSources > 0 ? ` (from ${totalSources} source file${totalSources === 1 ? '' : 's'})` : ''}.${placements.length > 0 || updates.length > 0 ? ` Existing KB: ${[placements.length > 0 ? `${placements.length} re-placed verbatim` : '', updates.length > 0 ? `${updates.length} improved with new findings` : ''].filter(Boolean).join(', ')}.` : ''} Review and select the ones to include in your knowledge base.`,
+        description: `AI discovered ${entries.length} new knowledge topic${entries.length === 1 ? '' : 's'}${totalSources > 0 ? ` (from ${totalSources} source file${totalSources === 1 ? '' : 's'})` : ''}.${existingKbBits ? ` Existing KB: ${existingKbBits}.` : ''} Review and select the ones to include in your knowledge base.`,
         fields: [
           {
             type: 'multi-select',
@@ -994,6 +1021,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
             options,
             defaults: defaults.length > 0 ? defaults : options.map((o) => o.value),
           },
+          ...(rerouteField ? [rerouteField] : []),
         ],
         submitLabel: 'Generate knowledge base',
       };
@@ -1002,16 +1030,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // The LLM mapped existing KB files to re-place and/or improve but emitted no
     // new topics — existing KB already covers the project. Confirm; allow extras.
     if (placements.length > 0 || updates.length > 0) {
-      const summary = [
-        placements.length > 0 ? `re-place ${placements.length} existing file(s) verbatim` : '',
-        updates.length > 0 ? `improve ${updates.length} stale file(s) with new findings` : '',
-      ]
-        .filter(Boolean)
-        .join(' and ');
       return {
         title: 'Knowledge base — existing files reused',
-        description: `The AI will ${summary} (into the canonical layout) and found no new topics to add. Submit to apply, or list any extra topics to document (one per line).`,
+        description: `The AI found no new topics. Existing KB: ${existingKbBits}.${rerouteField ? ' Review the Global KB moves below.' : ''} Submit to apply, or list any extra topics to document (one per line).`,
         fields: [
+          ...(rerouteField ? [rerouteField] : []),
           {
             type: 'textarea',
             id: 'manualTopics',
@@ -1058,8 +1081,13 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     const detected = args.detected as KnowledgeDetect;
     const values = args.formValues as {
       selectedTopics?: string[];
+      rerouteGlobal?: string[];
       manualTopics?: string;
     };
+    // Existing files the user kept ticked to move to the Global KB (empty when the
+    // form offered no re-routes). A global placement is moved only when selected;
+    // unticked ones fall through to a normal local re-place.
+    const rerouteSet = new Set(values.rerouteGlobal ?? []);
 
     // Strip transient fields
     delete (detected as unknown as Record<string, unknown>).__fileTree;
@@ -1127,10 +1155,10 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     for (const p of placements) {
       const src = existingByPath.get(p.path);
       if (!src || handledSrc.has(src.relPath)) continue;
-      if (p.scope === 'global') {
+      if (p.scope === 'global' && rerouteSet.has(p.path)) {
         // Re-route: the LLM judged this existing local file a reusable house
-        // standard → MOVE it to the Global KB as a draft (deduped above) and
-        // delete the local copy so it never feeds this repo's RAG.
+        // standard AND the user kept it ticked → MOVE it to the Global KB as a
+        // draft (deduped above) and delete the local copy so it never feeds RAG.
         handledSrc.add(src.relPath);
         try {
           const content = await readFile(path.join(kbDir, src.relPath), 'utf8');
