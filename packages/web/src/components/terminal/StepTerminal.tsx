@@ -232,15 +232,34 @@ function InvocationPanel({ taskId, invocation, label, idx, statusMessage }: Invo
           durationMs={invocation.durationMs}
           isActive={invocation.isActive}
         />
-        {invocation.tokenUsage && (
-          <span
-            className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 text-sky-300"
-            title={`Token usage (provider-native semantics): total ${invocation.tokenUsage.totalTokens.toLocaleString()}${invocation.tokenUsage.cacheReadTokens ? `, cache read ${invocation.tokenUsage.cacheReadTokens.toLocaleString()}` : ''}`}
-          >
-            in {formatTokens(invocation.tokenUsage.inputTokens)} / out{' '}
-            {formatTokens(invocation.tokenUsage.outputTokens)} tok
-          </span>
-        )}
+        {invocation.tokenUsage &&
+          (() => {
+            const tu = invocation.tokenUsage;
+            const cache = (tu.cacheReadTokens ?? 0) + (tu.cacheCreationTokens ?? 0);
+            return (
+              <span
+                className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 text-sky-300"
+                title={
+                  `Token usage (provider-native): in ${tu.inputTokens.toLocaleString()}` +
+                  ` / out ${tu.outputTokens.toLocaleString()}` +
+                  (tu.cacheReadTokens
+                    ? ` / cache read ${tu.cacheReadTokens.toLocaleString()}`
+                    : '') +
+                  (tu.cacheCreationTokens
+                    ? ` / cache write ${tu.cacheCreationTokens.toLocaleString()}`
+                    : '') +
+                  ` = total ${tu.totalTokens.toLocaleString()}`
+                }
+              >
+                {formatTokens(tu.totalTokens)} tok
+                <span className="text-neutral-500">
+                  {' '}
+                  · in {formatTokens(tu.inputTokens)} / out {formatTokens(tu.outputTokens)}
+                  {cache > 0 ? ` / cache ${formatTokens(cache)}` : ''}
+                </span>
+              </span>
+            );
+          })()}
         {invocation.startedAt && <span>{new Date(invocation.startedAt).toLocaleTimeString()}</span>}
       </div>
       {replayError && (
