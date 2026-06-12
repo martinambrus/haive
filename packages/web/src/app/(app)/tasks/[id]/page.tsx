@@ -1057,6 +1057,14 @@ function TaskTotalTime({
   const totalTokens = steps.reduce((sum, s) => sum + (s.tokenUsage?.totalTokens ?? 0), 0);
   const inputTokens = steps.reduce((sum, s) => sum + (s.tokenUsage?.inputTokens ?? 0), 0);
   const outputTokens = steps.reduce((sum, s) => sum + (s.tokenUsage?.outputTokens ?? 0), 0);
+  // Split the total: cached (cache read + write, re-used context) vs fresh in+out
+  // (the genuinely new tokens). cached + fresh === total.
+  const cachedTokens = steps.reduce(
+    (sum, s) =>
+      sum + (s.tokenUsage?.cacheReadTokens ?? 0) + (s.tokenUsage?.cacheCreationTokens ?? 0),
+    0,
+  );
+  const freshTokens = inputTokens + outputTokens;
   // While running, show seconds even past 1h so the live values visibly tick:
   // the 1s interval advances them, but the compact h/m format hides sub-minute
   // changes (a multi-hour task looks frozen). Completed tasks stay compact.
@@ -1070,7 +1078,7 @@ function TaskTotalTime({
           {task.completedAt ? new Date(task.completedAt).toLocaleString() : '(running)'}
         </span>
       </div>
-      <div className="flex items-center gap-6">
+      <div className="flex flex-wrap items-center justify-end gap-x-6 gap-y-2">
         <div className="flex flex-col items-end">
           <span className="font-mono text-lg text-indigo-300">{fmt(workMs)}</span>
           <span className="text-[10px] uppercase tracking-wider text-neutral-500">work</span>
@@ -1097,15 +1105,35 @@ function TaskTotalTime({
           <span className="text-[10px] uppercase tracking-wider text-neutral-500">wall clock</span>
         </div>
         {totalTokens > 0 && (
-          <div className="flex flex-col items-end">
-            <span
-              className="font-mono text-lg text-sky-300"
-              title={`CLI tokens (provider-native): in ${inputTokens.toLocaleString()} / out ${outputTokens.toLocaleString()} / total ${totalTokens.toLocaleString()}`}
-            >
-              {formatTokens(totalTokens)}
-            </span>
-            <span className="text-[10px] uppercase tracking-wider text-neutral-500">tokens</span>
-          </div>
+          <>
+            <div className="flex flex-col items-end">
+              <span
+                className="font-mono text-lg text-sky-300"
+                title={`CLI tokens (provider-native): in ${inputTokens.toLocaleString()} / out ${outputTokens.toLocaleString()} / cache ${cachedTokens.toLocaleString()} / total ${totalTokens.toLocaleString()}`}
+              >
+                {formatTokens(totalTokens)}
+              </span>
+              <span className="text-[10px] uppercase tracking-wider text-neutral-500">tokens</span>
+            </div>
+            <div className="flex flex-col items-end">
+              <span
+                className="font-mono text-lg text-cyan-300"
+                title={`Cached tokens (cache read + cache write — re-used context): ${cachedTokens.toLocaleString()}`}
+              >
+                {formatTokens(cachedTokens)}
+              </span>
+              <span className="text-[10px] uppercase tracking-wider text-neutral-500">cached</span>
+            </div>
+            <div className="flex flex-col items-end">
+              <span
+                className="font-mono text-lg text-teal-300"
+                title={`Fresh tokens (input + output — genuinely new): ${freshTokens.toLocaleString()}`}
+              >
+                {formatTokens(freshTokens)}
+              </span>
+              <span className="text-[10px] uppercase tracking-wider text-neutral-500">in+out</span>
+            </div>
+          </>
         )}
       </div>
     </Card>
