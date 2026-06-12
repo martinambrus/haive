@@ -431,21 +431,16 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
   return c.json({ entry });
 });
 
-// Soft-delete = archive (plan §8: prefer archived over hard delete for a corpus
-// that may be central/shared). The sync job removes the entry's vectors because
-// it is no longer `active`.
+// Hard delete (single-operator instance; no shared-corpus concern). Remove the
+// row, then enqueue a `delete` sync to drop its vectors. The UI guards this with
+// a confirm since it is irreversible.
 globalKbRoutes.delete('/entries/:id', async (c) => {
   const id = c.req.param('id');
   const entry = await withGlobalKb(getDb(), async ({ db }) => {
-    const now = new Date();
-    const [row] = await db
-      .update(globalKbEntries)
-      .set({ status: 'archived', supersededAt: now, updatedAt: now })
-      .where(eq(globalKbEntries.id, id))
-      .returning();
+    const [row] = await db.delete(globalKbEntries).where(eq(globalKbEntries.id, id)).returning();
     return row;
   });
   if (!entry) throw new HttpError(404, 'global KB entry not found');
-  await enqueueSync(entry.id, entry.namespace, 'upsert');
-  return c.json({ entry });
+  await enqueueSync(entry.id, entry.namespace, 'delete');
+  return c.json({ ok: true });
 });

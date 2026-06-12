@@ -21,6 +21,8 @@ import {
   Input,
   Label,
 } from '@/components/ui';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 
 function parseList(s: string): string[] {
   return s
@@ -65,12 +67,26 @@ function deriveOllamaMode(url: string): 'internal' | 'external' {
   return url && url !== INTERNAL_OLLAMA_URL ? 'external' : 'internal';
 }
 
+const CATEGORIES: GlobalKbEntry['category'][] = [
+  'general',
+  'tech_pattern',
+  'anti_pattern',
+  'best_practice',
+  'quick_reference',
+];
+const PER_PAGE = 12;
+
 export default function GlobalKbPage() {
   usePageTitle('Global KB');
   const [entries, setEntries] = useState<GlobalKbEntry[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [draftsOnly, setDraftsOnly] = useState(false);
+  const [q, setQ] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [categoryFilter, setCategoryFilter] = useState('all');
+  const [frameworkFilter, setFrameworkFilter] = useState('all');
+  const [page, setPage] = useState(1);
+  const [selected, setSelected] = useState<GlobalKbEntry | null>(null);
   const [repos, setRepos] = useState<Repository[]>([]);
   const [providers, setProviders] = useState<CliProvider[]>([]);
   const [enrich, setEnrich] = useState({
@@ -239,10 +255,16 @@ export default function GlobalKbPage() {
     return () => clearInterval(t);
   }, [hasTransient]);
 
+  // Filters change the result set — jump back to the first page.
+  useEffect(() => {
+    setPage(1);
+  }, [q, statusFilter, categoryFilter, frameworkFilter]);
+
   async function activate(e: GlobalKbEntry) {
     setBusy(true);
     try {
       await api.patch(`/global-kb/entries/${e.id}`, { status: 'active' });
+      setSelected((s) => (s?.id === e.id ? null : s));
       await refresh();
     } catch (err) {
       setLoadError((err as ApiError).message ?? 'Activate failed');
@@ -251,13 +273,15 @@ export default function GlobalKbPage() {
     }
   }
 
-  async function archive(e: GlobalKbEntry) {
+  async function remove(e: GlobalKbEntry) {
+    if (!window.confirm(`Delete "${e.title}" permanently? This cannot be undone.`)) return;
     setBusy(true);
     try {
       await api.delete(`/global-kb/entries/${e.id}`);
+      setSelected((s) => (s?.id === e.id ? null : s));
       await refresh();
     } catch (err) {
-      setLoadError((err as ApiError).message ?? 'Archive failed');
+      setLoadError((err as ApiError).message ?? 'Delete failed');
     } finally {
       setBusy(false);
     }
@@ -295,7 +319,26 @@ export default function GlobalKbPage() {
     }
   }
 
-  const shown = (entries ?? []).filter((e) => (draftsOnly ? e.status === 'draft' : true));
+  const all = entries ?? [];
+  const frameworkToken = (f: GlobalKbFacets): string[] => {
+    const fw = f.framework ?? [];
+    const maj = f.frameworkMajor ?? [];
+    return fw.map((name) => (maj.length ? `${name} ${maj[0]}` : name));
+  };
+  const frameworkOptions = Array.from(new Set(all.flatMap((e) => frameworkToken(e.facets)))).sort();
+  const needle = q.trim().toLowerCase();
+  const filtered = all.filter((e) => {
+    if (statusFilter !== 'all' && e.status !== statusFilter) return false;
+    if (categoryFilter !== 'all' && e.category !== categoryFilter) return false;
+    if (frameworkFilter !== 'all' && !frameworkToken(e.facets).includes(frameworkFilter)) {
+      return false;
+    }
+    if (needle && !`${e.title} ${e.body}`.toLowerCase().includes(needle)) return false;
+    return true;
+  });
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
+  const safePage = Math.min(page, pageCount);
+  const paged = filtered.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
 
   return (
     <div className="flex flex-col gap-4">
@@ -570,44 +613,72 @@ export default function GlobalKbPage() {
         </div>
       </Card>
 
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-neutral-200">
-          Entries {entries ? `(${shown.length})` : ''}
-        </h3>
-        <div className="flex gap-1">
-          <Button
-            size="sm"
-            variant={draftsOnly ? 'ghost' : 'primary'}
-            onClick={() => setDraftsOnly(false)}
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="mr-auto text-sm font-semibold text-neutral-200">
+            Entries{entries ? ` (${filtered.length})` : ''}
+          </h3>
+          <Input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search title + body…"
+            className="w-56"
+          />
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
           >
-            All
-          </Button>
-          <Button
-            size="sm"
-            variant={draftsOnly ? 'primary' : 'ghost'}
-            onClick={() => setDraftsOnly(true)}
+            <option value="all">any status</option>
+            <option value="active">active</option>
+            <option value="draft">draft</option>
+            <option value="enriching">enriching</option>
+          </select>
+          <select
+            value={categoryFilter}
+            onChange={(e) => setCategoryFilter(e.target.value)}
+            className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
           >
-            Pending review
-          </Button>
+            <option value="all">any category</option>
+            {CATEGORIES.map((c) => (
+              <option key={c} value={c}>
+                {c.replace(/_/g, ' ')}
+              </option>
+            ))}
+          </select>
+          {frameworkOptions.length > 0 && (
+            <select
+              value={frameworkFilter}
+              onChange={(e) => setFrameworkFilter(e.target.value)}
+              className="h-10 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
+            >
+              <option value="all">any stack</option>
+              {frameworkOptions.map((f) => (
+                <option key={f} value={f}>
+                  {f}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
+        <p className="text-xs text-neutral-500">
+          AI-added rules activate automatically. <span className="text-neutral-300">Activate</span>{' '}
+          publishes a pending auto-promoted draft into retrieval;{' '}
+          <span className="text-neutral-300">Delete</span> permanently removes a rule.
+        </p>
       </div>
-
-      <p className="text-xs text-neutral-500">
-        AI-added rules activate automatically when enrichment finishes.{' '}
-        <span className="text-neutral-300">Activate</span> publishes a pending auto-promoted draft
-        into retrieval; <span className="text-neutral-300">Archive</span> removes a rule from
-        retrieval.
-      </p>
 
       <FormError message={loadError} />
 
       {entries === null ? (
         <p className="text-sm text-neutral-500">Loading…</p>
-      ) : shown.length === 0 ? (
-        <p className="text-sm text-neutral-500">No entries yet.</p>
+      ) : filtered.length === 0 ? (
+        <p className="text-sm text-neutral-500">
+          {all.length === 0 ? 'No entries yet.' : 'No entries match the filters.'}
+        </p>
       ) : (
         <div className="flex flex-col gap-2">
-          {shown.map((e) => {
+          {paged.map((e) => {
             const enriching = e.status === 'enriching' || e.status === 'skeleton';
             return (
               <Card key={e.id}>
@@ -631,8 +702,12 @@ export default function GlobalKbPage() {
                     )}
                   </div>
                   <p className="text-xs text-neutral-400">{facetsSummary(e.facets)}</p>
-                  <p className="line-clamp-2 text-sm text-neutral-300">{e.body}</p>
-                  <div className="flex items-center gap-3">
+                  <div className="flex flex-wrap items-center gap-3">
+                    {!enriching && (
+                      <Button size="sm" variant="secondary" onClick={() => setSelected(e)}>
+                        View
+                      </Button>
+                    )}
                     {e.sourceTaskId && (
                       <a
                         href={`/tasks/${e.sourceTaskId}`}
@@ -654,16 +729,14 @@ export default function GlobalKbPage() {
                             Activate
                           </Button>
                         )}
-                        {(e.status === 'draft' || e.status === 'active') && (
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            disabled={busy}
-                            onClick={() => void archive(e)}
-                          >
-                            Archive
-                          </Button>
-                        )}
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          disabled={busy}
+                          onClick={() => void remove(e)}
+                        >
+                          Delete
+                        </Button>
                       </>
                     )}
                   </div>
@@ -671,8 +744,79 @@ export default function GlobalKbPage() {
               </Card>
             );
           })}
+          {pageCount > 1 && (
+            <div className="flex items-center justify-center gap-3 pt-1">
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={safePage <= 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+              >
+                Prev
+              </Button>
+              <span className="text-xs text-neutral-500">
+                page {safePage} of {pageCount}
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={safePage >= pageCount}
+                onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+              >
+                Next
+              </Button>
+            </div>
+          )}
         </div>
       )}
+
+      <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
+        <DialogContent>
+          {selected && (
+            <>
+              <DialogHeader>
+                <DialogTitle>{selected.title}</DialogTitle>
+              </DialogHeader>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={STATUS_VARIANT[selected.status] ?? 'default'}>
+                  {selected.status}
+                </Badge>
+                <Badge variant="default">{selected.category.replace(/_/g, ' ')}</Badge>
+                {selected.source === 'promoted' && <Badge variant="info">promoted</Badge>}
+              </div>
+              <p className="mt-2 text-xs text-neutral-400">{facetsSummary(selected.facets)}</p>
+              <div className="mt-3 rounded-md border border-neutral-800">
+                <MarkdownView body={selected.body} />
+              </div>
+              <div className="mt-4 flex items-center gap-3">
+                {selected.sourceTaskId && (
+                  <a
+                    href={`/tasks/${selected.sourceTaskId}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs font-medium text-indigo-400 hover:text-indigo-300"
+                  >
+                    View task ↗
+                  </a>
+                )}
+                {selected.status === 'draft' && (
+                  <Button size="sm" disabled={busy} onClick={() => void activate(selected)}>
+                    Activate
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  disabled={busy}
+                  onClick={() => void remove(selected)}
+                >
+                  Delete
+                </Button>
+              </div>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

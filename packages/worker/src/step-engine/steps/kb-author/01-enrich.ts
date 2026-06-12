@@ -304,11 +304,9 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
     const namespace = await withGlobalKb(ctx.db, async ({ db }) => {
       const now = new Date();
       if (isUpdate) {
-        // Fold the new article into the matched entry; retire the transient skeleton.
-        await db
-          .update(globalKbEntries)
-          .set({ status: 'archived', supersededAt: now, updatedAt: now })
-          .where(eq(globalKbEntries.id, skeletonId));
+        // Fold the new article into the matched entry; drop the transient skeleton
+        // (just the user's seed text — the real content goes onto the target).
+        await db.delete(globalKbEntries).where(eq(globalKbEntries.id, skeletonId));
       }
       const [row] = await db
         .update(globalKbEntries)
