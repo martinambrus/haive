@@ -167,6 +167,7 @@ async function main(): Promise<void> {
         localUrl: 'https://haive-drupal7-fixture.ddev.site',
         projectDescription: 'Drupal 7 fixture covering onboarding smoke end-to-end.',
       },
+      '04_5-global-kb': {},
       '04-tooling-infrastructure': {
         ragMode: 'none',
         ragConnectionString: '',

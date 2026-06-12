@@ -143,6 +143,7 @@ async function main(): Promise<void> {
         localUrl: 'http://localhost:3000',
         projectDescription: 'Smoke test project for the deterministic onboarding loop.',
       },
+      '04_5-global-kb': {},
       '04-tooling-infrastructure': {
         ragMode: 'none',
         ragConnectionString: '',
