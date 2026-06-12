@@ -117,6 +117,12 @@ export default function GlobalKbPage() {
         cliProviderId: cli ?? p.cliProviderId,
       }));
     }
+    // Arriving via the onboarding "review drafts" link (?status=draft) → pre-filter
+    // the list to the bucket the caller wants.
+    const status = params.get('status');
+    if (status && ['active', 'draft', 'enriching'].includes(status)) {
+      setStatusFilter(status);
+    }
     // Arriving via the onboarding "Add Global House KB" button (#add) → scroll to
     // the authoring card once the page has laid out.
     if (window.location.hash === '#add') {
