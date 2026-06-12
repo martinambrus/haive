@@ -797,12 +797,24 @@ export default function GlobalKbPage() {
         </div>
       )}
 
-      <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
-        <DialogContent>
+      <Dialog
+        open={!!selected}
+        onOpenChange={(o) => !o && setSelected(null)}
+        className="w-[95vw] max-w-6xl"
+      >
+        <DialogContent className="flex max-h-[90vh] flex-col">
           {selected && (
             <>
-              <DialogHeader>
+              <DialogHeader className="mb-3 flex-row items-start justify-between gap-4">
                 <DialogTitle>{selected.title}</DialogTitle>
+                <button
+                  type="button"
+                  onClick={() => setSelected(null)}
+                  aria-label="Close"
+                  className="-mr-1 -mt-1 shrink-0 rounded-md px-2 text-2xl leading-none text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+                >
+                  ×
+                </button>
               </DialogHeader>
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant={STATUS_VARIANT[selected.status] ?? 'default'}>
@@ -810,12 +822,6 @@ export default function GlobalKbPage() {
                 </Badge>
                 <Badge variant="default">{selected.category.replace(/_/g, ' ')}</Badge>
                 {selected.source === 'promoted' && <Badge variant="info">promoted</Badge>}
-              </div>
-              <p className="mt-2 text-xs text-neutral-400">{facetsSummary(selected.facets)}</p>
-              <div className="mt-3 rounded-md border border-neutral-800">
-                <MarkdownView body={selected.body} />
-              </div>
-              <div className="mt-4 flex items-center gap-3">
                 {selected.sourceTaskId && (
                   <a
                     href={`/tasks/${selected.sourceTaskId}`}
@@ -826,6 +832,12 @@ export default function GlobalKbPage() {
                     View task ↗
                   </a>
                 )}
+              </div>
+              <p className="mt-2 text-xs text-neutral-400">{facetsSummary(selected.facets)}</p>
+              <div className="mt-3 min-h-0 flex-1 overflow-hidden rounded-md border border-neutral-800">
+                <MarkdownView body={selected.body} className="max-h-full" />
+              </div>
+              <div className="mt-4 flex items-center justify-center gap-3">
                 {selected.status === 'draft' && (
                   <Button size="sm" disabled={busy} onClick={() => void activate(selected)}>
                     Activate

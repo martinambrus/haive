@@ -8,9 +8,12 @@ interface DialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   children: React.ReactNode;
+  /** Override the centered wrapper's sizing (default `max-w-lg`). Merged with
+   *  tailwind-merge, so e.g. `w-[95vw] max-w-6xl` widens it for a large modal. */
+  className?: string;
 }
 
-export function Dialog({ open, onOpenChange, children }: DialogProps) {
+export function Dialog({ open, onOpenChange, children, className }: DialogProps) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -27,7 +30,7 @@ export function Dialog({ open, onOpenChange, children }: DialogProps) {
         className="fixed inset-0 bg-black/60 backdrop-blur-sm"
         onClick={() => onOpenChange(false)}
       />
-      <div className="relative z-10 w-full max-w-lg">{children}</div>
+      <div className={cn('relative z-10 w-full max-w-lg', className)}>{children}</div>
     </div>,
     document.body,
   );

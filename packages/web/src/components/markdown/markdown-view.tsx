@@ -4,6 +4,7 @@ import { useMemo, useRef } from 'react';
 import ReactMarkdown, { type Components, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Element, ElementContent } from 'hast';
+import { cn } from '@/lib/cn';
 import { segmentMarkdownBody, type Segment } from './markdown-segments';
 import { QuizBlock } from './quiz-block';
 import { MermaidBlock } from './mermaid-block';
@@ -114,7 +115,15 @@ function hasCollapsibleContent(segments: Segment[]): boolean {
  *  diagrams, side-by-side before/after pairs, collapsed long code blocks
  *  with an expand/collapse-all toolbar. Non-spec bodies are unaffected —
  *  without those conventions this renders exactly like plain ReactMarkdown. */
-export function MarkdownView({ body, enhanced = true }: { body: string; enhanced?: boolean }) {
+export function MarkdownView({
+  body,
+  enhanced = true,
+  className,
+}: {
+  body: string;
+  enhanced?: boolean;
+  className?: string;
+}) {
   const rootRef = useRef<HTMLDivElement>(null);
   const segments = useMemo<Segment[]>(
     () => (enhanced ? segmentMarkdownBody(body) : [{ kind: 'markdown', text: body }]),
@@ -132,7 +141,7 @@ export function MarkdownView({ body, enhanced = true }: { body: string; enhanced
   };
 
   return (
-    <div ref={rootRef} className="haive-md max-h-96 overflow-auto px-3 py-2">
+    <div ref={rootRef} className={cn('haive-md max-h-96 overflow-auto px-3 py-2', className)}>
       {collapsible && (
         <div className="mb-1 flex justify-end gap-2">
           <button
