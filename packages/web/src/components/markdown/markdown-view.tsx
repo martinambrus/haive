@@ -68,7 +68,18 @@ function PreBlock({ node, children, ...rest }: PreProps) {
   return <pre {...rest}>{children}</pre>;
 }
 
-const MD_COMPONENTS: Components = { pre: PreBlock };
+const MD_COMPONENTS: Components = {
+  pre: PreBlock,
+  // Links inside info content open in a new tab so following a reference never
+  // navigates away from (and loses) the task/form the user is in.
+  a({ node: _node, children, ...rest }) {
+    return (
+      <a {...rest} target="_blank" rel="noopener noreferrer">
+        {children}
+      </a>
+    );
+  },
+};
 
 function hasCollapsibleContent(segments: Segment[]): boolean {
   return segments.some((segment) => {

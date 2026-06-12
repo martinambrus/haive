@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   api,
   type ApiError,
@@ -82,6 +82,23 @@ export default function GlobalKbPage() {
   });
   const [enrichBusy, setEnrichBusy] = useState(false);
   const [enrichError, setEnrichError] = useState<string | null>(null);
+  // Arriving from the onboarding step-04 link (?repo=&cli=) pre-fills the repo +
+  // CLI so the user does not re-pick what the task already knows. Once, on mount.
+  const prefilledEnrich = useRef(false);
+  useEffect(() => {
+    if (prefilledEnrich.current) return;
+    prefilledEnrich.current = true;
+    const params = new URLSearchParams(window.location.search);
+    const repo = params.get('repo');
+    const cli = params.get('cli');
+    if (repo || cli) {
+      setEnrich((p) => ({
+        ...p,
+        repoId: repo ?? p.repoId,
+        cliProviderId: cli ?? p.cliProviderId,
+      }));
+    }
+  }, []);
   const [cfg, setCfg] = useState({
     enabled: true,
     mode: 'internal' as 'internal' | 'external',
