@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  inferCategoryFromPath,
   kbIndexMarkdown,
+  parseKbPlacements,
   routeEntries,
   routePlacement,
+  titleFromMarkdown,
 } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
 
 describe('routePlacement', () => {
@@ -210,5 +213,43 @@ describe('kbIndexMarkdown', () => {
     for (let i = 1; i < order.length; i++) {
       expect(order[i]).toBeGreaterThan(order[i - 1]!);
     }
+  });
+});
+
+describe('re-route helpers', () => {
+  it('titleFromMarkdown uses the first H1 heading', () => {
+    expect(
+      titleFromMarkdown('# jQuery 1.2 Pitfalls\n\nbody', 'ANTI_PATTERNS/jquery-1-2-mistakes.md'),
+    ).toBe('jQuery 1.2 Pitfalls');
+  });
+
+  it('titleFromMarkdown falls back to a Title-Cased filename when there is no heading', () => {
+    expect(
+      titleFromMarkdown('no heading here', 'BEST_PRACTICES/php-legacy-best-practices.md'),
+    ).toBe('Php Legacy Best Practices');
+  });
+
+  it('inferCategoryFromPath maps KB subdirs to global categories', () => {
+    expect(inferCategoryFromPath('ANTI_PATTERNS/x-mistakes.md')).toBe('anti_pattern');
+    expect(inferCategoryFromPath('BEST_PRACTICES/x-best-practices.md')).toBe('best_practice');
+    expect(inferCategoryFromPath('QUICK_REFERENCE/x/cheat-sheet.md')).toBe('quick_reference');
+    expect(inferCategoryFromPath('TECH_PATTERNS/x/INDEX.md')).toBe('tech_pattern');
+    expect(inferCategoryFromPath('ARCHITECTURE.md')).toBe('general');
+  });
+
+  it('parseKbPlacements preserves a global scope flag for re-routing', () => {
+    const out = parseKbPlacements({
+      placements: [
+        {
+          path: 'BEST_PRACTICES/jquery-1-2-best-practices.md',
+          category: 'best_practice',
+          scope: 'global',
+        },
+        { path: 'ARCHITECTURE.md', canonical: 'ARCHITECTURE' },
+      ],
+    });
+    expect(out).toHaveLength(2);
+    expect(out[0]!.scope).toBe('global');
+    expect(out[1]!.scope).toBeUndefined();
   });
 });

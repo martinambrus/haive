@@ -4,7 +4,7 @@ import { jsonrepair } from 'jsonrepair';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
-import type { GlobalKbFacets } from '@haive/shared/global-kb';
+import type { GlobalKbCategory, GlobalKbFacets } from '@haive/shared/global-kb';
 import { clearTaskPromotedDrafts, promoteToGlobalKbDraft } from '../_global-kb-promote.js';
 
 /* ------------------------------------------------------------------ */
@@ -259,7 +259,7 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '    }',
     '  ],',
     '  "placements": [',
-    '    { "path": "<existing knowledge_base file path from the list above>", "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit)", "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference", "tech": "<tech slug, required when category is a tech bucket>" }',
+    '    { "path": "<existing knowledge_base file path from the list above>", "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit)", "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference", "tech": "<tech slug, required when category is a tech bucket>", "scope": "local | global (omit for local)" }',
     '  ],',
     '  "updates": [',
     '    { "path": "<existing knowledge_base file to IMPROVE>", "title": "...", "canonical": "ARCHITECTURE | API_REFERENCE | CODING_STANDARDS | TESTING_STANDARDS | SECURITY_STANDARDS | DEPLOYMENT | BUSINESS_LOGIC | (omit)", "category": "general | tech_pattern | anti_pattern | best_practice | quick_reference", "tech": "<tech slug when a tech bucket>", "sections": [ { "heading": "Section", "body": "improved markdown — preserve correct content, revise stale parts, add new findings" } ] }',
@@ -288,7 +288,11 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '  - Write as if explaining to a new team member who needs to understand this area.',
     '- placements: for each ACCURATE existing file, one object with its current `path` plus',
     '  the canonical/category/tech slot it belongs in (content moved verbatim). Omit BOTH',
-    '  canonical and tech to leave a file exactly where it is.',
+    '  canonical and tech to leave a file exactly where it is. Set `scope: "global"` on a',
+    '  placement when that existing file is a reusable HOUSE STANDARD about a framework /',
+    '  library / plugin (same rule as entry scope — e.g. an ANTI_PATTERNS, BEST_PRACTICES or',
+    '  QUICK_REFERENCE file for a third-party technology): it is MOVED to the shared Global KB',
+    '  as a draft and removed from this repo. Default "local" (keep it in this repo).',
     '- updates: for each STALE or incomplete existing file, one object with its `path`, the',
     '  canonical/category/tech slot, and improved `sections` (preserve correct content,',
     '  revise outdated parts, add new findings). Use placements OR updates for a file, never',
@@ -393,6 +397,10 @@ export interface KbPlacement {
   canonical?: string;
   category?: KbCategory;
   tech?: string;
+  /** When 'global', this existing file is a reusable house standard: on apply it
+   *  is MOVED to the cross-repo Global KB as a draft and deleted locally, instead
+   *  of being re-placed in this repo. Defaults to 'local'. */
+  scope?: 'local' | 'global';
 }
 
 function isValidPlacement(val: unknown): val is KbPlacement {
@@ -578,6 +586,33 @@ function defaultGlobalFacets(entry: KbEntry, detected: KnowledgeDetect): GlobalK
   }
   if (!f.language?.length && detected.language) f.language = [detected.language.toLowerCase()];
   return f;
+}
+
+/** Default global facets from the detected stack alone (no entry) — used when a
+ *  re-routed existing file is promoted to a global draft. */
+function detectedDefaultFacets(detected: KnowledgeDetect): GlobalKbFacets {
+  const f: GlobalKbFacets = {};
+  if (detected.framework) f.framework = [detected.framework];
+  if (detected.frameworkMajor) f.frameworkMajor = [detected.frameworkMajor];
+  if (detected.language) f.language = [detected.language.toLowerCase()];
+  return f;
+}
+
+/** First level-1 markdown heading, else a Title-Cased name from the file path. */
+export function titleFromMarkdown(content: string, relPath: string): string {
+  const heading = content.match(/^#\s+(.+?)\s*$/m)?.[1]?.trim();
+  if (heading) return heading;
+  const stem = relPath.replace(/\.md$/i, '').split('/').pop() ?? relPath;
+  return stem.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** Map an existing KB file's subdir to a global category for re-routing. */
+export function inferCategoryFromPath(relPath: string): GlobalKbCategory {
+  if (relPath.startsWith('ANTI_PATTERNS/')) return 'anti_pattern';
+  if (relPath.startsWith('BEST_PRACTICES/')) return 'best_practice';
+  if (relPath.startsWith('QUICK_REFERENCE/')) return 'quick_reference';
+  if (relPath.startsWith('TECH_PATTERNS/')) return 'tech_pattern';
+  return 'general';
 }
 
 function entryToMarkdown(entry: KbEntry): string {
@@ -950,7 +985,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
 
       return {
         title: 'Knowledge base — AI discoveries',
-        description: `AI analyzed ${totalSources} source files and discovered ${entries.length} knowledge topics.${placements.length > 0 || updates.length > 0 ? ` Existing KB: ${[placements.length > 0 ? `${placements.length} re-placed verbatim` : '', updates.length > 0 ? `${updates.length} improved with new findings` : ''].filter(Boolean).join(', ')}.` : ''} Review and select the ones to include in your knowledge base.`,
+        description: `AI discovered ${entries.length} new knowledge topic${entries.length === 1 ? '' : 's'}${totalSources > 0 ? ` (from ${totalSources} source file${totalSources === 1 ? '' : 's'})` : ''}.${placements.length > 0 || updates.length > 0 ? ` Existing KB: ${[placements.length > 0 ? `${placements.length} re-placed verbatim` : '', updates.length > 0 ? `${updates.length} improved with new findings` : ''].filter(Boolean).join(', ')}.` : ''} Review and select the ones to include in your knowledge base.`,
         fields: [
           {
             type: 'multi-select',
@@ -1045,6 +1080,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     }[] = [];
     let globalPromoted = 0;
 
+    // Idempotent re-runs (Retry): drop this task's prior promoted drafts ONCE,
+    // before any promotion below (placement re-routes AND entry promotes), so a
+    // retry replaces rather than duplicates them. No-op when global KB is off.
+    await clearTaskPromotedDrafts(ctx.db, ctx.taskId, ctx.logger);
+
     // 1. Re-place / improve existing KB files into the canonical layout. Updates
     //    win over placements for the same file; first writer wins per destination.
     const existing = await scanExistingKb(ctx.repoPath);
@@ -1082,10 +1122,42 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       }
     }
 
-    // 1b. Placements: move the (accurate) existing file verbatim to its slot.
+    // 1b. Placements: move the (accurate) existing file verbatim to its slot, OR
+    //     re-route a now-global file to the cross-repo KB and delete it locally.
     for (const p of placements) {
       const src = existingByPath.get(p.path);
       if (!src || handledSrc.has(src.relPath)) continue;
+      if (p.scope === 'global') {
+        // Re-route: the LLM judged this existing local file a reusable house
+        // standard → MOVE it to the Global KB as a draft (deduped above) and
+        // delete the local copy so it never feeds this repo's RAG.
+        handledSrc.add(src.relPath);
+        try {
+          const content = await readFile(path.join(kbDir, src.relPath), 'utf8');
+          const id = await promoteToGlobalKbDraft(
+            ctx.db,
+            {
+              userId: ctx.userId,
+              taskId: ctx.taskId,
+              title: titleFromMarkdown(content, src.relPath),
+              body: content,
+              category: p.category
+                ? (p.category as GlobalKbCategory)
+                : inferCategoryFromPath(src.relPath),
+              facets: detectedDefaultFacets(detected),
+            },
+            ctx.logger,
+          );
+          if (id) {
+            await rm(path.join(kbDir, src.relPath), { force: true });
+            globalPromoted += 1;
+            written.push({ id: src.relPath, filePath: `global-kb:${id}`, source: 'global' });
+          }
+        } catch (err) {
+          ctx.logger.warn({ err, path: p.path }, 'kb global re-route failed');
+        }
+        continue;
+      }
       const dest = routePlacement(p) ?? src.relPath; // null → leave in place
       if (takenDest.has(dest)) continue;
       takenDest.add(dest);
@@ -1113,9 +1185,6 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       // Global-routed entries become DRAFT rows in the cross-repo KB and are
       // NEVER written to .claude/knowledge_base/, so they are never indexed into
       // this repo's RAG (the "don't pollute the local DB" requirement, §5.4).
-      // Idempotent re-runs (Retry): drop this task's prior promoted drafts first
-      // so a retry replaces rather than duplicates them (no-op when KB is off).
-      await clearTaskPromotedDrafts(ctx.db, ctx.taskId, ctx.logger);
       for (const e of chosen.filter((entry) => entry.scope === 'global')) {
         const id = await promoteToGlobalKbDraft(
           ctx.db,
