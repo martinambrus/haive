@@ -67,11 +67,21 @@ taskRoutes.get('/', async (c) => {
     else stepsByTask.set(s.taskId, [s]);
   }
   const tasks = rows.map((t) => {
-    const { workMs, idleMs, userActiveMs } = computeTaskTiming(stepsByTask.get(t.id) ?? [], now);
+    const steps = stepsByTask.get(t.id) ?? [];
+    const { workMs, idleMs, userActiveMs } = computeTaskTiming(steps, now);
     const startMs = t.startedAt ? t.startedAt.getTime() : null;
     const endMs = t.completedAt ? t.completedAt.getTime() : now;
     const wallMs = startMs === null ? 0 : Math.max(0, endMs - startMs);
-    return { ...t, timing: { wallMs, workMs, idleMs, userActiveMs } };
+    // At most one step is in waiting_form at a time, so the single non-null
+    // waitingStartedAt tags THIS wait occurrence — a fresh value each time the
+    // task (re)enters a gate. Lets the notifier re-fire on a restart that returns
+    // to the same step, without re-firing on unrelated task edits.
+    const waitStart = steps.find((s) => s.waitingStartedAt)?.waitingStartedAt ?? null;
+    return {
+      ...t,
+      timing: { wallMs, workMs, idleMs, userActiveMs },
+      currentWaitStartedAt: waitStart ? waitStart.toISOString() : null,
+    };
   });
   return c.json({ tasks });
 });

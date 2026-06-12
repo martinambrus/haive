@@ -363,6 +363,11 @@ export interface Task {
   autoContinue: boolean;
   currentStepId: string | null;
   currentStepIndex: number;
+  /** ISO time the current gate began waiting (the waiting_form step's
+   *  waitingStartedAt), or null when the task is not parked at a gate. Tags the
+   *  wait occurrence so the notifier re-fires when a task re-enters the same gate
+   *  after a restart. List endpoint only. */
+  currentWaitStartedAt?: string | null;
   containerId: string | null;
   worktreePath: string | null;
   errorMessage: string | null;

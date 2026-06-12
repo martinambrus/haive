@@ -6,8 +6,8 @@ const task = (
   status: string,
   title = `Task ${id}`,
   currentStepId: string | null = null,
-  updatedAt = 't0',
-) => ({ id, title, status, currentStepId, updatedAt });
+  currentWaitStartedAt: string | null = 't0',
+) => ({ id, title, status, currentStepId, currentWaitStartedAt });
 
 describe('detectTransitions', () => {
   it('first poll surfaces only already-waiting tasks as baseline events', () => {
@@ -23,7 +23,7 @@ describe('detectTransitions', () => {
         title: 'Task a',
         status: 'waiting_user',
         currentStepId: null,
-        updatedAt: 't0',
+        currentWaitStartedAt: 't0',
         baseline: true,
       },
     ]);
@@ -48,7 +48,7 @@ describe('detectTransitions', () => {
     expect(events.every((e) => !e.baseline)).toBe(true);
   });
 
-  it('does not re-fire while the status and step are unchanged', () => {
+  it('does not re-fire while status, step and wait are unchanged', () => {
     const prev = snapshotIdentities([task('a', 'waiting_user')]);
     expect(detectTransitions(prev, [task('a', 'waiting_user')])).toEqual([]);
   });
@@ -59,21 +59,29 @@ describe('detectTransitions', () => {
   });
 
   it('fires when the step advances while the status stays waiting_user', () => {
-    // Two consecutive gates: the intervening `running` window was shorter than
-    // the poll interval, so the poller sees waiting_user → waiting_user. The
-    // step change must still surface the second gate.
     const prev = snapshotIdentities([task('a', 'waiting_user', 'Task a', '04-tooling')]);
     const events = detectTransitions(prev, [task('a', 'waiting_user', 'Task a', '05-next')]);
     expect(events).toHaveLength(1);
     expect(events[0]!.currentStepId).toBe('05-next');
   });
 
-  it('does not re-fire when only updatedAt changes (same gate, unrelated edit)', () => {
-    // A rename / autoContinue toggle bumps updatedAt but the task is parked on
-    // the same gate — it must not re-notify.
-    const prev = snapshotIdentities([task('a', 'waiting_user', 'Task a', '04-tooling', 't0')]);
+  it('fires when a restart re-enters the SAME gate (fresh wait occurrence)', () => {
+    // Background-tab throttling can make the poll skip the intervening `running`
+    // state, so the only signal is the fresh waitingStartedAt of the new wait.
+    const prev = snapshotIdentities([task('a', 'waiting_user', 'Task a', '02-detect', 't0')]);
     const events = detectTransitions(prev, [
-      task('a', 'waiting_user', 'Task a', '04-tooling', 't1'),
+      task('a', 'waiting_user', 'Task a', '02-detect', 't1'),
+    ]);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.currentWaitStartedAt).toBe('t1');
+  });
+
+  it('does not fire when an unrelated edit leaves the wait occurrence intact', () => {
+    // A rename / autoContinue toggle does not touch the gate's waitingStartedAt,
+    // so the identity is unchanged and no spurious notification fires.
+    const prev = snapshotIdentities([task('a', 'waiting_user', 'Task a', '02-detect', 't0')]);
+    const events = detectTransitions(prev, [
+      task('a', 'waiting_user', 'Renamed', '02-detect', 't0'),
     ]);
     expect(events).toEqual([]);
   });
@@ -103,7 +111,7 @@ describe('detectTransitions', () => {
       title: 'My fix',
       status: 'failed',
       currentStepId: null,
-      updatedAt: 't0',
+      currentWaitStartedAt: 't0',
       baseline: false,
     });
   });
@@ -114,23 +122,27 @@ describe('detectTransitions', () => {
     expect(event!.currentStepId).toBe('09-gate-2');
   });
 
-  it('carries updatedAt so the provider can key a wait occurrence', () => {
+  it('normalizes an absent wait occurrence to null on the event', () => {
     const prev = snapshotIdentities([task('a', 'running')]);
-    const [event] = detectTransitions(prev, [task('a', 'waiting_user', 'Task a', 'g', 't9')]);
-    expect(event!.updatedAt).toBe('t9');
+    const [event] = detectTransitions(prev, [
+      { id: 'a', title: 'Task a', status: 'waiting_user', currentStepId: 'g' },
+    ]);
+    expect(event!.currentWaitStartedAt).toBeNull();
   });
 });
 
 describe('snapshotIdentities', () => {
-  it('keys each task by status+step so a step change is a new identity', () => {
-    const a = snapshotIdentities([task('a', 'waiting_user', 'Task a', 'step-1')]);
-    const b = snapshotIdentities([task('a', 'waiting_user', 'Task a', 'step-2')]);
+  it('keys each task by status+step+wait so any of them changing is a new identity', () => {
+    const a = snapshotIdentities([task('a', 'waiting_user', 'Task a', 'step-1', 't0')]);
+    const b = snapshotIdentities([task('a', 'waiting_user', 'Task a', 'step-2', 't0')]);
+    const c = snapshotIdentities([task('a', 'waiting_user', 'Task a', 'step-1', 't1')]);
     expect(a.get('a')).not.toBe(b.get('a'));
+    expect(a.get('a')).not.toBe(c.get('a'));
   });
 
-  it('is stable when status and step are unchanged regardless of updatedAt', () => {
+  it('is stable when status, step and wait are unchanged', () => {
     const a = snapshotIdentities([task('a', 'waiting_user', 'Task a', 'step-1', 't0')]);
-    const b = snapshotIdentities([task('a', 'waiting_user', 'Task a', 'step-1', 't1')]);
+    const b = snapshotIdentities([task('a', 'waiting_user', 'Task a', 'step-1', 't0')]);
     expect(a.get('a')).toBe(b.get('a'));
   });
 

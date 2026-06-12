@@ -13,15 +13,15 @@ const SETTINGS_CHANGED_EVENT = 'haive:notification-settings-changed';
 const SEEN_PREFIX = 'haive:notif-seen:';
 const SEEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Per-episode dedupe key: (task, status, step, occurrence). localStorage (not
- *  sessionStorage) so a handled episode stays handled across tabs AND sessions
- *  — opening a new tab never re-fires an already-seen waiting notification.
- *  currentStepId distinguishes gates; updatedAt distinguishes wait OCCURRENCES
- *  so the same gate re-notifies after a restart/retry (a new wait carries a new
- *  updatedAt), while a new tab on the still-ongoing wait shares the key and
- *  stays deduped. */
+/** Per-episode dedupe key: (task, status, step, wait-occurrence). localStorage
+ *  (not sessionStorage) so a handled episode stays handled across tabs AND
+ *  sessions — opening a new tab never re-fires an already-seen waiting
+ *  notification. currentStepId distinguishes gates; currentWaitStartedAt
+ *  distinguishes wait OCCURRENCES so the same gate re-notifies after a
+ *  restart/retry (the new wait carries a fresh waitingStartedAt), while a new
+ *  tab on the still-ongoing wait shares the key and stays deduped. */
 function seenKey(e: TaskTransitionEvent): string {
-  return `${SEEN_PREFIX}${e.taskId}:${e.status}:${e.currentStepId ?? ''}:${e.updatedAt}`;
+  return `${SEEN_PREFIX}${e.taskId}:${e.status}:${e.currentStepId ?? ''}:${e.currentWaitStartedAt ?? ''}`;
 }
 
 function hasSeen(e: TaskTransitionEvent): boolean {
