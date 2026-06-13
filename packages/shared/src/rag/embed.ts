@@ -74,6 +74,30 @@ export async function warmOllamaModel(
   }
 }
 
+/** Evict an embedding model from Ollama immediately (keep_alive:0) so its
+ *  VRAM/RAM is freed for other processes (games etc.) once Haive is idle.
+ *  Sends a tiny non-empty input — `/api/embed` can reject an empty input,
+ *  which would skip the unload — with keep_alive:0 so the model is dropped
+ *  right after. Best-effort: returns false on any failure (the model also
+ *  self-unloads once its keep_alive window lapses, so a miss is not fatal). */
+export async function unloadOllamaModel(
+  url: string,
+  model: string,
+  timeoutMs = 10_000,
+): Promise<boolean> {
+  try {
+    const resp = await fetch(`${url}/api/embed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, input: 'unload', keep_alive: 0 }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Deterministic hash embedding fallback                               */
 /* ------------------------------------------------------------------ */

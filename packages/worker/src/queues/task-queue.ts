@@ -1,6 +1,6 @@
 import { Queue, Worker, type Job } from 'bullmq';
 import Docker from 'dockerode';
-import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, ne, notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
@@ -12,6 +12,7 @@ import {
   type TaskJobPayload,
   type WorkflowType,
 } from '@haive/shared';
+import { unloadOllamaModel } from '@haive/shared/rag';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { getDb } from '../db.js';
 import { getBullRedis, getRedis } from '../redis.js';
@@ -175,6 +176,7 @@ async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
     })
     .where(eq(schema.tasks.id, taskId));
   await cleanupTaskContainers(db, taskId, 'completed');
+  await maybeUnloadTaskEmbedModel(db, taskId);
 }
 
 async function markTaskFailed(db: Database, taskId: string, message: string): Promise<void> {
@@ -188,6 +190,83 @@ async function markTaskFailed(db: Database, taskId: string, message: string): Pr
     })
     .where(eq(schema.tasks.id, taskId));
   await cleanupTaskContainers(db, taskId, 'failed');
+  await maybeUnloadTaskEmbedModel(db, taskId);
+}
+
+/** The (ollamaUrl, embeddingModel) a task used for RAG — read from its
+ *  04-tooling-infrastructure step output, falling back to the repo's latest
+ *  onboarding run for workflow tasks (mirrors rag.ts resolveTaskRagContext).
+ *  Returns null when no Ollama model was configured (hash-embedding fallback
+ *  loads nothing, so there is nothing to unload). */
+async function resolveTaskEmbedTarget(
+  db: Database,
+  taskId: string,
+): Promise<{ url: string; model: string } | null> {
+  const readTooling = async (tid: string) => {
+    const row = await db.query.taskSteps.findFirst({
+      where: and(
+        eq(schema.taskSteps.taskId, tid),
+        eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
+      ),
+      columns: { output: true },
+    });
+    return (
+      (row?.output as { tooling?: { ollamaUrl?: string; embeddingModel?: string } } | null) ?? null
+    );
+  };
+
+  let tooling = await readTooling(taskId);
+  if (!tooling?.tooling?.ollamaUrl || !tooling?.tooling?.embeddingModel) {
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { repositoryId: true },
+    });
+    if (task?.repositoryId) {
+      const onboarding = await db.query.tasks.findFirst({
+        where: and(
+          eq(schema.tasks.repositoryId, task.repositoryId),
+          eq(schema.tasks.type, 'onboarding'),
+        ),
+        orderBy: [desc(schema.tasks.createdAt)],
+        columns: { id: true },
+      });
+      if (onboarding) tooling = await readTooling(onboarding.id);
+    }
+  }
+  const url = tooling?.tooling?.ollamaUrl;
+  const model = tooling?.tooling?.embeddingModel;
+  return url && model ? { url, model } : null;
+}
+
+/** After a task reaches a terminal state, evict its RAG embedding model from
+ *  Ollama so the GPU is freed — but only when no other task is still live (any
+ *  non-terminal task may need the model resident; for those the Ollama
+ *  keep_alive window is the backstop). Best-effort and self-contained: never
+ *  throws, so it cannot break the terminal transition. Repo-RAG only; the
+ *  global-KB model has its own lifecycle and keep_alive backstop. */
+async function maybeUnloadTaskEmbedModel(db: Database, taskId: string): Promise<void> {
+  try {
+    const target = await resolveTaskEmbedTarget(db, taskId);
+    if (!target) return;
+    const otherLive = await db
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(
+          ne(schema.tasks.id, taskId),
+          notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
+        ),
+      )
+      .limit(1);
+    if (otherLive.length > 0) {
+      logger.debug({ taskId, model: target.model }, 'skip ollama unload — another task is live');
+      return;
+    }
+    const ok = await unloadOllamaModel(target.url, target.model);
+    logger.info({ taskId, model: target.model, ok }, 'requested ollama embed model unload');
+  } catch (err) {
+    logger.warn({ err, taskId }, 'ollama embed model unload failed');
+  }
 }
 
 export type ContainerCleanupRunner = (db: Database, taskId: string) => Promise<number>;
@@ -663,6 +742,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
     .where(eq(schema.tasks.id, payload.taskId));
   await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
+  await maybeUnloadTaskEmbedModel(db, payload.taskId);
 }
 
 async function handleCleanupRepoRag(db: Database, payload: RepoRagCleanupPayload): Promise<void> {
