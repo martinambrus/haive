@@ -41,6 +41,27 @@ export function gitClone(url: string, dest: string, branch?: string): Promise<vo
   });
 }
 
+/** Point origin at a (tokenless) URL. Used after a credentialed clone so the
+ *  embedded token does not persist in .git/config. */
+export function gitSetOriginUrl(dest: string, url: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('git', ['-C', dest, 'remote', 'set-url', 'origin', url]);
+    let stderr = '';
+    proc.stderr.on('data', (d: Buffer) => {
+      stderr += d.toString();
+    });
+    proc.on('error', reject);
+    proc.on('exit', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const msg = stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
+      reject(new Error(`git remote set-url failed (exit ${code}): ${msg}`));
+    });
+  });
+}
+
 async function persistDetection(
   db: Database,
   repositoryId: string,
@@ -165,6 +186,15 @@ export async function handleClone(
   }
 
   await gitClone(cloneUrl, dest, payload.branch);
+  // Reset origin to the tokenless URL so the credential is never persisted in
+  // .git/config. Auth-needing operations (push/fetch from the repo terminal or
+  // the workflow push step) go through the git credential helper instead, which
+  // resolves the current secret from the DB - so token rotation/expiry just
+  // works. A repo refresh re-clones from scratch with the DB credential, so it
+  // never depends on the stored origin URL.
+  if (cloneUrl !== payload.remoteUrl) {
+    await gitSetOriginUrl(dest, payload.remoteUrl);
+  }
   await persistDetection(db, payload.repositoryId, dest);
   logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo clone complete');
 }
