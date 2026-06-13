@@ -51,11 +51,6 @@ export interface GenerateFilesDetect {
   customAgentSpecs: AgentSpec[];
   lspLanguages: string[];
   mcpSettingsJson: string;
-  prefs: {
-    verificationLevel?: string;
-    autoCommit?: boolean;
-    maxIterations?: number;
-  };
   cliProviders: { name: CliProviderName; rulesContent: string }[];
   /** Per-enabled-CLI target for agent file writes. One entry per unique
    *  `projectAgentsDir` — claude-code and zai share `.claude/agents` so
@@ -229,15 +224,12 @@ export function agentsIndexMarkdown(agents: AgentSpec[], ext: 'md' | 'toml' = 'm
   return lines.join('\n');
 }
 
-export function workflowConfigJson(
-  prefs: GenerateFilesDetect['prefs'],
-  framework: string | null,
-): string {
+/** The deterministic `.claude/workflow-config.json`. Reduced to the framework
+ *  stamp: the legacy verification_level / auto_commit / max_iterations fields
+ *  were collected by the (now-removed) workflow-prefs step but never consumed —
+ *  in the legacy orchestration or here. */
+export function workflowConfigJson(framework: string | null): string {
   const config = {
-    verificationLevel: prefs.verificationLevel ?? 'standard',
-    autoCommit: prefs.autoCommit ?? false,
-    maxIterations:
-      typeof prefs.maxIterations === 'number' && prefs.maxIterations > 0 ? prefs.maxIterations : 5,
     framework: framework ?? null,
   };
   return `${JSON.stringify(config, null, 2)}\n`;
@@ -434,10 +426,6 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const language = projectInfo.primaryLanguage;
     const projectName = projectInfo.name;
 
-    const prefsPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06-workflow-prefs');
-    const prefs = ((prefsPrev?.output as { prefs?: Record<string, unknown> } | null)?.prefs ??
-      {}) as GenerateFilesDetect['prefs'];
-
     const toolingPrev = await loadPreviousStepOutput(
       ctx.db,
       ctx.taskId,
@@ -579,7 +567,6 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       customAgentSpecs,
       lspLanguages,
       mcpSettingsJson,
-      prefs,
       cliProviders,
       agentTargets,
       plannedAgents,
@@ -670,10 +657,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       wroteFiles.push(rel);
     };
 
-    await writeIfAllowed(
-      '.claude/workflow-config.json',
-      workflowConfigJson(detected.prefs, detected.framework),
-    );
+    await writeIfAllowed('.claude/workflow-config.json', workflowConfigJson(detected.framework));
 
     // Write agents + index to every enabled CLI's native dir, using the
     // format each CLI expects (markdown for claude/gemini/zai, TOML for

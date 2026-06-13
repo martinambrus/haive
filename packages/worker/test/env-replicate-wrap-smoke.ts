@@ -229,12 +229,6 @@ async function main(): Promise<void> {
         mcpSettingsJson: '',
         lspLanguages: ['typescript'],
       },
-      '06-workflow-prefs': {
-        verificationLevel: 'standard',
-        autoCommit: false,
-        maxIterations: 3,
-        customNotes: '',
-      },
       '06_5-agent-discovery': { acceptedAgents: [] },
       '07-generate-files': { overwrite: true },
       '08-knowledge-acquisition': {

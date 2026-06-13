@@ -76,7 +76,6 @@ interface PostOnboardingOutput {
 function buildRenderContext(detect: GenerateFilesDetect): TemplateRenderContext {
   return {
     projectInfo: detect.projectInfo,
-    prefs: detect.prefs,
     framework: detect.framework,
     acceptedAgentIds: detect.acceptedAgentIds,
     customAgentSpecs: detect.customAgentSpecs,

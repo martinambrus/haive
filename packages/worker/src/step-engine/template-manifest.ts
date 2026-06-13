@@ -41,11 +41,6 @@ import { buildRtkTemplateItems } from './steps/onboarding/_rtk-templates.js';
  */
 export interface TemplateRenderContext {
   projectInfo: ProjectInfo;
-  prefs: {
-    verificationLevel?: string;
-    autoCommit?: boolean;
-    maxIterations?: number;
-  };
   framework: string | null;
   acceptedAgentIds: string[];
   customAgentSpecs: AgentSpec[];
@@ -91,7 +86,6 @@ const REFERENCE_PROJECT_INFO: ProjectInfo = {
  */
 export const REFERENCE_CONTEXT: TemplateRenderContext = {
   projectInfo: REFERENCE_PROJECT_INFO,
-  prefs: {},
   framework: null,
   acceptedAgentIds: [],
   customAgentSpecs: [],
@@ -171,12 +165,14 @@ function buildWorkflowConfigItem(): TemplateItem<TemplateRenderContext> {
   return {
     id: 'workflow-config',
     kind: 'workflow-config',
-    schemaVersion: 1,
+    // schemaVersion 2: dropped verification_level / auto_commit / max_iterations,
+    // leaving only { framework } (a shape change to workflow-config.json).
+    schemaVersion: 2,
     render(ctx: TemplateRenderContext): TemplateRendering[] {
       return [
         {
           diskPath: '.claude/workflow-config.json',
-          content: workflowConfigJson(ctx.prefs, ctx.framework),
+          content: workflowConfigJson(ctx.framework),
         },
       ];
     },

@@ -157,12 +157,6 @@ async function main(): Promise<void> {
         mcpSettingsJson: '',
         lspLanguages: ['typescript'],
       },
-      '06-workflow-prefs': {
-        verificationLevel: 'standard',
-        autoCommit: false,
-        maxIterations: 3,
-        customNotes: 'resume smoke',
-      },
       '06_3-custom-bundles': { bundles: [] },
       '06_5-agent-discovery': { acceptedAgents: [] },
       '07-generate-files': { overwrite: true },
@@ -184,7 +178,7 @@ async function main(): Promise<void> {
       },
     };
 
-    const killAfterStep = '06-workflow-prefs';
+    const killAfterStep = '04-tooling-infrastructure';
     const submitted = new Set<string>();
     let lastStepId: string | null = null;
     let killed = false;

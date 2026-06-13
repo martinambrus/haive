@@ -1,4 +1,4 @@
-import { and, inArray, isNull } from 'drizzle-orm';
+import { and, inArray, isNull, notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 
 /**
@@ -8,6 +8,7 @@ import { schema, type Database } from '@haive/database';
  */
 export async function runDataMigrations(db: Database): Promise<void> {
   await supersedeRemovedRtkArtifacts(db);
+  await skipRemovedSteps(db);
 }
 
 /** Template ids removed when the RTK awareness markdown was consolidated into
@@ -39,6 +40,28 @@ async function supersedeRemovedRtkArtifacts(db: Database): Promise<void> {
       and(
         inArray(schema.onboardingArtifacts.templateId, REMOVED_RTK_TEMPLATE_IDS),
         isNull(schema.onboardingArtifacts.supersededAt),
+      ),
+    );
+}
+
+/** Step ids removed from the onboarding registry. Their task_steps rows are
+ *  pre-created at task start, so a task created before the removal can still
+ *  hold a non-terminal row for one — and the runner throws on an unknown step
+ *  id when it reaches it. */
+const REMOVED_STEP_IDS = ['06-workflow-prefs'];
+
+/** Mark any non-terminal task_steps row for a removed step as skipped so the
+ *  orchestrator advances past it instead of stranding on a missing definition.
+ *  Idempotent: terminal rows (done/failed/skipped) are excluded, so a second
+ *  run is a no-op. */
+async function skipRemovedSteps(db: Database): Promise<void> {
+  await db
+    .update(schema.taskSteps)
+    .set({ status: 'skipped', endedAt: new Date() })
+    .where(
+      and(
+        inArray(schema.taskSteps.stepId, REMOVED_STEP_IDS),
+        notInArray(schema.taskSteps.status, ['done', 'failed', 'skipped']),
       ),
     );
 }

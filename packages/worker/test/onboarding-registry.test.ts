@@ -5,7 +5,6 @@ import {
   ripgrepConfigStep,
   detectionConfirmationStep,
   toolingInfrastructureStep,
-  workflowPrefsStep,
   postOnboardingStep,
 } from '../src/step-engine/steps/onboarding/index.js';
 
@@ -20,7 +19,6 @@ describe('onboarding registry', () => {
       '02-detection-confirmation',
       '04-tooling-infrastructure',
       '04_5-global-kb',
-      '06-workflow-prefs',
       '06_3-custom-bundles',
       '06_5-agent-discovery',
       '07-generate-files',
@@ -38,7 +36,7 @@ describe('onboarding registry', () => {
       '12-post-onboarding',
     ]);
     expect(steps.map((s) => s.metadata.index)).toEqual([
-      1, 2, 3, 4, 4.5, 5, 5.5, 6, 7, 8, 9, 10, 10.25, 10.5, 11, 12, 12.5, 13, 14, 15, 16,
+      1, 2, 3, 4, 4.5, 5.5, 6, 7, 8, 9, 10, 10.25, 10.5, 11, 12, 12.5, 13, 14, 15, 16,
     ]);
   });
 
@@ -162,18 +160,6 @@ describe('onboarding registry', () => {
     expect(fieldIds).toContain('ollamaUrl');
     expect(fieldIds).toContain('embeddingModel');
     expect(fieldIds).toContain('embeddingDimensions');
-  });
-
-  it('workflow prefs form contains verification level radio with three options', () => {
-    const ctx = {} as never;
-    const schema = workflowPrefsStep.form!(ctx, null);
-    const radio = schema!.fields.find((f) => f.id === 'verificationLevel');
-    expect(radio?.type).toBe('radio');
-    expect((radio as { options: { value: string }[] }).options.map((o) => o.value)).toEqual([
-      'quick',
-      'standard',
-      'comprehensive',
-    ]);
   });
 
   it('post-onboarding form has commit and commitMessage fields', () => {

@@ -150,12 +150,6 @@ async function main(): Promise<void> {
         mcpSettingsJson: '',
         lspLanguages: ['typescript'],
       },
-      '06-workflow-prefs': {
-        verificationLevel: 'standard',
-        autoCommit: false,
-        maxIterations: 5,
-        customNotes: '',
-      },
       '06_3-custom-bundles': {
         bundles: [],
       },
@@ -255,7 +249,6 @@ async function main(): Promise<void> {
       '01_5-ripgrep-config',
       '02-detection-confirmation',
       '04-tooling-infrastructure',
-      '06-workflow-prefs',
       '06_5-agent-discovery',
       '07-generate-files',
       '07_5-verify-files',

@@ -204,7 +204,6 @@ async function resolveRenderContext(
       buildTool: null,
       containerType: null,
     },
-    prefs: detect.prefs ?? {},
     framework: detect.framework ?? null,
     acceptedAgentIds: detect.acceptedAgentIds ?? [],
     customAgentSpecs: detect.customAgentSpecs ?? [],

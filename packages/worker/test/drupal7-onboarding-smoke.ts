@@ -174,12 +174,6 @@ async function main(): Promise<void> {
         mcpSettingsJson: '',
         lspLanguages: ['php'],
       },
-      '06-workflow-prefs': {
-        verificationLevel: 'standard',
-        autoCommit: false,
-        maxIterations: 5,
-        customNotes: 'Drupal 7 onboarding smoke.',
-      },
       '06_3-custom-bundles': {
         bundles: [],
       },
