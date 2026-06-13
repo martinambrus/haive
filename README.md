@@ -50,6 +50,8 @@ Mailpit ports are shifted from the upstream defaults (1025/8025) because ddev bi
 
 Three queues on Redis: `task-queue`, `cli-exec-queue`, `env-replicate-queue`. State of truth is PostgreSQL. Per-task sandboxes use the clawker Go binary wrapped via child_process for Docker-in-Docker isolation.
 
+Repositories come from a git remote, an uploaded archive, or a local directory. Remote and uploaded repos are copied into the `haive_repos` volume and mounted writable into each task sandbox. A local directory is, by default, bind-mounted **read-only** so a workflow can never mutate your real working tree. Tick **"Work on a writable copy"** when adding a local directory to instead snapshot it into the `haive_repos` volume at import; the workflow then edits and commits against the copy while your original directory stays untouched. The snapshot is taken once at import (it includes the full working tree, ignored folders such as `node_modules` included, so it uses extra disk); refreshing the repository re-copies from the source and discards any in-volume changes.
+
 See [CLAUDE.md](./CLAUDE.md) for monorepo layout, package boundaries, conventions, build commands, and constraints.
 
 ## Tech stack

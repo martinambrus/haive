@@ -91,6 +91,55 @@ export async function handleScan(payload: RepoJobPayload, db: Database): Promise
   logger.info({ repositoryId: payload.repositoryId }, 'Repo scan complete');
 }
 
+/** Recursively copy a directory's full contents (dotfiles like .git plus any
+ *  uncommitted/untracked working-tree changes) into dest, preserving
+ *  permissions, symlinks, and timestamps. `cp -a src/. dest` copies the
+ *  *contents* of src instead of nesting src under its basename. Symlinks are
+ *  preserved as-is (not followed), so a symlink in the user's tree cannot leak
+ *  a host file into the volume during the copy. */
+function copyTree(src: string, dest: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('cp', ['-a', `${src}/.`, dest]);
+    let stderr = '';
+    proc.stderr.on('data', (d: Buffer) => {
+      stderr += d.toString();
+    });
+    proc.on('error', reject);
+    proc.on('exit', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`cp -a failed (exit ${code}): ${stderr.trim()}`));
+    });
+  });
+}
+
+/** Writable-local import: copy the user's working tree from the host bind
+ *  (/host-fs/...) into the haive_repos volume so the workflow gets a writable
+ *  snapshot. Unlike handleScan — which leaves storagePath under /host-fs where
+ *  the sandbox binds it read-only — this points storagePath into the volume,
+ *  so every downstream resolver treats it as a writable volume repo. The copy
+ *  is a one-time snapshot taken at import (a later refresh re-copies). */
+export async function handleCopyLocal(
+  payload: RepoJobPayload,
+  db: Database,
+  repoStorageRoot: string,
+): Promise<void> {
+  if (!payload.localPath) throw new Error('localPath required for copy job');
+
+  const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
+  await mkdir(path.dirname(dest), { recursive: true });
+  // Clean dest first so a retry (or a refresh re-copy) starts from scratch
+  // instead of merging into a stale tree.
+  await rm(dest, { recursive: true, force: true });
+  await mkdir(dest, { recursive: true });
+
+  await copyTree(payload.localPath, dest);
+  await persistDetection(db, payload.repositoryId, dest);
+  logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo copy complete');
+}
+
 function runExtract(cmd: string, args: string[], okExits: number[] = [0]): Promise<void> {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args);

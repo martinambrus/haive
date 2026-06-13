@@ -29,6 +29,9 @@ export const REPO_JOB_NAMES = {
   CLONE: 'clone-repo',
   SCAN: 'scan-repo',
   EXTRACT: 'extract-repo',
+  /** Copy a writable-local repo's working tree from the host bind (/host-fs)
+   *  into the haive_repos volume so the workflow can write against a snapshot. */
+  COPY: 'copy-repo',
 } as const;
 
 export const BUNDLE_JOB_NAMES = {

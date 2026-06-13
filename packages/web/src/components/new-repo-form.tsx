@@ -130,6 +130,7 @@ export function NewRepoForm() {
   const [name, setName] = useState('');
   const [source, setSource] = useState<Source>('local_path');
   const [localPath, setLocalPath] = useState<string | null>(null);
+  const [writable, setWritable] = useState(false);
   const [remoteUrl, setRemoteUrl] = useState('');
   const [branch, setBranch] = useState('');
   const [credentialsId, setCredentialsId] = useState('');
@@ -300,6 +301,7 @@ export function NewRepoForm() {
         if (source === 'local_path') {
           if (!localPath) throw new Error('Pick a local directory containing a .git folder');
           body.localPath = localPath;
+          body.writable = writable;
         } else {
           if (!remoteUrl) throw new Error('Repository URL is required');
           if (source === 'github_oauth' && !credentialsId) {
@@ -353,6 +355,7 @@ export function NewRepoForm() {
             onChange={(e) => {
               setSource(e.target.value as Source);
               setLocalPath(null);
+              setWritable(false);
               setRemoteUrl('');
               resetOauthState();
               setCredentialsId('');
@@ -380,6 +383,23 @@ export function NewRepoForm() {
               </div>
             )}
             <FilesystemBrowser onSelect={(p) => setLocalPath(p)} selectedPath={localPath} />
+            <label className="mt-1 flex items-start gap-2 text-xs text-neutral-300">
+              <input
+                type="checkbox"
+                checked={writable}
+                onChange={(e) => setWritable(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                Work on a writable copy.{' '}
+                <span className="text-neutral-500">
+                  Copies the directory into Haive&apos;s managed storage so the workflow can edit,
+                  validate, and commit. Your original directory is never modified. Leave unchecked
+                  to reference it in place (read-only). The copy includes the full working tree
+                  (ignored folders like node_modules included), so it uses extra disk.
+                </span>
+              </span>
+            </label>
           </div>
         )}
 

@@ -120,6 +120,7 @@ export interface Repository {
   id: string;
   name: string;
   source: string;
+  writable: boolean;
   localPath: string | null;
   remoteUrl: string | null;
   branch: string | null;

@@ -60,6 +60,12 @@ export const repositories = pgTable(
      *  Null for repos onboarded before this column existed — API treats null
      *  as "use the live row set as the applicable domain". */
     applicableTemplateIds: text('applicable_template_ids').array(),
+    /** Writable-local mode: when true, a `local_path` repo's working tree was
+     *  copied into the haive_repos volume at import (storage_path points into
+     *  the volume) so the workflow can write/commit against a snapshot instead
+     *  of the read-only host bind mount. False (default) = reference the host
+     *  directory in place, read-only end to end. */
+    writable: boolean('writable').notNull().default(false),
     rtkEnabled: boolean('rtk_enabled').notNull().default(true),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),

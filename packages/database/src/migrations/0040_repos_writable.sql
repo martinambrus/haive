@@ -1,0 +1,13 @@
+-- Writable-local repos: opt-in flag set at import time. When true, a
+-- `local_path` repo's working tree was copied into the haive_repos volume
+-- (storage_path points into the volume) so the workflow can write/commit
+-- against a snapshot instead of the read-only host bind mount. False (the
+-- default) preserves the prior read-only-in-place behavior for every existing
+-- local_path repo, so backfill is a no-op.
+--
+-- Deploy note: applied via `drizzle-kit push --force` from the schema; this file
+-- is the idempotent parity/rollback record.
+--
+-- Rollback:
+--   ALTER TABLE "repositories" DROP COLUMN IF EXISTS "writable";
+ALTER TABLE "repositories" ADD COLUMN IF NOT EXISTS "writable" boolean NOT NULL DEFAULT false;

@@ -14,6 +14,7 @@ import {
   TERMINAL_SESSION_PREFIX,
   terminalSessionKey,
   logger,
+  isReadOnlyLocalRepo,
   terminalClientFrameSchema,
   type TerminalOpenRequest,
   type TerminalOpenResult,
@@ -469,8 +470,9 @@ interface RepoOwnershipResult {
 }
 
 /** Repo-scope ownership + eligibility. Unlike tasks, repositories never "end";
- *  the gates are ownership, readiness, and source (local-path repos are bound
- *  read-only end to end so they can't host a write/commit terminal). */
+ *  the gates are ownership, readiness, and source (read-only local-path repos
+ *  are bound read-only end to end so they can't host a write/commit terminal;
+ *  writable-local repos live in the volume and can). */
 async function verifyRepoOwnership(
   repositoryId: string,
   cliProviderId: string,
@@ -479,7 +481,7 @@ async function verifyRepoOwnership(
   const db = getDb();
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, repositoryId),
-    columns: { userId: true, status: true, source: true },
+    columns: { userId: true, status: true, source: true, writable: true },
   });
   if (!repo || repo.userId !== userId) return { ok: false, status: 404, message: 'Not Found' };
   const provider = await db.query.cliProviders.findFirst({
@@ -489,8 +491,12 @@ async function verifyRepoOwnership(
   if (!provider || provider.userId !== userId) {
     return { ok: false, status: 404, message: 'Not Found' };
   }
-  if (repo.source === 'local_path') {
-    return { ok: false, status: 409, message: 'Terminal not available for local-path repos' };
+  if (isReadOnlyLocalRepo(repo)) {
+    return {
+      ok: false,
+      status: 409,
+      message: 'Terminal not available for read-only local-path repos',
+    };
   }
   if (repo.status !== 'ready') {
     return {

@@ -7,6 +7,7 @@ import { api, type CliProvider, type Repository } from '@/lib/api-client';
 import { Button, Card } from '@/components/ui';
 import { InteractiveShell } from '@/components/terminal/InteractiveShell';
 import { usePageTitle } from '@/lib/use-page-title';
+import { isReadOnlyLocalRepo } from '@haive/shared/schemas';
 
 export default function RepoTerminalPage() {
   const params = useParams<{ id: string }>();
@@ -61,7 +62,7 @@ export default function RepoTerminalPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [maximized]);
 
-  const isLocal = repo?.source === 'local_path';
+  const isReadOnlyLocal = repo ? isReadOnlyLocalRepo(repo) : false;
   const notReady = repo != null && repo.status !== 'ready';
 
   const header = (
@@ -120,14 +121,14 @@ export default function RepoTerminalPage() {
     );
   }
 
-  if (isLocal) {
+  if (isReadOnlyLocal) {
     return (
       <div className="flex flex-col gap-4">
         <BackLink />
         <Card className="p-4 text-sm text-neutral-400">
-          The interactive terminal is not available for local-path repositories — their checkout is
-          mounted read-only, so edits, commits, and pushes are not possible. Use an uploaded or
-          cloned repository instead.
+          The interactive terminal is not available for read-only local-path repositories — their
+          checkout is mounted read-only, so edits, commits, and pushes are not possible. Re-add the
+          directory as a writable copy, or use an uploaded or cloned repository instead.
         </Card>
       </div>
     );

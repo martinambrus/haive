@@ -162,6 +162,7 @@ repoRoutes.post('/', async (c) => {
       branch: body.branch ?? 'main',
       status: 'cloning',
       credentialsSecretId: body.credentialsId ?? null,
+      writable: body.source === 'local_path' ? (body.writable ?? false) : false,
     })
     .returning();
 
@@ -176,7 +177,12 @@ repoRoutes.post('/', async (c) => {
     ...(body.branch ? { branch: body.branch } : {}),
     ...(body.credentialsId ? { credentialsId: body.credentialsId } : {}),
   };
-  const jobName = body.source === 'local_path' ? REPO_JOB_NAMES.SCAN : REPO_JOB_NAMES.CLONE;
+  const jobName =
+    body.source === 'local_path'
+      ? body.writable
+        ? REPO_JOB_NAMES.COPY
+        : REPO_JOB_NAMES.SCAN
+      : REPO_JOB_NAMES.CLONE;
   await queue.add(jobName, payload, {
     attempts: 3,
     backoff: { type: 'exponential', delay: 5000 },
@@ -798,7 +804,12 @@ repoRoutes.post('/:id/refresh-tree', async (c) => {
     ...(repo.branch ? { branch: repo.branch } : {}),
     ...(repo.credentialsSecretId ? { credentialsId: repo.credentialsSecretId } : {}),
   };
-  const jobName = repo.source === 'local_path' ? REPO_JOB_NAMES.SCAN : REPO_JOB_NAMES.CLONE;
+  const jobName =
+    repo.source === 'local_path'
+      ? repo.writable
+        ? REPO_JOB_NAMES.COPY
+        : REPO_JOB_NAMES.SCAN
+      : REPO_JOB_NAMES.CLONE;
   await queue.add(jobName, payload, {
     attempts: 3,
     backoff: { type: 'exponential', delay: 5000 },

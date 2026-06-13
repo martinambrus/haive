@@ -9,6 +9,16 @@ export const repoSourceSchema = z.enum([
   'upload',
 ]);
 
+/** A `local_path` repo is read-only end to end (its host directory is bound
+ *  `:ro` into the sandbox) UNLESS it was imported in writable mode, where its
+ *  working tree was copied into the haive_repos volume. Centralizes the guard
+ *  shared by the API terminal gate, the worker mount resolver, and the web UI
+ *  so the three never drift. Structural param so both server rows and the web
+ *  RepoRow satisfy it. */
+export function isReadOnlyLocalRepo(repo: { source: string; writable?: boolean | null }): boolean {
+  return repo.source === 'local_path' && !repo.writable;
+}
+
 export const createRepoRequestSchema = z
   .object({
     name: z.string().max(255).optional(),
@@ -17,6 +27,7 @@ export const createRepoRequestSchema = z
     remoteUrl: z.string().url().optional(),
     branch: z.string().max(255).optional(),
     credentialsId: z.string().uuid().optional(),
+    writable: z.boolean().optional(),
   })
   .superRefine((val, ctx) => {
     if (val.source === 'local_path' && !val.localPath) {
@@ -24,6 +35,13 @@ export const createRepoRequestSchema = z
         code: z.ZodIssueCode.custom,
         path: ['localPath'],
         message: 'localPath is required when source is local_path',
+      });
+    }
+    if (val.writable && val.source !== 'local_path') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['writable'],
+        message: 'writable mode is only valid for local_path repositories',
       });
     }
     if (

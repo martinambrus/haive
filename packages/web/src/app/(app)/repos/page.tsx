@@ -6,6 +6,7 @@ import { api, API_BASE_URL, type Repository } from '@/lib/api-client';
 import { Button, Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
 import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
 import { usePageTitle } from '@/lib/use-page-title';
+import { isReadOnlyLocalRepo } from '@haive/shared/schemas';
 
 function statusVariant(status: Repository['status']) {
   if (status === 'ready') return 'success' as const;
@@ -233,7 +234,7 @@ function RepoCard(props: RepoCardProps) {
               <Button size="sm">Create task</Button>
             </Link>
           )}
-          {repo.status === 'ready' && repo.source !== 'local_path' && (
+          {repo.status === 'ready' && !isReadOnlyLocalRepo(repo) && (
             <Link href={`/repos/${repo.id}/terminal`}>
               <Button variant="secondary" size="sm">
                 Terminal

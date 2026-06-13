@@ -4,7 +4,7 @@ import { schema } from '@haive/database';
 import { QUEUE_NAMES, REPO_JOB_NAMES, logger, type RepoJobPayload } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
-import { handleClone, handleExtract, handleScan } from '../repo/clone.js';
+import { handleClone, handleCopyLocal, handleExtract, handleScan } from '../repo/clone.js';
 
 export function startRepoWorker(repoStorageRoot: string): Worker {
   const worker = new Worker<RepoJobPayload>(
@@ -19,6 +19,8 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
           await handleScan(payload, db);
         } else if (job.name === REPO_JOB_NAMES.EXTRACT) {
           await handleExtract(payload, db, repoStorageRoot);
+        } else if (job.name === REPO_JOB_NAMES.COPY) {
+          await handleCopyLocal(payload, db, repoStorageRoot);
         } else {
           throw new Error(`Unknown repo job: ${job.name}`);
         }
