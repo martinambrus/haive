@@ -3,7 +3,7 @@ import type { CliProviderName } from '@haive/shared';
 import {
   buildClaudeSettingsJson,
   buildGeminiSettingsJson,
-  buildRtkMdRefBlock,
+  buildRtkAwarenessBlock,
   buildRtkTemplateItems,
   insertRtkHookEntry,
   RTK_HOOK_CLAUDE_COMMAND,
@@ -38,73 +38,41 @@ describe('buildRtkTemplateItems gating', () => {
     }
   });
 
-  it('claude-code enabled emits .claude/settings.json + .claude/RTK.md + CLAUDE.md ref', () => {
+  it('claude-code enabled emits only .claude/settings.json (awareness markdown is inlined into AGENTS.md, non-manifest)', () => {
     const items = buildRtkTemplateItems<RtkRenderInputs>();
     const c = ctx(true, ['claude-code']);
-    const paths = items
-      .flatMap((i) => i.render(c))
-      .map((r) => r.diskPath)
-      .sort();
-    expect(paths).toEqual(['.claude/RTK.md', '.claude/settings.json', 'CLAUDE.md']);
+    const paths = items.flatMap((i) => i.render(c)).map((r) => r.diskPath);
+    expect(paths).toEqual(['.claude/settings.json']);
   });
 
-  it('zai routes through the same .claude/ files as claude-code', () => {
+  it('zai routes through the same .claude/settings.json as claude-code', () => {
     const items = buildRtkTemplateItems<RtkRenderInputs>();
     const c = ctx(true, ['zai']);
-    const paths = items
-      .flatMap((i) => i.render(c))
-      .map((r) => r.diskPath)
-      .sort();
-    expect(paths).toEqual(['.claude/RTK.md', '.claude/settings.json', 'CLAUDE.md']);
+    const paths = items.flatMap((i) => i.render(c)).map((r) => r.diskPath);
+    expect(paths).toEqual(['.claude/settings.json']);
   });
 
-  it('gemini enabled emits .gemini/settings.json + .gemini/RTK.md + GEMINI.md ref', () => {
+  it('gemini enabled emits only .gemini/settings.json', () => {
     const items = buildRtkTemplateItems<RtkRenderInputs>();
     const c = ctx(true, ['gemini']);
-    const paths = items
-      .flatMap((i) => i.render(c))
-      .map((r) => r.diskPath)
-      .sort();
-    expect(paths).toEqual(['.gemini/RTK.md', '.gemini/settings.json', 'GEMINI.md']);
+    const paths = items.flatMap((i) => i.render(c)).map((r) => r.diskPath);
+    expect(paths).toEqual(['.gemini/settings.json']);
   });
 
-  it('codex enabled emits repo-root RTK.md + AGENTS.md ref', () => {
+  it('codex/amp track no manifest RTK files — their RTK awareness lives in the non-manifest AGENTS.md block', () => {
     const items = buildRtkTemplateItems<RtkRenderInputs>();
-    const c = ctx(true, ['codex']);
-    const paths = items
-      .flatMap((i) => i.render(c))
-      .map((r) => r.diskPath)
-      .sort();
-    expect(paths).toEqual(['AGENTS.md', 'RTK.md']);
+    expect(items.flatMap((i) => i.render(ctx(true, ['codex']))).map((r) => r.diskPath)).toEqual([]);
+    expect(items.flatMap((i) => i.render(ctx(true, ['amp']))).map((r) => r.diskPath)).toEqual([]);
   });
 
-  it('amp enabled routes through codex/agents-md path (no rtk-native flag, but project-level files still apply)', () => {
-    const items = buildRtkTemplateItems<RtkRenderInputs>();
-    const c = ctx(true, ['amp']);
-    const paths = items
-      .flatMap((i) => i.render(c))
-      .map((r) => r.diskPath)
-      .sort();
-    expect(paths).toEqual(['AGENTS.md', 'RTK.md']);
-  });
-
-  it('all CLIs enabled together fans out across every config file', () => {
+  it('all CLIs enabled together track only the two hook settings files', () => {
     const items = buildRtkTemplateItems<RtkRenderInputs>();
     const c = ctx(true, ['claude-code', 'gemini', 'codex', 'amp', 'zai']);
     const paths = items
       .flatMap((i) => i.render(c))
       .map((r) => r.diskPath)
       .sort();
-    expect(paths).toEqual([
-      '.claude/RTK.md',
-      '.claude/settings.json',
-      '.gemini/RTK.md',
-      '.gemini/settings.json',
-      'AGENTS.md',
-      'CLAUDE.md',
-      'GEMINI.md',
-      'RTK.md',
-    ]);
+    expect(paths).toEqual(['.claude/settings.json', '.gemini/settings.json']);
   });
 
   it('renders are deterministic — same context, same content', () => {
@@ -144,12 +112,13 @@ describe('buildGeminiSettingsJson', () => {
   });
 });
 
-describe('buildRtkMdRefBlock', () => {
-  it('wraps the @-ref line in the haive:rtk-ref marker pair', () => {
-    const block = buildRtkMdRefBlock('@.claude/RTK.md');
+describe('buildRtkAwarenessBlock', () => {
+  it('inlines the RTK_SLIM body in the haive:rtk-ref marker pair (no per-CLI @-ref)', () => {
+    const block = buildRtkAwarenessBlock();
     expect(block).toContain(RTK_REF_MARKER_START);
     expect(block).toContain(RTK_REF_MARKER_END);
-    expect(block).toContain('@.claude/RTK.md');
+    expect(block).toContain('rtk gain');
+    expect(block).not.toContain('@RTK.md');
   });
 });
 

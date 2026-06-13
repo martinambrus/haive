@@ -20,11 +20,9 @@ import { loadPreviousStepOutput, pathExists } from './_helpers.js';
 import {
   buildClaudeSettingsJson,
   buildGeminiSettingsJson,
-  buildRtkMdRefBlock,
+  buildRtkAwarenessBlock,
   RTK_REF_MARKER_END,
   RTK_REF_MARKER_START,
-  RTK_SLIM,
-  RTK_SLIM_CODEX,
 } from './_rtk-templates.js';
 
 export interface ProjectInfo {
@@ -265,6 +263,43 @@ export function dedupLines(blocks: string[]): string {
       .replace(/\n{3,}/g, '\n\n')
       .trim() + '\n'
   );
+}
+
+export interface RulesPlan {
+  /** Merged `haive:cli-rules` block for AGENTS.md, or null when no enabled
+   *  provider has rules content. */
+  agentsRulesBlock: string | null;
+  /** Files (CLAUDE.md, GEMINI.md) that receive only an `@AGENTS.md` import. */
+  importFiles: string[];
+  /** Files that receive a full duplicate of AGENTS.md (project-info + rules) —
+   *  for CLIs supporting neither native AGENTS.md nor `@` imports. Unused by
+   *  the current adapter set. */
+  copyFiles: string[];
+}
+
+/** Decide what each CLI's rules file gets, given the enabled providers joined
+ *  with their adapter rules-file metadata. AGENTS.md is the single source of
+ *  truth (every provider's rules merged + trim-equal deduped); import-mode
+ *  files (CLAUDE.md, GEMINI.md) just point at it via `@AGENTS.md`; native-mode
+ *  files (rulesFile === 'AGENTS.md') need nothing extra. */
+export function planRulesFiles(
+  providers: ReadonlyArray<{
+    rulesContent: string;
+    rulesFile: string;
+    rulesFileMode: 'native' | 'import' | 'copy';
+  }>,
+): RulesPlan {
+  const withRules = providers.map((p) => p.rulesContent).filter((c) => c.trim().length > 0);
+  const combined = withRules.length > 0 ? dedupLines(withRules) : null;
+  const agentsRulesBlock = combined ? `${CLI_RULES_START}\n${combined}${CLI_RULES_END}\n` : null;
+  const importFiles = new Set<string>();
+  const copyFiles = new Set<string>();
+  for (const p of providers) {
+    if (p.rulesFile === 'AGENTS.md') continue;
+    if (p.rulesFileMode === 'import') importFiles.add(p.rulesFile);
+    else if (p.rulesFileMode === 'copy') copyFiles.add(p.rulesFile);
+  }
+  return { agentsRulesBlock, importFiles: [...importFiles], copyFiles: [...copyFiles] };
 }
 
 /* ------------------------------------------------------------------ */
@@ -688,74 +723,64 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       PROJECT_INFO_END,
     );
 
-    // Per-CLI rules written to each adapter's native rules file. Providers that
-    // share a target file (codex + amp + gemini -> AGENTS.md, claude-code + zai ->
-    // CLAUDE.md) are merged line-by-line with trim-equal dedup so shared rules
-    // appear once. Three modes:
-    //   native: file is AGENTS.md, content written under haive:cli-rules marker.
-    //   import: file gets `@AGENTS.md` line + the same rules block (so the CLI
-    //           follows AGENTS.md via import AND has its own copy available).
-    //   copy:   file gets only the rules block (no import syntax supported).
-    const groups = new Map<string, { mode: 'native' | 'import' | 'copy'; blocks: string[] }>();
-    for (const p of detected.cliProviders) {
-      const adapter = cliAdapterRegistry.get(p.name);
-      const existing = groups.get(adapter.rulesFile);
-      if (existing) {
-        existing.blocks.push(p.rulesContent);
-      } else {
-        groups.set(adapter.rulesFile, {
-          mode: adapter.rulesFileMode,
-          blocks: [p.rulesContent],
-        });
-      }
+    // Agent rules are consolidated into AGENTS.md — the single source of truth
+    // every supported CLI reaches: codex/amp/antigravity read AGENTS.md
+    // natively, and claude-code/zai/gemini import it via `@AGENTS.md`. All
+    // enabled providers' rules are merged (trim-equal dedup) into one
+    // haive:cli-rules block appended after the project-info block above; each
+    // import-mode rules file (CLAUDE.md, GEMINI.md) becomes a lone `@AGENTS.md`.
+    const rulesPlan = planRulesFiles(
+      detected.cliProviders.map((p) => {
+        const adapter = cliAdapterRegistry.get(p.name);
+        return {
+          rulesContent: p.rulesContent,
+          rulesFile: adapter.rulesFile,
+          rulesFileMode: adapter.rulesFileMode,
+        };
+      }),
+    );
+    if (rulesPlan.agentsRulesBlock) {
+      await appendOrCreate('AGENTS.md', rulesPlan.agentsRulesBlock, CLI_RULES_START, CLI_RULES_END);
     }
-    const rulesStart = '<!-- haive:cli-rules -->';
-    const rulesEnd = '<!-- /haive:cli-rules -->';
-    for (const [rulesFile, group] of groups) {
-      const combined = dedupLines(group.blocks);
-      const rulesBlock = `${rulesStart}\n${combined}${rulesEnd}\n`;
-      if (group.mode === 'import') {
-        await appendOrCreate(rulesFile, '@AGENTS.md\n', '@AGENTS.md');
+    for (const rf of rulesPlan.importFiles) {
+      await appendOrCreate(rf, '@AGENTS.md\n', '@AGENTS.md');
+    }
+    for (const rf of rulesPlan.copyFiles) {
+      await appendOrCreate(
+        rf,
+        projectInfoMarkdown(detected.projectInfo),
+        PROJECT_INFO_START,
+        PROJECT_INFO_END,
+      );
+      if (rulesPlan.agentsRulesBlock) {
+        await appendOrCreate(rf, rulesPlan.agentsRulesBlock, CLI_RULES_START, CLI_RULES_END);
       }
-      await appendOrCreate(rulesFile, rulesBlock, rulesStart, rulesEnd);
     }
 
-    // RTK opt-in: per-CLI hook configs + slim awareness markdown. Mirrors the
-    // rtk-config TemplateItems in `_rtk-templates.ts` 1:1 so step 12's manifest
-    // expansion finds the same files on disk and records them as
-    // onboarding_artifacts. Toggle off → upgrade-plan surfaces these as
-    // `obsolete` and removes them on apply.
+    // RTK opt-in. The per-CLI hook settings files (.claude/settings.json,
+    // .gemini/settings.json) are the only manifest-tracked RTK artifacts —
+    // dedicated single-purpose files, so the upgrade path's whole-file
+    // overwrite/delete is safe. They mirror the surviving rtk-config
+    // TemplateItems in `_rtk-templates.ts` 1:1 so step 12 records them and
+    // toggling rtk off removes them on upgrade. The RTK awareness markdown is
+    // inlined into AGENTS.md (non-manifest, like project-info and cli-rules) so
+    // every CLI reads it — native AGENTS.md readers do not expand `@` refs, and
+    // CLAUDE.md/GEMINI.md stay a lone `@AGENTS.md` import.
     if (detected.rtkEnabled) {
       const enabled = detected.enabledCliProviders ?? [];
       const hasClaudeFamily = enabled.some((p) => p.name === 'claude-code' || p.name === 'zai');
       const hasGemini = enabled.some((p) => p.name === 'gemini');
-      const hasCodexOrAmp = enabled.some((p) => p.name === 'codex' || p.name === 'amp');
 
       if (hasClaudeFamily) {
         await writeIfAllowed('.claude/settings.json', buildClaudeSettingsJson());
-        await writeIfAllowed('.claude/RTK.md', RTK_SLIM);
-        await appendOrCreate(
-          'CLAUDE.md',
-          buildRtkMdRefBlock('@.claude/RTK.md'),
-          RTK_REF_MARKER_START,
-          RTK_REF_MARKER_END,
-        );
       }
       if (hasGemini) {
         await writeIfAllowed('.gemini/settings.json', buildGeminiSettingsJson());
-        await writeIfAllowed('.gemini/RTK.md', RTK_SLIM);
-        await appendOrCreate(
-          'GEMINI.md',
-          buildRtkMdRefBlock('@.gemini/RTK.md'),
-          RTK_REF_MARKER_START,
-          RTK_REF_MARKER_END,
-        );
       }
-      if (hasCodexOrAmp) {
-        await writeIfAllowed('RTK.md', RTK_SLIM_CODEX);
+      if (enabled.length > 0) {
         await appendOrCreate(
           'AGENTS.md',
-          buildRtkMdRefBlock('@RTK.md'),
+          buildRtkAwarenessBlock(),
           RTK_REF_MARKER_START,
           RTK_REF_MARKER_END,
         );

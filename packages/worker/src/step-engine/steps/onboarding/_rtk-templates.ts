@@ -23,13 +23,10 @@ working as intended — re-run with \`rtk proxy <cmd>\` only when you suspect
 filtering is hiding a real signal.
 `;
 
-/** Codex consumes plain markdown; same body as RTK_SLIM today, kept as a
- *  separate constant so we can diverge later (e.g. tooling-specific examples). */
-export const RTK_SLIM_CODEX = RTK_SLIM;
-
-/** Marker pair wrapping the `@RTK.md` reference appended into CLAUDE.md /
- *  AGENTS.md / GEMINI.md by step 07. Lets a later upgrade replace or strip
- *  the block cleanly when rtk is toggled off. */
+/** Marker pair wrapping the RTK awareness block inlined into AGENTS.md by
+ *  step 07. Lets `stripHaiveContent` (onboarding reset) and a re-run strip or
+ *  refresh the block cleanly. The `rtk-ref` slug is retained for backwards
+ *  compatibility with blocks written by earlier Haive versions. */
 export const RTK_REF_MARKER_START = '<!-- haive:rtk-ref -->';
 export const RTK_REF_MARKER_END = '<!-- /haive:rtk-ref -->';
 
@@ -37,11 +34,6 @@ export const RTK_REF_MARKER_END = '<!-- /haive:rtk-ref -->';
  *  fires. Mirrors rtk's own `CLAUDE_HOOK_COMMAND` / gemini hook command. */
 export const RTK_HOOK_CLAUDE_COMMAND = 'rtk hook claude';
 export const RTK_HOOK_GEMINI_COMMAND = 'rtk hook gemini';
-
-/** Files that step 07's apply must route through `appendOrCreate` with the
- *  rtk-ref markers — every other rtk-config rendering is a plain
- *  `writeIfAllowed`. Worker code reads this list to branch correctly. */
-export const RTK_REF_TARGETS = new Set<string>(['CLAUDE.md', 'AGENTS.md', 'GEMINI.md']);
 
 /** Minimal slice of `TemplateRenderContext` that rtk factories actually read.
  *  Declared locally so this module has no dependency on the manifest module
@@ -57,10 +49,6 @@ function hasClaudeFamily(ctx: RtkRenderInputs): boolean {
 
 function hasGemini(ctx: RtkRenderInputs): boolean {
   return ctx.enabledCliProviders.some((p) => p.name === 'gemini');
-}
-
-function hasCodexOrAmp(ctx: RtkRenderInputs): boolean {
-  return ctx.enabledCliProviders.some((p) => p.name === 'codex' || p.name === 'amp');
 }
 
 /** Hook block written to `.claude/settings.json` (claude-code, zai). Shape
@@ -97,26 +85,26 @@ export function buildGeminiSettingsJson(): string {
   return `${JSON.stringify(obj, null, 2)}\n`;
 }
 
-/** Body of the marker-wrapped `@RTK.md` block appended into AGENTS.md /
- *  CLAUDE.md / GEMINI.md. The leading/trailing newlines around the markers
- *  match the convention `appendOrCreate` already uses for project info. */
-export function buildRtkMdRefBlock(refLine: string): string {
-  return `${RTK_REF_MARKER_START}\n${refLine}\n${RTK_REF_MARKER_END}\n`;
+/** Marker-wrapped RTK awareness block inlined into AGENTS.md — the single
+ *  rules source every CLI reads (codex/amp/antigravity natively; claude/zai/
+ *  gemini via `@AGENTS.md`). Inlined rather than an `@RTK.md` reference because
+ *  native AGENTS.md readers do not expand `@` imports. */
+export function buildRtkAwarenessBlock(): string {
+  return `${RTK_REF_MARKER_START}\n${RTK_SLIM}${RTK_REF_MARKER_END}\n`;
 }
 
 /** Build all rtk template items in a single call. Caller registers the
- *  result alongside the existing manifest items in `buildTemplateItems()`. */
+ *  result alongside the existing manifest items in `buildTemplateItems()`.
+ *
+ *  Only the per-CLI hook settings files are manifest-tracked. They are
+ *  dedicated, single-purpose files, so the upgrade path's whole-file
+ *  overwrite/delete is safe for them. The RTK awareness *markdown* is NOT a
+ *  manifest item: it is inlined into AGENTS.md (alongside project-info and
+ *  cli-rules, which are likewise step-07-only) via `buildRtkAwarenessBlock`,
+ *  because a manifest item pointing at AGENTS.md would let an upgrade clobber
+ *  or delete the whole project-spec + rules file. */
 export function buildRtkTemplateItems<TCtx extends RtkRenderInputs>(): TemplateItem<TCtx>[] {
-  return [
-    rtkClaudeSettingsItem<TCtx>(),
-    rtkClaudeRtkMdItem<TCtx>(),
-    rtkClaudeMdRefItem<TCtx>(),
-    rtkGeminiSettingsItem<TCtx>(),
-    rtkGeminiRtkMdItem<TCtx>(),
-    rtkGeminiMdRefItem<TCtx>(),
-    rtkAgentsRtkMdItem<TCtx>(),
-    rtkAgentsMdRefItem<TCtx>(),
-  ];
+  return [rtkClaudeSettingsItem<TCtx>(), rtkGeminiSettingsItem<TCtx>()];
 }
 
 function rtkClaudeSettingsItem<TCtx extends RtkRenderInputs>(): TemplateItem<TCtx> {
@@ -131,30 +119,6 @@ function rtkClaudeSettingsItem<TCtx extends RtkRenderInputs>(): TemplateItem<TCt
   };
 }
 
-function rtkClaudeRtkMdItem<TCtx extends RtkRenderInputs>(): TemplateItem<TCtx> {
-  return {
-    id: 'rtk.claude-rtk-md',
-    kind: 'rtk-config',
-    schemaVersion: 1,
-    render(ctx): TemplateRendering[] {
-      if (!ctx.rtkEnabled || !hasClaudeFamily(ctx)) return [];
-      return [{ diskPath: '.claude/RTK.md', content: RTK_SLIM }];
-    },
-  };
-}
-
-function rtkClaudeMdRefItem<TCtx extends RtkRenderInputs>(): TemplateItem<TCtx> {
-  return {
-    id: 'rtk.claude-md-ref',
-    kind: 'rtk-config',
-    schemaVersion: 1,
-    render(ctx): TemplateRendering[] {
-      if (!ctx.rtkEnabled || !hasClaudeFamily(ctx)) return [];
-      return [{ diskPath: 'CLAUDE.md', content: buildRtkMdRefBlock('@.claude/RTK.md') }];
-    },
-  };
-}
-
 function rtkGeminiSettingsItem<TCtx extends RtkRenderInputs>(): TemplateItem<TCtx> {
   return {
     id: 'rtk.gemini-settings',
@@ -163,54 +127,6 @@ function rtkGeminiSettingsItem<TCtx extends RtkRenderInputs>(): TemplateItem<TCt
     render(ctx): TemplateRendering[] {
       if (!ctx.rtkEnabled || !hasGemini(ctx)) return [];
       return [{ diskPath: '.gemini/settings.json', content: buildGeminiSettingsJson() }];
-    },
-  };
-}
-
-function rtkGeminiRtkMdItem<TCtx extends RtkRenderInputs>(): TemplateItem<TCtx> {
-  return {
-    id: 'rtk.gemini-rtk-md',
-    kind: 'rtk-config',
-    schemaVersion: 1,
-    render(ctx): TemplateRendering[] {
-      if (!ctx.rtkEnabled || !hasGemini(ctx)) return [];
-      return [{ diskPath: '.gemini/RTK.md', content: RTK_SLIM }];
-    },
-  };
-}
-
-function rtkGeminiMdRefItem<TCtx extends RtkRenderInputs>(): TemplateItem<TCtx> {
-  return {
-    id: 'rtk.gemini-md-ref',
-    kind: 'rtk-config',
-    schemaVersion: 1,
-    render(ctx): TemplateRendering[] {
-      if (!ctx.rtkEnabled || !hasGemini(ctx)) return [];
-      return [{ diskPath: 'GEMINI.md', content: buildRtkMdRefBlock('@.gemini/RTK.md') }];
-    },
-  };
-}
-
-function rtkAgentsRtkMdItem<TCtx extends RtkRenderInputs>(): TemplateItem<TCtx> {
-  return {
-    id: 'rtk.agents-rtk-md',
-    kind: 'rtk-config',
-    schemaVersion: 1,
-    render(ctx): TemplateRendering[] {
-      if (!ctx.rtkEnabled || !hasCodexOrAmp(ctx)) return [];
-      return [{ diskPath: 'RTK.md', content: RTK_SLIM_CODEX }];
-    },
-  };
-}
-
-function rtkAgentsMdRefItem<TCtx extends RtkRenderInputs>(): TemplateItem<TCtx> {
-  return {
-    id: 'rtk.agents-md-ref',
-    kind: 'rtk-config',
-    schemaVersion: 1,
-    render(ctx): TemplateRendering[] {
-      if (!ctx.rtkEnabled || !hasCodexOrAmp(ctx)) return [];
-      return [{ diskPath: 'AGENTS.md', content: buildRtkMdRefBlock('@RTK.md') }];
     },
   };
 }
