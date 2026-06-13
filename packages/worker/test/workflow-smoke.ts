@@ -282,6 +282,11 @@ async function main(): Promise<void> {
         reviewerNote: 'Smoke test: stub pipeline end-to-end.',
         writeFiles: true,
       },
+      '11a-gate-4-push': {
+        push: false,
+        remoteUrl: 'https://smoke.invalid/repo.git',
+        credentialId: '',
+      },
       '12-worktree-cleanup': {
         removeWorktree: false,
       },
@@ -367,6 +372,7 @@ async function main(): Promise<void> {
       '09-gate-2-verify-approval',
       '10-gate-3-commit',
       '11-phase-8-learning',
+      '11a-gate-4-push',
       '12-worktree-cleanup',
     ];
     for (const id of expected) {

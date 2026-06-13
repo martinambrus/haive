@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { FormSchema } from '@haive/shared';
+import { validateFormValues, type FormSchema } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
 // Avoid the master-KEK / secretsService dependency: the credentialed push path
@@ -194,6 +194,47 @@ describe('gate-4 push: form', () => {
     expect(url).toBeDefined();
     expect(url.required).toBe(true);
     expect((fields.get('push') as { default: boolean }).default).toBe(false);
+  });
+});
+
+describe('gate-4 push: smoke canned value satisfies the form', () => {
+  // The workflow smokes submit this for 11a-gate-4-push. The step runner
+  // validates form values against the form schema before apply, so the canned
+  // value must pass whichever variant detect produces. Guards the smokes
+  // against future form changes.
+  const SMOKE_VALUE = {
+    push: false,
+    remoteUrl: 'https://smoke.invalid/repo.git',
+    credentialId: '',
+  };
+  const detectedBase = {
+    hasGit: true,
+    workspacePath: '/tmp/x',
+    branch: BRANCH,
+    recentCommits: 'abc init',
+    repositoryId: 'repo-1',
+    boundCredentialId: null,
+    credentials: [],
+  };
+
+  it('validates against the no-origin form', () => {
+    const { ctx } = makeCtx('/tmp/x');
+    const schema = gate4PushStep.form!(ctx, {
+      ...detectedBase,
+      hasOrigin: false,
+      originUrl: null,
+    }) as FormSchema;
+    expect(validateFormValues(schema, SMOKE_VALUE).success).toBe(true);
+  });
+
+  it('validates against the has-origin form', () => {
+    const { ctx } = makeCtx('/tmp/x');
+    const schema = gate4PushStep.form!(ctx, {
+      ...detectedBase,
+      hasOrigin: true,
+      originUrl: 'https://github.com/o/r.git',
+    }) as FormSchema;
+    expect(validateFormValues(schema, SMOKE_VALUE).success).toBe(true);
   });
 });
 

@@ -228,6 +228,11 @@ async function main(): Promise<void> {
       '09-gate-2-verify-approval': { decision: 'approve', feedback: 'env smoke verify.' },
       '10-gate-3-commit': { commit: false, commitMessage: '' },
       '11-phase-8-learning': { reviewerNote: 'env smoke note.', writeFiles: true },
+      '11a-gate-4-push': {
+        push: false,
+        remoteUrl: 'https://smoke.invalid/repo.git',
+        credentialId: '',
+      },
       '12-worktree-cleanup': { removeWorktree: false },
     };
 

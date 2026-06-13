@@ -264,6 +264,11 @@ async function main(): Promise<void> {
         reviewerNote: 'Real-commit smoke.',
         writeFiles: true,
       },
+      '11a-gate-4-push': {
+        push: false,
+        remoteUrl: 'https://smoke.invalid/repo.git',
+        credentialId: '',
+      },
       '12-worktree-cleanup': { removeWorktree: false },
     };
 
