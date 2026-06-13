@@ -13,7 +13,12 @@ import {
   type RagSearchHit,
   type RagToolingPrefs,
 } from '@haive/shared/rag';
-import { extractProjectFacets, withGlobalKb, type ProjectFacetSet } from '@haive/shared/global-kb';
+import {
+  extractProjectFacets,
+  withGlobalKb,
+  type ConfirmedStackValues,
+  type ProjectFacetSet,
+} from '@haive/shared/global-kb';
 import { getDb } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -65,6 +70,15 @@ async function resolveTaskRagContext(
       columns: { detectOutput: true },
     })
   )?.detectOutput;
+  let confirmedOutput = (
+    await db.query.taskSteps.findFirst({
+      where: and(
+        eq(schema.taskSteps.taskId, taskId),
+        eq(schema.taskSteps.stepId, '02-detection-confirmation'),
+      ),
+      columns: { output: true },
+    })
+  )?.output;
 
   if (!toolingOutput || !envDetect) {
     const task = await db.query.tasks.findFirst({
@@ -103,6 +117,17 @@ async function resolveTaskRagContext(
             })
           )?.detectOutput;
         }
+        if (!confirmedOutput) {
+          confirmedOutput = (
+            await db.query.taskSteps.findFirst({
+              where: and(
+                eq(schema.taskSteps.taskId, onboarding.id),
+                eq(schema.taskSteps.stepId, '02-detection-confirmation'),
+              ),
+              columns: { output: true },
+            })
+          )?.output;
+        }
       }
     }
   }
@@ -110,10 +135,11 @@ async function resolveTaskRagContext(
   const projectName =
     (envDetect as { data?: { project?: { name?: string } } } | null)?.data?.project?.name ??
     'default';
+  const confirmed = (confirmedOutput as { values?: ConfirmedStackValues } | null)?.values ?? null;
   return {
     prefs: prefsFromTooling(toolingOutput),
     projectName,
-    facets: extractProjectFacets(envDetect),
+    facets: extractProjectFacets(envDetect, confirmed),
   };
 }
 

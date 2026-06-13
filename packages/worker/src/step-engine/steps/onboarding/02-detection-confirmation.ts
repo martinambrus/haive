@@ -215,6 +215,13 @@ export const detectionConfirmationStep: StepDefinition<
         },
         {
           type: 'text',
+          id: 'phpVersion',
+          label: 'PHP version',
+          default: detected.runtimeVersions?.php ?? undefined,
+          placeholder: detected.runtimeVersions?.php ? undefined : '8.3, 7.4, 5.6...',
+        },
+        {
+          type: 'text',
           id: 'webserver',
           label: 'Webserver',
           default: detected.webserver ?? undefined,

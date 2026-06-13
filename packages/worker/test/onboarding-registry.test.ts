@@ -74,6 +74,7 @@ describe('onboarding registry', () => {
       'localUrl',
       'databaseType',
       'databaseVersion',
+      'phpVersion',
       'webserver',
       'testFrameworks',
       'buildTool',

@@ -30,6 +30,8 @@ const FACET_DIMS = [
   'language',
   'phpMajor',
   'nodeMajor',
+  'database',
+  'dbMajor',
   'packages',
   'tags',
 ] as const;
@@ -142,6 +144,8 @@ function buildEnrichPrompt(detected: KbAuthorDetect): string {
     '    "framework": ["<e.g. drupal>"],',
     '    "frameworkMajor": ["<e.g. 11>"],',
     '    "language": ["<e.g. php>"],',
+    '    "database": ["<e.g. mysql or mariadb — for datastore-only rules>"],',
+    '    "dbMajor": ["<e.g. 10 — the datastore major>"],',
     '    "packages": ["<name@major, e.g. drupal/paragraphs@8>"]',
     '  },',
     '  "body": "<the full markdown article>"',

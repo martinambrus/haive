@@ -21,6 +21,10 @@ export interface GlobalKbFacets {
   language?: string[];
   phpMajor?: string[];
   nodeMajor?: string[];
+  /** Datastore engine, e.g. ["mysql"], ["mariadb"], ["postgres"]. */
+  database?: string[];
+  /** Datastore major version, e.g. ["10"] for MariaDB 10.x, ["8"] for MySQL 8. */
+  dbMajor?: string[];
   packages?: string[];
   tags?: string[];
 }

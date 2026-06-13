@@ -77,6 +77,8 @@ const FACET_FILTER_DIMENSIONS = [
   'language',
   'phpMajor',
   'nodeMajor',
+  'database',
+  'dbMajor',
   'packages',
   'tags',
 ] as const;

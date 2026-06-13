@@ -4,7 +4,12 @@ import { jsonrepair } from 'jsonrepair';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
-import type { GlobalKbCategory, GlobalKbFacets } from '@haive/shared/global-kb';
+import {
+  resolveStackVersions,
+  type ConfirmedStackValues,
+  type GlobalKbCategory,
+  type GlobalKbFacets,
+} from '@haive/shared/global-kb';
 import {
   clearTaskPromotedDrafts,
   globalKbTopicKey,
@@ -20,6 +25,20 @@ interface KnowledgeDetect {
   frameworkMajor: string | null;
   language: string | null;
   projectName: string | null;
+  /** Major-version anchors for language/datastore-level global knowledge (PHP, the
+   *  datastore), overlaid with the user's 02-confirmation overrides. Null when
+   *  undetectable → such knowledge cannot be version-anchored and stays local. */
+  phpMajor: string | null;
+  nodeMajor: string | null;
+  database: string | null;
+  dbMajor: string | null;
+  /** Installed direct deps as `name@major` (from 01-env-detect). Used to scope and
+   *  to VERIFY a global entry's module/package version anchor. */
+  packages: string[];
+  /** Custom-vs-dependency code path prefixes (from 01-env-detect). `include` = this
+   *  repo's own custom code; `exclude` = contrib/core/vendor. Used to tell repo-private
+   *  code from public modules when deciding global vs local. */
+  customCode: { include: string[]; exclude: string[] };
   /** Transient — file tree for LLM prompt, stripped before persisting. */
   __fileTree?: string;
   /** Transient — README excerpt for LLM prompt context. */
@@ -185,6 +204,17 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '## Project context',
     `Framework: ${detected.framework ?? 'unknown'}`,
     `Language: ${detected.language ?? 'unknown'}`,
+    `Installed dependencies (name@major — use these EXACT tokens for module/package facets): ${
+      detected.packages.length ? detected.packages.join(', ') : '(none detected)'
+    }`,
+    `This repo's OWN custom code lives under: ${
+      detected.customCode.include.length ? detected.customCode.include.join(', ') : '(unknown)'
+    }. Public/vendor code that is NOT this repo's: ${
+      detected.customCode.exclude.length ? detected.customCode.exclude.join(', ') : '(unknown)'
+    }.`,
+    `PHP major version: ${detected.phpMajor ?? 'unknown'}. Datastore: ${
+      detected.database ?? 'unknown'
+    }${detected.dbMajor ? ` ${detected.dbMajor}` : ''}. Use these for language/datastore facets (phpMajor, and database + dbMajor).`,
     '',
     '## Repository overview (partial file tree)',
     '```',
@@ -284,18 +314,18 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '    * "quick_reference" — cheat sheet of common operations for a technology. Routes to QUICK_REFERENCE/<tech>/cheat-sheet.md.',
     '- canonical: optional. Use when the entry matches one of the standard root-level files (ARCHITECTURE, API_REFERENCE, CODING_STANDARDS, TESTING_STANDARDS, SECURITY_STANDARDS, DEPLOYMENT, BUSINESS_LOGIC). Produce AT MOST ONE entry per canonical name.',
     '- tech: required when category is tech_pattern, anti_pattern, best_practice, or quick_reference. kebab-case (e.g. node-pty, drupal-form-api, rails-ar, gradle, lwjgl2).',
-    `- scope: decide per entry whether the knowledge is reusable BEYOND this repo. Choose "global" for a HOUSE STANDARD about a framework, library, plugin or tool that holds for ANY project using it — anti-patterns, best practices, "never use X", conventional setup, version-specific gotchas (e.g. a jQuery 1.x pitfall, a Drupal module convention, an FCKeditor quirk). Choose "local" only for knowledge that needs THIS repository's own code to make sense — its architecture, file paths, business logic, naming, how this app is wired together. Rule of thumb: if the lesson would help a DIFFERENT project on the same stack, it is "global"; if it needs this repo's files in front of you, it is "local". anti_pattern / best_practice / quick_reference entries about a third-party technology are usually "global"; tech_pattern entries describing how THIS repo uses a tech, and anything citing this repo's specific files or business logic, are "local". Only when genuinely torn, prefer "local".`,
-    `- facets: ONLY for scope="global". They scope which projects later retrieve the entry. Default to this project's stack — framework=["${detected.framework ?? ''}"], language=["${detected.language ?? ''}"]. Drop framework when the standard applies to every version of it (e.g. all Drupal); set phpMajor/nodeMajor (e.g. "8", "20") when it is version-specific. Omitted dimensions apply to all.`,
+    `- scope: choose "global" ONLY for a self-contained house standard about a PUBLIC subject — the framework core, a contrib/community module, a public package (the framework itself or one appearing in the installed dependencies above), the LANGUAGE itself (e.g. PHP), or the DATASTORE engine (e.g. MySQL/MariaDB). Explain it from that subject's OWN public API/docs/spec so the article stands alone WITHOUT this repo. A subject can be global even when it is specific (a single contrib module, or a single PHP/DB version); "global" means the subject is PUBLIC, not that it is framework- or language-agnostic. Even a fully custom, frameworkless project still yields global knowledge: generic PHP-only or MySQL/MariaDB-only practices that hold for ANY project on that PHP/DB version. Choose "local" (the DEFAULT) if the entry does ANY of: (a) names a function, class, hook, route, table, env var or config key defined in THIS repo's own custom code (as opposed to a documented part of a public API); (b) relies on a custom/project helper or sanitizer that is not part of a public API; (c) cites a file path under this repo's own custom code; (d) lists this repo's source files, or describes how THIS app is wired, its architecture or its business logic; (e) mixes portable advice with repo-specific detail (e.g. generic MySQL guidance entangled with THIS project's schema/queries) — keep the whole entry local unless the portable part stands fully on its own (pure generic PHP/SQL knowledge is NOT "mixed"). Anchor every global entry to an installed MAJOR version from the context above: a module/package entry sets facets.packages=["name@major"] (and is NOT filed as generic framework/language); a framework-general entry sets framework[+frameworkMajor]; a pure PHP entry sets language=["php"] + phpMajor; a pure datastore entry sets database (e.g. ["mysql"], or ["mysql","mariadb"] for engine-agnostic SQL) + dbMajor. If you cannot anchor it to an installed major (framework, package, PHP, or DB), choose "local". tech_pattern and general/canonical entries are ALWAYS "local". Rule of thumb: if deleting this repo would make the article wrong or meaningless, it is "local". When genuinely torn, choose "local".`,
+    `- facets: ONLY for scope="global"; they scope which projects later retrieve the entry. MODULE/PACKAGE entry → facets.packages=["name@major"] from the installed dependencies above (do NOT also set framework/language). FRAMEWORK-general entry → framework=["${detected.framework ?? ''}"]${detected.frameworkMajor ? `, frameworkMajor=["${detected.frameworkMajor}"]` : ''}. PURE PHP entry → language=["php"]${detected.phpMajor ? `, phpMajor=["${detected.phpMajor}"]` : ''}. PURE DATASTORE entry → database=["${detected.database ?? 'mysql'}"]${detected.dbMajor ? `, dbMajor=["${detected.dbMajor}"]` : ''} (list multiple engines for engine-agnostic SQL). Every global entry MUST carry at least one installed major-version anchor (package@major, frameworkMajor, phpMajor, nodeMajor, or dbMajor) — if none applies, make the entry "local". Omitted dimensions apply to all.`,
     '- sections: at least 2 sections per entry with real extracted content, not generic advice.',
-    '  - Include actual code patterns, specific config values, real file paths from the project.',
-    '  - Cite repo paths with line ranges (e.g. `build.gradle:13-41`) wherever possible.',
+    '  - For LOCAL entries: include actual code patterns, specific config values, and real repo file paths with line ranges (e.g. `build.gradle:13-41`).',
+    "  - For GLOBAL entries: cite ONLY the public subject's own API, config keys and official docs — never this repo's file paths, source-file lists or custom function names. If you can only explain it by pointing at this repo's own files, it is not global; mark it \"local\".",
     '  - Write as if explaining to a new team member who needs to understand this area.',
     '- placements: for each ACCURATE existing file, one object with its current `path` plus',
     '  the canonical/category/tech slot it belongs in (content moved verbatim). Omit BOTH',
     '  canonical and tech to leave a file exactly where it is. ANTI_PATTERNS, BEST_PRACTICES',
     '  and QUICK_REFERENCE files are house standards about a third-party framework / library /',
     '  plugin and are routed to the shared Global KB by DEFAULT (moved out of this repo as a',
-    '  draft). Set `scope: "local"` on such a placement ONLY when it is specific to THIS repo;',
+    '  draft). Set `scope: "local"` on such a placement when the file names this repo\'s own custom code, paths, custom functions or business logic — anything not portable to another project on the same stack;',
     '  tech_pattern and general/canonical files always stay local.',
     '- updates: for each STALE or incomplete existing file, one object with its `path`, the',
     '  canonical/category/tech slot, and improved `sections` (preserve correct content,',
@@ -581,15 +611,87 @@ function collectRepaired(
 /* ------------------------------------------------------------------ */
 
 /** Facets for a promoted global entry: the LLM's facets win, with framework /
- *  language filled from the detected stack when the LLM omitted them. */
-function defaultGlobalFacets(entry: KbEntry, detected: KnowledgeDetect): GlobalKbFacets {
+ *  language filled from the detected stack when the LLM omitted them. A
+ *  module-scoped entry (one that already carries a `packages` facet) is left scoped
+ *  to its module/package alone — auto-stamping the whole framework/language would
+ *  mislabel module know-how as generic stack knowledge and over-retrieve it. */
+export function defaultGlobalFacets(entry: KbEntry, detected: KnowledgeDetect): GlobalKbFacets {
   const f: GlobalKbFacets = { ...(entry.facets ?? {}) };
-  if (!f.framework?.length && detected.framework) f.framework = [detected.framework];
-  if (!f.frameworkMajor?.length && detected.frameworkMajor) {
-    f.frameworkMajor = [detected.frameworkMajor];
+  if (f.packages?.length) return f;
+  // An entry the agent scoped to the language and/or datastore (and NOT the
+  // framework) stays scoped to that dimension — don't widen it to the framework.
+  const langOrDbScoped = !!(f.language?.length || f.database?.length) && !f.framework?.length;
+  if (!langOrDbScoped) {
+    if (!f.framework?.length && detected.framework) f.framework = [detected.framework];
+    if (!f.frameworkMajor?.length && detected.frameworkMajor) {
+      f.frameworkMajor = [detected.frameworkMajor];
+    }
+    if (!f.language?.length && detected.language) f.language = [detected.language.toLowerCase()];
   }
-  if (!f.language?.length && detected.language) f.language = [detected.language.toLowerCase()];
+  // Stamp the detected major for a language/datastore-scoped entry that named the
+  // dimension but omitted the major, so php-only / db-only globals can anchor.
+  if (
+    !f.framework?.length &&
+    !f.phpMajor?.length &&
+    detected.phpMajor &&
+    f.language?.some((l) => l.toLowerCase() === 'php')
+  ) {
+    f.phpMajor = [detected.phpMajor];
+  }
+  if (!f.dbMajor?.length && detected.dbMajor && f.database?.length) {
+    f.dbMajor = [detected.dbMajor];
+  }
   return f;
+}
+
+/** Derive version-anchor facets for a deterministically-promoted tech-bucket entry
+ *  from its `tech` slug + the detected stack, anchoring to what is actually
+ *  installed: PHP → language+phpMajor; a datastore → database+dbMajor (installed
+ *  engine + major); a detected dependency → packages; the framework →
+ *  framework+frameworkMajor. When nothing anchors (e.g. jquery/fckeditor with no
+ *  detectable version), no anchor is added and the caller keeps the entry local. */
+export function techAnchorFacets(
+  techRaw: string | undefined,
+  base: GlobalKbFacets,
+  detected: KnowledgeDetect,
+): GlobalKbFacets {
+  const f: GlobalKbFacets = { ...base };
+  if (f.packages?.length) return f; // already module-scoped
+  const tech = (techRaw ?? '').trim().toLowerCase();
+  if (!tech) return f;
+
+  // PHP language knowledge.
+  if (tech === 'php' && detected.phpMajor) {
+    f.language = ['php'];
+    f.phpMajor = [detected.phpMajor];
+    return f;
+  }
+  // Datastore knowledge — anchor to the INSTALLED engine + major.
+  const isDbTech =
+    ['mysql', 'mariadb', 'maria', 'sql'].includes(tech) || tech === detected.database;
+  if (isDbTech && detected.database && detected.dbMajor) {
+    const engines = new Set<string>([detected.database]);
+    if (tech === 'mysql' || tech === 'mariadb') engines.add(tech);
+    f.database = [...engines];
+    f.dbMajor = [detected.dbMajor];
+    return f;
+  }
+  // A detected dependency whose package name matches the tech slug.
+  const pkg = detected.packages.find((p) => {
+    const name = (p.split('@')[0] ?? '').toLowerCase();
+    return name === tech || name.split('/').pop() === tech;
+  });
+  if (pkg) {
+    f.packages = [pkg];
+    return f;
+  }
+  // The framework itself.
+  if (detected.framework && tech === detected.framework.toLowerCase() && detected.frameworkMajor) {
+    f.framework = [detected.framework];
+    f.frameworkMajor = [detected.frameworkMajor];
+    return f;
+  }
+  return f; // no anchor derivable → caller keeps it local
 }
 
 /** Default global facets from the detected stack alone (no entry) — used when a
@@ -600,6 +702,223 @@ function detectedDefaultFacets(detected: KnowledgeDetect): GlobalKbFacets {
   if (detected.frameworkMajor) f.frameworkMajor = [detected.frameworkMajor];
   if (detected.language) f.language = [detected.language.toLowerCase()];
   return f;
+}
+
+/* ------------------------------------------------------------------ */
+/* Global-scope backstop: deterministically demote mis-tagged entries */
+/* ------------------------------------------------------------------ */
+
+/** Source-file extensions used to recognise a bare (root-level) repo file citation
+ *  such as `core_functions.php:115-161`, which has no directory slash. */
+const CODE_FILE_EXT =
+  'php|inc|module|install|theme|phtml|engine|profile|js|jsx|mjs|cjs|ts|tsx|py|rb|go|java|rs|c|cc|cpp|h|hpp|sql|sh|pl|twig|vue|tpl';
+
+/** Path-like tokens cited in markdown prose/code spans. Captures both
+ *  directory-qualified paths (`src/foo/bar.php[:12-20]`) AND bare root-level source
+ *  filenames (`core_functions.php[:115-161]`), so a citation of a repo file at the
+ *  project root is still detected. Strips a trailing `:line`/`:line-line` range and
+ *  a leading `./`, and dedupes. Over-capture (URLs, prose, non-existent files) is
+ *  harmless — callers confirm against the real filesystem. */
+export function extractCitedPaths(text: string): string[] {
+  const out = new Set<string>();
+  const slashed = /(?:^|[\s`("[])((?:\.\/)?[\w.-]+(?:\/[\w.-]+)+)(?::\d+(?:-\d+)?)?/g;
+  for (let m = slashed.exec(text); m; m = slashed.exec(text)) {
+    const raw = m[1];
+    if (!raw) continue;
+    const rel = raw.replace(/^\.\//, '');
+    if (!(rel.split('/').pop() ?? '').includes('.')) continue; // need a file extension
+    out.add(rel);
+  }
+  const bare = new RegExp(`(?:^|[\\s\`("\\[])([\\w-]+\\.(?:${CODE_FILE_EXT}))\\b`, 'gi');
+  for (let m = bare.exec(text); m; m = bare.exec(text)) {
+    if (m[1]) out.add(m[1]);
+  }
+  return [...out];
+}
+
+/** Split a path into non-empty segments (leading `./` and trailing `/` stripped). */
+function pathSegments(p: string): string[] {
+  return p
+    .replace(/^\.?\//, '')
+    .replace(/\/+$/, '')
+    .split('/')
+    .filter(Boolean);
+}
+
+/** Whether `prefix`'s segments appear as a contiguous run anywhere in `pathSegs`,
+ *  so a prefix holds across a `web/` docroot and through nested dependency dirs
+ *  (e.g. `modules/custom` matches `web/modules/custom/foo/foo.module`). */
+function pathHasPrefix(pathSegs: string[], prefix: string): boolean {
+  const pre = pathSegments(prefix);
+  if (pre.length === 0) return false;
+  for (let i = 0; i + pre.length <= pathSegs.length; i++) {
+    let ok = true;
+    for (let j = 0; j < pre.length; j++) {
+      if (pathSegs[i + j] !== pre[j]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
+/** True when `rel` lives under one of the repo's custom-code prefixes and not under
+ *  a dependency (contrib/core/vendor) prefix. */
+export function isRepoOwnPath(
+  rel: string,
+  include: readonly string[],
+  exclude: readonly string[],
+): boolean {
+  const pathSegs = pathSegments(rel);
+  return (
+    include.some((p) => pathHasPrefix(pathSegs, p)) &&
+    !exclude.some((p) => pathHasPrefix(pathSegs, p))
+  );
+}
+
+/** Common shared files whose presence does NOT make an article repo-specific. */
+const SHARED_MANIFEST_BASENAMES = new Set([
+  'composer.json',
+  'composer.lock',
+  'package.json',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'readme.md',
+  'license',
+  'dockerfile',
+  'docker-compose.yml',
+  '.gitignore',
+]);
+
+/** Fallback repo-own test for projects with NO custom-code include prefixes (e.g.
+ *  framework=general): a cited path is repo-own unless it sits under a dependency /
+ *  ignored dir or is a known shared manifest. The caller still confirms the path
+ *  resolves on disk, so only real in-repo files count (e.g. a root-level
+ *  `core_functions.php`). */
+export function isLikelyRepoOwnPath(rel: string, exclude: readonly string[]): boolean {
+  const pathSegs = pathSegments(rel);
+  if (pathSegs.length === 0) return false;
+  if (pathSegs.some((s) => IGNORE_DIRS.has(s))) return false;
+  if (exclude.some((p) => pathHasPrefix(pathSegs, p))) return false;
+  const base = (pathSegs[pathSegs.length - 1] ?? '').toLowerCase();
+  return !SHARED_MANIFEST_BASENAMES.has(base);
+}
+
+/** A global entry must be anchored to an INSTALLED major version: a `packages`
+ *  facet matching an installed `name@major`, the detected framework major, or an
+ *  explicit language major. Otherwise it cannot be version-scoped → keep local. */
+export function hasInstalledVersionAnchor(
+  facets: GlobalKbFacets,
+  detected: {
+    packages: string[];
+    frameworkMajor: string | null;
+    phpMajor: string | null;
+    nodeMajor: string | null;
+    dbMajor: string | null;
+  },
+): boolean {
+  const norm = (s: string): string => s.trim().toLowerCase();
+  const installed = new Set(detected.packages.map(norm));
+  if (facets.packages?.some((p) => installed.has(norm(p)))) return true;
+  // Every other anchor must MATCH what was actually detected/installed — a major
+  // the agent invented (not in this project's stack) is not a valid anchor.
+  const majorMatches = (values: string[] | undefined, detectedMajor: string | null): boolean =>
+    !!(values?.length && detectedMajor && values.map(norm).includes(norm(detectedMajor)));
+  return (
+    majorMatches(facets.frameworkMajor, detected.frameworkMajor) ||
+    majorMatches(facets.phpMajor, detected.phpMajor) ||
+    majorMatches(facets.nodeMajor, detected.nodeMajor) ||
+    majorMatches(facets.dbMajor, detected.dbMajor)
+  );
+}
+
+/** First cited or sourced path that points at THIS repo's own custom code and
+ *  exists on disk. Non-null → the knowledge depends on repo-private code, so it is
+ *  not a portable house standard. No custom-code prefixes known → never fires. */
+async function repoOwnRef(
+  sectionsText: string,
+  sourceFiles: string[] | undefined,
+  detect: KnowledgeDetect,
+  repoPath: string,
+): Promise<string | null> {
+  const { include, exclude } = detect.customCode;
+  const candidates = [
+    ...extractCitedPaths(sectionsText),
+    ...(sourceFiles ?? []).map((s) => s.replace(/^\.\//, '').replace(/:\d+(?:-\d+)?$/, '')),
+  ];
+  for (const rel of candidates) {
+    const repoOwn =
+      include.length > 0 ? isRepoOwnPath(rel, include, exclude) : isLikelyRepoOwnPath(rel, exclude);
+    if (repoOwn && (await pathExists(path.join(repoPath, rel)))) return rel;
+  }
+  return null;
+}
+
+/* Repo-defined-symbol backstop: a "global" article must not lean on a function or
+ * class DEFINED in this repo (e.g. a custom helper like GetPHPVariables). */
+const REPO_SYMBOL_FILE_CAP = 4000;
+const REPO_SYMBOL_CAP = 40000;
+const SYMBOL_SCAN_EXT: Record<string, string[]> = {
+  php: ['.php', '.inc', '.module', '.install', '.theme', '.phtml', '.profile', '.engine'],
+  javascript: ['.js', '.jsx', '.mjs', '.cjs'],
+  typescript: ['.ts', '.tsx'],
+  python: ['.py'],
+  ruby: ['.rb'],
+  go: ['.go'],
+};
+
+/** Names of functions / classes / traits / interfaces DEFINED in this repo's own
+ *  source (dependency/ignored dirs excluded). Best-effort and bounded; returns an
+ *  empty set on any failure (the symbol backstop then simply never fires). */
+async function collectRepoSymbols(repoPath: string, detect: KnowledgeDetect): Promise<Set<string>> {
+  const symbols = new Set<string>();
+  const lang = (detect.language ?? '').toLowerCase();
+  const exts = SYMBOL_SCAN_EXT[lang] ?? ['.php', '.js', '.ts', '.py'];
+  try {
+    const files = await listFilesMatching(
+      repoPath,
+      (rel, isDir) => {
+        if (isDir) return false;
+        if (rel.split('/').some((p) => IGNORE_DIRS.has(p))) return false;
+        const low = rel.toLowerCase();
+        return exts.some((e) => low.endsWith(e));
+      },
+      10,
+    );
+    for (const rel of files.slice(0, REPO_SYMBOL_FILE_CAP)) {
+      let text: string;
+      try {
+        text = await readFile(path.join(repoPath, rel), 'utf8');
+      } catch {
+        continue;
+      }
+      const body = text.length > 200_000 ? text.slice(0, 200_000) : text;
+      const defRe = /\b(?:function|class|trait|interface)\s+([A-Za-z_]\w{4,})/g;
+      for (let m = defRe.exec(body); m; m = defRe.exec(body)) {
+        if (m[1]) symbols.add(m[1]);
+      }
+      if (symbols.size > REPO_SYMBOL_CAP) break;
+    }
+  } catch {
+    // best effort — no symbol backstop on failure
+  }
+  return symbols;
+}
+
+/** First identifier in `text` used as a call / `new`/`::` reference that is also a
+ *  repo-defined symbol — the article leans on repo-private code. Null when the
+ *  symbol set is empty or nothing matches. (Min 5 chars to avoid prose collisions.) */
+export function bodyUsesRepoSymbol(text: string, symbols: ReadonlySet<string>): string | null {
+  if (symbols.size === 0) return null;
+  const re = /\b([A-Za-z_]\w{4,})\s*\(|\bnew\s+([A-Za-z_]\w{4,})|\b([A-Za-z_]\w{4,})::/g;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    const name = m[1] ?? m[2] ?? m[3];
+    if (name && symbols.has(name)) return name;
+  }
+  return null;
 }
 
 /** First level-1 markdown heading, else a Title-Cased name from the file path. */
@@ -621,13 +940,14 @@ export function inferCategoryFromPath(relPath: string): GlobalKbCategory {
 
 /** Whether an existing-file placement routes to the Global KB. anti_pattern /
  *  best_practice / quick_reference files are house standards ABOUT a third-party
- *  technology, so they default to global — the per-file LLM scope tag proved
- *  unreliable (it catches some and misses others, and varies run to run). The
- *  LLM or user can force `scope: 'local'` to keep one in the repo. tech_pattern
- *  (how THIS repo uses a tech) and general/canonical files stay local. */
+ *  technology, so they default to global regardless of the per-file LLM scope tag,
+ *  which proved unreliable (weak agents mark everything "local"). The user keeps
+ *  one local by unticking the re-route in the form, and the apply backstop keeps
+ *  repo-specific or unversioned files local anyway. An explicit `scope: 'global'`
+ *  also promotes a general/canonical file; tech_pattern (how THIS repo uses a tech)
+ *  and general/canonical files otherwise stay local. */
 export function isGlobalRoutedPlacement(p: KbPlacement): boolean {
   if (p.scope === 'global') return true;
-  if (p.scope === 'local') return false;
   return (
     p.category === 'anti_pattern' ||
     p.category === 'best_practice' ||
@@ -655,7 +975,8 @@ export function placementTech(relPath: string): string | null {
   return null;
 }
 
-function entryToMarkdown(entry: KbEntry): string {
+function entryToMarkdown(entry: KbEntry, opts: { includeSourceFiles?: boolean } = {}): string {
+  const { includeSourceFiles = true } = opts;
   const lines: string[] = [`# ${entry.title}`, ''];
   for (const s of entry.sections) {
     lines.push(`## ${s.heading}`);
@@ -663,7 +984,7 @@ function entryToMarkdown(entry: KbEntry): string {
     lines.push(s.body.trim());
     lines.push('');
   }
-  if (entry.sourceFiles && entry.sourceFiles.length > 0) {
+  if (includeSourceFiles && entry.sourceFiles && entry.sourceFiles.length > 0) {
     lines.push('## Source files');
     lines.push('');
     for (const f of entry.sourceFiles) lines.push(`- \`${f}\``);
@@ -930,6 +1251,12 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
             frameworkMajor?: string | null;
             primaryLanguage?: string;
             name?: string;
+            packages?: string[];
+          };
+          paths?: { customCodePaths?: { include?: string[]; exclude?: string[] } };
+          stack?: {
+            runtimeVersions?: Record<string, string>;
+            database?: { type?: string | null; version?: string | null } | null;
           };
         }
       | undefined;
@@ -937,6 +1264,25 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     const frameworkMajor = envData?.project?.frameworkMajor ?? null;
     const language = envData?.project?.primaryLanguage ?? null;
     const projectName = envData?.project?.name ?? null;
+    const packages = envData?.project?.packages ?? [];
+    const customCode = {
+      include: envData?.paths?.customCodePaths?.include ?? [],
+      exclude: envData?.paths?.customCodePaths?.exclude ?? [],
+    };
+    // User overrides from the project-details form (02) win over raw detection for
+    // the PHP/DB version anchors, mirroring how 07-generate-files reads confirmed
+    // values — so a manually-entered PHP/DB version actually scopes the global KB.
+    const confirmedPrev = await loadPreviousStepOutput(
+      ctx.db,
+      ctx.taskId,
+      '02-detection-confirmation',
+    );
+    const confirmed =
+      (confirmedPrev?.output as { values?: ConfirmedStackValues } | null)?.values ?? null;
+    const { phpMajor, nodeMajor, database, dbMajor } = resolveStackVersions(
+      envData ?? {},
+      confirmed,
+    );
 
     await ctx.emitProgress('Collecting file tree for LLM orientation...');
     const fileTree = await collectShortFileTree(ctx.repoPath);
@@ -964,6 +1310,12 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       frameworkMajor,
       language,
       projectName,
+      phpMajor,
+      nodeMajor,
+      database,
+      dbMajor,
+      packages,
+      customCode,
       __fileTree: fileTree,
       __readmeExcerpt: readmeExcerpt ?? undefined,
       __existingKb: existingKb.length > 0 ? existingKb : undefined,
@@ -1119,6 +1471,13 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
 
   async apply(ctx, args): Promise<KnowledgeApply> {
     const detected = args.detected as KnowledgeDetect;
+    // Repo-defined-symbol index for the promotion backstop — an article that calls a
+    // repo-private function/class stays local. Scanned at most once, lazily.
+    let repoSymbolsCache: Set<string> | null = null;
+    const getRepoSymbols = async (): Promise<Set<string>> => {
+      if (!repoSymbolsCache) repoSymbolsCache = await collectRepoSymbols(ctx.repoPath, detected);
+      return repoSymbolsCache;
+    };
     const values = args.formValues as {
       selectedTopics?: string[];
       rerouteGlobal?: string[];
@@ -1196,45 +1555,79 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       const src = existingByPath.get(p.path);
       if (!src || handledSrc.has(src.relPath)) continue;
       if (isGlobalRoutedPlacement(p) && rerouteSet.has(p.path)) {
-        // Re-route: a reusable house-standard file (tech-bucket default or LLM
-        // global) the user kept ticked → MOVE it to the Global KB as a draft
-        // (deduped above) and delete the local copy so it never feeds RAG.
-        handledSrc.add(src.relPath);
+        // Re-route candidate: a reusable house-standard file the user kept ticked.
+        // Same deterministic backstop as the entry path — promote only when it is
+        // NOT repo-own custom code AND can be anchored to an installed major version;
+        // otherwise keep it local (fall through to the re-place branch below).
+        let content: string;
         try {
-          const content = await readFile(path.join(kbDir, src.relPath), 'utf8');
-          const category = p.category
-            ? (p.category as GlobalKbCategory)
-            : inferCategoryFromPath(src.relPath);
-          const promo = await promoteToGlobalKbDraft(
-            ctx.db,
-            {
-              userId: ctx.userId,
-              taskId: ctx.taskId,
-              title: titleFromMarkdown(content, src.relPath),
-              body: content,
-              category,
-              facets: detectedDefaultFacets(detected),
-              topicKey:
-                globalKbTopicKey(category, p.tech ?? placementTech(src.relPath)) ?? undefined,
-            },
-            ctx.logger,
-          );
-          if (promo && !promo.deduped) {
-            await rm(path.join(kbDir, src.relPath), { force: true });
-            globalPromoted += 1;
-            written.push({ id: src.relPath, filePath: `global-kb:${promo.id}`, source: 'global' });
-          } else if (promo?.deduped) {
-            // Topic already covered by another project — keep this repo's local
-            // copy (no data loss) rather than moving it.
-            ctx.logger.info(
-              { path: src.relPath, existingId: promo.id },
-              'kb re-route deduped (topic already in global KB); kept local copy',
-            );
-          }
+          content = await readFile(path.join(kbDir, src.relPath), 'utf8');
         } catch (err) {
           ctx.logger.warn({ err, path: p.path }, 'kb global re-route failed');
+          continue;
         }
-        continue;
+        const category = p.category
+          ? (p.category as GlobalKbCategory)
+          : inferCategoryFromPath(src.relPath);
+        const techBucket =
+          category === 'anti_pattern' ||
+          category === 'best_practice' ||
+          category === 'quick_reference';
+        const tech = p.tech ?? placementTech(src.relPath) ?? undefined;
+        const facets = techBucket
+          ? techAnchorFacets(tech, {}, detected)
+          : detectedDefaultFacets(detected);
+        const ownRef = await repoOwnRef(content, undefined, detected, ctx.repoPath);
+        const symRef = ownRef ? null : bodyUsesRepoSymbol(content, await getRepoSymbols());
+        if (!ownRef && !symRef && hasInstalledVersionAnchor(facets, detected)) {
+          // MOVE it to the Global KB as a draft (deduped above) and delete the local
+          // copy so it never feeds RAG.
+          handledSrc.add(src.relPath);
+          try {
+            const promo = await promoteToGlobalKbDraft(
+              ctx.db,
+              {
+                userId: ctx.userId,
+                taskId: ctx.taskId,
+                title: titleFromMarkdown(content, src.relPath),
+                body: content,
+                category,
+                facets,
+                topicKey: globalKbTopicKey(category, tech) ?? undefined,
+              },
+              ctx.logger,
+            );
+            if (promo && !promo.deduped) {
+              await rm(path.join(kbDir, src.relPath), { force: true });
+              globalPromoted += 1;
+              written.push({
+                id: src.relPath,
+                filePath: `global-kb:${promo.id}`,
+                source: 'global',
+              });
+            } else if (promo?.deduped) {
+              // Topic already covered by another project — keep this repo's local
+              // copy (no data loss) rather than moving it.
+              ctx.logger.info(
+                { path: src.relPath, existingId: promo.id },
+                'kb re-route deduped (topic already in global KB); kept local copy',
+              );
+            }
+          } catch (err) {
+            ctx.logger.warn({ err, path: p.path }, 'kb global re-route failed');
+          }
+          continue;
+        }
+        ctx.logger.info(
+          {
+            path: src.relPath,
+            repoRef: ownRef ?? null,
+            repoSymbol: symRef ?? null,
+            tech: tech ?? null,
+          },
+          'kb re-route kept local (repo-specific code/symbol or no installed version anchor)',
+        );
+        // fall through to the local re-placement branch below
       }
       const dest = routePlacement(p) ?? src.relPath; // null → leave in place
       if (takenDest.has(dest)) continue;
@@ -1260,10 +1653,57 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       const selected = new Set(values.selectedTopics ?? []);
       const chosen = entries.filter((e) => selected.has(e.id));
 
-      // Global-routed entries become DRAFT rows in the cross-repo KB and are
-      // NEVER written to .claude/knowledge_base/, so they are never indexed into
-      // this repo's RAG (the "don't pollute the local DB" requirement, §5.4).
-      for (const e of chosen.filter((entry) => entry.scope === 'global')) {
+      // Partition into global (promote) vs local (write to repo KB). Promotion
+      // candidacy is DETERMINISTIC, not agent-driven: anti_pattern / best_practice /
+      // quick_reference entries are house standards ABOUT a public tech, so they
+      // default to global (the per-entry LLM scope tag proved unreliable — weak
+      // agents mark everything "local"; this mirrors isGlobalRoutedPlacement for
+      // existing-file re-routes). An explicit scope:'global' on any other category is
+      // still honored. The backstop then keeps a candidate LOCAL when it depends on
+      // THIS repo's own custom code, or cannot be anchored to an installed major
+      // version (so jquery/fckeditor with no detectable version, and
+      // tech_pattern/general entries, stay local).
+      const globalChosen: { entry: KbEntry; facets: GlobalKbFacets }[] = [];
+      const localChosen: KbEntry[] = [];
+      for (const e of chosen) {
+        const category = e.category ?? 'general';
+        const techBucket =
+          category === 'anti_pattern' ||
+          category === 'best_practice' ||
+          category === 'quick_reference';
+        if (!techBucket && e.scope !== 'global') {
+          localChosen.push(e);
+          continue;
+        }
+        const facets = techBucket
+          ? techAnchorFacets(e.tech, e.facets ?? {}, detected)
+          : defaultGlobalFacets(e, detected);
+        const sectionsText = e.sections.map((s) => s.body).join('\n');
+        const ownRef = await repoOwnRef(sectionsText, e.sourceFiles, detected, ctx.repoPath);
+        const symRef = ownRef ? null : bodyUsesRepoSymbol(sectionsText, await getRepoSymbols());
+        if (ownRef || symRef) {
+          ctx.logger.info(
+            { entryId: e.id, repoRef: ownRef ?? null, repoSymbol: symRef ?? null },
+            "kb: kept local (depends on this repo's custom code/symbol)",
+          );
+          localChosen.push(e);
+          continue;
+        }
+        if (!hasInstalledVersionAnchor(facets, detected)) {
+          ctx.logger.info(
+            { entryId: e.id, tech: e.tech ?? null },
+            'kb: kept local (no installed version to anchor a global entry)',
+          );
+          localChosen.push(e);
+          continue;
+        }
+        globalChosen.push({ entry: e, facets });
+      }
+
+      // Global-routed entries become DRAFT rows in the cross-repo KB and are NEVER
+      // written to .claude/knowledge_base/, so they never feed this repo's RAG. The
+      // source-files footer is stripped — a portable article must not list repo files.
+      for (const { entry: e, facets } of globalChosen) {
         const category = e.category ?? 'general';
         const promo = await promoteToGlobalKbDraft(
           ctx.db,
@@ -1271,9 +1711,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
             userId: ctx.userId,
             taskId: ctx.taskId,
             title: e.title,
-            body: entryToMarkdown(e),
+            body: entryToMarkdown(e, { includeSourceFiles: false }),
             category,
-            facets: defaultGlobalFacets(e, detected),
+            facets,
             topicKey: globalKbTopicKey(category, e.tech) ?? undefined,
           },
           ctx.logger,
@@ -1284,9 +1724,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         }
       }
 
-      // Local entries: written into the canonical repo KB layout (unchanged),
+      // Local entries (incl. demotions): written into the canonical repo KB layout,
       // never overwriting an existing/re-placed file.
-      const routed = routeEntries(chosen.filter((entry) => entry.scope !== 'global'));
+      const routed = routeEntries(localChosen);
       for (const r of routed) {
         const filePath = path.join(kbDir, r.relPath);
         if (await pathExists(filePath)) {

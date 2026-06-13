@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractProjectFacets, majorOf } from '../src/global-kb/facets.js';
+import { extractProjectFacets, majorOf, resolveStackVersions } from '../src/global-kb/facets.js';
 
 describe('majorOf', () => {
   it('extracts the leading integer as the major token', () => {
@@ -13,6 +13,37 @@ describe('majorOf', () => {
     expect(majorOf(undefined)).toBeNull();
     expect(majorOf('')).toBeNull();
     expect(majorOf('latest')).toBeNull();
+  });
+});
+
+describe('resolveStackVersions', () => {
+  it('derives php/node/database/dbMajor from raw detection (engine lowercased)', () => {
+    expect(
+      resolveStackVersions({
+        stack: {
+          runtimeVersions: { php: '8.3', node: '20.1' },
+          database: { type: 'MariaDB', version: '10.11' },
+        },
+      }),
+    ).toEqual({ phpMajor: '8', nodeMajor: '20', database: 'mariadb', dbMajor: '10' });
+  });
+
+  it('lets confirmed overrides win over raw detection', () => {
+    expect(
+      resolveStackVersions(
+        { stack: { runtimeVersions: {}, database: { type: 'mysql', version: null } } },
+        { phpVersion: '5.6', databaseType: 'mariadb', databaseVersion: '10.11' },
+      ),
+    ).toEqual({ phpMajor: '5', nodeMajor: null, database: 'mariadb', dbMajor: '10' });
+  });
+
+  it('returns nulls when nothing is detectable', () => {
+    expect(resolveStackVersions({})).toEqual({
+      phpMajor: null,
+      nodeMajor: null,
+      database: null,
+      dbMajor: null,
+    });
   });
 });
 
@@ -68,5 +99,27 @@ describe('extractProjectFacets', () => {
       expect(facets.phpMajor).toEqual([]);
       expect(facets.nodeMajor).toEqual([]);
     }
+  });
+
+  it('includes database/dbMajor and honors a confirmed PHP/DB override', () => {
+    const facets = extractProjectFacets(
+      {
+        data: {
+          project: { framework: 'general', primaryLanguage: 'php', packages: [] },
+          stack: { runtimeVersions: {}, database: { type: 'mysql', version: null } },
+        },
+      },
+      { phpVersion: '8.3', databaseType: 'mariadb', databaseVersion: '10.11' },
+    );
+    expect(facets.phpMajor).toEqual(['8']);
+    expect(facets.database).toEqual(['mariadb']);
+    expect(facets.dbMajor).toEqual(['10']);
+    expect(facets.language).toEqual(['php']);
+  });
+
+  it('has empty datastore dims when the stack has no database', () => {
+    const facets = extractProjectFacets({ data: { project: { framework: 'general' } } });
+    expect(facets.database).toEqual([]);
+    expect(facets.dbMajor).toEqual([]);
   });
 });

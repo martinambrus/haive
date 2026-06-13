@@ -275,17 +275,23 @@ describe('re-route helpers', () => {
     expect(isGlobalRoutedPlacement({ path: 'ARCHITECTURE.md', category: 'general' })).toBe(false);
   });
 
-  it('isGlobalRoutedPlacement honours an explicit scope override either way', () => {
+  it('isGlobalRoutedPlacement: explicit global forces global; local is ignored for tech buckets', () => {
+    // A contrary "local" tag on a tech-bucket file is ignored (the per-file tag
+    // proved unreliable) — the category default wins; the user keeps it local by
+    // unticking the re-route in the form.
     expect(
       isGlobalRoutedPlacement({
         path: 'BEST_PRACTICES/x.md',
         category: 'best_practice',
         scope: 'local',
       }),
-    ).toBe(false);
+    ).toBe(true);
+    // An explicit global tag still promotes a general/canonical file.
     expect(
       isGlobalRoutedPlacement({ path: 'ARCHITECTURE.md', category: 'general', scope: 'global' }),
     ).toBe(true);
+    // general/canonical without an explicit global tag stays local.
+    expect(isGlobalRoutedPlacement({ path: 'ARCHITECTURE.md', category: 'general' })).toBe(false);
   });
 });
 
