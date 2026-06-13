@@ -13,6 +13,19 @@ const SETTINGS_CHANGED_EVENT = 'haive:notification-settings-changed';
 const SEEN_PREFIX = 'haive:notif-seen:';
 const SEEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** Cross-tab "actively viewing" registry. A tab that is the visible, focused
+ *  viewer of /tasks/:id heartbeats haive:viewing:<id> every VIEWING_HEARTBEAT_MS.
+ *  Every tab consults it before alerting, so a transition for a task the user is
+ *  watching in a SIBLING tab fires nothing — no toast, no sound, no OS notif. The
+ *  local `viewing` check below only sees the tab it runs in, and whichever tab
+ *  polls a transition first is arbitrary, so the viewing tab's knowledge has to
+ *  be shared. Heartbeat (1s) < stale window (3s) so an actively-viewed task is
+ *  always fresh at poll time; a clean blur/visibility/route change drops the
+ *  claim immediately, so alerts resume the instant the user looks away. */
+const VIEWING_PREFIX = 'haive:viewing:';
+const VIEWING_HEARTBEAT_MS = 1_000;
+const VIEWING_STALE_MS = 3_000;
+
 /** Per-episode dedupe key: (task, status, step, wait-occurrence). localStorage
  *  (not sessionStorage) so a handled episode stays handled across tabs AND
  *  sessions — opening a new tab never re-fires an already-seen waiting
@@ -51,13 +64,36 @@ function pruneSeen(): void {
     const stale: string[] = [];
     for (let i = 0; i < window.localStorage.length; i++) {
       const k = window.localStorage.key(i);
-      if (!k || !k.startsWith(SEEN_PREFIX)) continue;
+      if (!k) continue;
       const ts = Number(window.localStorage.getItem(k));
-      if (!Number.isFinite(ts) || now - ts > SEEN_TTL_MS) stale.push(k);
+      if (k.startsWith(SEEN_PREFIX)) {
+        if (!Number.isFinite(ts) || now - ts > SEEN_TTL_MS) stale.push(k);
+      } else if (k.startsWith(VIEWING_PREFIX)) {
+        // viewing keys are normally cleared on blur/unmount; only a hard
+        // crash leaves one behind. Drop it once past the stale window.
+        if (!Number.isFinite(ts) || now - ts > VIEWING_STALE_MS) stale.push(k);
+      }
     }
     for (const k of stale) window.localStorage.removeItem(k);
   } catch {
     // ignore
+  }
+}
+
+function viewingKey(taskId: string): string {
+  return `${VIEWING_PREFIX}${taskId}`;
+}
+
+/** True when SOME tab is the visible, focused viewer of this task right now
+ *  (a fresh heartbeat exists). Missing key → Number(null) is 0 → far past the
+ *  stale window → false. */
+function isViewedElsewhere(taskId: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const ts = Number(window.localStorage.getItem(viewingKey(taskId)));
+    return Number.isFinite(ts) && Date.now() - ts < VIEWING_STALE_MS;
+  } catch {
+    return false;
   }
 }
 
@@ -146,6 +182,57 @@ export function NotificationProvider() {
     };
   }, [loadSettings]);
 
+  // Maintain this tab's cross-tab "viewing" claim. Only a visible, focused tab on
+  // a /tasks/:id route claims that task; the claim refreshes on a heartbeat and is
+  // dropped the moment focus/visibility/route changes so sibling tabs resume
+  // alerting as soon as the user looks away. Read back by isViewedElsewhere().
+  useEffect(() => {
+    let claimed: string | null = null;
+    const viewedTask = (): string | null => {
+      if (document.visibilityState !== 'visible' || !document.hasFocus()) return null;
+      const m = /^\/tasks\/([^/]+)$/.exec(pathRef.current ?? '');
+      return m?.[1] ?? null;
+    };
+    const tick = () => {
+      const next = viewedTask();
+      if (claimed && claimed !== next) {
+        try {
+          window.localStorage.removeItem(viewingKey(claimed));
+        } catch {
+          // ignore
+        }
+        claimed = null;
+      }
+      if (next) {
+        try {
+          window.localStorage.setItem(viewingKey(next), String(Date.now()));
+        } catch {
+          // ignore
+        }
+        claimed = next;
+      }
+    };
+    tick();
+    const timer = setInterval(tick, VIEWING_HEARTBEAT_MS);
+    const onChange = () => tick();
+    document.addEventListener('visibilitychange', onChange);
+    window.addEventListener('focus', onChange);
+    window.addEventListener('blur', onChange);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onChange);
+      window.removeEventListener('focus', onChange);
+      window.removeEventListener('blur', onChange);
+      if (claimed) {
+        try {
+          window.localStorage.removeItem(viewingKey(claimed));
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, []);
+
   const playSound = useCallback(() => {
     if (soundUrlRef.current) {
       void new Audio(soundUrlRef.current).play().catch(() => {});
@@ -176,6 +263,16 @@ export function NotificationProvider() {
       const viewing = isCurrent && document.visibilityState === 'visible' && document.hasFocus();
       if (viewing) {
         markSeen(e); // looking at it now → don't nag for this episode anywhere
+        return;
+      }
+
+      // A SIBLING tab may be the focused viewer even when this tab isn't: whichever
+      // tab polls a transition first is arbitrary, so before firing anything (toast,
+      // sound, OS notif) consult the cross-tab heartbeat. Without this, a hidden tab
+      // on the wrong route alerts for a task the user is already reading in another
+      // tab, just because it processed the event before the viewing tab did.
+      if (isViewedElsewhere(e.taskId)) {
+        markSeen(e); // read in another tab → suppress everywhere for this episode
         return;
       }
 
