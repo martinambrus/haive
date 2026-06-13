@@ -83,8 +83,16 @@ export default function IntegrationsPage() {
         </CardHeader>
         <ol className="list-decimal pl-5 text-xs text-neutral-400 [&>li]:mb-1">
           <li>
-            Go to github.com/settings/developers and create a new OAuth App (or open an existing
-            one).
+            Go to{' '}
+            <a
+              href="https://github.com/settings/developers"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-indigo-400 underline hover:text-indigo-300"
+            >
+              github.com/settings/developers
+            </a>{' '}
+            and create a new OAuth App (or open an existing one).
           </li>
           <li>
             Under &quot;Authorization callback URL&quot;, enter your Haive URL (e.g.
