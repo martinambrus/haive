@@ -11,7 +11,13 @@ import { apiWebSocketUrl } from '@/lib/api-client';
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
 
 interface InteractiveShellProps {
-  taskId: string;
+  /** Session scope. Defaults to 'task'. Repo scope opens a standalone shell
+   *  against a repository's checkout (no task), keyed on repositoryId. */
+  scope?: 'task' | 'repo';
+  /** Required for task scope. */
+  taskId?: string;
+  /** Required for repo scope. */
+  repositoryId?: string;
   cliProviderId: string;
   /** When true, the parent task moved to a terminal state and the shell
    *  should refuse to mount / show a disabled banner. */
@@ -21,12 +27,10 @@ interface InteractiveShellProps {
 
 const KEEPALIVE_INTERVAL_MS = 30_000;
 
-export function InteractiveShell({
-  taskId,
-  cliProviderId,
-  disabled = false,
-  fill = false,
-}: InteractiveShellProps) {
+export function InteractiveShell(props: InteractiveShellProps) {
+  const { cliProviderId, disabled = false, fill = false } = props;
+  const scope = props.scope ?? 'task';
+  const scopeId = scope === 'repo' ? props.repositoryId : props.taskId;
   const mountRef = useRef<HTMLDivElement | null>(null);
   const [state, setState] = useState<ConnectionState>('connecting');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -34,6 +38,7 @@ export function InteractiveShell({
 
   useEffect(() => {
     if (disabled) return;
+    if (!scopeId) return;
     if (!mountRef.current) return;
 
     const term = new XTerm({
@@ -90,7 +95,11 @@ export function InteractiveShell({
       });
     });
 
-    const wsUrl = apiWebSocketUrl(`/terminal-shell/${taskId}/${cliProviderId}`);
+    const wsPath =
+      scope === 'repo'
+        ? `/terminal-repo-shell/${scopeId}/${cliProviderId}`
+        : `/terminal-shell/${scopeId}/${cliProviderId}`;
+    const wsUrl = apiWebSocketUrl(wsPath);
     const ws = new WebSocket(wsUrl);
     setState('connecting');
 
@@ -204,7 +213,7 @@ export function InteractiveShell({
       }
       term.dispose();
     };
-  }, [taskId, cliProviderId, disabled]);
+  }, [scope, scopeId, cliProviderId, disabled]);
 
   if (disabled) {
     return (

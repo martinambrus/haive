@@ -9,16 +9,18 @@ import {
   TERMINAL_OUT_CHANNEL_PREFIX,
   TERMINAL_REPLY_CHANNEL_PREFIX,
   TERMINAL_REQUEST_CHANNEL,
-  TERMINAL_SESSION_PREFIX,
+  terminalSessionKey,
   logger,
   type TerminalControlFrame,
+  type TerminalOpenRequest,
   type TerminalOpenResult,
   type TerminalRequest,
 } from '@haive/shared';
 import type { Redis } from 'ioredis';
 import { createRedisConnection } from '@haive/shared';
 import { ensureShellContainer } from './terminal-container.js';
-import { resolveTaskRepoMount } from '../queues/cli-exec-queue.js';
+import { resolveRepoMount, resolveTaskRepoMount } from '../queues/cli-exec-queue.js';
+import type { DockerVolumeMount } from '../sandbox/docker-runner.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type { McpServerSpec } from '../sandbox/mcp-config.js';
 import { buildDefaultMcpServers } from '../sandbox/mcp-config.js';
@@ -31,7 +33,8 @@ const log = logger.child({ module: 'terminal-session-manager' });
 interface SessionState {
   sessionId: string;
   userId: string;
-  taskId: string;
+  scope: 'task' | 'repo';
+  scopeId: string;
   providerId: string;
   containerName: string;
   shell: 'bash' | 'sh';
@@ -183,39 +186,58 @@ export class TerminalSessionManager {
     return adapter.buildShellEnv(provider, secrets, gitEnv);
   }
 
-  private async openSession(req: {
-    correlationId: string;
-    userId: string;
-    taskId: string;
-    cliProviderId: string;
-  }): Promise<TerminalOpenResult> {
-    const task = await this.db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, req.taskId),
-    });
-    if (!task) return { ok: false, error: 'task not found' };
-    if (task.userId !== req.userId) return { ok: false, error: 'task not owned by user' };
-    if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
-      return { ok: false, error: `task is ${task.status} - terminal disabled` };
+  private async openSession(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
+    const scope: 'task' | 'repo' = req.scope ?? 'task';
+    const providerId = req.cliProviderId;
+
+    let scopeId: string;
+    let repoMount: DockerVolumeMount | null;
+    let mcpServers: McpServerSpec[];
+
+    if (scope === 'repo') {
+      const repositoryId = req.repositoryId;
+      if (!repositoryId) return { ok: false, error: 'repositoryId required for repo terminal' };
+      // resolveRepoMount also enforces ownership + readiness + non-local-path.
+      repoMount = await resolveRepoMount(this.db, repositoryId, req.userId).catch(() => null);
+      if (!repoMount) {
+        return {
+          ok: false,
+          error: 'repository not available for terminal (not ready, not owned, or local-path)',
+        };
+      }
+      mcpServers = buildDefaultMcpServers({ repoPath: SANDBOX_WORKDIR });
+      scopeId = repositoryId;
+    } else {
+      const taskId = req.taskId;
+      if (!taskId) return { ok: false, error: 'taskId required for task terminal' };
+      const task = await this.db.query.tasks.findFirst({
+        where: eq(schema.tasks.id, taskId),
+      });
+      if (!task) return { ok: false, error: 'task not found' };
+      if (task.userId !== req.userId) return { ok: false, error: 'task not owned by user' };
+      if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
+        return { ok: false, error: `task is ${task.status} - terminal disabled` };
+      }
+      repoMount = await resolveTaskRepoMount(this.db, taskId).catch(() => null);
+      mcpServers = await this.buildMcpServers(req.userId, taskId);
+      scopeId = taskId;
     }
 
-    const repoMount = await resolveTaskRepoMount(this.db, req.taskId).catch(() => null);
-    const mcpServers = await this.buildMcpServers(req.userId, req.taskId);
-    const providerEnv = await this.resolveProviderShellEnv(req.userId, req.cliProviderId).catch(
-      (err) => {
-        log.warn({ err, providerId: req.cliProviderId }, 'resolveProviderShellEnv failed');
-        return {};
-      },
-    );
+    const providerEnv = await this.resolveProviderShellEnv(req.userId, providerId).catch((err) => {
+      log.warn({ err, providerId }, 'resolveProviderShellEnv failed');
+      return {};
+    });
 
-    const ensureKey = `${req.userId}:${req.taskId}:${req.cliProviderId}`;
+    const ensureKey = terminalSessionKey(req.userId, scope, scopeId, providerId);
     let ensurePromise = this.ensureInFlight.get(ensureKey);
     if (!ensurePromise) {
       ensurePromise = ensureShellContainer({
         db: this.db,
         docker: this.docker,
         userId: req.userId,
-        taskId: req.taskId,
-        providerId: req.cliProviderId,
+        scope,
+        scopeId,
+        providerId,
         repoMount,
         mcpServers,
         providerEnv,
@@ -283,8 +305,9 @@ export class TerminalSessionManager {
     const session: SessionState = {
       sessionId,
       userId: req.userId,
-      taskId: req.taskId,
-      providerId: req.cliProviderId,
+      scope,
+      scopeId,
+      providerId,
       containerName: ensured.containerName,
       shell: ensured.shell,
       ptyHandle,
@@ -316,7 +339,7 @@ export class TerminalSessionManager {
     // so the reaper's idle clock starts when the last tab disconnects. The
     // worker does NOT touch refcount because openSession is called per-WS
     // and overwriting would clobber sibling tab counts.
-    const key = `${TERMINAL_SESSION_PREFIX}${req.userId}:${req.taskId}:${req.cliProviderId}`;
+    const key = ensureKey;
     const now = Date.now();
     await this.redis.hset(key, {
       containerName: ensured.containerName,
@@ -356,12 +379,15 @@ export class TerminalSessionManager {
 
 function parseRequest(raw: string): TerminalRequest | null {
   try {
-    const obj = JSON.parse(raw) as Partial<TerminalRequest>;
-    if (obj.op === 'open' && obj.correlationId && obj.userId && obj.taskId && obj.cliProviderId) {
-      return obj as TerminalRequest;
+    const obj = JSON.parse(raw) as Record<string, unknown>;
+    if (obj.op === 'open' && obj.correlationId && obj.userId && obj.cliProviderId) {
+      const scope = obj.scope ?? 'task';
+      if (scope === 'repo' && obj.repositoryId) return obj as unknown as TerminalRequest;
+      if (scope === 'task' && obj.taskId) return obj as unknown as TerminalRequest;
+      return null;
     }
-    if (obj.op === 'close' && (obj as { sessionId?: string }).sessionId) {
-      return obj as TerminalRequest;
+    if (obj.op === 'close' && obj.sessionId) {
+      return obj as unknown as TerminalRequest;
     }
     return null;
   } catch {

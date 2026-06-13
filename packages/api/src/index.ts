@@ -19,6 +19,7 @@ import { githubOauthRoutes } from './routes/github-oauth.js';
 import { filesystemRoutes } from './routes/filesystem.js';
 import { integrationsRoutes } from './routes/integrations.js';
 import { globalKbRoutes } from './routes/global-kb.js';
+import { internalRoutes } from './routes/internal.js';
 import { ragRoutes } from './routes/rag.js';
 import { taskRoutes } from './routes/tasks.js';
 import { upgradeRoutes } from './routes/upgrades.js';
@@ -62,6 +63,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/filesystem', filesystemRoutes);
   app.route('/tasks', taskRoutes);
   app.route('/rag', ragRoutes);
+  app.route('/internal', internalRoutes);
   app.route('/global-kb', globalKbRoutes);
   app.route('/terminal-sessions', terminalSessionRoutes);
   app.route('/admin', adminRoutes);

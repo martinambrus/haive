@@ -4,6 +4,7 @@ export * from './crypto/index.js';
 export * from './config/index.js';
 export * from './logger/index.js';
 export * from './constants/index.js';
+export * from './git/index.js';
 export * from './utils/index.js';
 export * from './cli-providers/index.js';
 export * from './sandbox/index.js';

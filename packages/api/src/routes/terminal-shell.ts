@@ -12,8 +12,10 @@ import {
   TERMINAL_REPLY_CHANNEL_PREFIX,
   TERMINAL_REQUEST_CHANNEL,
   TERMINAL_SESSION_PREFIX,
+  terminalSessionKey,
   logger,
   terminalClientFrameSchema,
+  type TerminalOpenRequest,
   type TerminalOpenResult,
 } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -23,11 +25,13 @@ import { ACCESS_COOKIE } from '../auth/cookies.js';
 
 const log = logger.child({ module: 'terminal-shell-ws' });
 const WS_PATH_PREFIX = '/terminal-shell/';
+const WS_REPO_PATH_PREFIX = '/terminal-repo-shell/';
 const KEEPALIVE_INTERVAL_MS = 30_000;
 const OPEN_REPLY_TIMEOUT_MS = 15_000;
 
 interface TerminalShellWsOptions {
   path?: string;
+  repoPath?: string;
 }
 
 /** Per-(user, task, provider) interactive shell WS bridge.
@@ -41,6 +45,7 @@ export function installTerminalShellWebSocket(
   opts: TerminalShellWsOptions = {},
 ): void {
   const pathPrefix = opts.path ?? WS_PATH_PREFIX;
+  const repoPathPrefix = opts.repoPath ?? WS_REPO_PATH_PREFIX;
   const wss = new WebSocketServer({ noServer: true });
 
   // Boot-time refcount reset. On API restart, any prior session entries in
@@ -53,18 +58,58 @@ export function installTerminalShellWebSocket(
 
   server.on('upgrade', (req, socket, head) => {
     const rawUrl = req.url ?? '';
-    if (!rawUrl.startsWith(pathPrefix)) return;
+    const isRepo = rawUrl.startsWith(repoPathPrefix);
+    const isTask = rawUrl.startsWith(pathPrefix);
+    if (!isRepo && !isTask) return;
 
     void (async () => {
       try {
-        const ids = extractIds(rawUrl, pathPrefix);
-        if (!ids) {
-          rejectUpgrade(socket, 404, 'Not Found');
-          return;
-        }
         const auth = await authenticateUpgrade(req);
         if (!auth) {
           rejectUpgrade(socket, 401, 'Unauthorized');
+          return;
+        }
+
+        if (isRepo) {
+          const ids = extractRepoIds(rawUrl, repoPathPrefix);
+          if (!ids) {
+            rejectUpgrade(socket, 404, 'Not Found');
+            return;
+          }
+          const ownership = await verifyRepoOwnership(
+            ids.repositoryId,
+            ids.cliProviderId,
+            auth.userId,
+          );
+          if (!ownership.ok) {
+            rejectUpgrade(socket, ownership.status, ownership.message);
+            return;
+          }
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            runScopedShellSession(
+              ws,
+              auth.userId,
+              'repo',
+              ids.repositoryId,
+              ids.cliProviderId,
+            ).catch((err) => {
+              log.error(
+                { err, repositoryId: ids.repositoryId, cliProviderId: ids.cliProviderId },
+                'repo shell session crashed',
+              );
+              try {
+                ws.close(1011, 'internal_error');
+              } catch {
+                // ignore
+              }
+            });
+          });
+          return;
+        }
+
+        const ids = extractIds(rawUrl, pathPrefix);
+        if (!ids) {
+          rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
         const ownership = await verifyOwnership(ids.taskId, ids.cliProviderId, auth.userId);
@@ -96,13 +141,23 @@ export function installTerminalShellWebSocket(
     })();
   });
 
-  log.info({ pathPrefix }, 'terminal-shell websocket installed');
+  log.info({ pathPrefix, repoPathPrefix }, 'terminal-shell websocket installed');
 }
 
 export async function runShellSession(
   ws: WebSocket,
   userId: string,
   taskId: string,
+  cliProviderId: string,
+): Promise<void> {
+  return runScopedShellSession(ws, userId, 'task', taskId, cliProviderId);
+}
+
+export async function runScopedShellSession(
+  ws: WebSocket,
+  userId: string,
+  scope: 'task' | 'repo',
+  scopeId: string,
   cliProviderId: string,
 ): Promise<void> {
   const correlationId = randomUUID();
@@ -149,12 +204,12 @@ export async function runShellSession(
       if (newCount < 0) await publisher.hset(registryKey, 'refcount', '0');
       await publisher.hset(registryKey, 'lastSeenAt', String(Date.now()));
       log.info(
-        { sessionId, taskId, cliProviderId, refcountAfter: Math.max(0, newCount) },
+        { sessionId, scope, scopeId, cliProviderId, refcountAfter: Math.max(0, newCount) },
         'shell session closed',
       );
     } else {
       log.info(
-        { taskId, cliProviderId, sessionId, correlationId },
+        { scope, scopeId, cliProviderId, sessionId, correlationId },
         'shell ws closed before refcount acquired (likely StrictMode double-mount)',
       );
     }
@@ -173,10 +228,11 @@ export async function runShellSession(
     correlationId,
     replyChannel,
     userId,
-    taskId,
+    scope,
+    scopeId,
     cliProviderId,
   }).catch((err) => {
-    log.warn({ err, taskId, cliProviderId, correlationId }, 'open-session request failed');
+    log.warn({ err, scope, scopeId, cliProviderId, correlationId }, 'open-session request failed');
     return { ok: false as const, error: errorMessage(err) };
   });
 
@@ -197,13 +253,13 @@ export async function runShellSession(
   const inChannel = `${TERMINAL_IN_CHANNEL_PREFIX}${sessionId}`;
   const ctlChannel = `${TERMINAL_CTL_CHANNEL_PREFIX}${sessionId}`;
   outChannel = `${TERMINAL_OUT_CHANNEL_PREFIX}${sessionId}`;
-  registryKey = `${TERMINAL_SESSION_PREFIX}${userId}:${taskId}:${cliProviderId}`;
+  registryKey = terminalSessionKey(userId, scope, scopeId, cliProviderId);
 
   if (cleanupRan || ws.readyState !== WebSocket.OPEN) {
     // ws.close() fired during openSession await. cleanup() already ran with
     // refcountHeld=false → no -1 was issued. Don't take a refcount now.
     log.info(
-      { taskId, cliProviderId, sessionId, correlationId },
+      { scope, scopeId, cliProviderId, sessionId, correlationId },
       'shell ws closed during openSession — skipping refcount',
     );
     if (!cleanupRan) await cleanup();
@@ -227,7 +283,7 @@ export async function runShellSession(
     }
     await publisher.hset(registryKey, 'lastSeenAt', String(Date.now())).catch(() => undefined);
     log.info(
-      { sessionId, taskId, cliProviderId, refcountAfter: Math.max(0, undoCount ?? 0) },
+      { sessionId, scope, scopeId, cliProviderId, refcountAfter: Math.max(0, undoCount ?? 0) },
       'shell session closed during attach — refcount undone',
     );
     return;
@@ -305,7 +361,8 @@ interface OpenSessionArgs {
   correlationId: string;
   replyChannel: string;
   userId: string;
-  taskId: string;
+  scope: 'task' | 'repo';
+  scopeId: string;
   cliProviderId: string;
 }
 
@@ -337,18 +394,17 @@ function openSession(args: OpenSessionArgs): Promise<TerminalOpenResult> {
     subscriber.on('message', onMessage);
     subscriber
       .subscribe(replyChannel)
-      .then(() =>
-        publisher.publish(
-          TERMINAL_REQUEST_CHANNEL,
-          JSON.stringify({
-            op: 'open',
-            correlationId,
-            userId: args.userId,
-            taskId: args.taskId,
-            cliProviderId: args.cliProviderId,
-          }),
-        ),
-      )
+      .then(() => {
+        const payload: TerminalOpenRequest = {
+          op: 'open',
+          correlationId,
+          userId: args.userId,
+          cliProviderId: args.cliProviderId,
+          scope: args.scope,
+          ...(args.scope === 'repo' ? { repositoryId: args.scopeId } : { taskId: args.scopeId }),
+        };
+        return publisher.publish(TERMINAL_REQUEST_CHANNEL, JSON.stringify(payload));
+      })
       .catch((err) => {
         // Either subscribe or publish failed (most commonly: subscriber.quit()
         // was called from runShellSession's cleanup because the WS died
@@ -406,19 +462,71 @@ async function verifyOwnership(
   return { taskTerminal: !terminalDisabled, taskStatus: task.status };
 }
 
+interface RepoOwnershipResult {
+  ok: boolean;
+  status: number;
+  message: string;
+}
+
+/** Repo-scope ownership + eligibility. Unlike tasks, repositories never "end";
+ *  the gates are ownership, readiness, and source (local-path repos are bound
+ *  read-only end to end so they can't host a write/commit terminal). */
+async function verifyRepoOwnership(
+  repositoryId: string,
+  cliProviderId: string,
+  userId: string,
+): Promise<RepoOwnershipResult> {
+  const db = getDb();
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, repositoryId),
+    columns: { userId: true, status: true, source: true },
+  });
+  if (!repo || repo.userId !== userId) return { ok: false, status: 404, message: 'Not Found' };
+  const provider = await db.query.cliProviders.findFirst({
+    where: eq(schema.cliProviders.id, cliProviderId),
+    columns: { userId: true },
+  });
+  if (!provider || provider.userId !== userId) {
+    return { ok: false, status: 404, message: 'Not Found' };
+  }
+  if (repo.source === 'local_path') {
+    return { ok: false, status: 409, message: 'Terminal not available for local-path repos' };
+  }
+  if (repo.status !== 'ready') {
+    return {
+      ok: false,
+      status: 409,
+      message: `Repository is ${repo.status} - terminal unavailable`,
+    };
+  }
+  return { ok: true, status: 200, message: 'ok' };
+}
+
+function parseTwoSegmentPath(rawUrl: string, pathPrefix: string): [string, string] | null {
+  const qIdx = rawUrl.indexOf('?');
+  const pathOnly = qIdx === -1 ? rawUrl : rawUrl.slice(0, qIdx);
+  if (!pathOnly.startsWith(pathPrefix)) return null;
+  const parts = pathOnly.slice(pathPrefix.length).split('/').filter(Boolean);
+  if (parts.length !== 2) return null;
+  const [a, b] = parts as [string, string];
+  if (!a || !b) return null;
+  return [a, b];
+}
+
 export function extractIds(
   rawUrl: string,
   pathPrefix: string,
 ): { taskId: string; cliProviderId: string } | null {
-  const qIdx = rawUrl.indexOf('?');
-  const pathOnly = qIdx === -1 ? rawUrl : rawUrl.slice(0, qIdx);
-  if (!pathOnly.startsWith(pathPrefix)) return null;
-  const remainder = pathOnly.slice(pathPrefix.length);
-  const parts = remainder.split('/').filter(Boolean);
-  if (parts.length !== 2) return null;
-  const [taskId, cliProviderId] = parts as [string, string];
-  if (!taskId || !cliProviderId) return null;
-  return { taskId, cliProviderId };
+  const parsed = parseTwoSegmentPath(rawUrl, pathPrefix);
+  return parsed ? { taskId: parsed[0], cliProviderId: parsed[1] } : null;
+}
+
+export function extractRepoIds(
+  rawUrl: string,
+  pathPrefix: string,
+): { repositoryId: string; cliProviderId: string } | null {
+  const parsed = parseTwoSegmentPath(rawUrl, pathPrefix);
+  return parsed ? { repositoryId: parsed[0], cliProviderId: parsed[1] } : null;
 }
 
 function parseCookieValue(header: string, name: string): string | null {

@@ -233,6 +233,13 @@ function RepoCard(props: RepoCardProps) {
               <Button size="sm">Create task</Button>
             </Link>
           )}
+          {repo.status === 'ready' && repo.source !== 'local_path' && (
+            <Link href={`/repos/${repo.id}/terminal`}>
+              <Button variant="secondary" size="sm">
+                Terminal
+              </Button>
+            </Link>
+          )}
           {repo.status === 'ready' && (
             <Button variant="secondary" size="sm" onClick={downloadArchive} disabled={downloading}>
               {downloading ? 'Zipping...' : 'Download'}

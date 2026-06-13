@@ -280,8 +280,28 @@ export interface TerminalOpenRequest {
   op: 'open';
   correlationId: string;
   userId: string;
-  taskId: string;
   cliProviderId: string;
+  /** Session scope. Omitted is treated as 'task' for backward compatibility. */
+  scope?: 'task' | 'repo';
+  /** Present for task scope (the per-task sandbox shell). */
+  taskId?: string;
+  /** Present for repo scope (the standalone per-repository shell). */
+  repositoryId?: string;
+}
+
+/** Redis registry key for an interactive terminal session. Task scope keeps the
+ *  original `{userId}:{id}:{providerId}` shape; repo scope inserts a `repo:`
+ *  infix so the per-task reaper pattern (`*:{taskId}:*`) can never match a repo
+ *  session. Shared so the API (refcount owner) and the worker (metadata writer)
+ *  cannot drift on the key. */
+export function terminalSessionKey(
+  userId: string,
+  scope: 'task' | 'repo',
+  scopeId: string,
+  providerId: string,
+): string {
+  const mid = scope === 'repo' ? `repo:${scopeId}` : scopeId;
+  return `${TERMINAL_SESSION_PREFIX}${userId}:${mid}:${providerId}`;
 }
 
 export interface TerminalCloseRequest {

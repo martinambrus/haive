@@ -365,6 +365,39 @@ export async function resolveTaskRepoMount(
   };
 }
 
+/** Resolve the workdir mount for a standalone (taskless) repository terminal.
+ *  Mirrors resolveTaskRepoMount but keyed on a repositoryId and mounted
+ *  WRITABLE so the user can edit/commit/push. Returns null when the repo is not
+ *  owned by the user, isn't ready, or is a local-path repo — local-path repos
+ *  are bound read-only end to end (host fs is `:ro` in the worker) so they
+ *  cannot support a write/commit terminal. The caller rejects on null. */
+export async function resolveRepoMount(
+  db: Database,
+  repositoryId: string,
+  userId: string,
+): Promise<DockerVolumeMount | null> {
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, repositoryId),
+    columns: { userId: true, source: true, status: true, storagePath: true, localPath: true },
+  });
+  if (!repo) return null;
+  if (repo.userId !== userId) return null;
+  if (repo.status !== 'ready') return null;
+  if (repo.source === 'local_path') return null;
+
+  // Defensive: a non-local repo whose storage still resolves under the host
+  // bind root would also be read-only — treat it as unsupported.
+  const storagePath = repo.storagePath ?? repo.localPath;
+  if (storagePath && storagePath.startsWith(HOST_REPO_ROOT + '/')) return null;
+
+  return {
+    source: REPO_VOLUME_NAME,
+    target: REPO_MOUNT_TARGET,
+    subpath: `${userId}/${repositoryId}`,
+    readOnly: false,
+  };
+}
+
 const WORKER_REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
 const CHOWN_MARKER_REL = '.haive/.chowned-1000';
 
