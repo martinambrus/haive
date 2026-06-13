@@ -155,7 +155,7 @@ export default function GlobalKbPage() {
     msg: string | null;
   }>({ busy: false, ok: null, msg: null });
   const [cfgLoaded, setCfgLoaded] = useState(false);
-  const [connExpanded, setConnExpanded] = useState(true);
+  const [connExpanded, setConnExpanded] = useState(false);
   const connChecked = useRef(false);
 
   async function loadConfig() {
@@ -186,10 +186,13 @@ export default function GlobalKbPage() {
       ? INTERNAL_OLLAMA_URL
       : cfg.ollamaUrl.trim() || DEFAULT_EXTERNAL_OLLAMA_URL;
   const connOk = cfg.enabled && dbTest.ok === true && ollamaTest.ok === true;
+  // Null until the first-load check resolves; keeps the collapsed header from
+  // flashing a misleading "needs attention" while the test round-trips run.
+  const connChecking = dbTest.ok === null || ollamaTest.ok === null;
 
-  // On first load, validate the connection so the card can collapse when it's
-  // healthy (it rarely changes) and expand — with the failures shown inline —
-  // when it needs attention.
+  // The card starts collapsed — the connection rarely changes once set up, so it
+  // stays out of the way. On first load we validate and auto-expand — with the
+  // failures shown inline — only when it needs attention.
   useEffect(() => {
     if (!cfgLoaded || connChecked.current) return;
     connChecked.current = true;
@@ -427,8 +430,16 @@ export default function GlobalKbPage() {
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {!connExpanded && (
-                <span className={`text-xs ${connOk ? 'text-emerald-400' : 'text-amber-400'}`}>
-                  {connOk ? '✓ connected' : '⚠ needs attention'}
+                <span
+                  className={`text-xs ${
+                    connChecking
+                      ? 'text-neutral-400'
+                      : connOk
+                        ? 'text-emerald-400'
+                        : 'text-amber-400'
+                  }`}
+                >
+                  {connChecking ? '… checking' : connOk ? '✓ connected' : '⚠ needs attention'}
                 </span>
               )}
               <Button size="sm" variant="ghost" onClick={() => setConnExpanded((v) => !v)}>
