@@ -74,6 +74,75 @@ interface RollbackOutput extends RollbackDetect {
   installManifestWritten: boolean;
 }
 
+interface RollbackRendering {
+  content: string;
+  writtenHash: string;
+  templateContentHash: string;
+  templateSchemaVersion: number;
+  templateId: string;
+  templateKind: string;
+}
+
+interface RollbackRestorePlan {
+  content: string;
+  writtenHash: string;
+  templateContentHash: string;
+  schemaVersion: number;
+  templateId: string;
+  templateKind: string;
+}
+
+/** Decide how to restore one rollback target. Prefers the prior row's stored
+ *  bytes (migration 0013) — that is the exact file that was on disk, so it is a
+ *  correct revert EVEN across a template schema_version bump. Only the legacy
+ *  re-render fallback (no stored content) is blocked by a schema_version
+ *  mismatch, because re-rendering a changed-shape template cannot reproduce the
+ *  prior file. Pure so this branch selection — which has regressed before by
+ *  letting the schema guard short-circuit the stored-content path — stays
+ *  unit-tested. */
+export function resolveRollbackRestore(
+  target: RollbackTarget,
+  rendering: RollbackRendering | undefined,
+): { plan: RollbackRestorePlan; warning?: string } | { skip: string } {
+  if (target.priorWrittenContent !== null) {
+    return {
+      plan: {
+        content: target.priorWrittenContent,
+        writtenHash: target.priorWrittenHash,
+        templateContentHash: target.priorTemplateContentHash,
+        schemaVersion: target.templateSchemaVersion,
+        templateId: target.templateId,
+        templateKind: target.templateKind,
+      },
+    };
+  }
+  if (rendering) {
+    if (rendering.templateSchemaVersion !== target.templateSchemaVersion) {
+      return {
+        skip: `schema_version mismatch for ${target.diskPath} (prior=${target.templateSchemaVersion}, current=${rendering.templateSchemaVersion}) and no stored baseline content; skipping`,
+      };
+    }
+    const plan: RollbackRestorePlan = {
+      content: rendering.content,
+      writtenHash: rendering.writtenHash,
+      templateContentHash: rendering.templateContentHash,
+      schemaVersion: rendering.templateSchemaVersion,
+      templateId: rendering.templateId,
+      templateKind: rendering.templateKind,
+    };
+    if (rendering.templateContentHash !== target.priorTemplateContentHash) {
+      return {
+        plan,
+        warning: `content drifted for ${target.diskPath}; legacy row has no stored baseline content, restored from current code (best-effort)`,
+      };
+    }
+    return { plan };
+  }
+  return {
+    skip: `cannot restore ${target.diskPath}: no stored content and template ${target.templateId} no longer in manifest`,
+  };
+}
+
 async function requireRepositoryId(ctx: StepContext): Promise<string> {
   const row = await ctx.db
     .select({ repositoryId: schema.tasks.repositoryId })
@@ -252,53 +321,21 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
 
     for (const target of detected.targets) {
       const rendering = byTemplateAndPath.get(`${target.templateId}:${target.diskPath}`);
-      // Schema version mismatch is unrecoverable in either restore mode —
-      // shape changed, no way to safely revert without prior code.
-      if (rendering && rendering.templateSchemaVersion !== target.templateSchemaVersion) {
-        warnings.push(
-          `schema_version mismatch for ${target.diskPath} (prior=${target.templateSchemaVersion}, current=${rendering.templateSchemaVersion}); skipping`,
-        );
+
+      const decision = resolveRollbackRestore(target, rendering);
+      if ('skip' in decision) {
+        warnings.push(decision.skip);
         continue;
       }
-
-      // Preferred path: restore exact baseline content from the prior row's
-      // stored writtenContent. Works correctly across body drift since we
-      // store the actual bytes that were on disk.
-      let restoreContent: string | null = null;
-      let restoreWrittenHash: string;
-      let restoreTemplateContentHash: string;
-      let restoreSchemaVersion: number;
-      let restoreTemplateId: string;
-      let restoreTemplateKind: string;
-
-      if (target.priorWrittenContent !== null) {
-        restoreContent = target.priorWrittenContent;
-        restoreWrittenHash = target.priorWrittenHash;
-        restoreTemplateContentHash = target.priorTemplateContentHash;
-        restoreSchemaVersion = target.templateSchemaVersion;
-        restoreTemplateId = target.templateId;
-        restoreTemplateKind = target.templateKind;
-      } else if (rendering) {
-        // Legacy fallback: prior row predates migration 0013 (no stored
-        // content). Re-render against current manifest code — exact match
-        // when template body hasn't drifted, best-effort otherwise.
-        if (rendering.templateContentHash !== target.priorTemplateContentHash) {
-          warnings.push(
-            `content drifted for ${target.diskPath}; legacy row has no stored baseline content, restored from current code (best-effort)`,
-          );
-        }
-        restoreContent = rendering.content;
-        restoreWrittenHash = rendering.writtenHash;
-        restoreTemplateContentHash = rendering.templateContentHash;
-        restoreSchemaVersion = rendering.templateSchemaVersion;
-        restoreTemplateId = rendering.templateId;
-        restoreTemplateKind = rendering.templateKind;
-      } else {
-        warnings.push(
-          `cannot restore ${target.diskPath}: no stored content and template ${target.templateId} no longer in manifest`,
-        );
-        continue;
-      }
+      if (decision.warning) warnings.push(decision.warning);
+      const {
+        content: restoreContent,
+        writtenHash: restoreWrittenHash,
+        templateContentHash: restoreTemplateContentHash,
+        schemaVersion: restoreSchemaVersion,
+        templateId: restoreTemplateId,
+        templateKind: restoreTemplateKind,
+      } = decision.plan;
 
       const absPath = path.join(ctx.repoPath, target.diskPath);
       await mkdir(path.dirname(absPath), { recursive: true });
