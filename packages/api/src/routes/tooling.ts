@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
+import { ollamaEmbed } from '@haive/shared/rag';
 import { requireAuth } from '../middleware/auth.js';
 import type { AppEnv } from '../context.js';
 
@@ -51,7 +52,11 @@ tooling.post('/test-postgres', async (c) => {
 /* ------------------------------------------------------------------ */
 
 tooling.post('/test-ollama', async (c) => {
-  const body = (await c.req.json()) as { ollamaUrl?: string; model?: string };
+  const body = (await c.req.json()) as {
+    ollamaUrl?: string;
+    model?: string;
+    dimensions?: number;
+  };
   const url = body.ollamaUrl;
   if (!url || typeof url !== 'string') {
     return c.json({ ok: false, error: 'ollamaUrl is required' }, 400);
@@ -81,12 +86,34 @@ tooling.post('/test-ollama', async (c) => {
       );
     }
 
+    // Embedding-dimension check. Only when the model is actually present (so an
+    // unpulled model stays a fast reachability test) and an expected dimension
+    // was supplied. Generating an embedding loads + runs the model, so this is
+    // the slow part — it mirrors the global KB Ollama test and confirms the
+    // model's real output width matches the configured `embeddingDimensions`.
+    let dims: number | null = null;
+    let dimsMatch: boolean | null = null;
+    let dimsError: string | undefined;
+    if (modelFound && body.model && typeof body.dimensions === 'number') {
+      try {
+        const [vec] = await ollamaEmbed(url, body.model, ['healthcheck']);
+        dims = vec?.length ?? 0;
+        dimsMatch = dims === body.dimensions;
+      } catch (err) {
+        dimsError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
     return c.json({
       ok: true,
       reachable: true,
       modelCount: models.length,
       modelFound,
       models: models.slice(0, 50),
+      dims,
+      dimsMatch,
+      expectedDims: typeof body.dimensions === 'number' ? body.dimensions : null,
+      dimsError,
     });
   } catch (err) {
     return c.json({

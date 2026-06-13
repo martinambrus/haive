@@ -21,6 +21,12 @@ interface OllamaTestResult {
   modelCount?: number;
   modelFound?: boolean | null;
   models?: string[];
+  /** Actual embedding width returned by the model, when the dimension check
+   *  ran (model present + expected dimensions supplied). */
+  dims?: number | null;
+  dimsMatch?: boolean | null;
+  expectedDims?: number | null;
+  dimsError?: string;
 }
 
 interface PullProgress {
@@ -106,6 +112,7 @@ export function OllamaTestButton({ formValues }: { formValues: FormValues }) {
 
   const ollamaUrl = formValues.ollamaUrl as string;
   const model = formValues.embeddingModel as string | undefined;
+  const dimensions = Number(formValues.embeddingDimensions);
 
   const testConnection = useCallback(async () => {
     setTesting(true);
@@ -116,6 +123,7 @@ export function OllamaTestButton({ formValues }: { formValues: FormValues }) {
       const res = await api.post<OllamaTestResult>('/tooling/test-ollama', {
         ollamaUrl,
         model: model || undefined,
+        dimensions: Number.isFinite(dimensions) && dimensions > 0 ? dimensions : undefined,
       });
       setResult(res);
     } catch (err) {
@@ -123,7 +131,7 @@ export function OllamaTestButton({ formValues }: { formValues: FormValues }) {
     } finally {
       setTesting(false);
     }
-  }, [ollamaUrl, model]);
+  }, [ollamaUrl, model, dimensions]);
 
   async function pullModel() {
     if (!model) return;
@@ -243,6 +251,22 @@ export function OllamaTestButton({ formValues }: { formValues: FormValues }) {
               {result.modelFound === false && model && (
                 <span className="ml-1 font-medium text-amber-300">
                   Model &quot;{model}&quot; not found.
+                </span>
+              )}
+              {result.dimsMatch === true && (
+                <span className="ml-1 font-medium text-green-300">
+                  Embeddings: {result.dims} dims (matches config).
+                </span>
+              )}
+              {result.dimsMatch === false && (
+                <span className="ml-1 font-medium text-amber-300">
+                  Embeddings: {result.dims} dims, but config expects {result.expectedDims} — fix the
+                  dimensions field.
+                </span>
+              )}
+              {result.dimsError && result.modelFound === true && (
+                <span className="ml-1 font-medium text-amber-300">
+                  Embedding check failed: {result.dimsError}
                 </span>
               )}
             </span>
