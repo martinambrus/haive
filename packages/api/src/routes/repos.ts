@@ -24,6 +24,7 @@ import {
   enqueueRepoRagCleanupJob,
 } from '../lib/cancel-task.js';
 import { validateLocalPath, pathExists, isGitRepository } from '../lib/filesystem.js';
+import { createRepoArchiveStream } from '../lib/repo-archive.js';
 
 function maxUploadBytes(): number {
   const raw = process.env.MAX_UPLOAD_BYTES;
@@ -654,6 +655,28 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
     else missing.push(rel);
   }
   return c.json({ onboarded: missing.length === 0, present, missing });
+});
+
+repoRoutes.get('/:id/archive', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const db = getDb();
+  const repo = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    columns: { name: true, status: true, storagePath: true, localPath: true },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+  if (repo.status !== 'ready') throw new HttpError(409, 'Repository is not ready to download');
+  const root = repo.storagePath ?? repo.localPath;
+  if (!root) throw new HttpError(409, 'Repository has no resolvable path');
+
+  const { stream, filename } = await createRepoArchiveStream(root, repo.name);
+
+  c.header('Content-Type', 'application/zip');
+  c.header('Content-Disposition', `attachment; filename="${filename}"`);
+  c.header('Cache-Control', 'no-store');
+
+  return c.body(Readable.toWeb(stream) as ReadableStream);
 });
 
 repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {

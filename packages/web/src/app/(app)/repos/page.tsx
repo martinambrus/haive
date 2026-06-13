@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { api, type Repository } from '@/lib/api-client';
+import { api, API_BASE_URL, type Repository } from '@/lib/api-client';
 import { Button, Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
 import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
 import { usePageTitle } from '@/lib/use-page-title';
@@ -161,6 +161,36 @@ function RepoCard(props: RepoCardProps) {
   const canEdit = repo.status === 'ready' && topLevelPaths.length > 0;
   const excludedCount = repo.excludedPaths?.length ?? 0;
 
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  async function downloadArchive() {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/repos/${repo.id}/archive`, {
+        credentials: 'include',
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${repo.name}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setDownloadError((err as Error).message ?? 'Download failed');
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   return (
     <Card className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
@@ -203,6 +233,11 @@ function RepoCard(props: RepoCardProps) {
               <Button size="sm">Create task</Button>
             </Link>
           )}
+          {repo.status === 'ready' && (
+            <Button variant="secondary" size="sm" onClick={downloadArchive} disabled={downloading}>
+              {downloading ? 'Zipping...' : 'Download'}
+            </Button>
+          )}
           {canEdit && (
             <Button variant="secondary" size="sm" onClick={onExpand}>
               {expanded ? 'Close' : 'Exclusions'}
@@ -213,6 +248,7 @@ function RepoCard(props: RepoCardProps) {
           </Button>
         </div>
       </div>
+      {downloadError && <p className="text-xs text-red-400">{downloadError}</p>}
       {repo.detectedLanguages && (
         <div className="flex flex-wrap gap-1">
           {Object.entries(repo.detectedLanguages)

@@ -19,6 +19,7 @@
     "@haive/database": "workspace:*",
     "@haive/shared": "workspace:*",
     "@hono/node-server": "^1.14.1",
+    "archiver": "^8.0.0",
     "bcrypt": "^6.0.0",
     "bullmq": "^5.34.8",
     "dockerode": "^4.0.4",
@@ -32,6 +33,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@types/archiver": "^8.0.0",
     "@types/bcrypt": "^6.0.0",
     "@types/dockerode": "^4.0.1",
     "@types/jsonwebtoken": "^9.0.7",
