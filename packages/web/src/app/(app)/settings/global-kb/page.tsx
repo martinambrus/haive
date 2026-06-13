@@ -930,8 +930,8 @@ export default function GlobalKbPage() {
                 )}
               </div>
               <p className="mt-2 text-xs text-neutral-400">{facetsSummary(selected.facets)}</p>
-              <div className="mt-3 min-h-0 flex-1 overflow-hidden rounded-md border border-neutral-800">
-                <MarkdownView body={selected.body} className="max-h-full" />
+              <div className="mt-3 min-h-0 flex-1 overflow-y-auto rounded-md border border-neutral-800">
+                <MarkdownView body={selected.body} className="max-h-none overflow-visible" />
               </div>
               <div className="mt-4 flex items-center justify-center gap-3">
                 {selected.status === 'draft' && (
