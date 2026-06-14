@@ -821,12 +821,13 @@ export function CliProviderForm({
         </Label>
         {metadata.name === 'ollama' && (
           <p className="mb-1 mt-1 text-xs text-neutral-400">
-            Ollama Cloud (<code className="font-mono">:cloud</code> models): create a key at{' '}
+            <span className="text-white">Ollama Cloud</span> (
+            <code className="font-mono">:cloud</code> models): create a key at{' '}
             <a
               href="https://ollama.com/settings/keys"
               target="_blank"
               rel="noreferrer"
-              className="text-amber-400 underline underline-offset-2 hover:text-amber-300"
+              className="text-blue-400 underline underline-offset-2 hover:text-blue-300"
             >
               ollama.com/settings/keys
             </a>{' '}
