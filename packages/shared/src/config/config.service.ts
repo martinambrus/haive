@@ -27,6 +27,12 @@ export const CONFIG_KEYS = {
   MAX_PARALLEL_AGENTS: 'config:worker:maxParallelAgents',
   TASK_TIMEOUT_MS: 'config:worker:taskTimeoutMs',
   CLI_INVOCATION_TIMEOUT_MS: 'config:worker:cliInvocationTimeoutMs',
+  // Minimum CLI-invocation timeout (ms) for Ollama providers. A CLI invocation
+  // wraps a whole multi-turn agentic session, and local inference on weak
+  // hardware can take many minutes per turn; this floors the per-step timeout so
+  // a slow session isn't killed mid-generation. Default 2 h; raise for very
+  // slow setups.
+  OLLAMA_CLI_TIMEOUT_MS: 'config:worker:ollamaCliTimeoutMs',
   // When 'true', local in-stack Ollama models are allowed to run steps flagged
   // unsafeForLocalModels (skill generation, code simplification). Default false:
   // those steps fail for local models with an actionable message.
@@ -70,6 +76,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.MAX_PARALLEL_AGENTS]: '3',
   [CONFIG_KEYS.TASK_TIMEOUT_MS]: '3600000',
   [CONFIG_KEYS.CLI_INVOCATION_TIMEOUT_MS]: '600000',
+  [CONFIG_KEYS.OLLAMA_CLI_TIMEOUT_MS]: '7200000',
   [CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS]: 'false',
   [CONFIG_KEYS.HOST_REPO_ROOT]: '/host-fs',
   [CONFIG_KEYS.REPO_STORAGE_PATH]: '/var/lib/haive/repos',

@@ -1,6 +1,8 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
+  CONFIG_KEYS,
+  configService,
   type CliExecInvocationKind,
   type CliExecJobPayload,
   type CliNetworkPolicy,
@@ -116,6 +118,19 @@ function formatAuthDetail(existing: string | null): string {
   return ` (${capped})`;
 }
 
+/** Ollama inference (especially local, on weak hardware) can take many minutes
+ *  per turn. Floor the invocation timeout for Ollama providers so a slow
+ *  response isn't SIGKILLed mid-generation; non-Ollama providers keep their
+ *  per-step timeout unchanged. */
+async function resolveInvocationTimeoutMs(
+  requested: number | undefined,
+  provider: { name: CliProviderName } | null | undefined,
+): Promise<number | undefined> {
+  if (provider?.name !== 'ollama') return requested;
+  const floor = await configService.getNumber(CONFIG_KEYS.OLLAMA_CLI_TIMEOUT_MS, 7_200_000);
+  return Math.max(requested ?? 0, floor);
+}
+
 export async function executeByKind(
   db: Database,
   payload: CliExecJobPayload,
@@ -152,10 +167,11 @@ export async function executeByKind(
       const statusUpdater = payload.taskStepId
         ? createStepStatusUpdater(db, payload.taskStepId)
         : undefined;
+      const timeoutMs = await resolveInvocationTimeoutMs(payload.timeoutMs, providerRow);
       return executeCliSpec(
         payload.spec as CliCommandSpec,
         deps,
-        payload.timeoutMs,
+        timeoutMs,
         secrets,
         wrapperContent,
         sandboxImage,
