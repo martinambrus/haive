@@ -223,6 +223,18 @@ export async function executeCliSpec(
     args: mcpExtraArgs.length > 0 ? [...spec.args, ...mcpExtraArgs] : spec.args,
     env: { ...spec.env, ...secrets },
   };
+  // Ollama's key is intuitively named OLLAMA_API_KEY, but the claude binary
+  // authenticates with ANTHROPIC_AUTH_TOKEN. A key stored as a secret merges in
+  // above (post-build, so the adapter couldn't see it); map it onto the token
+  // here unless an explicit Anthropic token was set (the adapter's 'ollama'
+  // placeholder counts as unset). Harmless for non-Ollama providers.
+  if (
+    mergedSpec.env.OLLAMA_API_KEY &&
+    (!mergedSpec.env.ANTHROPIC_AUTH_TOKEN || mergedSpec.env.ANTHROPIC_AUTH_TOKEN === 'ollama')
+  ) {
+    mergedSpec.env.ANTHROPIC_AUTH_TOKEN = mergedSpec.env.OLLAMA_API_KEY;
+    mergedSpec.env.ANTHROPIC_API_KEY = mergedSpec.env.OLLAMA_API_KEY;
+  }
   const spawner: CliSpawner = createSandboxSpawner(
     wrapperContent,
     sandboxImage,

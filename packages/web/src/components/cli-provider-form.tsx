@@ -120,6 +120,26 @@ function parseCliArgs(text: string): string[] {
     .filter(Boolean);
 }
 
+// Env-var names that look like secrets — auto-routed to the encrypted Secrets
+// store instead of plaintext provider env vars (guards against pasting a key in
+// the wrong box).
+const SECRETISH_ENV_NAME = /KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL/i;
+
+/** Partition parsed env vars into plaintext env vars and secret-like ones (by
+ *  name), so the caller can store the latter encrypted rather than as plaintext. */
+function splitSecretishEnv(env: Record<string, string>): {
+  envVars: Record<string, string>;
+  secrets: Record<string, string>;
+} {
+  const envVars: Record<string, string> = {};
+  const secrets: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (SECRETISH_ENV_NAME.test(k)) secrets[k] = v;
+    else envVars[k] = v;
+  }
+  return { envVars, secrets };
+}
+
 function statesEqual(a: FormState, b: FormState): boolean {
   return (
     a.label === b.label &&
@@ -340,12 +360,15 @@ export function CliProviderForm({
       ips: snapshot.networkMode === 'allowlist' ? parseLinesList(snapshot.networkIpsText) : [],
     };
 
+    const { envVars: cleanEnvVars, secrets: movedSecrets } = splitSecretishEnv(
+      parseEnvVars(snapshot.envVarsText),
+    );
     const payload = {
       label: snapshot.label,
       executablePath: snapshot.executablePath,
       wrapperPath: snapshot.wrapperPath,
       wrapperContent: snapshot.wrapperContent,
-      envVars: parseEnvVars(snapshot.envVarsText),
+      envVars: cleanEnvVars,
       cliArgs: parseCliArgs(snapshot.cliArgsText),
       rulesContent: snapshot.rulesContent,
       authMode: snapshot.authMode,
@@ -362,7 +385,7 @@ export function CliProviderForm({
 
     await api.patch(`/cli-providers/${provider.id}`, payload);
 
-    const parsedSecrets = parseEnvVars(snapshot.secretsText);
+    const parsedSecrets = { ...movedSecrets, ...parseEnvVars(snapshot.secretsText) };
     const submittedNames = new Set(Object.keys(parsedSecrets));
 
     for (const s of existingSecrets) {
@@ -436,13 +459,16 @@ export function CliProviderForm({
           ips: state.networkMode === 'allowlist' ? parseLinesList(state.networkIpsText) : [],
         };
 
+        const { envVars: cleanEnvVars, secrets: movedSecrets } = splitSecretishEnv(
+          parseEnvVars(state.envVarsText),
+        );
         const payload = {
           name: state.name,
           label: state.label,
           executablePath: state.executablePath,
           wrapperPath: state.wrapperPath,
           wrapperContent: state.wrapperContent,
-          envVars: parseEnvVars(state.envVarsText),
+          envVars: cleanEnvVars,
           cliArgs: parseCliArgs(state.cliArgsText),
           rulesContent: state.rulesContent,
           authMode: state.authMode,
@@ -462,7 +488,7 @@ export function CliProviderForm({
           payload,
         );
 
-        const parsedSecrets = parseEnvVars(state.secretsText);
+        const parsedSecrets = { ...movedSecrets, ...parseEnvVars(state.secretsText) };
         for (const [secretName, value] of Object.entries(parsedSecrets)) {
           if (value.length > 0) {
             await api.post(`/cli-providers/${created.id}/secrets`, { secretName, value });
@@ -790,7 +816,9 @@ export function CliProviderForm({
       </div>
 
       <div>
-        <Label htmlFor="secrets">Secrets</Label>
+        <Label htmlFor="secrets" className="text-amber-400">
+          Secrets
+        </Label>
         {mode === 'edit' && existingSecrets.length > 0 && (
           <p className="mb-1 text-xs font-semibold text-yellow-400">
             {existingSecrets.length} secret{existingSecrets.length === 1 ? '' : 's'} configured.
@@ -814,6 +842,26 @@ export function CliProviderForm({
 
       <div>
         <Label htmlFor="envVars">Environment variables</Label>
+        <p className="mb-1 mt-1 text-xs font-bold text-red-500">
+          Don&apos;t put secrets (API keys, tokens, passwords) here — any variable whose name
+          contains KEY / TOKEN / SECRET / PASSWORD is automatically moved to the encrypted Secrets
+          field above when you save.
+        </p>
+        {metadata.name === 'ollama' && (
+          <p className="mb-1 text-xs text-neutral-400">
+            Ollama Cloud (<code className="font-mono">:cloud</code> models): create a key at{' '}
+            <a
+              href="https://ollama.com/settings/keys"
+              target="_blank"
+              rel="noreferrer"
+              className="text-amber-400 underline underline-offset-2 hover:text-amber-300"
+            >
+              ollama.com/settings/keys
+            </a>{' '}
+            and put it in Secrets above as <code className="font-mono">ANTHROPIC_AUTH_TOKEN=…</code>{' '}
+            (or <code className="font-mono">OLLAMA_API_KEY=…</code>). Local models need no key.
+          </p>
+        )}
         <textarea
           id="envVars"
           rows={5}
@@ -823,12 +871,7 @@ export function CliProviderForm({
           placeholder="KEY=VALUE"
         />
         <p className="mt-1 text-xs text-neutral-500">
-          One KEY=VALUE per line. Stored as plaintext metadata.
-        </p>
-        <p className="mt-1 text-xs font-bold text-red-500">
-          Never put secrets (API keys, tokens, passwords) here.
-          <br />
-          Use the Secrets field above — values are encrypted at rest.
+          One KEY=VALUE per line, stored as plaintext metadata.
         </p>
       </div>
 
