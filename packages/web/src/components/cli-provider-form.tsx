@@ -827,7 +827,7 @@ export function CliProviderForm({
               href="https://ollama.com/settings/keys"
               target="_blank"
               rel="noreferrer"
-              className="text-blue-400 underline underline-offset-2 hover:text-blue-300"
+              className="text-indigo-400 underline underline-offset-2 hover:text-indigo-300"
             >
               ollama.com/settings/keys
             </a>{' '}
