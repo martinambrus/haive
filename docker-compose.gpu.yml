@@ -10,5 +10,11 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              # Which NVIDIA GPU Ollama uses. Default GPU 0 (the only card on
+              # single-GPU machines, e.g. a laptop dGPU). On a multi-GPU box pin a
+              # specific card by index or UUID via OLLAMA_GPU_DEVICE in .env
+              # (e.g. OLLAMA_GPU_DEVICE=1 or =GPU-<uuid>). CPU-only machines never
+              # load this file (dev-up.sh gates it on an NVIDIA GPU being present),
+              # so the automatic CPU fallback is unaffected.
+              device_ids: ['${OLLAMA_GPU_DEVICE:-0}']
               capabilities: [gpu]
