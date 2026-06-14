@@ -25,8 +25,6 @@ export const CONFIG_KEYS = {
   // fan-outs). User-tunable per host capacity (>= 1; no upper limit — some
   // machines handle 10+).
   MAX_PARALLEL_AGENTS: 'config:worker:maxParallelAgents',
-  TASK_TIMEOUT_MS: 'config:worker:taskTimeoutMs',
-  CLI_INVOCATION_TIMEOUT_MS: 'config:worker:cliInvocationTimeoutMs',
   // Minimum CLI-invocation timeout (ms) for Ollama providers. A CLI invocation
   // wraps a whole multi-turn agentic session, and local inference on weak
   // hardware can take many minutes per turn; this floors the per-step timeout so
@@ -74,8 +72,6 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.SMTP_FROM_NAME]: 'Haive',
   [CONFIG_KEYS.WORKER_CONCURRENCY]: '5',
   [CONFIG_KEYS.MAX_PARALLEL_AGENTS]: '3',
-  [CONFIG_KEYS.TASK_TIMEOUT_MS]: '3600000',
-  [CONFIG_KEYS.CLI_INVOCATION_TIMEOUT_MS]: '600000',
   [CONFIG_KEYS.OLLAMA_CLI_TIMEOUT_MS]: '7200000',
   [CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS]: 'false',
   [CONFIG_KEYS.HOST_REPO_ROOT]: '/host-fs',
