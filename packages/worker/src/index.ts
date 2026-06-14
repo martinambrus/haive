@@ -13,6 +13,7 @@ import { startRepoWorker } from './queues/repo-queue.js';
 import { closeTaskQueue, reconcileOrphanedCliSteps, startTaskWorker } from './queues/task-queue.js';
 import { closeRedis } from './redis.js';
 import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
+import { ensureOllamaModels } from './sandbox/ollama-provision.js';
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 
@@ -41,6 +42,12 @@ async function main(): Promise<void> {
   });
   await scheduleBundleGitSyncTick().catch((err) => {
     logger.warn({ err }, 'failed to schedule bundle git-sync tick');
+  });
+  // Pre-pull declared local Ollama models so a fresh stack is usable without a
+  // manual pull. Non-blocking: boot completes while large pulls run in the
+  // background; per-model failures are logged, not fatal.
+  void ensureOllamaModels(getDb()).catch((err) => {
+    logger.warn({ err }, 'ollama model provisioning on boot failed');
   });
 
   // Terminal subsystem: session manager subscribes to terminal:request and
