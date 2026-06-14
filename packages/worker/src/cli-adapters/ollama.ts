@@ -5,8 +5,17 @@ import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from
 // provider.envVars.ANTHROPIC_BASE_URL (a remote host, or https://ollama.com).
 const OLLAMA_DEFAULT_BASE_URL = 'http://ollama:11434';
 // Ollama Cloud endpoint (serves an Anthropic-compatible /v1/messages API).
-// `:cloud` models route here by default.
+// Cloud models route here by default.
 const OLLAMA_CLOUD_URL = 'https://ollama.com';
+
+// Ollama Cloud models carry a `-cloud` or `:cloud` tag suffix, e.g.
+// `qwen3-coder:480b-cloud` (tag `480b-cloud`) or `deepseek-v4-pro:cloud`
+// (tag `cloud`). They run on ollama.com, never the local daemon, so a plain
+// `endsWith(':cloud')` misses the common `<size>-cloud` form and wrongly routes
+// it local (→ 401, daemon not signed in).
+export function isOllamaCloudModel(model: string): boolean {
+  return model.endsWith('-cloud') || model.endsWith(':cloud');
+}
 
 export class OllamaAdapter extends BaseCliAdapter {
   readonly providerName = 'ollama' as const;
@@ -48,9 +57,9 @@ export class OllamaAdapter extends BaseCliAdapter {
     if (!model) {
       throw new Error('ollama provider requires a model (set the provider model field)');
     }
-    // `:cloud` models run on Ollama Cloud; route there by default. Other models
+    // Cloud models run on Ollama Cloud; route there by default. Other models
     // use the in-stack daemon. An explicit ANTHROPIC_BASE_URL always wins.
-    const defaultBaseUrl = model.endsWith(':cloud') ? OLLAMA_CLOUD_URL : OLLAMA_DEFAULT_BASE_URL;
+    const defaultBaseUrl = isOllamaCloudModel(model) ? OLLAMA_CLOUD_URL : OLLAMA_DEFAULT_BASE_URL;
     env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL ?? defaultBaseUrl;
     // Token precedence: an explicit Anthropic token, else the Ollama API key
     // (cloud), else the literal 'ollama' a local daemon accepts. A key stored as
@@ -88,9 +97,10 @@ export class OllamaAdapter extends BaseCliAdapter {
     extraEnv: Record<string, string> = {},
   ): Record<string, string> {
     const env = super.buildShellEnv(provider, secrets, extraEnv);
-    const defaultBaseUrl = provider.model?.endsWith(':cloud')
-      ? OLLAMA_CLOUD_URL
-      : OLLAMA_DEFAULT_BASE_URL;
+    const defaultBaseUrl =
+      provider.model && isOllamaCloudModel(provider.model)
+        ? OLLAMA_CLOUD_URL
+        : OLLAMA_DEFAULT_BASE_URL;
     env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL ?? defaultBaseUrl;
     const token =
       env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY ?? env.OLLAMA_API_KEY ?? 'ollama';
