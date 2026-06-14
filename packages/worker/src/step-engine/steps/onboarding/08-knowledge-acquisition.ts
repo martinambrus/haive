@@ -319,6 +319,7 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '- sections: at least 2 sections per entry with real extracted content, not generic advice.',
     '  - For LOCAL entries: include actual code patterns, specific config values, and real repo file paths with line ranges (e.g. `build.gradle:13-41`).',
     "  - For GLOBAL entries: cite ONLY the public subject's own API, config keys and official docs — never this repo's file paths, source-file lists or custom function names. If you can only explain it by pointing at this repo's own files, it is not global; mark it \"local\".",
+    '  - Title and write each GLOBAL entry by the SUBJECT alone (e.g. "Vitest Quick Reference", NOT "Vitest Quick Reference for <thisProject>"); never put this project\'s name or package scope in a global title or body.',
     '  - Write as if explaining to a new team member who needs to understand this area.',
     '- placements: for each ACCURATE existing file, one object with its current `path` plus',
     '  the canonical/category/tech slot it belongs in (content moved verbatim). Omit BOTH',
@@ -1594,6 +1595,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
                 category,
                 facets,
                 topicKey: globalKbTopicKey(category, tech) ?? undefined,
+                projectName: detected.projectName ?? undefined,
               },
               ctx.logger,
             );
@@ -1715,6 +1717,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
             category,
             facets,
             topicKey: globalKbTopicKey(category, e.tech) ?? undefined,
+            projectName: detected.projectName ?? undefined,
           },
           ctx.logger,
         );

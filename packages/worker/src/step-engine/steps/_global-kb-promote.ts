@@ -19,10 +19,80 @@ export interface GlobalKbPromotion {
   /** Cross-repo dedup key (`category:tech`). When set and a matching entry
    *  already exists, the promotion is skipped instead of inserting a duplicate. */
   topicKey?: string;
+  /** Source repo's project name, used to genericize the article so it is portable
+   *  across repos (drops the name from the title, replaces it + its package scope
+   *  in the body with a placeholder). Omit to skip name scrubbing. */
+  projectName?: string | null;
 }
 
 interface PromoteLogger {
   warn: (obj: unknown, msg: string) => void;
+}
+
+/** Placeholder substituted for the source project's name in a promoted article,
+ *  chosen to read as an obvious "rename me" token for a future reader/model. */
+const GLOBAL_PLACEHOLDER = 'example-app';
+
+/** Project names too generic to safely find-and-replace in article text (a blanket
+ *  swap would corrupt unrelated prose/code). Such a name is left as-is. */
+const GENERIC_PROJECT_NAMES = new Set([
+  'app',
+  'api',
+  'web',
+  'test',
+  'tests',
+  'demo',
+  'site',
+  'core',
+  'main',
+  'src',
+  'lib',
+  'repo',
+  'project',
+  'example',
+  'server',
+  'client',
+  'backend',
+  'frontend',
+  'admin',
+  'worker',
+  'shared',
+  'monorepo',
+]);
+
+/** Make a promoted article portable for ANY repo on the same stack: always strip
+ *  the trailing `## Source files` footer (a repo file list), and when the project
+ *  name is distinctive, remove it from the title and replace it (plus its `@name/`
+ *  package scope) in the body with an obvious placeholder so a future reader knows
+ *  to rename it. A generic name (e.g. "app", "test") is left untouched to avoid
+ *  corrupting unrelated text. Pure + deterministic; exported for unit testing. */
+export function sanitizeGlobalArticle(input: {
+  title: string;
+  body: string;
+  projectName?: string | null;
+}): { title: string; body: string } {
+  // 1. Drop a trailing "## Source files" section regardless of the project name —
+  //    a portable article must never list a specific repo's files.
+  let body = input.body.replace(/\n#{1,6}[ \t]+source files\b[\s\S]*$/i, '').trimEnd() + '\n';
+  let title = input.title;
+
+  const name = (input.projectName ?? '').trim();
+  if (name.length >= 4 && !GENERIC_PROJECT_NAMES.has(name.toLowerCase())) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const nameRe = new RegExp(esc, 'gi');
+    // Body: `@name/...` scope and bare name -> placeholder.
+    body = body.replace(nameRe, GLOBAL_PLACEHOLDER);
+    // Title: drop the name plus a leading/trailing connector ("for/in/of", "-", ":"),
+    // then tidy. Keep the original if scrubbing would empty it.
+    const scrubbed = title
+      .replace(new RegExp(`\\s*(?:[-—–:]|\\b(?:for|in|of)\\b)\\s*${esc}\\b`, 'i'), '')
+      .replace(nameRe, '')
+      .replace(/\s{2,}/g, ' ')
+      .replace(/^[\s\-—–:]+|[\s\-—–:]+$/g, '')
+      .trim();
+    if (scrubbed) title = scrubbed;
+  }
+  return { title, body };
 }
 
 /** Promote a generalizable knowledge item to the cross-repo global KB as a DRAFT
@@ -65,13 +135,18 @@ export async function promoteToGlobalKbDraft(
           return { id: existing.id, deduped: true };
         }
       }
+      const clean = sanitizeGlobalArticle({
+        title: promotion.title,
+        body: promotion.body,
+        projectName: promotion.projectName,
+      });
       const [row] = await gdb
         .insert(globalKbEntries)
         .values({
           namespace: settings.namespace,
           userId: promotion.userId,
-          title: promotion.title,
-          body: promotion.body,
+          title: clean.title,
+          body: clean.body,
           category: promotion.category,
           facets: promotion.facets,
           status: 'draft',
