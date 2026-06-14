@@ -19,6 +19,7 @@ import {
   type CliSandboxBuildStatus,
 } from '@/lib/api-client';
 import { Button, FormError, Input, Label } from '@/components/ui';
+import { OllamaModelDownload } from '@/components/ollama-model-download';
 
 interface CliProviderFormProps {
   mode: 'create' | 'edit';
@@ -216,6 +217,23 @@ export function CliProviderForm({
   const [savedState, setSavedState] = useState<FormState>(() => state);
 
   const formDirty = !statesEqual(state, savedState);
+
+  // In-stack Ollama base URL for the model-download button, or null when the
+  // provider targets cloud/remote (those models are not pulled by the in-stack
+  // daemon). Only host `ollama`/`haive-ollama` is the API-pullable daemon.
+  const ollamaInStackUrl: string | null =
+    metadata.name === 'ollama'
+      ? (() => {
+          const raw =
+            (parseEnvVars(state.envVarsText).ANTHROPIC_BASE_URL ?? '').trim() ||
+            'http://ollama:11434';
+          try {
+            return ['ollama', 'haive-ollama'].includes(new URL(raw).hostname) ? raw : null;
+          } catch {
+            return 'http://ollama:11434';
+          }
+        })()
+      : null;
 
   // Precedence: dirty wins over building wins over failed. A dirty form
   // overrides an in-flight build so the user is told to save first; after
@@ -645,6 +663,9 @@ export function CliProviderForm({
             <code className="font-mono">qwen3-coder:480b-cloud</code>), or a custom model (
             <code className="font-mono">mannix/gemma4-98e:CD-Q6_K</code>).
           </p>
+          {ollamaInStackUrl && state.model.trim() && (
+            <OllamaModelDownload model={state.model.trim()} ollamaUrl={ollamaInStackUrl} />
+          )}
         </div>
       )}
 
