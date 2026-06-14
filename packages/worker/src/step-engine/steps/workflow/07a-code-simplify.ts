@@ -166,6 +166,9 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
       'A simplifier agent reduces unnecessary complexity in the implemented code without changing functionality; if it edits anything, one fixup agent verifies the spec still holds.',
     requiresCli: false,
     cliRoles: STEP_CLI_ROLES['07a-code-simplify'],
+    // Rewrites existing working code; a weak local model is risky here. Block
+    // local Ollama by default.
+    unsafeForLocalModels: true,
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {

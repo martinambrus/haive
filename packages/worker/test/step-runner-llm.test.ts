@@ -401,4 +401,74 @@ describe('advanceStep LLM phase', () => {
       expect(result.error).toMatch(/cli exited with code unknown/);
     }
   });
+
+  it('blocks a local Ollama model on an unsafeForLocalModels step', async () => {
+    const state = freshState();
+    const db = makeMockDb(state);
+    const enqueued: CliExecJobPayload[] = [];
+    const ollamaProvider = {
+      ...makeProvider(),
+      id: 'prov-ollama',
+      name: 'ollama',
+      authMode: 'api_key',
+      model: 'qwen3-coder:30b',
+      envVars: null, // unset base URL → default in-stack daemon → local
+    } as CliProviderRecord;
+    const stepDef = baseStep();
+    stepDef.metadata.unsafeForLocalModels = true;
+    const result = await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-ollama',
+      stepDef,
+      providers: [ollamaProvider],
+      deps: {
+        async enqueueCliInvocation(payload) {
+          enqueued.push(payload);
+        },
+      },
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toMatch(/blocked for local Ollama models/i);
+    }
+    expect(enqueued).toHaveLength(0);
+    expect(state.inserts.find((i) => i.table === 'cli_invocations')).toBeUndefined();
+  });
+
+  it('allows a cloud Ollama model on an unsafeForLocalModels step', async () => {
+    const state = freshState();
+    const db = makeMockDb(state);
+    const enqueued: CliExecJobPayload[] = [];
+    const cloudOllama = {
+      ...makeProvider(),
+      id: 'prov-ollama-cloud',
+      name: 'ollama',
+      authMode: 'api_key',
+      model: 'qwen3-coder:480b-cloud',
+      envVars: { ANTHROPIC_BASE_URL: 'https://ollama.com' }, // cloud → not local
+    } as CliProviderRecord;
+    const stepDef = baseStep();
+    stepDef.metadata.unsafeForLocalModels = true;
+    const result = await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-ollama-cloud',
+      stepDef,
+      providers: [cloudOllama],
+      deps: {
+        async enqueueCliInvocation(payload) {
+          enqueued.push(payload);
+        },
+      },
+    });
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toHaveLength(1);
+  });
 });

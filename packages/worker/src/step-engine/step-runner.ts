@@ -1,7 +1,7 @@
 import { and, desc, eq, isNull, ne } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema, type StepIterationEntry } from '@haive/database';
-import { logger, validateFormValues } from '@haive/shared';
+import { CONFIG_KEYS, configService, logger, validateFormValues } from '@haive/shared';
 import type {
   CliExecInvocationKind,
   CliExecJobPayload,
@@ -12,7 +12,7 @@ import type {
   StepStatus,
 } from '@haive/shared';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
-import { resolveDispatch } from '../orchestrator/dispatcher.js';
+import { resolveDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import {
   TaskCancelledError,
@@ -111,6 +111,60 @@ type UpdatePatch = Partial<{
 type LlmResolved =
   | { resolved: true; llmOutput: unknown; current: TaskStepRow }
   | { resolved: false; result: AdvanceStepResult };
+
+const IN_STACK_OLLAMA_HOSTS = new Set(['ollama', 'haive-ollama', 'localhost', '127.0.0.1']);
+
+/** True when the resolved provider is an in-stack (local) Ollama model. Cloud
+ *  (ollama.com) and external remote Ollama, and every non-Ollama provider, are
+ *  not "local" and are never blocked. */
+function isLocalOllama(provider: CliProviderRecord | null): boolean {
+  if (!provider || provider.name !== 'ollama') return false;
+  const baseUrl = provider.envVars?.ANTHROPIC_BASE_URL ?? 'http://ollama:11434';
+  try {
+    return IN_STACK_OLLAMA_HOSTS.has(new URL(baseUrl).hostname);
+  } catch {
+    return true; // unset/malformed → the adapter default is the in-stack daemon
+  }
+}
+
+/** Guard a step flagged `unsafeForLocalModels` against a local Ollama model (it
+ *  rewrites long-lived files where weak models are dangerous). Returns a failed
+ *  AdvanceStepResult to short-circuit when blocked; null to proceed. The
+ *  ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS config flag downgrades the block to a
+ *  warning. Cloud/remote Ollama and all other providers always pass. */
+async function enforceLocalModelGuard(
+  db: Database,
+  stepDef: StepDefinition,
+  current: TaskStepRow,
+  ctx: StepContext,
+  plan: DispatchPlan,
+): Promise<AdvanceStepResult | null> {
+  if (!stepDef.metadata.unsafeForLocalModels || !isLocalOllama(plan.provider)) return null;
+  let allow = false;
+  try {
+    allow = await configService.getBoolean(CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS, false);
+  } catch {
+    // Config store unavailable (e.g. not initialized) → safe default: block.
+    allow = false;
+  }
+  if (allow) {
+    ctx.logger.warn(
+      { stepId: stepDef.metadata.id, providerId: plan.providerId },
+      'local Ollama model running a destructive step (ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS override)',
+    );
+    return null;
+  }
+  const msg =
+    `Step "${stepDef.metadata.id}" rewrites long-lived project files and is blocked for ` +
+    `local Ollama models (low reliability for this work). Pick a commercial provider — or ` +
+    `cloud/remote Ollama — for this step, or set ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS=true to override.`;
+  const failed = await updateRow(db, current.id, {
+    status: 'failed',
+    errorMessage: msg,
+    endedAt: new Date(),
+  });
+  return { status: 'failed', row: failed, error: msg };
+}
 
 async function resolveLlmPhase(
   db: Database,
@@ -255,6 +309,9 @@ async function resolveLlmPhase(
     };
   }
 
+  const guard = await enforceLocalModelGuard(db, stepDef, current, ctx, plan);
+  if (guard) return { resolved: false, result: guard };
+
   const mode = plan.mode === 'subagent_emulated' ? 'subagent_emulated' : 'cli';
   const payloadKind: CliExecInvocationKind =
     plan.invocation.kind === 'subagent'
@@ -387,6 +444,9 @@ async function resolveAiFixPhase(
       result: { status: 'failed', row: failed, error: failed.errorMessage ?? plan.reason },
     };
   }
+
+  const fixGuard = await enforceLocalModelGuard(db, stepDef, current, ctx, plan);
+  if (fixGuard) return { resolved: false, result: fixGuard };
 
   const fixMode = plan.mode === 'subagent_emulated' ? 'subagent_emulated' : 'cli';
   const payloadKind: CliExecInvocationKind =

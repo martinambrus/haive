@@ -27,6 +27,10 @@ export const CONFIG_KEYS = {
   MAX_PARALLEL_AGENTS: 'config:worker:maxParallelAgents',
   TASK_TIMEOUT_MS: 'config:worker:taskTimeoutMs',
   CLI_INVOCATION_TIMEOUT_MS: 'config:worker:cliInvocationTimeoutMs',
+  // When 'true', local in-stack Ollama models are allowed to run steps flagged
+  // unsafeForLocalModels (skill generation, code simplification). Default false:
+  // those steps fail for local models with an actionable message.
+  ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS: 'config:worker:allowLocalModelDestructiveSteps',
 
   HOST_REPO_ROOT: 'config:filesystem:hostRepoRoot',
   REPO_STORAGE_PATH: 'config:filesystem:repoStoragePath',
@@ -66,6 +70,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.MAX_PARALLEL_AGENTS]: '3',
   [CONFIG_KEYS.TASK_TIMEOUT_MS]: '3600000',
   [CONFIG_KEYS.CLI_INVOCATION_TIMEOUT_MS]: '600000',
+  [CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS]: 'false',
   [CONFIG_KEYS.HOST_REPO_ROOT]: '/host-fs',
   [CONFIG_KEYS.REPO_STORAGE_PATH]: '/var/lib/haive/repos',
   [CONFIG_KEYS.CLAWKER_BIN]: '/usr/local/bin/clawker',

@@ -43,6 +43,12 @@ export interface StepMetadata {
    *  Skip is otherwise disabled across the workflow; only steps that opt in
    *  (currently 06a-db-migrate) may be skipped. The API skip handler enforces this. */
   allowSkip?: boolean;
+  /** When true, a local in-stack Ollama model is BLOCKED from running this step
+   *  by default — these steps rewrite long-lived project files (skills, working
+   *  code) where a weak local model is dangerous. Override per deployment with
+   *  the ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS config flag. Cloud/remote Ollama
+   *  and every non-Ollama provider are unaffected. */
+  unsafeForLocalModels?: boolean;
 }
 
 /** Step IDs whose StepDefinition sets `metadata.providerSensitive = true`.

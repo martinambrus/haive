@@ -873,6 +873,9 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       'LLM scans the repository and the knowledge base, identifies capability-based domain skills, and writes .claude/skills/<id>/SKILL.md plus sub-skills/<slug>.md files for each.',
     requiresCli: true,
     providerSensitive: true,
+    // A weak local model can corrupt the generated skill library (mann1x's
+    // caliber case); block local Ollama here by default.
+    unsafeForLocalModels: true,
   },
 
   async detect(ctx: StepContext): Promise<SkillGenDetect> {
