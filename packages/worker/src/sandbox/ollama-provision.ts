@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, ne, notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger, isOllamaCloudModel, type OllamaProvisionResult } from '@haive/shared';
 
@@ -277,5 +277,72 @@ export async function ensureOllamaModels(db: Database): Promise<void> {
     await provisionOllamaProvider(db, p).catch((err) =>
       log.warn({ err, providerId: p.id }, 'ensureOllamaModels: provision failed'),
     );
+  }
+}
+
+/** After a task reaches a terminal state, immediately unload (keep_alive:0) the
+ *  in-stack Ollama generative models its CLI invocations loaded, so GPU VRAM is
+ *  freed at once instead of lingering for the daemon's keep_alive window. Skipped
+ *  when another task is still live (it may need the model resident; keep_alive is
+ *  the backstop there) and for cloud/remote models (nothing loads locally). The
+ *  RAG embedding model is freed separately (maybeUnloadTaskEmbedModel). Never
+ *  throws — it must not break the terminal transition. */
+export async function unloadTaskOllamaCliModels(db: Database, taskId: string): Promise<void> {
+  try {
+    const rows = await db
+      .select({ model: schema.cliProviders.model, envVars: schema.cliProviders.envVars })
+      .from(schema.cliInvocations)
+      .innerJoin(
+        schema.cliProviders,
+        eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId),
+      )
+      .where(and(eq(schema.cliInvocations.taskId, taskId), eq(schema.cliProviders.name, 'ollama')));
+    const models = new Set<string>();
+    for (const r of rows) {
+      if (!r.model || isOllamaCloudModel(r.model)) continue;
+      if (!isInStackBaseUrl(r.envVars?.ANTHROPIC_BASE_URL)) continue;
+      models.add(r.model);
+    }
+    if (models.size === 0) return;
+    for (const model of models) {
+      // Keep a model resident only if another live task actually uses THIS model.
+      // (A coarse "any live task" guard — like the shared embed model uses — would
+      // wrongly pin this model whenever an unrelated task, e.g. on Claude Code, is
+      // running.)
+      const otherUsing = await db
+        .select({ id: schema.tasks.id })
+        .from(schema.cliInvocations)
+        .innerJoin(
+          schema.cliProviders,
+          eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId),
+        )
+        .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+        .where(
+          and(
+            eq(schema.cliProviders.name, 'ollama'),
+            eq(schema.cliProviders.model, model),
+            ne(schema.tasks.id, taskId),
+            notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
+          ),
+        )
+        .limit(1);
+      if (otherUsing.length > 0) {
+        log.debug({ taskId, model }, 'skip ollama cli model unload — another live task uses it');
+        continue;
+      }
+      try {
+        const resp = await fetch(`${IN_STACK_OLLAMA_URL}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, keep_alive: 0 }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        log.info({ taskId, model, ok: resp.ok }, 'requested ollama cli model unload');
+      } catch (err) {
+        log.warn({ err, taskId, model }, 'failed to unload ollama cli model');
+      }
+    }
+  } catch (err) {
+    log.warn({ err, taskId }, 'unloadTaskOllamaCliModels failed');
   }
 }

@@ -33,6 +33,7 @@ import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
+import { unloadTaskOllamaCliModels } from '../sandbox/ollama-provision.js';
 
 let registered = false;
 let taskQueueInstance: Queue<TaskJobPayload> | null = null;
@@ -177,6 +178,7 @@ async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
     .where(eq(schema.tasks.id, taskId));
   await cleanupTaskContainers(db, taskId, 'completed');
   await maybeUnloadTaskEmbedModel(db, taskId);
+  await unloadTaskOllamaCliModels(db, taskId);
 }
 
 async function markTaskFailed(db: Database, taskId: string, message: string): Promise<void> {
@@ -191,6 +193,7 @@ async function markTaskFailed(db: Database, taskId: string, message: string): Pr
     .where(eq(schema.tasks.id, taskId));
   await cleanupTaskContainers(db, taskId, 'failed');
   await maybeUnloadTaskEmbedModel(db, taskId);
+  await unloadTaskOllamaCliModels(db, taskId);
 }
 
 /** The (ollamaUrl, embeddingModel) a task used for RAG — read from its
@@ -239,16 +242,18 @@ async function resolveTaskEmbedTarget(
 }
 
 /** After a task reaches a terminal state, evict its RAG embedding model from
- *  Ollama so the GPU is freed — but only when no other task is still live (any
- *  non-terminal task may need the model resident; for those the Ollama
- *  keep_alive window is the backstop). Best-effort and self-contained: never
- *  throws, so it cannot break the terminal transition. Repo-RAG only; the
- *  global-KB model has its own lifecycle and keep_alive backstop. */
+ *  Ollama so the GPU is freed — but only when no other live task uses the SAME
+ *  embedding model (per (url, model)). A coarse "any live task" guard would
+ *  wrongly pin this model whenever any unrelated task runs, so two tasks on
+ *  different RAG models could never free either until both ended. Best-effort and
+ *  self-contained: never throws, so it cannot break the terminal transition.
+ *  Repo-RAG only; the global-KB model has its own lifecycle and keep_alive
+ *  backstop. */
 async function maybeUnloadTaskEmbedModel(db: Database, taskId: string): Promise<void> {
   try {
     const target = await resolveTaskEmbedTarget(db, taskId);
     if (!target) return;
-    const otherLive = await db
+    const liveTasks = await db
       .select({ id: schema.tasks.id })
       .from(schema.tasks)
       .where(
@@ -256,11 +261,16 @@ async function maybeUnloadTaskEmbedModel(db: Database, taskId: string): Promise<
           ne(schema.tasks.id, taskId),
           notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
         ),
-      )
-      .limit(1);
-    if (otherLive.length > 0) {
-      logger.debug({ taskId, model: target.model }, 'skip ollama unload — another task is live');
-      return;
+      );
+    for (const lt of liveTasks) {
+      const other = await resolveTaskEmbedTarget(db, lt.id);
+      if (other && other.url === target.url && other.model === target.model) {
+        logger.debug(
+          { taskId, model: target.model },
+          'skip ollama embed unload — another live task uses this model',
+        );
+        return;
+      }
     }
     const ok = await unloadOllamaModel(target.url, target.model);
     logger.info({ taskId, model: target.model, ok }, 'requested ollama embed model unload');
@@ -743,6 +753,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
   await maybeUnloadTaskEmbedModel(db, payload.taskId);
+  await unloadTaskOllamaCliModels(db, payload.taskId);
 }
 
 async function handleCleanupRepoRag(db: Database, payload: RepoRagCleanupPayload): Promise<void> {
