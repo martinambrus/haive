@@ -221,6 +221,9 @@ export async function ensureOllamaModels(db: Database): Promise<void> {
       log.warn({ providerId: p.id, label: p.label }, 'ollama provider has no model; skipping');
       continue;
     }
+    // `:cloud` models run on Ollama Cloud (ollama.com), not the local daemon, so
+    // there is nothing to pull or build for them here.
+    if (p.model.endsWith(':cloud')) continue;
     if (!jobs.has(p.model)) jobs.set(p.model, { model: p.model, modelfile: p.modelfile ?? null });
   }
   if (jobs.size === 0) return;
