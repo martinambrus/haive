@@ -819,6 +819,21 @@ export function CliProviderForm({
         <Label htmlFor="secrets" className="text-amber-400">
           Secrets
         </Label>
+        {metadata.name === 'ollama' && (
+          <p className="mb-1 mt-1 text-xs text-neutral-400">
+            Ollama Cloud (<code className="font-mono">:cloud</code> models): create a key at{' '}
+            <a
+              href="https://ollama.com/settings/keys"
+              target="_blank"
+              rel="noreferrer"
+              className="text-amber-400 underline underline-offset-2 hover:text-amber-300"
+            >
+              ollama.com/settings/keys
+            </a>{' '}
+            and paste it below as <code className="font-mono">ANTHROPIC_AUTH_TOKEN=…</code> (or{' '}
+            <code className="font-mono">OLLAMA_API_KEY=…</code>). Local models need no key.
+          </p>
+        )}
         {mode === 'edit' && existingSecrets.length > 0 && (
           <p className="mb-1 text-xs font-semibold text-yellow-400">
             {existingSecrets.length} secret{existingSecrets.length === 1 ? '' : 's'} configured.
@@ -847,21 +862,6 @@ export function CliProviderForm({
           contains KEY / TOKEN / SECRET / PASSWORD is automatically moved to the encrypted Secrets
           field above when you save.
         </p>
-        {metadata.name === 'ollama' && (
-          <p className="mb-1 text-xs text-neutral-400">
-            Ollama Cloud (<code className="font-mono">:cloud</code> models): create a key at{' '}
-            <a
-              href="https://ollama.com/settings/keys"
-              target="_blank"
-              rel="noreferrer"
-              className="text-amber-400 underline underline-offset-2 hover:text-amber-300"
-            >
-              ollama.com/settings/keys
-            </a>{' '}
-            and put it in Secrets above as <code className="font-mono">ANTHROPIC_AUTH_TOKEN=…</code>{' '}
-            (or <code className="font-mono">OLLAMA_API_KEY=…</code>). Local models need no key.
-          </p>
-        )}
         <textarea
           id="envVars"
           rows={5}
