@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull, or } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { envDepPresetUpsertSchema } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -27,6 +27,8 @@ async function assertRepoOwned(
 
 const presetColumns = {
   id: schema.envDepPresets.id,
+  repositoryId: schema.envDepPresets.repositoryId,
+  stepId: schema.envDepPresets.stepId,
   name: schema.envDepPresets.name,
   values: schema.envDepPresets.values,
   createdAt: schema.envDepPresets.createdAt,
@@ -36,16 +38,22 @@ const presetColumns = {
 envDepPresetRoutes.get('/', async (c) => {
   const userId = c.get('userId');
   const repositoryId = z.string().uuid().parse(c.req.query('repositoryId'));
+  const stepId = c.req.query('stepId') ?? '01-declare-deps';
   const db = getDb();
   await assertRepoOwned(db, repositoryId, userId);
 
+  // This repo's presets plus the user's global (repo-less) presets for the step.
   const presets = await db
     .select(presetColumns)
     .from(schema.envDepPresets)
     .where(
       and(
-        eq(schema.envDepPresets.repositoryId, repositoryId),
         eq(schema.envDepPresets.userId, userId),
+        eq(schema.envDepPresets.stepId, stepId),
+        or(
+          eq(schema.envDepPresets.repositoryId, repositoryId),
+          isNull(schema.envDepPresets.repositoryId),
+        ),
       ),
     )
     .orderBy(desc(schema.envDepPresets.updatedAt));
@@ -59,19 +67,46 @@ envDepPresetRoutes.post('/', async (c) => {
   const db = getDb();
   await assertRepoOwned(db, body.repositoryId, userId);
 
-  const inserted = await db
-    .insert(schema.envDepPresets)
-    .values({
-      userId,
-      repositoryId: body.repositoryId,
-      name: body.name,
-      values: body.values,
-    })
-    .onConflictDoUpdate({
-      target: [schema.envDepPresets.repositoryId, schema.envDepPresets.name],
-      set: { values: body.values, updatedAt: new Date() },
-    })
-    .returning(presetColumns);
+  // Global presets carry no repository and dedupe per (user, step, name) via the
+  // partial unique index; repo presets dedupe per (repo, step, name).
+  const inserted = body.global
+    ? await db
+        .insert(schema.envDepPresets)
+        .values({
+          userId,
+          repositoryId: null,
+          stepId: body.stepId,
+          name: body.name,
+          values: body.values,
+        })
+        .onConflictDoUpdate({
+          target: [
+            schema.envDepPresets.userId,
+            schema.envDepPresets.stepId,
+            schema.envDepPresets.name,
+          ],
+          targetWhere: isNull(schema.envDepPresets.repositoryId),
+          set: { values: body.values, updatedAt: new Date() },
+        })
+        .returning(presetColumns)
+    : await db
+        .insert(schema.envDepPresets)
+        .values({
+          userId,
+          repositoryId: body.repositoryId,
+          stepId: body.stepId,
+          name: body.name,
+          values: body.values,
+        })
+        .onConflictDoUpdate({
+          target: [
+            schema.envDepPresets.repositoryId,
+            schema.envDepPresets.stepId,
+            schema.envDepPresets.name,
+          ],
+          set: { values: body.values, updatedAt: new Date() },
+        })
+        .returning(presetColumns);
 
   return c.json({ preset: inserted[0] }, 201);
 });

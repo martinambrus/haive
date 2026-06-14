@@ -9,7 +9,7 @@ import {
   index,
   pgEnum,
 } from 'drizzle-orm/pg-core';
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import { users } from './auth.js';
 import { repositories } from './repos.js';
 import { tasks } from './tasks.js';
@@ -88,7 +88,7 @@ export const envTemplateFilesRelations = relations(envTemplateFiles, ({ one }) =
 // so the user can prefill the dependency form on future runs instead of
 // re-entering all 12 fields by hand. Distinct from `env_templates` above,
 // which is the per-task environment state (declared deps + dockerfile + build
-// status). Upsert target is (repository_id, name); cascade on repo delete.
+// status). Upsert target is (repository_id, step_id, name); cascade on repo delete.
 
 export const envDepPresets = pgTable(
   'env_dep_presets',
@@ -97,17 +97,33 @@ export const envDepPresets = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    repositoryId: uuid('repository_id')
-      .notNull()
-      .references(() => repositories.id, { onDelete: 'cascade' }),
+    // Null = a global preset, reusable across all of the user's repos. A set
+    // value scopes the preset to that repository (cascade-deletes with it).
+    repositoryId: uuid('repository_id').references(() => repositories.id, {
+      onDelete: 'cascade',
+    }),
     name: varchar('name', { length: 255 }).notNull(),
+    // Which env-replicate step's form this preset snapshots: '01-declare-deps'
+    // (the dependency form) or '02-generate-dockerfile' (the Dockerfile). One
+    // preset store serves every step, scoped per (repo, step, name).
+    stepId: text('step_id').notNull().default('01-declare-deps'),
     values: jsonb('values').$type<Record<string, unknown>>().notNull(),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
   (table) => [
     index('env_dep_presets_repository_id_idx').on(table.repositoryId),
-    uniqueIndex('env_dep_presets_repo_name_idx').on(table.repositoryId, table.name),
+    // Repo-scoped presets are unique per (repo, step, name). NULL repository_id
+    // (globals) are distinct under this index, so a separate partial unique keys
+    // globals per (user, step, name).
+    uniqueIndex('env_dep_presets_repo_step_name_idx').on(
+      table.repositoryId,
+      table.stepId,
+      table.name,
+    ),
+    uniqueIndex('env_dep_presets_global_step_name_idx')
+      .on(table.userId, table.stepId, table.name)
+      .where(sql`${table.repositoryId} IS NULL`),
   ],
 );
 

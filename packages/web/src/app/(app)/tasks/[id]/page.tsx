@@ -1232,31 +1232,40 @@ function StepCard({
   // and re-apply it on later runs to prefill all fields. The save controls
   // (checkbox + name) are deliberately page-local state — they must never
   // enter FormValues, which the submit route persists verbatim.
-  const isDeclareDeps = step.stepId === '01-declare-deps';
+  // Steps whose form can be saved/applied as a named, repo-scoped template, each
+  // mapped to the field after which the "Save as template" controls render.
+  const presetAnchorField = (
+    {
+      '01-declare-deps': 'extraPackages',
+      '02-generate-dockerfile': 'dockerfile',
+    } as Record<string, string>
+  )[step.stepId];
+  const supportsPresets = presetAnchorField !== undefined;
   const [presets, setPresets] = useState<EnvDepPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState('');
   const [appliedValues, setAppliedValues] = useState<FormValues | undefined>(undefined);
   const [formKey, setFormKey] = useState(0);
   const [saveAsTemplate, setSaveAsTemplate] = useState(false);
+  const [makeGlobal, setMakeGlobal] = useState(false);
   const [templateName, setTemplateName] = useState('');
   const [presetError, setPresetError] = useState<string | null>(null);
   const [deletingTemplate, setDeletingTemplate] = useState(false);
 
   const refreshPresets = useCallback(async () => {
-    if (!isDeclareDeps || !taskRepositoryId) return;
+    if (!supportsPresets || !taskRepositoryId) return;
     try {
       const data = await api.get<{ presets: EnvDepPreset[] }>(
-        `/env-dep-presets?repositoryId=${taskRepositoryId}`,
+        `/env-dep-presets?repositoryId=${taskRepositoryId}&stepId=${step.stepId}`,
       );
       setPresets(data.presets);
     } catch {
       setPresets([]);
     }
-  }, [isDeclareDeps, taskRepositoryId]);
+  }, [supportsPresets, taskRepositoryId, step.stepId]);
 
   useEffect(() => {
-    if (isDeclareDeps && showForm && taskRepositoryId) void refreshPresets();
-  }, [isDeclareDeps, showForm, taskRepositoryId, refreshPresets]);
+    if (supportsPresets && showForm && taskRepositoryId) void refreshPresets();
+  }, [supportsPresets, showForm, taskRepositoryId, refreshPresets]);
 
   // Picking a template remounts FormRenderer (via formKey) so its initial
   // values re-seed from the template; "— none —" reverts to the step's own
@@ -1284,7 +1293,7 @@ function StepCard({
 
   // Wraps the normal step submit: when "Save as template" is ticked, persist
   // the template first (aborting on a blank name), then submit the step.
-  async function handleDeclareDepsSubmit(values: FormValues) {
+  async function handlePresetSubmit(values: FormValues) {
     if (saveAsTemplate) {
       const name = templateName.trim();
       if (!name) {
@@ -1296,7 +1305,13 @@ function StepCard({
         return;
       }
       try {
-        await api.post('/env-dep-presets', { repositoryId: taskRepositoryId, name, values });
+        await api.post('/env-dep-presets', {
+          repositoryId: taskRepositoryId,
+          stepId: step.stepId,
+          name,
+          values,
+          global: makeGlobal,
+        });
         await refreshPresets();
       } catch (err) {
         setPresetError((err as Error).message ?? 'Failed to save template');
@@ -1312,17 +1327,23 @@ function StepCard({
       if (fieldId === 'ragConnectionString') return <PostgresTestButton formValues={values} />;
       if (fieldId === 'embeddingModel') return <OllamaTestButton formValues={values} />;
     }
-    if (isDeclareDeps && fieldId === 'extraPackages') {
+    if (supportsPresets && fieldId === presetAnchorField) {
       return (
         <SaveAsTemplateControls
           checked={saveAsTemplate}
           onToggle={(v) => {
             setSaveAsTemplate(v);
+            if (!v) setMakeGlobal(false);
             setPresetError(null);
           }}
           name={templateName}
           onNameChange={(v) => {
             setTemplateName(v);
+            setPresetError(null);
+          }}
+          global={makeGlobal}
+          onGlobalToggle={(v) => {
+            setMakeGlobal(v);
             setPresetError(null);
           }}
           error={presetError}
@@ -1554,7 +1575,7 @@ function StepCard({
       ) : (
         showForm && (
           <div className="flex flex-col gap-4 border-t border-neutral-800 pt-4">
-            {isDeclareDeps && taskRepositoryId && (
+            {supportsPresets && taskRepositoryId && (
               <div className="flex flex-col gap-1.5">
                 <label
                   htmlFor={`tpl-${step.stepId}`}
@@ -1572,7 +1593,7 @@ function StepCard({
                     <option value="">— none —</option>
                     {presets.map((p) => (
                       <option key={p.id} value={p.id}>
-                        {p.name}
+                        {p.repositoryId === null ? `[global] ${p.name}` : p.name}
                       </option>
                     ))}
                   </select>
@@ -1596,15 +1617,15 @@ function StepCard({
               </div>
             )}
             <FormRenderer
-              key={isDeclareDeps ? `${step.stepId}-${formKey}` : undefined}
+              key={supportsPresets ? `${step.stepId}-${formKey}` : undefined}
               schema={schema}
-              initialValues={isDeclareDeps ? (appliedValues ?? initialValues) : initialValues}
+              initialValues={supportsPresets ? (appliedValues ?? initialValues) : initialValues}
               submitting={submitting}
               errorMessage={submitError}
-              onSubmit={isDeclareDeps ? handleDeclareDepsSubmit : onSubmit}
+              onSubmit={supportsPresets ? handlePresetSubmit : onSubmit}
               repositoryId={taskRepositoryId}
               renderAfterField={
-                hasConnectionFields || isDeclareDeps ? renderAfterFieldFn : undefined
+                hasConnectionFields || supportsPresets ? renderAfterFieldFn : undefined
               }
             />
           </div>
@@ -1756,21 +1777,26 @@ function RagStatsPanel({ taskId, stepId }: { taskId: string; stepId: string }) {
   );
 }
 
-// "Save as template" controls injected next to the Save dependencies submit
-// button (env-replicate step 1). Ticking the checkbox reveals a required name
-// input; the existing submit then also saves the template. State lives in the
-// parent StepCard so it never becomes part of the submitted FormValues.
+// "Save as template" controls injected after a preset-enabled env-replicate
+// step's anchor field (step 1 deps, step 2 Dockerfile). Ticking the checkbox
+// reveals a required name input; the existing submit then also saves the
+// template. State lives in the parent StepCard so it never becomes part of the
+// submitted FormValues.
 function SaveAsTemplateControls({
   checked,
   onToggle,
   name,
   onNameChange,
+  global,
+  onGlobalToggle,
   error,
 }: {
   checked: boolean;
   onToggle: (value: boolean) => void;
   name: string;
   onNameChange: (value: string) => void;
+  global: boolean;
+  onGlobalToggle: (value: boolean) => void;
   error: string | null;
 }) {
   return (
@@ -1781,12 +1807,27 @@ function SaveAsTemplateControls({
       </label>
       {checked && (
         <div className="flex flex-col gap-1 pl-6">
-          <Input
-            value={name}
-            placeholder="Template name"
-            maxLength={255}
-            onChange={(e) => onNameChange(e.target.value)}
-          />
+          <div className="flex items-center gap-3">
+            <div className="flex-1">
+              <Input
+                value={name}
+                placeholder="Template name"
+                maxLength={255}
+                onChange={(e) => onNameChange(e.target.value)}
+              />
+            </div>
+            <label className="flex shrink-0 items-center gap-2 text-sm text-neutral-200">
+              <input
+                type="checkbox"
+                checked={global}
+                onChange={(e) => onGlobalToggle(e.target.checked)}
+              />
+              <span>Make global</span>
+            </label>
+          </div>
+          <p className="text-xs text-neutral-500">
+            Global templates are reusable across all your repositories.
+          </p>
           {error && <p className="text-xs text-red-400">{error}</p>}
         </div>
       )}

@@ -137,11 +137,15 @@ export interface Repository {
   createdAt: string;
 }
 
-/** A reusable, per-repository snapshot of the env-replicate step-1
- *  (`01-declare-deps`) form inputs. `values` is the raw FormValues object the
- *  step's form produced; it re-seeds the dependency form when applied. */
+/** A reusable, per-repository snapshot of an env-replicate step's form inputs
+ *  (`stepId` = `01-declare-deps` deps or `02-generate-dockerfile` Dockerfile).
+ *  `values` is the raw FormValues object the step's form produced; it re-seeds
+ *  that step's form when applied. */
 export interface EnvDepPreset {
   id: string;
+  /** Null for a global preset (reusable across all the user's repos). */
+  repositoryId: string | null;
+  stepId: string;
   name: string;
   values: Record<string, unknown>;
   createdAt: string;
