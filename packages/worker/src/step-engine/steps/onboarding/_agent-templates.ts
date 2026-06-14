@@ -1235,7 +1235,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     id: 'peer-reviewer',
     title: 'Peer Reviewer',
     description:
-      'Reviews a completed change as a senior peer would — correctness, readability, maintainability, and conventions — with severities and acknowledged positives.',
+      'Reviews a completed change as a senior peer would — correctness, readability, maintainability, conventions, and all 14 review dimensions as written — with severities and acknowledged positives.',
     color: 'green',
     field: 'review',
     tools: ['Read', 'Grep', 'Glob', 'Bash'],
@@ -1245,6 +1245,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       '**Verify correctness** — Confirm the change does what its spec says and handles edge and error cases.',
       '**Check maintainability** — Flag duplication, oversized functions, and unnecessary coupling.',
       '**Enforce conventions** — Compare against existing patterns in the repository and the knowledge base.',
+      '**Cover the 14 dimensions** — Evaluate the change as written against every canonical dimension (Security, Maintainability, Testability, Usability, Stability, Performance, Observability, Operational Readiness, Data Integrity, Developer Experience, Accessibility, Internationalization, Backward Compatibility, Privacy/Compliance) — not only what the spec promised — and raise any weak or missing one as a finding with the dimension named.',
       '**Acknowledge strengths** — Call out what was done well so good practice is reinforced.',
     ],
     whenInvoked: [
@@ -1263,7 +1264,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       },
       {
         title: 'Evaluate per category',
-        body: 'For each file assess correctness, readability, maintainability, and convention adherence, and note edge cases the code does not handle.',
+        body: 'For each file assess correctness, readability, maintainability, and convention adherence, and note edge cases the code does not handle. Then score the change against all 14 review dimensions as written (Security, Maintainability, Testability, Usability, Stability, Performance — N+1 queries, missing indexes on new WHERE/ORDER BY columns, hot-path blocking IO — Observability, Operational Readiness, Data Integrity, Developer Experience, Accessibility, Internationalization, Backward Compatibility, Privacy/Compliance) and surface any non-PASS dimension as a finding, independent of whether the spec named it.',
       },
       {
         title: 'Compile constructive feedback',
@@ -1288,6 +1289,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       'Critical issues are marked critical, never softened into suggestions',
       'Each finding has a file + line and a concrete fix',
       'At least one genuine positive is acknowledged',
+      'All 14 review dimensions were considered as written; any weak or missing one is raised as a finding',
       'A clear verdict (APPROVE / REQUEST_CHANGES / DISCUSS) is issued',
     ],
     antiPatterns: [
