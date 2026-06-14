@@ -10,9 +10,12 @@ export class OllamaAdapter extends BaseCliAdapter {
   // Ollama is a model runner, not an agentic CLI; reuse the claude binary
   // pointed at Ollama's Anthropic-compatible endpoint (same trick as zai).
   readonly defaultExecutable = 'claude';
-  // OSS models drive native sub-agents unreliably; keep false so the dispatcher
-  // never routes a subagent-required step to an Ollama model.
-  readonly supportsSubagents = false;
+  // Sub-agents run via the claude binary's native Task() against the Ollama
+  // endpoint — the same mechanism zai uses, just a different backend. Capable
+  // models (cloud, large local) drive it fine; weaker local models less so, but
+  // that is a model choice. Scaffolding steps are protected by the
+  // unsafeForLocalModels guardrail, not by this flag.
+  readonly supportsSubagents = true;
   // No `claude /login` flow; the token arrives via env (a real key for
   // cloud/remote, or the literal 'ollama' for a local daemon). supportsCliAuth
   // stays true so the dispatcher's CLI path is available; assertUserAuthReady

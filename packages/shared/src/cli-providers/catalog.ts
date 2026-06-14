@@ -224,9 +224,10 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     description:
       "Ollama models (local, remote server, or Ollama Cloud). Reuses the Claude binary against Ollama's Anthropic-compatible endpoint; set the model and base URL per provider.",
     defaultExecutable: 'claude',
-    // OSS models drive native sub-agents unreliably; keep false so the
-    // dispatcher never routes a subagent-required step to an Ollama model.
-    supportsSubagents: false,
+    // Native sub-agents via the claude binary's Task() (same mechanism as zai);
+    // agent-mining fan-outs work regardless. Scaffolding steps are protected by
+    // the unsafeForLocalModels guardrail, not by this flag.
+    supportsSubagents: true,
     supportsCliAuth: true,
     supportsMcp: true,
     supportsPlugins: false,
