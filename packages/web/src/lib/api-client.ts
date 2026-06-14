@@ -327,7 +327,7 @@ export interface Container {
   destroyedAt: string | null;
 }
 
-export type WorkflowType = 'onboarding' | 'workflow';
+export type WorkflowType = 'onboarding' | 'workflow' | 'onboarding_upgrade';
 
 export interface OnboardingStatus {
   onboarded: boolean;

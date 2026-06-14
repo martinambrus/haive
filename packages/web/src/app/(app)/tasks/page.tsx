@@ -27,6 +27,7 @@ function statusVariant(status: TaskStatus): BadgeVariant {
 const TYPE_LABELS: Record<string, string> = {
   onboarding: 'Onboarding',
   workflow: 'Workflow',
+  onboarding_upgrade: 'Onboarding upgrade',
   env_replicate: 'Env replicate', // legacy tasks only
 };
 

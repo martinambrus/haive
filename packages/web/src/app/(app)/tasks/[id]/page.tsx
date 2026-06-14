@@ -459,6 +459,12 @@ export default function TaskDetailPage() {
     );
   }
 
+  // Upgrade/rollback tasks (both type 'onboarding_upgrade'; rollback is
+  // metadata.mode === 'rollback') return to the repositories list rather than
+  // the tasks list.
+  const isUpgradeTask = task.type === 'onboarding_upgrade';
+  const backHref = isUpgradeTask ? '/repos' : '/tasks';
+  const backLabel = isUpgradeTask ? 'Back to repositories' : 'Back to tasks';
   const canCancel = !['completed', 'cancelled'].includes(task.status);
   const canRetry = task.status === 'failed';
   // A failed task failed AT a step. The top-level Retry must re-run that step
@@ -492,8 +498,8 @@ export default function TaskDetailPage() {
       )}
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <Link href="/tasks" className="text-xs text-indigo-400 underline">
-            Back to tasks
+          <Link href={backHref} className="text-xs text-indigo-400 underline">
+            {backLabel}
           </Link>
           <div ref={titleRowRef} className="flex items-center gap-2">
             {renaming ? (
@@ -627,6 +633,13 @@ export default function TaskDetailPage() {
             </div>
           ))}
           <TaskTotalTime task={task} steps={steps} userActive={userActive} />
+          {isUpgradeTask && (
+            <div className="flex justify-center pt-2">
+              <Link href="/repos">
+                <Button>Back to repositories</Button>
+              </Link>
+            </div>
+          )}
         </div>
       )}
 
