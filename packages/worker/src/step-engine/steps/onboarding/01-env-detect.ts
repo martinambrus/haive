@@ -13,6 +13,13 @@ import {
 import { extractFencedJson } from '../_fenced-json.js';
 import { matchYamlField, matchYamlBlockField } from '../_ddev-config.js';
 import { buildFileTree, detectLanguages } from '../../../repo/framework-detect.js';
+import {
+  collectExtraManifestDeps,
+  detectLanguageRuntimes,
+  firstMajor,
+  manifestPackages,
+  numericVersion,
+} from './_manifest-deps.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const GENERIC_NAMES = new Set([
@@ -354,12 +361,15 @@ interface PackageJsonShape {
   name?: string;
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
+  engines?: { node?: string };
+  volta?: { node?: string };
 }
 
 interface ComposerJsonShape {
   name?: string;
   require?: Record<string, string>;
   ['require-dev']?: Record<string, string>;
+  config?: { platform?: Record<string, string> };
 }
 
 function detectNodeFramework(pkg: PackageJsonShape): FrameworkName {
@@ -382,70 +392,64 @@ function detectPhpFramework(composer: ComposerJsonShape): FrameworkName {
   return 'general';
 }
 
-/** Leading integer of a version constraint as the major token: "^11.0" -> "11",
- *  "~10.3" -> "10", ">=9.5 <11" -> "9". Null when there is no integer. Major-only
- *  by design — minors churn, majors are API-stable (the user's stated tradeoff). */
-function firstMajor(constraint: string | undefined): string | null {
-  if (!constraint) return null;
-  const m = constraint.match(/\d+/);
-  return m ? m[0] : null;
-}
-
 /** Manifest dependency keys that hold each framework's version, keyed by the
  *  FrameworkName env-detect classifies into. Deterministic coverage is BOUNDED
  *  by the frameworks we recognize — not arbitrary user input — so each line maps
- *  one known framework to its version dep. Frameworks not listed (general /
- *  nodejs / python / wordpress / ...) get no frameworkMajor; the kb-author LLM
- *  fills the major for arbitrary stacks at authoring time. Extend by adding a
- *  line. */
-const FRAMEWORK_VERSION_KEYS: Partial<
-  Record<FrameworkName, { from: 'composer' | 'package'; keys: string[] }>
-> = {
-  drupal: {
-    from: 'composer',
-    keys: ['drupal/core', 'drupal/core-recommended', 'drupal/recommended-project'],
-  },
-  laravel: { from: 'composer', keys: ['laravel/framework'] },
-  nextjs: { from: 'package', keys: ['next'] },
+ *  one known framework to its version dep, looked up across the union of every
+ *  parsed manifest (composer, npm + workspaces, Gemfile, requirements/pyproject,
+ *  ...). Frameworks not listed (general / nodejs / python / wordpress / ...) get
+ *  no frameworkMajor; the kb-author LLM fills the major for arbitrary stacks at
+ *  authoring time. Extend by adding a line. */
+const FRAMEWORK_VERSION_KEYS: Partial<Record<FrameworkName, string[]>> = {
+  drupal: ['drupal/core', 'drupal/core-recommended', 'drupal/recommended-project'],
+  laravel: ['laravel/framework'],
+  nextjs: ['next'],
+  rails: ['rails'],
+  django: ['Django', 'django'],
 };
 
-/** Deterministic framework MAJOR from the repo manifests. drupal7 is implicit;
- *  otherwise look up the framework's version dep and take its leading integer.
- *  Null for frameworks without a registered key (the LLM handles those when
- *  authoring an entry against a specific repo). */
+/** Deterministic framework MAJOR from the merged manifest deps. drupal7 is
+ *  implicit; otherwise look up the framework's version dep(s) and take its leading
+ *  integer. Null for frameworks without a registered key (the LLM handles those
+ *  when authoring an entry against a specific repo). */
 function extractFrameworkMajor(
   framework: FrameworkName,
-  composerDeps: Record<string, string>,
-  packageDeps: Record<string, string>,
+  deps: Record<string, string>,
 ): string | null {
   if (framework === 'drupal7') return '7';
-  const spec = FRAMEWORK_VERSION_KEYS[framework];
-  if (!spec) return null;
-  const deps = spec.from === 'composer' ? composerDeps : packageDeps;
-  for (const key of spec.keys) {
+  const keys = FRAMEWORK_VERSION_KEYS[framework];
+  if (!keys) return null;
+  for (const key of keys) {
     const major = firstMajor(deps[key]);
     if (major) return major;
   }
   return null;
 }
 
-/** Direct manifest dependencies as `name@major`. Generic and deterministic — any
- *  package in a parsed manifest, no per-package code. Composer platform reqs
- *  (php, ext-*, lib-*) are skipped (not packages). Bounded to direct deps so the
- *  project facet set stays small. */
-function manifestPackages(
-  composerDeps: Record<string, string>,
-  packageDeps: Record<string, string>,
-): string[] {
-  const out: string[] = [];
-  const add = (name: string, constraint: string): void => {
-    if (name === 'php' || name.startsWith('ext-') || name.startsWith('lib-')) return;
-    const major = firstMajor(constraint);
-    if (major) out.push(`${name}@${major}`);
-  };
-  for (const [name, c] of Object.entries(composerDeps)) add(name, c);
-  for (const [name, c] of Object.entries(packageDeps)) add(name, c);
-  return out;
+/** Node runtime version from the repo's own pins, in precedence order: .nvmrc,
+ *  .node-version, package.json volta.node, then engines.node (a range — used
+ *  last). Null when none yields a number. Lets the global KB scope by Node major
+ *  WITHOUT a DDEV container (a Node project never has one). */
+async function detectNodeVersion(
+  repoPath: string,
+  pkg: PackageJsonShape | null,
+): Promise<string | null> {
+  const fromFile = async (name: string): Promise<string | null> =>
+    numericVersion((await readTextSafe(path.join(repoPath, name)))?.trim() ?? null);
+  return (
+    (await fromFile('.nvmrc')) ??
+    (await fromFile('.node-version')) ??
+    numericVersion(pkg?.volta?.node) ??
+    numericVersion(pkg?.engines?.node)
+  );
+}
+
+/** PHP runtime version from composer.json: the pinned config.platform.php wins
+ *  over the require.php constraint. Null when neither is set. Decouples PHP
+ *  version-scoping from DDEV. */
+function detectPhpVersion(composer: ComposerJsonShape | null): string | null {
+  if (!composer) return null;
+  return numericVersion(composer.config?.platform?.php) ?? numericVersion(composer.require?.php);
 }
 
 async function detectStack(
@@ -458,6 +462,8 @@ async function detectStack(
   let framework: FrameworkName | null = null;
   let packageDeps: Record<string, string> = {};
   let composerDeps: Record<string, string> = {};
+  let pkg: PackageJsonShape | null = null;
+  let composer: ComposerJsonShape | null = null;
 
   for (const { file, language: lang } of STACK_INDICATORS) {
     if (await pathExists(path.join(repoPath, file))) {
@@ -470,7 +476,7 @@ async function detectStack(
     const text = await readTextSafe(path.join(repoPath, 'package.json'));
     if (text) {
       try {
-        const pkg = JSON.parse(text) as PackageJsonShape;
+        pkg = JSON.parse(text) as PackageJsonShape;
         packageDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
         framework = detectNodeFramework(pkg);
       } catch {
@@ -486,7 +492,7 @@ async function detectStack(
     let phpFramework: FrameworkName = 'general';
     if (text) {
       try {
-        const composer = JSON.parse(text) as ComposerJsonShape;
+        composer = JSON.parse(text) as ComposerJsonShape;
         composerDeps = { ...(composer.require ?? {}), ...(composer['require-dev'] ?? {}) };
         phpFramework = detectPhpFramework(composer);
       } catch {
@@ -533,8 +539,41 @@ async function detectStack(
   }
 
   if (!framework) framework = 'general';
-  const frameworkMajor = extractFrameworkMajor(framework, composerDeps, packageDeps);
-  const packages = manifestPackages(composerDeps, packageDeps);
+
+  // Runtime language majors from the repo's own manifests, so version-scoping the
+  // global KB does not depend on a DDEV container. A container value (if any)
+  // already sits in runtimeVersions and wins — only fill the gaps.
+  if (!runtimeVersions.node) {
+    const node = await detectNodeVersion(repoPath, pkg);
+    if (node) runtimeVersions.node = node;
+  }
+  if (!runtimeVersions.php) {
+    const php = detectPhpVersion(composer);
+    if (php) runtimeVersions.php = php;
+  }
+  // Other supported languages (python/ruby/go/rust) from their own version files
+  // / manifests — captured so the confirmation step can show and confirm them.
+  const langRuntimes = await detectLanguageRuntimes(repoPath);
+  for (const [lang, version] of Object.entries(langRuntimes)) {
+    if (!runtimeVersions[lang]) runtimeVersions[lang] = version;
+  }
+
+  // Root composer.json / package.json deps (already parsed) PLUS every other
+  // supported manifest (npm workspaces, Gemfile, requirements/pyproject, go.mod,
+  // Cargo.toml) so a monorepo or non-JS/PHP stack still yields `name@major`
+  // anchors for the global KB and a rails/django framework major.
+  const extraDeps = await collectExtraManifestDeps(repoPath);
+  const allDeps: Record<string, string> = {
+    ...composerDeps,
+    ...packageDeps,
+    ...Object.fromEntries(extraDeps),
+  };
+  const frameworkMajor = extractFrameworkMajor(framework, allDeps);
+  const packages = manifestPackages([
+    ...Object.entries(composerDeps),
+    ...Object.entries(packageDeps),
+    ...extraDeps,
+  ]);
 
   const dbType = container.databaseType;
   const dbVersion = container.databaseVersion;

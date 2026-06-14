@@ -58,6 +58,7 @@ interface EnvDetectDataish {
  *  fields that affect version facets. Confirmed values win over raw detection. */
 export interface ConfirmedStackValues {
   phpVersion?: string | null;
+  nodeVersion?: string | null;
   databaseType?: string | null;
   databaseVersion?: string | null;
 }
@@ -79,7 +80,7 @@ export function resolveStackVersions(
   const dbType = confirmed?.databaseType ?? rawDb?.type ?? null;
   return {
     phpMajor: majorOf(confirmed?.phpVersion ?? rv.php),
-    nodeMajor: majorOf(rv.node),
+    nodeMajor: majorOf(confirmed?.nodeVersion ?? rv.node),
     database: dbType ? String(dbType).toLowerCase() : null,
     dbMajor: majorOf(confirmed?.databaseVersion ?? rawDb?.version),
   };

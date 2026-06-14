@@ -31,10 +31,10 @@ describe('resolveStackVersions', () => {
   it('lets confirmed overrides win over raw detection', () => {
     expect(
       resolveStackVersions(
-        { stack: { runtimeVersions: {}, database: { type: 'mysql', version: null } } },
-        { phpVersion: '5.6', databaseType: 'mariadb', databaseVersion: '10.11' },
+        { stack: { runtimeVersions: { node: '18' }, database: { type: 'mysql', version: null } } },
+        { phpVersion: '5.6', nodeVersion: '22', databaseType: 'mariadb', databaseVersion: '10.11' },
       ),
-    ).toEqual({ phpMajor: '5', nodeMajor: null, database: 'mariadb', dbMajor: '10' });
+    ).toEqual({ phpMajor: '5', nodeMajor: '22', database: 'mariadb', dbMajor: '10' });
   });
 
   it('returns nulls when nothing is detectable', () => {

@@ -12,7 +12,13 @@ import {
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
 interface EnvDetectData {
-  project: { name: string; framework: string; primaryLanguage: string };
+  project: {
+    name: string;
+    framework: string;
+    frameworkMajor?: string | null;
+    primaryLanguage: string;
+    packages?: string[];
+  };
   container: {
     type: string;
     configFile: string | null;
@@ -79,6 +85,100 @@ describe('envDetectStep', () => {
     expect(data.project.primaryLanguage).toBe('javascript');
     expect(data.stack.indicators).toContain('package.json');
     expect(data.paths.testPaths).toContain('__tests__');
+  });
+
+  it('collects workspace package deps as name@major in a pnpm monorepo', async () => {
+    await writeFile(
+      path.join(tmpRoot, 'package.json'),
+      JSON.stringify({ name: 'mono', devDependencies: { turbo: '^2.3.0' } }),
+    );
+    await writeFile(path.join(tmpRoot, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n');
+    await mkdir(path.join(tmpRoot, 'packages', 'web'), { recursive: true });
+    await writeFile(
+      path.join(tmpRoot, 'packages', 'web', 'package.json'),
+      JSON.stringify({ dependencies: { next: '^16.1.0', react: '^19.0.0' } }),
+    );
+
+    const data = await runDetect(tmpRoot);
+    expect(data.project.packages).toContain('turbo@2'); // root dep still captured
+    expect(data.project.packages).toContain('next@16'); // workspace dep captured
+    expect(data.project.packages).toContain('react@19');
+  });
+
+  it('derives rails frameworkMajor + package anchor from the Gemfile', async () => {
+    await writeFile(
+      path.join(tmpRoot, 'Gemfile'),
+      ["source 'https://rubygems.org'", "gem 'rails', '~> 7.1.0'", "gem 'pg'"].join('\n'),
+    );
+    const data = await runDetect(tmpRoot);
+    expect(data.project.framework).toBe('rails');
+    expect(data.project.frameworkMajor).toBe('7');
+    expect(data.project.packages).toContain('rails@7');
+  });
+
+  it('derives django frameworkMajor + package anchor from requirements.txt', async () => {
+    await writeFile(
+      path.join(tmpRoot, 'requirements.txt'),
+      ['Django==5.0.1', 'requests==2.31.0'].join('\n'),
+    );
+    await writeFile(path.join(tmpRoot, 'manage.py'), '#!/usr/bin/env python');
+    const data = await runDetect(tmpRoot);
+    expect(data.project.framework).toBe('django');
+    expect(data.project.frameworkMajor).toBe('5');
+    expect(data.project.packages).toContain('Django@5');
+  });
+
+  it('derives go runtime version from go.mod', async () => {
+    await writeFile(path.join(tmpRoot, 'go.mod'), 'module example.com/app\n\ngo 1.22\n');
+    const data = await runDetect(tmpRoot);
+    expect(data.project.framework).toBe('go');
+    expect(data.stack.runtimeVersions.go).toBe('1.22');
+  });
+
+  it('derives node runtime version from package.json engines (no DDEV)', async () => {
+    await writeFile(
+      path.join(tmpRoot, 'package.json'),
+      JSON.stringify({ name: 'svc', engines: { node: '>=24.0.0' } }),
+    );
+    const data = await runDetect(tmpRoot);
+    expect(data.stack.runtimeVersions.node).toBe('24.0.0');
+  });
+
+  it('prefers .nvmrc over engines for the node version', async () => {
+    await writeFile(
+      path.join(tmpRoot, 'package.json'),
+      JSON.stringify({ name: 'svc', engines: { node: '>=24.0.0' } }),
+    );
+    await writeFile(path.join(tmpRoot, '.nvmrc'), 'v22\n');
+    const data = await runDetect(tmpRoot);
+    expect(data.stack.runtimeVersions.node).toBe('22');
+  });
+
+  it('derives php runtime version from composer (no DDEV); platform pin wins', async () => {
+    await writeFile(
+      path.join(tmpRoot, 'composer.json'),
+      JSON.stringify({
+        name: 'x/y',
+        require: { php: '^8.2' },
+        config: { platform: { php: '8.3.0' } },
+      }),
+    );
+    const data = await runDetect(tmpRoot);
+    expect(data.stack.runtimeVersions.php).toBe('8.3.0');
+  });
+
+  it('keeps the DDEV php_version over a composer constraint', async () => {
+    await writeFile(
+      path.join(tmpRoot, 'composer.json'),
+      JSON.stringify({ name: 'x/y', require: { php: '^8.2' } }),
+    );
+    await mkdir(path.join(tmpRoot, '.ddev'));
+    await writeFile(
+      path.join(tmpRoot, '.ddev', 'config.yaml'),
+      ['name: x', 'type: php', 'php_version: "8.1"'].join('\n'),
+    );
+    const data = await runDetect(tmpRoot);
+    expect(data.stack.runtimeVersions.php).toBe('8.1');
   });
 
   it('detects Drupal 7 from composer.json + bootstrap.inc', async () => {

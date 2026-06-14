@@ -59,6 +59,7 @@ describe('onboarding registry', () => {
       webserver: 'nginx-fpm',
       docroot: 'web',
       runtimeVersions: { php: '8.3' },
+      indicators: ['composer.json'],
       testPaths: ['tests'],
       testFrameworks: ['phpunit'],
       localUrl: 'https://foo.ddev.site',
