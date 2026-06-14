@@ -41,6 +41,116 @@ async function loadOnboardingLspKeys(db: Database, repositoryId: string | null):
     .filter((v): v is LspKey => !!v);
 }
 
+// Map an onboarding-confirmed primaryLanguage / framework to the env-replicate
+// LanguageKeys, so a stack the user already confirmed pre-fills the right runtimes
+// here even when the in-repo scan comes up empty.
+const ONBOARDING_LANGUAGE_TO_KEY: Record<string, LanguageKey> = {
+  php: 'php',
+  javascript: 'node',
+  typescript: 'node',
+  node: 'node',
+  python: 'python',
+  ruby: 'ruby',
+  go: 'go',
+  rust: 'rust',
+  java: 'java',
+};
+
+const ONBOARDING_FRAMEWORK_TO_KEY: Record<string, LanguageKey> = {
+  drupal: 'php',
+  drupal7: 'php',
+  laravel: 'php',
+  wordpress: 'php',
+  symfony: 'php',
+  nodejs: 'node',
+  nextjs: 'node',
+  django: 'python',
+  rails: 'ruby',
+};
+
+const ONBOARDING_VERSION_KEYS: { field: string; language: LanguageKey }[] = [
+  { field: 'phpVersion', language: 'php' },
+  { field: 'nodeVersion', language: 'node' },
+  { field: 'pythonVersion', language: 'python' },
+  { field: 'rubyVersion', language: 'ruby' },
+  { field: 'goVersion', language: 'go' },
+  { field: 'rustVersion', language: 'rust' },
+  { field: 'javaVersion', language: 'java' },
+];
+
+/** Coerce a free-text onboarding database type into an env-replicate DatabaseKind. */
+function normalizeDbKind(raw: string | null | undefined): DatabaseKind {
+  const v = (raw ?? '').toLowerCase().trim();
+  if (v === 'mariadb') return 'mariadb';
+  if (v === 'postgres' || v === 'postgresql' || v === 'pgsql') return 'postgres';
+  if (v === 'mysql') return 'mysql';
+  if (v === 'sqlite' || v === 'sqlite3') return 'sqlite';
+  return 'none';
+}
+
+interface OnboardingDetection {
+  databaseType: string | null;
+  databaseVersion: string | null;
+  languages: LanguageKey[];
+  runtimeVersions: Partial<Record<LanguageKey, string>>;
+}
+
+/** The stack the user confirmed during onboarding (02-detection-confirmation):
+ *  database, per-language runtime versions, and the languages implied by the
+ *  primary language / framework. Reused here so an env-replicate task pre-fills
+ *  what the in-repo scan can miss (e.g. a DB version only declared in onboarding).
+ *  Returns null when the repo was never onboarded. */
+export async function loadOnboardingDetection(
+  db: Database,
+  repositoryId: string | null,
+): Promise<OnboardingDetection | null> {
+  if (!repositoryId) return null;
+  const rows = await db
+    .select({ output: schema.taskSteps.output })
+    .from(schema.taskSteps)
+    .innerJoin(schema.tasks, eq(schema.taskSteps.taskId, schema.tasks.id))
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'onboarding'),
+        eq(schema.taskSteps.stepId, '02-detection-confirmation'),
+        eq(schema.taskSteps.status, 'done'),
+      ),
+    )
+    .orderBy(desc(schema.taskSteps.endedAt))
+    .limit(1);
+  const values = (rows[0]?.output as { values?: Record<string, unknown> } | null)?.values;
+  if (!values) return null;
+
+  const str = (k: string): string | null => {
+    const v = values[k];
+    return typeof v === 'string' && v.trim().length > 0 ? v.trim() : null;
+  };
+
+  const languages = new Set<LanguageKey>();
+  const lang = str('primaryLanguage')?.toLowerCase();
+  if (lang && ONBOARDING_LANGUAGE_TO_KEY[lang]) languages.add(ONBOARDING_LANGUAGE_TO_KEY[lang]);
+  const framework = str('framework')?.toLowerCase();
+  if (framework && ONBOARDING_FRAMEWORK_TO_KEY[framework]) {
+    languages.add(ONBOARDING_FRAMEWORK_TO_KEY[framework]);
+  }
+  const runtimeVersions: Partial<Record<LanguageKey, string>> = {};
+  for (const { field, language } of ONBOARDING_VERSION_KEYS) {
+    const v = str(field);
+    if (v) {
+      runtimeVersions[language] = v;
+      languages.add(language);
+    }
+  }
+
+  return {
+    databaseType: str('databaseType'),
+    databaseVersion: str('databaseVersion'),
+    languages: Array.from(languages),
+    runtimeVersions,
+  };
+}
+
 type ContainerTool = 'ddev' | 'docker-compose' | 'docker' | 'none';
 type DatabaseKind = 'postgres' | 'mysql' | 'mariadb' | 'sqlite' | 'none';
 type LanguageKey = 'node' | 'php' | 'python' | 'ruby' | 'go' | 'rust' | 'java';
@@ -127,6 +237,16 @@ const RUNTIME_OPTIONS: { value: LanguageKey; label: string }[] = [
   { value: 'java', label: 'Java' },
 ];
 
+// Per-language runtime version fields. Each renders only when its language is
+// relevant to the project (detected in-repo or carried over from onboarding), so
+// irrelevant version boxes are hidden entirely.
+const VERSION_FIELDS: { id: string; label: string; language: LanguageKey; fallback: string }[] = [
+  { id: 'nodeVersion', label: 'Node.js version', language: 'node', fallback: '22' },
+  { id: 'phpVersion', label: 'PHP version', language: 'php', fallback: '8.3' },
+  { id: 'pythonVersion', label: 'Python version', language: 'python', fallback: '3.12' },
+  { id: 'javaVersion', label: 'Java version', language: 'java', fallback: '17' },
+];
+
 export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply> = {
   metadata: {
     id: '01-declare-deps',
@@ -144,9 +264,39 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       where: eq(schema.tasks.id, ctx.taskId),
       columns: { repositoryId: true },
     });
-    const onboardingLsp = await loadOnboardingLspKeys(ctx.db, taskRow?.repositoryId ?? null);
+    const repositoryId = taskRow?.repositoryId ?? null;
+    const onboardingLsp = await loadOnboardingLspKeys(ctx.db, repositoryId);
     if (onboardingLsp.length > 0) {
       result.suggestedLsp = Array.from(new Set([...result.suggestedLsp, ...onboardingLsp]));
+    }
+    // Reuse the stack confirmed during onboarding to fill what the in-repo scan
+    // missed: the database, and any runtimes (with versions) not found on disk —
+    // a non-standard repo layout can otherwise leave the form blank.
+    const onboarding = await loadOnboardingDetection(ctx.db, repositoryId);
+    if (onboarding) {
+      if (result.database.kind === 'none' && normalizeDbKind(onboarding.databaseType) !== 'none') {
+        result.database = {
+          kind: normalizeDbKind(onboarding.databaseType),
+          version: onboarding.databaseVersion,
+        };
+      } else if (!result.database.version && onboarding.databaseVersion) {
+        result.database.version = onboarding.databaseVersion;
+      }
+      for (const language of onboarding.languages) {
+        const existing = result.runtimes.find((r) => r.language === language);
+        if (existing) {
+          if (!existing.version && onboarding.runtimeVersions[language]) {
+            existing.version = onboarding.runtimeVersions[language]!;
+          }
+        } else {
+          result.runtimes.push({
+            language,
+            version: onboarding.runtimeVersions[language] ?? null,
+            source: 'onboarding',
+            packageManager: null,
+          });
+        }
+      }
     }
     return result;
   },
@@ -155,6 +305,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     const defaultContainer = detected.containerTool;
     const defaultDb = detected.database.kind;
     const defaultRuntimes = detected.runtimes.map((r) => r.language);
+    const relevantLanguages = new Set<LanguageKey>(defaultRuntimes);
 
     const fields: FormSchema['fields'] = [
       {
@@ -165,34 +316,18 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         options: RUNTIME_OPTIONS,
         defaults: defaultRuntimes,
       },
-      {
-        type: 'text',
-        id: 'nodeVersion',
-        label: 'Node.js version',
-        default: findVersion(detected.runtimes, 'node') ?? '22',
-        placeholder: '22',
-      },
-      {
-        type: 'text',
-        id: 'phpVersion',
-        label: 'PHP version',
-        default: findVersion(detected.runtimes, 'php') ?? '8.3',
-        placeholder: '8.3',
-      },
-      {
-        type: 'text',
-        id: 'pythonVersion',
-        label: 'Python version',
-        default: findVersion(detected.runtimes, 'python') ?? '3.12',
-        placeholder: '3.12',
-      },
-      {
-        type: 'text',
-        id: 'javaVersion',
-        label: 'Java version',
-        default: findVersion(detected.runtimes, 'java') ?? '17',
-        placeholder: '17',
-      },
+      // Runtime version fields render only for languages relevant to this project
+      // (found in-repo or carried over from the confirmed onboarding stack), so a
+      // PHP project is not asked for Node / Python / Java versions.
+      ...VERSION_FIELDS.filter((vf) => relevantLanguages.has(vf.language)).map(
+        (vf): FormSchema['fields'][number] => ({
+          type: 'text',
+          id: vf.id,
+          label: vf.label,
+          default: findVersion(detected.runtimes, vf.language) ?? vf.fallback,
+          placeholder: vf.fallback,
+        }),
+      ),
       {
         type: 'select',
         id: 'containerTool',
@@ -233,7 +368,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         type: 'checkbox',
         id: 'browserTesting',
         label: 'Install Chrome + chrome-devtools-mcp for browser testing',
-        default: false,
+        default: true,
       },
       {
         type: 'textarea',
@@ -333,10 +468,10 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
 
 interface DeclareDepsFormValues extends FormValues {
   runtimes: LanguageKey[];
-  nodeVersion: string;
-  phpVersion: string;
-  pythonVersion: string;
-  javaVersion: string;
+  nodeVersion?: string;
+  phpVersion?: string;
+  pythonVersion?: string;
+  javaVersion?: string;
   containerTool: ContainerTool;
   databaseKind: DatabaseKind;
   databaseVersion: string;
