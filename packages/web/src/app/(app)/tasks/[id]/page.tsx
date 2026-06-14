@@ -633,7 +633,7 @@ export default function TaskDetailPage() {
             </div>
           ))}
           <TaskTotalTime task={task} steps={steps} userActive={userActive} />
-          {isUpgradeTask && (
+          {isUpgradeTask && task.status === 'completed' && (
             <div className="flex justify-center pt-2">
               <Link href="/repos">
                 <Button>Back to repositories</Button>
