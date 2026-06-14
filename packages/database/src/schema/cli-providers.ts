@@ -76,6 +76,10 @@ export const cliProviders = pgTable(
     // use the adapter's defaultModel or the CLI's own default. Resolved at
     // dispatch, not baked into the sandbox image.
     model: text('model'),
+    // Optional Ollama Modelfile (custom TEMPLATE / PARAMETER / SYSTEM on top of a
+    // base model). When set, the worker builds the model via Ollama /api/create
+    // (parsed to structured fields) instead of a plain pull.
+    modelfile: text('modelfile'),
     sandboxDockerfileExtra: text('sandbox_dockerfile_extra'),
     sandboxImageTag: text('sandbox_image_tag'),
     sandboxImageBuildStatus: cliSandboxBuildStatusEnum('sandbox_image_build_status')

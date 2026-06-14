@@ -58,6 +58,7 @@ interface FormState {
   cliVersion: string;
   effortLevel: string;
   model: string;
+  modelfile: string;
   sandboxDockerfileExtra: string;
   enabled: boolean;
   isolateAuth: boolean;
@@ -132,6 +133,7 @@ function statesEqual(a: FormState, b: FormState): boolean {
     a.cliVersion === b.cliVersion &&
     a.effortLevel === b.effortLevel &&
     a.model === b.model &&
+    a.modelfile === b.modelfile &&
     a.sandboxDockerfileExtra === b.sandboxDockerfileExtra &&
     a.enabled === b.enabled &&
     a.isolateAuth === b.isolateAuth &&
@@ -197,6 +199,7 @@ export function CliProviderForm({
         : ''),
     effortLevel: metadata.effortScale ? (provider?.effortLevel ?? metadata.effortScale.max) : '',
     model: provider?.model ?? metadata.defaultModel ?? '',
+    modelfile: provider?.modelfile ?? '',
     sandboxDockerfileExtra: provider?.sandboxDockerfileExtra ?? '',
     enabled: provider?.enabled ?? true,
     isolateAuth: provider?.isolateAuth ?? false,
@@ -331,6 +334,7 @@ export function CliProviderForm({
       cliVersion: snapshot.cliVersion || null,
       effortLevel: metadata.effortScale ? snapshot.effortLevel || null : null,
       model: snapshot.model.trim() || null,
+      modelfile: snapshot.modelfile.trim() || null,
       sandboxDockerfileExtra: snapshot.sandboxDockerfileExtra,
       enabled: snapshot.enabled,
       isolateAuth: snapshot.isolateAuth,
@@ -427,6 +431,7 @@ export function CliProviderForm({
           cliVersion: state.cliVersion || null,
           effortLevel: metadata.effortScale ? state.effortLevel || null : null,
           model: state.model.trim() || null,
+          modelfile: state.modelfile.trim() || null,
           sandboxDockerfileExtra: state.sandboxDockerfileExtra,
           enabled: state.enabled,
           isolateAuth: state.isolateAuth,
@@ -639,6 +644,27 @@ export function CliProviderForm({
             <code className="font-mono">qwen3-coder:30b</code>), a cloud model (
             <code className="font-mono">qwen3-coder:480b-cloud</code>), or a custom model (
             <code className="font-mono">mannix/gemma4-98e:CD-Q6_K</code>).
+          </p>
+        </div>
+      )}
+
+      {metadata.name === 'ollama' && (
+        <div>
+          <Label htmlFor="modelfile">Custom Modelfile (optional)</Label>
+          <textarea
+            id="modelfile"
+            rows={6}
+            className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
+            value={state.modelfile}
+            onChange={(e) => update('modelfile', e.target.value)}
+            placeholder={'FROM qwen3-coder:30b\nPARAMETER num_ctx 262144\nTEMPLATE """..."""'}
+          />
+          <p className="mt-1 text-xs text-neutral-500">
+            Build the model above on top of a base model with a custom template, context length,
+            system prompt, or parameters. Built on the in-stack daemon via{' '}
+            <code className="font-mono">ollama create</code> (parsed to{' '}
+            <code className="font-mono">/api/create</code>). Leave empty to pull the model name
+            as-is. The model is (re)built on worker boot.
           </p>
         </div>
       )}

@@ -258,6 +258,7 @@ export interface CliProvider {
   cliVersion: string | null;
   effortLevel: string | null;
   model: string | null;
+  modelfile: string | null;
   sandboxDockerfileExtra: string | null;
   sandboxImageTag: string | null;
   sandboxImageBuildStatus: CliSandboxBuildStatus;

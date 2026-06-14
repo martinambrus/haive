@@ -256,6 +256,7 @@ cliProviderRoutes.post('/', async (c) => {
       cliVersion: resolvedVersion,
       effortLevel: resolveEffortLevelForSave(body.name, body.effortLevel ?? null),
       model: body.model?.trim() || null,
+      modelfile: body.modelfile?.trim() || null,
       sandboxDockerfileExtra: body.sandboxDockerfileExtra?.length
         ? body.sandboxDockerfileExtra
         : null,
@@ -327,6 +328,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
   // Model is resolved at dispatch, not baked into the sandbox image — do not
   // set imageInputsChanged for it.
   if (body.model !== undefined) updates.model = body.model?.trim() || null;
+  if (body.modelfile !== undefined) updates.modelfile = body.modelfile?.trim() || null;
   if (body.enabled !== undefined) updates.enabled = body.enabled;
   if (body.isolateAuth !== undefined) updates.isolateAuth = body.isolateAuth;
   if (body.rulesContent !== undefined) updates.rulesContent = body.rulesContent;
@@ -484,6 +486,7 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
       cliVersion: source.cliVersion,
       effortLevel: source.effortLevel,
       model: source.model,
+      modelfile: source.modelfile,
       sandboxDockerfileExtra: source.sandboxDockerfileExtra,
       enabled: source.enabled,
       isolateAuth: source.isolateAuth,

@@ -90,6 +90,9 @@ export const createCliProviderRequestSchema = z.object({
   // Optional model override (e.g. an Ollama model name like
   // `qwen3-coder:480b-cloud` or `mannix/gemma4-98e:CD-Q6_K`).
   model: z.string().nullable().optional(),
+  // Optional Ollama Modelfile (custom template/params/system on top of a base
+  // model). Built via `ollama create` on the in-stack daemon.
+  modelfile: z.string().nullable().optional(),
   sandboxDockerfileExtra: z.string().optional(),
   enabled: z.boolean().optional(),
   isolateAuth: z.boolean().optional(),

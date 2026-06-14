@@ -1,0 +1,11 @@
+-- Optional Ollama Modelfile for a CLI provider. When set, the worker builds the
+-- provider's model via Ollama's /api/create (the Modelfile is parsed into the
+-- structured from/system/template/parameters body) instead of a plain pull.
+-- Nullable; existing rows stay null (plain-pull behavior), so backfill is a no-op.
+--
+-- Deploy note: applied via `drizzle-kit push --force` from the schema; this file
+-- is the idempotent parity/rollback record.
+--
+-- Rollback:
+--   ALTER TABLE "cli_providers" DROP COLUMN IF EXISTS "modelfile";
+ALTER TABLE "cli_providers" ADD COLUMN IF NOT EXISTS "modelfile" text;
