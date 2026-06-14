@@ -714,6 +714,26 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     step.iterationCount === 0 &&
     (step.status === 'pending' || step.status === 'waiting_form' || step.status === 'failed')
   ) {
+    // A failed step still carries its ended cli_invocation. Without superseding
+    // it here, the re-advance below makes resolveLlmPhase re-read that old
+    // invocation and re-surface its error (and its provider) instead of
+    // dispatching the newly-selected CLI — so changing the provider on a failed
+    // step appears to do nothing (the old CLI's terminal flashes, then its error
+    // returns). Mirror the retry handler: supersede live invocations + drop
+    // agent minings. Done before the status reset so a failure here leaves the
+    // step failed (safe) rather than pending with a stale live invocation.
+    await db
+      .update(schema.cliInvocations)
+      .set({ supersededAt: new Date() })
+      .where(
+        and(
+          eq(schema.cliInvocations.taskStepId, step.id),
+          isNull(schema.cliInvocations.supersededAt),
+        ),
+      );
+    await db
+      .delete(schema.taskStepAgentMinings)
+      .where(eq(schema.taskStepAgentMinings.taskStepId, step.id));
     await db
       .update(schema.taskSteps)
       .set({
