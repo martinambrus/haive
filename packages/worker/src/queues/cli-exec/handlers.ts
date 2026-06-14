@@ -27,12 +27,15 @@ import {
   type RefreshCliVersionsJobResult,
   type SandboxImageBuildJobPayload,
   type SandboxImageBuildResult,
+  type OllamaProvisionJobPayload,
+  type OllamaProvisionResult,
 } from '@haive/shared';
 import { refreshAllCliVersions } from '../../cli-versions/index.js';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
 import { renderDockerfile, resolveImageTag } from '../../sandbox/image-cache.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import { resolveProviderSecrets } from '../../secrets/provider-secrets.js';
+import { provisionOllamaProvider } from '../../sandbox/ollama-provision.js';
 import { resolveUserGitEnv } from '../../secrets/user-git-identity.js';
 import { createSandboxLoginContainer } from '../../sandbox/login-container.js';
 import { buildSetupTokenCommand } from '../../cli-adapters/setup-token-command.js';
@@ -541,6 +544,26 @@ function clampParallelCap(n: number): number {
   return Math.max(1, Math.floor(n));
 }
 
+/** Pull/build a provider's in-stack Ollama model after a create/edit so it is
+ *  ready without a worker restart. Delegates to provisionOllamaProvider, which
+ *  updates model_provision_status. No-op for non-ollama providers. */
+async function handleProvisionOllamaModelJob(
+  db: Database,
+  payload: OllamaProvisionJobPayload,
+): Promise<OllamaProvisionResult> {
+  const provider = await db.query.cliProviders.findFirst({
+    where: eq(schema.cliProviders.id, payload.providerId),
+    columns: { id: true, name: true, model: true, modelfile: true, envVars: true },
+  });
+  if (!provider) {
+    return { ok: false, providerId: payload.providerId, error: 'provider not found' };
+  }
+  if (provider.name !== 'ollama') {
+    return { ok: true, providerId: payload.providerId };
+  }
+  return provisionOllamaProvider(db, provider);
+}
+
 export async function startCliExecWorker(
   deps: CliExecDeps = defaultDeps,
 ): Promise<
@@ -550,6 +573,7 @@ export async function startCliExecWorker(
     | SandboxImageBuildResult
     | RefreshCliVersionsJobResult
     | CliLoginCreateResult
+    | OllamaProvisionResult
     | void
   >
 > {
@@ -570,6 +594,7 @@ export async function startCliExecWorker(
     | RefreshCliVersionsJobResult
     | CliLoginCreateResult
     | CliSignOutJobResult
+    | OllamaProvisionResult
     | void
   >(
     QUEUE_NAMES.CLI_EXEC,
@@ -593,6 +618,9 @@ export async function startCliExecWorker(
       }
       if (job.name === CLI_EXEC_JOB_NAMES.SIGN_OUT) {
         return handleSignOutJob(db, job.data as CliSignOutJobPayload);
+      }
+      if (job.name === CLI_EXEC_JOB_NAMES.PROVISION_OLLAMA_MODEL) {
+        return handleProvisionOllamaModelJob(db, job.data as OllamaProvisionJobPayload);
       }
       throw new Error(`unknown cli-exec job ${job.name}`);
     },

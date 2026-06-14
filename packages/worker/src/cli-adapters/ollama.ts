@@ -1,3 +1,4 @@
+import { isOllamaCloudModel } from '@haive/shared';
 import { BaseCliAdapter } from './base-adapter.js';
 import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from './types.js';
 
@@ -5,17 +6,8 @@ import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from
 // provider.envVars.ANTHROPIC_BASE_URL (a remote host, or https://ollama.com).
 const OLLAMA_DEFAULT_BASE_URL = 'http://ollama:11434';
 // Ollama Cloud endpoint (serves an Anthropic-compatible /v1/messages API).
-// Cloud models route here by default.
+// Cloud models (isOllamaCloudModel, @haive/shared) route here by default.
 const OLLAMA_CLOUD_URL = 'https://ollama.com';
-
-// Ollama Cloud models carry a `-cloud` or `:cloud` tag suffix, e.g.
-// `qwen3-coder:480b-cloud` (tag `480b-cloud`) or `deepseek-v4-pro:cloud`
-// (tag `cloud`). They run on ollama.com, never the local daemon, so a plain
-// `endsWith(':cloud')` misses the common `<size>-cloud` form and wrongly routes
-// it local (→ 401, daemon not signed in).
-export function isOllamaCloudModel(model: string): boolean {
-  return model.endsWith('-cloud') || model.endsWith(':cloud');
-}
 
 export class OllamaAdapter extends BaseCliAdapter {
   readonly providerName = 'ollama' as const;

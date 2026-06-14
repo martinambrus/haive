@@ -7,6 +7,7 @@ import type {
   RefreshCliVersionsJobPayload,
   CliLoginCreateJobPayload,
   CliSignOutJobPayload,
+  OllamaProvisionJobPayload,
 } from '@haive/shared';
 import { QUEUE_NAMES } from '@haive/shared';
 import { defaultCliSpawner, type CliSpawner } from '../../cli-executor/index.js';
@@ -20,7 +21,8 @@ export type CliExecQueuePayload =
   | SandboxImageBuildJobPayload
   | RefreshCliVersionsJobPayload
   | CliLoginCreateJobPayload
-  | CliSignOutJobPayload;
+  | CliSignOutJobPayload
+  | OllamaProvisionJobPayload;
 
 let cliExecQueueInstance: Queue<CliExecQueuePayload> | null = null;
 

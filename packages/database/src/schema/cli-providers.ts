@@ -80,6 +80,13 @@ export const cliProviders = pgTable(
     // base model). When set, the worker builds the model via Ollama /api/create
     // (parsed to structured fields) instead of a plain pull.
     modelfile: text('modelfile'),
+    // Provisioning status of the in-stack Ollama model (pull, or Modelfile
+    // build), set by the worker after a create/edit so the form shows progress
+    // without a worker restart. Non-ollama / cloud / remote providers stay
+    // 'idle'. Plain text (not an enum) to keep the migration additive + trivially
+    // reversible. Values: 'idle' | 'provisioning' | 'ready' | 'failed'.
+    modelProvisionStatus: text('model_provision_status').notNull().default('idle'),
+    modelProvisionError: text('model_provision_error'),
     sandboxDockerfileExtra: text('sandbox_dockerfile_extra'),
     sandboxImageTag: text('sandbox_image_tag'),
     sandboxImageBuildStatus: cliSandboxBuildStatusEnum('sandbox_image_build_status')

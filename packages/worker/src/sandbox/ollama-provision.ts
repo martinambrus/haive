@@ -1,7 +1,6 @@
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { logger } from '@haive/shared';
-import { isOllamaCloudModel } from '../cli-adapters/ollama.js';
+import { logger, isOllamaCloudModel, type OllamaProvisionResult } from '@haive/shared';
 
 const log = logger.child({ module: 'ollama-provision' });
 
@@ -201,59 +200,82 @@ async function createOllamaModel(url: string, model: string, modelfileText: stri
 /* Boot provisioning                                                   */
 /* ------------------------------------------------------------------ */
 
-/** Provision each enabled in-stack Ollama provider's declared model so a fresh
- *  stack is usable without manual setup. A provider with a Modelfile is built
- *  via `ollama create`; otherwise the model name is pulled. Best-effort and
- *  idempotent (skips models already resident; editing a Modelfile rebuilds only
- *  when the model name changes or the model is deleted). Cloud/remote providers
- *  are skipped. Never throws — callers fire-and-forget on boot. */
+/** Persist a provider's model-provisioning status so the CLI provider form can
+ *  reflect progress (and surface errors) without a worker restart. */
+async function setProvisionStatus(
+  db: Database,
+  providerId: string,
+  status: 'idle' | 'provisioning' | 'ready' | 'failed',
+  error: string | null,
+): Promise<void> {
+  await db
+    .update(schema.cliProviders)
+    .set({ modelProvisionStatus: status, modelProvisionError: error, updatedAt: new Date() })
+    .where(eq(schema.cliProviders.id, providerId));
+}
+
+/** Provision one provider's in-stack Ollama model: build it from a Modelfile (via
+ *  /api/create) when set, otherwise pull it. Updates model_provision_status so the
+ *  form shows progress. Idempotent (a resident model is left as-is). Cloud
+ *  (-cloud) / external-remote / model-less providers are not ours to provision
+ *  and settle to 'idle'. Never throws — failures land in model_provision_error.
+ *  Shared by boot reconciliation and the on-save PROVISION_OLLAMA_MODEL job. */
+export async function provisionOllamaProvider(
+  db: Database,
+  provider: {
+    id: string;
+    model: string | null;
+    modelfile: string | null;
+    envVars: Record<string, string> | null;
+  },
+): Promise<OllamaProvisionResult> {
+  const baseUrl = provider.envVars?.ANTHROPIC_BASE_URL;
+  if (!provider.model || isOllamaCloudModel(provider.model) || !isInStackBaseUrl(baseUrl)) {
+    await setProvisionStatus(db, provider.id, 'idle', null);
+    return { ok: true, providerId: provider.id };
+  }
+  const model = provider.model;
+  await setProvisionStatus(db, provider.id, 'provisioning', null);
+  try {
+    let present: Set<string>;
+    try {
+      present = await listOllamaModels(IN_STACK_OLLAMA_URL);
+    } catch (err) {
+      log.warn({ err }, 'could not list ollama models; attempting provisioning anyway');
+      present = new Set();
+    }
+    if (!present.has(model)) {
+      if (provider.modelfile) {
+        log.info({ model, providerId: provider.id }, 'building ollama model from Modelfile');
+        await createOllamaModel(IN_STACK_OLLAMA_URL, model, provider.modelfile);
+        log.info({ model, providerId: provider.id }, 'ollama model build complete');
+      } else {
+        log.info({ model, providerId: provider.id }, 'pulling ollama model');
+        await pullOllamaModel(IN_STACK_OLLAMA_URL, model);
+        log.info({ model, providerId: provider.id }, 'ollama model pull complete');
+      }
+    }
+    await setProvisionStatus(db, provider.id, 'ready', null);
+    return { ok: true, providerId: provider.id, model };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn({ err, model, providerId: provider.id }, 'ollama model provisioning failed');
+    await setProvisionStatus(db, provider.id, 'failed', message);
+    return { ok: false, providerId: provider.id, model, error: message };
+  }
+}
+
+/** Provision every enabled Ollama provider on boot so a fresh stack is usable
+ *  without manual setup and model_provision_status is reconciled to reality.
+ *  Best-effort + idempotent; never throws — callers fire-and-forget on boot. */
 export async function ensureOllamaModels(db: Database): Promise<void> {
   const providers = await db.query.cliProviders.findMany({
     where: and(eq(schema.cliProviders.name, 'ollama'), eq(schema.cliProviders.enabled, true)),
-    columns: { id: true, label: true, model: true, modelfile: true, envVars: true },
+    columns: { id: true, model: true, modelfile: true, envVars: true },
   });
-
-  // Distinct models targeting the in-stack daemon, each with its Modelfile (if any).
-  const jobs = new Map<string, { model: string; modelfile: string | null }>();
   for (const p of providers) {
-    const baseUrl = (p.envVars as Record<string, string> | null)?.ANTHROPIC_BASE_URL;
-    if (!isInStackBaseUrl(baseUrl)) continue;
-    if (!p.model) {
-      log.warn({ providerId: p.id, label: p.label }, 'ollama provider has no model; skipping');
-      continue;
-    }
-    // Cloud models run on Ollama Cloud (ollama.com), not the local daemon, so
-    // there is nothing to pull or build for them here.
-    if (isOllamaCloudModel(p.model)) continue;
-    if (!jobs.has(p.model)) jobs.set(p.model, { model: p.model, modelfile: p.modelfile ?? null });
-  }
-  if (jobs.size === 0) return;
-
-  let present: Set<string>;
-  try {
-    present = await listOllamaModels(IN_STACK_OLLAMA_URL);
-  } catch (err) {
-    log.warn({ err }, 'could not list ollama models; attempting provisioning anyway');
-    present = new Set();
-  }
-
-  for (const { model, modelfile } of jobs.values()) {
-    if (present.has(model)) {
-      log.info({ model }, 'ollama model already present; skipping');
-      continue;
-    }
-    try {
-      if (modelfile) {
-        log.info({ model }, 'building ollama model from Modelfile');
-        await createOllamaModel(IN_STACK_OLLAMA_URL, model, modelfile);
-        log.info({ model }, 'ollama model build complete');
-      } else {
-        log.info({ model }, 'pulling ollama model');
-        await pullOllamaModel(IN_STACK_OLLAMA_URL, model);
-        log.info({ model }, 'ollama model pull complete');
-      }
-    } catch (err) {
-      log.warn({ err, model }, 'ollama model provisioning failed');
-    }
+    await provisionOllamaProvider(db, p).catch((err) =>
+      log.warn({ err, providerId: p.id }, 'ensureOllamaModels: provision failed'),
+    );
   }
 }

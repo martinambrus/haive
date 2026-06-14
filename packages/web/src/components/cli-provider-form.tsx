@@ -16,6 +16,7 @@ import {
   type CliProviderCatalogEntry,
   type CliProviderName,
   type CliProviderSecret,
+  type CliModelProvisionStatus,
   type CliSandboxBuildStatus,
 } from '@/lib/api-client';
 import { Button, FormError, Input, Label } from '@/components/ui';
@@ -197,6 +198,13 @@ export function CliProviderForm({
     builtAt: provider?.sandboxImageBuiltAt ?? null,
   });
   const [buildRequesting, setBuildRequesting] = useState(false);
+  const [modelProvision, setModelProvision] = useState<{
+    status: CliModelProvisionStatus;
+    error: string | null;
+  }>({
+    status: provider?.modelProvisionStatus ?? 'idle',
+    error: provider?.modelProvisionError ?? null,
+  });
   const [versionCache, setVersionCache] = useState<CliPackageVersionsEntry | null>(
     metadata.versionCache,
   );
@@ -321,6 +329,34 @@ export function CliProviderForm({
       clearInterval(interval);
     };
   }, [mode, provider?.id, buildState.status]);
+
+  // Poll model provisioning (pull/build on the in-stack daemon) to completion so
+  // re-opening a provider reflects whether its model finished or failed — without
+  // a worker restart. Mirrors the sandbox-image build poll above.
+  useEffect(() => {
+    if (mode !== 'edit' || !provider?.id) return;
+    if (modelProvision.status !== 'provisioning') return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const { provider: fresh } = await api.get<{ provider: CliProvider }>(
+          `/cli-providers/${provider.id}`,
+        );
+        if (cancelled) return;
+        setModelProvision({
+          status: fresh.modelProvisionStatus,
+          error: fresh.modelProvisionError,
+        });
+      } catch {
+        // Keep polling even if a single request fails.
+      }
+    };
+    const interval = setInterval(tick, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [mode, provider?.id, modelProvision.status]);
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setState((prev) => ({ ...prev, [key]: value }));
@@ -691,6 +727,23 @@ export function CliProviderForm({
           </p>
           {ollamaInStackUrl && state.model.trim() && (
             <OllamaModelDownload model={state.model.trim()} ollamaUrl={ollamaInStackUrl} />
+          )}
+          {mode === 'edit' && modelProvision.status !== 'idle' && (
+            <p
+              className={`mt-1.5 text-xs ${
+                modelProvision.status === 'failed'
+                  ? 'text-red-400'
+                  : modelProvision.status === 'ready'
+                    ? 'text-green-400'
+                    : 'text-amber-400'
+              }`}
+            >
+              {modelProvision.status === 'provisioning' &&
+                'Provisioning model on the local daemon (pull/build)…'}
+              {modelProvision.status === 'ready' && 'Model is ready on the local daemon.'}
+              {modelProvision.status === 'failed' &&
+                `Model provisioning failed: ${modelProvision.error ?? 'unknown error'}`}
+            </p>
           )}
         </div>
       )}

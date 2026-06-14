@@ -174,6 +174,7 @@ export type CliProviderName =
 
 export type CliAuthMode = 'subscription' | 'api_key';
 export type CliSandboxBuildStatus = 'idle' | 'building' | 'ready' | 'failed';
+export type CliModelProvisionStatus = 'idle' | 'provisioning' | 'ready' | 'failed';
 
 export type CliNetworkMode = 'none' | 'full' | 'allowlist';
 
@@ -259,6 +260,8 @@ export interface CliProvider {
   effortLevel: string | null;
   model: string | null;
   modelfile: string | null;
+  modelProvisionStatus: CliModelProvisionStatus;
+  modelProvisionError: string | null;
   sandboxDockerfileExtra: string | null;
   sandboxImageTag: string | null;
   sandboxImageBuildStatus: CliSandboxBuildStatus;

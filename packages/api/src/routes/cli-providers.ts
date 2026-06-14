@@ -11,6 +11,7 @@ import {
   createCliProviderRequestSchema,
   DEFAULT_AGENT_RULES,
   envelopeEncrypt,
+  isOllamaCloudModel,
   normalizeCliArgsArray,
   secretsService,
   setCliProviderSecretRequestSchema,
@@ -21,6 +22,7 @@ import {
   type CliProviderName,
   type CliSignOutJobPayload,
   type CliSignOutJobResult,
+  type OllamaProvisionJobPayload,
   type RefreshCliVersionsJobPayload,
   type SandboxImageBuildJobPayload,
 } from '@haive/shared';
@@ -130,6 +132,34 @@ async function enqueueBuildForProvider(providerId: string, userId: string): Prom
   const payload: SandboxImageBuildJobPayload = { providerId, userId };
   const queue = getCliExecQueue();
   await queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
+    removeOnComplete: true,
+    removeOnFail: 50,
+  });
+}
+
+/** True when a provider has an in-stack Ollama model worth provisioning. Cloud
+ *  (-cloud) models run on ollama.com and external remote daemons aren't ours to
+ *  build, so both are skipped (the worker also re-checks and settles those to
+ *  'idle'). */
+function shouldProvisionOllamaModel(p: { name: string; model: string | null }): boolean {
+  return p.name === 'ollama' && !!p.model && !isOllamaCloudModel(p.model);
+}
+
+/** Mark a provider's model as provisioning and enqueue the worker job that pulls
+ *  (or builds, when a Modelfile is set) it, so a new/edited Ollama model is ready
+ *  without a worker restart. Mirrors enqueueBuildForProvider (sandbox image). */
+async function enqueueOllamaProvisionForProvider(
+  providerId: string,
+  userId: string,
+): Promise<void> {
+  const db = getDb();
+  await db
+    .update(schema.cliProviders)
+    .set({ modelProvisionStatus: 'provisioning', modelProvisionError: null, updatedAt: new Date() })
+    .where(eq(schema.cliProviders.id, providerId));
+  const payload: OllamaProvisionJobPayload = { providerId, userId };
+  const queue = getCliExecQueue();
+  await queue.add(CLI_EXEC_JOB_NAMES.PROVISION_OLLAMA_MODEL, payload, {
     removeOnComplete: true,
     removeOnFail: 50,
   });
@@ -268,7 +298,20 @@ cliProviderRoutes.post('/', async (c) => {
 
   const created = inserted[0]!;
   await enqueueBuildForProvider(created.id, userId);
-  return c.json({ provider: { ...created, sandboxImageBuildStatus: 'building' as const } }, 201);
+  const provisioningModel = shouldProvisionOllamaModel(created);
+  if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
+  return c.json(
+    {
+      provider: {
+        ...created,
+        sandboxImageBuildStatus: 'building' as const,
+        ...(provisioningModel
+          ? { modelProvisionStatus: 'provisioning' as const, modelProvisionError: null }
+          : {}),
+      },
+    },
+    201,
+  );
 });
 
 cliProviderRoutes.patch('/:id', async (c) => {
@@ -325,10 +368,20 @@ cliProviderRoutes.patch('/:id', async (c) => {
   if (body.effortLevel !== undefined) {
     updates.effortLevel = resolveEffortLevelForSave(existing.name, body.effortLevel);
   }
-  // Model is resolved at dispatch, not baked into the sandbox image — do not
-  // set imageInputsChanged for it.
-  if (body.model !== undefined) updates.model = body.model?.trim() || null;
-  if (body.modelfile !== undefined) updates.modelfile = body.modelfile?.trim() || null;
+  // Model is resolved at dispatch, not baked into the sandbox image — do not set
+  // imageInputsChanged for it. But a changed model/Modelfile must be
+  // (re)provisioned on the in-stack daemon (pull/build) without a restart.
+  let modelInputsChanged = false;
+  if (body.model !== undefined) {
+    const nextModel = body.model?.trim() || null;
+    if (nextModel !== existing.model) modelInputsChanged = true;
+    updates.model = nextModel;
+  }
+  if (body.modelfile !== undefined) {
+    const nextModelfile = body.modelfile?.trim() || null;
+    if (nextModelfile !== existing.modelfile) modelInputsChanged = true;
+    updates.modelfile = nextModelfile;
+  }
   if (body.enabled !== undefined) updates.enabled = body.enabled;
   if (body.isolateAuth !== undefined) updates.isolateAuth = body.isolateAuth;
   if (body.rulesContent !== undefined) updates.rulesContent = body.rulesContent;
@@ -338,19 +391,29 @@ cliProviderRoutes.patch('/:id', async (c) => {
     .set(updates)
     .where(eq(schema.cliProviders.id, id))
     .returning();
+  const updatedRow = updated[0]!;
+
+  const provisioningModel =
+    modelInputsChanged &&
+    shouldProvisionOllamaModel({ name: existing.name, model: updatedRow.model });
+  if (provisioningModel) await enqueueOllamaProvisionForProvider(id, userId);
+  const modelStatusOverride = provisioningModel
+    ? { modelProvisionStatus: 'provisioning' as const, modelProvisionError: null }
+    : {};
 
   if (imageInputsChanged) {
     await enqueueBuildForProvider(id, userId);
     return c.json({
       provider: {
-        ...updated[0]!,
+        ...updatedRow,
         sandboxImageBuildStatus: 'building' as const,
         sandboxImageBuildError: null,
+        ...modelStatusOverride,
       },
     });
   }
 
-  return c.json({ provider: updated[0]! });
+  return c.json({ provider: { ...updatedRow, ...modelStatusOverride } });
 });
 
 cliProviderRoutes.delete('/:id', async (c) => {
@@ -511,7 +574,20 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
   }
 
   await enqueueBuildForProvider(created.id, userId);
-  return c.json({ provider: { ...created, sandboxImageBuildStatus: 'building' as const } }, 201);
+  const provisioningModel = shouldProvisionOllamaModel(created);
+  if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
+  return c.json(
+    {
+      provider: {
+        ...created,
+        sandboxImageBuildStatus: 'building' as const,
+        ...(provisioningModel
+          ? { modelProvisionStatus: 'provisioning' as const, modelProvisionError: null }
+          : {}),
+      },
+    },
+    201,
+  );
 });
 
 cliProviderRoutes.get('/:providerId/secrets', async (c) => {

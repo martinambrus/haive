@@ -94,6 +94,9 @@ export const CLI_EXEC_JOB_NAMES = {
   REFRESH_VERSIONS: 'cli-refresh-versions',
   LOGIN_CREATE: 'cli-login-create',
   SIGN_OUT: 'cli-sign-out',
+  /** Pull (or build, when a Modelfile is set) a provider's in-stack Ollama model
+   *  after a create/edit, so a new model is ready without a worker restart. */
+  PROVISION_OLLAMA_MODEL: 'cli-provision-ollama-model',
 } as const;
 
 export interface CliSignOutJobPayload {
@@ -157,6 +160,24 @@ export interface SandboxImageBuildResult {
   durationMs?: number;
   error?: string;
 }
+
+export interface OllamaProvisionJobPayload {
+  providerId: string;
+  userId: string;
+}
+
+export interface OllamaProvisionResult {
+  ok: boolean;
+  providerId: string;
+  model?: string;
+  error?: string;
+}
+
+/** Provisioning lifecycle of a provider's in-stack Ollama model (pull, or build
+ *  when a Modelfile is set), surfaced in the CLI provider form so a save shows
+ *  progress without a worker restart. Cloud / remote / non-ollama providers
+ *  stay 'idle' (nothing to provision locally). */
+export type CliModelProvisionStatus = 'idle' | 'provisioning' | 'ready' | 'failed';
 
 export type CliAuthStatus =
   | 'unknown'
