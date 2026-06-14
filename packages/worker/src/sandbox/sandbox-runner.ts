@@ -23,6 +23,26 @@ export const SANDBOX_USER = 'node';
 export const SANDBOX_USER_HOME = '/home/node';
 const DEFAULT_WORKDIR = SANDBOX_WORKDIR;
 
+// In-stack Ollama daemon hostnames. When a CLI's ANTHROPIC_BASE_URL targets one
+// of these, the sandbox joins the models network to reach the daemon directly,
+// and the host is excluded from the egress proxy (NO_PROXY).
+const IN_STACK_MODEL_HOSTS = new Set(['ollama', 'haive-ollama']);
+
+/** The in-stack Ollama host a spec targets via ANTHROPIC_BASE_URL, or null when
+ *  it targets an external/cloud endpoint (or none). Drives the models-network
+ *  attach + NO_PROXY bypass so a local Ollama model is reachable directly rather
+ *  than through the egress proxy. */
+function inStackModelsHost(env: Record<string, string> | undefined): string | null {
+  const base = env?.ANTHROPIC_BASE_URL;
+  if (!base) return null;
+  try {
+    const host = new URL(base).hostname;
+    return IN_STACK_MODEL_HOSTS.has(host) ? host : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface SandboxExtraFile {
   /** Absolute path inside the sandbox container. */
   containerPath: string;
@@ -145,8 +165,9 @@ export async function runInSandbox(
       }
     }
 
+    const modelsHost = inStackModelsHost(spec.env);
     const network = resolveDockerNetwork(policy, gateway);
-    const env = mergeProxyEnv(spec.env, gateway);
+    const env = mergeProxyEnv(spec.env, gateway, modelsHost);
 
     const result = await runner.run({
       image,
@@ -155,7 +176,7 @@ export async function runInSandbox(
       mounts,
       workdir,
       network,
-      connectNetworks: resolveApiConnectNetworks(policy, gateway),
+      connectNetworks: resolveApiConnectNetworks(policy, gateway, modelsHost !== null),
       user: 'node',
       labels: options.taskId ? { 'haive.task.id': options.taskId } : undefined,
       timeoutMs: spec.timeoutMs,
@@ -208,20 +229,37 @@ function resolveDockerNetwork(
 function resolveApiConnectNetworks(
   policy: CliNetworkPolicy | null,
   gateway: EgressGateway | null,
+  attachModels: boolean,
 ): string[] {
-  if (policy?.mode === 'none' && !gateway) return [];
-  return process.env.SANDBOX_NETWORK ? [process.env.SANDBOX_NETWORK] : [];
+  const sandboxNet = process.env.SANDBOX_NETWORK;
+  const modelsNet = process.env.SANDBOX_MODELS_NETWORK;
+  // Gateway-less 'none' makes SANDBOX_NETWORK the sole PRIMARY network (see
+  // resolveDockerNetwork), so it is not re-added here as a 2nd NIC. If
+  // SANDBOX_NETWORK is also unset the primary is literally 'none' and Docker
+  // forbids attaching any further network.
+  const noneNoGateway = policy?.mode === 'none' && !gateway;
+  const primaryIsNone = noneNoGateway && !sandboxNet;
+  const nets: string[] = [];
+  if (sandboxNet && !noneNoGateway) nets.push(sandboxNet);
+  // Ollama-backed CLIs (ANTHROPIC_BASE_URL → in-stack daemon) also join the
+  // models network so they can reach http://ollama:11434 directly.
+  if (attachModels && modelsNet && !primaryIsNone) nets.push(modelsNet);
+  return nets;
 }
 
 function mergeProxyEnv(
   base: Record<string, string> | undefined,
   gateway: EgressGateway | null,
+  modelsHost: string | null,
 ): Record<string, string> | undefined {
   if (!gateway) return base;
   const proxyUrl = gateway.proxyUrl;
   // `api` is reached directly over the internal sandbox<->API network, never via
-  // the squid proxy (which only allows the user's allowlisted domains).
-  const noProxy = 'localhost,127.0.0.1,::1,api';
+  // the squid proxy (which only allows the user's allowlisted domains). An
+  // in-stack Ollama host is likewise reached directly over the models network.
+  const noProxyHosts = ['localhost', '127.0.0.1', '::1', 'api'];
+  if (modelsHost) noProxyHosts.push(modelsHost);
+  const noProxy = noProxyHosts.join(',');
   return {
     ...(base ?? {}),
     HTTP_PROXY: proxyUrl,

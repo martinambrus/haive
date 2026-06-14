@@ -66,6 +66,9 @@ services:
       start_period: 10s
     networks:
       - haive-network
+      # Shared with per-task sandboxes so an Ollama-backed CLI can reach the
+      # daemon directly; postgres/redis are not on this network.
+      - haive-models
 
   api:
     build:
@@ -124,6 +127,7 @@ services:
       CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
       CLAWKER_BIN: ${CLAWKER_BIN:-/usr/local/bin/clawker}
       SANDBOX_NETWORK: ${SANDBOX_NETWORK:-haive-sandbox}
+      SANDBOX_MODELS_NETWORK: ${SANDBOX_MODELS_NETWORK:-haive-models}
       DOCKER_HOST: unix:///var/run/docker.sock
       HOST_REPO_ROOT: /host-fs
       HOST_REPO_ROOT_REAL: ${HOST_REPO_ROOT:-${HOME}}
@@ -178,6 +182,14 @@ networks:
   haive-sandbox:
     driver: bridge
     name: haive-sandbox
+    internal: true
+  # Sandbox<->Ollama only: the ollama service and the per-task sandboxes join
+  # this; postgres/redis do NOT, so a local Ollama-backed CLI reaches the daemon
+  # at http://ollama:11434 without widening the sandbox's reach. internal = no
+  # NAT/internet (the model is in-stack).
+  haive-models:
+    driver: bridge
+    name: haive-models
     internal: true
 
 volumes:
