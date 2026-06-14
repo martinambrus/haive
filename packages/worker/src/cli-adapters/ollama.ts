@@ -4,6 +4,9 @@ import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from
 // In-stack daemon default; remote/cloud providers override via
 // provider.envVars.ANTHROPIC_BASE_URL (a remote host, or https://ollama.com).
 const OLLAMA_DEFAULT_BASE_URL = 'http://ollama:11434';
+// Ollama Cloud endpoint (serves an Anthropic-compatible /v1/messages API).
+// `:cloud` models route here by default.
+const OLLAMA_CLOUD_URL = 'https://ollama.com';
 
 export class OllamaAdapter extends BaseCliAdapter {
   readonly providerName = 'ollama' as const;
@@ -41,19 +44,25 @@ export class OllamaAdapter extends BaseCliAdapter {
     opts: InvokeOpts,
   ): CliCommandSpec {
     const env = this.mergedEnv(provider, opts);
-    env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL ?? OLLAMA_DEFAULT_BASE_URL;
-    // Local Ollama accepts any non-empty token; cloud/remote inject a real key
-    // via a secret named ANTHROPIC_AUTH_TOKEN (merged in after this runs).
-    const token = env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY ?? 'ollama';
+    const model = opts.modelOverride ?? provider.model ?? this.defaultModel;
+    if (!model) {
+      throw new Error('ollama provider requires a model (set the provider model field)');
+    }
+    // `:cloud` models run on Ollama Cloud; route there by default. Other models
+    // use the in-stack daemon. An explicit ANTHROPIC_BASE_URL always wins.
+    const defaultBaseUrl = model.endsWith(':cloud') ? OLLAMA_CLOUD_URL : OLLAMA_DEFAULT_BASE_URL;
+    env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL ?? defaultBaseUrl;
+    // Token precedence: an explicit Anthropic token, else the Ollama API key
+    // (cloud), else the literal 'ollama' a local daemon accepts. A key stored as
+    // a SECRET named ANTHROPIC_AUTH_TOKEN overrides this after the post-build
+    // merge; OLLAMA_API_KEY works when set in the provider's env vars.
+    const token =
+      env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY ?? env.OLLAMA_API_KEY ?? 'ollama';
     env.ANTHROPIC_AUTH_TOKEN = token;
     env.ANTHROPIC_API_KEY = token;
     // The attribution header invalidates the KV cache on local models (~90%
     // slower); suppress it since the backend is not Anthropic.
     env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
-    const model = opts.modelOverride ?? provider.model ?? this.defaultModel;
-    if (!model) {
-      throw new Error('ollama provider requires a model (set the provider model field)');
-    }
     env.ANTHROPIC_MODEL = model;
     return {
       command: this.resolveExecutable(provider),
@@ -79,8 +88,12 @@ export class OllamaAdapter extends BaseCliAdapter {
     extraEnv: Record<string, string> = {},
   ): Record<string, string> {
     const env = super.buildShellEnv(provider, secrets, extraEnv);
-    env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL ?? OLLAMA_DEFAULT_BASE_URL;
-    const token = env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY ?? 'ollama';
+    const defaultBaseUrl = provider.model?.endsWith(':cloud')
+      ? OLLAMA_CLOUD_URL
+      : OLLAMA_DEFAULT_BASE_URL;
+    env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL ?? defaultBaseUrl;
+    const token =
+      env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY ?? env.OLLAMA_API_KEY ?? 'ollama';
     // Interactive `claude` warns when both AUTH_TOKEN and API_KEY are set; set
     // only AUTH_TOKEN here (buildCliInvocation sets both for the non-interactive
     // path / older binaries).
