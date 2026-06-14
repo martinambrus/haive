@@ -22,6 +22,7 @@ import {
   collectInternalRagProjectNamesForRepo,
   enqueueCancelJob,
   enqueueRepoRagCleanupJob,
+  enqueueRepoResourceCleanupJob,
 } from '../lib/cancel-task.js';
 import { validateLocalPath, pathExists, isGitRepository } from '../lib/filesystem.js';
 import { createRepoArchiveStream } from '../lib/repo-archive.js';
@@ -731,20 +732,34 @@ repoRoutes.delete('/:id', async (c) => {
   const cancelled: Array<{ id: string }> = [];
   let repoFound = false;
   let internalRagProjectNames: string[] = [];
+  let storagePath: string | null = null;
+  let capturedTasks: { id: string; envTemplateId: string | null }[] = [];
 
   await db.transaction(async (tx) => {
     const repoRows = await tx
-      .select({ id: schema.repositories.id })
+      .select({
+        id: schema.repositories.id,
+        storagePath: schema.repositories.storagePath,
+      })
       .from(schema.repositories)
       .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
     if (repoRows.length === 0) return;
     repoFound = true;
+    storagePath = repoRows[0]!.storagePath;
 
     // Capture project names of this repo's internal-mode RAG tasks before
     // the delete cascades `tasks.repository_id` to NULL. After cascade the
     // worker can no longer trace tasks back to this repo, so the project
     // names must travel in the cleanup job payload.
     internalRagProjectNames = await collectInternalRagProjectNamesForRepo(tx, id, userId);
+
+    // Same reason: capture the repo's tasks (+ their env templates) before the
+    // cascade, so the resource-cleanup worker can tear down runners/images it
+    // could no longer trace once repository_id is NULL.
+    capturedTasks = await tx
+      .select({ id: schema.tasks.id, envTemplateId: schema.tasks.envTemplateId })
+      .from(schema.tasks)
+      .where(and(eq(schema.tasks.repositoryId, id), eq(schema.tasks.userId, userId)));
 
     const open = await cancelOpenTasksForRepo(tx, id, userId);
     cancelled.push(...open);
@@ -771,6 +786,19 @@ repoRoutes.delete('/:id', async (c) => {
     repositoryId: id,
     userId,
     projectNames: internalRagProjectNames,
+  });
+
+  // Tear down the repo's leftover Docker resources + workspace files (DDEV/app
+  // runners, env images no longer referenced by a surviving task, haive_repos
+  // files) — the cancel jobs above only cover open tasks, not terminal ones.
+  await enqueueRepoResourceCleanupJob({
+    userId,
+    repositoryId: id,
+    taskIds: capturedTasks.map((t) => t.id),
+    envTemplateIds: Array.from(
+      new Set(capturedTasks.map((t) => t.envTemplateId).filter((x): x is string => x !== null)),
+    ),
+    storagePath,
   });
 
   return c.json({

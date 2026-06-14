@@ -68,6 +68,10 @@ export const TASK_JOB_NAMES = {
    *  reference with ragMode='internal'. External / ddev RAG modes are never
    *  touched — they live on infra Haive does not own. */
   CLEANUP_REPO_RAG: 'cleanup-repo-rag',
+  /** Tears down the Docker resources + on-disk workspace a deleted repository
+   *  left behind: DDEV/app runners (incl. failed tasks kept for recovery), env
+   *  images no longer referenced by a surviving task, and haive_repos files. */
+  CLEANUP_REPO_RESOURCES: 'cleanup-repo-resources',
 } as const;
 
 export interface TaskJobPayload {
@@ -85,6 +89,22 @@ export interface RepoRagCleanupPayload {
   repositoryId: string;
   userId: string;
   projectNames: string[];
+}
+
+/** Payload for `TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES`. Tears down what a deleted
+ *  repository leaves behind: each task's DDEV/app runners (incl. failed tasks
+ *  whose runners were kept for recovery), env images no longer referenced by any
+ *  task outside `taskIds` (ref-counted so shared/global images survive), and the
+ *  repo's haive_repos files. Captured before the delete because `repository_id`
+ *  cascades to NULL, so the worker could not trace these afterward. `storagePath`
+ *  is only removed when it lives under the worker's repo-storage root (never a
+ *  `/host-fs` local-path repo). */
+export interface RepoResourceCleanupPayload {
+  userId: string;
+  repositoryId: string;
+  taskIds: string[];
+  envTemplateIds: string[];
+  storagePath: string | null;
 }
 
 export const CLI_EXEC_JOB_NAMES = {

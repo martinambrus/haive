@@ -1,6 +1,11 @@
 import { and, eq, notInArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { TASK_JOB_NAMES, type RepoRagCleanupPayload, type TaskJobPayload } from '@haive/shared';
+import {
+  TASK_JOB_NAMES,
+  type RepoRagCleanupPayload,
+  type RepoResourceCleanupPayload,
+  type TaskJobPayload,
+} from '@haive/shared';
 import type { getDb } from '../db.js';
 import { getTaskQueue } from '../queues.js';
 
@@ -128,6 +133,18 @@ export async function collectInternalRagProjectNamesForRepo(
 export async function enqueueRepoRagCleanupJob(payload: RepoRagCleanupPayload): Promise<void> {
   if (payload.projectNames.length === 0) return;
   await getTaskQueue().add(TASK_JOB_NAMES.CLEANUP_REPO_RAG, payload, {
+    removeOnComplete: 50,
+    removeOnFail: 50,
+  });
+}
+
+/** Enqueue the worker-side job that tears down the Docker resources + on-disk
+ *  workspace a deleted repository left behind (runners, unreferenced env images,
+ *  haive_repos files). Ids/paths are captured before the delete. */
+export async function enqueueRepoResourceCleanupJob(
+  payload: RepoResourceCleanupPayload,
+): Promise<void> {
+  await getTaskQueue().add(TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES, payload, {
     removeOnComplete: 50,
     removeOnFail: 50,
   });

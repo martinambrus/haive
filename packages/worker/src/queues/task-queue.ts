@@ -1,3 +1,5 @@
+import { rm } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { Queue, Worker, type Job } from 'bullmq';
 import Docker from 'dockerode';
 import { and, desc, eq, inArray, isNull, ne, notInArray } from 'drizzle-orm';
@@ -9,6 +11,7 @@ import {
   logger,
   type CliExecJobPayload,
   type RepoRagCleanupPayload,
+  type RepoResourceCleanupPayload,
   type TaskJobPayload,
   type WorkflowType,
 } from '@haive/shared';
@@ -769,7 +772,79 @@ async function handleCleanupRepoRag(db: Database, payload: RepoRagCleanupPayload
   );
 }
 
-type TaskWorkerPayload = TaskJobPayload | RepoRagCleanupPayload;
+const WORKER_REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
+
+/** Tear down the Docker resources + workspace files a deleted repository left
+ *  behind. Best-effort + idempotent: it races the repo's CANCEL jobs (already-
+ *  removed = no-op) and runs after the repo row is gone, working off the ids and
+ *  paths captured at delete time. */
+async function handleCleanupRepoResources(
+  db: Database,
+  payload: RepoResourceCleanupPayload,
+): Promise<void> {
+  // Per-task runners — incl. failed tasks whose DDEV/app runners were kept for
+  // recovery and are otherwise never torn down.
+  for (const taskId of payload.taskIds) {
+    await killTaskDdevRunners(taskId).catch((err) =>
+      logger.warn({ err, taskId }, 'repo-cleanup: ddev runner teardown failed'),
+    );
+    await killTaskAppRunners(taskId).catch((err) =>
+      logger.warn({ err, taskId }, 'repo-cleanup: app runner teardown failed'),
+    );
+  }
+
+  // Env images no longer referenced by any task OUTSIDE this repo's captured set
+  // (ref-counted so a shared/global image another repo still uses is kept).
+  const deleted = new Set(payload.taskIds);
+  for (const envTemplateId of payload.envTemplateIds) {
+    try {
+      const refs = await db
+        .select({ id: schema.tasks.id })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.envTemplateId, envTemplateId));
+      if (refs.some((r) => !deleted.has(r.id))) continue; // still used elsewhere
+      const tpl = await db.query.envTemplates.findFirst({
+        where: eq(schema.envTemplates.id, envTemplateId),
+        columns: { imageTag: true },
+      });
+      if (tpl?.imageTag) {
+        const result = await defaultDockerRunner.remove(tpl.imageTag);
+        if (!result.ok) {
+          logger.warn(
+            { envTemplateId, imageTag: tpl.imageTag, stderr: result.stderr },
+            'repo-cleanup: env image removal failed',
+          );
+          continue;
+        }
+      }
+      await db.delete(schema.envTemplates).where(eq(schema.envTemplates.id, envTemplateId));
+    } catch (err) {
+      logger.warn({ err, envTemplateId }, 'repo-cleanup: env image cleanup failed');
+    }
+  }
+
+  // Workspace files in the haive_repos volume. NEVER touch /host-fs local-path
+  // repos (the user's real directories) — gate on the repo-storage root.
+  if (payload.storagePath) {
+    const resolved = resolve(payload.storagePath);
+    if (resolved.startsWith(WORKER_REPO_STORAGE_ROOT + '/')) {
+      await rm(resolved, { recursive: true, force: true }).catch((err) =>
+        logger.warn({ err, path: resolved }, 'repo-cleanup: workspace rm failed'),
+      );
+    }
+  }
+
+  logger.info(
+    {
+      repositoryId: payload.repositoryId,
+      tasks: payload.taskIds.length,
+      envTemplates: payload.envTemplateIds.length,
+    },
+    'repo resource cleanup complete',
+  );
+}
+
+type TaskWorkerPayload = TaskJobPayload | RepoRagCleanupPayload | RepoResourceCleanupPayload;
 
 export function startTaskWorker(): Worker<TaskWorkerPayload> {
   ensureRegistered();
@@ -780,6 +855,10 @@ export function startTaskWorker(): Worker<TaskWorkerPayload> {
       try {
         if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RAG) {
           await handleCleanupRepoRag(db, job.data as RepoRagCleanupPayload);
+          return;
+        }
+        if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES) {
+          await handleCleanupRepoResources(db, job.data as RepoResourceCleanupPayload);
           return;
         }
 
@@ -797,7 +876,11 @@ export function startTaskWorker(): Worker<TaskWorkerPayload> {
         const message = err instanceof Error ? err.message : String(err);
         const taskId = (job.data as TaskJobPayload).taskId;
         logger.error({ taskId, jobName: job.name, err }, 'task job failed');
-        if (taskId && job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RAG) {
+        if (
+          taskId &&
+          job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RAG &&
+          job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES
+        ) {
           await markTaskFailed(db, taskId, message).catch((cleanupErr) => {
             logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
           });
