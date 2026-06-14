@@ -3,18 +3,13 @@
 # Kept out of the base + dev compose so the stack boots on any host (CPU Ollama);
 # this layers GPU access on top. A multi-billion-parameter embedding model is far
 # faster on GPU. Requires the NVIDIA Container Toolkit on the host.
+#
+# By default Ollama uses ALL detected NVIDIA GPUs. On a multi-GPU host, pin it to
+# a single card by index or UUID via OLLAMA_GPU_DEVICE in .env (e.g.
+# OLLAMA_GPU_DEVICE=1 or OLLAMA_GPU_DEVICE=GPU-<uuid>). CPU-only machines never
+# load this file (dev-up.sh gates it), so the automatic CPU fallback is unaffected.
 services:
   ollama:
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              # Which NVIDIA GPU Ollama uses. Default GPU 0 (the only card on
-              # single-GPU machines, e.g. a laptop dGPU). On a multi-GPU box pin a
-              # specific card by index or UUID via OLLAMA_GPU_DEVICE in .env
-              # (e.g. OLLAMA_GPU_DEVICE=1 or =GPU-<uuid>). CPU-only machines never
-              # load this file (dev-up.sh gates it on an NVIDIA GPU being present),
-              # so the automatic CPU fallback is unaffected.
-              device_ids: ['${OLLAMA_GPU_DEVICE:-0}']
-              capabilities: [gpu]
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${OLLAMA_GPU_DEVICE:-all}
