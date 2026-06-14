@@ -57,6 +57,7 @@ interface FormState {
   authMode: CliAuthMode;
   cliVersion: string;
   effortLevel: string;
+  model: string;
   sandboxDockerfileExtra: string;
   enabled: boolean;
   isolateAuth: boolean;
@@ -130,6 +131,7 @@ function statesEqual(a: FormState, b: FormState): boolean {
     a.authMode === b.authMode &&
     a.cliVersion === b.cliVersion &&
     a.effortLevel === b.effortLevel &&
+    a.model === b.model &&
     a.sandboxDockerfileExtra === b.sandboxDockerfileExtra &&
     a.enabled === b.enabled &&
     a.isolateAuth === b.isolateAuth &&
@@ -194,6 +196,7 @@ export function CliProviderForm({
         ? (metadata.versionCache?.versions[0] ?? metadata.versionCache?.latestVersion ?? '')
         : ''),
     effortLevel: metadata.effortScale ? (provider?.effortLevel ?? metadata.effortScale.max) : '',
+    model: provider?.model ?? metadata.defaultModel ?? '',
     sandboxDockerfileExtra: provider?.sandboxDockerfileExtra ?? '',
     enabled: provider?.enabled ?? true,
     isolateAuth: provider?.isolateAuth ?? false,
@@ -327,6 +330,7 @@ export function CliProviderForm({
       authMode: snapshot.authMode,
       cliVersion: snapshot.cliVersion || null,
       effortLevel: metadata.effortScale ? snapshot.effortLevel || null : null,
+      model: snapshot.model.trim() || null,
       sandboxDockerfileExtra: snapshot.sandboxDockerfileExtra,
       enabled: snapshot.enabled,
       isolateAuth: snapshot.isolateAuth,
@@ -422,6 +426,7 @@ export function CliProviderForm({
           authMode: state.authMode,
           cliVersion: state.cliVersion || null,
           effortLevel: metadata.effortScale ? state.effortLevel || null : null,
+          model: state.model.trim() || null,
           sandboxDockerfileExtra: state.sandboxDockerfileExtra,
           enabled: state.enabled,
           isolateAuth: state.isolateAuth,
@@ -619,6 +624,24 @@ export function CliProviderForm({
           </>
         )}
       </div>
+
+      {metadata.name === 'ollama' && (
+        <div>
+          <Label htmlFor="model">Model</Label>
+          <Input
+            id="model"
+            value={state.model}
+            onChange={(e) => update('model', e.target.value)}
+            placeholder="qwen3-coder:480b-cloud"
+          />
+          <p className="mt-1 text-xs text-neutral-500">
+            The Ollama model this provider runs (required). Use a local/pulled name (
+            <code className="font-mono">qwen3-coder:30b</code>), a cloud model (
+            <code className="font-mono">qwen3-coder:480b-cloud</code>), or a custom model (
+            <code className="font-mono">mannix/gemma4-98e:CD-Q6_K</code>).
+          </p>
+        </div>
+      )}
 
       {metadata.effortScale && (
         <div>

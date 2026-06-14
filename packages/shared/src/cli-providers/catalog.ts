@@ -218,6 +218,33 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectAgentsDir: '.agents/agents',
     agentFileFormat: 'markdown',
   },
+  ollama: {
+    name: 'ollama',
+    displayName: 'Ollama',
+    description:
+      "Ollama models (local, remote server, or Ollama Cloud). Reuses the Claude binary against Ollama's Anthropic-compatible endpoint; set the model and base URL per provider.",
+    defaultExecutable: 'claude',
+    // OSS models drive native sub-agents unreliably; keep false so the
+    // dispatcher never routes a subagent-required step to an Ollama model.
+    supportsSubagents: false,
+    supportsCliAuth: true,
+    supportsMcp: true,
+    supportsPlugins: false,
+    defaultAuthMode: 'api_key',
+    // Local Ollama needs no real key (the binary accepts any non-empty token);
+    // cloud/remote users store their key UNDER THIS env name (not
+    // OLLAMA_API_KEY) because secrets merge into env verbatim with no remap.
+    apiKeyEnvName: 'ANTHROPIC_AUTH_TOKEN',
+    // No universal default; the per-provider `model` field must be set.
+    defaultModel: null,
+    authConfigPaths: ['~/.config/claude', '~/.claude'],
+    docsUrl: 'https://docs.ollama.com',
+    effortScale: null,
+    projectSkillsDir: '.claude/skills',
+    userSkillsPaths: [],
+    projectAgentsDir: '.claude/agents',
+    agentFileFormat: 'markdown',
+  },
 };
 
 export const CLI_PROVIDER_LIST: CliProviderMetadata[] = Object.values(CLI_PROVIDER_CATALOG);

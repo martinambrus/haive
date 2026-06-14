@@ -163,7 +163,14 @@ export interface FilesystemListing {
   entries: FilesystemEntry[];
 }
 
-export type CliProviderName = 'claude-code' | 'codex' | 'gemini' | 'amp' | 'zai' | 'antigravity';
+export type CliProviderName =
+  | 'claude-code'
+  | 'codex'
+  | 'gemini'
+  | 'amp'
+  | 'zai'
+  | 'antigravity'
+  | 'ollama';
 
 export type CliAuthMode = 'subscription' | 'api_key';
 export type CliSandboxBuildStatus = 'idle' | 'building' | 'ready' | 'failed';
@@ -194,6 +201,7 @@ export const CLI_DEFAULT_EGRESS_DOMAINS: Record<CliProviderName, string[]> = {
   amp: ['ampcode.com', '*.ampcode.com'],
   zai: ['api.z.ai'],
   antigravity: [],
+  ollama: ['ollama.com', '*.ollama.com'],
 };
 
 export interface EffortScaleMetadata {
@@ -249,6 +257,7 @@ export interface CliProvider {
   authMode: CliAuthMode;
   cliVersion: string | null;
   effortLevel: string | null;
+  model: string | null;
   sandboxDockerfileExtra: string | null;
   sandboxImageTag: string | null;
   sandboxImageBuildStatus: CliSandboxBuildStatus;

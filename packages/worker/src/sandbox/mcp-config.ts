@@ -135,6 +135,7 @@ export function buildMcpConfigForCli(
   switch (cliProvider) {
     case 'claude-code':
     case 'zai':
+    case 'ollama':
       return {
         path: CLAUDE_MCP_CONFIG_PATH,
         format: 'json',

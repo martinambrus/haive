@@ -1,0 +1,12 @@
+-- Per-provider model override for CLI providers. Nullable: when set it pins the
+-- model the adapter passes to the CLI (e.g. Ollama models such as
+-- `qwen3-coder:480b-cloud` or `mannix/gemma4-98e:CD-Q6_K`); when null the
+-- adapter's defaultModel (or the CLI's own default) applies. Existing rows stay
+-- null, so backfill is a no-op. Resolved at dispatch, never baked into an image.
+--
+-- Deploy note: applied via `drizzle-kit push --force` from the schema; this file
+-- is the idempotent parity/rollback record.
+--
+-- Rollback:
+--   ALTER TABLE "cli_providers" DROP COLUMN IF EXISTS "model";
+ALTER TABLE "cli_providers" ADD COLUMN IF NOT EXISTS "model" text;

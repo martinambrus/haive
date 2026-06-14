@@ -84,4 +84,11 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
     autoUpdateDisable: [{ kind: 'env', vars: { AGY_CLI_DISABLE_AUTO_UPDATE: 'true' } }],
     versionPinnable: false,
   },
+  ollama: {
+    // Ollama reuses the Claude binary (like zai); no separate install.
+    install: { kind: 'piggyback', uses: 'claude-code' },
+    versionSource: { kind: 'npm', package: '@anthropic-ai/claude-code' },
+    autoUpdateDisable: [{ kind: 'env', vars: { DISABLE_AUTOUPDATER: '1' } }],
+    versionPinnable: true,
+  },
 };

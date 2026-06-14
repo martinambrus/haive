@@ -7,6 +7,7 @@ export const cliProviderNameSchema = z.enum([
   'amp',
   'zai',
   'antigravity',
+  'ollama',
 ]);
 
 export const cliAuthModeSchema = z.enum(['subscription', 'api_key']);
@@ -86,6 +87,9 @@ export const createCliProviderRequestSchema = z.object({
   authMode: cliAuthModeSchema,
   cliVersion: z.string().nullable().optional(),
   effortLevel: z.string().nullable().optional(),
+  // Optional model override (e.g. an Ollama model name like
+  // `qwen3-coder:480b-cloud` or `mannix/gemma4-98e:CD-Q6_K`).
+  model: z.string().nullable().optional(),
   sandboxDockerfileExtra: z.string().optional(),
   enabled: z.boolean().optional(),
   isolateAuth: z.boolean().optional(),

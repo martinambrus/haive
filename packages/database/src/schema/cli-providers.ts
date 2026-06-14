@@ -22,6 +22,7 @@ export const cliProviderNameEnum = pgEnum('cli_provider_name', [
   'amp',
   'zai',
   'antigravity',
+  'ollama',
 ]);
 export const cliAuthModeEnum = pgEnum('cli_auth_mode', ['subscription', 'api_key']);
 export const cliSandboxBuildStatusEnum = pgEnum('cli_sandbox_build_status', [
@@ -71,6 +72,10 @@ export const cliProviders = pgTable(
     authMode: cliAuthModeEnum('auth_mode').notNull().default('subscription'),
     cliVersion: text('cli_version'),
     effortLevel: text('effort_level'),
+    // Optional per-provider model override (e.g. an Ollama model name). Null =
+    // use the adapter's defaultModel or the CLI's own default. Resolved at
+    // dispatch, not baked into the sandbox image.
+    model: text('model'),
     sandboxDockerfileExtra: text('sandbox_dockerfile_extra'),
     sandboxImageTag: text('sandbox_image_tag'),
     sandboxImageBuildStatus: cliSandboxBuildStatusEnum('sandbox_image_build_status')

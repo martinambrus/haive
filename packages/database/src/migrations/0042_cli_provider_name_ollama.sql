@@ -1,0 +1,16 @@
+-- Add 'ollama' to the cli_provider_name enum so an Ollama-backed CLI provider
+-- (reusing the Claude binary against Ollama's Anthropic-compatible endpoint) can
+-- be created. Additive; existing rows are unaffected.
+--
+-- Deploy note: applied via `drizzle-kit push --force` from the schema; this file
+-- is the idempotent parity/rollback record. Postgres cannot drop an enum value,
+-- so rollback requires recreating the type without 'ollama' and is only safe
+-- when no row references it (both cli_providers.name and cli_package_versions.name).
+--
+-- Rollback (only if no cli_providers / cli_package_versions row has name='ollama'):
+--   ALTER TYPE "cli_provider_name" RENAME TO "cli_provider_name_old";
+--   CREATE TYPE "cli_provider_name" AS ENUM ('claude-code','codex','gemini','amp','zai','antigravity');
+--   ALTER TABLE "cli_providers" ALTER COLUMN "name" TYPE "cli_provider_name" USING "name"::text::"cli_provider_name";
+--   ALTER TABLE "cli_package_versions" ALTER COLUMN "name" TYPE "cli_provider_name" USING "name"::text::"cli_provider_name";
+--   DROP TYPE "cli_provider_name_old";
+ALTER TYPE "cli_provider_name" ADD VALUE IF NOT EXISTS 'ollama';
