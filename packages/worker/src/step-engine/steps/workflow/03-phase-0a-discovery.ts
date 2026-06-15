@@ -302,12 +302,10 @@ export const phase0aDiscoveryStep: StepDefinition<DiscoveryDetect, DiscoveryAppl
   llm: {
     requiredCapabilities: ['tool_use'],
     timeoutMs: 60 * 60 * 1000,
-    skipIf: (args) => {
-      const detected = args.detected as DiscoveryDetect;
-      // No need to ask an LLM to "pick K of N" when N <= K — just dispatch
-      // every available persona.
-      return detected.personas.length <= MAX_SELECTED_AGENTS;
-    },
+    // Always run the selector — even when personas <= cap — so it filters by
+    // RELEVANCE and picks a complexity-appropriate COUNT. Dispatching every
+    // available persona (the old skipIf short-circuit) fanned out implementation/
+    // review/test agents that have no business mining the KB for a given task.
     buildPrompt: (args) => {
       const detected = args.detected as DiscoveryDetect;
       const values = args.formValues as { extraContext?: string };
@@ -327,25 +325,15 @@ export const phase0aDiscoveryStep: StepDefinition<DiscoveryDetect, DiscoveryAppl
     async selectAgents({ detected, formValues, llmOutput, ctx }): Promise<AgentMiningDispatch[]> {
       const detect = detected as DiscoveryDetect;
       const values = formValues as { extraContext?: string };
-      // Selector LLM was skipped (persona count <= cap) → dispatch all.
-      // Otherwise parse the LLM's pick (or fall back deterministically).
-      const selectedIds =
-        llmOutput === undefined
-          ? detect.personas.slice(0, MAX_SELECTED_AGENTS).map((p) => p.id)
-          : (() => {
-              const sel = parseAgentSelection(llmOutput, detect.personas);
-              ctx.logger.info(
-                { count: sel.selected.length, source: sel.source, ids: sel.selected },
-                'agent selection resolved',
-              );
-              return sel.selected;
-            })();
-      if (llmOutput === undefined) {
-        ctx.logger.info(
-          { count: selectedIds.length, ids: selectedIds, source: 'all-personas' },
-          'agent selection skipped LLM (persona count under cap), dispatching all',
-        );
-      }
+      // The selector LLM always runs now, so parse its relevance/complexity-based
+      // pick. parseAgentSelection falls back to a small deterministic default if
+      // the output is missing or unparseable — it never fans out to every persona.
+      const sel = parseAgentSelection(llmOutput, detect.personas);
+      ctx.logger.info(
+        { count: sel.selected.length, source: sel.source, ids: sel.selected },
+        'agent selection resolved',
+      );
+      const selectedIds = sel.selected;
       const byId = new Map(detect.personas.map((p) => [p.id, p]));
       const dispatches: AgentMiningDispatch[] = [];
       for (const id of selectedIds.slice(0, MAX_SELECTED_AGENTS)) {

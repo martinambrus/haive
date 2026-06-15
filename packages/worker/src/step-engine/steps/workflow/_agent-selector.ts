@@ -17,9 +17,20 @@ export function buildAgentSelectorPrompt(args: AgentSelectorPromptArgs): string 
     })
     .join('\n');
   return [
-    'You are the agent-selector phase of an engineering workflow.',
-    `From the available agent personas below, pick UP TO ${args.maxAgents} agents whose expertise is most relevant to the task.`,
+    'You are the agent-selector phase of an engineering workflow. The agents you pick will each',
+    'perform READ-ONLY knowledge mining (research) for the task below — not implementation, review,',
+    'or testing.',
+    '',
+    'From the available agent personas, pick ONLY the ones whose expertise is genuinely relevant to',
+    "researching THIS specific task, and CHOOSE HOW MANY to pick from the task's complexity and",
+    'breadth — do not return a fixed number:',
+    '- A small, localized, single-area task may need only 1-2 specialists.',
+    `- A large, cross-cutting task may warrant up to ${args.maxAgents}.`,
+    `Never pad the list to reach ${args.maxAgents}, and never exceed it. Relevance over count: an`,
+    'irrelevant specialist mining the knowledge base only adds noise to the discovery summary.',
     'Prefer breadth (different fields) over depth (multiple agents on the same niche).',
+    'EXCLUDE agents whose role is implementation, code review, testing, or spec/doc writing UNLESS',
+    'the task specifically calls for that lens during research — those are not knowledge miners.',
     'Always include a knowledge-mining or research-style agent if one exists.',
     '',
     'Emit ONE JSON object inside a ```json fenced code block with the shape:',
