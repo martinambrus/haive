@@ -472,6 +472,7 @@ const STATUS_DEFAULT_MESSAGE = 'Waiting for AI analysis...';
 export function createStepStatusUpdater(
   db: Database,
   taskStepId: string,
+  invocationId?: string | null,
 ): (message: string) => void {
   let lastFlush = 0;
   let pending: ReturnType<typeof setTimeout> | null = null;
@@ -487,6 +488,17 @@ export function createStepStatusUpdater(
       .catch((err: unknown) => {
         log.warn({ err, taskStepId }, 'failed to update step status');
       });
+    // Also stamp THIS invocation's own status so each terminal shows what its own
+    // agent is doing — the step status is shared/last-writer-wins (fine for the
+    // step header, useless per-terminal when agents mine in parallel).
+    if (invocationId) {
+      db.update(schema.cliInvocations)
+        .set({ statusMessage: truncated })
+        .where(eq(schema.cliInvocations.id, invocationId))
+        .catch((err: unknown) => {
+          log.warn({ err, invocationId }, 'failed to update invocation status');
+        });
+    }
   };
 
   const flush = (): void => {

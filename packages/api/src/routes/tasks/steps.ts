@@ -594,6 +594,9 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
       // For agent-mining invocations, the persona running this terminal (e.g.
       // "accessibility-specialist") so the header names the agent, not just "agent mining".
       agentTitle: schema.taskStepAgentMinings.agentTitle,
+      // This terminal's own latest activity line (per-invocation, not the shared
+      // step status), so each terminal shows what it is actually doing.
+      statusMessage: schema.cliInvocations.statusMessage,
     })
     .from(schema.cliInvocations)
     .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))

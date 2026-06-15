@@ -299,10 +299,10 @@ function InvocationPanel({ taskId, invocation, label, idx, statusMessage }: Invo
       ) : (
         !replayError && <div className="text-xs text-neutral-500">Loading output…</div>
       )}
-      {invocation.isActive && idx > 0 && statusMessage && (
+      {invocation.isActive && (invocation.statusMessage ?? (idx > 0 ? statusMessage : null)) && (
         <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
-          {statusMessage}
+          {invocation.statusMessage ?? statusMessage}
         </div>
       )}
     </div>

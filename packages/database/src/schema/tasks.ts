@@ -301,6 +301,11 @@ export const cliInvocations = pgTable(
      *  historical replay. Null on rows written before this column was
      *  added; consumers should fall back to rawOutput in that case. */
     streamLog: text('stream_log'),
+    /** Latest live-activity line parsed from THIS invocation's stream (throttled,
+     *  truncated), so each terminal shows what its own agent is doing — distinct
+     *  from the step's shared status_message (which is last-writer-wins). Null
+     *  until the first status line. */
+    statusMessage: varchar('status_message', { length: 256 }),
     /** Set when the step-runner has incorporated this invocation's output
      *  into an apply pass. resolveLlmPhase ignores consumed rows so the
      *  next pass enqueues a fresh invocation. Null = pending or in-flight. */

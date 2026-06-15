@@ -165,7 +165,7 @@ export async function executeByKind(
           )
         : { files: [], extraArgs: [] };
       const statusUpdater = payload.taskStepId
-        ? createStepStatusUpdater(db, payload.taskStepId)
+        ? createStepStatusUpdater(db, payload.taskStepId, payload.invocationId)
         : undefined;
       const timeoutMs = await resolveInvocationTimeoutMs(payload.timeoutMs, providerRow);
       return executeCliSpec(
