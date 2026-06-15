@@ -447,6 +447,9 @@ export interface TaskStep {
    *  Auto-skipped steps (shouldRun → false, or detect setting skipReason)
    *  have this as false. Used to hide the retry button on auto-skips. */
   manuallySkipped: boolean;
+  /** True when the step opts into the user-facing Skip action (server-enforced
+   *  via SKIPPABLE_STEP_IDS). Drives whether the Skip button is shown. */
+  canSkip: boolean;
   /** Number of non-superseded CLI invocations attached to this step. Drives
    *  whether the inline terminal toggle is rendered — 0 means the step has
    *  no terminal output to show (deterministic-only or pending steps). */

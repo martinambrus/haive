@@ -70,8 +70,13 @@ export const businessRequirementsStep: StepDefinition<BizReqDetect, BizReqApply>
     index: 3.5,
     title: 'Phase 1: Business requirements',
     description:
-      'A business-requirements-writer agent drafts a stakeholder-facing requirements doc from the task and discovery; you approve or reject it before the technical spec.',
+      'Optional. A business-requirements-writer agent drafts a stakeholder-facing requirements doc from the task and discovery; approve to feed it into the technical spec, reject to revise, or Skip when only a technical spec is needed.',
     requiresCli: false,
+    // Optional step: a task that needs only a technical spec (no stakeholder-facing
+    // requirements doc) can Skip it. 04-pre-planning treats the requirements as
+    // upstream context "when present", so a skip degrades cleanly. Keep in sync
+    // with SKIPPABLE_STEP_IDS in @haive/shared.
+    allowSkip: true,
   },
 
   async detect(ctx: StepContext): Promise<BizReqDetect> {

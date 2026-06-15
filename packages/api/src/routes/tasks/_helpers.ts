@@ -1,7 +1,12 @@
 import { relative, resolve } from 'node:path';
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { STEP_CLI_ROLES, type CliRoleDescriptor, type CliTokenUsage } from '@haive/shared';
+import {
+  SKIPPABLE_STEP_IDS,
+  STEP_CLI_ROLES,
+  type CliRoleDescriptor,
+  type CliTokenUsage,
+} from '@haive/shared';
 import { getDb } from '../../db.js';
 import { HttpError } from '../../context.js';
 
@@ -190,13 +195,22 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
   });
 }
 
-export async function enrichStepsWithSkipFlag<T extends { id: string; status: string }>(
+export async function enrichStepsWithSkipFlag<
+  T extends { id: string; status: string; stepId: string },
+>(
   db: ReturnType<typeof getDb>,
   taskId: string,
   steps: T[],
-): Promise<(T & { manuallySkipped: boolean })[]> {
+): Promise<(T & { manuallySkipped: boolean; canSkip: boolean })[]> {
+  // canSkip: the step opts into the user-facing Skip action (the skip handler
+  // enforces the same SKIPPABLE_STEP_IDS list). Drives the web's Skip button.
+  const withFlags = (s: T, manuallySkipped: boolean) => ({
+    ...s,
+    manuallySkipped,
+    canSkip: SKIPPABLE_STEP_IDS.includes(s.stepId),
+  });
   const skippedIds = steps.filter((s) => s.status === 'skipped').map((s) => s.id);
-  if (skippedIds.length === 0) return steps.map((s) => ({ ...s, manuallySkipped: false }));
+  if (skippedIds.length === 0) return steps.map((s) => withFlags(s, false));
   const events = await db
     .select({ taskStepId: schema.taskEvents.taskStepId })
     .from(schema.taskEvents)
@@ -208,7 +222,7 @@ export async function enrichStepsWithSkipFlag<T extends { id: string; status: st
       ),
     );
   const manualSet = new Set(events.map((e) => e.taskStepId).filter((v): v is string => !!v));
-  return steps.map((s) => ({ ...s, manuallySkipped: manualSet.has(s.id) }));
+  return steps.map((s) => withFlags(s, manualSet.has(s.id)));
 }
 
 export async function resolveWorkspaceRoot(

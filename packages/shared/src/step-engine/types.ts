@@ -94,7 +94,10 @@ export const STEP_CLI_ROLES: Record<string, readonly CliRoleDescriptor[]> = {
  *  Skip action is permitted ONLY on these; the API skip handler enforces it
  *  (the api can't import the worker step registry). Keep in sync with the
  *  `allowSkip: true` flags on StepDefinition metadata. */
-export const SKIPPABLE_STEP_IDS: readonly string[] = ['06a-db-migrate'];
+export const SKIPPABLE_STEP_IDS: readonly string[] = [
+  '03b-business-requirements',
+  '06a-db-migrate',
+];
 
 export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
   '04-tooling-infrastructure',

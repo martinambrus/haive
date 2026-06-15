@@ -1499,13 +1499,13 @@ function StepCard({
                     : 'Resume (new CLI)'}
               </Button>
             )}
-          {step.status === 'failed' && step.stepId === '06a-db-migrate' && (
+          {(step.status === 'failed' || step.status === 'waiting_form') && step.canSkip && (
             <Button
               size="sm"
               variant="secondary"
               disabled={actionBusy}
               onClick={() => onAction('skip')}
-              title="Skip database migrations and continue. Only available on this step."
+              title="Skip this optional step and continue to the next one."
             >
               Skip
             </Button>
