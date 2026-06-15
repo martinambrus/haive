@@ -8,7 +8,7 @@ import {
   type CliProbePathResult,
   type CliProbeResult,
   type CliProvider,
-  type CliProviderMetadata,
+  type CliProviderCatalogEntry,
   type CliProviderName,
 } from '@/lib/api-client';
 import {
@@ -52,11 +52,12 @@ interface SignOutState {
 export default function CliProvidersPage() {
   usePageTitle('CLI Providers');
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
-  const [catalog, setCatalog] = useState<CliProviderMetadata[] | null>(null);
+  const [catalog, setCatalog] = useState<CliProviderCatalogEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testStates, setTestStates] = useState<Record<string, TestState>>({});
   const [signOutStates, setSignOutStates] = useState<Record<string, SignOutState>>({});
   const [cloningIds, setCloningIds] = useState<Record<string, boolean>>({});
+  const [upgradingIds, setUpgradingIds] = useState<Record<string, boolean>>({});
   const { requireCliLogin } = useCliLogin();
 
   function handleLogin(p: CliProvider) {
@@ -81,7 +82,7 @@ export default function CliProvidersPage() {
     try {
       const [providersData, catalogData] = await Promise.all([
         api.get<{ providers: CliProvider[] }>('/cli-providers'),
-        api.get<{ providers: CliProviderMetadata[] }>('/cli-providers/catalog'),
+        api.get<{ providers: CliProviderCatalogEntry[] }>('/cli-providers/catalog'),
       ]);
       setProviders(providersData.providers);
       setCatalog(catalogData.providers);
@@ -116,6 +117,25 @@ export default function CliProvidersPage() {
       setCloningIds((s) => {
         const next = { ...s };
         delete next[id];
+        return next;
+      });
+    }
+  }
+
+  async function handleUpgrade(p: CliProvider, latest: string) {
+    setUpgradingIds((s) => ({ ...s, [p.id]: true }));
+    setError(null);
+    try {
+      // PATCH cliVersion → the API flags imageInputsChanged and rebuilds the
+      // provider's sandbox image automatically.
+      await api.patch(`/cli-providers/${p.id}`, { cliVersion: latest });
+      await load();
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to upgrade CLI version');
+    } finally {
+      setUpgradingIds((s) => {
+        const next = { ...s };
+        delete next[p.id];
         return next;
       });
     }
@@ -211,6 +231,8 @@ export default function CliProvidersPage() {
               <div className="grid gap-3">
                 {providers.map((p) => {
                   const meta = catalog.find((m) => m.name === p.name);
+                  const upgradeLatest = cliUpgradeLatest(p, meta);
+                  const upgrading = upgradingIds[p.id] === true;
                   const testState = testStates[p.id];
                   const cliAuthStatus = testState?.result?.cli?.authStatus;
                   const showLogin =
@@ -235,6 +257,11 @@ export default function CliProvidersPage() {
                             {testState?.result && (
                               <Badge variant={testState.result.ok ? 'success' : 'error'}>
                                 {testState.result.ok ? 'test ok' : 'test failed'}
+                              </Badge>
+                            )}
+                            {upgradeLatest && (
+                              <Badge variant="warning">
+                                upgrade: {p.cliVersion} → {upgradeLatest}
                               </Badge>
                             )}
                           </div>
@@ -264,6 +291,16 @@ export default function CliProvidersPage() {
                               disabled={signOutState?.busy === true}
                             >
                               {signOutState?.busy ? 'Signing out...' : 'Sign out'}
+                            </Button>
+                          )}
+                          {upgradeLatest && (
+                            <Button
+                              size="sm"
+                              onClick={() => handleUpgrade(p, upgradeLatest)}
+                              disabled={upgrading}
+                              title={`Pin ${upgradeLatest} and rebuild this provider's sandbox image`}
+                            >
+                              {upgrading ? 'Upgrading...' : 'Upgrade'}
                             </Button>
                           )}
                           <Link href={`/settings/cli-providers/${p.id}`}>
@@ -378,6 +415,23 @@ function authBadgeVariant(status: CliAuthStatus): 'success' | 'warning' | 'error
   if (status === 'rate_limited' || status === 'network_error') return 'warning';
   if (status === 'unknown') return 'default';
   return 'error';
+}
+
+/** Returns the newest available version to upgrade to, or null when none.
+ *  Target is versions[0] (newest published), NOT the dist-tag latestVersion,
+ *  which can lag behind the newest publish. Offered only when the pin is a
+ *  KNOWN, older entry (idx > 0): idx 0 = already newest; idx -1 = pinned to
+ *  something not in the cache (e.g. ahead of the registry list) → no offer, so
+ *  we never prompt a downgrade. Unpinnable providers never report an upgrade. */
+function cliUpgradeLatest(
+  p: CliProvider,
+  meta: CliProviderCatalogEntry | undefined,
+): string | null {
+  if (!meta?.versionPinnable) return null;
+  const versions = meta.versionCache?.versions ?? [];
+  const installed = p.cliVersion;
+  if (!installed || versions.length === 0) return null;
+  return versions.indexOf(installed) > 0 ? versions[0]! : null;
 }
 
 function TestPathLine({

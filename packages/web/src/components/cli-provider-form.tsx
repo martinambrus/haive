@@ -246,6 +246,20 @@ export function CliProviderForm({
 
   const formDirty = !statesEqual(state, savedState);
 
+  // Upgrade hint: the saved pin is a known, older entry in the version list.
+  // versions[] is newest-first; the upgrade target is versions[0] (the newest
+  // published), NOT the dist-tag latestVersion (which can lag). idx 0 = already
+  // newest; idx -1 = pinned ahead of the cache → no hint (never prompt a
+  // downgrade).
+  const cliVersionList = versionCache?.versions ?? [];
+  const installedCliVersion = provider?.cliVersion ?? null;
+  const newestCliVersion = cliVersionList[0] ?? null;
+  const cliUpgradeAvailable =
+    metadata.versionPinnable &&
+    !!installedCliVersion &&
+    !!newestCliVersion &&
+    cliVersionList.indexOf(installedCliVersion) > 0;
+
   // In-stack Ollama base URL for the model-download button, or null when the
   // provider targets cloud/remote (those models are not pulled by the in-stack
   // daemon). Only host `ollama`/`haive-ollama` is the API-pullable daemon.
@@ -690,6 +704,23 @@ export function CliProviderForm({
                 {refreshingVersions ? 'Refreshing...' : 'Refresh'}
               </Button>
             </div>
+            {cliUpgradeAvailable && newestCliVersion && (
+              <div className="mt-2 flex flex-wrap items-center gap-2 rounded border border-amber-900 bg-amber-950/30 px-2 py-1 text-xs">
+                <span className="text-amber-300">
+                  Newer version available: installed {installedCliVersion} → {newestCliVersion}
+                </span>
+                {state.cliVersion !== newestCliVersion && (
+                  <button
+                    type="button"
+                    className="font-semibold text-amber-200 underline underline-offset-2 hover:text-amber-100"
+                    onClick={() => update('cliVersion', newestCliVersion)}
+                  >
+                    Use latest
+                  </button>
+                )}
+                <span className="text-neutral-500">Save to apply &amp; rebuild.</span>
+              </div>
+            )}
             <p className="mt-1 text-xs text-neutral-500">
               The sandbox image for this CLI and version is built on first use and cached, then
               reused across all providers that pin the same version. Auto-update is always disabled
