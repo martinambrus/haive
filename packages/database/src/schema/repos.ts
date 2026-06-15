@@ -72,6 +72,17 @@ export const repositories = pgTable(
      *  A set value pins that rtk release for this repo's environment images;
      *  changing it changes the composed-image hash, forcing a rebuild. */
     rtkVersion: text('rtk_version'),
+    /** Per-repo LSP server version pins, keyed by lsp key (intelephense, vtsls,
+     *  pyright, gopls, solargraph). Missing entry / null value = latest/unpinned.
+     *  Stored repo-level (not only in the env-template declaredDeps, which
+     *  01-declare-deps rebuilds each task) so the pins survive env-replicate
+     *  re-derivation; 01-declare-deps injects them into declaredDeps so the
+     *  Dockerfile render picks them up. */
+    lspServerVersions: jsonb('lsp_server_versions').$type<Record<string, string | null>>(),
+    /** Per-repo chrome-devtools-mcp version pin (null = latest). Repo-level for
+     *  the same survival reason; injected into declaredDeps for the env-image
+     *  install line and the operative MCP launcher pin. */
+    chromeDevtoolsMcpVersion: text('chrome_devtools_mcp_version'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },

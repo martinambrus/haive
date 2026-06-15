@@ -400,6 +400,26 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       columns: { repositoryId: true },
     });
 
+    // Repo-level component version pins (set via the tooling-upgrade / management
+    // UI). Injected into declaredDeps below so renderDockerfile + the MCP launcher
+    // honor them. They live on the repo (not only in declaredDeps) because this
+    // step rebuilds declaredDeps from the form every task and would otherwise wipe
+    // them — including for a brand-new task that has no prior template to inherit.
+    let repoLspVersions: Record<string, string | null> | null = null;
+    let repoChromeMcpVersion: string | null = null;
+    if (task?.repositoryId) {
+      const repoRow = await ctx.db
+        .select({
+          lspServerVersions: schema.repositories.lspServerVersions,
+          chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
+        })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, task.repositoryId))
+        .limit(1);
+      repoLspVersions = repoRow[0]?.lspServerVersions ?? null;
+      repoChromeMcpVersion = repoRow[0]?.chromeDevtoolsMcpVersion ?? null;
+    }
+
     const packageManagers: Partial<Record<LanguageKey, PackageManager | null>> = {};
     for (const detected of args.detected.runtimes) {
       if (values.runtimes.includes(detected.language)) {
@@ -423,7 +443,9 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         version: values.databaseVersion || null,
       },
       lspServers: values.lspServers ?? [],
+      ...(repoLspVersions ? { lspServerVersions: repoLspVersions } : {}),
       browserTesting: values.browserTesting,
+      ...(repoChromeMcpVersion ? { chromeDevtoolsMcpVersion: repoChromeMcpVersion } : {}),
       extraPackages: parseExtraPackages(values.extraPackages ?? ''),
     };
 
