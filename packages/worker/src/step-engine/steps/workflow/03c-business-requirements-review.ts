@@ -2,6 +2,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
+import { recordBizReqDecision } from './_biz-req-feedback.js';
 
 // Phase 1 review — human sign-off for the business-requirements doc that 03b
 // drafts. Split from 03b so the agent mines ONLY after the user opts in at the
@@ -120,13 +121,19 @@ export const businessRequirementsReviewStep: StepDefinition<BizReqReviewDetect, 
       const feedback = values.feedback ?? '';
 
       if (decision === 'reject') {
+        // Persist BEFORE throwing — the throw halts the task and the revise retry
+        // resets these step rows, but the task_event survives so 03b can pre-fill
+        // the feedback as guidance on the re-mine.
+        await recordBizReqDecision(ctx, 'reject', feedback);
         ctx.logger.info('business requirements rejected');
         throw new Error(
           `business requirements rejected: ${feedback || 'no feedback supplied'}. ` +
-            'Retry the business-requirements step to re-mine and revise.',
+            'Re-run the business-requirements step to revise — your feedback is pre-filled there.',
         );
       }
 
+      // Clears any outstanding rejection so a later, unrelated re-mine starts clean.
+      await recordBizReqDecision(ctx, 'approve', feedback);
       ctx.logger.info('business requirements approved');
       return {
         requirements: detected.requirements,

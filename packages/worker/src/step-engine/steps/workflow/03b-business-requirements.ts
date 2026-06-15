@@ -4,6 +4,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { extractFencedJson } from '../_fenced-json.js';
+import { loadOutstandingBizReqFeedback } from './_biz-req-feedback.js';
 
 // Phase 1 — Business requirements (legacy phase1-business-requirements). Between
 // discovery (03) and the technical spec (04), a business-requirements-writer
@@ -17,6 +18,9 @@ interface BizReqDetect {
   taskTitle: string;
   taskDescription: string;
   discoverySummary: string;
+  /** Latest 03c rejection feedback not yet re-approved; pre-filled into guidance
+   *  so a re-mine addresses it. Empty on the first run / after approval. */
+  priorRejectionFeedback: string;
 }
 
 interface BizReqApply {
@@ -85,6 +89,7 @@ export const businessRequirementsStep: StepDefinition<BizReqDetect, BizReqApply>
       taskTitle: meta.title,
       taskDescription: meta.description,
       discoverySummary: output.summary ?? '',
+      priorRejectionFeedback: await loadOutstandingBizReqFeedback(ctx),
     };
   },
 
@@ -116,25 +121,27 @@ export const businessRequirementsStep: StepDefinition<BizReqDetect, BizReqApply>
   },
 
   form(_ctx, detected): FormSchema {
+    const revising = detected.priorRejectionFeedback.length > 0;
     return {
       title: 'Phase 1: Business requirements (optional)',
       description: [
         `Task: ${detected.taskTitle || '(untitled)'}`,
         '',
-        'A business-requirements-writer agent can draft a stakeholder-facing requirements',
-        'doc (no code or jargon) to ground the technical spec. It runs only when you submit —',
-        'nothing is mined before then. Skip this step if you only need a technical spec.',
+        revising
+          ? 'You rejected the previous draft. Your review feedback is pre-filled below — edit it if needed, then submit to re-mine the requirements addressing it.'
+          : 'A business-requirements-writer agent can draft a stakeholder-facing requirements doc (no code or jargon) to ground the technical spec. It runs only when you submit — nothing is mined before then. Skip this step if you only need a technical spec.',
       ].join('\n'),
       fields: [
         {
           type: 'textarea',
           id: 'guidance',
-          label: 'Guidance for the agent (optional)',
+          label: revising ? 'Revision feedback for the agent' : 'Guidance for the agent (optional)',
           rows: 4,
+          default: detected.priorRejectionFeedback || undefined,
           placeholder: 'Anything to emphasise, include, or avoid in the requirements doc.',
         },
       ],
-      submitLabel: 'Run the business-requirements agent',
+      submitLabel: revising ? 'Re-run with this feedback' : 'Run the business-requirements agent',
     };
   },
 

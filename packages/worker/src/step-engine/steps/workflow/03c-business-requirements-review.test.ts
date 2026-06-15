@@ -11,7 +11,14 @@ const detected = {
   summary: 'logout requirements',
 };
 
-const stubCtx = { logger: { info: () => {} } } as unknown as StepContext;
+// recordBizReqDecision writes a task_event via ctx.db.insert(...).values(...);
+// stub that chain so apply() can run without a real database.
+const stubCtx = {
+  logger: { info: () => {} },
+  taskId: 'task-1',
+  taskStepId: 'step-1',
+  db: { insert: () => ({ values: async () => undefined }) },
+} as unknown as StepContext;
 
 function applyArgs(formValues: Record<string, unknown>): StepApplyArgs<typeof detected> {
   return { detected, formValues, iteration: 0, previousIterations: [] };
@@ -62,5 +69,45 @@ describe('03c apply (decision handling)', () => {
   it('defaults a missing decision to approve (never silently rejects)', async () => {
     const out = await businessRequirementsReviewStep.apply(stubCtx, applyArgs({}));
     expect(out.decision).toBe('approve');
+  });
+});
+
+describe('03c persists the review decision (so 03b can re-mine with the feedback)', () => {
+  function capturingCtx() {
+    const events: Array<{ eventType: string; payload: { feedback?: string } }> = [];
+    const ctx = {
+      logger: { info: () => {} },
+      taskId: 'task-1',
+      taskStepId: 'step-1',
+      db: {
+        insert: () => ({
+          values: async (row: { eventType: string; payload: { feedback?: string } }) => {
+            events.push({ eventType: row.eventType, payload: row.payload });
+          },
+        }),
+      },
+    } as unknown as StepContext;
+    return { ctx, events };
+  }
+
+  it('records the rejection feedback as an event BEFORE halting', async () => {
+    const { ctx, events } = capturingCtx();
+    await expect(
+      businessRequirementsReviewStep.apply(
+        ctx,
+        applyArgs({ decision: 'reject', feedback: 'add an ETA section' }),
+      ),
+    ).rejects.toThrow();
+    expect(events[0]?.eventType).toBe('business_requirements.rejected');
+    expect(events[0]?.payload?.feedback).toBe('add an ETA section');
+  });
+
+  it('records an approval event so a later re-mine starts clean', async () => {
+    const { ctx, events } = capturingCtx();
+    await businessRequirementsReviewStep.apply(
+      ctx,
+      applyArgs({ decision: 'approve', feedback: '' }),
+    );
+    expect(events.map((e) => e.eventType)).toContain('business_requirements.approved');
   });
 });

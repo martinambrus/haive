@@ -619,6 +619,10 @@ export default function TaskDetailPage() {
                   stepActionError?.stepId === step.stepId ? stepActionError.message : null
                 }
                 onAction={(action) => runStepAction(step, action)}
+                onRetryStep={async (sid) => {
+                  const target = steps.find((s) => s.stepId === sid);
+                  if (target) await runStepAction(target, 'retry');
+                }}
                 onCliLogin={() => openCliLoginForStep(step)}
                 providers={providers}
                 taskCliProviderId={task.cliProviderId ?? null}
@@ -825,6 +829,9 @@ interface StepCardProps {
   autoContinueBusy: boolean;
   showAutoContinue: boolean;
   onToggleAutoContinue: () => void;
+  /** Retry an arbitrary step by id (not just this card's own step). Used by the
+   *  03c review card to re-run the previous business-requirements step. */
+  onRetryStep: (stepId: string) => Promise<void>;
 }
 
 const ACTIONABLE_STATUSES: ReadonlySet<StepStatus> = new Set([
@@ -1205,6 +1212,7 @@ function StepCard({
   actionBusy,
   actionError,
   onAction,
+  onRetryStep,
   onCliLogin,
   providers,
   taskCliProviderId,
@@ -1487,6 +1495,16 @@ function StepCard({
           )}
         </div>
         <div className="flex items-center gap-2">
+          {step.stepId === '03c-business-requirements-review' && step.status === 'failed' && (
+            <Button
+              size="sm"
+              disabled={actionBusy}
+              onClick={() => void onRetryStep('03b-business-requirements')}
+              title="Reset and re-run the business-requirements step with your rejection feedback pre-filled, so the agent re-drafts addressing it. Retrying THIS step would only re-review the same draft."
+            >
+              Re-run business requirements
+            </Button>
+          )}
           {canRetry &&
             (() => {
               const isActive = step.status === 'running' || step.status === 'waiting_cli';
