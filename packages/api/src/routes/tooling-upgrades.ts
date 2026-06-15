@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { DEFAULT_RTK_VERSION, TOOL_INSTALL_METADATA, type ToolName } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -39,6 +39,19 @@ const LSP_KEY_TO_TOOL: Record<string, ToolName> = {
   'rust-analyzer': 'rust-analyzer',
   jdtls: 'jdtls',
 };
+
+/** Selectable LSP servers (env keys) for the per-repo tooling management page. */
+const LSP_SERVER_OPTIONS: { value: string; label: string }[] = [
+  { value: 'intelephense', label: 'Intelephense (PHP)' },
+  { value: 'intelephense-extended', label: 'Intelephense + CMS extensions (PHP)' },
+  { value: 'vtsls', label: 'vtsls (TypeScript / JavaScript)' },
+  { value: 'pyright', label: 'Pyright (Python)' },
+  { value: 'gopls', label: 'gopls (Go)' },
+  { value: 'rust-analyzer', label: 'rust-analyzer (Rust)' },
+  { value: 'solargraph', label: 'Solargraph (Ruby)' },
+  { value: 'jdtls', label: 'jdtls (Java)' },
+];
+const LSP_KEY_SET = new Set(LSP_SERVER_OPTIONS.map((o) => o.value));
 
 function parseSemver(v: string): [number, number, number] | null {
   const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v.trim());
@@ -208,4 +221,110 @@ toolingUpgradeRoutes.post('/:id/tooling-upgrade', async (c) => {
   }
 
   return c.json({ repositoryId, applied, rebuildOnNextTask: applied.length > 0 });
+});
+
+/** Current per-repo tooling config + available versions, for the management page. */
+toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
+  const userId = c.get('userId');
+  const repositoryId = c.req.param('id');
+  const db = getDb();
+
+  const repo = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
+    columns: {
+      id: true,
+      rtkEnabled: true,
+      rtkVersion: true,
+      lspServers: true,
+      lspServerVersions: true,
+      chromeDevtoolsMcpVersion: true,
+    },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+
+  // Effective active LSP set + browser-testing flag from the repo's latest
+  // env-template when there is no explicit repo-level LSP override.
+  const envTemplate = await db.query.envTemplates.findFirst({
+    where: eq(schema.envTemplates.repositoryId, repositoryId),
+    orderBy: [desc(schema.envTemplates.updatedAt)],
+    columns: { declaredDeps: true },
+  });
+  const deps = (envTemplate?.declaredDeps ?? {}) as {
+    lspServers?: string[];
+    browserTesting?: boolean;
+  };
+
+  const versionMap = await loadToolVersions(db);
+  const versionsFor = (tool: ToolName): string[] => versionMap.get(tool)?.versions ?? [];
+
+  const lspOptions = LSP_SERVER_OPTIONS.map((o) => {
+    const tool = LSP_KEY_TO_TOOL[o.value]!;
+    const meta = TOOL_INSTALL_METADATA[tool];
+    return {
+      value: o.value,
+      label: o.label,
+      pinnable: meta.versionPinnable,
+      versions: meta.versionPinnable ? versionsFor(tool) : [],
+    };
+  });
+
+  return c.json({
+    repositoryId,
+    rtkEnabled: repo.rtkEnabled,
+    rtkVersion: repo.rtkVersion,
+    rtkVersions: versionsFor('rtk'),
+    chromeDevtoolsMcpVersion: repo.chromeDevtoolsMcpVersion,
+    chromeVersions: versionsFor('chrome-devtools-mcp'),
+    browserTesting: !!deps.browserTesting,
+    lspServers: repo.lspServers ?? deps.lspServers ?? [],
+    lspServerVersions: repo.lspServerVersions ?? {},
+    lspOptions,
+  });
+});
+
+/** Update per-repo tooling: enable/disable RTK + LSP servers and pin versions.
+ *  Only writes repo columns; the env image rebuilds on the next task (via
+ *  01-declare-deps re-injection). Disabling RTK flips rtk_enabled — the
+ *  .claude/settings.json hook is then reconciled by the existing onboarding
+ *  upgrade flow (the workflow upgrade banner surfaces rtk-config as removable). */
+toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
+  const userId = c.get('userId');
+  const repositoryId = c.req.param('id');
+  const db = getDb();
+
+  const repo = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
+    columns: { id: true },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+
+  const body = (await c.req.json().catch(() => ({}))) as {
+    rtkEnabled?: boolean;
+    rtkVersion?: string | null;
+    lspServers?: string[];
+    lspServerVersions?: Record<string, string | null>;
+    chromeDevtoolsMcpVersion?: string | null;
+  };
+
+  const updates: Partial<typeof schema.repositories.$inferInsert> = { updatedAt: new Date() };
+  if (typeof body.rtkEnabled === 'boolean') updates.rtkEnabled = body.rtkEnabled;
+  if (body.rtkVersion !== undefined) updates.rtkVersion = body.rtkVersion?.trim() || null;
+  if (body.chromeDevtoolsMcpVersion !== undefined) {
+    updates.chromeDevtoolsMcpVersion = body.chromeDevtoolsMcpVersion?.trim() || null;
+  }
+  if (Array.isArray(body.lspServers)) {
+    updates.lspServers = [...new Set(body.lspServers.filter((s) => LSP_KEY_SET.has(s)))];
+  }
+  if (body.lspServerVersions && typeof body.lspServerVersions === 'object') {
+    const clean: Record<string, string | null> = {};
+    for (const [k, v] of Object.entries(body.lspServerVersions)) {
+      if (!LSP_KEY_SET.has(k)) continue;
+      const val = typeof v === 'string' ? v.trim() : '';
+      if (val) clean[k] = val;
+    }
+    updates.lspServerVersions = clean;
+  }
+
+  await db.update(schema.repositories).set(updates).where(eq(schema.repositories.id, repositoryId));
+  return c.json({ repositoryId, ok: true });
 });

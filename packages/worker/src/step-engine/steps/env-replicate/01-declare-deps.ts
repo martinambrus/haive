@@ -407,17 +407,20 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     // them — including for a brand-new task that has no prior template to inherit.
     let repoLspVersions: Record<string, string | null> | null = null;
     let repoChromeMcpVersion: string | null = null;
+    let repoLspServers: string[] | null = null;
     if (task?.repositoryId) {
       const repoRow = await ctx.db
         .select({
           lspServerVersions: schema.repositories.lspServerVersions,
           chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
+          lspServers: schema.repositories.lspServers,
         })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, task.repositoryId))
         .limit(1);
       repoLspVersions = repoRow[0]?.lspServerVersions ?? null;
       repoChromeMcpVersion = repoRow[0]?.chromeDevtoolsMcpVersion ?? null;
+      repoLspServers = repoRow[0]?.lspServers ?? null;
     }
 
     const packageManagers: Partial<Record<LanguageKey, PackageManager | null>> = {};
@@ -442,7 +445,9 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         kind: values.databaseKind,
         version: values.databaseVersion || null,
       },
-      lspServers: values.lspServers ?? [],
+      // Repo-level LSP override (tooling management page) wins over the
+      // form/onboarding-derived set so enable/disable survives the per-task rebuild.
+      lspServers: repoLspServers ?? values.lspServers ?? [],
       ...(repoLspVersions ? { lspServerVersions: repoLspVersions } : {}),
       browserTesting: values.browserTesting,
       ...(repoChromeMcpVersion ? { chromeDevtoolsMcpVersion: repoChromeMcpVersion } : {}),

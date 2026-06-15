@@ -83,6 +83,12 @@ export const repositories = pgTable(
      *  the same survival reason; injected into declaredDeps for the env-image
      *  install line and the operative MCP launcher pin. */
     chromeDevtoolsMcpVersion: text('chrome_devtools_mcp_version'),
+    /** Per-repo override of the active LSP server set (env keys, e.g.
+     *  intelephense, vtsls, pyright). NULL = no override → 01-declare-deps uses
+     *  the form/onboarding-derived set. Set by the tooling management page to
+     *  enable/disable LSP servers after onboarding; injected into declaredDeps
+     *  so it survives the per-task declare-deps rebuild. */
+    lspServers: text('lsp_servers').array(),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
