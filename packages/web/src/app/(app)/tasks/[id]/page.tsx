@@ -29,7 +29,7 @@ import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
-import { FormRenderer, type FormValues } from '@/components/form-renderer';
+import { FormRenderer, InfoSections, type FormValues } from '@/components/form-renderer';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { TaskSource } from '@/components/task-source';
 import { StepTerminal } from '@/components/terminal/StepTerminal';
@@ -1635,6 +1635,11 @@ function StepCard({
           </div>
         )
       )}
+
+      {/* Done/skipped steps: re-show the spec/summary disclosures (business
+          requirements, technical spec, gate reviews, …) read-only so they stay
+          reviewable after the interactive form is gone. */}
+      {step.status !== 'waiting_form' && <InfoSections sections={schema?.infoSections} />}
 
       {step.status !== 'waiting_form' && (step.detectOutput !== null || step.output !== null) && (
         <button

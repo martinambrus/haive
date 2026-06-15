@@ -29,6 +29,43 @@ interface FormRendererProps {
   repositoryId?: string | null;
 }
 
+/** Read-only render of a form's infoSections (the disclosures that show specs /
+ *  summaries above the fields). Exported so done steps can re-show the spec for
+ *  review after the interactive form is gone. */
+export function InfoSections({ sections }: { sections: FormSchema['infoSections'] }) {
+  if (!sections || sections.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-2">
+      {sections.map((section, i) => {
+        const isMd = looksLikeMarkdown(section.body);
+        return (
+          <details
+            key={`${section.title}-${i}`}
+            open={section.defaultOpen ?? false}
+            className="rounded-md border border-neutral-800 bg-neutral-950/60"
+          >
+            <summary className="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900">
+              <span className="font-medium">{section.title}</span>
+              {section.preview && (
+                <span className="ml-2 text-xs text-neutral-400">{section.preview}</span>
+              )}
+            </summary>
+            {isMd ? (
+              <div className="border-t border-neutral-800">
+                <MarkdownView body={section.body} enhanced />
+              </div>
+            ) : (
+              <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-t border-neutral-800 px-3 py-2 text-xs text-neutral-300">
+                {section.body}
+              </pre>
+            )}
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
 function defaultValueFor(field: FormField): unknown {
   switch (field.type) {
     case 'text':
@@ -127,36 +164,7 @@ export function FormRenderer({
           <p className="mt-1 whitespace-pre-line text-sm text-neutral-400">{schema.description}</p>
         )}
       </div>
-      {schema.infoSections && schema.infoSections.length > 0 && (
-        <div className="flex flex-col gap-2">
-          {schema.infoSections.map((section, i) => {
-            const isMd = looksLikeMarkdown(section.body);
-            return (
-              <details
-                key={`${section.title}-${i}`}
-                open={section.defaultOpen ?? false}
-                className="rounded-md border border-neutral-800 bg-neutral-950/60"
-              >
-                <summary className="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900">
-                  <span className="font-medium">{section.title}</span>
-                  {section.preview && (
-                    <span className="ml-2 text-xs text-neutral-400">{section.preview}</span>
-                  )}
-                </summary>
-                {isMd ? (
-                  <div className="border-t border-neutral-800">
-                    <MarkdownView body={section.body} enhanced />
-                  </div>
-                ) : (
-                  <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-t border-neutral-800 px-3 py-2 text-xs text-neutral-300">
-                    {section.body}
-                  </pre>
-                )}
-              </details>
-            );
-          })}
-        </div>
-      )}
+      <InfoSections sections={schema.infoSections} />
       <div className="flex flex-col gap-4">
         {schema.fields.map((field) => (
           <div key={field.id}>
