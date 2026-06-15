@@ -19,6 +19,10 @@ interface ToolingUpgradeStatusResponse {
   components: ToolingComponentStatus[];
 }
 
+interface ToolingUpgradeApplyResponse {
+  applied: { component: string; from: string; to: string }[];
+}
+
 export interface ToolingUpgradeBannerProps {
   repositoryId: string;
 }
@@ -27,6 +31,7 @@ export function ToolingUpgradeBanner({ repositoryId }: ToolingUpgradeBannerProps
   const [status, setStatus] = useState<ToolingUpgradeStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
+  const [appliedMsg, setAppliedMsg] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -61,10 +66,20 @@ export function ToolingUpgradeBanner({ repositoryId }: ToolingUpgradeBannerProps
     if (applying) return;
     setApplying(true);
     setError(null);
+    setAppliedMsg(null);
     try {
       // Empty body = apply every available component upgrade. This only bumps
       // the repo's version pins; the env image rebuilds on the repo's next task.
-      await api.post(`/repositories/${repositoryId}/tooling-upgrade`, {});
+      const res = await api.post<ToolingUpgradeApplyResponse>(
+        `/repositories/${repositoryId}/tooling-upgrade`,
+        {},
+      );
+      const n = res.applied?.length ?? 0;
+      setAppliedMsg(
+        n > 0
+          ? `Upgraded ${n} component${n === 1 ? '' : 's'} — the environment rebuilds on the next task.`
+          : 'Nothing to apply.',
+      );
       await load();
     } catch (err) {
       setError((err as Error).message ?? 'Failed to apply tooling upgrades');
@@ -74,7 +89,25 @@ export function ToolingUpgradeBanner({ repositoryId }: ToolingUpgradeBannerProps
   }
 
   if (error) return <div className="text-xs text-red-400">Tooling upgrade check: {error}</div>;
-  if (!status || !status.hasUpgradeAvailable) return null;
+  if (!status) return null;
+
+  // Up-to-date (incl. right after a successful apply): keep a compact row so the
+  // "Manage tooling" link stays reachable and the apply result is visible,
+  // mirroring the workflow upgrade banner's up-to-date state.
+  if (!status.hasUpgradeAvailable) {
+    return (
+      <div className="flex flex-wrap items-center gap-2 rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-400">
+        <Badge variant="success">Tooling up to date</Badge>
+        {appliedMsg && <span className="text-emerald-400">{appliedMsg}</span>}
+        <Link
+          href={`/repos/${repositoryId}/tooling`}
+          className="ml-auto text-indigo-300 hover:underline"
+        >
+          Manage tooling
+        </Link>
+      </div>
+    );
+  }
 
   const upgrades = status.components.filter((c) => c.upgradeAvailable);
   return (
