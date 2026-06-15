@@ -275,7 +275,14 @@ export default function GlobalKbPage() {
 
   // Fetch one page from the server. Search + filters run in SQL, so the browser
   // only ever holds the current page (never the whole body-laden corpus).
+  // A monotonic sequence guards against out-of-order responses: on mount the
+  // initial unfiltered fetch and the URL-driven (?status=draft) fetch race, and
+  // without this the slower unfiltered response can land last and overwrite the
+  // filtered one — leaving the list showing everything while the dropdown shows
+  // the filter. Only the most recent request is allowed to apply its result.
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     try {
       const params = new URLSearchParams();
       params.set('page', String(page));
@@ -287,6 +294,7 @@ export default function GlobalKbPage() {
       const res = await api.get<{ entries: GlobalKbEntry[]; total: number; frameworks: string[] }>(
         `/global-kb/entries?${params.toString()}`,
       );
+      if (seq !== loadSeq.current) return;
       setEntries(res.entries);
       setTotal(res.total);
       setFrameworks(res.frameworks);
@@ -296,6 +304,7 @@ export default function GlobalKbPage() {
         setPage(Math.max(1, Math.ceil(res.total / PER_PAGE)));
       }
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       setLoadError((err as ApiError).message ?? 'Failed to load global KB');
     }
   }, [page, debouncedQ, statusFilter, categoryFilter, frameworkFilter]);
