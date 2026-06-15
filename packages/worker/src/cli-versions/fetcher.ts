@@ -1,4 +1,4 @@
-import { logger } from '@haive/shared';
+import { logger, type VersionSource } from '@haive/shared';
 
 const log = logger.child({ module: 'cli-version-fetcher' });
 
@@ -92,4 +92,48 @@ export async function fetchGithubReleases(
   const sorted = sortSemverDesc(stable);
   log.debug({ repo, count: sorted.length, latest: sorted[0] }, 'fetched github releases');
   return { versions: sorted, latestVersion: sorted[0] ?? null };
+}
+
+export async function fetchPypiVersions(pkg: string): Promise<FetchedVersions> {
+  const url = `https://pypi.org/pypi/${pkg}/json`;
+  const body = (await fetchJson(url)) as {
+    releases?: Record<string, unknown>;
+    info?: { version?: string };
+  };
+  const all = Object.keys(body.releases ?? {});
+  const stable = filterStable(all);
+  const sorted = sortSemverDesc(stable).slice(0, MAX_VERSIONS_PER_PROVIDER);
+  // PyPI reports the canonical latest as info.version; fall back to the sorted head.
+  const latest = body.info?.version ?? sorted[0] ?? null;
+  log.debug({ pkg, count: sorted.length, latest }, 'fetched pypi versions');
+  return { versions: sorted, latestVersion: latest };
+}
+
+export async function fetchGemVersions(gem: string): Promise<FetchedVersions> {
+  const url = `https://rubygems.org/api/v1/versions/${gem}.json`;
+  const body = (await fetchJson(url)) as Array<{ number: string; prerelease: boolean }>;
+  const all = body.filter((v) => !v.prerelease).map((v) => v.number);
+  const stable = filterStable(all);
+  const sorted = sortSemverDesc(stable).slice(0, MAX_VERSIONS_PER_PROVIDER);
+  log.debug({ gem, count: sorted.length, latest: sorted[0] }, 'fetched gem versions');
+  return { versions: sorted, latestVersion: sorted[0] ?? null };
+}
+
+/** Dispatch to the right registry fetcher for a VersionSource. Returns null for
+ *  `{ kind: 'none' }` (unpinnable tools). Shared by the CLI and tool refresh jobs. */
+export async function fetchVersionsFromSource(
+  source: VersionSource,
+): Promise<FetchedVersions | null> {
+  switch (source.kind) {
+    case 'npm':
+      return fetchNpmVersions(source.package);
+    case 'github-releases':
+      return fetchGithubReleases(source.repo, source.tagPrefix);
+    case 'pypi':
+      return fetchPypiVersions(source.package);
+    case 'gem':
+      return fetchGemVersions(source.gem);
+    case 'none':
+      return null;
+  }
 }

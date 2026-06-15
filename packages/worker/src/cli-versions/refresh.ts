@@ -3,21 +3,14 @@ import {
   CLI_INSTALL_METADATA,
   CLI_PROVIDER_LIST,
   logger,
+  TOOL_INSTALL_METADATA,
+  TOOL_NAME_LIST,
   type CliProviderName,
   type RefreshCliVersionsJobResult,
-  type VersionSource,
 } from '@haive/shared';
-import { fetchGithubReleases, fetchNpmVersions, type FetchedVersions } from './fetcher.js';
+import { fetchVersionsFromSource } from './fetcher.js';
 
 const log = logger.child({ module: 'cli-version-refresh' });
-
-async function fetchFromSource(source: VersionSource): Promise<FetchedVersions | null> {
-  if (source.kind === 'npm') return fetchNpmVersions(source.package);
-  if (source.kind === 'github-releases') {
-    return fetchGithubReleases(source.repo, source.tagPrefix);
-  }
-  return null;
-}
 
 export async function refreshAllCliVersions(db: Database): Promise<RefreshCliVersionsJobResult> {
   const refreshed: RefreshCliVersionsJobResult['refreshed'] = [];
@@ -30,7 +23,7 @@ export async function refreshAllCliVersions(db: Database): Promise<RefreshCliVer
     if (source.kind === 'none') continue;
 
     try {
-      const fetched = await fetchFromSource(source);
+      const fetched = await fetchVersionsFromSource(source);
       if (!fetched) continue;
       await db
         .insert(schema.cliPackageVersions)
@@ -81,6 +74,70 @@ export async function refreshAllCliVersions(db: Database): Promise<RefreshCliVer
             fetchError: error,
             updatedAt: new Date(),
           },
+        });
+    }
+  }
+
+  return { ok: errors.length === 0, refreshed, errors };
+}
+
+/** Refresh the available-version cache for the non-CLI tools (rtk,
+ *  chrome-devtools-mcp, the pinnable LSP servers). Mirrors refreshAllCliVersions
+ *  but writes to `tool_package_versions`; tools with `versionSource.kind === 'none'`
+ *  (rust-analyzer, jdtls) are skipped. Returns the same result shape. */
+export async function refreshAllToolVersions(db: Database): Promise<RefreshCliVersionsJobResult> {
+  const refreshed: RefreshCliVersionsJobResult['refreshed'] = [];
+  const errors: RefreshCliVersionsJobResult['errors'] = [];
+
+  for (const name of TOOL_NAME_LIST) {
+    const source = TOOL_INSTALL_METADATA[name].versionSource;
+    if (source.kind === 'none') continue;
+
+    try {
+      const fetched = await fetchVersionsFromSource(source);
+      if (!fetched) continue;
+      await db
+        .insert(schema.toolPackageVersions)
+        .values({
+          name,
+          versions: fetched.versions,
+          latestVersion: fetched.latestVersion,
+          fetchedAt: new Date(),
+          fetchError: null,
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: schema.toolPackageVersions.name,
+          set: {
+            versions: fetched.versions,
+            latestVersion: fetched.latestVersion,
+            fetchedAt: new Date(),
+            fetchError: null,
+            updatedAt: new Date(),
+          },
+        });
+      refreshed.push({ name, count: fetched.versions.length, latest: fetched.latestVersion });
+      log.info(
+        { name, count: fetched.versions.length, latest: fetched.latestVersion },
+        'refreshed tool versions',
+      );
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      errors.push({ name, error });
+      log.warn({ name, error }, 'failed to refresh tool versions');
+      await db
+        .insert(schema.toolPackageVersions)
+        .values({
+          name,
+          versions: [],
+          latestVersion: null,
+          fetchedAt: null,
+          fetchError: error,
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: schema.toolPackageVersions.name,
+          set: { fetchError: error, updatedAt: new Date() },
         });
     }
   }

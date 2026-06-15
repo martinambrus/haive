@@ -7,6 +7,8 @@ export type AutoUpdateDisableKnob =
 export type VersionSource =
   | { kind: 'npm'; package: string }
   | { kind: 'github-releases'; repo: string; tagPrefix?: string }
+  | { kind: 'pypi'; package: string }
+  | { kind: 'gem'; gem: string }
   | { kind: 'none' };
 
 export type InstallSpec =

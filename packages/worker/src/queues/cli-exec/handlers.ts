@@ -30,7 +30,7 @@ import {
   type OllamaProvisionJobPayload,
   type OllamaProvisionResult,
 } from '@haive/shared';
-import { refreshAllCliVersions } from '../../cli-versions/index.js';
+import { refreshAllCliVersions, refreshAllToolVersions } from '../../cli-versions/index.js';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
 import { renderDockerfile, resolveImageTag } from '../../sandbox/image-cache.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
@@ -390,7 +390,12 @@ export async function handleBuildSandboxImageJob(
 export async function handleRefreshCliVersionsJob(
   db: Database,
 ): Promise<RefreshCliVersionsJobResult> {
-  return refreshAllCliVersions(db);
+  const [cli, tools] = await Promise.all([refreshAllCliVersions(db), refreshAllToolVersions(db)]);
+  return {
+    ok: cli.ok && tools.ok,
+    refreshed: [...cli.refreshed, ...tools.refreshed],
+    errors: [...cli.errors, ...tools.errors],
+  };
 }
 
 export async function handleLoginCreateJob(

@@ -7,6 +7,7 @@ export * from './task-dag.js';
 export * from './containers.js';
 export * from './env.js';
 export * from './onboarding.js';
+export * from './tools.js';
 export * from './bundles.js';
 export * from './terminal.js';
 export * from './rag.js';
