@@ -27,7 +27,7 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
   const [loadError, setLoadError] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useAutoScrollTerminals();
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const prevCountRef = useRef<number | null>(null);
+  const prevRunningRef = useRef<string[] | null>(null);
 
   // Sync expanded state to autoExpand transitions only — not on every render.
   // This way: a step starts running → terminal pops open; the step finishes →
@@ -69,16 +69,24 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
     return () => clearInterval(t);
   }, [expanded, invocations, reload]);
 
-  // Scroll the newest run into view when a NEW invocation appears (the count
-  // grows). Not on the initial load — the page-level effect scrolls to the first
-  // terminal when a step becomes active; this handles subsequent runs (e.g. the
-  // spec-quality review/correct passes). Gated on the user's preference.
+  // Scroll the newest RUNNING run into view whenever the set of running runs gains
+  // a member — a fresh run starts OR a queued one finally gets a slot (its
+  // predecessor finished). Tracking the running SET, not just the count, is what
+  // makes the scroll follow the last ACTIVE terminal as the queue drains, instead
+  // of stalling on whichever ran first (e.g. landing on terminal 7 when 7 AND 8 go
+  // active). Not on the initial load (the page-level effect scrolls to the first
+  // terminal when the step becomes active). Gated on the user's preference.
   useEffect(() => {
-    if (invocations === null) return;
-    const count = invocations.length;
-    const prev = prevCountRef.current;
-    prevCountRef.current = count;
-    if (prev === null || count <= prev || !autoScroll) return;
+    if (invocations === null || !autoScroll) return;
+    // "running" = started and not yet ended (mirrors the data-cli-running marker).
+    const runningIds = invocations
+      .filter((i) => i.isActive && i.startedAt !== null)
+      .map((i) => i.id);
+    const prev = prevRunningRef.current;
+    prevRunningRef.current = runningIds;
+    if (prev === null) return;
+    const gainedActive = runningIds.some((id) => !prev.includes(id));
+    if (!gainedActive) return;
     // The new panel and its xterm mount a tick later; retry briefly.
     const timers = [80, 300, 700].map((delay) =>
       setTimeout(() => {
