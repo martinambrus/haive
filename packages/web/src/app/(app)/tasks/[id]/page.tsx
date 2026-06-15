@@ -1170,12 +1170,12 @@ function TaskTotalTime({
 }
 
 // Markdown documents a step writes to its `output` that should render as readable
-// disclosures on the done card. The apply phase stores these as plain strings, which
-// otherwise only surface as raw JSON behind "Show output" — so the business-
-// requirements doc (03b) and technical spec (04) were effectively invisible once the
-// approve/deny review was dropped. Field -> heading.
+// disclosures on the done card, instead of only surfacing as raw JSON behind "Show
+// output". The technical spec (04) has no form section that shows it, so render it
+// here. The business-requirements doc is intentionally NOT listed: the 03c review
+// step already shows it via its own form infoSection, so listing it here would
+// duplicate the doc onto the 03b done card. Field -> heading.
 const OUTPUT_DOC_FIELDS: ReadonlyArray<{ field: string; label: string }> = [
-  { field: 'requirements', label: 'Business requirements' },
   { field: 'spec', label: 'Technical specification' },
 ];
 
