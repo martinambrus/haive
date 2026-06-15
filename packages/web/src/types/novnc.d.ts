@@ -1,5 +1,7 @@
-// @novnc/novnc ships no TypeScript types; minimal surface we use.
-declare module '@novnc/novnc/core/rfb' {
+// @novnc/novnc ships no TypeScript types; minimal surface we use. Declared for the
+// BARE package specifier: novnc 1.7.0's `exports: "./core/rfb.js"` blocks the
+// `/core/rfb` subpath at bundle time, so BrowserVncPanel imports the bare package.
+declare module '@novnc/novnc' {
   export default class RFB {
     constructor(target: HTMLElement, url: string, options?: Record<string, unknown>);
     scaleViewport: boolean;
