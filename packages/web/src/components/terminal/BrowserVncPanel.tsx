@@ -46,7 +46,9 @@ export function BrowserVncPanel({ taskId, title, autoCollapse }: BrowserVncPanel
     setState('connecting');
     setMessage(null);
     try {
-      const { default: RFB } = await import('@novnc/novnc/core/rfb');
+      // novnc 1.7.0 ships `exports: "./core/rfb.js"`, which blocks the `/core/rfb`
+      // subpath import — the bare package specifier maps to that same module.
+      const { default: RFB } = await import('@novnc/novnc');
       const rfb = new RFB(containerRef.current, apiWebSocketUrl(`/browser-vnc/${taskId}`));
       rfb.scaleViewport = true;
       rfb.addEventListener('connect', () => setState('connected'));
