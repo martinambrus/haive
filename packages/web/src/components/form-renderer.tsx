@@ -334,6 +334,15 @@ interface FieldRowProps {
 }
 
 function FieldRow({ field, value, onChange, disabled, repositoryId }: FieldRowProps) {
+  if (field.type === 'note') {
+    return looksLikeMarkdown(field.body) ? (
+      <div className="text-sm text-neutral-400">
+        <MarkdownView body={field.body} enhanced />
+      </div>
+    ) : (
+      <p className="whitespace-pre-line text-sm text-neutral-400">{field.body}</p>
+    );
+  }
   if (field.type === 'checkbox') {
     return (
       <div className="flex flex-col gap-1">
@@ -386,6 +395,9 @@ function FieldControl({ field, value, onChange, disabled, repositoryId }: FieldR
   );
 
   switch (field.type) {
+    case 'note':
+      // Read-only notes are rendered by FieldRow; they never reach FieldControl.
+      return null;
     case 'text':
       return (
         <Input

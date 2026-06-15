@@ -36,11 +36,15 @@ interface ToolingDetect {
    *  as the form-field default so a re-run of step 04 reflects the most
    *  recently saved choice instead of the hard-coded migration default. */
   rtkEnabled: boolean;
-  /** This task's repository id, for the read-only tooling-page link. */
+  /** This task's repository id, for the bottom tooling-page link. */
   repositoryId: string | null;
-  /** Pre-rendered "Component: version (latest)" lines for the read-only tooling
-   *  versions info card. Version pinning itself lives on the /tooling page. */
-  toolingVersionLines: string[];
+  /** "version (latest)" label shown in the RTK checkbox description. */
+  rtkVersionLabel: string;
+  /** "version (latest)" label shown in the MCP (.claude/mcp_settings.json) field. */
+  chromeVersionLabel: string;
+  /** Per-LSP-option version badge (option value → "version (latest)"). Absent for
+   *  the unpinnable servers (rust → rust-analyzer, java → jdtls). */
+  lspVersionByOption: Record<string, string>;
 }
 
 interface EnvDetectData {
@@ -60,6 +64,19 @@ const LSP_OPTIONS: { value: string; label: string }[] = [
   { value: 'rust', label: 'rust-analyzer (Rust)' },
   { value: 'java', label: 'jdtls (Java)' },
 ];
+
+/** Maps each LSP option value (a language) to the tool name whose version cache
+ *  it uses, for surfacing the version badge. rust/java map to unpinnable servers
+ *  (rust-analyzer, jdtls) that have no cached version → no badge. */
+const LSP_OPTION_TO_TOOL: Record<string, string> = {
+  php: 'intelephense',
+  'php-extended': 'intelephense',
+  typescript: 'vtsls',
+  python: 'pyright',
+  go: 'gopls',
+  rust: 'rust-analyzer',
+  java: 'jdtls',
+};
 
 /** Frameworks that use non-standard PHP file extensions (.inc, .module, etc.) */
 const PHP_EXTENDED_FRAMEWORKS = new Set([
@@ -159,9 +176,9 @@ export const toolingInfrastructureStep: StepDefinition<
       }
     }
 
-    // Read-only "tooling versions" summary for the info card. Newest = head of
-    // the sorted-desc cache list (falls back to the dist-tag latest). An unpinned
-    // component (or a pin equal to newest) is shown with a " (latest)" suffix.
+    // Version labels for the checkbox/field descriptions + badges. Newest = head
+    // of the sorted-desc cache list (falls back to the dist-tag latest). An
+    // unpinned component (or a pin equal to newest) gets a " (latest)" suffix.
     const toolRows = await ctx.db
       .select({
         name: schema.toolPackageVersions.name,
@@ -177,19 +194,11 @@ export const toolingInfrastructureStep: StepDefinition<
       if (!effective) return 'latest';
       return `${effective}${!pin || pin === newest ? ' (latest)' : ''}`;
     };
-    const lspParts = ['intelephense', 'vtsls', 'pyright', 'gopls', 'solargraph']
-      .map((t) => {
-        const v = newestByTool.get(t);
-        return v ? `${t} ${v}` : null;
-      })
-      .filter((s): s is string => s !== null);
-    const toolingVersionLines = [
-      `RTK proxy: ${fmtVersion(rtkVersionPin, 'rtk')}`,
-      `Chrome DevTools MCP: ${fmtVersion(chromeMcpPin, 'chrome-devtools-mcp')}`,
-      lspParts.length > 0
-        ? `LSP servers (latest at build unless pinned): ${lspParts.join(', ')}`
-        : '',
-    ].filter((s) => s.length > 0);
+    const lspVersionByOption: Record<string, string> = {};
+    for (const [optValue, tool] of Object.entries(LSP_OPTION_TO_TOOL)) {
+      const v = newestByTool.get(tool);
+      if (v) lspVersionByOption[optValue] = `${v} (latest)`;
+    }
 
     return {
       primaryLanguage: data.project.primaryLanguage,
@@ -202,7 +211,9 @@ export const toolingInfrastructureStep: StepDefinition<
       cliSupportsPlugins: cliMeta?.supportsPlugins ?? false,
       rtkEnabled,
       repositoryId,
-      toolingVersionLines,
+      rtkVersionLabel: fmtVersion(rtkVersionPin, 'rtk'),
+      chromeVersionLabel: fmtVersion(chromeMcpPin, 'chrome-devtools-mcp'),
+      lspVersionByOption,
     };
   },
 
@@ -218,31 +229,20 @@ export const toolingInfrastructureStep: StepDefinition<
     );
     const ragDefault = detected.containerType === 'ddev' ? 'ddev' : 'internal';
 
-    // Read-only versions card with a new-tab link to the per-repo tooling page
-    // (the markdown link makes MarkdownView render it as a target=_blank anchor).
-    // Version pinning is centralized there; this step only enables/selects.
-    const versionLines = detected.toolingVersionLines ?? [];
-    const toolingInfoSections =
-      detected.repositoryId && versionLines.length > 0
-        ? [
-            {
-              title: 'Tooling versions',
-              preview: 'view / pin on the tooling page',
-              body:
-                `Versions used for this repository. Enable/disable components and pin specific ` +
-                `versions on the [tooling page](/repos/${detected.repositoryId}/tooling) ` +
-                `(opens in a new tab).\n\n` +
-                versionLines.map((l) => `- ${l}`).join('\n'),
-              defaultOpen: true,
-            },
-          ]
-        : undefined;
+    // Show each LSP server's version as a badge on its checkbox (absent for the
+    // unpinnable servers). Selecting installs that version at latest; pinning a
+    // specific version is done on the tooling page.
+    const lspVersionByOption = detected.lspVersionByOption ?? {};
+    const lspOptions = LSP_OPTIONS.map((o) =>
+      lspVersionByOption[o.value]
+        ? { ...o, badge: lspVersionByOption[o.value], badgeColor: 'green' as const }
+        : o,
+    );
 
     return {
       title: 'Tooling and infrastructure',
       description:
         'Configure RAG storage, Ollama embeddings, MCP browser testing and LSP language server preferences for this project.',
-      ...(toolingInfoSections ? { infoSections: toolingInfoSections } : {}),
       fields: [
         {
           type: 'select',
@@ -299,7 +299,8 @@ export const toolingInfrastructureStep: StepDefinition<
             (detected.cliSupportsMcp
               ? ''
               : `WARNING: ${detected.cliDisplayName ?? 'the current CLI'} does not support MCP in haive. Settings will be saved but ignored until you switch to a CLI that does (e.g. Claude Code, Codex, Gemini, Z.AI). `) +
-            'Written verbatim to .claude/mcp_settings.json and passed to Claude Code via --mcp-config. Pre-filled with the Chrome DevTools MCP server used by browser-testing workflow steps. Add additional servers inside the mcpServers object (e.g. filesystem, git, postgres). Leave empty to disable all MCP servers — a stub config (`{"mcpServers": {}}`) is written so CLI providers that pass --mcp-config still load successfully.',
+            'Written verbatim to .claude/mcp_settings.json and passed to Claude Code via --mcp-config. Pre-filled with the Chrome DevTools MCP server used by browser-testing workflow steps. Add additional servers inside the mcpServers object (e.g. filesystem, git, postgres). Leave empty to disable all MCP servers — a stub config (`{"mcpServers": {}}`) is written so CLI providers that pass --mcp-config still load successfully.' +
+            ` Chrome DevTools MCP currently ${detected.chromeVersionLabel ?? 'latest'}.`,
           default: DEFAULT_MCP_SETTINGS_JSON,
           rows: 14,
         },
@@ -312,7 +313,7 @@ export const toolingInfrastructureStep: StepDefinition<
               ? ''
               : `WARNING: ${detected.cliDisplayName ?? 'the current CLI'} does not support plugin install in haive. LSP servers will still be baked into the project image, but LSP plugins will not be installed into the CLI until you switch to a CLI that supports them (e.g. Claude Code, Z.AI, Qwen). `) +
             'Pick one or more language servers to install. Leave empty to skip LSP installation.',
-          options: LSP_OPTIONS,
+          options: lspOptions,
           defaults: defaultLspForLanguage(
             detected.primaryLanguage,
             detected.framework,
@@ -323,10 +324,19 @@ export const toolingInfrastructureStep: StepDefinition<
           type: 'checkbox',
           id: 'rtkEnabled',
           label: 'Enable RTK token-saving proxy',
-          description:
-            'Routes common dev commands (git, npm, docker, tests, etc.) through rtk so their output is compressed 60–90% before reaching the LLM. The binary is baked into every sandbox; per-CLI hook configs are written into the repo and into the per-task auth volume. Toggle off to remove the configs on the next upgrade-apply. Unpinned uses the latest rtk; pin a specific version on the tooling page (linked above).',
+          description: `Routes common dev commands (git, npm, docker, tests, etc.) through rtk, compressing their output 60–90% before it reaches the LLM. Baked into every sandbox; currently rtk ${detected.rtkVersionLabel ?? 'latest'}.`,
           default: detected.rtkEnabled,
         },
+        ...(detected.repositoryId
+          ? [
+              {
+                type: 'note' as const,
+                id: 'toolingLink',
+                label: 'Tooling page',
+                body: `Enable/disable components and manage versions for this repository on the [tooling page](/repos/${detected.repositoryId}/tooling) (opens in a new tab).`,
+              },
+            ]
+          : []),
       ],
       submitLabel: 'Save tooling preferences',
     };

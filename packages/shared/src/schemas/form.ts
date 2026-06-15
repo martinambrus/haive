@@ -112,6 +112,15 @@ export const numberFieldSchema = baseField.extend({
   step: z.number().optional(),
 });
 
+/** Read-only note rendered inline among the fields (no input value). `body` is
+ *  shown as markdown when it looks like markdown (links open in a new tab),
+ *  else as plain text. Use for a short contextual line — e.g. a link to a
+ *  related settings page — positioned by its place in the fields array. */
+export const noteFieldSchema = baseField.extend({
+  type: z.literal('note'),
+  body: z.string(),
+});
+
 export const treeNodeSchema: z.ZodType<TreeNode> = z.lazy(() =>
   z.object({
     path: z.string(),
@@ -193,6 +202,7 @@ export const leafFormFieldSchema = z.discriminatedUnion('type', [
   directoryPickerFieldSchema,
   fileUploadFieldSchema,
   numberFieldSchema,
+  noteFieldSchema,
   directoryTreeFieldSchema,
   bundleComposerFieldSchema,
   globalKbStatusFieldSchema,
@@ -225,6 +235,7 @@ export const formFieldSchema = z.discriminatedUnion('type', [
   directoryPickerFieldSchema,
   fileUploadFieldSchema,
   numberFieldSchema,
+  noteFieldSchema,
   directoryTreeFieldSchema,
   accordionFieldSchema,
   bundleComposerFieldSchema,
