@@ -36,12 +36,11 @@ interface ToolingDetect {
    *  as the form-field default so a re-run of step 04 reflects the most
    *  recently saved choice instead of the hard-coded migration default. */
   rtkEnabled: boolean;
-  /** Current `repositories.rtk_version` pin (null = follow latest/default). */
-  rtkVersion: string | null;
-  /** Available rtk versions from the tool_package_versions cache, newest first. */
-  rtkVersions: string[];
-  /** Newest available rtk version, or null when the cache is empty. */
-  rtkLatestVersion: string | null;
+  /** This task's repository id, for the read-only tooling-page link. */
+  repositoryId: string | null;
+  /** Pre-rendered "Component: version (latest)" lines for the read-only tooling
+   *  versions info card. Version pinning itself lives on the /tooling page. */
+  toolingVersionLines: string[];
 }
 
 interface EnvDetectData {
@@ -140,32 +139,57 @@ export const toolingInfrastructureStep: StepDefinition<
       .where(eq(schema.tasks.id, ctx.taskId))
       .limit(1);
     let rtkEnabled = true;
-    let rtkVersion: string | null = null;
+    let rtkVersionPin: string | null = null;
+    let chromeMcpPin: string | null = null;
     const repositoryId = taskRow[0]?.repositoryId ?? null;
     if (repositoryId) {
       const repoRow = await ctx.db
         .select({
           rtkEnabled: schema.repositories.rtkEnabled,
           rtkVersion: schema.repositories.rtkVersion,
+          chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
         })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repositoryId))
         .limit(1);
       if (repoRow[0]) {
         rtkEnabled = repoRow[0].rtkEnabled;
-        rtkVersion = repoRow[0].rtkVersion;
+        rtkVersionPin = repoRow[0].rtkVersion;
+        chromeMcpPin = repoRow[0].chromeDevtoolsMcpVersion;
       }
     }
 
-    // Available rtk versions for the picker, from the worker-refreshed cache.
-    const rtkCache = await ctx.db
+    // Read-only "tooling versions" summary for the info card. Newest = head of
+    // the sorted-desc cache list (falls back to the dist-tag latest). An unpinned
+    // component (or a pin equal to newest) is shown with a " (latest)" suffix.
+    const toolRows = await ctx.db
       .select({
+        name: schema.toolPackageVersions.name,
         versions: schema.toolPackageVersions.versions,
         latestVersion: schema.toolPackageVersions.latestVersion,
       })
-      .from(schema.toolPackageVersions)
-      .where(eq(schema.toolPackageVersions.name, 'rtk'))
-      .limit(1);
+      .from(schema.toolPackageVersions);
+    const newestByTool = new Map<string, string | null>();
+    for (const r of toolRows) newestByTool.set(r.name, r.versions?.[0] ?? r.latestVersion ?? null);
+    const fmtVersion = (pin: string | null, tool: string): string => {
+      const newest = newestByTool.get(tool) ?? null;
+      const effective = pin ?? newest;
+      if (!effective) return 'latest';
+      return `${effective}${!pin || pin === newest ? ' (latest)' : ''}`;
+    };
+    const lspParts = ['intelephense', 'vtsls', 'pyright', 'gopls', 'solargraph']
+      .map((t) => {
+        const v = newestByTool.get(t);
+        return v ? `${t} ${v}` : null;
+      })
+      .filter((s): s is string => s !== null);
+    const toolingVersionLines = [
+      `RTK proxy: ${fmtVersion(rtkVersionPin, 'rtk')}`,
+      `Chrome DevTools MCP: ${fmtVersion(chromeMcpPin, 'chrome-devtools-mcp')}`,
+      lspParts.length > 0
+        ? `LSP servers (latest at build unless pinned): ${lspParts.join(', ')}`
+        : '',
+    ].filter((s) => s.length > 0);
 
     return {
       primaryLanguage: data.project.primaryLanguage,
@@ -177,9 +201,8 @@ export const toolingInfrastructureStep: StepDefinition<
       cliSupportsMcp: cliMeta?.supportsMcp ?? false,
       cliSupportsPlugins: cliMeta?.supportsPlugins ?? false,
       rtkEnabled,
-      rtkVersion,
-      rtkVersions: rtkCache[0]?.versions ?? [],
-      rtkLatestVersion: rtkCache[0]?.latestVersion ?? null,
+      repositoryId,
+      toolingVersionLines,
     };
   },
 
@@ -195,29 +218,31 @@ export const toolingInfrastructureStep: StepDefinition<
     );
     const ragDefault = detected.containerType === 'ddev' ? 'ddev' : 'internal';
 
-    const rtkVersionsList = detected.rtkVersions ?? [];
-    const rtkVersionOptions: { value: string; label: string }[] = [
-      {
-        value: '',
-        label: detected.rtkLatestVersion
-          ? `Latest (${detected.rtkLatestVersion})`
-          : 'Latest available',
-      },
-      ...rtkVersionsList.map((v) => ({ value: v, label: v })),
-    ];
-    // Keep a previously-pinned version selectable even if it rotated out of the cache.
-    if (detected.rtkVersion && !rtkVersionsList.includes(detected.rtkVersion)) {
-      rtkVersionOptions.push({
-        value: detected.rtkVersion,
-        label: `${detected.rtkVersion} (current)`,
-      });
-    }
-    const rtkVersionDefault = detected.rtkVersion ?? '';
+    // Read-only versions card with a new-tab link to the per-repo tooling page
+    // (the markdown link makes MarkdownView render it as a target=_blank anchor).
+    // Version pinning is centralized there; this step only enables/selects.
+    const versionLines = detected.toolingVersionLines ?? [];
+    const toolingInfoSections =
+      detected.repositoryId && versionLines.length > 0
+        ? [
+            {
+              title: 'Tooling versions',
+              preview: 'view / pin on the tooling page',
+              body:
+                `Versions used for this repository. Enable/disable components and pin specific ` +
+                `versions on the [tooling page](/repos/${detected.repositoryId}/tooling) ` +
+                `(opens in a new tab).\n\n` +
+                versionLines.map((l) => `- ${l}`).join('\n'),
+              defaultOpen: true,
+            },
+          ]
+        : undefined;
 
     return {
       title: 'Tooling and infrastructure',
       description:
         'Configure RAG storage, Ollama embeddings, MCP browser testing and LSP language server preferences for this project.',
+      ...(toolingInfoSections ? { infoSections: toolingInfoSections } : {}),
       fields: [
         {
           type: 'select',
@@ -299,17 +324,8 @@ export const toolingInfrastructureStep: StepDefinition<
           id: 'rtkEnabled',
           label: 'Enable RTK token-saving proxy',
           description:
-            'Routes common dev commands (git, npm, docker, tests, etc.) through rtk so their output is compressed 60–90% before reaching the LLM. The binary is baked into every sandbox; per-CLI hook configs are written into the repo and into the per-task auth volume. Toggle off to remove the configs on the next upgrade-apply.',
+            'Routes common dev commands (git, npm, docker, tests, etc.) through rtk so their output is compressed 60–90% before reaching the LLM. The binary is baked into every sandbox; per-CLI hook configs are written into the repo and into the per-task auth volume. Toggle off to remove the configs on the next upgrade-apply. Unpinned uses the latest rtk; pin a specific version on the tooling page (linked above).',
           default: detected.rtkEnabled,
-        },
-        {
-          type: 'select',
-          id: 'rtkVersion',
-          label: 'RTK version',
-          description:
-            'Pin a specific rtk release for this project’s sandbox images, or track the latest. "Latest" resolves to the newest published version when you save. Only applies when RTK is enabled; a changed version rebuilds the environment image on the next task.',
-          default: rtkVersionDefault,
-          options: rtkVersionOptions,
         },
       ],
       submitLabel: 'Save tooling preferences',
@@ -340,15 +356,9 @@ export const toolingInfrastructureStep: StepDefinition<
     const rtkEnabled = Boolean(tooling.rtkEnabled);
     tooling.rtkEnabled = rtkEnabled;
 
-    // RTK version: the empty "Latest" selection is stored as null = track latest
-    // (the composer resolves null to the newest rtk at build, and the tooling
-    // upgrade banner never nags an unpinned repo); a concrete value is an
-    // explicit pin that the banner flags when a newer release appears.
-    const requestedRtkVersion =
-      typeof tooling.rtkVersion === 'string' ? tooling.rtkVersion.trim() : '';
-    const resolvedRtkVersion: string | null = requestedRtkVersion || null;
-    tooling.rtkVersion = resolvedRtkVersion;
-
+    // Persist RTK enable/disable only. RTK/LSP/chrome-devtools-mcp *version*
+    // pinning is centralized on the per-repo tooling page, so this step no longer
+    // writes rtk_version — an unpinned repo tracks the latest rtk at build.
     const taskRow = await ctx.db
       .select({ repositoryId: schema.tasks.repositoryId })
       .from(schema.tasks)
@@ -358,11 +368,11 @@ export const toolingInfrastructureStep: StepDefinition<
     if (repositoryId) {
       await ctx.db
         .update(schema.repositories)
-        .set({ rtkEnabled, rtkVersion: resolvedRtkVersion, updatedAt: new Date() })
+        .set({ rtkEnabled, updatedAt: new Date() })
         .where(eq(schema.repositories.id, repositoryId));
     } else {
       ctx.logger.warn(
-        'tooling-infrastructure: task has no repository_id; rtk preferences persisted only in step output',
+        'tooling-infrastructure: task has no repository_id; rtk_enabled persisted only in step output',
       );
     }
 
