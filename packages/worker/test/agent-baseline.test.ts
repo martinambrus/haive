@@ -101,4 +101,29 @@ describe('ported baseline agents', () => {
     expect(reviewerMd).toContain('warn finding');
     expect(reviewerMd).toContain('## Comprehension Quiz');
   });
+
+  it('working agents get the Response Style directive; document agents are exempt', () => {
+    const render = (id: string) =>
+      buildAgentFileForTarget(BASELINE_AGENT_SPECS.find((s) => s.id === id)!, {
+        dir: '.claude/agents',
+        format: 'markdown',
+      });
+
+    // Working agent → terseness directive present.
+    expect(render('code-reviewer')).toContain('## Response Style');
+
+    // Document-producing agents → directive must be absent so deliverables stay thorough.
+    for (const id of [
+      'technical-spec-writer',
+      'business-requirements-writer',
+      'spec-quality-reviewer',
+      'docs-writer',
+      'markdown-humanizer',
+      'accessibility-specialist',
+    ]) {
+      expect(render(id), `${id} should be exempt from Response Style`).not.toContain(
+        '## Response Style',
+      );
+    }
+  });
 });

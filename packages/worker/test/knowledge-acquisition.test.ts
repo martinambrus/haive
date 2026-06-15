@@ -463,3 +463,20 @@ describe('knowledgeAcquisitionStep.apply — improve stale KB files', () => {
     expect(dep).not.toContain('verbatim-marker.'); // not the verbatim placement
   });
 });
+
+describe('buildKnowledgePrompt', () => {
+  it('instructs the LLM to write section bodies densely to keep the KB token-light', () => {
+    const prompt = knowledgeAcquisitionStep.llm!.buildPrompt({
+      detected: {
+        framework: 'nodejs',
+        language: 'typescript',
+        packages: [],
+        customCode: { include: [], exclude: [] },
+      },
+      formValues: {},
+    });
+    expect(prompt).toContain('Write section bodies DENSELY');
+    // The density rule must not weaken the exact-content guarantee.
+    expect(prompt).toContain('Preserve EXACTLY');
+  });
+});

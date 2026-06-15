@@ -31,6 +31,35 @@ const SEARCH_ORDER_BLOCK = [
   '   - Most token-expensive — use only if RAG and KB are insufficient and LSP not applicable',
 ].join('\n');
 
+// Complements SEARCH_ORDER_BLOCK (which trims READ tokens): a WRITE-side
+// directive that keeps agent output concise to save subscription token
+// allowance. Injected into every working agent except the document-producing
+// ones in RESPONSE_STYLE_EXEMPT_IDS, whose deliverables must stay thorough.
+const RESPONSE_STYLE_BLOCK = [
+  '## Response Style',
+  '',
+  'Be concise. Lead with the answer, then only the reasoning that matters. Drop filler and',
+  'do not restate the question. Prefer fragments and lists over prose paragraphs.',
+  '',
+  'Exceptions — be as thorough as the task needs when writing a specification, requirements,',
+  'a migration, or a security finding; when explaining a multi-step plan; or when producing',
+  'user-facing documentation.',
+  '',
+  'Never compress structured output: emit JSON, code, diffs, and any required format exactly',
+  'as specified.',
+].join('\n');
+
+// Agents whose entire job is to produce thorough, descriptive deliverables.
+// They must NOT receive the terseness directive.
+const RESPONSE_STYLE_EXEMPT_IDS = new Set<string>([
+  'technical-spec-writer',
+  'business-requirements-writer',
+  'spec-quality-reviewer',
+  'docs-writer',
+  'markdown-humanizer',
+  'accessibility-specialist',
+]);
+
 function firstCharLower(s: string): string {
   return s.length === 0 ? s : s.charAt(0).toLowerCase() + s.slice(1);
 }
@@ -44,11 +73,13 @@ function yamlKbRefs(refs: AgentKbRefs): string[] {
 }
 
 function buildAgentBody(spec: AgentSpec): string {
+  const responseStyle = RESPONSE_STYLE_EXEMPT_IDS.has(spec.id) ? [] : [RESPONSE_STYLE_BLOCK, ''];
   const body: string[] = [
     `# ${spec.title}`,
     '',
     `You are the **${spec.title}**, a specialized agent that ${firstCharLower(spec.description)}`,
     '',
+    ...responseStyle,
     '## Core Mission',
     '',
     spec.coreMission,
