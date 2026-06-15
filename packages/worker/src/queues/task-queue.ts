@@ -667,17 +667,22 @@ async function handleAdvanceStep(db: Database, payload: TaskJobPayload): Promise
     return;
   }
 
-  let formValues = payload.formValues;
-  if (!formValues) {
-    const existing = await db
-      .select()
-      .from(schema.taskSteps)
-      .where(
-        and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, payload.stepId)),
-      )
-      .limit(1);
-    formValues = existing[0]?.formValues ?? undefined;
+  const existingRows = await db
+    .select()
+    .from(schema.taskSteps)
+    .where(
+      and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, payload.stepId)),
+    )
+    .limit(1);
+  const existing = existingRows[0];
+  // Finalized out-of-band — a user Skip via the api set this step to 'skipped'.
+  // Don't re-run it; advance to the next step from the registry run list (the api
+  // can't see unmaterialized future steps to compute the next step itself).
+  if (existing?.status === 'skipped') {
+    await handleResult(db, ctx, payload.stepId, { status: 'skipped', row: existing });
+    return;
   }
+  const formValues = payload.formValues ?? existing?.formValues ?? undefined;
 
   const providers = await loadProviders(db, ctx.userId);
   const result = await advanceStep({

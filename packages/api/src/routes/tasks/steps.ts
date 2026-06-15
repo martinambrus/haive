@@ -463,11 +463,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     if (step.status !== 'failed' && step.status !== 'waiting_form') {
       throw new HttpError(409, `Cannot skip step in status ${step.status}`);
     }
-    const result = await db.transaction(async (tx) => {
-      const now = new Date();
-      const closedIdleMs = step.waitingStartedAt
-        ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
-        : 0;
+    const now = new Date();
+    const closedIdleMs = step.waitingStartedAt
+      ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
+      : 0;
+    await db.transaction(async (tx) => {
       await tx
         .update(schema.taskSteps)
         .set({
@@ -485,63 +485,25 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         eventType: 'step.skip',
         payload: { stepId, note: body.note ?? null },
       });
-
-      const nextRows = await tx
-        .select()
-        .from(schema.taskSteps)
-        .where(eq(schema.taskSteps.taskId, id))
-        .orderBy(asc(schema.taskSteps.stepIndex));
-      const currentIdx = nextRows.findIndex((r) => r.id === step.id);
-      const next = currentIdx >= 0 ? nextRows[currentIdx + 1] : undefined;
-
-      if (next) {
-        await tx
-          .update(schema.tasks)
-          .set({
-            status: 'running',
-            errorMessage: null,
-            currentStepId: next.stepId,
-            currentStepIndex: next.stepIndex,
-            updatedAt: now,
-          })
-          .where(eq(schema.tasks.id, id));
-        return { completed: false as const, nextStepId: next.stepId };
-      }
-
       await tx
         .update(schema.tasks)
-        .set({
-          status: 'completed',
-          completedAt: now,
-          updatedAt: now,
-        })
+        .set({ status: 'running', errorMessage: null, updatedAt: now })
         .where(eq(schema.tasks.id, id));
-      await tx.insert(schema.taskEvents).values({
-        taskId: id,
-        taskStepId: null,
-        eventType: 'task.completed',
-        payload: { reason: 'skip-to-end' },
-      });
-      return { completed: true as const, nextStepId: null };
     });
-
-    if (!result.completed) {
-      await getTaskQueue().add(
-        TASK_JOB_NAMES.ADVANCE_STEP,
-        { taskId: id, userId, stepId: result.nextStepId } as TaskJobPayload,
-        {
-          attempts: 3,
-          backoff: { type: 'exponential', delay: 5000 },
-          removeOnComplete: 100,
-          removeOnFail: 100,
-        },
-      );
-      return c.json({
-        ok: true,
-        status: 'skipped',
-        nextStepId: result.nextStepId,
-      });
-    }
+    // The api can't see unmaterialized future steps, so it can't compute the next
+    // step. Enqueue an advance for the SKIPPED step; the worker sees it is already
+    // terminal and advances to the next step via the registry run list — the same
+    // path a step's own `skipped`/`done` result takes (handleResult → buildRunList).
+    await getTaskQueue().add(
+      TASK_JOB_NAMES.ADVANCE_STEP,
+      { taskId: id, userId, stepId } as TaskJobPayload,
+      {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: 100,
+        removeOnFail: 100,
+      },
+    );
     return c.json({ ok: true, status: 'skipped', nextStepId: null });
   }
 
