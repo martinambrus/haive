@@ -60,4 +60,20 @@ describe('issuePaths', () => {
     expect(p.sandboxWorktreePath).toBe('/haive/workdir/.haive/worktrees/feat-x--ISSUE-001');
     expect(p.branchName).toBe('feat-x--ISSUE-001');
   });
+
+  it('flattens a namespaced integration branch for the dir but keeps the slash in the branch ref', () => {
+    const ctx = {
+      repoPath: '/var/lib/haive/repos/u/r',
+      sandboxWorkdir: '/haive/workdir',
+    } as StepContext;
+    const p = issuePaths(
+      ctx,
+      { path: '/var/lib/haive/repos/u/r/.haive/worktrees/feature-foo', branch: 'feature/foo' },
+      'ISSUE-001',
+    );
+    // dir stays one level under worktrees (slash flattened)…
+    expect(p.worktreePath).toBe('/var/lib/haive/repos/u/r/.haive/worktrees/feature-foo--ISSUE-001');
+    // …but the git branch ref keeps the namespacing slash
+    expect(p.branchName).toBe('feature/foo--ISSUE-001');
+  });
 });

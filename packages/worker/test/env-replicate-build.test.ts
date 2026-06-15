@@ -279,6 +279,31 @@ describe('createVerifyEnvironmentStep.apply', () => {
     expect(result.reports[1]!.passed).toBe(false);
   });
 
+  it('opts into auto-submit so Auto-continue runs every check unattended', () => {
+    const inert: DockerRunner = {
+      build: async () => {
+        throw new Error('no');
+      },
+      run: async () => {
+        throw new Error('no');
+      },
+    };
+    const step = createVerifyEnvironmentStep(inert);
+    expect(step.metadata.autoSubmitDefaults).toBe(true);
+    const { ctx } = makeStubCtx();
+    const form = step.form!(ctx, {
+      envTemplateId: 'e',
+      imageRef: 'img:latest',
+      checks: [
+        { id: 'node', label: 'Node', cmd: ['node', '--version'] },
+        { id: 'bash', label: 'Shell', cmd: ['bash', '-c', 'echo ok'] },
+      ],
+    });
+    const ms = form!.fields.find((f) => f.id === 'selectedChecks');
+    // every check ticked by default → the runner auto-submits all of them
+    expect(ms && 'defaults' in ms ? ms.defaults : undefined).toEqual(['node', 'bash']);
+  });
+
   it('skips checks that are not in selectedChecks', async () => {
     const calls: string[] = [];
     const stubRunner: DockerRunner = {

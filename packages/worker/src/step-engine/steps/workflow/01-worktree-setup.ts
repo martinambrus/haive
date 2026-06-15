@@ -2,6 +2,8 @@ import { execFile } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { pathExists } from '../onboarding/_helpers.js';
@@ -23,6 +25,8 @@ interface WorktreeDetect {
   hasGit: boolean;
   currentBranch: string | null;
   isClean: boolean;
+  /** Pre-filled feature/fix branch name derived from the task title. */
+  proposedBranch: string;
 }
 
 interface WorktreeApply {
@@ -38,6 +42,40 @@ function slugify(input: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 48);
+}
+
+/** Slash-aware branch normalizer: slugifies each `/`-separated segment so a
+ *  `feature/<title>` / `fix/<title>` name keeps its prefix slash (plain slugify
+ *  flattens it). Caps total length and trims trailing separators. */
+export function slugifyBranch(input: string): string {
+  const segments = input
+    .toLowerCase()
+    .split('/')
+    .map((s) => s.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''))
+    .filter(Boolean);
+  const joined = segments
+    .join('/')
+    .slice(0, 60)
+    .replace(/[-/]+$/g, '');
+  return joined || 'feature-task';
+}
+
+/** A bug-fix task is flagged at creation (tasks.metadata.category='bugfix') or
+ *  inferred from the title/description. Mirrors detectBugFix in 11-phase-8-learning. */
+export function isBugBranch(
+  title: string,
+  description: string | null,
+  category: string | null,
+): boolean {
+  if (category === 'bugfix') return true;
+  return /\b(bug|fix|regression|hotfix|broken|crash)\b/i.test(`${title} ${description ?? ''}`);
+}
+
+/** Pre-filled branch name from the task title: `feature/<slug>` or `fix/<slug>`,
+ *  kept concise (well under Git's ref-length limit). */
+export function proposeBranchName(title: string, isBug: boolean): string {
+  const slug = slugify(title).slice(0, 40).replace(/-+$/g, '') || 'task';
+  return `${isBug ? 'fix' : 'feature'}/${slug}`;
 }
 
 async function gitRun(
@@ -113,10 +151,21 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
   },
 
   async detect(ctx: StepContext): Promise<WorktreeDetect> {
+    const task = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { title: true, description: true, metadata: true },
+    });
+    const title = task?.title ?? '';
+    const category = (task?.metadata as { category?: string } | null)?.category ?? null;
+    const proposedBranch = proposeBranchName(
+      title,
+      isBugBranch(title, task?.description ?? null, category),
+    );
+
     const gitDir = path.join(ctx.repoPath, '.git');
     const hasGit = await pathExists(gitDir);
     if (!hasGit) {
-      return { hasGit: false, currentBranch: null, isClean: true };
+      return { hasGit: false, currentBranch: null, isClean: true, proposedBranch };
     }
     const branch = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
     const status = await gitRun(ctx.repoPath, ['status', '--porcelain']);
@@ -124,6 +173,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       hasGit: true,
       currentBranch: branch.code === 0 ? branch.stdout.trim() : null,
       isClean: status.code === 0 && status.stdout.trim().length === 0,
+      proposedBranch,
     };
   },
 
@@ -139,6 +189,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
             id: 'branchName',
             label: 'Feature branch name',
             placeholder: 'feature/my-change',
+            default: detected.proposedBranch,
             required: true,
           },
           {
@@ -167,6 +218,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
           id: 'branchName',
           label: 'Feature branch name',
           placeholder: 'feature/my-change',
+          default: detected.proposedBranch,
           required: true,
         },
         {
@@ -187,7 +239,10 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       initBranch?: string;
       commitMessage?: string;
     };
-    const branchName = slugify(values.branchName ?? 'feature-task');
+    const branchName = slugifyBranch(values.branchName ?? 'feature-task');
+    // Branch may be namespaced (feature/…, fix/…); the worktree DIRECTORY name
+    // flattens the slash so the on-disk layout stays one level under .haive/worktrees.
+    const dirName = branchName.replace(/\//g, '-');
     let base: string;
 
     if (!args.detected.hasGit) {
@@ -201,7 +256,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
 
     await ensureExcludeEntry(ctx.repoPath);
 
-    const worktreePath = path.join(ctx.repoPath, WORKTREE_SUBDIR, branchName);
+    const worktreePath = path.join(ctx.repoPath, WORKTREE_SUBDIR, dirName);
     const branchExists = await gitRun(ctx.repoPath, [
       'show-ref',
       '--verify',
@@ -237,7 +292,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       );
     }
 
-    const sandboxWorktreePath = `${ctx.sandboxWorkdir}/${WORKTREE_SUBDIR}/${branchName}`;
+    const sandboxWorktreePath = `${ctx.sandboxWorkdir}/${WORKTREE_SUBDIR}/${dirName}`;
     ctx.logger.info({ worktreePath, sandboxWorktreePath, branchName, base }, 'worktree created');
     return {
       mode: 'worktree',

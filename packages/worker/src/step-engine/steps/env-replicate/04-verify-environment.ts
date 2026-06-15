@@ -141,6 +141,10 @@ export function createVerifyEnvironmentStep(
       description:
         'Runs smoke checks against the built image to confirm runtimes, language servers and clients are installed.',
       requiresCli: false,
+      // Under Auto-continue, run the smoke checks unattended with every relevant
+      // check ticked (the form defaults to all of them). Verifying the sandbox is
+      // almost never something a user wants to do by hand or skip.
+      autoSubmitDefaults: true,
     },
 
     async detect(ctx) {
