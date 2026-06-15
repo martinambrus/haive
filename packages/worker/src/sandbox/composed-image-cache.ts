@@ -39,9 +39,12 @@ export async function ensureComposedImage(
   });
   if (!envTemplate?.generatedDockerfile || envTemplate.status !== 'ready') return null;
 
-  // Per-repo RTK version pin (null → composer default). A changed pin changes
-  // the runtime-tools layer string, hence the composition hash, forcing a fresh
-  // composed image build for this repo's tasks.
+  // Per-repo RTK version. An explicit pin is honored; an unpinned repo (null)
+  // tracks the latest known rtk from the version cache rather than the baked
+  // default, so fresh/unpinned repos get the current release. A changed value
+  // changes the runtime-tools layer string, hence the composition hash, forcing
+  // a fresh composed build. Cache-empty (or no repo) falls back to the
+  // composer's DEFAULT_RTK_VERSION.
   let rtkVersion: string | null = null;
   if (task.repositoryId) {
     const repo = await db.query.repositories.findFirst({
@@ -49,6 +52,13 @@ export async function ensureComposedImage(
       columns: { rtkVersion: true },
     });
     rtkVersion = repo?.rtkVersion ?? null;
+  }
+  if (!rtkVersion) {
+    const rtkCache = await db.query.toolPackageVersions.findFirst({
+      where: eq(schema.toolPackageVersions.name, 'rtk'),
+      columns: { versions: true, latestVersion: true },
+    });
+    rtkVersion = rtkCache?.versions?.[0] ?? rtkCache?.latestVersion ?? null;
   }
 
   const baseImageId = await resolveBaseImageId(runner);

@@ -340,22 +340,13 @@ export const toolingInfrastructureStep: StepDefinition<
     const rtkEnabled = Boolean(tooling.rtkEnabled);
     tooling.rtkEnabled = rtkEnabled;
 
-    // Resolve the RTK version pin: empty = "track latest" → resolve to the
-    // newest cached version now (mirrors CLI version save); a concrete value
-    // pins that release. Null when the cache is empty → the composer falls back
-    // to its default version. Persisted so the composed image layer picks it up;
-    // a change forces a rebuild via the composition hash.
+    // RTK version: the empty "Latest" selection is stored as null = track latest
+    // (the composer resolves null to the newest rtk at build, and the tooling
+    // upgrade banner never nags an unpinned repo); a concrete value is an
+    // explicit pin that the banner flags when a newer release appears.
     const requestedRtkVersion =
       typeof tooling.rtkVersion === 'string' ? tooling.rtkVersion.trim() : '';
-    let resolvedRtkVersion: string | null = requestedRtkVersion || null;
-    if (!resolvedRtkVersion) {
-      const rtkCache = await ctx.db
-        .select({ latestVersion: schema.toolPackageVersions.latestVersion })
-        .from(schema.toolPackageVersions)
-        .where(eq(schema.toolPackageVersions.name, 'rtk'))
-        .limit(1);
-      resolvedRtkVersion = rtkCache[0]?.latestVersion ?? null;
-    }
+    const resolvedRtkVersion: string | null = requestedRtkVersion || null;
     tooling.rtkVersion = resolvedRtkVersion;
 
     const taskRow = await ctx.db

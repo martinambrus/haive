@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { DEFAULT_RTK_VERSION, TOOL_INSTALL_METADATA, type ToolName } from '@haive/shared';
+import { TOOL_INSTALL_METADATA, type ToolName } from '@haive/shared';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -99,17 +99,17 @@ function newestFor(
   return entry.versions[0] ?? entry.latest ?? null;
 }
 
-/** Build the candidate component list from the repo's pins. RTK is always
- *  present (an unpinned repo runs the baked default, which is genuinely stale);
- *  LSP/chrome appear only when explicitly pinned, since unpinned means
- *  latest-at-build (no upgrade notion). */
+/** Build the candidate component list from the repo's pins. A component appears
+ *  only when explicitly pinned: unpinned (null) means track-latest — RTK is
+ *  resolved to the newest release by the composer, LSP/chrome install latest at
+ *  build — so an unpinned component is never "behind" and never nags. */
 function repoComponents(repo: {
   rtkVersion: string | null;
   lspServerVersions: Record<string, string | null> | null;
   chromeDevtoolsMcpVersion: string | null;
 }): { component: string; tool: ToolName; installed: string }[] {
   const out: { component: string; tool: ToolName; installed: string }[] = [];
-  out.push({ component: 'rtk', tool: 'rtk', installed: repo.rtkVersion ?? DEFAULT_RTK_VERSION });
+  if (repo.rtkVersion) out.push({ component: 'rtk', tool: 'rtk', installed: repo.rtkVersion });
   for (const [lspKey, version] of Object.entries(repo.lspServerVersions ?? {})) {
     const tool = LSP_KEY_TO_TOOL[lspKey];
     if (!tool || !version || !TOOL_INSTALL_METADATA[tool].versionPinnable) continue;
