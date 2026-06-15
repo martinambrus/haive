@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { CliProviderName } from '@haive/shared';
+import { DEFAULT_RTK_VERSION, type CliProviderName } from '@haive/shared';
 import { buildProviderInstallLines } from '../cli-versions/codegen.js';
 
 export const SANDBOX_CORE_IMAGE = 'haive-cli-sandbox:latest';
@@ -83,14 +83,12 @@ function resolveBase(envTemplateDockerfile: string | null): string {
   return envTemplateDockerfile.trimEnd();
 }
 
-/** Default RTK version used when a repo carries no `rtk_version` pin. Kept in
- *  sync with the ARG in `packages/worker/sandbox-image/Dockerfile` (the
- *  sandbox-core base's baked rtk, used on the no-env-template path). Per-repo
- *  pins override this in the composed layer. The musl binary is statically
- *  linked, so the same artifact works on Alpine and on Debian/Ubuntu
- *  env-templates. Integrity is verified at build time against the release's
- *  checksums.txt — no per-version sha needs to be vendored here. */
-const DEFAULT_RTK_VERSION = '0.37.2';
+// DEFAULT_RTK_VERSION is imported from @haive/shared (kept in sync with the ARG
+// in sandbox-image/Dockerfile, the sandbox-core base's baked rtk used on the
+// no-env-template path). Per-repo pins override it in the composed layer. The
+// musl binary is statically linked, so the same artifact works on Alpine and on
+// Debian/Ubuntu env-templates; integrity is verified at build time against the
+// release's checksums.txt, so no per-version sha is vendored here.
 
 /** Idempotent install layer for the haive-side runtime tools the CLI session
  *  needs but that the env-template won't necessarily ship. Currently:

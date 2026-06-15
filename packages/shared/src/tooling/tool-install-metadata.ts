@@ -73,3 +73,9 @@ export const TOOL_INSTALL_METADATA: Record<ToolName, ToolInstallMetadata> = {
 };
 
 export const TOOL_NAME_LIST = Object.keys(TOOL_INSTALL_METADATA) as ToolName[];
+
+/** Default RTK version baked into the composed-image runtime-tools layer when a
+ *  repo carries no rtk_version pin. Kept in sync with the ARG in the
+ *  sandbox-image Dockerfile. Shared so the API can resolve an unpinned repo's
+ *  effective RTK version for upgrade detection. */
+export const DEFAULT_RTK_VERSION = '0.37.2';

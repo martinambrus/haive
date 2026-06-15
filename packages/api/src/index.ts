@@ -23,6 +23,7 @@ import { internalRoutes } from './routes/internal.js';
 import { ragRoutes } from './routes/rag.js';
 import { taskRoutes } from './routes/tasks.js';
 import { upgradeRoutes } from './routes/upgrades.js';
+import { toolingUpgradeRoutes } from './routes/tooling-upgrades.js';
 import { userSettingsRoutes } from './routes/user-settings.js';
 import { installBrowserVncWebSocket } from './routes/browser-vnc.js';
 import { installCliLoginBannerWebSocket } from './routes/cli-login-banner.js';
@@ -69,6 +70,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/admin', adminRoutes);
   app.route('/tooling', toolingRoutes);
   app.route('/repositories', upgradeRoutes);
+  app.route('/repositories', toolingUpgradeRoutes);
 
   return app;
 }

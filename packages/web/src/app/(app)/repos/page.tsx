@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, API_BASE_URL, type Repository } from '@/lib/api-client';
 import { Button, Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
 import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
+import { ToolingUpgradeBanner } from '@/components/tooling-upgrade-banner';
 import { usePageTitle } from '@/lib/use-page-title';
 import { isReadOnlyLocalRepo } from '@haive/shared/schemas';
 
@@ -272,6 +273,7 @@ function RepoCard(props: RepoCardProps) {
       {repo.status === 'ready' && (
         <UpgradeAvailableBanner repositoryId={repo.id} repositoryName={repo.name} />
       )}
+      {repo.status === 'ready' && <ToolingUpgradeBanner repositoryId={repo.id} />}
       {expanded && canEdit && (
         <div className="mt-2 border-t border-neutral-800 pt-3">
           <p className="mb-2 text-sm font-semibold text-neutral-100">Top-level exclusions</p>
