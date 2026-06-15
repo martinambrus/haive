@@ -235,6 +235,9 @@ async function main(): Promise<void> {
         extraContext: '',
       },
       '03b-business-requirements': {
+        guidance: '',
+      },
+      '03c-business-requirements-review': {
         decision: 'approve',
         feedback: '',
       },
@@ -360,6 +363,7 @@ async function main(): Promise<void> {
       '02-pre-rag-sync',
       '03-phase-0a-discovery',
       '03b-business-requirements',
+      '03c-business-requirements-review',
       '04-phase-0b-pre-planning',
       '05-phase-0b5-spec-quality',
       '06-gate-1-spec-approval',
