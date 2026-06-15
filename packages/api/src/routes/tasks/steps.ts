@@ -591,9 +591,16 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
       // CLI/model it was — important for multi-CLI loop steps (spec-quality).
       providerLabel: schema.cliProviders.label,
       providerName: schema.cliProviders.name,
+      // For agent-mining invocations, the persona running this terminal (e.g.
+      // "accessibility-specialist") so the header names the agent, not just "agent mining".
+      agentTitle: schema.taskStepAgentMinings.agentTitle,
     })
     .from(schema.cliInvocations)
     .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
+    .leftJoin(
+      schema.taskStepAgentMinings,
+      eq(schema.taskStepAgentMinings.cliInvocationId, schema.cliInvocations.id),
+    )
     .where(
       and(
         eq(schema.cliInvocations.taskStepId, step.id),

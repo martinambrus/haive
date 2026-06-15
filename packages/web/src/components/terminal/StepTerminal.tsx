@@ -220,8 +220,11 @@ function InvocationPanel({ taskId, invocation, label, idx, statusMessage }: Invo
     >
       <div className="flex flex-wrap items-center gap-2 text-[11px] text-neutral-400">
         {label && <span className="font-medium text-neutral-200">{label}</span>}
+        {invocation.agentTitle && (
+          <span className="font-medium text-indigo-300">{invocation.agentTitle}</span>
+        )}
         <span className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 uppercase tracking-wider">
-          {invocation.mode.replace(/_/g, ' ')}
+          {invocation.agentTitle ? 'mining' : invocation.mode.replace(/_/g, ' ')}
         </span>
         {invocation.providerLabel && (
           <span className="font-medium text-neutral-200">{invocation.providerLabel}</span>

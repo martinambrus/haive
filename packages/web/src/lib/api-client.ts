@@ -552,6 +552,9 @@ export interface CliInvocationSummary {
    *  rows / deleted providers). Shown on the terminal badge. */
   providerLabel: string | null;
   providerName: string | null;
+  /** For agent-mining invocations, the persona running this terminal (e.g.
+   *  "accessibility-specialist"); null for non-mining invocations. */
+  agentTitle: string | null;
   /** Token usage extracted from the CLI's structured output. Null for plain
    *  CLIs (antigravity), failed extractions, and rows written before capture
    *  existed. Semantics are provider-native. */
