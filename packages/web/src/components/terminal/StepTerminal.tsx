@@ -83,16 +83,21 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
     const timers = [80, 300, 700].map((delay) =>
       setTimeout(() => {
         const root = containerRef.current;
-        // Scroll to the auto-scroll toggle, which sits just below the newest run,
-        // so the checkbox stays visible and the user can see they can turn this
-        // off. Fall back to the last run panel if the toggle isn't rendered yet.
-        const toggle = root?.querySelector('[data-cli-autoscroll]');
-        if (toggle) {
-          toggle.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        } else {
-          const panels = root?.querySelectorAll('[data-cli-terminal]');
-          panels?.[panels.length - 1]?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        }
+        if (!root) return;
+        // Prefer the newest RUNNING run. isActive alone is true for a QUEUED run
+        // too (endedAt is null), and the last panel is often that empty, waiting
+        // terminal — 03-phase-0a-discovery fans out more invocations than the
+        // concurrency cap (8 dispatched, ~5 run at once), so the tail panels sit
+        // queued. Fall back to the auto-scroll toggle (keeps the checkbox visible),
+        // then the last panel.
+        const running = root.querySelectorAll('[data-cli-terminal][data-cli-running]');
+        const panels = root.querySelectorAll('[data-cli-terminal]');
+        const target =
+          running[running.length - 1] ??
+          root.querySelector('[data-cli-autoscroll]') ??
+          panels[panels.length - 1] ??
+          null;
+        target?.scrollIntoView({ behavior: 'smooth', block: 'end' });
       }, delay),
     );
     return () => timers.forEach(clearTimeout);
@@ -204,8 +209,15 @@ function InvocationPanel({ taskId, invocation, label, idx, statusMessage }: Invo
     };
   }, [taskId, invocation.id, invocation.isActive]);
 
+  // "running" = started and not yet ended. isActive alone is true for a QUEUED
+  // run too (endedAt is null), so the auto-scroll target must exclude those.
+  const isRunning = invocation.isActive && invocation.startedAt !== null;
   return (
-    <div data-cli-terminal className="flex flex-col gap-1.5 rounded border border-neutral-800 p-2">
+    <div
+      data-cli-terminal
+      data-cli-running={isRunning ? '' : undefined}
+      className="flex flex-col gap-1.5 rounded border border-neutral-800 p-2"
+    >
       <div className="flex flex-wrap items-center gap-2 text-[11px] text-neutral-400">
         {label && <span className="font-medium text-neutral-200">{label}</span>}
         <span className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 uppercase tracking-wider">

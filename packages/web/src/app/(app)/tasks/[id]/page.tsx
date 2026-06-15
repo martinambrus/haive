@@ -194,18 +194,22 @@ export default function TaskDetailPage() {
       };
       const scrollToLastTerminal = (): boolean => {
         const stepEl = container.querySelector(`[data-step-id="${activeId}"]`);
-        // Prefer the auto-scroll toggle (just below the newest run) so the
-        // checkbox stays visible; fall back to the last run panel.
-        const toggle = stepEl?.querySelector('[data-cli-autoscroll]');
-        if (toggle) {
-          toggle.scrollIntoView({ behavior: 'smooth', block: 'end' });
-          return true;
-        }
-        const terminals = stepEl?.querySelectorAll('[data-cli-terminal]');
-        if (!terminals || terminals.length === 0) return false;
-        const last = terminals[terminals.length - 1];
-        if (!last) return false;
-        last.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        if (!stepEl) return false;
+        // Prefer the newest RUNNING run. The last panel (and the toggle below it)
+        // is often a queued, empty terminal — a step that fans out more
+        // invocations than the concurrency cap (03-phase-0a-discovery: 8
+        // dispatched, ~5 run at once) leaves the tail panels waiting their turn.
+        // Fall back to the toggle (keeps the checkbox visible), then the last
+        // panel, when nothing is running yet.
+        const running = stepEl.querySelectorAll('[data-cli-terminal][data-cli-running]');
+        const panels = stepEl.querySelectorAll('[data-cli-terminal]');
+        const target =
+          running[running.length - 1] ??
+          stepEl.querySelector('[data-cli-autoscroll]') ??
+          panels[panels.length - 1] ??
+          null;
+        if (!target) return false;
+        target.scrollIntoView({ behavior: 'smooth', block: 'end' });
         return true;
       };
 
