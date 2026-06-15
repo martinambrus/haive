@@ -162,6 +162,7 @@ describe('onboarding registry', () => {
     expect(fieldIds).toContain('ollamaUrl');
     expect(fieldIds).toContain('embeddingModel');
     expect(fieldIds).toContain('embeddingDimensions');
+    expect(fieldIds).toContain('rtkVersion');
   });
 
   it('post-onboarding form has commit and commitMessage fields', () => {

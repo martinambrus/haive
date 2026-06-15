@@ -30,7 +30,7 @@ export async function ensureComposedImage(
 ): Promise<string | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { envTemplateId: true },
+    columns: { envTemplateId: true, repositoryId: true },
   });
   if (!task?.envTemplateId) return null;
 
@@ -39,11 +39,24 @@ export async function ensureComposedImage(
   });
   if (!envTemplate?.generatedDockerfile || envTemplate.status !== 'ready') return null;
 
+  // Per-repo RTK version pin (null → composer default). A changed pin changes
+  // the runtime-tools layer string, hence the composition hash, forcing a fresh
+  // composed image build for this repo's tasks.
+  let rtkVersion: string | null = null;
+  if (task.repositoryId) {
+    const repo = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, task.repositoryId),
+      columns: { rtkVersion: true },
+    });
+    rtkVersion = repo?.rtkVersion ?? null;
+  }
+
   const baseImageId = await resolveBaseImageId(runner);
   const composition = composeSandboxImage({
     envTemplateDockerfile: envTemplate.generatedDockerfile,
     provider,
     baseImageId,
+    rtkVersion,
   });
 
   const inspected = await runner.inspect(composition.tag);

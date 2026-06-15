@@ -36,6 +36,12 @@ interface ToolingDetect {
    *  as the form-field default so a re-run of step 04 reflects the most
    *  recently saved choice instead of the hard-coded migration default. */
   rtkEnabled: boolean;
+  /** Current `repositories.rtk_version` pin (null = follow latest/default). */
+  rtkVersion: string | null;
+  /** Available rtk versions from the tool_package_versions cache, newest first. */
+  rtkVersions: string[];
+  /** Newest available rtk version, or null when the cache is empty. */
+  rtkLatestVersion: string | null;
 }
 
 interface EnvDetectData {
@@ -134,15 +140,32 @@ export const toolingInfrastructureStep: StepDefinition<
       .where(eq(schema.tasks.id, ctx.taskId))
       .limit(1);
     let rtkEnabled = true;
+    let rtkVersion: string | null = null;
     const repositoryId = taskRow[0]?.repositoryId ?? null;
     if (repositoryId) {
       const repoRow = await ctx.db
-        .select({ rtkEnabled: schema.repositories.rtkEnabled })
+        .select({
+          rtkEnabled: schema.repositories.rtkEnabled,
+          rtkVersion: schema.repositories.rtkVersion,
+        })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repositoryId))
         .limit(1);
-      if (repoRow[0]) rtkEnabled = repoRow[0].rtkEnabled;
+      if (repoRow[0]) {
+        rtkEnabled = repoRow[0].rtkEnabled;
+        rtkVersion = repoRow[0].rtkVersion;
+      }
     }
+
+    // Available rtk versions for the picker, from the worker-refreshed cache.
+    const rtkCache = await ctx.db
+      .select({
+        versions: schema.toolPackageVersions.versions,
+        latestVersion: schema.toolPackageVersions.latestVersion,
+      })
+      .from(schema.toolPackageVersions)
+      .where(eq(schema.toolPackageVersions.name, 'rtk'))
+      .limit(1);
 
     return {
       primaryLanguage: data.project.primaryLanguage,
@@ -154,6 +177,9 @@ export const toolingInfrastructureStep: StepDefinition<
       cliSupportsMcp: cliMeta?.supportsMcp ?? false,
       cliSupportsPlugins: cliMeta?.supportsPlugins ?? false,
       rtkEnabled,
+      rtkVersion,
+      rtkVersions: rtkCache[0]?.versions ?? [],
+      rtkLatestVersion: rtkCache[0]?.latestVersion ?? null,
     };
   },
 
@@ -168,6 +194,25 @@ export const toolingInfrastructureStep: StepDefinition<
       { value: 'none', label: 'Skip RAG infrastructure' },
     );
     const ragDefault = detected.containerType === 'ddev' ? 'ddev' : 'internal';
+
+    const rtkVersionsList = detected.rtkVersions ?? [];
+    const rtkVersionOptions: { value: string; label: string }[] = [
+      {
+        value: '',
+        label: detected.rtkLatestVersion
+          ? `Latest (${detected.rtkLatestVersion})`
+          : 'Latest available',
+      },
+      ...rtkVersionsList.map((v) => ({ value: v, label: v })),
+    ];
+    // Keep a previously-pinned version selectable even if it rotated out of the cache.
+    if (detected.rtkVersion && !rtkVersionsList.includes(detected.rtkVersion)) {
+      rtkVersionOptions.push({
+        value: detected.rtkVersion,
+        label: `${detected.rtkVersion} (current)`,
+      });
+    }
+    const rtkVersionDefault = detected.rtkVersion ?? '';
 
     return {
       title: 'Tooling and infrastructure',
@@ -257,6 +302,15 @@ export const toolingInfrastructureStep: StepDefinition<
             'Routes common dev commands (git, npm, docker, tests, etc.) through rtk so their output is compressed 60–90% before reaching the LLM. The binary is baked into every sandbox; per-CLI hook configs are written into the repo and into the per-task auth volume. Toggle off to remove the configs on the next upgrade-apply.',
           default: detected.rtkEnabled,
         },
+        {
+          type: 'select',
+          id: 'rtkVersion',
+          label: 'RTK version',
+          description:
+            'Pin a specific rtk release for this project’s sandbox images, or track the latest. "Latest" resolves to the newest published version when you save. Only applies when RTK is enabled; a changed version rebuilds the environment image on the next task.',
+          default: rtkVersionDefault,
+          options: rtkVersionOptions,
+        },
       ],
       submitLabel: 'Save tooling preferences',
     };
@@ -286,6 +340,24 @@ export const toolingInfrastructureStep: StepDefinition<
     const rtkEnabled = Boolean(tooling.rtkEnabled);
     tooling.rtkEnabled = rtkEnabled;
 
+    // Resolve the RTK version pin: empty = "track latest" → resolve to the
+    // newest cached version now (mirrors CLI version save); a concrete value
+    // pins that release. Null when the cache is empty → the composer falls back
+    // to its default version. Persisted so the composed image layer picks it up;
+    // a change forces a rebuild via the composition hash.
+    const requestedRtkVersion =
+      typeof tooling.rtkVersion === 'string' ? tooling.rtkVersion.trim() : '';
+    let resolvedRtkVersion: string | null = requestedRtkVersion || null;
+    if (!resolvedRtkVersion) {
+      const rtkCache = await ctx.db
+        .select({ latestVersion: schema.toolPackageVersions.latestVersion })
+        .from(schema.toolPackageVersions)
+        .where(eq(schema.toolPackageVersions.name, 'rtk'))
+        .limit(1);
+      resolvedRtkVersion = rtkCache[0]?.latestVersion ?? null;
+    }
+    tooling.rtkVersion = resolvedRtkVersion;
+
     const taskRow = await ctx.db
       .select({ repositoryId: schema.tasks.repositoryId })
       .from(schema.tasks)
@@ -295,11 +367,11 @@ export const toolingInfrastructureStep: StepDefinition<
     if (repositoryId) {
       await ctx.db
         .update(schema.repositories)
-        .set({ rtkEnabled, updatedAt: new Date() })
+        .set({ rtkEnabled, rtkVersion: resolvedRtkVersion, updatedAt: new Date() })
         .where(eq(schema.repositories.id, repositoryId));
     } else {
       ctx.logger.warn(
-        'tooling-infrastructure: task has no repository_id; rtk_enabled persisted only in step output',
+        'tooling-infrastructure: task has no repository_id; rtk preferences persisted only in step output',
       );
     }
 

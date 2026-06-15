@@ -67,6 +67,11 @@ export const repositories = pgTable(
      *  directory in place, read-only end to end. */
     writable: boolean('writable').notNull().default(false),
     rtkEnabled: boolean('rtk_enabled').notNull().default(true),
+    /** Per-repo RTK version pin (bare semver, e.g. "0.42.4"). NULL = use the
+     *  Haive default version baked into the composed-image runtime-tools layer.
+     *  A set value pins that rtk release for this repo's environment images;
+     *  changing it changes the composed-image hash, forcing a rebuild. */
+    rtkVersion: text('rtk_version'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },

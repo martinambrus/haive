@@ -176,7 +176,7 @@ describe('composeSandboxImage', () => {
       );
     });
 
-    it('downloads pinned rtk musl tarball with sha256 verification', () => {
+    it('downloads the default rtk musl tarball and verifies it against checksums.txt', () => {
       const result = composeSandboxImage({
         envTemplateDockerfile: 'FROM ubuntu:24.04\n',
         provider: claudeCodeProvider,
@@ -185,8 +185,9 @@ describe('composeSandboxImage', () => {
         'https://github.com/rtk-ai/rtk/releases/download/v0.37.2/rtk-x86_64-unknown-linux-musl.tar.gz',
       );
       expect(result.dockerfileBody).toContain(
-        '3dfb7a05636a68687ba1c5aa696fa8d5fcb494447ded86d9eb8b88b7100a37c6  /tmp/rtk.tgz',
+        'https://github.com/rtk-ai/rtk/releases/download/v0.37.2/checksums.txt',
       );
+      expect(result.dockerfileBody).toContain('sha256sum -c -');
       expect(result.dockerfileBody).toContain('install -m 0755');
     });
 

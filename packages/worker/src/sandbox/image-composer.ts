@@ -30,6 +30,13 @@ export interface ComposeInput {
    * base image isn't yet built or the env-template doesn't reference it.
    */
   baseImageId?: string | null;
+  /**
+   * Per-repo RTK version pin (bare semver, e.g. "0.42.4"). Null/undefined uses
+   * DEFAULT_RTK_VERSION. The value is embedded in the runtime-tools layer, so a
+   * different pin yields a different dockerfile body and composition hash —
+   * which forces a fresh composed-image build when the repo's rtk pin changes.
+   */
+  rtkVersion?: string | null;
 }
 
 export function composeSandboxImage(input: ComposeInput): SandboxImageComposition {
@@ -47,7 +54,8 @@ export function composeSandboxImage(input: ComposeInput): SandboxImageCompositio
   // sandbox-core base (haive-cli-sandbox) installs `uv` from apk but only
   // applies when there is no env-template. Inject the install here so
   // composed images built on top of env-templates get it too.
-  parts.push(buildHaiveRuntimeToolsLayer());
+  const rtkVersion = (input.rtkVersion ?? '').trim() || DEFAULT_RTK_VERSION;
+  parts.push(buildHaiveRuntimeToolsLayer(rtkVersion));
   if (installLines.length > 0) parts.push(installLines.join('\n'));
   if (extra.length > 0) parts.push(extra);
 
@@ -75,15 +83,14 @@ function resolveBase(envTemplateDockerfile: string | null): string {
   return envTemplateDockerfile.trimEnd();
 }
 
-/** rtk binary version + sha for env-template-derived composed images.
- *  MUST stay in sync with the ARG values in
- *  `packages/worker/sandbox-image/Dockerfile` — both layers download the
- *  same tarball so behaviour matches whether the base image is the
- *  haive-cli-sandbox core or a project env-template. The musl binary is
- *  statically linked, so the same artifact works on Alpine and on
- *  Debian/Ubuntu env-templates. */
-const RTK_RELEASE_VERSION = 'v0.37.2';
-const RTK_X86_64_MUSL_SHA256 = '3dfb7a05636a68687ba1c5aa696fa8d5fcb494447ded86d9eb8b88b7100a37c6';
+/** Default RTK version used when a repo carries no `rtk_version` pin. Kept in
+ *  sync with the ARG in `packages/worker/sandbox-image/Dockerfile` (the
+ *  sandbox-core base's baked rtk, used on the no-env-template path). Per-repo
+ *  pins override this in the composed layer. The musl binary is statically
+ *  linked, so the same artifact works on Alpine and on Debian/Ubuntu
+ *  env-templates. Integrity is verified at build time against the release's
+ *  checksums.txt — no per-version sha needs to be vendored here. */
+const DEFAULT_RTK_VERSION = '0.37.2';
 
 /** Idempotent install layer for the haive-side runtime tools the CLI session
  *  needs but that the env-template won't necessarily ship. Currently:
@@ -103,8 +110,9 @@ const RTK_X86_64_MUSL_SHA256 = '3dfb7a05636a68687ba1c5aa696fa8d5fcb494447ded86d9
  *   - `rtk`: token-killer hook binary referenced by every project-level
  *     `.claude/settings.json` rendered with `rtk_enabled=true`. Without
  *     it claude/zai run a PreToolUse hook that fails with
- *     `rtk: not found` on every Bash invocation. Pulled from the same
- *     pinned musl tarball as the sandbox-core image.
+ *     `rtk: not found` on every Bash invocation. Installed at the repo's
+ *     pinned `rtkVersion` (or DEFAULT_RTK_VERSION), verified against the
+ *     release's checksums.txt.
  *  Auto-detects the package manager so the same line works on alpine (apk)
  *  and debian/ubuntu (apt). Falls back to the official uv installer when
  *  neither is present (rg / nano / tmux have no upstream tarball install
@@ -112,8 +120,9 @@ const RTK_X86_64_MUSL_SHA256 = '3dfb7a05636a68687ba1c5aa696fa8d5fcb494447ded86d9
  *  `command -v` short-circuits make re-runs cheap; ALL tools must be
  *  present for the early exit. Idempotent on its own line so a change
  *  here forces a clean cache miss across all composed images. */
-function buildHaiveRuntimeToolsLayer(): string {
-  const rtkUrl = `https://github.com/rtk-ai/rtk/releases/download/${RTK_RELEASE_VERSION}/rtk-x86_64-unknown-linux-musl.tar.gz`;
+function buildHaiveRuntimeToolsLayer(rtkVersion: string): string {
+  const asset = 'rtk-x86_64-unknown-linux-musl.tar.gz';
+  const releaseBase = `https://github.com/rtk-ai/rtk/releases/download/v${rtkVersion}`;
   return [
     'RUN set -eux; \\',
     '    if command -v uvx >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && command -v nano >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v rtk >/dev/null 2>&1; then exit 0; fi; \\',
@@ -133,11 +142,18 @@ function buildHaiveRuntimeToolsLayer(): string {
     '        arch="$(uname -m)"; \\',
     '        case "$arch" in \\',
     '          x86_64) \\',
-    `            curl -fsSL "${rtkUrl}" -o /tmp/rtk.tgz; \\`,
-    `            echo "${RTK_X86_64_MUSL_SHA256}  /tmp/rtk.tgz" | sha256sum -c -; \\`,
-    '            tar -xzf /tmp/rtk.tgz -C /tmp; \\',
+    '            cd /tmp; \\',
+    `            curl -fsSL "${releaseBase}/${asset}" -o "${asset}"; \\`,
+    `            curl -fsSL "${releaseBase}/checksums.txt" -o checksums.txt; \\`,
+    // Verify against the release's checksums.txt (cargo-dist format: "<sha>  <file>").
+    // awk-match our asset's line and feed exactly that to `sha256sum -c`; bail if the
+    // asset is absent so an empty match can't silently pass the check.
+    `            sum_line="$(awk -v f="${asset}" '$2==f' checksums.txt)"; \\`,
+    `            test -n "$sum_line" || { echo "rtk: ${asset} not in checksums.txt for v${rtkVersion}" >&2; exit 1; }; \\`,
+    '            echo "$sum_line" | sha256sum -c -; \\',
+    `            tar -xzf "${asset}" -C /tmp; \\`,
     '            install -m 0755 "$(find /tmp -maxdepth 3 -type f -name rtk -perm -u+x | head -n1)" /usr/local/bin/rtk; \\',
-    '            rm -rf /tmp/rtk.tgz /tmp/rtk-*; \\',
+    `            rm -rf "/tmp/${asset}" /tmp/checksums.txt /tmp/rtk-*; \\`,
     '            /usr/local/bin/rtk --version; \\',
     '            ;; \\',
     '          *) \\',
