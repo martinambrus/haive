@@ -191,6 +191,13 @@ export interface DeclareDepsDetect {
   ddevProjectName: string | null;
   database: { kind: DatabaseKind; version: string | null };
   suggestedLsp: LspKey[];
+  /** This task's repository id, for the bottom tooling-page link. */
+  repositoryId?: string | null;
+  /** Per-LSP-option version badge (env key → "version (latest)"); absent for the
+   *  unpinnable servers (rust-analyzer, jdtls). */
+  lspVersionByOption?: Record<string, string>;
+  /** "version (latest)" label for the chrome-devtools-mcp browser-testing line. */
+  chromeVersionLabel?: string;
 }
 
 export interface DeclareDepsApply {
@@ -298,6 +305,30 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         }
       }
     }
+
+    // Version labels for the LSP badges + the browser-testing (chrome-devtools-mcp)
+    // line, mirroring onboarding step 04. Newest = head of the sorted-desc cache
+    // list (falls back to the dist-tag latest).
+    const toolRows = await ctx.db
+      .select({
+        name: schema.toolPackageVersions.name,
+        versions: schema.toolPackageVersions.versions,
+        latestVersion: schema.toolPackageVersions.latestVersion,
+      })
+      .from(schema.toolPackageVersions);
+    const newestByTool = new Map<string, string | null>();
+    for (const r of toolRows) newestByTool.set(r.name, r.versions?.[0] ?? r.latestVersion ?? null);
+    const lspVersionByOption: Record<string, string> = {};
+    for (const opt of LSP_OPTIONS) {
+      const tool = opt.value === 'intelephense-extended' ? 'intelephense' : opt.value;
+      const v = newestByTool.get(tool);
+      if (v) lspVersionByOption[opt.value] = `${v} (latest)`;
+    }
+    const chromeNewest = newestByTool.get('chrome-devtools-mcp');
+    result.repositoryId = repositoryId;
+    result.lspVersionByOption = lspVersionByOption;
+    result.chromeVersionLabel = chromeNewest ? `${chromeNewest} (latest)` : 'latest';
+
     return result;
   },
 
@@ -306,6 +337,15 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     const defaultDb = detected.database.kind;
     const defaultRuntimes = detected.runtimes.map((r) => r.language);
     const relevantLanguages = new Set<LanguageKey>(defaultRuntimes);
+
+    // Show each LSP server's version as a badge (absent for the unpinnable
+    // servers). Versions are pinned on the tooling page (linked at the bottom).
+    const lspVersionByOption = detected.lspVersionByOption ?? {};
+    const lspOptions = LSP_OPTIONS.map((o) =>
+      lspVersionByOption[o.value]
+        ? { ...o, badge: lspVersionByOption[o.value], badgeColor: 'green' as const }
+        : o,
+    );
 
     const fields: FormSchema['fields'] = [
       {
@@ -353,7 +393,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         type: 'multi-select',
         id: 'lspServers',
         label: 'Language servers to preinstall',
-        options: LSP_OPTIONS,
+        options: lspOptions,
         defaults: detected.suggestedLsp,
       },
       {
@@ -368,6 +408,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         type: 'checkbox',
         id: 'browserTesting',
         label: 'Install Chrome + chrome-devtools-mcp for browser testing',
+        description: `Installs headed Chromium + chrome-devtools-mcp (currently ${detected.chromeVersionLabel ?? 'latest'}) for the browser-verification steps.`,
         default: true,
       },
       {
@@ -377,6 +418,16 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         rows: 4,
         placeholder: 'vim\ncurl\njq',
       },
+      ...(detected.repositoryId
+        ? [
+            {
+              type: 'note' as const,
+              id: 'toolingLink',
+              label: 'Tooling page',
+              body: `Pin LSP server and Chrome DevTools MCP versions for this repository on the [tooling page](/repos/${detected.repositoryId}/tooling) (opens in a new tab).`,
+            },
+          ]
+        : []),
     ];
 
     return {
