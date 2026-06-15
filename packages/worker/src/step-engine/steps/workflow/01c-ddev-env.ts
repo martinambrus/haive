@@ -1,12 +1,14 @@
 import path from 'node:path';
-import { readFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
-import { parseDdevConfig } from '../_ddev-config.js';
+import { parseDdevConfig, renderDdevConfig } from '../_ddev-config.js';
+import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { ensureDdevStarted, ddevExec } from '../../../sandbox/ddev-runner.js';
 
 // Boots the project's DDEV environment in a per-task nested-Docker runner and
@@ -26,6 +28,12 @@ interface DdevEnvDetect {
   dbUploadId: string | null;
   dumpWorkerPath: string | null;
   dumpRunnerPath: string | null;
+  /** True when the project declares DDEV (containerTool=ddev) but has no
+   *  .ddev/config.yaml yet — 01c generates one from the declared deps, writes it
+   *  into the worktree (the commit gate persists it), then boots. */
+  needsConfig: boolean;
+  /** The proposed .ddev/config.yaml shown for review; written on apply. */
+  proposedConfig: string | null;
 }
 
 /** php/db snapshot of the `.ddev/config.yaml` that was actually booted, plus a
@@ -67,6 +75,42 @@ async function readDdevBaseline(workspace: string | null): Promise<DdevBaseline 
   };
 }
 
+/** The env-template's declared deps for this task (php/db/containerTool), or null. */
+async function loadDeclaredDeps(ctx: StepContext): Promise<Record<string, unknown> | null> {
+  const tpl = await getTaskEnvTemplate(ctx.db, ctx.taskId);
+  return (tpl?.declaredDeps as Record<string, unknown> | null) ?? null;
+}
+
+/** The repository name (used as the DDEV project name), or null. */
+async function loadRepoName(ctx: StepContext): Promise<string | null> {
+  const task = await ctx.db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { repositoryId: true },
+  });
+  if (!task?.repositoryId) return null;
+  const repo = await ctx.db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, task.repositoryId),
+    columns: { name: true },
+  });
+  return repo?.name ?? null;
+}
+
+/** Render a `.ddev/config.yaml` from the declared deps (php/db) + repo name. */
+async function buildProposedConfig(
+  ctx: StepContext,
+  deps: Record<string, unknown>,
+): Promise<string> {
+  const versions = (deps.versions as Record<string, string | null> | undefined) ?? {};
+  const database = (deps.database as { kind?: string; version?: string | null } | undefined) ?? {};
+  const repoName = await loadRepoName(ctx);
+  return renderDdevConfig({
+    name: repoName ?? 'app',
+    phpVersion: versions.php ?? null,
+    dbType: database.kind ?? null,
+    dbVersion: database.version ?? null,
+  });
+}
+
 export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
   metadata: {
     id: '01c-ddev-env',
@@ -80,7 +124,11 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-    return ws ? pathExists(ddevConfigPath(ws.workspace)) : false;
+    if (!ws) return false;
+    if (await pathExists(ddevConfigPath(ws.workspace))) return true;
+    // No config yet — run only when the project declares DDEV, so we generate one.
+    const deps = await loadDeclaredDeps(ctx);
+    return deps?.containerTool === 'ddev';
   },
 
   async detect(ctx: StepContext): Promise<DdevEnvDetect> {
@@ -89,6 +137,16 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
     const ddevConfigured = ws ? await pathExists(ddevConfigPath(ws.workspace)) : false;
     const repoSubpath = ws?.repoSubpath ?? null;
+
+    let needsConfig = false;
+    let proposedConfig: string | null = null;
+    if (!ddevConfigured) {
+      const deps = await loadDeclaredDeps(ctx);
+      if (deps?.containerTool === 'ddev') {
+        needsConfig = true;
+        proposedConfig = await buildProposedConfig(ctx, deps);
+      }
+    }
 
     const task = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
@@ -121,17 +179,55 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
       dbUploadId,
       dumpWorkerPath,
       dumpRunnerPath,
+      needsConfig,
+      proposedConfig,
+    };
+  },
+
+  form(_ctx, detected): FormSchema | null {
+    // Only stop for review when we're CREATING a config. An existing .ddev project
+    // (or a non-ddev task) returns no form and proceeds straight to boot/skip.
+    if (!detected.needsConfig || !detected.proposedConfig) return null;
+    return {
+      title: 'DDEV configuration',
+      description:
+        'This project declares DDEV but has no .ddev/config.yaml yet. Review the generated config (php/database come from your declared dependencies) — it is written into the repo and booted.',
+      fields: [
+        {
+          type: 'textarea',
+          id: 'ddevConfig',
+          label: '.ddev/config.yaml',
+          rows: 16,
+          default: detected.proposedConfig,
+          required: true,
+        },
+      ],
+      submitLabel: 'Create DDEV config',
     };
   },
 
   async apply(ctx, args): Promise<DdevEnvApply> {
     const d = args.detected;
-    if (!d.ddevConfigured || !d.repoSubpath) {
+    if (!d.repoSubpath) {
+      return { started: false, imported: false, skipped: true, output: 'no repo', baseline: null };
+    }
+
+    // Create DDEV for a project that declares it but has none yet: write the
+    // (reviewed) .ddev/config.yaml into the worktree. The commit/push gates
+    // persist it so DDEV is usable after the task finishes.
+    if (d.needsConfig && d.workspace) {
+      const cfg = String(args.formValues.ddevConfig ?? d.proposedConfig ?? '').trim();
+      if (!cfg) throw new Error('ddev config cannot be empty');
+      const dir = path.join(d.workspace, '.ddev');
+      await mkdir(dir, { recursive: true });
+      await writeFile(path.join(dir, 'config.yaml'), cfg.endsWith('\n') ? cfg : `${cfg}\n`, 'utf8');
+      await ctx.emitProgress('Generated .ddev/config.yaml from declared dependencies');
+    } else if (!d.ddevConfigured) {
       return {
         started: false,
         imported: false,
         skipped: true,
-        output: 'no .ddev config or repo',
+        output: 'no .ddev config',
         baseline: null,
       };
     }

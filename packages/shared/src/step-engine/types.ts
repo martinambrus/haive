@@ -49,6 +49,15 @@ export interface StepMetadata {
    *  the ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS config flag. Cloud/remote Ollama
    *  and every non-Ollama provider are unaffected. */
   unsafeForLocalModels?: boolean;
+  /** When true, and the task is in auto-continue mode with no gate pre-answer
+   *  for this step, the runner auto-submits the form using each field's declared
+   *  default instead of parking on waiting_form. Off by default: only steps whose
+   *  defaults are the correct unattended choice opt in (currently 03-build-image,
+   *  where the default reuses an existing image or builds with the auto-generated
+   *  tag). If any required field lacks a default the candidate fails validation
+   *  and the step still falls back to waiting_form. Read only by the worker step
+   *  runner, so no shared-constant mirror is needed. */
+  autoSubmitDefaults?: boolean;
 }
 
 /** Step IDs whose StepDefinition sets `metadata.providerSensitive = true`.

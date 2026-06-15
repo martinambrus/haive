@@ -43,3 +43,51 @@ export function parseDdevConfig(text: string): DdevConfigFields {
     docroot: matchYamlField(text, 'docroot'),
   };
 }
+
+export interface DdevConfigInput {
+  /** Project name; slugified to a DNS-safe DDEV name. */
+  name: string;
+  /** DDEV project type (php, drupal, wordpress, laravel, …). Default 'php'. */
+  type?: string | null;
+  /** PHP version like '5.6' / '8.3'. Omitted (DDEV default) when null. */
+  phpVersion?: string | null;
+  /** DB service type: mariadb | mysql | postgres. Omitted (DDEV default mariadb)
+   *  for sqlite/none/null. */
+  dbType?: string | null;
+  dbVersion?: string | null;
+  docroot?: string | null;
+  webserverType?: string | null;
+}
+
+const DDEV_DB_TYPES = new Set(['mariadb', 'mysql', 'postgres']);
+
+/** Slugify to a DNS-safe DDEV project name (lowercase alnum + hyphens). */
+export function slugifyDdevName(name: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || 'app';
+}
+
+/** Render a minimal `.ddev/config.yaml` from declared deps. Emits exactly the
+ *  fields parseDdevConfig reads (round-trips); DDEV fills the rest with its own
+ *  defaults. Used by 01c-ddev-env to create DDEV for a project that declares it
+ *  but has no config yet. */
+export function renderDdevConfig(input: DdevConfigInput): string {
+  const lines: string[] = [];
+  lines.push(`name: ${slugifyDdevName(input.name)}`);
+  lines.push(`type: ${input.type || 'php'}`);
+  // Omit docroot when empty so DDEV auto-detects (and so it round-trips through
+  // the regex parser, which can't read an empty-quoted scalar).
+  if (input.docroot) lines.push(`docroot: "${input.docroot}"`);
+  if (input.phpVersion) lines.push(`php_version: "${input.phpVersion}"`);
+  lines.push(`webserver_type: ${input.webserverType || 'nginx-fpm'}`);
+  const dbType = input.dbType && DDEV_DB_TYPES.has(input.dbType) ? input.dbType : null;
+  if (dbType) {
+    lines.push('database:');
+    lines.push(`  type: ${dbType}`);
+    if (input.dbVersion) lines.push(`  version: "${input.dbVersion}"`);
+  }
+  return lines.join('\n') + '\n';
+}

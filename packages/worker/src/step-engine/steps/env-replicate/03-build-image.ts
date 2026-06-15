@@ -45,6 +45,10 @@ export function createBuildImageStep(
       title: 'Build environment image',
       description: 'Builds the Docker image declared in the generated Dockerfile.',
       requiresCli: false,
+      // Under auto-continue this step runs unattended on its defaults: first
+      // build → build with the auto-generated tag; already built → reuse
+      // (rebuild box unticked). See form() for the per-state field set.
+      autoSubmitDefaults: true,
     },
 
     async detect(ctx) {
@@ -76,15 +80,18 @@ export function createBuildImageStep(
           default: defaultTag,
           required: true,
         },
-        {
+      ];
+      // The rebuild checkbox only matters when an image already exists. On the
+      // first build there is nothing to reuse — apply() builds regardless of the
+      // flag (currentImageId is null) — so the box would be a no-op; omit it.
+      if (alreadyBuilt) {
+        fields.push({
           type: 'checkbox',
           id: 'forceRebuild',
-          label: alreadyBuilt
-            ? 'Rebuild even though an image already exists'
-            : 'Build the image now',
-          default: !alreadyBuilt,
-        },
-      ];
+          label: 'Rebuild even though an image already exists',
+          default: false,
+        });
+      }
       return {
         title: 'Build image',
         description: alreadyBuilt

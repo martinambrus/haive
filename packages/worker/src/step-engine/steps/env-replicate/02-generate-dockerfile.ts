@@ -166,6 +166,17 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   lines.push('');
   lines.push('ENV DEBIAN_FRONTEND=noninteractive');
   lines.push('');
+  // Make every apt install below fully non-interactive on conffile conflicts by
+  // auto-keeping the currently-installed conffile. DEBIAN_FRONTEND alone does
+  // NOT answer the dpkg "modified conffile" prompt, so a base that ships a
+  // package whose conffile differs from the new one (e.g. ddev-webserver's
+  // php*-fpm and its php-fpm.conf) aborts the build at the Y/I/N/O/D/Z prompt
+  // with "end of file on stdin at conffile prompt".
+  lines.push('# Auto-keep existing conffiles so apt never blocks the build on a prompt');
+  lines.push(
+    'RUN echo \'Dpkg::Options { "--force-confold"; "--force-confdef"; };\' > /etc/apt/apt.conf.d/99haive-noninteractive',
+  );
+  lines.push('');
 
   if (isDdevWebserverBase(baseImage)) {
     // ddev-webserver bundles the deb.sury.org PHP repo; sury rotates its
@@ -223,7 +234,10 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     lines.push('');
   }
 
-  if (runtimes.has('php')) {
+  // For DDEV projects the PHP runtime comes from DDEV itself (01c-ddev-env), not
+  // this sandbox image — so skip the apt install entirely (DDEV serves php 5.6/7/8
+  // from its own images; apt-installing legacy PHP on the base would just fail).
+  if (runtimes.has('php') && deps.containerTool !== 'ddev') {
     const requestedPhp = normalizePhpVersion(versions.php ?? '8.3');
     const phpVersion = clampPhpToInstallable(requestedPhp);
     const bumped = phpVersion !== requestedPhp;
@@ -312,8 +326,9 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
     lines.push('');
   }
 
+  // DDEV runs the database service itself; the CLI sandbox needs no client for it.
   const database = deps.database;
-  if (database && database.kind && database.kind !== 'none') {
+  if (database && database.kind && database.kind !== 'none' && deps.containerTool !== 'ddev') {
     lines.push(`# Database client: ${database.kind}`);
     const dbPackage =
       database.kind === 'postgres'

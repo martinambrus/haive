@@ -1,7 +1,13 @@
 import { and, desc, eq, isNull, ne } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema, type StepIterationEntry } from '@haive/database';
-import { CONFIG_KEYS, configService, logger, validateFormValues } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  configService,
+  extractFormDefaults,
+  logger,
+  validateFormValues,
+} from '@haive/shared';
 import type {
   CliExecInvocationKind,
   CliExecJobPayload,
@@ -760,14 +766,29 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       // browser mode that the runtime schema no longer offers. submitAction
       // 'retry' forms signal a broken precondition and are never auto-passed.
       if (autoContinue && (persistedSchema.submitAction ?? 'submit') === 'submit') {
-        const candidate = stepPreAnswer ?? (persistedSchema.fields.length === 0 ? {} : undefined);
+        // Candidate precedence: a gate pre-answer wins; else a zero-field info
+        // form auto-passes with {}; else a step that opts in via
+        // metadata.autoSubmitDefaults auto-submits its declared field defaults.
+        const candidate =
+          stepPreAnswer ??
+          (persistedSchema.fields.length === 0
+            ? {}
+            : meta.autoSubmitDefaults
+              ? extractFormDefaults(persistedSchema)
+              : undefined);
         if (candidate !== undefined) {
           const validation = validateFormValues(persistedSchema, candidate);
           if (validation.success) {
             formValues = validation.data;
             current = await updateRow(db, current.id, { formValues, status: 'running' });
             ctx.logger.info(
-              { source: stepPreAnswer ? 'pre_answer' : 'zero_field' },
+              {
+                source: stepPreAnswer
+                  ? 'pre_answer'
+                  : persistedSchema.fields.length === 0
+                    ? 'zero_field'
+                    : 'step_defaults',
+              },
               'auto-continue: form auto-submitted',
             );
           } else {

@@ -40,6 +40,7 @@ interface DeclaredDepsShape {
   runtimes?: string[];
   lspServers?: string[];
   database?: { kind?: string };
+  containerTool?: string;
 }
 
 export function buildSmokeChecks(deps: DeclaredDepsShape): SmokeCheck[] {
@@ -48,7 +49,10 @@ export function buildSmokeChecks(deps: DeclaredDepsShape): SmokeCheck[] {
   if (runtimes.includes('node')) {
     checks.push({ id: 'node', label: 'Node.js', cmd: ['node', '--version'] });
   }
-  if (runtimes.includes('php')) {
+  // For DDEV projects php (and the DB below) live in DDEV, not the CLI sandbox —
+  // they were deliberately excluded from the image, so don't smoke-check them
+  // here (they'd fail). 04 only verifies what's actually in the sandbox.
+  if (runtimes.includes('php') && deps.containerTool !== 'ddev') {
     checks.push({ id: 'php', label: 'PHP', cmd: ['php', '--version'] });
   }
   if (runtimes.includes('python')) {
@@ -100,7 +104,7 @@ export function buildSmokeChecks(deps: DeclaredDepsShape): SmokeCheck[] {
     checks.push({ id: 'lsp-jdtls', label: 'jdtls', cmd: ['jdtls', '--version'] });
   }
 
-  const dbKind = deps.database?.kind;
+  const dbKind = deps.containerTool === 'ddev' ? undefined : deps.database?.kind;
   if (dbKind === 'postgres') {
     checks.push({
       id: 'db-postgres',

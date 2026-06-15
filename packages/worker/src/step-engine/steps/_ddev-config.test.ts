@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { matchYamlField, matchYamlBlockField, parseDdevConfig } from './_ddev-config.js';
+import {
+  matchYamlField,
+  matchYamlBlockField,
+  parseDdevConfig,
+  renderDdevConfig,
+  slugifyDdevName,
+} from './_ddev-config.js';
 
 const MARIADB_CONFIG = `name: myproject
 type: drupal10
@@ -75,5 +81,49 @@ describe('matchYamlField / matchYamlBlockField', () => {
     expect(matchYamlBlockField(text, 'database', 'type')).toBe('mariadb');
     // top-level `version: top` must not leak into the block lookup
     expect(matchYamlBlockField(text, 'database', 'missing')).toBeNull();
+  });
+});
+
+describe('renderDdevConfig + slugifyDdevName', () => {
+  it('renders the legacy target (php 5.6 + mariadb 10.11) and round-trips through parseDdevConfig', () => {
+    const yaml = renderDdevConfig({
+      name: 'My Legacy App',
+      phpVersion: '5.6',
+      dbType: 'mariadb',
+      dbVersion: '10.11',
+    });
+    expect(yaml).toContain('name: my-legacy-app');
+    expect(yaml).toContain('type: php');
+    expect(parseDdevConfig(yaml)).toEqual({
+      phpVersion: '5.6',
+      dbType: 'mariadb',
+      dbVersion: '10.11',
+      webserver: 'nginx-fpm',
+      docroot: null, // omitted when empty → DDEV auto-detects
+    });
+  });
+
+  it('omits the database block for sqlite/none (DDEV defaults to mariadb)', () => {
+    expect(renderDdevConfig({ name: 'x', phpVersion: '8.3', dbType: 'sqlite' })).not.toContain(
+      'database:',
+    );
+    expect(renderDdevConfig({ name: 'x', phpVersion: '8.3', dbType: null })).not.toContain(
+      'database:',
+    );
+  });
+
+  it('omits php_version when not provided', () => {
+    expect(renderDdevConfig({ name: 'x' })).not.toContain('php_version');
+  });
+
+  it('honors an explicit project type + docroot', () => {
+    const yaml = renderDdevConfig({ name: 'x', type: 'drupal', docroot: 'web', phpVersion: '8.3' });
+    expect(yaml).toContain('type: drupal');
+    expect(parseDdevConfig(yaml).docroot).toBe('web');
+  });
+
+  it('slugifies to a DNS-safe DDEV name, falling back to "app"', () => {
+    expect(slugifyDdevName('My Legacy App!')).toBe('my-legacy-app');
+    expect(slugifyDdevName('___')).toBe('app');
   });
 });

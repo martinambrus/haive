@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { scanRepoForDeps } from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
+import {
+  computeBaseImage,
+  scanRepoForDeps,
+  stableStringify,
+} from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
 import {
   dockerfileTargetsUnbuildablePhp,
   renderDockerfile,
@@ -214,6 +218,21 @@ describe('renderDockerfile', () => {
     expect(out).toContain('WORKDIR /workspace');
   });
 
+  it('writes a force-confold apt drop-in before the first apt-get so conffile prompts never block the build', () => {
+    const out = renderDockerfile('ddev/ddev-webserver:v1.25.2', {
+      runtimes: ['php'],
+      versions: { php: '5.6' },
+    });
+    expect(out).toContain('/etc/apt/apt.conf.d/99haive-noninteractive');
+    expect(out).toContain('--force-confold');
+    expect(out).toContain('--force-confdef');
+    // Must take effect before any apt-get runs (and before the sury keyring step).
+    const dropInIdx = out.indexOf('99haive-noninteractive');
+    expect(dropInIdx).toBeGreaterThan(-1);
+    expect(dropInIdx).toBeLessThan(out.indexOf('apt-get update'));
+    expect(dropInIdx).toBeLessThan(out.indexOf('debsuryorg-archive-keyring.deb'));
+  });
+
   it('adds a Node.js install block when node runtime is declared', () => {
     const out = renderDockerfile('ubuntu:24.04', {
       runtimes: ['node'],
@@ -364,6 +383,36 @@ describe('renderDockerfile', () => {
     expect(out).toContain('htop');
   });
 
+  it('skips PHP and DB apt for a DDEV project — DDEV provides the runtime, sandbox stays tools-only', () => {
+    const out = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['php'],
+      versions: { php: '5.6' },
+      database: { kind: 'mariadb', version: '10.11' },
+      lspServers: ['intelephense'],
+      containerTool: 'ddev',
+    });
+    // No PHP runtime / composer / DB client baked into the sandbox image...
+    expect(out).not.toContain('php5.6-cli');
+    expect(out).not.toContain('# PHP');
+    expect(out).not.toContain('/usr/bin/composer');
+    expect(out).not.toContain('# Database client');
+    expect(out).not.toContain('default-mysql-client');
+    // ...but node + the node-based PHP LSP still land for code intelligence.
+    expect(out).toContain('# Node.js');
+    expect(out).toContain('RUN npm install -g intelephense');
+  });
+
+  it('still installs PHP + DB client via apt for a non-DDEV php project', () => {
+    const out = renderDockerfile('ubuntu:24.04', {
+      runtimes: ['php'],
+      versions: { php: '8.3' },
+      database: { kind: 'mariadb', version: '10.11' },
+      containerTool: 'none',
+    });
+    expect(out).toContain('php8.3-cli');
+    expect(out).toContain('# Database client');
+  });
+
   it('bumps sub-5.6 PHP to 5.6 and warns on the ddev base (the original php5.5 build failure)', () => {
     const out = renderDockerfile('ddev/ddev-webserver:v1.25.2', {
       runtimes: ['php'],
@@ -431,5 +480,43 @@ describe('dockerfileTargetsUnbuildablePhp', () => {
     });
     expect(fixed).toContain('FROM php:5.5-cli'); // the escape-hatch comment is present
     expect(dockerfileTargetsUnbuildablePhp(fixed)).toBe(false); // ...but not flagged
+  });
+});
+
+describe('stableStringify', () => {
+  it('is independent of object key order', () => {
+    expect(stableStringify({ a: 1, b: 2 })).toBe(stableStringify({ b: 2, a: 1 }));
+  });
+
+  it('detects a changed PHP version (the 8.3 -> 5.6 case that left the Dockerfile stale)', () => {
+    const before = { runtimes: ['php'], versions: { php: '8.3', node: null } };
+    const after = { runtimes: ['php'], versions: { php: '5.6', node: null } };
+    expect(stableStringify(before)).not.toBe(stableStringify(after));
+  });
+
+  it('treats a re-declared identical deps set as unchanged', () => {
+    const deps = {
+      runtimes: ['php', 'node'],
+      versions: { php: '8.3', node: '22' },
+      lspServers: ['intelephense'],
+    };
+    expect(stableStringify(deps)).toBe(stableStringify({ ...deps }));
+  });
+
+  it('is sensitive to array order (a reordered runtime list counts as changed)', () => {
+    expect(stableStringify({ runtimes: ['php', 'node'] })).not.toBe(
+      stableStringify({ runtimes: ['node', 'php'] }),
+    );
+  });
+});
+
+describe('computeBaseImage', () => {
+  it('uses a lightweight ubuntu base for DDEV projects (DDEV provides the app runtime)', () => {
+    expect(computeBaseImage('ddev')).toBe('ubuntu:24.04');
+  });
+
+  it('uses ubuntu for non-container projects too', () => {
+    expect(computeBaseImage('none')).toBe('ubuntu:24.04');
+    expect(computeBaseImage('docker-compose')).toBe('ubuntu:24.04');
   });
 });

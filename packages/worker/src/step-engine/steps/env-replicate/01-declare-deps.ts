@@ -428,6 +428,15 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     };
 
     if (existing) {
+      // A changed base image or declared-deps set makes the previously saved
+      // Dockerfile (and any image built from it) stale — it was rendered from
+      // the OLD inputs. Drop both so step 02 re-renders from the new deps and
+      // step 03 rebuilds, instead of 02's reuse path silently keeping the old
+      // Dockerfile (e.g. a PHP 8.3 -> 5.6 change, which the unbuildable-PHP
+      // self-heal does NOT catch). An unchanged re-run keeps any hand-edits.
+      const staleDockerfile =
+        baseImage !== existing.baseImage ||
+        stableStringify(declaredDeps) !== stableStringify(existing.declaredDeps ?? {});
       await ctx.db
         .update(schema.envTemplates)
         .set({
@@ -437,11 +446,14 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
           status: 'pending',
           dockerfileHash: null,
           imageTag: null,
+          ...(staleDockerfile
+            ? { generatedDockerfile: null, builtImageId: null, lastBuiltAt: null }
+            : {}),
           updatedAt: new Date(),
         })
         .where(eq(schema.envTemplates.id, existing.id));
       ctx.logger.info(
-        { envTemplateId: existing.id, baseImage, templateName },
+        { envTemplateId: existing.id, baseImage, templateName, staleDockerfile },
         'env template updated',
       );
       return { envTemplateId: existing.id, baseImage };
@@ -466,6 +478,23 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
   },
 };
 
+/** Stable, key-sorted JSON serialization for comparing two declared-deps
+ *  objects regardless of property order (arrays keep their order, which is
+ *  semantically meaningful). Used to decide whether a re-declared dependency
+ *  set actually changed, so the saved Dockerfile is only invalidated on a real
+ *  change rather than on every step-01 re-run. */
+export function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
 interface DeclareDepsFormValues extends FormValues {
   runtimes: LanguageKey[];
   nodeVersion?: string;
@@ -481,10 +510,14 @@ interface DeclareDepsFormValues extends FormValues {
   extraPackages: string;
 }
 
-function computeBaseImage(containerTool: ContainerTool): string {
+export function computeBaseImage(containerTool: ContainerTool): string {
   switch (containerTool) {
     case 'ddev':
-      return 'ddev/ddev-webserver:v1.25.2';
+      // DDEV provides the app runtime (php/db/web) itself in its own nested-Docker
+      // env (01c-ddev-env). The env-replicate image is only the CLI-agent sandbox,
+      // so a lightweight ubuntu base + tools/LSPs is enough — and it avoids trying
+      // to apt-install legacy PHP (e.g. 5.6) onto the ddev-webserver/debian base.
+      return 'ubuntu:24.04';
     case 'docker-compose':
     case 'docker':
     case 'none':

@@ -110,6 +110,7 @@ function freshState(): MockState {
 interface StepOpts {
   form?: (() => FormSchema | null) | undefined;
   hasFormMethod?: boolean;
+  autoSubmitDefaults?: boolean;
 }
 
 function makeStep(opts: StepOpts): StepDefinition {
@@ -121,6 +122,7 @@ function makeStep(opts: StepOpts): StepDefinition {
       title: 'cfg step',
       description: 'config test step',
       requiresCli: false,
+      autoSubmitDefaults: opts.autoSubmitDefaults ?? false,
     },
     async detect() {
       return { ok: true };
@@ -276,6 +278,43 @@ describe('advanceStep auto-continue', () => {
     const state = freshState();
     state.taskRow = { id: 'task-1', autoContinue: false, preAnswers: null };
     const result = await run(state, makeStep({ form: () => ZERO_FIELD_FORM }));
+    expect(result.status).toBe('waiting_form');
+  });
+
+  it('auto mode submits step field defaults when autoSubmitDefaults is set', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const result = await run(
+      state,
+      makeStep({ form: () => QUESTION_FORM, autoSubmitDefaults: true }),
+    );
+    expect(result.status).toBe('done');
+    const values = state.taskStepRow.formValues as Record<string, unknown>;
+    expect(values.action).toBe('update');
+    expect(values.flag).toBe(true);
+  });
+
+  it('autoSubmitDefaults still stops when a required field has no default', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const requiredNoDefault: FormSchema = {
+      title: 'Need input',
+      fields: [{ type: 'text', id: 'name', label: 'Name', required: true }],
+    };
+    const result = await run(
+      state,
+      makeStep({ form: () => requiredNoDefault, autoSubmitDefaults: true }),
+    );
+    expect(result.status).toBe('waiting_form');
+  });
+
+  it('autoSubmitDefaults does not auto-submit when auto-continue is off', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: false, preAnswers: null };
+    const result = await run(
+      state,
+      makeStep({ form: () => QUESTION_FORM, autoSubmitDefaults: true }),
+    );
     expect(result.status).toBe('waiting_form');
   });
 });

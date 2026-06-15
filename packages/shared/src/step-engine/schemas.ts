@@ -147,3 +147,27 @@ function defaultFor(field: FormField): unknown {
       return null;
   }
 }
+
+/** Builds a form-values candidate from each field's declared default, for steps
+ *  that opt into unattended auto-submit (StepMetadata.autoSubmitDefaults). The
+ *  runner feeds the result to validateFormValues() so the same coercion/required
+ *  rules apply. Recurses accordion groups. Only fields with a concrete default
+ *  contribute an entry; a field without one is omitted, so a required field with
+ *  no default makes validation fail and the runner falls back to waiting_form
+ *  rather than guessing a value. */
+export function extractFormDefaults(schema: FormSchema): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of schema.fields) collectFieldDefault(field, out);
+  return out;
+}
+
+function collectFieldDefault(field: FormField, out: Record<string, unknown>): void {
+  if (field.type === 'accordion') {
+    for (const item of field.items) {
+      for (const leaf of item.fields) collectFieldDefault(leaf, out);
+    }
+    return;
+  }
+  const value = defaultFor(field);
+  if (value !== undefined && value !== null) out[field.id] = value;
+}

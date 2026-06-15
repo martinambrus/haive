@@ -149,6 +149,49 @@ describe('createBuildImageStep.apply', () => {
   });
 });
 
+describe('createBuildImageStep.form', () => {
+  const inertRunner: DockerRunner = {
+    build: async () => {
+      throw new Error('form() must not build');
+    },
+    run: async () => {
+      throw new Error('form() must not run');
+    },
+  };
+
+  it('omits the rebuild checkbox on the first build and opts into autoSubmitDefaults', () => {
+    const step = createBuildImageStep(inertRunner);
+    const { ctx } = makeStubCtx();
+    const form = step.form!(ctx, {
+      envTemplateId: 'env-1',
+      name: 'task-abcdef01',
+      baseImage: 'ubuntu:24.04',
+      dockerfile: 'FROM ubuntu:24.04\n',
+      currentImageId: null,
+      status: 'pending',
+    });
+    expect(form).not.toBeNull();
+    expect(form!.fields.map((f) => f.id)).toEqual(['imageTag']);
+    expect(step.metadata.autoSubmitDefaults).toBe(true);
+  });
+
+  it('shows the rebuild checkbox (default false) when an image already exists', () => {
+    const step = createBuildImageStep(inertRunner);
+    const { ctx } = makeStubCtx();
+    const form = step.form!(ctx, {
+      envTemplateId: 'env-1',
+      name: 'task-abcdef01',
+      baseImage: 'ubuntu:24.04',
+      dockerfile: 'FROM ubuntu:24.04\n',
+      currentImageId: 'sha256:abc',
+      status: 'ready',
+    });
+    const checkbox = form!.fields.find((f) => f.id === 'forceRebuild');
+    expect(checkbox).toBeDefined();
+    expect(checkbox && 'default' in checkbox ? checkbox.default : undefined).toBe(false);
+  });
+});
+
 describe('buildSmokeChecks', () => {
   it('produces checks for each declared runtime plus a shell probe', () => {
     const checks = buildSmokeChecks({ runtimes: ['node', 'php'] });
@@ -176,6 +219,21 @@ describe('buildSmokeChecks', () => {
   it('returns only the shell probe when nothing is declared', () => {
     const checks = buildSmokeChecks({});
     expect(checks.map((c) => c.id)).toEqual(['bash']);
+  });
+
+  it('skips PHP and DB-client checks for a DDEV project — they live in DDEV, not the sandbox', () => {
+    const checks = buildSmokeChecks({
+      runtimes: ['php'],
+      lspServers: ['intelephense'],
+      database: { kind: 'mariadb' },
+      containerTool: 'ddev',
+    });
+    const ids = checks.map((c) => c.id);
+    expect(ids).not.toContain('php');
+    expect(ids).not.toContain('db-mysql');
+    // the node-based PHP LSP + shell probe ARE in the tools-only sandbox
+    expect(ids).toContain('lsp-intelephense');
+    expect(ids).toContain('bash');
   });
 });
 
