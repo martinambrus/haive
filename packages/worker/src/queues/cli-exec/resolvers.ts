@@ -255,6 +255,7 @@ export async function resolveMcpExtraFiles(
 
   // chrome-devtools is gated on a ready envTemplate with browserTesting.
   let includeChromeDevtools = false;
+  let chromeDevtoolsMcpVersion: string | null = null;
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: { envTemplateId: true },
@@ -267,6 +268,9 @@ export async function resolveMcpExtraFiles(
     if (envTemplate && envTemplate.status === 'ready') {
       const deps = envTemplate.declaredDeps as Record<string, unknown> | null;
       includeChromeDevtools = !!deps?.browserTesting;
+      // Operative chrome-devtools-mcp pin for this repo (null = latest).
+      chromeDevtoolsMcpVersion =
+        (deps?.chromeDevtoolsMcpVersion as string | null | undefined) ?? null;
     }
   }
 
@@ -284,6 +288,7 @@ export async function resolveMcpExtraFiles(
     repoPath: sandboxWorkdir,
     includeChromeDevtools,
     chromeDevtoolsBrowserUrl,
+    chromeDevtoolsMcpVersion,
     includeRagSearch: rag.enabled,
     ragServerPath: RAG_MCP_SERVER_PATH,
     ragApiUrl: rag.apiUrl,

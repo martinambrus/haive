@@ -40,6 +40,10 @@ export interface BuildDefaultMcpServersOptions {
    *  launching its own isolated headless instance — so the agent drives the
    *  SAME browser the user watches/assists via the VNC panel. */
   chromeDevtoolsBrowserUrl?: string;
+  /** Pin the chrome-devtools-mcp npm version the agent launches via `npx`. This
+   *  is the OPERATIVE pin (Haive's injected server overrides the user's on name
+   *  collision). Empty/absent = `@latest`. */
+  chromeDevtoolsMcpVersion?: string | null;
   /** Enable the haive-rag MCP server (project RAG retrieval). Requires
    *  ragServerPath, ragApiUrl, and ragToken to also be set. */
   includeRagSearch?: boolean;
@@ -84,15 +88,10 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
     // Connect to the runner's visible browser when its CDP URL is provided
     // (interactive/co-driven testing); otherwise self-launch an isolated
     // headless instance (the default automated path).
+    const cdmSpec = `chrome-devtools-mcp@${opts.chromeDevtoolsMcpVersion?.trim() || 'latest'}`;
     const chromeArgs = opts.chromeDevtoolsBrowserUrl
-      ? ['-y', 'chrome-devtools-mcp@latest', `--browser-url=${opts.chromeDevtoolsBrowserUrl}`]
-      : [
-          '-y',
-          'chrome-devtools-mcp@latest',
-          '--channel=stable',
-          '--isolated=true',
-          '--viewport=1920x1080',
-        ];
+      ? ['-y', cdmSpec, `--browser-url=${opts.chromeDevtoolsBrowserUrl}`]
+      : ['-y', cdmSpec, '--channel=stable', '--isolated=true', '--viewport=1920x1080'];
     servers.push({ name: 'chrome-devtools', command: 'npx', args: chromeArgs });
   }
 

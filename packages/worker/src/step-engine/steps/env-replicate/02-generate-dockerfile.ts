@@ -155,7 +155,15 @@ interface DeclaredDepsShape {
   containerTool?: string;
   database?: { kind?: string; version?: string | null };
   lspServers?: string[];
+  /** Per-LSP version pins, keyed by lsp key (e.g. intelephense, vtsls, pyright,
+   *  gopls, solargraph). Bare version string; absent/empty = latest/unpinned.
+   *  rust-analyzer and jdtls are not pinnable and ignore any value here. */
+  lspServerVersions?: Record<string, string | null>;
   browserTesting?: boolean;
+  /** chrome-devtools-mcp npm version pin baked into the env image (warm cache).
+   *  Absent/empty = latest. The operative runtime pin is applied separately when
+   *  the MCP server is launched (resolveMcpExtraFiles → buildDefaultMcpServers). */
+  chromeDevtoolsMcpVersion?: string | null;
   extraPackages?: string[];
 }
 
@@ -343,29 +351,34 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   }
 
   if (lspServers.length > 0) {
+    const lspVersions = deps.lspServerVersions ?? {};
     lines.push('# Language servers');
     for (const lsp of lspServers) {
+      // Bare version pin for this server; empty/absent = latest/unpinned.
+      const v = (lspVersions[lsp] ?? '').trim();
       switch (lsp) {
         case 'intelephense':
-          lines.push('RUN npm install -g intelephense');
+          lines.push(`RUN npm install -g intelephense${v ? `@${v}` : ''}`);
           break;
         case 'intelephense-extended':
-          lines.push('RUN npm install -g intelephense');
+          lines.push(`RUN npm install -g intelephense${v ? `@${v}` : ''}`);
           break;
         case 'vtsls':
-          lines.push('RUN npm install -g @vtsls/language-server typescript');
+          lines.push(`RUN npm install -g @vtsls/language-server${v ? `@${v}` : ''} typescript`);
           break;
         case 'pyright':
-          lines.push('RUN pip install --break-system-packages pyright');
+          lines.push(`RUN pip install --break-system-packages pyright${v ? `==${v}` : ''}`);
           break;
         case 'gopls':
-          lines.push('RUN go install golang.org/x/tools/gopls@latest');
+          // gopls module tags are vX.Y.Z; the cache stores the bare version.
+          lines.push(`RUN go install golang.org/x/tools/gopls@${v ? `v${v}` : 'latest'}`);
           break;
         case 'rust-analyzer':
+          // Not independently pinnable (tied to the rustup toolchain).
           lines.push('RUN rustup component add rust-analyzer');
           break;
         case 'solargraph':
-          lines.push('RUN gem install solargraph');
+          lines.push(`RUN gem install solargraph${v ? ` -v ${v}` : ''}`);
           break;
         case 'jdtls':
           lines.push(
@@ -396,7 +409,8 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
       '    && apt-get install -y --no-install-recommends chromium xvfb x11vnc socat procps fonts-dejavu \\',
     );
     lines.push('    && rm -rf /var/lib/apt/lists/*');
-    lines.push('RUN npm install -g chrome-devtools-mcp');
+    const cdmVersion = (deps.chromeDevtoolsMcpVersion ?? '').trim();
+    lines.push(`RUN npm install -g chrome-devtools-mcp${cdmVersion ? `@${cdmVersion}` : ''}`);
     lines.push(
       'RUN mkdir -p /opt/browser && cd /opt/browser && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1',
     );
