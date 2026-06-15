@@ -1,6 +1,8 @@
 import path from 'node:path';
+import { execFile } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
@@ -18,6 +20,12 @@ import { ensureDdevStarted, ddevExec } from '../../../sandbox/ddev-runner.js';
 // sandbox/ddev-runner.ts for why DDEV runs in nested Docker.
 
 const REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
+
+const execFileAsync = promisify(execFile);
+
+/** The repo volume is chowned to uid 1000 (the `node`/`ddev` sandbox user) so
+ *  DDEV and sandboxed CLIs can write. See resolvers.ts chownRepoVolume. */
+const SANDBOX_OWNER = '1000:1000';
 
 interface DdevEnvDetect {
   ddevConfigured: boolean;
@@ -230,6 +238,20 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
         output: 'no .ddev config',
         baseline: null,
       };
+    }
+
+    // The worktree was created by the worker as root, but DDEV runs as the `ddev`
+    // user (uid 1000, matching the repo volume's chowned ownership). Without this,
+    // `ddev start` fails with "permission denied" creating .ddev/.webimageBuild in
+    // the worktree. chown the worktree (incl. the .ddev we just wrote) so DDEV — and
+    // its web/db containers — can write throughout the project.
+    if (d.workspace) {
+      await execFileAsync('chown', ['-R', SANDBOX_OWNER, d.workspace]).catch((err) => {
+        ctx.logger.warn(
+          { err: String(err), workspace: d.workspace },
+          'ddev worktree chown to 1000:1000 failed — ddev start may hit permission denied',
+        );
+      });
     }
 
     await ctx.emitProgress('Starting DDEV environment (nested Docker)…');
