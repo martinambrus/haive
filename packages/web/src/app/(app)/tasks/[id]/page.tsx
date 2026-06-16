@@ -30,6 +30,7 @@ import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
 import { FormRenderer, InfoSections, type FormValues } from '@/components/form-renderer';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { TaskSource } from '@/components/task-source';
 import { StepTerminal } from '@/components/terminal/StepTerminal';
@@ -1662,16 +1663,18 @@ function StepCard({
         step.status === 'done' &&
         ((step.output as { findingsSummary?: string } | null)?.findingsSummary ?? '').trim()
           .length > 0 && (
-          <InfoSections
-            sections={[
-              {
-                title: 'Validation summary',
-                preview: 'what was found & fixed',
-                body: (step.output as { findingsSummary: string }).findingsSummary,
-                defaultOpen: true,
-              },
-            ]}
-          />
+          <details className="rounded-md border border-neutral-800 bg-neutral-950/60" open>
+            <summary className="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900">
+              <span className="font-medium">Validation summary</span>
+              <span className="ml-2 text-xs text-neutral-400">what was found &amp; fixed</span>
+            </summary>
+            <div className="border-t border-neutral-800">
+              <MarkdownView
+                body={(step.output as { findingsSummary: string }).findingsSummary}
+                enhanced
+              />
+            </div>
+          </details>
         )}
 
       {step.status !== 'waiting_form' && (step.detectOutput !== null || step.output !== null) && (
