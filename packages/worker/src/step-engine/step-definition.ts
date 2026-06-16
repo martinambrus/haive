@@ -206,5 +206,17 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
    *  step in waiting_cli per level until every level checkpoints, then apply
    *  finalizes. See packages/worker/src/step-engine/dag-executor.ts. */
   dagExecute?: DagExecuteSpec;
+  /** Fix-loop: when this step's apply output indicates a BLOCKING defect, the runner
+   *  returns `loop_back` instead of `done`, re-entering at the implementation step for
+   *  a new round (the whole post-implementation chain re-runs). `evaluate` inspects the
+   *  apply output and returns the diagnosis to hand the implementation agent, or null
+   *  (or blocking=false) when the step passed. */
+  fixLoop?: {
+    evaluate(applyOutput: TApply): { blocking: boolean; diagnosis: string } | null;
+  };
+  /** Deterministic steps (e.g. 07c-ddev-reconcile) that THROW on a fixable failure set
+   *  this so the runner routes the thrown error into the fix loop (diagnosis = error
+   *  message) instead of failing the task outright. */
+  fixLoopOnError?: boolean;
   apply(ctx: StepContext, args: StepApplyArgs<TDetect>): Promise<TApply>;
 }

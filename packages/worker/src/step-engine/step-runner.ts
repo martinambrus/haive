@@ -99,6 +99,7 @@ export type AdvanceStepResult =
   | { status: 'waiting_form'; row: TaskStepRow; formSchema: FormSchema }
   | { status: 'waiting_cli'; row: TaskStepRow }
   | { status: 'skipped'; row: TaskStepRow }
+  | { status: 'loop_back'; row: TaskStepRow; diagnosis: string; sourceStepId: string }
   | { status: 'failed'; row: TaskStepRow; error: string };
 
 type UpdatePatch = Partial<{
@@ -988,6 +989,32 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       }
     }
 
+    // --- Fix-loop hook: a downstream step that finds a BLOCKING defect routes back
+    // to the implementation step for a new round instead of finishing the chain. The
+    // step row is still marked done (it ran successfully and produced its findings);
+    // handleResult turns the loop_back into a round bump + re-entry at implement. ---
+    if (stepDef.fixLoop) {
+      const verdict = stepDef.fixLoop.evaluate(output);
+      if (verdict?.blocking) {
+        const finished = await updateRow(db, current.id, {
+          status: 'done',
+          output,
+          statusMessage: null,
+          endedAt: new Date(),
+        });
+        ctx.logger.info(
+          { stepId: meta.id, round },
+          'fix-loop: blocking defect found; routing back to implementation',
+        );
+        return {
+          status: 'loop_back',
+          row: finished,
+          diagnosis: verdict.diagnosis,
+          sourceStepId: meta.id,
+        };
+      }
+    }
+
     const done = await updateRow(db, current.id, {
       status: 'done',
       output,
@@ -1007,6 +1034,22 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       log.info({ stepId: meta.id, taskId }, 'step aborted by task cancel');
     } else {
       log.error({ err, stepId: meta.id, taskId }, 'step runner failed');
+    }
+    // Deterministic fix-loop steps (e.g. 07c) route a fixable thrown failure back to
+    // implementation as a diagnosis instead of failing the task. handleResult enforces
+    // the round cap; at the cap the task fails with this diagnosis.
+    if (!cancelled && stepDef.fixLoopOnError) {
+      const finished = await updateRow(db, row.id, {
+        status: 'done',
+        statusMessage: null,
+        errorMessage,
+        endedAt: new Date(),
+      }).catch(() => row);
+      log.info(
+        { stepId: meta.id, taskId, round },
+        'fix-loop: step error routed back to implementation',
+      );
+      return { status: 'loop_back', row: finished, diagnosis: errorMessage, sourceStepId: meta.id };
     }
     const failed = await updateRow(db, row.id, {
       status: 'failed',

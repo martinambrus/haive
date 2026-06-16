@@ -35,6 +35,11 @@ import { cleanupTaskAuthVolumes } from '../sandbox/task-auth-volume.js';
 import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
+import {
+  recordFixLoopRequest,
+  FIX_LOOP_TARGET_STEP_ID,
+  DEFAULT_MAX_FIX_ROUNDS,
+} from '../step-engine/steps/workflow/_fix-loop.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 import { unloadTaskOllamaCliModels } from '../sandbox/ollama-provision.js';
 
@@ -592,6 +597,56 @@ async function handleResult(
         })
         .where(eq(schema.tasks.id, ctx.taskId));
       await appendEvent(db, ctx.taskId, result.row.id, 'step.waiting_cli', { stepId });
+      return;
+    }
+    case 'loop_back': {
+      // A downstream step found a blocking defect. Bump the round and re-enter at the
+      // implementation step (which re-runs in fix mode with this diagnosis); the
+      // forward walk then re-runs the whole post-implementation chain as round-N rows.
+      const nextRound = result.row.round + 1;
+      const taskRow = await db.query.tasks.findFirst({
+        where: eq(schema.tasks.id, ctx.taskId),
+        columns: { maxFixRounds: true },
+      });
+      const cap = taskRow?.maxFixRounds ?? DEFAULT_MAX_FIX_ROUNDS;
+      await appendEvent(db, ctx.taskId, result.row.id, 'step.loop_back', {
+        stepId,
+        sourceStepId: result.sourceStepId,
+        round: nextRound,
+      });
+      if (nextRound > cap) {
+        // Cap reached. (Slice 5 replaces this with an interactive Continue / Accept /
+        // Abort gate.) Fail with the diagnosis so the user can act.
+        await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.exhausted', {
+          sourceStepId: result.sourceStepId,
+          rounds: cap,
+        });
+        await markTaskFailed(
+          db,
+          ctx.taskId,
+          `Fix loop reached the ${cap}-round limit without resolving the issue found by ` +
+            `${result.sourceStepId}. Latest diagnosis: ${result.diagnosis.slice(0, 800)}`,
+        );
+        return;
+      }
+      const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
+      await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
+        diagnosis: result.diagnosis,
+        sourceStepId: result.sourceStepId,
+        round: nextRound,
+      });
+      await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.started', {
+        sourceStepId: result.sourceStepId,
+        round: nextRound,
+      });
+      await markTaskRunningWithStep(
+        db,
+        ctx.taskId,
+        target.metadata.id,
+        computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
+        nextRound,
+      );
+      await enqueueAdvance(ctx.taskId, ctx.userId, target.metadata.id, nextRound);
       return;
     }
     case 'failed': {

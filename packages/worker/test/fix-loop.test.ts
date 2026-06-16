@@ -1,0 +1,165 @@
+import { describe, expect, it } from 'vitest';
+import type { Database } from '@haive/database';
+import { advanceStep, type AdvanceStepParams } from '../src/step-engine/step-runner.js';
+import type { StepDefinition } from '../src/step-engine/step-definition.js';
+
+// Slice 2 engine: a step that finds a blocking defect (via fixLoop.evaluate) or throws
+// with fixLoopOnError set returns `loop_back` from advanceStep instead of done/failed.
+// handleResult (task-queue) turns loop_back into a round bump + re-entry at implement;
+// that routing is exercised end-to-end by the Slice 6 smoke, not this unit test.
+
+interface MockState {
+  taskStepRow: Record<string, unknown>;
+  inserts: { table: string; row: Record<string, unknown> }[];
+  updates: Record<string, unknown>[];
+}
+
+function tableNameOf(table: unknown): string {
+  if (table && typeof table === 'object') {
+    const obj = table as Record<string, unknown>;
+    const sym = Object.getOwnPropertySymbols(obj).find((s) => s.description === 'drizzle:Name');
+    if (sym) {
+      const name = obj[sym as unknown as string];
+      if (typeof name === 'string') return name;
+    }
+  }
+  return '';
+}
+
+function makeMockDb(state: MockState): Database {
+  let nextId = 1;
+  return {
+    select: () => ({
+      from: (table: unknown) => {
+        const name = tableNameOf(table);
+        const rows = name === 'task_steps' && state.taskStepRow.id ? [state.taskStepRow] : [];
+        return {
+          where: () => ({
+            limit: async () => rows,
+            orderBy: () => ({ limit: async () => rows }),
+          }),
+        };
+      },
+    }),
+    insert: (table: unknown) => ({
+      values: (v: Record<string, unknown>) => ({
+        returning: async () => {
+          const name = tableNameOf(table);
+          const row = { id: `mock-${nextId++}`, createdAt: new Date(), ...v };
+          state.inserts.push({ table: name, row });
+          if (name === 'task_steps') state.taskStepRow = { ...state.taskStepRow, ...row };
+          return [row];
+        },
+      }),
+    }),
+    update: (table: unknown) => ({
+      set: (v: Record<string, unknown>) => ({
+        where: () => ({
+          returning: async () => {
+            const name = tableNameOf(table);
+            state.updates.push({ table: name, ...v });
+            if (name === 'task_steps') {
+              state.taskStepRow = { ...state.taskStepRow, ...v };
+              return [state.taskStepRow];
+            }
+            return [];
+          },
+        }),
+      }),
+    }),
+    query: {
+      tasks: { findFirst: async () => undefined },
+      userStepCliPreferences: { findFirst: async () => undefined },
+    },
+  } as unknown as Database;
+}
+
+function meta(id: string) {
+  return {
+    id,
+    workflowType: 'workflow' as const,
+    index: 99,
+    title: 't',
+    description: 'd',
+    requiresCli: false,
+  };
+}
+
+function fixLoopStep(blocking: boolean): StepDefinition {
+  return {
+    metadata: meta('test-fixloop'),
+    async detect() {
+      return { ok: true };
+    },
+    form() {
+      return null;
+    },
+    fixLoop: {
+      evaluate: () => (blocking ? { blocking: true, diagnosis: 'boom: bad config' } : null),
+    },
+    async apply() {
+      return { verdict: blocking ? 'ISSUES_FOUND' : 'VALID' };
+    },
+  };
+}
+
+function throwingStep(): StepDefinition {
+  return {
+    metadata: meta('test-fixloop-err'),
+    async detect() {
+      return { ok: true };
+    },
+    form() {
+      return null;
+    },
+    fixLoopOnError: true,
+    async apply() {
+      throw new Error('ddev restart failed: bad webserver');
+    },
+  };
+}
+
+function params(db: Database, step: StepDefinition, round: number): AdvanceStepParams {
+  return {
+    db,
+    taskId: 'task-1',
+    userId: 'user-1',
+    repoPath: '/tmp/r',
+    workspacePath: '/tmp/r',
+    cliProviderId: null,
+    stepDef: step,
+    round,
+  };
+}
+
+describe('fix-loop engine', () => {
+  it('returns loop_back when a fixLoop step finds a blocking defect', async () => {
+    const state: MockState = { taskStepRow: {}, inserts: [], updates: [] };
+    const result = await advanceStep(params(makeMockDb(state), fixLoopStep(true), 1));
+    expect(result.status).toBe('loop_back');
+    if (result.status === 'loop_back') {
+      expect(result.diagnosis).toContain('bad config');
+      expect(result.sourceStepId).toBe('test-fixloop');
+      expect(result.row.round).toBe(1);
+    }
+    // The source step is still finalized as done (it ran, produced findings).
+    expect(state.taskStepRow.status).toBe('done');
+  });
+
+  it('finishes done when a fixLoop step passes', async () => {
+    const state: MockState = { taskStepRow: {}, inserts: [], updates: [] };
+    const result = await advanceStep(params(makeMockDb(state), fixLoopStep(false), 0));
+    expect(result.status).toBe('done');
+  });
+
+  it('routes a thrown failure to loop_back when fixLoopOnError is set', async () => {
+    const state: MockState = { taskStepRow: {}, inserts: [], updates: [] };
+    const result = await advanceStep(params(makeMockDb(state), throwingStep(), 2));
+    expect(result.status).toBe('loop_back');
+    if (result.status === 'loop_back') {
+      expect(result.diagnosis).toContain('bad webserver');
+      expect(result.sourceStepId).toBe('test-fixloop-err');
+      expect(result.row.round).toBe(2);
+    }
+  });
+});
