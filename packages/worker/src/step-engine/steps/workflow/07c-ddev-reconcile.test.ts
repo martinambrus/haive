@@ -1,7 +1,40 @@
 import { describe, it, expect } from 'vitest';
-import { classifyDrift } from './07c-ddev-reconcile.js';
+import { classifyDrift, ddevReconcileStep } from './07c-ddev-reconcile.js';
 import type { DdevConfigFields } from '../_ddev-config.js';
 import type { DdevBaseline } from './01c-ddev-env.js';
+
+describe('07c-ddev-reconcile form', () => {
+  const detect = (driftKind: string, migrateTarget: string | null = null) =>
+    ({
+      repoSubpath: 'x',
+      workspace: '/w',
+      baseline: null,
+      target: null,
+      driftKind,
+      migrateTarget,
+      unsupportedReason: null,
+    }) as never;
+
+  it('restart + no-op auto-submit (nothing to decide; flows through even in manual mode)', () => {
+    for (const kind of ['restart', 'none']) {
+      const s = ddevReconcileStep.form!(undefined as never, detect(kind));
+      expect(s).not.toBeNull();
+      expect(s!.fields).toHaveLength(0);
+      expect(s!.autoSubmit).toBe(true);
+    }
+  });
+
+  it('db-migrate gates with a confirm checkbox (no auto-submit)', () => {
+    const s = ddevReconcileStep.form!(undefined as never, detect('db-migrate', 'mysql:8.0'));
+    expect(s).not.toBeNull();
+    expect(s!.autoSubmit).toBeUndefined();
+    expect(s!.fields.find((f) => f.id === 'confirmDbMigration')).toBeDefined();
+  });
+
+  it('unsupported renders no form (apply throws the reason)', () => {
+    expect(ddevReconcileStep.form!(undefined as never, detect('unsupported'))).toBeNull();
+  });
+});
 
 const HASH_A = 'hash-a';
 const HASH_B = 'hash-b';

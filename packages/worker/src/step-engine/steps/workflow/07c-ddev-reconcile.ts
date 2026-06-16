@@ -159,27 +159,43 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
 
   // Confirmation only for the destructive DB migrate (mirrors 06a-db-migrate's
   // checkbox; pauses even in auto-continue mode since it has a field). The php
-  // restart and no-op paths are formless → auto-continue. Unsupported renders no
-  // form and apply throws with the reason.
+  // restart + no-op paths have nothing to decide → an autoSubmit info form so they
+  // flow through even in manual mode (instead of a bare "Continue" pause). The
+  // unsupported case renders no form and apply throws with the reason.
   form(_ctx, detected): FormSchema | null {
-    if (detected.driftKind !== 'db-migrate') return null;
+    if (detected.driftKind === 'db-migrate') {
+      return {
+        title: 'DDEV database migration',
+        description: [
+          `The implementation changed the database to ${detected.migrateTarget}.`,
+          `This runs "ddev utility migrate-database ${detected.migrateTarget}" on the imported database`,
+          'after taking a snapshot (restore with "ddev snapshot restore haive-pre-migrate-<task>").',
+          'Uncheck to leave the database unchanged — DDEV stays as booted and the new database config is not applied.',
+        ].join('\n'),
+        fields: [
+          {
+            type: 'checkbox',
+            id: 'confirmDbMigration',
+            label: `Migrate database to ${detected.migrateTarget}`,
+            default: true,
+          },
+        ],
+        submitLabel: 'Reconcile DDEV environment',
+      };
+    }
+    // Unsupported DB change → no form; apply throws with the reason.
+    if (detected.driftKind === 'unsupported') return null;
+    // restart / none: nothing for the user to decide (a non-destructive `ddev
+    // restart`, or a no-op). Auto-submit so it flows through even in manual mode.
     return {
-      title: 'DDEV database migration',
-      description: [
-        `The implementation changed the database to ${detected.migrateTarget}.`,
-        `This runs "ddev utility migrate-database ${detected.migrateTarget}" on the imported database`,
-        'after taking a snapshot (restore with "ddev snapshot restore haive-pre-migrate-<task>").',
-        'Uncheck to leave the database unchanged — DDEV stays as booted and the new database config is not applied.',
-      ].join('\n'),
-      fields: [
-        {
-          type: 'checkbox',
-          id: 'confirmDbMigration',
-          label: `Migrate database to ${detected.migrateTarget}`,
-          default: true,
-        },
-      ],
-      submitLabel: 'Reconcile DDEV environment',
+      title: 'DDEV reconcile',
+      description:
+        detected.driftKind === 'restart'
+          ? 'Applying the post-implementation .ddev/config.yaml change to the running DDEV environment (restart — data preserved).'
+          : 'No DDEV config changes since boot — nothing to reconcile.',
+      fields: [],
+      submitLabel: 'Continue',
+      autoSubmit: true,
     };
   },
 
