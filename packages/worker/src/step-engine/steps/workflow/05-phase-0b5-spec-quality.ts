@@ -38,7 +38,7 @@ interface QualityFinding {
 
 type SpecVerdict = 'APPROVED' | 'NEEDS_REVISION' | 'BLOCKING_AMBIGUITY';
 
-interface SpecQualityApply {
+export interface SpecQualityApply {
   /** Reviewer verdict driving the loop + gate 1: APPROVED stops as done,
    *  NEEDS_REVISION continues the review/correct loop, BLOCKING_AMBIGUITY stops
    *  and surfaces to the user (intent must be clarified; the corrector can't fix it). */
@@ -196,15 +196,12 @@ function normaliseResult(
 }
 
 function stubSpecQuality(): { score: number; findings: QualityFinding[] } {
+  // Empty findings on purpose: a parse-failed review must NOT hand the corrector a
+  // fabricated finding. The corrector detects the lost review (source 'stub' / no
+  // findings) and self-reviews instead — see buildIterationPrompt + SELF_REVIEW_FALLBACK.
   return {
     score: 5,
-    findings: [
-      {
-        dimension: 'general',
-        severity: 'info',
-        comment: 'LLM synthesis skipped — default neutral score emitted.',
-      },
-    ],
+    findings: [],
   };
 }
 
@@ -258,6 +255,26 @@ function bestPriorReview(previous: StepLoopPassRecord[]): SpecQualityApply | nul
   return best;
 }
 
+/** Reconcile a fresh REVIEW pass with the best prior review. The guard exists only
+ *  to suppress reviewer NOISE — a re-review that wobbles to a lower score/verdict for
+ *  no real reason. It must NEVER roll back the corrected spec body or hide a genuinely
+ *  new error/blocking finding (the bug that reverted a corrector's amended spec). So we
+ *  borrow the prior (higher) verdict+score ONLY when the current review carries no hard
+ *  signal — no error finding and not BLOCKING_AMBIGUITY — and even then we keep the
+ *  current corrected spec and current findings. */
+export function resolveReviewResult(
+  current: SpecQualityApply,
+  best: SpecQualityApply | null,
+): SpecQualityApply {
+  const hasHardSignal =
+    current.findings.some((f) => f.severity === 'error') ||
+    current.verdict === 'BLOCKING_AMBIGUITY';
+  if (!hasHardSignal && best && iterationRank(best) > iterationRank(current)) {
+    return { ...current, verdict: best.verdict, score: best.score };
+  }
+  return current;
+}
+
 /** Renders the latest review's findings as a markdown bullet list to feed the
  *  corrector's prompt, so it validates and acts on those specific findings
  *  rather than re-reviewing from scratch. */
@@ -303,6 +320,10 @@ const REVIEW_RULES = [
   '3. If still not enough, Grep / Read the codebase directly for the symbols you need.',
   'A reference to code that does not exist is a BLOCKING_AMBIGUITY.',
   '',
+  'OUTPUT FORMAT IS STRICT: reply with a SINGLE JSON object inside one ```json fence. Do',
+  'NOT use YAML, do NOT add prose, and do NOT use any keys other than verdict/score/findings.',
+  'The first non-whitespace character inside the fence MUST be "{". severity MUST be exactly',
+  '"warn" or "error".',
   'Emit ONE JSON object inside a ```json fenced code block with the shape:',
   '{',
   '  "verdict": "APPROVED" | "NEEDS_REVISION" | "BLOCKING_AMBIGUITY",',
@@ -353,6 +374,21 @@ const CORRECT_RULES = [
   'If no finding is valid, return the current spec unchanged in amendedSpec with an empty',
   '"accepted" list. amendedSpec is REQUIRED.',
 ] as const;
+
+/** Substituted for the reviewer's findings when a review pass was lost (parse failure
+ *  -> stub, or zero findings). Turns an otherwise wasted corrector round into a
+ *  self-review so the spec still gets a chance at a real fix. */
+const SELF_REVIEW_FALLBACK = [
+  '',
+  '=== No usable reviewer findings this round ===',
+  'The reviewer pass produced no parseable findings. Do your OWN review of the spec against',
+  `these dimensions: ${QUALITY_DIMENSIONS.join(', ')}.`,
+  'Validate every candidate gap against the actual spec text and the codebase (rag_search',
+  'first, then .claude/knowledge_base, then Grep/Read). Fix ONLY error-level gaps you can',
+  'confirm would make the implementer build the wrong thing, miss a requirement, or get',
+  'blocked. If you find no such gap, return the current spec unchanged in amendedSpec with',
+  'an empty "accepted" list.',
+].join('\n');
 
 export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQualityApply> = {
   metadata: {
@@ -465,11 +501,20 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
       const values = formValues as { focusAreas?: string };
       const workingSpec = latestSpec(det.spec, previousIterations);
       if (roleForIteration(iteration) === ROLE_CORRECTOR) {
+        // When the preceding review was lost (parse-fail stub or zero findings) the
+        // corrector has nothing real to act on — fall back to a self-review instead of
+        // feeding it an empty/fabricated finding block.
+        const lastReview = latestReview(previousIterations);
+        const reviewLost =
+          !lastReview || lastReview.source === 'stub' || lastReview.findings.length === 0;
+        const findingsBlock = reviewLost
+          ? SELF_REVIEW_FALLBACK
+          : formatPriorFindings(previousIterations);
         return [
           ...CORRECT_RULES,
           '',
           `Focus areas: ${values.focusAreas ?? '(none)'}`,
-          formatPriorFindings(previousIterations),
+          findingsBlock,
           '',
           '=== Current spec body ===',
           workingSpec || '(empty)',
@@ -531,18 +576,19 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
         spec: workingSpec,
       };
       const best = bestPriorReview(args.previousIterations);
-      if (best && iterationRank(best) > iterationRank(current)) {
+      const chosen = resolveReviewResult(current, best);
+      if (chosen !== current) {
         ctx.logger.info(
           {
             iteration: args.iteration,
-            verdict: current.verdict,
-            score: current.score,
-            keptVerdict: best.verdict,
-            keptScore: best.score,
+            regressedVerdict: current.verdict,
+            regressedScore: current.score,
+            keptVerdict: chosen.verdict,
+            keptScore: chosen.score,
           },
-          'spec quality review regressed — keeping the higher-ranked prior review',
+          'spec quality review score wobble — keeping prior verdict/score on the corrected spec',
         );
-        return best;
+        return chosen;
       }
       ctx.logger.info(
         {
