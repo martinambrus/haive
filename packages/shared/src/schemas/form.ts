@@ -119,6 +119,10 @@ export const numberFieldSchema = baseField.extend({
 export const noteFieldSchema = baseField.extend({
   type: z.literal('note'),
   body: z.string(),
+  /** Visual emphasis. 'warning' renders an amber callout — use for an action the
+   *  user should take before continuing (e.g. fill in a hands-free config). Omitted
+   *  or 'info' renders the plain neutral line. */
+  variant: z.enum(['info', 'warning']).optional(),
 });
 
 export const treeNodeSchema: z.ZodType<TreeNode> = z.lazy(() =>

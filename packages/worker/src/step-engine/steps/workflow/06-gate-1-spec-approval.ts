@@ -297,16 +297,23 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
           rows: 4,
         },
         {
+          type: 'note',
+          id: 'runConfigNote',
+          label: 'Run configuration',
+          variant: 'warning',
+          body:
+            'Fill in the Run configuration below before continuing — these answers for the ' +
+            'implementation and verification steps let them run hands-free in auto-continue mode ' +
+            '(and arrive pre-filled otherwise). Applied from approval until Gate 2 (developer ' +
+            'verification).',
+        },
+        {
           type: 'accordion',
           id: 'runConfig',
           label: 'Run configuration — used until Gate 2',
           items: [
             {
               title: 'Run configuration',
-              description:
-                'Answers for the implementation and verification steps so they run ' +
-                'hands-free in auto-continue mode (and arrive pre-filled otherwise). ' +
-                'Applied from approval until Gate 2 (developer verification).',
               fields: [
                 {
                   type: 'select',

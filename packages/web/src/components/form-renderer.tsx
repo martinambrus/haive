@@ -343,6 +343,17 @@ interface FieldRowProps {
 
 function FieldRow({ field, value, onChange, disabled, repositoryId }: FieldRowProps) {
   if (field.type === 'note') {
+    if (field.variant === 'warning') {
+      return (
+        <div className="rounded-md border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-sm text-amber-200">
+          {looksLikeMarkdown(field.body) ? (
+            <MarkdownView body={field.body} enhanced />
+          ) : (
+            <p className="whitespace-pre-line">{field.body}</p>
+          )}
+        </div>
+      );
+    }
     return looksLikeMarkdown(field.body) ? (
       <div className="text-sm text-neutral-400">
         <MarkdownView body={field.body} enhanced />
