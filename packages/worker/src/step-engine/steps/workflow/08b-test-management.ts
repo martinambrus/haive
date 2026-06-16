@@ -270,40 +270,26 @@ const SEARCH_LADDER = [
   '3. then Grep / Read the codebase directly.',
 ] as const;
 
-function actionInstructions(action: string): string[] {
-  switch (action) {
-    case 'create_new':
-      return [
-        'ACTION: create automated tests for the new feature.',
-        '1. Analyze the spec for testable scenarios (happy path, validation/error cases,',
-        '   permissions if access control is involved, feature-specific edge cases).',
-        '2. Match the test TYPE that already exists in the project (E2E vs unit).',
-        '3. Read 2-3 existing test files and the shared utilities to learn the conventions;',
-        '   reuse existing utilities; create new ones only when needed.',
-        '4. Write the tests with descriptive names, testing from the user perspective for E2E.',
-      ];
-    case 'remove':
-      return [
-        'ACTION: remove or update tests for functionality this change removed.',
-        '1. Find tests referencing the removed functionality (search by feature keywords,',
-        '   changed files, URLs, selectors — including shared utilities and fixtures).',
-        '2. If an ENTIRE file tests only the removed feature, DELETE the file.',
-        '3. If a file has SOME tests for it, REMOVE those test blocks only.',
-        '4. Remove helper functions/imports only used by deleted tests.',
-        '5. Verify the remaining tests are still valid.',
-      ];
-    default:
-      return [
-        'ACTION: find and update existing tests affected by this change.',
-        '1. Find related tests: search the test directories for references to the changed',
-        '   files, functions, URLs, form fields and selectors (also check shared utilities,',
-        '   page objects and fixtures).',
-        '2. For each affected file: identify assertions/interactions referencing the changed',
-        '   functionality and update them to the new behavior, keeping the existing patterns.',
-        '3. DO NOT change tests unrelated to this feature and DO NOT refactor unnecessarily.',
-        '4. If no related tests exist, report zero changes — do not invent work.',
-      ];
-  }
+function actionInstructions(): string[] {
+  // One combined test-management action: find affected tests and UPDATE, CREATE and DELETE as
+  // needed for this change. Legacy pre-answers (update/create_new/remove) all map here.
+  return [
+    'ACTION: bring the test suite in line with this change — UPDATE, CREATE and DELETE tests as',
+    'needed. Apply only the parts that fit; skip a part honestly when it does not apply.',
+    '1. Find related tests: search the test directories for references to the changed files,',
+    '   functions, URLs, form fields and selectors (also shared utilities, page objects, fixtures).',
+    '2. UPDATE affected tests: where assertions/interactions reference changed functionality,',
+    '   update them to the new behavior, keeping existing patterns. Do not touch unrelated tests',
+    '   and do not refactor unnecessarily.',
+    '3. CREATE tests for genuinely new behavior this change introduces (happy path, validation/',
+    '   error cases, permissions if access control is involved, feature-specific edge cases).',
+    '   Match the test TYPE already used in the project (E2E vs unit); read 2-3 existing test',
+    '   files + shared utilities first and reuse them; add new utilities only when needed.',
+    '4. DELETE tests for functionality this change removed: if an ENTIRE file tests only removed',
+    '   behavior, delete the file; if a file has SOME such tests, remove just those blocks plus',
+    '   any helpers/imports only they used.',
+    '5. If a category does not apply, skip it — do not invent work; report zero changes honestly.',
+  ];
 }
 
 export const testManagementStep: StepDefinition<TestManagementDetect, TestManagementApply> = {
@@ -376,12 +362,13 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
           id: 'action',
           label: 'Test action',
           options: [
-            { value: 'update', label: 'Find & update tests affected by this change' },
-            { value: 'create_new', label: 'Write new tests for the new feature' },
-            { value: 'remove', label: 'Find & delete tests for removed functionality' },
+            {
+              value: 'manage',
+              label: 'Find, update, write & delete tests as needed for this change',
+            },
             { value: 'skip', label: 'No test changes needed' },
           ],
-          default: 'update',
+          default: 'manage',
           required: true,
         },
         {
@@ -423,7 +410,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
           : '',
         values.hints ? `User hints for locating related tests: ${values.hints}` : '',
         '',
-        ...actionInstructions(values.action ?? 'update'),
+        ...actionInstructions(),
         '',
         'Do NOT run the tests yourself (the orchestrator runs the related tests after you',
         'finish) and do NOT run git (it is unavailable in this environment).',
@@ -492,7 +479,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
   async apply(ctx, args): Promise<TestManagementApply> {
     const d = args.detected;
     const values = args.formValues as { action?: string; runTests?: boolean };
-    const action = values.action ?? 'update';
+    const action = values.action ?? 'manage';
 
     if (action === 'skip') {
       return {

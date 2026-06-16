@@ -354,7 +354,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
                   type: 'checkbox',
                   id: 'sprintAutoResolveConflicts',
                   label: 'Auto-resolve merge conflicts with AI (DAG mode)',
-                  default: false,
+                  default: true,
                 },
                 {
                   type: 'checkbox',
@@ -421,12 +421,13 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
                   id: 'testAction',
                   label: 'Test management',
                   options: [
-                    { value: 'update', label: 'Find & update tests affected by this change' },
-                    { value: 'create_new', label: 'Write new tests for the new feature' },
-                    { value: 'remove', label: 'Find & delete tests for removed functionality' },
+                    {
+                      value: 'manage',
+                      label: 'Find, update, write & delete tests as needed for this change',
+                    },
                     { value: 'skip', label: 'No test changes needed' },
                   ],
-                  default: 'update',
+                  default: 'manage',
                 },
                 {
                   type: 'checkbox',
@@ -463,7 +464,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
       adversarialQaLevel: str(values.adversarialQaLevel, 'none'),
       simplifyCode: bool(values.simplifyCode, true),
       sprintDecision: str(values.sprintDecision, 'proceed'),
-      sprintAutoResolveConflicts: bool(values.sprintAutoResolveConflicts, false),
+      sprintAutoResolveConflicts: bool(values.sprintAutoResolveConflicts, true),
       sprintReviewEnabled: bool(values.sprintReviewEnabled, true),
       verifyRunTest: bool(values.verifyRunTest, true),
       verifyRunLint: bool(values.verifyRunLint, true),
@@ -471,7 +472,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
       browserMode: str(values.browserMode, 'headless'),
       browserCheckConsoleErrors: bool(values.browserCheckConsoleErrors, true),
       browserCheckNetworkErrors: bool(values.browserCheckNetworkErrors, true),
-      testAction: str(values.testAction, 'update'),
+      testAction: str(values.testAction, 'manage'),
       testRunTests: bool(values.testRunTests, true),
     };
 

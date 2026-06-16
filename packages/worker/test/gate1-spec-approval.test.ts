@@ -199,7 +199,7 @@ describe('gate-1 run configuration', () => {
         browserMode: 'mcp',
         browserCheckConsoleErrors: false,
         browserCheckNetworkErrors: true,
-        testAction: 'create_new',
+        testAction: 'manage',
         testRunTests: false,
       }),
     );
@@ -225,7 +225,7 @@ describe('gate-1 run configuration', () => {
       checkConsoleErrors: false,
       checkNetworkErrors: true,
     });
-    expect(pre['08b-test-management']).toEqual({ action: 'create_new', runTests: false });
+    expect(pre['08b-test-management']).toEqual({ action: 'manage', runTests: false });
     expect(pre['08e-insights-triage']).toEqual({ selectedInsights: [] });
     expect((output as { runConfig: { browserMode: string } }).runConfig.browserMode).toBe('mcp');
   });

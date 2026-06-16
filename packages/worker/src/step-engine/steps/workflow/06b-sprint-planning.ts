@@ -312,7 +312,7 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
           id: 'autoResolveConflicts',
           label:
             'Auto-resolve merge conflicts with AI — run uninterrupted, do not pause for manual resolution',
-          default: false,
+          default: true,
         },
         {
           type: 'checkbox',
