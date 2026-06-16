@@ -330,6 +330,12 @@ async function resolveLlmPhase(
   if (guard) return { resolved: false, result: guard };
 
   const mode = plan.mode === 'subagent_emulated' ? 'subagent_emulated' : 'cli';
+  // For multi-CLI loop steps, label the invocation with its role (Validator /
+  // Fixer / Reviewer / Corrector / …) so the terminal header shows which pass it is.
+  const roleLabel =
+    role !== 'default'
+      ? (stepDef.metadata.cliRoles?.find((r) => r.id === role)?.label ?? null)
+      : null;
   const payloadKind: CliExecInvocationKind =
     plan.invocation.kind === 'subagent'
       ? plan.mode === 'subagent_emulated'
@@ -344,6 +350,7 @@ async function resolveLlmPhase(
       cliProviderId: plan.providerId,
       mode,
       prompt,
+      agentTitle: roleLabel,
     })
     .returning();
   const invRow = inserted[0];

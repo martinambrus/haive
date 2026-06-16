@@ -553,9 +553,12 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
       // CLI/model it was — important for multi-CLI loop steps (spec-quality).
       providerLabel: schema.cliProviders.label,
       providerName: schema.cliProviders.name,
-      // For agent-mining invocations, the persona running this terminal (e.g.
-      // "accessibility-specialist") so the header names the agent, not just "agent mining".
-      agentTitle: schema.taskStepAgentMinings.agentTitle,
+      // The agent running this terminal: the mining persona (e.g.
+      // "accessibility-specialist"), or — for multi-CLI loop steps — the role of this
+      // pass (Validator / Fixer) stored on the invocation itself. Coalesce the two.
+      agentTitle: sql<
+        string | null
+      >`coalesce(${schema.cliInvocations.agentTitle}, ${schema.taskStepAgentMinings.agentTitle})`,
       // This terminal's own latest activity line (per-invocation, not the shared
       // step status), so each terminal shows what it is actually doing.
       statusMessage: schema.cliInvocations.statusMessage,

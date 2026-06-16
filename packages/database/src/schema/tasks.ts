@@ -306,6 +306,10 @@ export const cliInvocations = pgTable(
      *  from the step's shared status_message (which is last-writer-wins). Null
      *  until the first status line. */
     statusMessage: varchar('status_message', { length: 256 }),
+    /** Per-invocation title for multi-CLI loop steps — the role of this pass
+     *  (Validator / Fixer, Reviewer / Corrector). The api COALESCEs it with the
+     *  mining agent title so the terminal header shows which agent ran. */
+    agentTitle: varchar('agent_title', { length: 256 }),
     /** Set when the step-runner has incorporated this invocation's output
      *  into an apply pass. resolveLlmPhase ignores consumed rows so the
      *  next pass enqueues a fresh invocation. Null = pending or in-flight. */

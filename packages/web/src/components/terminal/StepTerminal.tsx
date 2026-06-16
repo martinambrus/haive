@@ -232,7 +232,7 @@ function InvocationPanel({ taskId, invocation, label, idx, statusMessage }: Invo
           <span className="font-medium text-indigo-300">{invocation.agentTitle}</span>
         )}
         <span className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 uppercase tracking-wider">
-          {invocation.agentTitle ? 'mining' : invocation.mode.replace(/_/g, ' ')}
+          {invocation.mode === 'agent_mining' ? 'mining' : invocation.mode.replace(/_/g, ' ')}
         </span>
         {invocation.providerLabel && (
           <span className="font-medium text-neutral-200">{invocation.providerLabel}</span>
