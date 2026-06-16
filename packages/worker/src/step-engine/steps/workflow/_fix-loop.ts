@@ -22,6 +22,25 @@ export interface FixLoopRequest {
   round: number;
 }
 
+// ANSI escape sequences (terminal colour/cursor codes) — a stable, specified format
+// (ECMA-48), safe to strip and pure noise in a text prompt.
+const ANSI_RE = /\x1B\[[0-9;?]*[A-Za-z]/g;
+
+/** Strip ANSI escape codes and normalise whitespace so raw tool output reads cleanly
+ *  in a prompt. Deliberately does NOT try to recognise or remove tool banners / promo
+ *  text: that copy changes shape over time, so pattern-matching it is brittle and
+ *  risks eating the real error. Instead the fix-mode prompt instructs the agent to
+ *  locate the actual error within the output (the LLM is the dynamic extractor).
+ *  Keeps the tail when very long — CLI errors put the summary last. */
+export function cleanDiagnosis(raw: string): string {
+  const cleaned = raw
+    .replace(ANSI_RE, '')
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return cleaned.length > 6000 ? cleaned.slice(-6000) : cleaned;
+}
+
 /** Record a fix-loop request as a task_event so the round-N implement can read it. */
 export async function recordFixLoopRequest(
   db: Database,
@@ -54,7 +73,7 @@ export async function loadFixLoopDiagnosis(ctx: StepContext): Promise<string | n
   for (const r of rows) {
     const p = r.payload as { diagnosis?: string; round?: number } | null;
     if (p?.round === ctx.round) {
-      const d = (p.diagnosis ?? '').trim();
+      const d = cleanDiagnosis((p.diagnosis ?? '').trim());
       return d.length > 0 ? d : null;
     }
   }

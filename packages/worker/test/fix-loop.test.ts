@@ -3,6 +3,7 @@ import type { Database } from '@haive/database';
 import { advanceStep, type AdvanceStepParams } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import { phase2ImplementStep } from '../src/step-engine/steps/workflow/07-phase-2-implement.js';
+import { cleanDiagnosis } from '../src/step-engine/steps/workflow/_fix-loop.js';
 
 // Slice 2 engine: a step that finds a blocking defect (via fixLoop.evaluate) or throws
 // with fixLoopOnError set returns `loop_back` from advanceStep instead of done/failed.
@@ -201,5 +202,25 @@ describe('fix-mode implement prompt (slice 3)', () => {
       formValues: {},
     });
     expect(prompt).not.toContain('FIX PASS');
+  });
+});
+
+describe('cleanDiagnosis (slice 4 follow-up)', () => {
+  it('strips ANSI control codes but PRESERVES all content (incl. the error)', () => {
+    const raw = [
+      'ddev start failed: Network ddev_default created',
+      '',
+      '\x1B[106;30m TIP OF THE DAY                          \x1B[0m',
+      '\x1B[2K\x1B[31mFailed to start project(s): the rs-claude-less-tokens project has an unsupported webserver type: apache, DDEV (amd64) only supports the following webserver types: [apache-fpm generic nginx-fpm]\x1B[0m',
+    ].join('\n');
+    const out = cleanDiagnosis(raw);
+    // The real error survives — never dropped by brittle content matching.
+    expect(out).toContain('unsupported webserver type: apache');
+    expect(out).toContain('ddev start failed: Network ddev_default created');
+    // ANSI escape sequences (a stable format) are gone.
+    expect(out).not.toContain('\x1B[');
+    // Banner/promo text is intentionally LEFT IN — we don't pattern-match content
+    // that changes shape over time; the agent is told to find the error within it.
+    expect(out).toContain('TIP OF THE DAY');
   });
 });

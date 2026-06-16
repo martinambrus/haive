@@ -39,7 +39,9 @@ stepRoutes.get('/:id/steps', async (c) => {
     .select()
     .from(schema.taskSteps)
     .where(eq(schema.taskSteps.taskId, id))
-    .orderBy(asc(schema.taskSteps.stepIndex), asc(schema.taskSteps.round));
+    // Group by round so each fix round is a contiguous block (round 0 = original
+    // pass, then round 1, …), ordered by step position within the round.
+    .orderBy(asc(schema.taskSteps.round), asc(schema.taskSteps.stepIndex));
   const enriched = await enrichStepsWithCliPreferences(db, userId, stepRows);
   const withSkip = await enrichStepsWithSkipFlag(db, id, enriched);
   const steps = await enrichStepsWithCliStats(db, id, withSkip);

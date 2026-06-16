@@ -160,7 +160,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         `Workspace (inside sandbox): ${detected.sandboxWorkspacePath}`,
         `Spec length: ${detected.spec.length} chars`,
         isFix
-          ? `Fix pass — addressing a defect found downstream:\n${(detected.fixContext ?? '').slice(0, 500)}`
+          ? `Fix pass — addressing a defect found downstream. Latest tool output (the error is usually at the end):\n…${(detected.fixContext ?? '').slice(-800)}`
           : detected.gateFeedback
             ? `Gate 1 feedback: ${detected.gateFeedback}`
             : 'No gate 1 feedback recorded.',
@@ -210,6 +210,8 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
           'A later step found a BLOCKING defect in the current implementation. Fix ONLY the',
           'issue(s) below by editing files in the workspace. Keep the diff minimal and do not',
           're-do unrelated work — the rest of the implementation already exists and passed.',
+          'The diagnosis below is raw tool/agent output and may include unrelated banner or',
+          'promotional text — identify the actual error or failure it reports and fix that.',
           '',
           '=== Defect to fix (found downstream) ===',
           detected.fixContext,
