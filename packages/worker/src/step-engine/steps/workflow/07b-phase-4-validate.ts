@@ -56,6 +56,9 @@ interface ValidateApply {
   dimensions: DimensionResult[];
   /** Fixes accumulated across fixer passes. */
   fixesApplied: string[];
+  /** Bullet-point markdown of the run's outcome (verdict + all fixes applied across
+   *  iterations + any remaining issues), shown read-only on the done card. */
+  findingsSummary: string;
   /** Tail of the latest validator pass's raw output (the markdown report). */
   report: string;
   validatorPasses: number;
@@ -142,6 +145,33 @@ function accumulatedFixes(previous: StepLoopPassRecord[]): string[] {
   }
   const last = previous[previous.length - 1]?.applyOutput as ValidateApply | undefined;
   return last ? last.fixesApplied : fixes;
+}
+
+/** Bullet-point markdown of the whole run for the done card: the final verdict,
+ *  every fix applied across the validator<->fixer iterations, and any issue still
+ *  open. Persists on the step so the user can review what was found and fixed. */
+function buildFindingsSummary(
+  verdict: ValidationVerdict,
+  fixesApplied: string[],
+  issues: ValidationIssue[],
+): string {
+  const lines: string[] = [`**Verdict:** ${verdict}`];
+  if (fixesApplied.length > 0) {
+    lines.push('', `### Fixes applied (${fixesApplied.length})`);
+    for (const f of fixesApplied) lines.push(`- ${f}`);
+  }
+  if (issues.length > 0) {
+    lines.push('', `### Remaining issues (${issues.length})`);
+    for (const i of issues) {
+      const sev = i.severity ? `[${i.severity}] ` : '';
+      const loc = i.file ? `\`${i.file}\` — ` : '';
+      lines.push(`- ${sev}${loc}${i.description}`);
+    }
+  }
+  if (fixesApplied.length === 0 && issues.length === 0) {
+    lines.push('', '_No issues found — nothing to fix._');
+  }
+  return lines.join('\n');
 }
 
 const SEARCH_LADDER = [
@@ -441,13 +471,19 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     if (roleForIteration(args.iteration) === ROLE_FIXER) {
       const fixer = parseFixerOutput(args.llmOutput ?? null);
       const prior = latestValidator(previous);
+      const allFixes = [...fixesSoFar, ...fixer.fixesMade];
       ctx.logger.info({ fixes: fixer.fixesMade.length }, 'phase-4 fixer pass complete');
       return {
         verdict: prior?.verdict ?? 'ISSUES_FOUND',
         summary: prior?.summary ?? '',
         issues: prior?.issues ?? [],
         dimensions: prior?.dimensions ?? [],
-        fixesApplied: [...fixesSoFar, ...fixer.fixesMade],
+        fixesApplied: allFixes,
+        findingsSummary: buildFindingsSummary(
+          prior?.verdict ?? 'ISSUES_FOUND',
+          allFixes,
+          prior?.issues ?? [],
+        ),
         report: prior?.report ?? '',
         validatorPasses,
         source: 'fixer',
@@ -475,6 +511,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         issues: parsed.issues,
         dimensions: parsed.dimensions,
         fixesApplied: fixesSoFar,
+        findingsSummary: buildFindingsSummary(parsed.verdict, fixesSoFar, parsed.issues),
         report,
         validatorPasses: validatorPasses + 1,
         source: 'validator',
@@ -488,6 +525,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       issues: [],
       dimensions: [],
       fixesApplied: fixesSoFar,
+      findingsSummary: buildFindingsSummary('UNPARSEABLE', fixesSoFar, []),
       report,
       validatorPasses: validatorPasses + 1,
       source: 'stub',

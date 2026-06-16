@@ -1658,6 +1658,21 @@ function StepCard({
           requirements, technical spec, gate reviews, …) read-only so they stay
           reviewable after the interactive form is gone. */}
       {step.status !== 'waiting_form' && <InfoSections sections={schema?.infoSections} />}
+      {step.stepId === '07b-phase-4-validate' &&
+        step.status === 'done' &&
+        ((step.output as { findingsSummary?: string } | null)?.findingsSummary ?? '').trim()
+          .length > 0 && (
+          <InfoSections
+            sections={[
+              {
+                title: 'Validation summary',
+                preview: 'what was found & fixed',
+                body: (step.output as { findingsSummary: string }).findingsSummary,
+                defaultOpen: true,
+              },
+            ]}
+          />
+        )}
 
       {step.status !== 'waiting_form' && (step.detectOutput !== null || step.output !== null) && (
         <button
