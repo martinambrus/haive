@@ -8,7 +8,7 @@ import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
 import type { DdevBaseline, DdevEnvApply } from './01c-ddev-env.js';
 import {
-  runnerHandleForTask,
+  ensureDdevStarted,
   runnerExec,
   ddevRestart,
   ddevSnapshot,
@@ -222,7 +222,13 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
       throw new Error(drift.unsupportedReason ?? 'unsupported DDEV database change');
     }
 
-    const handle = runnerHandleForTask(ctx.taskId, repoSubpath);
+    // The runner can be reaped between 01c's boot and now (worker restart, host
+    // reboot, days elapsed) — a bare `ddevRestart`/`runnerExec` would then fail with
+    // "No such container". ensureDdevStarted returns the live handle when the env is
+    // still up (preserving the imported DB), else re-boots the runner + `ddev start`
+    // on the current .ddev/config.yaml. For the restart path that fresh start already
+    // applies the new config, so the `ddevRestart` below becomes an idempotent re-apply.
+    const handle = await ensureDdevStarted(ctx.taskId, repoSubpath);
 
     // --- DB migration path (MySQL/MariaDB version or type change) ---
     if (drift.kind === 'db-migrate' && drift.migrateTarget) {
