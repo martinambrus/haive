@@ -231,7 +231,7 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
     index: 6.2,
     title: 'Phase 2c: Sprint planning',
     description:
-      'An agent decides whether to implement with one agent or decompose the spec into a parallel DAG of issues; you confirm the decomposition.',
+      'An agent decides whether to implement with one agent or decompose the spec into a parallel DAG of issues; you confirm a DAG decomposition before it runs.',
     requiresCli: false,
   },
 
@@ -279,9 +279,30 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
 
   form(_ctx, _detected, llmOutput): FormSchema | null {
     const plan = parseSprintPlan(llmOutput);
-    // Single-agent: fast path, no gate. apply persists mode=single and
-    // 07-phase-2-implement runs.
-    if (plan.mode !== 'dag' || plan.issues.length === 0) return null;
+    // Single-agent: the fast path — there's no decomposition to confirm. But still
+    // SHOW the agent's decision + rationale (rather than letting the runner fall back
+    // to a bare "Continue" confirm with the generic step description) so the user can
+    // see WHAT was decided and WHY. Zero fields → auto-passes under auto-continue;
+    // parks for review otherwise. Retry this step to re-plan.
+    if (plan.mode !== 'dag' || plan.issues.length === 0) {
+      return {
+        title: 'Phase 2c: Sprint planning',
+        description:
+          'The planning agent chose a single implementation agent — no parallel decomposition is needed for this spec. Implementation runs next; Retry this step to re-plan.',
+        infoSections: plan.rationale
+          ? [
+              {
+                title: 'Planner decision: single agent',
+                preview: 'rationale',
+                body: plan.rationale,
+                defaultOpen: true,
+              },
+            ]
+          : undefined,
+        fields: [],
+        submitLabel: 'Continue',
+      };
+    }
     const infoSections: InfoSection[] = [
       {
         title: 'Sprint plan',

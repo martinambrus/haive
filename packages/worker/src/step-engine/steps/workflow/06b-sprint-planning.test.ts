@@ -1,5 +1,22 @@
 import { describe, it, expect } from 'vitest';
-import { parseSprintPlan } from './06b-sprint-planning.js';
+import { parseSprintPlan, sprintPlanningStep } from './06b-sprint-planning.js';
+
+describe('06b sprint-planning form (single mode)', () => {
+  it('surfaces the single-agent decision + rationale instead of returning null', () => {
+    const schema = sprintPlanningStep.form!(undefined as never, undefined as never, {
+      mode: 'single',
+      rationale: 'change is small and tightly coupled',
+      max_parallel: 1,
+      issues: [],
+      levels: [],
+    });
+    expect(schema).not.toBeNull();
+    // No decision fields (nothing to confirm), but the rationale IS shown so the
+    // user isn't left with a bare "Continue".
+    expect(schema!.fields).toHaveLength(0);
+    expect(schema!.infoSections?.[0]?.body).toContain('tightly coupled');
+  });
+});
 
 describe('parseSprintPlan', () => {
   it('parses a fenced single-mode plan ignoring surrounding prose', () => {
