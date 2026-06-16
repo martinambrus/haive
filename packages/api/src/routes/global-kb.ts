@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Hono } from 'hono';
-import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, ne, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -455,7 +455,7 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
   const data = parsed.data;
   if (Object.keys(data).length === 0) throw new HttpError(400, 'no fields to update');
 
-  const entry = await withGlobalKb(getDb(), async ({ db }) => {
+  const result = await withGlobalKb(getDb(), async ({ db }) => {
     const set: Partial<typeof globalKbEntries.$inferInsert> = { updatedAt: new Date() };
     if (data.title !== undefined) set.title = data.title;
     if (data.body !== undefined) set.body = data.body;
@@ -471,11 +471,30 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
       .set(set)
       .where(eq(globalKbEntries.id, id))
       .returning();
-    return row;
+    // Activation supersession: when a draft that proposes replacing another entry (a
+    // merge produced by onboarding) is activated, archive the entry it supersedes so
+    // the topic keeps a single live article. Its vectors are dropped below.
+    let supersededId: string | null = null;
+    if (row && set.status === 'active' && row.supersedesEntryId) {
+      const [archived] = await db
+        .update(globalKbEntries)
+        .set({ status: 'archived', supersededAt: new Date(), updatedAt: new Date() })
+        .where(
+          and(
+            eq(globalKbEntries.id, row.supersedesEntryId),
+            ne(globalKbEntries.status, 'archived'),
+          ),
+        )
+        .returning({ id: globalKbEntries.id });
+      supersededId = archived?.id ?? null;
+    }
+    return { row, supersededId };
   });
 
+  const entry = result.row;
   if (!entry) throw new HttpError(404, 'global KB entry not found');
   await enqueueSync(entry.id, entry.namespace, 'upsert');
+  if (result.supersededId) await enqueueSync(result.supersededId, entry.namespace, 'delete');
   return c.json({ entry });
 });
 

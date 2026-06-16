@@ -14,6 +14,7 @@ import { knowledgeQaSuggestionsStep } from './09_1-qa-suggestions.js';
 import { knowledgeQaResolveStep } from './09_2-qa-resolve.js';
 import { skillGenerationStep } from './09_5-skill-generation.js';
 import { skillVerificationStep } from './09_6-skill-verification.js';
+import { globalKbMergeStep } from './09_6_4-global-kb-merge.js';
 import { globalKbReviewStep } from './09_6_5-global-kb-review.js';
 import { ragSourceSelectionStep } from './09_7-rag-source-selection.js';
 import { ragPopulateStep } from './10-rag-populate.js';
@@ -36,6 +37,7 @@ export {
   knowledgeQaResolveStep,
   skillGenerationStep,
   skillVerificationStep,
+  globalKbMergeStep,
   globalKbReviewStep,
   ragSourceSelectionStep,
   ragPopulateStep,
@@ -59,6 +61,7 @@ export function registerOnboardingSteps(registry: StepRegistry): void {
   registry.register(knowledgeQaResolveStep);
   registry.register(skillGenerationStep);
   registry.register(skillVerificationStep);
+  registry.register(globalKbMergeStep);
   registry.register(globalKbReviewStep);
   registry.register(ragSourceSelectionStep);
   registry.register(ragPopulateStep);
