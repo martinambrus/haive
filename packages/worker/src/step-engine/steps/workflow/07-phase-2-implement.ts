@@ -3,12 +3,18 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { extractFencedJson } from '../_fenced-json.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
+import { loadFixLoopDiagnosis } from './_fix-loop.js';
 
 interface ImplementDetect {
   specSummary: string;
   spec: string;
   sandboxWorkspacePath: string;
   gateFeedback: string;
+  /** Fix-loop diagnosis to address on this round, or null on the original pass
+   *  (round 0). When set, the step runs in fix mode (diagnosis-first prompt). */
+  fixContext: string | null;
+  /** Fix-loop round (0 = original implementation pass). */
+  round: number;
 }
 
 interface ImplementApply {
@@ -140,18 +146,24 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       spec: resolvedOutput.spec ?? qualityOutput.spec ?? planOutput.spec ?? '',
       sandboxWorkspacePath: worktreeOutput.sandboxWorktreePath,
       gateFeedback: gateOutput.feedback ?? '',
+      // Fix-loop: on a round > 0 re-entry, the diagnosis a downstream step recorded.
+      fixContext: await loadFixLoopDiagnosis(ctx),
+      round: ctx.round,
     };
   },
 
   form(_ctx, detected): FormSchema {
+    const isFix = Boolean(detected.fixContext);
     return {
-      title: 'Phase 2: Implement',
+      title: isFix ? `Phase 2: Implement — fix round ${detected.round}` : 'Phase 2: Implement',
       description: [
         `Workspace (inside sandbox): ${detected.sandboxWorkspacePath}`,
         `Spec length: ${detected.spec.length} chars`,
-        detected.gateFeedback
-          ? `Gate 1 feedback: ${detected.gateFeedback}`
-          : 'No gate 1 feedback recorded.',
+        isFix
+          ? `Fix pass — addressing a defect found downstream:\n${(detected.fixContext ?? '').slice(0, 500)}`
+          : detected.gateFeedback
+            ? `Gate 1 feedback: ${detected.gateFeedback}`
+            : 'No gate 1 feedback recorded.',
       ].join('\n'),
       fields: [
         {
@@ -162,7 +174,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
           placeholder: 'Hard constraints, required files to touch, style overrides for this run.',
         },
       ],
-      submitLabel: 'Implement',
+      submitLabel: isFix ? 'Apply fix' : 'Implement',
     };
   },
 
@@ -172,11 +184,8 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     buildPrompt: (args) => {
       const detected = args.detected as ImplementDetect;
       const values = args.formValues as { instructions?: string };
-      return [
-        'You are the implementation phase of an engineering workflow.',
-        'Apply the specification below to the workspace. You may read and write files freely inside the workspace.',
-        'Prefer minimal, reviewable diffs. Follow existing conventions. Do not invent requirements.',
-        '',
+      // Shared guidance + output contract used by both the original and fix passes.
+      const common = [
         'Before implementing, search for the existing patterns the spec references, in this order:',
         '1. `rag_search` FIRST — query the haive-rag tool for the symbols/components/patterns involved',
         '   (semantic + lexical search over the indexed code AND knowledge base); prefer it over blind grepping.',
@@ -191,6 +200,39 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         `Your current working directory is already set to the workspace path above.`,
         `Gate 1 feedback: ${detected.gateFeedback || '(none)'}`,
         `Extra instructions: ${values.instructions ?? '(none)'}`,
+      ];
+
+      // Fix pass (round > 0): lead with the defect + a "fix only this" framing, THEN
+      // append the full spec as supporting context — the implementation already exists.
+      if (detected.fixContext) {
+        return [
+          'You are the implementation phase of an engineering workflow, running a FIX PASS.',
+          'A later step found a BLOCKING defect in the current implementation. Fix ONLY the',
+          'issue(s) below by editing files in the workspace. Keep the diff minimal and do not',
+          're-do unrelated work — the rest of the implementation already exists and passed.',
+          '',
+          '=== Defect to fix (found downstream) ===',
+          detected.fixContext,
+          '',
+          ...common,
+          '',
+          'The full specification is included below for context — use it to understand the',
+          'intended behavior, but only change what is needed to resolve the defect above.',
+          '',
+          '=== Spec ===',
+          detected.spec || '(empty spec)',
+          '',
+          INSIGHTS_INSTRUCTION,
+        ].join('\n');
+      }
+
+      // Original pass (round 0): implement the spec from scratch.
+      return [
+        'You are the implementation phase of an engineering workflow.',
+        'Apply the specification below to the workspace. You may read and write files freely inside the workspace.',
+        'Prefer minimal, reviewable diffs. Follow existing conventions. Do not invent requirements.',
+        '',
+        ...common,
         '',
         '=== Spec ===',
         detected.spec || '(empty spec — default to minimal safe change)',

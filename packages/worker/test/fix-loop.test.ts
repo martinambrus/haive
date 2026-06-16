@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
 import { advanceStep, type AdvanceStepParams } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
+import { phase2ImplementStep } from '../src/step-engine/steps/workflow/07-phase-2-implement.js';
 
 // Slice 2 engine: a step that finds a blocking defect (via fixLoop.evaluate) or throws
 // with fixLoopOnError set returns `loop_back` from advanceStep instead of done/failed.
@@ -161,5 +162,44 @@ describe('fix-loop engine', () => {
       expect(result.sourceStepId).toBe('test-fixloop-err');
       expect(result.row.round).toBe(2);
     }
+  });
+});
+
+describe('fix-mode implement prompt (slice 3)', () => {
+  const buildPrompt = phase2ImplementStep.llm!.buildPrompt;
+
+  it('leads with the diagnosis, then appends the full spec', () => {
+    const prompt = buildPrompt({
+      detected: {
+        specSummary: 's',
+        spec: 'THE-FULL-SPEC-BODY',
+        sandboxWorkspacePath: '/ws',
+        gateFeedback: '',
+        fixContext: 'webserver_type: apache is invalid; DDEV wants apache-fpm',
+        round: 1,
+      },
+      formValues: {},
+    });
+    expect(prompt).toContain('FIX PASS');
+    const defectIdx = prompt.indexOf('webserver_type: apache is invalid');
+    const specIdx = prompt.indexOf('THE-FULL-SPEC-BODY');
+    expect(defectIdx).toBeGreaterThan(-1);
+    expect(specIdx).toBeGreaterThan(-1);
+    expect(defectIdx).toBeLessThan(specIdx);
+  });
+
+  it('original pass (round 0, no fixContext) is not a fix pass', () => {
+    const prompt = buildPrompt({
+      detected: {
+        specSummary: 's',
+        spec: 'SPEC',
+        sandboxWorkspacePath: '/ws',
+        gateFeedback: '',
+        fixContext: null,
+        round: 0,
+      },
+      formValues: {},
+    });
+    expect(prompt).not.toContain('FIX PASS');
   });
 });
