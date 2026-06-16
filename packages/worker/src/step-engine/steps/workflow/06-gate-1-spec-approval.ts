@@ -273,8 +273,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     skipIf: (args) => (args.detected as SpecGateDetect).specBody.trim().length === 0,
     buildPrompt: (args) => {
       const d = args.detected as SpecGateDetect;
-      const browserChoices =
-        d.ddevMode || d.appRunnerMode ? 'headless | mcp | interactive | skip' : 'headless | skip';
+      const browserChoices = d.ddevMode || d.appRunnerMode ? 'mcp | interactive | skip' : 'skip';
       return [
         'Recommend the most appropriate post-implementation verification settings for the coding',
         'task described by the specification below. You are ONLY recommending — do not implement.',
@@ -286,10 +285,9 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
         '   - "standard": a typical feature touching app logic, data, or user-facing flows.',
         '   - "enterprise": security/auth/permissions, money or data integrity, or broad blast radius.',
         `2. browserMode — how to verify in a browser (available: ${browserChoices}):`,
-        '   - "headless": no meaningful UI change — automated HTTP-status + console/network checks suffice.',
         '   - "mcp": UI/frontend change worth automated agent testing in a real browser.',
         '   - "interactive": UI change a human should click through.',
-        '   - "skip": no runnable UI (library / CLI / backend-only).',
+        '   - "skip": no runnable UI (library/CLI/backend), or no runtime to test against.',
         '   NEVER pick a value outside the available list above.',
         '',
         '=== Specification ===',
@@ -301,7 +299,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     },
     bypassStub: () => ({
       adversarialQaLevel: 'standard',
-      browserMode: 'headless',
+      browserMode: 'skip',
       rationale: 'bypass stub',
     }),
   },
@@ -327,7 +325,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
         appRunnerMode: detected.appRunnerMode,
       }),
       rec.browserMode,
-      'headless',
+      detected.ddevMode || detected.appRunnerMode ? 'mcp' : 'skip',
     );
     const summaryBody = buildSummarySection(detected);
     const fullSpecBody =
@@ -534,7 +532,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
       verifyRunTest: bool(values.verifyRunTest, true),
       verifyRunLint: bool(values.verifyRunLint, true),
       verifyRunTypecheck: bool(values.verifyRunTypecheck, true),
-      browserMode: str(values.browserMode, 'headless'),
+      browserMode: str(values.browserMode, 'skip'),
       browserCheckConsoleErrors: bool(values.browserCheckConsoleErrors, true),
       browserCheckNetworkErrors: bool(values.browserCheckNetworkErrors, true),
       testAction: str(values.testAction, 'manage'),

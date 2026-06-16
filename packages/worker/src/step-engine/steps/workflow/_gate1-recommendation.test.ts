@@ -13,8 +13,8 @@ describe('parseConfigRecommendation', () => {
 
   it('accepts an already-parsed object (bypass stub shape)', () => {
     expect(
-      parseConfigRecommendation({ adversarialQaLevel: 'standard', browserMode: 'headless' }),
-    ).toEqual({ adversarialQaLevel: 'standard', browserMode: 'headless' });
+      parseConfigRecommendation({ adversarialQaLevel: 'standard', browserMode: 'mcp' }),
+    ).toEqual({ adversarialQaLevel: 'standard', browserMode: 'mcp' });
   });
 
   it('returns {} for null / garbage / missing fields', () => {

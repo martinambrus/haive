@@ -4,20 +4,16 @@ export interface BrowserModeOption {
 }
 
 /** The browser-verification mode options, shared by 08a (its own form) and Gate-1
- *  (the pre-answer) so the two never drift. `mcp` and `interactive` both need a
- *  runner with a headed-browser desktop — the DDEV runner OR the env-replicate
- *  app-runner — so both are offered whenever `ddevMode || appRunnerMode`. `headless`
- *  (no runner needed) + `skip` are always available. */
+ *  (the pre-answer) so the two never drift. Real browser testing needs a runner
+ *  with a headed-browser desktop — the DDEV runner OR the env-replicate app-runner —
+ *  so `mcp` + `interactive` are offered whenever `ddevMode || appRunnerMode`. A
+ *  project with no runner has nothing to test against, so only `skip` is offered. */
 export function buildBrowserModeOptions(args: {
   ddevMode: boolean;
   appRunnerMode: boolean;
 }): BrowserModeOption[] {
   const hasRunner = args.ddevMode || args.appRunnerMode;
   return [
-    {
-      value: 'headless',
-      label: 'Automated checks — HTTP status, console & network errors (no runner needed)',
-    },
     ...(hasRunner
       ? [
           {

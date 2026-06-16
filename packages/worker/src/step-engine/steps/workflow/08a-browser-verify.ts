@@ -182,7 +182,6 @@ const VISUAL_PROTOCOL = [
 
 interface BrowserReport {
   pageTitle: string | null;
-  httpStatus: number | null;
   consoleErrors: string[];
   consoleWarnings: string[];
   networkErrors: string[];
@@ -366,11 +365,9 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       title: 'Browser validation',
       description: [
         `App URL: ${detected.appUrl ?? '(unknown)'}`,
-        detected.ddevMode
-          ? 'Launches headless Chrome INSIDE the DDEV runner to validate the running app.'
-          : detected.appRunnerMode
-            ? 'Launches headless Chrome INSIDE the app-runner container to validate the running app.'
-            : 'Launches headless Chrome to validate the running application.',
+        detected.ddevMode || detected.appRunnerMode
+          ? 'Validates the running app in a real browser — automated agent testing, or interactive (you drive it in the Browser panel).'
+          : 'No runtime is available to browser-test against, so only Skip is offered.',
       ].join('\n'),
       fields: [
         {
@@ -381,7 +378,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
             ddevMode: detected.ddevMode,
             appRunnerMode: detected.appRunnerMode,
           }),
-          default: 'headless',
+          default: detected.ddevMode || detected.appRunnerMode ? 'mcp' : 'skip',
           required: true,
         },
         {
@@ -473,7 +470,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
 
   async apply(ctx, args): Promise<BrowserVerifyApply> {
     const detected = args.detected;
-    const mode = ((args.formValues as { mode?: string }).mode ?? 'headless') as BrowserMode;
+    const mode = ((args.formValues as { mode?: string }).mode ?? 'skip') as BrowserMode;
     const baseApply = {
       consoleErrors: [],
       consoleWarnings: [],
@@ -623,18 +620,13 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
 
     const checkConsole = values.checkConsoleErrors !== false;
     const checkNetwork = values.checkNetworkErrors !== false;
-    // The HTTP status is ALWAYS enforced — a 4xx/5xx page that renders cleanly must
-    // still fail — independent of the optional console/network checks.
-    const httpOk = report.httpStatus === null || report.httpStatus < 400;
     const passed =
-      httpOk &&
       (!checkConsole || report.consoleErrors.length === 0) &&
       (!checkNetwork || report.networkErrors.length === 0);
 
     ctx.logger.info(
       {
         pageTitle: report.pageTitle,
-        httpStatus: report.httpStatus,
         consoleErrors: report.consoleErrors.length,
         networkErrors: report.networkErrors.length,
         passed,
