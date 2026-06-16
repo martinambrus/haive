@@ -776,15 +776,22 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       // through to waiting_form (never fails the step) — e.g. a pre-answered
       // browser mode that the runtime schema no longer offers. submitAction
       // 'retry' forms signal a broken precondition and are never auto-passed.
-      if (autoContinue && (persistedSchema.submitAction ?? 'submit') === 'submit') {
+      // A form may opt to auto-submit even in manual mode (autoContinue off) via
+      // its own `autoSubmit` flag — for an info-only form with nothing to decide
+      // (e.g. 06b's single-agent decision).
+      if (
+        (autoContinue || persistedSchema.autoSubmit === true) &&
+        (persistedSchema.submitAction ?? 'submit') === 'submit'
+      ) {
         // Candidate precedence: a gate pre-answer wins; else a zero-field info
         // form auto-passes with {}; else a step that opts in via
-        // metadata.autoSubmitDefaults auto-submits its declared field defaults.
+        // metadata.autoSubmitDefaults (or the form's own autoSubmit) auto-submits
+        // its declared field defaults.
         const candidate =
           stepPreAnswer ??
           (persistedSchema.fields.length === 0
             ? {}
-            : meta.autoSubmitDefaults
+            : meta.autoSubmitDefaults || persistedSchema.autoSubmit
               ? extractFormDefaults(persistedSchema)
               : undefined);
         if (candidate !== undefined) {

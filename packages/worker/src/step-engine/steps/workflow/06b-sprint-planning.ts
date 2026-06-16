@@ -301,6 +301,9 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
           : undefined,
         fields: [],
         submitLabel: 'Continue',
+        // Nothing to decide — the agent chose single-agent. Flow through without
+        // pausing even in manual mode; the rationale stays on the done card.
+        autoSubmit: true,
       };
     }
     const infoSections: InfoSection[] = [

@@ -15,6 +15,8 @@ describe('06b sprint-planning form (single mode)', () => {
     // user isn't left with a bare "Continue".
     expect(schema!.fields).toHaveLength(0);
     expect(schema!.infoSections?.[0]?.body).toContain('tightly coupled');
+    // Flows through even in manual mode (nothing to decide).
+    expect(schema!.autoSubmit).toBe(true);
   });
 });
 

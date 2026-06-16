@@ -294,6 +294,12 @@ export const formSchemaSchema = z.object({
    *     a precondition unmet (e.g. no git repo) and the only useful next
    *     action is for the user to fix the precondition and re-run detect. */
   submitAction: z.enum(['submit', 'retry']).optional(),
+  /** Auto-submit this form (posting its field defaults / `{}`) WITHOUT pausing for
+   *  the user, even when the task's auto-continue is off. Use for an info-only form
+   *  that has nothing to decide (e.g. 06b's single-agent decision) — its
+   *  infoSections still render on the done card for review. Forms with a real
+   *  decision leave this unset so they gate. */
+  autoSubmit: z.boolean().optional(),
 });
 
 export type FormSchema = z.infer<typeof formSchemaSchema>;
