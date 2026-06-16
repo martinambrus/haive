@@ -6,6 +6,8 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseConfigRecommendation, markRecommended } from './_gate1-recommendation.js';
+import { buildBrowserModeOptions } from './_browser-modes.js';
+import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 
 interface SpecGateDetect {
   /** Full spec body (markdown). The renderer turns this into HTML inside
@@ -23,6 +25,10 @@ interface SpecGateDetect {
   /** Whether the workspace has a .ddev config — gates the mcp/interactive
    *  browser-verification options (same probe 08a uses at its own detect). */
   ddevMode: boolean;
+  /** Non-DDEV containerized runtime (env-replicate app-runner with browser
+   *  testing) — also offers mcp/interactive. Best-effort at gate-1 (the env image
+   *  is ready before implementation); 08a re-checks authoritatively at its detect. */
+  appRunnerMode: boolean;
   /** Current task-level run-config columns, used as form defaults so an
    *  API-set value survives into the gate-1 picker. */
   taskSimplifyCode: boolean;
@@ -221,6 +227,16 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
     const ddevMode =
       ws !== null && (await pathExists(path.join(ws.workspace, '.ddev', 'config.yaml')));
+    // Best-effort app-runner detection: a ready env image with browser testing means
+    // 08a will run mcp/interactive INSIDE the app-runner. 08a is authoritative.
+    let appRunnerMode = false;
+    if (!ddevMode) {
+      const envTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
+      const deps = (envTemplate?.declaredDeps as Record<string, unknown> | null) ?? null;
+      appRunnerMode = Boolean(
+        envTemplate?.status === 'ready' && deps?.browserTesting && envTemplate.imageTag,
+      );
+    }
     const taskRow = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
       columns: { simplifyCode: true, adversarialQaLevel: true },
@@ -230,6 +246,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
       specBody,
       specSummary: buildSpecSummary(specBody),
       ddevMode,
+      appRunnerMode,
       taskSimplifyCode: taskRow?.simplifyCode ?? false,
       taskAdversarialQaLevel: taskRow?.adversarialQaLevel ?? null,
       qualityScore: typeof qualityOutput.score === 'number' ? qualityOutput.score : null,
@@ -256,7 +273,8 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     skipIf: (args) => (args.detected as SpecGateDetect).specBody.trim().length === 0,
     buildPrompt: (args) => {
       const d = args.detected as SpecGateDetect;
-      const browserChoices = d.ddevMode ? 'headless | mcp | interactive | skip' : 'headless | skip';
+      const browserChoices =
+        d.ddevMode || d.appRunnerMode ? 'headless | mcp | interactive | skip' : 'headless | skip';
       return [
         'Recommend the most appropriate post-implementation verification settings for the coding',
         'task described by the specification below. You are ONLY recommending — do not implement.',
@@ -304,26 +322,10 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
       detected.taskAdversarialQaLevel ?? 'none',
     );
     const browser = markRecommended(
-      [
-        {
-          value: 'headless',
-          label: 'Automated checks — HTTP status, console & network errors (no runner needed)',
-        },
-        ...(detected.ddevMode
-          ? [
-              {
-                value: 'mcp',
-                label:
-                  'Automated agent testing — the integration-tester drives the visible browser via Chrome DevTools (MCP)',
-              },
-              {
-                value: 'interactive',
-                label: 'Interactive testing — you drive the headed Chrome in the Browser panel',
-              },
-            ]
-          : []),
-        { value: 'skip', label: 'Skip browser testing' },
-      ],
+      buildBrowserModeOptions({
+        ddevMode: detected.ddevMode,
+        appRunnerMode: detected.appRunnerMode,
+      }),
       rec.browserMode,
       'headless',
     );

@@ -27,6 +27,7 @@ import {
 } from '../../sandbox/mcp-config.js';
 import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
 import { runnerBrowserCdpUrl } from '../../sandbox/ddev-runner.js';
+import { appRunnerBrowserCdpUrl } from '../../sandbox/app-runner.js';
 import { signRagToken } from '@haive/shared/rag';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliProviderRecord } from '../../cli-adapters/types.js';
@@ -281,7 +282,7 @@ export async function resolveMcpExtraFiles(
   // of self-launching an isolated headless one — so it co-drives what the user
   // watches in the VNC panel.
   const chromeDevtoolsBrowserUrl = includeChromeDevtools
-    ? ((await runnerBrowserCdpUrl(taskId)) ?? undefined)
+    ? ((await runnerBrowserCdpUrl(taskId)) ?? (await appRunnerBrowserCdpUrl(taskId)) ?? undefined)
     : undefined;
 
   const servers = buildDefaultMcpServers({

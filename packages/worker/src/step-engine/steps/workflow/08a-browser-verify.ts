@@ -10,6 +10,7 @@ import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { extractFencedJson } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput, resolveDdevWorkspace } from './_task-meta.js';
+import { buildBrowserModeOptions } from './_browser-modes.js';
 import {
   runnerHandleForTask,
   runnerExec,
@@ -376,31 +377,10 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
           type: 'radio' as const,
           id: 'mode',
           label: 'Testing method',
-          options: [
-            {
-              value: 'headless',
-              label: 'Automated checks — HTTP status, console & network errors (no runner needed)',
-            },
-            ...(detected.ddevMode
-              ? [
-                  {
-                    value: 'mcp',
-                    label:
-                      'Automated agent testing — the integration-tester drives the visible browser via Chrome DevTools (visual + functional); watch and assist in the Browser panel below',
-                  },
-                ]
-              : []),
-            ...(detected.ddevMode || detected.appRunnerMode
-              ? [
-                  {
-                    value: 'interactive',
-                    label:
-                      'Interactive testing — you drive the headed Chrome in the Browser panel below (e.g. to dismiss native Chrome popups)',
-                  },
-                ]
-              : []),
-            { value: 'skip', label: 'Skip browser testing' },
-          ],
+          options: buildBrowserModeOptions({
+            ddevMode: detected.ddevMode,
+            appRunnerMode: detected.appRunnerMode,
+          }),
           default: 'headless',
           required: true,
         },
@@ -442,10 +422,17 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     prepare: async ({ ctx, detected, formValues }) => {
       const d = detected as BrowserVerifyDetect;
       if ((formValues as { mode?: string }).mode !== 'mcp') return;
-      if (!d.ddevMode || !d.repoSubpath) return;
+      if (!d.repoSubpath) return;
       await ctx.emitProgress('Starting the browser desktop for agent testing…');
-      const handle = await ensureDdevStarted(ctx.taskId, d.repoSubpath);
-      await startBrowserDesktop(handle);
+      // mcp drives the SAME visible browser via chrome-devtools, so the headed
+      // desktop must be up — in the DDEV runner OR the env-replicate app-runner.
+      if (d.ddevMode) {
+        const handle = await ensureDdevStarted(ctx.taskId, d.repoSubpath);
+        await startBrowserDesktop(handle);
+      } else if (d.appRunnerMode && d.envImageTag) {
+        const handle = await ensureAppRunnerStarted(ctx.taskId, d.repoSubpath, d.envImageTag);
+        await startAppBrowserDesktop(handle);
+      }
     },
     buildPrompt: (args) => {
       const d = args.detected as BrowserVerifyDetect;
