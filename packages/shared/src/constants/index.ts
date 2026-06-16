@@ -78,6 +78,8 @@ export interface TaskJobPayload {
   taskId: string;
   userId: string;
   stepId?: string;
+  /** Fix-loop round to materialize/advance the step at (default 0 = original pass). */
+  round?: number;
   formValues?: Record<string, unknown>;
 }
 

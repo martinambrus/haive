@@ -1,7 +1,7 @@
 import { readdir, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CLI_PROVIDER_CATALOG, type CliProviderMetadata } from '@haive/shared';
 
@@ -29,6 +29,10 @@ export async function loadPreviousStepOutput(
     .select()
     .from(schema.taskSteps)
     .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, stepId)))
+    // Latest round wins: during forward execution the current round is the highest
+    // that exists, so this returns the current round's row for repeating steps and
+    // round 0 for steps that never recur. (Fix-loop rounds.)
+    .orderBy(desc(schema.taskSteps.round))
     .limit(1);
   const row = rows[0];
   if (!row) return null;

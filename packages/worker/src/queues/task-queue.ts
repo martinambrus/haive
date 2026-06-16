@@ -141,6 +141,7 @@ async function markTaskWaiting(
   taskId: string,
   stepId: string,
   stepIndex: number,
+  round = 0,
 ): Promise<void> {
   await db
     .update(schema.tasks)
@@ -148,6 +149,7 @@ async function markTaskWaiting(
       status: 'waiting_user',
       currentStepId: stepId,
       currentStepIndex: stepIndex,
+      currentRound: round,
       updatedAt: new Date(),
     })
     .where(eq(schema.tasks.id, taskId));
@@ -158,6 +160,7 @@ async function markTaskRunningWithStep(
   taskId: string,
   stepId: string,
   stepIndex: number,
+  round = 0,
 ): Promise<void> {
   await db
     .update(schema.tasks)
@@ -165,6 +168,7 @@ async function markTaskRunningWithStep(
       status: 'running',
       currentStepId: stepId,
       currentStepIndex: stepIndex,
+      currentRound: round,
       updatedAt: new Date(),
     })
     .where(eq(schema.tasks.id, taskId));
@@ -485,11 +489,16 @@ async function defaultContainerCleanup(db: Database, taskId: string): Promise<nu
   return destroyed;
 }
 
-async function enqueueAdvance(taskId: string, userId: string, stepId: string): Promise<void> {
+async function enqueueAdvance(
+  taskId: string,
+  userId: string,
+  stepId: string,
+  round = 0,
+): Promise<void> {
   const queue = getTaskQueue();
   await queue.add(
     TASK_JOB_NAMES.ADVANCE_STEP,
-    { taskId, userId, stepId },
+    { taskId, userId, stepId, round },
     {
       attempts: 3,
       backoff: { type: 'exponential', delay: 5000 },
@@ -535,13 +544,16 @@ async function handleResult(
       const idx = steps.findIndex((s) => s.metadata.id === stepId);
       const next = idx >= 0 ? steps[idx + 1] : undefined;
       if (next) {
+        // Forward walk stays in the same round as the step that just finished.
+        const nextRound = result.row.round;
         await markTaskRunningWithStep(
           db,
           ctx.taskId,
           next.metadata.id,
           computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
+          nextRound,
         );
-        await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id);
+        await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, nextRound);
       } else {
         await markTaskCompleted(db, ctx.taskId);
         await appendEvent(db, ctx.taskId, null, 'task.completed', {});
@@ -554,6 +566,7 @@ async function handleResult(
         ctx.taskId,
         stepId,
         computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
+        result.row.round,
       );
       // Stamp the start of the idle (waiting-for-input) period so the step's
       // active-work timer can exclude it. Folded into idle_ms on form submit.
@@ -574,6 +587,7 @@ async function handleResult(
             stepDef.metadata.workflowType,
             stepDef.metadata.index,
           ),
+          currentRound: result.row.round,
           updatedAt: new Date(),
         })
         .where(eq(schema.tasks.id, ctx.taskId));
@@ -636,6 +650,8 @@ async function handleAdvanceStep(db: Database, payload: TaskJobPayload): Promise
     return;
   }
 
+  const round = payload.round ?? 0;
+
   // Concurrency guard: only one step of a task may execute at a time. A stale or
   // re-delivered advance-step — e.g. a queued job that survived a Retry/reset and
   // is replayed on worker restart — must NOT run a step while another is already
@@ -671,7 +687,11 @@ async function handleAdvanceStep(db: Database, payload: TaskJobPayload): Promise
     .select()
     .from(schema.taskSteps)
     .where(
-      and(eq(schema.taskSteps.taskId, ctx.taskId), eq(schema.taskSteps.stepId, payload.stepId)),
+      and(
+        eq(schema.taskSteps.taskId, ctx.taskId),
+        eq(schema.taskSteps.stepId, payload.stepId),
+        eq(schema.taskSteps.round, round),
+      ),
     )
     .limit(1);
   const existing = existingRows[0];
@@ -693,6 +713,7 @@ async function handleAdvanceStep(db: Database, payload: TaskJobPayload): Promise
     workspacePath: ctx.workspacePath,
     cliProviderId: ctx.cliProviderId,
     stepDef,
+    round,
     formValues,
     providers,
     deps: workerDeps,
@@ -713,6 +734,7 @@ export async function reconcileOrphanedCliSteps(db: Database): Promise<void> {
     .select({
       taskId: schema.taskSteps.taskId,
       stepId: schema.taskSteps.stepId,
+      round: schema.taskSteps.round,
       userId: schema.tasks.userId,
     })
     .from(schema.taskSteps)
@@ -730,6 +752,7 @@ export async function reconcileOrphanedCliSteps(db: Database): Promise<void> {
           and(
             eq(schema.taskSteps.taskId, s.taskId),
             eq(schema.taskSteps.stepId, s.stepId),
+            eq(schema.taskSteps.round, s.round),
             isNull(schema.cliInvocations.endedAt),
             isNull(schema.cliInvocations.supersededAt),
           ),
@@ -745,7 +768,7 @@ export async function reconcileOrphanedCliSteps(db: Database): Promise<void> {
           })
           .where(eq(schema.cliInvocations.id, inv.id));
       }
-      await enqueueAdvance(s.taskId, s.userId, s.stepId);
+      await enqueueAdvance(s.taskId, s.userId, s.stepId, s.round);
       logger.info({ taskId: s.taskId, stepId: s.stepId }, 'reconciled orphaned waiting_cli step');
     } catch (err) {
       logger.error({ err, taskId: s.taskId, stepId: s.stepId }, 'reconcile orphaned step failed');

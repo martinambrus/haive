@@ -87,6 +87,8 @@ export interface AdvanceStepParams {
   workspacePath: string;
   cliProviderId: string | null;
   stepDef: StepDefinition;
+  /** Fix-loop round to materialize/run the step at (default 0 = original pass). */
+  round?: number;
   formValues?: FormValues;
   providers?: CliProviderRecord[];
   deps?: WorkerDeps;
@@ -660,8 +662,9 @@ const CANCEL_POLL_INTERVAL_MS = 2_000;
 export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceStepResult> {
   const { db, stepDef, taskId } = params;
   const meta = stepDef.metadata;
+  const round = params.round ?? 0;
 
-  const row = await upsertRow(db, taskId, stepDef);
+  const row = await upsertRow(db, taskId, stepDef, round);
 
   const controller = new AbortController();
   const throwIfCancelled = (): void => {
@@ -693,6 +696,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     workspacePath: params.workspacePath,
     sandboxWorkdir: SANDBOX_WORKDIR,
     cliProviderId: params.cliProviderId,
+    round,
     db,
     logger: log.child({ stepId: meta.id, taskId, taskStepId: row.id }),
     signal: controller.signal,
@@ -1033,12 +1037,19 @@ async function upsertRow(
   db: Database,
   taskId: string,
   stepDef: StepDefinition,
+  round: number,
 ): Promise<TaskStepRow> {
   const meta = stepDef.metadata;
   const existing = await db
     .select()
     .from(schema.taskSteps)
-    .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, meta.id)))
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, taskId),
+        eq(schema.taskSteps.stepId, meta.id),
+        eq(schema.taskSteps.round, round),
+      ),
+    )
     .limit(1);
   if (existing[0]) return existing[0];
   const inserted = await db
@@ -1047,6 +1058,7 @@ async function upsertRow(
       taskId,
       stepId: meta.id,
       stepIndex: computeGlobalStepIndex(meta.workflowType, meta.index),
+      round,
       title: meta.title,
       status: 'pending',
     })

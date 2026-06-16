@@ -12,6 +12,9 @@ export interface StepContext {
   workspacePath: string;
   sandboxWorkdir: string;
   cliProviderId: string | null;
+  /** Fix-loop round this step row belongs to (0 = original pass). round > 0 means
+   *  a fix re-run; steps branch on it to enter fix mode (e.g. 07 implement). */
+  round: number;
   db: Database;
   logger: Logger;
   signal: AbortSignal;

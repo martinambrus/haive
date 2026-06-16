@@ -420,6 +420,8 @@ export interface TaskStep {
   taskId: string;
   stepId: string;
   stepIndex: number;
+  /** Fix-loop round (0 = original pass). The same stepId recurs once per round. */
+  round: number;
   title: string;
   status: StepStatus;
   detectOutput: unknown;

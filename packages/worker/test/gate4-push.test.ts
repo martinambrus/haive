@@ -76,7 +76,9 @@ function makeCtx(
     },
     // loadPreviousStepOutput(01-worktree-setup) -> no row, so detect falls back
     // to ctx.workspacePath.
-    select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
+    select: () => ({
+      from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }),
+    }),
     update: () => ({
       set: (v: Record<string, unknown>) => {
         sets.push(v);

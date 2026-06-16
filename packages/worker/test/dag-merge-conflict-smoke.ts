@@ -249,6 +249,7 @@ async function main(): Promise<void> {
       workspacePath: repoPath,
       sandboxWorkdir: SANDBOX_WORKDIR,
       cliProviderId: provider!.id,
+      round: 0,
       db,
       logger: log.child({ stepId: '06c-dag-execute' }),
       signal: controller.signal,

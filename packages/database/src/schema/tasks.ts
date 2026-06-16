@@ -130,6 +130,12 @@ export const tasks = pgTable(
      *  Record<stepId, Record<fieldId, value>>. Written by 06-gate-1 apply();
      *  null until a task's gate-1 records it. */
     preAnswers: jsonb('pre_answers').$type<Record<string, Record<string, unknown>>>(),
+    /** Fix-loop: the round new step rows are materialized at (0 = original pass);
+     *  bumped each time a blocking defect re-enters at 07-implement. */
+    currentRound: integer('current_round').notNull().default(0),
+    /** Per-task cap on automatic fix rounds before escalating to the user. Set on
+     *  the Gate-1 run-config form; default 5. */
+    maxFixRounds: integer('max_fix_rounds').notNull().default(5),
     errorMessage: text('error_message'),
     startedAt: timestamp('started_at'),
     completedAt: timestamp('completed_at'),
@@ -153,6 +159,10 @@ export const taskSteps = pgTable(
       .references(() => tasks.id, { onDelete: 'cascade' }),
     stepId: varchar('step_id', { length: 128 }).notNull(),
     stepIndex: doublePrecision('step_index').notNull(),
+    /** Fix-loop round (0 = original pass). A blocking downstream defect re-enters
+     *  at 07-implement and re-runs the chain as round+1; each round materializes
+     *  its own rows. Unique per (task_id, step_id, round). */
+    round: integer('round').notNull().default(0),
     title: varchar('title', { length: 512 }).notNull(),
     status: stepStatusEnum('status').notNull().default('pending'),
     detectOutput: jsonb('detect_output').$type<unknown>(),
@@ -195,7 +205,7 @@ export const taskSteps = pgTable(
   },
   (table) => [
     index('task_steps_task_id_idx').on(table.taskId),
-    uniqueIndex('task_steps_task_step_idx').on(table.taskId, table.stepId),
+    uniqueIndex('task_steps_task_step_round_idx').on(table.taskId, table.stepId, table.round),
   ],
 );
 
