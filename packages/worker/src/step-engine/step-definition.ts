@@ -40,6 +40,11 @@ export interface LlmInvocationSpec {
   /** When true, LLM runs after detect but before the form is generated.
    *  The form() function receives the parsed llmOutput as its third argument. */
   preForm?: boolean;
+  /** When true, a failed or un-dispatchable LLM invocation does NOT fail the
+   *  step — the runner degrades to `llmOutput = null` so downstream phases fall
+   *  back to defaults. Use for a best-effort enrichment (e.g. a gate-1 config
+   *  recommendation) that must never block the step. */
+  optional?: boolean;
   /** Optional predicate to skip the LLM call entirely when its output isn't
    *  needed (e.g. selector phase when persona count <= dispatch cap, so all
    *  personas would be picked anyway). When skipped, llmOutput is undefined

@@ -5,6 +5,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
+import { parseConfigRecommendation, markRecommended } from './_gate1-recommendation.js';
 
 interface SpecGateDetect {
   /** Full spec body (markdown). The renderer turns this into HTML inside
@@ -243,7 +244,90 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     };
   },
 
-  form(_ctx, detected): FormSchema {
+  // Best-effort recommendation: read the final spec and suggest the QA level +
+  // browser mode. optional:true so a failed/absent provider never blocks the gate
+  // (form() degrades to static defaults). Runs before the form so form() can mark
+  // the recommended option.
+  llm: {
+    requiredCapabilities: ['tool_use'],
+    optional: true,
+    preForm: true,
+    timeoutMs: 5 * 60 * 1000,
+    skipIf: (args) => (args.detected as SpecGateDetect).specBody.trim().length === 0,
+    buildPrompt: (args) => {
+      const d = args.detected as SpecGateDetect;
+      const browserChoices = d.ddevMode
+        ? 'headless | mcp | interactive | manual | skip'
+        : 'headless | manual | skip';
+      return [
+        'Recommend the most appropriate post-implementation verification settings for the coding',
+        'task described by the specification below. You are ONLY recommending — do not implement.',
+        '',
+        'Choose:',
+        '1. adversarialQaLevel — how much adversarial QA (independent agents attacking the change):',
+        '   - "none": trivial / very low risk (docs, copy, a config tweak).',
+        '   - "poc": small, localized change.',
+        '   - "standard": a typical feature touching app logic, data, or user-facing flows.',
+        '   - "enterprise": security/auth/permissions, money or data integrity, or broad blast radius.',
+        `2. browserMode — how to verify in a browser (available: ${browserChoices}):`,
+        '   - "headless": no meaningful UI change — a page-load smoke check is enough.',
+        '   - "mcp": UI/frontend change worth automated agent testing in a real browser.',
+        '   - "interactive": UI change a human should click through.',
+        '   - "manual": UI change but verify by hand.',
+        '   - "skip": no runnable UI (library / CLI / backend-only).',
+        '   NEVER pick a value outside the available list above.',
+        '',
+        '=== Specification ===',
+        d.specBody.slice(0, 12000) || '(none)',
+        '',
+        'Emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
+        '{ "adversarialQaLevel": "none|poc|standard|enterprise", "browserMode": "<one available>", "rationale": "<one short line>" }',
+      ].join('\n');
+    },
+    bypassStub: () => ({
+      adversarialQaLevel: 'standard',
+      browserMode: 'headless',
+      rationale: 'bypass stub',
+    }),
+  },
+
+  form(_ctx, detected, llmOutput): FormSchema {
+    // Best-effort LLM recommendation (null when the recommend phase was skipped,
+    // failed, or returned garbage). Mark the recommended option + use it as the
+    // default; otherwise keep the static defaults.
+    const rec = parseConfigRecommendation(llmOutput);
+    const qa = markRecommended(
+      [
+        { value: 'none', label: 'Skip adversarial QA' },
+        { value: 'poc', label: 'POC — 2 agents (quick)' },
+        { value: 'standard', label: 'Standard — 4 agents' },
+        { value: 'enterprise', label: 'Enterprise — 6 agents' },
+      ],
+      rec.adversarialQaLevel,
+      detected.taskAdversarialQaLevel ?? 'none',
+    );
+    const browser = markRecommended(
+      [
+        { value: 'headless', label: 'Headless probe — automated page-load check only' },
+        ...(detected.ddevMode
+          ? [
+              {
+                value: 'mcp',
+                label:
+                  'Automated agent testing — the integration-tester drives the visible browser via Chrome DevTools (MCP)',
+              },
+              {
+                value: 'interactive',
+                label: 'Interactive probe — headed Chrome on the DDEV desktop',
+              },
+            ]
+          : []),
+        { value: 'manual', label: 'Manual checklist — verify by hand' },
+        { value: 'skip', label: 'Skip browser testing' },
+      ],
+      rec.browserMode,
+      'headless',
+    );
     const summaryBody = buildSummarySection(detected);
     const fullSpecBody =
       detected.specBody.trim().length > 0
@@ -320,13 +404,8 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
                   id: 'adversarialQaLevel',
                   label: 'Adversarial QA (Phase 7)',
                   description: '2/4/6 adversarial agents attack the implementation before Gate 2.',
-                  options: [
-                    { value: 'none', label: 'Skip adversarial QA' },
-                    { value: 'poc', label: 'POC — 2 agents (quick)' },
-                    { value: 'standard', label: 'Standard — 4 agents' },
-                    { value: 'enterprise', label: 'Enterprise — 6 agents' },
-                  ],
-                  default: detected.taskAdversarialQaLevel ?? 'none',
+                  options: qa.options,
+                  default: qa.default,
                 },
                 {
                   type: 'checkbox',
@@ -384,25 +463,8 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
                   type: 'radio',
                   id: 'browserMode',
                   label: 'Browser verification',
-                  options: [
-                    { value: 'headless', label: 'Headless probe — automated page-load check only' },
-                    ...(detected.ddevMode
-                      ? [
-                          {
-                            value: 'mcp',
-                            label:
-                              'Automated agent testing — the integration-tester drives the visible browser via Chrome DevTools (MCP)',
-                          },
-                          {
-                            value: 'interactive',
-                            label: 'Interactive probe — headed Chrome on the DDEV desktop',
-                          },
-                        ]
-                      : []),
-                    { value: 'manual', label: 'Manual checklist — verify by hand' },
-                    { value: 'skip', label: 'Skip browser testing' },
-                  ],
-                  default: 'headless',
+                  options: browser.options,
+                  default: browser.default,
                 },
                 {
                   type: 'checkbox',

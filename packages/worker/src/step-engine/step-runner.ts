@@ -222,6 +222,13 @@ async function resolveLlmPhase(
     const errTrimmed = invocation.errorMessage?.trim() ?? '';
     const contentBad = errTrimmed.length > 0;
     if (exitedBad || contentBad) {
+      // Best-effort LLM (e.g. gate-1 config recommendation): a failed invocation
+      // must not fail the step. Degrade to null output and reuse this failed row
+      // on re-entry (no re-dispatch) so downstream phases fall back to defaults.
+      if (llmSpec.optional) {
+        ctx.logger.warn({ phase: 'llm' }, 'optional llm invocation failed; degrading to null');
+        return { resolved: true, llmOutput: null, current };
+      }
       const rawTail = invocation.rawOutput?.trim().slice(-1000) ?? '';
       const message =
         errTrimmed || rawTail || `cli exited with code ${invocation.exitCode ?? 'unknown'}`;
@@ -242,6 +249,10 @@ async function resolveLlmPhase(
 
   // No invocation exists yet — dispatch one
   if (!params.providers || !params.deps) {
+    // Best-effort LLM with no providers available: skip rather than fail.
+    if (llmSpec.optional) {
+      return { resolved: true, llmOutput: null, current };
+    }
     const failed = await updateRow(db, current.id, {
       status: 'failed',
       errorMessage: 'step requires CLI invocation but no providers or deps supplied',
