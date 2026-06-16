@@ -165,13 +165,50 @@ export async function promoteToGlobalKbDraft(
   }
 }
 
-/** Stable cross-repo dedup key for a promoted entry: `category:normalizedTech`
- *  (tech lowercased to its alphanumerics). Null when no tech is known — such a
- *  promotion is never deduped (always inserted). */
-export function globalKbTopicKey(category: string, tech: string | null | undefined): string | null {
-  if (!tech) return null;
-  const norm = tech.toLowerCase().replace(/[^a-z0-9]+/g, '');
-  return norm ? `${category}:${norm}` : null;
+/** Stable cross-repo dedup key for a promoted entry: `category:tech[:major]`.
+ *
+ *  The tech + major are taken from the DETECTION-DERIVED facets (built by
+ *  techAnchorFacets), which are stable across runs — unlike the free-form `tech`
+ *  string the LLM emits, which drifts ("php" <-> "php5") for the SAME article and so
+ *  broke dedup (the original bug: identical facets, divergent topic_key). Priority
+ *  mirrors how techAnchorFacets pins a single dimension; a tech-bucket article sets
+ *  exactly one. The major keeps genuinely-different majors apart (PHP 5 vs PHP 8).
+ *  Falls back to the free-form `tech` only when the facets carry no anchor. Null when
+ *  neither yields a tech — such a promotion is never deduped (always inserted). */
+export function globalKbTopicKey(
+  category: string,
+  facets: GlobalKbFacets,
+  fallbackTech?: string | null,
+): string | null {
+  const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const first = (a?: string[]): string | null => (a && a.length > 0 ? (a[0] ?? null) : null);
+
+  let tech: string | null = null;
+  let major: string | null = null;
+  const pkg = first(facets.packages); // e.g. "vitest@3", "@scope/name@18.2"
+  if (pkg) {
+    const at = pkg.lastIndexOf('@');
+    if (at > 0) {
+      tech = pkg.slice(0, at);
+      major = pkg.slice(at + 1).split('.')[0] || null;
+    } else {
+      tech = pkg;
+    }
+  } else if (first(facets.framework)) {
+    tech = first(facets.framework);
+    major = first(facets.frameworkMajor);
+  } else if (first(facets.database)) {
+    tech = first(facets.database);
+    major = first(facets.dbMajor);
+  } else if (first(facets.language)) {
+    tech = first(facets.language);
+    major = first(facets.phpMajor) ?? first(facets.nodeMajor);
+  }
+
+  const techNorm = tech ? norm(tech) : fallbackTech ? norm(fallbackTech) : '';
+  if (!techNorm) return null;
+  const majorNorm = major ? norm(major) : '';
+  return majorNorm ? `${category}:${techNorm}:${majorNorm}` : `${category}:${techNorm}`;
 }
 
 /** Delete the DRAFT promotions a prior run of this task created, so re-running a

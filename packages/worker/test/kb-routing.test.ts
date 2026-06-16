@@ -296,12 +296,40 @@ describe('re-route helpers', () => {
 });
 
 describe('cross-repo dedup key', () => {
-  it('globalKbTopicKey is category:alphanumeric-tech, or null without a tech', () => {
-    expect(globalKbTopicKey('anti_pattern', 'drupal11')).toBe('anti_pattern:drupal11');
-    expect(globalKbTopicKey('best_practice', 'jQuery 1.2')).toBe('best_practice:jquery12');
-    expect(globalKbTopicKey('quick_reference', 'NauSYS-API')).toBe('quick_reference:nausysapi');
-    expect(globalKbTopicKey('anti_pattern', null)).toBeNull();
-    expect(globalKbTopicKey('anti_pattern', '')).toBeNull();
+  it('derives category:tech:major from the canonical facets', () => {
+    expect(globalKbTopicKey('best_practice', { language: ['php'], phpMajor: ['5'] })).toBe(
+      'best_practice:php:5',
+    );
+    expect(globalKbTopicKey('quick_reference', { database: ['mariadb'], dbMajor: ['10'] })).toBe(
+      'quick_reference:mariadb:10',
+    );
+    expect(globalKbTopicKey('anti_pattern', { packages: ['vitest@3'] })).toBe(
+      'anti_pattern:vitest:3',
+    );
+    expect(
+      globalKbTopicKey('best_practice', { framework: ['drupal'], frameworkMajor: ['11'] }),
+    ).toBe('best_practice:drupal:11');
+  });
+
+  it('is STABLE across the drifting free-form tech that broke dedup', () => {
+    // The original bug: same article, identical facets, but tech "php" vs "php5"
+    // produced different topic_keys. The facets drive the key now, so both match.
+    const facets = { language: ['php'], phpMajor: ['5'] };
+    expect(globalKbTopicKey('best_practice', facets, 'php')).toBe('best_practice:php:5');
+    expect(globalKbTopicKey('best_practice', facets, 'php5')).toBe('best_practice:php:5');
+  });
+
+  it('keeps distinct majors apart (PHP 5 vs PHP 8)', () => {
+    expect(globalKbTopicKey('best_practice', { language: ['php'], phpMajor: ['5'] })).not.toBe(
+      globalKbTopicKey('best_practice', { language: ['php'], phpMajor: ['8'] }),
+    );
+  });
+
+  it('falls back to the free-form tech only when facets carry no anchor', () => {
+    expect(globalKbTopicKey('quick_reference', {}, 'NauSYS-API')).toBe('quick_reference:nausysapi');
+    expect(globalKbTopicKey('anti_pattern', {}, 'drupal11')).toBe('anti_pattern:drupal11');
+    expect(globalKbTopicKey('anti_pattern', {}, null)).toBeNull();
+    expect(globalKbTopicKey('anti_pattern', {})).toBeNull();
   });
 
   it('placementTech derives the tech slug from a KB file path', () => {
