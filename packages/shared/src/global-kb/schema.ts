@@ -69,6 +69,10 @@ export const globalKbEntries = pgTable('global_kb_entries', {
   contentHash: text('content_hash'),
   // Cross-repo dedup key (category:tech); null when no tech is derivable.
   topicKey: text('topic_key'),
+  // When set, this DRAFT is a proposed merge/enrichment of the entry with this id
+  // (same topicKey). A merge step fills its body from both; on activation it
+  // supersedes that entry. Plain uuid, no FK (provenance only, like sourceTaskId).
+  supersedesEntryId: uuid('supersedes_entry_id'),
   embedStatus: text('embed_status').$type<GlobalKbEmbedStatus>().notNull().default('pending'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),

@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   globalKbEntries,
@@ -27,6 +27,7 @@ export interface GlobalKbPromotion {
 
 interface PromoteLogger {
   warn: (obj: unknown, msg: string) => void;
+  info: (obj: unknown, msg: string) => void;
 }
 
 /** Placeholder substituted for the source project's name in a promoted article,
@@ -105,20 +106,33 @@ export async function promoteToGlobalKbDraft(
   db: Database,
   promotion: GlobalKbPromotion,
   log: PromoteLogger,
-): Promise<{ id: string; deduped: boolean } | null> {
+): Promise<{ id: string; deduped: boolean; supersedesEntryId?: string | null } | null> {
   try {
     const task = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, promotion.taskId),
       columns: { repositoryId: true },
     });
     return await withGlobalKb(db, async ({ db: gdb, settings }) => {
-      // Cross-repo dedup: if another promotion already covers this topic
-      // (category:tech), skip the insert so re-onboarding many projects does not
-      // stack duplicate drafts. The per-task draft cleanup runs first, so this
-      // only ever matches OTHER tasks' or already-activated entries.
+      const clean = sanitizeGlobalArticle({
+        title: promotion.title,
+        body: promotion.body,
+        projectName: promotion.projectName,
+      });
+      // Cross-repo reconcile: when another entry already covers this topic
+      // (category:tech[:major]), DON'T discard the new knowledge — unless it is
+      // byte-identical we keep it as a draft LINKED to that entry (supersedesEntryId)
+      // so the merge step can enrich it (keep unique info, dedup overlap) and, on
+      // activation, supersede the existing one. The existing entry — possibly a
+      // curated active — is never mutated here. The per-task draft cleanup runs
+      // first, so this matches OTHER tasks' or already-activated entries.
+      let supersedesEntryId: string | null = null;
       if (promotion.topicKey) {
         const [existing] = await gdb
-          .select({ id: globalKbEntries.id, status: globalKbEntries.status })
+          .select({
+            id: globalKbEntries.id,
+            status: globalKbEntries.status,
+            body: globalKbEntries.body,
+          })
           .from(globalKbEntries)
           .where(
             and(
@@ -126,20 +140,27 @@ export async function promoteToGlobalKbDraft(
               eq(globalKbEntries.topicKey, promotion.topicKey),
             ),
           )
+          // Prefer linking to the canonical active entry; else the newest.
+          .orderBy(
+            sql`case when ${globalKbEntries.status} = 'active' then 0 else 1 end`,
+            desc(globalKbEntries.createdAt),
+          )
           .limit(1);
         if (existing) {
-          log.warn(
+          if (existing.body.trim() === clean.body.trim()) {
+            log.info(
+              { topicKey: promotion.topicKey, existingId: existing.id },
+              'global KB promotion skipped (identical content already present)',
+            );
+            return { id: existing.id, deduped: true, supersedesEntryId: null };
+          }
+          supersedesEntryId = existing.id;
+          log.info(
             { topicKey: promotion.topicKey, existingId: existing.id, status: existing.status },
-            'global KB promotion deduped (topic already covered)',
+            'global KB promotion linked to existing topic for merge',
           );
-          return { id: existing.id, deduped: true };
         }
       }
-      const clean = sanitizeGlobalArticle({
-        title: promotion.title,
-        body: promotion.body,
-        projectName: promotion.projectName,
-      });
       const [row] = await gdb
         .insert(globalKbEntries)
         .values({
@@ -154,10 +175,11 @@ export async function promoteToGlobalKbDraft(
           sourceTaskId: promotion.taskId,
           sourceRepoId: task?.repositoryId ?? null,
           topicKey: promotion.topicKey ?? null,
+          supersedesEntryId,
           embedStatus: 'pending',
         })
         .returning({ id: globalKbEntries.id });
-      return row ? { id: row.id, deduped: false } : null;
+      return row ? { id: row.id, deduped: false, supersedesEntryId } : null;
     });
   } catch (err) {
     log.warn({ err, title: promotion.title }, 'global KB promotion failed (skipped)');

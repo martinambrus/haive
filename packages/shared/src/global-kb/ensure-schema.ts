@@ -65,6 +65,11 @@ export async function ensureGlobalKbSchema(
   await conn.pg.unsafe(
     `CREATE INDEX IF NOT EXISTS idx_global_kb_entries_ns_topic_key ON ${ENTRIES_TABLE} (namespace, topic_key)`,
   );
+  // Merge/update route: a draft links to the entry it enriches + supersedes on
+  // activation. Additive column for pre-existing DBs.
+  await conn.pg.unsafe(
+    `ALTER TABLE ${ENTRIES_TABLE} ADD COLUMN IF NOT EXISTS supersedes_entry_id uuid`,
+  );
 
   // 2. Global vector table — the per-project ai_rag_embeddings shape PLUS
   //    namespace/user_id/entry_id/facets. pgvector primary, jsonb fallback.
