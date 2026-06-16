@@ -21,6 +21,17 @@ const baseField = z.object({
   description: z.string().optional(),
   required: z.boolean().optional(),
   details: diffDetailsSchema.optional(),
+  /** Conditionally hide this field based on another field's CURRENT value in the
+   *  same form. When the predicate fails the field is not rendered. Use for inputs
+   *  that only apply to a particular choice (e.g. console/network checks that are
+   *  irrelevant once browser testing is skipped). */
+  visibleWhen: z
+    .object({
+      field: z.string().min(1),
+      equals: z.string().optional(),
+      notEquals: z.string().optional(),
+    })
+    .optional(),
 });
 
 export const textFieldSchema = baseField.extend({

@@ -256,9 +256,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     skipIf: (args) => (args.detected as SpecGateDetect).specBody.trim().length === 0,
     buildPrompt: (args) => {
       const d = args.detected as SpecGateDetect;
-      const browserChoices = d.ddevMode
-        ? 'headless | mcp | interactive | manual | skip'
-        : 'headless | manual | skip';
+      const browserChoices = d.ddevMode ? 'headless | mcp | interactive | skip' : 'headless | skip';
       return [
         'Recommend the most appropriate post-implementation verification settings for the coding',
         'task described by the specification below. You are ONLY recommending — do not implement.',
@@ -270,10 +268,9 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
         '   - "standard": a typical feature touching app logic, data, or user-facing flows.',
         '   - "enterprise": security/auth/permissions, money or data integrity, or broad blast radius.',
         `2. browserMode — how to verify in a browser (available: ${browserChoices}):`,
-        '   - "headless": no meaningful UI change — a page-load smoke check is enough.',
+        '   - "headless": no meaningful UI change — automated HTTP-status + console/network checks suffice.',
         '   - "mcp": UI/frontend change worth automated agent testing in a real browser.',
         '   - "interactive": UI change a human should click through.',
-        '   - "manual": UI change but verify by hand.',
         '   - "skip": no runnable UI (library / CLI / backend-only).',
         '   NEVER pick a value outside the available list above.',
         '',
@@ -308,7 +305,10 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     );
     const browser = markRecommended(
       [
-        { value: 'headless', label: 'Headless probe — automated page-load check only' },
+        {
+          value: 'headless',
+          label: 'Automated checks — HTTP status, console & network errors (no runner needed)',
+        },
         ...(detected.ddevMode
           ? [
               {
@@ -318,11 +318,10 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
               },
               {
                 value: 'interactive',
-                label: 'Interactive probe — headed Chrome on the DDEV desktop',
+                label: 'Interactive testing — you drive the headed Chrome in the Browser panel',
               },
             ]
           : []),
-        { value: 'manual', label: 'Manual checklist — verify by hand' },
         { value: 'skip', label: 'Skip browser testing' },
       ],
       rec.browserMode,
@@ -471,12 +470,14 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
                   id: 'browserCheckConsoleErrors',
                   label: 'Browser: check for console errors',
                   default: true,
+                  visibleWhen: { field: 'browserMode', notEquals: 'skip' },
                 },
                 {
                   type: 'checkbox',
                   id: 'browserCheckNetworkErrors',
                   label: 'Browser: check for failed network requests',
                   default: true,
+                  visibleWhen: { field: 'browserMode', notEquals: 'skip' },
                 },
                 {
                   type: 'radio',

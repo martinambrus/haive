@@ -10,6 +10,7 @@ import { GlobalKbStatusPanel } from '@/components/global-kb-status-panel';
 import { MarkdownView, looksLikeMarkdown } from '@/components/markdown/markdown-view';
 import { cn } from '@/lib/cn';
 import { validateRequired, type FormValues } from '@/components/form-validation';
+import { isFieldVisible } from '@/components/form-visibility';
 
 export type { FormValues };
 
@@ -166,27 +167,29 @@ export function FormRenderer({
       </div>
       <InfoSections sections={schema.infoSections} />
       <div className="flex flex-col gap-4">
-        {schema.fields.map((field) => (
-          <div key={field.id}>
-            {field.type === 'accordion' ? (
-              <AccordionField
-                field={field}
-                values={values}
-                onChange={update}
-                disabled={disabled || submitting}
-              />
-            ) : (
-              <FieldRow
-                field={field}
-                value={values[field.id]}
-                onChange={(value) => update(field.id, value)}
-                disabled={disabled || submitting}
-                repositoryId={repositoryId ?? null}
-              />
-            )}
-            {renderAfterField?.(field.id, values)}
-          </div>
-        ))}
+        {schema.fields.map((field) =>
+          isFieldVisible(field, values) ? (
+            <div key={field.id}>
+              {field.type === 'accordion' ? (
+                <AccordionField
+                  field={field}
+                  values={values}
+                  onChange={update}
+                  disabled={disabled || submitting}
+                />
+              ) : (
+                <FieldRow
+                  field={field}
+                  value={values[field.id]}
+                  onChange={(value) => update(field.id, value)}
+                  disabled={disabled || submitting}
+                  repositoryId={repositoryId ?? null}
+                />
+              )}
+              {renderAfterField?.(field.id, values)}
+            </div>
+          ) : null,
+        )}
       </div>
       <FormError message={localError ?? errorMessage ?? null} />
       <div>
@@ -316,15 +319,17 @@ function AccordionField({ field, values, onChange, disabled }: AccordionFieldPro
               {item.description && (
                 <p className="whitespace-pre-line text-xs text-neutral-200">{item.description}</p>
               )}
-              {item.fields.map((leaf) => (
-                <FieldRow
-                  key={leaf.id}
-                  field={leaf}
-                  value={values[leaf.id]}
-                  onChange={(value) => onChange(leaf.id, value)}
-                  disabled={disabled}
-                />
-              ))}
+              {item.fields.map((leaf) =>
+                isFieldVisible(leaf, values) ? (
+                  <FieldRow
+                    key={leaf.id}
+                    field={leaf}
+                    value={values[leaf.id]}
+                    onChange={(value) => onChange(leaf.id, value)}
+                    disabled={disabled}
+                  />
+                ) : null,
+              )}
             </div>
           </details>
         ))}

@@ -181,6 +181,7 @@ const VISUAL_PROTOCOL = [
 
 interface BrowserReport {
   pageTitle: string | null;
+  httpStatus: number | null;
   consoleErrors: string[];
   consoleWarnings: string[];
   networkErrors: string[];
@@ -205,13 +206,15 @@ async function run() {
   const networkErrors = [];
   page.on('console', msg => { consoleMessages.push({ level: msg.type(), text: msg.text() }); });
   page.on('requestfailed', req => { networkErrors.push(req.url() + ' ' + (req.failure()?.errorText || 'unknown')); });
-  try { await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 }); }
+  let httpStatus = null;
+  try { const resp = await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 }); httpStatus = resp ? resp.status() : null; }
   catch (err) { consoleMessages.push({ level: 'error', text: 'Navigation failed: ' + err.message }); }
   const title = await page.title().catch(() => null);
   await browser.close();
   const errors = consoleMessages.filter(m => m.level === 'error').map(m => m.text);
   const warnings = consoleMessages.filter(m => m.level === 'warning').map(m => m.text);
-  console.log(JSON.stringify({ pageTitle: title, consoleErrors: errors.slice(0, 50), consoleWarnings: warnings.slice(0, 50), networkErrors: networkErrors.slice(0, 50), passed: errors.length === 0 && networkErrors.length === 0 }));
+  const httpBad = httpStatus !== null && httpStatus >= 400;
+  console.log(JSON.stringify({ pageTitle: title, httpStatus: httpStatus, consoleErrors: errors.slice(0, 50), consoleWarnings: warnings.slice(0, 50), networkErrors: networkErrors.slice(0, 50), passed: errors.length === 0 && networkErrors.length === 0 && !httpBad }));
 }
 run().catch(err => { console.error(err.message); process.exit(1); });
 `;
@@ -374,7 +377,10 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
           id: 'mode',
           label: 'Testing method',
           options: [
-            { value: 'headless', label: 'Headless probe — automated page-load check only' },
+            {
+              value: 'headless',
+              label: 'Automated checks — HTTP status, console & network errors (no runner needed)',
+            },
             ...(detected.ddevMode
               ? [
                   {
@@ -389,14 +395,10 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
                   {
                     value: 'interactive',
                     label:
-                      'Interactive probe — headed Chrome on the runtime desktop; watch and click along in the Browser panel (e.g. to dismiss native Chrome popups)',
+                      'Interactive testing — you drive the headed Chrome in the Browser panel below (e.g. to dismiss native Chrome popups)',
                   },
                 ]
               : []),
-            {
-              value: 'manual',
-              label: 'Manual checklist — generate a testing checklist to verify by hand',
-            },
             { value: 'skip', label: 'Skip browser testing' },
           ],
           default: 'headless',
@@ -413,12 +415,14 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
           id: 'checkConsoleErrors',
           label: 'Check for console errors',
           default: true,
+          visibleWhen: { field: 'mode', notEquals: 'skip' },
         },
         {
           type: 'checkbox',
           id: 'checkNetworkErrors',
           label: 'Check for failed network requests',
           default: true,
+          visibleWhen: { field: 'mode', notEquals: 'skip' },
         },
       ],
       submitLabel: 'Run browser validation',
@@ -632,13 +636,18 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
 
     const checkConsole = values.checkConsoleErrors !== false;
     const checkNetwork = values.checkNetworkErrors !== false;
+    // The HTTP status is ALWAYS enforced — a 4xx/5xx page that renders cleanly must
+    // still fail — independent of the optional console/network checks.
+    const httpOk = report.httpStatus === null || report.httpStatus < 400;
     const passed =
+      httpOk &&
       (!checkConsole || report.consoleErrors.length === 0) &&
       (!checkNetwork || report.networkErrors.length === 0);
 
     ctx.logger.info(
       {
         pageTitle: report.pageTitle,
+        httpStatus: report.httpStatus,
         consoleErrors: report.consoleErrors.length,
         networkErrors: report.networkErrors.length,
         passed,
