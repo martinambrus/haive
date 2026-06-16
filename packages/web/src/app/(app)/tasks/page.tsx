@@ -41,6 +41,9 @@ function matchesStatus(status: TaskStatus, filter: string): boolean {
   if (!filter) return true;
   if (filter === 'open') return OPEN_STATUSES.has(status);
   if (filter === 'active') return ACTIVE_STATUSES.has(status);
+  // 'unfinished' = open plus failed: everything still needing attention
+  // (not cleanly completed or cancelled). Dropdown-only; no repo-badge link.
+  if (filter === 'unfinished') return OPEN_STATUSES.has(status) || status === 'failed';
   return status === filter;
 }
 
@@ -177,9 +180,10 @@ export default function TasksPage() {
             className={FILTER_SELECT_CLASS}
           >
             <option value="">All statuses</option>
-            <option value="open">Open</option>
-            <option value="active">Active</option>
+            <option value="unfinished">Unfinished</option>
+            <option value="active">In progress</option>
             <option value="waiting_user">Waiting on you</option>
+            <option value="open">Open</option>
             <option value="completed">Completed</option>
             <option value="failed">Failed</option>
             <option value="cancelled">Cancelled</option>
