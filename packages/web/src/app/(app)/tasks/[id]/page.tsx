@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { FormSchema, InfoSection } from '@haive/shared';
+import type { FormSchema } from '@haive/shared';
 // Import the pure timing helper from its dedicated subpath, NOT the package
 // barrel — the barrel pulls server-only utils (ioredis -> dns) that break the
 // browser bundle. timing.ts has no imports, so this subpath is browser-safe.
@@ -1169,36 +1169,6 @@ function TaskTotalTime({
   );
 }
 
-// Markdown documents a step writes to its `output` that should render as readable
-// disclosures on the done card, instead of only surfacing as raw JSON behind "Show
-// output". The technical spec (04) has no form section that shows it, so render it
-// here. The business-requirements doc is intentionally NOT listed: the 03c review
-// step already shows it via its own form infoSection, so listing it here would
-// duplicate the doc onto the 03b done card. Field -> heading.
-const OUTPUT_DOC_FIELDS: ReadonlyArray<{ field: string; label: string }> = [
-  { field: 'spec', label: 'Technical specification' },
-];
-
-/** Build readable disclosures for a step's markdown output documents, deduped
- *  against the form's own infoSections so a step that already previews the doc at
- *  form time (e.g. gate-1 shows the spec) does not repeat it on its done card. */
-function buildOutputDocSections(
-  output: unknown,
-  alreadyShown: FormSchema['infoSections'],
-): InfoSection[] {
-  if (!output || typeof output !== 'object') return [];
-  const rec = output as Record<string, unknown>;
-  const shown = new Set((alreadyShown ?? []).map((s) => s.body.trim()));
-  const sections: InfoSection[] = [];
-  for (const { field, label } of OUTPUT_DOC_FIELDS) {
-    const body = rec[field];
-    if (typeof body === 'string' && body.trim().length > 0 && !shown.has(body.trim())) {
-      sections.push({ title: label, body, defaultOpen: true });
-    }
-  }
-  return sections;
-}
-
 function StepCard({
   step,
   taskId,
@@ -1228,9 +1198,6 @@ function StepCard({
   const [showRagStats, setShowRagStats] = useState(false);
   const isDiscovery = step.stepId === '03-phase-0a-discovery';
   const schema = step.formSchema as FormSchema | null;
-  // Generated docs (business requirements, technical spec) the step stored in its
-  // output, rendered read-only on the done card.
-  const outputDocs = buildOutputDocSections(step.output, schema?.infoSections);
   const initialValues = (step.formValues as FormValues | null) ?? undefined;
   const taskCancelled = taskStatus === 'cancelled';
   const showForm = !taskCancelled && step.status === 'waiting_form' && schema;
@@ -1691,7 +1658,6 @@ function StepCard({
           requirements, technical spec, gate reviews, …) read-only so they stay
           reviewable after the interactive form is gone. */}
       {step.status !== 'waiting_form' && <InfoSections sections={schema?.infoSections} />}
-      {step.status !== 'waiting_form' && <InfoSections sections={outputDocs} />}
 
       {step.status !== 'waiting_form' && (step.detectOutput !== null || step.output !== null) && (
         <button
