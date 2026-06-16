@@ -134,6 +134,11 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
     allowSkip: true,
   },
 
+  // A reconcile failure (e.g. the implementation wrote an invalid .ddev/config.yaml
+  // like `webserver_type: apache`) is a fixable defect: route the thrown error back to
+  // the implementation step as a fix-loop diagnosis instead of failing the task.
+  fixLoopOnError: true,
+
   async shouldRun(ctx: StepContext): Promise<boolean> {
     const row = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01c-ddev-env');
     const apply01c = (row?.output ?? null) as DdevEnvApply | null;

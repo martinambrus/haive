@@ -255,6 +255,45 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     cliRoles: STEP_CLI_ROLES['08a-browser-verify'],
   },
 
+  // Fix-loop: a failed browser verification routes back to implementation with the
+  // observed failures + console/network errors as the diagnosis. Skipped runs pass.
+  fixLoop: {
+    evaluate: (out) => {
+      if (out.skipped || !out.ran || out.passed) return null;
+      const parts: string[] = [];
+      if (out.failures.length) {
+        parts.push(
+          '### Failures\n' +
+            out.failures
+              .map((f) => `- ${f.description}${f.evidence ? ` (${f.evidence})` : ''}`)
+              .join('\n'),
+        );
+      }
+      if (out.consoleErrors.length) {
+        parts.push(
+          '### Console errors\n' +
+            out.consoleErrors
+              .slice(0, 20)
+              .map((e) => `- ${e}`)
+              .join('\n'),
+        );
+      }
+      if (out.networkErrors.length) {
+        parts.push(
+          '### Network errors\n' +
+            out.networkErrors
+              .slice(0, 20)
+              .map((e) => `- ${e}`)
+              .join('\n'),
+        );
+      }
+      return {
+        blocking: true,
+        diagnosis: parts.join('\n\n') || out.output.slice(-2000) || 'Browser verification failed.',
+      };
+    },
+  },
+
   async shouldRun(ctx: StepContext): Promise<boolean> {
     const envTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
     if (!envTemplate || envTemplate.status !== 'ready') return false;

@@ -297,6 +297,18 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     cliRoles: STEP_CLI_ROLES['07b-phase-4-validate'],
   },
 
+  // Fix-loop: if validation still reports issues after its internal fixer loop, route
+  // back to implementation with the findings summary as the diagnosis.
+  fixLoop: {
+    evaluate: (out) =>
+      out.verdict === 'VALID'
+        ? null
+        : {
+            blocking: true,
+            diagnosis: out.findingsSummary || out.summary || 'Validation found unresolved issues.',
+          },
+  },
+
   async detect(ctx: StepContext): Promise<ValidateDetect> {
     const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const wt = worktree?.output as {

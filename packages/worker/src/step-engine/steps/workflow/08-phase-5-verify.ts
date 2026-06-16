@@ -260,6 +260,27 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     requiresCli: false,
   },
 
+  // Fix-loop: a failing verification suite routes back to implementation with the
+  // failing command output(s) as the diagnosis.
+  fixLoop: {
+    evaluate: (out) => {
+      if (out.passed) return null;
+      const parts: string[] = [];
+      for (const [name, check] of [
+        ['tests', out.test],
+        ['lint', out.lint],
+        ['typecheck', out.typecheck],
+      ] as const) {
+        if (check.ran && !check.passed) {
+          parts.push(
+            `### ${name} failed${check.command ? ` (\`${check.command}\`)` : ''}\n${check.output.slice(-2000)}`,
+          );
+        }
+      }
+      return { blocking: true, diagnosis: parts.join('\n\n') || 'Verification failed.' };
+    },
+  },
+
   async detect(ctx: StepContext): Promise<VerifyDetect> {
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const worktreeOutput = prev?.output as { worktreePath?: string } | null;

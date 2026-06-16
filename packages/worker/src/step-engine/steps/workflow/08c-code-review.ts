@@ -245,6 +245,35 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     requiresCli: false,
   },
 
+  // Fix-loop: blocking peer/security review findings route back to implementation.
+  fixLoop: {
+    evaluate: (out) => {
+      if (!out.blocking) return null;
+      const parts: string[] = [];
+      if (out.peer.findings.length) {
+        parts.push(
+          '### Peer review\n' +
+            out.peer.findings
+              .map(
+                (f) => `- [${f.severity}] ${f.path}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`,
+              )
+              .join('\n'),
+        );
+      }
+      if (out.security.findings.length) {
+        parts.push(
+          '### Security\n' +
+            out.security.findings
+              .map(
+                (f) => `- [${f.severity}] ${f.path}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`,
+              )
+              .join('\n'),
+        );
+      }
+      return { blocking: true, diagnosis: parts.join('\n\n') || 'Code review requested changes.' };
+    },
+  },
+
   async detect(ctx: StepContext): Promise<CodeReviewDetect> {
     const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const wt = worktree?.output as { worktreePath?: string } | null;

@@ -197,6 +197,20 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     requiresCli: false,
   },
 
+  // Fix-loop: blocking adversarial-QA findings (critical/high) route back to implementation.
+  fixLoop: {
+    evaluate: (out) => {
+      if (!out.blocking) return null;
+      const diagnosis = out.findings
+        .map(
+          (f) =>
+            `- [${f.severity}] ${f.category ?? 'issue'}${f.location ? ` @ ${f.location}` : ''}: ${f.impact ?? ''}${f.fix ? ` — fix: ${f.fix}` : ''}`,
+        )
+        .join('\n');
+      return { blocking: true, diagnosis: diagnosis || 'Adversarial QA found blocking issues.' };
+    },
+  },
+
   async shouldRun(ctx: StepContext): Promise<boolean> {
     const task = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
