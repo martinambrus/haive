@@ -264,10 +264,32 @@ export async function ddevMigrateDatabase(
  *  and THROWS if start fails. Callers treat a throw as a step failure — e.g. a
  *  task that just implemented `.ddev` (01c skipped early), where the browser-
  *  verify step boots the new config and a boot failure routes back to the dev. */
+const inFlightDdevBoots = new Map<string, Promise<DdevRunnerHandle>>();
+
 export async function ensureDdevStarted(
   taskId: string,
   repoSubpath: string,
   opts: { onProgress?: (line: string) => void } = {},
+): Promise<DdevRunnerHandle> {
+  // Coalesce concurrent boots of the SAME task into one. An interactive 08a apply
+  // and the VNC runtime-ensure job can both call this at once; two startDdevRunner
+  // calls would then collide on the fixed container name (`docker run --name`
+  // conflict) and fail the loser. The first call's in-flight promise serves both.
+  const inFlight = inFlightDdevBoots.get(taskId);
+  if (inFlight) return inFlight;
+  const boot = ensureDdevStartedInner(taskId, repoSubpath, opts);
+  inFlightDdevBoots.set(taskId, boot);
+  try {
+    return await boot;
+  } finally {
+    inFlightDdevBoots.delete(taskId);
+  }
+}
+
+async function ensureDdevStartedInner(
+  taskId: string,
+  repoSubpath: string,
+  opts: { onProgress?: (line: string) => void },
 ): Promise<DdevRunnerHandle> {
   const existing = runnerHandleForTask(taskId, repoSubpath);
   const describe = await ddevExec(existing, 'describe -j', { timeoutMs: 15_000 });

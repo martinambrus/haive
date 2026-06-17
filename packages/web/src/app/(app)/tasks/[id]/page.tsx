@@ -1756,6 +1756,7 @@ function StepCard({
       )}
 
       {step.stepId === '08a-browser-verify' &&
+        step.status !== 'failed' &&
         ['interactive', 'mcp'].includes(
           (step.formValues as { mode?: string } | null)?.mode ?? '',
         ) && <BrowserVncPanel taskId={taskId} autoCollapse={step.status === 'done'} />}

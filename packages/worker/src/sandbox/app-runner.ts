@@ -152,7 +152,27 @@ export async function startAppRunner(params: {
 /** Ensure the task's app-runner is up, launching it if not. Idempotent: returns
  *  the existing handle when the container is already running; a stopped/stale
  *  container is removed and recreated. */
+const inFlightAppRunnerBoots = new Map<string, Promise<AppRunnerHandle>>();
+
 export async function ensureAppRunnerStarted(
+  taskId: string,
+  repoSubpath: string,
+  imageTag: string,
+): Promise<AppRunnerHandle> {
+  // Coalesce concurrent boots of the same task (08a apply + VNC runtime-ensure)
+  // into one — two startAppRunner calls would collide on the container name.
+  const inFlight = inFlightAppRunnerBoots.get(taskId);
+  if (inFlight) return inFlight;
+  const boot = ensureAppRunnerStartedInner(taskId, repoSubpath, imageTag);
+  inFlightAppRunnerBoots.set(taskId, boot);
+  try {
+    return await boot;
+  } finally {
+    inFlightAppRunnerBoots.delete(taskId);
+  }
+}
+
+async function ensureAppRunnerStartedInner(
   taskId: string,
   repoSubpath: string,
   imageTag: string,
