@@ -325,7 +325,10 @@ export default function TaskDetailPage() {
     setStepActionBusy(step.stepId);
     setStepActionError(null);
     try {
-      await api.post<StepActionResponse>(`/tasks/${id}/steps/${step.stepId}/action`, { action });
+      await api.post<StepActionResponse>(`/tasks/${id}/steps/${step.stepId}/action`, {
+        action,
+        round: step.round,
+      });
       await reload();
     } catch (err) {
       setStepActionError({
@@ -363,6 +366,7 @@ export default function TaskDetailPage() {
     try {
       await api.post<StepActionResponse>(`/tasks/${id}/steps/${step.stepId}/action`, {
         action: 'retry',
+        round: step.round,
       });
       await reload();
     } catch (err) {
@@ -375,12 +379,18 @@ export default function TaskDetailPage() {
     }
   }
 
-  async function changeStepProvider(stepId: string, cliProviderId: string | null, role?: string) {
+  async function changeStepProvider(
+    stepId: string,
+    cliProviderId: string | null,
+    role: string | undefined,
+    round: number,
+  ) {
     setStepProviderBusy(stepId);
     setStepProviderError(null);
     try {
       await api.patch(`/tasks/${id}/steps/${stepId}/cli-provider`, {
         cliProviderId,
+        round,
         ...(role ? { role } : {}),
       });
       await reload();
@@ -646,7 +656,7 @@ export default function TaskDetailPage() {
                     stepProviderError?.stepId === step.stepId ? stepProviderError.message : null
                   }
                   onChangeCli={(cliProviderId, role) =>
-                    changeStepProvider(step.stepId, cliProviderId, role)
+                    changeStepProvider(step.stepId, cliProviderId, role, step.round)
                   }
                   autoContinue={task.autoContinue}
                   autoContinueBusy={autoContinueBusy}

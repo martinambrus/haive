@@ -95,6 +95,10 @@ export const stepActionSchema = z.enum(['retry', 'retry_ai', 'skip', 'resume', '
 export const stepActionRequestSchema = z.object({
   action: stepActionSchema,
   note: z.string().max(2000).optional(),
+  /** Which round of the step to act on. A fix-loop step recurs once per round
+   *  (round 0 = original pass), each rendered as its own row with its own
+   *  buttons, so the UI must say which one was clicked. Omitted → latest round. */
+  round: z.number().int().nonnegative().optional(),
 });
 
 export type StepAction = z.infer<typeof stepActionSchema>;
@@ -105,6 +109,9 @@ export const setCliProviderRequestSchema = z.object({
    *  single per-step provider (legacy path); named roles (e.g. 'reviewer',
    *  'corrector') are stored per (user, step, role) for multi-CLI steps. */
   role: z.string().max(32).optional(),
+  /** Which round of the step to act on (see stepActionRequestSchema). Omitted →
+   *  latest round. */
+  round: z.number().int().nonnegative().optional(),
 });
 
 export type SetCliProviderRequest = z.infer<typeof setCliProviderRequestSchema>;

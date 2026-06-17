@@ -212,10 +212,22 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
   });
   if (!task) throw new HttpError(404, 'Task not found');
 
+  // Act on the round the caller named. A fix-loop step recurs once per round
+  // (round 0 = original pass), each rendered as its own row with its own
+  // buttons, so the UI says which row's button was clicked. Fall back to the
+  // latest round when unspecified. Without this, the query grabbed an arbitrary
+  // (round-0) row, so Retry/Stop on a looped step reset the wrong round.
   const stepRows = await db
     .select()
     .from(schema.taskSteps)
-    .where(and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.stepId, stepId)))
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, id),
+        eq(schema.taskSteps.stepId, stepId),
+        body.round !== undefined ? eq(schema.taskSteps.round, body.round) : undefined,
+      ),
+    )
+    .orderBy(desc(schema.taskSteps.round))
     .limit(1);
   const step = stepRows[0];
   if (!step) throw new HttpError(404, 'Step not found');
@@ -609,9 +621,16 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     throw new HttpError(409, `Cannot change provider for ${task.status} task`);
   }
 
+  // Act on the caller's round, latest as fallback (see the action endpoint):
+  // a looped step recurs once per round; don't grab an arbitrary (round-0) row.
   const step = await db.query.taskSteps.findFirst({
-    where: and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.stepId, stepId)),
+    where: and(
+      eq(schema.taskSteps.taskId, id),
+      eq(schema.taskSteps.stepId, stepId),
+      body.round !== undefined ? eq(schema.taskSteps.round, body.round) : undefined,
+    ),
     columns: { id: true, status: true, iterationCount: true },
+    orderBy: desc(schema.taskSteps.round),
   });
   if (!step) throw new HttpError(404, 'Step not found');
   if (step.status === 'running' || step.status === 'waiting_cli') {
