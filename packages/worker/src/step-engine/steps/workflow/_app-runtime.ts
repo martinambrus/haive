@@ -62,6 +62,12 @@ interface RuntimeSpec {
   workspace: string | null;
 }
 
+// ESC-built (not a literal control char) so it doesn't trip no-control-regex.
+const ANSI_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
+function stripAnsi(s: string): string {
+  return s.replace(ANSI_RE, '');
+}
+
 function ddevConfigPath(workspace: string): string {
   return path.join(workspace, '.ddev', 'config.yaml');
 }
@@ -128,8 +134,31 @@ export async function ensureAppServing(ctx: AppRuntimeCtx): Promise<ServingRunti
   const spec = await classifyRuntime(ctx);
 
   if (spec.mode === 'ddev' && spec.repoSubpath) {
-    await ctx.emitProgress?.('Ensuring the DDEV environment is up…');
-    const handle = await ensureDdevStarted(ctx.taskId, spec.repoSubpath);
+    // A cold DDEV boot can take a minute or two (image build + container start).
+    // Stream the latest `ddev start` line plus an elapsed counter as progress so
+    // the step never looks frozen — the counter ticks even during DDEV's silent
+    // "waiting for containers" dots phase, which emits no lines.
+    const startedAt = Date.now();
+    let lastLine = 'starting containers…';
+    const heartbeat = ctx.emitProgress
+      ? setInterval(() => {
+          const secs = Math.round((Date.now() - startedAt) / 1000);
+          void ctx.emitProgress?.(
+            `Ensuring the DDEV environment is up… ${secs}s — ${lastLine}`.slice(0, 200),
+          );
+        }, 2500)
+      : null;
+    let handle: DdevRunnerHandle;
+    try {
+      handle = await ensureDdevStarted(ctx.taskId, spec.repoSubpath, {
+        onProgress: (line) => {
+          const clean = stripAnsi(line).trim();
+          if (clean) lastLine = clean.slice(0, 140);
+        },
+      });
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
+    }
     const url = (await ddevPrimaryUrl(handle)) ?? spec.knownUrl ?? 'http://localhost';
     return { mode: 'ddev', url, handle };
   }

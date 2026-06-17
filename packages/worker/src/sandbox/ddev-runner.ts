@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -178,10 +178,13 @@ export async function ddevExec(
       ['exec', '-u', 'ddev', handle.container, 'bash', '-lc', cmd],
       { timeout: opts.timeoutMs ?? 600_000, maxBuffer: 10 * 1024 * 1024 },
     );
-    return { exitCode: 0, output: `${stdout}${stderr}`.slice(0, 8000) };
+    // Keep the TAIL: ddev's result/error lands at the END, after verbose
+    // image-pull progress. Slicing the head drops the actual failure line (e.g.
+    // a `ddev start` container-readiness timeout), leaving only pull noise.
+    return { exitCode: 0, output: `${stdout}${stderr}`.slice(-8000) };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };
-    return { exitCode: e.code ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(0, 8000) };
+    return { exitCode: e.code ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}`.slice(-8000) };
   }
 }
 
@@ -264,6 +267,7 @@ export async function ddevMigrateDatabase(
 export async function ensureDdevStarted(
   taskId: string,
   repoSubpath: string,
+  opts: { onProgress?: (line: string) => void } = {},
 ): Promise<DdevRunnerHandle> {
   const existing = runnerHandleForTask(taskId, repoSubpath);
   const describe = await ddevExec(existing, 'describe -j', { timeoutMs: 15_000 });
@@ -271,7 +275,14 @@ export async function ensureDdevStarted(
     return existing; // already running — don't re-boot (preserves an imported DB)
   }
   const handle = await startDdevRunner({ taskId, repoSubpath });
-  const start = await ddevExec(handle, 'start', { timeoutMs: 900_000 });
+  let start = await ddevStartStreaming(handle, opts.onProgress);
+  if (start.exitCode !== 0) {
+    // A cold first boot builds the project's custom web image, so container
+    // readiness can land right at DDEV's default 120s timeout and fail
+    // transiently. The images are built now, so one retry usually clears it.
+    log.warn({ taskId, output: start.output.slice(-800) }, 'ddev start failed; retrying once');
+    start = await ddevStartStreaming(handle, opts.onProgress);
+  }
   if (start.exitCode !== 0) {
     throw new Error(`ddev start failed: ${start.output.slice(-1500)}`);
   }
@@ -297,6 +308,52 @@ async function restoreLatestSnapshot(handle: DdevRunnerHandle, taskId: string): 
     }
   }
   log.info({ taskId }, 'no DDEV DB snapshot to restore (first boot or no imported DB)');
+}
+
+/** `ddev start` with live line streaming for progress UI. The buffered ddevExec
+ *  returns nothing until the ~2-minute cold boot finishes; this spawns the same
+ *  command and calls onLine per output line so callers can surface the current
+ *  stage. Returns the identical { exitCode, output } shape (output = tail). */
+function ddevStartStreaming(
+  handle: DdevRunnerHandle,
+  onLine?: (line: string) => void,
+): Promise<{ exitCode: number; output: string }> {
+  const cmd = `cd ${handle.projectDir} && ddev start`;
+  return new Promise((resolve) => {
+    const child = spawn('docker', ['exec', '-u', 'ddev', handle.container, 'bash', '-lc', cmd]);
+    let buf = '';
+    let lineBuf = '';
+    const onData = (chunk: Buffer): void => {
+      const s = chunk.toString('utf8');
+      buf += s;
+      if (buf.length > 200_000) buf = buf.slice(-200_000);
+      lineBuf += s;
+      let nl: number;
+      while ((nl = lineBuf.indexOf('\n')) >= 0) {
+        const line = lineBuf.slice(0, nl);
+        lineBuf = lineBuf.slice(nl + 1);
+        if (onLine && line.trim()) onLine(line);
+      }
+    };
+    child.stdout.on('data', onData);
+    child.stderr.on('data', onData);
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already exited */
+      }
+    }, 900_000);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (onLine && lineBuf.trim()) onLine(lineBuf);
+      resolve({ exitCode: code ?? 1, output: buf.slice(-8000) });
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve({ exitCode: 1, output: buf.slice(-8000) });
+    });
+  });
 }
 
 /** Run an arbitrary command inside the runner as the non-root `ddev` user (e.g.
