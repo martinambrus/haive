@@ -31,6 +31,24 @@ describe('scanRepoForDeps', () => {
     expect(result.suggestedLsp).toEqual([]);
   });
 
+  it('defaults webserver to nginx-fpm when no .htaccess is present', async () => {
+    const result = await scanRepoForDeps(tmpRoot);
+    expect(result.webserver).toBe('nginx-fpm');
+  });
+
+  it('detects apache-fpm from a .htaccess at the repo root', async () => {
+    await writeFile(path.join(tmpRoot, '.htaccess'), 'RewriteEngine On\n');
+    const result = await scanRepoForDeps(tmpRoot);
+    expect(result.webserver).toBe('apache-fpm');
+  });
+
+  it('detects apache-fpm from a .htaccess in a web/ docroot', async () => {
+    await mkdir(path.join(tmpRoot, 'web'), { recursive: true });
+    await writeFile(path.join(tmpRoot, 'web', '.htaccess'), 'RewriteEngine On\n');
+    const result = await scanRepoForDeps(tmpRoot);
+    expect(result.webserver).toBe('apache-fpm');
+  });
+
   it('detects node runtime from package.json engines', async () => {
     await writeFile(
       path.join(tmpRoot, 'package.json'),

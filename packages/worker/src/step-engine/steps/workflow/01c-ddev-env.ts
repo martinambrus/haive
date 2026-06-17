@@ -103,10 +103,24 @@ async function loadRepoName(ctx: StepContext): Promise<string | null> {
   return repo?.name ?? null;
 }
 
+/** DDEV `webserver_type` for a project that has no config yet. A `.htaccess`
+ *  (repo root or a common docroot) means the app relies on Apache rewrite
+ *  handling — DDEV's apache-fpm honors .htaccess, nginx-fpm ignores it — so
+ *  default the generated config to apache-fpm. null otherwise → renderDdevConfig
+ *  keeps DDEV's nginx-fpm default. Always overridable in the config-review form. */
+const APACHE_DOCROOT_CANDIDATES = ['', 'web', 'docroot', 'public', 'html'];
+async function detectWebserverType(workspace: string): Promise<string | null> {
+  for (const sub of APACHE_DOCROOT_CANDIDATES) {
+    if (await pathExists(path.join(workspace, sub, '.htaccess'))) return 'apache-fpm';
+  }
+  return null;
+}
+
 /** Render a `.ddev/config.yaml` from the declared deps (php/db) + repo name. */
 async function buildProposedConfig(
   ctx: StepContext,
   deps: Record<string, unknown>,
+  webserverType: string | null,
 ): Promise<string> {
   const versions = (deps.versions as Record<string, string | null> | undefined) ?? {};
   const database = (deps.database as { kind?: string; version?: string | null } | undefined) ?? {};
@@ -116,6 +130,7 @@ async function buildProposedConfig(
     phpVersion: versions.php ?? null,
     dbType: database.kind ?? null,
     dbVersion: database.version ?? null,
+    webserverType,
   });
 }
 
@@ -152,7 +167,14 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
       const deps = await loadDeclaredDeps(ctx);
       if (deps?.containerTool === 'ddev') {
         needsConfig = true;
-        proposedConfig = await buildProposedConfig(ctx, deps);
+        // The explicit webserver choice from declare-deps wins; fall back to an
+        // in-worktree .htaccess scan only for templates declared before that
+        // selector existed (no deps.webserver).
+        const declaredWebserver =
+          deps.webserver === 'apache-fpm' || deps.webserver === 'nginx-fpm' ? deps.webserver : null;
+        const webserverType =
+          declaredWebserver ?? (ws ? await detectWebserverType(ws.workspace) : null);
+        proposedConfig = await buildProposedConfig(ctx, deps, webserverType);
       }
     }
 

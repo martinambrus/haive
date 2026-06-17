@@ -152,6 +152,7 @@ export async function loadOnboardingDetection(
 }
 
 type ContainerTool = 'ddev' | 'docker-compose' | 'docker' | 'none';
+type WebserverType = 'apache-fpm' | 'nginx-fpm';
 type DatabaseKind = 'postgres' | 'mysql' | 'mariadb' | 'sqlite' | 'none';
 type LanguageKey = 'node' | 'php' | 'python' | 'ruby' | 'go' | 'rust' | 'java';
 type LspKey =
@@ -188,6 +189,9 @@ interface DetectedRuntime {
 export interface DeclareDepsDetect {
   runtimes: DetectedRuntime[];
   containerTool: ContainerTool;
+  /** DDEV webserver_type default for the config 01c generates. apache-fpm when a
+   *  .htaccess is found (honors Apache rewrite/SAPI behavior), else nginx-fpm. */
+  webserver: WebserverType;
   ddevProjectName: string | null;
   database: { kind: DatabaseKind; version: string | null };
   suggestedLsp: LspKey[];
@@ -210,6 +214,11 @@ const CONTAINER_OPTIONS: { value: ContainerTool; label: string }[] = [
   { value: 'docker-compose', label: 'docker compose' },
   { value: 'docker', label: 'plain docker' },
   { value: 'none', label: 'none' },
+];
+
+const WEBSERVER_OPTIONS: { value: WebserverType; label: string }[] = [
+  { value: 'nginx-fpm', label: 'nginx (nginx-fpm) — DDEV default' },
+  { value: 'apache-fpm', label: 'Apache (apache-fpm) — honors .htaccess, mod_php behavior' },
 ];
 
 const DB_OPTIONS: { value: DatabaseKind; label: string }[] = [
@@ -306,6 +315,15 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       }
     }
 
+    // A previously declared webserver wins over the .htaccess-derived default, so
+    // re-running this step never silently reverts an Apache choice to nginx for a
+    // markerless legacy app the scan can't detect (no .htaccess to key on).
+    const existingTpl = await getTaskEnvTemplate(ctx.db, ctx.taskId);
+    const savedWebserver = (existingTpl?.declaredDeps as Record<string, unknown> | null)?.webserver;
+    if (savedWebserver === 'apache-fpm' || savedWebserver === 'nginx-fpm') {
+      result.webserver = savedWebserver;
+    }
+
     // Version labels for the LSP badges + the browser-testing (chrome-devtools-mcp)
     // line, mirroring onboarding step 04. Newest = head of the sorted-desc cache
     // list (falls back to the dist-tag latest).
@@ -374,6 +392,20 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         label: 'Container tool',
         options: CONTAINER_OPTIONS,
         default: defaultContainer,
+      },
+      // Only DDEV consumes webserver_type, so this is hidden unless DDEV is the
+      // selected container tool (evaluated live against the select above). apache-fpm
+      // matches a legacy Apache/mod_php app and honors .htaccess; nginx-fpm is DDEV's
+      // default. Prefilled to apache-fpm when a .htaccess was detected in the repo.
+      {
+        type: 'select',
+        id: 'webserver',
+        label: 'DDEV web server',
+        description:
+          'apache-fpm matches an Apache/mod_php project (honors .htaccess and the $_SERVER vars Apache populates); nginx-fpm is DDEV’s default. Only used when the container tool is DDEV.',
+        options: WEBSERVER_OPTIONS,
+        default: detected.webserver,
+        visibleWhen: { field: 'containerTool', equals: 'ddev' },
       },
       {
         type: 'select',
@@ -492,6 +524,10 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       packageManagers,
       preinstallDeps: values.preinstallDeps ?? true,
       containerTool: values.containerTool,
+      // DDEV is the only consumer of webserver_type (01c-ddev-env reads this when it
+      // generates .ddev/config.yaml). Store it only for DDEV so non-DDEV deps stay
+      // clean; the select is hidden for other container tools, so default defensively.
+      ...(values.containerTool === 'ddev' ? { webserver: values.webserver ?? 'nginx-fpm' } : {}),
       database: {
         kind: values.databaseKind,
         version: values.databaseVersion || null,
@@ -580,6 +616,7 @@ interface DeclareDepsFormValues extends FormValues {
   pythonVersion?: string;
   javaVersion?: string;
   containerTool: ContainerTool;
+  webserver?: WebserverType;
   databaseKind: DatabaseKind;
   databaseVersion: string;
   lspServers: LspKey[];
@@ -612,6 +649,18 @@ function parseExtraPackages(raw: string): string[] {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !line.startsWith('#'));
+}
+
+// A `.htaccess` (repo root or a common docroot) means the app relies on Apache
+// rewrite/SAPI behavior — DDEV's apache-fpm honors it, nginx-fpm does not — so the
+// generated DDEV config should default to apache-fpm. Markerless legacy apps (no
+// .htaccess) fall back to nginx-fpm and the user flips the selector if needed.
+const APACHE_DOCROOT_CANDIDATES = ['', 'web', 'docroot', 'public', 'html'];
+async function detectWebserver(repoPath: string): Promise<WebserverType> {
+  for (const sub of APACHE_DOCROOT_CANDIDATES) {
+    if (await fileExists(path.join(repoPath, sub, '.htaccess'))) return 'apache-fpm';
+  }
+  return 'nginx-fpm';
 }
 
 export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDetect> {
@@ -765,9 +814,12 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
     }
   }
 
+  const webserver = await detectWebserver(repoPath);
+
   return {
     runtimes,
     containerTool,
+    webserver,
     ddevProjectName: ddev.projectName,
     database,
     suggestedLsp: Array.from(suggestedLsp),
