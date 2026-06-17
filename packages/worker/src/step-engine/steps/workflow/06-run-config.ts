@@ -28,6 +28,8 @@ interface RunConfigDetect {
   /** Current task-level adversarial-QA column, used as the form default so an API-set
    *  value survives into the picker. */
   taskAdversarialQaLevel: string | null;
+  /** Current task-level max-fix-rounds (the fix-loop cap), used as the form default. */
+  taskMaxFixRounds: number;
 }
 
 /** Front-loaded run answers for the hands-free stretch to Gate 2 (browser/MCP mode,
@@ -47,6 +49,8 @@ interface RunConfig {
   browserCheckNetworkErrors: boolean;
   testAction: string;
   testRunTests: boolean;
+  /** Fix-loop cap: automatic fix rounds before the loop escalates to the user. */
+  maxFixRounds: number;
 }
 
 interface PrePlanningOutput {
@@ -97,7 +101,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     }
     const taskRow = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { adversarialQaLevel: true },
+      columns: { adversarialQaLevel: true, maxFixRounds: true },
     });
 
     return {
@@ -105,6 +109,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       ddevMode,
       appRunnerMode,
       taskAdversarialQaLevel: taskRow?.adversarialQaLevel ?? null,
+      taskMaxFixRounds: taskRow?.maxFixRounds ?? 5,
     };
   },
 
@@ -279,6 +284,19 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
           label: 'Run the related tests after test changes',
           default: true,
         },
+        {
+          type: 'select',
+          id: 'maxFixRounds',
+          label: 'Max automatic fix rounds',
+          description:
+            'When a downstream step (validate, verify, browser, review, QA, DDEV) finds a blocking defect, the implementation re-runs in fix mode. After this many rounds without resolving, the task pauses for you to decide.',
+          options: [
+            { value: '3', label: '3 rounds' },
+            { value: '5', label: '5 rounds' },
+            { value: '10', label: '10 rounds' },
+          ],
+          default: String(detected.taskMaxFixRounds),
+        },
       ],
       submitLabel: 'Save run configuration',
     };
@@ -289,6 +307,10 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     const str = (v: unknown, fallback: string): string => (typeof v === 'string' ? v : fallback);
     const bool = (v: unknown, fallback: boolean): boolean =>
       typeof v === 'boolean' ? v : fallback;
+    const num = (v: unknown, fallback: number): number => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 1 && n <= 50 ? Math.floor(n) : fallback;
+    };
     const runConfig: RunConfig = {
       adversarialQaLevel: str(values.adversarialQaLevel, 'none'),
       simplifyCode: bool(values.simplifyCode, true),
@@ -303,6 +325,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       browserCheckNetworkErrors: bool(values.browserCheckNetworkErrors, true),
       testAction: str(values.testAction, 'manage'),
       testRunTests: bool(values.testRunTests, true),
+      maxFixRounds: num(values.maxFixRounds, 5),
     };
 
     // Map run-config answers to the downstream steps' exact field ids. The runner
@@ -341,6 +364,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
         simplifyCode: runConfig.simplifyCode,
         adversarialQaLevel:
           runConfig.adversarialQaLevel !== 'none' ? runConfig.adversarialQaLevel : null,
+        maxFixRounds: runConfig.maxFixRounds,
         preAnswers,
         updatedAt: new Date(),
       })
