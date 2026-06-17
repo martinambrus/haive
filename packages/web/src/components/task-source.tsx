@@ -302,7 +302,7 @@ export function TaskSource({ taskId }: TaskSourceProps) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `task-${taskId}-source.tar.gz`;
+      a.download = `task-${taskId}-source.zip`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -354,9 +354,9 @@ export function TaskSource({ taskId }: TaskSourceProps) {
               onClick={() => void downloadArchive()}
               disabled={downloading}
               className="text-xs text-indigo-400 underline disabled:cursor-not-allowed disabled:text-neutral-500 disabled:no-underline"
-              title="Download workspace as tar.gz (includes hidden files)"
+              title="Download workspace as zip (includes hidden files)"
             >
-              {downloading ? 'Packing…' : 'Download .tar.gz'}
+              {downloading ? 'Zipping…' : 'Download .zip'}
             </button>
           </div>
         </div>
