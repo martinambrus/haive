@@ -58,6 +58,7 @@ export const CONFIG_KEYS = {
   GLOBAL_KB_OLLAMA_URL: 'config:globalKb:ollamaUrl',
   GLOBAL_KB_EMBED_MODEL: 'config:globalKb:embedModel',
   GLOBAL_KB_EMBED_DIMS: 'config:globalKb:embedDims',
+  GLOBAL_KB_ARCHIVE_RETENTION_DAYS: 'config:globalKb:archiveRetentionDays',
 } as const;
 
 const DEFAULT_CONFIG: Record<string, string> = {

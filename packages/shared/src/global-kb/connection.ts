@@ -20,6 +20,10 @@ export const GLOBAL_KB_DB_NAME = 'haive_kb_global';
 const DEFAULT_EMBED_MODEL = 'qwen3-embedding:4b';
 const DEFAULT_EMBED_DIMENSIONS = 2560;
 
+/** Default window before a superseded (archived) entry is hard-deleted by the
+ *  retention sweep. 0 = keep archived entries forever. */
+const DEFAULT_ARCHIVE_RETENTION_DAYS = 30;
+
 /** Instance-level global KB settings resolved from ConfigService + SecretsService. */
 export interface GlobalKbSettings {
   enabled: boolean;
@@ -30,6 +34,9 @@ export interface GlobalKbSettings {
   ollamaUrl: string | null;
   embedModel: string | null;
   embeddingDimensions: number;
+  /** Days a superseded (archived) entry is kept before the retention sweep
+   *  hard-deletes it. 0 = never purge. */
+  archiveRetentionDays: number;
 }
 
 export interface GlobalKbConnection {
@@ -47,13 +54,25 @@ export interface GlobalKbConnection {
  *  SecretsService (encrypted system_secrets). Both singletons must be
  *  initialized by the api/worker boot before this is called. */
 export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
-  const [enabled, mode, namespace, ollamaUrl, embedModel, embeddingDimensions] = await Promise.all([
+  const [
+    enabled,
+    mode,
+    namespace,
+    ollamaUrl,
+    embedModel,
+    embeddingDimensions,
+    archiveRetentionDays,
+  ] = await Promise.all([
     configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_ENABLED, false),
     configService.get(CONFIG_KEYS.GLOBAL_KB_MODE),
     configService.get(CONFIG_KEYS.GLOBAL_KB_NAMESPACE),
     configService.get(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL),
     configService.get(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL),
     configService.getNumber(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, DEFAULT_EMBED_DIMENSIONS),
+    configService.getNumber(
+      CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
+      DEFAULT_ARCHIVE_RETENTION_DAYS,
+    ),
   ]);
   const connectionString = await secretsService.get(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
   return {
@@ -64,6 +83,7 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
     ollamaUrl: ollamaUrl || null,
     embedModel: embedModel || DEFAULT_EMBED_MODEL,
     embeddingDimensions,
+    archiveRetentionDays,
   };
 }
 

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { Worker, type Job } from 'bullmq';
-import { eq } from 'drizzle-orm';
+import { Queue, Worker, type Job } from 'bullmq';
+import { and, eq, lt } from 'drizzle-orm';
 import {
   GLOBAL_KB_JOB_NAMES,
   QUEUE_NAMES,
@@ -8,7 +8,12 @@ import {
   type GlobalKbSyncJobPayload,
 } from '@haive/shared';
 import { hashEmbed, ollamaEmbed, vectorLiteral } from '@haive/shared/rag';
-import { globalKbEntries, withGlobalKb, type GlobalKbContext } from '@haive/shared/global-kb';
+import {
+  globalKbEntries,
+  resolveGlobalKbSettings,
+  withGlobalKb,
+  type GlobalKbContext,
+} from '@haive/shared/global-kb';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
@@ -150,6 +155,53 @@ export async function syncGlobalKbEntry(payload: GlobalKbSyncJobPayload): Promis
   });
 }
 
+const PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
+const PURGE_JOB_ID = 'global-kb-purge-archived-repeatable';
+
+/** Hard-delete archived (superseded) entries whose superseded_at is older than the
+ *  configured retention window, reclaiming the rows the activation-supersession path
+ *  leaves behind. Their vectors were already dropped on supersession; this clears any
+ *  stragglers too. retentionDays <= 0 keeps archived entries forever (no purge).
+ *  Entries archived without a superseded_at timestamp are never purged. */
+export async function purgeArchivedGlobalKbEntries(): Promise<void> {
+  const settings = await resolveGlobalKbSettings();
+  if (!settings.enabled) return;
+  const days = settings.archiveRetentionDays;
+  if (!Number.isFinite(days) || days <= 0) return;
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  await withGlobalKb(getDb(), async (ctx) => {
+    const rows = await ctx.db
+      .select({ id: globalKbEntries.id, namespace: globalKbEntries.namespace })
+      .from(globalKbEntries)
+      .where(and(eq(globalKbEntries.status, 'archived'), lt(globalKbEntries.supersededAt, cutoff)));
+    for (const r of rows) {
+      await deleteChunks(ctx, r.namespace, r.id);
+      await ctx.db.delete(globalKbEntries).where(eq(globalKbEntries.id, r.id));
+    }
+    if (rows.length > 0) {
+      log.info(
+        { purged: rows.length, retentionDays: days },
+        'purged expired archived global KB entries',
+      );
+    }
+  });
+}
+
+/** Register the daily archived-entry retention sweep (idempotent — fixed jobId). */
+export async function scheduleGlobalKbPurge(): Promise<void> {
+  const queue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
+  await queue.add(
+    GLOBAL_KB_JOB_NAMES.PURGE_ARCHIVED,
+    {},
+    {
+      repeat: { every: PURGE_INTERVAL_MS },
+      jobId: PURGE_JOB_ID,
+      removeOnComplete: true,
+      removeOnFail: 5,
+    },
+  );
+}
+
 export function startGlobalKbSyncWorker(): Worker {
   const worker = new Worker<GlobalKbSyncJobPayload>(
     QUEUE_NAMES.GLOBAL_KB_SYNC,
@@ -157,6 +209,9 @@ export function startGlobalKbSyncWorker(): Worker {
       switch (job.name) {
         case GLOBAL_KB_JOB_NAMES.SYNC_ENTRY:
           await syncGlobalKbEntry(job.data);
+          return;
+        case GLOBAL_KB_JOB_NAMES.PURGE_ARCHIVED:
+          await purgeArchivedGlobalKbEntries();
           return;
         default:
           throw new Error(`Unknown global-kb job: ${job.name}`);

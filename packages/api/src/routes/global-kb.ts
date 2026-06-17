@@ -118,6 +118,7 @@ function configResponse(s: Awaited<ReturnType<typeof resolveGlobalKbSettings>>) 
     ollamaUrl: s.ollamaUrl ?? '',
     embedModel: s.embedModel ?? '',
     embedDimensions: s.embeddingDimensions,
+    archiveRetentionDays: s.archiveRetentionDays,
     connectionStringSet: !!s.connectionString,
   };
 }
@@ -130,6 +131,7 @@ const configSchema = z
     ollamaUrl: z.string().optional(),
     embedModel: z.string().optional(),
     embedDimensions: z.number().int().positive().max(8192).optional(),
+    archiveRetentionDays: z.number().int().min(0).max(3650).optional(),
     connectionString: z.string().optional(),
   })
   .strict();
@@ -153,6 +155,11 @@ globalKbRoutes.put('/config', async (c) => {
     await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel);
   if (d.embedDimensions !== undefined)
     await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, String(d.embedDimensions));
+  if (d.archiveRetentionDays !== undefined)
+    await configService.set(
+      CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
+      String(d.archiveRetentionDays),
+    );
   if (d.connectionString !== undefined && d.connectionString.trim().length > 0) {
     await secretsService.set(
       SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,

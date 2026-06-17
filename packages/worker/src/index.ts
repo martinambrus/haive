@@ -3,7 +3,7 @@ import { bootstrap } from './bootstrap.js';
 import { getDb } from './db.js';
 import { getRedis } from './redis.js';
 import { scheduleBundleGitSyncTick, startBundleWorker } from './queues/bundle-queue.js';
-import { startGlobalKbSyncWorker } from './queues/global-kb-sync-queue.js';
+import { scheduleGlobalKbPurge, startGlobalKbSyncWorker } from './queues/global-kb-sync-queue.js';
 import {
   closeCliExecQueue,
   scheduleCliVersionRefresh,
@@ -42,6 +42,9 @@ async function main(): Promise<void> {
   });
   await scheduleBundleGitSyncTick().catch((err) => {
     logger.warn({ err }, 'failed to schedule bundle git-sync tick');
+  });
+  await scheduleGlobalKbPurge().catch((err) => {
+    logger.warn({ err }, 'failed to schedule global KB archive purge');
   });
   // Pre-pull declared local Ollama models so a fresh stack is usable without a
   // manual pull. Non-blocking: boot completes while large pulls run in the

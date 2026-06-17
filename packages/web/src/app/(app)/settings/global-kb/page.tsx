@@ -52,6 +52,7 @@ interface GlobalKbConfig {
   ollamaUrl: string;
   embedModel: string;
   embedDimensions: number;
+  archiveRetentionDays: number;
   connectionStringSet: boolean;
 }
 
@@ -139,6 +140,7 @@ export default function GlobalKbPage() {
     ollamaUrl: '',
     embedModel: DEFAULT_EMBED_MODEL,
     embedDimensions: 2560,
+    archiveRetentionDays: 30,
     connectionString: '',
   });
   const [cfgSet, setCfgSet] = useState(false);
@@ -170,6 +172,7 @@ export default function GlobalKbPage() {
         ollamaUrl: cc.ollamaUrl,
         embedModel: cc.embedModel,
         embedDimensions: cc.embedDimensions,
+        archiveRetentionDays: cc.archiveRetentionDays,
         connectionString: '',
       }));
       setCfgSet(cc.connectionStringSet);
@@ -234,6 +237,7 @@ export default function GlobalKbPage() {
         ollamaUrl: effectiveOllamaUrl,
         embedModel: cfg.embedModel,
         embedDimensions: cfg.embedDimensions,
+        archiveRetentionDays: cfg.archiveRetentionDays,
       };
       if (cfg.connectionString.trim()) payload.connectionString = cfg.connectionString.trim();
       await api.put('/global-kb/config', payload);
@@ -575,6 +579,21 @@ export default function GlobalKbPage() {
                   value={cfg.embedDimensions}
                   onChange={(e) =>
                     setCfg({ ...cfg, embedDimensions: Number(e.target.value) || 2560 })
+                  }
+                  className="w-32"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="cfg-retention">Archive retention (days)</Label>
+                <Input
+                  id="cfg-retention"
+                  type="number"
+                  value={cfg.archiveRetentionDays}
+                  onChange={(e) =>
+                    setCfg({
+                      ...cfg,
+                      archiveRetentionDays: Math.max(0, Number(e.target.value) || 0),
+                    })
                   }
                   className="w-32"
                 />
