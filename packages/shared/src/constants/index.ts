@@ -23,6 +23,7 @@ export const QUEUE_NAMES = {
   REPO: 'haive-repo',
   BUNDLE: 'haive-bundle',
   GLOBAL_KB_SYNC: 'haive-global-kb-sync',
+  RUNTIME_ENSURE: 'haive-runtime-ensure',
 } as const;
 
 export const REPO_JOB_NAMES = {
@@ -58,6 +59,28 @@ export interface GlobalKbSyncJobPayload {
   entryId: string;
   namespace: string;
   reason: 'upsert' | 'delete';
+}
+
+export const RUNTIME_ENSURE_JOB_NAMES = {
+  ENSURE: 'ensure-runtime',
+} as const;
+
+/** Payload for `RUNTIME_ENSURE_JOB_NAMES.ENSURE`. The api enqueues this (e.g. when
+ *  the live Browser/VNC panel opens) and the worker ensures the task's app is
+ *  serving — boots DDEV / relaunches a restart-killed app-runner dev server — then
+ *  starts the headed-browser desktop the VNC bridge attaches to. The api can't do
+ *  this itself: spawning task containers is worker-only. */
+export interface RuntimeEnsurePayload {
+  taskId: string;
+  userId: string;
+}
+
+/** Result the worker returns for a runtime-ensure job. `mode='none'` means no
+ *  runtime is recorded for the task (nothing to bring up). */
+export interface RuntimeEnsureResult {
+  ok: boolean;
+  url: string | null;
+  mode: 'ddev' | 'app-runner' | 'host' | 'none';
 }
 
 export const TASK_JOB_NAMES = {

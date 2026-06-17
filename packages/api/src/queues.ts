@@ -10,6 +10,8 @@ let cliExecQueue: Queue | null = null;
 let cliExecQueueEvents: QueueEvents | null = null;
 let bundleQueue: Queue | null = null;
 let globalKbSyncQueue: Queue | null = null;
+let runtimeEnsureQueue: Queue | null = null;
+let runtimeEnsureQueueEvents: QueueEvents | null = null;
 
 export function getRepoQueue(): Queue {
   if (!repoQueue) {
@@ -53,6 +55,25 @@ export function getGlobalKbSyncQueue(): Queue {
   return globalKbSyncQueue;
 }
 
+/** Queue + QueueEvents for the VNC "ensure runtime" handshake: the api enqueues an
+ *  ensure job and awaits its result (Job.waitUntilFinished needs the QueueEvents)
+ *  before bridging the VNC desktop. */
+export function getRuntimeEnsureQueue(): Queue {
+  if (!runtimeEnsureQueue) {
+    runtimeEnsureQueue = new Queue(QUEUE_NAMES.RUNTIME_ENSURE, { connection: getBullRedis() });
+  }
+  return runtimeEnsureQueue;
+}
+
+export function getRuntimeEnsureQueueEvents(): QueueEvents {
+  if (!runtimeEnsureQueueEvents) {
+    runtimeEnsureQueueEvents = new QueueEvents(QUEUE_NAMES.RUNTIME_ENSURE, {
+      connection: getBullRedis(),
+    });
+  }
+  return runtimeEnsureQueueEvents;
+}
+
 export async function closeQueues(): Promise<void> {
   await Promise.allSettled([
     repoQueue?.close(),
@@ -61,6 +82,8 @@ export async function closeQueues(): Promise<void> {
     cliExecQueueEvents?.close(),
     bundleQueue?.close(),
     globalKbSyncQueue?.close(),
+    runtimeEnsureQueue?.close(),
+    runtimeEnsureQueueEvents?.close(),
   ]);
   repoQueue = null;
   taskQueue = null;
@@ -68,4 +91,6 @@ export async function closeQueues(): Promise<void> {
   cliExecQueueEvents = null;
   bundleQueue = null;
   globalKbSyncQueue = null;
+  runtimeEnsureQueue = null;
+  runtimeEnsureQueueEvents = null;
 }

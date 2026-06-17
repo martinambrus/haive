@@ -4,8 +4,17 @@ import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { DDEV_RUNNER_VNC_PORT, ddevRunnerName, appRunnerName, logger } from '@haive/shared';
+import {
+  DDEV_RUNNER_VNC_PORT,
+  ddevRunnerName,
+  appRunnerName,
+  logger,
+  RUNTIME_ENSURE_JOB_NAMES,
+  type RuntimeEnsurePayload,
+  type RuntimeEnsureResult,
+} from '@haive/shared';
 import { getDb } from '../db.js';
+import { getRuntimeEnsureQueue, getRuntimeEnsureQueueEvents } from '../queues.js';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
 
@@ -20,6 +29,10 @@ import { ACCESS_COOKIE } from '../auth/cookies.js';
 
 const log = logger.child({ module: 'browser-vnc-ws' });
 const WS_PATH_PREFIX = '/browser-vnc/';
+/** Bounded wait for the worker to bring the runtime + browser desktop up before
+ *  bridging. Long enough for a warm ensure or an app-runner relaunch; a slower
+ *  DDEV cold boot overruns it and the panel's Retry reconnects once it finishes. */
+const VNC_ENSURE_TIMEOUT_MS = 30_000;
 
 export interface BrowserVncWsOptions {
   path?: string;
@@ -50,6 +63,16 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
         const owned = await taskBelongsToUser(taskId, auth.userId);
         if (!owned) {
           rejectUpgrade(socket, 404, 'Not Found');
+          return;
+        }
+        // Bring the task's runtime + browser desktop up before bridging. A
+        // worker-boot reap / restart can leave them down, and the api can't start
+        // them itself (spawning task containers is worker-only). Enqueue a worker
+        // ensure job and await it; on timeout/failure reject so the panel's Retry
+        // can reconnect once a slow DDEV cold start finishes in the background.
+        const ready = await ensureRuntimeUp(taskId, auth.userId);
+        if (!ready) {
+          rejectUpgrade(socket, 503, 'Runtime starting');
           return;
         }
         const desktopHost = await resolveDesktopContainer(taskId, vncPort);
@@ -140,6 +163,29 @@ async function resolveDesktopContainer(taskId: string, port: number): Promise<st
   const ddev = ddevRunnerName(taskId);
   if (await probeTcp(ddev, port)) return ddev;
   return appRunnerName(taskId);
+}
+
+/** Ask the worker to ensure the task's app + browser desktop are up, awaiting the
+ *  result with a bounded timeout. Coalesced per task (jobId = ensure-<taskId>) so
+ *  repeated panel (re)connects share one ensure and never race two cold boots of
+ *  the same runner. Returns false on timeout/failure — the ensure job keeps
+ *  running, so a later retry connects once it completes. */
+async function ensureRuntimeUp(taskId: string, userId: string): Promise<boolean> {
+  try {
+    const job = await getRuntimeEnsureQueue().add(
+      RUNTIME_ENSURE_JOB_NAMES.ENSURE,
+      { taskId, userId } satisfies RuntimeEnsurePayload,
+      { jobId: `ensure-${taskId}`, removeOnComplete: true, removeOnFail: true },
+    );
+    const result = (await job.waitUntilFinished(
+      getRuntimeEnsureQueueEvents(),
+      VNC_ENSURE_TIMEOUT_MS,
+    )) as RuntimeEnsureResult;
+    return result?.ok === true;
+  } catch (err) {
+    log.warn({ taskId, err }, 'runtime ensure for VNC did not complete in time');
+    return false;
+  }
 }
 
 async function taskBelongsToUser(taskId: string, userId: string): Promise<boolean> {

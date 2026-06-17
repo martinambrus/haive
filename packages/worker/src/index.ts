@@ -4,6 +4,7 @@ import { getDb } from './db.js';
 import { getRedis } from './redis.js';
 import { scheduleBundleGitSyncTick, startBundleWorker } from './queues/bundle-queue.js';
 import { scheduleGlobalKbPurge, startGlobalKbSyncWorker } from './queues/global-kb-sync-queue.js';
+import { startRuntimeEnsureWorker } from './queues/runtime-ensure-queue.js';
 import {
   closeCliExecQueue,
   scheduleCliVersionRefresh,
@@ -32,6 +33,9 @@ async function main(): Promise<void> {
   const taskWorker = startTaskWorker();
   const cliExecWorker = await startCliExecWorker();
   const globalKbSyncWorker = startGlobalKbSyncWorker();
+  // Serves the api's VNC "ensure runtime" requests: brings the task's app +
+  // headed-browser desktop back up on demand (e.g. after a worker-boot reap).
+  const runtimeEnsureWorker = startRuntimeEnsureWorker();
   // Recover steps a prior worker orphaned mid-CLI (their sandboxes were reaped
   // above): fail or resume them so they never hang in waiting_cli after a restart.
   await reconcileOrphanedCliSteps(getDb()).catch((err) => {
@@ -79,6 +83,7 @@ async function main(): Promise<void> {
       taskWorker.close(true),
       cliExecWorker.close(true),
       globalKbSyncWorker.close(true),
+      runtimeEnsureWorker.close(true),
       closeTaskQueue(),
       closeCliExecQueue(),
     ]);
