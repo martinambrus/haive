@@ -1650,6 +1650,8 @@ function StepCard({
               renderAfterField={
                 hasConnectionFields || supportsPresets ? renderAfterFieldFn : undefined
               }
+              onSkip={step.canSkip ? () => onAction('skip') : undefined}
+              skipDisabled={actionBusy}
             />
           </div>
         )

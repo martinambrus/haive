@@ -28,6 +28,12 @@ interface FormRendererProps {
    *  contains a `bundle-composer` field — the composer talks to /api/bundles
    *  on behalf of this repo. */
   repositoryId?: string | null;
+  /** When set, renders a Skip button beside Submit for skippable steps. Wired
+   *  to the same skip action as the step's action-row Skip, so confirmation and
+   *  behaviour are identical — this is purely a more visible placement. */
+  onSkip?: () => void;
+  skipLabel?: string;
+  skipDisabled?: boolean;
 }
 
 /** Read-only render of a form's infoSections (the disclosures that show specs /
@@ -131,6 +137,9 @@ export function FormRenderer({
   onValuesChange,
   renderAfterField,
   repositoryId,
+  onSkip,
+  skipLabel,
+  skipDisabled = false,
 }: FormRendererProps) {
   const initial = useMemo(() => buildInitial(schema, initialValues), [schema, initialValues]);
   const [values, setValues] = useState<FormValues>(initial);
@@ -192,10 +201,21 @@ export function FormRenderer({
         )}
       </div>
       <FormError message={localError ?? errorMessage ?? null} />
-      <div>
+      <div className="flex items-center gap-3">
         <Button type="submit" disabled={disabled || submitting}>
           {submitting ? 'Submitting...' : (schema.submitLabel ?? 'Submit')}
         </Button>
+        {onSkip && (
+          <Button
+            type="button"
+            variant="primary"
+            disabled={submitting || skipDisabled}
+            onClick={onSkip}
+            title="Skip this optional step and continue to the next one."
+          >
+            {skipLabel ?? 'Skip step'}
+          </Button>
+        )}
       </div>
     </form>
   );
