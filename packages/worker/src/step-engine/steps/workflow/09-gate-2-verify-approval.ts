@@ -148,6 +148,20 @@ function fmtResult(label: string, entry?: { passed?: boolean; output?: string })
   return `${label}: ${status}${output ? `\n${output}` : ''}`;
 }
 
+/** The diagnosis handed to the implementer when the developer rejects at Gate 2: their
+ *  hands-on findings become the round-N fix request (see restartLoop / FIX_LOOP_REQUESTED). */
+function formatRejectDiagnosis(feedback: string): string {
+  const f = feedback.trim();
+  return [
+    'Developer verification at Gate 2 rejected the implementation after hands-on testing.',
+    '',
+    'Findings to fix:',
+    f.length > 0
+      ? f
+      : '(no specific findings provided — re-check the implementation against the spec and the reported errors)',
+  ].join('\n');
+}
+
 export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGateApply> = {
   metadata: {
     id: '09-gate-2-verify-approval',
@@ -157,6 +171,15 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     description:
       'Presents the output of the verify phase (tests, lint, typecheck) so the user can approve the implementation before it is committed.',
     requiresCli: false,
+  },
+
+  // Restart-loop: a developer reject at this gate (after hands-on browser/manual
+  // verification) restarts from implementation with their findings attached — UNCAPPED
+  // and human-driven, distinct from the automated fix loop on the verify/review/QA steps.
+  // Approve returns normally and the forward walk continues to the commit gate.
+  restartLoop: {
+    evaluate: (out) =>
+      out.decision === 'reject' ? { diagnosis: formatRejectDiagnosis(out.feedback) } : null,
   },
 
   async detect(ctx: StepContext): Promise<VerifyGateDetect> {
@@ -357,7 +380,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         ? 'All verification checks passed.'
         : 'One or more verification checks failed.',
       v
-        ? `Pre-test validation: ${v.verdict}${v.exhaustedBudget ? ' (fix budget exhausted)' : ''}`
+        ? `Implementation validation: ${v.verdict}${v.exhaustedBudget ? ' (fix budget exhausted)' : ''}`
         : '',
       browserLine,
       codeReviewLine,
@@ -398,7 +421,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         lines.push('', '## Validator report (excerpt)', '', v.report);
       }
       infoSections.push({
-        title: 'Pre-test validation',
+        title: 'Implementation validation',
         preview: v.verdict + (v.exhaustedBudget ? ' • budget exhausted' : ''),
         body: lines.join('\n'),
         defaultOpen: !validationOk,
@@ -511,9 +534,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const values = args.formValues as { decision?: string; feedback?: string };
     const decision: 'approve' | 'reject' = values.decision === 'reject' ? 'reject' : 'approve';
     ctx.logger.info({ decision }, 'verify gate decision recorded');
-    if (decision === 'reject') {
-      throw new Error(`verify gate rejected: ${values.feedback ?? 'no feedback supplied'}`);
-    }
+    // Reject does NOT fail the task: the restartLoop hook above turns a reject into an
+    // uncapped restart from implementation, handing the developer's findings to the
+    // implementer. Approve finalizes and the forward walk proceeds to the commit gate.
     return { decision, feedback: values.feedback ?? '' };
   },
 };

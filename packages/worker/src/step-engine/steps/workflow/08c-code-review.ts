@@ -17,12 +17,14 @@ import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 // peer-reviewer (correctness/maintainability/conventions) and a
 // security-code-reviewer (injection/access-control/secrets). Both defer to the
 // repo's onboarded agent definition when present, else follow the embedded
-// condensed persona. Findings surface at gate 2.
+// condensed persona.
 //
-// No in-step fix loop (legacy had a 5-round loop that restarted Phase 4): the
-// step engine can't cleanly combine parallel mining with a role-based fixer, and
-// Haive's gate-2 reject already IS the fix path — rejecting there routes the user
-// back to implementation. Mandatory for workflow tasks; formless.
+// There is no IN-STEP fixer (parallel mining can't cleanly pair with a role-based
+// fixer). Instead, blocking peer/security findings drive the cross-step fixLoop
+// below: they route back to implementation (round-bumped, capped by max_fix_rounds
+// with an escalation gate at the cap) and the whole post-implementation chain
+// re-runs. Non-blocking findings surface at gate 2; a developer reject at gate 2 is
+// the separate, uncapped human restart path. Mandatory for workflow tasks; formless.
 
 const REVIEW_TIMEOUT_MS = 30 * 60 * 1000;
 

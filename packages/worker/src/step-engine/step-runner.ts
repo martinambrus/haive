@@ -100,7 +100,15 @@ export type AdvanceStepResult =
   | { status: 'waiting_form'; row: TaskStepRow; formSchema: FormSchema }
   | { status: 'waiting_cli'; row: TaskStepRow }
   | { status: 'skipped'; row: TaskStepRow }
-  | { status: 'loop_back'; row: TaskStepRow; diagnosis: string; sourceStepId: string }
+  | {
+      status: 'loop_back';
+      row: TaskStepRow;
+      diagnosis: string;
+      sourceStepId: string;
+      /** When true the loop_back skips the max_fix_rounds cap + escalation gate (a
+       *  human-driven restart, e.g. gate-2 developer reject). Omitted = capped. */
+      uncapped?: boolean;
+    }
   | { status: 'revise'; row: TaskStepRow; targetStepId: string; sourceStepId: string }
   | { status: 'failed'; row: TaskStepRow; error: string };
 
@@ -1015,6 +1023,34 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           row: finished,
           diagnosis: verdict.diagnosis,
           sourceStepId: meta.id,
+        };
+      }
+    }
+
+    // --- Restart-loop hook: a HUMAN gate (gate-2 developer reject after browser/manual
+    // verification) that asks to restart from implementation. Like fixLoop it returns
+    // loop_back — round bump + re-enter at implement, whole chain re-runs as new round
+    // rows — but UNCAPPED and suppression-immune: the developer is the bound, not
+    // max_fix_rounds, and a prior auto-fix Accept does not stand it down. ---
+    if (stepDef.restartLoop) {
+      const restart = stepDef.restartLoop.evaluate(output);
+      if (restart) {
+        const finished = await updateRow(db, current.id, {
+          status: 'done',
+          output,
+          statusMessage: null,
+          endedAt: new Date(),
+        });
+        ctx.logger.info(
+          { stepId: meta.id, round },
+          'restart-loop: human gate requested restart from implementation (uncapped)',
+        );
+        return {
+          status: 'loop_back',
+          row: finished,
+          diagnosis: restart.diagnosis,
+          sourceStepId: meta.id,
+          uncapped: true,
         };
       }
     }

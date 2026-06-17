@@ -227,5 +227,15 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   reviseLoop?: {
     evaluate(applyOutput: TApply): { targetStepId: string } | null;
   };
+  /** Human-gated restart-from-implementation: when this step's apply output requests a
+   *  restart (e.g. the gate-2 developer reject after browser verification), the runner
+   *  returns `loop_back` UNCAPPED and suppression-immune — re-enters the implementation
+   *  step at round+1 with `diagnosis` as the fix request and re-runs the whole
+   *  post-implementation chain as new round rows. Unlike fixLoop the human is the bound:
+   *  no max_fix_rounds cap and no stand-down on a prior Accept. `evaluate` returns the
+   *  diagnosis to hand the implementer, or null to finalize the step normally. */
+  restartLoop?: {
+    evaluate(applyOutput: TApply): { diagnosis: string } | null;
+  };
   apply(ctx: StepContext, args: StepApplyArgs<TDetect>): Promise<TApply>;
 }

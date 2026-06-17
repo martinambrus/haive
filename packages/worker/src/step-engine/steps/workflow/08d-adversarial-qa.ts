@@ -18,7 +18,9 @@ import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 // before gate 2, N adversarial agents actively try to BREAK the change — edge
 // cases, auth bypass, injection, logic flaws — and report proof-of-concept
 // findings. Proof-of-concept only: no persistence, no data deletion, no prod
-// disruption. Findings surface at gate 2. Formless; gated by shouldRun.
+// disruption. Blocking findings (critical/high) drive the fixLoop below — routing
+// back to implementation like 08c — while the rest surface at gate 2. Formless;
+// gated by shouldRun.
 //
 // Each prompt defers to the repo's onboarded adversarial agent definition
 // (.claude/agents/<id>.md — Haive onboards all six) when present, and embeds a

@@ -618,7 +618,9 @@ async function handleResult(
         sourceStepId: result.sourceStepId,
         round: nextRound,
       });
-      if (nextRound > cap) {
+      // Uncapped restarts (human gate-2 reject) skip the cap entirely — the developer is
+      // the bound, not max_fix_rounds — and fall through to re-enter implementation below.
+      if (!result.uncapped && nextRound > cap) {
         // Cap reached → escalate to an interactive gate (Continue / Accept / Abort)
         // parked on the source step, instead of failing. Record the fix request for the
         // next round up front so "Continue" can re-enter implementation immediately; it

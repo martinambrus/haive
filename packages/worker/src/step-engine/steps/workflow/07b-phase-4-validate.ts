@@ -7,7 +7,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { extractFencedJson } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 
-// Phase 4 — Pre-test validation (legacy phase4-validation.md + the
+// Phase 4 — Implementation validation (legacy phase4-validation.md + the
 // implementation-validator agent). An LLM validator checks what the test suite
 // cannot: spec compliance / logic / edge cases, refactoring impact across the
 // WHOLE codebase (stale callers of renamed/removed functions are blocking),
@@ -290,7 +290,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     id: '07b-phase-4-validate',
     workflowType: 'workflow',
     index: 7.7,
-    title: 'Phase 4: Pre-test validation',
+    title: 'Phase 4: Implementation validation',
     description:
       'An implementation-validator agent checks the code against the approved spec (logic, edge cases, refactoring impact, dead code, UI language, review dimensions) and loops a fixer agent until valid.',
     requiresCli: false,

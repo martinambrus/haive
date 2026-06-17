@@ -133,6 +133,27 @@ function throwingStep(): StepDefinition {
   };
 }
 
+function restartLoopStep(reject: boolean): StepDefinition {
+  return {
+    metadata: meta('test-restartloop'),
+    async detect() {
+      return { ok: true };
+    },
+    form() {
+      return null;
+    },
+    restartLoop: {
+      evaluate: (out) =>
+        (out as { decision?: string }).decision === 'reject'
+          ? { diagnosis: 'developer found: button does nothing' }
+          : null,
+    },
+    async apply() {
+      return { decision: reject ? 'reject' : 'approve' };
+    },
+  };
+}
+
 function params(db: Database, step: StepDefinition, round: number): AdvanceStepParams {
   return {
     db,
@@ -183,6 +204,36 @@ describe('fix-loop engine', () => {
     const state: MockState = { taskStepRow: {}, inserts: [], updates: [], suppressed: true };
     const result = await advanceStep(params(makeMockDb(state), fixLoopStep(true), 3));
     expect(result.status).toBe('done');
+  });
+
+  it('returns an UNCAPPED loop_back when a restartLoop step requests a restart', async () => {
+    // A human gate-2 reject: loop_back like fixLoop, but flagged uncapped so handleResult
+    // skips the round cap. The source row still finalizes done (it recorded the decision).
+    const state: MockState = { taskStepRow: {}, inserts: [], updates: [] };
+    const result = await advanceStep(params(makeMockDb(state), restartLoopStep(true), 4));
+    expect(result.status).toBe('loop_back');
+    if (result.status === 'loop_back') {
+      expect(result.uncapped).toBe(true);
+      expect(result.diagnosis).toContain('button does nothing');
+      expect(result.sourceStepId).toBe('test-restartloop');
+      expect(result.row.round).toBe(4);
+    }
+    expect(state.taskStepRow.status).toBe('done');
+  });
+
+  it('finishes done when a restartLoop step approves', async () => {
+    const state: MockState = { taskStepRow: {}, inserts: [], updates: [] };
+    const result = await advanceStep(params(makeMockDb(state), restartLoopStep(false), 0));
+    expect(result.status).toBe('done');
+  });
+
+  it('restartLoop is NOT stood down by a prior accept (human-driven, suppression-immune)', async () => {
+    // Unlike fixLoop, a developer reject still restarts even after a fix_loop.accepted event
+    // — the human is the bound, not the auto-fix budget.
+    const state: MockState = { taskStepRow: {}, inserts: [], updates: [], suppressed: true };
+    const result = await advanceStep(params(makeMockDb(state), restartLoopStep(true), 5));
+    expect(result.status).toBe('loop_back');
+    if (result.status === 'loop_back') expect(result.uncapped).toBe(true);
   });
 });
 
