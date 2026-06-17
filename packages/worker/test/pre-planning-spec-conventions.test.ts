@@ -14,6 +14,7 @@ const detect: Detect = {
   businessRequirements: '',
   relevantKbIds: [],
   kbReferences: [],
+  priorRejectionFeedback: '',
 };
 
 describe('pre-planning presentation conventions', () => {

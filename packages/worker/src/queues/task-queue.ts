@@ -41,6 +41,7 @@ import {
   DEFAULT_MAX_FIX_ROUNDS,
 } from '../step-engine/steps/workflow/_fix-loop.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
+import { resetStepAndDownstream } from './_step-reset.js';
 import { unloadTaskOllamaCliModels } from '../sandbox/ollama-provision.js';
 
 let registered = false;
@@ -647,6 +648,42 @@ async function handleResult(
         nextRound,
       );
       await enqueueAdvance(ctx.taskId, ctx.userId, target.metadata.id, nextRound);
+      return;
+    }
+    case 'revise': {
+      // A review step asked to revise an EARLIER generator step instead of failing
+      // (e.g. 03c reject → re-mine 03b). Reset the target + its downstream and re-enter
+      // the target in the SAME round — no round bump and no cap, because the loop is
+      // human-gated (the review form re-parks every cycle). The target reads its revise
+      // feedback from task_events, which resetStepAndDownstream deliberately preserves.
+      const target = stepRegistry.require(result.targetStepId);
+      await appendEvent(db, ctx.taskId, result.row.id, 'step.revise', {
+        stepId,
+        sourceStepId: result.sourceStepId,
+        targetStepId: result.targetStepId,
+      });
+      const reset = await resetStepAndDownstream(
+        db,
+        ctx.taskId,
+        result.targetStepId,
+        result.row.round,
+      );
+      if (!reset) {
+        await markTaskFailed(
+          db,
+          ctx.taskId,
+          `revise: target step ${result.targetStepId} not found at round ${result.row.round}`,
+        );
+        return;
+      }
+      await markTaskRunningWithStep(
+        db,
+        ctx.taskId,
+        target.metadata.id,
+        computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
+        result.row.round,
+      );
+      await enqueueAdvance(ctx.taskId, ctx.userId, target.metadata.id, result.row.round);
       return;
     }
     case 'failed': {

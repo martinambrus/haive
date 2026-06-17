@@ -100,6 +100,7 @@ export type AdvanceStepResult =
   | { status: 'waiting_cli'; row: TaskStepRow }
   | { status: 'skipped'; row: TaskStepRow }
   | { status: 'loop_back'; row: TaskStepRow; diagnosis: string; sourceStepId: string }
+  | { status: 'revise'; row: TaskStepRow; targetStepId: string; sourceStepId: string }
   | { status: 'failed'; row: TaskStepRow; error: string };
 
 type UpdatePatch = Partial<{
@@ -1010,6 +1011,33 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           status: 'loop_back',
           row: finished,
           diagnosis: verdict.diagnosis,
+          sourceStepId: meta.id,
+        };
+      }
+    }
+
+    // --- Revise-loop hook: a review step whose apply output asks to revise an EARLIER
+    // step (e.g. 03c reject → re-mine 03b). The step row is marked done (it ran fine and
+    // recorded its decision); handleResult resets the target + its downstream and
+    // re-enters the target in the SAME round. Human-gated (the review form re-parks each
+    // cycle), so unlike fix-loop there is no round bump and no cap. ---
+    if (stepDef.reviseLoop) {
+      const target = stepDef.reviseLoop.evaluate(output);
+      if (target) {
+        const finished = await updateRow(db, current.id, {
+          status: 'done',
+          output,
+          statusMessage: null,
+          endedAt: new Date(),
+        });
+        ctx.logger.info(
+          { stepId: meta.id, targetStepId: target.targetStepId },
+          'revise-loop: apply requested revising an earlier step',
+        );
+        return {
+          status: 'revise',
+          row: finished,
+          targetStepId: target.targetStepId,
           sourceStepId: meta.id,
         };
       }

@@ -57,13 +57,13 @@ describe('03c apply (decision handling)', () => {
     expect(out.requirements).toContain('Users need to log out.');
   });
 
-  it('reject throws to halt the task', async () => {
-    await expect(
-      businessRequirementsReviewStep.apply(
-        stubCtx,
-        applyArgs({ decision: 'reject', feedback: 'needs more detail' }),
-      ),
-    ).rejects.toThrow(/rejected/i);
+  it('reject returns the decision without throwing (re-mine route)', async () => {
+    const out = await businessRequirementsReviewStep.apply(
+      stubCtx,
+      applyArgs({ decision: 'reject', feedback: 'needs more detail' }),
+    );
+    expect(out.decision).toBe('reject');
+    expect(out.feedback).toBe('needs more detail');
   });
 
   it('defaults a missing decision to approve (never silently rejects)', async () => {
@@ -90,14 +90,13 @@ describe('03c persists the review decision (so 03b can re-mine with the feedback
     return { ctx, events };
   }
 
-  it('records the rejection feedback as an event BEFORE halting', async () => {
+  it('records the rejection feedback as an event (no throw)', async () => {
     const { ctx, events } = capturingCtx();
-    await expect(
-      businessRequirementsReviewStep.apply(
-        ctx,
-        applyArgs({ decision: 'reject', feedback: 'add an ETA section' }),
-      ),
-    ).rejects.toThrow();
+    const out = await businessRequirementsReviewStep.apply(
+      ctx,
+      applyArgs({ decision: 'reject', feedback: 'add an ETA section' }),
+    );
+    expect(out.decision).toBe('reject');
     expect(events[0]?.eventType).toBe('business_requirements.rejected');
     expect(events[0]?.payload?.feedback).toBe('add an ETA section');
   });
@@ -109,5 +108,17 @@ describe('03c persists the review decision (so 03b can re-mine with the feedback
       applyArgs({ decision: 'approve', feedback: '' }),
     );
     expect(events.map((e) => e.eventType)).toContain('business_requirements.approved');
+  });
+});
+
+describe('03c reviseLoop (reject → re-mine 03b)', () => {
+  it('routes a reject back to 03b and finalizes an approve', () => {
+    const hook = businessRequirementsReviewStep.reviseLoop!;
+    expect(
+      hook.evaluate({ requirements: '', summary: '', decision: 'reject', feedback: '' }),
+    ).toEqual({ targetStepId: '03b-business-requirements' });
+    expect(
+      hook.evaluate({ requirements: '', summary: '', decision: 'approve', feedback: '' }),
+    ).toBeNull();
   });
 });

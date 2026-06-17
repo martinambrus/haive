@@ -126,13 +126,23 @@ function leafFields(schema: FormSchema): Map<string, Record<string, unknown>> {
   return map;
 }
 
-function makeApplyCtx(): { ctx: StepContext; sets: Record<string, unknown>[] } {
+function makeApplyCtx(): {
+  ctx: StepContext;
+  sets: Record<string, unknown>[];
+  events: { eventType: string; payload: { feedback?: string } }[];
+} {
   const sets: Record<string, unknown>[] = [];
+  const events: { eventType: string; payload: { feedback?: string } }[] = [];
   const db = {
     update: () => ({
       set: (v: Record<string, unknown>) => {
         sets.push(v);
         return { where: async () => undefined };
+      },
+    }),
+    insert: () => ({
+      values: async (row: { eventType: string; payload: { feedback?: string } }) => {
+        events.push({ eventType: row.eventType, payload: row.payload });
       },
     }),
   };
@@ -151,7 +161,7 @@ function makeApplyCtx(): { ctx: StepContext; sets: Record<string, unknown>[] } {
     emitProgress: async () => undefined,
     throwIfCancelled: noop,
   } as unknown as StepContext;
-  return { ctx, sets };
+  return { ctx, sets, events };
 }
 
 function applyArgs(formValues: Record<string, unknown>) {
@@ -239,11 +249,34 @@ describe('gate-1 run configuration', () => {
     expect(sets[0]!.adversarialQaLevel).toBeNull();
   });
 
-  it('rejecting throws and writes nothing', async () => {
-    const { ctx, sets } = makeApplyCtx();
-    await expect(
-      gate1SpecApprovalStep.apply(ctx, applyArgs({ decision: 'reject', feedback: 'redo' })),
-    ).rejects.toThrow(/redo/);
-    expect(sets).toHaveLength(0);
+  it('rejecting records feedback, writes no run config, and returns reject (no throw)', async () => {
+    const { ctx, sets, events } = makeApplyCtx();
+    const out = (await gate1SpecApprovalStep.apply(
+      ctx,
+      applyArgs({ decision: 'reject', feedback: 'redo' }),
+    )) as { decision: string; feedback: string; runConfig: unknown };
+    expect(out.decision).toBe('reject');
+    expect(out.feedback).toBe('redo');
+    expect(out.runConfig).toBeNull();
+    expect(sets).toHaveLength(0); // no tasks run-config update on reject
+    expect(events[0]?.eventType).toBe('spec.rejected');
+    expect(events[0]?.payload?.feedback).toBe('redo');
+  });
+
+  it('reviseLoop routes a reject back to the spec generator (04) and finalizes an approve', () => {
+    const hook = gate1SpecApprovalStep.reviseLoop!;
+    expect(hook.evaluate({ decision: 'reject', feedback: '', runConfig: null })).toEqual({
+      targetStepId: '04-phase-0b-pre-planning',
+    });
+    expect(hook.evaluate({ decision: 'approve', feedback: '', runConfig: null })).toBeNull();
+  });
+
+  it('approving records a spec.approved event so a later re-draft starts clean', async () => {
+    const { ctx, events } = makeApplyCtx();
+    await gate1SpecApprovalStep.apply(
+      ctx,
+      applyArgs({ decision: 'approve', adversarialQaLevel: 'none' }),
+    );
+    expect(events.map((e) => e.eventType)).toContain('spec.approved');
   });
 });

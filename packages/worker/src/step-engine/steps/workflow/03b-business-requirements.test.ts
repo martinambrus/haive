@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { parseBizReqOutput } from './03b-business-requirements.js';
+import type { StepContext } from '../../step-definition.js';
+import { businessRequirementsStep, parseBizReqOutput } from './03b-business-requirements.js';
 
 describe('parseBizReqOutput', () => {
   it('parses a fenced requirements doc', () => {
@@ -21,5 +22,30 @@ describe('parseBizReqOutput', () => {
     expect(parseBizReqOutput('```json\n{"requirements":"","summary":"x"}\n```')).toBeNull();
     expect(parseBizReqOutput('no json')).toBeNull();
     expect(parseBizReqOutput(null)).toBeNull();
+  });
+});
+
+describe('03b form autoSubmit on revise', () => {
+  const base = {
+    taskTitle: 'T',
+    taskDescription: 'D',
+    discoverySummary: '',
+    priorRejectionFeedback: '',
+  };
+  const ctx = {} as unknown as StepContext;
+
+  it('auto-submits with the pre-filled feedback when revising (03c rejected)', () => {
+    const schema = businessRequirementsStep.form!(ctx, {
+      ...base,
+      priorRejectionFeedback: 'add ETA',
+    });
+    expect(schema!.autoSubmit).toBe(true);
+    const guidance = schema!.fields.find((f) => f.id === 'guidance') as { default?: string };
+    expect(guidance.default).toBe('add ETA');
+  });
+
+  it('does not auto-submit on the first run (opt-in gate preserved)', () => {
+    const schema = businessRequirementsStep.form!(ctx, base);
+    expect(schema!.autoSubmit).toBeUndefined();
   });
 });

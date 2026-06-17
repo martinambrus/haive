@@ -6,6 +6,7 @@ import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { extractFencedJson } from '../_fenced-json.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
+import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 
 interface KbReference {
   id: string;
@@ -20,6 +21,10 @@ interface PrePlanningDetect {
   businessRequirements: string;
   relevantKbIds: string[];
   kbReferences: KbReference[];
+  /** Latest gate-1 (06) spec rejection feedback not yet re-approved; pre-filled into the
+   *  scope field and auto-submitted so a re-draft addresses it. Empty on the first run /
+   *  after approval. */
+  priorRejectionFeedback: string;
 }
 
 function kbHeading(text: string): string | null {
@@ -195,6 +200,7 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
       businessRequirements,
       relevantKbIds: ids,
       kbReferences,
+      priorRejectionFeedback: await loadOutstandingSpecFeedback(ctx),
     };
   },
 
@@ -217,6 +223,7 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         body: lines.join('\n'),
       });
     }
+    const revising = detected.priorRejectionFeedback.length > 0;
     return {
       title: 'Phase 0b: Pre-planning',
       description: [
@@ -224,21 +231,28 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         '',
         detected.taskDescription || '(no description)',
         '',
-        detected.discoverySummary
-          ? 'Discovery summary and KB files available below — expand to inspect.'
-          : 'Discovery summary not available.',
+        revising
+          ? 'You rejected the previous spec at Gate 1. Your review feedback is pre-filled below — edit it if needed, then submit to re-draft the spec addressing it.'
+          : detected.discoverySummary
+            ? 'Discovery summary and KB files available below — expand to inspect.'
+            : 'Discovery summary not available.',
       ].join('\n'),
       infoSections: infoSections.length > 0 ? infoSections : undefined,
       fields: [
         {
           type: 'textarea',
           id: 'scope',
-          label: 'Scope / constraints (optional)',
+          label: revising ? 'Revision feedback for the spec' : 'Scope / constraints (optional)',
           rows: 4,
+          default: detected.priorRejectionFeedback || undefined,
           placeholder: 'Explicit boundaries, out-of-scope items, hard constraints.',
         },
       ],
-      submitLabel: 'Draft spec',
+      submitLabel: revising ? 'Re-draft with this feedback' : 'Draft spec',
+      // On a revise (Gate 1 rejected the previous spec), auto-submit the pre-filled
+      // feedback so the spec is re-drafted immediately — the user already authored it at
+      // the Gate 1 review. First run leaves this unset so the user provides scope first.
+      autoSubmit: revising ? true : undefined,
     };
   },
 
@@ -248,6 +262,8 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
     buildPrompt: (args) => {
       const detected = args.detected as PrePlanningDetect;
       const values = args.formValues as { scope?: string };
+      const revising = detected.priorRejectionFeedback.length > 0;
+      const scopeVal = (values.scope ?? '').trim();
       return [
         'If a `.claude/agents/technical-spec-writer.md` agent definition exists in the repo, follow',
         'it; otherwise follow the protocol below.',
@@ -278,7 +294,9 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         '',
         `Task title: ${detected.taskTitle || '(untitled)'}`,
         `Task description: ${detected.taskDescription || '(none)'}`,
-        `Scope guidance: ${values.scope ?? '(none)'}`,
+        revising
+          ? `=== Reviewer feedback to address in this revised spec ===\n${scopeVal || detected.priorRejectionFeedback}`
+          : `Scope guidance: ${scopeVal || '(none)'}`,
         '',
         '=== Discovery summary ===',
         detected.discoverySummary || '(none)',

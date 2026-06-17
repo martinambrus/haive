@@ -142,6 +142,12 @@ export const businessRequirementsStep: StepDefinition<BizReqDetect, BizReqApply>
         },
       ],
       submitLabel: revising ? 'Re-run with this feedback' : 'Run the business-requirements agent',
+      // On a revise (03c rejected an earlier draft), auto-submit the pre-filled feedback
+      // so the agent re-mines immediately — the user already authored the feedback at the
+      // 03c review, so re-asking here is redundant friction. First run leaves this unset
+      // so the opt-in gate stands (nothing is mined until the user submits). A reject with
+      // empty feedback leaves `revising` false, so 03b parks here to collect guidance.
+      autoSubmit: revising ? true : undefined,
     };
   },
 

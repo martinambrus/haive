@@ -87,7 +87,8 @@ export const businessRequirementsReviewStep: StepDefinition<BizReqReviewDetect, 
           `Task: ${detected.taskTitle || '(untitled)'}`,
           '',
           'Review the drafted requirements below and approve to proceed to the technical spec,',
-          'or reject with feedback to halt (retry the previous step to re-mine and revise).',
+          'or reject with feedback — the draft is re-generated automatically with your',
+          'feedback and comes back here for another review.',
         ].join('\n'),
         infoSections,
         fields: [
@@ -97,7 +98,7 @@ export const businessRequirementsReviewStep: StepDefinition<BizReqReviewDetect, 
             label: 'Approve these business requirements?',
             options: [
               { value: 'approve', label: 'Approve — proceed to the technical spec' },
-              { value: 'reject', label: 'Reject — request changes and halt' },
+              { value: 'reject', label: 'Reject — request changes and re-draft' },
             ],
             default: 'approve',
             required: true,
@@ -114,6 +115,15 @@ export const businessRequirementsReviewStep: StepDefinition<BizReqReviewDetect, 
       };
     },
 
+    // Reject does NOT fail the task: it re-enters the previous step (03b) so the agent
+    // re-drafts with the recorded feedback, then returns here for another review. Approve
+    // returns null here and the step finalizes, proceeding to the technical spec. The
+    // target literal matches 03b's metadata.id (also used by loadBizReq above).
+    reviseLoop: {
+      evaluate: (out) =>
+        out.decision === 'reject' ? { targetStepId: '03b-business-requirements' } : null,
+    },
+
     async apply(ctx, args): Promise<BizReqReviewApply> {
       const detected = args.detected as BizReqReviewDetect;
       const values = args.formValues as { decision?: string; feedback?: string };
@@ -121,15 +131,18 @@ export const businessRequirementsReviewStep: StepDefinition<BizReqReviewDetect, 
       const feedback = values.feedback ?? '';
 
       if (decision === 'reject') {
-        // Persist BEFORE throwing — the throw halts the task and the revise retry
-        // resets these step rows, but the task_event survives so 03b can pre-fill
-        // the feedback as guidance on the re-mine.
+        // Record the rejection feedback, then return normally (no throw, no halt). The
+        // reviseLoop hook below turns this reject output into a re-entry at 03b: the
+        // revise route resets the 03b/03c step rows but task_events survive, so 03b reads
+        // this feedback to pre-fill AND auto-submit its re-mine — no manual Re-run.
         await recordBizReqDecision(ctx, 'reject', feedback);
-        ctx.logger.info('business requirements rejected');
-        throw new Error(
-          `business requirements rejected: ${feedback || 'no feedback supplied'}. ` +
-            'Re-run the business-requirements step to revise — your feedback is pre-filled there.',
-        );
+        ctx.logger.info('business requirements rejected; re-mining with feedback');
+        return {
+          requirements: detected.requirements,
+          summary: detected.summary,
+          decision,
+          feedback,
+        };
       }
 
       // Clears any outstanding rejection so a later, unrelated re-mine starts clean.

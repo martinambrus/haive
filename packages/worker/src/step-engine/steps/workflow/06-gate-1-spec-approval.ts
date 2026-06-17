@@ -8,6 +8,7 @@ import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseConfigRecommendation, markRecommended } from './_gate1-recommendation.js';
 import { buildBrowserModeOptions } from './_browser-modes.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
+import { recordSpecDecision } from './_spec-feedback.js';
 
 interface SpecGateDetect {
   /** Full spec body (markdown). The renderer turns this into HTML inside
@@ -359,7 +360,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     return {
       title: 'Gate 1: Spec approval',
       description:
-        'Review the spec drafted in phase 0b and approve it before implementation begins. Reject to halt the workflow with feedback.',
+        'Review the spec drafted in phase 0b and approve it before implementation begins. Reject with feedback to send it back for an automatic re-draft (the spec is regenerated and re-reviewed here).',
       infoSections,
       fields: [
         {
@@ -368,7 +369,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
           label: 'Approve the specification?',
           options: [
             { value: 'approve', label: 'Approve — proceed to implementation' },
-            { value: 'reject', label: 'Reject — request changes and halt' },
+            { value: 'reject', label: 'Reject — request changes and re-draft' },
           ],
           default: 'approve',
           required: true,
@@ -507,17 +508,31 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     };
   },
 
+  // Reject does NOT halt the workflow: it re-enters the spec generator (04) so the spec
+  // is re-drafted with the recorded feedback, re-runs the quality review, and comes back
+  // here for another approval. Approve returns null here and the step finalizes, recording
+  // the run configuration and proceeding to implementation.
+  reviseLoop: {
+    evaluate: (out) =>
+      out.decision === 'reject' ? { targetStepId: '04-phase-0b-pre-planning' } : null,
+  },
+
   async apply(ctx, args): Promise<SpecGateApply> {
     const values = args.formValues as Record<string, unknown> & {
       decision?: string;
       feedback?: string;
     };
     const decision: 'approve' | 'reject' = values.decision === 'reject' ? 'reject' : 'approve';
+    const feedback = typeof values.feedback === 'string' ? values.feedback : '';
     ctx.logger.info({ decision }, 'spec gate decision recorded');
     if (decision === 'reject') {
-      throw new Error(
-        `spec gate rejected: ${typeof values.feedback === 'string' && values.feedback ? values.feedback : 'no feedback supplied'}`,
-      );
+      // Record the rejection feedback, then return normally (no throw, no halt). The
+      // reviseLoop hook below re-enters the spec generator (04): the revise route resets
+      // the 04..06 rows but task_events survive, so 04 reads this feedback to pre-fill AND
+      // auto-submit its re-draft — no manual Re-run.
+      await recordSpecDecision(ctx, 'reject', feedback);
+      ctx.logger.info('spec rejected; re-drafting with feedback');
+      return { decision, feedback, runConfig: null };
     }
 
     const str = (v: unknown, fallback: string): string => (typeof v === 'string' ? v : fallback);
@@ -581,9 +596,11 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
       .where(eq(schema.tasks.id, ctx.taskId));
     ctx.logger.info({ runConfig }, 'run configuration recorded for the hands-free stretch');
 
+    // Clears any outstanding spec rejection so a later, unrelated re-draft starts clean.
+    await recordSpecDecision(ctx, 'approve', feedback);
     return {
       decision,
-      feedback: typeof values.feedback === 'string' ? values.feedback : '',
+      feedback,
       runConfig,
     };
   },

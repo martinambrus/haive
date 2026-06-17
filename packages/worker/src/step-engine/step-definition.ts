@@ -218,5 +218,14 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
    *  this so the runner routes the thrown error into the fix loop (diagnosis = error
    *  message) instead of failing the task outright. */
   fixLoopOnError?: boolean;
+  /** Review-gate revise loop: when this step's apply output asks to revise an EARLIER
+   *  step, the runner returns `revise` (reset the target + its downstream and re-enter
+   *  the target in the SAME round) instead of `done`. Unlike fixLoop this is
+   *  human-gated — the review form re-parks every cycle — so there is no round bump and
+   *  no cap. `evaluate` returns the target step id to revise, or null to finalize the
+   *  step normally. Used by 03c-business-requirements-review (reject → re-mine 03b). */
+  reviseLoop?: {
+    evaluate(applyOutput: TApply): { targetStepId: string } | null;
+  };
   apply(ctx: StepContext, args: StepApplyArgs<TDetect>): Promise<TApply>;
 }
