@@ -113,6 +113,10 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     description:
       'Delegates the spec to the active CLI provider for implementation inside the workspace and records a summary of what was changed.',
     requiresCli: false,
+    // The only field is an optional "additional instructions" textarea — nothing
+    // to decide. Under auto-continue, auto-submit on its empty default and start
+    // implementing; manual mode still parks so instructions can be added first.
+    autoSubmitDefaults: true,
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
