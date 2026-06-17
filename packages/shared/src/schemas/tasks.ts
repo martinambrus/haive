@@ -119,3 +119,46 @@ export const renameTaskRequestSchema = z
   });
 
 export type RenameTaskRequest = z.infer<typeof renameTaskRequestSchema>;
+
+// --- Tasks listing: status filter tokens -------------------------------------
+// The /tasks listing filters by a status *token* emitted by the dropdown and by
+// the repositories-page badge deep-links (?status=open|active). 'open' =
+// non-terminal; 'active' = open minus waiting_user; 'unfinished' = open plus
+// failed (everything still needing attention). These sets are the single source
+// of truth shared by the web dropdown and the server-side query, so the listing
+// can paginate/filter in SQL instead of folding a full in-memory list. 'paused'
+// is a live DB status even though the shared TaskStatus union omits it, so these
+// are plain string literals rather than TaskStatus[].
+export const OPEN_TASK_STATUSES = [
+  'created',
+  'queued',
+  'running',
+  'paused',
+  'waiting_user',
+] as const;
+
+export const ACTIVE_TASK_STATUSES = ['created', 'queued', 'running', 'paused'] as const;
+
+const ALL_TASK_STATUSES = [
+  'created',
+  'queued',
+  'running',
+  'paused',
+  'waiting_user',
+  'completed',
+  'failed',
+  'cancelled',
+] as const;
+
+/** Expand a status filter token into the concrete set of statuses to filter on,
+ *  or null for "no status filter" (all). Mirrors the web matchesStatus grouping
+ *  exactly. An empty or unrecognized token yields null — the dropdown only emits
+ *  known tokens, so a hand-typed garbage value falls back to the unfiltered (but
+ *  still user-scoped) list rather than an empty-IN edge case. */
+export function expandTaskStatusFilter(token: string | undefined | null): string[] | null {
+  if (!token) return null;
+  if (token === 'open') return [...OPEN_TASK_STATUSES];
+  if (token === 'active') return [...ACTIVE_TASK_STATUSES];
+  if (token === 'unfinished') return [...OPEN_TASK_STATUSES, 'failed'];
+  return (ALL_TASK_STATUSES as readonly string[]).includes(token) ? [token] : null;
+}

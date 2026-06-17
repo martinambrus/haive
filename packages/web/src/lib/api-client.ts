@@ -415,6 +415,16 @@ export interface Task {
   } | null;
 }
 
+/** GET /tasks response: one page of tasks plus the totals and repo facet that
+ *  drive the listing's infinite scroll and repository dropdown. */
+export interface TaskListResponse {
+  tasks: Task[];
+  total: number;
+  page: number;
+  pageSize: number;
+  repositories: { id: string; name: string }[];
+}
+
 export interface TaskStep {
   id: string;
   taskId: string;

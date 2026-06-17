@@ -1,9 +1,10 @@
 import { Hono } from 'hono';
-import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   computeTaskTiming,
   createTaskRequestSchema,
+  expandTaskStatusFilter,
   logger,
   PROVIDER_SENSITIVE_STEP_IDS,
   renameTaskRequestSchema,
@@ -35,13 +36,57 @@ taskRoutes.use('*', requireAuth);
 taskRoutes.get('/', async (c) => {
   const userId = c.get('userId');
   const db = getDb();
+
+  // Server-side pagination + filtering so large projects ship only one slice to
+  // the client (the web listing scrolls more pages in on demand). Mirrors the
+  // global-kb /entries pattern: page/pageSize + count(*) + a filter facet.
+  const repositoryId = c.req.query('repositoryId')?.trim() || undefined;
+  const statusToken = c.req.query('status')?.trim();
+  const q = c.req.query('q')?.trim();
+  const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1')) || 1);
+  const pageSize = Math.min(
+    100,
+    Math.max(1, Math.floor(Number(c.req.query('pageSize') ?? '20')) || 20),
+  );
+
+  const conds = [eq(schema.tasks.userId, userId)];
+  if (repositoryId) conds.push(eq(schema.tasks.repositoryId, repositoryId));
+  const statuses = expandTaskStatusFilter(statusToken);
+  if (statuses) {
+    conds.push(
+      inArray(schema.tasks.status, statuses as (typeof schema.tasks.$inferSelect)['status'][]),
+    );
+  }
+  if (q) conds.push(sql`${schema.tasks.title} ilike ${`%${q}%`}`);
+  const where = and(...conds);
+
+  const totalRows = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(schema.tasks)
+    .where(where);
+  const total = totalRows[0]?.n ?? 0;
+
   const rows = await db.query.tasks.findMany({
-    where: eq(schema.tasks.userId, userId),
+    where,
     orderBy: [desc(schema.tasks.createdAt)],
     with: { repository: { columns: { id: true, name: true } } },
+    limit: pageSize,
+    offset: (page - 1) * pageSize,
   });
+
+  // Distinct repos that own at least one of the user's tasks, for the listing's
+  // repository dropdown. Computed independent of the active filters/page so the
+  // options stay stable as the user filters (the loaded page alone no longer
+  // contains every repo once the list is paginated).
+  const repositories = await db
+    .selectDistinct({ id: schema.repositories.id, name: schema.repositories.name })
+    .from(schema.tasks)
+    .innerJoin(schema.repositories, eq(schema.tasks.repositoryId, schema.repositories.id))
+    .where(eq(schema.tasks.userId, userId))
+    .orderBy(asc(schema.repositories.name));
+
   // Per-task time breakdown for the listing (wall/work/idle/user). The task rows
-  // carry no steps, so pull every step of the listed tasks in one query and fold
+  // carry no steps, so pull every step of THIS PAGE's tasks in one query and fold
   // them with the same computeTaskTiming the detail page uses. Snapshot at `now`;
   // the listing's 3s poll keeps running tasks current.
   const now = Date.now();
@@ -83,7 +128,7 @@ taskRoutes.get('/', async (c) => {
       currentWaitStartedAt: waitStart ? waitStart.toISOString() : null,
     };
   });
-  return c.json({ tasks });
+  return c.json({ tasks, total, page, pageSize, repositories });
 });
 
 taskRoutes.post('/', async (c) => {
