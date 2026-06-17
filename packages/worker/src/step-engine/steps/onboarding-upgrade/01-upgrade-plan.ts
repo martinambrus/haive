@@ -2,7 +2,19 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { getHaiveVersion, normalizeContent, sha256Hex } from '@haive/shared';
+import {
+  buildCliRulesBlockFromProviders,
+  CLI_RULES_DISK_PATH,
+  CLI_RULES_END,
+  CLI_RULES_SCHEMA_VERSION,
+  CLI_RULES_START,
+  CLI_RULES_TEMPLATE_ID,
+  CLI_RULES_TEMPLATE_KIND,
+  extractRegion,
+  getHaiveVersion,
+  normalizeContent,
+  sha256Hex,
+} from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandCustomBundlesFor,
@@ -308,10 +320,20 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     for (const diskPath of allPaths) {
       const current = byPath.get(diskPath) ?? null;
       const live = liveByPath.get(diskPath) ?? null;
-      const { content: diskContent, hash: diskHash } = await readDiskContent(
-        ctx.repoPath,
-        diskPath,
-      );
+      const disk = await readDiskContent(ctx.repoPath, diskPath);
+      // The cli-rules artifact owns only the marker-delimited region inside
+      // AGENTS.md, not the whole file. Compare and diff against just that region
+      // so the project-info + RTK regions and any user content stay out of scope.
+      const isCliRules = (current?.templateKind ?? live?.templateKind) === CLI_RULES_TEMPLATE_KIND;
+      let diskContent = disk.content;
+      let diskHash = disk.hash;
+      if (isCliRules) {
+        const region = disk.content
+          ? extractRegion(disk.content, CLI_RULES_START, CLI_RULES_END)
+          : null;
+        diskContent = region;
+        diskHash = region ? sha256Hex(normalizeContent(region)) : null;
+      }
 
       const bucket = classifyEntry({ live, current, diskContent, diskHash });
       const newContent = current?.content ?? null;
@@ -463,6 +485,34 @@ async function unionExpandedFor(
     }
     seen.add(r.diskPath);
     out.push(r);
+  }
+
+  // Current-side expansion of the AGENTS.md cli-rules region. It is per-repo
+  // (built from the repo owner's current enabled providers, sorted by name),
+  // so it is not in the global manifest — recompute it here exactly the way
+  // step 12 and the API do, so a rules change surfaces as drift. A null block
+  // (no rules-bearing provider) means the region is obsolete: omit it so a live
+  // row with no current match classifies as `obsolete` (region removal).
+  const ruleRows = await ctx.db
+    .select({
+      name: schema.cliProviders.name,
+      rulesContent: schema.cliProviders.rulesContent,
+      enabled: schema.cliProviders.enabled,
+    })
+    .from(schema.cliProviders)
+    .where(eq(schema.cliProviders.userId, ctx.userId));
+  const cliRulesBlock = buildCliRulesBlockFromProviders(ruleRows);
+  if (cliRulesBlock && !seen.has(CLI_RULES_DISK_PATH)) {
+    const writtenHash = sha256Hex(normalizeContent(cliRulesBlock));
+    out.push({
+      templateId: CLI_RULES_TEMPLATE_ID,
+      templateKind: CLI_RULES_TEMPLATE_KIND,
+      templateSchemaVersion: CLI_RULES_SCHEMA_VERSION,
+      templateContentHash: writtenHash,
+      diskPath: CLI_RULES_DISK_PATH,
+      content: cliRulesBlock,
+      writtenHash,
+    });
   }
   return out;
 }

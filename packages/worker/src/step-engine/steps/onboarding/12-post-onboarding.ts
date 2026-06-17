@@ -4,7 +4,17 @@ import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CliProviderName, FormSchema } from '@haive/shared';
-import { getCliProviderMetadata, getHaiveVersion } from '@haive/shared';
+import {
+  buildCliRulesBlock,
+  CLI_RULES_DISK_PATH,
+  CLI_RULES_SCHEMA_VERSION,
+  CLI_RULES_TEMPLATE_ID,
+  CLI_RULES_TEMPLATE_KIND,
+  getCliProviderMetadata,
+  getHaiveVersion,
+  normalizeContent,
+  sha256Hex,
+} from '@haive/shared';
 import type { Database } from '@haive/database';
 import type { StepDefinition, StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from './_helpers.js';
@@ -147,6 +157,26 @@ async function recordOnboardingArtifacts(
     }
     seenDiskPaths.add(r.diskPath);
     expanded.push(r);
+  }
+
+  // The AGENTS.md cli-rules region is per-repo (depends on the user's enabled
+  // providers' rules), so it is tracked as a region-scoped artifact rather than
+  // a manifest template. detect.cliProviders is already enabled+non-empty and
+  // sorted by name, so the block and its hash are deterministic and match the
+  // API's drift recompute. diskPath 'AGENTS.md' carries no other live artifact
+  // row, so the (repository_id, disk_path) unique index stays satisfied.
+  const cliRulesBlock = buildCliRulesBlock(detect.cliProviders.map((p) => p.rulesContent));
+  if (cliRulesBlock) {
+    const writtenHash = sha256Hex(normalizeContent(cliRulesBlock));
+    expanded.push({
+      templateId: CLI_RULES_TEMPLATE_ID,
+      templateKind: CLI_RULES_TEMPLATE_KIND,
+      templateSchemaVersion: CLI_RULES_SCHEMA_VERSION,
+      templateContentHash: writtenHash,
+      diskPath: CLI_RULES_DISK_PATH,
+      content: cliRulesBlock,
+      writtenHash,
+    });
   }
 
   if (expanded.length === 0) {

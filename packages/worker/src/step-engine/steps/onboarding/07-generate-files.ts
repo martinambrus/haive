@@ -3,7 +3,12 @@ import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, FormSchema } from '@haive/shared';
-import { getCliProviderMetadata } from '@haive/shared';
+import {
+  buildCliRulesBlock,
+  CLI_RULES_START,
+  CLI_RULES_END,
+  getCliProviderMetadata,
+} from '@haive/shared';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { CliProviderName } from '../../../cli-adapters/types.js';
 import { mcpSettingsFileContent } from '../../../sandbox/mcp-config.js';
@@ -151,8 +156,9 @@ function extractProjectInfo(
 
 export const PROJECT_INFO_START = '<!-- haive:project-info -->';
 export const PROJECT_INFO_END = '<!-- /haive:project-info -->';
-export const CLI_RULES_START = '<!-- haive:cli-rules -->';
-export const CLI_RULES_END = '<!-- /haive:cli-rules -->';
+// CLI rules markers now live in @haive/shared so the API can recompute the same
+// block; re-exported here for back-compat with existing importers.
+export { CLI_RULES_START, CLI_RULES_END };
 
 export function projectInfoMarkdown(info: ProjectInfo): string {
   const lines: string[] = [
@@ -235,28 +241,6 @@ export function workflowConfigJson(framework: string | null): string {
   return `${JSON.stringify(config, null, 2)}\n`;
 }
 
-/** Merge an ordered list of rule blocks into one deduplicated block. Keys on
- *  `line.trim()` so "- foo" and "  - foo  " collapse; first-seen capitalization
- *  and leading whitespace win. Runs of 3+ blank lines collapse to 2. */
-export function dedupLines(blocks: string[]): string {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const block of blocks) {
-    for (const line of block.split('\n')) {
-      const key = line.trim();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(line);
-    }
-  }
-  return (
-    out
-      .join('\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim() + '\n'
-  );
-}
-
 export interface RulesPlan {
   /** Merged `haive:cli-rules` block for AGENTS.md, or null when no enabled
    *  provider has rules content. */
@@ -281,9 +265,7 @@ export function planRulesFiles(
     rulesFileMode: 'native' | 'import' | 'copy';
   }>,
 ): RulesPlan {
-  const withRules = providers.map((p) => p.rulesContent).filter((c) => c.trim().length > 0);
-  const combined = withRules.length > 0 ? dedupLines(withRules) : null;
-  const agentsRulesBlock = combined ? `${CLI_RULES_START}\n${combined}${CLI_RULES_END}\n` : null;
+  const agentsRulesBlock = buildCliRulesBlock(providers.map((p) => p.rulesContent));
   const importFiles = new Set<string>();
   const copyFiles = new Set<string>();
   for (const p of providers) {
@@ -468,7 +450,11 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       .where(eq(schema.cliProviders.userId, ctx.userId));
     const cliProviders = providerRows
       .filter((p) => p.enabled && p.rulesContent.trim().length > 0)
-      .map((p) => ({ name: p.name, rulesContent: p.rulesContent }));
+      .map((p) => ({ name: p.name, rulesContent: p.rulesContent }))
+      // Sort by provider name so the merged cli-rules block (and its hash) is
+      // deterministic regardless of cli_providers row order — required so the
+      // API's drift recompute matches the stored block byte-for-byte.
+      .sort((a, b) => a.name.localeCompare(b.name));
 
     const rulesFiles = new Set<string>();
     for (const p of cliProviders) {

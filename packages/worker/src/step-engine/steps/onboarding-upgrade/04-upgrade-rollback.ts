@@ -2,7 +2,15 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { getHaiveVersion, normalizeContent, type InstallManifest } from '@haive/shared';
+import {
+  CLI_RULES_END,
+  CLI_RULES_START,
+  CLI_RULES_TEMPLATE_KIND,
+  getHaiveVersion,
+  normalizeContent,
+  upsertRegion,
+  type InstallManifest,
+} from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandManifestFor,
@@ -11,7 +19,7 @@ import {
   type TemplateRenderContext,
 } from '../../template-manifest.js';
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
-import { resolveBundleItemId } from './02-upgrade-apply.js';
+import { readFileOrEmpty, resolveBundleItemId } from './02-upgrade-apply.js';
 
 function isRollback(ctx: StepContext): Promise<boolean> {
   return ctx.db
@@ -58,6 +66,7 @@ interface RollbackTarget {
  *  the live row. There is no baseline to restore. */
 interface NewArtifactToUndo {
   diskPath: string;
+  templateKind: string;
   upgradeArtifactId: string;
 }
 
@@ -246,6 +255,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       if (!prior) {
         newArtifactsToUndo.push({
           diskPath: upgradeRow.diskPath,
+          templateKind: upgradeRow.templateKind,
           upgradeArtifactId: upgradeRow.id,
         });
         continue;
@@ -339,7 +349,18 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
 
       const absPath = path.join(ctx.repoPath, target.diskPath);
       await mkdir(path.dirname(absPath), { recursive: true });
-      await writeFile(absPath, restoreContent, 'utf8');
+      if (restoreTemplateKind === CLI_RULES_TEMPLATE_KIND) {
+        // Restore only the cli-rules region from the prior baseline bytes,
+        // leaving the rest of AGENTS.md as it currently stands.
+        const existing = await readFileOrEmpty(absPath);
+        await writeFile(
+          absPath,
+          upsertRegion(existing, restoreContent, CLI_RULES_START, CLI_RULES_END),
+          'utf8',
+        );
+      } else {
+        await writeFile(absPath, restoreContent, 'utf8');
+      }
       revertedCount += 1;
 
       upgradeRowIds.push(target.upgradeArtifactId);
@@ -371,7 +392,19 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     const undoneNewArtifactIds: string[] = [];
     for (const item of detected.newArtifactsToUndo) {
       try {
-        await rm(path.join(ctx.repoPath, item.diskPath), { force: true });
+        if (item.templateKind === CLI_RULES_TEMPLATE_KIND) {
+          // The upgrade introduced the cli-rules region; undo removes just the
+          // region, not the shared AGENTS.md file.
+          const absPath = path.join(ctx.repoPath, item.diskPath);
+          const existing = await readFileOrEmpty(absPath);
+          await writeFile(
+            absPath,
+            upsertRegion(existing, '', CLI_RULES_START, CLI_RULES_END),
+            'utf8',
+          );
+        } else {
+          await rm(path.join(ctx.repoPath, item.diskPath), { force: true });
+        }
         undoneNewArtifactIds.push(item.upgradeArtifactId);
         revertedCount += 1;
       } catch (err) {

@@ -1,8 +1,17 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { getHaiveVersion, normalizeContent, sha256Hex, type FormSchema } from '@haive/shared';
+import {
+  CLI_RULES_END,
+  CLI_RULES_START,
+  CLI_RULES_TEMPLATE_KIND,
+  getHaiveVersion,
+  normalizeContent,
+  sha256Hex,
+  upsertRegion,
+  type FormSchema,
+} from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   expandCustomBundlesFor,
@@ -110,6 +119,17 @@ const TEMPLATE_KIND_LABELS: Record<string, string> = {
 
 function templateKindLabel(kind: string): string {
   return TEMPLATE_KIND_LABELS[kind] ?? kind;
+}
+
+/** Read a file, returning '' when it does not exist. Used by the cli-rules
+ *  region writes so a missing AGENTS.md is treated as empty (upsertRegion then
+ *  creates the region) rather than throwing. */
+export async function readFileOrEmpty(absPath: string): Promise<string> {
+  try {
+    return await readFile(absPath, 'utf8');
+  } catch {
+    return '';
+  }
 }
 
 interface UpgradeApplyOutput {
@@ -351,7 +371,19 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
       if (action === 'delete') {
         try {
-          await rm(path.join(ctx.repoPath, entry.diskPath), { force: true });
+          if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
+            // Region-scoped artifact: strip just the cli-rules block, leaving
+            // the rest of AGENTS.md (project-info, RTK, user content) intact.
+            const absPath = path.join(ctx.repoPath, entry.diskPath);
+            const existing = await readFileOrEmpty(absPath);
+            await writeFile(
+              absPath,
+              upsertRegion(existing, '', CLI_RULES_START, CLI_RULES_END),
+              'utf8',
+            );
+          } else {
+            await rm(path.join(ctx.repoPath, entry.diskPath), { force: true });
+          }
           if (entry.liveArtifactId) rowsToSupersede.push(entry.liveArtifactId);
           deletedCount += 1;
         } catch (err) {
@@ -369,7 +401,18 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
       const absPath = path.join(ctx.repoPath, entry.diskPath);
       await mkdir(path.dirname(absPath), { recursive: true });
-      await writeFile(absPath, entry.newContent, 'utf8');
+      if (entry.templateKind === CLI_RULES_TEMPLATE_KIND) {
+        // Merge the new block into the existing AGENTS.md in place, replacing
+        // only the cli-rules region and leaving every other region untouched.
+        const existing = await readFileOrEmpty(absPath);
+        await writeFile(
+          absPath,
+          upsertRegion(existing, entry.newContent, CLI_RULES_START, CLI_RULES_END),
+          'utf8',
+        );
+      } else {
+        await writeFile(absPath, entry.newContent, 'utf8');
+      }
       appliedCount += 1;
 
       if (entry.liveArtifactId) rowsToSupersede.push(entry.liveArtifactId);

@@ -3,8 +3,13 @@ import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   TASK_JOB_NAMES,
+  buildCliRulesBlockFromProviders,
+  CLI_RULES_SCHEMA_VERSION,
+  CLI_RULES_TEMPLATE_ID,
   computeSetHash,
   getHaiveVersion,
+  normalizeContent,
+  sha256Hex,
   type TaskJobPayload,
   type UpgradeStatusResponse,
   type RollbackUpgradeResponse,
@@ -17,6 +22,14 @@ import { getTaskQueue } from '../queues.js';
 export const upgradeRoutes = new Hono<AppEnv>();
 
 upgradeRoutes.use('*', requireAuth);
+
+/** Per-repo templates are tracked like Haive templates but live outside the
+ *  global manifest cache, so their "current" hash is computed per repo rather
+ *  than read from template_manifest_cache: custom bundle items and the
+ *  AGENTS.md cli-rules region. */
+function isPerRepoTemplateId(id: string): boolean {
+  return id.startsWith('custom.') || id === CLI_RULES_TEMPLATE_ID;
+}
 
 /**
  * Report whether an upgrade is available for a repository by comparing the
@@ -62,6 +75,28 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     schemaVersion: b.schemaVersion,
     contentHash: b.contentHash,
   }));
+
+  // The AGENTS.md cli-rules region is per-repo content (the repo owner's merged
+  // provider rules), so it is not in the global manifest cache. Recompute its
+  // current hash here via the shared pure helper — byte-identical to what the
+  // worker writes/records — so a rules change surfaces as drift. Providers are
+  // sorted by name to match the deterministic onboarding/plan ordering.
+  const ruleProviderRows = await db
+    .select({
+      name: schema.cliProviders.name,
+      rulesContent: schema.cliProviders.rulesContent,
+      enabled: schema.cliProviders.enabled,
+    })
+    .from(schema.cliProviders)
+    .where(eq(schema.cliProviders.userId, userId));
+  const cliRulesBlock = buildCliRulesBlockFromProviders(ruleProviderRows);
+  const cliRulesCurrent = cliRulesBlock
+    ? {
+        templateId: CLI_RULES_TEMPLATE_ID,
+        schemaVersion: CLI_RULES_SCHEMA_VERSION,
+        contentHash: sha256Hex(normalizeContent(cliRulesBlock)),
+      }
+    : null;
 
   const liveArtifacts = await db
     .select({
@@ -202,9 +237,12 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   for (const c of customCurrent) {
     currentByTemplate.set(c.templateId, c);
   }
+  if (cliRulesCurrent) {
+    currentByTemplate.set(cliRulesCurrent.templateId, cliRulesCurrent);
+  }
   const filteredInstalled = new Map(
     Array.from(distinctInstalled.entries()).filter(
-      ([id]) => applicableSet.has(id) || id.startsWith('custom.'),
+      ([id]) => applicableSet.has(id) || isPerRepoTemplateId(id),
     ),
   );
 
