@@ -655,12 +655,18 @@ export async function resumeStepIfLinked(
   }
   const stepRow = await db.query.taskSteps.findFirst({
     where: eq(schema.taskSteps.id, payload.taskStepId),
-    columns: { stepId: true },
+    columns: { stepId: true, round: true },
   });
   const taskPayload: TaskJobPayload = {
     taskId: payload.taskId,
     userId: payload.userId,
     stepId: stepRow?.stepId,
+    // Carry the step's round so the resume advances the SAME round. Without it the
+    // advance defaults to round 0 (handleAdvanceStep: `payload.round ?? 0`), so a
+    // fix-loop step (round > 0) that finishes its CLI never gets resumed: its
+    // round-0 sibling is re-processed (→ waiting_form) while the real round stays
+    // stuck in waiting_cli, unconsumed.
+    round: stepRow?.round,
   };
   const queue = getTaskQueue();
   await queue.add(TASK_JOB_NAMES.ADVANCE_STEP, taskPayload, {
