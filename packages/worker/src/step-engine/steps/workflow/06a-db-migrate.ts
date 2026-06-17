@@ -4,7 +4,12 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
-import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
+import {
+  runnerHandleForTask,
+  ddevExec,
+  ddevSnapshot,
+  ddevMigratedSnapshotName,
+} from '../../../sandbox/ddev-runner.js';
 
 // Runs the framework's DB migrations inside the task's DDEV environment, after
 // gate-1 (spec approved) and before implementation. Critical when an old DB was
@@ -164,6 +169,17 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
       // Block the pipeline — the recovery options (retry / retry-with-AI / skip)
       // are surfaced on the failed step.
       throw new Error(`migration failed (${command}): ${res.output.slice(-1500)}`);
+    }
+
+    // Durability snapshot of the migrated DB so a cold boot (worker/host restart)
+    // restores the MIGRATED state, not the pre-migration import. Lives on the repo
+    // volume; ensureDdevStarted prefers it over the import snapshot. Non-fatal.
+    const snap = await ddevSnapshot(handle, ddevMigratedSnapshotName(ctx.taskId));
+    if (snap.exitCode !== 0) {
+      ctx.logger.warn(
+        { taskId: ctx.taskId, output: snap.output.slice(-500) },
+        'ddev post-migrate snapshot non-zero (continuing)',
+      );
     }
 
     ctx.logger.info({ taskId: ctx.taskId, command }, 'db migrations applied');

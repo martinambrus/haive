@@ -11,7 +11,12 @@ import { pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseDdevConfig, renderDdevConfig } from '../_ddev-config.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
-import { ensureDdevStarted, ddevExec } from '../../../sandbox/ddev-runner.js';
+import {
+  ensureDdevStarted,
+  ddevExec,
+  ddevSnapshot,
+  ddevImportSnapshotName,
+} from '../../../sandbox/ddev-runner.js';
 
 // Boots the project's DDEV environment in a per-task nested-Docker runner and
 // imports the uploaded DB dump (then deletes it). Gated on the repo actually
@@ -289,6 +294,19 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
         throw new Error(`ddev import-db failed: ${imp.output.slice(-1500)}`);
       }
       imported = true;
+      // Durability snapshot of the freshly-imported DB. It lives on the repo
+      // volume (.ddev/.snapshots), so it survives the worker-boot reaper /
+      // daemon / host restart that destroys the runner's nested DB —
+      // ensureDdevStarted restores it on a cold boot. Non-fatal: the import
+      // already succeeded, and a prior attempt's snapshot may already exist.
+      await ctx.emitProgress('Snapshotting the imported database…');
+      const snap = await ddevSnapshot(handle, ddevImportSnapshotName(ctx.taskId));
+      if (snap.exitCode !== 0) {
+        ctx.logger.warn(
+          { taskId: ctx.taskId, output: snap.output.slice(-500) },
+          'ddev import snapshot non-zero (continuing)',
+        );
+      }
       // Delete the dump immediately + mark the upload consumed (the env now holds it).
       if (d.dumpWorkerPath) await rm(d.dumpWorkerPath, { force: true }).catch(() => {});
       await ctx.db

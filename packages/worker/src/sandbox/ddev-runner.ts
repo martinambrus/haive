@@ -222,6 +222,28 @@ export async function ddevSnapshot(
   return ddevExec(handle, `snapshot --name=${name}`, { timeoutMs: 600_000 });
 }
 
+/** `ddev snapshot restore <name>` — repopulate the DB from a snapshot. Long
+ *  timeout for large dumps. */
+export async function ddevSnapshotRestore(
+  handle: DdevRunnerHandle,
+  name: string,
+): Promise<{ exitCode: number; output: string }> {
+  return ddevExec(handle, `snapshot restore ${name}`, { timeoutMs: 1_800_000 });
+}
+
+// Deterministic durability-snapshot names. They live in `.ddev/.snapshots/` under
+// the project (on the haive_repos NAMED VOLUME), so they survive the worker-boot
+// reaper's `docker rm` of the runner, a Docker daemon restart, and a host reboot —
+// none of which the runner's own nested-Docker DB volume survives. The cold-boot
+// path in ensureDdevStarted restores the most recent of these so verify/browser
+// testing runs against a populated DB instead of an empty one.
+export function ddevImportSnapshotName(taskId: string): string {
+  return `haive-import-${taskId}`;
+}
+export function ddevMigratedSnapshotName(taskId: string): string {
+  return `haive-migrated-${taskId}`;
+}
+
 /** `ddev utility migrate-database <type>:<version>` — converts the existing DB to a
  *  new dbtype/dbversion IN PLACE (MySQL/MariaDB only; rejects Postgres). The original
  *  dump was consumed at 01c, so this — preceded by ddevSnapshot — is the only safe
@@ -253,7 +275,28 @@ export async function ensureDdevStarted(
   if (start.exitCode !== 0) {
     throw new Error(`ddev start failed: ${start.output.slice(-1500)}`);
   }
+  // Cold boot: the prior runner (and its nested DB) is gone — destroyed by the
+  // worker-boot reaper, a daemon/host restart, or task time elapsed — so the
+  // freshly-started DB is empty. A durability snapshot may survive on the repo
+  // volume; restore it so downstream verify/browser testing runs against a
+  // populated DB. No-op (and not an error) when none exists.
+  await restoreLatestSnapshot(handle, taskId);
   return handle;
+}
+
+/** Restore the most recent Haive durability snapshot after a cold boot: a
+ *  post-migration snapshot wins over the raw import. Both absent (first boot, or a
+ *  project with no imported DB) is the normal no-op case. Tolerant by design —
+ *  keyed only on exit codes, never on snapshot-list output formatting. */
+async function restoreLatestSnapshot(handle: DdevRunnerHandle, taskId: string): Promise<void> {
+  for (const name of [ddevMigratedSnapshotName(taskId), ddevImportSnapshotName(taskId)]) {
+    const res = await ddevSnapshotRestore(handle, name);
+    if (res.exitCode === 0) {
+      log.info({ taskId, snapshot: name }, 'restored DDEV DB snapshot after cold boot');
+      return;
+    }
+  }
+  log.info({ taskId }, 'no DDEV DB snapshot to restore (first boot or no imported DB)');
 }
 
 /** Run an arbitrary command inside the runner as the non-root `ddev` user (e.g.
