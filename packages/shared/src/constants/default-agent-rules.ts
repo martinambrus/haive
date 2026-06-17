@@ -124,3 +124,24 @@ The post-2.1.110 harness regression causes jump-to-conclusion behaviour: hypothe
 
 - Match the invariant, not the ephemeral value (forward compatibility). Before keying any logic on a value, classify it. Stable values are contracts that change only with notice: documented APIs, exit codes, schema fields, error types/classes, structural delimiters (newlines, separators, stream boundaries). Ephemeral values are cosmetic or version-bound and change silently: banners, decorative headers, log/branding prefixes (e.g. a ddev/Docker banner), version strings, timestamps, ANSI codes, the exact wording of human-facing messages. Never match, parse, slice, or branch on an ephemeral value — a fix that string-matches today's banner breaks the instant upstream rewords it, and it breaks silently (truncated/empty output) so it surfaces in production, not review. Instead: key on the stable invariant (split a banner from a message by the structural boundary — delimiter, blank line, stream, exit code, message object — not the banner's literal text); prefer "capture everything, exclude the known-stable part" over "capture the known-ephemeral part" (take the whole stderr stream rather than only the text after a known banner); and if you genuinely must depend on an ephemeral value, isolate it in one named constant marked volatile and fail loud rather than silent when it stops matching. Test before committing: if this tool reworded its banner, bumped its version, or changed its formatting tomorrow, would this code still be correct? If no, you matched the wrong thing — find the invariant.
 `;
+
+/**
+ * sha256 over the RUNTIME string of every DEFAULT_AGENT_RULES value ever shipped
+ * (the source literal contains escaped backticks, so hash the evaluated
+ * constant, not the raw file). A provider whose stored rulesContent matches one
+ * of these is an uncustomized verbatim copy of a default and inherits the live
+ * template via resolveEffectiveRules, so editing DEFAULT_AGENT_RULES above
+ * propagates to onboarded repos on their next upgrade.
+ *
+ * When you edit DEFAULT_AGENT_RULES: append the sha256 of the NEW value to this
+ * set. Existing provider copies of the OLD value already match (its hash is here
+ * from when it shipped), so they inherit the new text automatically; adding the
+ * new value's hash keeps providers created under it inheriting the *next* edit
+ * too. A provider stores a copy of whatever default was current at its creation,
+ * so every shipped default's hash must live here.
+ */
+export const KNOWN_DEFAULT_RULES_HASHES: ReadonlySet<string> = new Set([
+  '25441d9c27aa9c2304fe86d91518d1677e8090aeea5aa333f682904865dc231a', // per-CLI default (4c6351b)
+  '34092f7878ef9461fbe0ec4468ca0e90fcb472c65d989fa3ddda2a1489799302', // expanded default (04495d1)
+  '0cf013f7aa212445b94d38dde2f5efcb343b5a4d72e847cd47f75db6d1d73c47', // current: + match-the-invariant (0e3ae82)
+]);

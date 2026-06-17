@@ -331,12 +331,16 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
         const region = disk.content
           ? extractRegion(disk.content, CLI_RULES_START, CLI_RULES_END)
           : null;
-        diskContent = region;
-        diskHash = region ? sha256Hex(normalizeContent(region)) : null;
+        // Normalize so the on-disk region (extractRegion drops the trailing
+        // newline) and the rendered block (buildCliRulesBlock keeps one) compare
+        // and diff cleanly — otherwise the end marker churns in the UI diff.
+        diskContent = region ? normalizeContent(region) : null;
+        diskHash = diskContent ? sha256Hex(diskContent) : null;
       }
 
       const bucket = classifyEntry({ live, current, diskContent, diskHash });
-      const newContent = current?.content ?? null;
+      let newContent = current?.content ?? null;
+      if (isCliRules && newContent) newContent = normalizeContent(newContent);
       const baselineContent = live && current && diskHash === live.writtenHash ? diskContent : null;
       const delta = newContent ? computeLineDelta(diskContent ?? '', newContent) : null;
 

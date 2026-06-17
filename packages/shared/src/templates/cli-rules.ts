@@ -8,6 +8,12 @@
  * byte-identical output without the API importing worker code.
  */
 
+import {
+  DEFAULT_AGENT_RULES,
+  KNOWN_DEFAULT_RULES_HASHES,
+} from '../constants/default-agent-rules.js';
+import { sha256Hex } from './manifest.js';
+
 /** Opening marker of the cli-rules region inside AGENTS.md. */
 export const CLI_RULES_START = '<!-- haive:cli-rules -->';
 /** Closing marker of the cli-rules region inside AGENTS.md. */
@@ -59,20 +65,31 @@ export function buildCliRulesBlock(rulesContents: readonly string[]): string | n
   return `${CLI_RULES_START}\n${combined}${CLI_RULES_END}\n`;
 }
 
-/** Convenience over buildCliRulesBlock for the common call shape: keep the
- *  enabled providers with non-empty rules, sort by name so the block is
- *  deterministic regardless of DB row order, then build it. Shared by the
- *  onboarding/upgrade worker steps and the upgrade-status API so all sites
- *  compute the same block — and therefore the same drift hash. */
+/** Resolve a provider's stored rulesContent to the rules that actually go into
+ *  the AGENTS.md block. Empty, or a verbatim copy of any shipped default
+ *  (KNOWN_DEFAULT_RULES_HASHES), means the provider never overrode the rules, so
+ *  it inherits the live DEFAULT_AGENT_RULES — letting template edits propagate.
+ *  Anything else is an explicit override and is used as-is. */
+export function resolveEffectiveRules(rulesContent: string): string {
+  if (rulesContent.trim().length === 0) return DEFAULT_AGENT_RULES;
+  if (KNOWN_DEFAULT_RULES_HASHES.has(sha256Hex(rulesContent))) return DEFAULT_AGENT_RULES;
+  return rulesContent;
+}
+
+/** Convenience over buildCliRulesBlock for the common call shape: take every
+ *  enabled provider's effective rules (resolveEffectiveRules), sort by name so
+ *  the block is deterministic regardless of DB row order, then build it. Shared
+ *  by the onboarding/upgrade worker steps and the upgrade-status API so all
+ *  sites compute the same block — and therefore the same drift hash. */
 export function buildCliRulesBlockFromProviders(
   providers: ReadonlyArray<{ name: string; rulesContent: string; enabled: boolean }>,
 ): string | null {
   return buildCliRulesBlock(
     providers
-      .filter((p) => p.enabled && p.rulesContent.trim().length > 0)
+      .filter((p) => p.enabled)
       .slice()
       .sort((a, b) => a.name.localeCompare(b.name))
-      .map((p) => p.rulesContent),
+      .map((p) => resolveEffectiveRules(p.rulesContent)),
   );
 }
 

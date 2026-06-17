@@ -5,10 +5,12 @@ import {
   dedupLines,
   buildCliRulesBlock,
   buildCliRulesBlockFromProviders,
+  resolveEffectiveRules,
   extractRegion,
   upsertRegion,
 } from '../src/templates/cli-rules.js';
 import { normalizeContent, sha256Hex } from '../src/templates/manifest.js';
+import { DEFAULT_AGENT_RULES } from '../src/constants/default-agent-rules.js';
 
 const PI_START = '<!-- haive:project-info -->';
 const PI_END = '<!-- /haive:project-info -->';
@@ -51,6 +53,22 @@ describe('buildCliRulesBlock', () => {
   });
 });
 
+describe('resolveEffectiveRules', () => {
+  it('inherits the live default when rules are empty or whitespace', () => {
+    expect(resolveEffectiveRules('')).toBe(DEFAULT_AGENT_RULES);
+    expect(resolveEffectiveRules('   \n\t')).toBe(DEFAULT_AGENT_RULES);
+  });
+
+  it('inherits the live default for a verbatim copy of a shipped default', () => {
+    // DEFAULT_AGENT_RULES's own hash is in KNOWN_DEFAULT_RULES_HASHES.
+    expect(resolveEffectiveRules(DEFAULT_AGENT_RULES)).toBe(DEFAULT_AGENT_RULES);
+  });
+
+  it('keeps an explicit override as-is', () => {
+    expect(resolveEffectiveRules('- my custom rule')).toBe('- my custom rule');
+  });
+});
+
 describe('buildCliRulesBlockFromProviders', () => {
   const p = (name: string, rulesContent: string, enabled = true) => ({
     name,
@@ -58,13 +76,19 @@ describe('buildCliRulesBlockFromProviders', () => {
     enabled,
   });
 
-  it('excludes disabled providers and empty rules', () => {
+  it('an enabled provider with empty rules inherits the template', () => {
+    expect(buildCliRulesBlockFromProviders([p('codex', '')])).toBe(
+      buildCliRulesBlock([DEFAULT_AGENT_RULES]),
+    );
+  });
+
+  it('excludes disabled providers; merges overrides with inherited defaults', () => {
     const block = buildCliRulesBlockFromProviders([
-      p('claude-code', '- a'),
-      p('codex', '- b', false),
-      p('gemini', '   '),
+      p('claude-code', '- override'),
+      p('codex', '- ignored', false),
+      p('gemini', ''),
     ]);
-    expect(block).toBe(`${CLI_RULES_START}\n- a\n${CLI_RULES_END}\n`);
+    expect(block).toBe(buildCliRulesBlock(['- override', DEFAULT_AGENT_RULES]));
   });
 
   it('is deterministic regardless of provider row order (sorted by name)', () => {
@@ -75,9 +99,9 @@ describe('buildCliRulesBlockFromProviders', () => {
     expect(hash(forward!)).toBe(hash(reversed!));
   });
 
-  it('returns null when no provider contributes rules', () => {
+  it('returns null only when every provider is disabled', () => {
     expect(
-      buildCliRulesBlockFromProviders([p('claude-code', '', false), p('codex', '  ')]),
+      buildCliRulesBlockFromProviders([p('claude-code', '- a', false), p('codex', '', false)]),
     ).toBeNull();
   });
 });

@@ -8,6 +8,7 @@ import {
   CLI_RULES_START,
   CLI_RULES_END,
   getCliProviderMetadata,
+  resolveEffectiveRules,
 } from '@haive/shared';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { CliProviderName } from '../../../cli-adapters/types.js';
@@ -449,11 +450,13 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       .from(schema.cliProviders)
       .where(eq(schema.cliProviders.userId, ctx.userId));
     const cliProviders = providerRows
-      .filter((p) => p.enabled && p.rulesContent.trim().length > 0)
-      .map((p) => ({ name: p.name, rulesContent: p.rulesContent }))
+      .filter((p) => p.enabled)
+      .map((p) => ({ name: p.name, rulesContent: resolveEffectiveRules(p.rulesContent) }))
       // Sort by provider name so the merged cli-rules block (and its hash) is
       // deterministic regardless of cli_providers row order — required so the
-      // API's drift recompute matches the stored block byte-for-byte.
+      // API's drift recompute matches the stored block byte-for-byte. Each
+      // provider's effective rules inherit DEFAULT_AGENT_RULES unless it carries
+      // an explicit override, so template edits flow into onboarding output.
       .sort((a, b) => a.name.localeCompare(b.name));
 
     const rulesFiles = new Set<string>();
