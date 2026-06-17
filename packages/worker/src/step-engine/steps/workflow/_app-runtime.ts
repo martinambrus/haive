@@ -134,31 +134,7 @@ export async function ensureAppServing(ctx: AppRuntimeCtx): Promise<ServingRunti
   const spec = await classifyRuntime(ctx);
 
   if (spec.mode === 'ddev' && spec.repoSubpath) {
-    // A cold DDEV boot can take a minute or two (image build + container start).
-    // Stream the latest `ddev start` line plus an elapsed counter as progress so
-    // the step never looks frozen — the counter ticks even during DDEV's silent
-    // "waiting for containers" dots phase, which emits no lines.
-    const startedAt = Date.now();
-    let lastLine = 'starting containers…';
-    const heartbeat = ctx.emitProgress
-      ? setInterval(() => {
-          const secs = Math.round((Date.now() - startedAt) / 1000);
-          void ctx.emitProgress?.(
-            `Ensuring the DDEV environment is up… ${secs}s — ${lastLine}`.slice(0, 200),
-          );
-        }, 2500)
-      : null;
-    let handle: DdevRunnerHandle;
-    try {
-      handle = await ensureDdevStarted(ctx.taskId, spec.repoSubpath, {
-        onProgress: (line) => {
-          const clean = stripAnsi(line).trim();
-          if (clean) lastLine = clean.slice(0, 140);
-        },
-      });
-    } finally {
-      if (heartbeat) clearInterval(heartbeat);
-    }
+    const handle = await ensureDdevWithProgress(ctx, spec.repoSubpath);
     const url = (await ddevPrimaryUrl(handle)) ?? spec.knownUrl ?? 'http://localhost';
     return { mode: 'ddev', url, handle };
   }
@@ -187,4 +163,35 @@ export async function ensureAppServing(ctx: AppRuntimeCtx): Promise<ServingRunti
   }
 
   return { mode: 'none', url: null };
+}
+
+/** Boot/ensure the task's DDEV runner while streaming live progress to the step's
+ *  status line: the latest `ddev start` output line plus an elapsed counter that
+ *  ticks even through DDEV's silent "waiting for containers" dots phase, so a
+ *  ~2-minute cold boot never looks frozen. Shared by 01c-ddev-env, 07c-ddev-
+ *  reconcile, and ensureAppServing. Throws whatever ensureDdevStarted throws. */
+export async function ensureDdevWithProgress(
+  ctx: Pick<AppRuntimeCtx, 'taskId' | 'emitProgress'>,
+  repoSubpath: string,
+): Promise<DdevRunnerHandle> {
+  const startedAt = Date.now();
+  let lastLine = 'starting containers…';
+  const heartbeat = ctx.emitProgress
+    ? setInterval(() => {
+        const secs = Math.round((Date.now() - startedAt) / 1000);
+        void ctx.emitProgress?.(
+          `Ensuring the DDEV environment is up… ${secs}s — ${lastLine}`.slice(0, 200),
+        );
+      }, 2500)
+    : null;
+  try {
+    return await ensureDdevStarted(ctx.taskId, repoSubpath, {
+      onProgress: (line) => {
+        const clean = stripAnsi(line).trim();
+        if (clean) lastLine = clean.slice(0, 140);
+      },
+    });
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
+  }
 }

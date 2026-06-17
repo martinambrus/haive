@@ -8,12 +8,12 @@ import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
 import type { DdevBaseline, DdevEnvApply } from './01c-ddev-env.js';
 import {
-  ensureDdevStarted,
   runnerExec,
   ddevRestart,
   ddevSnapshot,
   ddevMigrateDatabase,
 } from '../../../sandbox/ddev-runner.js';
+import { ensureDdevWithProgress } from './_app-runtime.js';
 
 // Reconciles the per-task DDEV runtime with the post-implementation
 // `.ddev/config.yaml`. 01c-ddev-env booted DDEV ONCE early on the pre-change
@@ -233,7 +233,7 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
     // still up (preserving the imported DB), else re-boots the runner + `ddev start`
     // on the current .ddev/config.yaml. For the restart path that fresh start already
     // applies the new config, so the `ddevRestart` below becomes an idempotent re-apply.
-    const handle = await ensureDdevStarted(ctx.taskId, repoSubpath);
+    const handle = await ensureDdevWithProgress(ctx, repoSubpath);
 
     // --- DB migration path (MySQL/MariaDB version or type change) ---
     if (drift.kind === 'db-migrate' && drift.migrateTarget) {

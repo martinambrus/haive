@@ -11,12 +11,8 @@ import { pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseDdevConfig, renderDdevConfig } from '../_ddev-config.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
-import {
-  ensureDdevStarted,
-  ddevExec,
-  ddevSnapshot,
-  ddevImportSnapshotName,
-} from '../../../sandbox/ddev-runner.js';
+import { ddevExec, ddevSnapshot, ddevImportSnapshotName } from '../../../sandbox/ddev-runner.js';
+import { ensureDdevWithProgress } from './_app-runtime.js';
 
 // Boots the project's DDEV environment in a per-task nested-Docker runner and
 // imports the uploaded DB dump (then deletes it). Gated on the repo actually
@@ -282,7 +278,7 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
     }
 
     await ctx.emitProgress('Starting DDEV environment (nested Docker)…');
-    const handle = await ensureDdevStarted(ctx.taskId, d.repoSubpath);
+    const handle = await ensureDdevWithProgress(ctx, d.repoSubpath);
 
     let imported = false;
     if (d.dumpRunnerPath && d.dbUploadId) {
