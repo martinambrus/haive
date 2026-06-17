@@ -4,6 +4,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { parseCorrectorOutput } from './05-phase-0b5-spec-quality.js';
+import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 
 // The spec-quality (05) amended spec is written here so the user can hand-edit
 // it in the Terminal tab (the workspace mounts at ctx.sandboxWorkdir, RW for
@@ -34,6 +35,10 @@ interface ResolveWarningsDetect {
   spec: string;
   /** In-terminal path of the editable spec file. */
   specFilePath: string;
+  /** True on a spec revise round (gate-1 rejected the prior spec, not yet
+   *  re-approved). The form auto-submits ("continue as-is") then, advancing the
+   *  re-drafted spec straight to the gate-1 re-review instead of re-gating here. */
+  revising: boolean;
 }
 
 interface ResolveWarningsApply {
@@ -116,6 +121,7 @@ export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, Reso
         errorCount: findings.filter((f) => f.severity === 'error').length,
         spec,
         specFilePath: `${ctx.sandboxWorkdir}/${SPEC_REVIEW_REL}`,
+        revising: (await loadOutstandingSpecFeedback(ctx)).length > 0,
       };
     },
 
@@ -158,6 +164,11 @@ export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, Reso
           },
         ],
         submitLabel: 'Continue',
+        // On a spec revise (gate-1 rejected the prior spec), auto-submit the default
+        // "continue as-is" so the re-drafted + re-reviewed spec advances straight to the
+        // gate-1 re-review. First pass (no outstanding rejection) gates so the user can
+        // hand-edit or agent-fix the remaining findings.
+        autoSubmit: detected.revising ? true : undefined,
       };
     },
 

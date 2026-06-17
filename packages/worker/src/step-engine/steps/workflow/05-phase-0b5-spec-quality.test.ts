@@ -174,3 +174,19 @@ describe('REVIEW prompt hardening', () => {
     expect(prompt).toContain('YAML');
   });
 });
+
+describe('05 form auto-submit on a spec revise', () => {
+  const base = { specSummary: '', spec: 'SPEC', specLength: 4, currentBudget: 5 };
+
+  it('auto-submits when revising, carrying the durable budget default', () => {
+    const schema = phase0b5SpecQualityStep.form!(ctx, { ...base, revising: true })!;
+    expect(schema.autoSubmit).toBe(true);
+    const budget = schema.fields.find((f) => f.id === 'maxIterations') as { default?: string };
+    expect(budget.default).toBe('5');
+  });
+
+  it('gates on the first pass (no outstanding spec rejection)', () => {
+    const schema = phase0b5SpecQualityStep.form!(ctx, { ...base, revising: false })!;
+    expect(schema.autoSubmit).toBeUndefined();
+  });
+});

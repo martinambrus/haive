@@ -4,6 +4,7 @@ import { STEP_CLI_ROLES, type FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { extractFencedJson } from '../_fenced-json.js';
+import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 
 interface SpecQualityDetect {
   specSummary: string;
@@ -13,6 +14,10 @@ interface SpecQualityDetect {
    *  tasks.step_loop_limits at detect time so retries reflect whatever
    *  budget the user previously chose for the task. */
   currentBudget: number;
+  /** True on a spec revise round (gate-1 rejected the prior spec, not yet
+   *  re-approved). The form auto-submits then, re-running the quality review with
+   *  the already-chosen budget + reviewer/corrector CLIs instead of re-gating. */
+  revising: boolean;
 }
 
 // Budget is counted in ROUNDS; each round is 2 LLM passes (1 review + 1 correct),
@@ -419,6 +424,7 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
       spec,
       specLength: spec.length,
       currentBudget,
+      revising: (await loadOutstandingSpecFeedback(ctx)).length > 0,
     };
   },
 
@@ -461,6 +467,11 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
         },
       ],
       submitLabel: 'Review spec',
+      // On a spec revise (gate-1 rejected the prior spec), auto-submit so the quality
+      // review re-runs hands-free with the budget + reviewer/corrector CLIs already
+      // chosen — the revise advances toward the gate-1 re-review instead of re-gating
+      // here. First pass (no outstanding rejection) gates normally so the user picks.
+      autoSubmit: detected.revising ? true : undefined,
     };
   },
 
