@@ -1,13 +1,6 @@
-import path from 'node:path';
-import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
-import { resolveDdevWorkspace } from './_task-meta.js';
-import { parseConfigRecommendation, markRecommended } from './_gate1-recommendation.js';
-import { buildBrowserModeOptions } from './_browser-modes.js';
-import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { recordSpecDecision } from './_spec-feedback.js';
 
 interface SpecGateDetect {
@@ -23,42 +16,11 @@ interface SpecGateDetect {
   qualityFindings: string[];
   iterationHistory: string[];
   exhaustedBudget: boolean;
-  /** Whether the workspace has a .ddev config — gates the mcp/interactive
-   *  browser-verification options (same probe 08a uses at its own detect). */
-  ddevMode: boolean;
-  /** Non-DDEV containerized runtime (env-replicate app-runner with browser
-   *  testing) — also offers mcp/interactive. Best-effort at gate-1 (the env image
-   *  is ready before implementation); 08a re-checks authoritatively at its detect. */
-  appRunnerMode: boolean;
-  /** Current task-level run-config columns, used as form defaults so an
-   *  API-set value survives into the gate-1 picker. */
-  taskSimplifyCode: boolean;
-  taskAdversarialQaLevel: string | null;
-}
-
-/** Gate-1 "run configuration": the front-loaded answers for the hands-free
- *  stretch to gate 2 (browser/MCP mode, test action, verify slots, sprint
- *  mode). Recorded in the step output and written to tasks.pre_answers. */
-interface SpecGateRunConfig {
-  adversarialQaLevel: string;
-  simplifyCode: boolean;
-  sprintDecision: string;
-  sprintAutoResolveConflicts: boolean;
-  sprintReviewEnabled: boolean;
-  verifyRunTest: boolean;
-  verifyRunLint: boolean;
-  verifyRunTypecheck: boolean;
-  browserMode: string;
-  browserCheckConsoleErrors: boolean;
-  browserCheckNetworkErrors: boolean;
-  testAction: string;
-  testRunTests: boolean;
 }
 
 interface SpecGateApply {
   decision: 'approve' | 'reject';
   feedback: string;
-  runConfig: SpecGateRunConfig | null;
 }
 
 interface PrePlanningOutput {
@@ -222,34 +184,9 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     const iterations = (quality?.iterations ?? []) as IterationEntry[];
     const exhaustedBudget = iterations.some((entry) => entry.exhaustedBudget === true);
 
-    // ddev probe mirrors 08a's detect (01c's own output is unreliable when its
-    // shouldRun skipped the step). Determines whether the mcp/interactive
-    // browser options are offered in the run-config section.
-    const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-    const ddevMode =
-      ws !== null && (await pathExists(path.join(ws.workspace, '.ddev', 'config.yaml')));
-    // Best-effort app-runner detection: a ready env image with browser testing means
-    // 08a will run mcp/interactive INSIDE the app-runner. 08a is authoritative.
-    let appRunnerMode = false;
-    if (!ddevMode) {
-      const envTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
-      const deps = (envTemplate?.declaredDeps as Record<string, unknown> | null) ?? null;
-      appRunnerMode = Boolean(
-        envTemplate?.status === 'ready' && deps?.browserTesting && envTemplate.imageTag,
-      );
-    }
-    const taskRow = await ctx.db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, ctx.taskId),
-      columns: { simplifyCode: true, adversarialQaLevel: true },
-    });
-
     return {
       specBody,
       specSummary: buildSpecSummary(specBody),
-      ddevMode,
-      appRunnerMode,
-      taskSimplifyCode: taskRow?.simplifyCode ?? false,
-      taskAdversarialQaLevel: taskRow?.adversarialQaLevel ?? null,
       qualityScore: typeof qualityOutput.score === 'number' ? qualityOutput.score : null,
       qualityVerdict: typeof qualityOutput.verdict === 'string' ? qualityOutput.verdict : null,
       qualityFindings: Array.isArray(qualityOutput.findings)
@@ -262,72 +199,7 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     };
   },
 
-  // Best-effort recommendation: read the final spec and suggest the QA level +
-  // browser mode. optional:true so a failed/absent provider never blocks the gate
-  // (form() degrades to static defaults). Runs before the form so form() can mark
-  // the recommended option.
-  llm: {
-    requiredCapabilities: ['tool_use'],
-    optional: true,
-    preForm: true,
-    timeoutMs: 5 * 60 * 1000,
-    skipIf: (args) => (args.detected as SpecGateDetect).specBody.trim().length === 0,
-    buildPrompt: (args) => {
-      const d = args.detected as SpecGateDetect;
-      const browserChoices = d.ddevMode || d.appRunnerMode ? 'mcp | interactive | skip' : 'skip';
-      return [
-        'Recommend the most appropriate post-implementation verification settings for the coding',
-        'task described by the specification below. You are ONLY recommending — do not implement.',
-        '',
-        'Choose:',
-        '1. adversarialQaLevel — how much adversarial QA (independent agents attacking the change):',
-        '   - "none": trivial / very low risk (docs, copy, a config tweak).',
-        '   - "poc": small, localized change.',
-        '   - "standard": a typical feature touching app logic, data, or user-facing flows.',
-        '   - "enterprise": security/auth/permissions, money or data integrity, or broad blast radius.',
-        `2. browserMode — how to verify in a browser (available: ${browserChoices}):`,
-        '   - "mcp": UI/frontend change worth automated agent testing in a real browser.',
-        '   - "interactive": UI change a human should click through.',
-        '   - "skip": no runnable UI (library/CLI/backend), or no runtime to test against.',
-        '   NEVER pick a value outside the available list above.',
-        '',
-        '=== Specification ===',
-        d.specBody.slice(0, 12000) || '(none)',
-        '',
-        'Emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
-        '{ "adversarialQaLevel": "none|poc|standard|enterprise", "browserMode": "<one available>", "rationale": "<one short line>" }',
-      ].join('\n');
-    },
-    bypassStub: () => ({
-      adversarialQaLevel: 'standard',
-      browserMode: 'skip',
-      rationale: 'bypass stub',
-    }),
-  },
-
-  form(_ctx, detected, llmOutput): FormSchema {
-    // Best-effort LLM recommendation (null when the recommend phase was skipped,
-    // failed, or returned garbage). Mark the recommended option + use it as the
-    // default; otherwise keep the static defaults.
-    const rec = parseConfigRecommendation(llmOutput);
-    const qa = markRecommended(
-      [
-        { value: 'none', label: 'Skip adversarial QA' },
-        { value: 'poc', label: 'POC — 2 agents (quick)' },
-        { value: 'standard', label: 'Standard — 4 agents' },
-        { value: 'enterprise', label: 'Enterprise — 6 agents' },
-      ],
-      rec.adversarialQaLevel,
-      detected.taskAdversarialQaLevel ?? 'none',
-    );
-    const browser = markRecommended(
-      buildBrowserModeOptions({
-        ddevMode: detected.ddevMode,
-        appRunnerMode: detected.appRunnerMode,
-      }),
-      rec.browserMode,
-      detected.ddevMode || detected.appRunnerMode ? 'mcp' : 'skip',
-    );
+  form(_ctx, detected): FormSchema {
     const summaryBody = buildSummarySection(detected);
     const fullSpecBody =
       detected.specBody.trim().length > 0
@@ -380,129 +252,6 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
           label: 'Feedback for the implementation phase',
           rows: 4,
         },
-        {
-          type: 'note',
-          id: 'runConfigNote',
-          label: 'Run configuration',
-          variant: 'warning',
-          body:
-            'Fill in the Run configuration below before continuing — these answers for the ' +
-            'implementation and verification steps let them run hands-free in auto-continue mode ' +
-            '(and arrive pre-filled otherwise). Applied from approval until Gate 2 (developer ' +
-            'verification).',
-        },
-        {
-          type: 'accordion',
-          id: 'runConfig',
-          label: 'Run configuration — used until Gate 2',
-          items: [
-            {
-              title: 'Run configuration',
-              fields: [
-                {
-                  type: 'select',
-                  id: 'adversarialQaLevel',
-                  label: 'Adversarial QA (Phase 7)',
-                  description: '2/4/6 adversarial agents attack the implementation before Gate 2.',
-                  options: qa.options,
-                  default: qa.default,
-                },
-                {
-                  type: 'checkbox',
-                  id: 'simplifyCode',
-                  label: 'AI code simplification pass after implementation (Phase 3.5)',
-                  default: true,
-                },
-                {
-                  type: 'radio',
-                  id: 'sprintDecision',
-                  label: 'Implementation mode',
-                  options: [
-                    {
-                      value: 'proceed',
-                      label: 'Follow the sprint plan (parallel DAG when planned)',
-                    },
-                    {
-                      value: 'use_single_agent',
-                      label: 'Always use a single implementation agent',
-                    },
-                  ],
-                  default: 'proceed',
-                },
-                {
-                  type: 'checkbox',
-                  id: 'sprintAutoResolveConflicts',
-                  label: 'Auto-resolve merge conflicts with AI (DAG mode)',
-                  default: true,
-                },
-                {
-                  type: 'checkbox',
-                  id: 'sprintReviewEnabled',
-                  label: 'AI-review each issue before merge (DAG mode)',
-                  default: true,
-                },
-                {
-                  type: 'checkbox',
-                  id: 'verifyRunTest',
-                  label: 'Verify: run tests',
-                  default: true,
-                },
-                {
-                  type: 'checkbox',
-                  id: 'verifyRunLint',
-                  label: 'Verify: run lint',
-                  default: true,
-                },
-                {
-                  type: 'checkbox',
-                  id: 'verifyRunTypecheck',
-                  label: 'Verify: run typecheck',
-                  default: true,
-                },
-                {
-                  type: 'radio',
-                  id: 'browserMode',
-                  label: 'Browser verification',
-                  options: browser.options,
-                  default: browser.default,
-                },
-                {
-                  type: 'checkbox',
-                  id: 'browserCheckConsoleErrors',
-                  label: 'Browser: check for console errors',
-                  default: true,
-                  visibleWhen: { field: 'browserMode', notEquals: 'skip' },
-                },
-                {
-                  type: 'checkbox',
-                  id: 'browserCheckNetworkErrors',
-                  label: 'Browser: check for failed network requests',
-                  default: true,
-                  visibleWhen: { field: 'browserMode', notEquals: 'skip' },
-                },
-                {
-                  type: 'radio',
-                  id: 'testAction',
-                  label: 'Test management',
-                  options: [
-                    {
-                      value: 'manage',
-                      label: 'Find, update, write & delete tests as needed for this change',
-                    },
-                    { value: 'skip', label: 'No test changes needed' },
-                  ],
-                  default: 'manage',
-                },
-                {
-                  type: 'checkbox',
-                  id: 'testRunTests',
-                  label: 'Run the related tests after test changes',
-                  default: true,
-                },
-              ],
-            },
-          ],
-        },
       ],
       submitLabel: 'Record decision',
     };
@@ -532,76 +281,12 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
       // auto-submit its re-draft — no manual Re-run.
       await recordSpecDecision(ctx, 'reject', feedback);
       ctx.logger.info('spec rejected; re-drafting with feedback');
-      return { decision, feedback, runConfig: null };
+      return { decision, feedback };
     }
 
-    const str = (v: unknown, fallback: string): string => (typeof v === 'string' ? v : fallback);
-    const bool = (v: unknown, fallback: boolean): boolean =>
-      typeof v === 'boolean' ? v : fallback;
-    const runConfig: SpecGateRunConfig = {
-      adversarialQaLevel: str(values.adversarialQaLevel, 'none'),
-      simplifyCode: bool(values.simplifyCode, true),
-      sprintDecision: str(values.sprintDecision, 'proceed'),
-      sprintAutoResolveConflicts: bool(values.sprintAutoResolveConflicts, true),
-      sprintReviewEnabled: bool(values.sprintReviewEnabled, true),
-      verifyRunTest: bool(values.verifyRunTest, true),
-      verifyRunLint: bool(values.verifyRunLint, true),
-      verifyRunTypecheck: bool(values.verifyRunTypecheck, true),
-      browserMode: str(values.browserMode, 'skip'),
-      browserCheckConsoleErrors: bool(values.browserCheckConsoleErrors, true),
-      browserCheckNetworkErrors: bool(values.browserCheckNetworkErrors, true),
-      testAction: str(values.testAction, 'manage'),
-      testRunTests: bool(values.testRunTests, true),
-    };
-
-    // Map run-config answers to the downstream steps' exact field ids. The
-    // runner auto-submits these in auto-continue mode and pre-fills the forms
-    // otherwise. 06a/07 get fixed empty entries so their optional-only forms
-    // auto-pass (detect-time defaults win); 08e gets an explicit empty
-    // selection so the optional-insights triage never blocks the run.
-    const preAnswers: Record<string, Record<string, unknown>> = {
-      '06a-db-migrate': {},
-      '06b-sprint-planning': {
-        decision: runConfig.sprintDecision,
-        autoResolveConflicts: runConfig.sprintAutoResolveConflicts,
-        reviewEnabled: runConfig.sprintReviewEnabled,
-      },
-      '07-phase-2-implement': {},
-      '08-phase-5-verify': {
-        runTest: runConfig.verifyRunTest,
-        runLint: runConfig.verifyRunLint,
-        runTypecheck: runConfig.verifyRunTypecheck,
-      },
-      '08a-browser-verify': {
-        mode: runConfig.browserMode,
-        checkConsoleErrors: runConfig.browserCheckConsoleErrors,
-        checkNetworkErrors: runConfig.browserCheckNetworkErrors,
-      },
-      '08b-test-management': {
-        action: runConfig.testAction,
-        runTests: runConfig.testRunTests,
-      },
-      '08e-insights-triage': { selectedInsights: [] },
-    };
-
-    await ctx.db
-      .update(schema.tasks)
-      .set({
-        simplifyCode: runConfig.simplifyCode,
-        adversarialQaLevel:
-          runConfig.adversarialQaLevel !== 'none' ? runConfig.adversarialQaLevel : null,
-        preAnswers,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.tasks.id, ctx.taskId));
-    ctx.logger.info({ runConfig }, 'run configuration recorded for the hands-free stretch');
-
+    // Approve: the run configuration is collected by the next step (06-run-config).
     // Clears any outstanding spec rejection so a later, unrelated re-draft starts clean.
     await recordSpecDecision(ctx, 'approve', feedback);
-    return {
-      decision,
-      feedback,
-      runConfig,
-    };
+    return { decision, feedback };
   },
 };

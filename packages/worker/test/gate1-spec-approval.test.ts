@@ -97,7 +97,7 @@ describe('buildSpecSummary', () => {
   });
 });
 
-function detectedStub(ddevMode: boolean) {
+function detectedStub() {
   return {
     specBody: '# Spec',
     specSummary: '# Spec',
@@ -106,40 +106,15 @@ function detectedStub(ddevMode: boolean) {
     qualityFindings: [],
     iterationHistory: [],
     exhaustedBudget: false,
-    ddevMode,
-    taskSimplifyCode: false,
-    taskAdversarialQaLevel: null,
   };
-}
-
-function leafFields(schema: FormSchema): Map<string, Record<string, unknown>> {
-  const map = new Map<string, Record<string, unknown>>();
-  for (const field of schema.fields) {
-    if (field.type === 'accordion') {
-      for (const item of field.items) {
-        for (const leaf of item.fields) map.set(leaf.id, leaf as Record<string, unknown>);
-      }
-    } else {
-      map.set(field.id, field as Record<string, unknown>);
-    }
-  }
-  return map;
 }
 
 function makeApplyCtx(): {
   ctx: StepContext;
-  sets: Record<string, unknown>[];
   events: { eventType: string; payload: { feedback?: string } }[];
 } {
-  const sets: Record<string, unknown>[] = [];
   const events: { eventType: string; payload: { feedback?: string } }[] = [];
   const db = {
-    update: () => ({
-      set: (v: Record<string, unknown>) => {
-        sets.push(v);
-        return { where: async () => undefined };
-      },
-    }),
     insert: () => ({
       values: async (row: { eventType: string; payload: { feedback?: string } }) => {
         events.push({ eventType: row.eventType, payload: row.payload });
@@ -161,122 +136,56 @@ function makeApplyCtx(): {
     emitProgress: async () => undefined,
     throwIfCancelled: noop,
   } as unknown as StepContext;
-  return { ctx, sets, events };
+  return { ctx, events };
 }
 
 function applyArgs(formValues: Record<string, unknown>) {
   return {
-    detected: detectedStub(false),
+    detected: detectedStub(),
     formValues,
     iteration: 0,
     previousIterations: [],
   } as never;
 }
 
-describe('gate-1 run configuration', () => {
-  it('offers mcp/interactive browser modes only in ddev mode', () => {
-    const withDdev = gate1SpecApprovalStep.form!(
-      makeApplyCtx().ctx,
-      detectedStub(true),
-    ) as FormSchema;
-    const without = gate1SpecApprovalStep.form!(
-      makeApplyCtx().ctx,
-      detectedStub(false),
-    ) as FormSchema;
-    const modeWith = leafFields(withDdev).get('browserMode') as { options: { value: string }[] };
-    const modeWithout = leafFields(without).get('browserMode') as { options: { value: string }[] };
-    expect(modeWith.options.map((o) => o.value)).toContain('mcp');
-    expect(modeWith.options.map((o) => o.value)).toContain('interactive');
-    expect(modeWithout.options.map((o) => o.value)).not.toContain('mcp');
-    expect(modeWithout.options.map((o) => o.value)).not.toContain('interactive');
-  });
-
-  it('maps run-config answers to the downstream step field ids on approve', async () => {
-    const { ctx, sets } = makeApplyCtx();
-    const output = await gate1SpecApprovalStep.apply(
-      ctx,
-      applyArgs({
-        decision: 'approve',
-        feedback: 'ok',
-        adversarialQaLevel: 'poc',
-        simplifyCode: false,
-        sprintDecision: 'use_single_agent',
-        sprintAutoResolveConflicts: true,
-        sprintReviewEnabled: false,
-        verifyRunTest: false,
-        verifyRunLint: true,
-        verifyRunTypecheck: true,
-        browserMode: 'mcp',
-        browserCheckConsoleErrors: false,
-        browserCheckNetworkErrors: true,
-        testAction: 'manage',
-        testRunTests: false,
-      }),
-    );
-    expect(sets).toHaveLength(1);
-    const patch = sets[0]!;
-    expect(patch.simplifyCode).toBe(false);
-    expect(patch.adversarialQaLevel).toBe('poc');
-    const pre = patch.preAnswers as Record<string, Record<string, unknown>>;
-    expect(pre['06a-db-migrate']).toEqual({});
-    expect(pre['07-phase-2-implement']).toEqual({});
-    expect(pre['06b-sprint-planning']).toEqual({
-      decision: 'use_single_agent',
-      autoResolveConflicts: true,
-      reviewEnabled: false,
-    });
-    expect(pre['08-phase-5-verify']).toEqual({
-      runTest: false,
-      runLint: true,
-      runTypecheck: true,
-    });
-    expect(pre['08a-browser-verify']).toEqual({
-      mode: 'mcp',
-      checkConsoleErrors: false,
-      checkNetworkErrors: true,
-    });
-    expect(pre['08b-test-management']).toEqual({ action: 'manage', runTests: false });
-    expect(pre['08e-insights-triage']).toEqual({ selectedInsights: [] });
-    expect((output as { runConfig: { browserMode: string } }).runConfig.browserMode).toBe('mcp');
-  });
-
-  it("writes adversarialQaLevel null when 'none' is selected", async () => {
-    const { ctx, sets } = makeApplyCtx();
-    await gate1SpecApprovalStep.apply(
-      ctx,
-      applyArgs({ decision: 'approve', adversarialQaLevel: 'none' }),
-    );
-    expect(sets[0]!.adversarialQaLevel).toBeNull();
-  });
-
-  it('rejecting records feedback, writes no run config, and returns reject (no throw)', async () => {
-    const { ctx, sets, events } = makeApplyCtx();
+describe('gate-1 spec approval (run config now lives in 06-run-config)', () => {
+  it('rejecting records feedback and returns reject without throwing', async () => {
+    const { ctx, events } = makeApplyCtx();
     const out = (await gate1SpecApprovalStep.apply(
       ctx,
       applyArgs({ decision: 'reject', feedback: 'redo' }),
-    )) as { decision: string; feedback: string; runConfig: unknown };
+    )) as { decision: string; feedback: string };
     expect(out.decision).toBe('reject');
     expect(out.feedback).toBe('redo');
-    expect(out.runConfig).toBeNull();
-    expect(sets).toHaveLength(0); // no tasks run-config update on reject
     expect(events[0]?.eventType).toBe('spec.rejected');
     expect(events[0]?.payload?.feedback).toBe('redo');
   });
 
   it('reviseLoop routes a reject back to the spec generator (04) and finalizes an approve', () => {
     const hook = gate1SpecApprovalStep.reviseLoop!;
-    expect(hook.evaluate({ decision: 'reject', feedback: '', runConfig: null })).toEqual({
+    expect(hook.evaluate({ decision: 'reject', feedback: '' })).toEqual({
       targetStepId: '04-phase-0b-pre-planning',
     });
-    expect(hook.evaluate({ decision: 'approve', feedback: '', runConfig: null })).toBeNull();
+    expect(hook.evaluate({ decision: 'approve', feedback: '' })).toBeNull();
   });
 
-  it('approving records a spec.approved event so a later re-draft starts clean', async () => {
+  it('approving records a spec.approved event and returns approve (no task writes here)', async () => {
     const { ctx, events } = makeApplyCtx();
-    await gate1SpecApprovalStep.apply(
+    const out = (await gate1SpecApprovalStep.apply(
       ctx,
-      applyArgs({ decision: 'approve', adversarialQaLevel: 'none' }),
-    );
+      applyArgs({ decision: 'approve', feedback: 'looks good' }),
+    )) as { decision: string; feedback: string };
+    expect(out.decision).toBe('approve');
+    expect(out.feedback).toBe('looks good');
     expect(events.map((e) => e.eventType)).toContain('spec.approved');
+  });
+
+  it('form shows the approve/reject decision + feedback, not the run config', () => {
+    const schema = gate1SpecApprovalStep.form!(makeApplyCtx().ctx, detectedStub()) as FormSchema;
+    const ids = schema.fields.map((f) => f.id);
+    expect(ids).toContain('decision');
+    expect(ids).toContain('feedback');
+    expect(ids).not.toContain('runConfig');
+    expect(ids).not.toContain('runConfigNote');
   });
 });

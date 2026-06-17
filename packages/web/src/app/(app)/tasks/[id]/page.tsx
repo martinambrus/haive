@@ -1420,7 +1420,7 @@ function StepCard({
           {showAutoContinue && (
             <label
               className="ml-auto flex cursor-pointer items-center gap-1.5 text-xs text-neutral-300"
-              title="Auto-submit info-only steps and the Gate 1 run configuration so the workflow runs hands-free between gates. Untick to confirm every step with a Continue button. Task-wide; applies from the next step decision."
+              title="Auto-submit info-only and pre-configured steps so the workflow runs hands-free between the decision gates. Untick to confirm every step with a Continue button. Task-wide; applies from the next step decision."
             >
               <input
                 type="checkbox"

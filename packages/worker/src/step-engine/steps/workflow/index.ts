@@ -11,6 +11,7 @@ import { phase0bPrePlanningStep } from './04-phase-0b-pre-planning.js';
 import { phase0b5SpecQualityStep } from './05-phase-0b5-spec-quality.js';
 import { resolveSpecWarningsStep } from './05a-resolve-spec-warnings.js';
 import { gate1SpecApprovalStep } from './06-gate-1-spec-approval.js';
+import { runConfigStep } from './06-run-config.js';
 import { dbMigrateStep } from './06a-db-migrate.js';
 import { sprintPlanningStep } from './06b-sprint-planning.js';
 import { dagExecuteStep } from './06c-dag-execute.js';
@@ -43,6 +44,7 @@ export {
   phase0b5SpecQualityStep,
   resolveSpecWarningsStep,
   gate1SpecApprovalStep,
+  runConfigStep,
   dbMigrateStep,
   sprintPlanningStep,
   dagExecuteStep,
@@ -76,6 +78,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(phase0b5SpecQualityStep);
   registry.register(resolveSpecWarningsStep);
   registry.register(gate1SpecApprovalStep);
+  registry.register(runConfigStep);
   registry.register(dbMigrateStep);
   registry.register(sprintPlanningStep);
   registry.register(dagExecuteStep);
