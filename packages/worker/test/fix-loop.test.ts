@@ -18,6 +18,9 @@ interface MockState {
   taskStepRow: Record<string, unknown>;
   inserts: { table: string; row: Record<string, unknown> }[];
   updates: Record<string, unknown>[];
+  /** When true, task_events queries return a row — models a fix_loop.accepted event
+   *  so isFixLoopSuppressed() reports the loop as stood down. */
+  suppressed?: boolean;
 }
 
 function tableNameOf(table: unknown): string {
@@ -38,7 +41,12 @@ function makeMockDb(state: MockState): Database {
     select: () => ({
       from: (table: unknown) => {
         const name = tableNameOf(table);
-        const rows = name === 'task_steps' && state.taskStepRow.id ? [state.taskStepRow] : [];
+        const rows =
+          name === 'task_steps' && state.taskStepRow.id
+            ? [state.taskStepRow]
+            : name === 'task_events' && state.suppressed
+              ? [{ id: 'evt-accepted' }]
+              : [];
         return {
           where: () => ({
             limit: async () => rows,
@@ -167,6 +175,14 @@ describe('fix-loop engine', () => {
       expect(result.sourceStepId).toBe('test-fixloop-err');
       expect(result.row.round).toBe(2);
     }
+  });
+
+  it('does NOT loop_back once the user accepted remaining issues (suppressed)', async () => {
+    // A fix_loop.accepted event is present → the escalation-gate "accept" stood the loop
+    // down, so a blocking downstream step now finalizes (done) instead of routing back.
+    const state: MockState = { taskStepRow: {}, inserts: [], updates: [], suppressed: true };
+    const result = await advanceStep(params(makeMockDb(state), fixLoopStep(true), 3));
+    expect(result.status).toBe('done');
   });
 });
 
