@@ -599,48 +599,63 @@ export default function TaskDetailPage() {
               No steps recorded yet. The task worker will populate them once it starts.
             </div>
           )}
-          {steps.map((step) => (
-            <div key={step.id} data-step-id={step.stepId}>
-              {/* currentStep: the step the run is parked on — auto-continue is
+          {steps.map((step, i) => {
+            // Fix-loop rounds: the same stepId recurs once per round (round 0 = the
+            // original pass). Mark the start of each round > 0 group with a header.
+            const showLoopHeader =
+              step.round > 0 && (i === 0 || steps[i - 1]!.round !== step.round);
+            return (
+              <div key={step.id} data-step-id={step.stepId}>
+                {showLoopHeader && (
+                  <div className="mb-2 mt-5 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-amber-400/80">
+                    <span className="h-px flex-1 bg-amber-400/20" />
+                    Fix loop #{step.round}
+                    <span className="h-px flex-1 bg-amber-400/20" />
+                  </div>
+                )}
+                {/* currentStep: the step the run is parked on — auto-continue is
                   only offered there; passed steps can't be auto-continued. */}
-              <StepCard
-                step={step}
-                taskId={task.id}
-                taskStatus={task.status}
-                taskCompletedAt={task.completedAt}
-                taskRepositoryId={task.repositoryId}
-                userActiveDisplayMs={
-                  userActive.activeStepId === step.stepId ? userActive.displayMs : step.userActiveMs
-                }
-                submitting={submitting === step.stepId}
-                submitError={submitting === step.stepId ? submitError : null}
-                onSubmit={(values) => submitStep(step, values)}
-                actionBusy={stepActionBusy === step.stepId}
-                actionError={
-                  stepActionError?.stepId === step.stepId ? stepActionError.message : null
-                }
-                onAction={(action) => runStepAction(step, action)}
-                onRetryStep={async (sid) => {
-                  const target = steps.find((s) => s.stepId === sid);
-                  if (target) await runStepAction(target, 'retry');
-                }}
-                onCliLogin={() => openCliLoginForStep(step)}
-                providers={providers}
-                taskCliProviderId={task.cliProviderId ?? null}
-                cliBusy={stepProviderBusy === step.stepId}
-                cliError={
-                  stepProviderError?.stepId === step.stepId ? stepProviderError.message : null
-                }
-                onChangeCli={(cliProviderId, role) =>
-                  changeStepProvider(step.stepId, cliProviderId, role)
-                }
-                autoContinue={task.autoContinue}
-                autoContinueBusy={autoContinueBusy}
-                showAutoContinue={step.id === currentStep?.id}
-                onToggleAutoContinue={() => void toggleAutoContinue()}
-              />
-            </div>
-          ))}
+                <StepCard
+                  step={step}
+                  taskId={task.id}
+                  taskStatus={task.status}
+                  taskCompletedAt={task.completedAt}
+                  taskRepositoryId={task.repositoryId}
+                  userActiveDisplayMs={
+                    userActive.activeStepId === step.stepId
+                      ? userActive.displayMs
+                      : step.userActiveMs
+                  }
+                  submitting={submitting === step.stepId}
+                  submitError={submitting === step.stepId ? submitError : null}
+                  onSubmit={(values) => submitStep(step, values)}
+                  actionBusy={stepActionBusy === step.stepId}
+                  actionError={
+                    stepActionError?.stepId === step.stepId ? stepActionError.message : null
+                  }
+                  onAction={(action) => runStepAction(step, action)}
+                  onRetryStep={async (sid) => {
+                    const target = steps.find((s) => s.stepId === sid);
+                    if (target) await runStepAction(target, 'retry');
+                  }}
+                  onCliLogin={() => openCliLoginForStep(step)}
+                  providers={providers}
+                  taskCliProviderId={task.cliProviderId ?? null}
+                  cliBusy={stepProviderBusy === step.stepId}
+                  cliError={
+                    stepProviderError?.stepId === step.stepId ? stepProviderError.message : null
+                  }
+                  onChangeCli={(cliProviderId, role) =>
+                    changeStepProvider(step.stepId, cliProviderId, role)
+                  }
+                  autoContinue={task.autoContinue}
+                  autoContinueBusy={autoContinueBusy}
+                  showAutoContinue={step.id === currentStep?.id}
+                  onToggleAutoContinue={() => void toggleAutoContinue()}
+                />
+              </div>
+            );
+          })}
           <TaskTotalTime task={task} steps={steps} userActive={userActive} />
           {isUpgradeTask && task.status === 'completed' && (
             <div className="flex justify-center pt-2">
