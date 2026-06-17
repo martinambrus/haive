@@ -6,6 +6,7 @@ import {
   CLI_RULES_END,
   CLI_RULES_START,
   CLI_RULES_TEMPLATE_KIND,
+  extractRegion,
   getHaiveVersion,
   normalizeContent,
   sha256Hex,
@@ -329,6 +330,10 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
     const rowsToSupersede: string[] = [];
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
+    // Superseded baseline rows captured for cli-rules new_artifacts whose region
+    // already exists on disk (pre-feature onboarding), so rollback restores the
+    // prior region instead of deleting it.
+    const baselineRows: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
 
     // bundle_item_id is FK-enforced. Resolve all candidate ids from entry
     // templateIds against custom_bundle_items so we can null out linkage for
@@ -405,6 +410,36 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         // Merge the new block into the existing AGENTS.md in place, replacing
         // only the cli-rules region and leaving every other region untouched.
         const existing = await readFileOrEmpty(absPath);
+        // A region already on disk with no live tracking row (new_artifact) is
+        // an untracked onboarding baseline. Capture it as a superseded backfill
+        // row before overwriting so a rollback of this upgrade restores the
+        // prior region rather than deleting it.
+        if (!entry.liveArtifactId) {
+          const priorRegion = extractRegion(existing, CLI_RULES_START, CLI_RULES_END);
+          if (priorRegion) {
+            const priorNorm = normalizeContent(priorRegion);
+            const priorHash = sha256Hex(priorNorm);
+            baselineRows.push({
+              userId: ctx.userId,
+              repositoryId: plan.repositoryId,
+              taskId: ctx.taskId,
+              diskPath: entry.diskPath,
+              templateId: entry.templateId,
+              templateKind: entry.templateKind,
+              templateSchemaVersion: entry.templateSchemaVersion ?? 1,
+              templateContentHash: priorHash,
+              writtenHash: priorHash,
+              writtenContent: priorNorm,
+              lastObservedDiskHash: priorHash,
+              userModified: false,
+              formValuesSnapshot: plan.renderCtxSnapshot,
+              sourceStepId: '02-upgrade-apply',
+              source: 'backfill' as const,
+              haiveVersion,
+              bundleItemId: null,
+            });
+          }
+        }
         await writeFile(
           absPath,
           upsertRegion(existing, entry.newContent, CLI_RULES_START, CLI_RULES_END),
@@ -449,7 +484,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     // plan attached. Wrapped in a single transaction so a half-applied state
     // is impossible.
     const insertPaths = Array.from(new Set(rowsToInsert.map((r) => r.diskPath)));
-    if (rowsToSupersede.length > 0 || insertPaths.length > 0) {
+    if (rowsToSupersede.length > 0 || insertPaths.length > 0 || baselineRows.length > 0) {
       await ctx.db.transaction(async (tx) => {
         const now = new Date();
         if (rowsToSupersede.length > 0) {
@@ -474,6 +509,14 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
                 isNull(schema.onboardingArtifacts.supersededAt),
               ),
             );
+        }
+        if (baselineRows.length > 0) {
+          // Insert as already-superseded so the live upgrade row is the only
+          // non-superseded row at this diskPath (the partial unique index holds)
+          // while rollback can still find this as the prior baseline to restore.
+          await tx
+            .insert(schema.onboardingArtifacts)
+            .values(baselineRows.map((r) => ({ ...r, supersededAt: now, updatedAt: now })));
         }
         if (rowsToInsert.length > 0) {
           await tx.insert(schema.onboardingArtifacts).values(rowsToInsert);
