@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, ne, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   globalKbEntries,
@@ -138,6 +138,9 @@ export async function promoteToGlobalKbDraft(
             and(
               eq(globalKbEntries.namespace, settings.namespace),
               eq(globalKbEntries.topicKey, promotion.topicKey),
+              // Don't reconcile against a superseded (archived) entry — it's on its
+              // way out; match only live drafts/actives for this topic.
+              ne(globalKbEntries.status, 'archived'),
             ),
           )
           // Prefer linking to the canonical active entry; else the newest.

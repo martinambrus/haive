@@ -120,7 +120,7 @@ export default function GlobalKbPage() {
     // Arriving via the onboarding "review drafts" link (?status=draft) → pre-filter
     // the list to the bucket the caller wants.
     const status = params.get('status');
-    if (status && ['active', 'draft', 'enriching'].includes(status)) {
+    if (status && ['active', 'draft', 'enriching', 'archived'].includes(status)) {
       setStatusFilter(status);
     }
     // Arriving via the onboarding "Add Global House KB" button (#add) → scroll to
@@ -738,6 +738,7 @@ export default function GlobalKbPage() {
             <option value="active">active</option>
             <option value="draft">draft</option>
             <option value="enriching">enriching</option>
+            <option value="archived">archived</option>
           </select>
           <select
             value={categoryFilter}
