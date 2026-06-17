@@ -183,6 +183,10 @@ const VISUAL_PROTOCOL = [
 
 interface BrowserReport {
   pageTitle: string | null;
+  /** HTTP status of the app's main response; null when navigation got NO response
+   *  (TLS/connection/DNS error or timeout) → the app was unreachable. Absent on
+   *  legacy probe reports written before this field existed. */
+  httpStatus?: number | null;
   consoleErrors: string[];
   consoleWarnings: string[];
   networkErrors: string[];
@@ -655,6 +659,21 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         output: `no report parsed: ${rawOutput.slice(-1500)}`,
         source: 'probe',
       };
+    }
+
+    // Explicit environment-failure handling: when the browser got NO HTTP
+    // response (TLS/connection/DNS error or timeout — e.g. an untrusted local
+    // DDEV cert, or the app not serving), the app was never reachable. That is
+    // not a code defect, so FAIL the step (recovery: Retry / Skip) instead of
+    // letting a passed=false route back to implementation via the fix-loop.
+    // Guarded on the field's presence so legacy reports keep their prior behavior.
+    if ('httpStatus' in report && report.httpStatus === null) {
+      throw new Error(
+        `Could not reach the app at ${appUrl}: the browser received no HTTP response ` +
+          `(TLS/connection error or timeout — e.g. an untrusted local cert, or the app is ` +
+          `not serving). This is an environment issue, not a code defect — fix the ` +
+          `environment and Retry, or Skip browser validation.`,
+      );
     }
 
     const checkConsole = values.checkConsoleErrors !== false;

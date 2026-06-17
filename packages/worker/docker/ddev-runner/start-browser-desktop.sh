@@ -33,6 +33,8 @@ if ! pgrep -f "chromium.*remote-debugging-port=${CDP_LOCAL}" >/dev/null 2>&1; th
     --no-default-browser-check \
     --disable-session-crashed-bubble \
     --disable-infobars \
+    --test-type \
+    --ignore-certificate-errors \
     --password-store=basic \
     --no-sandbox \
     --disable-dev-shm-usage \

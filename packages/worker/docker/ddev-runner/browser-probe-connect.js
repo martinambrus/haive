@@ -35,8 +35,10 @@ async function run() {
     networkErrors.push(req.url() + ' ' + (req.failure()?.errorText || 'unknown'));
   });
 
+  let httpStatus = null;
   try {
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    const resp = await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    httpStatus = resp ? resp.status() : null;
   } catch (err) {
     consoleMessages.push({ level: 'error', text: 'Navigation failed: ' + err.message });
   }
@@ -49,6 +51,7 @@ async function run() {
   console.log(
     JSON.stringify({
       pageTitle: title,
+      httpStatus: httpStatus,
       consoleErrors: errors.slice(0, 50),
       consoleWarnings: warnings.slice(0, 50),
       networkErrors: networkErrors.slice(0, 50),
