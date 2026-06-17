@@ -1,6 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import rehypeHighlight from 'rehype-highlight';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 import {
   api,
   API_BASE_URL,
@@ -20,6 +23,107 @@ function formatSize(bytes: number | null): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+// Mirrors IMAGE_EXTENSIONS on the API side (_helpers.ts) — files matching this
+// set are fetched as raw bytes and previewed inline instead of as text.
+const IMAGE_EXTENSIONS = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'svg',
+  'bmp',
+  'ico',
+  'avif',
+]);
+
+function extOf(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot === -1 ? '' : name.slice(dot + 1).toLowerCase();
+}
+
+function isImage(name: string): boolean {
+  return IMAGE_EXTENSIONS.has(extOf(name));
+}
+
+function isMarkdown(name: string): boolean {
+  const ext = extOf(name);
+  return ext === 'md' || ext === 'markdown' || name.toLowerCase() === 'readme';
+}
+
+// Maps a file extension to a highlight.js language id (the common set shipped
+// with rehype-highlight). Unmapped extensions fall back to auto-detect via
+// `ignoreMissing`, so this only needs the cases worth nudging.
+const EXT_LANG: Record<string, string> = {
+  ts: 'typescript',
+  tsx: 'typescript',
+  mts: 'typescript',
+  cts: 'typescript',
+  js: 'javascript',
+  jsx: 'javascript',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  py: 'python',
+  rb: 'ruby',
+  go: 'go',
+  rs: 'rust',
+  java: 'java',
+  php: 'php',
+  sh: 'bash',
+  bash: 'bash',
+  zsh: 'bash',
+  html: 'xml',
+  xml: 'xml',
+  css: 'css',
+  scss: 'scss',
+  json: 'json',
+  yml: 'yaml',
+  yaml: 'yaml',
+  toml: 'ini',
+  ini: 'ini',
+  conf: 'ini',
+  sql: 'sql',
+  md: 'markdown',
+  c: 'c',
+  h: 'c',
+  cpp: 'cpp',
+  cc: 'cpp',
+  hpp: 'cpp',
+  cs: 'csharp',
+  kt: 'kotlin',
+  swift: 'swift',
+  lua: 'lua',
+  diff: 'diff',
+  patch: 'diff',
+};
+
+function langForName(name: string): string {
+  if (name.toLowerCase() === 'dockerfile') return 'dockerfile';
+  return EXT_LANG[extOf(name)] ?? '';
+}
+
+/** Renders file content as a highlighted code block by feeding it through the
+ *  same ReactMarkdown + rehype-highlight pipeline the markdown views use (the
+ *  `.haive-md` theme in globals.css styles the `.hljs` tokens). Deliberately
+ *  bypasses MarkdownView so source files are not collapsed/segmented. */
+function HighlightedSource({ name, content }: { name: string; content: string }) {
+  const fenced = useMemo(() => {
+    // The fence has to be longer than any backtick run inside the file, or the
+    // file's own ``` would terminate the block early and leak into markdown.
+    let longest = 0;
+    for (const m of content.matchAll(/`+/g)) longest = Math.max(longest, m[0].length);
+    const fence = '`'.repeat(Math.max(3, longest + 1));
+    return `${fence}${langForName(name)}\n${content}\n${fence}`;
+  }, [name, content]);
+  return (
+    <div className="haive-md max-h-[600px] overflow-auto">
+      <ReactMarkdown rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}>
+        {fenced}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 export function TaskSource({ taskId }: TaskSourceProps) {
   const [path, setPath] = useState<string | null>(null);
   const [listing, setListing] = useState<TaskFileListing | null>(null);
@@ -34,8 +138,15 @@ export function TaskSource({ taskId }: TaskSourceProps) {
   const [isWide, setIsWide] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [fileDownloading, setFileDownloading] = useState(false);
+  // Markdown files preview as rendered HTML by default; toggles back to source.
+  const [mdRendered, setMdRendered] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
+  // Holds the live object URL for the previewed image so it can be revoked
+  // before the next preview and on unmount (object URLs leak otherwise).
+  const imageUrlRef = useRef<string | null>(null);
 
   // Track wide-screen mode; the resizable splitter only renders at md+ where
   // the layout is side-by-side. Below md the panes stack and the splitter is
@@ -102,20 +213,72 @@ export function TaskSource({ taskId }: TaskSourceProps) {
     void loadListing(path ?? undefined);
   }, [loadListing, path]);
 
+  function revokeImage() {
+    if (imageUrlRef.current) {
+      URL.revokeObjectURL(imageUrlRef.current);
+      imageUrlRef.current = null;
+    }
+  }
+
+  // Revoke the previewed image's object URL when the component unmounts.
+  useEffect(() => revokeImage, []);
+
+  async function fetchFileBlob(entry: TaskFileEntry): Promise<Blob> {
+    const res = await fetch(
+      `${API_BASE_URL}/tasks/${taskId}/files/raw?path=${encodeURIComponent(entry.path)}`,
+      { credentials: 'include' },
+    );
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(body.error ?? `HTTP ${res.status}`);
+    }
+    return res.blob();
+  }
+
   async function openFile(entry: TaskFileEntry) {
     setSelectedFile(entry);
     setContentLoading(true);
     setContentError(null);
     setContent(null);
+    revokeImage();
+    setImageUrl(null);
+    setMdRendered(true);
     try {
-      const data = await api.get<TaskFileContent>(
-        `/tasks/${taskId}/files/content?path=${encodeURIComponent(entry.path)}`,
-      );
-      setContent(data);
+      if (isImage(entry.name)) {
+        const blob = await fetchFileBlob(entry);
+        const url = URL.createObjectURL(blob);
+        imageUrlRef.current = url;
+        setImageUrl(url);
+      } else {
+        const data = await api.get<TaskFileContent>(
+          `/tasks/${taskId}/files/content?path=${encodeURIComponent(entry.path)}`,
+        );
+        setContent(data);
+      }
     } catch (err) {
       setContentError((err as Error).message ?? 'Failed to load file');
     } finally {
       setContentLoading(false);
+    }
+  }
+
+  async function downloadFile(entry: TaskFileEntry) {
+    setFileDownloading(true);
+    setContentError(null);
+    try {
+      const blob = await fetchFileBlob(entry);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = entry.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setContentError((err as Error).message ?? 'Download failed');
+    } finally {
+      setFileDownloading(false);
     }
   }
 
@@ -262,13 +425,31 @@ export function TaskSource({ taskId }: TaskSourceProps) {
               <div className="truncate text-xs text-neutral-400" title={selectedFile.path}>
                 {selectedFile.name}
               </div>
-              {content && (
-                <div className="flex items-center gap-2 text-[10px] text-neutral-500">
-                  <span>{formatSize(content.size)}</span>
-                  {content.truncated && <span className="text-yellow-400">truncated</span>}
-                  {content.binary && <span className="text-yellow-400">binary</span>}
-                </div>
-              )}
+              <div className="flex shrink-0 items-center gap-2 text-[10px] text-neutral-500">
+                {selectedFile.size !== null && <span>{formatSize(selectedFile.size)}</span>}
+                {content?.truncated && <span className="text-yellow-400">truncated</span>}
+                {content?.binary && <span className="text-yellow-400">binary</span>}
+                {content &&
+                  !content.binary &&
+                  content.content !== null &&
+                  isMarkdown(selectedFile.name) && (
+                    <button
+                      type="button"
+                      onClick={() => setMdRendered((v) => !v)}
+                      className="text-indigo-400 underline"
+                    >
+                      {mdRendered ? 'View raw' : 'View rendered'}
+                    </button>
+                  )}
+                <button
+                  type="button"
+                  onClick={() => void downloadFile(selectedFile)}
+                  disabled={fileDownloading}
+                  className="text-indigo-400 underline disabled:cursor-not-allowed disabled:text-neutral-500 disabled:no-underline"
+                >
+                  {fileDownloading ? 'Downloading…' : 'Download'}
+                </button>
+              </div>
             </div>
             {contentError && (
               <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300">
@@ -276,16 +457,27 @@ export function TaskSource({ taskId }: TaskSourceProps) {
               </div>
             )}
             {contentLoading && <div className="text-xs text-neutral-500">Loading...</div>}
+            {imageUrl && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={imageUrl}
+                alt={selectedFile.name}
+                className="max-h-[600px] max-w-full self-start rounded-md border border-neutral-800 bg-neutral-950 object-contain"
+              />
+            )}
             {content && content.binary && (
               <div className="rounded-md border border-neutral-800 bg-neutral-950 p-4 text-sm text-neutral-400">
-                Binary file. Preview not available.
+                Binary file. Preview not available. Use Download to save it.
               </div>
             )}
-            {content && !content.binary && content.content !== null && (
-              <pre className="max-h-[600px] overflow-auto rounded-md border border-neutral-800 bg-neutral-950 p-3 text-[11px] leading-relaxed text-neutral-200">
-                {content.content}
-              </pre>
-            )}
+            {content &&
+              !content.binary &&
+              content.content !== null &&
+              (isMarkdown(selectedFile.name) && mdRendered ? (
+                <MarkdownView body={content.content} enhanced={false} className="max-h-[600px]" />
+              ) : (
+                <HighlightedSource name={selectedFile.name} content={content.content} />
+              ))}
           </>
         )}
       </div>

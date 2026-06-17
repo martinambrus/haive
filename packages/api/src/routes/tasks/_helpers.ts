@@ -45,6 +45,37 @@ export const TEXT_EXTENSIONS = new Set([
   '.editorconfig',
 ]);
 
+export const IMAGE_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.svg',
+  '.bmp',
+  '.ico',
+  '.avif',
+]);
+
+const IMAGE_MIME_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
+  '.avif': 'image/avif',
+};
+
+/** Best-effort MIME for the raw-bytes endpoint. Images get a precise type so
+ *  the browser previews them; everything else is octet-stream (forces a
+ *  download rather than rendering untrusted bytes inline). */
+export function mimeForExtension(ext: string): string {
+  return IMAGE_MIME_TYPES[ext] ?? 'application/octet-stream';
+}
+
 export async function enrichStepsWithCliPreferences<T extends { stepId: string }>(
   db: ReturnType<typeof getDb>,
   userId: string,
