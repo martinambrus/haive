@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
@@ -11,15 +12,15 @@ import { extractFencedJson } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput, resolveDdevWorkspace } from './_task-meta.js';
 import { buildBrowserModeOptions } from './_browser-modes.js';
+import { ddevUrlFromConfigText } from '../_ddev-config.js';
+import { ensureAppServing } from './_app-runtime.js';
 import {
   runnerHandleForTask,
   runnerExec,
-  ensureDdevStarted,
   startBrowserDesktop,
   ddevPrimaryUrl,
 } from '../../../sandbox/ddev-runner.js';
 import {
-  ensureAppRunnerStarted,
   appRunnerExec,
   startBrowserDesktop as startAppBrowserDesktop,
 } from '../../../sandbox/app-runner.js';
@@ -348,16 +349,22 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       const implementationFiles = await collectImplementationFiles(ctx, ws.workspace);
       // DDEV path: the runner targets the worktree (where `.ddev` lives). It may
       // not be up yet (a task that just implemented .ddev, where 01c skipped
-      // early) — apply boots it via ensureDdevStarted and fails hard if it can't.
-      // Surface the URL now only if it already happens to run.
-      const url = await ddevPrimaryUrl(runnerHandleForTask(ctx.taskId, ws.repoSubpath));
+      // early) or a worker/host restart may have stopped it — apply boots it via
+      // ensureAppServing and fails hard if it can't. Prefer the live primary_url;
+      // else derive https://<name>.ddev.site from the booted config so the form
+      // and the mcp tester get a real URL, never the meaningless http://localhost.
+      const liveUrl = await ddevPrimaryUrl(runnerHandleForTask(ctx.taskId, ws.repoSubpath));
+      const cfgText = liveUrl
+        ? null
+        : await readFile(ddevConfigPath(ws.workspace), 'utf8').catch(() => null);
+      const url = liveUrl ?? (cfgText ? ddevUrlFromConfigText(cfgText) : null);
       return {
         browserTesting: true,
         ddevMode: true,
         appRunnerMode: false,
         envImageTag: null,
         repoSubpath: ws.repoSubpath,
-        appBooted: url !== null,
+        appBooted: liveUrl !== null,
         appUrl: url,
         available: true,
         skipReason: null,
@@ -455,20 +462,16 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     },
     // mcp mode needs the runner's headed browser up so chrome-devtools connects
     // to the SAME browser the user watches. Idempotent (pgrep-guarded).
-    prepare: async ({ ctx, detected, formValues }) => {
-      const d = detected as BrowserVerifyDetect;
+    prepare: async ({ ctx, formValues }) => {
       if ((formValues as { mode?: string }).mode !== 'mcp') return;
-      if (!d.repoSubpath) return;
       await ctx.emitProgress('Starting the browser desktop for agent testing…');
-      // mcp drives the SAME visible browser via chrome-devtools, so the headed
-      // desktop must be up — in the DDEV runner OR the env-replicate app-runner.
-      if (d.ddevMode) {
-        const handle = await ensureDdevStarted(ctx.taskId, d.repoSubpath);
-        await startBrowserDesktop(handle);
-      } else if (d.appRunnerMode && d.envImageTag) {
-        const handle = await ensureAppRunnerStarted(ctx.taskId, d.repoSubpath, d.envImageTag);
-        await startAppBrowserDesktop(handle);
-      }
+      // mcp drives the SAME visible browser via chrome-devtools, so the app must
+      // be serving and the headed desktop up. ensureAppServing boots DDEV /
+      // relaunches a restart-killed app-runner process; then start the desktop on
+      // whichever runner backs it.
+      const runtime = await ensureAppServing(ctx);
+      if (runtime.mode === 'ddev') await startBrowserDesktop(runtime.handle);
+      else if (runtime.mode === 'app-runner') await startAppBrowserDesktop(runtime.handle);
     },
     buildPrompt: (args) => {
       const d = args.detected as BrowserVerifyDetect;
@@ -573,63 +576,60 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     ctx.logger.info({ ddevMode: detected.ddevMode, interactive }, 'running browser validation');
 
     let rawOutput: string;
-    let appUrl: string;
+    // Ensure the app is actually serving — boots the DDEV env, or brings the
+    // app-runner container back AND relaunches a restart-killed dev server — and
+    // resolve its authoritative URL. A DDEV boot failure THROWS → the step fails
+    // and routes back to the developer via the recovery actions (Retry /
+    // Retry-with-AI). A user-entered URL still overrides.
+    const runtime = await ensureAppServing(ctx);
+    const appUrl = appUrlOverride || runtime.url || detected.appUrl || 'http://localhost';
 
-    if (detected.ddevMode && detected.repoSubpath) {
-      // Boot the (possibly just-implemented) DDEV env. A boot failure THROWS →
-      // the step fails and routes back to the developer via the recovery actions
-      // (Retry / Retry-with-AI). A correctly-implemented DDEV should always boot.
-      await ctx.emitProgress('Ensuring the DDEV environment is up…');
-      const handle = await ensureDdevStarted(ctx.taskId, detected.repoSubpath);
-      appUrl = appUrlOverride || (await ddevPrimaryUrl(handle)) || 'http://localhost';
+    if (runtime.mode === 'ddev') {
       if (interactive) {
         // Headed Chrome on the runner's virtual desktop: the user watches and
         // interacts via the web Browser (noVNC) panel while the probe runs the
         // same checks over CDP — and the browser STAYS OPEN afterwards.
         await ctx.emitProgress('Starting the browser desktop…');
-        await startBrowserDesktop(handle);
+        await startBrowserDesktop(runtime.handle);
         await ctx.emitProgress('Running browser validation (interactive)…');
-        const res = await runnerExec(handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
-          timeoutMs: 90_000,
-        });
-        rawOutput = res.output;
+        rawOutput = (
+          await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
+            timeoutMs: 90_000,
+          })
+        ).output;
       } else {
         await ctx.emitProgress('Running browser validation…');
-        const res = await runnerExec(handle, `node /opt/browser-check.js '${appUrl}'`, {
-          timeoutMs: 90_000,
-        });
-        rawOutput = res.output;
+        rawOutput = (
+          await runnerExec(runtime.handle, `node /opt/browser-check.js '${appUrl}'`, {
+            timeoutMs: 90_000,
+          })
+        ).output;
       }
-    } else if (detected.appRunnerMode && detected.repoSubpath && detected.envImageTag) {
+    } else if (runtime.mode === 'app-runner') {
       // Non-DDEV: the app + the headed-browser desktop live in the per-task
       // app-runner container, so the probe runs INSIDE it (browser hits the app
       // on localhost). Probe scripts were injected at /opt/browser by the runner.
-      await ctx.emitProgress('Ensuring the app-runner is up…');
-      const handle = await ensureAppRunnerStarted(
-        ctx.taskId,
-        detected.repoSubpath,
-        detected.envImageTag,
-      );
-      appUrl = appUrlOverride || detected.appUrl || 'http://localhost';
       if (interactive) {
         await ctx.emitProgress('Starting the browser desktop…');
-        await startAppBrowserDesktop(handle);
+        await startAppBrowserDesktop(runtime.handle);
         await ctx.emitProgress('Running browser validation (interactive)…');
-        const res = await appRunnerExec(
-          handle,
-          `node /opt/browser/browser-probe-connect.js '${appUrl}'`,
-          { timeoutMs: 90_000 },
-        );
-        rawOutput = res.output;
+        rawOutput = (
+          await appRunnerExec(
+            runtime.handle,
+            `node /opt/browser/browser-probe-connect.js '${appUrl}'`,
+            { timeoutMs: 90_000 },
+          )
+        ).output;
       } else {
         await ctx.emitProgress('Running browser validation…');
-        const res = await appRunnerExec(handle, `node /opt/browser/browser-check.js '${appUrl}'`, {
-          timeoutMs: 90_000,
-        });
-        rawOutput = res.output;
+        rawOutput = (
+          await appRunnerExec(runtime.handle, `node /opt/browser/browser-check.js '${appUrl}'`, {
+            timeoutMs: 90_000,
+          })
+        ).output;
       }
     } else {
-      appUrl = appUrlOverride || detected.appUrl || 'http://localhost';
+      // Legacy host boot (or no runtime handle): host-side puppeteer check.
       try {
         const r = await exec('node', ['-e', BROWSER_CHECK_SCRIPT, appUrl], {
           cwd: ctx.workspacePath,

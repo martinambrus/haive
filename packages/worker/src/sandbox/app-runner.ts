@@ -188,6 +188,57 @@ export async function appRunnerExec(
   }
 }
 
+/** POSIX-safe single-quote: wraps a string for use as one shell word, so a
+ *  user/LLM command with env prefixes or spaces survives interpolation intact. */
+function shSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+/** Poll the app's port from inside the app-runner until it answers (curl 2xx/3xx),
+ *  or the timeout elapses. Used both to launch-and-wait and to cheaply probe
+ *  whether an already-running container still serves the app. */
+export async function waitForPortInRunner(
+  handle: AppRunnerHandle,
+  port: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const r = await appRunnerExec(
+      handle,
+      `curl -fsS -o /dev/null "http://localhost:${port}" && echo HAIVE_UP || true`,
+      { timeoutMs: 10_000 },
+    );
+    if (r.output.includes('HAIVE_UP')) return true;
+    if (Date.now() >= deadline) break;
+    await new Promise((res) => setTimeout(res, 2000));
+  } while (Date.now() < deadline);
+  return false;
+}
+
+/** (Re)launch the app's dev server inside the app-runner: background it (nohup +
+ *  disown) so it outlives this exec, through `bash -lc` so env-prefixed commands
+ *  like `PORT=3000 npm run dev` parse correctly, then wait for the port. The one
+ *  source of truth for the launch invariant — 01a-app-boot's first boot and
+ *  ensureAppServing's post-restart relaunch both call this. */
+export async function launchAppInRunner(
+  handle: AppRunnerHandle,
+  bootCommand: string,
+  port: number,
+  opts: { timeoutMs?: number } = {},
+): Promise<{ healthy: boolean; logTail: string }> {
+  await appRunnerExec(
+    handle,
+    `cd ${handle.projectDir} && nohup bash -lc ${shSingleQuote(bootCommand)} > /tmp/haive-app.log 2>&1 & disown`,
+    { timeoutMs: 30_000 },
+  );
+  const healthy = await waitForPortInRunner(handle, port, opts.timeoutMs ?? 60_000);
+  const tail = await appRunnerExec(handle, 'tail -c 2000 /tmp/haive-app.log 2>/dev/null || true', {
+    timeoutMs: 15_000,
+  });
+  return { healthy, logTail: tail.output.slice(-1500) };
+}
+
 /** Start (idempotently) the headed-browser desktop inside the app-runner. The
  *  launcher is pgrep-guarded so re-runs are no-ops. Throws when it fails to come
  *  up. The web noVNC panel attaches via the api bridge to <container>:5900. */

@@ -5,6 +5,7 @@ import {
   parseDdevConfig,
   renderDdevConfig,
   slugifyDdevName,
+  ddevUrlFromConfigText,
 } from './_ddev-config.js';
 
 const MARIADB_CONFIG = `name: myproject
@@ -81,6 +82,25 @@ describe('matchYamlField / matchYamlBlockField', () => {
     expect(matchYamlBlockField(text, 'database', 'type')).toBe('mariadb');
     // top-level `version: top` must not leak into the block lookup
     expect(matchYamlBlockField(text, 'database', 'missing')).toBeNull();
+  });
+});
+
+describe('ddevUrlFromConfigText', () => {
+  it('derives https://<name>.ddev.site from the booted config (default tld)', () => {
+    expect(ddevUrlFromConfigText(MARIADB_CONFIG)).toBe('https://myproject.ddev.site');
+  });
+
+  it('honors a custom project_tld', () => {
+    const cfg = `name: myproject\nproject_tld: ddev.local\n`;
+    expect(ddevUrlFromConfigText(cfg)).toBe('https://myproject.ddev.local');
+  });
+
+  it('reads a quoted name', () => {
+    expect(ddevUrlFromConfigText('name: "my-app"\n')).toBe('https://my-app.ddev.site');
+  });
+
+  it('returns null when name is absent (never a meaningless localhost)', () => {
+    expect(ddevUrlFromConfigText('type: php\nphp_version: "8.3"\n')).toBeNull();
   });
 });
 

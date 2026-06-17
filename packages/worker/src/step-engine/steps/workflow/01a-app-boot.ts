@@ -11,7 +11,7 @@ import { extractFencedJson } from '../_fenced-json.js';
 import {
   ensureAppRunnerStarted,
   appRunnerExec,
-  type AppRunnerHandle,
+  launchAppInRunner,
 } from '../../../sandbox/app-runner.js';
 
 const exec = promisify(execFile);
@@ -212,31 +212,6 @@ async function hostHealthCheck(
     case 'none':
       return { passed: true, url: 'http://localhost:3000' };
   }
-}
-
-/** Poll the app's port from inside the runtime container until it answers. */
-async function waitForPortInRunner(
-  handle: AppRunnerHandle,
-  port: number,
-  timeoutMs: number,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const r = await appRunnerExec(
-      handle,
-      `curl -fsS -o /dev/null "http://localhost:${port}" && echo HAIVE_UP || true`,
-      { timeoutMs: 10_000 },
-    );
-    if (r.output.includes('HAIVE_UP')) return true;
-    await new Promise((res) => setTimeout(res, 2000));
-  }
-  return false;
-}
-
-/** POSIX-safe single-quote: wraps a string for use as one shell word, so a
- *  user/LLM command with env prefixes or spaces survives interpolation intact. */
-function shSingleQuote(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
 function parseRunRecipe(raw: unknown): RunRecipe | null {
@@ -544,22 +519,7 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
         }
 
         await ctx.emitProgress('Launching the app…');
-        // Background the server (nohup + disown) so it outlives this exec, and
-        // run it through `bash -lc` so env-prefixed commands like
-        // `PORT=3000 npm run dev` parse correctly — bare `nohup PORT=3000 …`
-        // would try to exec the assignment token as a program.
-        await appRunnerExec(
-          handle,
-          `cd ${handle.projectDir} && nohup bash -lc ${shSingleQuote(bootCommand)} > /tmp/haive-app.log 2>&1 & disown`,
-          { timeoutMs: 30_000 },
-        );
-        await ctx.emitProgress('Waiting for the app to respond…');
-        const healthy = await waitForPortInRunner(handle, port, 60_000);
-        const tail = await appRunnerExec(
-          handle,
-          'tail -c 2000 /tmp/haive-app.log 2>/dev/null || true',
-          { timeoutMs: 15_000 },
-        );
+        const { healthy, logTail } = await launchAppInRunner(handle, bootCommand, port);
         ctx.logger.info(
           { healthy, appUrl, container: handle.container },
           'app-runner launch complete',
@@ -574,7 +534,7 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
           containerized: true,
           runtimeContainer: handle.container,
           port,
-          output: [installOut && `install:\n${installOut}`, `app log:\n${tail.output.slice(-1500)}`]
+          output: [installOut && `install:\n${installOut}`, `app log:\n${logTail}`]
             .filter(Boolean)
             .join('\n\n'),
         };

@@ -12,6 +12,19 @@ export function matchYamlField(text: string, key: string): string | null {
   return m && m[1] ? m[1].trim() : null;
 }
 
+/** The DDEV project's primary URL derived from its `.ddev/config.yaml` WITHOUT
+ *  booting the runner: `https://<name>.<project_tld>`. DDEV's primary_url is https
+ *  on the default router, and Haive never customizes the scheme; `project_tld`
+ *  defaults to `ddev.site` and is read from the config when overridden. Returns
+ *  null when `name:` is absent. Best-effort prefill — the authoritative URL is
+ *  still `ddev describe -j` (ddevPrimaryUrl) once the runner is up. */
+export function ddevUrlFromConfigText(text: string): string | null {
+  const name = matchYamlField(text, 'name');
+  if (!name) return null;
+  const tld = matchYamlField(text, 'project_tld') ?? 'ddev.site';
+  return `https://${name}.${tld}`;
+}
+
 /** Match a `key: value` scalar one level inside a `block:` mapping. */
 export function matchYamlBlockField(text: string, block: string, key: string): string | null {
   const blockRe = new RegExp(`^${block}:\\s*\\n((?:[ \\t]+.+\\n?)+)`, 'm');
