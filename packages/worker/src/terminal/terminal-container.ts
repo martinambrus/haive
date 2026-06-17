@@ -336,6 +336,22 @@ export async function ensureShellContainer(
     log.warn({ err, containerName }, 'failed to write mcp config into shell container');
   });
 
+  // Enable tmux mouse mode. The interactive shell runs inside a tmux session
+  // (terminal-session-manager) which owns the alternate screen, so the xterm
+  // buffer is always 'alternate' — there the browser terminal converts the
+  // mouse wheel into cursor-key escapes, which bash reads as history
+  // navigation instead of scrolling earlier output. `mouse on` makes tmux
+  // consume the wheel and scroll its own pane history (copy mode). Written
+  // before the first attach so the tmux server reads it when it starts.
+  await writeFileInto(
+    docker,
+    containerName,
+    `${SANDBOX_USER_HOME}/.tmux.conf`,
+    'set -g mouse on\n',
+  ).catch((err) => {
+    log.warn({ err, containerName }, 'failed to write tmux.conf — wheel scrollback may not work');
+  });
+
   // Repo-scope: dual-home onto the internal sandbox network so the git
   // credential helper can reach the API, then install the helper + git config.
   // Best-effort — on failure `git push` just falls back to manual auth.

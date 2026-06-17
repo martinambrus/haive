@@ -7,6 +7,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import { api, apiWebSocketUrl } from '@/lib/api-client';
+import { attachWheelScroll } from '@/lib/terminal-wheel';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
 
@@ -132,6 +133,7 @@ export function CliStreamViewer({
     });
 
     term.open(mountRef.current);
+    const detachWheel = attachWheelScroll(term);
     let fitRaf1 = 0;
     let fitRaf2 = 0;
     fitRaf1 = requestAnimationFrame(() => {
@@ -174,6 +176,7 @@ export function CliStreamViewer({
         cancelAnimationFrame(fitRaf2);
         window.removeEventListener('resize', handleResize);
         resizeObserver.disconnect();
+        detachWheel();
         term.dispose();
       };
     }
@@ -253,6 +256,7 @@ export function CliStreamViewer({
       clearInterval(keepalive);
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
+      detachWheel();
       try {
         ws.close(1000, 'unmount');
       } catch {

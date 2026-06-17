@@ -12,6 +12,7 @@ import {
   type TerminalSessionDetail,
   type TerminalSessionSummary,
 } from '@/lib/api-client';
+import { attachWheelScroll } from '@/lib/terminal-wheel';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
 
@@ -113,6 +114,7 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
       return true;
     });
     term.open(mountRef.current);
+    const detachWheel = attachWheelScroll(term);
     let disposed = false;
     let fitRaf1 = 0;
     let fitRaf2 = 0;
@@ -252,6 +254,7 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
       inputDisposable.dispose();
+      detachWheel();
       try {
         ws.close(1000, 'unmount');
       } catch {

@@ -7,6 +7,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import { apiWebSocketUrl } from '@/lib/api-client';
+import { attachWheelScroll } from '@/lib/terminal-wheel';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
 
@@ -79,6 +80,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
       return true;
     });
     term.open(mountRef.current);
+    const detachWheel = attachWheelScroll(term);
     let disposed = false;
     let fitRaf1 = 0;
     let fitRaf2 = 0;
@@ -206,6 +208,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
       inputDisposable.dispose();
+      detachWheel();
       try {
         ws.close(1000, 'unmount');
       } catch {
