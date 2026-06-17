@@ -19,7 +19,12 @@ async function run() {
     defaultViewport: null,
   });
 
-  const page = await browser.newPage();
+  // Reuse the desktop's existing (about:blank) tab so the user lands ON the app
+  // in the VISIBLE window. browser.newPage() would navigate a background tab and
+  // leave about:blank in front. bringToFront foregrounds it; we leave it open.
+  const existingPages = await browser.pages();
+  const page = existingPages.length > 0 ? existingPages[0] : await browser.newPage();
+  await page.bringToFront().catch(() => {});
   const consoleMessages = [];
   const networkErrors = [];
 
