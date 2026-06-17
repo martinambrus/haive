@@ -37,6 +37,9 @@ import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
 import {
   recordFixLoopRequest,
+  recordFixLoopAccepted,
+  buildFixLoopEscalationSchema,
+  FIX_LOOP_ACTION_FIELD,
   FIX_LOOP_TARGET_STEP_ID,
   DEFAULT_MAX_FIX_ROUNDS,
 } from '../step-engine/steps/workflow/_fix-loop.js';
@@ -616,18 +619,38 @@ async function handleResult(
         round: nextRound,
       });
       if (nextRound > cap) {
-        // Cap reached. (Slice 5 replaces this with an interactive Continue / Accept /
-        // Abort gate.) Fail with the diagnosis so the user can act.
-        await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.exhausted', {
+        // Cap reached → escalate to an interactive gate (Continue / Accept / Abort)
+        // parked on the source step, instead of failing. Record the fix request for the
+        // next round up front so "Continue" can re-enter implementation immediately; it
+        // is simply never read if the user accepts or aborts.
+        await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
+          diagnosis: result.diagnosis,
           sourceStepId: result.sourceStepId,
-          rounds: cap,
+          round: nextRound,
         });
-        await markTaskFailed(
+        await db
+          .update(schema.taskSteps)
+          .set({
+            status: 'waiting_form',
+            formSchema: buildFixLoopEscalationSchema(result.sourceStepId, result.diagnosis, cap),
+            formValues: null,
+            endedAt: null,
+            waitingStartedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.taskSteps.id, result.row.id));
+        await markTaskWaiting(
           db,
           ctx.taskId,
-          `Fix loop reached the ${cap}-round limit without resolving the issue found by ` +
-            `${result.sourceStepId}. Latest diagnosis: ${result.diagnosis.slice(0, 800)}`,
+          stepId,
+          computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
+          result.row.round,
         );
+        await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.escalated', {
+          sourceStepId: result.sourceStepId,
+          rounds: cap,
+          round: nextRound,
+        });
         return;
       }
       const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
@@ -695,6 +718,66 @@ async function handleResult(
       return;
     }
   }
+}
+
+/** Resolve a fix-loop escalation gate decision parked on the source step (the step that
+ *  found the defect at the round cap): continue (one more round), accept (stand down the
+ *  loop + advance), or abort (fail). Mirrors the revise route's submit-driven routing. */
+async function resolveFixLoopGate(
+  db: Database,
+  ctx: ResolvedTaskContext,
+  gateRow: typeof schema.taskSteps.$inferSelect,
+  action: string,
+  round: number,
+): Promise<void> {
+  await db
+    .update(schema.taskSteps)
+    .set({ status: 'done', endedAt: new Date(), updatedAt: new Date() })
+    .where(eq(schema.taskSteps.id, gateRow.id));
+
+  if (action === 'abort') {
+    await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.aborted', { round });
+    await markTaskFailed(db, ctx.taskId, `Fix loop aborted by the user at round ${round}.`);
+    return;
+  }
+
+  if (action === 'accept') {
+    // Stand down every later fix-loop check + advance forward from the source step so the
+    // remaining chain runs to gate 2 with the issues recorded but unresolved.
+    await recordFixLoopAccepted(db, ctx.taskId, gateRow.id);
+    await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.accepted', { round });
+    const steps = await buildRunList(ctx);
+    const idx = steps.findIndex((s) => s.metadata.id === gateRow.stepId);
+    const next = idx >= 0 ? steps[idx + 1] : undefined;
+    if (next) {
+      await markTaskRunningWithStep(
+        db,
+        ctx.taskId,
+        next.metadata.id,
+        computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
+        round,
+      );
+      await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round);
+    } else {
+      await markTaskCompleted(db, ctx.taskId);
+      await appendEvent(db, ctx.taskId, null, 'task.completed', {});
+    }
+    return;
+  }
+
+  // 'continue' (default): grant one more round — re-enter implementation at round + 1.
+  // The fix request for that round was recorded when the gate was raised.
+  const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
+  const nextRound = round + 1;
+  await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.continued', { round: nextRound });
+  await markTaskRunningWithStep(
+    db,
+    ctx.taskId,
+    target.metadata.id,
+    computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
+    nextRound,
+  );
+  await enqueueAdvance(ctx.taskId, ctx.userId, target.metadata.id, nextRound);
 }
 
 async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<void> {
@@ -794,6 +877,16 @@ async function handleAdvanceStep(db: Database, payload: TaskJobPayload): Promise
     await handleResult(db, ctx, payload.stepId, { status: 'skipped', row: existing });
     return;
   }
+
+  // Fix-loop escalation gate: a submission carrying the gate's decision field resolves
+  // the action (continue / accept / abort) here instead of re-running the parked step.
+  const gateAction = (payload.formValues ??
+    (existing?.formValues as Record<string, unknown> | null))?.[FIX_LOOP_ACTION_FIELD];
+  if (existing && typeof gateAction === 'string') {
+    await resolveFixLoopGate(db, ctx, existing, gateAction, round);
+    return;
+  }
+
   const formValues = payload.formValues ?? existing?.formValues ?? undefined;
 
   const providers = await loadProviders(db, ctx.userId);

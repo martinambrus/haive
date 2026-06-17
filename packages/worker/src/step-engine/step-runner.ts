@@ -28,6 +28,7 @@ import {
   type StepLoopPassRecord,
 } from './step-definition.js';
 import { resolveDagPhase } from './dag-executor.js';
+import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 
 const log = logger.child({ module: 'step-runner' });
 
@@ -994,7 +995,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // to the implementation step for a new round instead of finishing the chain. The
     // step row is still marked done (it ran successfully and produced its findings);
     // handleResult turns the loop_back into a round bump + re-entry at implement. ---
-    if (stepDef.fixLoop) {
+    // Skip the loop-back once the user accepted remaining issues at the escalation
+    // gate — every later fix-loop check stands down so the run proceeds to gate 2.
+    if (stepDef.fixLoop && !(await isFixLoopSuppressed(db, taskId))) {
       const verdict = stepDef.fixLoop.evaluate(output);
       if (verdict?.blocking) {
         const finished = await updateRow(db, current.id, {

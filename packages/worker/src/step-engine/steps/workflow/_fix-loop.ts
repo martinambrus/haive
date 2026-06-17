@@ -1,5 +1,6 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import type { FormSchema } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 
 // Durable channel for the fix-loop diagnosis. When a downstream step finds a blocking
@@ -15,6 +16,76 @@ export const FIX_LOOP_TARGET_STEP_ID = '07-phase-2-implement';
 /** Fallback cap when a task predates tasks.max_fix_rounds (set on the Gate-1 form). */
 export const DEFAULT_MAX_FIX_ROUNDS = 5;
 const FIX_LOOP_REQUESTED = 'fix_loop.requested';
+const FIX_LOOP_ACCEPTED = 'fix_loop.accepted';
+/** Radio field id on the escalation gate form — its presence in a submitted form
+ *  marks the submission as a gate decision (not a normal step re-run). */
+export const FIX_LOOP_ACTION_FIELD = 'fixLoopAction';
+
+/** The escalation gate shown when the fix loop hits the round cap: the diagnosis +
+ *  Continue / Accept / Abort. Parked on the source step (the one that found the
+ *  defect); resolved by handleAdvanceStep on submit. Mirrors the revise-loop review
+ *  gate (a parked form whose submitted choice drives the routing). */
+export function buildFixLoopEscalationSchema(
+  sourceStepId: string,
+  diagnosis: string,
+  cap: number,
+): FormSchema {
+  return {
+    title: `Fix loop reached the ${cap}-round limit`,
+    description:
+      `The automatic fix loop ran ${cap} round${cap === 1 ? '' : 's'} without resolving the issue ` +
+      `${sourceStepId} found. Decide how to proceed.`,
+    infoSections: [
+      {
+        title: 'Latest diagnosis',
+        body: diagnosis || '(no diagnosis recorded)',
+        defaultOpen: true,
+      },
+    ],
+    fields: [
+      {
+        type: 'radio',
+        id: FIX_LOOP_ACTION_FIELD,
+        label: 'How would you like to proceed?',
+        options: [
+          { value: 'continue', label: 'Continue fixing — run one more fix round' },
+          { value: 'accept', label: 'Accept the remaining issues and proceed to verification' },
+          { value: 'abort', label: 'Abort the task' },
+        ],
+        default: 'continue',
+      },
+    ],
+    submitLabel: 'Apply decision',
+  };
+}
+
+/** Record that the user accepted the remaining issues — every later fix-loop check is
+ *  suppressed for this task so the run proceeds to gate 2 instead of looping again. */
+export async function recordFixLoopAccepted(
+  db: Database,
+  taskId: string,
+  sourceTaskStepId: string,
+): Promise<void> {
+  await db.insert(schema.taskEvents).values({
+    taskId,
+    taskStepId: sourceTaskStepId,
+    eventType: FIX_LOOP_ACCEPTED,
+    payload: {},
+  });
+}
+
+/** True once the user accepted remaining issues at the escalation gate — downstream
+ *  fix-loop checks stop routing back so the run finishes. */
+export async function isFixLoopSuppressed(db: Database, taskId: string): Promise<boolean> {
+  const rows = await db
+    .select({ id: schema.taskEvents.id })
+    .from(schema.taskEvents)
+    .where(
+      and(eq(schema.taskEvents.taskId, taskId), eq(schema.taskEvents.eventType, FIX_LOOP_ACCEPTED)),
+    )
+    .limit(1);
+  return rows.length > 0;
+}
 
 export interface FixLoopRequest {
   diagnosis: string;

@@ -3,7 +3,11 @@ import type { Database } from '@haive/database';
 import { advanceStep, type AdvanceStepParams } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import { phase2ImplementStep } from '../src/step-engine/steps/workflow/07-phase-2-implement.js';
-import { cleanDiagnosis } from '../src/step-engine/steps/workflow/_fix-loop.js';
+import {
+  cleanDiagnosis,
+  buildFixLoopEscalationSchema,
+  FIX_LOOP_ACTION_FIELD,
+} from '../src/step-engine/steps/workflow/_fix-loop.js';
 
 // Slice 2 engine: a step that finds a blocking defect (via fixLoop.evaluate) or throws
 // with fixLoopOnError set returns `loop_back` from advanceStep instead of done/failed.
@@ -222,5 +226,19 @@ describe('cleanDiagnosis (slice 4 follow-up)', () => {
     // Banner/promo text is intentionally LEFT IN — we don't pattern-match content
     // that changes shape over time; the agent is told to find the error within it.
     expect(out).toContain('TIP OF THE DAY');
+  });
+});
+
+describe('fix-loop escalation gate (slice 5c)', () => {
+  it('builds a Continue / Accept / Abort gate with the diagnosis', () => {
+    const schema = buildFixLoopEscalationSchema('08c-code-review', 'security: SQLi in login', 5);
+    expect(schema.title).toContain('5');
+    // The decision radio carries the marker field id that flags a gate submission.
+    const radio = schema.fields.find((f) => f.id === FIX_LOOP_ACTION_FIELD);
+    expect(radio?.type).toBe('radio');
+    const values = (radio as { options?: { value: string }[] }).options?.map((o) => o.value);
+    expect(values).toEqual(['continue', 'accept', 'abort']);
+    // The diagnosis is surfaced read-only.
+    expect(JSON.stringify(schema.infoSections)).toContain('SQLi in login');
   });
 });

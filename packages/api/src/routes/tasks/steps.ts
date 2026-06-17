@@ -143,16 +143,23 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
   });
   if (!task) throw new HttpError(404, 'Task not found');
 
+  // Target the row awaiting submission: filter to waiting_form + the latest round, so a
+  // round > 0 parked form (a fix-loop escalation gate or a manual-mode fix round) is
+  // submitted, not the original round-0 row of the same stepId (which is already done).
   const stepRows = await db
     .select()
     .from(schema.taskSteps)
-    .where(and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.stepId, stepId)))
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, id),
+        eq(schema.taskSteps.stepId, stepId),
+        eq(schema.taskSteps.status, 'waiting_form'),
+      ),
+    )
+    .orderBy(desc(schema.taskSteps.round))
     .limit(1);
   const step = stepRows[0];
-  if (!step) throw new HttpError(404, 'Step not found');
-  if (step.status !== 'waiting_form') {
-    throw new HttpError(409, `Step is in status ${step.status}, not waiting_form`);
-  }
+  if (!step) throw new HttpError(409, `No step awaiting form submission for id ${stepId}`);
 
   const now = new Date();
   // Close the idle (waiting-for-input) period: fold the time since the step
@@ -180,6 +187,7 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     taskId: id,
     userId,
     stepId,
+    round: step.round,
     formValues: body.values,
   };
   await queue.add(TASK_JOB_NAMES.ADVANCE_STEP, payload, {
