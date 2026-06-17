@@ -260,6 +260,25 @@ async function main(): Promise<void> {
         decision: 'approve',
         feedback: 'Smoke run; proceeding with stub spec.',
       },
+      // Run config (split out of gate-1; always gated, never auto-submits). Mirrors the
+      // prior gate-1 preanswers: skip verify/browser/test/adversarial, walk the Phase 3.5
+      // simplify step. Its preanswers then auto-submit 07/08-verify/08b downstream.
+      '06-run-config': {
+        adversarialQaLevel: 'none',
+        simplifyCode: true,
+        sprintDecision: 'use_single_agent',
+        sprintAutoResolveConflicts: false,
+        sprintReviewEnabled: false,
+        verifyRunTest: false,
+        verifyRunLint: false,
+        verifyRunTypecheck: false,
+        browserMode: 'skip',
+        browserCheckConsoleErrors: false,
+        browserCheckNetworkErrors: false,
+        testAction: 'skip',
+        testRunTests: false,
+        maxFixRounds: '5',
+      },
       '07-phase-2-implement': {
         instructions: '',
       },

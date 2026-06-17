@@ -264,6 +264,24 @@ async function main(): Promise<void> {
         decision: 'approve',
         feedback: 'envwrap smoke stub approval.',
       },
+      // Run config (split out of gate-1; always gated). Skip simplify/verify/browser/
+      // test/adversarial so the run walks straight through to gate 2.
+      '06-run-config': {
+        adversarialQaLevel: 'none',
+        simplifyCode: false,
+        sprintDecision: 'use_single_agent',
+        sprintAutoResolveConflicts: false,
+        sprintReviewEnabled: false,
+        verifyRunTest: false,
+        verifyRunLint: false,
+        verifyRunTypecheck: false,
+        browserMode: 'skip',
+        browserCheckConsoleErrors: false,
+        browserCheckNetworkErrors: false,
+        testAction: 'skip',
+        testRunTests: false,
+        maxFixRounds: '5',
+      },
       '07-phase-2-implement': { instructions: '' },
       '08-phase-5-verify': {
         runTest: false,
