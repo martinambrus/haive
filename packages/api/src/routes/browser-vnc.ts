@@ -30,9 +30,13 @@ import { ACCESS_COOKIE } from '../auth/cookies.js';
 const log = logger.child({ module: 'browser-vnc-ws' });
 const WS_PATH_PREFIX = '/browser-vnc/';
 /** Bounded wait for the worker to bring the runtime + browser desktop up before
- *  bridging. Long enough for a warm ensure or an app-runner relaunch; a slower
- *  DDEV cold boot overruns it and the panel's Retry reconnects once it finishes. */
-const VNC_ENSURE_TIMEOUT_MS = 30_000;
+ *  bridging — sized to cover a DDEV cold boot (image already built) so the WS stays
+ *  pending through the boot and bridges in ONE shot. At 30s it timed out mid-cold-
+ *  boot → 503 → noVNC "Connection closed (1006)" console-error spam while the panel
+ *  re-tried each cycle. waitUntilFinished returns as soon as the ensure job
+ *  completes, so a warm/fast boot still bridges quickly; a boot slower than this
+ *  still falls back to the panel's reconnect. */
+const VNC_ENSURE_TIMEOUT_MS = 180_000;
 
 export interface BrowserVncWsOptions {
   path?: string;
