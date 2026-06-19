@@ -1675,6 +1675,14 @@ function StepCard({
               renderAfterField={
                 hasConnectionFields || supportsPresets ? renderAfterFieldFn : undefined
               }
+              headerSlot={
+                step.stepId === '08a-browser-verify' &&
+                step.activeRole !== 'fixer' &&
+                (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
+                  ?.available ? (
+                  <BrowserVncPanel taskId={taskId} />
+                ) : undefined
+              }
               onSkip={step.canSkip ? () => onAction('skip') : undefined}
               skipDisabled={actionBusy}
             />
@@ -1757,6 +1765,7 @@ function StepCard({
 
       {step.stepId === '08a-browser-verify' &&
         step.status !== 'failed' &&
+        step.status !== 'waiting_form' &&
         step.activeRole !== 'fixer' &&
         (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
           ?.available && <BrowserVncPanel taskId={taskId} autoCollapse={step.status === 'done'} />}

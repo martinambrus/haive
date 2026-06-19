@@ -24,6 +24,10 @@ interface FormRendererProps {
   onValuesChange?: (values: FormValues) => void;
   /** Render extra content (e.g. test buttons) after a specific field. */
   renderAfterField?: (fieldId: string, values: FormValues) => React.ReactNode;
+  /** Content rendered right after the form title (before description + fields).
+   *  Used by 08a to put the live-browser panel at the top so the user can test
+   *  the app before the approve/refuse decision, without scrolling. */
+  headerSlot?: React.ReactNode;
   /** Repository the form is being filled for. Required when the schema
    *  contains a `bundle-composer` field — the composer talks to /api/bundles
    *  on behalf of this repo. */
@@ -136,6 +140,7 @@ export function FormRenderer({
   errorMessage,
   onValuesChange,
   renderAfterField,
+  headerSlot,
   repositoryId,
   onSkip,
   skipLabel,
@@ -174,6 +179,7 @@ export function FormRenderer({
           <p className="mt-1 whitespace-pre-line text-sm text-neutral-400">{schema.description}</p>
         )}
       </div>
+      {headerSlot}
       <InfoSections sections={schema.infoSections} />
       <div className="flex flex-col gap-4">
         {schema.fields.map((field) =>
