@@ -4,7 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { STEP_CLI_ROLES } from '@haive/shared';
-import type { FormSchema } from '@haive/shared';
+import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
@@ -54,6 +54,17 @@ interface BrowserVerifyDetect {
   /** Spec + changed files for the MCP tester / manual-checklist prompts. */
   spec: string;
   implementationFiles: string[];
+  /** Live headed browser for the interactive gate: brought up + navigated in
+   *  detect (idempotent, mirrors 09-gate-2) so the noVNC panel shows the running
+   *  app during the form, with the probe verdict to pre-set the approve/refuse
+   *  default. null when there's no runtime to bring up; available:false on a
+   *  bring-up failure (the gate still renders, just without the panel). */
+  liveBrowser: {
+    available: boolean;
+    appUrl: string | null;
+    probe: BrowserReport | null;
+    reason?: string;
+  } | null;
 }
 
 interface TestFailure {
@@ -258,6 +269,79 @@ function extractReport(output: string): BrowserReport | null {
   return null;
 }
 
+/** Bring up the per-task headed browser + navigate it to the app for the gate,
+ *  mirroring 09-gate-2's live-browser bring-up. Idempotent (ensureAppServing +
+ *  pgrep-guarded desktop). Returns the probe verdict so the form pre-sets the
+ *  approve/refuse default and shows the auto-checks. Best-effort: any failure
+ *  yields available:false so the gate still renders, just without the panel. */
+async function bringUpLiveBrowser(
+  ctx: StepContext,
+  detected: Omit<BrowserVerifyDetect, 'liveBrowser'>,
+): Promise<BrowserVerifyDetect['liveBrowser']> {
+  if (!detected.available || (!detected.ddevMode && !detected.appRunnerMode)) return null;
+  try {
+    await ctx.emitProgress('Bringing up the browser for verification…');
+    const runtime = await ensureAppServing(ctx);
+    const appUrl = detected.appUrl || runtime.url || 'http://localhost';
+    let probe: BrowserReport | null = null;
+    if (runtime.mode === 'ddev') {
+      await startBrowserDesktop(runtime.handle);
+      const r = await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
+        timeoutMs: 60_000,
+      });
+      probe = extractReport(r.output);
+    } else if (runtime.mode === 'app-runner') {
+      await startAppBrowserDesktop(runtime.handle);
+      const r = await appRunnerExec(
+        runtime.handle,
+        `node /opt/browser/browser-probe-connect.js '${appUrl}'`,
+        { timeoutMs: 60_000 },
+      );
+      probe = extractReport(r.output);
+    }
+    return { available: true, appUrl, probe };
+  } catch (err) {
+    ctx.logger.warn({ err }, '08a live browser bring-up failed');
+    return {
+      available: false,
+      appUrl: detected.appUrl,
+      probe: null,
+      reason: (err as Error).message,
+    };
+  }
+}
+
+/** Build the implementer's diagnosis from an interactive REFUSE: the developer's
+ *  feedback plus the auto-probe's console/network findings. */
+function formatInteractiveReject(out: BrowserVerifyApply): string {
+  const parts = [
+    'Interactive browser verification was REFUSED by the developer after hands-on testing.',
+  ];
+  if (out.output.trim()) {
+    parts.push('', 'Feedback to address:', out.output.trim());
+  } else {
+    parts.push(
+      '',
+      '(no specific feedback given — re-check the implementation against the spec and the errors below)',
+    );
+  }
+  if (out.consoleErrors.length > 0) {
+    parts.push(
+      '',
+      'Console errors observed:',
+      ...out.consoleErrors.slice(0, 20).map((e) => `- ${e}`),
+    );
+  }
+  if (out.networkErrors.length > 0) {
+    parts.push(
+      '',
+      'Network errors observed:',
+      ...out.networkErrors.slice(0, 20).map((e) => `- ${e}`),
+    );
+  }
+  return parts.join('\n');
+}
+
 export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerifyApply> = {
   metadata: {
     id: '08a-browser-verify',
@@ -273,6 +357,9 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
   // observed failures + console/network errors as the diagnosis. Skipped runs pass.
   fixLoop: {
     evaluate: (out) => {
+      // Interactive verification is a HUMAN gate: a refuse routes via restartLoop
+      // (uncapped) below, not the automated fix loop — don't double-fire here.
+      if (out.method === 'interactive') return null;
       if (out.skipped || !out.ran || out.passed) return null;
       const parts: string[] = [];
       if (out.failures.length) {
@@ -306,6 +393,16 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         diagnosis: parts.join('\n\n') || out.output.slice(-2000) || 'Browser verification failed.',
       };
     },
+  },
+
+  // Restart-loop: an interactive (human) REFUSE restarts from implementation with the
+  // developer's feedback + observed errors attached — UNCAPPED, like Gate 2. fixLoop
+  // above returns null for interactive, so only one of the two ever fires.
+  restartLoop: {
+    evaluate: (out) =>
+      out.method === 'interactive' && out.ran && !out.passed
+        ? { diagnosis: formatInteractiveReject(out) }
+        : null,
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
@@ -344,6 +441,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         ...base,
         available: false,
         skipReason: 'Browser testing not enabled in environment template',
+        liveBrowser: null,
       };
     }
 
@@ -358,20 +456,21 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       '';
 
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
+    let result: Omit<BrowserVerifyDetect, 'liveBrowser'>;
     if (ws && (await pathExists(ddevConfigPath(ws.workspace)))) {
       const implementationFiles = await collectImplementationFiles(ctx, ws.workspace);
       // DDEV path: the runner targets the worktree (where `.ddev` lives). It may
       // not be up yet (a task that just implemented .ddev, where 01c skipped
-      // early) or a worker/host restart may have stopped it — apply boots it via
-      // ensureAppServing and fails hard if it can't. Prefer the live primary_url;
-      // else derive https://<name>.ddev.site from the booted config so the form
-      // and the mcp tester get a real URL, never the meaningless http://localhost.
+      // early) or a worker/host restart may have stopped it — bringUpLiveBrowser
+      // below boots it via ensureAppServing. Prefer the live primary_url; else
+      // derive https://<name>.ddev.site from the booted config so the form and the
+      // mcp tester get a real URL, never the meaningless http://localhost.
       const liveUrl = await ddevPrimaryUrl(runnerHandleForTask(ctx.taskId, ws.repoSubpath));
       const cfgText = liveUrl
         ? null
         : await readFile(ddevConfigPath(ws.workspace), 'utf8').catch(() => null);
       const url = liveUrl ?? (cfgText ? ddevUrlFromConfigText(cfgText) : null);
-      return {
+      result = {
         browserTesting: true,
         ddevMode: true,
         appRunnerMode: false,
@@ -384,50 +483,102 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         spec,
         implementationFiles,
       };
-    }
-
-    // Legacy / non-DDEV path: rely on 01a-app-boot. A non-DDEV app may run in its
-    // per-task app-runner container (01a containerized path), which hosts the
-    // headed-browser desktop when the env image was built with browser testing —
-    // so headless + interactive run INSIDE that container, like the DDEV runner.
-    const boot = await loadAppBootOutput(ctx.db, ctx.taskId);
-    const appBooted = boot !== null && boot.booted && !boot.skipped;
-    if (!appBooted) {
-      return {
-        ...base,
-        available: false,
-        skipReason: 'Application was not booted (app-boot step skipped or failed)',
+    } else {
+      // Legacy / non-DDEV path: rely on 01a-app-boot. A non-DDEV app may run in its
+      // per-task app-runner container (01a containerized path), which hosts the
+      // headed-browser desktop when the env image was built with browser testing —
+      // so headless + interactive run INSIDE that container, like the DDEV runner.
+      const boot = await loadAppBootOutput(ctx.db, ctx.taskId);
+      const appBooted = boot !== null && boot.booted && !boot.skipped;
+      if (!appBooted) {
+        return {
+          ...base,
+          available: false,
+          skipReason: 'Application was not booted (app-boot step skipped or failed)',
+          liveBrowser: null,
+        };
+      }
+      const appRunnerMode = boot?.containerized === true && !!boot.runtimeContainer;
+      const appRunnerWs = appRunnerMode
+        ? await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath)
+        : null;
+      result = {
+        browserTesting: true,
+        ddevMode: false,
+        appRunnerMode,
+        envImageTag: appRunnerMode ? (envTemplate?.imageTag ?? null) : null,
+        repoSubpath: appRunnerWs?.repoSubpath ?? null,
+        appBooted: true,
+        appUrl: boot?.appUrl ?? null,
+        available: true,
+        skipReason: null,
+        spec,
+        implementationFiles: await collectImplementationFiles(ctx, ctx.workspacePath),
       };
     }
-    const appRunnerMode = boot?.containerized === true && !!boot.runtimeContainer;
-    const appRunnerWs = appRunnerMode
-      ? await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath)
-      : null;
-    return {
-      browserTesting: true,
-      ddevMode: false,
-      appRunnerMode,
-      envImageTag: appRunnerMode ? (envTemplate?.imageTag ?? null) : null,
-      repoSubpath: appRunnerWs?.repoSubpath ?? null,
-      appBooted: true,
-      appUrl: boot?.appUrl ?? null,
-      available: true,
-      skipReason: null,
-      spec,
-      implementationFiles: await collectImplementationFiles(ctx, ctx.workspacePath),
-    };
+
+    // Bring up the live headed browser for the gate (idempotent; mirrors 09-gate-2).
+    // Best-effort — a failure leaves the gate usable, just without the live panel.
+    const liveBrowser = await bringUpLiveBrowser(ctx, result);
+    return { ...result, liveBrowser };
   },
 
   form(_ctx, detected): FormSchema | null {
     if (!detected.available) return null;
+    const lb = detected.liveBrowser;
+    const probe = lb?.probe ?? null;
+    // Pre-set the interactive verdict from the auto-probe: clean → approve; any
+    // console/network error or a 5xx → refuse (the user can override after looking).
+    const probeClean =
+      probe != null &&
+      probe.consoleErrors.length === 0 &&
+      probe.networkErrors.length === 0 &&
+      !(probe.httpStatus != null && probe.httpStatus >= 500);
+    const infoSections: InfoSection[] = [];
+    if (lb && lb.available === false && lb.reason) {
+      infoSections.push({
+        title: 'Live browser unavailable',
+        preview: 'bring-up failed',
+        body: `The headed browser could not be brought up:\n\n${lb.reason}\n\nInteractive verification needs the panel — retry the step, or pick automated/skip.`,
+        defaultOpen: true,
+      });
+    } else if (probe) {
+      const lines = [
+        `**HTTP status:** ${probe.httpStatus ?? '(no response)'}`,
+        `**Page title:** ${probe.pageTitle ?? '(none)'}`,
+        `**Console errors:** ${probe.consoleErrors.length}`,
+        `**Network errors:** ${probe.networkErrors.length}`,
+      ];
+      if (probe.consoleErrors.length > 0) {
+        lines.push(
+          '',
+          '## Console errors',
+          ...probe.consoleErrors.slice(0, 20).map((e) => `- ${e}`),
+        );
+      }
+      if (probe.networkErrors.length > 0) {
+        lines.push(
+          '',
+          '## Network errors',
+          ...probe.networkErrors.slice(0, 20).map((e) => `- ${e}`),
+        );
+      }
+      infoSections.push({
+        title: 'Automated checks',
+        preview: probeClean ? 'clean' : 'issues found',
+        body: lines.join('\n'),
+        defaultOpen: !probeClean,
+      });
+    }
     return {
       title: 'Browser validation',
       description: [
         `App URL: ${detected.appUrl ?? '(unknown)'}`,
         detected.ddevMode || detected.appRunnerMode
-          ? 'Validates the running app in a real browser — automated agent testing, or interactive (you drive it in the Browser panel).'
+          ? 'Interactive: drive the app yourself in the Browser panel, then Approve or Refuse. Automated: an agent tests it and decides. The automated checks summarized above ran during bring-up.'
           : 'No runtime is available to browser-test against, so only Skip is offered.',
       ].join('\n'),
+      ...(infoSections.length > 0 ? { infoSections } : {}),
       fields: [
         {
           type: 'radio' as const,
@@ -439,6 +590,24 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
           }),
           default: detected.ddevMode || detected.appRunnerMode ? 'mcp' : 'skip',
           required: true,
+        },
+        {
+          type: 'radio' as const,
+          id: 'decision',
+          label: 'Your verdict (interactive verification)',
+          options: [
+            { value: 'approve', label: 'Approve — the app works, proceed' },
+            { value: 'refuse', label: 'Refuse — re-run implementation with my feedback' },
+          ],
+          default: probeClean ? 'approve' : 'refuse',
+          visibleWhen: { field: 'mode', equals: 'interactive' },
+        },
+        {
+          type: 'textarea' as const,
+          id: 'feedback',
+          label: 'Feedback for the implementer (used when you Refuse)',
+          rows: 4,
+          visibleWhen: { field: 'mode', equals: 'interactive' },
         },
         {
           type: 'text',
@@ -461,7 +630,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
           visibleWhen: { field: 'mode', notEquals: 'skip' },
         },
       ],
-      submitLabel: 'Run browser validation',
+      submitLabel: 'Submit',
     };
   },
 
@@ -604,7 +773,32 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     if (mode === 'mcp') {
       return applyMcp(ctx, args, detected);
     }
-    // Probe modes (headless / interactive) fall through to the probe below.
+
+    // Interactive (human gate): detect already brought the browser up + probed, and
+    // the user drove it in the panel. The submitted verdict decides — approve
+    // advances, refuse routes back to implementation via restartLoop. No re-probe;
+    // carry detect's probe so gate-2 + the reject diagnosis have the findings.
+    if (mode === 'interactive') {
+      const decision =
+        (args.formValues as { decision?: string }).decision === 'refuse' ? 'refuse' : 'approve';
+      const feedback = ((args.formValues as { feedback?: string }).feedback ?? '').trim();
+      const probe = detected.liveBrowser?.probe ?? null;
+      ctx.logger.info({ decision }, 'interactive browser verification decision');
+      return {
+        ...baseApply,
+        ran: true,
+        skipped: false,
+        method: 'interactive',
+        appUrl: detected.liveBrowser?.appUrl ?? detected.appUrl,
+        consoleErrors: probe?.consoleErrors ?? [],
+        networkErrors: probe?.networkErrors ?? [],
+        pageTitle: probe?.pageTitle ?? null,
+        passed: decision === 'approve',
+        output: decision === 'refuse' ? feedback : '',
+        source: 'probe',
+      };
+    }
+    // Probe mode (headless) falls through to the probe below.
 
     const values = args.formValues as {
       mode?: string;

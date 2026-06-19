@@ -1757,9 +1757,8 @@ function StepCard({
 
       {step.stepId === '08a-browser-verify' &&
         step.status !== 'failed' &&
-        ['interactive', 'mcp'].includes(
-          (step.formValues as { mode?: string } | null)?.mode ?? '',
-        ) && <BrowserVncPanel taskId={taskId} autoCollapse={step.status === 'done'} />}
+        (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
+          ?.available && <BrowserVncPanel taskId={taskId} autoCollapse={step.status === 'done'} />}
 
       {step.stepId === '09-gate-2-verify-approval' &&
         (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
