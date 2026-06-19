@@ -94,6 +94,63 @@ function normalise(
   return { summary, filesTouched, notes };
 }
 
+/** Remove fenced code blocks (```...```), leaving the agent's prose. */
+function stripFencedBlocks(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/** Best-effort touched-file list from an off-schema object, tolerating the common key
+ *  spellings agents use. Provenance only — the authoritative set is the dirty worktree
+ *  (see collectImplementationFiles in _impl-changes.ts), so this need not be exact. */
+function collectFileList(obj: Record<string, unknown> | null): string[] {
+  if (!obj) return [];
+  for (const key of ['filesTouched', 'files_changed', 'filesChanged', 'files']) {
+    const val = obj[key];
+    if (Array.isArray(val)) {
+      const list = val.filter((v): v is string => typeof v === 'string');
+      if (list.length > 0) return list;
+    }
+  }
+  return [];
+}
+
+/** Strict parse missed (e.g. the browser-verify fix pass emits a different JSON shape
+ *  with no top-level `summary`). The agent still ran and likely edited files, so
+ *  salvage an honest record from whatever it returned — its prose summary plus any file
+ *  list — instead of falsely reporting a skip. Null only when there is no agent output
+ *  at all (then apply emits the genuine no-output stub). */
+export function salvageImplementOutput(
+  raw: unknown,
+): { summary: string; filesTouched: string[]; notes: string } | null {
+  let text = '';
+  let obj: Record<string, unknown> | null = null;
+  if (typeof raw === 'string') {
+    text = raw;
+    const body = extractFencedJson(raw);
+    if (body) {
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed && typeof parsed === 'object') obj = parsed as Record<string, unknown>;
+      } catch {
+        /* leave obj null; the prose is still usable */
+      }
+    }
+  } else if (raw && typeof raw === 'object') {
+    obj = raw as Record<string, unknown>;
+  }
+  if (!text.trim() && !obj) return null;
+  const objSummary = obj && typeof obj.summary === 'string' ? obj.summary.trim() : '';
+  const prose = stripFencedBlocks(text);
+  const summary =
+    objSummary ||
+    prose ||
+    'The implementation agent ran but returned no readable summary; see the step terminal for its full output.';
+  return { summary: summary.slice(0, 2000), filesTouched: collectFileList(obj), notes: '' };
+}
+
 function stubImplement(detect: ImplementDetect): {
   summary: string;
   filesTouched: string[];
@@ -101,7 +158,7 @@ function stubImplement(detect: ImplementDetect): {
 } {
   return {
     summary:
-      'Implementation phase was skipped — no CLI provider produced a change set. The spec remains the authoritative source of intent.',
+      'The implementation agent produced no output (no CLI provider was available, or the run returned nothing). No changes were recorded; the spec remains the authoritative source of intent.',
     filesTouched: [],
     notes: detect.gateFeedback
       ? `Gate 1 feedback carried forward: ${detect.gateFeedback}`
@@ -289,8 +346,19 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         source: 'llm',
       };
     }
+    // Strict parse missed. If the agent still returned output (e.g. the browser-verify
+    // fix pass emits a different JSON shape), salvage an honest record from it rather
+    // than reporting a skip. Only the genuine no-output case falls through to the stub.
+    const salvaged = salvageImplementOutput(args.llmOutput ?? null);
+    if (salvaged) {
+      ctx.logger.info(
+        { filesTouched: salvaged.filesTouched.length, source: 'llm' },
+        'implementation summary salvaged from off-format agent output',
+      );
+      return { ...salvaged, source: 'llm' };
+    }
     const stub = stubImplement(args.detected);
-    ctx.logger.info({ source: 'stub' }, 'implementation stubbed');
+    ctx.logger.info({ source: 'stub' }, 'implementation stubbed (no agent output)');
     return {
       summary: stub.summary,
       filesTouched: stub.filesTouched,
