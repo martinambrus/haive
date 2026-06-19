@@ -251,7 +251,13 @@ taskRoutes.get('/:id', async (c) => {
     .select()
     .from(schema.taskSteps)
     .where(eq(schema.taskSteps.taskId, id))
-    .orderBy(asc(schema.taskSteps.stepIndex));
+    // Chronological (creation) order, NOT stepIndex alone: a fix loop re-runs the
+    // 07->08a steps as NEW rows with the same stepIndex but a higher round, created
+    // when the loop re-enters. Ordering by createdAt lays them out in run order — the
+    // round-0 sequence, then the round-1 fix-loop sequence, then the post-loop steps —
+    // and makes same-stepIndex rounds deterministic (round 1 after round 0, not
+    // arbitrarily on top, which is what the heap order did). stepIndex breaks ties.
+    .orderBy(asc(schema.taskSteps.createdAt), asc(schema.taskSteps.stepIndex));
   const enriched = await enrichStepsWithCliPreferences(db, userId, stepRows);
   const withSkip = await enrichStepsWithSkipFlag(db, id, enriched);
   const withStats = await enrichStepsWithCliStats(db, id, withSkip);
