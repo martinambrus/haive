@@ -55,6 +55,14 @@ export interface BuildDefaultMcpServersOptions {
   ragToken?: string;
 }
 
+/** Chromium binary path inside browserTesting sandboxes. The env-template
+ *  Dockerfile (02-generate-dockerfile.ts) installs it here and exports it as
+ *  CHROME_PATH. chrome-devtools-mcp honors no env var for the binary, so the
+ *  headless self-launch must pass it explicitly via --executable-path
+ *  (--channel=stable looks for Google Chrome, absent on Debian). Keep in sync
+ *  with the Dockerfile install path. */
+const SANDBOX_CHROME_PATH = '/usr/bin/chromium';
+
 export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): McpServerSpec[] {
   const servers: McpServerSpec[] = [];
   const includeFs = opts.includeFilesystem !== false;
@@ -86,12 +94,22 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
 
   if (opts.includeChromeDevtools) {
     // Connect to the runner's visible browser when its CDP URL is provided
-    // (interactive/co-driven testing); otherwise self-launch an isolated
-    // headless instance (the default automated path).
+    // (interactive/co-driven testing); otherwise self-launch a headless Chromium
+    // in the sandbox. The sandbox has no X display, so --headless is required;
+    // and chrome-devtools-mcp must be pointed at the installed binary via
+    // --executable-path — --channel=stable looks for Google Chrome, which the
+    // Debian sandbox lacks (the cause of past "Could not connect to Chrome").
     const cdmSpec = `chrome-devtools-mcp@${opts.chromeDevtoolsMcpVersion?.trim() || 'latest'}`;
     const chromeArgs = opts.chromeDevtoolsBrowserUrl
       ? ['-y', cdmSpec, `--browser-url=${opts.chromeDevtoolsBrowserUrl}`]
-      : ['-y', cdmSpec, '--channel=stable', '--isolated=true', '--viewport=1920x1080'];
+      : [
+          '-y',
+          cdmSpec,
+          `--executable-path=${SANDBOX_CHROME_PATH}`,
+          '--headless=true',
+          '--isolated=true',
+          '--viewport=1920x1080',
+        ];
     servers.push({ name: 'chrome-devtools', command: 'npx', args: chromeArgs });
   }
 

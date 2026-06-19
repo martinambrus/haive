@@ -242,6 +242,26 @@ async function loadUserMcpServers(db: Database, taskId: string): Promise<Record<
   return parse(rows[0]?.output) ?? {};
 }
 
+const CDP_PROBE_ATTEMPTS = 3;
+const CDP_PROBE_RETRY_MS = 2_000;
+
+/** Resolve the task runner's live headed-browser CDP URL, retrying briefly so a
+ *  runner whose desktop is still finishing bring-up (e.g. just recovered after a
+ *  worker restart) is connected to rather than prematurely abandoned to the headless
+ *  fallback. Returns the first URL that answers, or undefined. Each probe is a single
+ *  fast docker-exec curl and only the runner type the task actually has can answer,
+ *  so once the desktop is up this returns on the first attempt with no added latency. */
+async function resolveRunnerBrowserCdpUrl(taskId: string): Promise<string | undefined> {
+  for (let attempt = 0; attempt < CDP_PROBE_ATTEMPTS; attempt += 1) {
+    const url = (await runnerBrowserCdpUrl(taskId)) ?? (await appRunnerBrowserCdpUrl(taskId));
+    if (url) return url;
+    if (attempt < CDP_PROBE_ATTEMPTS - 1) {
+      await new Promise((resolve) => setTimeout(resolve, CDP_PROBE_RETRY_MS));
+    }
+  }
+  return undefined;
+}
+
 export async function resolveMcpExtraFiles(
   db: Database,
   taskId: string,
@@ -282,7 +302,7 @@ export async function resolveMcpExtraFiles(
   // of self-launching an isolated headless one — so it co-drives what the user
   // watches in the VNC panel.
   const chromeDevtoolsBrowserUrl = includeChromeDevtools
-    ? ((await runnerBrowserCdpUrl(taskId)) ?? (await appRunnerBrowserCdpUrl(taskId)) ?? undefined)
+    ? await resolveRunnerBrowserCdpUrl(taskId)
     : undefined;
 
   const servers = buildDefaultMcpServers({
