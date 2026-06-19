@@ -331,7 +331,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     });
     await getTaskQueue().add(
       TASK_JOB_NAMES.ADVANCE_STEP,
-      { taskId: id, userId, stepId } as TaskJobPayload,
+      // round is essential: handleAdvanceStep defaults a missing round to 0, so it
+      // would resolve the round-0 (done) sibling of a fix-loop step and advance PAST
+      // the pending retried round instead of re-running it (round-drop, cf. 1408fc9).
+      { taskId: id, userId, stepId, round: step.round } as TaskJobPayload,
       {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
@@ -405,7 +408,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     });
     await getTaskQueue().add(
       TASK_JOB_NAMES.ADVANCE_STEP,
-      { taskId: id, userId, stepId } as TaskJobPayload,
+      { taskId: id, userId, stepId, round: step.round } as TaskJobPayload,
       {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
@@ -470,7 +473,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     await appendTaskEvent(db, id, step.id, 'step.retry_ai', { stepId, note: body.note ?? null });
     await getTaskQueue().add(
       TASK_JOB_NAMES.ADVANCE_STEP,
-      { taskId: id, userId, stepId } as TaskJobPayload,
+      { taskId: id, userId, stepId, round: step.round } as TaskJobPayload,
       {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
@@ -523,7 +526,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // path a step's own `skipped`/`done` result takes (handleResult → buildRunList).
     await getTaskQueue().add(
       TASK_JOB_NAMES.ADVANCE_STEP,
-      { taskId: id, userId, stepId } as TaskJobPayload,
+      { taskId: id, userId, stepId, round: step.round } as TaskJobPayload,
       {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
@@ -634,7 +637,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       eq(schema.taskSteps.stepId, stepId),
       body.round !== undefined ? eq(schema.taskSteps.round, body.round) : undefined,
     ),
-    columns: { id: true, status: true, iterationCount: true },
+    columns: { id: true, status: true, iterationCount: true, round: true },
     orderBy: desc(schema.taskSteps.round),
   });
   if (!step) throw new HttpError(404, 'Step not found');
@@ -774,7 +777,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   if (invalidated) {
     await getTaskQueue().add(
       TASK_JOB_NAMES.ADVANCE_STEP,
-      { taskId: id, userId, stepId } as TaskJobPayload,
+      { taskId: id, userId, stepId, round: step.round } as TaskJobPayload,
       {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
