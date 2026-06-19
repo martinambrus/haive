@@ -181,6 +181,12 @@ export const taskSteps = pgTable(
      *  on iteration count without parsing the JSONB blob. */
     iterationCount: integer('iteration_count').notNull().default(0),
     statusMessage: text('status_message'),
+    /** Human-readable recap of what this step's LLM agent did, shown as the
+     *  collapsible "What the agent did" panel on the done card. Populated from
+     *  the apply output's curated summary (findingsSummary/summary/notes) when
+     *  present, else by a best-effort async LLM summarizer. Null on steps that
+     *  ran no agent (deterministic-only) or before the summary lands. */
+    summary: text('summary'),
     errorMessage: text('error_message'),
     errorHint: jsonb('error_hint').$type<TaskStepErrorHint>(),
     /** Set by the retry_ai action: the prior failure context for the

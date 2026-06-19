@@ -439,6 +439,10 @@ export interface TaskStep {
   formValues: Record<string, unknown> | null;
   output: unknown;
   statusMessage: string | null;
+  /** Human-readable recap of what this step's LLM agent did — shown as the
+   *  collapsible "What the agent did" panel. Null on deterministic-only steps
+   *  or before the async summarizer fills it. */
+  summary: string | null;
   errorMessage: string | null;
   errorHint: StepErrorHint | null;
   startedAt: string | null;

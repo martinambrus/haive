@@ -29,6 +29,7 @@ import {
 } from './step-definition.js';
 import { resolveDagPhase } from './dag-executor.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
+import { resolveCuratedSummary } from './_step-summary.js';
 
 const log = logger.child({ module: 'step-runner' });
 
@@ -121,6 +122,7 @@ type UpdatePatch = Partial<{
   iterations: StepIterationEntry[];
   iterationCount: number;
   statusMessage: string | null;
+  summary: string | null;
   errorMessage: string | null;
   aiFixContext: { priorError: string; priorOutput: string } | null;
   startedAt: Date;
@@ -940,6 +942,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       previousIterations,
     });
 
+    // Curated per-step recap for the "What the agent did" panel. LLM steps that
+    // already emit a summary field get it for free here; steps that ran an agent
+    // but emit no summary field are left null for the async LLM summarizer
+    // (handleResult) to fill. Deterministic steps stay null (no panel).
+    const curatedSummary =
+      stepDef.llm || stepDef.agentMining || stepDef.dagExecute
+        ? resolveCuratedSummary(output)
+        : null;
+
     // --- Loop hook: decide whether another LLM pass is warranted ---
     if (stepDef.loop) {
       const budget = (await resolveLoopBudget(db, taskId, current, stepDef)) ?? 1;
@@ -999,6 +1010,13 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       }
     }
 
+    // No curated summary field was available → kick off a best-effort async LLM
+    // summarizer that fills task_steps.summary later. We are past the loop hook here,
+    // so this runs once per step finalization (not per loop pass) and never blocks it.
+    if (!curatedSummary && (stepDef.llm || stepDef.agentMining || stepDef.dagExecute)) {
+      await maybeEnqueueStepSummary(db, stepDef, current, params, output, ctx.logger);
+    }
+
     // --- Fix-loop hook: a downstream step that finds a BLOCKING defect routes back
     // to the implementation step for a new round instead of finishing the chain. The
     // step row is still marked done (it ran successfully and produced its findings);
@@ -1011,6 +1029,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         const finished = await updateRow(db, current.id, {
           status: 'done',
           output,
+          summary: curatedSummary,
           statusMessage: null,
           endedAt: new Date(),
         });
@@ -1038,6 +1057,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         const finished = await updateRow(db, current.id, {
           status: 'done',
           output,
+          summary: curatedSummary,
           statusMessage: null,
           endedAt: new Date(),
         });
@@ -1066,6 +1086,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         const finished = await updateRow(db, current.id, {
           status: 'done',
           output,
+          summary: curatedSummary,
           statusMessage: null,
           endedAt: new Date(),
         });
@@ -1085,6 +1106,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     const done = await updateRow(db, current.id, {
       status: 'done',
       output,
+      summary: curatedSummary,
       statusMessage: null,
       endedAt: new Date(),
     });
@@ -1187,6 +1209,110 @@ async function updateRow(db: Database, id: string, patch: UpdatePatch): Promise<
   const row = rows[0];
   if (!row) throw new Error(`Task step ${id} not found`);
   return row;
+}
+
+const STEP_SUMMARY_TIMEOUT_MS = 60_000;
+
+/** Best-effort: enqueue a prompt-only LLM summarizer for a finalizing LLM step that
+ *  produced no curated summary field. The invocation is unlinked (taskStepId=null) so
+ *  it stays out of the step terminal and token totals; its completion handler writes
+ *  task_steps.summary for `current.id` and does NOT resume the step machine. Never
+ *  throws — a missing provider or failed call just leaves summary null (no panel). */
+async function maybeEnqueueStepSummary(
+  db: Database,
+  stepDef: StepDefinition,
+  current: TaskStepRow,
+  params: AdvanceStepParams,
+  output: unknown,
+  logger: StepContext['logger'],
+): Promise<void> {
+  try {
+    const { providers, deps } = params;
+    if (!providers || !deps) return;
+    const [latest] = await db
+      .select({ rawOutput: schema.cliInvocations.rawOutput })
+      .from(schema.cliInvocations)
+      .where(
+        and(
+          eq(schema.cliInvocations.taskStepId, current.id),
+          isNull(schema.cliInvocations.supersededAt),
+          ne(schema.cliInvocations.mode, 'agent_mining'),
+        ),
+      )
+      .orderBy(desc(schema.cliInvocations.createdAt))
+      .limit(1);
+    const rawOutput = latest?.rawOutput?.trim();
+    if (!rawOutput) return; // no agent text to summarize
+
+    const prompt = buildStepSummaryPrompt(current.title, output, rawOutput);
+    const preferredProviderId = await resolvePreferredCli(
+      db,
+      params.userId,
+      stepDef.metadata.id,
+      params.cliProviderId ?? null,
+      providers,
+      'default',
+    );
+    const plan = resolveDispatch({
+      providers,
+      preferredProviderId,
+      input: { kind: 'prompt', prompt, capabilities: [] },
+      invokeOpts: { cwd: params.workspacePath },
+    });
+    const invocation = plan.invocation;
+    if (plan.mode === 'skip' || !invocation || invocation.kind !== 'cli') return;
+
+    const [invRow] = await db
+      .insert(schema.cliInvocations)
+      .values({
+        taskId: params.taskId,
+        taskStepId: null,
+        cliProviderId: plan.providerId,
+        mode: 'cli',
+        prompt,
+        agentTitle: 'Step summary',
+      })
+      .returning({ id: schema.cliInvocations.id });
+    if (!invRow) return;
+
+    await deps.enqueueCliInvocation({
+      invocationId: invRow.id,
+      taskId: params.taskId,
+      taskStepId: null,
+      userId: params.userId,
+      cliProviderId: plan.providerId,
+      kind: 'cli',
+      spec: invocation.spec,
+      timeoutMs: STEP_SUMMARY_TIMEOUT_MS,
+      purpose: 'step_summary',
+      summaryForStepId: current.id,
+    });
+    logger.info({ stepId: stepDef.metadata.id, invocationId: invRow.id }, 'step summary enqueued');
+  } catch (err) {
+    logger.warn({ err, stepId: stepDef.metadata.id }, 'step summary enqueue failed (best-effort)');
+  }
+}
+
+function buildStepSummaryPrompt(stepTitle: string, output: unknown, rawOutput: string): string {
+  const structured = JSON.stringify(output ?? {}, null, 2).slice(0, 4000);
+  const agentText = rawOutput.slice(0, 6000);
+  return [
+    `An automated coding agent just finished a workflow step titled "${stepTitle}".`,
+    '',
+    "The agent's final message was:",
+    '"""',
+    agentText,
+    '"""',
+    '',
+    'Its structured result was:',
+    '```json',
+    structured,
+    '```',
+    '',
+    'In 1-3 plain sentences, describe what the agent actually did in this step — what it ' +
+      'found, changed, or fixed, and the outcome. Write only the summary itself: no ' +
+      'preamble, no headings, no bullet list.',
+  ].join('\n');
 }
 
 /** Read the step's persisted iterations array as the lighter-weight

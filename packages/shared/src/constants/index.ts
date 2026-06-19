@@ -183,6 +183,12 @@ export interface CliExecJobPayload {
   timeoutMs?: number;
   /** For kind='agent_mining': the task_step_agent_minings.id row to update with results. */
   agentMiningId?: string;
+  /** Marks a best-effort per-step summarizer invocation: its completion writes
+   *  task_steps.summary (for summaryForStepId) and does NOT resume the step machine. */
+  purpose?: 'step_summary';
+  /** Target task_steps.id for purpose='step_summary'. The invocation itself is
+   *  unlinked (taskStepId=null) so it stays out of the step terminal and token totals. */
+  summaryForStepId?: string;
 }
 
 export type CliProbeTargetMode = 'cli';

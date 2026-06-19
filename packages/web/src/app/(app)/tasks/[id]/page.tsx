@@ -1694,23 +1694,16 @@ function StepCard({
           requirements, technical spec, gate reviews, …) read-only so they stay
           reviewable after the interactive form is gone. */}
       {step.status !== 'waiting_form' && <InfoSections sections={schema?.infoSections} />}
-      {step.stepId === '07b-phase-4-validate' &&
-        step.status === 'done' &&
-        ((step.output as { findingsSummary?: string } | null)?.findingsSummary ?? '').trim()
-          .length > 0 && (
-          <details className="rounded-md border border-neutral-800 bg-neutral-950/60" open>
-            <summary className="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900">
-              <span className="font-medium">Validation summary</span>
-              <span className="ml-2 text-xs text-neutral-400">what was found &amp; fixed</span>
-            </summary>
-            <div className="border-t border-neutral-800">
-              <MarkdownView
-                body={(step.output as { findingsSummary: string }).findingsSummary}
-                enhanced
-              />
-            </div>
-          </details>
-        )}
+      {(step.summary ?? '').trim().length > 0 && (
+        <details className="rounded-md border border-neutral-800 bg-neutral-950/60">
+          <summary className="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900">
+            <span className="font-medium">What the agent did</span>
+          </summary>
+          <div className="border-t border-neutral-800">
+            <MarkdownView body={step.summary ?? ''} enhanced />
+          </div>
+        </details>
+      )}
 
       {step.status !== 'waiting_form' && (step.detectOutput !== null || step.output !== null) && (
         <button

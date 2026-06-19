@@ -125,6 +125,19 @@ export async function handleCliExecJob(
       })
       .where(eq(schema.cliInvocations.id, row.id));
 
+    // Best-effort per-step summarizer: write task_steps.summary and stop. This
+    // invocation is unlinked (taskStepId=null) so it must not resume the step.
+    if (payload.purpose === 'step_summary') {
+      const summaryText = (result.rawOutput ?? '').trim().slice(0, 2000);
+      if (payload.summaryForStepId && result.exitCode === 0 && summaryText) {
+        await db
+          .update(schema.taskSteps)
+          .set({ summary: summaryText, updatedAt: new Date() })
+          .where(eq(schema.taskSteps.id, payload.summaryForStepId));
+      }
+      return;
+    }
+
     if (payload.agentMiningId) {
       const failed = result.exitCode !== 0 || (finalErrorMessage?.trim().length ?? 0) > 0;
       await db
@@ -155,6 +168,9 @@ export async function handleCliExecJob(
         endedAt: new Date(),
       })
       .where(eq(schema.cliInvocations.id, row.id));
+    // Summarizer is best-effort: on failure leave summary null and do not resume or
+    // retry (taskStepId is null so resumeStepIfLinked is a no-op anyway).
+    if (payload.purpose === 'step_summary') return;
     if (payload.agentMiningId) {
       await db
         .update(schema.taskStepAgentMinings)
