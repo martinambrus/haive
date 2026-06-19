@@ -77,6 +77,9 @@ interface BrowserVerifyApply {
   visualVerdict: string | null;
   checklistMarkdown: string | null;
   fixesApplied: string[];
+  /** Tester's fix-scope judgement on a failed mcp pass (null otherwise): 'trivial'
+   *  keeps the in-step fixer loop, 'implementation' stops it so fixLoop escalates. */
+  fixScope: 'trivial' | 'implementation' | null;
   /** Internal loop bookkeeping (the runner re-applies per pass). */
   source: 'probe' | 'tester' | 'fixer' | 'manual' | 'skip';
 }
@@ -87,6 +90,10 @@ const testerOutputSchema = z.object({
     .array(z.object({ description: z.string(), evidence: z.string().optional() }))
     .default([]),
   visual_verdict: z.enum(['STYLED', 'NEEDS_POLISH', 'UNSTYLED', 'SKIPPED']).optional(),
+  // On a failure, the tester's judgement of WHERE the fix belongs: 'trivial' = an
+  // in-step fixer can patch it (typo/one-liner); 'implementation' = route to the
+  // implementation agent. Defaults to 'implementation' so an unjudged fail escalates.
+  fix_scope: z.enum(['trivial', 'implementation']).default('implementation'),
   notes: z.string().default(''),
 });
 
@@ -118,6 +125,7 @@ export function parseBrowserTestOutput(raw: unknown): {
   passed: boolean;
   failures: TestFailure[];
   visualVerdict: string | null;
+  fixScope: 'trivial' | 'implementation';
   notes: string;
 } | null {
   const parsed = testerOutputSchema.safeParse(fencedCandidate(raw));
@@ -126,6 +134,7 @@ export function parseBrowserTestOutput(raw: unknown): {
     passed: parsed.data.passed,
     failures: parsed.data.failures,
     visualVerdict: parsed.data.visual_verdict ?? null,
+    fixScope: parsed.data.fix_scope,
     notes: parsed.data.notes,
   };
 }
@@ -218,7 +227,7 @@ async function run() {
   await browser.close();
   const errors = consoleMessages.filter(m => m.level === 'error').map(m => m.text);
   const warnings = consoleMessages.filter(m => m.level === 'warning').map(m => m.text);
-  const httpBad = httpStatus !== null && httpStatus >= 400;
+  const httpBad = httpStatus !== null && httpStatus >= 500;
   console.log(JSON.stringify({ pageTitle: title, httpStatus: httpStatus, consoleErrors: errors.slice(0, 50), consoleWarnings: warnings.slice(0, 50), networkErrors: networkErrors.slice(0, 50), passed: errors.length === 0 && networkErrors.length === 0 && !httpBad }));
 }
 run().catch(err => { console.error(err.message); process.exit(1); });
@@ -466,7 +475,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     },
     // mcp mode needs the runner's headed browser up so chrome-devtools connects
     // to the SAME browser the user watches. Idempotent (pgrep-guarded).
-    prepare: async ({ ctx, formValues }) => {
+    prepare: async ({ ctx, formValues, detected }) => {
       if ((formValues as { mode?: string }).mode !== 'mcp') return;
       await ctx.emitProgress('Starting the browser desktop for agent testing…');
       // mcp drives the SAME visible browser via chrome-devtools, so the app must
@@ -474,8 +483,27 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       // relaunches a restart-killed app-runner process; then start the desktop on
       // whichever runner backs it.
       const runtime = await ensureAppServing(ctx);
-      if (runtime.mode === 'ddev') await startBrowserDesktop(runtime.handle);
-      else if (runtime.mode === 'app-runner') await startAppBrowserDesktop(runtime.handle);
+      const appUrl =
+        (formValues as { appUrl?: string }).appUrl ||
+        runtime.url ||
+        (detected as BrowserVerifyDetect).appUrl ||
+        'http://localhost';
+      // Point the visible desktop at the app up front so the user sees the app —
+      // not about:blank — while the agent spins up (the agent re-navigates as it
+      // tests). Best-effort: a nav miss never blocks the agent.
+      if (runtime.mode === 'ddev') {
+        await startBrowserDesktop(runtime.handle);
+        await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
+          timeoutMs: 30_000,
+        }).catch(() => {});
+      } else if (runtime.mode === 'app-runner') {
+        await startAppBrowserDesktop(runtime.handle);
+        await appRunnerExec(
+          runtime.handle,
+          `node /opt/browser/browser-probe-connect.js '${appUrl}'`,
+          { timeoutMs: 30_000 },
+        ).catch(() => {});
+      }
     },
     buildPrompt: (args) => {
       const d = args.detected as BrowserVerifyDetect;
@@ -501,7 +529,15 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     shouldContinue: ({ applyOutput, iteration }) => {
       if (roleForIteration(iteration) === ROLE_FIXER) return true; // after a fix, re-test
       const out = applyOutput as BrowserVerifyApply;
-      return out.method === 'mcp' && out.source === 'tester' && out.passed === false;
+      // mcp tester failed: keep the in-step fixer loop ONLY for a trivial bug (a typo /
+      // one-liner the tester flagged `trivial`). A substantial failure stops the loop
+      // here so fixLoop escalates to the implementation agent (full pipeline re-run).
+      return (
+        out.method === 'mcp' &&
+        out.source === 'tester' &&
+        out.passed === false &&
+        out.fixScope === 'trivial'
+      );
     },
     buildIterationPrompt: ({ detected, formValues, iteration, previousIterations }) => {
       const d = detected as BrowserVerifyDetect;
@@ -526,6 +562,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       visualVerdict: null as string | null,
       checklistMarkdown: null as string | null,
       fixesApplied: [] as string[],
+      fixScope: null as 'trivial' | 'implementation' | null,
     };
     const skipped: BrowserVerifyApply = {
       ...baseApply,
@@ -678,7 +715,11 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
 
     const checkConsole = values.checkConsoleErrors !== false;
     const checkNetwork = values.checkNetworkErrors !== false;
+    // A 5xx (server crash — e.g. PHP memory exhaustion) is a hard fail even when no
+    // JS console/network error fired; 4xx (401/403/404) are fine for login-gated apps.
+    const httpBad = 'httpStatus' in report && report.httpStatus != null && report.httpStatus >= 500;
     const passed =
+      !httpBad &&
       (!checkConsole || report.consoleErrors.length === 0) &&
       (!checkNetwork || report.networkErrors.length === 0);
 
@@ -725,6 +766,7 @@ async function applyMcp(
     ran: true,
     skipped: false,
     method: 'mcp' as BrowserMode,
+    fixScope: null as 'trivial' | 'implementation' | null,
   };
 
   // Fixer pass: record fixes, carry the prior tester verdict forward (still
@@ -757,6 +799,7 @@ async function applyMcp(
       checklistMarkdown: null,
       fixesApplied: fixesSoFar,
       passed: false,
+      fixScope: 'implementation',
       output: typeof args.llmOutput === 'string' ? args.llmOutput.slice(-2000) : '',
       source: 'tester',
     };
@@ -774,6 +817,7 @@ async function applyMcp(
     checklistMarkdown: null,
     fixesApplied: fixesSoFar,
     passed,
+    fixScope: passed ? null : verdict.fixScope,
     output: verdict.notes,
     source: 'tester',
   };
@@ -801,9 +845,12 @@ function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string): string {
     ...SEARCH_LADDER,
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
-    '{ "passed": true|false, "failures": [{ "description": "...", "evidence": "file:line or screenshot path" }], "visual_verdict": "STYLED|NEEDS_POLISH|UNSTYLED|SKIPPED", "notes": "" }',
+    '{ "passed": true|false, "failures": [{ "description": "...", "evidence": "file:line or screenshot path" }], "visual_verdict": "STYLED|NEEDS_POLISH|UNSTYLED|SKIPPED", "fix_scope": "trivial|implementation", "notes": "" }',
     'passed=false if ANY functional OR blocking visual check failed. visual_verdict SKIPPED for',
-    'backend-only changes.',
+    'backend-only changes. On a failure, set fix_scope "trivial" ONLY for a tiny self-evident bug',
+    '(a JS typo, a one-line logic slip, a wrong CSS value) a focused fixer can patch in place; use',
+    '"implementation" for anything needing real design/logic work or spanning multiple files (it',
+    'routes back to the implementation agent). When passed=true, fix_scope is ignored.',
     '',
     '=== Spec (acceptance criteria) ===',
     d.spec || '(no spec recorded)',

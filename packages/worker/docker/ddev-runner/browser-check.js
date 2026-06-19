@@ -47,7 +47,9 @@ async function run() {
 
   const errors = consoleMessages.filter((m) => m.level === 'error').map((m) => m.text);
   const warnings = consoleMessages.filter((m) => m.level === 'warning').map((m) => m.text);
-  const httpBad = httpStatus !== null && httpStatus >= 400;
+  // Only 5xx (server crash, e.g. PHP memory exhaustion) is a hard fail; 4xx like
+  // 401/403/404 are legitimate for login-gated apps and must not fail the check.
+  const httpBad = httpStatus !== null && httpStatus >= 500;
 
   console.log(
     JSON.stringify({
