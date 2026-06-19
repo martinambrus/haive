@@ -4,6 +4,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { extractFencedJson } from '../_fenced-json.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { loadFixLoopDiagnosis } from './_fix-loop.js';
+import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 
 interface ImplementDetect {
   specSummary: string;
@@ -15,6 +16,10 @@ interface ImplementDetect {
   fixContext: string | null;
   /** Fix-loop round (0 = original implementation pass). */
   round: number;
+  /** Env template ready with browserTesting on → a chrome-devtools MCP is wired to
+   *  the running app's browser (same gate as resolvers.ts), so the fix pass directs
+   *  the agent to verify its change in-browser. */
+  browserTesting: boolean;
 }
 
 interface ImplementApply {
@@ -143,6 +148,10 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         '07-phase-2-implement requires 01-worktree-setup to have produced sandboxWorktreePath',
       );
     }
+    const envTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
+    const browserTesting =
+      envTemplate?.status === 'ready' &&
+      !!(envTemplate.declaredDeps as Record<string, unknown> | null)?.browserTesting;
     return {
       specSummary: planOutput.summary ?? '',
       // Implement from the spec the user APPROVED at gate 1: the post-checkpoint
@@ -153,6 +162,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       // Fix-loop: on a round > 0 re-entry, the diagnosis a downstream step recorded.
       fixContext: await loadFixLoopDiagnosis(ctx),
       round: ctx.round,
+      browserTesting,
     };
   },
 
@@ -206,6 +216,22 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         `Extra instructions: ${values.instructions ?? '(none)'}`,
       ];
 
+      // When the repo does browser testing, a chrome-devtools MCP is wired to the
+      // running app's browser (resolvers.ts attaches it to the live headed desktop
+      // when up, else a headless isolated Chrome). On a fix pass, direct the agent to
+      // re-verify its change there — closing the loop the defect came from.
+      const browserVerify = detected.browserTesting
+        ? [
+            '',
+            '=== Verify in the browser (a chrome-devtools MCP is available) ===',
+            "A `chrome-devtools` MCP is connected to the running app's browser — the",
+            'same instance under test (or an isolated headless Chrome). For any change',
+            "affecting the app's runtime behavior or UI: after editing, use chrome-devtools",
+            'to navigate to the app, reproduce the reported problem, and confirm it is',
+            'resolved BEFORE finishing. Note what you observed in your summary.',
+          ]
+        : [];
+
       // Fix pass (round > 0): lead with the defect + a "fix only this" framing, THEN
       // append the full spec as supporting context — the implementation already exists.
       if (detected.fixContext) {
@@ -221,6 +247,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
           detected.fixContext,
           '',
           ...common,
+          ...browserVerify,
           '',
           'The full specification is included below for context — use it to understand the',
           'intended behavior, but only change what is needed to resolve the defect above.',
