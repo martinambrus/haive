@@ -45,7 +45,7 @@ export const browserSetupStep: StepDefinition<BrowserRuntimeInfo, BrowserSetupAp
       description: [
         `App URL: ${detected.appUrl ?? '(unknown)'}`,
         hasRuntime
-          ? 'Pick how to verify the app. The next step brings the live browser up: Interactive lets you drive it and Approve/Refuse; Automated runs an agent that decides. Skip bypasses browser testing.'
+          ? 'Pick how to verify the app. The next step brings the live browser up: Interactive lets you drive it and Approve/Reject; Automated runs an agent that decides. Skip bypasses browser testing.'
           : 'No runtime is available to browser-test against, so only Skip is offered.',
       ].join('\n'),
       fields: [

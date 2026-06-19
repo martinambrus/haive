@@ -26,7 +26,7 @@ interface FormRendererProps {
   renderAfterField?: (fieldId: string, values: FormValues) => React.ReactNode;
   /** Content rendered right after the form title (before description + fields).
    *  Used by 08a to put the live-browser panel at the top so the user can test
-   *  the app before the approve/refuse decision, without scrolling. */
+   *  the app before the approve/reject decision, without scrolling. */
   headerSlot?: React.ReactNode;
   /** Repository the form is being filled for. Required when the schema
    *  contains a `bundle-composer` field — the composer talks to /api/bundles
