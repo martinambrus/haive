@@ -4,8 +4,41 @@ import {
   parseCorrectorOutput,
   parseSpecQualityOutput,
   phase0b5SpecQualityStep,
+  reviewScorePlateaued,
 } from '../src/step-engine/steps/workflow/05-phase-0b5-spec-quality.js';
 import type { StepLoopPassRecord } from '../src/step-engine/step-definition.js';
+
+describe('reviewScorePlateaued (diminishing-returns gate)', () => {
+  type Outs = Parameters<typeof reviewScorePlateaued>[0];
+  const r = (score: number, verdict = 'NEEDS_REVISION') => ({ source: 'review', verdict, score });
+  const c = (score: number) => ({ source: 'correct', verdict: 'NEEDS_REVISION', score });
+  const plateaued = (outs: unknown[]) => reviewScorePlateaued(outs as unknown as Outs);
+
+  it('returns false until more than STALL_REVIEWS reviews exist', () => {
+    expect(plateaued([r(7)])).toBe(false);
+    expect(plateaued([r(7), r(6)])).toBe(false);
+  });
+
+  it('stops on a wobble that never sets a new best (7,6,8,7,8)', () => {
+    expect(plateaued([r(7), r(6), r(8), r(7), r(8)])).toBe(true);
+  });
+
+  it('keeps going on a genuine climb (5,6,7,8)', () => {
+    expect(plateaued([r(5), r(6), r(7), r(8)])).toBe(false);
+  });
+
+  it('stops when scores are flat', () => {
+    expect(plateaued([r(7), r(7), r(7)])).toBe(true);
+  });
+
+  it('treats a verdict upgrade as a new best (keeps going)', () => {
+    expect(plateaued([r(5), r(5), r(5, 'APPROVED')])).toBe(false);
+  });
+
+  it('ignores corrector passes — only reviews count', () => {
+    expect(plateaued([r(7), c(7), r(6), c(6), r(8)])).toBe(false);
+  });
+});
 
 describe('parseSpecQualityOutput', () => {
   it('returns null for empty / non-stringy / unparseable input', () => {

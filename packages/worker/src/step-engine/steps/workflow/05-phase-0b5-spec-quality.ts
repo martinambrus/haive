@@ -260,6 +260,23 @@ function bestPriorReview(previous: StepLoopPassRecord[]): SpecQualityApply | nul
   return best;
 }
 
+/** Diminishing-returns guard. The review score wobbles when the reviewer chases
+ *  borderline findings (different ones each pass) instead of converging. Once the
+ *  last STALL_REVIEWS review passes fail to set a NEW best rank (verdict-then-score),
+ *  more passes are unlikely to help — stop and let bestPriorReview hand gate-1 the
+ *  strongest spec. Fires only after > STALL_REVIEWS reviews, and a genuine slow climb
+ *  keeps setting new highs so it is never cut short. */
+const STALL_REVIEWS = 2;
+export function reviewScorePlateaued(outs: (SpecQualityApply | undefined)[]): boolean {
+  const ranks = outs
+    .filter((o): o is SpecQualityApply => !!o && o.source === 'review')
+    .map(iterationRank);
+  if (ranks.length <= STALL_REVIEWS) return false;
+  const recent = ranks.slice(-STALL_REVIEWS);
+  const before = ranks.slice(0, -STALL_REVIEWS);
+  return Math.max(...recent) <= Math.max(...before);
+}
+
 /** Reconcile a fresh REVIEW pass with the best prior review. The guard exists only
  *  to suppress reviewer NOISE — a re-review that wobbles to a lower score/verdict for
  *  no real reason. It must NEVER roll back the corrected spec body or hide a genuinely
@@ -499,13 +516,29 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
     maxIterations: SPEC_QUALITY_DEFAULT_BUDGET,
     passesPerRound: 2,
     resolveRole: roleForIteration,
-    shouldContinue: ({ applyOutput, iteration }) => {
+    shouldContinue: ({ ctx, applyOutput, iteration, previousIterations }) => {
       // After a correction (odd) always re-review (even) unless the runner's
       // budget stops us. After a review (even) keep going only while the reviewer
       // says NEEDS_REVISION; APPROVED is done, BLOCKING_AMBIGUITY needs a human.
       if (roleForIteration(iteration) === ROLE_CORRECTOR) return true;
       const out = applyOutput as SpecQualityApply;
-      return out.verdict === 'NEEDS_REVISION';
+      if (out.verdict !== 'NEEDS_REVISION') return false;
+      // Diminishing-returns gate: stop chasing reviewer wobble once the score has not
+      // set a new best across the last STALL_REVIEWS review passes. The corrected spec
+      // is preserved (bestPriorReview hands gate-1 the strongest pass), so this skips
+      // only low-value passes, never loses work.
+      const reviews = [
+        ...previousIterations.map((p) => p.applyOutput as SpecQualityApply | undefined),
+        out,
+      ];
+      if (reviewScorePlateaued(reviews)) {
+        ctx.logger.info(
+          { reviews: STALL_REVIEWS },
+          'spec-quality: review score plateaued — stopping early (diminishing returns)',
+        );
+        return false;
+      }
+      return true;
     },
     buildIterationPrompt: ({ detected, formValues, iteration, previousIterations }) => {
       const det = detected as SpecQualityDetect;
