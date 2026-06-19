@@ -109,26 +109,35 @@ export async function startDdevRunner(params: {
 }): Promise<DdevRunnerHandle> {
   const tag = await ensureDdevRunnerImage();
   const name = runnerName(params.taskId);
-  // Drop any stale runner from a prior attempt (with its anon volume).
-  await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
-  await exec(
-    'docker',
-    [
-      'run',
-      '-d',
-      '--privileged',
-      '--name',
-      name,
-      '--label',
-      `haive.task.id=${params.taskId}`,
-      '--label',
-      'haive.ddev=1',
-      '-v',
-      `${REPO_VOLUME}:/repos`,
-      tag,
-    ],
-    { timeout: 60_000 },
-  );
+  // Drop any stale runner from a prior attempt (with its anon volume). A DinD
+  // runner's teardown (nested dockerd + the anon /var/lib/docker volume) can be
+  // slow; if the rm overruns its timeout the `docker run` below hits a name
+  // conflict. So give the rm room AND retry the run once after a forced removal,
+  // instead of failing the boot — this conflict was the recurring VNC "Connection
+  // closed (1006)" surfacing through the runtime-ensure job.
+  const runArgs = [
+    'run',
+    '-d',
+    '--privileged',
+    '--name',
+    name,
+    '--label',
+    `haive.task.id=${params.taskId}`,
+    '--label',
+    'haive.ddev=1',
+    '-v',
+    `${REPO_VOLUME}:/repos`,
+    tag,
+  ];
+  await exec('docker', ['rm', '-f', '-v', name], { timeout: 90_000 }).catch(() => {});
+  try {
+    await exec('docker', runArgs, { timeout: 60_000 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/already in use/i.test(msg)) throw err;
+    await exec('docker', ['rm', '-f', '-v', name], { timeout: 90_000 }).catch(() => {});
+    await exec('docker', runArgs, { timeout: 60_000 });
+  }
 
   // Second NIC on the internal sandbox network (same one sandboxes + the api
   // join), so the api's VNC bridge and sandboxed CLIs reach the runner by DNS
