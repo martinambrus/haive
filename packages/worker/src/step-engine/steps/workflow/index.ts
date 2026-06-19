@@ -20,6 +20,7 @@ import { codeSimplifyStep } from './07a-code-simplify.js';
 import { phase4ValidateStep } from './07b-phase-4-validate.js';
 import { ddevReconcileStep } from './07c-ddev-reconcile.js';
 import { phase5VerifyStep } from './08-phase-5-verify.js';
+import { browserSetupStep } from './08a-browser-setup.js';
 import { browserVerifyStep } from './08a-browser-verify.js';
 import { testManagementStep } from './08b-test-management.js';
 import { codeReviewStep } from './08c-code-review.js';
@@ -53,6 +54,7 @@ export {
   phase4ValidateStep,
   ddevReconcileStep,
   phase5VerifyStep,
+  browserSetupStep,
   browserVerifyStep,
   testManagementStep,
   codeReviewStep,
@@ -87,6 +89,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(phase4ValidateStep);
   registry.register(ddevReconcileStep);
   registry.register(phase5VerifyStep);
+  registry.register(browserSetupStep);
   registry.register(browserVerifyStep);
   registry.register(testManagementStep);
   registry.register(codeReviewStep);

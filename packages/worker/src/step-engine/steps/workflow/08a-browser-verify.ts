@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
@@ -11,15 +10,9 @@ import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { extractFencedJson } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput, resolveDdevWorkspace } from './_task-meta.js';
-import { buildBrowserModeOptions } from './_browser-modes.js';
-import { ddevUrlFromConfigText } from '../_ddev-config.js';
+import { resolveBrowserRuntime } from './_browser-runtime.js';
 import { ensureAppServing } from './_app-runtime.js';
-import {
-  runnerHandleForTask,
-  runnerExec,
-  startBrowserDesktop,
-  ddevPrimaryUrl,
-} from '../../../sandbox/ddev-runner.js';
+import { runnerExec, startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
 import {
   appRunnerExec,
   startBrowserDesktop as startAppBrowserDesktop,
@@ -40,6 +33,8 @@ interface BrowserVerifyDetect {
   skipReason: string | null;
   appUrl: string | null;
   browserTesting: boolean;
+  /** Method chosen at 08a-browser-setup (mcp | interactive | skip). */
+  mode: BrowserMode;
   appBooted: boolean;
   /** When true the app runs in the per-task DDEV runner, so the headless-Chrome
    *  check runs INSIDE the runner (where <name>.ddev.site resolves). */
@@ -410,6 +405,9 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     if (!envTemplate || envTemplate.status !== 'ready') return false;
     const deps = envTemplate.declaredDeps as Record<string, unknown> | null;
     if (!deps?.browserTesting) return false;
+    // Don't run when the user picked Skip at the setup step (08a-browser-setup).
+    const setup = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-setup');
+    if ((setup?.output as { mode?: string } | null)?.mode === 'skip') return false;
     // DDEV-enabled projects run in the per-task runner. `.ddev` lives in the
     // worktree — the implementation may have just written it (add-ddev task).
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
@@ -420,32 +418,30 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
   },
 
   async detect(ctx: StepContext): Promise<BrowserVerifyDetect> {
-    const envTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
-    const deps = (envTemplate?.declaredDeps as Record<string, unknown>) ?? {};
-    const browserTesting = !!deps.browserTesting;
-
-    const base = {
-      browserTesting,
-      ddevMode: false,
-      appRunnerMode: false,
-      envImageTag: null as string | null,
-      repoSubpath: null as string | null,
-      appBooted: false,
-      appUrl: null as string | null,
-      spec: '',
-      implementationFiles: [] as string[],
+    const rt = await resolveBrowserRuntime(ctx);
+    // Method chosen at 08a-browser-setup; default mcp when a runtime exists (a
+    // legacy task created before the split has no setup row).
+    const setup = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-setup');
+    const setupOut = (setup?.output as { mode?: string; appUrl?: string } | null) ?? null;
+    const mode = ((setupOut?.mode as BrowserMode | undefined) ??
+      (rt.ddevMode || rt.appRunnerMode ? 'mcp' : 'skip')) as BrowserMode;
+    const baseDetect = {
+      browserTesting: rt.browserTesting,
+      ddevMode: rt.ddevMode,
+      appRunnerMode: rt.appRunnerMode,
+      envImageTag: rt.envImageTag,
+      repoSubpath: rt.repoSubpath,
+      appBooted: rt.appBooted,
+      appUrl: (setupOut?.appUrl ?? '').trim() || rt.appUrl,
+      available: rt.available,
+      skipReason: rt.skipReason,
+      mode,
     };
-
-    if (!browserTesting) {
-      return {
-        ...base,
-        available: false,
-        skipReason: 'Browser testing not enabled in environment template',
-        liveBrowser: null,
-      };
+    if (!rt.available || mode === 'skip') {
+      return { ...baseDetect, spec: '', implementationFiles: [], liveBrowser: null };
     }
 
-    // Spec (05a → 05 → 04 precedence) + changed files for the tester/manual prompts.
+    // Spec (05a → 05 → 04 precedence) + changed files for the tester prompts.
     const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
     const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
     const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
@@ -454,73 +450,16 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         (quality?.output as { spec?: string } | null)?.spec ??
         (plan?.output as { spec?: string } | null)?.spec) ||
       '';
-
-    const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
-    let result: Omit<BrowserVerifyDetect, 'liveBrowser'>;
-    if (ws && (await pathExists(ddevConfigPath(ws.workspace)))) {
-      const implementationFiles = await collectImplementationFiles(ctx, ws.workspace);
-      // DDEV path: the runner targets the worktree (where `.ddev` lives). It may
-      // not be up yet (a task that just implemented .ddev, where 01c skipped
-      // early) or a worker/host restart may have stopped it — bringUpLiveBrowser
-      // below boots it via ensureAppServing. Prefer the live primary_url; else
-      // derive https://<name>.ddev.site from the booted config so the form and the
-      // mcp tester get a real URL, never the meaningless http://localhost.
-      const liveUrl = await ddevPrimaryUrl(runnerHandleForTask(ctx.taskId, ws.repoSubpath));
-      const cfgText = liveUrl
-        ? null
-        : await readFile(ddevConfigPath(ws.workspace), 'utf8').catch(() => null);
-      const url = liveUrl ?? (cfgText ? ddevUrlFromConfigText(cfgText) : null);
-      result = {
-        browserTesting: true,
-        ddevMode: true,
-        appRunnerMode: false,
-        envImageTag: null,
-        repoSubpath: ws.repoSubpath,
-        appBooted: liveUrl !== null,
-        appUrl: url,
-        available: true,
-        skipReason: null,
-        spec,
-        implementationFiles,
-      };
-    } else {
-      // Legacy / non-DDEV path: rely on 01a-app-boot. A non-DDEV app may run in its
-      // per-task app-runner container (01a containerized path), which hosts the
-      // headed-browser desktop when the env image was built with browser testing —
-      // so headless + interactive run INSIDE that container, like the DDEV runner.
-      const boot = await loadAppBootOutput(ctx.db, ctx.taskId);
-      const appBooted = boot !== null && boot.booted && !boot.skipped;
-      if (!appBooted) {
-        return {
-          ...base,
-          available: false,
-          skipReason: 'Application was not booted (app-boot step skipped or failed)',
-          liveBrowser: null,
-        };
-      }
-      const appRunnerMode = boot?.containerized === true && !!boot.runtimeContainer;
-      const appRunnerWs = appRunnerMode
-        ? await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath)
-        : null;
-      result = {
-        browserTesting: true,
-        ddevMode: false,
-        appRunnerMode,
-        envImageTag: appRunnerMode ? (envTemplate?.imageTag ?? null) : null,
-        repoSubpath: appRunnerWs?.repoSubpath ?? null,
-        appBooted: true,
-        appUrl: boot?.appUrl ?? null,
-        available: true,
-        skipReason: null,
-        spec,
-        implementationFiles: await collectImplementationFiles(ctx, ctx.workspacePath),
-      };
-    }
+    const implementationFiles = await collectImplementationFiles(
+      ctx,
+      rt.workspace ?? ctx.workspacePath,
+    );
+    const detectedForBringUp = { ...baseDetect, spec, implementationFiles };
 
     // Bring up the live headed browser for the gate (idempotent; mirrors 09-gate-2).
     // Best-effort — a failure leaves the gate usable, just without the live panel.
-    const liveBrowser = await bringUpLiveBrowser(ctx, result);
-    return { ...result, liveBrowser };
+    const liveBrowser = await bringUpLiveBrowser(ctx, detectedForBringUp);
+    return { ...detectedForBringUp, liveBrowser };
   },
 
   form(_ctx, detected): FormSchema | null {
@@ -570,64 +509,40 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         defaultOpen: !probeClean,
       });
     }
+    // Automated (mcp): no human input — the agent tests + decides. Auto-submit so
+    // the step proceeds straight to the agent; the panel still shows it working.
+    if (detected.mode === 'mcp') {
+      return {
+        title: 'Browser validation (automated)',
+        description: `App URL: ${detected.appUrl ?? '(unknown)'}\nAn agent is testing the app in the live browser — watch it in the Browser panel.`,
+        ...(infoSections.length > 0 ? { infoSections } : {}),
+        fields: [],
+        autoSubmit: true,
+        submitLabel: 'Run agent testing',
+      };
+    }
+    // Interactive: the human approve/refuse gate (the live browser shows above).
     return {
       title: 'Browser validation',
-      description: [
-        `App URL: ${detected.appUrl ?? '(unknown)'}`,
-        detected.ddevMode || detected.appRunnerMode
-          ? 'Interactive: drive the app yourself in the Browser panel, then Approve or Refuse. Automated: an agent tests it and decides. The automated checks summarized above ran during bring-up.'
-          : 'No runtime is available to browser-test against, so only Skip is offered.',
-      ].join('\n'),
+      description: `App URL: ${detected.appUrl ?? '(unknown)'}\nDrive the app in the Browser panel, then Approve or Refuse. The automated checks summarized above ran during bring-up.`,
       ...(infoSections.length > 0 ? { infoSections } : {}),
       fields: [
         {
           type: 'radio' as const,
-          id: 'mode',
-          label: 'Testing method',
-          options: buildBrowserModeOptions({
-            ddevMode: detected.ddevMode,
-            appRunnerMode: detected.appRunnerMode,
-          }),
-          default: detected.ddevMode || detected.appRunnerMode ? 'mcp' : 'skip',
-          required: true,
-        },
-        {
-          type: 'radio' as const,
           id: 'decision',
-          label: 'Your verdict (interactive verification)',
+          label: 'Your verdict',
           options: [
             { value: 'approve', label: 'Approve — the app works, proceed' },
             { value: 'refuse', label: 'Refuse — re-run implementation with my feedback' },
           ],
           default: probeClean ? 'approve' : 'refuse',
-          visibleWhen: { field: 'mode', equals: 'interactive' },
+          required: true,
         },
         {
           type: 'textarea' as const,
           id: 'feedback',
           label: 'Feedback for the implementer (used when you Refuse)',
           rows: 4,
-          visibleWhen: { field: 'mode', equals: 'interactive' },
-        },
-        {
-          type: 'text',
-          id: 'appUrl',
-          label: 'Application URL to validate',
-          default: detected.appUrl ?? 'http://localhost',
-        },
-        {
-          type: 'checkbox',
-          id: 'checkConsoleErrors',
-          label: 'Check for console errors',
-          default: true,
-          visibleWhen: { field: 'mode', notEquals: 'skip' },
-        },
-        {
-          type: 'checkbox',
-          id: 'checkNetworkErrors',
-          label: 'Check for failed network requests',
-          default: true,
-          visibleWhen: { field: 'mode', notEquals: 'skip' },
         },
       ],
       submitLabel: 'Submit',
@@ -638,25 +553,21 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     requiredCapabilities: ['tool_use', 'file_write'],
     timeoutMs: 30 * 60 * 1000,
     // Only the agent modes dispatch a CLI; the probe modes + skip resolve in apply.
-    skipIf: ({ formValues }) => {
-      const mode = (formValues as { mode?: string }).mode;
+    skipIf: ({ detected }) => {
+      const mode = (detected as BrowserVerifyDetect).mode;
       return mode !== 'mcp' && mode !== 'manual';
     },
     // mcp mode needs the runner's headed browser up so chrome-devtools connects
     // to the SAME browser the user watches. Idempotent (pgrep-guarded).
-    prepare: async ({ ctx, formValues, detected }) => {
-      if ((formValues as { mode?: string }).mode !== 'mcp') return;
+    prepare: async ({ ctx, detected }) => {
+      if ((detected as BrowserVerifyDetect).mode !== 'mcp') return;
       await ctx.emitProgress('Starting the browser desktop for agent testing…');
       // mcp drives the SAME visible browser via chrome-devtools, so the app must
       // be serving and the headed desktop up. ensureAppServing boots DDEV /
       // relaunches a restart-killed app-runner process; then start the desktop on
       // whichever runner backs it.
       const runtime = await ensureAppServing(ctx);
-      const appUrl =
-        (formValues as { appUrl?: string }).appUrl ||
-        runtime.url ||
-        (detected as BrowserVerifyDetect).appUrl ||
-        'http://localhost';
+      const appUrl = runtime.url || (detected as BrowserVerifyDetect).appUrl || 'http://localhost';
       // Point the visible desktop at the app up front so the user sees the app —
       // not about:blank — while the agent spins up (the agent re-navigates as it
       // tests). Best-effort: a nav miss never blocks the agent.
@@ -676,14 +587,13 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     },
     buildPrompt: (args) => {
       const d = args.detected as BrowserVerifyDetect;
-      const mode = (args.formValues as { mode?: string; appUrl?: string }).mode;
-      const appUrl = (args.formValues as { appUrl?: string }).appUrl || d.appUrl || 'the app URL';
-      if (mode === 'manual') return buildChecklistPrompt(d, appUrl);
+      const appUrl = d.appUrl || 'the app URL';
+      if (d.mode === 'manual') return buildChecklistPrompt(d, appUrl);
       return buildTesterPrompt(d, appUrl);
     },
     bypassStub: (args) => {
-      const mode = (args.formValues as { mode?: string }).mode;
-      if (mode === 'manual') return { checklist_markdown: '# Test checklist\n- [ ] bypass stub' };
+      if ((args.detected as BrowserVerifyDetect).mode === 'manual')
+        return { checklist_markdown: '# Test checklist\n- [ ] bypass stub' };
       return { passed: true, failures: [], visual_verdict: 'SKIPPED', notes: 'bypass stub' };
     },
   },
@@ -708,9 +618,9 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
         out.fixScope === 'trivial'
       );
     },
-    buildIterationPrompt: ({ detected, formValues, iteration, previousIterations }) => {
+    buildIterationPrompt: ({ detected, iteration, previousIterations }) => {
       const d = detected as BrowserVerifyDetect;
-      const appUrl = (formValues as { appUrl?: string }).appUrl || d.appUrl || 'the app URL';
+      const appUrl = d.appUrl || 'the app URL';
       if (roleForIteration(iteration) === ROLE_FIXER) {
         const prior = latestTester(previousIterations);
         return buildFixerPrompt(d, prior?.failures ?? []);
@@ -721,7 +631,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
 
   async apply(ctx, args): Promise<BrowserVerifyApply> {
     const detected = args.detected;
-    const mode = ((args.formValues as { mode?: string }).mode ?? 'skip') as BrowserMode;
+    const mode = detected.mode;
     const baseApply = {
       consoleErrors: [],
       consoleWarnings: [],
