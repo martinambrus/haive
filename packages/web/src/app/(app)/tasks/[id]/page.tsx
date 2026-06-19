@@ -171,7 +171,7 @@ export default function TaskDetailPage() {
     const activeStep = steps.find(
       (s) => s.status === 'waiting_form' || s.status === 'running' || s.status === 'waiting_cli',
     );
-    const activeId = activeStep?.stepId ?? null;
+    const activeId = activeStep?.id ?? null;
     const showsTerminal =
       (activeStep?.cliInvocationCount ?? 0) > 0 &&
       (activeStep?.status === 'running' || activeStep?.status === 'waiting_cli');
@@ -267,7 +267,9 @@ export default function TaskDetailPage() {
     : (steps.find((s) => s.status === 'waiting_form') ?? null);
   const userActive = useUserActiveTimer(
     id,
-    activeWaitingStep?.stepId ?? null,
+    // The step ROW id (unique per fix-loop round), so the live timer + the task total
+    // attach to the CURRENT round only — not every row that shares this stepId.
+    activeWaitingStep?.id ?? null,
     activeWaitingStep?.userActiveMs ?? 0,
   );
 
@@ -615,7 +617,7 @@ export default function TaskDetailPage() {
             const showLoopHeader =
               step.round > 0 && (i === 0 || steps[i - 1]!.round !== step.round);
             return (
-              <div key={step.id} data-step-id={step.stepId}>
+              <div key={step.id} data-step-id={step.id}>
                 {showLoopHeader && (
                   <div className="mb-2 mt-5 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-amber-400/80">
                     <span className="h-px flex-1 bg-amber-400/20" />
@@ -632,9 +634,7 @@ export default function TaskDetailPage() {
                   taskCompletedAt={task.completedAt}
                   taskRepositoryId={task.repositoryId}
                   userActiveDisplayMs={
-                    userActive.activeStepId === step.stepId
-                      ? userActive.displayMs
-                      : step.userActiveMs
+                    userActive.activeStepId === step.id ? userActive.displayMs : step.userActiveMs
                   }
                   submitting={submitting === step.stepId}
                   submitError={submitting === step.stepId ? submitError : null}
@@ -1101,7 +1101,7 @@ function TaskTotalTime({
   // computeTaskTiming's open-wait handling; work correctly pauses at the gate.
   const liveSteps = userActive.activeStepId
     ? steps.map((s) =>
-        s.stepId === userActive.activeStepId ? { ...s, userActiveMs: userActive.displayMs } : s,
+        s.id === userActive.activeStepId ? { ...s, userActiveMs: userActive.displayMs } : s,
       )
     : steps;
   const { workMs, idleMs, userActiveMs } = computeTaskTiming(liveSteps, endMs);

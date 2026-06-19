@@ -106,10 +106,13 @@ const userActiveRequestSchema = z.object({
   deltaMs: z.number().int().min(0).max(60_000),
 });
 
-stepRoutes.post('/:id/steps/:stepId/user-active', async (c) => {
+stepRoutes.post('/:id/steps/:stepRowId/user-active', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
-  const stepId = c.req.param('stepId');
+  // The step ROW id (unique per fix-loop round), NOT the stepId — a stepId maps to
+  // one row per round, so updating by stepId would add the time onto every round and
+  // double-count it in the task total.
+  const stepRowId = c.req.param('stepRowId');
   const { deltaMs } = userActiveRequestSchema.parse(await c.req.json());
   const db = getDb();
 
@@ -126,7 +129,7 @@ stepRoutes.post('/:id/steps/:stepId/user-active', async (c) => {
         userActiveMs: sql`${schema.taskSteps.userActiveMs} + ${deltaMs}`,
         updatedAt: new Date(),
       })
-      .where(and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.stepId, stepId)));
+      .where(and(eq(schema.taskSteps.id, stepRowId), eq(schema.taskSteps.taskId, id)));
   }
 
   return c.json({ ok: true });

@@ -97,9 +97,9 @@ export const api = {
  *  final flush survives a tab close / navigation, and bypasses the `request`
  *  wrapper (no 401-refresh/throw): this is best-effort telemetry, so failures
  *  are swallowed rather than surfaced. */
-export function postUserActive(taskId: string, stepId: string, deltaMs: number): void {
+export function postUserActive(taskId: string, stepRowId: string, deltaMs: number): void {
   if (deltaMs <= 0) return;
-  void fetch(`${API_BASE}/tasks/${taskId}/steps/${stepId}/user-active`, {
+  void fetch(`${API_BASE}/tasks/${taskId}/steps/${stepRowId}/user-active`, {
     method: 'POST',
     credentials: 'include',
     keepalive: true,
