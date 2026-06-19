@@ -40,9 +40,11 @@ stepRoutes.get('/:id/steps', async (c) => {
     .select()
     .from(schema.taskSteps)
     .where(eq(schema.taskSteps.taskId, id))
-    // Group by round so each fix round is a contiguous block (round 0 = original
-    // pass, then round 1, …), ordered by step position within the round.
-    .orderBy(asc(schema.taskSteps.round), asc(schema.taskSteps.stepIndex));
+    // Chronological (creation) order — kept identical to GET /tasks/:id (index.ts):
+    // createdAt reflects fix-loop run order (round-0 sequence, then the round-1 block,
+    // then post-loop round-0 steps), whereas a round-primary sort would hoist the
+    // post-loop steps above the round-1 block. stepIndex breaks ties.
+    .orderBy(asc(schema.taskSteps.createdAt), asc(schema.taskSteps.stepIndex));
   const enriched = await enrichStepsWithCliPreferences(db, userId, stepRows);
   const withSkip = await enrichStepsWithSkipFlag(db, id, enriched);
   const withStats = await enrichStepsWithCliStats(db, id, withSkip);
