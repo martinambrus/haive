@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { logger } from '@haive/shared';
+import { APP_RUNNER_LABEL, logger } from '@haive/shared';
 
 const log = logger.child({ module: 'cli-container-reaper' });
 
@@ -14,15 +14,24 @@ const log = logger.child({ module: 'cli-container-reaper' });
  *  Two passes (label + name prefix) are unioned so a shell container that
  *  somehow lost its labels still gets reaped via the deterministic name. */
 export async function reapAllCliSandboxes(reason: string): Promise<number> {
-  const [labelIds, shellIds] = await Promise.all([
+  const [labelIds, shellIds, ddevIds, appRunnerIds] = await Promise.all([
     listSandboxIdsByFilter('label=haive.task.id'),
     listSandboxIdsByFilter('name=haive-shell-'),
+    listSandboxIdsByFilter('label=haive.ddev'),
+    listSandboxIdsByFilter(`label=${APP_RUNNER_LABEL}`),
   ]);
-  const ids = Array.from(new Set([...labelIds, ...shellIds]));
+  // The durable per-task runners (DDEV DinD + non-DDEV app-runner) carry
+  // haive.task.id but are NOT orphaned CLI sandboxes — they're long-lived task
+  // infra that ensureAppServing recovers on demand. Reaping them on every worker
+  // restart forced a slow cold re-boot (DDEV re-pulls its images into a fresh
+  // /var/lib/docker), surfacing as the VNC "Connection closed (1006)". Preserve
+  // them; only the short-lived CLI sandboxes + terminal shells get reaped.
+  const durable = new Set([...ddevIds, ...appRunnerIds]);
+  const ids = Array.from(new Set([...labelIds, ...shellIds])).filter((id) => !durable.has(id));
   if (ids.length === 0) return 0;
   log.warn(
-    { count: ids.length, byLabel: labelIds.length, byShellName: shellIds.length, reason },
-    'reaping orphan haive sandbox/shell containers',
+    { count: ids.length, preserved: durable.size, reason },
+    'reaping orphan haive CLI sandbox/shell containers (durable runners preserved)',
   );
   await rmForce(ids);
   return ids.length;
