@@ -226,6 +226,46 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
   });
 }
 
+/** Reverse-lookup the role of each waiting_cli step's LIVE cli invocation (from its
+ *  agentTitle, the role label) so the UI can react to the active pass — e.g. the
+ *  browser panel hides during 08a's `fixer` pass. cli_invocations has no role
+ *  column, so map the label back through STEP_CLI_ROLES. null when not waiting on a
+ *  role-bearing CLI. */
+export async function enrichStepsWithActiveRole<
+  T extends { id: string; stepId: string; status: string },
+>(
+  db: ReturnType<typeof getDb>,
+  taskId: string,
+  steps: T[],
+): Promise<(T & { activeRole: string | null })[]> {
+  const liveIds = steps
+    .filter((s) => s.status === 'waiting_cli' && STEP_CLI_ROLES[s.stepId])
+    .map((s) => s.id);
+  if (liveIds.length === 0) return steps.map((s) => ({ ...s, activeRole: null }));
+  const rows = await db
+    .select({
+      taskStepId: schema.cliInvocations.taskStepId,
+      agentTitle: schema.cliInvocations.agentTitle,
+    })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskId, taskId),
+        inArray(schema.cliInvocations.taskStepId, liveIds),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
+  const titleByStep = new Map<string, string | null>();
+  for (const r of rows) if (r.taskStepId) titleByStep.set(r.taskStepId, r.agentTitle);
+  return steps.map((s) => {
+    const title = titleByStep.get(s.id) ?? null;
+    const role =
+      title != null ? (STEP_CLI_ROLES[s.stepId]?.find((r) => r.label === title)?.id ?? null) : null;
+    return { ...s, activeRole: role };
+  });
+}
+
 export async function enrichStepsWithSkipFlag<
   T extends { id: string; status: string; stepId: string },
 >(

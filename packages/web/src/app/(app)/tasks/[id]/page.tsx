@@ -1757,8 +1757,16 @@ function StepCard({
 
       {step.stepId === '08a-browser-verify' &&
         step.status !== 'failed' &&
+        step.activeRole !== 'fixer' &&
         (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
           ?.available && <BrowserVncPanel taskId={taskId} autoCollapse={step.status === 'done'} />}
+
+      {step.stepId === '08a-browser-verify' && step.activeRole === 'fixer' && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+          The browser test found issues — fixing them in the code now. The live browser is paused;
+          follow the fix in the terminal above.
+        </div>
+      )}
 
       {step.stepId === '09-gate-2-verify-approval' &&
         (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser

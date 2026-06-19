@@ -466,6 +466,11 @@ export interface TaskStep {
    *  whether the inline terminal toggle is rendered — 0 means the step has
    *  no terminal output to show (deterministic-only or pending steps). */
   cliInvocationCount: number;
+  /** Role id of the step's LIVE cli invocation (e.g. 'tester' | 'fixer' for the
+   *  browser-test loop), reverse-looked-up from the invocation label; null when not
+   *  waiting on a role-bearing CLI. Drives UI that reacts to the active pass — e.g.
+   *  hiding the browser panel during 08a's fixer pass. */
+  activeRole: string | null;
   /** Summed token usage across this step's non-superseded CLI invocations
    *  (provider-native semantics; same filter as cliInvocationCount, so it
    *  reconciles with the per-invocation terminal panel). null when the step
