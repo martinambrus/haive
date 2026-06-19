@@ -76,7 +76,39 @@ export async function ensureDdevRunnerImage(): Promise<string> {
     maxBuffer: 50 * 1024 * 1024,
   });
   log.info({ tag }, 'haive-ddev-runner image built');
+  await pruneOldRunnerImages(tag);
   return tag;
+}
+
+/** Remove superseded haive-ddev-runner:<hash> image tags, keeping the current one.
+ *  The tag is a content hash of the build context, so old tags are dead weight
+ *  (~2GB each) once the context changes. Best-effort — a tag still referenced by a
+ *  stopped container is logged and skipped. */
+async function pruneOldRunnerImages(currentTag: string): Promise<void> {
+  try {
+    const { stdout } = await exec(
+      'docker',
+      ['images', 'haive-ddev-runner', '--format', '{{.Repository}}:{{.Tag}}'],
+      { timeout: 15_000 },
+    );
+    const stale = stdout
+      .split(/\s+/)
+      .filter((t) => t.length > 0 && t !== currentTag && t.startsWith('haive-ddev-runner:'));
+    for (const t of stale) {
+      await exec('docker', ['image', 'rm', '-f', t], { timeout: 30_000 }).catch((err) => {
+        log.warn(
+          { tag: t, err: err instanceof Error ? err.message : String(err) },
+          'prune stale runner image failed',
+        );
+      });
+    }
+    if (stale.length > 0) log.info({ removed: stale.length }, 'pruned stale runner images');
+  } catch (err) {
+    log.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      'runner image prune failed',
+    );
+  }
 }
 
 function runnerName(taskId: string): string {

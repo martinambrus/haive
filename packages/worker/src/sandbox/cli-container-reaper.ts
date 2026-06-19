@@ -48,7 +48,10 @@ function listSandboxIdsByFilter(filter: string): Promise<string[]> {
 
 function rmForce(ids: string[]): Promise<void> {
   return new Promise((resolve) => {
-    const child = spawn('docker', ['rm', '-f', ...ids]);
+    // -v drops each container's ANONYMOUS volumes (named volumes like haive_repos
+    // are untouched). Critical for the DinD DDEV runners: each declares an anon
+    // /var/lib/docker (1-2GB of nested images); reaping without -v orphans it.
+    const child = spawn('docker', ['rm', '-f', '-v', ...ids]);
     child.on('close', () => resolve());
     child.on('error', () => resolve());
     setTimeout(() => {

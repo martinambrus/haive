@@ -105,7 +105,7 @@ export async function startAppRunner(params: {
   imageTag: string;
 }): Promise<AppRunnerHandle> {
   const name = appRunnerName(params.taskId);
-  await exec('docker', ['rm', '-f', name], { timeout: 30_000 }).catch(() => {});
+  await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
   await exec(
     'docker',
     [
@@ -182,7 +182,7 @@ async function ensureAppRunnerStartedInner(
     return { container: name, projectDir: `/repos/${repoSubpath}` };
   }
   if (await containerExists(name)) {
-    await exec('docker', ['rm', '-f', name], { timeout: 30_000 }).catch(() => {});
+    await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
   }
   return startAppRunner({ taskId, repoSubpath, imageTag });
 }
@@ -307,6 +307,6 @@ export async function killTaskAppRunners(taskId: string): Promise<number> {
     return 0;
   }
   if (ids.length === 0) return 0;
-  await exec('docker', ['rm', '-f', ...ids], { timeout: 60_000 }).catch(() => {});
+  await exec('docker', ['rm', '-f', '-v', ...ids], { timeout: 60_000 }).catch(() => {});
   return ids.length;
 }
