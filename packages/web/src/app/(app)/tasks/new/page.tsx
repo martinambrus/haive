@@ -98,6 +98,8 @@ export default function NewTaskPage() {
   const [repositoryId, setRepositoryId] = useState<string>('');
   const [cliProviderId, setCliProviderId] = useState<string>('');
   const [isBugFix, setIsBugFix] = useState(false);
+  const [feature, setFeature] = useState('');
+  const [affectedClients, setAffectedClients] = useState('');
 
   const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
@@ -224,6 +226,12 @@ export default function NewTaskPage() {
       if (cliProviderId) body.cliProviderId = cliProviderId;
       if (type === 'workflow') {
         body.isBugFix = isBugFix;
+        if (feature.trim()) body.feature = feature.trim();
+        const clients = affectedClients
+          .split(',')
+          .map((c) => c.trim())
+          .filter(Boolean);
+        if (clients.length > 0) body.affectedClients = clients;
       }
 
       if (type === 'workflow' && dumpFile) {
@@ -441,6 +449,24 @@ export default function NewTaskPage() {
 
         {inferredType === 'workflow' && (
           <div className="flex flex-col gap-1.5">
+            <Label htmlFor="feature">Feature / area (optional)</Label>
+            <Input
+              id="feature"
+              type="text"
+              value={feature}
+              onChange={(e) => setFeature(e.target.value)}
+              placeholder="e.g. checkout, user-import"
+              maxLength={120}
+            />
+            <p className="text-xs text-neutral-500">
+              Recorded with the task and baked into any bug investigation, so knowledge discovery
+              can find past fixes for the same feature.
+            </p>
+          </div>
+        )}
+
+        {inferredType === 'workflow' && (
+          <div className="flex flex-col gap-1.5">
             <label className="flex items-center gap-2 text-sm text-neutral-100">
               <input
                 type="checkbox"
@@ -455,6 +481,22 @@ export default function NewTaskPage() {
               lesson) into the knowledge base, so future runs find it via search. You review the
               draft before it is written.
             </p>
+            {isBugFix && (
+              <div className="mt-2 flex flex-col gap-1.5">
+                <Label htmlFor="affectedClients">Affected clients (optional)</Label>
+                <Input
+                  id="affectedClients"
+                  type="text"
+                  value={affectedClients}
+                  onChange={(e) => setAffectedClients(e.target.value)}
+                  placeholder="Comma-separated, e.g. acme, globex"
+                />
+                <p className="text-xs text-neutral-500">
+                  Comma-separated. Recorded in the task and the local investigation only — never
+                  sent to the cross-repo knowledge base.
+                </p>
+              </div>
+            )}
           </div>
         )}
 

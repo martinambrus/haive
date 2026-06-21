@@ -88,3 +88,53 @@ describe('createTaskRequestSchema with stepLoopLimits', () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe('createTaskRequestSchema with feature and affectedClients', () => {
+  const baseWorkflow = {
+    type: 'workflow' as const,
+    title: 'fix checkout bug',
+    description: 'a real description',
+  };
+
+  it('accepts a workflow task with feature and affectedClients', () => {
+    const parsed = createTaskRequestSchema.parse({
+      ...baseWorkflow,
+      feature: 'checkout',
+      affectedClients: ['acme', 'globex'],
+    });
+    expect(parsed.feature).toBe('checkout');
+    expect(parsed.affectedClients).toEqual(['acme', 'globex']);
+  });
+
+  it('trims the feature and the client names', () => {
+    const parsed = createTaskRequestSchema.parse({
+      ...baseWorkflow,
+      feature: '  checkout  ',
+      affectedClients: ['  acme  '],
+    });
+    expect(parsed.feature).toBe('checkout');
+    expect(parsed.affectedClients).toEqual(['acme']);
+  });
+
+  it('treats both as optional', () => {
+    const parsed = createTaskRequestSchema.parse(baseWorkflow);
+    expect(parsed.feature).toBeUndefined();
+    expect(parsed.affectedClients).toBeUndefined();
+  });
+
+  it('rejects an over-long feature (>120 chars)', () => {
+    const result = createTaskRequestSchema.safeParse({
+      ...baseWorkflow,
+      feature: 'x'.repeat(121),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an over-sized affectedClients array (>50)', () => {
+    const result = createTaskRequestSchema.safeParse({
+      ...baseWorkflow,
+      affectedClients: Array.from({ length: 51 }, (_, i) => `c${i}`),
+    });
+    expect(result.success).toBe(false);
+  });
+});

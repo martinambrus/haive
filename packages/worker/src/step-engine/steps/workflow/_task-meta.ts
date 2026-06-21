@@ -5,6 +5,12 @@ import { schema, type Database } from '@haive/database';
 export interface TaskMeta {
   title: string;
   description: string;
+  /** Optional feature/area the task targets (tasks.metadata.feature). Null when
+   *  not set. Used to bias discovery search and baked into bug investigations. */
+  feature: string | null;
+  /** Clients/tenants the fix affects (tasks.metadata.affectedClients). Empty when
+   *  not set. Recorded only in the local investigation frontmatter. */
+  affectedClients: string[];
 }
 
 export interface DdevWorkspace {
@@ -64,9 +70,20 @@ export async function loadTaskMeta(db: Database, taskId: string): Promise<TaskMe
   const row = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
   });
+  const meta = (row?.metadata ?? null) as {
+    feature?: unknown;
+    affectedClients?: unknown;
+  } | null;
+  const feature =
+    typeof meta?.feature === 'string' && meta.feature.length > 0 ? meta.feature : null;
+  const affectedClients = Array.isArray(meta?.affectedClients)
+    ? meta.affectedClients.filter((c): c is string => typeof c === 'string')
+    : [];
   return {
     title: row?.title ?? '',
     description: row?.description ?? '',
+    feature,
+    affectedClients,
   };
 }
 

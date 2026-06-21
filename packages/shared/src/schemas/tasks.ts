@@ -62,6 +62,14 @@ export const createTaskRequestSchema = z
      *  investigation (root cause + lesson) into the knowledge base. Stored in
      *  tasks.metadata.category. Workflow tasks only. */
     isBugFix: z.boolean().optional(),
+    /** Short feature/area the task targets (e.g. "checkout", "user-import").
+     *  Stored in tasks.metadata.feature. Baked into the bug investigation and
+     *  used to bias knowledge discovery search. Workflow tasks only. */
+    feature: z.string().trim().max(120).optional(),
+    /** Clients/tenants impacted by the bug being fixed. Stored in
+     *  tasks.metadata.affectedClients and recorded only in the local investigation
+     *  frontmatter — never promoted to the cross-repo KB. Workflow tasks only. */
+    affectedClients: z.array(z.string().trim().max(120)).max(50).optional(),
     /** Auto-continue: auto-submit info-only forms and gate-1 pre-answers so the
      *  workflow runs hands-free between gates. Defaults to true. */
     autoContinue: z.boolean().optional(),

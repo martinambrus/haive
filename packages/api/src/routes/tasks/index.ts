@@ -195,7 +195,10 @@ taskRoutes.post('/', async (c) => {
     }
   }
 
-  const metadata: Record<string, unknown> | null = body.isBugFix ? { category: 'bugfix' } : null;
+  const metadata: Record<string, unknown> = {};
+  if (body.isBugFix) metadata.category = 'bugfix';
+  if (body.feature) metadata.feature = body.feature;
+  if (body.affectedClients?.length) metadata.affectedClients = body.affectedClients;
 
   const inserted = await db
     .insert(schema.tasks)
@@ -216,7 +219,7 @@ taskRoutes.post('/', async (c) => {
       cpuLimitMilli: body.resourceLimits?.cpuLimitMilli ?? null,
       stepLoopLimits: body.stepLoopLimits ?? {},
       autoContinue: body.autoContinue ?? true,
-      metadata,
+      metadata: Object.keys(metadata).length > 0 ? metadata : null,
       status: 'created',
     })
     .returning();

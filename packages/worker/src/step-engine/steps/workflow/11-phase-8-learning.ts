@@ -12,6 +12,8 @@ import { clearTaskPromotedDrafts, promoteToGlobalKbDraft } from '../_global-kb-p
 interface LearningDetect {
   taskTitle: string;
   taskDescription: string;
+  feature: string | null;
+  affectedClients: string[];
   implementSummary: string;
   filesTouched: string[];
   verifyPassed: boolean;
@@ -28,6 +30,9 @@ interface LearningEntry {
 
 interface Investigation {
   title: string;
+  /** Observable symptoms + verbatim error strings — the lexical anchor that makes
+   *  this investigation findable by future hybrid search. May be '' if omitted. */
+  symptoms: string;
   rootCause: string;
   lesson: string;
   /** Routing decision (plan §5.4). `global` promotes the investigation to the
@@ -77,11 +82,12 @@ export function parseInvestigation(raw: unknown): Investigation | null {
   if (!inv || typeof inv !== 'object') return null;
   const i = inv as Record<string, unknown>;
   const title = typeof i.title === 'string' ? i.title : '';
+  const symptoms = typeof i.symptoms === 'string' ? i.symptoms : '';
   const rootCause = typeof i.root_cause === 'string' ? i.root_cause : '';
   const lesson = typeof i.lesson === 'string' ? i.lesson : '';
   const scope: 'local' | 'global' = i.scope === 'global' ? 'global' : 'local';
   if (!title || !rootCause) return null;
-  return { title, rootCause, lesson, scope };
+  return { title, symptoms, rootCause, lesson, scope };
 }
 
 interface ImplementOutput {
@@ -196,12 +202,14 @@ async function writeLearningEntries(
 /** Write a bug investigation into the knowledge base (auto-RAG-indexed by the
  *  next run's pre-rag-sync). `nowIso` is passed in — this is a normal worker
  *  step so the worker clock is fine. */
-async function writeInvestigation(
+export async function writeInvestigation(
   workspace: string,
   inv: Investigation,
   taskTitle: string,
   reviewerNote: string,
   nowIso: string,
+  feature: string | null,
+  affectedClients: string[],
 ): Promise<string> {
   const dir = path.join(workspace, '.claude', 'knowledge_base', 'investigations');
   await mkdir(dir, { recursive: true });
@@ -213,10 +221,13 @@ async function writeInvestigation(
     'type: bug-investigation',
     `date: ${nowIso}`,
     `task: ${taskTitle}`,
+    ...(feature ? [`feature: ${JSON.stringify(feature)}`] : []),
+    ...(affectedClients.length > 0 ? [`affected_clients: ${JSON.stringify(affectedClients)}`] : []),
     '---',
     '',
     `# ${inv.title}`,
     '',
+    ...(inv.symptoms.trim() ? ['## Symptoms', inv.symptoms, ''] : []),
     '## Root cause',
     inv.rootCause,
     '',
@@ -256,6 +267,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       commitSha: commitOutput.commitSha ?? null,
       commitMessage: commitOutput.message ?? '',
       isBugFix: await detectBugFix(ctx, meta.title, meta.description),
+      feature: meta.feature,
+      affectedClients: meta.affectedClients,
     };
   },
 
@@ -273,15 +286,16 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         'You are the learning capture phase of an engineering workflow.',
         'Emit ONE JSON object inside a ```json fenced code block with the shape:',
         detected.isBugFix
-          ? '{ "entries": [ { "id": "<kebab-case>", "title": "<short>", "body": "<markdown>" } ], "investigation": { "title": "<short>", "root_cause": "<why/how the bug happened>", "lesson": "<durable lesson for future runs>", "scope": "local | global" } }'
+          ? '{ "entries": [ { "id": "<kebab-case>", "title": "<short>", "body": "<markdown>" } ], "investigation": { "title": "<short>", "symptoms": "<observable symptoms + the EXACT error strings/messages, verbatim>", "root_cause": "<why/how the bug happened>", "lesson": "<durable lesson for future runs>", "scope": "local | global" } }'
           : '{ "entries": [ { "id": "<kebab-case>", "title": "<short>", "body": "<markdown>" } ] }',
         'Each entry must be a reusable lesson grounded in the workflow run. Avoid generic advice.',
         detected.isBugFix
-          ? 'This task was a BUG FIX: ALSO produce an `investigation` — the root cause (why/how the bug existed, grounded in the implementation) and the durable lesson for future work. Set its `scope` to "global" ONLY when the lesson is a reusable house standard for any project of this stack (not specific to this repo); otherwise "local".'
+          ? 'This task was a BUG FIX: ALSO produce an `investigation`. In `symptoms`, lead with the observable symptoms and quote the EXACT error strings/messages verbatim — these are the lexical anchor future searches match on; name the affected feature/area. Give the root cause (why/how the bug existed, grounded in the implementation) and the durable lesson for future work. Set its `scope` to "global" ONLY when the lesson is a reusable house standard for any project of this stack (not specific to this repo); otherwise "local".'
           : '',
         '',
         `Task title: ${detected.taskTitle || '(untitled)'}`,
         `Task description: ${detected.taskDescription || '(none)'}`,
+        `Feature/area: ${detected.feature ?? '(unspecified)'}`,
         `Implementation summary: ${detected.implementSummary || '(none)'}`,
         `Verification passed: ${detected.verifyPassed}`,
         `Commit sha: ${detected.commitSha ?? '(none)'}`,
@@ -294,7 +308,15 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       const d = args.detected as LearningDetect;
       const base = { entries: [{ id: 'bypass', title: 'Bypass stub', body: 'bypass' }] };
       return d.isBugFix
-        ? { ...base, investigation: { title: 'Bypass', root_cause: 'stub', lesson: 'stub' } }
+        ? {
+            ...base,
+            investigation: {
+              title: 'Bypass',
+              symptoms: 'stub',
+              root_cause: 'stub',
+              lesson: 'stub',
+            },
+          }
         : base;
     },
   },
@@ -318,7 +340,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       infoSections.push({
         title: 'Drafted bug investigation',
         preview: investigation.title,
-        body: `**${investigation.title}**\n\n## Root cause\n${investigation.rootCause}\n\n## Lesson\n${investigation.lesson}`,
+        body: `**${investigation.title}**\n\n${investigation.symptoms.trim() ? `## Symptoms\n${investigation.symptoms}\n\n` : ''}## Root cause\n${investigation.rootCause}\n\n## Lesson\n${investigation.lesson}`,
         defaultOpen: true,
       });
     }
@@ -403,7 +425,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
             userId: ctx.userId,
             taskId: ctx.taskId,
             title: investigation.title,
-            body: `# ${investigation.title}\n\n## Root cause\n${investigation.rootCause}\n\n## Lesson\n${investigation.lesson}`,
+            body: `# ${investigation.title}\n\n${investigation.symptoms.trim() ? `## Symptoms\n${investigation.symptoms}\n\n` : ''}## Root cause\n${investigation.rootCause}\n\n## Lesson\n${investigation.lesson}`,
             category: 'anti_pattern',
             facets: {},
           },
@@ -417,6 +439,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           args.detected.taskTitle,
           reviewerNote,
           new Date().toISOString(),
+          args.detected.feature,
+          args.detected.affectedClients,
         );
       }
     }

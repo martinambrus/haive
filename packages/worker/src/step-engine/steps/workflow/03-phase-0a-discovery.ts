@@ -22,6 +22,7 @@ interface KbSnippet {
 interface DiscoveryDetect {
   taskTitle: string;
   taskDescription: string;
+  feature: string | null;
   kbSnippets: KbSnippet[];
   personas: AgentPersona[];
 }
@@ -147,7 +148,8 @@ function buildAgentMiningPrompt(
     '',
     '=== How to research — follow this order ===',
     '1. `rag_search` FIRST. Call the haive-rag tool with focused queries from your specialty',
-    '   and the task below (key terms, component/symbol names, error symptoms). It does a',
+    '   and the task below (key terms, component/symbol names, error symptoms, and the',
+    '   feature/area name when one is given). It does a',
     '   semantic + lexical search over BOTH the knowledge base and the code — prefer it over',
     '   guessing or blind grepping.',
     '2. If rag_search returns nothing useful, READ the relevant knowledge-base files under',
@@ -159,6 +161,7 @@ function buildAgentMiningPrompt(
     '=== Task being analyzed (DO NOT execute) ===',
     `Title: ${detect.taskTitle || '(untitled)'}`,
     `Description: ${detect.taskDescription || '(none)'}`,
+    `Feature/area: ${detect.feature ?? '(unspecified)'}`,
     `Additional context: ${extraContext || '(none)'}`,
     '',
     '=== Knowledge base index (previews; use rag_search for full content) ===',
@@ -250,6 +253,7 @@ export const phase0aDiscoveryStep: StepDefinition<DiscoveryDetect, DiscoveryAppl
     return {
       taskTitle: meta.title,
       taskDescription: meta.description,
+      feature: meta.feature,
       kbSnippets,
       personas,
     };
