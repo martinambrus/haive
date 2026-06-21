@@ -7,6 +7,8 @@ declare module '@novnc/novnc' {
     scaleViewport: boolean;
     resizeSession: boolean;
     disconnect(): void;
+    /** Send text to the remote's clipboard (client → server paste). */
+    clipboardPasteFrom(text: string): void;
     addEventListener(type: string, listener: (e: Event) => void): void;
   }
 }

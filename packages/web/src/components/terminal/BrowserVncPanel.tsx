@@ -35,7 +35,9 @@ export function BrowserVncPanel({ taskId, title, autoCollapse }: BrowserVncPanel
   const [state, setState] = useState<VncState>('idle');
   const [message, setMessage] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const rfbRef = useRef<{ disconnect(): void } | null>(null);
+  const rfbRef = useRef<{ disconnect(): void; clipboardPasteFrom(text: string): void } | null>(
+    null,
+  );
   // Auto-reconnect bookkeeping (see MAX_CONNECT_RETRIES): connectedRef tells a
   // dropped live session apart from a not-yet-ready runtime; the timer holds the
   // pending reconnect; connectRef lets the disconnect handler call the latest
@@ -96,6 +98,14 @@ export function BrowserVncPanel({ taskId, title, autoCollapse }: BrowserVncPanel
           setState('error');
         }
       });
+      // Clipboard sharing (remote → host): when the user copies inside the remote
+      // browser, x11vnc relays the selection over RFB; mirror it into the host
+      // clipboard. Best-effort — no-ops outside a secure context (navigator.clipboard
+      // is undefined over plain HTTP on a non-localhost origin).
+      rfb.addEventListener('clipboard', (e) => {
+        const text = (e as CustomEvent<{ text?: string }>).detail?.text;
+        if (text) void navigator.clipboard?.writeText(text).catch(() => {});
+      });
       rfbRef.current = rfb;
     } catch (err) {
       setMessage((err as Error).message ?? 'Failed to load the VNC client');
@@ -109,6 +119,20 @@ export function BrowserVncPanel({ taskId, title, autoCollapse }: BrowserVncPanel
     setMessage(null);
     void connect();
   }, [connect]);
+
+  // Clipboard sharing (host → remote): readText() needs a user gesture + the
+  // clipboard-read permission, so it's driven by the Paste button rather than synced
+  // automatically. canPaste hides the button where the clipboard API is unavailable
+  // (a non-secure context — plain HTTP on a non-localhost origin).
+  const canPaste = typeof navigator !== 'undefined' && !!navigator.clipboard?.readText;
+  const pasteIntoBrowser = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) rfbRef.current?.clipboardPasteFrom(text);
+    } catch {
+      /* permission denied or clipboard unavailable */
+    }
+  }, []);
 
   useEffect(() => {
     if (expanded && state === 'idle' && !rfbRef.current) void connect();
@@ -169,6 +193,16 @@ export function BrowserVncPanel({ taskId, title, autoCollapse }: BrowserVncPanel
           {state === 'connecting' && <span className="ml-2 text-neutral-500">starting…</span>}
         </span>
         <div className="flex gap-2">
+          {expanded && state === 'connected' && canPaste && (
+            <button
+              type="button"
+              onClick={() => void pasteIntoBrowser()}
+              title="Paste your clipboard into the remote browser"
+              className="text-xs text-indigo-400 underline"
+            >
+              Paste
+            </button>
+          )}
           {expanded && (
             <>
               <button
