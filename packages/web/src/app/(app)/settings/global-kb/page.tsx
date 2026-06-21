@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   api,
+  releaseGlobalKbEmbedModel,
   type ApiError,
   type CliProvider,
   type GlobalKbEntry,
@@ -131,6 +132,24 @@ export default function GlobalKbPage() {
         document.getElementById('add-house-rule')?.scrollIntoView({ behavior: 'smooth' });
       }, 150);
     }
+  }, []);
+  // Leaving the Global KB page is a strong "done managing the KB" signal: ask the
+  // API to release the embedding model from the GPU. The endpoint self-gates (only
+  // evicts when the model is resident and no live task / in-flight sync needs it),
+  // so this fires unconditionally — on SPA navigation away (cleanup) and on tab or
+  // window close (pagehide). Best-effort; the worker-boot reconciler is the backstop.
+  useEffect(() => {
+    let fired = false;
+    const release = () => {
+      if (fired) return;
+      fired = true;
+      releaseGlobalKbEmbedModel();
+    };
+    window.addEventListener('pagehide', release);
+    return () => {
+      window.removeEventListener('pagehide', release);
+      release();
+    };
   }, []);
   const [cfg, setCfg] = useState({
     enabled: true,

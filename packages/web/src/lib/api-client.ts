@@ -108,6 +108,20 @@ export function postUserActive(taskId: string, stepRowId: string, deltaMs: numbe
   }).catch(() => {});
 }
 
+/** Best-effort: ask the API to release the Global KB embedding model from the GPU
+ *  (Ollama keep_alive:0) when the user leaves the Global KB settings page. Uses
+ *  `keepalive` so it survives a tab close / navigation, and swallows errors — the
+ *  server gates the eviction (resident + unused) and the worker-boot reconciler is
+ *  the durable backstop, so a missed call is harmless. Mirrors `postUserActive`. */
+export function releaseGlobalKbEmbedModel(): void {
+  void fetch(`${API_BASE}/global-kb/release-embed-model`, {
+    method: 'POST',
+    credentials: 'include',
+    keepalive: true,
+    headers: { 'Content-Type': 'application/json' },
+  }).catch(() => {});
+}
+
 export interface User {
   id: string;
   email: string;

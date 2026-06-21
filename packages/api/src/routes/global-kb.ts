@@ -21,7 +21,7 @@ import {
   type GlobalKbFacets,
   type GlobalKbStatus,
 } from '@haive/shared/global-kb';
-import { ollamaEmbed, probeOllama } from '@haive/shared/rag';
+import { ollamaEmbed, probeOllama, releaseEmbedModelIfUnused } from '@haive/shared/rag';
 import { getDb } from '../db.js';
 import { getGlobalKbSyncQueue, getTaskQueue } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -258,6 +258,28 @@ globalKbRoutes.post('/test-db', async (c) => {
   } finally {
     if (conn) await conn.close().catch(() => {});
   }
+});
+
+// Best-effort GPU release, called by the Global KB settings page when the user
+// leaves it (SPA unmount / tab close). Evicts the global-KB embed model ONLY when
+// it is resident AND unused — the shared gate keeps it loaded if a live repo-RAG
+// task (which may share the same model) or an in-flight global-KB sync still needs
+// it, and never load-then-unloads a model that is not resident. The worker-boot
+// reconciler and Ollama's keep_alive are the durable backstops; this just frees
+// the GPU sooner once the user is clearly done with the KB UI.
+globalKbRoutes.post('/release-embed-model', async (c) => {
+  const settings = await resolveGlobalKbSettings();
+  if (!settings.enabled || !settings.ollamaUrl || !settings.embedModel) {
+    return c.json({ released: false, status: 'not_configured' });
+  }
+  const queue = getGlobalKbSyncQueue();
+  const inFlight = (await queue.getActiveCount()) + (await queue.getWaitingCount());
+  const status = await releaseEmbedModelIfUnused(getDb(), {
+    url: settings.ollamaUrl,
+    model: settings.embedModel,
+    alsoInUse: inFlight > 0,
+  });
+  return c.json({ released: status === 'unloaded', status });
 });
 
 // Repo-anchored AI enrichment (plan §5.1/§5.3): create a `skeleton` entry, then a

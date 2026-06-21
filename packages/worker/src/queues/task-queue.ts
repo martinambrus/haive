@@ -2,7 +2,7 @@ import { rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Queue, Worker, type Job } from 'bullmq';
 import Docker from 'dockerode';
-import { and, desc, eq, inArray, isNull, ne, notInArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
@@ -15,7 +15,12 @@ import {
   type TaskJobPayload,
   type WorkflowType,
 } from '@haive/shared';
-import { unloadOllamaModel } from '@haive/shared/rag';
+import {
+  listResidentOllamaModels,
+  releaseEmbedModelIfUnused,
+  resolveTaskEmbedTarget,
+} from '@haive/shared/rag';
+import { resolveGlobalKbSettings } from '@haive/shared/global-kb';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { getDb } from '../db.js';
 import { getBullRedis, getRedis } from '../redis.js';
@@ -212,86 +217,90 @@ async function markTaskFailed(db: Database, taskId: string, message: string): Pr
   await unloadTaskOllamaCliModels(db, taskId);
 }
 
-/** The (ollamaUrl, embeddingModel) a task used for RAG — read from its
- *  04-tooling-infrastructure step output, falling back to the repo's latest
- *  onboarding run for workflow tasks (mirrors rag.ts resolveTaskRagContext).
- *  Returns null when no Ollama model was configured (hash-embedding fallback
- *  loads nothing, so there is nothing to unload). */
-async function resolveTaskEmbedTarget(
-  db: Database,
-  taskId: string,
-): Promise<{ url: string; model: string } | null> {
-  const readTooling = async (tid: string) => {
-    const row = await db.query.taskSteps.findFirst({
-      where: and(
-        eq(schema.taskSteps.taskId, tid),
-        eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
-      ),
-      columns: { output: true },
-    });
-    return (
-      (row?.output as { tooling?: { ollamaUrl?: string; embeddingModel?: string } } | null) ?? null
-    );
-  };
-
-  let tooling = await readTooling(taskId);
-  if (!tooling?.tooling?.ollamaUrl || !tooling?.tooling?.embeddingModel) {
-    const task = await db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, taskId),
-      columns: { repositoryId: true },
-    });
-    if (task?.repositoryId) {
-      const onboarding = await db.query.tasks.findFirst({
-        where: and(
-          eq(schema.tasks.repositoryId, task.repositoryId),
-          eq(schema.tasks.type, 'onboarding'),
-        ),
-        orderBy: [desc(schema.tasks.createdAt)],
-        columns: { id: true },
-      });
-      if (onboarding) tooling = await readTooling(onboarding.id);
-    }
-  }
-  const url = tooling?.tooling?.ollamaUrl;
-  const model = tooling?.tooling?.embeddingModel;
-  return url && model ? { url, model } : null;
-}
-
 /** After a task reaches a terminal state, evict its RAG embedding model from
- *  Ollama so the GPU is freed — but only when no other live task uses the SAME
- *  embedding model (per (url, model)). A coarse "any live task" guard would
- *  wrongly pin this model whenever any unrelated task runs, so two tasks on
- *  different RAG models could never free either until both ended. Best-effort and
- *  self-contained: never throws, so it cannot break the terminal transition.
+ *  Ollama so the GPU is freed — but only when it is still resident AND no other
+ *  live task uses the SAME (url, model). The resolve + residency + live-task gate
+ *  lives in @haive/shared/rag (shared with the worker-boot reconciler and the API
+ *  release endpoint, so all three stay in lockstep on "safe to evict"). Best-effort
+ *  and self-contained: never throws, so it cannot break the terminal transition.
  *  Repo-RAG only; the global-KB model has its own lifecycle and keep_alive
  *  backstop. */
 async function maybeUnloadTaskEmbedModel(db: Database, taskId: string): Promise<void> {
   try {
     const target = await resolveTaskEmbedTarget(db, taskId);
     if (!target) return;
-    const liveTasks = await db
-      .select({ id: schema.tasks.id })
-      .from(schema.tasks)
-      .where(
-        and(
-          ne(schema.tasks.id, taskId),
-          notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
-        ),
-      );
-    for (const lt of liveTasks) {
-      const other = await resolveTaskEmbedTarget(db, lt.id);
-      if (other && other.url === target.url && other.model === target.model) {
-        logger.debug(
-          { taskId, model: target.model },
-          'skip ollama embed unload — another live task uses this model',
-        );
-        return;
-      }
-    }
-    const ok = await unloadOllamaModel(target.url, target.model);
-    logger.info({ taskId, model: target.model, ok }, 'requested ollama embed model unload');
+    const status = await releaseEmbedModelIfUnused(db, {
+      url: target.url,
+      model: target.model,
+      excludeTaskId: taskId,
+    });
+    logger.info({ taskId, model: target.model, status }, 'ollama embed model release');
   } catch (err) {
     logger.warn({ err, taskId }, 'ollama embed model unload failed');
+  }
+}
+
+/** Worker-boot recovery for the embed-model unload. A cancel/complete/fail can die
+ *  mid-transition (worker crash, redeploy, tsx-watch restart) AFTER marking the
+ *  task terminal but BEFORE `maybeUnloadTaskEmbedModel` runs, leaving the model
+ *  pinned on its last keep_alive (the bug that motivated this). On boot, reconcile
+ *  residency to intent: for every Ollama endpoint Haive knows (global-KB settings +
+ *  the distinct repo-RAG 04-tooling targets), evict each resident embed model that
+ *  no live task needs. The global-KB model is kept while a global-KB sync is in
+ *  flight. Idempotent + best-effort; never throws, so it cannot block boot. */
+export async function reconcileEmbedModelResidency(db: Database): Promise<void> {
+  try {
+    const settings = await resolveGlobalKbSettings();
+    const globalKbUrl = settings.enabled ? settings.ollamaUrl : null;
+    const globalKbModel = settings.enabled ? settings.embedModel : null;
+
+    // Distinct repo-RAG (url, model) targets ever configured — realistically one.
+    const rows = (await db.execute(sql`
+      SELECT DISTINCT
+        output->'tooling'->>'ollamaUrl' AS url,
+        output->'tooling'->>'embeddingModel' AS model
+      FROM task_steps
+      WHERE step_id = '04-tooling-infrastructure'
+        AND output->'tooling'->>'ollamaUrl' IS NOT NULL
+        AND output->'tooling'->>'embeddingModel' IS NOT NULL
+    `)) as unknown as Array<{ url: string; model: string }>;
+
+    const byUrl = new Map<string, Set<string>>();
+    const add = (url: string | null, model: string | null): void => {
+      if (!url || !model) return;
+      if (!byUrl.has(url)) byUrl.set(url, new Set());
+      byUrl.get(url)!.add(model);
+    };
+    for (const r of rows) add(r.url, r.model);
+    add(globalKbUrl, globalKbModel);
+    if (byUrl.size === 0) return;
+
+    // An in-flight global-KB sync legitimately keeps the global-KB model resident.
+    const kbQueue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
+    let kbSyncActive = 0;
+    try {
+      kbSyncActive = (await kbQueue.getActiveCount()) + (await kbQueue.getWaitingCount());
+    } finally {
+      await kbQueue.close().catch(() => {});
+    }
+
+    let unloaded = 0;
+    for (const [url, models] of byUrl) {
+      const resident = await listResidentOllamaModels(url);
+      if (!resident) continue; // unreachable, or nothing loaded
+      for (const model of models) {
+        if (!resident.includes(model)) continue;
+        const alsoInUse = kbSyncActive > 0 && url === globalKbUrl && model === globalKbModel;
+        const status = await releaseEmbedModelIfUnused(db, { url, model, alsoInUse });
+        if (status === 'unloaded') unloaded += 1;
+      }
+    }
+    logger.info(
+      { endpoints: byUrl.size, kbSyncActive, unloaded },
+      'embed-model residency reconciled on boot',
+    );
+  } catch (err) {
+    logger.warn({ err }, 'embed-model residency reconciliation on boot failed');
   }
 }
 

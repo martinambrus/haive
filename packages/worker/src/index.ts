@@ -11,7 +11,12 @@ import {
   startCliExecWorker,
 } from './queues/cli-exec-queue.js';
 import { startRepoWorker } from './queues/repo-queue.js';
-import { closeTaskQueue, reconcileOrphanedCliSteps, startTaskWorker } from './queues/task-queue.js';
+import {
+  closeTaskQueue,
+  reconcileEmbedModelResidency,
+  reconcileOrphanedCliSteps,
+  startTaskWorker,
+} from './queues/task-queue.js';
 import { closeRedis } from './redis.js';
 import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
 import { ensureOllamaModels } from './sandbox/ollama-provision.js';
@@ -40,6 +45,11 @@ async function main(): Promise<void> {
   // above): fail or resume them so they never hang in waiting_cli after a restart.
   await reconcileOrphanedCliSteps(getDb()).catch((err) => {
     logger.warn({ err }, 'orphaned-cli-step reconciliation on boot failed');
+  });
+  // Recover embed-model unloads a prior worker missed (died mid terminal-transition
+  // before sending keep_alive:0): evict any resident RAG model no live task needs.
+  await reconcileEmbedModelResidency(getDb()).catch((err) => {
+    logger.warn({ err }, 'embed-model residency reconciliation on boot failed');
   });
   await scheduleCliVersionRefresh().catch((err) => {
     logger.warn({ err }, 'failed to schedule cli version refresh');

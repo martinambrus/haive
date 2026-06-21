@@ -98,6 +98,31 @@ export async function unloadOllamaModel(
   }
 }
 
+/** List the models Ollama currently holds resident (loaded in VRAM/RAM) via
+ *  `/api/ps`. Eviction must gate on this: `unloadOllamaModel` sends a dummy embed
+ *  with keep_alive:0, which would LOAD a non-resident model just to unload it — the
+ *  opposite of intent. Returns the resident model identifiers (both the `name` and
+ *  `model` fields, deduped, since callers may hold either form). Returns null when
+ *  Ollama is unreachable, distinguishing "down" from "up but nothing loaded" ([]). */
+export async function listResidentOllamaModels(
+  url: string,
+  timeoutMs = 5000,
+): Promise<string[] | null> {
+  try {
+    const resp = await fetch(`${url}/api/ps`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as { models?: Array<{ name?: string; model?: string }> };
+    const names = new Set<string>();
+    for (const m of data.models ?? []) {
+      if (m.name) names.add(m.name);
+      if (m.model) names.add(m.model);
+    }
+    return Array.from(names);
+  } catch {
+    return null;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Deterministic hash embedding fallback                               */
 /* ------------------------------------------------------------------ */
