@@ -51,6 +51,21 @@ describe('parseJsonLoose', () => {
     ).toBeNull();
   });
 
+  it('salvages an unescaped inner double-quote left by a weak model', () => {
+    // A literal `"` inside a value, left unescaped, desyncs the balanced scanner
+    // AND jsonrepair (both read it as a string boundary); the inner-quote escape
+    // tier recovers it. This is the deepseek `... and `"` to `&quot;` ...` failure.
+    const text = '{"note": "press the " key to continue", "ok": true}';
+    expect(parseJsonLoose(text)).toEqual({ note: 'press the " key to continue', ok: true });
+  });
+
+  it('parses valid JSON with properly escaped inner quotes (no false re-escape)', () => {
+    expect(parseJsonLoose('{"a": "say \\"hi\\" ok", "b": 1}')).toEqual({
+      a: 'say "hi" ok',
+      b: 1,
+    });
+  });
+
   it('returns null for an empty string', () => {
     expect(parseJsonLoose('')).toBeNull();
   });

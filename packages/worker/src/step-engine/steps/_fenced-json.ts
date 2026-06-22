@@ -113,6 +113,57 @@ function rawJsonTail(text: string): string | null {
 }
 
 /**
+ * Escape double-quotes that sit INSIDE a JSON string but were left unescaped by a
+ * weak model — e.g. a literal `"` in a value (`` and `"` to `&quot;` ``). Such a
+ * stray quote desyncs both the balanced scanner (findBalancedEnd) and jsonrepair,
+ * which each read it as a string boundary, so the whole value fails to parse.
+ *
+ * A `"` is a real string boundary only when the next non-space char is structural
+ * (`:` `,` `}` `]`) or end-of-input; any other `"` inside an open string is an inner
+ * quote and gets `\`-escaped. Already-escaped quotes (`\"`) are skipped, so VALID
+ * JSON passes through byte-for-byte unchanged (no false escapes). Best-effort: an
+ * inner quote that happens to be followed by a structural char (the genuinely
+ * ambiguous `he said "ok", bye` shape) is still mis-read — callers validate the
+ * parsed shape downstream, so a wrong recovery is rejected, not trusted.
+ *
+ * Run this on the raw tail (which starts at the first bracket) so quote tracking
+ * begins in sync — running it across leading prose would start mid-stream.
+ */
+export function escapeInnerQuotes(s: string): string {
+  let out = '';
+  let inString = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (!inString) {
+      out += c;
+      if (c === '"') inString = true;
+      continue;
+    }
+    if (c === '\\') {
+      out += c + (s[i + 1] ?? '');
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < s.length && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n' || s[j] === '\r')) {
+        j++;
+      }
+      const next = s[j];
+      if (next === undefined || next === ':' || next === ',' || next === '}' || next === ']') {
+        out += c;
+        inString = false;
+      } else {
+        out += '\\"';
+      }
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+/**
  * Robust best-effort parse of a single JSON value from agent text — for strict-JSON
  * step contracts that a flaky model intermittently mangles. Tries, in order: the
  * balanced-scan slice (extractFencedJson — immune to nested ``` fences and trailing
@@ -149,6 +200,29 @@ export function parseJsonLoose(text: string): unknown | null {
       return JSON.parse(jsonrepair(c));
     } catch {
       // fall through to the next candidate
+    }
+  }
+  // Final tier: a weak model left an inner double-quote unescaped, which desyncs
+  // both the balanced scanner and jsonrepair above. Escape inner quotes on the raw
+  // tail (starts at the first bracket, so quote tracking is in sync), re-extract a
+  // balanced value, and parse — strict first, then jsonrepair for any remaining
+  // defect. Gated on the escape actually changing the text, so clean and
+  // narration-only inputs reach `return null` exactly as before.
+  const tail = rawJsonTail(text);
+  if (tail) {
+    const escaped = escapeInnerQuotes(tail);
+    if (escaped !== tail) {
+      const sliced = extractFencedJson(escaped) ?? escaped;
+      try {
+        return JSON.parse(sliced);
+      } catch {
+        // fall through to the repair attempt
+      }
+      try {
+        return JSON.parse(jsonrepair(sliced));
+      } catch {
+        // give up — return null below
+      }
     }
   }
   return null;
