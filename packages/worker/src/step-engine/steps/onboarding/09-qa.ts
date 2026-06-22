@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { DetectResult } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -162,7 +162,10 @@ function buildPrompt(args: LlmBuildArgs): string {
     '',
     '## Instructions',
     '',
-    'Use your file-reading tools to deeply explore this repository. For each ambiguous area:',
+    'Call your file-reading tools DIRECTLY to explore this repository — actually issue the',
+    'tool calls. Do NOT narrate intent (e.g. "Let me check the TODO file") and then end your',
+    'turn; a turn that stops on narration without a tool call or the final JSON is a failure.',
+    'For each ambiguous area:',
     '1. Read the relevant code thoroughly.',
     '2. Check whether the existing KB files above already explain it. If yes, skip — do not re-ask.',
     '3. If neither code nor KB makes the answer obvious, formulate ONE targeted question.',
@@ -215,6 +218,10 @@ function buildPrompt(args: LlmBuildArgs): string {
     'An empty array WITHOUT `"explicitNoQuestions": true` will be treated as a parse failure',
     `and the step will be marked failed for the user to retry. So is more than ${MAX_AGENT_QUESTIONS} questions.`,
     'Do not emit any prose outside the fenced JSON block.',
+    '',
+    'Your FINAL message MUST be the ```json block (or the explicit no-questions object',
+    'shown above) — never a tool result, a plan, or narration. When you have explored',
+    'enough, emit the JSON immediately rather than continuing to narrate.',
   ].join('\n');
 }
 
@@ -254,17 +261,9 @@ export function parseQaPrepOutput(raw: unknown): KnowledgeQaPrepApply {
     throw new QaPrepParseError('LLM output is empty or not parseable');
   }
 
-  const body = extractFencedJson(text);
-  if (!body) {
-    throw new QaPrepParseError('No ```json fenced block found in LLM output');
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch (err) {
-    throw new QaPrepParseError(
-      `JSON parse error in LLM output: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  const parsed = parseJsonLoose(text);
+  if (parsed === null) {
+    throw new QaPrepParseError('No parseable JSON object found in LLM output');
   }
   return validateParsed(parsed);
 }
@@ -351,6 +350,7 @@ export const knowledgeQaPrepStep: StepDefinition<KnowledgeQaPrepDetect, Knowledg
     requiredCapabilities: ['tool_use'],
     buildPrompt,
     timeoutMs: 60 * 60 * 1000,
+    retry: { maxAttempts: 3, retryOn: (err) => err instanceof QaPrepParseError },
     bypassStub: () => ({ agentQuestions: [], explicitNoQuestions: true }),
   },
 

@@ -1,6 +1,6 @@
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import type { AgentQuestion, KnowledgeQaPrepApply } from './09-qa.js';
 
 /* ------------------------------------------------------------------ */
@@ -87,6 +87,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '- Distinct strings only (no duplicates within a question).',
     '- Use the exact `id` from each question header above.',
     '- Do not emit prose outside the fenced JSON block.',
+    '- Your FINAL message MUST be the ```json block — never narration or a tool result.',
   ].join('\n');
 }
 
@@ -108,16 +109,9 @@ export function parseQaSuggestionsOutput(raw: unknown): SuggestionEntry[] {
   }
   let parsed: unknown;
   if (typeof source === 'string') {
-    const body = extractFencedJson(source);
-    if (!body) {
-      throw new QaSuggestionsParseError('No ```json fenced block found in LLM output');
-    }
-    try {
-      parsed = JSON.parse(body);
-    } catch (err) {
-      throw new QaSuggestionsParseError(
-        `JSON parse error in LLM output: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    parsed = parseJsonLoose(source);
+    if (parsed === null) {
+      throw new QaSuggestionsParseError('No parseable JSON object found in LLM output');
     }
   } else if (typeof source === 'object' && source !== null) {
     parsed = source;
@@ -210,6 +204,7 @@ export const knowledgeQaSuggestionsStep: StepDefinition<
     requiredCapabilities: ['tool_use'],
     buildPrompt,
     timeoutMs: 30 * 60 * 1000,
+    retry: { maxAttempts: 3, retryOn: (err) => err instanceof QaSuggestionsParseError },
     skipIf: (args) => {
       const detected = args.detected as KnowledgeQaSuggestionsDetect;
       return detected.agentQuestions.length === 0;

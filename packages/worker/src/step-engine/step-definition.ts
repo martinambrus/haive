@@ -66,6 +66,16 @@ export interface LlmInvocationSpec {
    *  MCP can connect to it. Idempotent; awaited each dispatch (incl. loop
    *  passes). Skipped under HAIVE_TEST_BYPASS_LLM. */
   prepare?: (args: LlmBuildArgs & { ctx: StepContext }) => Promise<void>;
+  /** Retry the LLM phase when apply() throws — for steps whose output is a strict
+   *  JSON contract a flaky model intermittently misses (emits prose, an empty turn,
+   *  or unparseable JSON). On an apply throw the runner re-enqueues a FRESH cli
+   *  invocation (the prior one is marked consumed) up to `maxAttempts` TOTAL attempts,
+   *  then lets the error fail the step. `retryOn` decides which thrown errors are
+   *  retryable (default: all). Ignored for steps that also declare loop?. */
+  retry?: {
+    maxAttempts: number;
+    retryOn?: (err: unknown) => boolean;
+  };
 }
 
 export interface AgentMiningDispatch {

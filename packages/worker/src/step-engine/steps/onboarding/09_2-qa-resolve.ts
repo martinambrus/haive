@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { FormField, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from './_helpers.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import type { KbFileSummary, KnowledgeQaPrepApply } from './09-qa.js';
 import type { EnrichedAgentQuestion, KnowledgeQaSuggestionsApply } from './09_1-qa-suggestions.js';
 
@@ -212,6 +212,9 @@ function buildPrompt(args: LlmBuildArgs): string {
     '  2. If not in KB, use your file-reading tools to search the codebase. If found, write a new KB section with the answer.',
     '  3. If neither KB nor code can answer, mark the question as unanswered with a brief reason.',
     '',
+    'Call your file-reading tools DIRECTLY — issue the actual tool calls; do NOT narrate intent',
+    '("Let me check…") and then end your turn without a tool call or the final JSON.',
+    '',
     '## Existing knowledge base files',
     kbList,
     '',
@@ -262,6 +265,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     `- ${userQuestions.length} new user questions to process.`,
     '- Do not emit prose outside the fenced JSON block.',
     '- An empty JSON object (no kbWrites, no answers) is acceptable ONLY if both input lists were empty.',
+    '- Your FINAL message MUST be the ```json block — never narration or a tool result.',
   ].join('\n');
 }
 
@@ -289,16 +293,9 @@ export function parseQaResolveOutput(raw: unknown): ParsedResolve {
   }
   let parsed: unknown;
   if (typeof source === 'string') {
-    const body = extractFencedJson(source);
-    if (!body) {
-      throw new QaResolveParseError('No ```json fenced block found in LLM output');
-    }
-    try {
-      parsed = JSON.parse(body);
-    } catch (err) {
-      throw new QaResolveParseError(
-        `JSON parse error in LLM output: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    parsed = parseJsonLoose(source);
+    if (parsed === null) {
+      throw new QaResolveParseError('No parseable JSON object found in LLM output');
     }
   } else if (typeof source === 'object' && source !== null) {
     parsed = source;
@@ -515,6 +512,7 @@ export const knowledgeQaResolveStep: StepDefinition<
     requiredCapabilities: ['tool_use'],
     buildPrompt,
     timeoutMs: 60 * 60 * 1000,
+    retry: { maxAttempts: 3, retryOn: (err) => err instanceof QaResolveParseError },
     bypassStub: () => ({ kbWrites: [], answers: [], unanswered: [] }),
   },
 

@@ -114,12 +114,12 @@ describe('parseQaPrepOutput', () => {
     expect(() => parseQaPrepOutput(raw)).toThrow(QaPrepParseError);
   });
 
-  it('throws when no fenced JSON block is present', () => {
-    expect(() => parseQaPrepOutput('plain text no fence')).toThrow(/fenced block/);
+  it('throws when no JSON is present at all', () => {
+    expect(() => parseQaPrepOutput('plain text no fence')).toThrow(QaPrepParseError);
   });
 
   it('throws on invalid JSON inside fence', () => {
-    expect(() => parseQaPrepOutput('```json\n{not json}\n```')).toThrow(/JSON parse/);
+    expect(() => parseQaPrepOutput('```json\n{not json}\n```')).toThrow(QaPrepParseError);
   });
 
   it('throws when explicitNoQuestions is missing', () => {

@@ -9,8 +9,12 @@
  * brackets with string/escape awareness, so nested fences and any trailing prose
  * after the value are ignored. They also recover fence-less raw JSON.
  *
- * The helpers return STRINGS; callers run JSON.parse and their own shape guards.
+ * The string-returning helpers (extractFencedJson / extractFencedJsonObjects) hand
+ * back STRINGS; callers run JSON.parse and their own shape guards. parseJsonLoose
+ * goes one step further and returns the parsed value, with a jsonrepair salvage pass.
  */
+
+import { jsonrepair } from 'jsonrepair';
 
 /**
  * Index of the bracket that closes the `{` or `[` at `openIdx`, or -1 if the value
@@ -89,4 +93,63 @@ export function extractFencedJsonObjects(text: string): string[] {
     cursor = end + 1;
   }
   return out;
+}
+
+/**
+ * Raw slice from the first `{` or `[` (after a ```json fence when present, else from
+ * offset 0) to end-of-text, with no closing-bracket requirement. This is the only
+ * candidate that survives a TRUNCATED stream — output cut mid-value, so there is no
+ * balanced close and no closing ``` fence — which jsonrepair can then complete.
+ * Returns null when the text holds no bracket at all (pure prose).
+ */
+function rawJsonTail(text: string): string | null {
+  const fence = /```json\s*/i.exec(text);
+  const start = fence ? fence.index + fence[0].length : 0;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (c === '{' || c === '[') return text.slice(i);
+  }
+  return null;
+}
+
+/**
+ * Robust best-effort parse of a single JSON value from agent text — for strict-JSON
+ * step contracts that a flaky model intermittently mangles. Tries, in order: the
+ * balanced-scan slice (extractFencedJson — immune to nested ``` fences and trailing
+ * prose), the greedy fence span, the lazy fence span — each first with strict
+ * JSON.parse. If every strict parse fails, retries each candidate (plus the raw tail
+ * for truncated streams) through jsonrepair, which closes the common weak-model
+ * defects: a dropped quote/comma or an unterminated tail. Returns the parsed value,
+ * or null when nothing yields JSON. Callers run their own shape validation, so a
+ * repaired-but-wrong-shape result is still rejected downstream. Mirrors the salvage
+ * chain in 06_5-agent-discovery and 08-knowledge-acquisition.
+ */
+export function parseJsonLoose(text: string): unknown | null {
+  const greedy = text.match(/```(?:json)?\s*([\s\S]*)```/i);
+  const lazy = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidates = [extractFencedJson(text), greedy?.[1], lazy?.[1]].filter(
+    (c): c is string => typeof c === 'string' && c.trim().length > 0,
+  );
+  // Strict pass: the balanced slice wins (handles nested fences / trailing prose),
+  // then the fenced spans.
+  for (const c of candidates) {
+    try {
+      return JSON.parse(c);
+    } catch {
+      // fall through to the next candidate / the salvage pass
+    }
+  }
+  // Salvage pass: jsonrepair the same candidates, plus the raw tail (the only one
+  // that survives truncation). Order keeps the cleanest candidate first.
+  const repairCandidates = [...candidates, rawJsonTail(text)].filter(
+    (c): c is string => typeof c === 'string' && c.trim().length > 0,
+  );
+  for (const c of repairCandidates) {
+    try {
+      return JSON.parse(jsonrepair(c));
+    } catch {
+      // fall through to the next candidate
+    }
+  }
+  return null;
 }

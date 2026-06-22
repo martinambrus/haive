@@ -969,14 +969,54 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     const previousIterations = stepIterationsAsRecords(current);
     const iteration = previousIterations.length;
-    const output = await stepDef.apply(ctx, {
-      detected,
-      formValues: formValues ?? {},
-      llmOutput,
-      agentMiningResults,
-      iteration,
-      previousIterations,
-    });
+    let output: unknown;
+    try {
+      output = await stepDef.apply(ctx, {
+        detected,
+        formValues: formValues ?? {},
+        llmOutput,
+        agentMiningResults,
+        iteration,
+        previousIterations,
+      });
+    } catch (applyErr) {
+      // llm.retry: a flaky model (e.g. a cloud Ollama model whose agentic tool-loop
+      // intermittently ends with no JSON, or emits unparseable/truncated JSON) often
+      // succeeds on a fresh roll. On a retryable apply throw, re-enqueue a NEW cli
+      // invocation (consume the bad one) up to maxAttempts TOTAL, parking the step in
+      // waiting_cli; once attempts are exhausted, rethrow so the outer catch fails the
+      // step. Skipped for loop steps (they own their own re-dispatch counting).
+      const retry = stepDef.llm?.retry;
+      if (retry && !stepDef.loop && (retry.retryOn?.(applyErr) ?? true)) {
+        const attempt = await countLlmAttempts(db, current.id);
+        if (attempt < retry.maxAttempts) {
+          ctx.logger.warn(
+            {
+              stepId: meta.id,
+              attempt,
+              maxAttempts: retry.maxAttempts,
+              err: applyErr instanceof Error ? applyErr.message : String(applyErr),
+            },
+            'llm apply failed; retrying with a fresh invocation',
+          );
+          await markLatestInvocationConsumed(db, current.id);
+          const retryLlm = await resolveLlmPhase(
+            db,
+            stepDef,
+            current,
+            ctx,
+            detected,
+            formValues,
+            params,
+          );
+          // A fresh enqueue always parks in waiting_cli (resolved:false); return it
+          // so the orchestrator re-enters when the retry invocation completes. If it
+          // somehow resolved synchronously, fall through and rethrow.
+          if (!retryLlm.resolved) return retryLlm.result;
+        }
+      }
+      throw applyErr;
+    }
 
     // Curated per-step recap for the "What the agent did" panel. LLM steps that
     // already emit a summary field get it for free here; steps that ran an agent
@@ -1432,6 +1472,24 @@ async function markLatestInvocationConsumed(db: Database, taskStepId: string): P
     .update(schema.cliInvocations)
     .set({ consumedAt: new Date() })
     .where(eq(schema.cliInvocations.id, invId));
+}
+
+/** Count the LLM invocations already spent on this step (non-superseded,
+ *  non-agent_mining). Drives the llm.retry attempt cap; durable across worker
+ *  restarts because every attempt — including consumed prior ones — is its own
+ *  cli_invocations row. */
+async function countLlmAttempts(db: Database, taskStepId: string): Promise<number> {
+  const rows = await db
+    .select({ id: schema.cliInvocations.id })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        isNull(schema.cliInvocations.supersededAt),
+        ne(schema.cliInvocations.mode, 'agent_mining'),
+      ),
+    );
+  return rows.length;
 }
 
 /** Writes a gate-1 pre-answer value into a leaf field's default so a form

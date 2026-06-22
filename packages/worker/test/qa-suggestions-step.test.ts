@@ -95,8 +95,8 @@ describe('parseQaSuggestionsOutput', () => {
     expect(out[0]!.suggestedAnswers).toEqual(['Real answer']);
   });
 
-  it('throws when no fenced JSON block is present', () => {
-    expect(() => parseQaSuggestionsOutput('plain text')).toThrow(/fenced block/);
+  it('throws when no JSON is present at all', () => {
+    expect(() => parseQaSuggestionsOutput('plain text')).toThrow(QaSuggestionsParseError);
   });
 
   it('throws on invalid JSON inside fence', () => {
