@@ -6,7 +6,8 @@ import type { CliProviderName, DetectResult, FormSchema } from '@haive/shared';
 import { getCliProviderMetadata, skillEntrySchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
-import { extractFencedJsonObjects } from '../_fenced-json.js';
+import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
+import { jsonrepair } from 'jsonrepair';
 import type { KbFileSummary } from './09-qa.js';
 
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
@@ -60,6 +61,9 @@ interface SkillGenApply {
   totalSubSkills: number;
   droppedFromCap: number;
   rejectedIds: string[];
+  /** LLM skills dropped because they carried zero sub-skills (the truncation
+   *  signal). Empty on a clean pass; surfaced for visibility in the step output. */
+  droppedForSubSkills: string[];
 }
 
 // Skill IR types (SkillEntry, SkillSubSkill, supporting shapes) live in
@@ -274,6 +278,24 @@ export class SkillGenParseError extends Error {
   }
 }
 
+/** Push every valid SkillEntry found in a parsed JSON value into `out`. Accepts a
+ *  bare array, a single skill object, or a `{ skills: [...] }` wrapper. */
+function collectSkillsFrom(parsed: unknown, out: SkillEntry[]): void {
+  if (Array.isArray(parsed)) {
+    for (const item of parsed) if (isValidSkill(item)) out.push(item);
+  } else if (isValidSkill(parsed)) {
+    out.push(parsed);
+  } else if (
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    Array.isArray((parsed as Record<string, unknown>).skills)
+  ) {
+    for (const item of (parsed as Record<string, unknown>).skills as unknown[]) {
+      if (isValidSkill(item)) out.push(item);
+    }
+  }
+}
+
 export function parseSkillEntries(raw: unknown): SkillEntry[] {
   if (!raw) return [];
   let source: unknown = raw;
@@ -301,20 +323,7 @@ export function parseSkillEntries(raw: unknown): SkillEntry[] {
   if (bodies.length === 0) bodies.push(source);
   for (const body of bodies) {
     try {
-      const parsed = JSON.parse(body);
-      if (Array.isArray(parsed)) {
-        for (const item of parsed) if (isValidSkill(item)) out.push(item);
-      } else if (isValidSkill(parsed)) {
-        out.push(parsed);
-      } else if (
-        typeof parsed === 'object' &&
-        parsed !== null &&
-        Array.isArray((parsed as Record<string, unknown>).skills)
-      ) {
-        for (const item of (parsed as Record<string, unknown>).skills as unknown[]) {
-          if (isValidSkill(item)) out.push(item);
-        }
-      }
+      collectSkillsFrom(JSON.parse(body), out);
     } catch {
       // fall through to salvage scan below
     }
@@ -326,23 +335,25 @@ export function parseSkillEntries(raw: unknown): SkillEntry[] {
     for (const body of scanTargets) {
       for (const candidate of extractFencedJsonObjects(body)) {
         try {
-          const parsed = JSON.parse(candidate);
-          if (isValidSkill(parsed)) {
-            out.push(parsed);
-          } else if (
-            typeof parsed === 'object' &&
-            parsed !== null &&
-            Array.isArray((parsed as Record<string, unknown>).skills)
-          ) {
-            for (const item of (parsed as Record<string, unknown>).skills as unknown[]) {
-              if (isValidSkill(item)) out.push(item);
-            }
-          }
+          collectSkillsFrom(JSON.parse(candidate), out);
         } catch {
-          continue;
+          // strict parse failed; try a jsonrepair pass on this object candidate
+          try {
+            collectSkillsFrom(JSON.parse(jsonrepair(candidate)), out);
+          } catch {
+            continue;
+          }
         }
       }
     }
+  }
+  // Final salvage tier: jsonrepair the whole source via parseJsonLoose. The only
+  // tier that recovers an unterminated string / dropped comma / truncated tail the
+  // balance-scan above cannot slice (e.g. an unescaped quote inside a sub-skill
+  // body). Mirrors the salvage used by 09-qa / 09_1 / 09_2.
+  if (out.length === 0) {
+    const loose = parseJsonLoose(source);
+    if (loose) collectSkillsFrom(loose, out);
   }
   return dedupeById(out);
 }
@@ -357,6 +368,24 @@ function dedupeById(entries: SkillEntry[]): SkillEntry[] {
     out.push(e);
   }
   return out;
+}
+
+/** Heuristic: did the model TRY to emit skills? True when the output carries
+ *  skill-shaped markers (a ```json fence, a "skills"/"subSkills" key) but parsing
+ *  yielded nothing. Distinguishes a malformed-JSON failure (retry) from a model
+ *  that legitimately produced no skills (proceed with bundle skills only). */
+function llmAttemptedSkills(llmOutput: unknown): boolean {
+  let src: unknown = llmOutput;
+  if (src && typeof src === 'object' && 'result' in (src as Record<string, unknown>)) {
+    src = (src as Record<string, unknown>).result;
+  }
+  if (typeof src === 'string') {
+    return /```json|"sub-?skills"|"skills"\s*:/i.test(src);
+  }
+  if (src && typeof src === 'object') {
+    return Array.isArray((src as Record<string, unknown>).skills);
+  }
+  return false;
 }
 
 function isValidSkill(val: unknown): val is SkillEntry {
@@ -414,6 +443,14 @@ export function sanitizeSubSkills(entry: SkillEntry): SkillSubSkill[] {
     out.push({ ...raw, slug });
   }
   return out;
+}
+
+/** True when the entry has at least one valid sub-skill after sanitization.
+ *  A truncated LLM pass often yields a skill that passes isValidSkill but
+ *  carries zero sub-skills; apply() drops those (the prompt mandates >=3) so a
+ *  partial pass cannot ship a half-written skill library. */
+export function hasSubSkills(entry: SkillEntry): boolean {
+  return sanitizeSubSkills(entry).length > 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -966,6 +1003,10 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     requiredCapabilities: ['tool_use', 'file_write'],
     buildPrompt,
     timeoutMs: 60 * 60 * 1000,
+    // A truncated/flaky pass (the weak-model case) throws SkillGenParseError from
+    // apply(); re-roll a fresh invocation up to 3 total attempts before failing,
+    // mirroring the QA steps (09-qa / 09_1 / 09_2).
+    retry: { maxAttempts: 3, retryOn: (err) => err instanceof SkillGenParseError },
     bypassStub: () => ({
       skills: [
         {
@@ -1020,15 +1061,26 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const bundleSkillIds = new Set(bundleSkills.map((s) => s.id));
 
     const llmEntries = parseSkillEntries(args.llmOutput ?? null);
-    if (llmEntries.length === 0 && bundleSkills.length === 0) {
-      throw new SkillGenParseError(
-        'LLM produced no valid skill entries and no bundle skills present — surface failure for retry.',
-      );
+    if (llmEntries.length === 0) {
+      // The model emitted skill-shaped output but none survived parsing — even
+      // after the jsonrepair salvage in parseSkillEntries (e.g. an unescaped quote
+      // inside a sub-skill body). Surface for retry EVEN WHEN bundle skills exist,
+      // so a flaky pass re-rolls instead of silently shipping only the bundle.
+      if (llmAttemptedSkills(args.llmOutput ?? null)) {
+        throw new SkillGenParseError(
+          'LLM emitted skill output but none parsed (likely malformed JSON) — surface failure for retry.',
+        );
+      }
+      if (bundleSkills.length === 0) {
+        throw new SkillGenParseError(
+          'LLM produced no valid skill entries and no bundle skills present — surface failure for retry.',
+        );
+      }
     }
 
     const seenIds = new Set<string>(bundleSkillIds);
     const rejectedIds: string[] = [];
-    const acceptedLlm: SkillEntry[] = [];
+    let acceptedLlm: SkillEntry[] = [];
     for (const entry of llmEntries) {
       const cleanId = sanitizeSkillId(entry.id);
       if (!cleanId) {
@@ -1046,6 +1098,23 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       }
       seenIds.add(cleanId);
       acceptedLlm.push({ ...entry, id: cleanId });
+    }
+
+    // Sub-skill floor: a truncated model output often parses into a skill object
+    // that passes isValidSkill (id/title/description/overview present) but carries
+    // ZERO sub-skills — a partial skill the prompt's "at least 3 sub-skills" rule
+    // forbids. Drop those LLM skills so a truncated pass cannot ship a half-written
+    // library; bundle skills are user-supplied and exempt (added to `final` below
+    // regardless). If the model emitted entries but every one was sub-skill-empty,
+    // that is the truncation signal — throw to retry even when bundle skills exist
+    // (the LLM was meant to add coverage on top of them).
+    const droppedForSubSkills = acceptedLlm.filter((e) => !hasSubSkills(e)).map((e) => e.id);
+    acceptedLlm = acceptedLlm.filter(hasSubSkills);
+    if (acceptedLlm.length === 0 && droppedForSubSkills.length > 0) {
+      throw new SkillGenParseError(
+        `All ${droppedForSubSkills.length} LLM skill(s) had zero sub-skills ` +
+          '(likely truncated output) — surface failure for retry.',
+      );
     }
 
     if (acceptedLlm.length === 0 && bundleSkills.length === 0) {
@@ -1135,9 +1204,10 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
         totalSubSkills,
         droppedFromCap,
         rejectedIds: rejectedIds.length,
+        droppedForSubSkills: droppedForSubSkills.length,
       },
       'skills written',
     );
-    return { written, totalSubSkills, droppedFromCap, rejectedIds };
+    return { written, totalSubSkills, droppedFromCap, rejectedIds, droppedForSubSkills };
   },
 };

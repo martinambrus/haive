@@ -1,6 +1,6 @@
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CliProviderName, FormSchema } from '@haive/shared';
 import { getCliProviderMetadata, mapWithConcurrency } from '@haive/shared';
@@ -9,6 +9,11 @@ import { resolveParallelCap } from '../../_parallel-cap.js';
 import { pathExists } from './_helpers.js';
 
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
+
+/** Issue text recorded for a skill whose SKILL.md is valid but has no sub-skill
+ *  leaf docs — the disk-side signal of a truncated 09_5 generation. Only added for
+ *  NON-bundle skills (a user-supplied bundle skill may legitimately be flat). */
+const SUBSKILL_DEFICIENCY_ISSUE = 'no sub-skills (likely truncated generation — re-run 09_5)';
 
 async function resolveProjectSkillsDir(ctx: StepContext): Promise<string> {
   if (!ctx.cliProviderId) return DEFAULT_PROJECT_SKILLS_DIR;
@@ -24,17 +29,54 @@ function skillsDirParts(skillsDir: string): string[] {
   return skillsDir.split('/').filter((p) => p.length > 0);
 }
 
+/** Repo-relative skill ids that came from custom bundles (06_3). They are
+ *  user-supplied and may legitimately be flat (no sub-skills), so the sub-skill
+ *  deficiency check skips them. Mirrors loadBundleSkills' query in 09_5. */
+async function loadBundleSkillIds(ctx: StepContext): Promise<Set<string>> {
+  const out = new Set<string>();
+  const taskRow = await ctx.db
+    .select({ repositoryId: schema.tasks.repositoryId })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, ctx.taskId))
+    .limit(1);
+  const repositoryId = taskRow[0]?.repositoryId ?? null;
+  if (!repositoryId) return out;
+  const items = await ctx.db
+    .select({ normalizedSpec: schema.customBundleItems.normalizedSpec })
+    .from(schema.customBundleItems)
+    .innerJoin(schema.customBundles, eq(schema.customBundleItems.bundleId, schema.customBundles.id))
+    .where(
+      and(
+        eq(schema.customBundles.repositoryId, repositoryId),
+        eq(schema.customBundleItems.kind, 'skill'),
+      ),
+    );
+  for (const item of items) {
+    const spec = item.normalizedSpec as { id?: unknown } | null;
+    if (spec && typeof spec.id === 'string' && spec.id.trim().length > 0) {
+      out.add(spec.id.trim());
+    }
+  }
+  return out;
+}
+
 export interface SkillCheck {
   skillId: string;
   skillPath: string;
   passed: boolean;
   issues: string[];
+  /** Number of *.md files under the skill's sub-skills/ dir. 0 is the truncated-
+   *  generation signal (a valid SKILL.md with no leaf docs). */
+  subSkillCount: number;
 }
 
 export interface SkillVerificationDetect {
   checks: SkillCheck[];
   missingFileIds: string[];
   brokenStructureIds: string[];
+  /** Skills whose SKILL.md exists and is readable but have zero sub-skill files —
+   *  the disk-side signal of a truncated/partial 09_5 generation. */
+  deficientSubSkillIds: string[];
   /** Repo-relative skills dir resolved from the active CLI's catalog entry. */
   projectSkillsDir: string;
 }
@@ -118,7 +160,30 @@ async function listSkillDirs(repo: string, skillsDir: string): Promise<string[]>
   }
 }
 
-async function checkSkill(repo: string, skillsDir: string, skillId: string): Promise<SkillCheck> {
+/** Count *.md files under <skillsDir>/<id>/sub-skills/. A truncated 09_5 pass
+ *  writes a valid SKILL.md with no sub-skills; this is the disk-side detector.
+ *  Tolerates an absent dir (→ 0). Exported for tests. */
+export async function countSubSkillFiles(
+  repo: string,
+  skillsDir: string,
+  skillId: string,
+): Promise<number> {
+  const dir = path.join(repo, ...skillsDirParts(skillsDir), skillId, 'sub-skills');
+  if (!(await pathExists(dir))) return 0;
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    return entries.filter((e) => e.isFile() && e.name.endsWith('.md')).length;
+  } catch {
+    return 0;
+  }
+}
+
+export async function checkSkill(
+  repo: string,
+  skillsDir: string,
+  skillId: string,
+  isBundle = false,
+): Promise<SkillCheck> {
   const skillPath = path.join(repo, ...skillsDirParts(skillsDir), skillId, 'SKILL.md');
   const issues: string[] = [];
   if (!(await pathExists(skillPath))) {
@@ -127,6 +192,7 @@ async function checkSkill(repo: string, skillsDir: string, skillId: string): Pro
       skillPath,
       passed: false,
       issues: ['SKILL.md missing'],
+      subSkillCount: 0,
     };
   }
   let text: string;
@@ -138,6 +204,7 @@ async function checkSkill(repo: string, skillsDir: string, skillId: string): Pro
       skillPath,
       passed: false,
       issues: [`read failed: ${(err as Error).message}`],
+      subSkillCount: 0,
     };
   }
   if (text.trim().length === 0) {
@@ -146,6 +213,7 @@ async function checkSkill(repo: string, skillsDir: string, skillId: string): Pro
       skillPath,
       passed: false,
       issues: ['SKILL.md empty'],
+      subSkillCount: 0,
     };
   }
   const parsed = parseSkillMarkdown(text);
@@ -153,11 +221,18 @@ async function checkSkill(repo: string, skillsDir: string, skillId: string): Pro
   if (!parsed.description) issues.push('frontmatter missing description');
   if (!parsed.hasTitle) issues.push('missing level-1 title heading');
   if (!parsed.hasOverviewSection) issues.push('missing ## Overview section');
+  const subSkillCount = await countSubSkillFiles(repo, skillsDir, skillId);
+  // Bundle skills are user-supplied and may legitimately be flat — only flag a
+  // missing sub-skills set for skills 09_5 was meant to generate.
+  if (subSkillCount === 0 && !isBundle) {
+    issues.push(SUBSKILL_DEFICIENCY_ISSUE);
+  }
   return {
     skillId,
     skillPath,
     passed: issues.length === 0,
     issues,
+    subSkillCount,
   };
 }
 
@@ -179,8 +254,9 @@ export const skillVerificationStep: StepDefinition<
   async detect(ctx: StepContext): Promise<SkillVerificationDetect> {
     const projectSkillsDir = await resolveProjectSkillsDir(ctx);
     const skillIds = await listSkillDirs(ctx.repoPath, projectSkillsDir);
+    const bundleSkillIds = await loadBundleSkillIds(ctx);
     const checks = await mapWithConcurrency(skillIds, await resolveParallelCap(), (id) =>
-      checkSkill(ctx.repoPath, projectSkillsDir, id),
+      checkSkill(ctx.repoPath, projectSkillsDir, id, bundleSkillIds.has(id)),
     );
     const missingFileIds = checks
       .filter((c) => c.issues.includes('SKILL.md missing'))
@@ -188,17 +264,24 @@ export const skillVerificationStep: StepDefinition<
     const brokenStructureIds = checks
       .filter((c) => !c.passed && !c.issues.includes('SKILL.md missing'))
       .map((c) => c.skillId);
+    // SKILL.md present and readable but no sub-skills on disk — the truncated/partial
+    // 09_5 case. Keys on the deficiency issue, which checkSkill only adds for
+    // non-bundle skills, so user-supplied flat bundle skills are excluded.
+    const deficientSubSkillIds = checks
+      .filter((c) => c.issues.includes(SUBSKILL_DEFICIENCY_ISSUE))
+      .map((c) => c.skillId);
     ctx.logger.info(
       {
         total: checks.length,
         passed: checks.filter((c) => c.passed).length,
         missing: missingFileIds.length,
         broken: brokenStructureIds.length,
+        deficientSubSkills: deficientSubSkillIds.length,
         projectSkillsDir,
       },
       'skill verification detect complete',
     );
-    return { checks, missingFileIds, brokenStructureIds, projectSkillsDir };
+    return { checks, missingFileIds, brokenStructureIds, deficientSubSkillIds, projectSkillsDir };
   },
 
   form(_ctx, detected): FormSchema | null {
@@ -240,10 +323,11 @@ export const skillVerificationStep: StepDefinition<
       }
     }
 
+    const bundleSkillIds = shouldRegenerate ? await loadBundleSkillIds(ctx) : new Set<string>();
     const finalChecks = shouldRegenerate
       ? await mapWithConcurrency(detected.checks, await resolveParallelCap(), (c) =>
           detected.missingFileIds.includes(c.skillId)
-            ? checkSkill(ctx.repoPath, skillsDir, c.skillId)
+            ? checkSkill(ctx.repoPath, skillsDir, c.skillId, bundleSkillIds.has(c.skillId))
             : Promise.resolve(c),
         )
       : detected.checks;
