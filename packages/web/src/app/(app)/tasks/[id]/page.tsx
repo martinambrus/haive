@@ -216,6 +216,15 @@ export default function TaskDetailPage() {
 
       if (!showsTerminal || !auto) {
         scrollToHeader();
+        // The just-finished step's terminal collapses a tick later (its
+        // autoExpand flips false and the run panels unmount), removing a large
+        // chunk of vertical space ABOVE this header and shoving it back out of
+        // view — so the scroll above, computed against the still-expanded
+        // layout, lands too high (often near page top). Re-apply once the
+        // collapse settles. Timers are cleared on the next key change / unmount.
+        [150, 400].forEach((delay) =>
+          scrollTimersRef.current.push(setTimeout(scrollToHeader, delay)),
+        );
       } else if (!scrollToLastTerminal()) {
         // Terminal panels mount after an async invocations fetch, so the first
         // attempt can run before they exist — retry until they're in the DOM.
