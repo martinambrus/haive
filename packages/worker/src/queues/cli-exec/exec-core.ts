@@ -279,8 +279,18 @@ export async function executeCliSpec(
   // REPLACES the claude collector (mutually exclusive), it does not run
   // alongside it.
   const outputFormat = mergedSpec.outputFormat;
-  const collector = createStreamJsonCollector(statusCallback);
-  const codexCollector = outputFormat === 'codex-jsonl' ? createCodexJsonlCollector() : null;
+  // Publish the model's prose text (assistant text blocks / codex agent_message)
+  // as a dedicated `text` frame so the terminal viewer's Clean tab can render
+  // readable output instead of the raw NDJSON. Live runs only (needs an
+  // invocation stream); replay reuses the persisted rawOutput.
+  const onProseText = invocationId
+    ? (text: string) => {
+        void publishCliChunk(invocationId, 'text', text);
+      }
+    : undefined;
+  const collector = createStreamJsonCollector(statusCallback, onProseText);
+  const codexCollector =
+    outputFormat === 'codex-jsonl' ? createCodexJsonlCollector(onProseText) : null;
 
   // While the CLI streams, persist a running token-usage snapshot on a throttle
   // so the task page + terminal polls show a live, growing count before the

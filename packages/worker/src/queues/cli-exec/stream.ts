@@ -28,6 +28,7 @@ interface StreamJsonCollector {
 
 export function createStreamJsonCollector(
   onProgress?: (message: string) => void,
+  onText?: (text: string) => void,
 ): StreamJsonCollector {
   let buffer = '';
   let resultText: string | null = null;
@@ -117,6 +118,7 @@ export function createStreamJsonCollector(
           const b = block as Record<string, unknown>;
           if (b.type === 'text' && typeof b.text === 'string') {
             assistantText += b.text;
+            onText?.(b.text);
           } else if (b.type === 'tool_use' && onProgress) {
             const toolName = b.name as string;
             const input = b.input as Record<string, unknown> | undefined;

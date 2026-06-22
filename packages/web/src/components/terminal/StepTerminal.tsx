@@ -287,13 +287,20 @@ function InvocationPanel({ taskId, invocation, label, idx, statusMessage }: Invo
         </div>
       )}
       {invocation.isActive ? (
-        <CliStreamViewer invocationId={invocation.id} taskId={taskId} height="h-[400px]" />
+        <CliStreamViewer
+          invocationId={invocation.id}
+          taskId={taskId}
+          height="h-[400px]"
+          cleanSupported={invocation.mode !== 'subagent_sequential'}
+        />
       ) : replay ? (
         <CliStreamViewer
           invocationId={invocation.id}
           taskId={taskId}
-          staticOutput={replay.rawOutput}
+          staticOutput={replay.streamLog}
+          staticCleanOutput={replay.cleanOutput}
           staticExitCode={replay.exitCode}
+          cleanSupported={invocation.mode !== 'subagent_sequential'}
           height="h-[400px]"
         />
       ) : (

@@ -12,12 +12,18 @@ import { MermaidBlock } from './mermaid-block';
 import { BeforeAfterBlock, BeforeAfterPanel } from './before-after-block';
 
 /** Heuristic markdown detection — true when the body has a heading line, a fenced
- *  code block, or a Markdown link `[text](url)`. Stays conservative on plain "- "
- *  lists / "**" emphasis (which appear in regular text outputs) to avoid false
- *  positives; a full link with parens is specific enough to be safe. */
+ *  code block, an inline code span `` `x` ``, a bold run `**x**`, or a Markdown link
+ *  `[text](url)`. Stays conservative on bare "- " lists and single `*`/`_` emphasis
+ *  (which collide with plain text — bullet-looking prose, arithmetic, snake_case
+ *  names) to avoid false positives; paired backticks / `**bold**` / a full link with
+ *  parens are specific enough to be safe signals. */
 export function looksLikeMarkdown(text: string): boolean {
   return (
-    /^\s*#{1,6}\s+\S/m.test(text) || /^\s*```/m.test(text) || /\[[^\]\n]+\]\([^)\s]+\)/.test(text)
+    /^\s*#{1,6}\s+\S/m.test(text) ||
+    /^\s*```/m.test(text) ||
+    /`[^`\n]+`/.test(text) ||
+    /\*\*[^\n]+?\*\*/.test(text) ||
+    /\[[^\]\n]+\]\([^)\s]+\)/.test(text)
   );
 }
 

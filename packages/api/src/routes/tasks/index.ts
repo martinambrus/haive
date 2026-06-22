@@ -474,7 +474,11 @@ taskRoutes.get('/:id/cli-invocations/:invocationId/output', async (c) => {
   // historical replay still shows something meaningful.
   return c.json({
     id: inv.id,
-    rawOutput: inv.streamLog ?? inv.rawOutput ?? '',
+    // Raw tab: the full live-stream transcript (header + NDJSON + stderr); fall
+    // back to the parsed result on legacy rows written before stream_log existed.
+    streamLog: inv.streamLog ?? inv.rawOutput ?? '',
+    // Clean tab: the model's parsed prose (assistant text / agent_message).
+    cleanOutput: inv.rawOutput ?? '',
     exitCode: inv.exitCode,
     errorMessage: inv.errorMessage,
     durationMs: inv.durationMs,

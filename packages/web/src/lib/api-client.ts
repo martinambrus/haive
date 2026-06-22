@@ -287,6 +287,7 @@ export interface CliProvider {
   sandboxImageBuiltAt: string | null;
   enabled: boolean;
   isolateAuth: boolean;
+  disableThinking: boolean;
   authStatus: CliAuthStatus;
   authMessage: string | null;
   authLastCheckedAt: string | null;
@@ -621,7 +622,10 @@ export interface CliInvocationSummary {
 
 export interface CliInvocationOutput {
   id: string;
-  rawOutput: string;
+  /** Raw live-stream transcript for the Raw tab (header + NDJSON + stderr). */
+  streamLog: string;
+  /** Parsed model prose for the Clean tab (assistant text / agent_message). */
+  cleanOutput: string;
   exitCode: number | null;
   errorMessage: string | null;
   durationMs: number | null;

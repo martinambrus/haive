@@ -70,7 +70,7 @@ export function installCliStreamWebSocket(server: Server, opts: CliStreamWsOptio
 interface StreamFrameOut {
   type: 'connected' | 'output' | 'exit' | 'error' | 'pong';
   invocationId?: string;
-  stream?: 'stdout' | 'stderr';
+  stream?: 'stdout' | 'stderr' | 'text';
   data?: string;
   code?: number;
   message?: string;
@@ -177,7 +177,7 @@ function fieldsToFrame(fields: string[]): StreamFrameOut | null {
     const code = parseInt(map.get('code') ?? '-1', 10);
     return { type: 'exit', code: Number.isFinite(code) ? code : -1 };
   }
-  if (stream === 'stdout' || stream === 'stderr') {
+  if (stream === 'stdout' || stream === 'stderr' || stream === 'text') {
     const data = map.get('data');
     if (typeof data === 'string') {
       return { type: 'output', stream, data };

@@ -237,3 +237,40 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     expect(plain.getTokenUsage()).toBeNull();
   });
 });
+
+describe('createStreamJsonCollector onText (Clean-tab prose stream)', () => {
+  it('fires onText with each assistant text block, excluding tool_use', () => {
+    const prose: string[] = [];
+    const c = createStreamJsonCollector(undefined, (t) => prose.push(t));
+    feed(c, [
+      { type: 'system', subtype: 'init' },
+      {
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'text', text: 'Hello ' },
+            { type: 'tool_use', name: 'Read', input: { file_path: '/a' } },
+            { type: 'text', text: 'world' },
+          ],
+        },
+      },
+      { type: 'result', subtype: 'success', result: 'Hello world' },
+    ]);
+    c.getResult();
+    expect(prose).toEqual(['Hello ', 'world']);
+    // The streamed prose must reconstruct the same text the collector accumulated.
+    expect(prose.join('')).toBe(c.getAssistantText());
+  });
+
+  it('emits nothing for a tool_use-only assistant event', () => {
+    const prose: string[] = [];
+    const c = createStreamJsonCollector(undefined, (t) => prose.push(t));
+    feed(c, [
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'ls' } }] },
+      },
+    ]);
+    expect(prose).toEqual([]);
+  });
+});

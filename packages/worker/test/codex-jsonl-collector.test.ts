@@ -92,3 +92,18 @@ describe('extractCodexJsonlOutput', () => {
     expect(out.tokenUsage).toBeNull();
   });
 });
+
+describe('createCodexJsonlCollector onText (Clean-tab prose stream)', () => {
+  it('fires onText for each agent_message, excluding reasoning', () => {
+    const prose: string[] = [];
+    const c = createCodexJsonlCollector((t) => prose.push(t));
+    feed(c, [
+      ...DOCUMENTED_RUN,
+      { type: 'turn.started' },
+      { type: 'item.completed', item: { type: 'agent_message', text: 'Second answer' } },
+      { type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } },
+    ]);
+    // DOCUMENTED_RUN carries a 'reasoning' item that must NOT be emitted as prose.
+    expect(prose).toEqual(['First answer', 'Second answer']);
+  });
+});

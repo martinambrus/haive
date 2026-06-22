@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -8,8 +8,10 @@ import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import { api, apiWebSocketUrl } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
+import { MarkdownView, looksLikeMarkdown } from '@/components/markdown/markdown-view';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
+type TerminalTab = 'clean' | 'raw';
 
 interface CliStreamViewerProps {
   invocationId: string;
@@ -21,13 +23,20 @@ interface CliStreamViewerProps {
   /** Override the default 600px height for inline embedding. */
   height?: string;
   /** When provided, render this output statically (no WebSocket, no Cancel
-   *  button). Used to replay an ended invocation's persisted rawOutput from
-   *  cli_invocations.raw_output without keeping a stream alive past the
+   *  button). Used to replay an ended invocation's persisted stream_log from
+   *  cli_invocations.stream_log without keeping a stream alive past the
    *  Redis-stream 600s expiry. */
   staticOutput?: string;
   /** Final exit code annotation for static replays (rendered in cyan after
    *  the buffered output). Ignored when staticOutput is unset. */
   staticExitCode?: number | null;
+  /** Persisted model prose for the Clean tab on replay (cli_invocations.raw_output).
+   *  Ignored for live runs, which accumulate prose from `text` stream frames. */
+  staticCleanOutput?: string;
+  /** Whether this invocation produces parsed model prose. False for
+   *  subagent_sequential (its rawOutput is a JSON trace, not prose) — those
+   *  panels render raw-only with no tab bar. Defaults to true. */
+  cleanSupported?: boolean;
 }
 
 const KEEPALIVE_INTERVAL_MS = 30_000;
@@ -40,6 +49,8 @@ export function CliStreamViewer({
   height,
   staticOutput,
   staticExitCode,
+  staticCleanOutput,
+  cleanSupported = true,
 }: CliStreamViewerProps) {
   const isReplay = staticOutput !== undefined;
   // Suppress the "Loading…" overlay once any byte has been written to xterm.
@@ -54,6 +65,19 @@ export function CliStreamViewer({
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
   const onExitRef = useRef(onExit);
+
+  // Tabbed view: Clean (parsed model prose) is the default; Raw is the original
+  // xterm byte stream. cleanText accumulates live `text` frames; on replay the
+  // Clean tab renders staticCleanOutput instead. When cleanSupported is false we
+  // render raw-only (no tabs) — unchanged from the pre-tabs behavior.
+  const [tab, setTab] = useState<TerminalTab>('clean');
+  const [cleanText, setCleanText] = useState('');
+  const cleanScrollRef = useRef<HTMLDivElement | null>(null);
+  // Refs to the live terminal + fit addon so the tab-switch effect can re-fit
+  // when Raw becomes visible (xterm laid out in a display:none container keeps a
+  // zero size until re-fit).
+  const termRef = useRef<XTerm | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
 
   useEffect(() => {
     onExitRef.current = onExit;
@@ -104,6 +128,8 @@ export function CliStreamViewer({
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
     term.loadAddon(clipboardAddon);
+    termRef.current = term;
+    fitRef.current = fitAddon;
 
     // Read-only viewer: intercept Ctrl+C as a "kill the running CLI" shortcut.
     // Any other key is ignored (disableStdin already blocks input forwarding;
@@ -177,6 +203,8 @@ export function CliStreamViewer({
         window.removeEventListener('resize', handleResize);
         resizeObserver.disconnect();
         detachWheel();
+        termRef.current = null;
+        fitRef.current = null;
         term.dispose();
       };
     }
@@ -204,8 +232,25 @@ export function CliStreamViewer({
           break;
         case 'output':
           if (typeof parsed.data === 'string') {
-            term.write(parsed.data);
-            if (parsed.data.length > 0) setHasOutput(true);
+            // `text` frames carry the model's parsed prose for the Clean tab;
+            // stdout/stderr (and legacy frames without a stream) go to xterm.
+            if (parsed.stream === 'text') {
+              if (parsed.data.length > 0) {
+                const chunk = parsed.data;
+                // Each `text` frame is one complete assistant turn / agent_message.
+                // Separate consecutive responses with a blank line so they don't
+                // visually run together — and so Markdown renders them as distinct
+                // blocks rather than one continuous paragraph.
+                setCleanText((prev) => {
+                  if (!prev) return chunk;
+                  const sep = prev.endsWith('\n\n') ? '' : prev.endsWith('\n') ? '\n' : '\n\n';
+                  return prev + sep + chunk;
+                });
+              }
+            } else {
+              term.write(parsed.data);
+              if (parsed.data.length > 0) setHasOutput(true);
+            }
           }
           break;
         case 'exit':
@@ -262,6 +307,8 @@ export function CliStreamViewer({
       } catch {
         // ignore
       }
+      termRef.current = null;
+      fitRef.current = null;
       term.dispose();
     };
     // The component is re-mounted whenever invocationId changes, so the cleanup
@@ -269,7 +316,37 @@ export function CliStreamViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [invocationId, isReplay, staticOutput, staticExitCode]);
 
+  // Re-fit xterm whenever the Raw panel becomes visible. While the Clean tab is
+  // active the xterm container is display:none (zero size), so fit() must run
+  // again on show or the grid stays collapsed.
+  useEffect(() => {
+    if (cleanSupported && tab !== 'raw') return;
+    const id = requestAnimationFrame(() => {
+      try {
+        fitRef.current?.fit();
+        const t = termRef.current;
+        if (t) t.refresh(0, t.rows - 1);
+      } catch {
+        // ignore
+      }
+    });
+    return () => cancelAnimationFrame(id);
+  }, [tab, cleanSupported]);
+
+  // CR-only sequences confuse HTML pre-wrap; JSON.parse already turned \n/\t into
+  // real characters, so stripping bare \r is all the escaping the prose needs.
+  const cleanContent = (isReplay ? (staticCleanOutput ?? '') : cleanText).replace(/\r/g, '');
+
+  // Keep the Clean panel pinned to the latest output as it streams.
+  useEffect(() => {
+    const el = cleanScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [cleanContent, tab]);
+
   const heightClass = height ?? (fill ? '' : 'h-[400px]');
+  const showTabs = cleanSupported;
+  const rawHidden = showTabs && tab !== 'raw';
+
   return (
     <div className={`flex flex-col gap-2 ${fill ? 'h-full min-h-0' : ''}`}>
       <div className="flex items-center justify-between">
@@ -298,20 +375,91 @@ export function CliStreamViewer({
           </div>
         )}
       </div>
-      <div className={`relative w-full ${fill ? 'min-h-0 flex-1' : heightClass}`}>
-        <div
-          ref={mountRef}
-          className="h-full w-full rounded border border-neutral-800 bg-[#0a0a0a] p-2"
-        />
-        {!hasOutput && state !== 'error' && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-neutral-500">
-            <span className="rounded bg-neutral-900/80 px-3 py-1">
-              {state === 'connecting' ? 'Connecting…' : 'Waiting for CLI output…'}
-            </span>
+
+      {showTabs && (
+        <div className="flex items-center gap-1">
+          <TabButton active={tab === 'clean'} onClick={() => setTab('clean')}>
+            Clean
+          </TabButton>
+          <TabButton active={tab === 'raw'} onClick={() => setTab('raw')}>
+            Raw
+          </TabButton>
+        </div>
+      )}
+
+      <div className={`w-full ${fill ? 'min-h-0 flex-1' : heightClass}`}>
+        {/* Raw / xterm panel — always mounted so live frames are never lost;
+            hidden (not unmounted) while the Clean tab is active. */}
+        <div className={`relative h-full w-full ${rawHidden ? 'hidden' : ''}`}>
+          <div
+            ref={mountRef}
+            className="h-full w-full rounded border border-neutral-800 bg-[#0a0a0a] p-2"
+          />
+          {!hasOutput && state !== 'error' && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-neutral-500">
+              <span className="rounded bg-neutral-900/80 px-3 py-1">
+                {state === 'connecting' ? 'Connecting…' : 'Waiting for CLI output…'}
+              </span>
+            </div>
+          )}
+        </div>
+        {showTabs && tab === 'clean' && (
+          <div
+            ref={cleanScrollRef}
+            className="h-full w-full overflow-auto rounded border border-neutral-800 bg-[#0a0a0a]"
+          >
+            {cleanContent.length === 0 ? (
+              <div className="p-3 text-xs text-neutral-500">
+                {isReplay
+                  ? 'No model text for this run.'
+                  : state === 'connecting'
+                    ? 'Connecting…'
+                    : 'No text generated by the model yet.'}
+              </div>
+            ) : looksLikeMarkdown(cleanContent) ? (
+              // Model prose is Markdown — render it. react-markdown (v10, no
+              // rehype-raw) escapes embedded HTML and strips javascript: URLs, so
+              // this is safe for untrusted CLI output. enhanced=false skips the
+              // spec-only quiz/before-after segmentation. The outer div owns the
+              // scroll, so neutralize MarkdownView's own max-height/overflow.
+              <MarkdownView
+                body={cleanContent}
+                enhanced={false}
+                className="max-h-none overflow-visible p-3"
+              />
+            ) : (
+              <div className="whitespace-pre-wrap break-words p-3 font-mono text-[13px] leading-relaxed text-neutral-200">
+                {cleanContent}
+              </div>
+            )}
           </div>
         )}
       </div>
     </div>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded border px-2 py-0.5 text-[11px] uppercase tracking-wider ${
+        active
+          ? 'border-indigo-500/50 bg-indigo-500/15 text-indigo-200'
+          : 'border-neutral-700 bg-neutral-800/40 text-neutral-400 hover:text-neutral-200'
+      }`}
+    >
+      {children}
+    </button>
   );
 }
 

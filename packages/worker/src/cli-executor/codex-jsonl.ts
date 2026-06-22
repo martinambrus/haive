@@ -26,7 +26,7 @@ export interface CodexJsonlCollector {
   getMalformedLineCount: () => number;
 }
 
-export function createCodexJsonlCollector(): CodexJsonlCollector {
+export function createCodexJsonlCollector(onText?: (text: string) => void): CodexJsonlCollector {
   let buffer = '';
   let eventCount = 0;
   let malformedLineCount = 0;
@@ -52,6 +52,7 @@ export function createCodexJsonlCollector(): CodexJsonlCollector {
       const item = event.item as Record<string, unknown> | undefined;
       if (item?.type === 'agent_message' && typeof item.text === 'string') {
         lastAgentMessage = item.text;
+        onText?.(item.text);
       }
       return;
     }

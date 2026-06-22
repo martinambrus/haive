@@ -12,7 +12,7 @@ const STREAM_MAXLEN = 5000;
  *  who opens the Terminal tab after-the-fact still sees the final output. */
 const STREAM_TTL_SECONDS = 600;
 
-export type StreamFrameKind = 'stdout' | 'stderr' | 'exit';
+export type StreamFrameKind = 'stdout' | 'stderr' | 'text' | 'exit';
 
 export function streamKey(invocationId: string): string {
   return `${STREAM_PREFIX}${invocationId}`;
@@ -20,7 +20,7 @@ export function streamKey(invocationId: string): string {
 
 export async function publishCliChunk(
   invocationId: string | null | undefined,
-  stream: 'stdout' | 'stderr',
+  stream: 'stdout' | 'stderr' | 'text',
   data: string,
 ): Promise<void> {
   if (!invocationId || !data) return;
