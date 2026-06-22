@@ -43,6 +43,11 @@ const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderN
 const MAX_URL_WAIT_ATTEMPTS = 3;
 const URL_WAIT_TIMEOUT_MS = 30_000;
 
+// Upper bound on phase 'success' ("saving credentials..."). The server runs the
+// post-login probe (<=30s) then sends 'saved'. If that frame is lost (WS closed
+// mid-probe -> dropped wsSend), the modal would otherwise hang here forever.
+const SUCCESS_SAVE_TIMEOUT_MS = 40_000;
+
 // Debug toggle: when true, antigravity's login modal renders agy's live TUI in
 // an xterm. The normal flow is field-only (the server sizes the PTY so agy emits
 // the OAuth URL without a client terminal). Set true only to inspect the TUI.
@@ -192,6 +197,23 @@ export function CliAuthBannerModal({
     return () => clearTimeout(timer);
   }, [open, phase, authUrl, urlAttempt, providerName]);
 
+  // Safety net: phase 'success' ("saving credentials...") waits on the server's
+  // post-login probe + 'saved' frame. If that frame never arrives (e.g. the WS
+  // closed mid-probe, so the server's wsSend was dropped), the modal would hang
+  // here forever. Bound it: after SUCCESS_SAVE_TIMEOUT_MS, surface an escape. The
+  // probe already persisted auth_status server-side, so re-testing reflects truth.
+  useEffect(() => {
+    if (phase !== 'success') return;
+    const timer = setTimeout(() => {
+      setPhase('error');
+      setError(
+        'Sign-in finished but verification did not come back in time. Your credentials may ' +
+          'already be saved — close this dialog and click "Test connection" to confirm.',
+      );
+    }, SUCCESS_SAVE_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [phase]);
+
   // antigravity debug terminal: render agy's TUI in an xterm bound to the same
   // banner WS the modal owns. 'output' frames are written to the term (see
   // ws.onmessage); keystrokes/resizes are sent back as 'input'/'resize'. Other
@@ -315,16 +337,14 @@ export function CliAuthBannerModal({
             <h2 className="text-lg font-semibold text-neutral-50">Sign in — {providerLabel}</h2>
             <p className="text-xs text-neutral-500">{providerName}</p>
           </div>
-          {phase !== 'success' && (
-            <button
-              type="button"
-              onClick={handleClose}
-              className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
-              aria-label="Close"
-            >
-              Close
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={handleClose}
+            className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
+            aria-label="Close"
+          >
+            Close
+          </button>
         </div>
 
         <FormError message={error} />

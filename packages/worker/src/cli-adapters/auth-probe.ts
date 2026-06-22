@@ -23,7 +23,7 @@ export interface AuthProbeExecResult {
 
 const AUTH_PROBE_PROMPT = 'respond with the single word pong';
 const AUTH_FAILURE_GUARD =
-  /invalid[_\s-]?token|unauthor(ised|ized)|\b401\b|authentication[_\s-]?required/i;
+  /invalid[_\s-]?token|unauthor(ised|ized)|\b401\b|authentication[_\s-]?required|please[_\s-]?sign[_\s-]?in/i;
 
 // Gemini's folder-trust feature, when enabled, overrides --yolo to "default"
 // and prints a warning whenever the CWD is not in trustedFolders.json. The
@@ -59,7 +59,7 @@ const PATTERNS: Array<{ pattern: RegExp; status: CliAuthStatus }> = [
   },
   {
     pattern:
-      /invalid[_\s-]?token|(?:invalid|missing)[_\s-]?(?:or[_\s-]+missing[_\s-]+)?api[_\s-]?key|token[_\s-]?expired|sub[_\s-]?expired|credentials[_\s-]?expired|re[-_\s]?auth|not[_\s-]?authenticated|not[_\s-]?logged[_\s-]?in|\bunauthor(ised|ized)\b|\b401\b|please[_\s-]?log[_\s-]?in|please[_\s-]?run[^\n]*\/?login|\/login\b|\blog\s*in\s+(?:required|needed)|run\s+['"]?amp\s+login/i,
+      /invalid[_\s-]?token|(?:invalid|missing)[_\s-]?(?:or[_\s-]+missing[_\s-]+)?api[_\s-]?key|token[_\s-]?expired|sub[_\s-]?expired|credentials[_\s-]?expired|re[-_\s]?auth|not[_\s-]?authenticated|not[_\s-]?logged[_\s-]?in|\bunauthor(ised|ized)\b|\b401\b|please[_\s-]?log[_\s-]?in|please[_\s-]?sign[_\s-]?in|please[_\s-]?run[^\n]*\/?login|\/login\b|\blog\s*in\s+(?:required|needed)|run\s+['"]?amp\s+login/i,
     status: 'auth_expired',
   },
   // Gemini's "Please set an Auth method..." stderr — fired when ~/.gemini has
@@ -200,13 +200,16 @@ export function buildAuthProbeCommand(
         env,
       };
     case 'antigravity':
-      // agy has no --output-format; plain -p prints the response.
-      // --dangerously-skip-permissions keeps it non-interactive. Missing/expired
-      // creds print "Authentication required..." (caught as auth_expired); a
-      // fully unpopulated login is blocked earlier by assertUserAuthReady.
+      // `agy models` lists the account's available models via one backend call —
+      // fast (~3s) and auth-discriminating, like `amp usage`. The previous
+      // `agy -p pong` ran a full agentic LLM round-trip that routinely blew the
+      // 25s probe budget and got misclassified as `timeout` (a valid login read
+      // as "not logged in"). Unauthenticated, agy prints "Please sign in to view
+      // available models" and exits 0 — caught as auth_expired via the sign-in
+      // pattern (also in AUTH_FAILURE_GUARD so the exit-0 isn't read as ok).
       return {
         command: executable,
-        args: ['-p', AUTH_PROBE_PROMPT, '--dangerously-skip-permissions'],
+        args: ['models'],
         env,
       };
     default:

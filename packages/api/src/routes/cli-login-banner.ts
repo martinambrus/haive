@@ -77,6 +77,9 @@ interface BannerSession {
   timeout: NodeJS.Timeout;
   cleanedUp: boolean;
   credsPoller: NodeJS.Timeout | null;
+  // Content signature (md5) of agy's OAuth token file captured on the poller's
+  // first read, so a pre-existing token isn't mistaken for a fresh sign-in.
+  credsBaseline: string | null;
   urlDebugged: boolean;
   firstChunkLogged: boolean;
   menuAdvanceTimer: NodeJS.Timeout | null;
@@ -275,6 +278,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     }, SESSION_TIMEOUT_MS),
     cleanedUp: false,
     credsPoller: null,
+    credsBaseline: null,
     urlDebugged: false,
     firstChunkLogged: false,
     menuAdvanceTimer: null,
@@ -610,11 +614,14 @@ const ANTIGRAVITY_POLL_INTERVAL_MS = 1000;
 // min; the 10-min SESSION_TIMEOUT_MS is the hard backstop that tears the session
 // (and poller) down.
 const ANTIGRAVITY_POLL_MAX_TRIES = 540;
-// agy writes its OAuth token here on successful sign-in (verified on agy 1.0.5).
-const ANTIGRAVITY_CREDS_CHECK = [
+// Content signature (md5) of agy's OAuth token file (path verified on agy 1.0.5),
+// or empty stdout when the file is missing. The poller baselines this on its
+// first read and fires only when the signature CHANGES, so a token already
+// present on the persistent auth volume is never mistaken for a fresh sign-in.
+const ANTIGRAVITY_CREDS_SIGNATURE = [
   'sh',
   '-c',
-  'test -s "$HOME/.gemini/antigravity-cli/antigravity-oauth-token"',
+  'md5sum "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" 2>/dev/null | cut -d" " -f1',
 ];
 
 /** Polls the login container for gemini's creds file after the user pastes
@@ -740,19 +747,35 @@ function startAntigravityCredsPoller(session: BannerSession): void {
       clearInterval(poller);
       return;
     }
-    void execInContainer(session.docker, session.dockerContainerId, ANTIGRAVITY_CREDS_CHECK)
+    void execInContainer(session.docker, session.dockerContainerId, ANTIGRAVITY_CREDS_SIGNATURE)
       .then((result) => {
         if (session.cleanedUp || session.authSuccessSent) {
           clearInterval(poller);
           session.credsPoller = null;
           return;
         }
-        if (result.exitCode === 0) {
+        const signature = result.stdout.trim() || 'ABSENT';
+        if (session.credsBaseline === null) {
+          // First read establishes the baseline. A token already present at
+          // session start (already-authenticated provider on the persistent auth
+          // volume, or a stale/expired token still on disk) must NOT be read as a
+          // fresh sign-in — otherwise the modal fires a false "auth-success"
+          // before any OAuth URL, and re-login after expiry can never complete.
+          session.credsBaseline = signature;
+          log.info(
+            { providerId: session.providerId, present: signature !== 'ABSENT' },
+            'antigravity creds baseline captured',
+          );
+        } else if (signature !== 'ABSENT' && signature !== session.credsBaseline) {
+          // Token file (re)written during this session = a genuine sign-in.
           clearInterval(poller);
           session.credsPoller = null;
           session.authSuccessSent = true;
           session.probePending = true;
-          log.info({ providerId: session.providerId }, 'antigravity creds file detected');
+          log.info(
+            { providerId: session.providerId },
+            'antigravity creds file written (new sign-in)',
+          );
           wsSend(session.ws, { type: 'auth-success' });
           void runProbeAndSave(session);
           return;
@@ -762,7 +785,7 @@ function startAntigravityCredsPoller(session: BannerSession): void {
           session.credsPoller = null;
           log.warn(
             { providerId: session.providerId, tries },
-            'antigravity token file not found before poll timeout',
+            'antigravity token file not written before poll timeout',
           );
           wsSend(session.ws, {
             type: 'error',

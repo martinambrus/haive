@@ -209,6 +209,25 @@ describe('classifyAuthProbeOutput', () => {
     });
     expect(result.status).toBe('auth_expired');
   });
+
+  it('classifies antigravity "Please sign in to view available models" (agy models, exit 0) as auth_expired', () => {
+    const result = classifyAuthProbeOutput({
+      stdout:
+        'Error: Please sign in to view available models. Launch the CLI without arguments to sign in.',
+      stderr: '',
+      exitCode: 0,
+    });
+    expect(result.status).toBe('auth_expired');
+  });
+
+  it('classifies an authenticated `agy models` model list (exit 0) as ok', () => {
+    const result = classifyAuthProbeOutput({
+      stdout: 'gemini-2.5-pro\ngemini-2.5-flash\nclaude-sonnet-4\n',
+      stderr: '',
+      exitCode: 0,
+    });
+    expect(result.status).toBe('ok');
+  });
 });
 
 describe('buildAuthProbeCommand', () => {
@@ -236,12 +255,10 @@ describe('buildAuthProbeCommand', () => {
     expect(spec.env?.GEMINI_CLI_TRUST_WORKSPACE).toBe('true');
   });
 
-  it('builds antigravity spec with -p and --dangerously-skip-permissions', () => {
+  it('builds antigravity spec with the fast `models` auth check', () => {
     const spec = buildAuthProbeCommand(makeProvider({ id: '5', name: 'antigravity' }), 'agy');
     expect(spec.command).toBe('agy');
-    expect(spec.args).toContain('-p');
-    expect(spec.args).toContain('respond with the single word pong');
-    expect(spec.args).toContain('--dangerously-skip-permissions');
+    expect(spec.args).toEqual(['models']);
   });
 
   it('throws CliAuthProbeUnsupportedError for zai', () => {
