@@ -202,13 +202,18 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
   db: ReturnType<typeof getDb>,
   taskId: string,
   steps: T[],
-): Promise<(T & { cliInvocationCount: number; tokenUsage: CliTokenUsage | null })[]> {
+): Promise<
+  (T & { cliInvocationCount: number; attemptCount: number; tokenUsage: CliTokenUsage | null })[]
+> {
   if (steps.length === 0) return [];
   const tu = schema.cliInvocations.tokenUsage;
   const rows = await db
     .select({
       taskStepId: schema.cliInvocations.taskStepId,
       count: sql<number>`count(*)::int`,
+      // LLM run attempts: exclude agent_mining (parallel sub-agents inflate the
+      // count and aren't retries). >1 on a non-loop step => an auto-retry happened.
+      attemptCount: sql<number>`count(*) filter (where ${schema.cliInvocations.mode} <> 'agent_mining')::int`,
       inputTokens: sql<number>`coalesce(sum((${tu} ->> 'inputTokens')::numeric), 0)::int`,
       outputTokens: sql<number>`coalesce(sum((${tu} ->> 'outputTokens')::numeric), 0)::int`,
       totalTokens: sql<number>`coalesce(sum((${tu} ->> 'totalTokens')::numeric), 0)::int`,
@@ -222,7 +227,10 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
     )
     .groupBy(schema.cliInvocations.taskStepId);
 
-  const byStep = new Map<string, { count: number; tokenUsage: CliTokenUsage | null }>();
+  const byStep = new Map<
+    string,
+    { count: number; attemptCount: number; tokenUsage: CliTokenUsage | null }
+  >();
   for (const row of rows) {
     if (!row.taskStepId) continue;
     const inputTokens = Number(row.inputTokens) || 0;
@@ -242,11 +250,20 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
           ...(costUsd > 0 ? { costUsd } : {}),
         }
       : null;
-    byStep.set(row.taskStepId, { count: row.count, tokenUsage });
+    byStep.set(row.taskStepId, {
+      count: row.count,
+      attemptCount: Number(row.attemptCount) || 0,
+      tokenUsage,
+    });
   }
   return steps.map((s) => {
     const stat = byStep.get(s.id);
-    return { ...s, cliInvocationCount: stat?.count ?? 0, tokenUsage: stat?.tokenUsage ?? null };
+    return {
+      ...s,
+      cliInvocationCount: stat?.count ?? 0,
+      attemptCount: stat?.attemptCount ?? 0,
+      tokenUsage: stat?.tokenUsage ?? null,
+    };
   });
 }
 

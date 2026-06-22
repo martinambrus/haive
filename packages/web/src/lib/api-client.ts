@@ -487,6 +487,10 @@ export interface TaskStep {
    *  whether the inline terminal toggle is rendered — 0 means the step has
    *  no terminal output to show (deterministic-only or pending steps). */
   cliInvocationCount: number;
+  /** Non-superseded, non-agent_mining CLI invocations = LLM run attempts. >1 on a
+   *  non-loop step (iterationCount === 0) means the step auto-retried (form-aware /
+   *  retry-then-degrade) because an earlier attempt's output couldn't be used. */
+  attemptCount: number;
   /** Role id of the step's LIVE cli invocation (e.g. 'tester' | 'fixer' for the
    *  browser-test loop), reverse-looked-up from the invocation label; null when not
    *  waiting on a role-bearing CLI. Drives UI that reacts to the active pass — e.g.

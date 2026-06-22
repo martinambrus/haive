@@ -1617,6 +1617,14 @@ function StepCard({
         </div>
       )}
 
+      {step.attemptCount > 1 && step.iterationCount === 0 && (
+        <div className="rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
+          {step.attemptCount - 1 === 1
+            ? 'The first attempt produced output that could not be used (e.g. unparseable model JSON), so this step re-ran automatically. The latest run is shown below.'
+            : `${step.attemptCount - 1} earlier attempts produced output that could not be used (e.g. unparseable model JSON), so this step re-ran automatically. The latest run is shown below.`}
+        </div>
+      )}
+
       {step.degradedNote && (
         <div className="whitespace-pre-wrap rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
           {step.degradedNote}
