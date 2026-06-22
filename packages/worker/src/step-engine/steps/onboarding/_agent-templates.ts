@@ -1,4 +1,5 @@
 import type { AgentColor, AgentExpertise, AgentKbRefs, AgentModel, AgentSpec } from '@haive/shared';
+import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 
 // Re-export the canonical types so existing worker imports keep working without
 // touching every call site. Source of truth lives in @haive/shared.
@@ -239,6 +240,13 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
         body: 'For each file: read the full file (not just the hunk) to understand context, then evaluate correctness, error handling, security, and convention adherence.',
       },
       {
+        title: 'Run the failure, replay and safeguard pass',
+        body: [
+          'Beyond whether the change is correct on the happy path, ask these four questions of the diff and raise anything it fails as a finding:',
+          QA_LENS_NUMBERED,
+        ].join('\n'),
+      },
+      {
         title: 'Draft findings grouped by severity',
         body: 'Emit structured findings. Each finding: path, line range, severity, description, suggested fix. Never rewrite the code — propose the fix in prose.',
       },
@@ -258,6 +266,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       'All blockers explicitly called out (never stuffed into nits)',
       'Each finding has a concrete file + line reference',
       'Suggested fix given for every blocker/major finding',
+      'The failure, replay and safeguard pass was run (error path, replay/double-write, blast radius, missing safeguard)',
       'No code written — only findings and suggestions',
     ],
     antiPatterns: [
@@ -295,7 +304,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       },
       {
         title: 'Identify the gap',
-        body: 'List the specific behaviors the new or changed code introduces. Each becomes a test case. Include at least one failure-mode test (invalid input, missing dependency, etc.).',
+        body: 'List the specific behaviors the new or changed code introduces. Each becomes a test case. Include at least one failure-mode test (invalid input, missing dependency, etc.), and — when the change writes, charges, or has an external effect — a replay test that runs the same operation twice and asserts it does not double-write or duplicate.',
       },
       {
         title: 'Author tests',
@@ -319,6 +328,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     qualityCriteria: [
       'All new tests pass when run together with the existing suite',
       'At least one failure-mode test per new behavior',
+      'A replay / double-run test for any operation that writes, charges, or has an external effect',
       'Matches the framework and naming already used in the repo',
       'No mocks at internal module boundaries — only at process boundaries',
     ],
@@ -1298,6 +1308,13 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
         body: 'For each file assess correctness, readability, maintainability, and convention adherence, and note edge cases the code does not handle. Then score the change against all 14 review dimensions as written (Security, Maintainability, Testability, Usability, Stability, Performance — N+1 queries, missing indexes on new WHERE/ORDER BY columns, hot-path blocking IO — Observability, Operational Readiness, Data Integrity, Developer Experience, Accessibility, Internationalization, Backward Compatibility, Privacy/Compliance) and surface any non-PASS dimension as a finding, independent of whether the spec named it.',
       },
       {
+        title: 'Run the failure, replay and safeguard pass',
+        body: [
+          'Beyond whether the change is correct on the happy path, ask these four questions of the diff and raise anything it fails as a finding:',
+          QA_LENS_NUMBERED,
+        ].join('\n'),
+      },
+      {
         title: 'Compile constructive feedback',
         body: 'Group findings by severity with a concrete fix for each, record genuine positives, and issue a verdict. Propose fixes in prose; never edit the code.',
       },
@@ -1321,6 +1338,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       'Each finding has a file + line and a concrete fix',
       'At least one genuine positive is acknowledged',
       'All 14 review dimensions were considered as written; any weak or missing one is raised as a finding',
+      'The failure, replay and safeguard pass was run; any failed lens (error path, replay/double-write, blast radius, missing safeguard) is raised as a finding',
       'A clear verdict (APPROVE / REQUEST_CHANGES / DISCUSS) is issued',
     ],
     antiPatterns: [
@@ -2017,6 +2035,13 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
         body: 'Score each of the 14 dimensions PASS/WEAK/MISSING/N-A (justify any N/A), and scan for vague verbs, unnamed references, untestable criteria, implicit assumptions, and contradictions.',
       },
       {
+        title: 'Require the failure and replay safeguards',
+        body: [
+          'For each of the four questions below, confirm the spec already answers it; if the spec is silent, that is a MISSING finding — the implementation and the downstream validator cannot supply a safeguard the spec never required:',
+          QA_LENS_NUMBERED,
+        ].join('\n'),
+      },
+      {
         title: 'Decide the verdict',
         body: 'APPROVED only with no blocking findings and no MISSING on a relevant dimension; NEEDS_REVISION when the writer can fix gaps without new info; BLOCKING_AMBIGUITY when intent itself is unclear and a human must clarify. List required revisions in priority order.',
       },
@@ -2041,6 +2066,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       'All 14 dimensions scored, with any N/A justified',
       'Ambiguity hunt run across the whole spec',
       'Every file/function the spec references verified to exist',
+      'The spec is checked against the four failure/replay lenses (error path, replay/idempotency, blast radius, missing safeguards); silence on any relevant one is a MISSING finding',
       'A single clear verdict with prescriptive, priority-ordered revisions',
     ],
     antiPatterns: [

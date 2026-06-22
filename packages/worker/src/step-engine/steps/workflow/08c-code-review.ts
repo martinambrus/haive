@@ -9,6 +9,7 @@ import type {
 } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { extractFencedJson } from '../_fenced-json.js';
+import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 
@@ -170,6 +171,9 @@ const PEER_PERSONA = [
   'Experience, Accessibility, Internationalization, Backward Compatibility, Privacy/Compliance; raise',
   'any weak or missing dimension as a finding with the dimension named in the issue. Acknowledge',
   'genuine strengths.',
+  'Then run the failure, replay and safeguard pass — beyond whether the change is correct on the',
+  'happy path, ask these four questions of the diff and raise anything it fails as a finding:',
+  QA_LENS_NUMBERED,
   'Every finding needs a file + line, the offending code snippet, and a concrete fix (with a code',
   'example where it helps); mark critical issues critical (never soften to a suggestion). Report',
   'EVERY finding in full — never just counts. Do NOT edit code and do NOT run git (it is',

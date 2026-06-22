@@ -5,6 +5,7 @@ import { STEP_CLI_ROLES } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { extractFencedJson } from '../_fenced-json.js';
+import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 
 // Phase 4 — Implementation validation (legacy phase4-validation.md + the
@@ -211,6 +212,11 @@ const VALIDATOR_DEFINITION = [
   'correct, edge cases are handled, errors are handled. Trace execution mentally with sample data;',
   'check boundary conditions (0, 1, max, null); verify conditional branches; check loop termination.',
   '',
+  'Step 3.5 - Failure, replay and safeguard pass: beyond happy-path correctness, evaluate the change',
+  'against each of these four questions and record any it fails as an issue (this is where the most',
+  'expensive bugs hide — a right line that should exist and does not):',
+  QA_LENS_NUMBERED,
+  '',
   'Step 4 - Refactoring impact check (HIGH PRIORITY, WHOLE CODEBASE, BLOCKING): if ANY function was',
   'renamed or removed in this implementation, search the ENTIRE codebase for calls to the old name',
   '(grep -rn / find-references). If references exist outside the modified files, UPDATE those',
@@ -240,7 +246,9 @@ const VALIDATOR_DEFINITION = [
   '   confirmation prompts for destructive actions the spec names (visual checks happen later in',
   '   browser testing)',
   '5. Stability - dependency failures (DB, HTTP, file IO) caught and handled per spec; no empty',
-  '   catch blocks; spec-marked idempotent operations actually idempotent',
+  '   catch blocks; any write/charge/external-effect that can run twice (retry, redelivery,',
+  '   double-submit) is guarded against double-writes (idempotency key, dedupe, upsert, or unique',
+  '   constraint), whether or not the spec named it idempotent',
   '6. Performance - no new N+1 queries; new WHERE/ORDER BY columns indexed per spec; no blocking',
   '   external HTTP on the request hot path',
   '7. Observability - failure paths log with context; no silent catches (log OR rethrow OR typed',
