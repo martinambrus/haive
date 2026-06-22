@@ -1,4 +1,5 @@
 import type { StepRegistry } from '../../registry.js';
+import { makeModelHealthStep } from '../_model-health.js';
 import { worktreeSetupStep } from './01-worktree-setup.js';
 import { installPluginsStep } from './01b-install-plugins.js';
 import { appBootStep } from './01a-app-boot.js';
@@ -68,6 +69,7 @@ export {
 };
 
 export function registerWorkflowSteps(registry: StepRegistry): void {
+  registry.register(makeModelHealthStep('workflow'));
   registry.register(worktreeSetupStep);
   registry.register(installPluginsStep);
   registry.register(appBootStep);

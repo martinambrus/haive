@@ -941,6 +941,10 @@ export type EnvDetectApply = {
   directoriesCreated: string[];
   enrichedData: EnvDetectData;
   source: 'llm' | 'deterministic';
+  /** True when the LLM ran and produced output but it could not be parsed into
+   *  enrichment, so only deterministic detection was used. Drives the non-fatal
+   *  "degraded" note in the UI (the runner reads this flag). */
+  degraded?: boolean;
 };
 
 export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
@@ -1053,6 +1057,13 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
       ctx.logger.info({ source: 'deterministic' }, 'env-detect using deterministic results only');
     }
 
+    // The LLM ran but its output could not be parsed into enrichment → only the
+    // deterministic detection was used. Flag it (non-fatal) so the silent fallback is
+    // visible. Empty/absent LLM output is not "degraded" — there was nothing to parse.
+    const rawLlm = args.llmOutput;
+    const llmProduced = typeof rawLlm === 'string' ? rawLlm.trim() !== '' : rawLlm != null;
+    const degraded = llmProduced && !enrichment;
+
     const created: string[] = [];
     for (const dir of ['.claude', path.join('.claude', 'knowledge_base')]) {
       const full = path.join(ctx.repoPath, dir);
@@ -1063,6 +1074,6 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
       { detected: detectResult.summary, created, source: data.source },
       'env-detect apply complete',
     );
-    return { directoriesCreated: created, enrichedData: data, source: data.source };
+    return { directoriesCreated: created, enrichedData: data, source: data.source, degraded };
   },
 };

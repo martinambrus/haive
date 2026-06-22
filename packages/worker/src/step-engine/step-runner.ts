@@ -124,6 +124,7 @@ type UpdatePatch = Partial<{
   statusMessage: string | null;
   summary: string | null;
   errorMessage: string | null;
+  degradedNote: string | null;
   aiFixContext: { priorError: string; priorOutput: string } | null;
   startedAt: Date;
   endedAt: Date;
@@ -185,6 +186,41 @@ async function enforceLocalModelGuard(
     endedAt: new Date(),
   });
   return { status: 'failed', row: failed, error: msg };
+}
+
+/** Source provenance values a step sets on its apply output when it could not parse
+ *  the model's response and fell back to a deterministic result. */
+const DEGRADED_SOURCES = new Set(['stub', 'salvage', 'fallback']);
+
+/** Non-fatal advisory text when a step ran its model but the output was unparseable
+ *  and it degraded to a stub; null otherwise. Keys on the step's own `source`
+ *  provenance (already emitted by most LLM steps) and requires the model to have
+ *  actually produced output, so a legitimately skipped/absent LLM is never flagged. */
+function computeDegradedNote(
+  stepDef: StepDefinition,
+  llmOutput: unknown,
+  agentMiningResults: AgentMiningResult[] | undefined,
+  output: unknown,
+): string | null {
+  if (!stepDef.llm && !stepDef.agentMining) return null;
+  const llmProduced =
+    llmOutput !== undefined &&
+    llmOutput !== null &&
+    !(typeof llmOutput === 'string' && llmOutput.trim() === '');
+  const miningProduced =
+    Array.isArray(agentMiningResults) &&
+    agentMiningResults.some((r) => typeof r.rawOutput === 'string' && r.rawOutput.trim() !== '');
+  if (!llmProduced && !miningProduced) return null;
+  if (typeof output !== 'object' || output === null) return null;
+  const o = output as { source?: unknown; degraded?: unknown };
+  const bySource = typeof o.source === 'string' && DEGRADED_SOURCES.has(o.source);
+  const byFlag = o.degraded === true;
+  if (!bySource && !byFlag) return null;
+  const detail = bySource ? ` (source: ${o.source as string})` : '';
+  return (
+    'The AI output could not be fully parsed, so this step used a deterministic fallback' +
+    `${detail}. The result may be incomplete — consider a more capable model.`
+  );
 }
 
 async function resolveLlmPhase(
@@ -951,6 +987,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         ? resolveCuratedSummary(output)
         : null;
 
+    // Non-fatal: surface when a step silently fell back to a stub because the model's
+    // output was unparseable (a weak-but-alive model). Persisted on the done finalize.
+    const degradedNote = computeDegradedNote(stepDef, llmOutput, agentMiningResults, output);
+
     // --- Loop hook: decide whether another LLM pass is warranted ---
     if (stepDef.loop) {
       const budget = (await resolveLoopBudget(db, taskId, current, stepDef)) ?? 1;
@@ -1107,6 +1147,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       status: 'done',
       output,
       summary: curatedSummary,
+      degradedNote,
       statusMessage: null,
       endedAt: new Date(),
     });

@@ -189,6 +189,11 @@ export const taskSteps = pgTable(
     summary: text('summary'),
     errorMessage: text('error_message'),
     errorHint: jsonb('error_hint').$type<TaskStepErrorHint>(),
+    /** Non-fatal advisory: set when a step's LLM output could not be parsed and the
+     *  step silently fell back to a deterministic stub (source stub/salvage/fallback).
+     *  The step status still finalizes as 'done'; the UI shows this as an amber banner
+     *  so a weak-but-alive model's degraded output is visible instead of hidden. */
+    degradedNote: text('degraded_note'),
     /** Set by the retry_ai action: the prior failure context for the
      *  diagnose-and-fix agent. The step-runner dispatches a fix agent when this
      *  is present, then clears it and re-runs apply against the fixed workspace. */

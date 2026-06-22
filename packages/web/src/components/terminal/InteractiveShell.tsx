@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -17,8 +18,11 @@ interface InteractiveShellProps {
   scope?: 'task' | 'repo';
   /** Required for task scope. */
   taskId?: string;
-  /** Required for repo scope. */
+  /** Required for repo scope. Also used by the task-scope disabled banner to
+   *  deep-link to this repository's standalone terminal. */
   repositoryId?: string;
+  /** Repository name, used only to label the disabled-banner deep link. */
+  repositoryName?: string | null;
   cliProviderId: string;
   /** When true, the parent task moved to a terminal state and the shell
    *  should refuse to mount / show a disabled banner. */
@@ -220,9 +224,29 @@ export function InteractiveShell(props: InteractiveShellProps) {
 
   if (disabled) {
     return (
-      <div className="rounded border border-neutral-800 bg-neutral-950 p-6 text-sm text-neutral-400">
-        Terminal is disabled because the task has ended (completed, failed, or cancelled). The
-        underlying container has been torn down.
+      <div className="flex flex-col gap-2 rounded border border-neutral-800 bg-neutral-950 p-6 text-sm text-neutral-400">
+        <p>
+          Terminal is disabled because the task has ended (completed, failed, or cancelled). The
+          per-task sandbox container has been torn down.
+        </p>
+        <p>
+          To run a shell against this repository&apos;s checkout, open a standalone terminal from
+          the repositories section:
+        </p>
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          {props.repositoryId && (
+            <Link
+              href={`/repos/${props.repositoryId}/terminal`}
+              className="text-indigo-400 underline"
+            >
+              Open terminal
+              {props.repositoryName ? ` for ${props.repositoryName}` : ' for this repository'}
+            </Link>
+          )}
+          <Link href="/repos" className="text-indigo-400 underline">
+            Browse repositories
+          </Link>
+        </div>
       </div>
     );
   }

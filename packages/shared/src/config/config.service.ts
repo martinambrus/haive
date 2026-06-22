@@ -35,6 +35,10 @@ export const CONFIG_KEYS = {
   // unsafeForLocalModels (skill generation, code simplification). Default false:
   // those steps fail for local models with an actionable message.
   ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS: 'config:worker:allowLocalModelDestructiveSteps',
+  // Global kill-switch for the model-health canary: a tiny first step (00-model-health)
+  // that fails a task/onboarding loudly when the configured model can't emit valid
+  // fenced JSON / follow instructions. Default true; set 'false' to skip the canary.
+  MODEL_HEALTH_CHECK_ENABLED: 'config:worker:modelHealthCheckEnabled',
 
   HOST_REPO_ROOT: 'config:filesystem:hostRepoRoot',
   REPO_STORAGE_PATH: 'config:filesystem:repoStoragePath',
@@ -79,6 +83,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.MAX_PARALLEL_AGENTS]: '3',
   [CONFIG_KEYS.OLLAMA_CLI_TIMEOUT_MS]: '7200000',
   [CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS]: 'false',
+  [CONFIG_KEYS.MODEL_HEALTH_CHECK_ENABLED]: 'true',
   [CONFIG_KEYS.HOST_REPO_ROOT]: '/host-fs',
   [CONFIG_KEYS.REPO_STORAGE_PATH]: '/var/lib/haive/repos',
   [CONFIG_KEYS.CLAWKER_BIN]: '/usr/local/bin/clawker',

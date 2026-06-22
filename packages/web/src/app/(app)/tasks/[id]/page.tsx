@@ -683,6 +683,8 @@ export default function TaskDetailPage() {
         <TerminalTab
           taskId={id}
           taskStatus={task.status}
+          repositoryId={task.repositoryId}
+          repositoryName={task.repository?.name ?? null}
           providers={providers}
           selectedCliProviderId={terminalCliProviderId}
           onSelectCliProvider={setTerminalCliProviderId}
@@ -764,6 +766,8 @@ function TabButton({
 interface TerminalTabProps {
   taskId: string;
   taskStatus: TaskStatus;
+  repositoryId: string | null;
+  repositoryName: string | null;
   providers: CliProvider[];
   selectedCliProviderId: string | null;
   onSelectCliProvider: (id: string) => void;
@@ -772,6 +776,8 @@ interface TerminalTabProps {
 function TerminalTab({
   taskId,
   taskStatus,
+  repositoryId,
+  repositoryName,
   providers,
   selectedCliProviderId,
   onSelectCliProvider,
@@ -818,6 +824,8 @@ function TerminalTab({
       {selectedCliProviderId && (
         <InteractiveShell
           taskId={taskId}
+          repositoryId={repositoryId ?? undefined}
+          repositoryName={repositoryName}
           cliProviderId={selectedCliProviderId}
           disabled={terminalDisabled}
         />
@@ -1577,8 +1585,14 @@ function StepCard({
       )}
 
       {step.errorMessage && (
-        <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+        <div className="whitespace-pre-wrap rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
           {step.errorMessage}
+        </div>
+      )}
+
+      {step.degradedNote && (
+        <div className="whitespace-pre-wrap rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
+          {step.degradedNote}
         </div>
       )}
 

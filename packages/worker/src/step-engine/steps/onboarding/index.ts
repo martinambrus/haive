@@ -1,4 +1,5 @@
 import type { StepRegistry } from '../../registry.js';
+import { makeModelHealthStep } from '../_model-health.js';
 import { envDetectStep } from './01-env-detect.js';
 import { ripgrepConfigStep } from './01_5-ripgrep-config.js';
 import { detectionConfirmationStep } from './02-detection-confirmation.js';
@@ -46,6 +47,7 @@ export {
 };
 
 export function registerOnboardingSteps(registry: StepRegistry): void {
+  registry.register(makeModelHealthStep('onboarding'));
   registry.register(envDetectStep);
   registry.register(ripgrepConfigStep);
   registry.register(detectionConfirmationStep);

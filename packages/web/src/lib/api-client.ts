@@ -459,6 +459,9 @@ export interface TaskStep {
   summary: string | null;
   errorMessage: string | null;
   errorHint: StepErrorHint | null;
+  /** Non-fatal advisory: the step's LLM output could not be parsed and it fell back
+   *  to a deterministic stub. Status stays 'done'; shown as an amber banner. */
+  degradedNote: string | null;
   startedAt: string | null;
   endedAt: string | null;
   createdAt: string;
