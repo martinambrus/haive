@@ -314,12 +314,17 @@ export default function TaskDetailPage() {
     }
   }
 
-  async function runStepAction(step: TaskStep, action: StepAction) {
+  async function runStepAction(
+    step: TaskStep,
+    action: StepAction,
+    opts?: { overrideLocalModel?: boolean },
+  ) {
     const downstreamCount = steps.filter(
       (s) => s.stepIndex > step.stepIndex && s.status !== 'pending',
     ).length;
-    const label =
-      action === 'retry_ai'
+    const label = opts?.overrideLocalModel
+      ? 'Run this step on the current local model anyway?\n\nLocal models are unreliable at rewriting long-lived project files (skills, agents, config) and may produce low-quality or damaging output. Proceed only if you understand the risk.'
+      : action === 'retry_ai'
         ? 'Spawn an AI agent to diagnose and fix this failure, then re-run the step?'
         : action === 'abort'
           ? 'Abort this step and cancel the task? The environment will be torn down.'
@@ -339,6 +344,7 @@ export default function TaskDetailPage() {
       await api.post<StepActionResponse>(`/tasks/${id}/steps/${step.stepId}/action`, {
         action,
         round: step.round,
+        overrideLocalModel: opts?.overrideLocalModel,
       });
       await reload();
     } catch (err) {
@@ -652,7 +658,7 @@ export default function TaskDetailPage() {
                   actionError={
                     stepActionError?.stepId === step.stepId ? stepActionError.message : null
                   }
-                  onAction={(action) => runStepAction(step, action)}
+                  onAction={(action, opts) => runStepAction(step, action, opts)}
                   onRetryStep={async (sid) => {
                     const target = steps.find((s) => s.stepId === sid);
                     if (target) await runStepAction(target, 'retry');
@@ -858,7 +864,7 @@ interface StepCardProps {
   onSubmit: (values: FormValues) => Promise<void>;
   actionBusy: boolean;
   actionError: string | null;
-  onAction: (action: StepAction) => Promise<void>;
+  onAction: (action: StepAction, opts?: { overrideLocalModel?: boolean }) => Promise<void>;
   onCliLogin: () => void;
   providers: CliProvider[];
   /** Task-level fallback when this step has no per-step preference set. */
@@ -1543,6 +1549,16 @@ function StepCard({
               title="Spawn an AI agent to diagnose and fix the failure, then re-run this step automatically. Uses the step's CLI provider."
             >
               Retry with AI
+            </Button>
+          )}
+          {step.errorHint?.type === 'local_model_destructive' && step.status === 'failed' && (
+            <Button
+              size="sm"
+              disabled={actionBusy}
+              onClick={() => onAction('retry', { overrideLocalModel: true })}
+              title="Run this step on the current local model despite the reliability warning. Bypasses the block for this step only — other steps keep the guard."
+            >
+              {actionBusy ? 'Overriding…' : 'Override and run'}
             </Button>
           )}
           {step.status === 'failed' &&

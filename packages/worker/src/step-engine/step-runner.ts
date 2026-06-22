@@ -5,6 +5,7 @@ import {
   CONFIG_KEYS,
   configService,
   extractFormDefaults,
+  isOllamaCloudModel,
   logger,
   validateFormValues,
 } from '@haive/shared';
@@ -124,6 +125,7 @@ type UpdatePatch = Partial<{
   statusMessage: string | null;
   summary: string | null;
   errorMessage: string | null;
+  errorHint: TaskStepRow['errorHint'];
   degradedNote: string | null;
   aiFixContext: { priorError: string; priorOutput: string } | null;
   startedAt: Date;
@@ -137,10 +139,17 @@ type LlmResolved =
 const IN_STACK_OLLAMA_HOSTS = new Set(['ollama', 'haive-ollama', 'localhost', '127.0.0.1']);
 
 /** True when the resolved provider is an in-stack (local) Ollama model. Cloud
- *  (ollama.com) and external remote Ollama, and every non-Ollama provider, are
- *  not "local" and are never blocked. */
+ *  models (tag suffix -cloud/:cloud) run on ollama.com via the local daemon as a
+ *  proxy — they are strong models, so they are NOT "local" and never blocked,
+ *  regardless of base URL. External remote Ollama (custom ANTHROPIC_BASE_URL host)
+ *  and every non-Ollama provider are likewise not "local". */
 function isLocalOllama(provider: CliProviderRecord | null): boolean {
   if (!provider || provider.name !== 'ollama') return false;
+  // Cloud is tagged in the model name, NOT the base URL: the provider record
+  // stores no ANTHROPIC_BASE_URL for cloud models (the daemon proxies them), so a
+  // base-URL check alone defaults to the in-stack host and misclassifies every
+  // cloud model as local. Key on the stable tag suffix instead.
+  if (isOllamaCloudModel(provider.model ?? '')) return false;
   const baseUrl = provider.envVars?.ANTHROPIC_BASE_URL ?? 'http://ollama:11434';
   try {
     return IN_STACK_OLLAMA_HOSTS.has(new URL(baseUrl).hostname);
@@ -162,6 +171,16 @@ async function enforceLocalModelGuard(
   plan: DispatchPlan,
 ): Promise<AdvanceStepResult | null> {
   if (!stepDef.metadata.unsafeForLocalModels || !isLocalOllama(plan.provider)) return null;
+  // Per-step manual override from the "Override and run" UI button (a retry that
+  // sets task_steps.local_model_override). Lets a user without server shell access
+  // run the step on a local model without the global config/env flag below.
+  if (current.localModelOverride) {
+    ctx.logger.warn(
+      { stepId: stepDef.metadata.id, providerId: plan.providerId },
+      'local Ollama model running a destructive step (per-step "Override and run")',
+    );
+    return null;
+  }
   let allow = false;
   try {
     allow = await configService.getBoolean(CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS, false);
@@ -179,10 +198,16 @@ async function enforceLocalModelGuard(
   const msg =
     `Step "${stepDef.metadata.id}" rewrites long-lived project files and is blocked for ` +
     `local Ollama models (low reliability for this work). Pick a commercial provider — or ` +
-    `cloud/remote Ollama — for this step, or set ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS=true to override.`;
+    `cloud/remote Ollama — for this step, use "Override and run" to proceed on this model ` +
+    `anyway, or set ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS=true to override globally.`;
   const failed = await updateRow(db, current.id, {
     status: 'failed',
     errorMessage: msg,
+    errorHint: {
+      type: 'local_model_destructive',
+      stepId: stepDef.metadata.id,
+      providerName: plan.provider?.name ?? 'ollama',
+    },
     endedAt: new Date(),
   });
   return { status: 'failed', row: failed, error: msg };

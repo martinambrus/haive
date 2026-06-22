@@ -471,4 +471,40 @@ describe('advanceStep LLM phase', () => {
     expect(result.status).toBe('waiting_cli');
     expect(enqueued).toHaveLength(1);
   });
+
+  it('allows a cloud Ollama model even when no base URL is set (real provider shape)', async () => {
+    const state = freshState();
+    const db = makeMockDb(state);
+    const enqueued: CliExecJobPayload[] = [];
+    // Real cloud providers store NO ANTHROPIC_BASE_URL (the local daemon proxies
+    // cloud), so detection must key on the -cloud/:cloud model suffix, not the
+    // base URL. This is the shape that wrongly tripped the guard in production.
+    const cloudOllamaNoUrl = {
+      ...makeProvider(),
+      id: 'prov-ollama-cloud-nourl',
+      name: 'ollama',
+      authMode: 'api_key',
+      model: 'qwen3-coder:480b-cloud',
+      envVars: null,
+    } as CliProviderRecord;
+    const stepDef = baseStep();
+    stepDef.metadata.unsafeForLocalModels = true;
+    const result = await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-ollama-cloud-nourl',
+      stepDef,
+      providers: [cloudOllamaNoUrl],
+      deps: {
+        async enqueueCliInvocation(payload) {
+          enqueued.push(payload);
+        },
+      },
+    });
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toHaveLength(1);
+  });
 });

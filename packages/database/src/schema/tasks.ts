@@ -26,7 +26,9 @@ import { containers } from './containers.js';
  * `@haive/database` free of a reverse dependency on shared (shared already
  * depends on database via the secrets services).
  */
-type TaskStepErrorHint = { type: 'cli_login_required'; providerId: string; providerName: string };
+type TaskStepErrorHint =
+  | { type: 'cli_login_required'; providerId: string; providerName: string }
+  | { type: 'local_model_destructive'; stepId: string; providerName: string };
 
 export const cliInvocationModeEnum = pgEnum('cli_invocation_mode', [
   'cli',
@@ -198,6 +200,12 @@ export const taskSteps = pgTable(
      *  diagnose-and-fix agent. The step-runner dispatches a fix agent when this
      *  is present, then clears it and re-runs apply against the fixed workspace. */
     aiFixContext: jsonb('ai_fix_context').$type<{ priorError: string; priorOutput: string }>(),
+    /** Set true by the "Override and run" UI action (retry + overrideLocalModel):
+     *  lets enforceLocalModelGuard bypass the unsafe-for-local-models block for
+     *  THIS step, so a user without server shell access can run a destructive step
+     *  on a local Ollama model without the ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS env
+     *  flag. Per-step; a plain Retry resets it to false (re-arms the guard). */
+    localModelOverride: boolean('local_model_override').notNull().default(false),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
     /** Accumulated time (ms) the step spent idle waiting for user input

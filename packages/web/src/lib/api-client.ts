@@ -521,11 +521,17 @@ export interface TaskStep {
   userActiveMs: number;
 }
 
-export type StepErrorHint = {
-  type: 'cli_login_required';
-  providerId: string;
-  providerName: string;
-};
+export type StepErrorHint =
+  | {
+      type: 'cli_login_required';
+      providerId: string;
+      providerName: string;
+    }
+  | {
+      type: 'local_model_destructive';
+      stepId: string;
+      providerName: string;
+    };
 
 /** One rag_search call's telemetry, surfaced in the discovery step's RAG stats
  *  panel. `codeHits` is the headline signal — whether code (not just KB) is

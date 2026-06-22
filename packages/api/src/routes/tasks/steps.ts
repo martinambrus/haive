@@ -308,6 +308,14 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           updatedAt: now,
         })
         .where(inArray(schema.taskSteps.id, allStepIds));
+      // Per-step "Override and run": only the clicked step bypasses the
+      // unsafe-for-local-models guard on re-run. A plain retry sets this false
+      // (re-arming the guard); the override button sets it true. Scoped to
+      // step.id so the downstream cascade keeps its own override state.
+      await tx
+        .update(schema.taskSteps)
+        .set({ localModelOverride: body.overrideLocalModel === true })
+        .where(eq(schema.taskSteps.id, step.id));
       await tx
         .update(schema.tasks)
         .set({
@@ -328,6 +336,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           note: body.note ?? null,
           priorStatus: step.status,
           cascadedSteps: downstreamToReset.length,
+          overrideLocalModel: body.overrideLocalModel === true,
         },
       });
     });

@@ -35,11 +35,20 @@ export type AuthMode = 'subscription' | 'api_key';
  * a plain text error. Discriminated on `type` — new kinds can be added without
  * breaking existing consumers.
  */
-export type StepErrorHint = {
-  type: 'cli_login_required';
-  providerId: string;
-  providerName: CliProviderName;
-};
+export type StepErrorHint =
+  | {
+      type: 'cli_login_required';
+      providerId: string;
+      providerName: CliProviderName;
+    }
+  | {
+      /** Step is flagged `unsafeForLocalModels` and the resolved provider is a
+       *  local Ollama model. The UI renders an "Override and run" button that
+       *  retries the step with `overrideLocalModel` set, bypassing the guard. */
+      type: 'local_model_destructive';
+      stepId: string;
+      providerName: CliProviderName;
+    };
 
 /** Per-invocation token usage captured from a CLI's structured output.
  *  Semantics are PROVIDER-NATIVE (later stats should normalize by provider):

@@ -107,6 +107,11 @@ export const stepActionRequestSchema = z.object({
    *  (round 0 = original pass), each rendered as its own row with its own
    *  buttons, so the UI must say which one was clicked. Omitted → latest round. */
   round: z.number().int().nonnegative().optional(),
+  /** Only meaningful with action 'retry'. When true, the retry sets
+   *  task_steps.local_model_override on the clicked step so the
+   *  unsafe-for-local-models guard is bypassed on re-run (the "Override and run"
+   *  button). Omitted/false → a normal retry that re-arms the guard. */
+  overrideLocalModel: z.boolean().optional(),
 });
 
 export type StepAction = z.infer<typeof stepActionSchema>;
