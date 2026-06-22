@@ -14,6 +14,7 @@ describe('onboarding registry', () => {
     registerOnboardingSteps(registry);
     const steps = registry.listByWorkflow('onboarding');
     expect(steps.map((s) => s.metadata.id)).toEqual([
+      '00-model-health-onboarding',
       '01-env-detect',
       '01_5-ripgrep-config',
       '02-detection-confirmation',
@@ -37,7 +38,7 @@ describe('onboarding registry', () => {
       '12-post-onboarding',
     ]);
     expect(steps.map((s) => s.metadata.index)).toEqual([
-      1, 2, 3, 4, 4.5, 5.5, 6, 7, 8, 9, 10, 10.25, 10.5, 11, 12, 12.4, 12.5, 13, 14, 15, 16,
+      0, 1, 2, 3, 4, 4.5, 5.5, 6, 7, 8, 9, 10, 10.25, 10.5, 11, 12, 12.4, 12.5, 13, 14, 15, 16,
     ]);
   });
 
