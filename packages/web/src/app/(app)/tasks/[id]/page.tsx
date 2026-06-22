@@ -573,7 +573,9 @@ export default function TaskDetailPage() {
           </div>
           {renameError && <p className="mt-1 text-xs text-red-400">{renameError}</p>}
           {task.description && <p className="text-sm text-neutral-400">{task.description}</p>}
-          {task.errorMessage && <p className="text-sm text-red-400">Error: {task.errorMessage}</p>}
+          {task.status === 'failed' && task.errorMessage && (
+            <p className="text-sm text-red-400">Error: {task.errorMessage}</p>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           {canRetry && (

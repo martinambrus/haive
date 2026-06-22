@@ -773,6 +773,14 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
         updatedAt: new Date(),
       })
       .where(eq(schema.taskSteps.id, step.id));
+    // Mirror the retry/resume handlers: a failed task must leave the failed state
+    // and shed its stale top-level error when its failed step is reset + re-run via
+    // a provider/model change, else the task page keeps showing the old error after
+    // the re-run passes.
+    await db
+      .update(schema.tasks)
+      .set({ status: 'running', errorMessage: null, updatedAt: new Date() })
+      .where(and(eq(schema.tasks.id, id), inArray(schema.tasks.status, ['failed', 'queued'])));
     invalidated = true;
   }
 
