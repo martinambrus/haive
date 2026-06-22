@@ -33,7 +33,7 @@ stepRoutes.get('/:id/steps', async (c) => {
   const db = getDb();
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true },
+    columns: { id: true, ignoreSavedStepClis: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
   const stepRows = await db
@@ -45,7 +45,13 @@ stepRoutes.get('/:id/steps', async (c) => {
     // then post-loop round-0 steps), whereas a round-primary sort would hoist the
     // post-loop steps above the round-1 block. stepIndex breaks ties.
     .orderBy(asc(schema.taskSteps.createdAt), asc(schema.taskSteps.stepIndex));
-  const enriched = await enrichStepsWithCliPreferences(db, userId, stepRows);
+  const enriched = await enrichStepsWithCliPreferences(
+    db,
+    userId,
+    stepRows,
+    id,
+    task.ignoreSavedStepClis,
+  );
   const withSkip = await enrichStepsWithSkipFlag(db, id, enriched);
   const withStats = await enrichStepsWithCliStats(db, id, withSkip);
   const steps = await enrichStepsWithActiveRole(db, id, withStats);
@@ -633,7 +639,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
 
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true, status: true },
+    columns: { id: true, status: true, ignoreSavedStepClis: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
   if (task.status === 'completed' || task.status === 'cancelled') {
@@ -692,6 +698,26 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           ),
         );
     }
+    // Track the touch so a task that opted out of saved prefs still honors this
+    // explicit mid-task choice (set) or reverts to the task provider (clear).
+    if (task.ignoreSavedStepClis) {
+      if (body.cliProviderId) {
+        await db
+          .insert(schema.taskStepCliTouched)
+          .values({ taskId: id, stepId, role })
+          .onConflictDoNothing();
+      } else {
+        await db
+          .delete(schema.taskStepCliTouched)
+          .where(
+            and(
+              eq(schema.taskStepCliTouched.taskId, id),
+              eq(schema.taskStepCliTouched.stepId, stepId),
+              eq(schema.taskStepCliTouched.role, role),
+            ),
+          );
+      }
+    }
     await appendTaskEvent(db, id, step.id, 'step.cli_role_provider_changed', {
       stepId,
       role,
@@ -726,6 +752,26 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           eq(schema.userStepCliPreferences.stepId, stepId),
         ),
       );
+  }
+
+  // Same touch tracking as the role path, for the 'default' single-CLI pref.
+  if (task.ignoreSavedStepClis) {
+    if (body.cliProviderId) {
+      await db
+        .insert(schema.taskStepCliTouched)
+        .values({ taskId: id, stepId, role: 'default' })
+        .onConflictDoNothing();
+    } else {
+      await db
+        .delete(schema.taskStepCliTouched)
+        .where(
+          and(
+            eq(schema.taskStepCliTouched.taskId, id),
+            eq(schema.taskStepCliTouched.stepId, stepId),
+            eq(schema.taskStepCliTouched.role, 'default'),
+          ),
+        );
+    }
   }
 
   // Invalidate the step's cached detect/form so the next advance re-detects

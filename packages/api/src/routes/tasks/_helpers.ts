@@ -80,6 +80,8 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
   db: ReturnType<typeof getDb>,
   userId: string,
   steps: T[],
+  taskId: string,
+  ignoreSaved = false,
 ): Promise<
   (T & {
     preferredCliProviderId: string | null;
@@ -92,6 +94,22 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
   const stepIds = [...new Set(steps.map((s) => s.stepId))];
   const byStep = new Map<string, string>();
   const roleByStep = new Map<string, Map<string, string>>();
+  // When the task opted out of saved per-step prefs (ignore_saved_step_clis),
+  // only prefs the user explicitly (re)set WITHIN this task are honored — tracked
+  // by task_step_cli_touched. Load that touched set once and gate each surfaced
+  // pref by its (step, role); untouched steps fall back to the task provider.
+  const touchedByStep = new Map<string, Set<string>>();
+  if (ignoreSaved && stepIds.length > 0) {
+    const touched = await db
+      .select()
+      .from(schema.taskStepCliTouched)
+      .where(eq(schema.taskStepCliTouched.taskId, taskId));
+    for (const t of touched) {
+      const set = touchedByStep.get(t.stepId) ?? new Set<string>();
+      set.add(t.role);
+      touchedByStep.set(t.stepId, set);
+    }
+  }
   if (stepIds.length > 0) {
     const prefs = await db
       .select()
@@ -130,14 +148,20 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
   return steps.map((s) => {
     const roles = STEP_CLI_ROLES[s.stepId];
     const roleProviders = roleByStep.get(s.stepId) ?? new Map<string, string>();
+    const touchedRoles = touchedByStep.get(s.stepId);
+    // Under ignoreSaved a saved pref surfaces only where a marker exists for that
+    // exact role; gating the 'default' read by its own marker stops a flagged
+    // multi-role step from leaking a pre-existing default pref via fallthrough.
+    const honor = (role: string, value: string | null): string | null =>
+      !ignoreSaved || touchedRoles?.has(role) ? value : null;
     return {
       ...s,
-      preferredCliProviderId: byStep.get(s.stepId) ?? null,
+      preferredCliProviderId: honor('default', byStep.get(s.stepId) ?? null),
       ...(roles
         ? {
             cliRoles: roles,
             cliRoleProviders: Object.fromEntries(
-              roles.map((r) => [r.id, roleProviders.get(r.id) ?? null]),
+              roles.map((r) => [r.id, honor(r.id, roleProviders.get(r.id) ?? null)]),
             ),
           }
         : {}),

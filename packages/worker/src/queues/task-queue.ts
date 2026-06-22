@@ -84,6 +84,7 @@ interface ResolvedTaskContext {
   repoPath: string;
   workspacePath: string;
   cliProviderId: string | null;
+  ignoreSavedStepClis: boolean;
   metadata: Record<string, unknown> | null;
 }
 
@@ -124,6 +125,7 @@ async function resolveTaskContext(
     repoPath,
     workspacePath: repoPath,
     cliProviderId: task.cliProviderId,
+    ignoreSavedStepClis: task.ignoreSavedStepClis,
     metadata: task.metadata ?? null,
   };
 }
@@ -814,6 +816,7 @@ async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<v
     repoPath: ctx.repoPath,
     workspacePath: ctx.workspacePath,
     cliProviderId: ctx.cliProviderId,
+    ignoreSavedStepClis: ctx.ignoreSavedStepClis,
     stepDef: first,
     providers,
     deps: workerDeps,
@@ -908,6 +911,7 @@ async function handleAdvanceStep(db: Database, payload: TaskJobPayload): Promise
     repoPath: ctx.repoPath,
     workspacePath: ctx.workspacePath,
     cliProviderId: ctx.cliProviderId,
+    ignoreSavedStepClis: ctx.ignoreSavedStepClis,
     stepDef,
     round,
     formValues,

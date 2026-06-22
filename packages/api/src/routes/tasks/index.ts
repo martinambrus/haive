@@ -219,6 +219,7 @@ taskRoutes.post('/', async (c) => {
       cpuLimitMilli: body.resourceLimits?.cpuLimitMilli ?? null,
       stepLoopLimits: body.stepLoopLimits ?? {},
       autoContinue: body.autoContinue ?? true,
+      ignoreSavedStepClis: body.ignoreSavedStepClis ?? false,
       metadata: Object.keys(metadata).length > 0 ? metadata : null,
       status: 'created',
     })
@@ -261,7 +262,13 @@ taskRoutes.get('/:id', async (c) => {
     // and makes same-stepIndex rounds deterministic (round 1 after round 0, not
     // arbitrarily on top, which is what the heap order did). stepIndex breaks ties.
     .orderBy(asc(schema.taskSteps.createdAt), asc(schema.taskSteps.stepIndex));
-  const enriched = await enrichStepsWithCliPreferences(db, userId, stepRows);
+  const enriched = await enrichStepsWithCliPreferences(
+    db,
+    userId,
+    stepRows,
+    id,
+    task.ignoreSavedStepClis,
+  );
   const withSkip = await enrichStepsWithSkipFlag(db, id, enriched);
   const withStats = await enrichStepsWithCliStats(db, id, withSkip);
   const steps = await enrichStepsWithActiveRole(db, id, withStats);

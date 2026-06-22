@@ -434,6 +434,8 @@ async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<
     params.cliProviderId ?? null,
     providers,
     'default',
+    params.taskId,
+    params.ignoreSavedStepClis ?? false,
   );
   const plan = resolveDispatch({
     providers,
@@ -646,6 +648,8 @@ async function spawnReviewAgent(
     ra.params.cliProviderId ?? null,
     ra.providers,
     role,
+    ra.params.taskId,
+    ra.params.ignoreSavedStepClis ?? false,
   );
   const plan = resolveDispatch({
     providers: ra.providers,
@@ -1031,6 +1035,8 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
     ea.params.cliProviderId ?? null,
     ea.providers,
     'replanner',
+    ea.params.taskId,
+    ea.params.ignoreSavedStepClis ?? false,
   );
   const plan = resolveDispatch({
     providers: ea.providers,
@@ -1332,6 +1338,8 @@ export async function resolveDagPhase(
         params.cliProviderId ?? null,
         providers,
         'coder',
+        params.taskId,
+        params.ignoreSavedStepClis ?? false,
       );
       const upstreamDebt = await buildUpstreamDebt(db, plan.id, curLevel.level);
       let dispatched = 0;

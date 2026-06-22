@@ -47,7 +47,25 @@ export async function resolvePreferredCli(
   fallback: string | null,
   providers: { id: string; enabled: boolean }[],
   role: string = 'default',
+  taskId?: string,
+  ignoreSaved = false,
 ): Promise<string | null> {
+  // When the task set ignore_saved_step_clis, a saved pref is honored only where
+  // the user explicitly (re)set it WITHIN this task (a task_step_cli_touched
+  // marker for that exact role); otherwise the step falls back to the task
+  // provider. ignoreSaved=false (the default) makes every check below a no-op,
+  // preserving the original resolution behavior.
+  const isTouched = async (r: string): Promise<boolean> => {
+    if (!taskId) return false;
+    const m = await db.query.taskStepCliTouched.findFirst({
+      where: and(
+        eq(schema.taskStepCliTouched.taskId, taskId),
+        eq(schema.taskStepCliTouched.stepId, stepId),
+        eq(schema.taskStepCliTouched.role, r),
+      ),
+    });
+    return !!m;
+  };
   // Named roles (e.g. reviewer/corrector) first consult the per-role table; an
   // unset/disabled role falls through to the step's single 'default' pref, then
   // to the task provider, so partially-configured multi-CLI steps still run.
@@ -62,7 +80,9 @@ export async function resolvePreferredCli(
     });
     if (roleRow) {
       const p = providers.find((p) => p.id === roleRow.cliProviderId);
-      if (p && p.enabled) return roleRow.cliProviderId;
+      if (p && p.enabled && (!ignoreSaved || (await isTouched(role)))) {
+        return roleRow.cliProviderId;
+      }
     }
   }
   const row = await db.query.userStepCliPreferences.findFirst({
@@ -75,6 +95,9 @@ export async function resolvePreferredCli(
   if (!row) return fallback;
   const provider = providers.find((p) => p.id === row.cliProviderId);
   if (!provider || !provider.enabled) return fallback;
+  // Gate the 'default' read by its own marker so a flagged multi-role step can't
+  // leak a pre-existing default pref via the role->default fallthrough above.
+  if (ignoreSaved && !(await isTouched('default'))) return fallback;
   return row.cliProviderId;
 }
 
@@ -89,6 +112,10 @@ export interface AdvanceStepParams {
   repoPath: string;
   workspacePath: string;
   cliProviderId: string | null;
+  /** Per-task "ignore saved per-step CLIs" toggle (tasks.ignore_saved_step_clis).
+   *  Threaded into resolvePreferredCli so a flagged task defaults each step to
+   *  cliProviderId unless the user touched that step within the task. */
+  ignoreSavedStepClis?: boolean;
   stepDef: StepDefinition;
   /** Fix-loop round to materialize/run the step at (default 0 = original pass). */
   round?: number;
@@ -376,6 +403,8 @@ async function resolveLlmPhase(
     params.cliProviderId ?? null,
     params.providers,
     role,
+    params.taskId,
+    params.ignoreSavedStepClis ?? false,
   );
   const plan = resolveDispatch({
     providers: params.providers,
@@ -525,6 +554,8 @@ async function resolveAiFixPhase(
     params.cliProviderId ?? null,
     params.providers,
     'default',
+    params.taskId,
+    params.ignoreSavedStepClis ?? false,
   );
   const plan = resolveDispatch({
     providers: params.providers,
@@ -655,6 +686,9 @@ async function resolveAgentMiningPhase(
     stepDef.metadata.id,
     params.cliProviderId ?? null,
     params.providers,
+    'default',
+    params.taskId,
+    params.ignoreSavedStepClis ?? false,
   );
   for (const dispatch of dispatches) {
     const plan = resolveDispatch({
@@ -1395,6 +1429,8 @@ async function maybeEnqueueStepSummary(
       params.cliProviderId ?? null,
       providers,
       'default',
+      params.taskId,
+      params.ignoreSavedStepClis ?? false,
     );
     const plan = resolveDispatch({
       providers,

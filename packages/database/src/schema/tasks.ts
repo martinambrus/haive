@@ -128,6 +128,12 @@ export const tasks = pgTable(
      *  forms and the run-config pre-answers so the workflow runs hands-free
      *  between gates; when false EVERY step pauses for a Continue confirmation. */
     autoContinue: boolean('auto_continue').notNull().default(true),
+    /** Per-task "use my chosen CLI for all steps" toggle (New Task form). When
+     *  true, the step-CLI resolver + UI ignore the user's pre-existing saved
+     *  per-step CLI prefs and default every step to this task's cli_provider_id;
+     *  a step the user explicitly changes during the task is recorded in
+     *  task_step_cli_touched and honored. Default false = today's behavior. */
+    ignoreSavedStepClis: boolean('ignore_saved_step_clis').notNull().default(false),
     /** "Run configuration" answers applied to later steps' forms.
      *  Record<stepId, Record<fieldId, value>>. Written by 06-run-config apply();
      *  null until a task's run-config step records them. */
@@ -303,6 +309,29 @@ export const taskStepAgentMinings = pgTable(
   (table) => [
     index('task_step_agent_minings_task_step_id_idx').on(table.taskStepId),
     uniqueIndex('task_step_agent_minings_step_agent_idx').on(table.taskStepId, table.agentId),
+  ],
+);
+
+// --- Per-task "CLI touched" markers --------------------------------------
+// Records which (step, role) the user explicitly set a CLI for WITHIN a task
+// that has ignore_saved_step_clis=true. Under that flag the resolver + UI ignore
+// pre-existing global per-step prefs EXCEPT where a marker exists, so a mid-task
+// manual change still takes effect (and still writes the global pref, as normal)
+// while the auto-applied default stays the task's cli_provider_id. Keyed per
+// task_id => no cross-task bleed. Only written for flagged tasks.
+export const taskStepCliTouched = pgTable(
+  'task_step_cli_touched',
+  {
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    stepId: varchar('step_id', { length: 128 }).notNull(),
+    role: varchar('role', { length: 32 }).notNull().default('default'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('task_step_cli_touched_pk').on(table.taskId, table.stepId, table.role),
+    index('task_step_cli_touched_task_id_idx').on(table.taskId),
   ],
 );
 

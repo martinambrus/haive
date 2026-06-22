@@ -97,6 +97,7 @@ export default function NewTaskPage() {
   const [description, setDescription] = useState('');
   const [repositoryId, setRepositoryId] = useState<string>('');
   const [cliProviderId, setCliProviderId] = useState<string>('');
+  const [ignoreSavedStepClis, setIgnoreSavedStepClis] = useState(false);
   const [isBugFix, setIsBugFix] = useState(false);
   const [feature, setFeature] = useState('');
   const [affectedClients, setAffectedClients] = useState('');
@@ -224,6 +225,7 @@ export default function NewTaskPage() {
       };
       if (description.trim()) body.description = description.trim();
       if (cliProviderId) body.cliProviderId = cliProviderId;
+      if (ignoreSavedStepClis) body.ignoreSavedStepClis = true;
       if (type === 'workflow') {
         body.isBugFix = isBugFix;
         if (feature.trim()) body.feature = feature.trim();
@@ -433,6 +435,20 @@ export default function NewTaskPage() {
               </option>
             ))}
           </select>
+          <label className="mt-2 flex items-center gap-2 text-sm text-neutral-100">
+            <input
+              type="checkbox"
+              checked={ignoreSavedStepClis}
+              onChange={(e) => setIgnoreSavedStepClis(e.target.checked)}
+              className="h-4 w-4 rounded border-neutral-700 bg-neutral-950"
+            />
+            Use this CLI for every step (this task only)
+          </label>
+          <p className="text-xs text-neutral-500">
+            Ignores your saved per-step CLI choices and defaults every step to the CLI above, for
+            this task only — your saved choices are left untouched. Steps you change manually during
+            the task are still saved as usual.
+          </p>
           {effortWarning && (
             <div className="mt-2 rounded-md border border-amber-700 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
               <strong>Reasoning effort below maximum.</strong> Provider{' '}

@@ -73,6 +73,10 @@ export const createTaskRequestSchema = z
     /** Auto-continue: auto-submit info-only forms and gate-1 pre-answers so the
      *  workflow runs hands-free between gates. Defaults to true. */
     autoContinue: z.boolean().optional(),
+    /** Per-task override: ignore the user's saved per-step CLI prefs and default
+     *  every step to this task's cliProviderId. Manual mid-task step changes
+     *  still save globally as usual (see tasks.ignore_saved_step_clis). */
+    ignoreSavedStepClis: z.boolean().optional(),
     resourceLimits: resourceLimitsSchema,
     stepLoopLimits: stepLoopLimitsSchema,
   })
