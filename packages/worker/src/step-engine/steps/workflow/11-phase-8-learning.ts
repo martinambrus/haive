@@ -312,6 +312,14 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         : base;
     },
     retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
+    // Form-aware: re-roll before the validation form when the draft produced no usable
+    // learning entries, so the user validates a real draft rather than a stub.
+    shouldRetryPreForm: (raw) => {
+      const nonEmpty = typeof raw === 'string' ? raw.trim() !== '' : raw != null;
+      if (!nonEmpty) return false;
+      const parsed = parseLearningOutput(raw);
+      return !parsed || parsed.length === 0;
+    },
   },
 
   form(_ctx, detected, llmOutput): FormSchema {
@@ -392,9 +400,6 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     };
     const reviewerNote = values.reviewerNote ?? '';
     const parsed = parseLearningOutput(args.llmOutput ?? null);
-    if ((!parsed || parsed.length === 0) && !args.isFinalLlmAttempt) {
-      throw new RetryableParseError('learning output unparseable — retrying');
-    }
     const source: 'llm' | 'stub' = parsed && parsed.length > 0 ? 'llm' : 'stub';
     const entries = parsed && parsed.length > 0 ? parsed : stubLearning(args.detected);
     const written =

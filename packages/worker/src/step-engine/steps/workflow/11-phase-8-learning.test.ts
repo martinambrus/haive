@@ -2,7 +2,11 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { parseInvestigation, writeInvestigation } from './11-phase-8-learning.js';
+import {
+  parseInvestigation,
+  writeInvestigation,
+  phase8LearningStep,
+} from './11-phase-8-learning.js';
 
 describe('parseInvestigation', () => {
   it('parses an investigation from a fenced object', () => {
@@ -100,5 +104,23 @@ describe('writeInvestigation', () => {
     } finally {
       await rm(ws, { recursive: true, force: true });
     }
+  });
+});
+
+describe('phase8LearningStep preForm retry gate', () => {
+  const gate = phase8LearningStep.llm!.shouldRetryPreForm!;
+
+  it('retries when the draft produced no usable entries (non-empty)', () => {
+    expect(gate('prose, no learning json')).toBe(true);
+  });
+
+  it('does not retry on empty output', () => {
+    expect(gate('')).toBe(false);
+    expect(gate(null)).toBe(false);
+  });
+
+  it('does not retry when entries parsed', () => {
+    const raw = '```json\n{"entries":[{"id":"x","title":"X","body":"b"}]}\n```';
+    expect(gate(raw)).toBe(false);
   });
 });

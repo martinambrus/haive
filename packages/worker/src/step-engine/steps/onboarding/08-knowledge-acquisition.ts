@@ -3,6 +3,7 @@ import path from 'node:path';
 import { jsonrepair } from 'jsonrepair';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
+import { RetryableParseError } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
 import {
   resolveStackVersions,
@@ -1329,6 +1330,19 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     preForm: true,
     buildPrompt: buildKnowledgePrompt,
     timeoutMs: 90 * 60 * 1000, // 90 minutes — large repos need extensive tool_use scanning
+    retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
+    // Form-aware: re-roll before the manual-topics form when the LLM produced output
+    // but nothing parsed (no entries / placements / updates) — so the user isn't
+    // asked to hand-author topics on a transient bad turn.
+    shouldRetryPreForm: (raw) => {
+      const nonEmpty = typeof raw === 'string' ? raw.trim() !== '' : raw != null;
+      if (!nonEmpty) return false;
+      return (
+        extractEntries(raw).length === 0 &&
+        parseKbPlacements(raw).length === 0 &&
+        parseKbUpdates(raw).length === 0
+      );
+    },
   },
 
   form(ctx, detected, llmOutput): FormSchema {

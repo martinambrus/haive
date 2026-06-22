@@ -4,6 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
@@ -353,6 +354,12 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
         port: d.suggestedPort,
       };
     },
+    retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
+    // Form-aware: re-roll before the boot form when the agent emitted output but no
+    // usable run recipe parsed — so the form's prefilled command isn't silently the
+    // deterministic guess on a transient bad turn.
+    shouldRetryPreForm: (raw) =>
+      (typeof raw === 'string' ? raw.trim() !== '' : raw != null) && parseRunRecipe(raw) === null,
   },
 
   form(_ctx, detected, llmOutput): FormSchema | null {

@@ -274,6 +274,12 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
       ].join('\n');
     },
     parseOutput: (raw) => parseSprintPlan(raw),
+    // Form-aware: re-roll before the plan-confirmation form when the planner output
+    // could not be turned into a usable plan (would fall back to single-agent).
+    shouldRetryPreForm: (raw) => {
+      const plannerRan = typeof raw === 'string' && raw.trim() !== '';
+      return plannerRan && parseSprintPlan(raw).rationale === SPRINT_FALLBACK_RATIONALE;
+    },
     bypassStub: () => ({
       mode: 'single',
       rationale: 'bypass stub',
@@ -359,13 +365,10 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
   async apply(ctx, args): Promise<SprintPlanningApply> {
     const plan = parseSprintPlan(args.llmOutput ?? null);
     // A planner that emitted output we couldn't turn into a usable plan fell back to
-    // single-agent. Re-roll before accepting that downgrade; on the final attempt keep
-    // the (safe) single-agent fallback and flag it degraded.
+    // single-agent. The preForm gate (shouldRetryPreForm) already re-rolled it; if it
+    // still didn't parse, keep the (safe) single-agent fallback and flag it degraded.
     const plannerRan = typeof args.llmOutput === 'string' && args.llmOutput.trim().length > 0;
     const degraded = plannerRan && plan.rationale === SPRINT_FALLBACK_RATIONALE;
-    if (degraded && !args.isFinalLlmAttempt) {
-      throw new RetryableParseError('sprint plan output unparseable — retrying');
-    }
     const values = (args.formValues ?? {}) as {
       decision?: string;
       autoResolveConflicts?: boolean;

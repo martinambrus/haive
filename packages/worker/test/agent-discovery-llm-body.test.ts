@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  agentDiscoveryStep,
   buildAgentSpecFromLlm,
   type LlmCustomAgentBody,
 } from '../src/step-engine/steps/onboarding/06_5-agent-discovery.js';
@@ -93,5 +94,22 @@ describe('buildAgentSpecFromLlm', () => {
     expect(spec!.field).toBe('graph');
     expect(spec!.coreMission).toBe('mission');
     expect(spec!.outputFormat).toBe('```\nschema\n```');
+  });
+});
+
+describe('agentDiscoveryStep preForm retry gate', () => {
+  const gate = agentDiscoveryStep.llm!.shouldRetryPreForm!;
+
+  it('retries when the LLM output is unparseable (non-empty)', () => {
+    expect(gate('no json here at all')).toBe(true);
+  });
+
+  it('does not retry on empty output', () => {
+    expect(gate('')).toBe(false);
+    expect(gate(null)).toBe(false);
+  });
+
+  it('does not retry when a valid agent result parsed', () => {
+    expect(gate('```json\n{"predefined":{"code-reviewer":true},"custom":[]}\n```')).toBe(false);
   });
 });

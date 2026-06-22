@@ -10,6 +10,7 @@ import {
   type FormSchema,
 } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
+import { RetryableParseError } from '../../step-definition.js';
 import type { AgentColor, AgentSpec } from './_agent-templates.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { extractFencedJson } from '../_fenced-json.js';
@@ -1098,6 +1099,18 @@ export const agentDiscoveryStep: StepDefinition<AgentDiscoveryDetect, AgentDisco
     preForm: true,
     buildPrompt: buildAgentDiscoveryPrompt,
     timeoutMs: 60 * 60 * 1000,
+    retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
+    // Form-aware: re-roll before the candidate-selection form when the LLM output
+    // produced NO usable agent result (total parse failure) — so the user isn't
+    // shown a stub-only candidate list on a transient bad turn.
+    shouldRetryPreForm: (raw) => {
+      let extracted: unknown = raw;
+      if (raw && typeof raw === 'object' && 'result' in (raw as Record<string, unknown>)) {
+        extracted = (raw as { result: unknown }).result;
+      }
+      if (typeof extracted !== 'string' || extracted.trim() === '') return false;
+      return parseLlmAgentOutputWithDiagnostic(extracted).result === null;
+    },
   },
 
   form(ctx, detected, llmOutput): FormSchema {

@@ -480,3 +480,22 @@ describe('buildKnowledgePrompt', () => {
     expect(prompt).toContain('Preserve EXACTLY');
   });
 });
+
+describe('knowledgeAcquisitionStep preForm retry gate', () => {
+  const gate = knowledgeAcquisitionStep.llm!.shouldRetryPreForm!;
+
+  it('retries when output is non-empty but nothing parsed (entries/placements/updates all empty)', () => {
+    expect(gate('here is prose, no kb json at all')).toBe(true);
+  });
+
+  it('does not retry on empty output', () => {
+    expect(gate('')).toBe(false);
+    expect(gate(null)).toBe(false);
+  });
+
+  it('does not retry when entries parsed', () => {
+    const raw =
+      '```json\n{"entries":[{"id":"x","title":"X","sections":[{"heading":"H","body":"b"}]}]}\n```';
+    expect(gate(raw)).toBe(false);
+  });
+});

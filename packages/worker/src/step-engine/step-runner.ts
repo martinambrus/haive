@@ -817,6 +817,32 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         if (!llmResult.resolved) return llmResult.result;
         llmOutput = llmResult.llmOutput;
         current = llmResult.current;
+
+        // Form-aware retry: re-roll a preForm generator whose output is unusable
+        // BEFORE the form renders, so a form that surfaces the parse failure (a
+        // manual-topics / candidate-selection / recipe-prefill prompt) is only shown
+        // after the retry budget is spent. Reuses the llm.retry budget; each re-roll
+        // parks and re-enters here, so this advances one attempt per completion.
+        // Skipped under test bypass (no real invocation to re-roll).
+        const preFormRetry = stepDef.llm.retry;
+        if (
+          preFormRetry &&
+          process.env.HAIVE_TEST_BYPASS_LLM !== '1' &&
+          stepDef.llm.shouldRetryPreForm?.(llmOutput)
+        ) {
+          const attempts = await countLlmAttempts(db, current.id);
+          if (attempts < preFormRetry.maxAttempts) {
+            ctx.logger.warn(
+              { stepId: meta.id, attempts, maxAttempts: preFormRetry.maxAttempts },
+              'preForm output unusable — re-rolling before form',
+            );
+            await markLatestInvocationConsumed(db, current.id);
+            const reroll = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
+            if (!reroll.resolved) return reroll.result;
+            llmOutput = reroll.llmOutput;
+            current = reroll.current;
+          }
+        }
       }
     }
 

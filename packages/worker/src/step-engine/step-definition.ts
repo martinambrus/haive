@@ -76,6 +76,13 @@ export interface LlmInvocationSpec {
     maxAttempts: number;
     retryOn?: (err: unknown) => boolean;
   };
+  /** preForm-only: re-roll the llm invocation when its output is unusable and the
+   *  retry budget remains, BEFORE the form renders — so a form that surfaces the
+   *  parse failure (a manual-topics / candidate-selection / recipe-prefill form) is
+   *  only shown after retries are spent. Returns true when the current output
+   *  warrants a re-roll. Requires llm.retry (for the maxAttempts budget) and
+   *  llm.preForm; ignored under HAIVE_TEST_BYPASS_LLM. */
+  shouldRetryPreForm?: (llmOutput: unknown) => boolean;
 }
 
 export interface AgentMiningDispatch {

@@ -78,3 +78,22 @@ describe('parseSprintPlan', () => {
     expect(p.max_parallel).toBe(1);
   });
 });
+
+describe('sprintPlanningStep preForm retry gate', () => {
+  const gate = sprintPlanningStep.llm!.shouldRetryPreForm!;
+
+  it('retries when the planner output is unparseable (non-empty)', () => {
+    expect(gate('no json here, just prose')).toBe(true);
+  });
+
+  it('does not retry on empty output', () => {
+    expect(gate('')).toBe(false);
+    expect(gate(null)).toBe(false);
+  });
+
+  it('does not retry when a valid dag plan parsed', () => {
+    const raw =
+      '```json\n{"mode":"dag","rationale":"r","max_parallel":2,"issues":[{"id":"A","title":"a","depends_on":[],"level":0}],"levels":[["A"]]}\n```';
+    expect(gate(raw)).toBe(false);
+  });
+});
