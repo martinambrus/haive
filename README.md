@@ -150,6 +150,12 @@ pnpm format:check
 
 Every task, repository, credential, and CLI provider row is scoped by `userId`. API routes filter by the authenticated user in every query; there is no implicit admin bypass. A regression smoke test (`packages/api/test/multi-user-isolation-smoke.ts`) creates two users and asserts that user B cannot read, list, submit, action, or otherwise observe user A's resources.
 
+### Secret-file masking
+
+AI CLI agents run with the model-provider endpoint allowlisted, so any repo file an agent reads can be shipped to a third-party model as context — the one egress channel the firewall must keep open. To limit that, the worker hides likely-secret files (`.env` and `.env.*`, private keys and certs, SSH keys, cloud and service-account credentials, registry auth, Terraform state, database dumps, backups, Drupal `settings.local.php`, and more) from the agent: before each CLI invocation it bind-mounts empty read-only files over every match inside the agent's sandbox. The running app (DDEV / app-runner) mounts the same repo volume **without** the masks, so it still boots with the real files.
+
+Masking is on by default and covers **untracked files only** (committed secrets are left as-is). Per repository you can adjust it on the tooling settings page: turn it off, add an **allow** list to un-mask specific files, or add a **deny-extend** list to mask extra globs (for example `**/*.sql` if your repo keeps SQL dumps rather than schema migrations). The built-in deny list lives in `DEFAULT_SECRET_DENY_GLOBS` (`@haive/shared`); `CONFIG_KEYS.SECRET_MASK_ENABLED` is a global kill-switch.
+
 ### Terminal control characters
 
 `Ctrl+C` (0x03) and `Ctrl+D` (0x04) bytes are stripped from WebSocket input before being forwarded to the PTY so an accidental keystroke cannot tear down a long-running CLI session. To forward them explicitly the client sends a `set_control_passthrough` frame with `allow: true`; sending `allow: false` restores the default block. Pure helpers `scanOauthPrompts` and `stripControlBytes` are exported from `packages/api/src/routes/terminal.ts` and unit-tested in `packages/api/test/terminal-parser.test.ts`.

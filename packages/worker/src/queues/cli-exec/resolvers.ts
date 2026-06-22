@@ -351,7 +351,7 @@ export async function resolveMcpExtraFiles(
 
 const REPO_VOLUME_NAME = 'haive_repos';
 const REPO_MOUNT_TARGET = SANDBOX_WORKDIR;
-const HOST_REPO_ROOT = process.env.HOST_REPO_ROOT ?? '/host-fs';
+export const HOST_REPO_ROOT = process.env.HOST_REPO_ROOT ?? '/host-fs';
 const HOST_REPO_ROOT_REAL = process.env.HOST_REPO_ROOT_REAL ?? process.env.HOME ?? '/';
 
 export async function resolveTaskRepoMount(
@@ -433,7 +433,7 @@ export async function resolveRepoMount(
   };
 }
 
-const WORKER_REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
+export const WORKER_REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
 const CHOWN_MARKER_REL = '.haive/.chowned-1000';
 
 /** chown the repo-volume subpath for a task to 1000:1000 (the `node` user

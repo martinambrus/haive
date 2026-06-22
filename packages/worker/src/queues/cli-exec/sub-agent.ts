@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { type CliExecJobPayload, type CliProviderName } from '@haive/shared';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
+import type { SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { SubAgentInvocation } from '../../cli-adapters/types.js';
 import { runSequentialSubAgent, type SubAgentRunResult } from '../../cli-executor/index.js';
@@ -23,6 +24,7 @@ export async function executeSubAgentNative(
   secrets: Record<string, string>,
   repoMount: DockerVolumeMount | null,
   sandboxWorkdir: string,
+  maskFiles: SandboxExtraFile[],
 ): Promise<ExecutionOutcome> {
   if (!payload.cliProviderId) {
     throw new Error('subagent_native requires cliProviderId');
@@ -64,7 +66,7 @@ export async function executeSubAgentNative(
     sandboxWorkdir,
     provider.networkPolicy,
     resolveEffectiveEgressDomains(provider),
-    mcp.files,
+    [...mcp.files, ...maskFiles],
     authMounts,
     undefined,
     payload.taskId ?? null,
@@ -80,6 +82,7 @@ export async function executeSubAgentSequential(
   secrets: Record<string, string>,
   repoMount: DockerVolumeMount | null,
   sandboxWorkdir: string,
+  maskFiles: SandboxExtraFile[],
 ): Promise<ExecutionOutcome> {
   if (!payload.cliProviderId) {
     throw new Error('subagent_sequential requires cliProviderId');
@@ -112,7 +115,7 @@ export async function executeSubAgentSequential(
     sandboxWorkdir,
     provider.networkPolicy,
     resolveEffectiveEgressDomains(provider),
-    mcp.files,
+    [...mcp.files, ...maskFiles],
     authMounts,
     payload.taskId ?? null,
     payload.invocationId ?? null,

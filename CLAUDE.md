@@ -76,6 +76,8 @@ The sub-agent emulator splits a single sub-agent specification into either a nat
 
 `packages/worker/src/sandbox/clawker-client.ts` wraps the clawker binary. The worker container mounts `/var/run/docker.sock` and uses Docker-in-Docker to spawn per-task containers. Only the cloned repository is bind-mounted into the per-task container. The worker filesystem and the user home directory are never exposed. CLI authentication files are copied into a named volume per task at startup and the volume is destroyed at task end.
 
+Secret-file masking (default on, Tier 1): before each cli-exec invocation the worker hides files matching a secret deny-list from the AI CLI agent by bind-mounting empty read-only files over them inside the cli-exec sandbox (`packages/worker/src/queues/cli-exec/secret-mask.ts`, threaded via `resolveSecretMasks` in `exec-core.ts` for the `cli`/`agent_mining`/sub-agent kinds). The effective set is `DEFAULT_SECRET_DENY_GLOBS` (in `@haive/shared`) plus per-repo `secret_mask_deny_extend`, minus `DEFAULT_SECRET_CARVEOUTS` and per-repo `secret_mask_allow`. Untracked files only (`git ls-files` filter) — committed secrets are out of scope. The app runtime (app-runner/ddev mount the same `haive_repos` subpath without masks) still sees the real files. Per-repo controls live on the tooling settings page (`secret_mask_enabled`/`secret_mask_allow`/`secret_mask_deny_extend`); `CONFIG_KEYS.SECRET_MASK_ENABLED` is the global kill-switch.
+
 ## Build commands
 
 - `pnpm install` installs all workspace dependencies.

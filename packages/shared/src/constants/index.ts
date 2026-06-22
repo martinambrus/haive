@@ -515,3 +515,157 @@ export const DEFAULT_EXCLUDED_PATTERNS = [
   'yarn.lock',
   'pnpm-lock.yaml',
 ] as const;
+
+/**
+ * Filename/path globs for files that may carry secrets and must be hidden from
+ * AI CLI agents. The worker masks each match with an empty read-only file inside
+ * the cli-exec sandbox (CLI-agnostic read-block — see
+ * packages/worker/src/queues/cli-exec/secret-mask.ts). Matched with
+ * tinyglobby/picomatch semantics under `dot: true`, so both `**` and `*.ext`
+ * work and leading-dot files are matched.
+ *
+ * Bare `*.sql` is intentionally NOT here: it would mask schema/migration SQL
+ * the agent must read (e.g. this repo's database migrations). Users who treat
+ * `.sql` as dumps add it per-repo via `secretMaskDenyExtend`.
+ */
+export const DEFAULT_SECRET_DENY_GLOBS = [
+  // env files
+  '**/.env',
+  '**/.env.*',
+  // private keys / certificates
+  '**/*.pem',
+  '**/*.key',
+  '**/*.p12',
+  '**/*.pfx',
+  '**/*.p8',
+  '**/*.jks',
+  '**/*.keystore',
+  '**/*.asc',
+  // ssh keys
+  '**/id_rsa',
+  '**/id_dsa',
+  '**/id_ecdsa',
+  '**/id_ed25519',
+  '**/*_rsa',
+  '**/.ssh/**',
+  // cloud / service-account credentials
+  '**/.aws/credentials',
+  '**/.aws/config',
+  '**/service-account*.json',
+  '**/gcp-*.json',
+  '**/.azure/**',
+  '**/kubeconfig',
+  '**/.kube/config',
+  '**/.docker/config.json',
+  // package / registry auth
+  '**/.npmrc',
+  '**/.pypirc',
+  '**/.netrc',
+  '**/.git-credentials',
+  '**/.cargo/credentials*',
+  '**/.terraformrc',
+  // framework config secrets (Drupal/PHP). settings.local.php holds real DB
+  // creds + hash salt and is normally untracked; a tracked settings.php is
+  // skipped by the untracked filter, so only a local creds-bearing one is
+  // masked. The `default.settings.php` / `settings.example.php` scaffolding is
+  // NOT matched (different basename), so it stays readable.
+  '**/settings.local.php',
+  '**/settings.php',
+  // terraform state / vars
+  '**/*.tfstate',
+  '**/*.tfstate.*',
+  '**/*.tfvars',
+  '**/*.tfvars.json',
+  // backups / editor leftovers
+  '**/*.bak',
+  '**/*.bckp',
+  '**/*.bkp',
+  '**/*.backup',
+  '**/*.old',
+  '**/*.orig',
+  '**/*~',
+  '**/*.swp',
+  '**/*.swo',
+  // database dumps
+  '**/*.dump',
+  '**/*.dmp',
+  '**/*.bson',
+  '**/*.rdb',
+  '**/*.sql.gz',
+  '**/*.sql.bz2',
+  '**/*.sql.xz',
+  '**/*.sql.zst',
+  '**/dump.sql',
+  '**/*-dump.sql',
+  '**/*.dump.sql',
+  '**/backup*.sql',
+  '**/*-backup.sql',
+  '**/db_backup*',
+  // local databases
+  '**/*.sqlite',
+  '**/*.sqlite3',
+  // misc secret stores
+  '**/secrets.*',
+  '**/*secret*.{yml,yaml}',
+  '**/.vault-token',
+  '**/*.gpg',
+] as const;
+
+/**
+ * Globs that stay readable even when they also match a deny glob: example/sample
+ * configs and public-key material. Applied as ignore patterns over the matches,
+ * so e.g. `.env.example` survives the `.env.*` deny.
+ */
+export const DEFAULT_SECRET_CARVEOUTS = [
+  '**/*.example',
+  '**/*.sample',
+  '**/*.template',
+  '**/*.dist',
+  '**/*.defaults',
+  '**/example.*',
+  '**/*.pub',
+  '**/known_hosts',
+  '**/*.tfvars.example',
+] as const;
+
+/**
+ * Directories never scanned for secrets (performance + relevance). A secret
+ * planted inside one of these is not a new leak: an agent would have had to read
+ * the original to copy it there.
+ */
+export const SECRET_SCAN_IGNORE_DIRS = [
+  '**/.git/**',
+  '**/node_modules/**',
+  '**/vendor/**',
+  '**/dist/**',
+  '**/build/**',
+  '**/.next/**',
+] as const;
+
+/** Max masks emitted per invocation; excess is dropped with a warning. */
+export const SECRET_MASK_LIMIT = 500;
+
+export interface SecretMaskGlobs {
+  /** Patterns to match — the files to mask. */
+  deny: string[];
+  /** Patterns to ignore — carve-outs, per-repo allow list, structural dirs. */
+  ignore: string[];
+}
+
+/**
+ * Effective deny/ignore glob sets for a repo's secret masking:
+ *   deny   = DEFAULT_SECRET_DENY_GLOBS ∪ denyExtend
+ *   ignore = DEFAULT_SECRET_CARVEOUTS ∪ allow ∪ SECRET_SCAN_IGNORE_DIRS
+ * The matcher returns files matching `deny` minus those matching `ignore`, so
+ * `allow` un-masks specific files and `denyExtend` adds globs.
+ */
+export function computeEffectiveSecretGlobs(opts: {
+  allow?: string[] | null;
+  denyExtend?: string[] | null;
+}): SecretMaskGlobs {
+  const deny = [...new Set([...DEFAULT_SECRET_DENY_GLOBS, ...(opts.denyExtend ?? [])])];
+  const ignore = [
+    ...new Set([...DEFAULT_SECRET_CARVEOUTS, ...(opts.allow ?? []), ...SECRET_SCAN_IGNORE_DIRS]),
+  ];
+  return { deny, ignore };
+}

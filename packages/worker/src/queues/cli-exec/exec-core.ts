@@ -35,6 +35,7 @@ import {
   tryJsonParse,
 } from './resolvers.js';
 import { executeSubAgentNative, executeSubAgentSequential } from './sub-agent.js';
+import { resolveSecretMasks } from './secret-mask.js';
 import { makeUsageSnapshotPersister } from './running-usage.js';
 
 /** Throttle for persisting running token-usage snapshots during a CLI stream.
@@ -140,6 +141,10 @@ export async function executeByKind(
   const repoMount = await resolveTaskRepoMount(db, payload.taskId);
   await ensureRepoMountWritable(repoMount);
   const sandboxWorkdir = await resolveTaskSandboxWorkdir(db, payload.taskId);
+  // Empty-file masks hiding deny-listed secret files from the agent (Tier 1,
+  // untracked-only). Applied to every cli-exec kind; the app runtime mounts the
+  // same repo volume WITHOUT these masks, so the running app still sees them.
+  const maskFiles = await resolveSecretMasks(db, payload.taskId);
   switch (payload.kind) {
     case 'cli':
     case 'agent_mining': {
@@ -179,7 +184,7 @@ export async function executeByKind(
         sandboxWorkdir,
         networkPolicy,
         egressDomains,
-        mcp.files,
+        [...mcp.files, ...maskFiles],
         authMounts,
         statusUpdater,
         payload.taskId ?? null,
@@ -189,9 +194,17 @@ export async function executeByKind(
       );
     }
     case 'subagent_sequential':
-      return executeSubAgentSequential(db, payload, secrets, repoMount, sandboxWorkdir);
+      return executeSubAgentSequential(db, payload, secrets, repoMount, sandboxWorkdir, maskFiles);
     case 'subagent_native':
-      return executeSubAgentNative(db, payload, deps, secrets, repoMount, sandboxWorkdir);
+      return executeSubAgentNative(
+        db,
+        payload,
+        deps,
+        secrets,
+        repoMount,
+        sandboxWorkdir,
+        maskFiles,
+      );
     default:
       throw new Error(
         `unknown cli exec kind: ${(payload as { kind: CliExecInvocationKind }).kind}`,

@@ -238,6 +238,9 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
       lspServers: true,
       lspServerVersions: true,
       chromeDevtoolsMcpVersion: true,
+      secretMaskEnabled: true,
+      secretMaskAllow: true,
+      secretMaskDenyExtend: true,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -278,6 +281,9 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
     browserTesting: !!deps.browserTesting,
     lspServers: repo.lspServers ?? deps.lspServers ?? [],
     lspServerVersions: repo.lspServerVersions ?? {},
+    secretMaskEnabled: repo.secretMaskEnabled,
+    secretMaskAllow: repo.secretMaskAllow ?? [],
+    secretMaskDenyExtend: repo.secretMaskDenyExtend ?? [],
     lspOptions,
   });
 });
@@ -304,6 +310,9 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     lspServers?: string[];
     lspServerVersions?: Record<string, string | null>;
     chromeDevtoolsMcpVersion?: string | null;
+    secretMaskEnabled?: boolean;
+    secretMaskAllow?: string[];
+    secretMaskDenyExtend?: string[];
   };
 
   const updates: Partial<typeof schema.repositories.$inferInsert> = { updatedAt: new Date() };
@@ -323,6 +332,19 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       if (val) clean[k] = val;
     }
     updates.lspServerVersions = clean;
+  }
+  if (typeof body.secretMaskEnabled === 'boolean') {
+    updates.secretMaskEnabled = body.secretMaskEnabled;
+  }
+  if (Array.isArray(body.secretMaskAllow)) {
+    updates.secretMaskAllow = [
+      ...new Set(body.secretMaskAllow.map((s) => s.trim()).filter(Boolean)),
+    ];
+  }
+  if (Array.isArray(body.secretMaskDenyExtend)) {
+    updates.secretMaskDenyExtend = [
+      ...new Set(body.secretMaskDenyExtend.map((s) => s.trim()).filter(Boolean)),
+    ];
   }
 
   await db.update(schema.repositories).set(updates).where(eq(schema.repositories.id, repositoryId));

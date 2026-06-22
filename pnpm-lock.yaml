@@ -288,6 +288,9 @@ importers:
       tar-fs:
         specifier: ^3.0.9
         version: 3.1.2
+      tinyglobby:
+        specifier: ^0.2.16
+        version: 0.2.16
       zod:
         specifier: ^4.3.6
         version: 4.3.6

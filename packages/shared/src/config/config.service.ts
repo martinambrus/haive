@@ -41,6 +41,10 @@ export const CONFIG_KEYS = {
 
   CLAWKER_BIN: 'config:sandbox:clawkerBin',
   SANDBOX_NETWORK: 'config:sandbox:network',
+  // Global kill-switch for secret-file masking (hides deny-listed files from AI
+  // CLI agents in the cli-exec sandbox). Default true; set 'false' to disable
+  // masking for every repo without per-repo edits or a redeploy.
+  SECRET_MASK_ENABLED: 'config:sandbox:secretMaskEnabled',
 
   APP_URL: 'config:app:url',
 
@@ -79,6 +83,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.REPO_STORAGE_PATH]: '/var/lib/haive/repos',
   [CONFIG_KEYS.CLAWKER_BIN]: '/usr/local/bin/clawker',
   [CONFIG_KEYS.SANDBOX_NETWORK]: 'haive-network',
+  [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
   [CONFIG_KEYS.APP_URL]: 'http://localhost:3000',
   [CONFIG_KEYS.MAINTENANCE_MODE]: 'false',
   [CONFIG_KEYS.MAINTENANCE_MESSAGE]: 'Maintenance in progress. Please check back shortly.',

@@ -89,6 +89,21 @@ export const repositories = pgTable(
      *  enable/disable LSP servers after onboarding; injected into declaredDeps
      *  so it survives the per-task declare-deps rebuild. */
     lspServers: text('lsp_servers').array(),
+    /** Secret-file masking (Tier 1, default on): when true the worker hides
+     *  files matching the secret deny-list (DEFAULT_SECRET_DENY_GLOBS ∪
+     *  secretMaskDenyExtend, minus carve-outs and secretMaskAllow) from AI CLI
+     *  agents by mounting empty read-only files over them in the cli-exec
+     *  sandbox. Untracked files only. The running app (ddev/app-runner) still
+     *  sees the real files (separate mount, no masks). */
+    secretMaskEnabled: boolean('secret_mask_enabled').notNull().default(true),
+    /** Per-repo un-mask escape hatch: globs that stay readable to the agent even
+     *  if they match a deny glob (e.g. a repo whose tooling genuinely needs the
+     *  agent to read a specific env file). */
+    secretMaskAllow: jsonb('secret_mask_allow').$type<string[]>().notNull().default([]),
+    /** Extra globs to mask on top of the built-in deny-list, for repo-specific
+     *  conventions (e.g. `*.sql` when a repo treats SQL files as dumps rather
+     *  than schema/migrations). */
+    secretMaskDenyExtend: jsonb('secret_mask_deny_extend').$type<string[]>().notNull().default([]),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },

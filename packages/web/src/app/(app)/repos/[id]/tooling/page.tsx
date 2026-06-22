@@ -24,6 +24,9 @@ interface ToolingConfig {
   browserTesting: boolean;
   lspServers: string[];
   lspServerVersions: Record<string, string | null>;
+  secretMaskEnabled: boolean;
+  secretMaskAllow: string[];
+  secretMaskDenyExtend: string[];
   lspOptions: LspOption[];
 }
 
@@ -71,6 +74,9 @@ export default function RepoToolingPage() {
   const [chromeVersion, setChromeVersion] = useState('');
   const [lspChecked, setLspChecked] = useState<Set<string>>(new Set());
   const [lspVersions, setLspVersions] = useState<Record<string, string>>({});
+  const [secretMaskEnabled, setSecretMaskEnabled] = useState(true);
+  const [secretMaskAllow, setSecretMaskAllow] = useState('');
+  const [secretMaskDenyExtend, setSecretMaskDenyExtend] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -86,6 +92,9 @@ export default function RepoToolingPage() {
         const lv: Record<string, string> = {};
         for (const [k, v] of Object.entries(cfg.lspServerVersions)) if (v) lv[k] = v;
         setLspVersions(lv);
+        setSecretMaskEnabled(cfg.secretMaskEnabled);
+        setSecretMaskAllow((cfg.secretMaskAllow ?? []).join('\n'));
+        setSecretMaskDenyExtend((cfg.secretMaskDenyExtend ?? []).join('\n'));
       } catch (err) {
         if (!cancelled) setError((err as Error).message ?? 'Failed to load tooling config');
       }
@@ -117,6 +126,15 @@ export default function RepoToolingPage() {
         chromeDevtoolsMcpVersion: chromeVersion || null,
         lspServers: [...lspChecked],
         lspServerVersions,
+        secretMaskEnabled,
+        secretMaskAllow: secretMaskAllow
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean),
+        secretMaskDenyExtend: secretMaskDenyExtend
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean),
       });
       setSaved(true);
     } catch (err) {
@@ -242,6 +260,63 @@ export default function RepoToolingPage() {
                   markDirty();
                 }}
               />
+            </div>
+          </Card>
+
+          <Card>
+            <h2 className="text-lg font-semibold text-neutral-100">Secret file protection</h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              Hides files that look like secrets (.env, keys, credentials, database dumps, …) from
+              AI CLI agents by mounting empty files over them in the sandbox. The running app still
+              sees the real files. Covers untracked files only — committed secrets are not masked.
+            </p>
+            <div className="mt-3 flex items-center gap-2">
+              <input
+                id="secretMaskEnabled"
+                type="checkbox"
+                className="h-4 w-4 rounded border-neutral-700 bg-neutral-900 text-indigo-500"
+                checked={secretMaskEnabled}
+                onChange={(e) => {
+                  setSecretMaskEnabled(e.target.checked);
+                  markDirty();
+                }}
+              />
+              <Label htmlFor="secretMaskEnabled">Mask secret files from agents</Label>
+            </div>
+            <div className="mt-4 flex flex-col gap-1.5">
+              <Label htmlFor="secretMaskAllow">Allow (un-mask) — one glob per line</Label>
+              <textarea
+                id="secretMaskAllow"
+                className="min-h-20 rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1.5 font-mono text-xs text-neutral-100 disabled:opacity-50"
+                placeholder={'**/.env.shared'}
+                value={secretMaskAllow}
+                disabled={!secretMaskEnabled}
+                onChange={(e) => {
+                  setSecretMaskAllow(e.target.value);
+                  markDirty();
+                }}
+              />
+              <p className="text-xs text-neutral-600">
+                Files matching these globs stay readable even if they match the deny list.
+              </p>
+            </div>
+            <div className="mt-4 flex flex-col gap-1.5">
+              <Label htmlFor="secretMaskDenyExtend">Also mask — one glob per line</Label>
+              <textarea
+                id="secretMaskDenyExtend"
+                className="min-h-20 rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1.5 font-mono text-xs text-neutral-100 disabled:opacity-50"
+                placeholder={'**/*.sql'}
+                value={secretMaskDenyExtend}
+                disabled={!secretMaskEnabled}
+                onChange={(e) => {
+                  setSecretMaskDenyExtend(e.target.value);
+                  markDirty();
+                }}
+              />
+              <p className="text-xs text-neutral-600">
+                Extra globs to mask on top of the built-in deny list (e.g. SQL files if your repo
+                uses them as dumps rather than schema/migrations).
+              </p>
             </div>
           </Card>
 
