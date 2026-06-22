@@ -5,6 +5,7 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { FRAMEWORK_PATTERNS, type FrameworkName, type DetectResult } from '@haive/shared';
 import type { StepContext, StepDefinition, LlmBuildArgs } from '../../step-definition.js';
+import { RetryableParseError } from '../../step-definition.js';
 import {
   buildTechInventory,
   renderTechInventoryTable,
@@ -1035,6 +1036,7 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
     requiredCapabilities: [],
     buildPrompt: buildEnvDetectPrompt,
     parseOutput: (raw: string, _parsed: unknown) => parseEnrichment(raw),
+    retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
   },
 
   async apply(ctx, args): Promise<EnvDetectApply> {
@@ -1060,6 +1062,9 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
     const rawLlm = args.llmOutput;
     const llmProduced = typeof rawLlm === 'string' ? rawLlm.trim() !== '' : rawLlm != null;
     const degraded = llmProduced && !enrichment;
+    if (degraded && !args.isFinalLlmAttempt) {
+      throw new RetryableParseError('env-detect enrichment output unparseable — retrying');
+    }
 
     const created: string[] = [];
     for (const dir of ['.claude', path.join('.claude', 'knowledge_base')]) {

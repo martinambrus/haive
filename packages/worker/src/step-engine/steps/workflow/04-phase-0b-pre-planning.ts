@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
@@ -303,6 +304,7 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         INSIGHTS_INSTRUCTION,
       ].join('\n');
     },
+    retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
   },
 
   async apply(ctx, args): Promise<PrePlanningApply> {
@@ -310,6 +312,9 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
     if (parsed) {
       ctx.logger.info({ source: 'llm' }, 'pre-planning spec parsed');
       return { summary: parsed.summary, spec: parsed.spec, source: 'llm' };
+    }
+    if (!args.isFinalLlmAttempt) {
+      throw new RetryableParseError('pre-planning spec output unparseable — retrying');
     }
     const stub = stubPrePlanning(args.detected);
     ctx.logger.info({ source: 'stub' }, 'pre-planning spec stubbed');

@@ -151,6 +151,21 @@ export interface StepApplyArgs<TDetect = unknown> {
    *  payload and the apply output of each preceding pass so the new pass
    *  can amend the spec / decide convergence. */
   previousIterations: StepLoopPassRecord[];
+  /** True when this is the LAST llm.retry attempt (or the step has no retry): a
+   *  generator should DEGRADE (return its stub/fallback) rather than throw a
+   *  RetryableParseError. False on earlier attempts so a parse failure re-rolls.
+   *  Undefined for callers that don't set it (treated as final). */
+  isFinalLlmAttempt?: boolean;
+}
+
+/** Throw from apply() on an unrecoverable LLM parse failure to trigger llm.retry
+ *  (re-roll a fresh invocation). Generators throw this only while
+ *  args.isFinalLlmAttempt is false; on the final attempt they degrade instead. */
+export class RetryableParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RetryableParseError';
+  }
 }
 
 export interface StepLoopPassRecord {

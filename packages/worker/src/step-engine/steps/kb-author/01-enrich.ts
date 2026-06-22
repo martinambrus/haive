@@ -2,6 +2,7 @@ import { and, desc, eq, inArray, ne } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { globalKbEntries, withGlobalKb, type GlobalKbFacets } from '@haive/shared/global-kb';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { RetryableParseError } from '../../step-definition.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { syncGlobalKbEntry } from '../../../queues/global-kb-sync-queue.js';
 
@@ -280,6 +281,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
         body: `# ${title}\n\n${d.seedText}`,
       };
     },
+    retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
   },
 
   async apply(ctx, args): Promise<KbAuthorApply> {
@@ -288,6 +290,9 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
     const skeletonId = detected.entryId;
 
     const parsed = parseEnrichment(args.llmOutput ?? null);
+    if (!parsed && !args.isFinalLlmAttempt) {
+      throw new RetryableParseError('kb enrichment output unparseable — retrying');
+    }
     const title =
       parsed?.title?.trim() || firstLine(detected.seedText).slice(0, 80) || 'Untitled house rule';
     const category = normCategory(parsed?.category);

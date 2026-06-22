@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
@@ -310,6 +311,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           }
         : base;
     },
+    retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
   },
 
   form(_ctx, detected, llmOutput): FormSchema {
@@ -390,6 +392,9 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     };
     const reviewerNote = values.reviewerNote ?? '';
     const parsed = parseLearningOutput(args.llmOutput ?? null);
+    if ((!parsed || parsed.length === 0) && !args.isFinalLlmAttempt) {
+      throw new RetryableParseError('learning output unparseable — retrying');
+    }
     const source: 'llm' | 'stub' = parsed && parsed.length > 0 ? 'llm' : 'stub';
     const entries = parsed && parsed.length > 0 ? parsed : stubLearning(args.detected);
     const written =

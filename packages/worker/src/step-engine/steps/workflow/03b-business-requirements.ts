@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
@@ -113,6 +114,7 @@ export const businessRequirementsStep: StepDefinition<BizReqDetect, BizReqApply>
       ].join('\n');
     },
     bypassStub: () => ({ requirements: '# Requirements\n\n(bypass stub)', summary: 'bypass stub' }),
+    retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
   },
 
   form(_ctx, detected): FormSchema {
@@ -150,6 +152,9 @@ export const businessRequirementsStep: StepDefinition<BizReqDetect, BizReqApply>
     // Reached only when the user SUBMITTED the gate (Skip short-circuits the whole
     // step), so the agent ran. Store its mined requirements for the technical spec.
     const parsed = parseBizReqOutput(args.llmOutput ?? null);
+    if (!parsed && !args.isFinalLlmAttempt) {
+      throw new RetryableParseError('business requirements output unparseable — retrying');
+    }
     ctx.logger.info({ source: parsed ? 'llm' : 'stub' }, 'business requirements drafted');
     return {
       requirements: parsed?.requirements ?? '',

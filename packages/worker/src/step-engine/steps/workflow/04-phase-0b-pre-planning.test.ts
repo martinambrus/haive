@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { logger } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
+import { RetryableParseError } from '../../step-definition.js';
 import { phase0bPrePlanningStep } from './04-phase-0b-pre-planning.js';
 
 const base = {
@@ -50,5 +52,38 @@ describe('04 pre-planning revise (gate-1 reject → re-draft)', () => {
     });
     expect(prompt).toContain('Scope guidance: no DB changes');
     expect(prompt).not.toContain('Reviewer feedback to address');
+  });
+});
+
+describe('04 pre-planning retry-then-degrade', () => {
+  const applyCtx = { logger: logger.child({ test: '04-apply' }) } as unknown as StepContext;
+  function runApply(llmOutput: unknown, isFinalLlmAttempt: boolean) {
+    return phase0bPrePlanningStep.apply(applyCtx, {
+      detected: base,
+      formValues: {},
+      llmOutput,
+      iteration: 0,
+      previousIterations: [],
+      isFinalLlmAttempt,
+    } as unknown as Parameters<typeof phase0bPrePlanningStep.apply>[1]);
+  }
+
+  it('throws RetryableParseError on unparseable output when NOT the final attempt', async () => {
+    await expect(runApply('just prose, no json at all', false)).rejects.toBeInstanceOf(
+      RetryableParseError,
+    );
+  });
+
+  it('degrades to a stub spec (no throw) on the final attempt', async () => {
+    const out = await runApply('just prose, no json at all', true);
+    expect(out.source).toBe('stub');
+    expect(out.spec.length).toBeGreaterThan(0);
+  });
+
+  it('returns the parsed spec when output is valid (never retries)', async () => {
+    const raw = '```json\n{"summary":"s","spec":"# Spec\\n\\nbody"}\n```';
+    const out = await runApply(raw, false);
+    expect(out.source).toBe('llm');
+    expect(out.spec).toContain('# Spec');
   });
 });

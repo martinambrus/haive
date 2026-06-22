@@ -994,6 +994,16 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     const previousIterations = stepIterationsAsRecords(current);
     const iteration = previousIterations.length;
+    // For llm.retry steps, tell apply whether this is the final attempt so it can
+    // degrade (return its stub) instead of throwing a RetryableParseError once the
+    // re-roll budget is spent. Non-retry steps are always "final" (degrade now).
+    // Bypass (smoke) enqueues no invocation, so treat it as the final attempt
+    // (degrade, never throw-to-retry). Non-retry steps are always final.
+    const llmRetry = stepDef.llm?.retry;
+    const isFinalLlmAttempt =
+      process.env.HAIVE_TEST_BYPASS_LLM === '1' || !llmRetry
+        ? true
+        : (await countLlmAttempts(db, current.id)) >= llmRetry.maxAttempts;
     let output: unknown;
     try {
       output = await stepDef.apply(ctx, {
@@ -1003,6 +1013,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         agentMiningResults,
         iteration,
         previousIterations,
+        isFinalLlmAttempt,
       });
     } catch (applyErr) {
       // llm.retry: a flaky model (e.g. a cloud Ollama model whose agentic tool-loop

@@ -8,6 +8,7 @@ import {
   type SprintPlan,
 } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 
@@ -280,6 +281,7 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
       issues: [],
       levels: [],
     }),
+    retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
   },
 
   form(_ctx, _detected, llmOutput): FormSchema | null {
@@ -356,6 +358,14 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
 
   async apply(ctx, args): Promise<SprintPlanningApply> {
     const plan = parseSprintPlan(args.llmOutput ?? null);
+    // A planner that emitted output we couldn't turn into a usable plan fell back to
+    // single-agent. Re-roll before accepting that downgrade; on the final attempt keep
+    // the (safe) single-agent fallback and flag it degraded.
+    const plannerRan = typeof args.llmOutput === 'string' && args.llmOutput.trim().length > 0;
+    const degraded = plannerRan && plan.rationale === SPRINT_FALLBACK_RATIONALE;
+    if (degraded && !args.isFinalLlmAttempt) {
+      throw new RetryableParseError('sprint plan output unparseable — retrying');
+    }
     const values = (args.formValues ?? {}) as {
       decision?: string;
       autoResolveConflicts?: boolean;
@@ -379,11 +389,6 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
       levelCount = counts.levelCount;
     }
 
-    // De-silence: when the planner produced output but it could not be turned into a
-    // usable plan (fell back to single-agent), surface a degraded note rather than a
-    // silent downgrade. A genuine planner-chosen single-mode keeps its own rationale.
-    const plannerRan = typeof args.llmOutput === 'string' && args.llmOutput.trim().length > 0;
-    const degraded = plannerRan && plan.rationale === SPRINT_FALLBACK_RATIONALE;
     if (degraded) {
       ctx.logger.warn('sprint planner output unparseable — single-agent fallback (degraded)');
     }
