@@ -6,7 +6,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { clearTaskPromotedDrafts, promoteToGlobalKbDraft } from '../_global-kb-promote.js';
 
 interface LearningDetect {
@@ -70,12 +70,9 @@ export function parseInvestigation(raw: unknown): Investigation | null {
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
     obj = raw as Record<string, unknown>;
   } else if (typeof raw === 'string') {
-    const body = extractFencedJson(raw);
-    if (!body) return null;
-    try {
-      obj = JSON.parse(body) as Record<string, unknown>;
-    } catch {
-      return null;
+    const parsed = parseJsonLoose(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      obj = parsed as Record<string, unknown>;
     }
   }
   const inv = obj?.investigation;
@@ -128,20 +125,14 @@ export function parseLearningOutput(raw: unknown): LearningEntry[] | null {
   } else {
     return null;
   }
-  const body = extractFencedJson(text);
-  if (!body) return null;
-  try {
-    const parsed = JSON.parse(body);
-    if (Array.isArray(parsed)) return normaliseEntries(parsed);
-    if (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      Array.isArray((parsed as Record<string, unknown>).entries)
-    ) {
-      return normaliseEntries((parsed as Record<string, unknown>).entries as unknown[]);
-    }
-  } catch {
-    return null;
+  const parsed = parseJsonLoose(text);
+  if (Array.isArray(parsed)) return normaliseEntries(parsed);
+  if (
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    Array.isArray((parsed as Record<string, unknown>).entries)
+  ) {
+    return normaliseEntries((parsed as Record<string, unknown>).entries as unknown[]);
   }
   return null;
 }

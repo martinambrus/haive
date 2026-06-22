@@ -1,7 +1,7 @@
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { loadFixLoopDiagnosis } from './_fix-loop.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
@@ -61,24 +61,18 @@ export function parseImplementOutput(raw: unknown): {
   } else {
     return null;
   }
-  const body = extractFencedJson(text);
-  if (!body) return null;
-  try {
-    const parsed = JSON.parse(body);
-    if (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      typeof (parsed as Record<string, unknown>).summary === 'string'
-    ) {
-      const obj = parsed as Record<string, unknown>;
-      return normalise(
-        obj.summary as string,
-        obj.filesTouched,
-        typeof obj.notes === 'string' ? (obj.notes as string) : '',
-      );
-    }
-  } catch {
-    return null;
+  const parsed = parseJsonLoose(text);
+  if (
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    typeof (parsed as Record<string, unknown>).summary === 'string'
+  ) {
+    const obj = parsed as Record<string, unknown>;
+    return normalise(
+      obj.summary as string,
+      obj.filesTouched,
+      typeof obj.notes === 'string' ? (obj.notes as string) : '',
+    );
   }
   return null;
 }
@@ -129,15 +123,10 @@ export function salvageImplementOutput(
   let obj: Record<string, unknown> | null = null;
   if (typeof raw === 'string') {
     text = raw;
-    const body = extractFencedJson(raw);
-    if (body) {
-      try {
-        const parsed = JSON.parse(body);
-        if (parsed && typeof parsed === 'object') obj = parsed as Record<string, unknown>;
-      } catch {
-        /* leave obj null; the prose is still usable */
-      }
-    }
+    // parseJsonLoose runs a jsonrepair salvage pass; null leaves obj null and the
+    // prose summary below is still used.
+    const parsed = parseJsonLoose(raw);
+    if (parsed && typeof parsed === 'object') obj = parsed as Record<string, unknown>;
   } else if (raw && typeof raw === 'object') {
     obj = raw as Record<string, unknown>;
   }

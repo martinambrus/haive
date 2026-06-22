@@ -3,7 +3,7 @@ import { schema } from '@haive/database';
 import { STEP_CLI_ROLES, type FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 
 interface SpecQualityDetect {
@@ -116,26 +116,20 @@ export function parseSpecQualityOutput(raw: unknown): SpecQualityParseResult | n
   } else {
     return null;
   }
-  const body = extractFencedJson(text);
-  if (!body) return null;
-  try {
-    const parsed = JSON.parse(body);
-    if (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      typeof (parsed as Record<string, unknown>).score === 'number' &&
-      Array.isArray((parsed as Record<string, unknown>).findings)
-    ) {
-      const obj = parsed as Record<string, unknown>;
-      return normaliseResult(
-        obj.score as number,
-        obj.findings as unknown[],
-        typeof obj.amendedSpec === 'string' ? (obj.amendedSpec as string) : null,
-        obj.verdict,
-      );
-    }
-  } catch {
-    return null;
+  const parsed = parseJsonLoose(text);
+  if (
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    typeof (parsed as Record<string, unknown>).score === 'number' &&
+    Array.isArray((parsed as Record<string, unknown>).findings)
+  ) {
+    const obj = parsed as Record<string, unknown>;
+    return normaliseResult(
+      obj.score as number,
+      obj.findings as unknown[],
+      typeof obj.amendedSpec === 'string' ? (obj.amendedSpec as string) : null,
+      obj.verdict,
+    );
   }
   return null;
 }
@@ -149,15 +143,10 @@ export function parseCorrectorOutput(raw: unknown): { amendedSpec: string | null
     return { amendedSpec: typeof o.amendedSpec === 'string' ? o.amendedSpec : null };
   }
   if (typeof raw !== 'string') return null;
-  const body = extractFencedJson(raw);
-  if (!body) return null;
-  try {
-    const parsed = JSON.parse(body) as Record<string, unknown>;
-    if (parsed && typeof parsed === 'object') {
-      return { amendedSpec: typeof parsed.amendedSpec === 'string' ? parsed.amendedSpec : null };
-    }
-  } catch {
-    return null;
+  const parsed = parseJsonLoose(raw);
+  if (parsed && typeof parsed === 'object') {
+    const obj = parsed as Record<string, unknown>;
+    return { amendedSpec: typeof obj.amendedSpec === 'string' ? obj.amendedSpec : null };
   }
   return null;
 }

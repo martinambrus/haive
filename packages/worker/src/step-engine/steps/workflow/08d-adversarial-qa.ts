@@ -8,7 +8,7 @@ import type {
   AgentMiningResult,
 } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput } from './_task-meta.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
@@ -127,13 +127,9 @@ function fencedCandidate(raw: unknown): unknown {
   if (!raw) return null;
   if (typeof raw === 'object') return raw;
   if (typeof raw !== 'string') return null;
-  const body = extractFencedJson(raw);
-  if (!body) return null;
-  try {
-    return JSON.parse(body);
-  } catch {
-    return null;
-  }
+  // parseJsonLoose extracts the fenced/balanced JSON and runs a jsonrepair salvage
+  // pass, so a truncated/malformed adversary turn is recovered instead of dropped.
+  return parseJsonLoose(raw);
 }
 
 /** Parse one adversarial agent's JSON; null when unparseable. */
@@ -307,8 +303,22 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     const unlocated: AdversarialFinding[] = [];
     for (const r of results) {
       if (r.status !== 'done') continue;
-      const findings = parseAdversaryOutput(r.output ?? r.rawOutput) ?? [];
-      for (const f of findings) {
+      const raw = r.output ?? r.rawOutput;
+      const parsed = parseAdversaryOutput(raw);
+      if (parsed == null) {
+        // Adversary ran but its output was unparseable (even after jsonrepair salvage).
+        // Do NOT treat that as "no vulnerabilities" — surface a visible QA-gap finding
+        // so it shows at gate 2 (the Tier-3 retry will re-roll the agent upstream).
+        if (raw != null) {
+          unlocated.push({
+            severity: 'medium',
+            category: 'qa-gap',
+            impact: `Adversarial agent "${r.agentId}" produced unparseable output — its findings may be missing; re-run adversarial QA.`,
+          });
+        }
+        continue;
+      }
+      for (const f of parsed) {
         const key = (f.location ?? '').trim().toLowerCase();
         if (!key) {
           unlocated.push(f);

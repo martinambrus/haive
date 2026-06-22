@@ -4,7 +4,7 @@ import { schema } from '@haive/database';
 import { STEP_CLI_ROLES } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 
@@ -99,13 +99,7 @@ function fencedCandidate(raw: unknown): unknown {
   if (!raw) return null;
   if (typeof raw === 'object') return raw;
   if (typeof raw !== 'string') return null;
-  const body = extractFencedJson(raw);
-  if (!body) return null;
-  try {
-    return JSON.parse(body);
-  } catch {
-    return null;
-  }
+  return parseJsonLoose(raw);
 }
 
 /** Parse the validator's final fenced JSON; null when unparseable (the step then

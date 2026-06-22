@@ -1,5 +1,23 @@
 import { describe, it, expect } from 'vitest';
-import { parseAdversaryOutput, adversaryIdsForLevel } from './08d-adversarial-qa.js';
+import { logger } from '@haive/shared';
+import {
+  parseAdversaryOutput,
+  adversaryIdsForLevel,
+  adversarialQaStep,
+} from './08d-adversarial-qa.js';
+import type { AgentMiningResult, StepContext } from '../../step-definition.js';
+
+const fakeCtx = { logger: logger.child({ test: '08d-apply' }) } as unknown as StepContext;
+function mining(agentId: string, rawOutput: string | null): AgentMiningResult {
+  return {
+    agentId,
+    agentTitle: agentId,
+    status: 'done',
+    output: null,
+    rawOutput,
+    errorMessage: null,
+  };
+}
 
 describe('adversaryIdsForLevel', () => {
   it('returns cumulative rosters of 2/4/6', () => {
@@ -33,5 +51,19 @@ describe('parseAdversaryOutput', () => {
   it('returns null on garbled output', () => {
     expect(parseAdversaryOutput('no json')).toBeNull();
     expect(parseAdversaryOutput(null)).toBeNull();
+  });
+});
+
+describe('adversarialQaStep.apply de-silence', () => {
+  it('surfaces a qa-gap finding (not silent 0-findings) when an adversary ran but was unparseable', async () => {
+    const out = await adversarialQaStep.apply(fakeCtx, {
+      detected: { level: 'poc' },
+      agentMiningResults: [
+        mining('edge-case-breaker', 'I tried hard to break it but did not emit any json'),
+      ],
+    } as unknown as Parameters<typeof adversarialQaStep.apply>[1]);
+    expect(out.ran).toBe(true);
+    expect(out.findings.length).toBeGreaterThan(0);
+    expect(out.findings.some((f) => f.category === 'qa-gap')).toBe(true);
   });
 });

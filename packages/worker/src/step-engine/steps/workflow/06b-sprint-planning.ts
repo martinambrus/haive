@@ -9,7 +9,7 @@ import {
 } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 
 // Phase 2c — Sprint planning (the DAG decision). An agent reads the spec
 // approved at gate 1 and decides mode 'single' (one implementation agent, the
@@ -30,6 +30,9 @@ interface SprintPlanningApply {
   planId: string | null;
   issueCount: number;
   levelCount: number;
+  /** 'stub' when the planner produced output that could not be turned into a usable
+   *  plan, so it fell back to single-agent. Surfaces a degraded note (DEGRADED_SOURCES). */
+  source?: 'stub';
 }
 
 interface PrePlanningOutput {
@@ -44,10 +47,15 @@ interface Gate1Output {
 
 /** Parse the planner's fenced JSON into a SprintPlan; falls back to single-agent
  *  on any parse/validation failure so the pipeline always has a usable plan. */
+/** Rationale stamped on the single-agent fallback when the planner output could not
+ *  be turned into a usable plan. apply() keys on this constant (with a non-empty
+ *  planner output) to surface a degraded note instead of a silent downgrade. */
+const SPRINT_FALLBACK_RATIONALE = 'planner output unparseable — defaulting to single-agent';
+
 export function parseSprintPlan(raw: unknown): SprintPlan {
   const fallback: SprintPlan = {
     mode: 'single',
-    rationale: 'planner output unparseable — defaulting to single-agent',
+    rationale: SPRINT_FALLBACK_RATIONALE,
     max_parallel: 1,
     issues: [],
     levels: [],
@@ -55,13 +63,10 @@ export function parseSprintPlan(raw: unknown): SprintPlan {
   if (!raw) return fallback;
   let candidate: unknown = raw;
   if (typeof raw === 'string') {
-    const body = extractFencedJson(raw);
-    if (!body) return fallback;
-    try {
-      candidate = JSON.parse(body);
-    } catch {
-      return fallback;
-    }
+    // parseJsonLoose extracts the fenced/balanced JSON and runs a jsonrepair salvage
+    // pass, so a truncated/malformed planner turn still yields the DAG plan.
+    candidate = parseJsonLoose(raw);
+    if (candidate == null) return fallback;
   }
   const result = sprintPlanSchema.safeParse(candidate);
   return result.success ? result.data : fallback;
@@ -374,7 +379,21 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
       levelCount = counts.levelCount;
     }
 
-    ctx.logger.info({ mode, planId, issueCount, levelCount }, 'sprint plan recorded');
-    return { mode, planId, issueCount, levelCount };
+    // De-silence: when the planner produced output but it could not be turned into a
+    // usable plan (fell back to single-agent), surface a degraded note rather than a
+    // silent downgrade. A genuine planner-chosen single-mode keeps its own rationale.
+    const plannerRan = typeof args.llmOutput === 'string' && args.llmOutput.trim().length > 0;
+    const degraded = plannerRan && plan.rationale === SPRINT_FALLBACK_RATIONALE;
+    if (degraded) {
+      ctx.logger.warn('sprint planner output unparseable — single-agent fallback (degraded)');
+    }
+    ctx.logger.info({ mode, planId, issueCount, levelCount, degraded }, 'sprint plan recorded');
+    return {
+      mode,
+      planId,
+      issueCount,
+      levelCount,
+      ...(degraded ? { source: 'stub' as const } : {}),
+    };
   },
 };

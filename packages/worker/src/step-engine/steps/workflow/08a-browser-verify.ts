@@ -7,7 +7,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput, resolveDdevWorkspace } from './_task-meta.js';
 import { resolveBrowserRuntime } from './_browser-runtime.js';
@@ -116,13 +116,9 @@ function fencedCandidate(raw: unknown): unknown {
   if (!raw) return null;
   if (typeof raw === 'object') return raw;
   if (typeof raw !== 'string') return null;
-  const body = extractFencedJson(raw);
-  if (!body) return null;
-  try {
-    return JSON.parse(body);
-  } catch {
-    return null;
-  }
+  // parseJsonLoose extracts the fenced/balanced JSON and runs a jsonrepair salvage
+  // pass, so a truncated/malformed agent turn is recovered instead of dropped.
+  return parseJsonLoose(raw);
 }
 
 /** Parse the MCP tester verdict; null when unparseable (caller treats a parse

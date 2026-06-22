@@ -7,7 +7,7 @@ import type {
   StepContext,
   StepDefinition,
 } from '../../step-definition.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { pathExists } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { loadAgentPersonas, type AgentPersona } from './_agent-loader.js';
@@ -86,13 +86,9 @@ function parseMiningOutput(raw: unknown): MiningJson | null {
   if (!raw) return null;
   let obj: Record<string, unknown> | null = null;
   if (typeof raw === 'string') {
-    const body = extractFencedJson(raw) ?? raw;
-    try {
-      const parsed = JSON.parse(body);
-      if (typeof parsed === 'object' && parsed !== null) obj = parsed as Record<string, unknown>;
-    } catch {
-      return null;
-    }
+    const parsed = parseJsonLoose(raw);
+    if (parsed == null) return null;
+    if (typeof parsed === 'object') obj = parsed as Record<string, unknown>;
   } else if (typeof raw === 'object') {
     obj = raw as Record<string, unknown>;
   }

@@ -1,5 +1,29 @@
 import { describe, it, expect } from 'vitest';
-import { parsePeerReview, parseSecurityReview, computeBlocking } from './08c-code-review.js';
+import { logger } from '@haive/shared';
+import {
+  parsePeerReview,
+  parseSecurityReview,
+  computeBlocking,
+  codeReviewStep,
+} from './08c-code-review.js';
+import type { AgentMiningResult, StepContext } from '../../step-definition.js';
+
+const fakeCtx = { logger: logger.child({ test: '08c-apply' }) } as unknown as StepContext;
+function mining(agentId: string, rawOutput: string | null): AgentMiningResult {
+  return {
+    agentId,
+    agentTitle: agentId,
+    status: 'done',
+    output: null,
+    rawOutput,
+    errorMessage: null,
+  };
+}
+function runReview(results: AgentMiningResult[]) {
+  return codeReviewStep.apply(fakeCtx, {
+    agentMiningResults: results,
+  } as unknown as Parameters<typeof codeReviewStep.apply>[1]);
+}
 
 describe('parsePeerReview', () => {
   it('parses a fenced peer review', () => {
@@ -81,5 +105,37 @@ describe('computeBlocking', () => {
 
   it('handles null reviews (bypass)', () => {
     expect(computeBlocking(null, null)).toBe(false);
+  });
+});
+
+describe('codeReviewStep.apply de-silence', () => {
+  it('does NOT silently APPROVE/SECURE when a reviewer ran but its output was unparseable', async () => {
+    const out = await runReview([
+      mining('peer-reviewer', 'I reviewed everything thoroughly but forgot to emit any JSON'),
+      mining('security-code-reviewer', 'No obvious problems in prose form, no json here'),
+    ]);
+    expect(out.reviewed).toBe(true);
+    expect(out.peer.verdict).not.toBe('APPROVE');
+    expect(out.security.verdict).not.toBe('SECURE');
+    expect(out.peer.findings.length).toBeGreaterThan(0);
+  });
+
+  it('reports a clean no-op only when no reviewer ran (bypass)', async () => {
+    const out = await runReview([]);
+    expect(out.reviewed).toBe(false);
+    expect(out.peer.verdict).toBe('APPROVE');
+    expect(out.security.verdict).toBe('SECURE');
+    expect(out.blocking).toBe(false);
+  });
+
+  it('still blocks on a real parsed REQUEST_CHANGES', async () => {
+    const out = await runReview([
+      mining(
+        'peer-reviewer',
+        '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"critical","issue":"bug"}]}\n```',
+      ),
+    ]);
+    expect(out.reviewed).toBe(true);
+    expect(out.blocking).toBe(true);
   });
 });

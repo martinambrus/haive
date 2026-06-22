@@ -8,7 +8,7 @@ import type {
   AgentMiningResult,
 } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
@@ -103,13 +103,9 @@ function fencedCandidate(raw: unknown): unknown {
   if (!raw) return null;
   if (typeof raw === 'object') return raw;
   if (typeof raw !== 'string') return null;
-  const body = extractFencedJson(raw);
-  if (!body) return null;
-  try {
-    return JSON.parse(body);
-  } catch {
-    return null;
-  }
+  // parseJsonLoose extracts the fenced/balanced JSON and runs a jsonrepair salvage
+  // pass, so a truncated/malformed reviewer turn is recovered instead of dropped.
+  return parseJsonLoose(raw);
 }
 
 /** Parse the peer-reviewer JSON; null when unparseable. */
@@ -352,12 +348,15 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
 
   async apply(ctx, args): Promise<CodeReviewApply> {
     const results = args.agentMiningResults ?? [];
-    const peer = parsePeerReview(miningResult(results, 'peer-reviewer'));
-    const security = parseSecurityReview(miningResult(results, 'security-code-reviewer'));
+    const peerRaw = miningResult(results, 'peer-reviewer');
+    const securityRaw = miningResult(results, 'security-code-reviewer');
+    const peer = parsePeerReview(peerRaw);
+    const security = parseSecurityReview(securityRaw);
 
-    if (!peer && !security) {
-      // No reviews (bypass, or both agents failed) — nothing to block on.
-      ctx.logger.info('code review produced no parseable results');
+    if (peerRaw == null && securityRaw == null) {
+      // No reviewer produced output (test bypass, or both agents no-op'd). Nothing
+      // was reviewed, so there is nothing to block on.
+      ctx.logger.info('code review produced no agent output (bypass or no-op)');
       return {
         reviewed: false,
         peer: { verdict: 'APPROVE', findings: [], positives: [] },
@@ -367,29 +366,70 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       };
     }
 
+    // A reviewer that RAN but whose output could not be parsed (even after the
+    // jsonrepair salvage) must NOT be reported as APPROVE/SECURE — that would
+    // advance unreviewed code. Surface a visible, non-approving finding at gate 2
+    // instead (the Tier-3 reviewer retry, when added, re-rolls upstream of this).
+    const peerUnparsed = peerRaw != null && peer == null;
+    const securityUnparsed = securityRaw != null && security == null;
+    if (peerUnparsed || securityUnparsed) {
+      ctx.logger.warn(
+        { peerUnparsed, securityUnparsed },
+        'code review output unparseable — surfacing as non-approving, not silently approving',
+      );
+    }
+
+    const peerOut = peer ?? {
+      verdict: peerUnparsed ? 'DISCUSS' : 'APPROVE',
+      findings: peerUnparsed
+        ? [
+            {
+              severity: 'warning',
+              issue:
+                'Peer review output was unparseable — review did not complete; re-run code review.',
+            },
+          ]
+        : [],
+      positives: [],
+    };
+    const securityOut = security ?? {
+      verdict: securityUnparsed ? 'NEEDS_FIXES' : 'SECURE',
+      findings: securityUnparsed
+        ? [
+            {
+              severity: 'medium',
+              issue:
+                'Security review output was unparseable — review did not complete; re-run code review.',
+            },
+          ]
+        : [],
+    };
+
     const blocking = computeBlocking(peer, security);
-    const securityCriticalHigh = (security?.findings ?? []).filter((f) => {
+    const securityCriticalHigh = securityOut.findings.filter((f) => {
       const s = (f.severity ?? '').toLowerCase();
       return s === 'critical' || s === 'high';
     }).length;
 
     ctx.logger.info(
       {
-        peerVerdict: peer?.verdict,
-        securityVerdict: security?.verdict,
-        peerFindings: peer?.findings.length ?? 0,
+        peerVerdict: peerOut.verdict,
+        securityVerdict: securityOut.verdict,
+        peerFindings: peerOut.findings.length,
         securityCriticalHigh,
         blocking,
+        peerUnparsed,
+        securityUnparsed,
       },
       'code review complete',
     );
 
     return {
       reviewed: true,
-      peer: peer ?? { verdict: 'DISCUSS', findings: [], positives: [] },
-      security: security ?? { verdict: 'NEEDS_FIXES', findings: [] },
+      peer: peerOut,
+      security: securityOut,
       blocking,
-      counts: { peer: peer?.findings.length ?? 0, securityCriticalHigh },
+      counts: { peer: peerOut.findings.length, securityCriticalHigh },
     };
   },
 };

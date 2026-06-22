@@ -4,7 +4,7 @@ import { schema } from '@haive/database';
 import { STEP_CLI_ROLES } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 
 // Phase 3.5 — Code simplification (legacy phase3_5-code-simplification.md). A
@@ -54,13 +54,7 @@ function fencedCandidate(raw: unknown): unknown {
   if (!raw) return null;
   if (typeof raw === 'object') return raw;
   if (typeof raw !== 'string') return null;
-  const body = extractFencedJson(raw);
-  if (!body) return null;
-  try {
-    return JSON.parse(body);
-  } catch {
-    return null;
-  }
+  return parseJsonLoose(raw);
 }
 
 /** Parse the simplifier's JSON; null when unparseable (treated as no-changes —

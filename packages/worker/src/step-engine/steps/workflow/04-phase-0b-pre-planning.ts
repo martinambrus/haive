@@ -4,7 +4,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 
@@ -79,21 +79,15 @@ export function parsePrePlanningOutput(raw: unknown): {
   } else {
     return null;
   }
-  const body = extractFencedJson(text);
-  if (!body) return null;
-  try {
-    const parsed = JSON.parse(body);
-    if (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      typeof (parsed as Record<string, unknown>).summary === 'string' &&
-      typeof (parsed as Record<string, unknown>).spec === 'string'
-    ) {
-      const obj = parsed as Record<string, unknown>;
-      return { summary: obj.summary as string, spec: obj.spec as string };
-    }
-  } catch {
-    return null;
+  const parsed = parseJsonLoose(text);
+  if (parsed == null) return null;
+  if (
+    typeof parsed === 'object' &&
+    typeof (parsed as Record<string, unknown>).summary === 'string' &&
+    typeof (parsed as Record<string, unknown>).spec === 'string'
+  ) {
+    const obj = parsed as Record<string, unknown>;
+    return { summary: obj.summary as string, spec: obj.spec as string };
   }
   return null;
 }

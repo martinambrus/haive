@@ -3,7 +3,7 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { loadOutstandingBizReqFeedback } from './_biz-req-feedback.js';
 
 // Phase 1 — Business requirements (legacy phase1-business-requirements). Between
@@ -42,13 +42,8 @@ const bizReqSchema = z.object({
 export function parseBizReqOutput(raw: unknown): { requirements: string; summary: string } | null {
   let candidate: unknown = raw;
   if (typeof raw === 'string') {
-    const body = extractFencedJson(raw);
-    if (!body) return null;
-    try {
-      candidate = JSON.parse(body);
-    } catch {
-      return null;
-    }
+    candidate = parseJsonLoose(raw);
+    if (candidate == null) return null;
   }
   const parsed = bizReqSchema.safeParse(candidate);
   if (!parsed.success || !parsed.data.requirements.trim()) return null;

@@ -7,7 +7,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import {
   ensureAppRunnerStarted,
   appRunnerExec,
@@ -218,13 +218,7 @@ function parseRunRecipe(raw: unknown): RunRecipe | null {
   if (!raw) return null;
   let obj: unknown = raw;
   if (typeof raw === 'string') {
-    const body = extractFencedJson(raw);
-    if (!body) return null;
-    try {
-      obj = JSON.parse(body);
-    } catch {
-      return null;
-    }
+    obj = parseJsonLoose(raw);
   }
   if (typeof obj !== 'object' || obj === null) return null;
   const o = obj as Record<string, unknown>;

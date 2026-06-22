@@ -10,7 +10,7 @@ import {
   renderTechInventoryTable,
   type TechInventory,
 } from './_tech-inventory.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { matchYamlField, matchYamlBlockField } from '../_ddev-config.js';
 import { buildFileTree, detectLanguages } from '../../../repo/framework-detect.js';
 import {
@@ -674,13 +674,10 @@ function parseEnrichment(raw: unknown): LlmEnrichment | null {
   } else {
     return null;
   }
-  const body = extractFencedJson(text) ?? text;
-  try {
-    const parsed = JSON.parse(body) as Record<string, unknown>;
-    return isValidEnrichment(parsed) ? (parsed as unknown as LlmEnrichment) : null;
-  } catch {
-    return null;
-  }
+  const parsed = parseJsonLoose(text);
+  if (parsed == null) return null;
+  const obj = parsed as Record<string, unknown>;
+  return isValidEnrichment(obj) ? (obj as unknown as LlmEnrichment) : null;
 }
 
 function isValidEnrichment(v: Record<string, unknown>): boolean {

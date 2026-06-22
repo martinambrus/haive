@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, ne } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { globalKbEntries, withGlobalKb, type GlobalKbFacets } from '@haive/shared/global-kb';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { syncGlobalKbEntry } from '../../../queues/global-kb-sync-queue.js';
 
 // Repo-anchored global-KB authoring (plan serialized-crunching-aurora). The task
@@ -169,12 +169,9 @@ export function parseEnrichment(raw: unknown): Enrichment | null {
     else text = JSON.stringify(o);
   }
   if (!text) return null;
-  const json = extractFencedJson(text) ?? text;
-  try {
-    return JSON.parse(json) as Enrichment;
-  } catch {
-    return null;
-  }
+  const parsed = parseJsonLoose(text);
+  if (parsed == null) return null;
+  return parsed as Enrichment;
 }
 
 /** Sanitize the LLM's facets to clean string sets per known dimension. */
