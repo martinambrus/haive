@@ -10,6 +10,7 @@ import {
   type DockerVolumeMount,
 } from './docker-runner.js';
 import { createEgressGateway, type EgressGateway } from './egress-gateway.js';
+import { OLLAMA_THINKING_PROXY_HOST } from '../cli-adapters/ollama-thinking-proxy.js';
 
 const log = logger.child({ module: 'sandbox-runner' });
 
@@ -257,7 +258,9 @@ function mergeProxyEnv(
   // `api` is reached directly over the internal sandbox<->API network, never via
   // the squid proxy (which only allows the user's allowlisted domains). An
   // in-stack Ollama host is likewise reached directly over the models network.
-  const noProxyHosts = ['localhost', '127.0.0.1', '::1', 'api'];
+  // The thinking-disable proxy is an internal sandbox-network hostname (like
+  // `api`), reached directly — never via the squid allowlist proxy.
+  const noProxyHosts = ['localhost', '127.0.0.1', '::1', 'api', OLLAMA_THINKING_PROXY_HOST];
   if (modelsHost) noProxyHosts.push(modelsHost);
   const noProxy = noProxyHosts.join(',');
   return {

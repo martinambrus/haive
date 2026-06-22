@@ -64,6 +64,7 @@ interface FormState {
   sandboxDockerfileExtra: string;
   enabled: boolean;
   isolateAuth: boolean;
+  disableThinking: boolean;
   networkMode: CliNetworkMode;
   networkDomainsText: string;
   networkIpsText: string;
@@ -159,6 +160,7 @@ function statesEqual(a: FormState, b: FormState): boolean {
     a.sandboxDockerfileExtra === b.sandboxDockerfileExtra &&
     a.enabled === b.enabled &&
     a.isolateAuth === b.isolateAuth &&
+    a.disableThinking === b.disableThinking &&
     a.networkMode === b.networkMode &&
     a.networkDomainsText === b.networkDomainsText &&
     a.networkIpsText === b.networkIpsText &&
@@ -232,6 +234,7 @@ export function CliProviderForm({
     sandboxDockerfileExtra: provider?.sandboxDockerfileExtra ?? '',
     enabled: provider?.enabled ?? true,
     isolateAuth: provider?.isolateAuth ?? false,
+    disableThinking: provider?.disableThinking ?? false,
     networkMode: (provider?.networkPolicy ?? DEFAULT_CLI_NETWORK_POLICY).mode,
     networkDomainsText: (provider?.networkPolicy?.domains ?? []).join('\n'),
     networkIpsText: (provider?.networkPolicy?.ips ?? []).join('\n'),
@@ -429,6 +432,7 @@ export function CliProviderForm({
       sandboxDockerfileExtra: snapshot.sandboxDockerfileExtra,
       enabled: snapshot.enabled,
       isolateAuth: snapshot.isolateAuth,
+      disableThinking: snapshot.disableThinking,
       networkPolicy,
       egressDomains: parseLinesList(snapshot.egressDomainsText),
     };
@@ -529,6 +533,7 @@ export function CliProviderForm({
           sandboxDockerfileExtra: state.sandboxDockerfileExtra,
           enabled: state.enabled,
           isolateAuth: state.isolateAuth,
+          disableThinking: state.disableThinking,
           networkPolicy,
           egressDomains: parseLinesList(state.egressDomainsText),
         };
@@ -797,6 +802,28 @@ export function CliProviderForm({
             <code className="font-mono">/api/create</code>). Leave empty to pull the model name
             as-is. The model is (re)built on worker boot.
           </p>
+        </div>
+      )}
+
+      {metadata.name === 'ollama' && (
+        <div className="flex items-start gap-2">
+          <input
+            id="disableThinking"
+            type="checkbox"
+            className="mt-1 h-4 w-4 rounded border-neutral-700 bg-neutral-900 text-indigo-500 focus:ring-indigo-500"
+            checked={state.disableThinking}
+            onChange={(e) => update('disableThinking', e.target.checked)}
+          />
+          <div className="flex flex-col">
+            <Label htmlFor="disableThinking">Disable model thinking</Label>
+            <p className="text-xs text-neutral-500">
+              For Ollama Cloud reasoning models that hide their answer in the thinking channel and
+              return an empty visible response (e.g.{' '}
+              <code className="font-mono">deepseek-v4-pro:cloud</code>). Routes this provider&apos;s
+              requests through a proxy that disables thinking, so the model replies with visible
+              text. No effect on local models.
+            </p>
+          </div>
         </div>
       )}
 

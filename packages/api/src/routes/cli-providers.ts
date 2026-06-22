@@ -292,6 +292,7 @@ cliProviderRoutes.post('/', async (c) => {
         : null,
       enabled: body.enabled ?? true,
       isolateAuth: body.isolateAuth ?? false,
+      disableThinking: body.disableThinking ?? false,
       rulesContent: body.rulesContent ?? DEFAULT_AGENT_RULES,
     })
     .returning();
@@ -384,6 +385,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
   }
   if (body.enabled !== undefined) updates.enabled = body.enabled;
   if (body.isolateAuth !== undefined) updates.isolateAuth = body.isolateAuth;
+  if (body.disableThinking !== undefined) updates.disableThinking = body.disableThinking;
   if (body.rulesContent !== undefined) updates.rulesContent = body.rulesContent;
 
   const updated = await db
@@ -553,6 +555,7 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
       sandboxDockerfileExtra: source.sandboxDockerfileExtra,
       enabled: source.enabled,
       isolateAuth: source.isolateAuth,
+      disableThinking: source.disableThinking,
       rulesContent: source.rulesContent,
     })
     .returning();

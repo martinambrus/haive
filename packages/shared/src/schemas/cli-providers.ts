@@ -96,6 +96,7 @@ export const createCliProviderRequestSchema = z.object({
   sandboxDockerfileExtra: z.string().optional(),
   enabled: z.boolean().optional(),
   isolateAuth: z.boolean().optional(),
+  disableThinking: z.boolean().optional(),
   networkPolicy: cliNetworkPolicySchema.optional(),
   // Extra egress domains for the CLI's own model/auth servers (merged at runtime
   // with adapter defaults). Same validation as allowlist domains.

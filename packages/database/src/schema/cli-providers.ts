@@ -96,6 +96,12 @@ export const cliProviders = pgTable(
     sandboxImageBuiltAt: timestamp('sandbox_image_built_at'),
     enabled: boolean('enabled').notNull().default(true),
     isolateAuth: boolean('isolate_auth').notNull().default(false),
+    // When true, the worker routes this provider's ollama-cloud invocations
+    // through the thinking-disable proxy, which injects thinking:{type:"disabled"}
+    // into /v1/messages so reasoning models that hide their answer in the thinking
+    // channel (e.g. deepseek-v4-pro:cloud) return visible text. No-op for
+    // non-cloud models.
+    disableThinking: boolean('disable_thinking').notNull().default(false),
     authStatus: cliAuthStatusEnum('auth_status').notNull().default('unknown'),
     authLastCheckedAt: timestamp('auth_last_checked_at'),
     authMessage: text('auth_message'),

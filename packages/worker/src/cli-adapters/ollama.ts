@@ -1,5 +1,6 @@
 import { isOllamaCloudModel } from '@haive/shared';
 import { BaseCliAdapter } from './base-adapter.js';
+import { OLLAMA_THINKING_PROXY_URL } from './ollama-thinking-proxy.js';
 import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from './types.js';
 
 // In-stack daemon default; remote/cloud providers override via
@@ -51,7 +52,18 @@ export class OllamaAdapter extends BaseCliAdapter {
     }
     // Cloud models run on Ollama Cloud; route there by default. Other models
     // use the in-stack daemon. An explicit ANTHROPIC_BASE_URL always wins.
-    const defaultBaseUrl = isOllamaCloudModel(model) ? OLLAMA_CLOUD_URL : OLLAMA_DEFAULT_BASE_URL;
+    // When "Disable model thinking" is on for a cloud model, route through the
+    // thinking-disable proxy instead (it injects thinking:{type:"disabled"} and
+    // forwards to ollama.com) so reasoning models that hide their answer in the
+    // thinking channel return visible text. Only when we'd otherwise default to
+    // ollama.com — a user-set base URL still wins.
+    const useThinkingProxy =
+      provider.disableThinking && isOllamaCloudModel(model) && !env.ANTHROPIC_BASE_URL;
+    const defaultBaseUrl = useThinkingProxy
+      ? OLLAMA_THINKING_PROXY_URL
+      : isOllamaCloudModel(model)
+        ? OLLAMA_CLOUD_URL
+        : OLLAMA_DEFAULT_BASE_URL;
     env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL ?? defaultBaseUrl;
     // Token precedence: an explicit Anthropic token, else the Ollama API key
     // (cloud), else the literal 'ollama' a local daemon accepts. A key stored as

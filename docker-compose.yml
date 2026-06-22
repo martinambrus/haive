@@ -171,6 +171,20 @@ services:
     networks:
       - haive-network
 
+  # Injects thinking:{type:"disabled"} into Ollama Cloud /v1/messages requests for
+  # providers with the per-provider "Disable model thinking" toggle on. Dual-homed
+  # like the api container: haive-network for outbound internet to ollama.com,
+  # haive-sandbox (internal) so per-task sandboxes reach it by name.
+  ollama-thinking-proxy:
+    build:
+      context: ./docker/ollama-thinking-proxy
+      dockerfile: Dockerfile
+    container_name: haive-ollama-thinking-proxy
+    restart: unless-stopped
+    networks:
+      - haive-network
+      - haive-sandbox
+
 networks:
   haive-network:
     driver: bridge
