@@ -109,4 +109,53 @@ describe('template manifest', () => {
     const hashes = new Set(multiAgent.map((r) => r.templateContentHash));
     expect(hashes.size).toBe(1);
   });
+
+  it('gates agents by acceptedAgentIds: never-accepted baseline/framework agents do not expand', () => {
+    const ctx: TemplateRenderContext = {
+      ...REFERENCE_CONTEXT,
+      acceptedAgentIds: ['code-reviewer'],
+      agentTargets: [{ dir: '.claude/agents', format: 'markdown' }],
+    };
+    const agentIds = new Set(
+      expandManifestFor(ctx)
+        .filter((r) => r.templateKind === 'agent')
+        .map((r) => r.templateId),
+    );
+    expect(agentIds.has('agent.code-reviewer')).toBe(true);
+    // framework agents must never expand into a repo that did not accept them
+    expect(agentIds.has('agent.django-model-dev')).toBe(false);
+    expect(agentIds.has('agent.node-package-dev')).toBe(false);
+    // a non-accepted baseline is gated out too
+    expect(agentIds.has('agent.test-writer')).toBe(false);
+    expect(agentIds.size).toBe(1);
+  });
+
+  it('empty acceptedAgentIds falls back to all agents (legacy/snapshotless safety)', () => {
+    const ctx: TemplateRenderContext = {
+      ...REFERENCE_CONTEXT,
+      acceptedAgentIds: [],
+      agentTargets: [{ dir: '.claude/agents', format: 'markdown' }],
+    };
+    const agentIds = new Set(
+      expandManifestFor(ctx)
+        .filter((r) => r.templateKind === 'agent')
+        .map((r) => r.templateId),
+    );
+    expect(agentIds.has('agent.code-reviewer')).toBe(true);
+    expect(agentIds.has('agent.django-model-dev')).toBe(true);
+    expect(agentIds.size).toBeGreaterThan(1);
+  });
+
+  it('applies-gate is decoupled from hashing: gated-out agents keep populated, distinct content hashes', () => {
+    const manifest = getTemplateManifest();
+    const agentItems = manifest.items.filter((i) => i.kind === 'agent');
+    // django is gated out of a non-django expansion but must still be a hashed
+    // manifest item (the gate lives outside render()).
+    const django = agentItems.find((i) => i.id === 'agent.django-model-dev');
+    expect(django, 'agent.django-model-dev should remain a manifest item').toBeDefined();
+    expect(django!.contentHash.length).toBeGreaterThan(0);
+    const reviewer = agentItems.find((i) => i.id === 'agent.code-reviewer');
+    // distinct bodies => distinct hashes; the gate did not blank them out
+    expect(reviewer!.contentHash).not.toBe(django!.contentHash);
+  });
 });

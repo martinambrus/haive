@@ -52,6 +52,13 @@ export interface TemplateItem<TCtx = unknown> {
    *  user-owned artefacts like mcp_settings.json. */
   isUserOwnedAfterWrite?: boolean;
   render(ctx: TCtx): TemplateRendering[];
+  /** Per-repo applicability gate, evaluated at expansion time (NOT at
+   *  manifest-build/hash time). When it returns false the item is skipped by
+   *  `expandManifestFor`, so it produces no `onboarding_artifacts` row and no
+   *  "current" rendering at upgrade. `render` stays independent of this so the
+   *  reference-context contentHash keeps covering the item's body. Items without
+   *  an `applies` are always applicable. */
+  applies?(ctx: TCtx): boolean;
 }
 
 /** TemplateItem augmented with the auto-computed content hash derived at

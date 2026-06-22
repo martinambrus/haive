@@ -126,6 +126,16 @@ function buildAgentTemplateItem(spec: AgentSpec): TemplateItem<TemplateRenderCon
       }
       return out;
     },
+    // Only render agents the repo actually accepted at onboarding. Without this
+    // gate the framework-blind manifest emits every baseline + framework agent
+    // (e.g. django/node/react into a PHP repo), creating phantom
+    // onboarding_artifacts rows for files that were never written. An empty
+    // acceptedAgentIds means "no snapshot" (the lazy-backfill default in
+    // 01-upgrade-plan), so fall back to applicable to avoid gating out every
+    // agent on legacy repos. Kept off `render` so contentHash still covers the
+    // body (REFERENCE_CONTEXT.acceptedAgentIds is []).
+    applies: (ctx: TemplateRenderContext): boolean =>
+      ctx.acceptedAgentIds.length === 0 || ctx.acceptedAgentIds.includes(spec.id),
   };
 }
 
@@ -268,6 +278,7 @@ export function expandManifestFor(
 ): ExpandedRendering[] {
   const out: ExpandedRendering[] = [];
   for (const item of manifest.items) {
+    if (item.applies && !item.applies(ctx)) continue;
     const renderings = item.render(ctx);
     for (const r of renderings) {
       const normalized = normalizeContent(r.content);

@@ -1,4 +1,4 @@
-import { and, inArray, isNull, notInArray } from 'drizzle-orm';
+import { and, inArray, isNull, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 
 /**
@@ -9,6 +9,7 @@ import { schema, type Database } from '@haive/database';
 export async function runDataMigrations(db: Database): Promise<void> {
   await supersedeRemovedRtkArtifacts(db);
   await skipRemovedSteps(db);
+  await supersedePhantomAgentArtifacts(db);
 }
 
 /** Template ids removed when the RTK awareness markdown was consolidated into
@@ -64,4 +65,73 @@ async function skipRemovedSteps(db: Database): Promise<void> {
         notInArray(schema.taskSteps.status, ['done', 'failed', 'skipped']),
       ),
     );
+}
+
+/** Soft-delete phantom Haive-agent onboarding_artifacts rows. Before the
+ *  expandManifestFor `applies` gate, 12-post-onboarding recorded a row for every
+ *  baseline + framework agent regardless of stack (the manifest was
+ *  framework-blind), while 07-generate-files only wrote the accepted agents to
+ *  disk. So repos carry rows for agents they never accepted and that were never
+ *  written (e.g. django/node/react in a PHP repo); the upgrade plan then
+ *  mislabels them `user_deleted` ("reinstate deleted files").
+ *
+ *  A row is phantom when its agent id is absent from its own
+ *  `form_values_snapshot.acceptedAgentIds`. The non-empty guard skips
+ *  legacy/snapshotless rows (acceptedAgentIds defaults to [] there) so a repo's
+ *  whole agent set is never mass-superseded — same conservative rule as the
+ *  `applies` gate. A genuinely user-deleted *accepted* agent keeps its id in the
+ *  snapshot, so the predicate is false and the row is preserved.
+ *
+ *  Relies on the `applies` gate shipping together: once gated, the manifest no
+ *  longer renders these agents, so a superseded phantom stays absent instead of
+ *  resurfacing as `new_artifact`. Idempotent via the `superseded_at IS NULL`
+ *  guard. Step 1 (applicable-ids cleanup) runs first because it reads the
+ *  still-live phantom rows; step 2 then supersedes them. */
+async function supersedePhantomAgentArtifacts(db: Database): Promise<void> {
+  // 1. Remove phantom agent template_ids from each affected repo's
+  //    applicable_template_ids. The upgrade-status API reads only
+  //    template_manifest_cache + applicable_template_ids (it never expands), so
+  //    without this a superseded phantom would resurface there as "new".
+  await db.execute(sql`
+    UPDATE repositories r
+    SET applicable_template_ids = (
+          SELECT COALESCE(array_agg(t ORDER BY t), '{}')
+          FROM unnest(r.applicable_template_ids) AS t
+          WHERE NOT EXISTS (
+            SELECT 1 FROM onboarding_artifacts oa
+            WHERE oa.repository_id = r.id
+              AND oa.template_id = t
+              AND oa.template_kind = 'agent'
+              AND oa.template_id LIKE 'agent.%'
+              AND oa.superseded_at IS NULL
+              AND jsonb_typeof(oa.form_values_snapshot -> 'acceptedAgentIds') = 'array'
+              AND jsonb_array_length(oa.form_values_snapshot -> 'acceptedAgentIds') > 0
+              AND NOT jsonb_exists(oa.form_values_snapshot -> 'acceptedAgentIds', replace(oa.template_id, 'agent.', ''))
+          )
+        ),
+        updated_at = now()
+    WHERE r.applicable_template_ids IS NOT NULL
+      AND EXISTS (
+        SELECT 1 FROM onboarding_artifacts oa
+        WHERE oa.repository_id = r.id
+          AND oa.template_kind = 'agent'
+          AND oa.template_id LIKE 'agent.%'
+          AND oa.superseded_at IS NULL
+          AND jsonb_typeof(oa.form_values_snapshot -> 'acceptedAgentIds') = 'array'
+          AND jsonb_array_length(oa.form_values_snapshot -> 'acceptedAgentIds') > 0
+          AND NOT jsonb_exists(oa.form_values_snapshot -> 'acceptedAgentIds', replace(oa.template_id, 'agent.', ''))
+      )
+  `);
+
+  // 2. Soft-delete the phantom rows themselves.
+  await db.execute(sql`
+    UPDATE onboarding_artifacts
+    SET superseded_at = now(), updated_at = now()
+    WHERE template_kind = 'agent'
+      AND template_id LIKE 'agent.%'
+      AND superseded_at IS NULL
+      AND jsonb_typeof(form_values_snapshot -> 'acceptedAgentIds') = 'array'
+      AND jsonb_array_length(form_values_snapshot -> 'acceptedAgentIds') > 0
+      AND NOT jsonb_exists(form_values_snapshot -> 'acceptedAgentIds', replace(template_id, 'agent.', ''))
+  `);
 }
