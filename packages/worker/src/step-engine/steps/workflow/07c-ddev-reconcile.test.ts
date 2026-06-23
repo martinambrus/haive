@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { classifyDrift, ddevReconcileStep } from './07c-ddev-reconcile.js';
-import { parseDdevListForApproot } from '../../../sandbox/ddev-runner.js';
+import { parseDdevProjectListForApproot } from '../../../sandbox/ddev-runner.js';
 import type { DdevConfigFields } from '../_ddev-config.js';
 import type { DdevBaseline } from './01c-ddev-env.js';
 
@@ -110,31 +110,35 @@ describe('classifyDrift', () => {
   });
 });
 
-describe('parseDdevListForApproot (Slice C name-drift detection)', () => {
-  const listJson = JSON.stringify({
-    raw: [
-      { name: 'rs-ollama2', approot: '/repos/u/r/.haive/worktrees/feature-x' },
-      { name: 'other', approot: '/repos/u/other' },
-    ],
+describe('parseDdevProjectListForApproot (Slice C name-drift detection)', () => {
+  // The registry retains the OLD name (rs-ollama9) after the config was renamed to calypso —
+  // exactly the drift that must trigger a rename. Mirrors a real ~/.ddev/project_list.yaml.
+  const registry = [
+    'rs-ollama9:',
+    '    approot: /repos/u/r/.haive/worktrees/feature-add-ddev-environment',
+    'other:',
+    '    approot: /repos/u/other',
+    '',
+  ].join('\n');
+
+  it('returns the REGISTERED name for the approot (old name after a config rename)', () => {
+    expect(
+      parseDdevProjectListForApproot(
+        registry,
+        '/repos/u/r/.haive/worktrees/feature-add-ddev-environment',
+      ),
+    ).toBe('rs-ollama9');
   });
 
-  it('returns the project name registered at the approot', () => {
-    expect(parseDdevListForApproot(listJson, '/repos/u/r/.haive/worktrees/feature-x')).toBe(
-      'rs-ollama2',
-    );
+  it('matches a later entry too', () => {
+    expect(parseDdevProjectListForApproot(registry, '/repos/u/other')).toBe('other');
   });
 
-  it('returns null when no project matches the approot', () => {
-    expect(parseDdevListForApproot(listJson, '/repos/u/r/.haive/worktrees/none')).toBeNull();
+  it('returns null when no entry matches the approot', () => {
+    expect(parseDdevProjectListForApproot(registry, '/repos/u/nope')).toBeNull();
   });
 
-  it('tolerates leading log/pull noise before the JSON', () => {
-    expect(parseDdevListForApproot(`pulling images...\n${listJson}\n`, '/repos/u/other')).toBe(
-      'other',
-    );
-  });
-
-  it('returns null on unparseable output', () => {
-    expect(parseDdevListForApproot('not json at all', '/x')).toBeNull();
+  it('returns null on an empty/missing registry', () => {
+    expect(parseDdevProjectListForApproot('', '/x')).toBeNull();
   });
 });

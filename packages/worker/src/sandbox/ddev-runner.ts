@@ -247,32 +247,42 @@ export async function ddevPrimaryUrl(handle: DdevRunnerHandle): Promise<string |
   }
 }
 
-/** Parse `ddev list -j` output for the project registered at `approot`, returning its name
- *  or null. Pure (no docker) so it is unit-testable; tolerant of verbose pull/log noise that
- *  can precede the JSON (slices to the outermost object). */
-export function parseDdevListForApproot(jsonText: string, approot: string): string | null {
-  const start = jsonText.indexOf('{');
-  const end = jsonText.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  try {
-    const parsed = JSON.parse(jsonText.slice(start, end + 1)) as {
-      raw?: { name?: string; approot?: string }[];
-    };
-    const match = (parsed.raw ?? []).find((p) => p.approot === approot);
-    return match?.name ?? null;
-  } catch {
-    return null;
+/** Parse DDEV's registry file (`~/.ddev/project_list.yaml`) for the project name registered
+ *  at `approot`, or null. The registry is the source DDEV checks for the "already contains a
+ *  project named <name>" conflict, and crucially it retains the name the approot was STARTED
+ *  under even after `.ddev/config.yaml` is renamed (`ddev list` instead reports the new
+ *  config name, hiding the drift). Flat format, regex-parsed (the worker carries no YAML dep,
+ *  matching _ddev-config.ts):
+ *      <name>:
+ *          approot: <path>
+ */
+export function parseDdevProjectListForApproot(yamlText: string, approot: string): string | null {
+  let currentName: string | null = null;
+  for (const line of yamlText.split('\n')) {
+    const top = line.match(/^([A-Za-z0-9][^:\s]*):\s*$/);
+    if (top) {
+      currentName = top[1] ?? null;
+      continue;
+    }
+    const ap = line.match(/^\s+approot:\s*"?([^"\n]+?)"?\s*$/);
+    if (ap && currentName && (ap[1] ?? '').trim() === approot) return currentName;
   }
+  return null;
 }
 
-/** The DDEV project name currently REGISTERED for this runner's approot (via `ddev list -j`),
- *  or null when none is registered there. 07c uses it to detect a project rename: when the
- *  config `name:` no longer matches, a bare `ddev restart` would collide ("already contains a
- *  project named <old>") and a data-safe rename is needed instead. */
+/** The DDEV project name currently REGISTERED for this runner's approot, read from the
+ *  per-runner registry (`~/.ddev/project_list.yaml`), or null when none is registered there.
+ *  07c uses it to detect a project rename: when the config `name:` no longer matches this, a
+ *  bare `ddev restart` would collide ("already contains a project named <old>") and a
+ *  data-safe rename is needed instead. NOTE: read the registry, NOT `ddev list` — list
+ *  reports each project's CURRENT config name, so after a rename it already shows the NEW
+ *  name and the drift is invisible. */
 export async function ddevRegisteredProjectName(handle: DdevRunnerHandle): Promise<string | null> {
-  const res = await ddevExec(handle, 'list -j', { timeoutMs: 30_000 });
+  const res = await runnerExec(handle, 'cat "$HOME/.ddev/project_list.yaml" 2>/dev/null || true', {
+    timeoutMs: 15_000,
+  });
   if (res.exitCode !== 0) return null;
-  return parseDdevListForApproot(res.output, handle.projectDir);
+  return parseDdevProjectListForApproot(res.output, handle.projectDir);
 }
 
 /** `ddev restart` — re-reads `.ddev/config.yaml` and applies changes (php_version,
