@@ -7,6 +7,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { collectImplementationFiles } from './_impl-changes.js';
+import { loadHonoredConstraints } from './_fix-loop.js';
 
 // Phase 4 — Implementation validation (legacy phase4-validation.md + the
 // implementation-validator agent). An LLM validator checks what the test suite
@@ -33,6 +34,8 @@ interface ValidateDetect {
   implementationFiles: string[];
   /** Pre-formatted KNOWN TECHNICAL DEBT block from DAG execution ('' if none). */
   debtBlock: string;
+  /** Prior objective/runtime fix-loop constraints the validator must not revert ('' if none). */
+  honoredBlock: string;
 }
 
 export type ValidationVerdict = 'VALID' | 'ISSUES_FOUND' | 'UNPARSEABLE';
@@ -367,6 +370,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       spec,
       implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
       debtBlock,
+      honoredBlock: await loadHonoredConstraints(ctx),
     };
   },
 
@@ -386,6 +390,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           ? `Changed files (your validation scope):\n- ${d.implementationFiles.join('\n- ')}`
           : 'Determine the recently-implemented files from the workspace.',
         d.debtBlock ? `\n${d.debtBlock}` : '',
+        d.honoredBlock ? `\n${d.honoredBlock}` : '',
         '',
         'Do NOT run git (it is unavailable in this environment — the orchestrator commits later)',
         'and do NOT run the test suite (a later step does).',
@@ -459,6 +464,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           ? `Changed files (your validation scope):\n- ${d.implementationFiles.join('\n- ')}`
           : '',
         d.debtBlock ? `\n${d.debtBlock}` : '',
+        d.honoredBlock ? `\n${d.honoredBlock}` : '',
         '',
         'Re-validate from scratch — verify the fixes hold AND nothing else broke.',
         'Do NOT run git and do NOT run the test suite.',

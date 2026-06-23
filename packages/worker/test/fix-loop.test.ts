@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
 import { advanceStep, type AdvanceStepParams } from '../src/step-engine/step-runner.js';
-import type { StepDefinition } from '../src/step-engine/step-definition.js';
+import type { StepContext, StepDefinition } from '../src/step-engine/step-definition.js';
 import { phase2ImplementStep } from '../src/step-engine/steps/workflow/07-phase-2-implement.js';
+import { phase4ValidateStep } from '../src/step-engine/steps/workflow/07b-phase-4-validate.js';
 import {
   cleanDiagnosis,
   buildFixLoopEscalationSchema,
+  buildOscillationEscalationSchema,
+  fixLoopFingerprint,
+  detectFixLoopOscillation,
+  loadHonoredConstraints,
   FIX_LOOP_ACTION_FIELD,
 } from '../src/step-engine/steps/workflow/_fix-loop.js';
 
@@ -307,5 +312,188 @@ describe('fix-loop escalation gate (slice 5c)', () => {
     expect(values).toEqual(['continue', 'accept', 'abort']);
     // The diagnosis is surfaced read-only.
     expect(JSON.stringify(schema.infoSections)).toContain('SQLi in login');
+  });
+});
+
+// --- Slice A: oscillation guard ------------------------------------------------
+
+/** A db whose fix_loop.requested scan (select.from.where.orderBy, awaited directly)
+ *  resolves to a scripted event list. detectFixLoopOscillation only reads `payload`. */
+function eventsDb(events: { payload: Record<string, unknown> }[]): Database {
+  return {
+    select: () => ({
+      from: () => ({ where: () => ({ orderBy: async () => events }) }),
+    }),
+  } as unknown as Database;
+}
+
+const D07C = 'ddev start failed: already contains a project named rs-ollama2';
+const D07B = 'Developer Experience: rename rs-ollama2 to redaction-system';
+function ev(sourceStepId: string, round: number, diagnosis: string) {
+  return {
+    payload: {
+      sourceStepId,
+      diagnosis,
+      round,
+      fingerprint: fixLoopFingerprint(sourceStepId, diagnosis),
+    },
+  };
+}
+
+describe('fixLoopFingerprint', () => {
+  it('is stable across volatile tokens (line numbers, uuids, paths)', () => {
+    const a = fixLoopFingerprint(
+      '07c-ddev-reconcile',
+      'ddev start failed at /repos/abc-123/.ddev/config.yaml:5: already contains a project named rs-ollama2 (snapshot haive-import-11112222-3333-4444-5555-666677778888)',
+    );
+    const b = fixLoopFingerprint(
+      '07c-ddev-reconcile',
+      'ddev start failed at /repos/zzz-999/.ddev/config.yaml:42: already contains a project named rs-ollama2 (snapshot haive-import-99998888-7777-6666-5555-444433332222)',
+    );
+    expect(a).toBe(b);
+  });
+
+  it('differs by source step even for identical text (no cross-step collision)', () => {
+    expect(fixLoopFingerprint('07b-phase-4-validate', 'rename rs-ollama2')).not.toBe(
+      fixLoopFingerprint('07c-ddev-reconcile', 'rename rs-ollama2'),
+    );
+  });
+
+  it('normalizes ANSI before hashing (same as the cleaned form)', () => {
+    expect(fixLoopFingerprint('07c-ddev-reconcile', '\x1B[31mddev start failed: boom\x1B[0m')).toBe(
+      fixLoopFingerprint('07c-ddev-reconcile', 'ddev start failed: boom'),
+    );
+  });
+});
+
+describe('detectFixLoopOscillation', () => {
+  it('trips when a source re-raises the same complaint with alternation in between', async () => {
+    const db = eventsDb([ev('07c-ddev-reconcile', 2, D07C), ev('07b-phase-4-validate', 3, D07B)]);
+    const r = await detectFixLoopOscillation(db, 't', '07c-ddev-reconcile', D07C, 4);
+    expect(r.tripped).toBe(true);
+    expect(r.conflictingStepId).toBe('07b-phase-4-validate');
+    expect(r.conflictingDiagnoses).toEqual([D07C, D07B]);
+  });
+
+  it('does NOT trip when the same source repeats but nothing alternated in', async () => {
+    const db = eventsDb([ev('07c-ddev-reconcile', 2, D07C)]);
+    const r = await detectFixLoopOscillation(db, 't', '07c-ddev-reconcile', D07C, 4);
+    expect(r.tripped).toBe(false);
+  });
+
+  it('does NOT trip when each round raises a different (converging) complaint', async () => {
+    const db = eventsDb([
+      ev('07c-ddev-reconcile', 2, 'ddev start failed: missing extension foo'),
+      ev('07b-phase-4-validate', 3, D07B),
+    ]);
+    const r = await detectFixLoopOscillation(db, 't', '07c-ddev-reconcile', D07C, 4);
+    expect(r.tripped).toBe(false);
+  });
+
+  it('does NOT trip before round 3', async () => {
+    const db = eventsDb([ev('07c-ddev-reconcile', 0, D07C)]);
+    const r = await detectFixLoopOscillation(db, 't', '07c-ddev-reconcile', D07C, 2);
+    expect(r.tripped).toBe(false);
+  });
+
+  it('recomputes the fingerprint for legacy events written before the field', async () => {
+    const db = eventsDb([
+      { payload: { sourceStepId: '07c-ddev-reconcile', diagnosis: D07C, round: 2 } },
+      { payload: { sourceStepId: '07b-phase-4-validate', diagnosis: D07B, round: 3 } },
+    ]);
+    const r = await detectFixLoopOscillation(db, 't', '07c-ddev-reconcile', D07C, 4);
+    expect(r.tripped).toBe(true);
+  });
+});
+
+describe('oscillation escalation gate', () => {
+  it('reuses the gate action field and surfaces both conflicting diagnoses', () => {
+    const s = buildOscillationEscalationSchema(
+      '07c-ddev-reconcile',
+      '07b-phase-4-validate',
+      'pin the ddev project name',
+      'rename the ddev project name',
+    );
+    const radio = s.fields.find((f) => f.id === FIX_LOOP_ACTION_FIELD);
+    expect(radio?.type).toBe('radio');
+    expect((radio as { options?: { value: string }[] }).options?.map((o) => o.value)).toEqual([
+      'continue',
+      'accept',
+      'abort',
+    ]);
+    const info = JSON.stringify(s.infoSections);
+    expect(info).toContain('pin the ddev project name');
+    expect(info).toContain('rename the ddev project name');
+    expect(s.title).toContain('07c-ddev-reconcile');
+    expect(s.title).toContain('07b-phase-4-validate');
+  });
+});
+
+// --- Slice B: loop-aware validator (honored constraints) -----------------------
+
+function ctxWith(events: { payload: Record<string, unknown> }[], round: number): StepContext {
+  return { db: eventsDb(events), taskId: 't', round } as unknown as StepContext;
+}
+
+describe('loadHonoredConstraints', () => {
+  it('returns empty on the original pass (round 0)', async () => {
+    expect(await loadHonoredConstraints(ctxWith([ev('07c-ddev-reconcile', 0, D07C)], 0))).toBe('');
+  });
+
+  it('includes objective sources (07c) and excludes 07b own findings', async () => {
+    const block = await loadHonoredConstraints(
+      ctxWith([ev('07c-ddev-reconcile', 1, D07C), ev('07b-phase-4-validate', 2, D07B)], 2),
+    );
+    expect(block).toContain('HONORED CONSTRAINTS');
+    expect(block).toContain('07c-ddev-reconcile');
+    expect(block).toContain('already contains a project named rs-ollama2');
+    expect(block).toContain('harness-owned');
+    expect(block).not.toContain('07b-phase-4-validate');
+  });
+
+  it('excludes constraints recorded for a later round', async () => {
+    expect(await loadHonoredConstraints(ctxWith([ev('07c-ddev-reconcile', 5, D07C)], 2))).toBe('');
+  });
+
+  it('dedups to the latest diagnosis per source (rows are newest-first)', async () => {
+    const block = await loadHonoredConstraints(
+      ctxWith(
+        [
+          ev('07c-ddev-reconcile', 2, 'ddev start failed: NEW reason'),
+          ev('07c-ddev-reconcile', 1, 'ddev start failed: OLD reason'),
+        ],
+        2,
+      ),
+    );
+    expect(block).toContain('NEW reason');
+    expect(block).not.toContain('OLD reason');
+  });
+});
+
+describe('07b validator prompt — honored constraints', () => {
+  const buildPrompt = phase4ValidateStep.llm!.buildPrompt;
+  const base = {
+    worktreePath: '/wt',
+    sandboxWorktreePath: '/ws',
+    spec: 'SPEC',
+    implementationFiles: ['a.php'],
+    debtBlock: '',
+  };
+
+  it('injects the honored-constraints block when present', () => {
+    const prompt = buildPrompt({
+      detected: {
+        ...base,
+        honoredBlock: 'HONORED CONSTRAINTS — do not revert\n- 07c-ddev-reconcile: pin the name',
+      },
+      formValues: {},
+    });
+    expect(prompt).toContain('HONORED CONSTRAINTS');
+    expect(prompt).toContain('07c-ddev-reconcile: pin the name');
+  });
+
+  it('omits the block when there are no honored constraints', () => {
+    const prompt = buildPrompt({ detected: { ...base, honoredBlock: '' }, formValues: {} });
+    expect(prompt).not.toContain('HONORED CONSTRAINTS');
   });
 });

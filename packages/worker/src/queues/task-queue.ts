@@ -46,6 +46,8 @@ import {
   recordFixLoopRequest,
   recordFixLoopAccepted,
   buildFixLoopEscalationSchema,
+  buildOscillationEscalationSchema,
+  detectFixLoopOscillation,
   FIX_LOOP_ACTION_FIELD,
   FIX_LOOP_TARGET_STEP_ID,
   DEFAULT_MAX_FIX_ROUNDS,
@@ -640,6 +642,55 @@ async function handleResult(
         sourceStepId: result.sourceStepId,
         round: nextRound,
       });
+      // Oscillation guard: before the round cap, catch a non-converging loop (two checks
+      // with contradictory criteria ping-ponging) and escalate to the SAME Continue/Accept/
+      // Abort gate early instead of burning every round. Skipped for uncapped human restarts
+      // (the developer is already the bound). Mirrors the cap-reached branch below.
+      if (!result.uncapped) {
+        const osc = await detectFixLoopOscillation(
+          db,
+          ctx.taskId,
+          result.sourceStepId,
+          result.diagnosis,
+          nextRound,
+        );
+        if (osc.tripped && osc.conflictingDiagnoses) {
+          await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
+            diagnosis: result.diagnosis,
+            sourceStepId: result.sourceStepId,
+            round: nextRound,
+          });
+          await db
+            .update(schema.taskSteps)
+            .set({
+              status: 'waiting_form',
+              formSchema: buildOscillationEscalationSchema(
+                result.sourceStepId,
+                osc.conflictingStepId ?? 'another step',
+                osc.conflictingDiagnoses[0],
+                osc.conflictingDiagnoses[1],
+              ),
+              formValues: null,
+              endedAt: null,
+              waitingStartedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.taskSteps.id, result.row.id));
+          await markTaskWaiting(
+            db,
+            ctx.taskId,
+            stepId,
+            computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
+            result.row.round,
+          );
+          await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.oscillation_detected', {
+            sourceStepId: result.sourceStepId,
+            conflictingStepId: osc.conflictingStepId,
+            round: nextRound,
+          });
+          return;
+        }
+      }
       // Uncapped restarts (human gate-2 reject) skip the cap entirely — the developer is
       // the bound, not max_fix_rounds — and fall through to re-enter implementation below.
       if (!result.uncapped && nextRound > cap) {
