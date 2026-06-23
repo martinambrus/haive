@@ -200,6 +200,9 @@ async function main(): Promise<void> {
     await state.queue.add(TASK_JOB_NAMES.START, { taskId: task.id, userId });
 
     const formPayloads: Record<string, Record<string, unknown>> = {
+      // 00-triage runs first now; pick the full pipeline so this smoke still
+      // exercises every step (no execution-path trimming).
+      '00-triage': { path: 'full_workflow' },
       '01-declare-deps': {
         runtimes: ['node'],
         nodeVersion: '22',

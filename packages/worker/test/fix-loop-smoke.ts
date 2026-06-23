@@ -240,6 +240,10 @@ async function main(): Promise<void> {
     // Canned form values for the gated steps. 06-run-config sets max_fix_rounds = 2 and
     // disables the optional fix-loop steps (07a/08a/08d) so the loop lands at 07b.
     const formPayloads: Record<string, Record<string, unknown>> = {
+      // 00-triage runs first now; pick the full pipeline explicitly so the
+      // fix-loop steps (07b/08/08c -> 07) are all present and the walk does not
+      // fall back to the heuristic default (which could trim the path).
+      '00-triage': { path: 'full_workflow' },
       '01-declare-deps': {
         runtimes: ['node'],
         nodeVersion: '22',
