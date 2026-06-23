@@ -860,6 +860,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '',
     '- Ground every claim in concrete repo paths with line ranges (e.g. `lib/wrapper.mjs:42-89`, NOT "the wrapper module" and NOT `lib/wrapper.mjs` alone).',
     '- Each skill MUST have at least 3 sub-skills (and at most 8).',
+    '- Every sub-skill MUST include a non-empty `summary` (the one-line blurb shown beside its link in the parent SKILL.md). A sub-skill with an empty or missing `summary` is discarded, which can collapse the whole skill and force a re-run.',
     '- Each sub-skill body SHOULD be 100-250 lines following the Required sub-skill body structure above. Shorter bodies are acceptable only when a section truly does not apply — never to save effort.',
     '- Pitfalls & Edge Cases is REQUIRED in every sub-skill, with the three subsections (Common Mistakes / Edge Cases / Known Limitations) populated. State exact error symptoms.',
     '- At least two `## Pattern: <name>` recipes per sub-skill where applicable (build steps, runtime invocations, debug procedures), each with reproducible commands.',
