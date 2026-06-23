@@ -233,6 +233,23 @@ export function NotificationProvider() {
     };
   }, []);
 
+  // Prune live toasts the user has since opened. Once SOME focused tab becomes the
+  // viewer of a toast's task — this tab via in-tab nav, or a sibling tab/window —
+  // its haive:viewing:<id> heartbeat goes fresh and the toast is redundant: the
+  // user has seen the task even without clicking the toast. Checked at heartbeat
+  // cadence; the guarded functional update returns the same array reference when
+  // nothing is pruned so idle tabs never re-render.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setToasts((prev) => {
+        if (prev.length === 0) return prev;
+        const next = prev.filter((t) => !isViewedElsewhere(t.taskId));
+        return next.length === prev.length ? prev : next;
+      });
+    }, VIEWING_HEARTBEAT_MS);
+    return () => clearInterval(timer);
+  }, []);
+
   const playSound = useCallback(() => {
     if (soundUrlRef.current) {
       void new Audio(soundUrlRef.current).play().catch(() => {});
