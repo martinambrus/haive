@@ -40,11 +40,11 @@ interface CliStreamViewerProps {
 }
 
 const KEEPALIVE_INTERVAL_MS = 30_000;
-// How long the Clean tab may show no new model prose during a live run before we
-// nudge the user toward the Raw tab. Ollama-class models stream thinking/assistant
-// frames (which land in Raw) and may not emit a parsed `text` frame for a long
-// time, leaving the Clean tab looking frozen even though the model is working.
-const RAW_HINT_IDLE_MS = 20_000;
+// How long the Clean tab may stay empty during a live run before we nudge the user
+// toward the Raw tab. Ollama-class models stream thinking/assistant frames (which
+// land in Raw) and may not emit the first parsed `text` frame for a long time,
+// leaving an empty Clean tab looking frozen even though the model is working.
+const RAW_HINT_IDLE_MS = 30_000;
 
 export function CliStreamViewer({
   invocationId,
@@ -352,14 +352,16 @@ export function CliStreamViewer({
   }, [cleanContent, tab]);
 
   // Nudge toward the Raw tab when a live run is clearly active (raw bytes flowing)
-  // but the Clean tab has shown no new model prose for RAW_HINT_IDLE_MS. Every new
-  // clean frame resets the timer; replay / no raw output / stream end suppress it.
+  // but the Clean tab is still empty after RAW_HINT_IDLE_MS — the model is working
+  // yet has produced no parsed prose at all. Once any prose lands the hint is
+  // suppressed for the rest of the run; a mid-run gap between frames is normal and
+  // must not re-trigger it. Replay / no raw output / stream end also suppress it.
   useEffect(() => {
-    if (isReplay || !cleanSupported || state !== 'connected' || !hasOutput) {
+    const cleanIsEmpty = cleanText.trim().length === 0;
+    if (isReplay || !cleanSupported || state !== 'connected' || !hasOutput || !cleanIsEmpty) {
       setShowRawHint(false);
       return;
     }
-    setShowRawHint(false);
     const id = setTimeout(() => setShowRawHint(true), RAW_HINT_IDLE_MS);
     return () => clearTimeout(id);
   }, [isReplay, cleanSupported, state, hasOutput, cleanText]);
