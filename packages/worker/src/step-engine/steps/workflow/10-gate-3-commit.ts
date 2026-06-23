@@ -4,8 +4,16 @@ import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { resolveUserGitEnv } from '../../../secrets/user-git-identity.js';
 
 const exec = promisify(execFile);
+
+const FALLBACK_GIT_IDENTITY = {
+  GIT_AUTHOR_NAME: 'Haive',
+  GIT_AUTHOR_EMAIL: 'worker@haive.local',
+  GIT_COMMITTER_NAME: 'Haive',
+  GIT_COMMITTER_EMAIL: 'worker@haive.local',
+};
 
 interface CommitGateDetect {
   hasGit: boolean;
@@ -23,9 +31,11 @@ interface CommitGateApply {
 async function gitRun(
   cwd: string,
   args: string[],
+  env?: Record<string, string>,
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   try {
-    const { stdout, stderr } = await exec('git', args, { cwd });
+    const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
+    const { stdout, stderr } = await exec('git', args, opts);
     return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; code?: number };
@@ -119,7 +129,9 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const message =
       (values.commitMessage ?? 'feat: apply workflow changes').trim() ||
       'feat: apply workflow changes';
-    const commit = await gitRun(workspace, ['commit', '-m', message]);
+    const userEnv = await resolveUserGitEnv(ctx.db, ctx.userId);
+    const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
+    const commit = await gitRun(workspace, ['commit', '-m', message], commitEnv);
     if (commit.code !== 0) {
       const stderr = commit.stderr || commit.stdout;
       if (/nothing to commit/i.test(stderr)) {
