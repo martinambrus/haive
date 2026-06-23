@@ -23,15 +23,19 @@ describe('keepForPath', () => {
     expect(keepForPath('07-phase-2-implement', 'quick_bugfix')).toBe(true);
     expect(keepForPath('08-phase-5-verify', 'quick_bugfix')).toBe(true);
     expect(keepForPath('04-phase-0b-pre-planning', 'quick_bugfix')).toBe(false);
+    expect(keepForPath('05-phase-0b5-spec-quality', 'quick_bugfix')).toBe(false);
+    expect(keepForPath('08c-code-review', 'quick_bugfix')).toBe(false);
     expect(keepForPath('08d-adversarial-qa', 'quick_bugfix')).toBe(false);
     expect(keepForPath('06b-sprint-planning', 'quick_bugfix')).toBe(false);
   });
 
-  it('plan_tasklist keeps the spec + DAG chain, drops adversarial/browser', () => {
+  it('plan_tasklist keeps spec audit + DAG + code review, drops adversarial/browser', () => {
     expect(keepForPath('04-phase-0b-pre-planning', 'plan_tasklist')).toBe(true);
+    expect(keepForPath('05-phase-0b5-spec-quality', 'plan_tasklist')).toBe(true);
     expect(keepForPath('06-gate-1-spec-approval', 'plan_tasklist')).toBe(true);
     expect(keepForPath('06b-sprint-planning', 'plan_tasklist')).toBe(true);
     expect(keepForPath('06c-dag-execute', 'plan_tasklist')).toBe(true);
+    expect(keepForPath('08c-code-review', 'plan_tasklist')).toBe(true);
     expect(keepForPath('08d-adversarial-qa', 'plan_tasklist')).toBe(false);
     expect(keepForPath('08a-browser-verify', 'plan_tasklist')).toBe(false);
   });

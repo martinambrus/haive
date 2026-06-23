@@ -40,15 +40,20 @@ const SPINE: readonly string[] = [
   '12-worktree-cleanup',
 ];
 
-/** plan_tasklist adds the spec + decomposition chain on top of the spine. gate-1
- *  doubles as the plan-approval gate; 06b/06c are the DAG tasklist + executor. */
+/** plan_tasklist adds the spec + decomposition chain on top of the spine, plus a
+ *  spec-quality audit of the draft (05) and a peer/security code review of the
+ *  result (08c). gate-1 doubles as the plan-approval gate; 06b/06c are the DAG
+ *  tasklist + executor. Still lighter than full: no 05a warning auto-resolve, no
+ *  08d adversarial QA, no browser verify, no gate-2. */
 const PLAN_TASKLIST_EXTRA: readonly string[] = [
   '03-phase-0a-discovery',
   '04-phase-0b-pre-planning',
+  '05-phase-0b5-spec-quality',
   '06-run-config',
   '06-gate-1-spec-approval',
   '06b-sprint-planning',
   '06c-dag-execute',
+  '08c-code-review',
   '11-phase-8-learning',
 ];
 
