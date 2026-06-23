@@ -351,6 +351,11 @@ export interface Container {
 
 export type WorkflowType = 'onboarding' | 'workflow' | 'onboarding_upgrade';
 
+/** Execution path chosen at the 00-triage step (workflow tasks). Mirrors
+ *  ExecutionPath in @haive/shared; redefined here so the browser bundle never
+ *  imports the server-only package barrel. */
+export type ExecutionPath = 'quick_bugfix' | 'plan_tasklist' | 'full_workflow';
+
 export interface OnboardingStatus {
   onboarded: boolean;
   present: string[];
@@ -387,6 +392,9 @@ export interface Task {
   repositoryId: string | null;
   cliProviderId: string | null;
   type: WorkflowType;
+  /** Execution path chosen at the 00-triage step (workflow tasks only). null until
+   *  triage records it, and on non-workflow tasks. */
+  executionPath?: ExecutionPath | null;
   title: string;
   description: string | null;
   status: TaskStatus;

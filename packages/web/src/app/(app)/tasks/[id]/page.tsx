@@ -14,6 +14,7 @@ import {
   type CliProvider,
   type CliProviderName,
   type EnvDepPreset,
+  type ExecutionPath,
   type RagQueryEntry,
   type StepAction,
   type StepActionResponse,
@@ -50,6 +51,26 @@ function taskStatusVariant(status: TaskStatus): BadgeVariant {
       return 'error';
     case 'waiting_user':
       return 'warning';
+    default:
+      return 'default';
+  }
+}
+
+const EXECUTION_PATH_LABELS: Record<ExecutionPath, string> = {
+  quick_bugfix: 'Quick bugfix',
+  plan_tasklist: 'Plan + tasklist',
+  full_workflow: 'Full workflow',
+};
+
+/** Chip colour per path: lighter path = greener (fast), full = neutral. Returns
+ *  the Badge component's variant union (which includes 'info', unlike the local
+ *  BadgeVariant alias used by the status helpers). */
+function executionPathVariant(path: ExecutionPath): 'success' | 'info' | 'default' {
+  switch (path) {
+    case 'quick_bugfix':
+      return 'success';
+    case 'plan_tasklist':
+      return 'info';
     default:
       return 'default';
   }
@@ -564,6 +585,11 @@ export default function TaskDetailPage() {
                 <h1 className="text-2xl font-bold text-neutral-50">{task.title}</h1>
                 <Badge variant={taskStatusVariant(task.status)}>{task.status}</Badge>
                 <Badge>{task.type}</Badge>
+                {task.executionPath && (
+                  <Badge variant={executionPathVariant(task.executionPath)}>
+                    {EXECUTION_PATH_LABELS[task.executionPath]}
+                  </Badge>
+                )}
                 {task.repository && <Badge variant="info">repo: {task.repository.name}</Badge>}
                 <Button size="sm" variant="secondary" onClick={startRename}>
                   Rename

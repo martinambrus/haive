@@ -2,6 +2,21 @@ import { z } from 'zod';
 
 export const workflowTypeSchema = z.enum(['onboarding', 'workflow', 'onboarding_upgrade']);
 
+/** Execution path for a workflow task, chosen at the 00-triage step. quick_bugfix
+ *  hands the CLI the problem directly; plan_tasklist drafts a spec and runs a
+ *  decomposed DAG; full_workflow is the complete pipeline. Workflow tasks only. */
+export const executionPathSchema = z.enum(['quick_bugfix', 'plan_tasklist', 'full_workflow']);
+
+export type ExecutionPath = z.infer<typeof executionPathSchema>;
+
+export const EXECUTION_PATHS = executionPathSchema.options;
+
+export const EXECUTION_PATH_LABELS: Record<ExecutionPath, string> = {
+  quick_bugfix: 'Quick bugfix',
+  plan_tasklist: 'Plan + tasklist',
+  full_workflow: 'Full workflow',
+};
+
 export const taskStatusSchema = z.enum([
   'created',
   'queued',

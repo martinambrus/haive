@@ -1,6 +1,7 @@
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { loadFixLoopDiagnosis } from './_fix-loop.js';
@@ -198,11 +199,24 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     const browserTesting =
       envTemplate?.status === 'ready' &&
       !!(envTemplate.declaredDeps as Record<string, unknown> | null)?.browserTesting;
+    // Implement from the spec the user APPROVED at gate 1: the post-checkpoint spec
+    // (05a user/agent fixes), then the 05 amended body, then the 04 draft.
+    let spec = resolvedOutput.spec ?? qualityOutput.spec ?? planOutput.spec ?? '';
+    let specSummary = planOutput.summary ?? '';
+    if (spec.trim().length === 0) {
+      // Lightweight paths (quick_bugfix) skip the spec steps (03/04/05), so there is
+      // no drafted spec — fall back to the raw task title + description as the
+      // implementation brief ("hand the agent the problem directly"). Full/plan paths
+      // always have a spec here, so this never changes their behavior.
+      const meta = await loadTaskMeta(ctx.db, ctx.taskId);
+      const title = meta.title.trim();
+      const description = meta.description.trim();
+      spec = [title ? `# ${title}` : '', description].filter((s) => s.length > 0).join('\n\n');
+      if (specSummary.length === 0) specSummary = title;
+    }
     return {
-      specSummary: planOutput.summary ?? '',
-      // Implement from the spec the user APPROVED at gate 1: the post-checkpoint
-      // spec (05a user/agent fixes), then the 05 amended body, then the 04 draft.
-      spec: resolvedOutput.spec ?? qualityOutput.spec ?? planOutput.spec ?? '',
+      specSummary,
+      spec,
       sandboxWorkspacePath: worktreeOutput.sandboxWorktreePath,
       gateFeedback: gateOutput.feedback ?? '',
       // Fix-loop: on a round > 0 re-entry, the diagnosis a downstream step recorded.

@@ -135,6 +135,7 @@ export const CLI_DISPATCH_STEP_IDS: readonly string[] = [
   '09_6_4-global-kb-merge',
   '11-final-review',
   // workflow
+  '00-triage',
   '01a-app-boot',
   '03-phase-0a-discovery',
   '03b-business-requirements',

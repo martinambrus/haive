@@ -115,6 +115,11 @@ export const tasks = pgTable(
      *  'poc'|'standard'|'enterprise' fan out 2/4/6 adversarial agents. Chosen on
      *  the new-task form; default off so existing tasks + fixtures skip the step. */
     adversarialQaLevel: text('adversarial_qa_level'),
+    /** Execution path chosen by the 00-triage step: 'quick_bugfix' | 'plan_tasklist'
+     *  | 'full_workflow'. NULL until triage records it (and on legacy rows); buildRunList
+     *  runs the full workflow when unset, and trims the workflow step list to the chosen
+     *  path once set. Workflow tasks only — onboarding never reaches triage. */
+    executionPath: varchar('execution_path', { length: 32 }),
     /** Per-task overrides for the maximum loop iterations a step can run.
      *  Map of stepId → maxIterations. The runner reads this when a step
      *  declares a loop hook and falls back to the loopSpec default when

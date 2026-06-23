@@ -12,6 +12,7 @@ import {
   type CliExecJobPayload,
   type RepoRagCleanupPayload,
   type RepoResourceCleanupPayload,
+  type ExecutionPath,
   type TaskJobPayload,
   type WorkflowType,
 } from '@haive/shared';
@@ -34,6 +35,7 @@ import {
   type WorkerDeps,
 } from '../step-engine/index.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
+import { orderWorkflowRunList } from '../orchestrator/execution-paths.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import { cleanupTaskAuthVolumes } from '../sandbox/task-auth-volume.js';
@@ -85,16 +87,24 @@ interface ResolvedTaskContext {
   workspacePath: string;
   cliProviderId: string | null;
   ignoreSavedStepClis: boolean;
+  /** Execution path recorded by 00-triage; null pre-triage and on legacy rows. */
+  executionPath: ExecutionPath | null;
   metadata: Record<string, unknown> | null;
 }
 
 async function buildRunList(ctx: ResolvedTaskContext): Promise<StepDefinition[]> {
   const main = stepRegistry.listByWorkflow(ctx.workflowType);
-  if (ctx.workflowType === 'workflow') {
-    const prelude = stepRegistry.listByWorkflow('env_replicate');
-    return [...prelude, ...main];
-  }
-  return main;
+  // Only implementation-workflow tasks branch by execution path; onboarding,
+  // onboarding_upgrade, kb_author, etc. run their full registered list unchanged.
+  if (ctx.workflowType !== 'workflow') return main;
+  const prelude = stepRegistry.listByWorkflow('env_replicate');
+  // 00-triage runs first (ahead of the env-replicate prelude so the path is chosen
+  // up front); execution_path (null pre-triage / on legacy rows) then trims the
+  // workflow steps to the chosen path. The ordering + filtering is a pure helper in
+  // orchestrator/execution-paths.ts so it can be unit-tested. Safe with the forward
+  // walk because every path set contains triage + the spine, so the just-finished
+  // step is always present in the filtered list.
+  return orderWorkflowRunList(main, prelude, ctx.executionPath);
 }
 
 async function resolveTaskContext(
@@ -126,6 +136,7 @@ async function resolveTaskContext(
     workspacePath: repoPath,
     cliProviderId: task.cliProviderId,
     ignoreSavedStepClis: task.ignoreSavedStepClis,
+    executionPath: (task.executionPath as ExecutionPath | null) ?? null,
     metadata: task.metadata ?? null,
   };
 }

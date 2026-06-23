@@ -1,5 +1,6 @@
 import { CLI_DISPATCH_STEP_IDS, PROVIDER_SENSITIVE_STEP_IDS } from '@haive/shared';
 import type { StepRegistry } from '../registry.js';
+import { PATH_STEP_SETS, PATH_REQUIRED_TARGETS } from '../../orchestrator/execution-paths.js';
 import { registerEnvReplicateSteps } from './env-replicate/index.js';
 import { registerOnboardingSteps } from './onboarding/index.js';
 import { registerOnboardingUpgradeSteps } from './onboarding-upgrade/index.js';
@@ -22,6 +23,41 @@ export function registerAllSteps(registry: StepRegistry): void {
   registerKbAuthorSteps(registry);
   assertProviderSensitiveListInSync(registry);
   assertCliDispatchListInSync(registry);
+  assertPathStepSetsClosed(registry);
+}
+
+/** Startup sanity check for execution-path filtering (execution-paths.ts). Every
+ *  step id referenced by a non-full PATH_STEP_SET must be a registered step, and
+ *  any retained step that emits a loop_back / revise / restart must keep its
+ *  target in the SAME set (PATH_REQUIRED_TARGETS) — otherwise buildRunList would
+ *  trim a step the fix loop / forward walk jumps to. A retained loop step with no
+ *  PATH_REQUIRED_TARGETS entry is also rejected, so adding a new loop hook without
+ *  declaring its target fails the boot instead of silently breaking filtering. */
+function assertPathStepSetsClosed(registry: StepRegistry): void {
+  for (const [path, set] of Object.entries(PATH_STEP_SETS)) {
+    for (const id of set) {
+      const def = registry.get(id);
+      if (!def) {
+        throw new Error(`execution path '${path}' references unregistered step '${id}'`);
+      }
+      const hasLoop = Boolean(
+        def.fixLoop || def.reviseLoop || def.restartLoop || def.fixLoopOnError,
+      );
+      if (!hasLoop) continue;
+      const target = PATH_REQUIRED_TARGETS[id];
+      if (!target) {
+        throw new Error(
+          `step '${id}' has a loop/revise/restart hook but no PATH_REQUIRED_TARGETS entry — ` +
+            'declare its loop target so execution-path filtering stays closed',
+        );
+      }
+      if (!set.has(target)) {
+        throw new Error(
+          `execution path '${path}' retains '${id}' but drops its loop target '${target}'`,
+        );
+      }
+    }
+  }
 }
 
 /** Startup sanity check: the PROVIDER_SENSITIVE_STEP_IDS constant in
