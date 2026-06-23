@@ -249,6 +249,39 @@ taskRoutes.post('/', async (c) => {
   return c.json({ task }, 201);
 });
 
+// Feature/area autocomplete: distinct `metadata.feature` values previously used
+// on THIS repo, substring-matched (ilike) on the typed query. Scoped to the
+// requesting user so it never leaks another owner's feature tags — repos are
+// single-owner and the new-task form only lists the caller's repos, so this is
+// also the only set that can actually "pair" in per-repo knowledge discovery.
+// Min 2 chars (mirrors the client) so a 1-char query can't scan every task.
+// Most-used first, then alphabetical. Registered before `/:id` so the literal
+// path isn't captured as a task id.
+taskRoutes.get('/feature-suggestions', async (c) => {
+  const userId = c.get('userId');
+  const repositoryId = c.req.query('repositoryId')?.trim();
+  const q = c.req.query('q')?.trim();
+  if (!repositoryId || !q || q.length < 2) return c.json({ suggestions: [] });
+  const db = getDb();
+  // NULL/missing feature → `NULL ilike ...` is NULL → row dropped; '' can't
+  // contain a >=2-char substring → dropped. So the ilike alone excludes blanks.
+  const featureExpr = sql<string>`${schema.tasks.metadata} ->> 'feature'`;
+  const rows = await db
+    .select({ feature: featureExpr })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.userId, userId),
+        eq(schema.tasks.repositoryId, repositoryId),
+        sql`${featureExpr} ilike ${`%${q}%`}`,
+      ),
+    )
+    .groupBy(featureExpr)
+    .orderBy(desc(sql`count(*)`), asc(featureExpr))
+    .limit(10);
+  return c.json({ suggestions: rows.map((r) => r.feature) });
+});
+
 taskRoutes.get('/:id', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');

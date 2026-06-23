@@ -100,6 +100,8 @@ export default function NewTaskPage() {
   const [ignoreSavedStepClis, setIgnoreSavedStepClis] = useState(false);
   const [isBugFix, setIsBugFix] = useState(false);
   const [feature, setFeature] = useState('');
+  const [featureSuggestions, setFeatureSuggestions] = useState<string[]>([]);
+  const [showFeatureSuggestions, setShowFeatureSuggestions] = useState(false);
   const [affectedClients, setAffectedClients] = useState('');
 
   const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatus | null>(null);
@@ -172,6 +174,38 @@ export default function NewTaskPage() {
   useEffect(() => {
     void refreshStatus(repositoryId);
   }, [repositoryId, refreshStatus]);
+
+  // Feature/area autocomplete: once >=2 chars are typed and a repo is selected,
+  // fetch prior feature names for that repo (substring match) so the user reuses
+  // an existing name instead of inventing a near-duplicate. Debounced so each
+  // keystroke doesn't hit the API; `cancelled` drops a stale response if the
+  // inputs change (or the component unmounts) before it resolves.
+  useEffect(() => {
+    const term = feature.trim();
+    if (term.length < 2 || !repositoryId) {
+      setFeatureSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    const handle = setTimeout(() => {
+      void api
+        .get<{ suggestions: string[] }>(
+          `/tasks/feature-suggestions?repositoryId=${encodeURIComponent(
+            repositoryId,
+          )}&q=${encodeURIComponent(term)}`,
+        )
+        .then((res) => {
+          if (!cancelled) setFeatureSuggestions(res.suggestions);
+        })
+        .catch(() => {
+          if (!cancelled) setFeatureSuggestions([]);
+        });
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [feature, repositoryId]);
 
   async function handleResetOnboarding() {
     if (!repositoryId) return;
@@ -465,15 +499,69 @@ export default function NewTaskPage() {
 
         {inferredType === 'workflow' && (
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="feature">Feature / area (optional)</Label>
-            <Input
-              id="feature"
-              type="text"
-              value={feature}
-              onChange={(e) => setFeature(e.target.value)}
-              placeholder="e.g. checkout, user-import"
-              maxLength={120}
+            <Label htmlFor="dbDump">Database dump (optional)</Label>
+            <input
+              id="dbDump"
+              type="file"
+              accept=".sql,.sql.gz,.dump"
+              onChange={(e) => {
+                setDumpFile(e.target.files?.[0] ?? null);
+                setDumpProgress(0);
+              }}
+              className="block w-full text-sm text-neutral-300 file:mr-3 file:rounded-md file:border-0 file:bg-neutral-800 file:px-3 file:py-1.5 file:text-sm file:text-neutral-100 hover:file:bg-neutral-700"
             />
+            <p className="text-xs text-neutral-500">
+              Uploaded before the task runs and imported into the temporary environment, so
+              migrations run against your real data. Accepts .sql, .sql.gz, .dump. Deleted
+              immediately after import.
+            </p>
+            {dumpUploading && (
+              <p className="text-xs text-indigo-300">Uploading dump… {dumpProgress}%</p>
+            )}
+          </div>
+        )}
+
+        {inferredType === 'workflow' && (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="feature">Feature / area (optional)</Label>
+            <div className="relative">
+              <Input
+                id="feature"
+                type="text"
+                value={feature}
+                onChange={(e) => {
+                  setFeature(e.target.value);
+                  setShowFeatureSuggestions(true);
+                }}
+                onFocus={() => setShowFeatureSuggestions(true)}
+                onBlur={() => setShowFeatureSuggestions(false)}
+                placeholder="e.g. checkout, user-import"
+                maxLength={120}
+                autoComplete="off"
+              />
+              {showFeatureSuggestions && featureSuggestions.length > 0 && (
+                <ul className="absolute z-10 mt-1 max-h-48 w-full overflow-auto rounded-md border border-neutral-800 bg-neutral-950 py-1 shadow-lg">
+                  {featureSuggestions.map((s) => (
+                    <li key={s}>
+                      <button
+                        type="button"
+                        // onMouseDown + preventDefault (not onClick): fires before the
+                        // input's onBlur, so focus is kept and the value is set before
+                        // the dropdown would otherwise close.
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          setFeature(s);
+                          setShowFeatureSuggestions(false);
+                        }}
+                        className="block w-full px-3 py-1.5 text-left text-sm text-neutral-200 hover:bg-neutral-800"
+                      >
+                        {s}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
             <p className="text-xs text-neutral-500">
               Recorded with the task and baked into any bug investigation, so knowledge discovery
               can find past fixes for the same feature.
@@ -512,30 +600,6 @@ export default function NewTaskPage() {
                   sent to the cross-repo knowledge base.
                 </p>
               </div>
-            )}
-          </div>
-        )}
-
-        {inferredType === 'workflow' && (
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="dbDump">Database dump (optional)</Label>
-            <input
-              id="dbDump"
-              type="file"
-              accept=".sql,.sql.gz,.dump"
-              onChange={(e) => {
-                setDumpFile(e.target.files?.[0] ?? null);
-                setDumpProgress(0);
-              }}
-              className="block w-full text-sm text-neutral-300 file:mr-3 file:rounded-md file:border-0 file:bg-neutral-800 file:px-3 file:py-1.5 file:text-sm file:text-neutral-100 hover:file:bg-neutral-700"
-            />
-            <p className="text-xs text-neutral-500">
-              Uploaded before the task runs and imported into the temporary environment, so
-              migrations run against your real data. Accepts .sql, .sql.gz, .dump. Deleted
-              immediately after import.
-            </p>
-            {dumpUploading && (
-              <p className="text-xs text-indigo-300">Uploading dump… {dumpProgress}%</p>
             )}
           </div>
         )}
