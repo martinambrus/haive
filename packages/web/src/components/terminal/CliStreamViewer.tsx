@@ -40,6 +40,11 @@ interface CliStreamViewerProps {
 }
 
 const KEEPALIVE_INTERVAL_MS = 30_000;
+// How long the Clean tab may show no new model prose during a live run before we
+// nudge the user toward the Raw tab. Ollama-class models stream thinking/assistant
+// frames (which land in Raw) and may not emit a parsed `text` frame for a long
+// time, leaving the Clean tab looking frozen even though the model is working.
+const RAW_HINT_IDLE_MS = 20_000;
 
 export function CliStreamViewer({
   invocationId,
@@ -72,6 +77,9 @@ export function CliStreamViewer({
   // render raw-only (no tabs) — unchanged from the pre-tabs behavior.
   const [tab, setTab] = useState<TerminalTab>('clean');
   const [cleanText, setCleanText] = useState('');
+  // Set when a live run streams raw output but produces no parsed model prose for
+  // RAW_HINT_IDLE_MS; drives the Raw-tab highlight + hint while the Clean tab is up.
+  const [showRawHint, setShowRawHint] = useState(false);
   const cleanScrollRef = useRef<HTMLDivElement | null>(null);
   // Refs to the live terminal + fit addon so the tab-switch effect can re-fit
   // when Raw becomes visible (xterm laid out in a display:none container keeps a
@@ -343,6 +351,19 @@ export function CliStreamViewer({
     if (el) el.scrollTop = el.scrollHeight;
   }, [cleanContent, tab]);
 
+  // Nudge toward the Raw tab when a live run is clearly active (raw bytes flowing)
+  // but the Clean tab has shown no new model prose for RAW_HINT_IDLE_MS. Every new
+  // clean frame resets the timer; replay / no raw output / stream end suppress it.
+  useEffect(() => {
+    if (isReplay || !cleanSupported || state !== 'connected' || !hasOutput) {
+      setShowRawHint(false);
+      return;
+    }
+    setShowRawHint(false);
+    const id = setTimeout(() => setShowRawHint(true), RAW_HINT_IDLE_MS);
+    return () => clearTimeout(id);
+  }, [isReplay, cleanSupported, state, hasOutput, cleanText]);
+
   const heightClass = height ?? (fill ? '' : 'h-[400px]');
   const showTabs = cleanSupported;
   const rawHidden = showTabs && tab !== 'raw';
@@ -381,9 +402,18 @@ export function CliStreamViewer({
           <TabButton active={tab === 'clean'} onClick={() => setTab('clean')}>
             Clean
           </TabButton>
-          <TabButton active={tab === 'raw'} onClick={() => setTab('raw')}>
+          <TabButton
+            active={tab === 'raw'}
+            onClick={() => setTab('raw')}
+            highlight={showRawHint && tab !== 'raw'}
+          >
             Raw
           </TabButton>
+          {showRawHint && tab !== 'raw' && (
+            <span className="ml-1 text-[11px] text-amber-300/90">
+              ← The model may be streaming to the Raw tab
+            </span>
+          )}
         </div>
       )}
 
@@ -442,10 +472,12 @@ export function CliStreamViewer({
 function TabButton({
   active,
   onClick,
+  highlight = false,
   children,
 }: {
   active: boolean;
   onClick: () => void;
+  highlight?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -455,7 +487,9 @@ function TabButton({
       className={`rounded border px-2 py-0.5 text-[11px] uppercase tracking-wider ${
         active
           ? 'border-indigo-500/50 bg-indigo-500/15 text-indigo-200'
-          : 'border-neutral-700 bg-neutral-800/40 text-neutral-400 hover:text-neutral-200'
+          : highlight
+            ? 'animate-pulse border-amber-500/60 bg-amber-500/15 text-amber-200'
+            : 'border-neutral-700 bg-neutral-800/40 text-neutral-400 hover:text-neutral-200'
       }`}
     >
       {children}
