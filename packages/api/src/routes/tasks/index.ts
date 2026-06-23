@@ -222,6 +222,7 @@ taskRoutes.post('/', async (c) => {
         body.adversarialQaLevel && body.adversarialQaLevel !== 'none'
           ? body.adversarialQaLevel
           : null,
+      broadAudit: body.broadAudit ?? true,
       memoryLimitMb: body.resourceLimits?.memoryLimitMb ?? null,
       cpuLimitMilli: body.resourceLimits?.cpuLimitMilli ?? null,
       stepLoopLimits: body.stepLoopLimits ?? {},

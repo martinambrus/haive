@@ -115,6 +115,11 @@ export const tasks = pgTable(
      *  'poc'|'standard'|'enterprise' fan out 2/4/6 adversarial agents. Chosen on
      *  the new-task form; default off so existing tasks + fixtures skip the step. */
     adversarialQaLevel: text('adversarial_qa_level'),
+    /** Broad audit (default ON): run the report-only broad spec audit (04a-spec-audit)
+     *  and code audit (08c2-code-audit) on top of the narrow reviewers. Creation-time
+     *  toggle on the new-task form — read by 04a at index 4.6, before run-config sets
+     *  the other QA options. Per-task switch-off; default true so it runs unless opted out. */
+    broadAudit: boolean('broad_audit').notNull().default(true),
     /** Execution path chosen by the 00-triage step: 'quick_bugfix' | 'plan_tasklist'
      *  | 'full_workflow'. NULL until triage records it (and on legacy rows); buildRunList
      *  runs the full workflow when unset, and trims the workflow step list to the chosen

@@ -10,6 +10,7 @@ import { phase0aDiscoveryStep } from './03-phase-0a-discovery.js';
 import { businessRequirementsStep } from './03b-business-requirements.js';
 import { businessRequirementsReviewStep } from './03c-business-requirements-review.js';
 import { phase0bPrePlanningStep } from './04-phase-0b-pre-planning.js';
+import { specAuditStep } from './04a-spec-audit.js';
 import { phase0b5SpecQualityStep } from './05-phase-0b5-spec-quality.js';
 import { resolveSpecWarningsStep } from './05a-resolve-spec-warnings.js';
 import { gate1SpecApprovalStep } from './06-gate-1-spec-approval.js';
@@ -26,6 +27,7 @@ import { browserSetupStep } from './08a-browser-setup.js';
 import { browserVerifyStep } from './08a-browser-verify.js';
 import { testManagementStep } from './08b-test-management.js';
 import { codeReviewStep } from './08c-code-review.js';
+import { codeAuditStep } from './08c2-code-audit.js';
 import { adversarialQaStep } from './08d-adversarial-qa.js';
 import { insightsTriageStep } from './08e-insights-triage.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
@@ -45,6 +47,7 @@ export {
   businessRequirementsStep,
   businessRequirementsReviewStep,
   phase0bPrePlanningStep,
+  specAuditStep,
   phase0b5SpecQualityStep,
   resolveSpecWarningsStep,
   gate1SpecApprovalStep,
@@ -61,6 +64,7 @@ export {
   browserVerifyStep,
   testManagementStep,
   codeReviewStep,
+  codeAuditStep,
   adversarialQaStep,
   insightsTriageStep,
   gate2VerifyApprovalStep,
@@ -82,6 +86,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(businessRequirementsStep);
   registry.register(businessRequirementsReviewStep);
   registry.register(phase0bPrePlanningStep);
+  registry.register(specAuditStep);
   registry.register(phase0b5SpecQualityStep);
   registry.register(resolveSpecWarningsStep);
   registry.register(gate1SpecApprovalStep);
@@ -98,6 +103,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(browserVerifyStep);
   registry.register(testManagementStep);
   registry.register(codeReviewStep);
+  registry.register(codeAuditStep);
   registry.register(adversarialQaStep);
   registry.register(insightsTriageStep);
   registry.register(gate2VerifyApprovalStep);

@@ -99,6 +99,7 @@ export default function NewTaskPage() {
   const [cliProviderId, setCliProviderId] = useState<string>('');
   const [ignoreSavedStepClis, setIgnoreSavedStepClis] = useState(false);
   const [isBugFix, setIsBugFix] = useState(false);
+  const [broadAudit, setBroadAudit] = useState(true);
   const [feature, setFeature] = useState('');
   const [featureSuggestions, setFeatureSuggestions] = useState<string[]>([]);
   const [showFeatureSuggestions, setShowFeatureSuggestions] = useState(false);
@@ -262,6 +263,7 @@ export default function NewTaskPage() {
       if (ignoreSavedStepClis) body.ignoreSavedStepClis = true;
       if (type === 'workflow') {
         body.isBugFix = isBugFix;
+        body.broadAudit = broadAudit;
         if (feature.trim()) body.feature = feature.trim();
         const clients = affectedClients
           .split(',')
@@ -601,6 +603,26 @@ export default function NewTaskPage() {
                 </p>
               </div>
             )}
+          </div>
+        )}
+
+        {inferredType === 'workflow' && (
+          <div className="flex flex-col gap-1.5">
+            <label className="flex items-center gap-2 text-sm text-neutral-100">
+              <input
+                type="checkbox"
+                checked={broadAudit}
+                onChange={(e) => setBroadAudit(e.target.checked)}
+                className="h-4 w-4 rounded border-neutral-700 bg-neutral-950"
+              />
+              Run broad audits
+            </label>
+            <p className="text-xs text-neutral-500">
+              Adds a report-only broad spec audit before implementation and a broad code-vs-spec
+              audit before gate 2, on top of the focused reviewers. Findings surface at the approval
+              gates; out-of-scope notes go to insight triage. On by default — uncheck to skip the
+              extra passes.
+            </p>
           </div>
         )}
 

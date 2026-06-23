@@ -41,19 +41,25 @@ const SPINE: readonly string[] = [
 ];
 
 /** plan_tasklist adds the spec + decomposition chain on top of the spine, plus a
- *  spec-quality audit of the draft (05) and a peer/security code review of the
- *  result (08c). gate-1 doubles as the plan-approval gate; 06b/06c are the DAG
- *  tasklist + executor. Still lighter than full: no 05a warning auto-resolve, no
- *  08d adversarial QA, no browser verify, no gate-2. */
+ *  spec-quality review of the draft (05) and a peer/security code review of the
+ *  result (08c). The broad audits (04a spec, 08c2 code) and their sinks (05a
+ *  resolve-warnings, 09 gate-2) are included too so the broad-audit findings
+ *  surface and get resolved here, not only in full_workflow. gate-1 doubles as
+ *  the plan-approval gate; 06b/06c are the DAG tasklist + executor. Lighter than
+ *  full: no 08d adversarial QA, no browser verify. */
 const PLAN_TASKLIST_EXTRA: readonly string[] = [
   '03-phase-0a-discovery',
   '04-phase-0b-pre-planning',
+  '04a-spec-audit',
   '05-phase-0b5-spec-quality',
+  '05a-resolve-spec-warnings',
   '06-run-config',
   '06-gate-1-spec-approval',
   '06b-sprint-planning',
   '06c-dag-execute',
   '08c-code-review',
+  '08c2-code-audit',
+  '09-gate-2-verify-approval',
   '11-phase-8-learning',
 ];
 

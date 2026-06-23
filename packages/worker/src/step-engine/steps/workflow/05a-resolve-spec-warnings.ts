@@ -39,6 +39,9 @@ interface ResolveWarningsDetect {
    *  re-approved). The form auto-submits ("continue as-is") then, advancing the
    *  re-drafted spec straight to the gate-1 re-review instead of re-gating here. */
   revising: boolean;
+  /** True when the broad auditor (04a) contributed findings — the form then
+   *  defaults to the agent fix (validate-then-act) instead of "continue". */
+  hasAuditFindings: boolean;
 }
 
 interface ResolveWarningsApply {
@@ -56,6 +59,21 @@ function formatFinding(f: QualityFinding): string {
 async function loadQuality(ctx: StepContext): Promise<SpecQualityOutput> {
   const q = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
   return (q?.output as SpecQualityOutput | null) ?? {};
+}
+
+/** Findings from the broad spec auditor (04a). Merged with the narrow 05 findings
+ *  so the existing validate-then-act corrector resolves both sets. */
+async function loadAuditFindings(ctx: StepContext): Promise<QualityFinding[]> {
+  const a = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04a-spec-audit');
+  const findings = (a?.output as { findings?: QualityFinding[] } | null)?.findings;
+  return Array.isArray(findings) ? findings : [];
+}
+
+/** Fallback spec body when 05 did not run (e.g. plan_tasklist): the 04 draft. */
+async function loadDraftSpec(ctx: StepContext): Promise<string> {
+  const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
+  const out = (plan?.output as { spec?: string; summary?: string } | null) ?? {};
+  return out.spec ?? out.summary ?? '';
 }
 
 function specReviewFsPath(ctx: StepContext): string {
@@ -99,13 +117,16 @@ export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, Reso
     // Skip entirely (→ straight to gate 1) when the spec-quality pass left no findings.
     async shouldRun(ctx: StepContext): Promise<boolean> {
       const q = await loadQuality(ctx);
-      return Array.isArray(q.findings) && q.findings.length > 0;
+      const qf = Array.isArray(q.findings) ? q.findings.length : 0;
+      if (qf > 0) return true;
+      return (await loadAuditFindings(ctx)).length > 0;
     },
 
     async detect(ctx: StepContext): Promise<ResolveWarningsDetect> {
       const q = await loadQuality(ctx);
-      const findings = Array.isArray(q.findings) ? q.findings : [];
-      const spec = q.spec ?? '';
+      const auditFindings = await loadAuditFindings(ctx);
+      const findings = [...(Array.isArray(q.findings) ? q.findings : []), ...auditFindings];
+      const spec = q.spec || (await loadDraftSpec(ctx));
       // Materialize the spec to a workspace file for hand-editing, but only if
       // absent so a re-detect (e.g. CLI-provider change) doesn't clobber edits.
       const fsPath = specReviewFsPath(ctx);
@@ -122,6 +143,7 @@ export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, Reso
         spec,
         specFilePath: `${ctx.sandboxWorkdir}/${SPEC_REVIEW_REL}`,
         revising: (await loadOutstandingSpecFeedback(ctx)).length > 0,
+        hasAuditFindings: auditFindings.length > 0,
       };
     },
 
@@ -159,7 +181,11 @@ export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, Reso
                 label: 'Have an agent fix them (uses the CLI picked on this card)',
               },
             ],
-            default: 'continue',
+            default: detected.revising
+              ? 'continue'
+              : detected.hasAuditFindings
+                ? 'agent'
+                : 'continue',
             required: true,
           },
         ],

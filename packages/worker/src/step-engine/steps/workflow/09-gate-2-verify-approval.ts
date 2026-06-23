@@ -53,6 +53,8 @@ interface VerifyGateDetect {
     lensFindings: string[];
     positives: string[];
   } | null;
+  /** Phase 6b broad code audit (08c2) result — advisory; null when it didn't run. */
+  codeAudit: { findings: string[] } | null;
   /** Phase 7 adversarial QA result (null when the step didn't run). */
   adversarial: {
     level: string;
@@ -140,6 +142,9 @@ interface Phase4Output {
 interface VerifyGateApply {
   decision: 'approve' | 'reject';
   feedback: string;
+  /** Broad code-audit findings (08c2) carried into the restart diagnosis so the
+   *  implementer validates each and acts on the valid, in-scope ones. */
+  auditFindings: string[];
 }
 
 interface VerifyOutput {
@@ -158,16 +163,25 @@ function fmtResult(label: string, entry?: { passed?: boolean; output?: string })
 
 /** The diagnosis handed to the implementer when the developer rejects at Gate 2: their
  *  hands-on findings become the round-N fix request (see restartLoop / FIX_LOOP_REQUESTED). */
-function formatRejectDiagnosis(feedback: string): string {
+function formatRejectDiagnosis(feedback: string, auditFindings: string[] = []): string {
   const f = feedback.trim();
-  return [
+  const parts = [
     'Developer verification at Gate 2 rejected the implementation after hands-on testing.',
     '',
     'Findings to fix:',
     f.length > 0
       ? f
       : '(no specific findings provided — re-check the implementation against the spec and the reported errors)',
-  ].join('\n');
+  ];
+  if (auditFindings.length > 0) {
+    parts.push(
+      '',
+      'Broad code-audit findings — validate EACH against the code and act ONLY on the valid,',
+      'in-scope ones (ignore any that are wrong, already handled, or out of scope):',
+      ...auditFindings.map((x) => `- ${x}`),
+    );
+  }
+  return parts.join('\n');
 }
 
 export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGateApply> = {
@@ -187,7 +201,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
   // Approve returns normally and the forward walk continues to the commit gate.
   restartLoop: {
     evaluate: (out) =>
-      out.decision === 'reject' ? { diagnosis: formatRejectDiagnosis(out.feedback) } : null,
+      out.decision === 'reject'
+        ? { diagnosis: formatRejectDiagnosis(out.feedback, out.auditFindings) }
+        : null,
   },
 
   async detect(ctx: StepContext): Promise<VerifyGateDetect> {
@@ -277,6 +293,27 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       };
     }
 
+    // Phase 6b broad code audit (08c2): advisory findings surfaced for the human.
+    const phase8c2 = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08c2-code-audit');
+    const pc2 = phase8c2?.output as {
+      audited?: boolean;
+      findings?: {
+        severity?: string;
+        path?: string;
+        lines?: string;
+        issue?: string;
+        fix?: string;
+      }[];
+    } | null;
+    let codeAudit: VerifyGateDetect['codeAudit'] = null;
+    if (pc2?.audited) {
+      codeAudit = {
+        findings: (pc2.findings ?? []).map((f) =>
+          `[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+        ),
+      };
+    }
+
     // Phase 7 adversarial QA: surface findings; blocking on any critical/high.
     const phase8d = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08d-adversarial-qa');
     const pd = phase8d?.output as Phase8dOutput | null;
@@ -359,6 +396,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       testManagement,
       browser,
       codeReview,
+      codeAudit,
       adversarial,
       liveBrowser,
     };
@@ -379,6 +417,11 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const codeReviewLine = cr
       ? `Code review: peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} operational/perf` : ''}${cr.blocking ? ' — BLOCKING' : ''}`
       : '';
+    const cAudit = detected.codeAudit;
+    const codeAuditLine =
+      cAudit && cAudit.findings.length > 0
+        ? `Code audit (broad): ${cAudit.findings.length} finding(s) — advisory`
+        : '';
     const aq = detected.adversarial;
     const adversarialOk = aq === null || !aq.blocking;
     const adversarialLine = aq
@@ -397,6 +440,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         : '',
       browserLine,
       codeReviewLine,
+      codeAuditLine,
       adversarialLine,
       detected.testManagement ? detected.testManagement.line : '',
     ]
@@ -495,6 +539,17 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       });
     }
 
+    if (cAudit && cAudit.findings.length > 0) {
+      const lines: string[] = ['## Findings'];
+      for (const f of cAudit.findings) lines.push(`- ${f}`);
+      infoSections.push({
+        title: 'Code audit (broad)',
+        preview: `${cAudit.findings.length} finding(s) • advisory`,
+        body: lines.join('\n'),
+        defaultOpen: false,
+      });
+    }
+
     if (aq) {
       const lines: string[] = [
         `**Level:** ${aq.level}`,
@@ -554,6 +609,10 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // Reject does NOT fail the task: the restartLoop hook above turns a reject into an
     // uncapped restart from implementation, handing the developer's findings to the
     // implementer. Approve finalizes and the forward walk proceeds to the commit gate.
-    return { decision, feedback: values.feedback ?? '' };
+    return {
+      decision,
+      feedback: values.feedback ?? '',
+      auditFindings: args.detected.codeAudit?.findings ?? [],
+    };
   },
 };
