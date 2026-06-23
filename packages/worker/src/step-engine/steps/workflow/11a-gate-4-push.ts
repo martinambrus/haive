@@ -73,6 +73,10 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
     description:
       'Presents the branch and pending commits and offers to push to origin once the user confirms. Nothing is pushed automatically. If the repo has no origin yet, lets the user add one and pick a credential.',
     requiresCli: false,
+    // Local-only projects have no remote to push to; allow the user to Skip
+    // this gate so the task can still finish. Keep in sync with
+    // SKIPPABLE_STEP_IDS in @haive/shared.
+    allowSkip: true,
   },
 
   async detect(ctx: StepContext): Promise<PushGateDetect> {

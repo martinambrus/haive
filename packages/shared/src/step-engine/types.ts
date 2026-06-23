@@ -97,6 +97,7 @@ export const STEP_CLI_ROLES: Record<string, readonly CliRoleDescriptor[]> = {
 export const SKIPPABLE_STEP_IDS: readonly string[] = [
   '03b-business-requirements',
   '06a-db-migrate',
+  '11a-gate-4-push',
 ];
 
 export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
