@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { classifyDrift, ddevReconcileStep } from './07c-ddev-reconcile.js';
+import { parseDdevListForApproot } from '../../../sandbox/ddev-runner.js';
 import type { DdevConfigFields } from '../_ddev-config.js';
 import type { DdevBaseline } from './01c-ddev-env.js';
 
@@ -106,5 +107,34 @@ describe('classifyDrift', () => {
       HASH_B,
     );
     expect(r.kind).toBe('unsupported');
+  });
+});
+
+describe('parseDdevListForApproot (Slice C name-drift detection)', () => {
+  const listJson = JSON.stringify({
+    raw: [
+      { name: 'rs-ollama2', approot: '/repos/u/r/.haive/worktrees/feature-x' },
+      { name: 'other', approot: '/repos/u/other' },
+    ],
+  });
+
+  it('returns the project name registered at the approot', () => {
+    expect(parseDdevListForApproot(listJson, '/repos/u/r/.haive/worktrees/feature-x')).toBe(
+      'rs-ollama2',
+    );
+  });
+
+  it('returns null when no project matches the approot', () => {
+    expect(parseDdevListForApproot(listJson, '/repos/u/r/.haive/worktrees/none')).toBeNull();
+  });
+
+  it('tolerates leading log/pull noise before the JSON', () => {
+    expect(parseDdevListForApproot(`pulling images...\n${listJson}\n`, '/repos/u/other')).toBe(
+      'other',
+    );
+  });
+
+  it('returns null on unparseable output', () => {
+    expect(parseDdevListForApproot('not json at all', '/x')).toBeNull();
   });
 });

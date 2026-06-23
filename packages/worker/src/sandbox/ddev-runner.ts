@@ -247,6 +247,34 @@ export async function ddevPrimaryUrl(handle: DdevRunnerHandle): Promise<string |
   }
 }
 
+/** Parse `ddev list -j` output for the project registered at `approot`, returning its name
+ *  or null. Pure (no docker) so it is unit-testable; tolerant of verbose pull/log noise that
+ *  can precede the JSON (slices to the outermost object). */
+export function parseDdevListForApproot(jsonText: string, approot: string): string | null {
+  const start = jsonText.indexOf('{');
+  const end = jsonText.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(jsonText.slice(start, end + 1)) as {
+      raw?: { name?: string; approot?: string }[];
+    };
+    const match = (parsed.raw ?? []).find((p) => p.approot === approot);
+    return match?.name ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The DDEV project name currently REGISTERED for this runner's approot (via `ddev list -j`),
+ *  or null when none is registered there. 07c uses it to detect a project rename: when the
+ *  config `name:` no longer matches, a bare `ddev restart` would collide ("already contains a
+ *  project named <old>") and a data-safe rename is needed instead. */
+export async function ddevRegisteredProjectName(handle: DdevRunnerHandle): Promise<string | null> {
+  const res = await ddevExec(handle, 'list -j', { timeoutMs: 30_000 });
+  if (res.exitCode !== 0) return null;
+  return parseDdevListForApproot(res.output, handle.projectDir);
+}
+
 /** `ddev restart` — re-reads `.ddev/config.yaml` and applies changes (php_version,
  *  webserver, docroot, …) to the already-running project. Idempotent; the db data
  *  volume is preserved when the db version is unchanged. Long timeout because a
@@ -273,6 +301,49 @@ export async function ddevSnapshotRestore(
   name: string,
 ): Promise<{ exitCode: number; output: string }> {
   return ddevExec(handle, `snapshot restore ${name}`, { timeoutMs: 1_800_000 });
+}
+
+/** Data-safe DDEV project rename, for when the implementation changed `.ddev/config.yaml`
+ *  `name:` AFTER the project was registered+started under the old name (a bare `ddev restart`
+ *  then fails: "already contains a project named <old>"). A rename gives the new name a FRESH
+ *  db volume (volumes are per-project), so the DB is snapshotted first and restored after:
+ *  snapshot -> `ddev stop --unlist <old>` (non-destructive; drops the registration, keeps the
+ *  old volume, which the per-task DinD runner discards at task end) -> `ddev start` (registers
+ *  the new name from config) -> `ddev snapshot restore`. Snapshot/restore are no-ops when the
+ *  env has no DB (a freshly-generated env with no import). Returns the `ddev start` result —
+ *  exitCode 0 means the rename took effect. */
+export async function ddevSafeRename(
+  handle: DdevRunnerHandle,
+  oldName: string,
+  snapshotName: string,
+): Promise<{ exitCode: number; output: string }> {
+  const snap = await ddevSnapshot(handle, snapshotName);
+  const hadSnapshot = snap.exitCode === 0;
+  if (!hadSnapshot) {
+    log.info(
+      { oldName, output: snap.output.slice(-300) },
+      'ddev pre-rename snapshot non-zero (empty DB?) — continuing',
+    );
+  }
+  const stop = await ddevExec(handle, `stop --unlist ${oldName}`, { timeoutMs: 120_000 });
+  if (stop.exitCode !== 0) {
+    log.warn(
+      { oldName, output: stop.output.slice(-300) },
+      'ddev stop --unlist non-zero (continuing to start under the new name)',
+    );
+  }
+  const start = await ddevExec(handle, 'start', { timeoutMs: 900_000 });
+  if (start.exitCode !== 0) return start;
+  if (hadSnapshot) {
+    const restore = await ddevSnapshotRestore(handle, snapshotName);
+    if (restore.exitCode !== 0) {
+      log.warn(
+        { snapshotName, output: restore.output.slice(-300) },
+        'ddev snapshot restore after rename non-zero',
+      );
+    }
+  }
+  return start;
 }
 
 // Deterministic durability-snapshot names. They live in `.ddev/.snapshots/` under

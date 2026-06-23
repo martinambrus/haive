@@ -5,13 +5,15 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
-import { parseDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
+import { matchYamlField, parseDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
 import type { DdevBaseline, DdevEnvApply } from './01c-ddev-env.js';
 import {
   runnerExec,
   ddevRestart,
   ddevSnapshot,
   ddevMigrateDatabase,
+  ddevRegisteredProjectName,
+  ddevSafeRename,
 } from '../../../sandbox/ddev-runner.js';
 import { ensureDdevWithProgress } from './_app-runtime.js';
 
@@ -206,7 +208,7 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
 
   async apply(ctx, args): Promise<ReconcileApply> {
     // Re-derive from scratch — detect output is cached across retries.
-    const { repoSubpath, baseline, target, drift } = await loadReconcileState(ctx);
+    const { repoSubpath, workspace, baseline, target, drift } = await loadReconcileState(ctx);
 
     const noop = (output: string): ReconcileApply => ({
       action: 'none',
@@ -310,6 +312,33 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
 
     // --- Restart path (php / webserver / docroot / other config change) ---
     ctx.throwIfCancelled();
+    // A project NAME change can't be applied by `ddev restart`: the approot is registered
+    // under the OLD name, so DDEV refuses ("already contains a project named <old>"). Detect
+    // it and do a data-safe rename (snapshot -> stop --unlist old -> start new -> restore)
+    // instead of restarting into the conflict.
+    const registeredName = await ddevRegisteredProjectName(handle);
+    const configText = workspace
+      ? await readFile(ddevConfigPath(workspace), 'utf8').catch(() => null)
+      : null;
+    const configName = configText ? matchYamlField(configText, 'name') : null;
+    if (registeredName && configName && registeredName !== configName) {
+      const snapshotName = `haive-pre-rename-${ctx.taskId}`;
+      await ctx.emitProgress(`Renaming DDEV project ${registeredName} → ${configName}…`);
+      const renamed = await ddevSafeRename(handle, registeredName, snapshotName);
+      if (renamed.exitCode !== 0) {
+        throw new Error(
+          `ddev rename ${registeredName} → ${configName} failed: ${renamed.output.slice(-1500)}`,
+        );
+      }
+      return {
+        action: 'restart',
+        reconciled: true,
+        snapshotName,
+        from: registeredName,
+        to: configName,
+        output: `Renamed DDEV project ${registeredName} → ${configName} (snapshot + restart, data preserved).`,
+      };
+    }
     await ctx.emitProgress('Restarting DDEV to apply the new configuration…');
     const r = await ddevRestart(handle);
     if (r.exitCode !== 0) throw new Error(`ddev restart failed: ${r.output.slice(-1500)}`);
