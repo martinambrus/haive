@@ -34,6 +34,7 @@ import { FormRenderer, InfoSections, type FormValues } from '@/components/form-r
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { TaskSource } from '@/components/task-source';
+import { CommitDiffViewer } from '@/components/commit-diff-viewer';
 import { StepTerminal } from '@/components/terminal/StepTerminal';
 import { BrowserVncPanel } from '@/components/terminal/BrowserVncPanel';
 import { InteractiveShell } from '@/components/terminal/InteractiveShell';
@@ -1860,6 +1861,14 @@ function StepCard({
       {step.stepId === '09-gate-2-verify-approval' &&
         (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
           ?.available && <BrowserVncPanel taskId={taskId} title="Browser — test the app here" />}
+
+      {step.stepId === '10-gate-3-commit' &&
+        (step.detectOutput as { diffArtifactPath?: string | null } | null)?.diffArtifactPath && (
+          <CommitDiffViewer
+            taskId={taskId}
+            artifactPath={(step.detectOutput as { diffArtifactPath: string }).diffArtifactPath}
+          />
+        )}
     </Card>
   );
 }

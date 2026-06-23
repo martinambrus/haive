@@ -5,6 +5,7 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveUserGitEnv } from '../../../secrets/user-git-identity.js';
+import { buildCommitDiffArtifact } from './_commit-diff.js';
 
 const exec = promisify(execFile);
 
@@ -20,6 +21,12 @@ interface CommitGateDetect {
   workspacePath: string;
   diffSummary: string;
   dirtyFiles: number;
+  // Absolute path to the worker-written commit-diff artifact, fetched lazily by
+  // the web viewer via the existing /files/raw route. null when there is no git
+  // repo, no pending changes, or the build failed (viewer is then hidden).
+  diffArtifactPath: string | null;
+  changedFileCount: number;
+  diffArtifactTruncated: boolean;
 }
 
 interface CommitGateApply {
@@ -64,7 +71,15 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const workspacePath = worktreeOutput?.worktreePath ?? ctx.workspacePath;
     const hasGit = await pathExists(path.join(workspacePath, '.git'));
     if (!hasGit) {
-      return { hasGit: false, workspacePath, diffSummary: '(no git)', dirtyFiles: 0 };
+      return {
+        hasGit: false,
+        workspacePath,
+        diffSummary: '(no git)',
+        dirtyFiles: 0,
+        diffArtifactPath: null,
+        changedFileCount: 0,
+        diffArtifactTruncated: false,
+      };
     }
     const status = await gitRun(workspacePath, ['status', '--porcelain']);
     const dirtyFiles = status.stdout.split('\n').filter((line) => line.trim().length > 0).length;
@@ -73,11 +88,31 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       diffStat.stdout.trim().length > 0
         ? diffStat.stdout.trim().slice(0, 3000)
         : 'No pending changes detected against HEAD.';
+
+    // Build the interactive commit-diff artifact for the web viewer. Never fail
+    // the gate on a diff-build error — the viewer is simply hidden.
+    let diffArtifactPath: string | null = null;
+    let changedFileCount = 0;
+    let diffArtifactTruncated = false;
+    if (dirtyFiles > 0) {
+      try {
+        const res = await buildCommitDiffArtifact(workspacePath, gitRun);
+        diffArtifactPath = res.artifactPath;
+        changedFileCount = res.changedFileCount;
+        diffArtifactTruncated = res.truncated;
+      } catch (err) {
+        ctx.logger.warn({ err }, 'failed to build commit diff artifact');
+      }
+    }
+
     return {
       hasGit: true,
       workspacePath,
       diffSummary: summary,
       dirtyFiles,
+      diffArtifactPath,
+      changedFileCount,
+      diffArtifactTruncated,
     };
   },
 
