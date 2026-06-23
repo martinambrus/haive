@@ -139,24 +139,13 @@ export function CliStreamViewer({
     termRef.current = term;
     fitRef.current = fitAddon;
 
-    // Read-only viewer: intercept Ctrl+C as a "kill the running CLI" shortcut.
-    // Any other key is ignored (disableStdin already blocks input forwarding;
-    // we use the key handler purely for the cancel hotkey).
+    // Read-only viewer: Ctrl+C / Ctrl+Shift+C copy the current selection.
+    // There is no CLI-cancel hotkey — cancelling is done via the Cancel
+    // button so Ctrl+C never interferes with the standard copy shortcut.
+    // (disableStdin already blocks input forwarding.)
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== 'keydown') return true;
-      if (ev.ctrlKey && !ev.shiftKey && (ev.key === 'C' || ev.key === 'c')) {
-        const sel = term.getSelection();
-        if (sel) {
-          // Honor the standard "Ctrl+C copies selection" UX; only treat it
-          // as cancel when nothing is selected.
-          void navigator.clipboard.writeText(sel);
-          return false;
-        }
-        term.writeln('\r\n\x1b[33m[Ctrl+C → cancelling running CLI…]\x1b[0m');
-        void cancelActiveCli();
-        return false;
-      }
-      if (ev.ctrlKey && ev.shiftKey && (ev.key === 'C' || ev.key === 'c')) {
+      if (ev.ctrlKey && (ev.key === 'C' || ev.key === 'c')) {
         const sel = term.getSelection();
         if (sel) {
           void navigator.clipboard.writeText(sel);
@@ -386,7 +375,7 @@ export function CliStreamViewer({
         </div>
         {!isReplay && (
           <div className="flex items-center gap-3 text-xs text-neutral-400">
-            <span>Read-only — Ctrl+C cancels the running CLI</span>
+            <span>Read-only — use Cancel to stop the running CLI</span>
             <button
               type="button"
               onClick={() => void cancelActiveCli()}
