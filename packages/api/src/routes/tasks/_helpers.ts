@@ -1,5 +1,5 @@
 import { relative, resolve } from 'node:path';
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_DISPATCH_STEP_IDS,
@@ -266,6 +266,59 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
       tokenUsage: stat?.tokenUsage ?? null,
     };
   });
+}
+
+/** Sum each task's CLI token usage for the listing (GET /tasks). One GROUP BY
+ *  over the whole page keeps it a single round-trip regardless of task count.
+ *  Uses the same `supersededAt IS NULL` filter as the per-step stats, plus a
+ *  non-null step, so a task's list total equals the sum of its per-step token
+ *  badges on the detail page (which folds step totals and skips null-step rows).
+ *  Tasks with no token-bearing invocation are simply absent from the map. */
+export async function sumTaskTokens(
+  db: ReturnType<typeof getDb>,
+  taskIds: string[],
+): Promise<Map<string, CliTokenUsage>> {
+  const out = new Map<string, CliTokenUsage>();
+  if (taskIds.length === 0) return out;
+  const tu = schema.cliInvocations.tokenUsage;
+  const rows = await db
+    .select({
+      taskId: schema.cliInvocations.taskId,
+      inputTokens: sql<number>`coalesce(sum((${tu} ->> 'inputTokens')::numeric), 0)::int`,
+      outputTokens: sql<number>`coalesce(sum((${tu} ->> 'outputTokens')::numeric), 0)::int`,
+      totalTokens: sql<number>`coalesce(sum((${tu} ->> 'totalTokens')::numeric), 0)::int`,
+      cacheReadTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheReadTokens')::numeric), 0)::int`,
+      cacheCreationTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheCreationTokens')::numeric), 0)::int`,
+      costUsd: sql<number>`coalesce(sum((${tu} ->> 'costUsd')::numeric), 0)::double precision`,
+    })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        inArray(schema.cliInvocations.taskId, taskIds),
+        isNull(schema.cliInvocations.supersededAt),
+        isNotNull(schema.cliInvocations.taskStepId),
+      ),
+    )
+    .groupBy(schema.cliInvocations.taskId);
+  for (const row of rows) {
+    const inputTokens = Number(row.inputTokens) || 0;
+    const outputTokens = Number(row.outputTokens) || 0;
+    const totalTokens = Number(row.totalTokens) || 0;
+    const cacheReadTokens = Number(row.cacheReadTokens) || 0;
+    const cacheCreationTokens = Number(row.cacheCreationTokens) || 0;
+    const costUsd = Number(row.costUsd) || 0;
+    const hasTokens = totalTokens > 0 || inputTokens > 0 || outputTokens > 0 || costUsd > 0;
+    if (!hasTokens) continue;
+    out.set(row.taskId, {
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      ...(cacheReadTokens > 0 ? { cacheReadTokens } : {}),
+      ...(cacheCreationTokens > 0 ? { cacheCreationTokens } : {}),
+      ...(costUsd > 0 ? { costUsd } : {}),
+    });
+  }
+  return out;
 }
 
 /** Reverse-lookup the role of each waiting_cli step's LIVE cli invocation (from its

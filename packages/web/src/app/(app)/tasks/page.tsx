@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, type Task, type TaskListResponse, type TaskStatus } from '@/lib/api-client';
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { formatDuration } from '@/lib/format-duration';
+import { formatTokens } from '@/lib/format-tokens';
 import { usePageTitle } from '@/lib/use-page-title';
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
@@ -357,6 +358,14 @@ export default function TasksPage() {
                     >
                       user {formatDuration(task.timing.userActiveMs)}
                     </span>
+                    {task.tokenUsage && task.tokenUsage.totalTokens > 0 && (
+                      <span
+                        className="text-sky-300"
+                        title={`CLI tokens (provider-native): in ${task.tokenUsage.inputTokens.toLocaleString()} / out ${task.tokenUsage.outputTokens.toLocaleString()} / total ${task.tokenUsage.totalTokens.toLocaleString()}`}
+                      >
+                        {formatTokens(task.tokenUsage.totalTokens)} tok
+                      </span>
+                    )}
                   </div>
                 )}
               </Card>

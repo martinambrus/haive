@@ -428,6 +428,19 @@ export interface Task {
     idleMs: number;
     userActiveMs: number;
   } | null;
+  /** Summed CLI token usage across the task's non-superseded invocations,
+   *  attached by the list endpoint (GET /tasks). Matches the sum of the per-step
+   *  token badges on the detail page. A snapshot at request time; the listing's
+   *  3s poll keeps running tasks current. null when the task ran no token-bearing
+   *  CLI. Absent on the create response. */
+  tokenUsage?: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+    costUsd?: number;
+  } | null;
 }
 
 /** GET /tasks response: one page of tasks plus the totals and repo facet that

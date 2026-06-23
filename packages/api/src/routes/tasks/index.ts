@@ -27,6 +27,7 @@ import {
   enrichStepsWithCliUsage,
   enrichStepsWithSkipFlag,
   findActiveCliInvocation,
+  sumTaskTokens,
 } from './_helpers.js';
 import { fileRoutes } from './files.js';
 import { stepRoutes } from './steps.js';
@@ -113,6 +114,10 @@ taskRoutes.get('/', async (c) => {
     if (list) list.push(s);
     else stepsByTask.set(s.taskId, [s]);
   }
+  // Per-task CLI token totals for the listing, summed across the page's tasks in
+  // one query. Like timing, it's a snapshot at `now`; the listing's 3s poll keeps
+  // running tasks current as the worker flushes live usage snapshots.
+  const tokensByTask = await sumTaskTokens(db, taskIds);
   const tasks = rows.map((t) => {
     const steps = stepsByTask.get(t.id) ?? [];
     const { workMs, idleMs, userActiveMs } = computeTaskTiming(steps, now);
@@ -127,6 +132,7 @@ taskRoutes.get('/', async (c) => {
     return {
       ...t,
       timing: { wallMs, workMs, idleMs, userActiveMs },
+      tokenUsage: tokensByTask.get(t.id) ?? null,
       currentWaitStartedAt: waitStart ? waitStart.toISOString() : null,
     };
   });
