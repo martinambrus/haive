@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Haive Onboarding — LLM Comparison (Redaction System)</title>
+<style>
+  :root{
+    --bg:#0b0f14; --bg2:#11171f; --card:#151c26; --card2:#1b2430;
+    --ink:#e7edf3; --mut:#8da0b3; --line:#243140;
+    --accent:#3ddc97; --accent2:#4aa8ff; --warn:#f5b14c; --bad:#f2607a;
+    --good:#3ddc97; --mid:#f5b14c; --weak:#f2607a;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,#16202c 0,var(--bg) 55%);color:var(--ink);font-family:var(--sans);line-height:1.55;font-size:15px}
+  a{color:var(--accent2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1120px;margin:0 auto;padding:0 20px 80px}
+  header.hero{padding:54px 0 26px;border-bottom:1px solid var(--line)}
+  .kicker{font:600 12px/1 var(--mono);letter-spacing:.18em;text-transform:uppercase;color:var(--accent)}
+  h1{font-size:34px;line-height:1.12;margin:14px 0 8px;letter-spacing:-.5px}
+  h2{font-size:22px;margin:46px 0 6px;letter-spacing:-.3px}
+  h2 .num{font:600 13px/1 var(--mono);color:var(--accent);margin-right:10px;vertical-align:2px}
+  h3{font-size:16px;margin:22px 0 8px}
+  p.sub{color:var(--mut);max-width:78ch;margin:6px 0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:18px;font:500 13px/1.4 var(--mono);color:var(--mut)}
+  .meta b{color:var(--ink);font-weight:600}
+  .pill{display:inline-block;padding:3px 10px;border:1px solid var(--line);border-radius:999px;background:var(--bg2);font:600 12px/1.5 var(--mono)}
+  .src{margin-top:16px;padding:12px 16px;background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent2);border-radius:8px}
+  .src .t{font:600 12px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--mut)}
+
+  /* verdict cards */
+  .verdicts{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:24px}
+  .vcard{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:12px;padding:16px 16px 14px;position:relative;overflow:hidden}
+  .vcard .lab{font:700 11px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--mut)}
+  .vcard .who{font-size:19px;font-weight:700;margin:8px 0 4px}
+  .vcard .why{font-size:13px;color:var(--mut)}
+  .vcard.win{border-color:#2f6b52}
+  .vcard.win::after,.vcard.val::after{content:"";position:absolute;inset:0 auto 0 0;width:3px}
+  .vcard.win::after{background:var(--good)}
+  .vcard.val{border-color:#2c4d70}.vcard.val::after{background:var(--accent2)}
+  .vcard.avoid{border-color:#6b2f3e}.vcard.avoid::after{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--bad)}
+
+  /* controls + table */
+  .controls{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:16px 0 10px}
+  .controls .l{font:600 12px/1 var(--mono);color:var(--mut);margin-right:4px}
+  button.sb{font:600 12px/1 var(--mono);color:var(--ink);background:var(--bg2);border:1px solid var(--line);padding:7px 11px;border-radius:7px;cursor:pointer}
+  button.sb:hover{border-color:var(--accent)}
+  button.sb.on{background:var(--accent);color:#06120c;border-color:var(--accent)}
+  .tbl-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+  table{border-collapse:collapse;width:100%;min-width:860px}
+  th,td{padding:10px 12px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+  th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+  thead th{position:sticky;top:0;background:var(--bg2);font:600 12px/1.2 var(--mono);color:var(--mut);cursor:pointer;user-select:none;letter-spacing:.02em}
+  thead th:hover{color:var(--ink)}
+  thead th.sorted{color:var(--accent)}
+  tbody tr:hover{background:#19222e}
+  tbody tr.tierA td:first-child{box-shadow:inset 3px 0 var(--good)}
+  tbody tr.tierB td:first-child{box-shadow:inset 3px 0 var(--mid)}
+  tbody tr.tierC td:first-child,tbody tr.tierD td:first-child{box-shadow:inset 3px 0 var(--bad)}
+  .llm{font-weight:600}
+  .prov{display:block;font:500 11px/1.3 var(--mono);color:var(--mut)}
+  .sc{font:600 13px/1 var(--mono);color:#06120c;border-radius:6px;padding:4px 7px;display:inline-block;min-width:34px;text-align:center}
+  td.num{font:500 13px/1 var(--mono);color:var(--ink)}
+  td.dim{color:var(--mut)}
+  .rank{font:700 13px/1 var(--mono);color:var(--mut)}
+
+  /* chart */
+  .chartwrap{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-top:8px}
+  .chartwrap svg{width:100%;height:auto;display:block}
+  .axt{fill:var(--mut);font:500 11px/1 var(--mono)}
+  .axl{fill:var(--ink);font:600 12px/1 var(--sans)}
+  .dotlab{fill:var(--ink);font:600 11px/1 var(--mono)}
+  .grid{stroke:var(--line);stroke-width:1}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;font:600 12px/1 var(--mono);color:var(--mut)}
+  .legend i{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:6px;vertical-align:-1px}
+
+  /* per-llm cards */
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:12px;margin-top:10px}
+  details.llmc{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  details.llmc[open]{border-color:var(--accent2)}
+  details.llmc summary{list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center;gap:12px}
+  details.llmc summary::-webkit-details-marker{display:none}
+  .badge{font:700 14px/1 var(--mono);color:#06120c;border-radius:8px;padding:7px 9px;min-width:46px;text-align:center}
+  .csum{flex:1}
+  .csum .n{font-weight:700;font-size:15px}
+  .csum .p{font:500 11px/1.3 var(--mono);color:var(--mut)}
+  .chev{color:var(--mut);font:600 12px/1 var(--mono)}
+  .cbody{padding:0 16px 16px;border-top:1px solid var(--line)}
+  .statline{display:flex;flex-wrap:wrap;gap:6px 14px;margin:12px 0;font:500 12px/1.4 var(--mono);color:var(--mut)}
+  .statline b{color:var(--ink)}
+  .cbody ul{margin:6px 0;padding-left:18px}
+  .cbody li{margin:3px 0;font-size:13.5px}
+  .cbody .pro li{color:#bfe9d4}
+  .cbody .con li{color:#f3c3cd}
+  .lbl{font:700 11px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--mut);margin-top:10px;display:block}
+
+  /* generic blocks */
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:720px){.grid2{grid-template-columns:1fr}}
+  .box{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .box h3{margin-top:0}
+  table.mini{min-width:0}
+  table.mini th,table.mini td{padding:8px 10px;font-size:13px}
+  .flag{border-left:3px solid var(--bad);padding:8px 0 8px 14px;margin:10px 0;font-size:14px}
+  .flag b{color:#ffd2dc}
+  .note{border-left:3px solid var(--warn);padding:8px 0 8px 14px;margin:10px 0;font-size:14px;color:var(--mut)}
+  ol.recs{padding-left:20px}
+  ol.recs li{margin:8px 0}
+  ol.recs b{color:var(--ink)}
+  details.method summary{cursor:pointer;font:600 13px/1 var(--mono);color:var(--accent2);padding:6px 0}
+  footer{margin-top:50px;padding-top:18px;border-top:1px solid var(--line);color:var(--mut);font:500 12px/1.6 var(--mono)}
+  code{font-family:var(--mono);background:var(--bg2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="kicker">Haive · Onboarding Benchmark</div>
+  <h1>Which LLM onboards a legacy codebase best?</h1>
+  <p class="sub">The same repository was auto-onboarded 10 times through Haive&rsquo;s deterministic step pipeline, each run driven by a different LLM. Every run was audited across five correctness dimensions (verified against the real source code) and two cost dimensions (compute time &amp; output tokens).</p>
+  <div class="meta">
+    <span><b>10</b> LLMs</span>
+    <span><b>5</b> correctness dims</span>
+    <span><b>~20</b> steps / run</span>
+    <span>Audited <b>2026-06-23</b></span>
+    <span class="pill">all runs completed</span>
+  </div>
+  <div class="src">
+    <div class="t">Onboarded project</div>
+    <div style="margin-top:6px"><b>Redaction System</b> &mdash; a legacy PHP content-management / page-&ldquo;redaction&rdquo; CMS (circa 2008).
+    Source: <a href="https://sourceforge.net/projects/redactionsystem/" target="_blank" rel="noopener">sourceforge.net/projects/redactionsystem</a></div>
+    <div style="margin-top:6px;color:var(--mut);font:500 12.5px/1.5 var(--mono)">Stack (ground truth): PHP (122 files) · JS 218 · CSS 80 · HTML 41 · deprecated <code>mysql_*</code> extension · MySQL/MariaDB · FCKeditor · YUI · jQuery · <b>no framework</b>.</div>
+  </div>
+</header>
+
+<section>
+  <div class="verdicts">
+    <div class="vcard win"><div class="lab">Best overall</div><div class="who">Claude Code</div><div class="why">Top-3 in every dimension, zero hallucinations, best judgment (rejected a false detection, cleanest knowledge routing). Mid-pack speed.</div></div>
+    <div class="vcard val"><div class="lab">Best value</div><div class="who">deepseek-v4-pro</div><div class="why">Best detection &amp; discovered-agents, near-top KB &mdash; at <b>28&nbsp;min</b>, fastest of the strong tier. ~96% of Claude&rsquo;s quality at ~half the compute.</div></div>
+    <div class="vcard avoid"><div class="lab">Over-priced</div><div class="who">z.ai / glm-4.6</div><div class="why">Good quality (4th) but <b>slowest compute (79&nbsp;min ≈ 2× median)</b> and padding-prone. Three faster models match or beat it.</div></div>
+    <div class="vcard avoid"><div class="lab">Avoid</div><div class="who">qwen · gpt-oss · gemma</div><div class="why">Global-KB contamination (qwen), invented an agent + a fake DB table (gpt-oss), omits half the app (gemma).</div></div>
+  </div>
+</section>
+
+<h2><span class="num">01</span>The leaderboard</h2>
+<p class="sub">Composite = weighted blend (KB 25% · Skills 25% · Detection 20% · Agents 15% · Global-KB 15%). Click any header to sort, or use the quick-sort buttons. Cells are heat-mapped 3.5&nbsp;&rarr;&nbsp;10.</p>
+<div class="controls">
+  <span class="l">Quick sort:</span>
+  <button class="sb" data-k="composite">Composite</button>
+  <button class="sb" data-k="detect">Detection</button>
+  <button class="sb" data-k="kb">Knowledge base</button>
+  <button class="sb" data-k="skills">Skills</button>
+  <button class="sb" data-k="agents">Agents</button>
+  <button class="sb" data-k="global">Global KB</button>
+  <button class="sb" data-k="cliMin" data-asc="1">Speed (fastest)</button>
+  <button class="sb" data-k="value">Value</button>
+</div>
+<div class="tbl-scroll">
+  <table id="tbl">
+    <thead><tr id="head"></tr></thead>
+    <tbody id="body"></tbody>
+  </table>
+</div>
+<p class="sub" style="font-size:13px;margin-top:8px"><b>Value</b> = composite ÷ compute-minutes (correctness per minute). <b>Output tokens</b> are the only roughly-comparable token metric &mdash; raw input/total counts differ wildly by provider (cache accounting); antigravity reported none.</p>
+
+<h2><span class="num">02</span>Quality vs. speed</h2>
+<p class="sub">The money chart. Up = more correct; left = faster. The shaded <b>value zone</b> (top-left) is high correctness at low compute. Note how deepseek lands there, Claude sits high-and-central, and glm/z.ai is pushed to the slow right edge.</p>
+<div class="chartwrap">
+  <svg id="scatter" viewBox="0 0 880 540" role="img" aria-label="Scatter plot of correctness versus compute time"></svg>
+  <div class="legend">
+    <span><i style="background:var(--good)"></i>Excellent (≥8.0)</span>
+    <span><i style="background:var(--mid)"></i>Decent (6&ndash;8)</span>
+    <span><i style="background:var(--bad)"></i>Weak (&lt;6)</span>
+    <span style="color:var(--mut)">bubble size ∝ output tokens</span>
+  </div>
+</div>
+
+<h2><span class="num">03</span>Best LLM per step</h2>
+<div class="tbl-scroll">
+<table class="mini">
+  <thead><tr><th>Onboarding step</th><th style="text-align:left">Winner</th><th>Score</th><th style="text-align:left">Runner-up</th><th style="text-align:left">Why the winner</th></tr></thead>
+  <tbody>
+    <tr><td style="text-align:left">Stack detection (01/02/04)</td><td style="text-align:left"><b>deepseek-v4-pro</b></td><td>9.5</td><td style="text-align:left">claude (9.0)</td><td style="text-align:left">Only model to explicitly debunk the injected Jest false-positive</td></tr>
+    <tr><td style="text-align:left">Agent discovery (06_5)</td><td style="text-align:left"><b>deepseek-v4-pro</b></td><td>9.5</td><td style="text-align:left">glm (9.0)</td><td style="text-align:left">5 grounded domain agents (mysql, php-legacy, yui, theme, fckeditor)</td></tr>
+    <tr><td style="text-align:left">Knowledge base (08)</td><td style="text-align:left"><b>amp</b> &amp; <b>minimax-m3</b></td><td>10</td><td style="text-align:left">claude / deepseek (9.5)</td><td style="text-align:left">Bug-level accuracy (inverted <code>Update()</code> return; schema-mutation-on-write)</td></tr>
+    <tr><td style="text-align:left">Skill generation (09_5)</td><td style="text-align:left"><b>minimax / claude / glm</b></td><td>9.5</td><td style="text-align:left">kimi (9.0)</td><td style="text-align:left">Domain-specific, line-grounded skills (form-wizard, edit-locking, url-aliases)</td></tr>
+    <tr><td style="text-align:left">Global-KB promotion</td><td style="text-align:left"><b>amp</b></td><td>9.5</td><td style="text-align:left">claude (9.0)</td><td style="text-align:left">6 portable, correctly-merged articles (no project leakage)</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="note">RAG-populate (step 10) is deterministic embedding &mdash; not LLM-differentiating; all runs indexed the same 314 code files.</p>
+
+<h2><span class="num">04</span>Every model, in detail</h2>
+<p class="sub">Click a card to expand strengths, weaknesses, and the per-dimension scores. Findings were verified to file:line against the real repository.</p>
+<div class="cards" id="cards"></div>
+
+<h2><span class="num">05</span>Notable defects</h2>
+<div class="grid2">
+  <div class="box">
+    <h3>Correctness failures</h3>
+    <div class="flag"><b>qwen3-coder</b> &mdash; promoted the <i>global</i> article &ldquo;MySQL Best Practices <b>for Redaction System</b>&rdquo;. A portable cross-project article must never contain the project name. Caught &amp; deleted at the review gate, but the <i>promotion decision</i> was wrong.</div>
+    <div class="flag"><b>gpt-oss:120b</b> &mdash; hallucinated a <code>jest-specialist</code> agent (no npm/tests exist) and a fake <code>settings</code> table; misframes HTTP actions as <code>php actions/*.php</code> CLI scripts.</div>
+    <div class="flag"><b>gemma4:31b</b> &mdash; never flags the deprecated <code>mysql_*</code> extension (the single most important legacy fact) and omits half the app&rsquo;s subsystems.</div>
+  </div>
+  <div class="box">
+    <h3>Hygiene / lower-severity</h3>
+    <div class="note"><b>Jest false-positive</b> (injected identically into all 10 by a deterministic heuristic matching FCKeditor/YUI JS): <b>qwen, gpt-oss, minimax, gemma</b> baked &ldquo;Test frameworks: jest&rdquo; into <code>AGENTS.md</code>; the other six rejected it.</div>
+    <div class="note"><b>Sandbox-path leaks</b> (<code>/haive/workdir/&hellip;</code>) in qwen + antigravity artifacts &mdash; non-portable.</div>
+    <div class="note"><b>amp</b> &mdash; duplicate multilingual skills (one feature, twice) + invented Db methods <code>queryCount/lastQuery</code>.</div>
+    <div class="note"><b>&ldquo;MariaDB 10.11&rdquo; anachronism</b> &mdash; sourced from harness metadata; asserted as the app&rsquo;s DB by qwen/gemma without noting the real <code>mysql_*</code> 3.23-era extension.</div>
+  </div>
+</div>
+
+<h2><span class="num">06</span>Recommendations</h2>
+<ol class="recs">
+  <li><b>Default / highest-stakes onboarding &rarr; Claude Code.</b> Most reliable, no weak dimension, no hallucinations, best judgment. Accept ~55&nbsp;min compute.</li>
+  <li><b>High-throughput / cost-sensitive &rarr; deepseek-v4-pro.</b> ~96% of Claude&rsquo;s correctness at ~half the compute; best detection + agents. Caveat: it promotes nothing to the global KB and generates fewer skills &mdash; nudge it on both.</li>
+  <li><b>Honorable mentions:</b> kimi-k2.7 (fast + strong, best non-deepseek value) and minimax-m3 (deepest KB + skills, mid speed).</li>
+  <li><b>Deprioritize z.ai / glm-4.6:</b> quality is real, but three faster models match or beat it &mdash; not worth 2× the compute.</li>
+  <li><b>Avoid for production onboarding:</b> qwen, gpt-oss, gemma (hallucinations / shallow output / global-KB contamination).</li>
+</ol>
+
+<details class="method">
+  <summary>&#9656; Methodology &amp; caveats</summary>
+  <div class="box" style="margin-top:10px">
+    <ul>
+      <li><b>Ground truth.</b> All 10 onboarded the same repo (re-uploaded per run &rarr; separate workspaces, so each LLM&rsquo;s <code>.claude/</code> artifacts persisted independently). Four parallel auditor agents verified claims against the real source to file:line.</li>
+      <li><b>Where the data lives.</b> Counts &amp; timing from <code>task_steps</code> / <code>cli_invocations</code> (main DB); generated content from each repo&rsquo;s on-disk <code>.claude/</code> dir; global articles from the separate <code>haive_kb_global</code> DB (filtered by <code>source_task_id</code>).</li>
+      <li><b>Tokens are not comparable across providers.</b> Claude reports cache-inclusive totals (14K input / 6.2M total); ollama-cloud reports raw uncached input (12&ndash;18M); antigravity reports 0 (broken tracking). Only <b>output tokens</b> and <b>CLI compute-minutes</b> are used for cost.</li>
+      <li><b>Wall-clock is misleading.</b> It includes user-idle-at-gate time. deepseek&rsquo;s 729-min wall was only 28&nbsp;min compute (the task sat between gates). Speed is ranked by <b>CLI active minutes</b>.</li>
+      <li><b>Step completion is uniform</b> (~20 done / 2 skipped for all 10) &mdash; the pipeline&rsquo;s stubs/fallbacks mask weak models, so all real signal is in content quality, not completion.</li>
+      <li><b>Scores</b> are an LLM-assisted structured audit; treat single decimals as indicative, not laboratory-precise. The tiers and per-step winners are robust.</li>
+    </ul>
+  </div>
+</details>
+
+<footer>
+  Generated for the Haive onboarding step-engine benchmark · onboarded project: Redaction System (sourceforge.net/projects/redactionsystem) · self-contained, no external dependencies.
+</footer>
+
+</div>
+
+<script>
+const DATA = [
+ {id:"claude-code",name:"Claude Code",prov:"Anthropic · subscription",tier:"A",
+  composite:8.95,detect:9.0,kb:9.5,skills:9.5,agents:7.0,global:9.0,
+  cliMin:54.6,wallMin:125.4,idleMin:12.3,outTok:165795,kbLocal:15,kbGlobal:8,skillsN:7,agentsDisc:1,
+  pro:[`Rejected the injected Jest false-positive; committed to PHP/no-framework/2008-LAMP`,
+       `Cleanest knowledge routing: 15 project-local KB files + 8 portable articles promoted to global`,
+       `Best single mysql-specialist agent (spotted makeDBSafe uses only stripslashes; flagged sql_debug.txt exposure)`,
+       `Zero hallucinations; top-3 in every dimension`],
+  con:[`Only 1 discovered agent (deepseek/glm/minimax found 3-5)`,
+       `mariadb/ folder name is anachronistic (content accurate)`,
+       `Mid-pack compute (~55 min)`]},
+
+ {id:"amp",name:"Sourcegraph Amp",prov:"Sourcegraph Amp · subscription",tier:"A",
+  composite:8.68,detect:7.5,kb:10,skills:8.5,agents:7.5,global:9.5,
+  cliMin:69.6,wallMin:381.6,idleMin:145.1,outTok:244316,kbLocal:20,kbGlobal:6,skillsN:6,agentsDisc:1,
+  pro:[`Best knowledge base (10/10) - bug-level accuracy: caught the inverted Db::Update() return and the fckeditor-substring XSS bypass`,
+       `Best global-KB promotion: 6 portable articles, correctly merged/deduped`,
+       `Unique domain-glossary "decoder ring" skill`],
+  con:[`Slow: ~70 min compute, 54 min on skills alone`,
+       `Duplicate multilingual skills (one feature shipped twice)`,
+       `Invented Db methods queryCount/lastQuery; shallow stack detection`]},
+
+ {id:"deepseek-v4-pro",name:"deepseek-v4-pro",prov:"Ollama Cloud · deepseek-v4-pro:cloud",tier:"A",
+  composite:8.60,detect:9.5,kb:9.5,skills:8.0,agents:9.5,global:6.0,
+  cliMin:27.9,wallMin:729.2,idleMin:96.1,outTok:103549,kbLocal:22,kbGlobal:0,skillsN:4,agentsDisc:5,
+  pro:[`Best stack detection (9.5) - only model to explicitly debunk the Jest false-positive`,
+       `Best discovered agents (5 grounded: mysql, php-legacy, yui, theme, fckeditor)`,
+       `Five real redaction-* subsystem KB dirs with verbatim source quotes`,
+       `Fastest of the strong tier: 28 min compute`],
+  con:[`Promoted nothing to global KB (missed reusable PHP5/mysql knowledge)`,
+       `Only 3-4 skills`,
+       `Cited one non-existent path (installer/actions_step_2.php)`]},
+
+ {id:"glm-4.6",name:"glm-4.6 (z.ai)",prov:"Z.AI · glm-4.6",tier:"A",
+  composite:8.58,detect:8.5,kb:9.0,skills:9.5,agents:9.0,global:6.0,
+  cliMin:79.2,wallMin:157.4,idleMin:22.5,outTok:134395,kbLocal:30,kbGlobal:0,skillsN:5,agentsDisc:3,
+  pro:[`Densest, security-grade skills (flagged the math-captcha eval() guard; decoded encryptPW=md5(crypt()))`,
+       `Strong framework-specialist agent`,
+       `Deepest KB content (30 files, verified not padded)`],
+  con:[`Slowest compute by far: ~79 min (about 2x the median), slow even on trivial steps`,
+       `30 local KB files / 0 promoted - no local-vs-global routing`,
+       `Worst value of the strong tier`]},
+
+ {id:"kimi-k2.7-code",name:"kimi-k2.7-code",prov:"Ollama Cloud · kimi-k2.7-code:cloud",tier:"A",
+  composite:8.30,detect:8.5,kb:9.0,skills:9.0,agents:8.0,global:6.0,
+  cliMin:40.0,wallMin:47.0,idleMin:5.6,outTok:163714,kbLocal:26,kbGlobal:0,skillsN:7,agentsDisc:2,
+  pro:[`Fast + strong: 40 min compute, lowest idle`,
+       `Broad architecture KB, every symbol verified to file:line`,
+       `Grounded url-aliases + rank-based-access skills; version-accurate (jquery-1-2)`],
+  con:[`Edit-locking only lightly covered`,
+       `Stray rs_ollama4. artifact atop INDEX.md`,
+       `0 global promotions`]},
+
+ {id:"minimax-m3",name:"minimax-m3",prov:"Ollama Cloud · minimax-m3:cloud",tier:"A",
+  composite:8.25,detect:6.0,kb:10,skills:9.5,agents:8.5,global:6.0,
+  cliMin:43.8,wallMin:110.2,idleMin:65.6,outTok:73579,kbLocal:25,kbGlobal:0,skillsN:8,agentsDisc:3,
+  pro:[`Best KB + skills depth (10 / 9.5)`,
+       `Precise family naming ("mysql-extension","php4-procedural"); 30+ claims verified line-exact`,
+       `Niche subsystems others missed (mailform flood-lock, visitor-counter, cross-language copy)`],
+  con:[`Weak detection (6.0) - propagated the Jest false-positive into AGENTS.md`,
+       `0 global promotions`]},
+
+ {id:"antigravity",name:"Google Antigravity",prov:"Google Antigravity · subscription",tier:"B",
+  composite:7.93,detect:8.0,kb:9.0,skills:8.5,agents:7.0,global:6.0,
+  cliMin:10.1,wallMin:56.8,idleMin:10.0,outTok:0,kbLocal:26,kbGlobal:0,skillsN:4,agentsDisc:1,
+  pro:[`Fastest compute (10 min)`,
+       `Every falsifiable claim verified exact`,
+       `Standout dynamic-modules skill`],
+  con:[`Broken token tracking (reports 0 tokens)`,
+       `Brief / shallow coverage depth`,
+       `Leaked /haive/workdir/ sandbox paths; invented a bogus localUrl`]},
+
+ {id:"gpt-oss",name:"gpt-oss:120b",prov:"Ollama Cloud · gpt-oss:120b-cloud",tier:"C",
+  composite:5.83,detect:5.0,kb:9.0,skills:4.0,agents:4.5,global:6.0,
+  cliMin:15.2,wallMin:122.8,idleMin:79.7,outTok:50742,kbLocal:22,kbGlobal:0,skillsN:4,agentsDisc:3,
+  pro:[`KB tech files mostly rs-anchored with line numbers (KB scored 9/10)`,
+       `Fast compute (15 min)`],
+  con:[`Hallucinated a jest-specialist agent (no npm/tests exist) + a fake settings table`,
+       `Refused to name PHP as the primary language`,
+       `Propagated the Jest false-positive; weakest skills/agents tier`]},
+
+ {id:"gemma4-31b",name:"gemma4:31b",prov:"Ollama Cloud · gemma4:31b-cloud",tier:"C",
+  composite:5.43,detect:5.0,kb:7.0,skills:5.0,agents:3.5,global:6.0,
+  cliMin:19.4,wallMin:29.4,idleMin:9.0,outTok:30456,kbLocal:13,kbGlobal:0,skillsN:4,agentsDisc:1,
+  pro:[`Lean but line-accurate where it speaks (cites real eval() at functions.php:1301)`,
+       `Fast (19 min) and well-organized`],
+  con:[`Shallow - omits half the app (edit-locking, aliases, form-wizard, installer, FCKeditor/YUI)`,
+       `Never flags the deprecated mysql_* extension`,
+       `Propagated the Jest false-positive; stray artifact in INDEX`]},
+
+ {id:"qwen3-coder",name:"qwen3-coder:480b",prov:"Ollama Cloud · qwen3-coder:480b-cloud",tier:"D",
+  composite:3.93,detect:3.5,kb:5.0,skills:4.0,agents:4.0,global:2.5,
+  cliMin:31.9,wallMin:78.8,idleMin:22.2,outTok:32717,kbLocal:14,kbGlobal:1,skillsN:4,agentsDisc:1,
+  pro:[`Accurate spine where present (real files/Db methods; "calypso" codename real)`],
+  con:[`Worst overall. Global-KB contamination: promoted "MySQL Best Practices for Redaction System" (project name leaked)`,
+       `Credulously accepted Jest into AGENTS.md`,
+       `Stub-shallow KB (~2 paragraphs/file), omits most subsystems`,
+       `Leaked sandbox paths; cited a non-repo path`]},
+];
+DATA.forEach(d=>{ d.value = +(d.composite/d.cliMin).toFixed(3); });
+
+// ---------- helpers ----------
+const fmtTok = t => t===0 ? "n/a" : (t>=1000 ? (t/1000).toFixed(1)+"K" : ""+t);
+function scoreColor(v){ // 3.5 -> red, 6.5 -> amber, 10 -> green
+  const lo=3.5, mid=6.5, hi=10;
+  let r,g,b;
+  if(v<=mid){ const t=(v-lo)/(mid-lo); r=242; g=Math.round(96+t*(177-96)); b=Math.round(122+t*(76-122)); }
+  else { const t=(v-mid)/(hi-mid); r=Math.round(245-t*(245-61)); g=Math.round(177-t*(177-220)); b=Math.round(76+t*(151-76)); }
+  return `rgb(${r},${g},${b})`;
+}
+const tierClass = t => "tier"+t;
+
+// ---------- table ----------
+const COLS = [
+  {k:"rank",   t:"#",          kind:"rank"},
+  {k:"name",   t:"LLM",        kind:"llm"},
+  {k:"composite",t:"Composite",kind:"score"},
+  {k:"detect", t:"Detect",     kind:"score"},
+  {k:"kb",     t:"KB",         kind:"score"},
+  {k:"skills", t:"Skills",     kind:"score"},
+  {k:"agents", t:"Agents",     kind:"score"},
+  {k:"global", t:"Global KB",  kind:"score"},
+  {k:"cliMin", t:"Compute min",kind:"num"},
+  {k:"outTok", t:"Out tokens", kind:"tok"},
+  {k:"value",  t:"Value",      kind:"num"},
+];
+let sortKey="composite", sortAsc=false;
+
+function renderHead(){
+  document.getElementById("head").innerHTML = COLS.map(c=>{
+    const s = c.k===sortKey ? " sorted" : "";
+    const arrow = c.k===sortKey ? (sortAsc?" ▲":" ▼") : "";
+    return `<th class="col-${c.k}${s}" data-k="${c.k}">${c.t}${arrow}</th>`;
+  }).join("");
+  document.querySelectorAll("#head th").forEach(th=>{
+    if(th.dataset.k==="rank"||th.dataset.k==="name") return;
+    th.addEventListener("click",()=>setSort(th.dataset.k));
+  });
+}
+function sorted(){
+  const arr=[...DATA];
+  if(sortKey!=="rank") arr.sort((a,b)=> sortAsc ? a[sortKey]-b[sortKey] : b[sortKey]-a[sortKey]);
+  return arr;
+}
+function renderBody(){
+  const arr=sorted();
+  document.getElementById("body").innerHTML = arr.map((d,i)=>{
+    const cells = COLS.map(c=>{
+      if(c.kind==="rank") return `<td><span class="rank">${i+1}</span></td>`;
+      if(c.kind==="llm")  return `<td><span class="llm">${d.name}</span><span class="prov">${d.prov}</span></td>`;
+      if(c.kind==="score"){ const v=d[c.k]; return `<td><span class="sc" style="background:${scoreColor(v)}">${v.toFixed(1)}</span></td>`; }
+      if(c.kind==="num")  return `<td class="num">${d[c.k]}</td>`;
+      if(c.kind==="tok")  return `<td class="num dim">${fmtTok(d[c.k])}</td>`;
+      return `<td>${d[c.k]}</td>`;
+    }).join("");
+    return `<tr class="${tierClass(d.tier)}">${cells}</tr>`;
+  }).join("");
+}
+function setSort(k){
+  if(k===sortKey){ sortAsc=!sortAsc; } else { sortKey=k; sortAsc = (k==="cliMin"); } // speed defaults ascending
+  document.querySelectorAll("button.sb").forEach(b=>b.classList.toggle("on",b.dataset.k===k));
+  renderHead(); renderBody();
+}
+document.querySelectorAll("button.sb").forEach(b=>{
+  b.addEventListener("click",()=>{ sortKey=b.dataset.k; sortAsc = b.dataset.asc==="1";
+    document.querySelectorAll("button.sb").forEach(x=>x.classList.toggle("on",x===b));
+    renderHead(); renderBody(); });
+});
+
+// ---------- scatter ----------
+function renderScatter(){
+  const W=880,H=540, L=64,R=28,T=28,B=72;
+  const X0=L, X1=W-R, Y0=T, Y1=H-B;
+  const xmin=0,xmax=85, ymin=3,ymax=10;
+  const sx=v=>X0+(v-xmin)/(xmax-xmin)*(X1-X0);
+  const sy=v=>Y1-(v-ymin)/(ymax-ymin)*(Y1-Y0);
+  let s="";
+  // value zone (quality>=8, time<=45)
+  s+=`<rect x="${sx(0)}" y="${sy(10)}" width="${sx(45)-sx(0)}" height="${sy(8)-sy(10)}" fill="rgba(61,220,151,.08)" stroke="rgba(61,220,151,.25)" stroke-dasharray="4 4"/>`;
+  s+=`<text class="axt" x="${sx(2)}" y="${sy(9.85)}" style="fill:rgba(61,220,151,.8)">value zone</text>`;
+  // gridlines + x ticks
+  for(let g=0;g<=80;g+=20){ s+=`<line class="grid" x1="${sx(g)}" y1="${Y0}" x2="${sx(g)}" y2="${Y1}"/>`;
+    s+=`<text class="axt" x="${sx(g)}" y="${Y1+20}" text-anchor="middle">${g}</text>`; }
+  for(let g=4;g<=10;g+=2){ s+=`<line class="grid" x1="${X0}" y1="${sy(g)}" x2="${X1}" y2="${sy(g)}"/>`;
+    s+=`<text class="axt" x="${X0-10}" y="${sy(g)+4}" text-anchor="end">${g}</text>`; }
+  // axis labels
+  s+=`<text class="axl" x="${(X0+X1)/2}" y="${H-14}" text-anchor="middle">CLI compute time (minutes) &rarr; slower</text>`;
+  s+=`<text class="axl" transform="translate(16,${(Y0+Y1)/2}) rotate(-90)" text-anchor="middle">Correctness composite &rarr; better</text>`;
+  // dots
+  const col=t=> t==="A"?"var(--good)" : t==="B"?"var(--mid)" : "var(--bad)";
+  const maxTok=Math.max(...DATA.map(d=>d.outTok));
+  DATA.forEach(d=>{
+    const r = 6 + 12*Math.sqrt((d.outTok||1)/maxTok);
+    const x=sx(d.cliMin), y=sy(d.composite);
+    s+=`<circle cx="${x}" cy="${y}" r="${r}" fill="${col(d.tier)}" fill-opacity=".22" stroke="${col(d.tier)}" stroke-width="1.6"><title>${d.name} — composite ${d.composite}, ${d.cliMin} min, out ${fmtTok(d.outTok)}</title></circle>`;
+    // label placement: shift to avoid overlap roughly
+    const dy = (d.id==="kimi-k2.7-code")? 16 : (d.id==="deepseek-v4-pro"? -14 : (d.id==="glm-4.6"? -14 : -r-6));
+    const dx = (d.id==="amp")? 10 : 0;
+    s+=`<text class="dotlab" x="${x+dx}" y="${y+dy}" text-anchor="middle">${d.name.replace(/ \(.*\)/,"").replace(":cloud","")}</text>`;
+  });
+  document.getElementById("scatter").innerHTML=s;
+}
+
+// ---------- per-llm cards ----------
+function renderCards(){
+  const arr=[...DATA].sort((a,b)=>b.composite-a.composite);
+  document.getElementById("cards").innerHTML = arr.map(d=>{
+    const proc = scoreColor(d.composite);
+    return `<details class="llmc">
+      <summary>
+        <span class="badge" style="background:${proc}">${d.composite.toFixed(1)}</span>
+        <span class="csum"><span class="n">${d.name}</span><span class="p">${d.prov}</span></span>
+        <span class="chev">▾</span>
+      </summary>
+      <div class="cbody">
+        <div class="statline">
+          <span>Detect <b>${d.detect}</b></span><span>KB <b>${d.kb}</b></span><span>Skills <b>${d.skills}</b></span>
+          <span>Agents <b>${d.agents}</b></span><span>Global <b>${d.global}</b></span>
+          <span>· compute <b>${d.cliMin}m</b></span><span>out <b>${fmtTok(d.outTok)}</b></span>
+          <span>KB <b>${d.kbLocal}</b> local / <b>${d.kbGlobal}</b> global</span>
+          <span>skills <b>${d.skillsN}</b></span><span>discovered agents <b>${d.agentsDisc}</b></span>
+        </div>
+        <span class="lbl">Strengths</span>
+        <ul class="pro">${d.pro.map(x=>`<li>${x}</li>`).join("")}</ul>
+        <span class="lbl">Weaknesses</span>
+        <ul class="con">${d.con.map(x=>`<li>${x}</li>`).join("")}</ul>
+      </div>
+    </details>`;
+  }).join("");
+}
+
+// init
+renderHead(); renderBody(); renderScatter(); renderCards();
+document.querySelector('button.sb[data-k="composite"]').classList.add("on");
+</script>
+</body>
+</html>
