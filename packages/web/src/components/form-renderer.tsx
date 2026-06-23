@@ -318,6 +318,32 @@ function OptionBadge({ text, color }: { text: string; color?: string }) {
   );
 }
 
+/** A small "i" info icon with a styled HTML hover/focus tooltip (not the native
+ *  title attribute). Used for per-option explanations on radio fields. */
+function InfoTooltip({ content }: { content: string }) {
+  return (
+    <span className="group/tip relative inline-flex align-middle">
+      <button
+        type="button"
+        aria-label="More information"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+        className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-neutral-600 text-[10px] font-semibold leading-none text-neutral-400 transition-colors hover:border-neutral-400 hover:text-neutral-200 focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500"
+      >
+        i
+      </button>
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-72 -translate-x-1/2 whitespace-pre-line rounded-md border border-neutral-700 bg-neutral-900 px-3 py-2 text-xs font-normal leading-relaxed text-neutral-200 opacity-0 shadow-xl transition-opacity duration-150 group-hover/tip:opacity-100 group-focus-within/tip:opacity-100"
+      >
+        {content}
+      </span>
+    </span>
+  );
+}
+
 type AccordionFormField = Extract<FormField, { type: 'accordion' }>;
 
 interface AccordionFieldProps {
@@ -615,18 +641,25 @@ function FieldControl({ field, value, onChange, disabled, repositoryId }: FieldR
     }
     case 'radio':
       return (
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-2">
           {field.options.map((opt) => (
-            <label key={opt.value} className="flex items-center gap-2 text-sm text-neutral-200">
-              <input
-                type="radio"
-                name={field.id}
-                value={opt.value}
-                checked={value === opt.value}
-                disabled={disabled}
-                onChange={(e) => onChange(e.target.value)}
-              />
-              {opt.label}
+            <label key={opt.value} className="flex flex-col gap-0.5 text-sm text-neutral-200">
+              <span className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  name={field.id}
+                  value={opt.value}
+                  checked={value === opt.value}
+                  disabled={disabled}
+                  onChange={(e) => onChange(e.target.value)}
+                />
+                <span>{opt.label}</span>
+                {opt.badge && <OptionBadge text={opt.badge} color={opt.badgeColor} />}
+                {opt.info && <InfoTooltip content={opt.info} />}
+              </span>
+              {opt.description && (
+                <span className="pl-6 text-xs text-neutral-400">{opt.description}</span>
+              )}
             </label>
           ))}
         </div>

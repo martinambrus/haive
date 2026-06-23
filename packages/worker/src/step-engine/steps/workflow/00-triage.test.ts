@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { heuristicTriage, parseTriageOutput, resolveTriage } from './00-triage.js';
+import { heuristicTriage, parseTriageOutput, resolveTriage, triageStep } from './00-triage.js';
 
 describe('heuristicTriage', () => {
   it('an explicit bug with a short description -> quick_bugfix', () => {
@@ -73,5 +73,45 @@ describe('resolveTriage', () => {
     const r = resolveTriage(null, detected);
     expect(r.recommended).toBe('plan_tasklist');
     expect(r.source).toBe('heuristic');
+  });
+});
+
+describe('triageStep.form', () => {
+  const detected = {
+    title: 'fix thing',
+    description: 'desc',
+    heuristicPath: 'plan_tasklist' as const,
+    heuristicReason: 'because',
+  };
+
+  function buildForm(llmOutput: unknown) {
+    const schema = triageStep.form!(null as never, detected, llmOutput);
+    const field = schema.fields[0] as {
+      type: string;
+      options: Array<{ value: string; label: string; description?: string; info?: string }>;
+    };
+    return { schema, field };
+  }
+
+  it('puts "(recommended)" in the chosen label and the rationale in its info tooltip', () => {
+    const { field } = buildForm({ recommended: 'quick_bugfix', rationale: 'a small focused fix' });
+    const rec = field.options.find((o) => o.value === 'quick_bugfix')!;
+    expect(rec.label).toMatch(/\(recommended\)$/);
+    expect(rec.info).toContain('a small focused fix');
+    for (const o of field.options.filter((opt) => opt.value !== 'quick_bugfix')) {
+      expect(o.label).not.toContain('(recommended)');
+      expect(o.info).toBeUndefined();
+    }
+  });
+
+  it('gives every option a gray description and renders no collapsible infoSections', () => {
+    const { schema, field } = buildForm(null);
+    expect(field.type).toBe('radio');
+    expect(field.options).toHaveLength(3);
+    for (const o of field.options) {
+      expect(typeof o.description).toBe('string');
+      expect((o.description ?? '').length).toBeGreaterThan(0);
+    }
+    expect(schema.infoSections).toBeUndefined();
   });
 });

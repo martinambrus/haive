@@ -54,6 +54,12 @@ export const optionSchema = z.object({
   badge: z.string().optional(),
   /** Badge color variant. Defaults to 'default' (neutral). */
   badgeColor: z.enum(['default', 'amber', 'indigo', 'green']).optional(),
+  /** Optional gray sub-text rendered under the option label (radio fields), e.g. a
+   *  one-line explanation of what the option does. */
+  description: z.string().optional(),
+  /** Optional hover-tooltip content shown via an info icon after the option label
+   *  (radio fields). Rendered as a styled HTML tooltip, not the native title. */
+  info: z.string().optional(),
   /** Optional pretty group label. When set on one or more options in a
    *  multi-select, the renderer clusters options by group and shows a
    *  "Select all in <group>" button per distinct group. */

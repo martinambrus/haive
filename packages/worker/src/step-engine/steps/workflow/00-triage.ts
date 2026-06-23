@@ -6,7 +6,6 @@ import {
   executionPathSchema,
   type ExecutionPath,
   type FormSchema,
-  type InfoSection,
 } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { TRIAGE_STEP_ID } from '../../../orchestrator/execution-paths.js';
@@ -35,11 +34,15 @@ interface TriageApply {
   source: 'llm' | 'heuristic';
 }
 
-const PATHS_EXPLAINER = [
-  '- **Quick bugfix** — hand the change straight to the AI, then verify, commit and push. Best for small, well-understood fixes.',
-  '- **Plan + tasklist** — draft a short spec, break it into a checklist of tasks, run them, then verify and commit. Best for medium changes with a few moving parts.',
-  '- **Full workflow** — the complete pipeline: discovery, spec + quality review, sprint planning, implementation, validation, code review, adversarial QA and staged approvals. Best for large or risky work.',
-].join('\n');
+/** One-line gray sub-text shown under each path's radio option. */
+const PATH_DESCRIPTIONS: Record<ExecutionPath, string> = {
+  quick_bugfix:
+    'Hand the change straight to the AI, then verify, commit and push. Best for small, well-understood fixes.',
+  plan_tasklist:
+    'Draft a short spec, break it into a checklist of tasks, run them, then verify and commit. Best for medium changes with a few moving parts.',
+  full_workflow:
+    'The full pipeline: discovery, spec + quality review, sprint planning, implementation, validation, code review, adversarial QA and staged approvals. Best for large or risky work.',
+};
 
 const TRIAGE_RULES = [
   'You are a task triage assistant for an automated engineering workflow. Classify the',
@@ -190,28 +193,27 @@ export const triageStep: StepDefinition<TriageDetect, TriageApply> = {
 
   form(_ctx, detected, llmOutput): FormSchema {
     const r = resolveTriage(llmOutput, detected);
-    const options = EXECUTION_PATHS.map((p) => ({
-      value: p,
-      label: EXECUTION_PATH_LABELS[p],
-      ...(p === r.recommended ? { badge: 'Recommended', badgeColor: 'green' as const } : {}),
-    }));
-    const infoSections: InfoSection[] = [
-      {
-        title: `Recommended: ${EXECUTION_PATH_LABELS[r.recommended]}`,
-        preview: r.source === 'llm' ? 'AI assessment' : 'heuristic',
-        body: r.rationale,
-        defaultOpen: true,
-      },
-      {
-        title: 'What each path does',
-        body: PATHS_EXPLAINER,
-      },
-    ];
+    const sourceLabel = r.source === 'llm' ? 'AI assessment' : 'heuristic';
+    const options = EXECUTION_PATHS.map((p) => {
+      const isRecommended = p === r.recommended;
+      return {
+        value: p,
+        // "(recommended)" goes at the end of the label itself; the info icon renders
+        // right after it (only on the recommended option).
+        label: isRecommended
+          ? `${EXECUTION_PATH_LABELS[p]} (recommended)`
+          : EXECUTION_PATH_LABELS[p],
+        // Gray one-liner under each option so the user sees what it does at a glance.
+        description: PATH_DESCRIPTIONS[p],
+        // Hover tooltip on the recommended option carries the full rationale, so the
+        // old top-of-form collapsible is no longer needed.
+        ...(isRecommended ? { info: `Recommended (${sourceLabel})\n\n${r.rationale}` } : {}),
+      };
+    });
     return {
       title: 'Choose execution path',
       description:
         'A quick assessment recommends a path. Pick the one you want — you can choose a lighter or heavier path than recommended.',
-      infoSections,
       fields: [
         {
           type: 'radio',
