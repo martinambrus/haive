@@ -207,6 +207,12 @@ export interface StepLoopSpec<TApply = unknown> {
     formValues: FormValues;
     iteration: number;
     previousIterations: StepLoopPassRecord[];
+    /** Consecutive output-truncation failures for the CURRENT iteration (0
+     *  normally). When > 0 a same-iteration re-dispatch is underway after the
+     *  model hit its output cap, so the builder should request a SMALLER response
+     *  (fewer/shorter items) to fit. The runner re-routes iteration-0 retries
+     *  through this builder too so the shrink hint reaches the first pass. */
+    truncationRetries?: number;
   }): string;
   /** Optional. Returns the CLI role to use for the given iteration so the runner
    *  resolves a per-role provider (e.g. spec-quality: even iterations review,

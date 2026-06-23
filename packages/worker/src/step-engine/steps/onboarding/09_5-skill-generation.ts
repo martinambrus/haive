@@ -4,7 +4,7 @@ import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import { skillEntrySchema } from '@haive/shared';
-import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
+import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   listFilesMatching,
   loadPreviousStepOutput,
@@ -42,6 +42,10 @@ interface SkillGenDetect {
 interface SkillGenApply {
   written: {
     id: string;
+    /** Carried so the README index can be rebuilt from the cumulative set on
+     *  every loop iteration without re-reading the prior skill files. */
+    title: string;
+    description: string;
     /** Canonical path inside the first target dir (kept for backwards compat
      *  with log/UI consumers). */
     filePath: string;
@@ -55,6 +59,23 @@ interface SkillGenApply {
   /** LLM skills dropped because they carried zero sub-skills (the truncation
    *  signal). Empty on a clean pass; surfaced for visibility in the step output. */
   droppedForSubSkills: string[];
+  /* --- Loop control state (carried across iterations; read by loop.shouldContinue,
+   *  which has no access to formValues). Each apply() returns the CUMULATIVE result
+   *  so the loop's final pass output is the complete library. --- */
+  /** Clamped skill cap from the form (caps the cumulative LLM-skill count). */
+  maxSkills: number;
+  /** deterministic = iterate the BUSINESS_LOGIC.md capability list (>=3 known);
+   *  discovery = generate-next-until-the-model-signals-done (small/no BL.md). */
+  mode: 'deterministic' | 'discovery';
+  /** Deterministic target skill count (capability-list length, capped). 0 in
+   *  discovery mode (bounded by maxSkills instead). */
+  targetCount: number;
+  /** Count of NEW valid LLM skills produced by the most recent pass. 0 = dry. */
+  lastBatchCount: number;
+  /** Cumulative LLM-generated skill count (excludes bundle skills); capped by maxSkills. */
+  llmSkillCount: number;
+  /** Consecutive dry passes. Bounds in-loop re-rolls before the loop gives up. */
+  consecutiveEmpty: number;
 }
 
 // Skill IR types (SkillEntry, SkillSubSkill, supporting shapes) live in
@@ -81,6 +102,9 @@ export type {
 
 const DEFAULT_MAX_SKILLS = 15;
 const HARD_MAX_SKILLS = 30;
+/** Consecutive dry (zero-new-skill) loop passes tolerated before the skill-gen
+ *  loop gives up — bounds in-loop re-rolls of a flaky/empty single-skill pass. */
+const MAX_EMPTY_PASSES = 2;
 const IGNORE_DIRS = new Set([
   'node_modules',
   '.git',
@@ -361,24 +385,6 @@ function dedupeById(entries: SkillEntry[]): SkillEntry[] {
   return out;
 }
 
-/** Heuristic: did the model TRY to emit skills? True when the output carries
- *  skill-shaped markers (a ```json fence, a "skills"/"subSkills" key) but parsing
- *  yielded nothing. Distinguishes a malformed-JSON failure (retry) from a model
- *  that legitimately produced no skills (proceed with bundle skills only). */
-function llmAttemptedSkills(llmOutput: unknown): boolean {
-  let src: unknown = llmOutput;
-  if (src && typeof src === 'object' && 'result' in (src as Record<string, unknown>)) {
-    src = (src as Record<string, unknown>).result;
-  }
-  if (typeof src === 'string') {
-    return /```json|"sub-?skills"|"skills"\s*:/i.test(src);
-  }
-  if (src && typeof src === 'object') {
-    return Array.isArray((src as Record<string, unknown>).skills);
-  }
-  return false;
-}
-
 function isValidSkill(val: unknown): val is SkillEntry {
   if (!val || typeof val !== 'object') return false;
   const v = val as Record<string, unknown>;
@@ -652,28 +658,57 @@ export function skillsReadmeMarkdown(
 /* LLM prompt                                                          */
 /* ------------------------------------------------------------------ */
 
-function buildPrompt(args: LlmBuildArgs): string {
-  const detected = args.detected as SkillGenDetect;
-  const values = args.formValues as { maxSkills?: number; domainHints?: string };
+/** Loop chunking plan. deterministic = the BUSINESS_LOGIC.md capability list is
+ *  large enough (>=3) to drive an exact per-capability iteration count; discovery
+ *  = let the model surface capabilities until it signals done. See the step loop. */
+function computeDomainPlan(
+  detected: SkillGenDetect,
+  maxSkills: number,
+): { mode: 'deterministic' | 'discovery'; domains: string[] } {
+  const required = detected.requiredDomains ?? [];
+  if (required.length >= 3) {
+    return { mode: 'deterministic', domains: required.slice(0, maxSkills) };
+  }
+  return { mode: 'discovery', domains: required };
+}
+
+/** Skill ids already on disk (bundle + every prior loop pass). The newest loop
+ *  pass's cumulative `written` already folds in the bundle skills, so on
+ *  iteration 0 (no prior passes) fall back to the bundle ids directly. */
+function coveredSkillIds(
+  previousIterations: { applyOutput: unknown }[],
+  bundleSkills: SkillEntry[],
+): string[] {
+  const last = previousIterations.at(-1)?.applyOutput as SkillGenApply | undefined;
+  if (last?.written && last.written.length > 0) return last.written.map((w) => w.id);
+  return bundleSkills.map((s) => s.id);
+}
+
+/** Per-skill prompt. Each loop pass asks for EXACTLY ONE new skill so the output
+ *  of any single CLI invocation stays small — the fix for output-token truncation
+ *  on CLIs (e.g. Amp) whose single-response ceiling we cannot raise. Deterministic
+ *  mode walks the capability checklist; discovery mode asks for the next uncovered
+ *  capability and lets the model return an empty array to signal done. */
+function buildSkillPrompt(
+  detected: SkillGenDetect,
+  formValues: Record<string, unknown>,
+  previousIterations: { applyOutput: unknown }[],
+  truncationRetries = 0,
+): string {
+  const values = formValues as { maxSkills?: number; domainHints?: string };
   const maxSkills = clampMaxSkills(values.maxSkills);
   const hints = typeof values.domainHints === 'string' ? values.domainHints.trim() : '';
+  const plan = computeDomainPlan(detected, maxSkills);
+  const covered = coveredSkillIds(previousIterations, detected.bundleSkills ?? []);
   const requiredDomains = detected.requiredDomains ?? [];
-  // When BUSINESS_LOGIC.md yields >=3 capabilities the project is provably
-  // non-trivial, so the prompt demands full coverage and drops the "produce
-  // fewer if small / never pad" hedges that otherwise license the LLM to
-  // under-produce and trip apply()'s rejection floor. minSkills mirrors that
-  // floor (apply() rejects producedCount < 3 when requiredDomains.length >= 3).
-  const hasCapabilityList = requiredDomains.length >= 3;
-  const minSkills = hasCapabilityList ? 3 : 0;
-  const requiredDomainsLead = hasCapabilityList
-    ? `This project has ${requiredDomains.length} confirmed, distinct business capabilities (listed below). ` +
-      `Emit AT LEAST ONE skill for EACH of them — cover all ${requiredDomains.length}. They ARE capability ` +
-      'domains, not documentation chapters; name each skill for the capability and ground it in the relevant ' +
-      'code, not just the KB text. Skip one only if a reserved bundle skill above already covers it.'
-    : 'These are the distinct business capabilities this project exposes. Emit ONE skill for EACH capability ' +
-      'below (one capability = one skill) unless a reserved bundle skill already covers it. These ARE ' +
-      'capability domains (not documentation chapters) — name each skill for the capability and ground it ' +
-      'in the relevant code, not just the KB text.';
+  // Shrink the request on a re-dispatch after the model hit its output cap, so the
+  // retry fits. truncationRetries=0 reproduces the normal 8 / 100-250 mandate.
+  const maxSub = Math.max(3, 8 - 2 * truncationRetries); // 8, 6, 4, then floor 3
+  const bodyLen = truncationRetries > 0 ? '80-150' : '100-250';
+  const shrinkNote =
+    truncationRetries > 0
+      ? `## A previous attempt was cut off — produce a SMALLER skill\n\nThe last attempt at this skill exceeded the model's output-token limit and was truncated. This time emit at most ${maxSub} sub-skills with ${bodyLen}-line bodies and be concise. A COMPLETE smaller skill is required; a cut-off response fails again.\n`
+      : '';
 
   const fileTree = detected.__fileTree ?? '(no file tree available)';
   const kbList =
@@ -702,33 +737,42 @@ function buildPrompt(args: LlmBuildArgs): string {
           '',
           ...bundleSkillIds.map((id) => `- ${id}`),
           '',
-          'These skills are already on disk under the same target dirs. Emit different ids for any',
-          'similar capability, or omit it entirely if the bundle skill already covers the domain.',
+        ].join('\n')
+      : '';
+  const coveredSection =
+    covered.length > 0
+      ? [
+          '## Skills ALREADY generated (do NOT regenerate or duplicate any of these)',
+          '',
+          ...covered.map((id) => `- ${id}`),
+          '',
+          'Pick a DIFFERENT, not-yet-covered capability. You MAY reference these by id in `relatedSkills`.',
           '',
         ].join('\n')
       : '';
-  const requiredDomainsSection =
+  const checklistSection =
     requiredDomains.length > 0
       ? [
           '## Business capabilities to cover (from BUSINESS_LOGIC.md)',
           '',
-          requiredDomainsLead,
+          'These ARE capability domains (not documentation chapters). Name the skill for the capability',
+          'and ground it in the relevant code, not just the KB text.',
           '',
           ...requiredDomains.map((d) => `- ${d}`),
           '',
-          ...(hasCapabilityList
-            ? [
-                'The orchestrator HARD-REJECTS the result and wastes this entire run if you emit fewer than ' +
-                  `${minSkills} skills, so under-covering these capabilities guarantees failure. Covering all ` +
-                  `${requiredDomains.length} is the goal.`,
-                '',
-              ]
-            : []),
         ].join('\n')
       : '';
+
+  // Single-skill task line + the loop's done-signal differ by mode.
+  const taskLine =
+    plan.mode === 'deterministic'
+      ? 'From the capability checklist above, pick the FIRST capability NOT yet represented by an already-generated skill, and produce EXACTLY ONE skill for it. The orchestrator calls you once per capability until all are covered.'
+      : `Produce EXACTLY ONE skill for the next distinct capability NOT already covered. The orchestrator calls you repeatedly. When every distinct capability this codebase exposes is already covered (up to ${maxSkills} total), return an empty array: \`{ "skills": [] }\` — do NOT pad with generic filler.`;
+
   return [
-    'You are a senior software engineer generating Claude Code SKILLS for this specific codebase.',
+    'You are a senior software engineer generating ONE Claude Code SKILL for this specific codebase.',
     '',
+    shrinkNote,
     '## Critical definitions',
     '',
     '- **AGENTS** capture technical expertise (HOW to use a framework). They live in `.claude/agents/`. NOT your concern here.',
@@ -749,9 +793,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '  knowledge-base filename verbatim.',
     '',
     'Note: KB files like `BUSINESS_LOGIC.md`, `ARCHITECTURE.md` are REFERENCE MATERIAL you CONSULT to',
-    'understand the project — do not NAME a skill after a KB file (api-reference, architecture) or emit one',
-    'skill per KB file. This is about skill NAMES, not coverage: the business capabilities listed below are',
-    'valid skill domains and MUST still each be covered even though they are sourced from BUSINESS_LOGIC.md.',
+    'understand the project — do not NAME a skill after a KB file (api-reference, architecture).',
     '',
     '## Project context',
     '',
@@ -763,7 +805,8 @@ function buildPrompt(args: LlmBuildArgs): string {
     kbList,
     '',
     reservedSection,
-    requiredDomainsSection,
+    coveredSection,
+    checklistSection,
     '## Repository overview (partial file tree)',
     '',
     '```',
@@ -773,17 +816,10 @@ function buildPrompt(args: LlmBuildArgs): string {
     hints.length > 0 ? `## User-supplied hints about likely skill domains\n\n${hints}\n` : '',
     '## Your task',
     '',
-    'Use your file-reading tools (Read, Grep, Glob) to deeply explore this repository:',
-    '1. Read the knowledge base files listed above for domain context.',
-    '2. Scan the source tree (src/, lib/, bin/, app/, packages/, modules/, etc.) — each focused module',
-    '   or feature flag often corresponds to a skill domain.',
-    '3. Identify CAPABILITY-BASED skill domains. Each domain should be something a future agent',
-    '   would need to understand WHEN modifying or extending that part of the code.',
-    hasCapabilityList
-      ? `4. Produce one skill per listed business capability above — at least ${minSkills}, up to ${maxSkills}. Cover every capability; do not stop early. Quality matters, but under-covering the listed capabilities fails the run.`
-      : `4. Produce between 3 and ${maxSkills} skills. Quality over quantity. If the codebase is small, produce fewer skills.`,
+    'Use your file-reading tools (Read, Grep, Glob) to deeply explore this repository, then:',
+    taskLine,
     '',
-    '## Required structure per skill',
+    '## Required structure for the skill',
     '',
     'DO NOT write, create, edit, or install any files on disk. You are NOT the installer.',
     'The orchestrator that called you will create the file tree from your JSON response;',
@@ -791,15 +827,15 @@ function buildPrompt(args: LlmBuildArgs): string {
     'or any other file-modifying tool will cause the whole step to fail. Use only',
     'read-only exploration tools (Read, Grep, Glob, Bash for read-only commands).',
     '',
-    `Conceptually each skill maps to a directory \`${primarySkillsDir}/<id>/\` containing:`,
+    `Conceptually the skill maps to a directory \`${primarySkillsDir}/<id>/\` containing:`,
     '  - `SKILL.md` — concise overview with YAML frontmatter (the loader)',
-    '  - `sub-skills/<slug>.md` — 3 to 8 leaf documents covering distinct facets of the domain',
+    `  - \`sub-skills/<slug>.md\` — 3 to ${maxSub} leaf documents covering distinct facets of the domain`,
     '',
     'This is the SHAPE the orchestrator will materialise from your JSON, not a',
     'set of files you create yourself. Your only output is the JSON below.',
     '',
     'SKILL.md MUST be lightweight (under ~1000 tokens of body). It indexes the sub-skills.',
-    'Sub-skills carry the detail. Each sub-skill is a focused leaf doc and SHOULD be 100-250 lines.',
+    `Sub-skills carry the detail. Each sub-skill is a focused leaf doc and SHOULD be ${bodyLen} lines.`,
     '',
     '## Required sub-skill body structure',
     '',
@@ -823,7 +859,8 @@ function buildPrompt(args: LlmBuildArgs): string {
     '',
     '## JSON output format',
     '',
-    'Emit ONE JSON object inside a single ```json fenced code block:',
+    'Emit ONE JSON object inside a single ```json fenced code block. The `skills` array',
+    'holds EXACTLY ONE skill (or zero, only when signalling done in discovery mode):',
     '',
     '```json',
     '{',
@@ -847,7 +884,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '          "description": "<activation description in sub-skill frontmatter>",',
     '          "category": "<optional grouping shown under ## Sub-Skills in parent>",',
     '          "summary": "<short line shown beside the sub-skill link in parent SKILL.md>",',
-    '          "body": "<full markdown body following the Required sub-skill body structure above — 100-250 lines, every claim cited file:line>",',
+    `          "body": "<full markdown body following the Required sub-skill body structure above — ${bodyLen} lines, every claim cited file:line>",`,
     '          "identification": [ { "label": "Function", "value": "lib/foo.mjs::bar" } ]',
     '        }',
     '      ]',
@@ -858,22 +895,19 @@ function buildPrompt(args: LlmBuildArgs): string {
     '',
     '## Hard rules',
     '',
+    '- Emit EXACTLY ONE skill (the `skills` array has length 1), or an empty array only to signal done in discovery mode.',
     '- Ground every claim in concrete repo paths with line ranges (e.g. `lib/wrapper.mjs:42-89`, NOT "the wrapper module" and NOT `lib/wrapper.mjs` alone).',
-    '- Each skill MUST have at least 3 sub-skills (and at most 8).',
-    '- Every sub-skill MUST include a non-empty `summary` (the one-line blurb shown beside its link in the parent SKILL.md). A sub-skill with an empty or missing `summary` is discarded, which can collapse the whole skill and force a re-run.',
-    '- Each sub-skill body SHOULD be 100-250 lines following the Required sub-skill body structure above. Shorter bodies are acceptable only when a section truly does not apply — never to save effort.',
+    `- The skill MUST have at least 3 sub-skills (and at most ${maxSub}). A skill with fewer is rejected and re-rolled.`,
+    '- Every sub-skill MUST include a non-empty `summary` (the one-line blurb shown beside its link in the parent SKILL.md). A sub-skill with an empty or missing `summary` is discarded, which can collapse the whole skill and force a re-roll.',
+    `- Each sub-skill body SHOULD be ${bodyLen} lines following the Required sub-skill body structure above. Shorter bodies are acceptable only when a section truly does not apply — never to save effort.`,
     '- Pitfalls & Edge Cases is REQUIRED in every sub-skill, with the three subsections (Common Mistakes / Edge Cases / Known Limitations) populated. State exact error symptoms.',
     '- At least two `## Pattern: <name>` recipes per sub-skill where applicable (build steps, runtime invocations, debug procedures), each with reproducible commands.',
-    `- Cap: at most ${maxSkills} top-level skills. Quality over quantity.`,
     '- Skill ids: kebab-case, lowercase, no `-skill` suffix, no underscores, max 64 chars.',
     '- Do NOT emit prose outside the fenced JSON block.',
     '- Do NOT write, create, edit, or install files on disk. JSON output ONLY — the',
     '  orchestrator handles all file writes. Calling write_file / edit_file / shell',
     '  `cat > ...` / `mkdir` / `cp` is a hard failure even if the JSON is also valid.',
     '- Do NOT propose generic skills like "general-knowledge", "project-overview", "documentation".',
-    hasCapabilityList
-      ? `- The ${requiredDomains.length} business capabilities listed above are all real — emit a skill for each; never collapse them to save effort. Never pad with generic filler beyond the genuine capability set.`
-      : '- If the codebase has fewer than 3 distinct capability domains, emit fewer skills — never pad.',
   ]
     .filter((line) => line !== '')
     .concat([''])
@@ -995,12 +1029,19 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
 
   llm: {
     requiredCapabilities: ['tool_use', 'file_write'],
-    buildPrompt,
+    // Iteration 0 prompt; iterations > 0 use loop.buildIterationPrompt below. Each
+    // pass asks for ONE skill so a single CLI invocation never blows the model's
+    // output-token ceiling (the Amp max_tokens failure this step is chunked to fix).
+    buildPrompt: (args) =>
+      buildSkillPrompt(
+        args.detected as SkillGenDetect,
+        (args.formValues ?? {}) as Record<string, unknown>,
+        [],
+      ),
     timeoutMs: 60 * 60 * 1000,
-    // A truncated/flaky pass (the weak-model case) throws SkillGenParseError from
-    // apply(); re-roll a fresh invocation up to 3 total attempts before failing,
-    // mirroring the QA steps (09-qa / 09_1 / 09_2).
-    retry: { maxAttempts: 3, retryOn: (err) => err instanceof SkillGenParseError },
+    // No llm.retry: step-runner skips llm.retry for loop steps (they own their
+    // re-dispatch counting). Flaky/empty passes are re-rolled inside the loop via
+    // the consecutive-empty counter — see loop.shouldContinue + apply() below.
     bypassStub: () => ({
       skills: [
         {
@@ -1041,6 +1082,38 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     }),
   },
 
+  // Chunked generation: one skill per LLM pass so a single CLI invocation never
+  // exceeds the model's output-token ceiling (the Amp max_tokens failure). apply()
+  // returns the CUMULATIVE library each pass, so the loop's final output is whole.
+  loop: {
+    // Generous ceiling; shouldContinue drives the real count. Allows up to the hard
+    // skill cap plus in-loop re-rolls of flaky/empty passes. (resolveLoopBudget
+    // falls through to this because the form field is `maxSkills`, not maxIterations.)
+    maxIterations: HARD_MAX_SKILLS * 2 + 4,
+    buildIterationPrompt: ({ detected, formValues, previousIterations, truncationRetries }) =>
+      buildSkillPrompt(
+        detected as SkillGenDetect,
+        formValues as Record<string, unknown>,
+        previousIterations,
+        truncationRetries ?? 0,
+      ),
+    shouldContinue: ({ applyOutput }) => {
+      const out = applyOutput as SkillGenApply;
+      if (out.mode === 'deterministic') {
+        // One skill per capability; stop once every capability is covered.
+        if (out.llmSkillCount >= out.targetCount) return false;
+        if (out.lastBatchCount > 0) return true;
+        // Dry pass with capabilities still uncovered: re-roll within budget.
+        return out.consecutiveEmpty < MAX_EMPTY_PASSES;
+      }
+      // Discovery: bounded by maxSkills. The model signals done with an empty array.
+      if (out.llmSkillCount >= out.maxSkills) return false;
+      if (out.lastBatchCount > 0) return true;
+      if (out.llmSkillCount >= 1) return false; // model says done and we have skills
+      return out.consecutiveEmpty < MAX_EMPTY_PASSES; // nothing yet → re-roll
+    },
+  },
+
   async apply(ctx, args): Promise<SkillGenApply> {
     const values = args.formValues as { maxSkills?: number };
     const maxSkills = clampMaxSkills(values.maxSkills);
@@ -1052,101 +1125,61 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
         : [DEFAULT_PROJECT_SKILLS_DIR];
 
     const bundleSkills = detected.bundleSkills ?? [];
-    const bundleSkillIds = new Set(bundleSkills.map((s) => s.id));
+    const plan = computeDomainPlan(detected, maxSkills);
 
-    const llmEntries = parseSkillEntries(args.llmOutput ?? null);
-    if (llmEntries.length === 0) {
-      // The model emitted skill-shaped output but none survived parsing — even
-      // after the jsonrepair salvage in parseSkillEntries (e.g. an unescaped quote
-      // inside a sub-skill body). Surface for retry EVEN WHEN bundle skills exist,
-      // so a flaky pass re-rolls instead of silently shipping only the bundle.
-      if (llmAttemptedSkills(args.llmOutput ?? null)) {
-        throw new SkillGenParseError(
-          'LLM emitted skill output but none parsed (likely malformed JSON) — surface failure for retry.',
-        );
-      }
-      if (bundleSkills.length === 0) {
-        throw new SkillGenParseError(
-          'LLM produced no valid skill entries and no bundle skills present — surface failure for retry.',
-        );
-      }
-    }
+    // Prior cumulative state — each loop pass extends the previous one so the
+    // loop's final output is the complete library. Iteration 0 has no prior.
+    const prior =
+      (args.previousIterations.at(-1)?.applyOutput as SkillGenApply | undefined) ?? null;
+    const priorWritten = prior?.written ?? [];
 
-    const seenIds = new Set<string>(bundleSkillIds);
-    const rejectedIds: string[] = [];
-    let acceptedLlm: SkillEntry[] = [];
-    for (const entry of llmEntries) {
+    // Ids already on disk: bundle ids + everything prior passes wrote.
+    const seenIds = new Set<string>([
+      ...bundleSkills.map((s) => s.id),
+      ...priorWritten.map((w) => w.id),
+    ]);
+
+    // This pass asked for ONE new skill. Accept it only if new, valid, sub-skill-
+    // bearing, and under the LLM cap. Empty/duplicate/zero-sub-skill output is a
+    // dry pass — the loop re-rolls or stops (shouldContinue + give-up check below)
+    // instead of throwing, since loop steps get no llm.retry.
+    let llmSkillCount = prior?.llmSkillCount ?? 0;
+    let droppedFromCap = prior?.droppedFromCap ?? 0;
+    const rejectedThisPass: string[] = [];
+    const droppedForSubSkillsThisPass: string[] = [];
+    const accepted: SkillEntry[] = [];
+    for (const entry of parseSkillEntries(args.llmOutput ?? null)) {
       const cleanId = sanitizeSkillId(entry.id);
       if (!cleanId) {
-        rejectedIds.push(String(entry.id));
+        rejectedThisPass.push(String(entry.id));
         continue;
       }
       if (seenIds.has(cleanId)) {
-        // Bundle wins on collision, or LLM duplicated within its own output.
-        rejectedIds.push(
-          bundleSkillIds.has(cleanId)
-            ? `${entry.id} (already provided by bundle as ${cleanId})`
-            : `${entry.id} (duplicate of ${cleanId})`,
-        );
+        rejectedThisPass.push(`${entry.id} (duplicate of ${cleanId})`);
+        continue;
+      }
+      // Zero sub-skills = the truncation/under-production signal the prompt forbids.
+      if (!hasSubSkills(entry)) {
+        droppedForSubSkillsThisPass.push(cleanId);
+        continue;
+      }
+      if (llmSkillCount >= maxSkills) {
+        droppedFromCap += 1;
+        rejectedThisPass.push(`${entry.id} (over maxSkills cap of ${maxSkills})`);
         continue;
       }
       seenIds.add(cleanId);
-      acceptedLlm.push({ ...entry, id: cleanId });
+      accepted.push({ ...entry, id: cleanId });
+      llmSkillCount += 1;
     }
 
-    // Sub-skill floor: a truncated model output often parses into a skill object
-    // that passes isValidSkill (id/title/description/overview present) but carries
-    // ZERO sub-skills — a partial skill the prompt's "at least 3 sub-skills" rule
-    // forbids. Drop those LLM skills so a truncated pass cannot ship a half-written
-    // library; bundle skills are user-supplied and exempt (added to `final` below
-    // regardless). If the model emitted entries but every one was sub-skill-empty,
-    // that is the truncation signal — throw to retry even when bundle skills exist
-    // (the LLM was meant to add coverage on top of them).
-    const droppedForSubSkills = acceptedLlm.filter((e) => !hasSubSkills(e)).map((e) => e.id);
-    acceptedLlm = acceptedLlm.filter(hasSubSkills);
-    if (acceptedLlm.length === 0 && droppedForSubSkills.length > 0) {
-      throw new SkillGenParseError(
-        `All ${droppedForSubSkills.length} LLM skill(s) had zero sub-skills ` +
-          '(likely truncated output) — surface failure for retry.',
-      );
-    }
+    // Bundle skills are user-supplied and written once, on the first pass.
+    const toWrite: SkillEntry[] = args.iteration === 0 ? [...bundleSkills, ...accepted] : accepted;
 
-    if (acceptedLlm.length === 0 && bundleSkills.length === 0) {
-      throw new SkillGenParseError(
-        'No skill entries survived id sanitization — surface failure for retry.',
-      );
-    }
-
-    // Floor: the prompt asks for >=3 skills, but a single weak LLM pass can
-    // collapse to one (and silently win on a step re-run). When the project
-    // clearly has >=3 business capabilities (from BUSINESS_LOGIC.md), enforce
-    // the minimum so the step retries instead of shipping a one-skill result.
-    // The capability checklist in the prompt drives coverage toward the full
-    // domain set; this guard only blocks egregious under-production.
-    const requiredDomains = detected.requiredDomains ?? [];
-    const minSkills = requiredDomains.length >= 3 ? 3 : 0;
-    const producedCount = acceptedLlm.length + bundleSkills.length;
-    if (minSkills > 0 && producedCount < minSkills) {
-      throw new SkillGenParseError(
-        `Only ${producedCount} skill(s) produced but the project has ${requiredDomains.length} ` +
-          `business capabilities (minimum ${minSkills}) — surface failure for retry with fuller coverage.`,
-      );
-    }
-
-    // Cap applies to LLM output only; bundle skills are user-supplied and
-    // always written.
-    const droppedFromCap = Math.max(0, acceptedLlm.length - maxSkills);
-    const finalLlm = acceptedLlm.slice(0, maxSkills);
-    const final: SkillEntry[] = [...bundleSkills, ...finalLlm];
-
-    const written: SkillGenApply['written'] = [];
-    const summaryForReadme: { id: string; title: string; description: string }[] = [];
-    let totalSubSkills = 0;
-
-    // Render each skill + sub-skill markdown once; mirror to every target dir.
-    // Bundle skills go first so any LLM skill with a colliding id (already
-    // filtered out above) cannot accidentally overwrite the bundle copy.
-    for (const entry of final) {
+    // Render + write each new skill (and the bundle on pass 0) to every target dir.
+    const newWritten: SkillGenApply['written'] = [];
+    let newSubSkills = 0;
+    for (const entry of toWrite) {
       const skillMd = skillToMarkdown(entry);
       const subs = sanitizeSubSkills(entry);
       const renderedSubs = subs.map((sub) => ({
@@ -1173,35 +1206,93 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
         }
       }
 
-      totalSubSkills += renderedSubs.length;
-      written.push({
+      newSubSkills += renderedSubs.length;
+      newWritten.push({
         id: entry.id,
+        title: entry.title,
+        description: entry.description,
         filePath: primaryPath,
         mirroredDirs: targetDirs,
         subSkillCount: renderedSubs.length,
       });
-      summaryForReadme.push({ id: entry.id, title: entry.title, description: entry.description });
     }
 
-    if (summaryForReadme.length > 0) {
+    const written = [...priorWritten, ...newWritten];
+
+    // Rebuild the README index from the cumulative set every pass (deterministic,
+    // code-only, no tokens) so it stays complete as skills accrue.
+    if (written.length > 0) {
       for (const targetDir of targetDirs) {
         const parts = targetDir.split('/').filter((p) => p.length > 0);
         const readmePath = path.join(ctx.repoPath, ...parts, 'README.md');
         await mkdir(path.dirname(readmePath), { recursive: true });
-        await writeFile(readmePath, skillsReadmeMarkdown(summaryForReadme, targetDir), 'utf8');
+        await writeFile(
+          readmePath,
+          skillsReadmeMarkdown(
+            written.map((w) => ({ id: w.id, title: w.title, description: w.description })),
+            targetDir,
+          ),
+          'utf8',
+        );
+      }
+    }
+
+    const lastBatchCount = accepted.length;
+    const consecutiveEmpty = lastBatchCount > 0 ? 0 : (prior?.consecutiveEmpty ?? 0) + 1;
+    const droppedForSubSkills = [
+      ...(prior?.droppedForSubSkills ?? []),
+      ...droppedForSubSkillsThisPass,
+    ];
+    const rejectedIds = [...(prior?.rejectedIds ?? []), ...rejectedThisPass];
+    const totalSubSkills = (prior?.totalSubSkills ?? 0) + newSubSkills;
+
+    // Give-up / floor enforcement: a dry pass after the re-roll budget is spent.
+    // Loop steps get no llm.retry, so throwing here fails the step (the desired
+    // terminal outcome) only when nothing usable was produced, or the
+    // BUSINESS_LOGIC.md coverage floor (>=3 capabilities -> >=3 skills) is unmet.
+    // Otherwise return the cumulative library and let shouldContinue stop the loop.
+    if (lastBatchCount === 0 && consecutiveEmpty >= MAX_EMPTY_PASSES) {
+      if (written.length === 0) {
+        throw new SkillGenParseError(
+          'Skill generation produced no skills after repeated empty passes — surface failure.',
+        );
+      }
+      const minSkills = plan.mode === 'deterministic' ? Math.min(3, plan.domains.length) : 0;
+      if (minSkills > 0 && llmSkillCount < minSkills) {
+        throw new SkillGenParseError(
+          `Only ${llmSkillCount} skill(s) generated but the project has ` +
+            `${(detected.requiredDomains ?? []).length} business capabilities ` +
+            `(minimum ${minSkills}) — surface failure for fuller coverage.`,
+        );
       }
     }
 
     ctx.logger.info(
       {
-        written: written.length,
+        iteration: args.iteration,
+        mode: plan.mode,
+        newThisPass: lastBatchCount,
+        totalWritten: written.length,
+        llmSkillCount,
         totalSubSkills,
+        consecutiveEmpty,
         droppedFromCap,
-        rejectedIds: rejectedIds.length,
-        droppedForSubSkills: droppedForSubSkills.length,
       },
-      'skills written',
+      'skill-generation loop pass written',
     );
-    return { written, totalSubSkills, droppedFromCap, rejectedIds, droppedForSubSkills };
+
+    return {
+      written,
+      totalSubSkills,
+      droppedFromCap,
+      rejectedIds,
+      droppedForSubSkills,
+      maxSkills,
+      mode: plan.mode,
+      targetCount: plan.mode === 'deterministic' ? plan.domains.length : 0,
+      lastBatchCount,
+      llmSkillCount,
+      consecutiveEmpty,
+    };
   },
 };

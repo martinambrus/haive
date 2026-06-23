@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { createStreamJsonCollector } from '../src/queues/cli-exec-queue.js';
+import {
+  classifyStreamFailure,
+  isOutputTruncationMessage,
+  OUTPUT_TRUNCATION_HEADLINE,
+} from '../src/queues/cli-exec/failure-class.js';
 
 function feed(collector: ReturnType<typeof createStreamJsonCollector>, events: unknown[]): void {
   for (const e of events) collector.onChunk(JSON.stringify(e) + '\n');
@@ -66,6 +71,36 @@ describe('createStreamJsonCollector.getNoResultReason', () => {
     expect(reason).toMatch(/require paid credits/);
   });
 
+  it('classifies a max_tokens result as output truncation with an actionable message', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init' },
+      { type: 'result', subtype: 'error_during_execution', is_error: true, error: 'max_tokens' },
+    ]);
+    const reason = c.getNoResultReason();
+    expect(reason).toMatch(/output truncated/i);
+    expect(reason).toMatch(/output-token limit/i);
+    expect(reason).toMatch(/split the task|reduce the requested output/i);
+    expect(isOutputTruncationMessage(reason)).toBe(true);
+  });
+
+  it('classifies a context-window overflow distinctly from output truncation', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init' },
+      {
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        error: 'Prompt is too long: 250000 tokens > 200000 maximum',
+      },
+    ]);
+    const reason = c.getNoResultReason();
+    expect(reason).toMatch(/context window/i);
+    expect(reason).not.toMatch(/output truncated/i);
+    expect(isOutputTruncationMessage(reason)).toBe(false);
+  });
+
   it('flags an overage-rejected rate-limit event while the user is already in overage', () => {
     const c = createStreamJsonCollector();
     feed(c, [
@@ -82,6 +117,32 @@ describe('createStreamJsonCollector.getNoResultReason', () => {
     ]);
     expect(c.getNoResultReason()).toMatch(/rate limit/i);
     expect(c.getNoResultReason()).toMatch(/out_of_credits/);
+  });
+});
+
+describe('classifyStreamFailure', () => {
+  it('flags max_tokens / MAX_TOKENS / max_output_tokens as output_truncated', () => {
+    expect(classifyStreamFailure('error_during_execution', 'max_tokens')).toBe('output_truncated');
+    expect(classifyStreamFailure('error', 'finishReason: MAX_TOKENS')).toBe('output_truncated');
+    expect(classifyStreamFailure(null, 'max_output_tokens reached')).toBe('output_truncated');
+  });
+
+  it('flags prompt / context-window overflow as context_overflow', () => {
+    expect(classifyStreamFailure('error_during_execution', 'Prompt is too long')).toBe(
+      'context_overflow',
+    );
+    expect(classifyStreamFailure('error', 'context_length_exceeded')).toBe('context_overflow');
+  });
+
+  it('leaves unrelated failures generic', () => {
+    expect(classifyStreamFailure('error_max_turns', null)).toBe('generic');
+    expect(classifyStreamFailure('error_during_execution', 'require paid credits')).toBe('generic');
+  });
+
+  it('isOutputTruncationMessage detects the headline produced by getNoResultReason', () => {
+    expect(isOutputTruncationMessage(`${OUTPUT_TRUNCATION_HEADLINE} — foo`)).toBe(true);
+    expect(isOutputTruncationMessage('cli invocation failed: something else')).toBe(false);
+    expect(isOutputTruncationMessage(null)).toBe(false);
   });
 });
 

@@ -4,6 +4,7 @@
 
 import type { CliTokenUsage } from '@haive/shared';
 import { normalizeClaudeUsage } from '../../cli-executor/usage-extract.js';
+import { classifyStreamFailure, OUTPUT_TRUNCATION_HEADLINE } from './failure-class.js';
 
 interface StreamJsonCollector {
   /** Feed raw stdout chunks. Parses NDJSON lines, emits progress, collects result. */
@@ -155,6 +156,17 @@ export function createStreamJsonCollector(
       if (resultText !== null) return null;
       if (eventCount === 0) return null;
       if (lastResultSubtype && lastResultSubtype !== 'success') {
+        const cls = classifyStreamFailure(lastResultSubtype, lastResultError);
+        const detail = lastResultError ? `: ${lastResultError}` : '';
+        if (cls === 'output_truncated') {
+          // The assistant hit its OUTPUT-token ceiling and the turn was cut off
+          // (e.g. Amp/Claude max_tokens). The fix is to emit less per call, not to
+          // retry the same oversized request — see failure-class.ts.
+          return `${OUTPUT_TRUNCATION_HEADLINE} — the response was cut off at the model's output-token limit (subtype "${lastResultSubtype}"${detail}). Reduce the requested output or split the task into smaller calls.`;
+        }
+        if (cls === 'context_overflow') {
+          return `LLM stopped: the prompt exceeded the model's context window (subtype "${lastResultSubtype}"${detail}). Reduce the prompt size or clear prior context.`;
+        }
         const base = `LLM stream ended with result subtype "${lastResultSubtype}"`;
         return lastResultError ? `${base}: ${lastResultError}` : base;
       }

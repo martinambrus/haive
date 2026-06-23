@@ -21,6 +21,7 @@ import type {
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
+import { isOutputTruncationMessage } from '../queues/cli-exec/failure-class.js';
 import {
   TaskCancelledError,
   type AgentMiningResult,
@@ -335,6 +336,41 @@ async function resolveLlmPhase(
       const rawTail = invocation.rawOutput?.trim().slice(-1000) ?? '';
       const message =
         errTrimmed || rawTail || `cli exited with code ${invocation.exitCode ?? 'unknown'}`;
+      // Output-truncation retry: a response that hit the model's output-token cap
+      // produces no result, so it never reaches apply()'s retry — handle it here by
+      // consuming the bad row and re-dispatching a fresh invocation.
+      //  - Non-loop steps: bounded by llm.retry.maxAttempts (total attempts).
+      //  - Loop steps (no llm.retry): bounded by MAX_TRUNCATION_RETRIES consecutive
+      //    truncations for the CURRENT iteration; each retry shrinks the request via
+      //    buildIterationPrompt's truncationRetries (computed in the dispatch path),
+      //    so a deterministically-oversized chunk converges to a fitting size
+      //    instead of failing the whole step.
+      if (isOutputTruncationMessage(errTrimmed)) {
+        const llmRetry = llmSpec.retry;
+        const canRetry = stepDef.loop
+          ? (await countTrailingTruncations(db, current.id)) < MAX_TRUNCATION_RETRIES
+          : !!llmRetry && (await countLlmAttempts(db, current.id)) < llmRetry.maxAttempts;
+        if (canRetry) {
+          ctx.logger.warn(
+            { stepId: stepDef.metadata.id, message, loop: !!stepDef.loop },
+            'cli output truncated; retrying with a fresh (smaller) invocation',
+          );
+          await markLatestInvocationConsumed(db, current.id);
+          // resolveLlmPhase returns LlmResolved; a fresh dispatch parks in
+          // waiting_cli (resolved:false) — propagate it as-is. If it somehow
+          // resolved, fall through and fail normally below.
+          const retryLlm = await resolveLlmPhase(
+            db,
+            stepDef,
+            current,
+            ctx,
+            detected,
+            formValues,
+            params,
+          );
+          if (!retryLlm.resolved) return retryLlm;
+        }
+      }
       const failed = await updateRow(db, current.id, {
         status: 'failed',
         errorMessage: `cli invocation failed: ${message}`,
@@ -384,13 +420,18 @@ async function resolveLlmPhase(
   // already completed (i.e. the upcoming pass's index).
   const previousIterations = stepIterationsAsRecords(current);
   const upcomingIteration = previousIterations.length;
+  // Consecutive output-truncations for the current (pending) iteration. When > 0 a
+  // same-iteration retry is underway; route even iteration 0 through the iteration
+  // builder so its shrink hint (truncationRetries) reaches the first pass too.
+  const truncationRetries = stepDef.loop ? await countTrailingTruncations(db, current.id) : 0;
   const prompt =
-    upcomingIteration > 0 && stepDef.loop?.buildIterationPrompt
+    (upcomingIteration > 0 || truncationRetries > 0) && stepDef.loop?.buildIterationPrompt
       ? stepDef.loop.buildIterationPrompt({
           detected,
           formValues: formValues ?? {},
           iteration: upcomingIteration,
           previousIterations,
+          truncationRetries,
         })
       : llmSpec.buildPrompt({ detected, formValues: formValues ?? {} });
   // Multi-CLI loop steps pick a role per iteration (e.g. reviewer vs corrector);
@@ -1588,6 +1629,38 @@ async function countLlmAttempts(db: Database, taskStepId: string): Promise<numbe
       ),
     );
   return rows.length;
+}
+
+/** Max consecutive output-truncation re-dispatches tolerated for one loop
+ *  iteration before the step fails. Each retry shrinks the request, so this also
+ *  bounds how small a single chunk is asked to get. */
+const MAX_TRUNCATION_RETRIES = 3;
+
+/** Count the most-recent CONSECUTIVE invocations for a step whose error is an
+ *  output-truncation. Resets at the first non-truncation row, so for a loop step
+ *  this is the truncation count for the CURRENT (pending) iteration — used both to
+ *  bound truncation retries and to tell the iteration prompt builder how much to
+ *  shrink. A consumed-but-not-superseded truncated row still counts (it is the
+ *  attempt we just re-dispatched past). */
+async function countTrailingTruncations(db: Database, taskStepId: string): Promise<number> {
+  const rows = await db
+    .select({ errorMessage: schema.cliInvocations.errorMessage })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        isNull(schema.cliInvocations.supersededAt),
+        ne(schema.cliInvocations.mode, 'agent_mining'),
+      ),
+    )
+    .orderBy(desc(schema.cliInvocations.createdAt))
+    .limit(10);
+  let n = 0;
+  for (const r of rows) {
+    if (isOutputTruncationMessage(r.errorMessage)) n++;
+    else break;
+  }
+  return n;
 }
 
 /** Writes a gate-1 pre-answer value into a leaf field's default so a form

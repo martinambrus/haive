@@ -34,6 +34,18 @@ export class GeminiAdapter extends BaseCliAdapter {
       // unwraps `response` for the step parsers and reads token usage from
       // `stats.models`. Older binaries that ignore the flag fall back to the
       // plain-text path.
+      //
+      // KNOWN LIMITATION (max output tokens): the Gemini CLI has no flag or env to
+      // raise the model's output cap, so the API default (8192) applies and long
+      // single responses truncate silently (finishReason MAX_TOKENS in the
+      // gemini-json envelope). The only lever is a settings.json
+      // `modelConfigs.aliases.<alias>.modelConfig.generateContentConfig.maxOutputTokens`
+      // override that must ALSO be explicitly selected — version-bound, and a wrong
+      // key silently no-ops (google-gemini/gemini-cli#23081), so it is deliberately
+      // NOT injected here. Mitigation is the same as for any capped CLI: keep
+      // per-invocation output small (e.g. the 09_5 skill loop emits one skill per
+      // call). If a large-output gemini step truncates, add the override in the
+      // runtime settings.json writer and VERIFY it against the pinned CLI version.
       args: this.mergedArgs(provider, ['-p', prompt, '--output-format', 'json']),
       env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
