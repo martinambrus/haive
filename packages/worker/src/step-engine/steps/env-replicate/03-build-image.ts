@@ -34,6 +34,12 @@ function slugifyName(name: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
+// ESC-built (not a literal control char) so it doesn't trip no-control-regex.
+const ANSI_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
+function stripAnsi(s: string): string {
+  return s.replace(ANSI_RE, '');
+}
+
 export function createBuildImageStep(
   runner: DockerRunner,
 ): StepDefinition<BuildImageDetect, BuildImageApply> {
@@ -131,6 +137,23 @@ export function createBuildImageStep(
         .where(eq(schema.envTemplates.id, detected.envTemplateId));
 
       const tempDir = await mkdtemp(path.join(os.tmpdir(), 'haive-env-build-'));
+      // Live progress for the multi-minute build: `docker --progress=plain` emits
+      // one line per stage (mostly on stderr). Surface the latest line plus an
+      // elapsed counter to the step status line — polled by the UI every ~2s — so
+      // the build never looks frozen. Mirrors ensureDdevWithProgress (_app-runtime).
+      const buildStartedAt = Date.now();
+      let lastBuildLine = 'preparing build context…';
+      let lineBuf = '';
+      const trackLine = (chunk: string): void => {
+        lineBuf += chunk;
+        let nl: number;
+        while ((nl = lineBuf.indexOf('\n')) >= 0) {
+          const clean = stripAnsi(lineBuf.slice(0, nl)).trim();
+          lineBuf = lineBuf.slice(nl + 1);
+          if (clean) lastBuildLine = clean.slice(0, 140);
+        }
+      };
+      let heartbeat: ReturnType<typeof setInterval> | null = null;
       try {
         const dockerfilePath = path.join(tempDir, 'Dockerfile');
         await writeFile(dockerfilePath, detected.dockerfile, 'utf8');
@@ -143,12 +166,23 @@ export function createBuildImageStep(
           },
           'docker build starting',
         );
+        await ctx.emitProgress('Building image…');
+        heartbeat = setInterval(() => {
+          const secs = Math.round((Date.now() - buildStartedAt) / 1000);
+          void ctx.emitProgress(`Building image… ${secs}s — ${lastBuildLine}`.slice(0, 200));
+        }, 2500);
         const buildResult = await runner.build({
           contextDir,
           dockerfilePath,
           tag: imageTag,
-          onStdoutChunk: (chunk) => ctx.logger.debug({ chunk }, 'docker stdout'),
-          onStderrChunk: (chunk) => ctx.logger.debug({ chunk }, 'docker stderr'),
+          onStdoutChunk: (chunk) => {
+            ctx.logger.debug({ chunk }, 'docker stdout');
+            trackLine(chunk);
+          },
+          onStderrChunk: (chunk) => {
+            ctx.logger.debug({ chunk }, 'docker stderr');
+            trackLine(chunk);
+          },
           signal: ctx.signal,
         });
         if (buildResult.exitCode !== 0) {
@@ -188,6 +222,7 @@ export function createBuildImageStep(
           durationMs: buildResult.durationMs,
         };
       } finally {
+        if (heartbeat) clearInterval(heartbeat);
         await rm(tempDir, { recursive: true, force: true });
       }
     },
