@@ -34,6 +34,11 @@ export class TaskCancelledError extends Error {
 export interface LlmBuildArgs {
   detected: unknown;
   formValues: FormValues;
+  /** Loop pass index (0 = first). Lets skipIf/buildPrompt vary by iteration — e.g.
+   *  09_5 skips the bulk llm call at iteration 0 (parallel agentMining does the bulk)
+   *  but runs it for sequential gap-fill at iteration > 0. Optional; callers that
+   *  don't track iterations omit it. */
+  iteration?: number;
 }
 
 export interface LlmInvocationSpec {

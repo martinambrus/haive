@@ -214,3 +214,208 @@ describe('skill-generation truncation shrink', () => {
     expect(iterPrompt(3)).toMatch(/at most 3/);
   });
 });
+
+describe('skill-generation parallel deterministic', () => {
+  const fakeCtx = {
+    repoPath: '/tmp/haive-skill-parallel',
+    logger: logger.child({ test: 'skill-parallel' }),
+    db: undefined as never,
+  } as unknown as StepContext;
+
+  const base = {
+    framework: 'general',
+    language: 'php',
+    kbFiles: [],
+    skillTargetDirs: ['.claude/skills'],
+    bundleSkills: [],
+    __fileTree: '(tree)',
+  };
+  const det = (domains: string[]) => ({ ...base, requiredDomains: domains });
+
+  function mkSkill(id: string) {
+    return {
+      id,
+      title: id,
+      description: 'd',
+      overview: 'o',
+      subSkills: [
+        {
+          slug: `${id}-s`,
+          name: `${id}-s`,
+          title: 'S',
+          description: 'd',
+          summary: 's',
+          body: '## Purpose\n\nx',
+        },
+      ],
+    };
+  }
+  function miningResult(agentId: string, skillId: string) {
+    return {
+      agentId,
+      agentTitle: skillId,
+      status: 'done' as const,
+      output: { skills: [mkSkill(skillId)] },
+      rawOutput: null,
+      errorMessage: null,
+    };
+  }
+  function apply(over: Record<string, unknown>) {
+    return skillGenerationStep.apply(fakeCtx, {
+      detected: det(['Access Control', 'Forms', 'Modules']),
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+      isFinalLlmAttempt: true,
+      ...over,
+    } as unknown as Parameters<typeof skillGenerationStep.apply>[1]);
+  }
+  function withBypass<T>(value: string | undefined, fn: () => T): T {
+    const prev = process.env.HAIVE_TEST_BYPASS_LLM;
+    if (value === undefined) delete process.env.HAIVE_TEST_BYPASS_LLM;
+    else process.env.HAIVE_TEST_BYPASS_LLM = value;
+    try {
+      return fn();
+    } finally {
+      if (prev === undefined) delete process.env.HAIVE_TEST_BYPASS_LLM;
+      else process.env.HAIVE_TEST_BYPASS_LLM = prev;
+    }
+  }
+
+  it('iteration 0 ingests the parallel agentMining batch and writes every skill', async () => {
+    const out = await apply({
+      agentMiningResults: [
+        miningResult('cap-0-a', 'alpha'),
+        miningResult('cap-1-b', 'beta'),
+        miningResult('cap-2-c', 'gamma'),
+      ],
+    });
+    expect(out.written.map((w) => w.id).sort()).toEqual(['alpha', 'beta', 'gamma']);
+    expect(out.llmSkillCount).toBe(3);
+    expect(out.lastBatchCount).toBe(3);
+    expect(out.mode).toBe('deterministic');
+    const cont = await skillGenerationStep.loop!.shouldContinue!({
+      ctx: fakeCtx,
+      applyOutput: out,
+      llmOutput: undefined,
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(cont).toBe(false); // full coverage -> loop stops immediately
+  });
+
+  it('iteration > 0 gap-fill adds only the new skill (cached mining ignored, no double-write)', async () => {
+    const prior = {
+      written: ['alpha', 'beta', 'gamma'].map((id) => ({
+        id,
+        title: id,
+        description: 'd',
+        filePath: '',
+        mirroredDirs: ['.claude/skills'],
+        subSkillCount: 1,
+      })),
+      totalSubSkills: 3,
+      droppedFromCap: 0,
+      rejectedIds: [],
+      droppedForSubSkills: [],
+      maxSkills: 15,
+      mode: 'deterministic',
+      targetCount: 4,
+      lastBatchCount: 3,
+      llmSkillCount: 3,
+      consecutiveEmpty: 0,
+    };
+    const out = await apply({
+      detected: det(['Access Control', 'Forms', 'Modules', 'Routing']),
+      iteration: 1,
+      previousIterations: [
+        { iteration: 0, llmOutput: null, applyOutput: prior, continueRequested: true },
+      ],
+      agentMiningResults: [
+        miningResult('cap-0-a', 'alpha'),
+        miningResult('cap-1-b', 'beta'),
+        miningResult('cap-2-c', 'gamma'),
+      ],
+      llmOutput: { skills: [mkSkill('delta')] },
+    });
+    expect(out.written.map((w) => w.id).sort()).toEqual(['alpha', 'beta', 'delta', 'gamma']);
+    expect(out.lastBatchCount).toBe(1);
+    expect(out.llmSkillCount).toBe(4);
+  });
+
+  it('selectAgents returns one unique dispatch per capability when deterministic', async () => {
+    const dispatches = await withBypass(undefined, () =>
+      skillGenerationStep.agentMining!.selectAgents({
+        ctx: fakeCtx,
+        detected: det(['A', 'B', 'C', 'D', 'E']),
+        formValues: {},
+        llmOutput: undefined,
+      }),
+    );
+    expect(dispatches).toHaveLength(5);
+    expect(new Set(dispatches.map((d) => d.agentId)).size).toBe(5);
+    expect(dispatches[0]!.prompt).toMatch(/EXACTLY ONE skill for this specific capability/);
+  });
+
+  it('selectAgents returns [] for discovery (<3 capabilities) and under test bypass', async () => {
+    const discovery = await withBypass(undefined, () =>
+      skillGenerationStep.agentMining!.selectAgents({
+        ctx: fakeCtx,
+        detected: det(['A', 'B']),
+        formValues: {},
+        llmOutput: undefined,
+      }),
+    );
+    expect(discovery).toEqual([]);
+    const bypassed = await withBypass('1', () =>
+      skillGenerationStep.agentMining!.selectAgents({
+        ctx: fakeCtx,
+        detected: det(['A', 'B', 'C']),
+        formValues: {},
+        llmOutput: undefined,
+      }),
+    );
+    expect(bypassed).toEqual([]);
+  });
+
+  it('skipIf skips the bulk llm call only at iteration 0 in deterministic mode', () => {
+    const d = det(['A', 'B', 'C']);
+    expect(skillGenerationStep.llm!.skipIf!({ detected: d, formValues: {}, iteration: 0 })).toBe(
+      true,
+    );
+    expect(skillGenerationStep.llm!.skipIf!({ detected: d, formValues: {}, iteration: 1 })).toBe(
+      false,
+    );
+    // discovery never skips
+    expect(
+      skillGenerationStep.llm!.skipIf!({ detected: det(['A']), formValues: {}, iteration: 0 }),
+    ).toBe(false);
+  });
+
+  it('a failed parallel item leaves a gap that the loop will fill', async () => {
+    const out = await apply({
+      agentMiningResults: [
+        miningResult('cap-0-a', 'alpha'),
+        {
+          agentId: 'cap-1-b',
+          agentTitle: 'Forms',
+          status: 'failed' as const,
+          output: null,
+          rawOutput: null,
+          errorMessage: 'max_tokens',
+        },
+        miningResult('cap-2-c', 'gamma'),
+      ],
+    });
+    expect(out.written.map((w) => w.id).sort()).toEqual(['alpha', 'gamma']); // 1 of 3 failed
+    expect(out.llmSkillCount).toBe(2);
+    const cont = await skillGenerationStep.loop!.shouldContinue!({
+      ctx: fakeCtx,
+      applyOutput: out,
+      llmOutput: undefined,
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(cont).toBe(true); // gap remains -> loop continues to sequential gap-fill
+  });
+});

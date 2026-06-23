@@ -4,7 +4,7 @@ import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, FormSchema } from '@haive/shared';
 import { skillEntrySchema } from '@haive/shared';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
+import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../step-definition.js';
 import {
   listFilesMatching,
   loadPreviousStepOutput,
@@ -694,6 +694,7 @@ function buildSkillPrompt(
   formValues: Record<string, unknown>,
   previousIterations: { applyOutput: unknown }[],
   truncationRetries = 0,
+  targetCapability?: string,
 ): string {
   const values = formValues as { maxSkills?: number; domainHints?: string };
   const maxSkills = clampMaxSkills(values.maxSkills);
@@ -763,9 +764,12 @@ function buildSkillPrompt(
         ].join('\n')
       : '';
 
-  // Single-skill task line + the loop's done-signal differ by mode.
-  const taskLine =
-    plan.mode === 'deterministic'
+  // Single-skill task line. When targetCapability is set (a parallel agentMining
+  // dispatch pins one capability), generate exactly that one. Otherwise the
+  // sequential modes pick the next uncovered capability / discover one.
+  const taskLine = targetCapability
+    ? `Produce EXACTLY ONE skill for this specific capability: "${targetCapability}". Name the skill for this capability and ground it in the relevant code, not just the KB text.`
+    : plan.mode === 'deterministic'
       ? 'From the capability checklist above, pick the FIRST capability NOT yet represented by an already-generated skill, and produce EXACTLY ONE skill for it. The orchestrator calls you once per capability until all are covered.'
       : `Produce EXACTLY ONE skill for the next distinct capability NOT already covered. The orchestrator calls you repeatedly. When every distinct capability this codebase exposes is already covered (up to ${maxSkills} total), return an empty array: \`{ "skills": [] }\` — do NOT pad with generic filler.`;
 
@@ -1029,6 +1033,15 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
 
   llm: {
     requiredCapabilities: ['tool_use', 'file_write'],
+    // Deterministic mode runs the bulk generation in PARALLEL via agentMining at
+    // iteration 0, so skip the sequential bulk llm call there. Iterations > 0 are the
+    // loop's gap-fill for any capability the parallel batch missed — let llm run then.
+    // Discovery mode (no fixed list to parallelize) always runs llm.
+    skipIf: ({ detected, formValues, iteration }) =>
+      computeDomainPlan(
+        detected as SkillGenDetect,
+        clampMaxSkills((formValues as { maxSkills?: number }).maxSkills),
+      ).mode === 'deterministic' && (iteration ?? 0) === 0,
     // Iteration 0 prompt; iterations > 0 use loop.buildIterationPrompt below. Each
     // pass asks for ONE skill so a single CLI invocation never blows the model's
     // output-token ceiling (the Amp max_tokens failure this step is chunked to fix).
@@ -1080,6 +1093,31 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
         },
       ],
     }),
+  },
+
+  // Parallel bulk (deterministic only): one cli-exec per BUSINESS_LOGIC capability,
+  // fanned out via the agent-mining barrier (read-only, no worktrees, capped by
+  // MAX_PARALLEL_AGENTS). apply() ingests these at iteration 0; any capability whose
+  // parallel call failed is gap-filled by the loop's sequential shrink-retry below.
+  // Returns [] for discovery (no fixed list) and under test bypass, leaving the
+  // llm + loop path to run unchanged.
+  agentMining: {
+    requiredCapabilities: ['tool_use', 'file_write'],
+    timeoutMs: 60 * 60 * 1000,
+    async selectAgents({ detected, formValues }): Promise<AgentMiningDispatch[]> {
+      if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
+      const det = detected as SkillGenDetect;
+      const fv = formValues as Record<string, unknown>;
+      const maxSkills = clampMaxSkills((fv as { maxSkills?: number }).maxSkills);
+      const plan = computeDomainPlan(det, maxSkills);
+      if (plan.mode !== 'deterministic') return [];
+      return plan.domains.map((capability, i) => ({
+        // Unique per capability (task_step_agent_minings is keyed by (step, agentId)).
+        agentId: `cap-${i}-${sanitizeSkillId(capability) ?? 'x'}`.slice(0, 120),
+        agentTitle: capability,
+        prompt: buildSkillPrompt(det, fv, [], 0, capability),
+      }));
+    },
   },
 
   // Chunked generation: one skill per LLM pass so a single CLI invocation never
@@ -1148,7 +1186,19 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const rejectedThisPass: string[] = [];
     const droppedForSubSkillsThisPass: string[] = [];
     const accepted: SkillEntry[] = [];
-    for (const entry of parseSkillEntries(args.llmOutput ?? null)) {
+    // Candidate skills for this pass. Iteration 0 in deterministic mode comes from the
+    // parallel agentMining batch (one result per capability); the loop's sequential
+    // gap-fill (iterations > 0) and discovery mode come from llmOutput. Mining results
+    // are ingested only at iteration 0 — on later passes they are already in
+    // prior.written and would just dedup-reject.
+    const candidates: SkillEntry[] = [];
+    if (args.iteration === 0) {
+      for (const r of args.agentMiningResults ?? []) {
+        if (r.status === 'done') candidates.push(...parseSkillEntries(r.output ?? r.rawOutput));
+      }
+    }
+    candidates.push(...parseSkillEntries(args.llmOutput ?? null));
+    for (const entry of candidates) {
       const cleanId = sanitizeSkillId(entry.id);
       if (!cleanId) {
         rejectedThisPass.push(String(entry.id));

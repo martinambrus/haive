@@ -884,7 +884,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // --- Pre-form LLM phase ---
     let llmOutput: unknown = undefined;
     if (stepDef.llm?.preForm) {
-      const skip = stepDef.llm.skipIf?.({ detected, formValues: {} }) ?? false;
+      const skip =
+        stepDef.llm.skipIf?.({
+          detected,
+          formValues: {},
+          iteration: stepIterationsAsRecords(current).length,
+        }) ?? false;
       if (skip) {
         ctx.logger.info({ phase: 'llm.preForm' }, 'skipping llm phase via skipIf predicate');
       } else {
@@ -1048,7 +1053,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     // --- Post-form LLM phase (default) ---
     if (stepDef.llm && !stepDef.llm.preForm) {
-      const skip = stepDef.llm.skipIf?.({ detected, formValues: formValues ?? {} }) ?? false;
+      const skip =
+        stepDef.llm.skipIf?.({
+          detected,
+          formValues: formValues ?? {},
+          iteration: stepIterationsAsRecords(current).length,
+        }) ?? false;
       if (skip) {
         ctx.logger.info({ phase: 'llm.postForm' }, 'skipping llm phase via skipIf predicate');
       } else {
