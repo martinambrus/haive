@@ -1257,7 +1257,14 @@ function StepCard({
   // steps remain retryable in case the user changed their mind.
   const isAutoSkipped = step.status === 'skipped' && !step.manuallySkipped;
   const canRetry = !taskCancelled && !isAutoSkipped && RETRYABLE_STEP_STATUSES.has(step.status);
-  const showCliPicker = !taskCancelled && ACTIONABLE_STATUSES.has(step.status);
+  // Only steps that actually dispatch a CLI (llm | agentMining | dagExecute) get a
+  // provider picker; deterministic steps never consume a per-step provider, so the
+  // picker would be a dead control. usesCli comes from CLI_DISPATCH_STEP_IDS.
+  const showCliPicker = !taskCancelled && ACTIONABLE_STATUSES.has(step.status) && step.usesCli;
+  // Deterministic actionable steps show a subtle note in place of the picker so
+  // its absence reads as intentional rather than a bug.
+  const showDeterministicNote =
+    !taskCancelled && ACTIONABLE_STATUSES.has(step.status) && !step.usesCli;
   const cliPickerId = `cli-${step.stepId}`;
   // Per-step preference wins; otherwise fall back to the task default. Empty
   // string for "no preference" so the dropdown shows the (none) option.
@@ -1418,7 +1425,7 @@ function StepCard({
 
   return (
     <Card className="flex flex-col gap-3">
-      {(showCliPicker || showAutoContinue) && (
+      {(showCliPicker || showAutoContinue || showDeterministicNote) && (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-neutral-800 pb-3">
           {showCliPicker &&
             (step.cliRoles && step.cliRoles.length > 0 ? (
@@ -1466,6 +1473,11 @@ function StepCard({
           )}
           {showCliPicker && cliError && (
             <span className="text-[11px] text-red-400">{cliError}</span>
+          )}
+          {showDeterministicNote && (
+            <span className="text-[11px] text-neutral-500">
+              Deterministic step — runs without an AI CLI
+            </span>
           )}
           {showAutoContinue && (
             <label

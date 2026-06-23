@@ -108,6 +108,55 @@ export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
   '01b-install-plugins',
 ];
 
+/** Step ids whose StepDefinition dispatches a CLI — i.e. defines `llm`,
+ *  `agentMining`, or `dagExecute` (the exact predicate the worker step runner
+ *  uses to decide an invocation happens). Only these steps ever consume a
+ *  per-step CLI provider, so the web renders the per-step CLI picker ONLY for
+ *  them; deterministic steps hide it (their per-step preference is never read —
+ *  provider-sensitive deterministic steps key off the task-level provider).
+ *
+ *  Duplicated here (like PROVIDER_SENSITIVE_STEP_IDS) because the api/web
+ *  packages cannot import the worker step registry. A worker startup assertion
+ *  (assertCliDispatchListInSync) verifies this matches the registry, so the
+ *  worker refuses to boot on drift. Do NOT key off StepMetadata.requiresCli —
+ *  that flag is unreliable (hand-set, unasserted) and read nowhere in prod. */
+export const CLI_DISPATCH_STEP_IDS: readonly string[] = [
+  // canary model-health steps (one per pipeline)
+  '00-model-health-onboarding',
+  '00-model-health-workflow',
+  // onboarding
+  '01-env-detect',
+  '06_5-agent-discovery',
+  '08-knowledge-acquisition',
+  '09-qa',
+  '09_1-qa-suggestions',
+  '09_2-qa-resolve',
+  '09_5-skill-generation',
+  '09_6_4-global-kb-merge',
+  '11-final-review',
+  // workflow
+  '01a-app-boot',
+  '03-phase-0a-discovery',
+  '03b-business-requirements',
+  '04-phase-0b-pre-planning',
+  '05-phase-0b5-spec-quality',
+  '05a-resolve-spec-warnings',
+  '06-run-config',
+  '06b-sprint-planning',
+  '06c-dag-execute',
+  '07-phase-2-implement',
+  '07a-code-simplify',
+  '07b-phase-4-validate',
+  '08a-browser-verify',
+  '08b-test-management',
+  '08c-code-review',
+  '08d-adversarial-qa',
+  '08e-insights-triage',
+  '11-phase-8-learning',
+  // kb-author
+  '01-kb-enrich',
+];
+
 export interface StepRunRecord {
   id: string;
   taskId: string;

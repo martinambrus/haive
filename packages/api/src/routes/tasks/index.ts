@@ -24,6 +24,7 @@ import {
   enrichStepsWithActiveRole,
   enrichStepsWithCliStats,
   enrichStepsWithCliPreferences,
+  enrichStepsWithCliUsage,
   enrichStepsWithSkipFlag,
   findActiveCliInvocation,
 } from './_helpers.js';
@@ -271,7 +272,8 @@ taskRoutes.get('/:id', async (c) => {
   );
   const withSkip = await enrichStepsWithSkipFlag(db, id, enriched);
   const withStats = await enrichStepsWithCliStats(db, id, withSkip);
-  const steps = await enrichStepsWithActiveRole(db, id, withStats);
+  const withActiveRole = await enrichStepsWithActiveRole(db, id, withStats);
+  const steps = enrichStepsWithCliUsage(withActiveRole);
   const active = await findActiveCliInvocation(db, id);
   const taskWithActive = {
     ...task,

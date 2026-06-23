@@ -2,6 +2,7 @@ import { relative, resolve } from 'node:path';
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  CLI_DISPATCH_STEP_IDS,
   SKIPPABLE_STEP_IDS,
   STEP_CLI_ROLES,
   type CliRoleDescriptor,
@@ -335,6 +336,20 @@ export async function enrichStepsWithSkipFlag<
     );
   const manualSet = new Set(events.map((e) => e.taskStepId).filter((v): v is string => !!v));
   return steps.map((s) => withFlags(s, manualSet.has(s.id)));
+}
+
+const CLI_DISPATCH_STEP_ID_SET = new Set<string>(CLI_DISPATCH_STEP_IDS);
+
+/** Annotate each step with whether it ever dispatches a CLI (llm | agentMining |
+ *  dagExecute), from the CLI_DISPATCH_STEP_IDS mirror. Drives whether the web
+ *  renders the per-step CLI picker — deterministic steps never consume a per-step
+ *  provider, so the picker is hidden (and a "runs without an AI CLI" note shown)
+ *  for them. Pure/static: the source of truth is the worker step registry, kept
+ *  in sync by a worker boot assertion. */
+export function enrichStepsWithCliUsage<T extends { stepId: string }>(
+  steps: T[],
+): (T & { usesCli: boolean })[] {
+  return steps.map((s) => ({ ...s, usesCli: CLI_DISPATCH_STEP_ID_SET.has(s.stepId) }));
 }
 
 export async function resolveWorkspaceRoot(
