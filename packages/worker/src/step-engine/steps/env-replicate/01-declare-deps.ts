@@ -278,9 +278,23 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     const result = await scanRepoForDeps(ctx.repoPath);
     const taskRow = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { repositoryId: true },
+      columns: { repositoryId: true, title: true, description: true },
     });
     const repositoryId = taskRow?.repositoryId ?? null;
+
+    // A legacy project that is ADDING a container tool has no marker file on disk
+    // yet, so scanRepoForDeps returns 'none'. Honor an explicit intent in the task
+    // title/description ("add ddev", "docker compose", …) so the Container tool is
+    // pre-selected — otherwise 01a-app-boot tries to boot an app that cannot run
+    // yet and 01c-ddev-env never generates the .ddev config. An on-disk marker
+    // (ddev/compose already present) always wins; intent only fills the 'none' case.
+    if (result.containerTool === 'none') {
+      const intent = detectContainerToolIntent(
+        `${taskRow?.title ?? ''}\n${taskRow?.description ?? ''}`,
+      );
+      if (intent) result.containerTool = intent;
+    }
+
     const onboardingLsp = await loadOnboardingLspKeys(ctx.db, repositoryId);
     if (onboardingLsp.length > 0) {
       result.suggestedLsp = Array.from(new Set([...result.suggestedLsp, ...onboardingLsp]));
@@ -661,6 +675,20 @@ async function detectWebserver(repoPath: string): Promise<WebserverType> {
     if (await fileExists(path.join(repoPath, sub, '.htaccess'))) return 'apache-fpm';
   }
   return 'nginx-fpm';
+}
+
+// Container-tool intent parsed from the task title/description. Pre-selects the
+// Container tool when no marker is on disk yet (a legacy project ADDING a tool).
+// Matched most-specific-first so "docker compose" and "ddev" win over bare
+// "docker"; the word boundaries keep "dockerize"/"Dockerfile" from matching.
+// Returns null when nothing is mentioned (containerTool stays whatever the scan
+// found). The select is user-editable, so a false positive is one click to undo.
+function detectContainerToolIntent(text: string): ContainerTool | null {
+  const t = text.toLowerCase();
+  if (/\bddev\b/.test(t)) return 'ddev';
+  if (/\bdocker[-\s]?compose\b/.test(t)) return 'docker-compose';
+  if (/\bdocker\b/.test(t)) return 'docker';
+  return null;
 }
 
 export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDetect> {
