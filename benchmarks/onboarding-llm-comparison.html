@@ -122,9 +122,9 @@
 <header class="hero">
   <div class="kicker">Haive · Onboarding Benchmark</div>
   <h1>Which LLM onboards a legacy codebase best?</h1>
-  <p class="sub">The same repository was auto-onboarded 10 times through Haive&rsquo;s deterministic step pipeline, each run driven by a different LLM. Every run was audited across five correctness dimensions (verified against the real source code) and two cost dimensions (compute time &amp; output tokens).</p>
+  <p class="sub">The same repository was auto-onboarded 11 times through Haive&rsquo;s deterministic step pipeline, each run driven by a different LLM. Every run was audited across five correctness dimensions (verified against the real source code) and two cost dimensions (compute time &amp; output tokens).</p>
   <div class="meta">
-    <span><b>10</b> LLMs</span>
+    <span><b>11</b> LLMs</span>
     <span><b>5</b> correctness dims</span>
     <span><b>~20</b> steps / run</span>
     <span>Audited <b>2026-06-23</b></span>
@@ -141,8 +141,8 @@
 <section>
   <div class="verdicts">
     <div class="vcard win"><div class="lab">Best overall</div><div class="who">Claude Code</div><div class="why">Top-3 in every dimension, zero hallucinations, best judgment (rejected a false detection, cleanest knowledge routing). Mid-pack speed.</div></div>
-    <div class="vcard val"><div class="lab">Best value</div><div class="who">deepseek-v4-pro</div><div class="why">Best detection &amp; discovered-agents, near-top KB &mdash; at <b>28&nbsp;min</b>, fastest of the strong tier. ~96% of Claude&rsquo;s quality at ~half the compute.</div></div>
-    <div class="vcard avoid"><div class="lab">Over-priced</div><div class="who">z.ai / glm-4.6</div><div class="why">Good quality (4th) but <b>slowest compute (79&nbsp;min ≈ 2× median)</b> and padding-prone. Three faster models match or beat it.</div></div>
+    <div class="vcard val"><div class="lab">Best value</div><div class="who">glm-5.2 &amp; deepseek-v4-pro</div><div class="why">glm-5.2: 2nd-highest correctness (8.7) at <b>29&nbsp;min</b>, top-tier skills. deepseek: best detection+agents at 28&nbsp;min. Both ~half Claude&rsquo;s compute.</div></div>
+    <div class="vcard win"><div class="lab">Biggest gain</div><div class="who">glm-5.2 &gt; glm-4.6</div><div class="why">The new GLM matches/beats its sibling (KB 9.5 vs 9.0, skills 9.5) at <b>2.7× the speed</b> (29 vs 79&nbsp;min). glm-4.6 is now superseded.</div></div>
     <div class="vcard avoid"><div class="lab">Avoid</div><div class="who">qwen · gpt-oss · gemma</div><div class="why">Global-KB contamination (qwen), invented an agent + a fake DB table (gpt-oss), omits half the app (gemma).</div></div>
   </div>
 </section>
@@ -169,7 +169,7 @@
 <p class="sub" style="font-size:13px;margin-top:8px"><b>Value</b> = composite ÷ compute-minutes (correctness per minute). <b>Output tokens</b> are the only roughly-comparable token metric &mdash; raw input/total counts differ wildly by provider (cache accounting); antigravity reported none.</p>
 
 <h2><span class="num">02</span>Quality vs. speed</h2>
-<p class="sub">The money chart. Up = more correct; left = faster. The shaded <b>value zone</b> (top-left) is high correctness at low compute. Note how deepseek lands there, Claude sits high-and-central, and glm/z.ai is pushed to the slow right edge.</p>
+<p class="sub">The money chart. Up = more correct; left = faster. The shaded <b>value zone</b> (top-left) is high correctness at low compute. Note how glm-5.2 and deepseek land there together, Claude sits high-and-central, and the older glm-4.6 is pushed to the slow right edge &mdash; same model family at 2.7× the speed.</p>
 <div class="chartwrap">
   <svg id="scatter" viewBox="0 0 880 540" role="img" aria-label="Scatter plot of correctness versus compute time"></svg>
   <div class="legend">
@@ -188,7 +188,7 @@
     <tr><td style="text-align:left">Stack detection (01/02/04)</td><td style="text-align:left"><b>deepseek-v4-pro</b></td><td>9.5</td><td style="text-align:left">claude (9.0)</td><td style="text-align:left">Only model to explicitly debunk the injected Jest false-positive</td></tr>
     <tr><td style="text-align:left">Agent discovery (06_5)</td><td style="text-align:left"><b>deepseek-v4-pro</b></td><td>9.5</td><td style="text-align:left">glm (9.0)</td><td style="text-align:left">5 grounded domain agents (mysql, php-legacy, yui, theme, fckeditor)</td></tr>
     <tr><td style="text-align:left">Knowledge base (08)</td><td style="text-align:left"><b>amp</b> &amp; <b>minimax-m3</b></td><td>10</td><td style="text-align:left">claude / deepseek (9.5)</td><td style="text-align:left">Bug-level accuracy (inverted <code>Update()</code> return; schema-mutation-on-write)</td></tr>
-    <tr><td style="text-align:left">Skill generation (09_5)</td><td style="text-align:left"><b>minimax / claude / glm</b></td><td>9.5</td><td style="text-align:left">kimi (9.0)</td><td style="text-align:left">Domain-specific, line-grounded skills (form-wizard, edit-locking, url-aliases)</td></tr>
+    <tr><td style="text-align:left">Skill generation (09_5)</td><td style="text-align:left"><b>minimax / claude / glm-4.6 / glm-5.2</b></td><td>9.5</td><td style="text-align:left">kimi (9.0)</td><td style="text-align:left">Domain-specific, line-grounded skills (form-wizard, edit-locking, url-aliases)</td></tr>
     <tr><td style="text-align:left">Global-KB promotion</td><td style="text-align:left"><b>amp</b></td><td>9.5</td><td style="text-align:left">claude (9.0)</td><td style="text-align:left">6 portable, correctly-merged articles (no project leakage)</td></tr>
   </tbody>
 </table>
@@ -219,9 +219,9 @@
 <h2><span class="num">06</span>Recommendations</h2>
 <ol class="recs">
   <li><b>Default / highest-stakes onboarding &rarr; Claude Code.</b> Most reliable, no weak dimension, no hallucinations, best judgment. Accept ~55&nbsp;min compute.</li>
-  <li><b>High-throughput / cost-sensitive &rarr; deepseek-v4-pro.</b> ~96% of Claude&rsquo;s correctness at ~half the compute; best detection + agents. Caveat: it promotes nothing to the global KB and generates fewer skills &mdash; nudge it on both.</li>
-  <li><b>Honorable mentions:</b> kimi-k2.7 (fast + strong, best non-deepseek value) and minimax-m3 (deepest KB + skills, mid speed).</li>
-  <li><b>Deprioritize z.ai / glm-4.6:</b> quality is real, but three faster models match or beat it &mdash; not worth 2× the compute.</li>
+  <li><b>High-throughput / cost-sensitive &rarr; glm-5.2 or deepseek-v4-pro.</b> glm-5.2 is now 2nd overall (8.7) with top-tier skills, at 29&nbsp;min; deepseek wins detection + agents at 28&nbsp;min. Both ~half Claude&rsquo;s compute. Caveat: both promote nothing to the global KB &mdash; nudge them.</li>
+  <li><b>Honorable mentions:</b> kimi-k2.7 (fast + strong) and minimax-m3 (deepest KB + skills, mid speed).</li>
+  <li><b>glm-5.2 supersedes glm-4.6:</b> same-or-better quality (KB 9.5 vs 9.0, skills 9.5) at ~1/3 the compute (29 vs 79&nbsp;min). No reason to run glm-4.6 now.</li>
   <li><b>Avoid for production onboarding:</b> qwen, gpt-oss, gemma (hallucinations / shallow output / global-KB contamination).</li>
 </ol>
 
@@ -229,11 +229,11 @@
   <summary>&#9656; Methodology &amp; caveats</summary>
   <div class="box" style="margin-top:10px">
     <ul>
-      <li><b>Ground truth.</b> All 10 onboarded the same repo (re-uploaded per run &rarr; separate workspaces, so each LLM&rsquo;s <code>.claude/</code> artifacts persisted independently). Four parallel auditor agents verified claims against the real source to file:line.</li>
+      <li><b>Ground truth.</b> All 11 onboarded the same repo (re-uploaded per run &rarr; separate workspaces, so each LLM&rsquo;s <code>.claude/</code> artifacts persisted independently). Parallel auditor agents verified claims against the real source to file:line.</li>
       <li><b>Where the data lives.</b> Counts &amp; timing from <code>task_steps</code> / <code>cli_invocations</code> (main DB); generated content from each repo&rsquo;s on-disk <code>.claude/</code> dir; global articles from the separate <code>haive_kb_global</code> DB (filtered by <code>source_task_id</code>).</li>
       <li><b>Tokens are not comparable across providers.</b> Claude reports cache-inclusive totals (14K input / 6.2M total); ollama-cloud reports raw uncached input (12&ndash;18M); antigravity reports 0 (broken tracking). Only <b>output tokens</b> and <b>CLI compute-minutes</b> are used for cost.</li>
       <li><b>Wall-clock is misleading.</b> It includes user-idle-at-gate time. deepseek&rsquo;s 729-min wall was only 28&nbsp;min compute (the task sat between gates). Speed is ranked by <b>CLI active minutes</b>.</li>
-      <li><b>Step completion is uniform</b> (~20 done / 2 skipped for all 10) &mdash; the pipeline&rsquo;s stubs/fallbacks mask weak models, so all real signal is in content quality, not completion.</li>
+      <li><b>Step completion is uniform</b> (~20 done / 2 skipped for all 11) &mdash; the pipeline&rsquo;s stubs/fallbacks mask weak models, so all real signal is in content quality, not completion.</li>
       <li><b>Scores</b> are an LLM-assisted structured audit; treat single decimals as indicative, not laboratory-precise. The tiers and per-step winners are robust.</li>
     </ul>
   </div>
@@ -287,7 +287,20 @@ const DATA = [
        `Deepest KB content (30 files, verified not padded)`],
   con:[`Slowest compute by far: ~79 min (about 2x the median), slow even on trivial steps`,
        `30 local KB files / 0 promoted - no local-vs-global routing`,
-       `Worst value of the strong tier`]},
+       `Superseded by glm-5.2: same-or-better quality at ~1/3 the compute (29 vs 79 min)`]},
+
+ {id:"glm-5.2",name:"glm-5.2 (z.ai)",prov:"Ollama Cloud · glm-5.2:cloud",tier:"A",
+  composite:8.70,detect:8.5,kb:9.5,skills:9.5,agents:9.0,global:6.0,
+  cliMin:29.4,wallMin:29.7,idleMin:6.4,outTok:109819,kbLocal:35,kbGlobal:0,skillsN:5,agentsDisc:3,
+  pro:[`Matches or beats its sibling glm-4.6 across the board - at 2.7x the speed (29 vs 79 min compute)`,
+       `Deepest KB of the field (35 files, +26% words vs glm-4.6, ~15/15 claims verified) - not padded; covers jquery + recaptcha subsystems others skipped`,
+       `Top-tier skills (9.5): security-grade encryptPW=md5(crypt()) decode; forms-wizard newform table lifecycle`,
+       `Rejected the Jest false-positive; wrote a standalone TESTING_STANDARDS.md debunk`,
+       `Fast: 29 min compute, low idle, no degraded steps`],
+  con:[`Promoted nothing to global KB (35 local / 0 global) - no local-vs-global routing`,
+       `Left webserver/docroot null in detection (glm-4.6 resolved them)`,
+       `3 discovered agents (mysql, fckeditor, installer) - missed the YUI/theme layers deepseek caught`,
+       `Cosmetic "(calypso)" codename label in KB headers (unverified, not load-bearing)`]},
 
  {id:"kimi-k2.7-code",name:"kimi-k2.7-code",prov:"Ollama Cloud · kimi-k2.7-code:cloud",tier:"A",
   composite:8.30,detect:8.5,kb:9.0,skills:9.0,agents:8.0,global:6.0,
@@ -442,8 +455,8 @@ function renderScatter(){
     const x=sx(d.cliMin), y=sy(d.composite);
     s+=`<circle cx="${x}" cy="${y}" r="${r}" fill="${col(d.tier)}" fill-opacity=".22" stroke="${col(d.tier)}" stroke-width="1.6"><title>${d.name} — composite ${d.composite}, ${d.cliMin} min, out ${fmtTok(d.outTok)}</title></circle>`;
     // label placement: shift to avoid overlap roughly
-    const dy = (d.id==="kimi-k2.7-code")? 16 : (d.id==="deepseek-v4-pro"? -14 : (d.id==="glm-4.6"? -14 : -r-6));
-    const dx = (d.id==="amp")? 10 : 0;
+    const dy = (d.id==="kimi-k2.7-code")? 16 : (d.id==="deepseek-v4-pro"? -14 : (d.id==="glm-4.6"? -14 : (d.id==="glm-5.2"? 20 : -r-6)));
+    const dx = (d.id==="amp")? 10 : (d.id==="glm-5.2"? 8 : 0);
     s+=`<text class="dotlab" x="${x+dx}" y="${y+dy}" text-anchor="middle">${d.name.replace(/ \(.*\)/,"").replace(":cloud","")}</text>`;
   });
   document.getElementById("scatter").innerHTML=s;
