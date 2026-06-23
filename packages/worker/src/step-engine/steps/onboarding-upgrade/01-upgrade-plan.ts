@@ -27,10 +27,9 @@ import {
 import {
   extractBundleItemId,
   loadBundlesForExpansion,
-  resolveSkillTargets,
   type BundleWithMeta,
 } from '../../_custom-bundle-loader.js';
-import { pathExists } from '../onboarding/_helpers.js';
+import { pathExists, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import type { GenerateFilesDetect } from '../onboarding/07-generate-files.js';
 import { computeLineDelta } from './_diff.js';
 
@@ -469,7 +468,7 @@ async function unionExpandedFor(
   const haiveExpanded = expandManifestFor(renderCtx, manifest);
 
   const bundles: BundleWithMeta[] = await loadBundlesForExpansion(ctx.db, repositoryId, ctx.logger);
-  const skillTargets = await resolveSkillTargets(ctx.db, ctx.userId);
+  const skillTargets = await resolveSkillTargetDirs(ctx.db, ctx.userId);
   const customExpanded = expandCustomBundlesFor(bundles, renderCtx.agentTargets, skillTargets);
 
   const out: ExpandedRendering[] = [];

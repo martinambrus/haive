@@ -22,12 +22,8 @@ import {
   type ExpandedRendering,
   type TemplateRenderContext,
 } from '../../template-manifest.js';
-import {
-  extractBundleItemId,
-  loadBundlesForExpansion,
-  resolveSkillTargets,
-} from '../../_custom-bundle-loader.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
+import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import type { UpgradePlanOutput, UpgradePlanEntry } from './01-upgrade-plan.js';
 
 const CONFLICT_CHOICE_VALUES = ['apply_theirs', 'keep_ours', 'skip'] as const;
@@ -532,7 +528,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const renderCtx = plan.renderCtxSnapshot as unknown as TemplateRenderContext;
     const haiveApplicable = expandManifestFor(renderCtx, manifest);
     const bundles = await loadBundlesForExpansion(ctx.db, plan.repositoryId, ctx.logger);
-    const skillTargets = await resolveSkillTargets(ctx.db, ctx.userId);
+    const skillTargets = await resolveSkillTargetDirs(ctx.db, ctx.userId);
     const customApplicable = expandCustomBundlesFor(bundles, renderCtx.agentTargets, skillTargets);
     const applicableExpanded: ExpandedRendering[] = [...haiveApplicable, ...customApplicable];
     await updateApplicableTemplateIds(ctx.db, plan.repositoryId, applicableExpanded);

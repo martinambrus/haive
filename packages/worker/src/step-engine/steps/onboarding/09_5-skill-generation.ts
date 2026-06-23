@@ -2,29 +2,20 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { CliProviderName, DetectResult, FormSchema } from '@haive/shared';
-import { getCliProviderMetadata, skillEntrySchema } from '@haive/shared';
+import type { DetectResult, FormSchema } from '@haive/shared';
+import { skillEntrySchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
-import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
+import {
+  listFilesMatching,
+  loadPreviousStepOutput,
+  pathExists,
+  resolveSkillTargetDirs,
+} from './_helpers.js';
 import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
 import { jsonrepair } from 'jsonrepair';
 import type { KbFileSummary } from './09-qa.js';
 
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
-
-async function resolveSkillTargetDirs(ctx: StepContext): Promise<string[]> {
-  const rows = await ctx.db.query.cliProviders.findMany({
-    where: eq(schema.cliProviders.userId, ctx.userId),
-    columns: { name: true, enabled: true },
-  });
-  const targets = new Set<string>();
-  for (const row of rows) {
-    if (!row.enabled) continue;
-    const dir = getCliProviderMetadata(row.name as CliProviderName).projectSkillsDir;
-    if (dir) targets.add(dir);
-  }
-  return targets.size > 0 ? Array.from(targets) : [DEFAULT_PROJECT_SKILLS_DIR];
-}
 
 interface SkillGenDetect {
   framework: string | null;
@@ -924,7 +915,9 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const framework = envData?.project?.framework ?? null;
     const language = envData?.project?.primaryLanguage ?? null;
 
-    const skillTargetDirs = await resolveSkillTargetDirs(ctx);
+    const skillTargetDirs = await resolveSkillTargetDirs(ctx.db, ctx.userId, [
+      DEFAULT_PROJECT_SKILLS_DIR,
+    ]);
 
     await ctx.emitProgress('Listing existing knowledge base...');
     const kbFiles = await listKbFiles(ctx.repoPath);

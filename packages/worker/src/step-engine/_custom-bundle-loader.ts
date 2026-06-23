@@ -1,12 +1,7 @@
 import { eq } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
-import {
-  agentSpecSchema,
-  getCliProviderMetadata,
-  skillEntrySchema,
-  type CliProviderName,
-} from '@haive/shared';
+import { agentSpecSchema, skillEntrySchema } from '@haive/shared';
 import type { BundleForExpansion, BundleItemForExpansion } from './template-manifest.js';
 
 /** Lightweight pino-compatible shape so callers can pass any logger child
@@ -102,23 +97,6 @@ export async function loadBundlesForExpansion(
     });
   }
   return result;
-}
-
-/** Resolve unique `projectSkillsDir` entries for the user's enabled CLIs.
- *  Same logic as `resolveSkillTargetDirs` in 09_5 — extracted so 01-upgrade-
- *  plan / 02-upgrade-apply / 12-post-onboarding all hit identical fan-out. */
-export async function resolveSkillTargets(db: Database, userId: string): Promise<string[]> {
-  const rows = await db.query.cliProviders.findMany({
-    where: eq(schema.cliProviders.userId, userId),
-    columns: { name: true, enabled: true },
-  });
-  const dirs = new Set<string>();
-  for (const row of rows) {
-    if (!row.enabled) continue;
-    const meta = getCliProviderMetadata(row.name as CliProviderName);
-    if (meta.projectSkillsDir) dirs.add(meta.projectSkillsDir);
-  }
-  return Array.from(dirs);
 }
 
 /** Pluck the `custom_bundle_items.id` out of a custom template id of the form

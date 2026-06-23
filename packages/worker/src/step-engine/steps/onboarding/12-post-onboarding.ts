@@ -17,7 +17,7 @@ import {
 } from '@haive/shared';
 import type { Database } from '@haive/database';
 import type { StepDefinition, StepContext } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from './_helpers.js';
+import { loadPreviousStepOutput, pathExists, resolveSkillTargetDirs } from './_helpers.js';
 import {
   expandCustomBundlesFor,
   expandManifestFor,
@@ -26,11 +26,7 @@ import {
   type ExpandedRendering,
   type TemplateRenderContext,
 } from '../../template-manifest.js';
-import {
-  extractBundleItemId,
-  loadBundlesForExpansion,
-  resolveSkillTargets,
-} from '../../_custom-bundle-loader.js';
+import { extractBundleItemId, loadBundlesForExpansion } from '../../_custom-bundle-loader.js';
 import { writeInstallManifestFromLiveRows } from '../../_install-manifest.js';
 import type { GenerateFilesDetect } from './07-generate-files.js';
 
@@ -134,7 +130,7 @@ async function recordOnboardingArtifacts(
   // this should not happen in practice since Haive paths and bundle paths
   // never overlap by convention, but we log+drop just in case).
   const bundlesForInstall = await loadBundlesForExpansion(ctx.db, repositoryId, ctx.logger);
-  const skillTargets = await resolveSkillTargets(ctx.db, ctx.userId);
+  const skillTargets = await resolveSkillTargetDirs(ctx.db, ctx.userId);
   const customExpanded = expandCustomBundlesFor(
     bundlesForInstall,
     detect.agentTargets,

@@ -3,7 +3,12 @@ import type { Dirent } from 'node:fs';
 import path from 'node:path';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { CLI_PROVIDER_CATALOG, type CliProviderMetadata } from '@haive/shared';
+import {
+  CLI_PROVIDER_CATALOG,
+  getCliProviderMetadata,
+  type CliProviderMetadata,
+  type CliProviderName,
+} from '@haive/shared';
 
 export async function loadCliProviderMetadata(
   db: Database,
@@ -18,6 +23,31 @@ export async function loadCliProviderMetadata(
   const name = rows[0]?.name;
   if (!name) return null;
   return CLI_PROVIDER_CATALOG[name] ?? null;
+}
+
+/** Repo-relative skills directories to write to and verify, one per unique
+ *  projectSkillsDir across all ENABLED CLI providers for this user (claude/zai/amp
+ *  collapse to .claude/skills; gemini -> .gemini/skills; codex -> .agents/skills).
+ *  Returns `fallback` (default []) when no enabled provider declares a skills dir.
+ *  Bundle-expansion callers take the empty default so expansion no-ops rather than
+ *  writing to a dir no CLI asked for; the write/verify steps (09_5/09_6) pass
+ *  ['.claude/skills'] so they always have somewhere to target. */
+export async function resolveSkillTargetDirs(
+  db: Database,
+  userId: string,
+  fallback: string[] = [],
+): Promise<string[]> {
+  const rows = await db.query.cliProviders.findMany({
+    where: eq(schema.cliProviders.userId, userId),
+    columns: { name: true, enabled: true },
+  });
+  const targets = new Set<string>();
+  for (const row of rows) {
+    if (!row.enabled) continue;
+    const dir = getCliProviderMetadata(row.name as CliProviderName).projectSkillsDir;
+    if (dir) targets.add(dir);
+  }
+  return targets.size > 0 ? Array.from(targets) : fallback;
 }
 
 export async function loadPreviousStepOutput(
