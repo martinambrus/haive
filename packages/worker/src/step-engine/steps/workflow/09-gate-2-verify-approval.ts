@@ -49,6 +49,8 @@ interface VerifyGateDetect {
     blocking: boolean;
     peerFindings: string[];
     securityFindings: string[];
+    /** Findings from the level-gated extra review lenses (operational/performance). */
+    lensFindings: string[];
     positives: string[];
   } | null;
   /** Phase 7 adversarial QA result (null when the step didn't run). */
@@ -98,6 +100,12 @@ interface Phase8cOutput {
       fix?: string;
     }[];
   };
+  extraLenses?: {
+    id?: string;
+    title?: string;
+    verdict?: string;
+    findings?: { severity?: string; path?: string; lines?: string; issue?: string; fix?: string }[];
+  }[];
 }
 
 interface Phase5aOutput {
@@ -260,6 +268,11 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         securityFindings: (pc.security?.findings ?? []).map((f) =>
           `[${f.severity ?? '?'}] ${f.path ?? ''}${f.line ? `:${f.line}` : ''} ${f.issue ?? ''}${f.attack ? ` (attack: ${f.attack})` : ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
+        lensFindings: (pc.extraLenses ?? []).flatMap((lens) =>
+          (lens.findings ?? []).map((f) =>
+            `[${lens.title ?? lens.id ?? 'lens'}] [${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+          ),
+        ),
         positives: pc.peer?.positives ?? [],
       };
     }
@@ -364,7 +377,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const cr = detected.codeReview;
     const codeReviewOk = cr === null || !cr.blocking;
     const codeReviewLine = cr
-      ? `Code review: peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.blocking ? ' — BLOCKING' : ''}`
+      ? `Code review: peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} operational/perf` : ''}${cr.blocking ? ' — BLOCKING' : ''}`
       : '';
     const aq = detected.adversarial;
     const adversarialOk = aq === null || !aq.blocking;
@@ -466,13 +479,17 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         lines.push('', '## Peer findings');
         for (const f of cr.peerFindings) lines.push(`- ${f}`);
       }
+      if (cr.lensFindings.length > 0) {
+        lines.push('', '## Operational / performance review');
+        for (const f of cr.lensFindings) lines.push(`- ${f}`);
+      }
       if (cr.positives.length > 0) {
         lines.push('', '## Positives');
         for (const p of cr.positives) lines.push(`- ${p}`);
       }
       infoSections.push({
         title: 'Code review',
-        preview: `peer ${cr.peerVerdict} • security ${cr.securityVerdict}${cr.blocking ? ' • BLOCKING' : ''}`,
+        preview: `peer ${cr.peerVerdict} • security ${cr.securityVerdict}${cr.lensFindings.length ? ` • +${cr.lensFindings.length} ops/perf` : ''}${cr.blocking ? ' • BLOCKING' : ''}`,
         body: lines.join('\n'),
         defaultOpen: cr.blocking,
       });

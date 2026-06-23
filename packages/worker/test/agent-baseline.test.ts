@@ -17,6 +17,8 @@ const PORTED_AGENTS = [
   'code-tracer',
   'peer-reviewer',
   'security-code-reviewer',
+  'operational-reviewer',
+  'performance-reviewer',
   'pattern-replicator',
   'markdown-humanizer',
   'auth-bandit',

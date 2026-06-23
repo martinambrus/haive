@@ -116,6 +116,16 @@ export const BASELINE_AGENT_DEFS: { id: string; label: string; hint: string }[] 
     hint: 'diff-focused security review: injection, access control, data exposure',
   },
   {
+    id: 'operational-reviewer',
+    label: 'Operational reviewer',
+    hint: 'observability, rollback, migration safety, backward compatibility, docs',
+  },
+  {
+    id: 'performance-reviewer',
+    label: 'Performance reviewer',
+    hint: 'N+1 queries, indexes, hot-path blocking IO, concurrency, payload size',
+  },
+  {
     id: 'pattern-replicator',
     label: 'Pattern replicator',
     hint: 'extracts an existing pattern so new code matches it ("implement X like Y")',

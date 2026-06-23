@@ -29,10 +29,14 @@ import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 
 const REVIEW_TIMEOUT_MS = 30 * 60 * 1000;
 
+type QaLevel = 'none' | 'poc' | 'standard' | 'enterprise';
+
 interface CodeReviewDetect {
   spec: string;
   implementationFiles: string[];
   debtBlock: string;
+  /** Task adversarial-QA level, reused to gate the extra review lenses. */
+  level: QaLevel;
 }
 
 interface PeerFinding {
@@ -55,10 +59,19 @@ interface SecurityFinding {
   fix?: string;
 }
 
+interface ReviewLensResult {
+  id: string;
+  title: string;
+  verdict: string;
+  findings: PeerFinding[];
+}
+
 interface CodeReviewApply {
   reviewed: boolean;
   peer: { verdict: string; findings: PeerFinding[]; positives: string[] };
   security: { verdict: string; findings: SecurityFinding[] };
+  /** Level-gated extra review lenses (operational, performance). Empty for none/poc. */
+  extraLenses: ReviewLensResult[];
   blocking: boolean;
   counts: { peer: number; securityCriticalHigh: number };
 }
@@ -99,6 +112,24 @@ const securitySchema = z.object({
     .default([]),
 });
 
+// Extra review lenses reuse the peer finding shape (verdict + findings, no
+// positives), so one schema/parser covers operational and performance both.
+const reviewLensSchema = z.object({
+  verdict: z.enum(['APPROVE', 'REQUEST_CHANGES', 'DISCUSS']).optional(),
+  findings: z
+    .array(
+      z.object({
+        severity: z.string().default('suggestion'),
+        path: z.string().optional(),
+        lines: z.string().optional(),
+        issue: z.string(),
+        snippet: z.string().optional(),
+        fix: z.string().optional(),
+      }),
+    )
+    .default([]),
+});
+
 function fencedCandidate(raw: unknown): unknown {
   if (!raw) return null;
   if (typeof raw === 'object') return raw;
@@ -130,11 +161,20 @@ export function parseSecurityReview(
   return { verdict: parsed.data.verdict ?? 'NEEDS_FIXES', findings: parsed.data.findings };
 }
 
+/** Parse one extra review-lens (operational/performance) JSON; null when unparseable. */
+export function parseReviewLens(raw: unknown): { verdict: string; findings: PeerFinding[] } | null {
+  const parsed = reviewLensSchema.safeParse(fencedCandidate(raw));
+  if (!parsed.success) return null;
+  return { verdict: parsed.data.verdict ?? 'DISCUSS', findings: parsed.data.findings };
+}
+
 /** A review result is blocking when peer requests changes, security is
- *  vulnerable, or any security finding is critical/high. */
+ *  vulnerable, any security finding is critical/high, or an extra review lens
+ *  (operational/performance) requests changes. */
 export function computeBlocking(
   peer: { verdict: string } | null,
   security: { verdict: string; findings: SecurityFinding[] } | null,
+  lenses: { verdict: string }[] = [],
 ): boolean {
   if (peer?.verdict === 'REQUEST_CHANGES') return true;
   if (security?.verdict === 'VULNERABLE') return true;
@@ -146,6 +186,7 @@ export function computeBlocking(
   ) {
     return true;
   }
+  if (lenses.some((l) => l.verdict === 'REQUEST_CHANGES')) return true;
   return false;
 }
 
@@ -186,6 +227,71 @@ const SECURITY_PERSONA = [
   'with full information. Report EVERY finding in full — never just counts. Do NOT edit code and do',
   'NOT run git (it is unavailable here — work from the changed-files list and read them directly).',
 ] as const;
+
+const OPERATIONAL_PERSONA = [
+  'You are the Operational Reviewer. Review the change AS WRITTEN for the operational and lifecycle',
+  'dimensions a feature-focused review tends to under-weight, and NEVER rewrite the code (the author',
+  'owns it). Raise every weak or missing aspect as a finding with the dimension named in the issue:',
+  '- Observability: can a new code path be debugged in production from its own logs/metrics/traces',
+  '  alone? Flag silent failures, swallowed errors, and new branches with no structured logging.',
+  '- Operational readiness: timeouts and retries on external calls, graceful degradation on failure,',
+  '  resource limits and cleanup, and config / feature-flag handling for the new behavior.',
+  '- Migration safety: any DB or schema migration is present, idempotent, reversible, and',
+  '  forward-compatible (old code tolerates the new schema during a rolling deploy).',
+  '- Backward compatibility: does the change break existing callers, API consumers, persisted data,',
+  '  or serialized formats? Check the call sites of anything whose signature or shape changed.',
+  '- Rollback: can this change be undone safely? Flag one-way doors and destructive steps with no',
+  '  documented undo path.',
+  '- Documentation: are READMEs, inline comments, and developer docs updated for the new behavior?',
+  'Do NOT review test coverage (a separate step owns it) or security (a separate reviewer owns it).',
+  'Every finding needs a file + line, the offending snippet, and a concrete fix. Report EVERY finding',
+  'in full — never just counts. Do NOT edit code and do NOT run git (it is unavailable here — work',
+  'from the changed-files list and read them directly).',
+] as const;
+
+const PERFORMANCE_PERSONA = [
+  'You are the Performance Reviewer. Review the change AS WRITTEN for performance and data-access',
+  'efficiency, and NEVER rewrite the code (the author owns it). Raise every issue as a finding with',
+  'the concern named in the issue:',
+  '- Query efficiency: N+1 query patterns, queries issued inside loops, and missing indexes on new',
+  '  columns used in WHERE / ORDER BY / JOIN clauses.',
+  '- Unbounded work: list endpoints or queries with no pagination or limit, and operations whose',
+  '  cost grows with unbounded input.',
+  '- Hot-path blocking: synchronous or blocking IO, heavy CPU, or external calls on a request or',
+  '  event hot path that should be async, cached, or moved off the critical path.',
+  '- Data integrity under concurrency: writes that need a transaction, a unique constraint, or an',
+  '  idempotency guard to stay correct under retries and concurrent requests.',
+  '- Memory and payload: large payloads read fully into memory, unbounded buffers, and missing',
+  '  streaming where the data set can be large.',
+  'Every finding needs a file + line, the offending snippet, and a concrete fix. Report EVERY finding',
+  'in full — never just counts. Do NOT edit code and do NOT run git (it is unavailable here — work',
+  'from the changed-files list and read them directly).',
+] as const;
+
+interface ReviewLensDef {
+  id: string;
+  title: string;
+  persona: readonly string[];
+}
+
+// Extra review lenses layered on peer + security, gated by the task's adversarial-QA
+// level. They cover quality dimensions the single peer-reviewer blob under-serves and
+// that no 08d adversary re-derives (observability, operational readiness,
+// migration/rollback safety, backward compat, documentation; and data-access
+// performance) — so a miss there is otherwise final. Order matters: lensesForLevel
+// slices this cumulatively.
+const REVIEW_LENSES: ReviewLensDef[] = [
+  { id: 'operational-reviewer', title: 'Operational Reviewer', persona: OPERATIONAL_PERSONA },
+  { id: 'performance-reviewer', title: 'Performance Reviewer', persona: PERFORMANCE_PERSONA },
+];
+
+/** Cumulative roster by level: none/poc add nothing, standard adds operational,
+ *  enterprise adds operational + performance. Exported for the unit test. */
+export function lensesForLevel(level: QaLevel): ReviewLensDef[] {
+  if (level === 'standard') return REVIEW_LENSES.slice(0, 1);
+  if (level === 'enterprise') return REVIEW_LENSES.slice(0, 2);
+  return [];
+}
 
 function reviewAssignment(d: CodeReviewDetect): string {
   return [
@@ -231,6 +337,19 @@ function buildSecurityPrompt(d: CodeReviewDetect): string {
   ].join('\n');
 }
 
+function buildLensPrompt(lens: ReviewLensDef, d: CodeReviewDetect): string {
+  return [
+    `If a \`.claude/agents/${lens.id}.md\` agent definition exists in the repo, follow it;`,
+    'otherwise follow the protocol below.',
+    ...lens.persona,
+    '',
+    reviewAssignment(d),
+    '',
+    'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
+    '{ "verdict": "APPROVE|REQUEST_CHANGES|DISCUSS", "findings": [{ "severity": "critical|warning|suggestion", "path": "file", "lines": "start-end", "issue": "...", "snippet": "<offending code>", "fix": "..." }] }',
+  ].join('\n');
+}
+
 function miningResult(results: AgentMiningResult[], agentId: string): unknown {
   const r = results.find((m) => m.agentId === agentId && m.status === 'done');
   return r ? (r.output ?? r.rawOutput) : null;
@@ -268,6 +387,18 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
             out.security.findings
               .map(
                 (f) => `- [${f.severity}] ${f.path}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`,
+              )
+              .join('\n'),
+        );
+      }
+      for (const lens of out.extraLenses) {
+        if (!lens.findings.length) continue;
+        parts.push(
+          `### ${lens.title}\n` +
+            lens.findings
+              .map(
+                (f) =>
+                  `- [${f.severity}] ${f.path ?? ''}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`,
               )
               .join('\n'),
         );
@@ -320,10 +451,17 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       }
     }
 
+    const task = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { adversarialQaLevel: true },
+    });
+    const level = (task?.adversarialQaLevel ?? 'none') as QaLevel;
+
     return {
       spec,
       implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
       debtBlock,
+      level,
     };
   },
 
@@ -342,6 +480,11 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
           agentTitle: 'Security Code Reviewer',
           prompt: buildSecurityPrompt(d),
         },
+        ...lensesForLevel(d.level).map((lens) => ({
+          agentId: lens.id,
+          agentTitle: lens.title,
+          prompt: buildLensPrompt(lens, d),
+        })),
       ];
     },
   },
@@ -361,6 +504,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         reviewed: false,
         peer: { verdict: 'APPROVE', findings: [], positives: [] },
         security: { verdict: 'SECURE', findings: [] },
+        extraLenses: [],
         blocking: false,
         counts: { peer: 0, securityCriticalHigh: 0 },
       };
@@ -405,7 +549,41 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         : [],
     };
 
-    const blocking = computeBlocking(peer, security);
+    // Extra review lenses (operational/performance) — present only when the task
+    // level enabled them. Mirror the peer/security de-silence rule: a lens that
+    // RAN but whose output is unparseable surfaces as non-approving, never silent.
+    const extraLenses: ReviewLensResult[] = [];
+    for (const lens of REVIEW_LENSES) {
+      const raw = miningResult(results, lens.id);
+      if (raw == null) continue;
+      const parsed = parseReviewLens(raw);
+      if (parsed == null) {
+        ctx.logger.warn(
+          { lens: lens.id },
+          'review lens output unparseable — surfacing as non-approving, not silently approving',
+        );
+        extraLenses.push({
+          id: lens.id,
+          title: lens.title,
+          verdict: 'DISCUSS',
+          findings: [
+            {
+              severity: 'warning',
+              issue: `${lens.title} output was unparseable — review did not complete; re-run code review.`,
+            },
+          ],
+        });
+        continue;
+      }
+      extraLenses.push({
+        id: lens.id,
+        title: lens.title,
+        verdict: parsed.verdict,
+        findings: parsed.findings,
+      });
+    }
+
+    const blocking = computeBlocking(peer, security, extraLenses);
     const securityCriticalHigh = securityOut.findings.filter((f) => {
       const s = (f.severity ?? '').toLowerCase();
       return s === 'critical' || s === 'high';
@@ -417,6 +595,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         securityVerdict: securityOut.verdict,
         peerFindings: peerOut.findings.length,
         securityCriticalHigh,
+        lenses: extraLenses.map((l) => `${l.id}:${l.verdict}`),
         blocking,
         peerUnparsed,
         securityUnparsed,
@@ -428,6 +607,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       reviewed: true,
       peer: peerOut,
       security: securityOut,
+      extraLenses,
       blocking,
       counts: { peer: peerOut.findings.length, securityCriticalHigh },
     };

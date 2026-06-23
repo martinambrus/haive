@@ -3,6 +3,8 @@ import { logger } from '@haive/shared';
 import {
   parsePeerReview,
   parseSecurityReview,
+  parseReviewLens,
+  lensesForLevel,
   computeBlocking,
   codeReviewStep,
 } from './08c-code-review.js';
@@ -69,6 +71,46 @@ describe('parseSecurityReview', () => {
   });
 });
 
+describe('parseReviewLens', () => {
+  it('parses a fenced review lens', () => {
+    const p = parseReviewLens(
+      '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"warning","path":"a.ts","issue":"x"}]}\n```',
+    );
+    expect(p).not.toBeNull();
+    expect(p!.verdict).toBe('REQUEST_CHANGES');
+    expect(p!.findings).toHaveLength(1);
+  });
+
+  it('defaults verdict to DISCUSS when omitted', () => {
+    const p = parseReviewLens('```json\n{}\n```');
+    expect(p!.verdict).toBe('DISCUSS');
+    expect(p!.findings).toEqual([]);
+  });
+
+  it('returns null on garbled output', () => {
+    expect(parseReviewLens('no json here')).toBeNull();
+    expect(parseReviewLens(null)).toBeNull();
+  });
+});
+
+describe('lensesForLevel', () => {
+  it('adds no lenses for none/poc', () => {
+    expect(lensesForLevel('none').map((l) => l.id)).toEqual([]);
+    expect(lensesForLevel('poc').map((l) => l.id)).toEqual([]);
+  });
+
+  it('adds the operational lens at standard', () => {
+    expect(lensesForLevel('standard').map((l) => l.id)).toEqual(['operational-reviewer']);
+  });
+
+  it('adds operational + performance at enterprise', () => {
+    expect(lensesForLevel('enterprise').map((l) => l.id)).toEqual([
+      'operational-reviewer',
+      'performance-reviewer',
+    ]);
+  });
+});
+
 describe('computeBlocking', () => {
   it('blocks on peer REQUEST_CHANGES', () => {
     expect(
@@ -106,6 +148,23 @@ describe('computeBlocking', () => {
   it('handles null reviews (bypass)', () => {
     expect(computeBlocking(null, null)).toBe(false);
   });
+
+  it('blocks on an extra lens REQUEST_CHANGES', () => {
+    expect(
+      computeBlocking({ verdict: 'APPROVE' }, { verdict: 'SECURE', findings: [] }, [
+        { verdict: 'REQUEST_CHANGES' },
+      ]),
+    ).toBe(true);
+  });
+
+  it('does not block on extra lenses that approve or discuss', () => {
+    expect(
+      computeBlocking({ verdict: 'APPROVE' }, { verdict: 'SECURE', findings: [] }, [
+        { verdict: 'APPROVE' },
+        { verdict: 'DISCUSS' },
+      ]),
+    ).toBe(false);
+  });
 });
 
 describe('codeReviewStep.apply de-silence', () => {
@@ -137,5 +196,34 @@ describe('codeReviewStep.apply de-silence', () => {
     ]);
     expect(out.reviewed).toBe(true);
     expect(out.blocking).toBe(true);
+  });
+
+  it('parses an extra review lens into extraLenses and blocks on its REQUEST_CHANGES', async () => {
+    const out = await runReview([
+      mining('peer-reviewer', '```json\n{"verdict":"APPROVE","findings":[],"positives":[]}\n```'),
+      mining('security-code-reviewer', '```json\n{"verdict":"SECURE","findings":[]}\n```'),
+      mining(
+        'operational-reviewer',
+        '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"warning","path":"a.ts","lines":"1-2","issue":"no logging on new path","fix":"add logger"}]}\n```',
+      ),
+    ]);
+    expect(out.reviewed).toBe(true);
+    expect(out.extraLenses).toHaveLength(1);
+    expect(out.extraLenses[0]!.id).toBe('operational-reviewer');
+    expect(out.extraLenses[0]!.verdict).toBe('REQUEST_CHANGES');
+    expect(out.extraLenses[0]!.findings).toHaveLength(1);
+    // a lens REQUEST_CHANGES blocks even when peer + security are clean
+    expect(out.blocking).toBe(true);
+  });
+
+  it('surfaces an unparseable lens as non-approving, not silently approving', async () => {
+    const out = await runReview([
+      mining('peer-reviewer', '```json\n{"verdict":"APPROVE","findings":[],"positives":[]}\n```'),
+      mining('operational-reviewer', 'I checked everything but emitted no JSON'),
+    ]);
+    const op = out.extraLenses.find((l) => l.id === 'operational-reviewer');
+    expect(op).toBeDefined();
+    expect(op!.verdict).toBe('DISCUSS');
+    expect(op!.findings.length).toBeGreaterThan(0);
   });
 });

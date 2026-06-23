@@ -188,7 +188,8 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
           type: 'select',
           id: 'adversarialQaLevel',
           label: 'Adversarial QA (Phase 7)',
-          description: '2/4/6 adversarial agents attack the implementation before Gate 2.',
+          description:
+            '2/4/6 adversarial agents attack the implementation before Gate 2. Also sets code-review depth: Standard adds an operational review lens, Enterprise adds a performance lens.',
           options: qa.options,
           default: qa.default,
         },
