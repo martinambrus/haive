@@ -11,6 +11,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { clearTaskPromotedDrafts, promoteToGlobalKbDraft } from '../_global-kb-promote.js';
+import { buildTaskHistoryDigest, type TaskHistoryDigest } from './_task-history-digest.js';
 
 interface LearningDetect {
   taskTitle: string;
@@ -23,6 +24,10 @@ interface LearningDetect {
   commitSha: string | null;
   commitMessage: string;
   isBugFix: boolean;
+  /** Curated, bounded, complexity-tiered digest of what actually happened during
+   *  the run (per-round diagnoses, findings, human gate reactions, runtime errors),
+   *  mined from the persisted history so the agent grounds output in the real run. */
+  historyDigest: TaskHistoryDigest;
 }
 
 interface LearningEntry {
@@ -326,6 +331,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const implementOutput = (implement?.output as ImplementOutput | null) ?? {};
     const verifyOutput = (verify?.output as VerifyOutput | null) ?? {};
     const commitOutput = (commit?.output as CommitOutput | null) ?? {};
+    const historyDigest = await buildTaskHistoryDigest(ctx.db, ctx.taskId);
     return {
       taskTitle: meta.title,
       taskDescription: meta.description,
@@ -337,6 +343,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       isBugFix: await detectBugFix(ctx, meta.title, meta.description),
       feature: meta.feature,
       affectedClients: meta.affectedClients,
+      historyDigest,
     };
   },
 
@@ -375,6 +382,11 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         `Verification passed: ${detected.verifyPassed}`,
         `Commit sha: ${detected.commitSha ?? '(none)'}`,
         `Files touched: ${detected.filesTouched.join(', ') || '(none)'}`,
+        '',
+        '=== What happened during this task (mine this — it is the real, persisted run history) ===',
+        detected.historyDigest.text,
+        '',
+        'Ground EVERY learning, the investigation, and the KB sync in the SPECIFIC diagnoses, findings, and human reactions above: quote the real errors/symptoms, name what was planned or implemented wrong and how it was resolved, and fold the human reviewer reactions in. Do NOT write generic advice. For a bug, the investigation symptoms + root cause must cite the actual diagnosis; the KB sync should reflect what the reviewers and the human actually flagged.',
       ]
         .filter(Boolean)
         .join('\n');
