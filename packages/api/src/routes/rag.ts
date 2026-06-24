@@ -180,6 +180,8 @@ async function logRagQuery(
       hitCount: hits.length,
       kbHits: hits.filter((h) => h.sourceType === 'kb').length,
       codeHits: hits.filter((h) => h.sourceType === 'code').length,
+      runbookHits: hits.filter((h) => h.sourceType === 'runbook').length,
+      learningHits: hits.filter((h) => h.sourceType === 'learning').length,
       globalHits: hits.filter((h) => h.scope === 'global').length,
       maxRrf: hits.reduce((m, h) => Math.max(m, h.rrf), 0),
       maxDense: hits.reduce((m, h) => Math.max(m, h.denseSim), 0),

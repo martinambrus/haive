@@ -27,6 +27,8 @@ export const ragQueryLog = pgTable(
     hitCount: integer('hit_count').notNull().default(0),
     kbHits: integer('kb_hits').notNull().default(0),
     codeHits: integer('code_hits').notNull().default(0),
+    runbookHits: integer('runbook_hits').notNull().default(0),
+    learningHits: integer('learning_hits').notNull().default(0),
     globalHits: integer('global_hits').notNull().default(0),
     maxRrf: doublePrecision('max_rrf').notNull().default(0),
     maxDense: doublePrecision('max_dense').notNull().default(0),
