@@ -4,9 +4,54 @@ import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
   parseInvestigation,
+  parseKbSync,
   writeInvestigation,
   phase8LearningStep,
 } from './11-phase-8-learning.js';
+
+describe('parseKbSync', () => {
+  it('parses classification + changes and drops invalid ops / empty files', () => {
+    const ks = parseKbSync({
+      kbSync: {
+        classification: 'new_feature',
+        changes: [
+          { file: '.claude/knowledge_base/BUSINESS_LOGIC.md', op: 'insert', summary: 'adds X' },
+          { file: 'bad.md', op: 'frobnicate', summary: 'invalid op dropped' },
+          { file: '', op: 'update', summary: 'no file dropped' },
+        ],
+      },
+    });
+    expect(ks).not.toBeNull();
+    expect(ks!.classification).toBe('new_feature');
+    expect(ks!.changes).toHaveLength(1);
+    expect(ks!.changes[0]).toEqual({
+      file: '.claude/knowledge_base/BUSINESS_LOGIC.md',
+      op: 'insert',
+      summary: 'adds X',
+    });
+  });
+
+  it('parses from a fenced JSON string and tolerates the kb_sync alias', () => {
+    const ks = parseKbSync(
+      '```json\n{"kb_sync":{"classification":"feature_removal","changes":[{"file":"a.md","op":"delete","summary":"gone"}]}}\n```',
+    );
+    expect(ks?.classification).toBe('feature_removal');
+    expect(ks?.changes[0]?.op).toBe('delete');
+  });
+
+  it('returns null when no kbSync block is present', () => {
+    expect(parseKbSync({ entries: [] })).toBeNull();
+    expect(parseKbSync('no json')).toBeNull();
+    expect(parseKbSync(null)).toBeNull();
+  });
+
+  it('defaults classification to unknown and changes to [] when malformed', () => {
+    const ks = parseKbSync({ kbSync: { changes: 'nope' } });
+    expect(ks).not.toBeNull();
+    expect(ks!.classification).toBe('unknown');
+    expect(ks!.changes).toEqual([]);
+  });
+});
 
 describe('parseInvestigation', () => {
   it('parses an investigation from a fenced object', () => {

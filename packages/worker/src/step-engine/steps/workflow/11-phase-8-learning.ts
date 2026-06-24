@@ -1,4 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -42,12 +44,36 @@ interface Investigation {
   scope?: 'local' | 'global';
 }
 
+/** One structured-KB file the learning agent edited to keep the knowledge base in
+ *  sync with what this task built/changed/removed (Feature KB Sync). */
+interface KbSyncChange {
+  file: string;
+  op: 'insert' | 'update' | 'delete';
+  summary: string;
+}
+
+interface KbSync {
+  classification: string;
+  changes: KbSyncChange[];
+}
+
 interface LearningApply {
   entries: LearningEntry[];
   written: string[];
   investigationWritten: string | null;
+  /** Feature KB Sync result: the classification + the structured-KB files the agent
+   *  edited in the worktree. null when the agent reported none. */
+  kbSync: KbSync | null;
+  /** True when the user unticked "keep KB sync" and apply reverted the agent's
+   *  knowledge_base edits before commit. */
+  kbReverted: boolean;
   source: 'llm' | 'stub';
 }
+
+const execFileP = promisify(execFile);
+
+/** Valid op values for a reported KB sync change. */
+const KB_SYNC_OPS = new Set(['insert', 'update', 'delete']);
 
 /** A bug-fix task is flagged at creation (tasks.metadata.category) or inferred
  *  from the title/description as a fallback. */
@@ -86,6 +112,56 @@ export function parseInvestigation(raw: unknown): Investigation | null {
   const scope: 'local' | 'global' = i.scope === 'global' ? 'global' : 'local';
   if (!title || !rootCause) return null;
   return { title, symptoms, rootCause, lesson, scope };
+}
+
+/** Parse the optional Feature KB Sync block the learning agent reports after editing
+ *  the structured KB files. Defensive: unknown ops and non-string fields are dropped. */
+export function parseKbSync(raw: unknown): KbSync | null {
+  let obj: Record<string, unknown> | null = null;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    obj = raw as Record<string, unknown>;
+  } else if (typeof raw === 'string') {
+    const parsed = parseJsonLoose(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      obj = parsed as Record<string, unknown>;
+    }
+  }
+  const ks = obj?.kbSync ?? obj?.kb_sync;
+  if (!ks || typeof ks !== 'object') return null;
+  const k = ks as Record<string, unknown>;
+  const classification = typeof k.classification === 'string' ? k.classification : 'unknown';
+  const rawChanges = Array.isArray(k.changes) ? k.changes : [];
+  const changes: KbSyncChange[] = [];
+  for (const c of rawChanges) {
+    if (!c || typeof c !== 'object') continue;
+    const cc = c as Record<string, unknown>;
+    const file = typeof cc.file === 'string' ? cc.file : '';
+    const op =
+      typeof cc.op === 'string' && KB_SYNC_OPS.has(cc.op) ? (cc.op as KbSyncChange['op']) : null;
+    const summary = typeof cc.summary === 'string' ? cc.summary : '';
+    if (!file || !op) continue;
+    changes.push({ file, op, summary });
+  }
+  return { classification, changes };
+}
+
+/** Discard the learning agent's structured-KB edits (Feature KB Sync) when the user
+ *  rejects them: `checkout` restores tracked modifications + deletions, `clean` removes
+ *  new files. Scoped to `.claude/knowledge_base` — investigations/ is written AFTER this
+ *  and learnings live elsewhere, so neither is affected. Best-effort (a brand-new repo
+ *  with no tracked KB makes checkout a no-op). */
+async function revertKbSync(worktree: string): Promise<void> {
+  await execFileP('git', [
+    '-C',
+    worktree,
+    'checkout',
+    'HEAD',
+    '--',
+    '.claude/knowledge_base',
+  ]).catch(() => undefined);
+  await execFileP('git', ['-C', worktree, 'clean', '-fdq', '--', '.claude/knowledge_base']).catch(
+    () => undefined,
+  );
 }
 
 interface ImplementOutput {
@@ -278,9 +354,16 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         'You are the learning capture phase of an engineering workflow.',
         'Emit ONE JSON object inside a ```json fenced code block with the shape:',
         detected.isBugFix
-          ? '{ "entries": [ { "id": "<kebab-case>", "title": "<short>", "body": "<markdown>" } ], "investigation": { "title": "<short>", "symptoms": "<observable symptoms + the EXACT error strings/messages, verbatim>", "root_cause": "<why/how the bug happened>", "lesson": "<durable lesson for future runs>", "scope": "local | global" } }'
-          : '{ "entries": [ { "id": "<kebab-case>", "title": "<short>", "body": "<markdown>" } ] }',
+          ? '{ "entries": [ { "id": "<kebab-case>", "title": "<short>", "body": "<markdown>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] }, "investigation": { "title": "<short>", "symptoms": "<observable symptoms + the EXACT error strings/messages, verbatim>", "root_cause": "<why/how the bug happened>", "lesson": "<durable lesson for future runs>", "scope": "local | global" } }'
+          : '{ "entries": [ { "id": "<kebab-case>", "title": "<short>", "body": "<markdown>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] } }',
         'Each entry must be a reusable lesson grounded in the workflow run. Avoid generic advice.',
+        '',
+        'KNOWLEDGE BASE SYNC — before emitting the JSON, keep the project knowledge base in sync with what this task changed:',
+        '1. CLASSIFY the task: new_feature (adds capability) | feature_update (changes existing behavior) | feature_removal (removes capability) | bug_fix | refactor.',
+        '2. bug_fix / refactor → SKIP KB edits (documented behavior is unchanged); set "changes": []. (A bug fix is still captured by the investigation below.)',
+        '3. new_feature / feature_update / feature_removal → find where the feature belongs (search `rag_search` FIRST, then `.claude/knowledge_base/INDEX.md`), then EDIT the structured `.claude/knowledge_base/*.md` files IN PLACE with your file tools: INSERT a section for a new feature, UPDATE the existing section for a change (correct now-stale text; leave no contradictions), DELETE the section for a removal. Document business purpose, key rules, tables/fields, and access control using the target file’s conventions. Keep `INDEX.md` in sync when you add or remove a file.',
+        '4. KB GAP DETECTION: if the run surfaced domain knowledge that was MISSING from the KB (a rule discovered from code, a constraint, an edge case), append it to the right KB file.',
+        '5. Report EVERY knowledge_base file you changed in `kbSync.changes`. Do NOT edit `.claude/knowledge_base/investigations/` — that is recorded separately below.',
         detected.isBugFix
           ? 'This task was a BUG FIX: ALSO produce an `investigation`. In `symptoms`, lead with the observable symptoms and quote the EXACT error strings/messages verbatim — these are the lexical anchor future searches match on; name the affected feature/area. Give the root cause (why/how the bug existed, grounded in the implementation) and the durable lesson for future work. Set its `scope` to "global" ONLY when the lesson is a reusable house standard for any project of this stack (not specific to this repo); otherwise "local".'
           : '',
@@ -325,6 +408,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
   form(_ctx, detected, llmOutput): FormSchema {
     const entries = parseLearningOutput(llmOutput ?? null) ?? [];
     const investigation = detected.isBugFix ? parseInvestigation(llmOutput ?? null) : null;
+    const kbSync = parseKbSync(llmOutput ?? null);
+    const kbChanged = (kbSync?.changes.length ?? 0) > 0;
     const infoSections: InfoSection[] = [];
     if (entries.length > 0) {
       infoSections.push({
@@ -345,12 +430,28 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         defaultOpen: true,
       });
     }
+    if (kbChanged && kbSync) {
+      infoSections.push({
+        title: `Knowledge base sync (${kbSync.classification}, ${kbSync.changes.length} file${kbSync.changes.length === 1 ? '' : 's'})`,
+        preview: kbSync.changes
+          .map((c) => `${c.op} ${c.file}`)
+          .join('; ')
+          .slice(0, 80),
+        body: kbSync.changes
+          .map((c) => `- **${c.op.toUpperCase()}** \`${c.file}\`\n  ${c.summary || '(no summary)'}`)
+          .join('\n'),
+        defaultOpen: true,
+      });
+    }
     return {
       title: 'Phase 8: Learning capture',
       description: [
         `Task: ${detected.taskTitle || '(untitled)'}`,
         `Verification: ${detected.verifyPassed ? 'passed' : 'did not pass'}`,
         detected.isBugFix ? 'Bug fix — a knowledge-base investigation was drafted below.' : '',
+        kbChanged
+          ? 'Feature KB sync — the agent updated the knowledge base; review the changes below.'
+          : '',
         'Review the drafts below; approve to write them, add a note to refine, or untick to skip.',
       ]
         .filter(Boolean)
@@ -363,6 +464,16 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           label: 'Write learning entries to .claude/learnings/',
           default: true,
         },
+        ...(kbChanged && kbSync
+          ? [
+              {
+                type: 'checkbox' as const,
+                id: 'keepKbSync',
+                label: `Keep the knowledge-base sync edits (${kbSync.changes.length} file${kbSync.changes.length === 1 ? '' : 's'}); untick to revert them`,
+                default: true,
+              },
+            ]
+          : []),
         ...(investigation
           ? [
               {
@@ -394,6 +505,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
   async apply(ctx, args): Promise<LearningApply> {
     const values = args.formValues as {
       writeFiles?: boolean;
+      keepKbSync?: boolean;
       writeInvestigation?: boolean;
       promoteInvestigationGlobal?: boolean;
       reviewerNote?: string;
@@ -406,6 +518,20 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const worktreePath =
       (worktree?.output as { worktreePath?: string } | null)?.worktreePath ?? ctx.workspacePath;
+
+    // Feature KB Sync: the agent edited .claude/knowledge_base/*.md in the worktree during
+    // the LLM phase. Revert those edits when the reviewer unticked "keep KB sync". Done
+    // BEFORE writing the investigation (which lands under knowledge_base/investigations/),
+    // so a kept investigation survives the revert.
+    const kbSync = parseKbSync(args.llmOutput ?? null);
+    const kbHasChanges = (kbSync?.changes.length ?? 0) > 0;
+    let kbReverted = false;
+    if (kbHasChanges && values.keepKbSync === false) {
+      await revertKbSync(worktreePath);
+      kbReverted = true;
+      ctx.logger.info({ files: kbSync!.changes.length }, 'feature KB sync reverted by reviewer');
+    }
+
     const parsed = parseLearningOutput(args.llmOutput ?? null);
     const source: 'llm' | 'stub' = parsed && parsed.length > 0 ? 'llm' : 'stub';
     const entries = parsed && parsed.length > 0 ? parsed : stubLearning(args.detected);
@@ -454,9 +580,17 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     }
 
     ctx.logger.info(
-      { entries: entries.length, written: written.length, investigationWritten, source },
+      {
+        entries: entries.length,
+        written: written.length,
+        investigationWritten,
+        kbClassification: kbSync?.classification ?? null,
+        kbChanged: kbHasChanges,
+        kbReverted,
+        source,
+      },
       'learning capture complete',
     );
-    return { entries, written, investigationWritten, source };
+    return { entries, written, investigationWritten, kbSync, kbReverted, source };
   },
 };
