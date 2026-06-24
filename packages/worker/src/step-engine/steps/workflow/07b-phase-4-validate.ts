@@ -8,6 +8,10 @@ import { parseJsonLoose } from '../_fenced-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadHonoredConstraints } from './_fix-loop.js';
+import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
+import { ensureAppServing } from './_app-runtime.js';
+import { startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
+import { startBrowserDesktop as startAppBrowserDesktop } from '../../../sandbox/app-runner.js';
 
 // Phase 4 — Implementation validation (legacy phase4-validation.md + the
 // implementation-validator agent). An LLM validator checks what the test suite
@@ -42,6 +46,9 @@ interface ValidateDetect {
   debtBlock: string;
   /** Prior objective/runtime fix-loop constraints the validator must not revert ('' if none). */
   honoredBlock: string;
+  /** Env template ready with browserTesting on → a chrome-devtools MCP is wired to the
+   *  running app's browser; the fixer pass verifies runtime-affecting fixes in-browser. */
+  browserTesting: boolean;
 }
 
 export type ValidationVerdict = 'VALID' | 'ISSUES_FOUND' | 'UNPARSEABLE';
@@ -423,6 +430,11 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       }
     }
 
+    const envTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
+    const browserTesting =
+      envTemplate?.status === 'ready' &&
+      !!(envTemplate.declaredDeps as Record<string, unknown> | null)?.browserTesting;
+
     return {
       worktreePath: wt.worktreePath,
       sandboxWorktreePath: wt.sandboxWorktreePath,
@@ -430,12 +442,27 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
       debtBlock,
       honoredBlock: await loadHonoredConstraints(ctx),
+      browserTesting,
     };
   },
 
   llm: {
     requiredCapabilities: ['tool_use', 'file_write'],
     timeoutMs: 30 * 60 * 1000,
+    // Bring up the headed app browser (idempotent) when the repo does browser testing so
+    // the FIXER pass's chrome-devtools MCP connects to the LIVE app. Runs before each pass;
+    // the static validator pass simply ignores it. Best-effort — never blocks the step.
+    prepare: async ({ ctx, detected }) => {
+      const d = detected as ValidateDetect;
+      if (!d.browserTesting) return;
+      try {
+        const runtime = await ensureAppServing(ctx);
+        if (runtime.mode === 'ddev') await startBrowserDesktop(runtime.handle);
+        else if (runtime.mode === 'app-runner') await startAppBrowserDesktop(runtime.handle);
+      } catch (err) {
+        ctx.logger.warn({ err }, 'validation browser desktop bring-up failed (non-fatal)');
+      }
+    },
     // Pass 0 — the validator.
     buildPrompt: (args) => {
       const d = args.detected as ValidateDetect;
@@ -505,6 +532,17 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           'Make ONLY the fixes needed - do not add unrelated changes.',
           'Do NOT run git and do NOT run the test suite.',
           ...SEARCH_LADDER,
+          ...(d.browserTesting
+            ? [
+                '',
+                '=== Verify runtime-affecting fixes in the browser (chrome-devtools MCP) ===',
+                "A `chrome-devtools` MCP is connected to the running app's live browser. If any",
+                'issue above affects runtime behavior or the UI, after editing use chrome-devtools',
+                'to navigate to the affected view, reproduce the problem, and confirm your fix',
+                'resolves it (no new console/network errors) before finishing. Purely static',
+                'issues (dead code, naming) need no browser check.',
+              ]
+            : []),
           '',
           'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
           '{ "fixes_made": ["<each correction>"], "notes": "<caveats or empty>" }',

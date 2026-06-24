@@ -6,6 +6,9 @@ import { parseJsonLoose } from '../_fenced-json.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { loadFixLoopDiagnosis } from './_fix-loop.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
+import { ensureAppServing } from './_app-runtime.js';
+import { startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
+import { startBrowserDesktop as startAppBrowserDesktop } from '../../../sandbox/app-runner.js';
 
 interface ImplementDetect {
   specSummary: string;
@@ -255,6 +258,23 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
   llm: {
     requiredCapabilities: ['tool_use', 'file_write'],
     timeoutMs: 60 * 60 * 1000,
+    // On a FIX round, guarantee the headed app browser is up before the agent runs so
+    // the chrome-devtools MCP connects to the LIVE app (resolvers wires it to the
+    // runner's :9223 when up; otherwise it falls back to a headless Chrome that cannot
+    // reach a ddev/app-runner URL). Round 0 skips it — the first pass does not need the
+    // browser. Idempotent + best-effort; a bring-up miss never blocks the fix.
+    prepare: async ({ ctx, detected }) => {
+      const d = detected as ImplementDetect;
+      if (!d.browserTesting || d.round <= 0) return;
+      try {
+        await ctx.emitProgress('Bringing up the app browser so the fix can be verified…');
+        const runtime = await ensureAppServing(ctx);
+        if (runtime.mode === 'ddev') await startBrowserDesktop(runtime.handle);
+        else if (runtime.mode === 'app-runner') await startAppBrowserDesktop(runtime.handle);
+      } catch (err) {
+        ctx.logger.warn({ err }, 'fix-round browser desktop bring-up failed (non-fatal)');
+      }
+    },
     buildPrompt: (args) => {
       const detected = args.detected as ImplementDetect;
       const values = args.formValues as { instructions?: string };
@@ -284,11 +304,15 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         ? [
             '',
             '=== Verify in the browser (a chrome-devtools MCP is available) ===',
-            "A `chrome-devtools` MCP is connected to the running app's browser — the",
-            'same instance under test (or an isolated headless Chrome). For any change',
-            "affecting the app's runtime behavior or UI: after editing, use chrome-devtools",
-            'to navigate to the app, reproduce the reported problem, and confirm it is',
-            'resolved BEFORE finishing. Note what you observed in your summary.',
+            "A `chrome-devtools` MCP is connected to the running app's LIVE browser (the",
+            'same instance under test). The defect above may be a browser-only symptom — a',
+            'console error, a broken/blank view, a layout break, or a 5xx/redirect from a bad',
+            'code path — not visible in the source alone. Procedure:',
+            '1. Navigate to the affected view and REPRODUCE the reported defect first (confirm',
+            '   you can see it before changing anything).',
+            '2. Apply the fix.',
+            '3. Re-navigate and CONFIRM the defect is gone and you introduced no new console/',
+            '   network errors, BEFORE finishing. Note what you observed in your summary.',
           ]
         : [];
 

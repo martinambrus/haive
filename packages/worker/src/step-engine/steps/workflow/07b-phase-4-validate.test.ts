@@ -243,3 +243,29 @@ describe('phase4ValidateStep.apply marks non-convergence', () => {
     expect(out.churnFiles).toEqual([]);
   });
 });
+
+describe('phase4ValidateStep fixer browser guidance', () => {
+  const baseDetect = {
+    worktreePath: '/wt',
+    sandboxWorktreePath: '/ws',
+    spec: 'spec',
+    implementationFiles: [],
+    debtBlock: '',
+    honoredBlock: '',
+  };
+  const fixerPrompt = (browserTesting: boolean) =>
+    phase4ValidateStep.loop!.buildIterationPrompt!({
+      detected: { ...baseDetect, browserTesting } as never,
+      formValues: {},
+      iteration: 1, // odd = fixer pass
+      previousIterations: [validatorRecord(0, ['app/Home.tsx:5'])],
+    });
+
+  it('includes chrome-devtools guidance in the fixer pass when browserTesting is on', () => {
+    expect(fixerPrompt(true)).toContain('chrome-devtools');
+  });
+
+  it('omits browser guidance from the fixer pass when browserTesting is off', () => {
+    expect(fixerPrompt(false)).not.toContain('chrome-devtools');
+  });
+});

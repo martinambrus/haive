@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { salvageImplementOutput } from './07-phase-2-implement.js';
+import { salvageImplementOutput, phase2ImplementStep } from './07-phase-2-implement.js';
 
 // Mirrors the real round-2 (browser-testing fix pass) output that exposed the bug:
 // the agent emitted a verification-report JSON with NO top-level `summary` key (so the
@@ -67,5 +67,31 @@ describe('salvageImplementOutput', () => {
     const s = salvageImplementOutput('x'.repeat(5000));
     expect(s).not.toBeNull();
     expect(s!.summary.length).toBeLessThanOrEqual(2000);
+  });
+});
+
+describe('phase2ImplementStep fix-pass browser guidance', () => {
+  const detect = (over: Record<string, unknown>) => ({
+    specSummary: '',
+    spec: 'spec',
+    sandboxWorkspacePath: '/ws',
+    gateFeedback: '',
+    fixContext: null,
+    round: 0,
+    browserTesting: false,
+    ...over,
+  });
+  const prompt = (over: Record<string, unknown>) =>
+    phase2ImplementStep.llm!.buildPrompt({ detected: detect(over), formValues: {} } as never);
+
+  it('adds reproduce-and-verify browser steps on a fix pass when browserTesting is on', () => {
+    const p = prompt({ fixContext: 'DB error on the homepage', round: 1, browserTesting: true });
+    expect(p).toContain('chrome-devtools');
+    expect(p).toContain('REPRODUCE');
+  });
+
+  it('omits the browser block on the original pass (no fixContext)', () => {
+    const p = prompt({ fixContext: null, round: 0, browserTesting: true });
+    expect(p).not.toContain('=== Verify in the browser');
   });
 });

@@ -2,6 +2,7 @@ import path from 'node:path';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { parseJsonLoose } from '../_fenced-json.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
 import {
@@ -70,7 +71,13 @@ interface VerifyGateDetect {
    *  desktop, brought up (idempotent) and pointed at the app URL so the user can
    *  test right here while the user-active timer keeps running. null when this
    *  isn't a DDEV + browser-testing task; available:false if bring-up failed. */
-  liveBrowser: { available: boolean; appUrl: string | null; reason?: string } | null;
+  liveBrowser: {
+    available: boolean;
+    appUrl: string | null;
+    reason?: string;
+    consoleErrors?: string[];
+    networkErrors?: string[];
+  } | null;
   /** Mandatory runtime HTTP smoke from 08-phase-5-verify (null when not probed).
    *  A failure defaults this gate to reject but never auto-reroutes to implement. */
   runtimeSmoke: {
@@ -160,6 +167,9 @@ interface VerifyGateApply {
   /** Broad code-audit findings (08c2) carried into the restart diagnosis so the
    *  implementer validates each and acts on the valid, in-scope ones. */
   auditFindings: string[];
+  /** Concrete runtime errors (browser console/network + HTTP smoke excerpt) appended to
+   *  the restart diagnosis so the fixer can reproduce them in-browser. */
+  runtimeErrors: string;
 }
 
 interface VerifyOutput {
@@ -183,9 +193,49 @@ function fmtResult(label: string, entry?: { passed?: boolean; output?: string })
   return `${label}: ${status}${output ? `\n${output}` : ''}`;
 }
 
+/** Pull the browser probe's client-side errors from browser-probe-connect.js stdout
+ *  (a JSON report). Empty on a parse miss. */
+function parseProbeErrors(raw: string | undefined): {
+  consoleErrors: string[];
+  networkErrors: string[];
+} {
+  const parsed = parseJsonLoose(raw ?? '');
+  const obj = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+  const toList = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  return { consoleErrors: toList(obj?.consoleErrors), networkErrors: toList(obj?.networkErrors) };
+}
+
+/** Concrete runtime errors handed to a rejected-at-gate-2 fixer: the live browser's
+ *  captured console/network errors plus the mandatory HTTP smoke's body excerpt. The
+ *  human's prose says WHAT is wrong; this says exactly what the runtime reported, so the
+ *  fixer can reproduce it in the chrome-devtools browser. */
+function buildRuntimeErrorsBlock(detected: VerifyGateDetect): string {
+  const lines: string[] = [];
+  const lb = detected.liveBrowser;
+  if (lb?.consoleErrors?.length) {
+    lines.push('Browser console errors:', ...lb.consoleErrors.slice(0, 20).map((e) => `- ${e}`));
+  }
+  if (lb?.networkErrors?.length) {
+    lines.push('Browser network errors:', ...lb.networkErrors.slice(0, 20).map((e) => `- ${e}`));
+  }
+  const rs = detected.runtimeSmoke;
+  if (rs?.ran && !rs.passed && rs.errorExcerpt) {
+    lines.push(
+      `Runtime HTTP smoke${rs.httpStatus !== null ? ` (HTTP ${rs.httpStatus})` : ''} at ${rs.url ?? 'the app'} — response excerpt:`,
+      rs.errorExcerpt.slice(0, 1200),
+    );
+  }
+  return lines.join('\n');
+}
+
 /** The diagnosis handed to the implementer when the developer rejects at Gate 2: their
  *  hands-on findings become the round-N fix request (see restartLoop / FIX_LOOP_REQUESTED). */
-function formatRejectDiagnosis(feedback: string, auditFindings: string[] = []): string {
+function formatRejectDiagnosis(
+  feedback: string,
+  auditFindings: string[] = [],
+  runtimeErrors = '',
+): string {
   const f = feedback.trim();
   const parts = [
     'Developer verification at Gate 2 rejected the implementation after hands-on testing.',
@@ -195,6 +245,13 @@ function formatRejectDiagnosis(feedback: string, auditFindings: string[] = []): 
       ? f
       : '(no specific findings provided — re-check the implementation against the spec and the reported errors)',
   ];
+  if (runtimeErrors.trim().length > 0) {
+    parts.push(
+      '',
+      'Runtime errors captured at rejection time (reproduce + verify these in the chrome-devtools browser):',
+      runtimeErrors.trim(),
+    );
+  }
   if (auditFindings.length > 0) {
     parts.push(
       '',
@@ -224,7 +281,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
   restartLoop: {
     evaluate: (out) =>
       out.decision === 'reject'
-        ? { diagnosis: formatRejectDiagnosis(out.feedback, out.auditFindings) }
+        ? {
+            diagnosis: formatRejectDiagnosis(out.feedback, out.auditFindings, out.runtimeErrors),
+          }
         : null,
   },
 
@@ -384,6 +443,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           });
           if (nav.exitCode !== 0)
             ctx.logger.warn({ appUrl }, 'gate-2 browser navigate returned non-zero');
+          liveBrowser = { ...liveBrowser, ...parseProbeErrors(nav.output) };
         } else if (ws) {
           // Non-DDEV: the app + desktop run in the per-task app-runner container.
           const boot = await loadAppBootOutput(ctx.db, ctx.taskId);
@@ -403,6 +463,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             );
             if (nav.exitCode !== 0)
               ctx.logger.warn({ appUrl }, 'gate-2 browser navigate returned non-zero');
+            liveBrowser = { ...liveBrowser, ...parseProbeErrors(nav.output) };
           }
         }
       }
@@ -684,6 +745,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       decision,
       feedback: values.feedback ?? '',
       auditFindings: args.detected.codeAudit?.findings ?? [],
+      runtimeErrors: buildRuntimeErrorsBlock(args.detected),
     };
   },
 };
