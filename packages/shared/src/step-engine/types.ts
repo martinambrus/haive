@@ -58,6 +58,19 @@ export interface StepMetadata {
    *  and the step still falls back to waiting_form. Read only by the worker step
    *  runner, so no shared-constant mirror is needed. */
   autoSubmitDefaults?: boolean;
+  /** When true, and the task is in auto-continue mode, the runner reuses the most
+   *  recent SUCCESSFULLY COMPLETED same-repository, same-workflow-type task's
+   *  submitted `formValues` for this step id and auto-submits them instead of
+   *  parking on waiting_form. For steps whose answers are stable per project
+   *  (currently 01-declare-deps and 02-generate-dockerfile). Gated strictly on
+   *  auto-continue: with auto-continue off the form always parks, so manual mode is
+   *  unchanged. Distinct from autoSubmitDefaults, which submits the schema's own
+   *  field defaults even on the first task; this reuses a prior task's actual
+   *  answers and only fires once such a task exists. Falls back to waiting_form
+   *  when no prior completed task exists or the reused values fail validation
+   *  against the current schema. Read only by the worker step runner, so no
+   *  shared-constant mirror is needed. */
+  reuseLastCompletedFormValues?: boolean;
 }
 
 /** Step IDs whose StepDefinition sets `metadata.providerSensitive = true`.

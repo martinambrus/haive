@@ -272,6 +272,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     description:
       'Detects runtimes, container tools, database and language servers needed by the project.',
     requiresCli: false,
+    reuseLastCompletedFormValues: true,
   },
 
   async detect(ctx) {

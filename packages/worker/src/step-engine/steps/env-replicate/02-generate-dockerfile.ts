@@ -33,6 +33,7 @@ export const generateDockerfileStep: StepDefinition<
     description:
       'Renders a Dockerfile from declared dependencies. The user can edit the result before building.',
     requiresCli: false,
+    reuseLastCompletedFormValues: true,
   },
 
   async detect(ctx) {

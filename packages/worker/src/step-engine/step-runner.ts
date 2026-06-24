@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, ne } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull, ne } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema, type StepIterationEntry } from '@haive/database';
 import {
@@ -36,6 +36,42 @@ import { resolveCuratedSummary } from './_step-summary.js';
 const log = logger.child({ module: 'step-runner' });
 
 export type TaskStepRow = typeof schema.taskSteps.$inferSelect;
+
+/** Loads the submitted `formValues` from the most recent successfully completed
+ *  task (same repository, same user, same workflow type) whose row for this step
+ *  id finished (status 'done') with non-null form values. Returns undefined when
+ *  no such task exists. Used by the runner to auto-submit a step from a prior
+ *  task's exact answers when the step opts in via metadata.reuseLastCompletedFormValues.
+ *  The runner validates the result against the current schema, so a stale shape
+ *  fails validation there and the step falls back to waiting_form. */
+async function loadLastCompletedFormValues(
+  db: Database,
+  params: {
+    repositoryId: string;
+    userId: string;
+    type: (typeof schema.tasks.$inferSelect)['type'];
+    stepId: string;
+  },
+): Promise<FormValues | undefined> {
+  const rows = await db
+    .select({ formValues: schema.taskSteps.formValues })
+    .from(schema.taskSteps)
+    .innerJoin(schema.tasks, eq(schema.taskSteps.taskId, schema.tasks.id))
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, params.repositoryId),
+        eq(schema.tasks.userId, params.userId),
+        eq(schema.tasks.type, params.type),
+        eq(schema.tasks.status, 'completed'),
+        eq(schema.taskSteps.stepId, params.stepId),
+        eq(schema.taskSteps.status, 'done'),
+        isNotNull(schema.taskSteps.formValues),
+      ),
+    )
+    .orderBy(desc(schema.tasks.completedAt))
+    .limit(1);
+  return rows[0]?.formValues ?? undefined;
+}
 
 /** Returns the user's explicit per-step CLI override (set via the task UI),
  *  validated as enabled. Falls back to the task default when no explicit
@@ -932,7 +968,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // with no pre-answers, i.e. today's behavior.
     const taskFlags = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, taskId),
-      columns: { autoContinue: true, preAnswers: true },
+      columns: { autoContinue: true, preAnswers: true, repositoryId: true, type: true },
     });
     const autoContinue = taskFlags?.autoContinue ?? true;
     const stepPreAnswer = (taskFlags?.preAnswers ?? {})[meta.id];
@@ -974,12 +1010,31 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         (autoContinue || persistedSchema.autoSubmit === true) &&
         (persistedSchema.submitAction ?? 'submit') === 'submit'
       ) {
-        // Candidate precedence: a gate pre-answer wins; else a zero-field info
-        // form auto-passes with {}; else a step that opts in via
-        // metadata.autoSubmitDefaults (or the form's own autoSubmit) auto-submits
-        // its declared field defaults.
+        // A step may reuse a prior completed task's exact answers for this form
+        // (env-replicate's declare-deps / generate-dockerfile, whose values are
+        // stable per project). Strictly auto-continue gated — never fires in manual
+        // mode, even for a form that set its own autoSubmit. undefined when not
+        // opted in, the task has no repository, or no prior completed task has this
+        // form filled.
+        const reuseCandidate =
+          autoContinue &&
+          !stepPreAnswer &&
+          meta.reuseLastCompletedFormValues &&
+          taskFlags?.repositoryId
+            ? await loadLastCompletedFormValues(db, {
+                repositoryId: taskFlags.repositoryId,
+                userId: params.userId,
+                type: taskFlags.type,
+                stepId: meta.id,
+              })
+            : undefined;
+        // Candidate precedence: a gate pre-answer wins; else a prior completed
+        // task's reused values; else a zero-field info form auto-passes with {};
+        // else a step that opts in via metadata.autoSubmitDefaults (or the form's
+        // own autoSubmit) auto-submits its declared field defaults.
         const candidate =
           stepPreAnswer ??
+          reuseCandidate ??
           (persistedSchema.fields.length === 0
             ? {}
             : meta.autoSubmitDefaults || persistedSchema.autoSubmit
@@ -994,9 +1049,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               {
                 source: stepPreAnswer
                   ? 'pre_answer'
-                  : persistedSchema.fields.length === 0
-                    ? 'zero_field'
-                    : 'step_defaults',
+                  : reuseCandidate
+                    ? 'prior_task'
+                    : persistedSchema.fields.length === 0
+                      ? 'zero_field'
+                      : 'step_defaults',
               },
               'auto-continue: form auto-submitted',
             );
