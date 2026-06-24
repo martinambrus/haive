@@ -97,6 +97,10 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
       'Runs the framework DB migrations inside the DDEV environment before implementation.',
     requiresCli: false,
     allowSkip: true,
+    // Under auto-continue, run the detected migration on its defaults (runMigration
+    // ticked + detected command, or skip when no framework/command) instead of
+    // parking; manual mode still gates. Failure blocks with retry/skip recovery.
+    autoSubmitDefaults: true,
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
