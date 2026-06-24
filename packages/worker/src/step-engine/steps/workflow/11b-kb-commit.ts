@@ -92,6 +92,9 @@ export const kbCommitStep: StepDefinition<KbCommitDetect, KbCommitApply> = {
     // Local-only / nothing-to-commit cases can be skipped without blocking the
     // task. Keep in sync with SKIPPABLE_STEP_IDS in @haive/shared.
     allowSkip: true,
+    // Honor the description's "commits automatically under auto-continue": submit the
+    // form's defaults (commit ticked + default message) instead of parking. Manual gates.
+    autoSubmitDefaults: true,
   },
 
   // Only run when the learning phase actually wrote KB/learning files to disk in

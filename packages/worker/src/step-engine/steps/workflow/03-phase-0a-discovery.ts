@@ -238,6 +238,9 @@ export const phase0aDiscoveryStep: StepDefinition<DiscoveryDetect, DiscoveryAppl
     description:
       'Picks relevant agent personas and fans out per-agent knowledge mining over the project knowledge base, then aggregates a discovery summary for pre-planning.',
     requiresCli: false,
+    // Under auto-continue, start mining on the defaults (no extra context) instead
+    // of parking; manual mode still gates so the user can add context.
+    autoSubmitDefaults: true,
   },
 
   async detect(ctx: StepContext): Promise<DiscoveryDetect> {

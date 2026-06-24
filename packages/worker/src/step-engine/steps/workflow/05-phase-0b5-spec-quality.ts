@@ -418,6 +418,9 @@ export const phase0b5SpecQualityStep: StepDefinition<SpecQualityDetect, SpecQual
       'Reviews the draft spec against 14 quality dimensions with one CLI, then corrects it with another (the corrector validates each finding before acting), looping until APPROVED or the budget.',
     requiresCli: false,
     cliRoles: STEP_CLI_ROLES['05-phase-0b5-spec-quality'],
+    // Under auto-continue, review on the defaults (default round budget, no focus
+    // areas) instead of parking; manual mode still gates so the user can tune it.
+    autoSubmitDefaults: true,
   },
 
   async detect(ctx: StepContext): Promise<SpecQualityDetect> {

@@ -307,8 +307,9 @@ async function main(): Promise<void> {
         reviewerNote: 'Smoke test: stub pipeline end-to-end.',
         writeFiles: true,
       },
-      // KB-commit gate (surfaces because the learning phase wrote files). Skip the
-      // actual commit so this smoke stays side-effect free, matching gate-3/push.
+      // KB-commit gate (surfaces because the learning phase wrote files). Under
+      // auto-continue 11b auto-submits its defaults and commits the KB, so this canned
+      // payload is unused; the commit lands in the worktree but is never pushed (push:false).
       '11b-kb-commit': {
         commit: false,
         commitMessage: '',

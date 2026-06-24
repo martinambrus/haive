@@ -286,8 +286,9 @@ async function main(): Promise<void> {
         reviewerNote: 'Real-commit smoke.',
         writeFiles: true,
       },
-      // KB-commit gate. commit:false so it adds no commit and HEAD stays at the
-      // gate-3 commitSha verified below.
+      // KB-commit gate. Under auto-continue 11b auto-submits its defaults and commits
+      // the KB on top of gate-3, so this canned payload is unused (the drive loop never
+      // stops here). The assertions below verify the gate-3 commit by sha within history.
       '11b-kb-commit': {
         commit: false,
         commitMessage: '',
@@ -394,19 +395,23 @@ async function main(): Promise<void> {
     const verifyDir = wtOut?.worktreePath ?? fixtureDir;
 
     const head = await git(verifyDir, ['rev-parse', 'HEAD']);
-    if (head !== commitSha) {
-      throw new Error(`HEAD ${head} != commitSha ${commitSha}`);
-    }
     if (head === baseSha) {
       throw new Error('HEAD unchanged; no new commit created');
     }
-    const headMsg = await git(verifyDir, ['log', '-1', '--pretty=%s']);
-    if (!headMsg.includes('logout button')) {
-      throw new Error(`commit message mismatch: ${headMsg}`);
+    // 11b-kb-commit auto-commits the knowledge base on top of gate-3 under
+    // auto-continue, so the gate-3 commit is an ancestor of HEAD, not HEAD itself.
+    // Verify it by sha within history and assert its content at that sha.
+    const ancestry = (await git(verifyDir, ['rev-list', 'HEAD'])).split('\n');
+    if (!ancestry.includes(commitSha)) {
+      throw new Error(`gate-3 commit ${commitSha} not in HEAD history ${head}`);
     }
-    const logoutExists = await git(verifyDir, ['ls-files', 'LOGOUT.md']);
+    const commitMsg = await git(verifyDir, ['log', '-1', '--pretty=%s', commitSha]);
+    if (!commitMsg.includes('logout button')) {
+      throw new Error(`commit message mismatch: ${commitMsg}`);
+    }
+    const logoutExists = await git(verifyDir, ['ls-tree', '--name-only', commitSha, 'LOGOUT.md']);
     if (logoutExists !== 'LOGOUT.md') {
-      throw new Error('LOGOUT.md not in git index after commit');
+      throw new Error('LOGOUT.md not in gate-3 commit tree');
     }
 
     const learningStep = allSteps.find((s) => s.stepId === '11-phase-8-learning');
@@ -414,13 +419,13 @@ async function main(): Promise<void> {
       throw new Error('learning step not done');
     }
 
-    log.info({ commitSha, head, headMsg }, 'workflow-commit smoke assertions passed');
+    log.info({ commitSha, head, commitMsg }, 'workflow-commit smoke assertions passed');
     console.log(
       JSON.stringify({
         smoke: 'WORKFLOW_COMMIT_OK',
         baseSha,
         commitSha,
-        message: headMsg,
+        message: commitMsg,
       }),
     );
   } catch (err) {

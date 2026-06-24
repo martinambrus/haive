@@ -43,6 +43,9 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
     description:
       'Incrementally synchronises knowledge base and code files into the RAG vector store. Uses chunk hashing to skip unchanged content. Skipped if no RAG infrastructure is configured.',
     requiresCli: false,
+    // Under auto-continue, run the sync on its default (runSync ticked when RAG is
+    // configured) instead of parking; manual mode still gates for confirmation.
+    autoSubmitDefaults: true,
   },
 
   async detect(ctx: StepContext): Promise<RagSyncDetect> {

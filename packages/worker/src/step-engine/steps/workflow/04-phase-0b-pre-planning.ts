@@ -181,6 +181,9 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
     description:
       'Produces a draft specification for the task using the discovery summary as context.',
     requiresCli: false,
+    // Under auto-continue, draft on the defaults (empty scope on a first run, or the
+    // pre-filled rejection feedback on a revise) instead of parking; manual gates.
+    autoSubmitDefaults: true,
   },
 
   async detect(ctx: StepContext): Promise<PrePlanningDetect> {
