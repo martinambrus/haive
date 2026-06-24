@@ -1292,6 +1292,10 @@ function StepCard({
   const schema = step.formSchema as FormSchema | null;
   const initialValues = (step.formValues as FormValues | null) ?? undefined;
   const taskCancelled = taskStatus === 'cancelled';
+  // Whole task finished — used to drop live-runtime panels (e.g. the gate-2 VNC)
+  // so they stop reconnecting against a torn-down runtime and spamming the console
+  // with WebSocket 1006 errors.
+  const taskEnded = taskCancelled || taskStatus === 'completed' || taskStatus === 'failed';
   const showForm = !taskCancelled && step.status === 'waiting_form' && schema;
   // Auto-skipped steps (shouldRun → false, or detect skipReason) have nothing
   // to retry — they were intentionally bypassed by the runner. Manually-skipped
@@ -1874,7 +1878,13 @@ function StepCard({
 
       {step.stepId === '09-gate-2-verify-approval' &&
         (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
-          ?.available && <BrowserVncPanel taskId={taskId} title="Browser — test the app here" />}
+          ?.available && (
+          <BrowserVncPanel
+            taskId={taskId}
+            title="Browser — test the app here"
+            autoCollapse={step.status === 'done' || taskEnded}
+          />
+        )}
 
       {step.stepId === '10-gate-3-commit' &&
         (step.detectOutput as { diffArtifactPath?: string | null } | null)?.diffArtifactPath && (
