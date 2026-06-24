@@ -320,9 +320,9 @@ async function main(): Promise<void> {
       },
       '12-worktree-cleanup': {
         // Worktree is mandatory now (01-worktree-setup always creates one), so the
-        // cleanup form asks for an action. remove_only deletes the worktree and
-        // keeps the branch — deterministic, no merge.
-        action: 'remove_only',
+        // cleanup form asks for an action. keep leaves the worktree in place — no
+        // merge, no removal — which is the safe, deterministic choice for a smoke.
+        action: 'keep',
       },
     };
 
