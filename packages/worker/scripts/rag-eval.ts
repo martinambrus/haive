@@ -68,10 +68,13 @@ async function main(): Promise<void> {
     model: prefs.embeddingModel,
     dimensions: prefs.embeddingDimensions,
   });
-  const hits = await ragHybridSearch(conn, vec, query, { topK });
+  const runbookBoost = Number(process.env.RAG_RUNBOOK_BOOST || 1);
+  const hits = await ragHybridSearch(conn, vec, query, { topK, runbookBoost });
 
   console.log(`\nQuery:   ${query}`);
-  console.log(`Project: ${projectName} (mode=${prefs.ragMode})   hits: ${hits.length}\n`);
+  console.log(
+    `Project: ${projectName} (mode=${prefs.ragMode})   runbookBoost: ${runbookBoost}   hits: ${hits.length}\n`,
+  );
   hits.forEach((h, i) => {
     const mark = expected && h.sourcePath.includes(expected) ? '   <== EXPECTED' : '';
     console.log(

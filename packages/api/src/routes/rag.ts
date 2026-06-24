@@ -4,6 +4,8 @@ import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
 import {
   DEFAULT_RAG_SEARCH_CONFIG,
+  RUNBOOK_BOOST_BUGFIX,
+  RUNBOOK_BOOST_FEATURE,
   embedQuery,
   ragHybridSearch,
   resolveRagConnection,
@@ -43,6 +45,23 @@ function prefsFromTooling(output: unknown): RagToolingPrefs {
     embeddingModel: t.embeddingModel || null,
     embeddingDimensions: typeof t.embeddingDimensions === 'number' ? t.embeddingDimensions : 2560,
   };
+}
+
+/** Run-book RRF boost for THIS task: bug fixes surface run-books (1.5), other tasks
+ *  demote them (0.5). Mirrors the isBugBranch rule the spec agent (04) uses, so
+ *  retrieval and the prompt agree on what counts as a bug fix. Neutral (1.0) only
+ *  when the task row is missing. */
+async function resolveRunbookBoost(db: ReturnType<typeof getDb>, taskId: string): Promise<number> {
+  const row = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { title: true, description: true, metadata: true },
+  });
+  if (!row) return 1.0;
+  const category = (row.metadata as { category?: string } | null)?.category ?? null;
+  const isBug =
+    category === 'bugfix' ||
+    /\b(bug|fix|regression|hotfix|broken|crash)\b/i.test(`${row.title} ${row.description ?? ''}`);
+  return isBug ? RUNBOOK_BOOST_BUGFIX : RUNBOOK_BOOST_FEATURE;
 }
 
 /** Resolve RAG prefs (ragMode/connection) + project name + the project FACET SET
@@ -226,7 +245,11 @@ ragRoutes.post('/search', async (c) => {
           model: prefs.embeddingModel,
           dimensions: prefs.embeddingDimensions,
         });
-        const hits = await ragHybridSearch(conn, vec, query, topK ? { topK } : {});
+        const runbookBoost = await resolveRunbookBoost(db, taskId);
+        const hits = await ragHybridSearch(conn, vec, query, {
+          runbookBoost,
+          ...(topK ? { topK } : {}),
+        });
         localHits = hits.map((h) => ({ ...h, scope: 'local' as const }));
       }
     } catch (err) {

@@ -27,6 +27,11 @@ export interface RagSearchConfig {
    *  ranking or gating — RRF does both. Kept for tuning visibility. */
   denseWeight: number;
   lexWeight: number;
+  /** Final-RRF multiplier applied ONLY to `source_type='runbook'` rows (bug
+   *  investigations). >1 boosts run-books (bug-fix tasks), <1 demotes them
+   *  (new-feature tasks), 1 = neutral / no run-books present. Other source types
+   *  are untouched. Tunable with scripts/rag-eval.ts once run-books accumulate. */
+  runbookBoost: number;
 }
 
 export const DEFAULT_RAG_SEARCH_CONFIG: RagSearchConfig = {
@@ -37,7 +42,16 @@ export const DEFAULT_RAG_SEARCH_CONFIG: RagSearchConfig = {
   topK: 8,
   denseWeight: 0.7,
   lexWeight: 0.3,
+  runbookBoost: 1.0,
 };
+
+/** Per-task-type run-book RRF multipliers applied by the /rag/search route.
+ *  Calibrated with scripts/rag-eval.ts against seeded run-books: 1.5 clusters the
+ *  relevant run-books near the top for a bug query without dragging irrelevant ones
+ *  in (2.5 over-pulls); 0.5 demotes them for feature tasks ("present but lower
+ *  priority"). 1.0 (neutral) is the default when a task type is unknown. */
+export const RUNBOOK_BOOST_BUGFIX = 1.5;
+export const RUNBOOK_BOOST_FEATURE = 0.5;
 
 export interface RagSearchHit {
   sourcePath: string;
@@ -171,6 +185,9 @@ export async function ragHybridSearch(
     const fc = filter ? buildFacetClause(filter, 10) : null;
     const denseWhere = fc ? `WHERE ${fc.core}` : '';
     const lexFacet = fc ? `\n          AND ${fc.core}` : '';
+    // Run-book RRF multiplier param goes AFTER the base ($1..$9) + facet params so
+    // facet numbering is untouched: $10 with no facet, else just past the facets.
+    const boostParam = 9 + (fc?.params.length ?? 0) + 1;
     rows = (await conn.pg.unsafe(
       `
       WITH q AS (
@@ -210,8 +227,10 @@ export async function ragHybridSearch(
           + $7 * (COALESCE(l.ts, 0) / (COALESCE(l.ts, 0) + 1))
         ) AS hybrid,
         (
-          CASE WHEN d.d_rank IS NOT NULL THEN 1.0 / ($4 + d.d_rank) ELSE 0 END
-          + CASE WHEN l.l_rank IS NOT NULL THEN 1.0 / ($4 + l.l_rank) ELSE 0 END
+          (
+            CASE WHEN d.d_rank IS NOT NULL THEN 1.0 / ($4 + d.d_rank) ELSE 0 END
+            + CASE WHEN l.l_rank IS NOT NULL THEN 1.0 / ($4 + l.l_rank) ELSE 0 END
+          ) * (CASE WHEN e.source_type = 'runbook' THEN $${boostParam}::double precision ELSE 1 END)
         ) AS rrf
       FROM cand c
       JOIN ${RAG_TABLE} e ON e.id = c.id
@@ -235,6 +254,7 @@ export async function ragHybridSearch(
         cfg.topK,
         cfg.codeDenseFloor,
         ...(fc?.params ?? []),
+        cfg.runbookBoost,
       ],
     )) as unknown as RawRow[];
   } else {
@@ -242,6 +262,7 @@ export async function ragHybridSearch(
     // Base params are $1..$3; facet params (if any) start at $4.
     const fc = filter ? buildFacetClause(filter, 4) : null;
     const lexFacet = fc ? ` AND ${fc.core}` : '';
+    const boostParamJ = 3 + (fc?.params.length ?? 0) + 1;
     rows = (await conn.pg.unsafe(
       `
       WITH q AS (SELECT plainto_tsquery('english', $1) AS qq)
@@ -252,15 +273,15 @@ export async function ragHybridSearch(
           / (ts_rank_cd(content_tsv, (SELECT qq FROM q)) + 1)) AS ts_norm,
         (ts_rank_cd(content_tsv, (SELECT qq FROM q))
           / (ts_rank_cd(content_tsv, (SELECT qq FROM q)) + 1)) AS hybrid,
-        1.0 / ($2 + row_number() OVER (
+        (1.0 / ($2 + row_number() OVER (
           ORDER BY ts_rank_cd(content_tsv, (SELECT qq FROM q)) DESC
-        )) AS rrf
+        ))) * (CASE WHEN source_type = 'runbook' THEN $${boostParamJ}::double precision ELSE 1 END) AS rrf
       FROM ${RAG_TABLE}
       WHERE content_tsv @@ (SELECT qq FROM q)${lexFacet}
       ORDER BY rrf DESC
       LIMIT $3
       `,
-      [queryText, cfg.rrfK, cfg.topK, ...(fc?.params ?? [])],
+      [queryText, cfg.rrfK, cfg.topK, ...(fc?.params ?? []), cfg.runbookBoost],
     )) as unknown as RawRow[];
   }
 
