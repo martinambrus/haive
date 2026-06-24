@@ -116,9 +116,10 @@ export const tasks = pgTable(
      *  the new-task form; default off so existing tasks + fixtures skip the step. */
     adversarialQaLevel: text('adversarial_qa_level'),
     /** Broad audit (default ON): run the report-only broad spec audit (04a-spec-audit)
-     *  and code audit (08c2-code-audit) on top of the narrow reviewers. Creation-time
-     *  toggle on the new-task form — read by 04a at index 4.6, before run-config sets
-     *  the other QA options. Per-task switch-off; default true so it runs unless opted out. */
+     *  and code audit (08c2-code-audit) on top of the narrow reviewers. Chosen on the
+     *  00-triage form per the selected execution path (hidden + forced off for
+     *  quick_bugfix, whose step set has neither audit) — read by 04a / 08c2 in their
+     *  shouldRun gate. Per-task switch-off; default true so it runs unless opted out. */
     broadAudit: boolean('broad_audit').notNull().default(true),
     /** Execution path chosen by the 00-triage step: 'quick_bugfix' | 'plan_tasklist'
      *  | 'full_workflow'. NULL until triage records it (and on legacy rows); buildRunList

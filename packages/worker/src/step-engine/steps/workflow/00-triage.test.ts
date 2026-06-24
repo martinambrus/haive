@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { heuristicTriage, parseTriageOutput, resolveTriage, triageStep } from './00-triage.js';
+import {
+  heuristicTriage,
+  parseTriageOutput,
+  resolveBroadAudit,
+  resolveTriage,
+  triageStep,
+} from './00-triage.js';
 
 describe('heuristicTriage', () => {
   it('an explicit bug with a short description -> quick_bugfix', () => {
@@ -113,5 +119,36 @@ describe('triageStep.form', () => {
       expect((o.description ?? '').length).toBeGreaterThan(0);
     }
     expect(schema.infoSections).toBeUndefined();
+  });
+
+  it('adds a broadAudit checkbox (fields[1]) hidden on quick_bugfix, default on', () => {
+    const { schema } = buildForm(null);
+    expect((schema.fields[0] as { type: string }).type).toBe('radio');
+    const cb = schema.fields[1] as {
+      type: string;
+      id: string;
+      label: string;
+      default?: boolean;
+      visibleWhen?: { field: string; notEquals?: string; equals?: string };
+    };
+    expect(cb.type).toBe('checkbox');
+    expect(cb.id).toBe('broadAudit');
+    expect(cb.default).toBe(true);
+    expect(cb.label).toContain('Extended results validation');
+    expect(cb.label).toContain('(Recommended)');
+    expect(cb.visibleWhen).toEqual({ field: 'path', notEquals: 'quick_bugfix' });
+  });
+});
+
+describe('resolveBroadAudit', () => {
+  it('forces off on quick_bugfix regardless of the submitted value', () => {
+    expect(resolveBroadAudit('quick_bugfix', true)).toBe(false);
+    expect(resolveBroadAudit('quick_bugfix', undefined)).toBe(false);
+  });
+
+  it('defaults on for non-quick paths when unset, honors an explicit untick', () => {
+    expect(resolveBroadAudit('plan_tasklist', undefined)).toBe(true);
+    expect(resolveBroadAudit('plan_tasklist', false)).toBe(false);
+    expect(resolveBroadAudit('full_workflow', true)).toBe(true);
   });
 });

@@ -32,6 +32,8 @@ interface TriageApply {
   path: ExecutionPath;
   recommended: ExecutionPath;
   source: 'llm' | 'heuristic';
+  /** Effective broad-audit flag persisted to tasks.broad_audit for the chosen path. */
+  broadAudit: boolean;
 }
 
 /** One-line gray sub-text shown under each path's radio option. */
@@ -139,6 +141,16 @@ export function resolveTriage(
   };
 }
 
+/** Effective broad_audit for the chosen path. quick_bugfix's step set (SPINE) contains
+ *  neither audit step (04a-spec-audit / 08c2-code-audit), so the flag is a no-op there —
+ *  force it off so the DB matches the run list and a hidden-but-ticked checkbox can't
+ *  submit a stale true. plan_tasklist and full_workflow both include the audits, so they
+ *  default on unless the user unticked. See orchestrator/execution-paths.ts. */
+export function resolveBroadAudit(chosen: ExecutionPath, broadAudit: boolean | undefined): boolean {
+  if (chosen === 'quick_bugfix') return false;
+  return broadAudit ?? true;
+}
+
 export const triageStep: StepDefinition<TriageDetect, TriageApply> = {
   metadata: {
     id: TRIAGE_STEP_ID,
@@ -223,6 +235,25 @@ export const triageStep: StepDefinition<TriageDetect, TriageApply> = {
           default: r.recommended,
           required: true,
         },
+        {
+          type: 'checkbox',
+          id: 'broadAudit',
+          label: 'Extended results validation (Recommended)',
+          description:
+            'By using this option, hAIve will perform additional accuracy validation of ' +
+            'technical specification and the actual code changes in this task. ' +
+            "It's recommended to keep this option ticked, unless you're very restricted " +
+            'in tokens usage, as unticking it will potentially save you some tokens (but may ' +
+            'also cost you more, as the spec or code could need more corrections after ' +
+            'your review).',
+          default: true,
+          // Hide on quick_bugfix: that path's step set (SPINE) has neither audit step
+          // (04a-spec-audit / 08c2-code-audit), so the flag does nothing there. The
+          // plan_tasklist and full_workflow paths both include the audits. If a future
+          // path is added that also lacks the audits, revisit this predicate (see
+          // orchestrator/execution-paths.ts).
+          visibleWhen: { field: 'path', notEquals: 'quick_bugfix' },
+        },
       ],
       submitLabel: 'Start task',
     };
@@ -230,17 +261,18 @@ export const triageStep: StepDefinition<TriageDetect, TriageApply> = {
 
   async apply(ctx, args): Promise<TriageApply> {
     const r = resolveTriage(args.llmOutput ?? null, args.detected);
-    const values = (args.formValues ?? {}) as { path?: string };
+    const values = (args.formValues ?? {}) as { path?: string; broadAudit?: boolean };
     const parsedChoice = executionPathSchema.safeParse(values.path);
     const chosen: ExecutionPath = parsedChoice.success ? parsedChoice.data : r.recommended;
+    const broadAudit = resolveBroadAudit(chosen, values.broadAudit);
     await ctx.db
       .update(schema.tasks)
-      .set({ executionPath: chosen, updatedAt: new Date() })
+      .set({ executionPath: chosen, broadAudit, updatedAt: new Date() })
       .where(eq(schema.tasks.id, ctx.taskId));
     ctx.logger.info(
-      { chosen, recommended: r.recommended, source: r.source },
+      { chosen, recommended: r.recommended, source: r.source, broadAudit },
       'execution path selected',
     );
-    return { path: chosen, recommended: r.recommended, source: r.source };
+    return { path: chosen, recommended: r.recommended, source: r.source, broadAudit };
   },
 };
