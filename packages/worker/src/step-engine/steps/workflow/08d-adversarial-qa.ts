@@ -18,9 +18,9 @@ import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 // before gate 2, N adversarial agents actively try to BREAK the change — edge
 // cases, auth bypass, injection, logic flaws — and report proof-of-concept
 // findings. Proof-of-concept only: no persistence, no data deletion, no prod
-// disruption. Blocking findings (critical/high) drive the fixLoop below — routing
-// back to implementation like 08c — while the rest surface at gate 2. Formless;
-// gated by shouldRun.
+// disruption. Findings are reviewed by the human at gate 1.5 (08d2-adversarial-qa-
+// review): it decides whether to send them back to implementation or accept them,
+// and they also surface at gate 2. Formless; gated by shouldRun.
 //
 // Each prompt defers to the repo's onboarded adversarial agent definition
 // (.claude/agents/<id>.md — Haive onboards all six) when present, and embeds a
@@ -193,20 +193,6 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     description:
       'Adversarial agents actively try to break the change (edge cases, auth, injection, logic). Findings surface at gate 2. Opt-in per task.',
     requiresCli: false,
-  },
-
-  // Fix-loop: blocking adversarial-QA findings (critical/high) route back to implementation.
-  fixLoop: {
-    evaluate: (out) => {
-      if (!out.blocking) return null;
-      const diagnosis = out.findings
-        .map(
-          (f) =>
-            `- [${f.severity}] ${f.category ?? 'issue'}${f.location ? ` @ ${f.location}` : ''}: ${f.impact ?? ''}${f.fix ? ` — fix: ${f.fix}` : ''}`,
-        )
-        .join('\n');
-      return { blocking: true, diagnosis: diagnosis || 'Adversarial QA found blocking issues.' };
-    },
   },
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
