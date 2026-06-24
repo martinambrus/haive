@@ -543,6 +543,11 @@ export default function TaskDetailPage() {
       {titleStripVisible && (
         <div className="fixed left-64 right-0 top-0 z-30 flex items-center gap-3 border-b border-neutral-800 bg-neutral-950/90 px-8 py-2 backdrop-blur">
           <p className="min-w-0 truncate text-sm font-semibold text-indigo-300">{task.title}</p>
+          {task.executionPath && (
+            <Badge variant={executionPathVariant(task.executionPath)} className="shrink-0">
+              {EXECUTION_PATH_LABELS[task.executionPath]}
+            </Badge>
+          )}
           {task.repository && (
             <Badge variant="info" className="shrink-0">
               repo: {task.repository.name}
