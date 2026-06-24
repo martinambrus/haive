@@ -292,6 +292,8 @@ async function main(): Promise<void> {
         commit: false,
         commitMessage: '',
       },
+      // RAG re-index gate. runReindex:false → no-op (smoke has no real RAG/Ollama).
+      '11c-rag-reindex': { runReindex: false },
       '11a-gate-4-push': {
         push: false,
         remoteUrl: 'https://smoke.invalid/repo.git',

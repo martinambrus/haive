@@ -69,6 +69,7 @@ const PLAN_TASKLIST_EXTRA: readonly string[] = [
   '09-gate-2-verify-approval',
   '11-phase-8-learning',
   '11b-kb-commit',
+  '11c-rag-reindex',
 ];
 
 export const PATH_STEP_SETS: Record<

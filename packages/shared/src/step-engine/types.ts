@@ -112,6 +112,7 @@ export const SKIPPABLE_STEP_IDS: readonly string[] = [
   '06a-db-migrate',
   '11a-gate-4-push',
   '11b-kb-commit',
+  '11c-rag-reindex',
 ];
 
 export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
