@@ -55,7 +55,17 @@ interface RagSyncApply {
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
-const SOURCE_PREFIXES = ['.claude/knowledge_base/'];
+const SOURCE_PREFIXES = ['.claude/knowledge_base/', '.claude/learnings/'];
+
+type RagSourceType = 'kb' | 'code' | 'learning' | 'runbook';
+
+/** Type a markdown source by its path so RAG can filter/boost by knowledge kind:
+ *  bug run-books (investigations), durable learnings, and general KB articles. */
+function classifyKbSourceType(relPath: string): RagSourceType {
+  if (relPath.startsWith('.claude/knowledge_base/investigations/')) return 'runbook';
+  if (relPath.startsWith('.claude/learnings/')) return 'learning';
+  return 'kb';
+}
 const CODE_IGNORE_DIRS = new Set([
   'node_modules',
   '.git',
@@ -313,8 +323,8 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
       const kbFiles = await collectKbFiles(ctx.repoPath);
       const codeFiles = await collectCodeFiles(ctx.repoPath);
 
-      const allFiles: Array<{ relPath: string; sourceType: 'kb' | 'code' }> = [
-        ...kbFiles.map((r) => ({ relPath: r, sourceType: 'kb' as const })),
+      const allFiles: Array<{ relPath: string; sourceType: RagSourceType }> = [
+        ...kbFiles.map((r) => ({ relPath: r, sourceType: classifyKbSourceType(r) })),
         ...codeFiles.map((r) => ({ relPath: r, sourceType: 'code' as const })),
       ];
 
@@ -334,9 +344,9 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
         }
 
         const sections =
-          sourceType === 'kb'
-            ? extractMarkdownSections(text, relPath)
-            : extractCodeSections(text, relPath);
+          sourceType === 'code'
+            ? extractCodeSections(text, relPath)
+            : extractMarkdownSections(text, relPath);
         const chunks: RagChunk[] = [];
         for (const section of sections) {
           chunks.push(...chunkSection(section));
