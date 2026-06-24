@@ -155,6 +155,7 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
                 taskId={taskId}
                 invocation={inv}
                 idx={idx}
+                total={count}
                 statusMessage={statusMessage}
                 label={invocations.length > 1 ? `Run ${idx + 1}` : null}
               />
@@ -185,12 +186,22 @@ interface InvocationPanelProps {
   label: string | null;
   /** Zero-based position in the run list (0 = first/oldest run). */
   idx: number;
+  /** Total runs in this step. The in-panel status box only renders for 2+ runs;
+   *  single-terminal steps already show their status above the terminal. */
+  total: number;
   /** Step's live status_message, shown below this panel when it's an active run
    *  past the first (the top status line is off-screen by then). */
   statusMessage: string | null;
 }
 
-function InvocationPanel({ taskId, invocation, label, idx, statusMessage }: InvocationPanelProps) {
+function InvocationPanel({
+  taskId,
+  invocation,
+  label,
+  idx,
+  total,
+  statusMessage,
+}: InvocationPanelProps) {
   const [replay, setReplay] = useState<CliInvocationOutput | null>(null);
   const [replayError, setReplayError] = useState<string | null>(null);
 
@@ -306,12 +317,14 @@ function InvocationPanel({ taskId, invocation, label, idx, statusMessage }: Invo
       ) : (
         !replayError && <div className="text-xs text-neutral-500">Loading output…</div>
       )}
-      {invocation.isActive && (invocation.statusMessage ?? (idx > 0 ? statusMessage : null)) && (
-        <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">
-          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
-          {invocation.statusMessage ?? statusMessage}
-        </div>
-      )}
+      {total > 1 &&
+        invocation.isActive &&
+        (invocation.statusMessage ?? (idx > 0 ? statusMessage : null)) && (
+          <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
+            {invocation.statusMessage ?? statusMessage}
+          </div>
+        )}
     </div>
   );
 }
