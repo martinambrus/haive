@@ -8,6 +8,7 @@ import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
+import { loadBusinessRequirements } from './_business-requirements.js';
 
 interface KbReference {
   id: string;
@@ -184,10 +185,9 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
     const output = (prev?.output as DiscoveryOutput | null) ?? {};
     const ids = Array.isArray(output.relevantKbIds) ? output.relevantKbIds : [];
     const kbReferences = await resolveKbReferences(ctx.repoPath, ids);
-    // Approved business requirements (03b) ground the technical spec when present.
-    const bizReq = await loadPreviousStepOutput(ctx.db, ctx.taskId, '03b-business-requirements');
-    const businessRequirements =
-      (bizReq?.output as { requirements?: string } | null)?.requirements ?? '';
+    // Approved business requirements ground the technical spec when present — the
+    // humanized 03b2 version if it ran, else 03b's raw draft.
+    const businessRequirements = (await loadBusinessRequirements(ctx)).requirements;
     return {
       taskTitle: meta.title,
       taskDescription: meta.description,

@@ -1,8 +1,8 @@
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { recordBizReqDecision } from './_biz-req-feedback.js';
+import { loadBusinessRequirements } from './_business-requirements.js';
 
 // Phase 1 review — human sign-off for the business-requirements doc that 03b
 // drafts. Split from 03b so the agent mines ONLY after the user opts in at the
@@ -30,11 +30,10 @@ interface BizReqOutput {
   summary?: string;
 }
 
-/** Load 03b's stored business-requirements output (empty object when 03b was
- *  skipped or never ran). */
+/** Load the business-requirements doc to review: the humanized 03b2 output when
+ *  present, else 03b's raw draft (empty when neither ran). */
 async function loadBizReq(ctx: StepContext): Promise<BizReqOutput> {
-  const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '03b-business-requirements');
-  return (prev?.output as BizReqOutput | null) ?? {};
+  return loadBusinessRequirements(ctx);
 }
 
 /** The skip-both gate: 03c only runs when 03b actually produced a requirements
