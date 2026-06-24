@@ -7,6 +7,8 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
+import { appRunnerExec } from '../../../sandbox/app-runner.js';
+import { ensureAppServing } from './_app-runtime.js';
 
 // Phase 5 verify: runs the project's test / lint / typecheck checks and records
 // the outcome for gate 2. Each of the three slots is framework-aware — a JS
@@ -46,11 +48,25 @@ interface CheckResult {
   output: string;
 }
 
+/** Mandatory post-implementation HTTP smoke: boots the app once and records what
+ *  it actually serves, independent of test/lint detection or `browserTesting`.
+ *  Kept OUT of `passed` (so it never routes back to implement via the fixLoop) and
+ *  surfaced at gate-2 for a human decision. `ran:false` = no servable runtime, or
+ *  the probe itself was unavailable — gate-2 treats that as non-blocking. */
+interface RuntimeSmoke {
+  ran: boolean;
+  passed: boolean;
+  httpStatus: number | null;
+  url: string | null;
+  errorExcerpt: string;
+}
+
 interface VerifyApply {
   test: CheckResult;
   lint: CheckResult;
   typecheck: CheckResult;
   passed: boolean;
+  runtimeSmoke: RuntimeSmoke | null;
 }
 
 /**
@@ -249,6 +265,72 @@ const skippedResult = (): CheckResult => ({
   output: 'skipped',
 });
 
+// Body/exit signatures that mean the app did NOT come up cleanly. Conservative on
+// purpose — PHP fatals and DB-down strings only — so a normal page never trips it.
+// A legacy app often renders its DB-connection failure as HTTP 200 with the error
+// in the BODY, so a status-only check is insufficient; these patterns plus the
+// always-attached excerpt are what catch it.
+const FATAL_PATTERNS =
+  /Fatal error:|Parse error:|Uncaught\b|Call to undefined function|SQLSTATE|Connection (?:refused|was refused)|No such file or directory/i;
+
+/** Parse a `curl -i` dump into a smoke verdict. Pure (no IO) so it is unit-testable.
+ *  Uses the LAST HTTP status line (so a redirect chain reports the final code). A
+ *  null status with a command-missing message means the probe binary was absent
+ *  (ran:false, not a failure); a null status otherwise means the app never answered
+ *  (a failure). */
+export function parseRuntimeSmokeOutput(raw: string): {
+  ran: boolean;
+  passed: boolean;
+  httpStatus: number | null;
+  errorExcerpt: string;
+} {
+  const text = raw ?? '';
+  const codes = [...text.matchAll(/HTTP\/\d(?:\.\d)?\s+(\d{3})/g)].map((m) => Number(m[1]));
+  const httpStatus = codes.length > 0 ? codes[codes.length - 1]! : null;
+  const errorExcerpt = text.trim().slice(-1500);
+  if (
+    httpStatus === null &&
+    /command not found|executable file not found|not installed|:\s*not found/i.test(text)
+  ) {
+    return { ran: false, passed: false, httpStatus: null, errorExcerpt };
+  }
+  const passed = httpStatus !== null && httpStatus < 500 && !FATAL_PATTERNS.test(text);
+  return { ran: true, passed, httpStatus, errorExcerpt };
+}
+
+function notProbed(url: string | null, reason: string): RuntimeSmoke {
+  return { ran: false, passed: false, httpStatus: null, url, errorExcerpt: reason };
+}
+
+/** Boot the app once (idempotent via ensureAppServing) and curl it from INSIDE its
+ *  container, where loopback/DNS resolve. Never throws — a boot or probe failure
+ *  degrades to ran:false so the verify step still records test/lint/typecheck. */
+async function runRuntimeSmoke(ctx: StepContext): Promise<RuntimeSmoke> {
+  try {
+    const rt = await ensureAppServing(ctx);
+    if (rt.mode === 'none') return notProbed(null, 'No servable runtime recorded for this task.');
+    if (rt.mode === 'host') return notProbed(rt.url, 'Host runtime is not smoke-probed.');
+    const output =
+      rt.mode === 'ddev'
+        ? (
+            await ddevExec(rt.handle, 'exec curl -sS -i -m 20 http://127.0.0.1/', {
+              timeoutMs: 30_000,
+            })
+          ).output
+        : (await appRunnerExec(rt.handle, `curl -sS -i -m 20 ${rt.url}`, { timeoutMs: 30_000 }))
+            .output;
+    const parsed = parseRuntimeSmokeOutput(output);
+    ctx.logger.info(
+      { mode: rt.mode, httpStatus: parsed.httpStatus, passed: parsed.passed, ran: parsed.ran },
+      'runtime smoke complete',
+    );
+    return { ...parsed, url: rt.url };
+  } catch (err) {
+    ctx.logger.warn({ err }, 'runtime smoke could not run — recording as not probed');
+    return notProbed(null, `Runtime smoke could not run: ${(err as Error).message}`);
+  }
+}
+
 export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
   metadata: {
     id: '08-phase-5-verify',
@@ -356,14 +438,20 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       (!lint.ran || lint.passed) &&
       (!typecheck.ran || typecheck.passed);
 
+    // Always smoke the running app, regardless of the test/lint checkboxes — this
+    // is the only step that catches a runtime failure (e.g. a DB-connection error
+    // page) before gate-2. Kept out of `passed` so it never routes to implement.
+    const runtimeSmoke = await runRuntimeSmoke(ctx);
+
     ctx.logger.info(
       {
         test: test.ran ? (test.passed ? 'pass' : 'fail') : 'skip',
         lint: lint.ran ? (lint.passed ? 'pass' : 'fail') : 'skip',
         typecheck: typecheck.ran ? (typecheck.passed ? 'pass' : 'fail') : 'skip',
+        smoke: runtimeSmoke.ran ? (runtimeSmoke.passed ? 'pass' : 'fail') : 'skip',
       },
       'verify phase complete',
     );
-    return { test, lint, typecheck, passed };
+    return { test, lint, typecheck, passed, runtimeSmoke };
   },
 };

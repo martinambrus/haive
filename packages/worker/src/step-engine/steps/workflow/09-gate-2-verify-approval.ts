@@ -29,6 +29,10 @@ interface VerifyGateDetect {
     failedDimensions: string[];
     fixesApplied: number;
     exhaustedBudget: boolean;
+    /** False when 07b's churn guard stopped the loop on a non-converging file. */
+    converged: boolean;
+    /** Files the validator/fixer kept re-flagging without resolving (empty when converged). */
+    churnFiles: string[];
     report: string;
   } | null;
   /** Phase 5b test management summary line (null when the step didn't run). */
@@ -67,6 +71,15 @@ interface VerifyGateDetect {
    *  test right here while the user-active timer keeps running. null when this
    *  isn't a DDEV + browser-testing task; available:false if bring-up failed. */
   liveBrowser: { available: boolean; appUrl: string | null; reason?: string } | null;
+  /** Mandatory runtime HTTP smoke from 08-phase-5-verify (null when not probed).
+   *  A failure defaults this gate to reject but never auto-reroutes to implement. */
+  runtimeSmoke: {
+    ran: boolean;
+    passed: boolean;
+    httpStatus: number | null;
+    url: string | null;
+    errorExcerpt: string;
+  } | null;
 }
 
 interface Phase8dOutput {
@@ -137,6 +150,8 @@ interface Phase4Output {
   dimensions?: { name?: string; status?: string; note?: string }[];
   fixesApplied?: string[];
   report?: string;
+  converged?: boolean;
+  churnFiles?: string[];
 }
 
 interface VerifyGateApply {
@@ -152,6 +167,13 @@ interface VerifyOutput {
   lint?: { passed?: boolean; output?: string };
   typecheck?: { passed?: boolean; output?: string };
   passed?: boolean;
+  runtimeSmoke?: {
+    ran?: boolean;
+    passed?: boolean;
+    httpStatus?: number | null;
+    url?: string | null;
+    errorExcerpt?: string;
+  } | null;
 }
 
 function fmtResult(label: string, entry?: { passed?: boolean; output?: string }): string {
@@ -228,6 +250,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           .map((d) => `${d.name}${d.note ? `: ${d.note}` : ''}`),
         fixesApplied: (p4.fixesApplied ?? []).length,
         exhaustedBudget: iterations.some((e) => e.exhaustedBudget === true),
+        converged: p4.converged !== false,
+        churnFiles: p4.churnFiles ?? [],
         report: (p4.report ?? '').slice(0, 8000),
       };
     }
@@ -387,6 +411,17 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       liveBrowser = { available: false, appUrl: null, reason: (err as Error).message };
     }
 
+    const rsOut = output.runtimeSmoke ?? null;
+    const runtimeSmoke = rsOut
+      ? {
+          ran: rsOut.ran === true,
+          passed: rsOut.passed === true,
+          httpStatus: rsOut.httpStatus ?? null,
+          url: rsOut.url ?? null,
+          errorExcerpt: rsOut.errorExcerpt ?? '',
+        }
+      : null;
+
     return {
       testResults: fmtResult('tests', output.test),
       lintResults: fmtResult('lint', output.lint),
@@ -399,6 +434,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       codeAudit,
       adversarial,
       liveBrowser,
+      runtimeSmoke,
     };
   },
 
@@ -427,6 +463,12 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const adversarialLine = aq
       ? `Adversarial QA (${aq.level}): ${aq.counts.total} findings (${aq.counts.critical} critical, ${aq.counts.high} high)${aq.blocking ? ' — BLOCKING' : ''}`
       : '';
+    const rs = detected.runtimeSmoke;
+    const runtimeSmokeOk = !rs || !rs.ran || rs.passed;
+    const runtimeSmokeLine =
+      rs && rs.ran && !rs.passed
+        ? `Runtime smoke: FAIL${rs.httpStatus !== null ? ` (HTTP ${rs.httpStatus})` : ''} — the app did not come up cleanly`
+        : '';
     const summary = [
       detected.testResults,
       detected.lintResults,
@@ -442,12 +484,31 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       codeReviewLine,
       codeAuditLine,
       adversarialLine,
+      runtimeSmokeLine,
       detected.testManagement ? detected.testManagement.line : '',
     ]
       .filter(Boolean)
       .join('\n');
 
     const infoSections: InfoSection[] = [];
+    if (rs && rs.ran && !rs.passed) {
+      infoSections.push({
+        title: 'Runtime smoke failed',
+        preview: rs.httpStatus !== null ? `HTTP ${rs.httpStatus}` : 'no response',
+        body: [
+          `The app was booted and probed at ${rs.url ?? 'its runtime URL'} but did not come up cleanly.`,
+          rs.httpStatus !== null
+            ? `HTTP status: ${rs.httpStatus}`
+            : 'No HTTP response was received from the app.',
+          '',
+          '## Response excerpt',
+          '```',
+          rs.errorExcerpt || '(empty)',
+          '```',
+        ].join('\n'),
+        defaultOpen: true,
+      });
+    }
     if (v) {
       const lines: string[] = [`**Verdict:** ${v.verdict}`];
       if (v.summary) lines.push('', v.summary);
@@ -466,6 +527,12 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           "> ⚠️ The validator's output could not be parsed — review the report excerpt below.",
         );
       }
+      if (v.churnFiles.length > 0) {
+        lines.push(
+          '',
+          `> ⚠️ **Validation did not converge** — the validator/fixer kept re-flagging ${v.churnFiles.join(', ')} across rounds without resolving it, so the loop stopped instead of burning more rounds. A human decision is needed.`,
+        );
+      }
       if (v.failedDimensions.length > 0) {
         lines.push('', '## Failed review dimensions');
         for (const d of v.failedDimensions) lines.push(`- ${d}`);
@@ -479,7 +546,10 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       }
       infoSections.push({
         title: 'Implementation validation',
-        preview: v.verdict + (v.exhaustedBudget ? ' • budget exhausted' : ''),
+        preview:
+          v.verdict +
+          (v.exhaustedBudget ? ' • budget exhausted' : '') +
+          (v.churnFiles.length > 0 ? ' • did not converge' : ''),
         body: lines.join('\n'),
         defaultOpen: !validationOk,
       });
@@ -586,7 +656,8 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             testsOk &&
             browserOk &&
             codeReviewOk &&
-            adversarialOk
+            adversarialOk &&
+            runtimeSmokeOk
               ? 'approve'
               : 'reject',
           required: true,

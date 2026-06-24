@@ -22,6 +22,12 @@ import { loadHonoredConstraints } from './_fix-loop.js';
 const ROLE_VALIDATOR = 'validator';
 const ROLE_FIXER = 'fixer';
 const REPORT_CAP = 16_000;
+// A file the validator re-flags across this many distinct validator passes is
+// treated as non-converging churn: the fixer keeps touching it without the
+// validator clearing it (the ext/mysql-enablement thrash that ran all 5 rounds).
+// The loop then stops and surfaces to the human at gate-2 instead of burning more
+// rounds or routing back to implement. Tunable.
+const CHURN_FILE_THRESHOLD = 3;
 
 function roleForIteration(iteration: number): string {
   return iteration % 2 === 0 ? ROLE_VALIDATOR : ROLE_FIXER;
@@ -58,6 +64,12 @@ interface ValidateApply {
   summary: string;
   issues: ValidationIssue[];
   dimensions: DimensionResult[];
+  /** False when the validator re-flagged the same file across CHURN_FILE_THRESHOLD
+   *  validator passes (non-converging). A false value routes the run to a human
+   *  decision at gate-2 instead of another fix round. */
+  converged: boolean;
+  /** Files that tripped the churn guard (empty when converged). */
+  churnFiles: string[];
   /** Fixes accumulated across fixer passes. */
   fixesApplied: string[];
   /** Bullet-point markdown of the run's outcome (verdict + all fixes applied across
@@ -145,6 +157,41 @@ function accumulatedFixes(previous: StepLoopPassRecord[]): string[] {
   return last ? last.fixesApplied : fixes;
 }
 
+/** Strip a trailing `:line` (or `:line:col`) so the same file flagged at different
+ *  lines across passes is counted as one. */
+function normalizeIssueFile(file?: string): string {
+  if (!file) return '';
+  return file.trim().replace(/:\d+(?::\d+)?$/, '');
+}
+
+/** Files the validator re-flagged in at least CHURN_FILE_THRESHOLD distinct
+ *  validator passes — the fixer keeps editing them but the validator never clears
+ *  them, so the loop is not converging there. Counts once per pass (a file flagged
+ *  twice in one pass still counts as one). */
+export function churnHotspots(issuesPerValidatorPass: ValidationIssue[][]): string[] {
+  const counts = new Map<string, number>();
+  for (const issues of issuesPerValidatorPass) {
+    const filesThisPass = new Set<string>();
+    for (const issue of issues) {
+      const f = normalizeIssueFile(issue.file);
+      if (f) filesThisPass.add(f);
+    }
+    for (const f of filesThisPass) counts.set(f, (counts.get(f) ?? 0) + 1);
+  }
+  return [...counts.entries()].filter(([, n]) => n >= CHURN_FILE_THRESHOLD).map(([f]) => f);
+}
+
+/** Issue lists from every prior validator (or stub) pass, oldest first — the input
+ *  to the churn detector. */
+function priorValidatorIssueLists(previous: StepLoopPassRecord[]): ValidationIssue[][] {
+  const lists: ValidationIssue[][] = [];
+  for (const p of previous) {
+    const out = p.applyOutput as ValidateApply | undefined;
+    if (out && (out.source === 'validator' || out.source === 'stub')) lists.push(out.issues);
+  }
+  return lists;
+}
+
 /** Bullet-point markdown of the whole run for the done card: the final verdict,
  *  every fix applied across the validator<->fixer iterations, and any issue still
  *  open. Persists on the step so the user can review what was found and fixed. */
@@ -152,8 +199,15 @@ function buildFindingsSummary(
   verdict: ValidationVerdict,
   fixesApplied: string[],
   issues: ValidationIssue[],
+  churnFiles: string[] = [],
 ): string {
   const lines: string[] = [`**Verdict:** ${verdict}`];
+  if (churnFiles.length > 0) {
+    lines.push(
+      '',
+      `**Did not converge** — re-flagged after repeated fix attempts: ${churnFiles.join(', ')}. Manual decision needed.`,
+    );
+  }
   if (fixesApplied.length > 0) {
     lines.push('', `### Fixes applied (${fixesApplied.length})`);
     for (const f of fixesApplied) lines.push(`- ${f}`);
@@ -305,13 +359,18 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
   // Fix-loop: if validation still reports issues after its internal fixer loop, route
   // back to implementation with the findings summary as the diagnosis.
   fixLoop: {
-    evaluate: (out) =>
-      out.verdict === 'VALID'
-        ? null
-        : {
-            blocking: true,
-            diagnosis: out.findingsSummary || out.summary || 'Validation found unresolved issues.',
-          },
+    // VALID passes do not loop. A churn bail (validator/fixer could not converge on
+    // a file) also returns null: it surfaces at gate-2 for a human decision rather
+    // than routing back to implement, where re-implementing the same churn would
+    // just burn another round.
+    evaluate: (out) => {
+      if (out.verdict === 'VALID') return null;
+      if ((out.churnFiles?.length ?? 0) > 0) return null;
+      return {
+        blocking: true,
+        diagnosis: out.findingsSummary || out.summary || 'Validation found unresolved issues.',
+      };
+    },
   },
 
   async detect(ctx: StepContext): Promise<ValidateDetect> {
@@ -415,10 +474,13 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     resolveRole: roleForIteration,
     shouldContinue: ({ applyOutput, iteration }) => {
       // After a fix (odd) always re-validate; after a validation (even) keep
-      // going only while issues remain. UNPARSEABLE never loops.
+      // going only while issues remain. UNPARSEABLE never loops. A churn-bailed
+      // validator pass also stops — the human decides at gate-2.
       if (roleForIteration(iteration) === ROLE_FIXER) return true;
       const out = applyOutput as ValidateApply;
-      return out.verdict === 'ISSUES_FOUND';
+      if (out.verdict !== 'ISSUES_FOUND') return false;
+      if ((out.churnFiles?.length ?? 0) > 0) return false;
+      return true;
     },
     buildIterationPrompt: ({ detected, iteration, previousIterations }) => {
       const d = detected as ValidateDetect;
@@ -498,11 +560,14 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         summary: prior?.summary ?? '',
         issues: prior?.issues ?? [],
         dimensions: prior?.dimensions ?? [],
+        converged: prior?.converged ?? true,
+        churnFiles: prior?.churnFiles ?? [],
         fixesApplied: allFixes,
         findingsSummary: buildFindingsSummary(
           prior?.verdict ?? 'ISSUES_FOUND',
           allFixes,
           prior?.issues ?? [],
+          prior?.churnFiles ?? [],
         ),
         report: prior?.report ?? '',
         validatorPasses,
@@ -517,11 +582,17 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         : JSON.stringify(args.llmOutput ?? '').slice(-REPORT_CAP);
     const parsed = parseValidatorOutput(args.llmOutput ?? null);
     if (parsed) {
+      // Churn only matters while issues remain; a VALID pass converged by definition.
+      const churnFiles =
+        parsed.verdict === 'ISSUES_FOUND'
+          ? churnHotspots([...priorValidatorIssueLists(previous), parsed.issues])
+          : [];
       ctx.logger.info(
         {
           verdict: parsed.verdict,
           issues: parsed.issues.length,
           dimensionFails: parsed.dimensions.filter((dim) => dim.status === 'FAIL').length,
+          churnFiles: churnFiles.length,
         },
         'phase-4 validation pass complete',
       );
@@ -530,8 +601,15 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         summary: parsed.summary,
         issues: parsed.issues,
         dimensions: parsed.dimensions,
+        converged: churnFiles.length === 0,
+        churnFiles,
         fixesApplied: fixesSoFar,
-        findingsSummary: buildFindingsSummary(parsed.verdict, fixesSoFar, parsed.issues),
+        findingsSummary: buildFindingsSummary(
+          parsed.verdict,
+          fixesSoFar,
+          parsed.issues,
+          churnFiles,
+        ),
         report,
         validatorPasses: validatorPasses + 1,
         source: 'validator',
@@ -544,6 +622,8 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       summary: 'Validator output could not be parsed; review the raw report at gate 2.',
       issues: [],
       dimensions: [],
+      converged: true,
+      churnFiles: [],
       fixesApplied: fixesSoFar,
       findingsSummary: buildFindingsSummary('UNPARSEABLE', fixesSoFar, []),
       report,
