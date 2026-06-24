@@ -751,6 +751,17 @@ async function handleResult(
         sourceStepId: result.sourceStepId,
         round: nextRound,
       });
+      // If a prior attempt at this round left a terminal row (e.g. a reaped/failed CLI
+      // whose invocation was never superseded — a worker reload mid-CLI), reset it so the
+      // re-entry runs a FRESH invocation instead of re-consuming the dead one. Returns null
+      // (no-op) when the round is new, which is the normal case. Mirrors the revise reset.
+      const reentryReset = await resetStepAndDownstream(
+        db,
+        ctx.taskId,
+        target.metadata.id,
+        nextRound,
+      );
+      const reentryEpoch = reentryReset?.newEpoch ?? ctx.orchestrationEpoch;
       await markTaskRunningWithStep(
         db,
         ctx.taskId,
@@ -758,13 +769,7 @@ async function handleResult(
         computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
         nextRound,
       );
-      await enqueueAdvance(
-        ctx.taskId,
-        ctx.userId,
-        target.metadata.id,
-        nextRound,
-        ctx.orchestrationEpoch,
-      );
+      await enqueueAdvance(ctx.taskId, ctx.userId, target.metadata.id, nextRound, reentryEpoch);
       return;
     }
     case 'revise': {
