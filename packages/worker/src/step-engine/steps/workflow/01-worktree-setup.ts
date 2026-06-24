@@ -34,6 +34,10 @@ interface WorktreeApply {
   worktreePath: string;
   sandboxWorktreePath: string;
   branchName: string;
+  /** The branch the worktree was created FROM. Recorded so 12-worktree-cleanup can
+   *  merge the worktree branch back into it (and the safety check can verify the
+   *  parent repo is still on it). */
+  baseBranch: string;
 }
 
 function slugify(input: string): string {
@@ -299,6 +303,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       worktreePath,
       sandboxWorktreePath,
       branchName,
+      baseBranch: base,
     };
   },
 };
