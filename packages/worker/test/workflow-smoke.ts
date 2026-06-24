@@ -319,7 +319,10 @@ async function main(): Promise<void> {
         credentialId: '',
       },
       '12-worktree-cleanup': {
-        removeWorktree: false,
+        // Worktree is mandatory now (01-worktree-setup always creates one), so the
+        // cleanup form asks for an action. remove_only deletes the worktree and
+        // keeps the branch — deterministic, no merge.
+        action: 'remove_only',
       },
     };
 

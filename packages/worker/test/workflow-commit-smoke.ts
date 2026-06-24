@@ -297,7 +297,9 @@ async function main(): Promise<void> {
         remoteUrl: 'https://smoke.invalid/repo.git',
         credentialId: '',
       },
-      '12-worktree-cleanup': { removeWorktree: false },
+      // Worktree is mandatory now; cleanup needs an action. remove_only keeps the
+      // feature branch (and its gate-3 commit verified below) and removes the worktree.
+      '12-worktree-cleanup': { action: 'remove_only' },
     };
 
     const submitted = new Set<string>();
