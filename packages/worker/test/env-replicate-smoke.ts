@@ -250,6 +250,8 @@ async function main(): Promise<void> {
       '09-gate-2-verify-approval': { decision: 'approve', feedback: 'env smoke verify.' },
       '10-gate-3-commit': { commit: false, commitMessage: '' },
       '11-phase-8-learning': { reviewerNote: 'env smoke note.', writeFiles: true },
+      // KB-commit gate; skip the actual commit (no git mutation in this smoke).
+      '11b-kb-commit': { commit: false, commitMessage: '' },
       '11a-gate-4-push': {
         push: false,
         remoteUrl: 'https://smoke.invalid/repo.git',

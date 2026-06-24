@@ -303,6 +303,8 @@ async function main(): Promise<void> {
         reviewerNote: 'envwrap smoke: prelude+workflow end-to-end.',
         writeFiles: true,
       },
+      // KB-commit gate; skip the actual commit (no git mutation in this smoke).
+      '11b-kb-commit': { commit: false, commitMessage: '' },
       '11a-gate-4-push': {
         push: false,
         remoteUrl: 'https://smoke.invalid/repo.git',

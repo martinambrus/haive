@@ -286,6 +286,12 @@ async function main(): Promise<void> {
         reviewerNote: 'Real-commit smoke.',
         writeFiles: true,
       },
+      // KB-commit gate. commit:false so it adds no commit and HEAD stays at the
+      // gate-3 commitSha verified below.
+      '11b-kb-commit': {
+        commit: false,
+        commitMessage: '',
+      },
       '11a-gate-4-push': {
         push: false,
         remoteUrl: 'https://smoke.invalid/repo.git',

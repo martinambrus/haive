@@ -307,6 +307,12 @@ async function main(): Promise<void> {
         reviewerNote: 'Smoke test: stub pipeline end-to-end.',
         writeFiles: true,
       },
+      // KB-commit gate (surfaces because the learning phase wrote files). Skip the
+      // actual commit so this smoke stays side-effect free, matching gate-3/push.
+      '11b-kb-commit': {
+        commit: false,
+        commitMessage: '',
+      },
       '11a-gate-4-push': {
         push: false,
         remoteUrl: 'https://smoke.invalid/repo.git',
