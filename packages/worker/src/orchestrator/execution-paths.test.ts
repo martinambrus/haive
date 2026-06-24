@@ -82,25 +82,27 @@ describe('orderWorkflowRunList', () => {
   const ids = (path: Parameters<typeof orderWorkflowRunList>[2]) =>
     orderWorkflowRunList(main, prelude, path).map((s) => s.metadata.id);
 
-  it('null path: triage first, then prelude, then the rest (full run)', () => {
+  it('null path: model-health first, then triage, then prelude, then the rest', () => {
     const r = ids(null);
-    expect(r[0]).toBe(TRIAGE_STEP_ID);
-    expect(r.slice(1, 3)).toEqual(['01-declare-deps', '03-build-image']);
+    expect(r[0]).toBe('00-model-health-workflow');
+    expect(r[1]).toBe(TRIAGE_STEP_ID);
+    expect(r.slice(2, 4)).toEqual(['01-declare-deps', '03-build-image']);
     expect(r).toContain('08d-adversarial-qa');
-    expect(r).toContain('00-model-health-workflow');
   });
 
-  it('quick_bugfix: triage first, prelude kept, heavy steps dropped', () => {
+  it('quick_bugfix: model-health + triage first, prelude kept, heavy steps dropped', () => {
     const r = ids('quick_bugfix');
-    expect(r[0]).toBe(TRIAGE_STEP_ID);
+    expect(r[0]).toBe('00-model-health-workflow');
+    expect(r[1]).toBe(TRIAGE_STEP_ID);
     expect(r).toContain('01-declare-deps'); // prelude is never filtered
     expect(r).toContain('07-phase-2-implement');
     expect(r).not.toContain('08d-adversarial-qa');
     expect(r).not.toContain('04-phase-0b-pre-planning');
   });
 
-  it('plan_tasklist: spec + DAG kept, adversarial dropped', () => {
+  it('plan_tasklist: model-health first, spec + DAG kept, adversarial dropped', () => {
     const r = ids('plan_tasklist');
+    expect(r[0]).toBe('00-model-health-workflow');
     expect(r).toContain('04-phase-0b-pre-planning');
     expect(r).toContain('06b-sprint-planning');
     expect(r).not.toContain('08d-adversarial-qa');

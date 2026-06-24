@@ -100,12 +100,14 @@ async function buildRunList(ctx: ResolvedTaskContext): Promise<StepDefinition[]>
   // onboarding_upgrade, kb_author, etc. run their full registered list unchanged.
   if (ctx.workflowType !== 'workflow') return main;
   const prelude = stepRegistry.listByWorkflow('env_replicate');
-  // 00-triage runs first (ahead of the env-replicate prelude so the path is chosen
-  // up front); execution_path (null pre-triage / on legacy rows) then trims the
-  // workflow steps to the chosen path. The ordering + filtering is a pure helper in
-  // orchestrator/execution-paths.ts so it can be unit-tested. Safe with the forward
-  // walk because every path set contains triage + the spine, so the just-finished
-  // step is always present in the filtered list.
+  // The model-health canary runs first (a dead model fails loudly before any path is
+  // chosen — the path is moot when no model can run it), then 00-triage, both ahead of
+  // the env-replicate prelude so the path is chosen up front; execution_path (null
+  // pre-triage / on legacy rows) then trims the workflow steps to the chosen path. The
+  // ordering + filtering is a pure helper in orchestrator/execution-paths.ts so it can
+  // be unit-tested. Safe with the forward walk because every path set contains the
+  // canary + triage + the spine, so the just-finished step is always present in the
+  // filtered list.
   return orderWorkflowRunList(main, prelude, ctx.executionPath);
 }
 

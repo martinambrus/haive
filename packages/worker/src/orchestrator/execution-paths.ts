@@ -12,8 +12,15 @@ import type { ExecutionPath } from '@haive/shared';
 // (PATH_REQUIRED_TARGETS) is enforced at boot by assertPathStepSetsClosed.
 // See plan: ~/.claude/plans/hidden-puzzling-lantern.md.
 
+/** The pre-flight model-health canary id (workflow pipeline). Single source of
+ *  truth — referenced by the SPINE and buildRunList (which pulls it to the very
+ *  front, ahead of triage): a dead model fails loudly here before a path is chosen,
+ *  since the chosen path is moot when no model can run it. */
+export const MODEL_HEALTH_STEP_ID = '00-model-health-workflow';
+
 /** The pre-flight triage step id. Single source of truth — referenced by the step
- *  definition, the SPINE, and buildRunList (which pulls it to the front). */
+ *  definition, the SPINE, and buildRunList (which pulls it to the front, just behind
+ *  the model-health canary). */
 export const TRIAGE_STEP_ID = '00-triage';
 
 /** Steps present in every non-full path. 00-triage MUST be in every set so that,
@@ -22,8 +29,8 @@ export const TRIAGE_STEP_ID = '00-triage';
  *  spine because spine verify steps (08-phase-5-verify fixLoop, 07c-ddev-reconcile
  *  fixLoopOnError) loop back to it. */
 const SPINE: readonly string[] = [
+  MODEL_HEALTH_STEP_ID,
   TRIAGE_STEP_ID,
-  '00-model-health-workflow',
   '01-worktree-setup',
   '01a-app-boot',
   '01b-install-plugins',
@@ -104,19 +111,24 @@ export interface OrderableStep {
   readonly metadata: { readonly id: string; readonly workflowType: string };
 }
 
-/** Build the ordered run list for a workflow task: 00-triage first (ahead of the
- *  env-replicate prelude so the path is chosen up front), then the prelude, then the
- *  remaining workflow steps in their existing order. When a path is set, workflow
- *  steps are trimmed to that path; the env-replicate prelude is never filtered.
- *  Pure (no registry / DB) so it is unit-testable. */
+/** Build the ordered run list for a workflow task: the model-health canary first (a
+ *  dead model fails loudly before anything else runs), then 00-triage (so the path is
+ *  chosen up front), then the env-replicate prelude, then the remaining workflow steps
+ *  in their existing order. When a path is set, workflow steps are trimmed to that
+ *  path; the env-replicate prelude is never filtered. Both the canary and triage are
+ *  in every path set (SPINE), so neither is ever filtered out. Pure (no registry / DB)
+ *  so it is unit-testable. */
 export function orderWorkflowRunList<T extends OrderableStep>(
   main: readonly T[],
   prelude: readonly T[],
   path: ExecutionPath | null,
 ): T[] {
+  const health = main.filter((s) => s.metadata.id === MODEL_HEALTH_STEP_ID);
   const triage = main.filter((s) => s.metadata.id === TRIAGE_STEP_ID);
-  const rest = main.filter((s) => s.metadata.id !== TRIAGE_STEP_ID);
-  const ordered = [...triage, ...prelude, ...rest];
+  const rest = main.filter(
+    (s) => s.metadata.id !== MODEL_HEALTH_STEP_ID && s.metadata.id !== TRIAGE_STEP_ID,
+  );
+  const ordered = [...health, ...triage, ...prelude, ...rest];
   if (!path) return ordered;
   return ordered.filter(
     (s) => s.metadata.workflowType === 'env_replicate' || keepForPath(s.metadata.id, path),

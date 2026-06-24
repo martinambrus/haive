@@ -12,13 +12,13 @@ import { TRIAGE_STEP_ID } from '../../../orchestrator/execution-paths.js';
 import { isBugBranch } from './01-worktree-setup.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 
-// 00-triage — the pre-flight difficulty assessment. Runs FIRST (buildRunList pulls
-// it ahead of the env-replicate prelude) so the user picks an execution path up
-// front. A one-shot LLM classifies the task into quick_bugfix / plan_tasklist /
-// full_workflow; that recommendation pre-selects a radio the user can override. The
-// chosen path is written to tasks.execution_path, which buildRunList then uses to
-// trim the workflow step list. The LLM is optional — with no usable CLI it degrades
-// to a deterministic heuristic baseline so the step never blocks.
+// 00-triage — the pre-flight difficulty assessment. Runs second, right after the
+// 00-model-health canary and ahead of the env-replicate prelude, so the user picks an
+// execution path up front. A one-shot LLM classifies the task into quick_bugfix /
+// plan_tasklist / full_workflow; that recommendation pre-selects a radio the user can
+// override. The chosen path is written to tasks.execution_path, which buildRunList
+// then uses to trim the workflow step list. The LLM is optional — with no usable CLI
+// it degrades to a deterministic heuristic baseline so the step never blocks.
 
 interface TriageDetect {
   title: string;
