@@ -10,6 +10,7 @@ import { segmentMarkdownBody, type Segment } from './markdown-segments';
 import { QuizBlock } from './quiz-block';
 import { MermaidBlock } from './mermaid-block';
 import { BeforeAfterBlock, BeforeAfterPanel } from './before-after-block';
+import { JsonTreeBlock } from './json-tree-block';
 import { downloadMarkdownHtml } from './export-html';
 
 /** Heuristic markdown detection — true when the body has a heading line, a fenced
@@ -53,6 +54,27 @@ function fenceLanguage(node: Element | undefined): string | null {
   return null;
 }
 
+/** When a fenced block strictly parses as JSON, PreBlock renders it as a
+ *  collapsible tree instead of a flat <pre>. Eligible fences: tagged
+ *  json/jsonc/json5, or an unlabeled fence whose body opens with `{`/`[`.
+ *  Anything that fails JSON.parse (truncated, NDJSON, comments, trailing
+ *  commas) returns null and falls through to the normal <pre>. The wrapper
+ *  object lets a valid parse of `null`/`false`/`0` be told apart from "not
+ *  JSON". */
+const JSON_FENCE_LANGS = new Set(['json', 'jsonc', 'json5']);
+function parseJsonFence(lang: string | null, raw: string): { value: unknown } | null {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  const eligible =
+    lang !== null ? JSON_FENCE_LANGS.has(lang) : trimmed[0] === '{' || trimmed[0] === '[';
+  if (!eligible) return null;
+  try {
+    return { value: JSON.parse(trimmed) };
+  } catch {
+    return null;
+  }
+}
+
 type PreProps = React.ComponentPropsWithoutRef<'pre'> & ExtraProps;
 
 /** react-markdown v10 only produces <pre> for fenced code blocks, so this is
@@ -66,6 +88,8 @@ function PreBlock({ node, children, ...rest }: PreProps) {
   const raw = textOf(node?.children).replace(/\n$/, '');
   if (lang === 'mermaid') return <MermaidBlock source={raw} />;
   if (lang === 'before' || lang === 'after') return <BeforeAfterPanel side={lang} code={raw} />;
+  const json = parseJsonFence(lang, raw);
+  if (json) return <JsonTreeBlock value={json.value} />;
   const lines = raw.length === 0 ? 0 : raw.split('\n').length;
   if (lines > COLLAPSE_LINES) {
     return (
