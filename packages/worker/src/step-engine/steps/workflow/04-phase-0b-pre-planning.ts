@@ -9,6 +9,7 @@ import { parseJsonLoose } from '../_fenced-json.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 import { loadBusinessRequirements } from './_business-requirements.js';
+import { isBugBranch } from './01-worktree-setup.js';
 
 interface KbReference {
   id: string;
@@ -23,6 +24,9 @@ interface PrePlanningDetect {
   businessRequirements: string;
   relevantKbIds: string[];
   kbReferences: KbReference[];
+  /** True when this task is a bug fix (isBugBranch on title/description/category).
+   *  Steers the RAG retrieval guidance: bug fixes lean on run-books + learnings. */
+  isBugFix: boolean;
   /** Latest gate-1 (06) spec rejection feedback not yet re-approved; pre-filled into the
    *  scope field and auto-submitted so a re-draft addresses it. Empty on the first run /
    *  after approval. */
@@ -195,6 +199,7 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
       businessRequirements,
       relevantKbIds: ids,
       kbReferences,
+      isBugFix: isBugBranch(meta.title, meta.description, meta.category),
       priorRejectionFeedback: await loadOutstandingSpecFeedback(ctx),
     };
   },
@@ -273,6 +278,14 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         'compatibility for existing callers and stored data. Omit a dimension only when it genuinely',
         'does not apply to this change.',
         'Ground every claim in the discovery summary — do not invent details.',
+        '',
+        'Knowledge retrieval — use the `rag_search` MCP tool; it returns ranked, TYPED snippets:',
+        '- KB articles + indexed code: the project’s documented behavior and the real implementation.',
+        '- LEARNINGS (paths under `.claude/learnings/`): durable lessons from PRIOR runs. Search them to',
+        '  avoid repeating past mistakes on similar work and fold the relevant ones into the Risks section.',
+        detected.isBugFix
+          ? '- RUN-BOOKS (`.claude/knowledge_base/investigations/`): past bug investigations (symptom → root cause → fix). This task is a BUG FIX — search them FIRST for this class of bug; quote the prior symptom/root cause and ground the Approach in what resolved it before.'
+          : '- RUN-BOOKS (`.claude/knowledge_base/investigations/`): past bug investigations. Lower priority for this NEW-FEATURE task, but still worth checking when extending a historically-buggy area.',
         '',
         'Presentation conventions for the spec body (the Haive web renderer detects and upgrades these):',
         '1. REQUIRED final section `## Comprehension Quiz` with 3-5 questions that test understanding',

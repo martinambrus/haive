@@ -11,6 +11,9 @@ export interface TaskMeta {
   /** Clients/tenants the fix affects (tasks.metadata.affectedClients). Empty when
    *  not set. Recorded only in the local investigation frontmatter. */
   affectedClients: string[];
+  /** Task category at creation (tasks.metadata.category), e.g. 'bugfix'. Null when
+   *  unset. Combined with the title/description by isBugBranch to classify the task. */
+  category: string | null;
 }
 
 export interface DdevWorkspace {
@@ -73,17 +76,21 @@ export async function loadTaskMeta(db: Database, taskId: string): Promise<TaskMe
   const meta = (row?.metadata ?? null) as {
     feature?: unknown;
     affectedClients?: unknown;
+    category?: unknown;
   } | null;
   const feature =
     typeof meta?.feature === 'string' && meta.feature.length > 0 ? meta.feature : null;
   const affectedClients = Array.isArray(meta?.affectedClients)
     ? meta.affectedClients.filter((c): c is string => typeof c === 'string')
     : [];
+  const category =
+    typeof meta?.category === 'string' && meta.category.length > 0 ? meta.category : null;
   return {
     title: row?.title ?? '',
     description: row?.description ?? '',
     feature,
     affectedClients,
+    category,
   };
 }
 
