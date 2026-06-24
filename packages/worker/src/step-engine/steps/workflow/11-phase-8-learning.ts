@@ -399,12 +399,19 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       reviewerNote?: string;
     };
     const reviewerNote = values.reviewerNote ?? '';
+    // Write into the worktree (the feature branch), NOT the main checkout. ctx.repoPath
+    // is the repo root; 01-worktree-setup created the worktree the rest of the pipeline
+    // (07/10/11a/12) operates in, so KB/learnings must land there to be on the branch,
+    // committed (11b-kb-commit), pushed (11a) and merged (12). Mirrors 10-gate-3-commit.
+    const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
+    const worktreePath =
+      (worktree?.output as { worktreePath?: string } | null)?.worktreePath ?? ctx.workspacePath;
     const parsed = parseLearningOutput(args.llmOutput ?? null);
     const source: 'llm' | 'stub' = parsed && parsed.length > 0 ? 'llm' : 'stub';
     const entries = parsed && parsed.length > 0 ? parsed : stubLearning(args.detected);
     const written =
       values.writeFiles !== false
-        ? await writeLearningEntries(ctx.repoPath, entries, reviewerNote)
+        ? await writeLearningEntries(worktreePath, entries, reviewerNote)
         : [];
 
     // Idempotent re-runs (Retry): replace this task's prior promoted drafts so a
@@ -435,7 +442,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         investigationWritten = promo ? `global-kb:${promo.id}` : null;
       } else {
         investigationWritten = await writeInvestigation(
-          ctx.repoPath,
+          worktreePath,
           investigation,
           args.detected.taskTitle,
           reviewerNote,
