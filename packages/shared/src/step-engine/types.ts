@@ -109,6 +109,16 @@ export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
   '01b-install-plugins',
 ];
 
+/** The model-health canary step ids (one per pipeline). The canary validates the
+ *  task's chosen model, so a CLI change here is a task-level decision, not a
+ *  per-step one: the api rewrites tasks.cli_provider_id to the new provider so
+ *  every later step inherits it (worker re-reads it each advance). Duplicated
+ *  here because the api cannot import the worker step registry. */
+export const MODEL_HEALTH_STEP_IDS: readonly string[] = [
+  '00-model-health-onboarding',
+  '00-model-health-workflow',
+];
+
 /** Step ids whose StepDefinition dispatches a CLI — i.e. defines `llm`,
  *  `agentMining`, or `dagExecute` (the exact predicate the worker step runner
  *  uses to decide an invocation happens). Only these steps ever consume a

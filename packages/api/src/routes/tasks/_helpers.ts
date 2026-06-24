@@ -3,6 +3,7 @@ import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_DISPATCH_STEP_IDS,
+  MODEL_HEALTH_STEP_IDS,
   SKIPPABLE_STEP_IDS,
   STEP_CLI_ROLES,
   type CliRoleDescriptor,
@@ -453,4 +454,39 @@ export async function appendTaskEvent(
     eventType,
     payload,
   });
+}
+
+/** The model-health canary validates THE task's model, so swapping the CLI on a
+ *  canary step (typically because the canary rejected the original model) is a
+ *  task-level decision, not a per-step one: rewrite tasks.cli_provider_id so every
+ *  later step that falls back to the task default — every step under
+ *  ignore_saved_step_clis, and any untouched step otherwise — dispatches the new
+ *  model instead of the rejected one. The worker re-reads tasks.cli_provider_id on
+ *  each advance (resolveTaskContext), so the next step picks it up.
+ *
+ *  No-op (returns false) unless this is a canary step AND a concrete provider was
+ *  picked: clearing the per-step pref back to the task default carries no new
+ *  provider to propagate. Returns true when it rewrote the default. */
+export async function propagateModelHealthCliToTaskDefault(
+  db: ReturnType<typeof getDb>,
+  params: {
+    taskId: string;
+    taskStepId: string;
+    stepId: string;
+    cliProviderId: string | null;
+    by: string;
+  },
+): Promise<boolean> {
+  const { taskId, taskStepId, stepId, cliProviderId, by } = params;
+  if (!cliProviderId || !MODEL_HEALTH_STEP_IDS.includes(stepId)) return false;
+  await db
+    .update(schema.tasks)
+    .set({ cliProviderId, updatedAt: new Date() })
+    .where(eq(schema.tasks.id, taskId));
+  await appendTaskEvent(db, taskId, taskStepId, 'task.cli_provider_changed', {
+    cliProviderId,
+    via: stepId,
+    by,
+  });
+  return true;
 }

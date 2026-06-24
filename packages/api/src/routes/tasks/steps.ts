@@ -23,6 +23,7 @@ import {
   enrichStepsWithCliStats,
   enrichStepsWithCliPreferences,
   enrichStepsWithSkipFlag,
+  propagateModelHealthCliToTaskDefault,
 } from './_helpers.js';
 
 export const stepRoutes = new Hono<AppEnv>();
@@ -753,6 +754,17 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
         ),
       );
   }
+
+  // A CLI swap on the model-health canary rewrites the task default so every later
+  // step inherits the new model (see propagateModelHealthCliToTaskDefault). No-op
+  // for any other step or when the pref was cleared rather than set.
+  await propagateModelHealthCliToTaskDefault(db, {
+    taskId: id,
+    taskStepId: step.id,
+    stepId,
+    cliProviderId: body.cliProviderId ?? null,
+    by: userId,
+  });
 
   // Same touch tracking as the role path, for the 'default' single-CLI pref.
   if (task.ignoreSavedStepClis) {
