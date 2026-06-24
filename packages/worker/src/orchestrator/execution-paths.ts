@@ -68,6 +68,7 @@ const PLAN_TASKLIST_EXTRA: readonly string[] = [
   '08c2-code-audit',
   '09-gate-2-verify-approval',
   '11-phase-8-learning',
+  '11b-kb-commit',
 ];
 
 export const PATH_STEP_SETS: Record<
@@ -89,7 +90,6 @@ export const PATH_REQUIRED_TARGETS: Record<string, string> = {
   '08-phase-5-verify': '07-phase-2-implement', // fixLoop
   '07c-ddev-reconcile': '07-phase-2-implement', // fixLoopOnError
   '08c-code-review': '07-phase-2-implement', // fixLoop
-  '08d-adversarial-qa': '07-phase-2-implement', // fixLoop
   '08a-browser-verify': '07-phase-2-implement', // fixLoop + restartLoop
   '09-gate-2-verify-approval': '07-phase-2-implement', // restartLoop
   '06-gate-1-spec-approval': '04-phase-0b-pre-planning', // reviseLoop

@@ -8,6 +8,7 @@ import { ddevEnvStep } from './01c-ddev-env.js';
 import { preRagSyncStep } from './02-pre-rag-sync.js';
 import { phase0aDiscoveryStep } from './03-phase-0a-discovery.js';
 import { businessRequirementsStep } from './03b-business-requirements.js';
+import { humanizeRequirementsStep } from './03b2-humanize-requirements.js';
 import { businessRequirementsReviewStep } from './03c-business-requirements-review.js';
 import { phase0bPrePlanningStep } from './04-phase-0b-pre-planning.js';
 import { specAuditStep } from './04a-spec-audit.js';
@@ -29,10 +30,12 @@ import { testManagementStep } from './08b-test-management.js';
 import { codeReviewStep } from './08c-code-review.js';
 import { codeAuditStep } from './08c2-code-audit.js';
 import { adversarialQaStep } from './08d-adversarial-qa.js';
+import { adversarialQaReviewStep } from './08d2-adversarial-qa-review.js';
 import { insightsTriageStep } from './08e-insights-triage.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
 import { gate3CommitStep } from './10-gate-3-commit.js';
 import { phase8LearningStep } from './11-phase-8-learning.js';
+import { kbCommitStep } from './11b-kb-commit.js';
 import { gate4PushStep } from './11a-gate-4-push.js';
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
 
@@ -45,6 +48,7 @@ export {
   preRagSyncStep,
   phase0aDiscoveryStep,
   businessRequirementsStep,
+  humanizeRequirementsStep,
   businessRequirementsReviewStep,
   phase0bPrePlanningStep,
   specAuditStep,
@@ -66,10 +70,12 @@ export {
   codeReviewStep,
   codeAuditStep,
   adversarialQaStep,
+  adversarialQaReviewStep,
   insightsTriageStep,
   gate2VerifyApprovalStep,
   gate3CommitStep,
   phase8LearningStep,
+  kbCommitStep,
   gate4PushStep,
   worktreeCleanupStep,
 };
@@ -84,6 +90,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(preRagSyncStep);
   registry.register(phase0aDiscoveryStep);
   registry.register(businessRequirementsStep);
+  registry.register(humanizeRequirementsStep);
   registry.register(businessRequirementsReviewStep);
   registry.register(phase0bPrePlanningStep);
   registry.register(specAuditStep);
@@ -105,10 +112,12 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(codeReviewStep);
   registry.register(codeAuditStep);
   registry.register(adversarialQaStep);
+  registry.register(adversarialQaReviewStep);
   registry.register(insightsTriageStep);
   registry.register(gate2VerifyApprovalStep);
   registry.register(gate3CommitStep);
   registry.register(phase8LearningStep);
+  registry.register(kbCommitStep);
   registry.register(gate4PushStep);
   registry.register(worktreeCleanupStep);
 }

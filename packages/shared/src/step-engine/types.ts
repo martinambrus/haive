@@ -98,6 +98,7 @@ export const SKIPPABLE_STEP_IDS: readonly string[] = [
   '03b-business-requirements',
   '06a-db-migrate',
   '11a-gate-4-push',
+  '11b-kb-commit',
 ];
 
 export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
@@ -150,6 +151,7 @@ export const CLI_DISPATCH_STEP_IDS: readonly string[] = [
   '01a-app-boot',
   '03-phase-0a-discovery',
   '03b-business-requirements',
+  '03b2-humanize-requirements',
   '04-phase-0b-pre-planning',
   '04a-spec-audit',
   '05-phase-0b5-spec-quality',
