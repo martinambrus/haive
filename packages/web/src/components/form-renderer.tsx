@@ -63,7 +63,7 @@ export function InfoSections({ sections }: { sections: FormSchema['infoSections'
             </summary>
             {isMd ? (
               <div className="border-t border-neutral-800">
-                <MarkdownView body={section.body} enhanced />
+                <MarkdownView body={section.body} enhanced title={section.title} toolbar />
               </div>
             ) : (
               <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-t border-neutral-800 px-3 py-2 text-xs text-neutral-300">

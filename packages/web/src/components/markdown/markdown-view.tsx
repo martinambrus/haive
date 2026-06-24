@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown, { type Components, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -10,6 +10,7 @@ import { segmentMarkdownBody, type Segment } from './markdown-segments';
 import { QuizBlock } from './quiz-block';
 import { MermaidBlock } from './mermaid-block';
 import { BeforeAfterBlock, BeforeAfterPanel } from './before-after-block';
+import { downloadMarkdownHtml } from './export-html';
 
 /** Heuristic markdown detection — true when the body has a heading line, a fenced
  *  code block, an inline code span `` `x` ``, a bold run `**x**`, or a Markdown link
@@ -129,12 +130,20 @@ export function MarkdownView({
   body,
   enhanced = true,
   className,
+  title,
+  toolbar = false,
 }: {
   body: string;
   enhanced?: boolean;
   className?: string;
+  /** Filename stem for the HTML download and the fullscreen header. */
+  title?: string;
+  /** Show the hover-revealed Maximize + Download toolbar. Off by default so
+   *  existing callers (step summaries, source previews) are unchanged. */
+  toolbar?: boolean;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const [maximized, setMaximized] = useState(false);
   const segments = useMemo<Segment[]>(
     () => (enhanced ? segmentMarkdownBody(body) : [{ kind: 'markdown', text: body }]),
     [body, enhanced],
@@ -150,10 +159,22 @@ export function MarkdownView({
     });
   };
 
-  return (
-    <div ref={rootRef} className={cn('haive-md max-h-96 overflow-auto px-3 py-2', className)}>
+  // Esc exits fullscreen (mirrors commit-diff-viewer).
+  useEffect(() => {
+    if (!maximized) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setMaximized(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [maximized]);
+
+  // Rendered once and shared across the toolbar/maximize branches so the
+  // subtree (and its already-rendered mermaid SVGs) never remounts on toggle.
+  const content = (
+    <>
       {collapsible && (
-        <div className="mb-1 flex justify-end gap-2">
+        <div data-md-export-skip className="mb-1 flex justify-end gap-2">
           <button
             type="button"
             onClick={() => setAll(true)}
@@ -186,6 +207,72 @@ export function MarkdownView({
           </ReactMarkdown>
         );
       })}
+    </>
+  );
+
+  // Default callers render exactly as before — no wrapper, no toolbar.
+  if (!toolbar) {
+    return (
+      <div ref={rootRef} className={cn('haive-md max-h-96 overflow-auto px-3 py-2', className)}>
+        {content}
+      </div>
+    );
+  }
+
+  const onDownload = (): void => {
+    if (rootRef.current) downloadMarkdownHtml(title ?? 'document', rootRef.current);
+  };
+
+  const btnClass =
+    'rounded border border-neutral-800 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-900';
+
+  return (
+    <div
+      className={
+        maximized ? 'fixed inset-0 z-50 flex flex-col gap-2 bg-neutral-950 p-3' : 'group relative'
+      }
+    >
+      {maximized && (
+        <div className="flex items-center justify-between gap-2 px-1">
+          <span className="text-sm font-medium text-neutral-200">{title ?? 'Document'}</span>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={onDownload} className={btnClass}>
+              Download
+            </button>
+            <button type="button" onClick={() => setMaximized(false)} className={btnClass}>
+              Exit fullscreen
+            </button>
+          </div>
+        </div>
+      )}
+      {!maximized && (
+        <div className="pointer-events-none absolute right-2 top-2 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <button
+            type="button"
+            onClick={() => setMaximized(true)}
+            className={cn(btnClass, 'pointer-events-auto bg-neutral-950/80')}
+          >
+            Maximize
+          </button>
+          <button
+            type="button"
+            onClick={onDownload}
+            className={cn(btnClass, 'pointer-events-auto bg-neutral-950/80')}
+          >
+            Download
+          </button>
+        </div>
+      )}
+      <div
+        ref={rootRef}
+        className={cn(
+          'haive-md overflow-auto px-3 py-2',
+          maximized ? 'min-h-0 flex-1' : 'max-h-96',
+          className,
+        )}
+      >
+        {content}
+      </div>
     </div>
   );
 }
