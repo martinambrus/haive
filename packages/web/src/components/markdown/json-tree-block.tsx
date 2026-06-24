@@ -7,10 +7,9 @@
  * or is an unlabeled fence whose body strictly parses as JSON. Malformed JSON
  * never reaches here — PreBlock falls back to <pre> on parse failure.
  *
- * Uncontrolled <details> per node (no React open-state): the initial `open`
- * flag is a pure function of depth + entry count, so it stays constant across
- * the parent's re-renders. React therefore applies `open` once on mount and
- * never overwrites the user's manual toggle — the same reason MarkdownView's
+ * Uncontrolled <details> per node (no React open-state): every node defaults to
+ * open, and the `open` prop is a constant, so React applies it once on mount and
+ * never overwrites the user's manual collapse — the same reason MarkdownView's
  * Expand-all/Collapse-all DOM mutation is safe on the surrounding <details>.
  * Nodes are keyed by object key / array index so reconciliation is stable.
  *
@@ -19,16 +18,10 @@
  * default disclosure triangle (same affordance as .haive-code-details).
  */
 
-/** Auto-expand containers shallower than this; deeper ones start collapsed. */
-const AUTO_OPEN_DEPTH = 2;
-/** Auto-collapse a container with more entries than this, at any depth — keeps
- *  large fix-loop payloads from rendering thousands of open nodes at once. */
-const AUTO_OPEN_MAX_ENTRIES = 100;
-
 export function JsonTreeBlock({ value }: { value: unknown }) {
   return (
     <div className="haive-json-tree my-2 overflow-auto rounded-md border border-neutral-800 bg-neutral-950 p-3 font-mono text-[12px] leading-relaxed text-neutral-200">
-      <JsonNode value={value} depth={0} />
+      <JsonNode value={value} />
     </div>
   );
 }
@@ -42,13 +35,11 @@ function JsonNode({
   name,
   index,
   value,
-  depth,
 }: {
   name?: string;
   /** True when `name` is an array index, so it renders dimmer than object keys. */
   index?: boolean;
   value: unknown;
-  depth: number;
 }) {
   if (value === null || typeof value !== 'object') {
     return (
@@ -80,10 +71,12 @@ function JsonNode({
 
   const noun = isArray ? 'item' : 'key';
   const count = `${entries.length} ${noun}${entries.length === 1 ? '' : 's'}`;
-  const initiallyOpen = depth < AUTO_OPEN_DEPTH && entries.length <= AUTO_OPEN_MAX_ENTRIES;
 
+  // Every container starts expanded — manual 1-by-1 expansion was tedious. The
+  // user can still collapse any node; React keeps the open prop constant so it
+  // never reverts a manual collapse on re-render.
   return (
-    <details open={initiallyOpen} className="haive-json-node">
+    <details open className="haive-json-node">
       <summary className="whitespace-nowrap">
         <Label name={name} index={index} />
         <span className="text-neutral-500">{open}</span>
@@ -92,7 +85,7 @@ function JsonNode({
       </summary>
       <div className="ml-1 border-l border-neutral-800 pl-3">
         {entries.map(([k, v]) => (
-          <JsonNode key={k} name={k} index={isArray} value={v} depth={depth + 1} />
+          <JsonNode key={k} name={k} index={isArray} value={v} />
         ))}
       </div>
     </details>
