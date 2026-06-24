@@ -298,8 +298,11 @@ export const formSchemaSchema = z.object({
    *   - 'retry': trigger a step retry instead — the renderer skips the form
    *     entirely and shows a single Retry button. Use when `detect` finds
    *     a precondition unmet (e.g. no git repo) and the only useful next
-   *     action is for the user to fix the precondition and re-run detect. */
-  submitAction: z.enum(['submit', 'retry']).optional(),
+   *     action is for the user to fix the precondition and re-run detect.
+   *   - 'clarify': POST the answer to the step's /clarify route — a mid-step
+   *     clarification (e.g. the merge-resolver asking how to resolve a conflict)
+   *     whose answer must NOT overwrite the step's form values. */
+  submitAction: z.enum(['submit', 'retry', 'clarify']).optional(),
   /** Auto-submit this form (posting its field defaults / `{}`) WITHOUT pausing for
    *  the user, even when the task's auto-continue is off. Use for an info-only form
    *  that has nothing to decide (e.g. 06b's single-agent decision) — its

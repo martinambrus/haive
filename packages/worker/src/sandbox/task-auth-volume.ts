@@ -51,6 +51,11 @@ const log = logger.child({ module: 'task-auth-volume' });
 const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? 'haive-cli-sandbox:latest';
 const READY_MARKER = '.haive-ready';
 const HELPER_TIMEOUT_MS = 60_000;
+const VOLUME_READY_POLL_MS = 1_500;
+// A concurrent sibling agent's populate helper finishes well within this; bounded so a
+// genuinely-stale volume still gets recreated promptly.
+const VOLUME_READY_MAX_WAIT_MS = 30_000;
+const VOLUME_REMOVE_RETRIES = 5;
 
 /** Distinct exit code from the rtk seed helper script when the sandbox image
  *  has no rtk binary on PATH. Exported so tests can assert on the boundary. */
@@ -83,7 +88,18 @@ export async function ensureTaskAuthVolumes(
         continue;
       }
       log.warn({ taskVol }, 'task auth volume exists but not ready, recreating');
-      const removed = await runner.volumeRemove(taskVol);
+      let removed = await runner.volumeRemove(taskVol);
+      if (!removed.ok && /in use/i.test(removed.stderr)) {
+        // In use → a CONCURRENT sibling agent (08c fans out 2 agents that share this
+        // per-task volume) is mid-setup with the volume mounted by its populate helper,
+        // which is what produced the EXIT -1. Wait for it to make the volume ready and
+        // reuse it; only if it stays unready do we retry the remove (the sibling's
+        // helper has exited by then) and recreate.
+        if (await waitForTaskVolumeReady(taskVol, runner)) {
+          continue;
+        }
+        removed = await removeVolumeWithRetry(taskVol, runner);
+      }
       if (!removed.ok) {
         throw new Error(
           `Failed to remove stale task auth volume ${taskVol}: ${removed.stderr || 'unknown error'}`,
@@ -132,6 +148,36 @@ export async function ensureTaskAuthVolumes(
 
     log.info({ taskVol, userVol, userHasData }, 'task auth volume ready');
   }
+}
+
+/** Poll until the volume is ready or the wait elapses. A concurrent sibling agent
+ *  (08c fan-out shares this per-task volume) may be mid-setup; wait for it rather than
+ *  racing a remove against its mounted populate helper. */
+async function waitForTaskVolumeReady(taskVol: string, runner: DockerRunner): Promise<boolean> {
+  const deadline = Date.now() + VOLUME_READY_MAX_WAIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, VOLUME_READY_POLL_MS));
+    if (await isTaskVolumeReady(taskVol, runner)) return true;
+  }
+  return false;
+}
+
+/** Remove a volume, retrying on a transient "volume is in use" (a sibling's populate
+ *  helper exiting). Returns the last attempt's result. */
+async function removeVolumeWithRetry(
+  taskVol: string,
+  runner: DockerRunner,
+): Promise<{ ok: boolean; stderr: string }> {
+  let last = await runner.volumeRemove(taskVol);
+  for (
+    let attempt = 0;
+    !last.ok && /in use/i.test(last.stderr) && attempt < VOLUME_REMOVE_RETRIES;
+    attempt += 1
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, VOLUME_READY_POLL_MS));
+    last = await runner.volumeRemove(taskVol);
+  }
+  return last;
 }
 
 async function isTaskVolumeReady(taskVol: string, runner: DockerRunner): Promise<boolean> {

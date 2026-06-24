@@ -308,7 +308,16 @@ export default function TaskDetailPage() {
     setSubmitting(step.stepId);
     setSubmitError(null);
     try {
-      await api.post(`/tasks/${id}/steps/${step.stepId}/submit`, { values });
+      const schema = step.formSchema as FormSchema | null;
+      if (schema?.submitAction === 'clarify') {
+        // Mid-step clarification (e.g. the merge-resolver). The answer must NOT
+        // overwrite the step's form values, so it goes to /clarify (task_events).
+        await api.post(`/tasks/${id}/steps/${step.stepId}/clarify`, {
+          answer: String(values.mergeGuidance ?? ''),
+        });
+      } else {
+        await api.post(`/tasks/${id}/steps/${step.stepId}/submit`, { values });
+      }
       await reload();
       // Keep button disabled here. The effect below clears `submitting` once the
       // step's status leaves `waiting_form`, which is when the form unmounts

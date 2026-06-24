@@ -1,14 +1,16 @@
-import { execFile } from 'node:child_process';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
-import { getDecryptedCredentials } from '../../../repo/credentials.js';
-
-const exec = promisify(execFile);
+import {
+  detectOrigin,
+  ensureOrigin,
+  getOriginUrl,
+  gitRun,
+  pushBranch,
+} from '../../../repo/git-push.js';
 
 const MANUAL_CREDENTIAL_VALUE = '';
 
@@ -35,33 +37,6 @@ interface PushGateApply {
   remote: string | null;
   branch: string | null;
   message: string;
-}
-
-async function gitRun(
-  cwd: string,
-  args: string[],
-  env?: Record<string, string>,
-): Promise<{ stdout: string; stderr: string; code: number }> {
-  try {
-    const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
-    const { stdout, stderr } = await exec('git', args, opts);
-    return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number };
-    return {
-      stdout: (e.stdout ?? '').toString(),
-      stderr: (e.stderr ?? '').toString(),
-      code: typeof e.code === 'number' ? e.code : 1,
-    };
-  }
-}
-
-/** Replace every occurrence of the secret in command output before it is
- *  logged or surfaced to the user. Defensive: git masks credential-helper
- *  passwords in most errors, but a misconfigured remote can echo them. */
-function scrubSecret(text: string, secret: string | null): string {
-  if (!secret) return text;
-  return text.split(secret).join('***');
 }
 
 export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
@@ -125,19 +100,8 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
     const branchRes = await gitRun(workspacePath, ['rev-parse', '--abbrev-ref', 'HEAD']);
     const branch = branchRes.code === 0 ? branchRes.stdout.trim() : null;
 
-    const remotesRes = await gitRun(workspacePath, ['remote']);
-    const hasOrigin =
-      remotesRes.code === 0 &&
-      remotesRes.stdout
-        .split('\n')
-        .map((l) => l.trim())
-        .includes('origin');
-
-    let originUrl: string | null = null;
-    if (hasOrigin) {
-      const urlRes = await gitRun(workspacePath, ['remote', 'get-url', 'origin']);
-      originUrl = urlRes.code === 0 ? urlRes.stdout.trim() : null;
-    }
+    const hasOrigin = await detectOrigin(workspacePath);
+    const originUrl = hasOrigin ? await getOriginUrl(workspacePath) : null;
 
     const logRes = await gitRun(workspacePath, ['log', '--oneline', '-10']);
     const recentCommits =
@@ -287,13 +251,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       if (!remoteUrl) {
         throw new Error('origin remote URL is required to push');
       }
-      const add = await gitRun(workspace, ['remote', 'add', 'origin', remoteUrl]);
-      if (add.code !== 0 && !/remote origin already exists/i.test(add.stderr)) {
-        throw new Error(`git remote add origin failed: ${add.stderr || add.stdout}`);
-      }
-      if (/remote origin already exists/i.test(add.stderr)) {
-        await gitRun(workspace, ['remote', 'set-url', 'origin', remoteUrl]);
-      }
+      await ensureOrigin(workspace, remoteUrl);
       // Persist the remote (and the chosen credential) onto the repo row so
       // future pushes/clones are pre-wired. Plain runtime write; idempotent.
       if (detected.repositoryId) {
@@ -310,35 +268,14 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
     }
 
     const setUpstream = detected.hasOrigin ? values.setUpstream !== false : true;
-    const pushArgs: string[] = [];
-    const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
-    let secret: string | null = null;
-
-    if (values.credentialId) {
-      const creds = await getDecryptedCredentials(ctx.db, values.credentialId, ctx.userId);
-      secret = creds.secret;
-      // Inline, one-shot credential helper. The token rides in env (not argv,
-      // not .git/config), so it never persists and isn't visible via `ps`.
-      // Leading empty `credential.helper=` clears any inherited global helper.
-      env.GIT_HAIVE_USER = creds.username;
-      env.GIT_HAIVE_PASS = creds.secret;
-      pushArgs.push(
-        '-c',
-        'credential.helper=',
-        '-c',
-        `credential.helper=!f() { test "$1" = get && printf 'username=%s\\npassword=%s\\n' "$GIT_HAIVE_USER" "$GIT_HAIVE_PASS"; }; f`,
-      );
-    }
-
-    pushArgs.push('push');
-    if (setUpstream) pushArgs.push('-u');
-    pushArgs.push('origin', branch);
-
-    const res = await gitRun(workspace, pushArgs, env);
-    if (res.code !== 0) {
-      const stderr = scrubSecret(res.stderr || res.stdout, secret);
-      throw new Error(`git push failed: ${stderr}`);
-    }
+    await pushBranch({
+      cwd: workspace,
+      branch,
+      setUpstream,
+      credentialId: values.credentialId || undefined,
+      db: ctx.db,
+      userId: ctx.userId,
+    });
     ctx.logger.info({ branch, remote: 'origin' }, 'workflow push finalised');
     return { pushed: true, remote: 'origin', branch, message: `pushed ${branch} to origin` };
   },

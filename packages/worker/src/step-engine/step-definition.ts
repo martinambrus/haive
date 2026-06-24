@@ -149,6 +149,40 @@ export interface DagExecuteSpec {
   timeoutMs?: number;
 }
 
+/** Declared by a step that finishes by merging a feature branch into its base with
+ *  an LLM-driven conflict-resolution loop (resolveMergePhase). Like dagExecute the
+ *  orchestration (git + agent dispatch + the persisted state machine) lives in the
+ *  runner; the step supplies only the per-conflict fix prompt + capabilities and the
+ *  predicate that decides whether the chosen form action is a merge. The runner runs
+ *  this AFTER the form (it needs the merge action + push choice) and BEFORE apply
+ *  (which still removes the worktree). Mutually exclusive with dagExecute.
+ *  See packages/worker/src/step-engine/merge-resolver.ts. */
+export interface MergeResolveSpec {
+  requiredCapabilities: StepCapability[];
+  /** Build the conflict-resolution agent's prompt. `guidance` is the user's
+   *  free-text answer to a prior clarification (empty string when none). */
+  buildFixPrompt(args: {
+    baseBranch: string;
+    featureBranch: string;
+    conflictFiles: string[];
+    guidance: string;
+  }): string;
+  /** Build the form shown when the agent is uncertain and needs the user to decide
+   *  how to resolve the conflict. The user's answer is fed back into buildFixPrompt's
+   *  `guidance` on the next attempt. */
+  buildClarificationForm(args: {
+    baseBranch: string;
+    featureBranch: string;
+    conflictFiles: string[];
+    uncertainty: string;
+  }): FormSchema;
+  /** True when the submitted form values selected the merge path (so the phase
+   *  runs). A non-merge action makes resolveMergePhase a no-op pass-through. */
+  selectedMerge(formValues: FormValues): boolean;
+  /** Sandbox timeout per fix-agent invocation. Defaults to 30 minutes. */
+  timeoutMs?: number;
+}
+
 export interface StepApplyArgs<TDetect = unknown> {
   detected: TDetect;
   formValues: FormValues;
@@ -249,6 +283,11 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
    *  step in waiting_cli per level until every level checkpoints, then apply
    *  finalizes. See packages/worker/src/step-engine/dag-executor.ts. */
   dagExecute?: DagExecuteSpec;
+  /** Marks this step as the merge-resolver. The runner drives an LLM conflict-
+   *  resolution loop (resolveMergePhase) after the form/llm phases and before apply,
+   *  interleaving waiting_cli (fix agent) and waiting_form (user clarification) until
+   *  the merge commits or halts. Mutually exclusive with dagExecute. */
+  mergeResolve?: MergeResolveSpec;
   /** Fix-loop: when this step's apply output indicates a BLOCKING defect, the runner
    *  returns `loop_back` instead of `done`, re-entering at the implementation step for
    *  a new round (the whole post-implementation chain re-runs). `evaluate` inspects the

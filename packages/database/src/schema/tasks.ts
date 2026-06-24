@@ -155,6 +155,10 @@ export const tasks = pgTable(
     /** Per-task cap on automatic fix rounds before escalating to the user. Set on
      *  the Gate-1 run-config form; default 5. */
     maxFixRounds: integer('max_fix_rounds').notNull().default(5),
+    /** Orchestration generation. Bumped by every retry/reset re-drive so any
+     *  advance-step job enqueued under an older epoch is skipped as stale — closing
+     *  the same-step concurrency race a retry-while-active otherwise triggers. */
+    orchestrationEpoch: integer('orchestration_epoch').notNull().default(0),
     errorMessage: text('error_message'),
     startedAt: timestamp('started_at'),
     completedAt: timestamp('completed_at'),
@@ -217,6 +221,13 @@ export const taskSteps = pgTable(
      *  diagnose-and-fix agent. The step-runner dispatches a fix agent when this
      *  is present, then clears it and re-runs apply against the fixed workspace. */
     aiFixContext: jsonb('ai_fix_context').$type<{ priorError: string; priorOutput: string }>(),
+    /** Persisted state machine for the merge-resolution phase (resolveMergePhase),
+     *  the 12-worktree-cleanup analogue of task_dag_levels.merge_state. Null until
+     *  the merge phase first runs; left 'done' (or cleared) once the merge commits.
+     *  Every ADVANCE_STEP re-entry is a pure function of this + on-disk git state so
+     *  a crash + redelivery resumes correctly. jsonb, so the shape can evolve without
+     *  a migration. */
+    mergeResolveState: jsonb('merge_resolve_state').$type<MergeResolveState>(),
     /** Set true by the "Override and run" UI action (retry + overrideLocalModel):
      *  lets enforceLocalModelGuard bypass the unsafe-for-local-models block for
      *  THIS step, so a user without server shell access can run a destructive step
@@ -260,6 +271,39 @@ export interface StepIterationEntry {
    *  still have findings". */
   exhaustedBudget?: boolean;
   recordedAt: string;
+}
+
+export interface MergeResolveState {
+  /** same-branch: feature -> base merged in the parent checkout (parent IS on base).
+   *  cross-branch: parent moved off base, so the merge runs in a transient worktree
+   *  checked out on base (under .haive/worktrees) and is persisted/pushed from there. */
+  mode: 'same-branch' | 'cross-branch';
+  phase: 'pending' | 'resolving' | 'awaiting-guidance' | 'pushing' | 'done';
+  /** The branch the merge lands on (= recorded base, or parent HEAD fallback). */
+  baseBranch: string;
+  /** The branch being merged in (the worktree's feature branch). */
+  featureBranch: string;
+  /** Worker-absolute dir the merge runs in: ctx.repoPath (same-branch) or the
+   *  base worktree path (cross-branch). */
+  mergeDir: string;
+  /** mergeDir as the cli-exec sandbox sees it — the conflict fix agent's cwd. */
+  sandboxMergeDir: string;
+  /** cli_invocations.id of the in-flight conflict fix agent (null = none). */
+  fixInvocationId: string | null;
+  /** Count of automatic (unguided) fix-agent attempts so far; bounds auto-retry. */
+  conflictRetries: number;
+  /** Set while phase==='awaiting-guidance': the agent's stated uncertainty + when it
+   *  was asked, so the clarification form can be rebuilt deterministically. */
+  pendingQuestion: { uncertainty: string; askedAt: string } | null;
+  /** Whether the cleanup form requested a push of the base branch after merging. */
+  pushAfterMerge: boolean;
+  /** Terminal outcome (set when phase==='done'): whether a merge commit landed. */
+  merged: boolean;
+  /** When merged is false: why the merge did not run (e.g. cross-branch skip in the
+   *  same-branch-only path, or no base/branch). Null when merged. */
+  skipReason: string | null;
+  /** Whether the base branch was pushed to origin (the pushing phase). */
+  pushed: boolean;
 }
 
 export const taskEvents = pgTable(

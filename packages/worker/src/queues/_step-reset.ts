@@ -1,4 +1,4 @@
-import { and, eq, gt, inArray, isNull } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 
 // Reset a step + its downstream back to `pending` so the worker re-runs the step from
@@ -11,14 +11,15 @@ import { schema, type Database } from '@haive/database';
  *  superseding their open cli_invocations and dropping their agent minings. Deliberately
  *  does NOT touch task_events: append-only channels the target reads to revise (e.g. the
  *  biz-req rejection feedback) must survive the reset, exactly as across an API retry.
- *  Scoped to `round` so a concurrent fix-loop round's rows are never disturbed. Returns
- *  the downstream-reset count, or null when no target row exists for that round. */
+ *  Scoped to `round` so a concurrent fix-loop round's rows are never disturbed. Bumps the
+ *  task's orchestration epoch (like the API retry) so stale advance-step jobs no-op.
+ *  Returns the downstream-reset count + the new epoch, or null when no target row exists. */
 export async function resetStepAndDownstream(
   db: Database,
   taskId: string,
   targetStepId: string,
   round: number,
-): Promise<{ downstreamReset: number } | null> {
+): Promise<{ downstreamReset: number; newEpoch: number } | null> {
   const targetRows = await db
     .select()
     .from(schema.taskSteps)
@@ -46,6 +47,7 @@ export async function resetStepAndDownstream(
   const downstreamToReset = downstream.filter((r) => r.status !== 'pending').map((r) => r.id);
   const allStepIds = [target.id, ...downstreamToReset];
 
+  let newEpoch = 0;
   await db.transaction(async (tx) => {
     const now = new Date();
     await tx
@@ -83,7 +85,16 @@ export async function resetStepAndDownstream(
         updatedAt: now,
       })
       .where(inArray(schema.taskSteps.id, allStepIds));
+    // Bump the task's orchestration epoch so any advance-step job queued under the
+    // prior epoch (a stale/duplicate job) is skipped by handleAdvanceStep — the
+    // worker-side equivalent of the API retry's epoch bump.
+    const bumped = await tx
+      .update(schema.tasks)
+      .set({ orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`, updatedAt: now })
+      .where(eq(schema.tasks.id, taskId))
+      .returning({ epoch: schema.tasks.orchestrationEpoch });
+    newEpoch = bumped[0]?.epoch ?? 0;
   });
 
-  return { downstreamReset: downstreamToReset.length };
+  return { downstreamReset: downstreamToReset.length, newEpoch };
 }

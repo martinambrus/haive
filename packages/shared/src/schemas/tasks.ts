@@ -112,6 +112,20 @@ export const submitStepRequestSchema = z.object({
 
 export type SubmitStepRequest = z.infer<typeof submitStepRequestSchema>;
 
+/** Body for POST /tasks/:id/steps/:stepId/clarify — a free-text answer to a mid-step
+ *  clarification question (e.g. the merge-resolver's "how should I resolve this?"). */
+export const clarifyStepRequestSchema = z.object({
+  answer: z.string().min(1).max(8000),
+});
+
+export type ClarifyStepRequest = z.infer<typeof clarifyStepRequestSchema>;
+
+/** task_events event types for the merge-resolver clarification channel. Shared so
+ *  the worker (which reads outstanding guidance) and the api /clarify route (which
+ *  writes the answer) key on the same string. */
+export const MERGE_CLARIFICATION_ASKED_EVENT = 'merge_resolution.clarification_asked';
+export const MERGE_CLARIFICATION_ANSWERED_EVENT = 'merge_resolution.clarification_answered';
+
 export const taskActionSchema = z.enum(['cancel', 'retry']);
 
 export const taskActionRequestSchema = z.object({

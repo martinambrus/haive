@@ -3,7 +3,9 @@ import { z } from 'zod';
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  clarifyStepRequestSchema,
   logger,
+  MERGE_CLARIFICATION_ANSWERED_EVENT,
   setCliProviderRequestSchema,
   SKIPPABLE_STEP_IDS,
   stepActionRequestSchema,
@@ -214,6 +216,67 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
   return c.json({ ok: true, queued: true });
 });
 
+// Mid-step clarification answer (e.g. the merge-resolver asking how to resolve a
+// conflict). Unlike /submit it must NOT overwrite form_values — the answer rides
+// task_events; the worker reads the latest outstanding guidance on re-entry.
+stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const stepId = c.req.param('stepId');
+  const body = clarifyStepRequestSchema.parse(await c.req.json());
+  const db = getDb();
+
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
+    columns: { id: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+
+  const stepRows = await db
+    .select()
+    .from(schema.taskSteps)
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, id),
+        eq(schema.taskSteps.stepId, stepId),
+        eq(schema.taskSteps.status, 'waiting_form'),
+      ),
+    )
+    .orderBy(desc(schema.taskSteps.round))
+    .limit(1);
+  const step = stepRows[0];
+  if (!step) throw new HttpError(409, `No step awaiting clarification for id ${stepId}`);
+
+  const now = new Date();
+  const closedIdleMs = step.waitingStartedAt
+    ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
+    : 0;
+  // Persist the answer to task_events (NOT form_values) and close the idle period.
+  await db.insert(schema.taskEvents).values({
+    taskId: id,
+    taskStepId: step.id,
+    eventType: MERGE_CLARIFICATION_ANSWERED_EVENT,
+    payload: { answer: body.answer },
+  });
+  await db
+    .update(schema.taskSteps)
+    .set({ idleMs: step.idleMs + closedIdleMs, waitingStartedAt: null, updatedAt: now })
+    .where(eq(schema.taskSteps.id, step.id));
+
+  await appendTaskEvent(db, id, step.id, 'step.clarified', { stepId });
+
+  const queue = getTaskQueue();
+  const payload: TaskJobPayload = { taskId: id, userId, stepId, round: step.round };
+  await queue.add(TASK_JOB_NAMES.ADVANCE_STEP, payload, {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 5000 },
+    removeOnComplete: 100,
+    removeOnFail: 100,
+  });
+
+  return c.json({ ok: true, queued: true });
+});
+
 stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -268,6 +331,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       logger.info({ taskId: id, stepId, killed }, 'killed task sandboxes for retry-while-active');
     }
 
+    let newEpoch = 0;
     await db.transaction(async (tx) => {
       const now = new Date();
       const downstreamToReset = downstream.filter((r) => r.status !== 'pending').map((r) => r.id);
@@ -323,7 +387,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         .update(schema.taskSteps)
         .set({ localModelOverride: body.overrideLocalModel === true })
         .where(eq(schema.taskSteps.id, step.id));
-      await tx
+      const bumped = await tx
         .update(schema.tasks)
         .set({
           status: 'running',
@@ -331,9 +395,14 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           completedAt: null,
           currentStepId: stepId,
           currentStepIndex: step.stepIndex,
+          // Bump the orchestration epoch so any advance-step job still queued from
+          // before this retry is skipped as stale (a retry stops in-flight work first).
+          orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
           updatedAt: now,
         })
-        .where(eq(schema.tasks.id, id));
+        .where(eq(schema.tasks.id, id))
+        .returning({ epoch: schema.tasks.orchestrationEpoch });
+      newEpoch = bumped[0]?.epoch ?? 0;
       await tx.insert(schema.taskEvents).values({
         taskId: id,
         taskStepId: step.id,
@@ -352,7 +421,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       // round is essential: handleAdvanceStep defaults a missing round to 0, so it
       // would resolve the round-0 (done) sibling of a fix-loop step and advance PAST
       // the pending retried round instead of re-running it (round-drop, cf. 1408fc9).
-      { taskId: id, userId, stepId, round: step.round } as TaskJobPayload,
+      { taskId: id, userId, stepId, round: step.round, epoch: newEpoch } as TaskJobPayload,
       {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },

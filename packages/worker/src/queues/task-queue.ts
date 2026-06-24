@@ -92,6 +92,9 @@ interface ResolvedTaskContext {
   /** Execution path recorded by 00-triage; null pre-triage and on legacy rows. */
   executionPath: ExecutionPath | null;
   metadata: Record<string, unknown> | null;
+  /** Current orchestration generation; advance-step jobs from an older epoch are
+   *  skipped as stale (see handleAdvanceStep). */
+  orchestrationEpoch: number;
 }
 
 async function buildRunList(ctx: ResolvedTaskContext): Promise<StepDefinition[]> {
@@ -142,6 +145,7 @@ async function resolveTaskContext(
     ignoreSavedStepClis: task.ignoreSavedStepClis,
     executionPath: (task.executionPath as ExecutionPath | null) ?? null,
     metadata: task.metadata ?? null,
+    orchestrationEpoch: task.orchestrationEpoch ?? 0,
   };
 }
 
@@ -529,11 +533,12 @@ async function enqueueAdvance(
   userId: string,
   stepId: string,
   round = 0,
+  epoch?: number,
 ): Promise<void> {
   const queue = getTaskQueue();
   await queue.add(
     TASK_JOB_NAMES.ADVANCE_STEP,
-    { taskId, userId, stepId, round },
+    { taskId, userId, stepId, round, epoch },
     {
       attempts: 3,
       backoff: { type: 'exponential', delay: 5000 },
@@ -588,7 +593,13 @@ async function handleResult(
           computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
           nextRound,
         );
-        await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, nextRound);
+        await enqueueAdvance(
+          ctx.taskId,
+          ctx.userId,
+          next.metadata.id,
+          nextRound,
+          ctx.orchestrationEpoch,
+        );
       } else {
         await markTaskCompleted(db, ctx.taskId);
         await appendEvent(db, ctx.taskId, null, 'task.completed', {});
@@ -747,7 +758,13 @@ async function handleResult(
         computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
         nextRound,
       );
-      await enqueueAdvance(ctx.taskId, ctx.userId, target.metadata.id, nextRound);
+      await enqueueAdvance(
+        ctx.taskId,
+        ctx.userId,
+        target.metadata.id,
+        nextRound,
+        ctx.orchestrationEpoch,
+      );
       return;
     }
     case 'revise': {
@@ -783,7 +800,13 @@ async function handleResult(
         computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
         result.row.round,
       );
-      await enqueueAdvance(ctx.taskId, ctx.userId, target.metadata.id, result.row.round);
+      await enqueueAdvance(
+        ctx.taskId,
+        ctx.userId,
+        target.metadata.id,
+        result.row.round,
+        reset.newEpoch,
+      );
       return;
     }
     case 'failed': {
@@ -834,7 +857,7 @@ async function resolveFixLoopGate(
         computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
         round,
       );
-      await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round);
+      await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round, ctx.orchestrationEpoch);
     } else {
       await markTaskCompleted(db, ctx.taskId);
       await appendEvent(db, ctx.taskId, null, 'task.completed', {});
@@ -854,7 +877,13 @@ async function resolveFixLoopGate(
     computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
     nextRound,
   );
-  await enqueueAdvance(ctx.taskId, ctx.userId, target.metadata.id, nextRound);
+  await enqueueAdvance(
+    ctx.taskId,
+    ctx.userId,
+    target.metadata.id,
+    nextRound,
+    ctx.orchestrationEpoch,
+  );
 }
 
 async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<void> {
@@ -904,6 +933,25 @@ async function handleAdvanceStep(db: Database, payload: TaskJobPayload): Promise
   }
 
   const round = payload.round ?? 0;
+
+  // Epoch guard: a retry/reset bumps the task's orchestration epoch, so an advance-step
+  // job that explicitly carries an OLDER epoch is stale — skip it. This enforces the
+  // "a retry stops in-flight work first" invariant: it invalidates queued/duplicate jobs
+  // from before the retry, while still allowing a legit same-epoch stalled-recovery
+  // re-delivery (which the same-step concurrency guard below cannot tell apart). A job
+  // with no epoch (un-stamped / pre-deploy enqueue) is allowed — never falsely skipped.
+  if (payload.epoch != null && payload.epoch < ctx.orchestrationEpoch) {
+    logger.warn(
+      {
+        taskId: ctx.taskId,
+        stepId: payload.stepId,
+        jobEpoch: payload.epoch,
+        taskEpoch: ctx.orchestrationEpoch,
+      },
+      'advance-step skipped: stale orchestration epoch (a retry/reset superseded this job)',
+    );
+    return;
+  }
 
   // Concurrency guard: only one step of a task may execute at a time. A stale or
   // re-delivered advance-step — e.g. a queued job that survived a Retry/reset and
@@ -1000,6 +1048,7 @@ export async function reconcileOrphanedCliSteps(db: Database): Promise<void> {
       stepId: schema.taskSteps.stepId,
       round: schema.taskSteps.round,
       userId: schema.tasks.userId,
+      epoch: schema.tasks.orchestrationEpoch,
     })
     .from(schema.taskSteps)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
@@ -1032,7 +1081,7 @@ export async function reconcileOrphanedCliSteps(db: Database): Promise<void> {
           })
           .where(eq(schema.cliInvocations.id, inv.id));
       }
-      await enqueueAdvance(s.taskId, s.userId, s.stepId, s.round);
+      await enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, s.epoch);
       logger.info({ taskId: s.taskId, stepId: s.stepId }, 'reconciled orphaned waiting_cli step');
     } catch (err) {
       logger.error({ err, taskId: s.taskId, stepId: s.stepId }, 'reconcile orphaned step failed');

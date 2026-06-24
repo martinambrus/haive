@@ -166,6 +166,22 @@ describe('ensureTaskAuthVolumes', () => {
     expect(runner.readyVolumes.has(taskVol)).toBe(true);
   });
 
+  it('reuses the volume (no recreate) when a concurrent sibling holds it "in use" then readies it', async () => {
+    // 08c fans out two agents that share this per-task volume. The sibling's populate
+    // helper has it mounted (so remove returns "volume is in use") and makes it ready
+    // shortly after — we must wait and reuse, not crash (the EXIT -1) or recreate.
+    const taskVol = 'haive_cli_auth_task_task777_codex_0';
+    const runner = makeRunner({ preExistingVolumes: [taskVol] });
+    runner.volumeRemove = async (name) => {
+      runner.removeCalls.push(name);
+      runner.readyVolumes.add(name); // sibling's helper finished → now ready
+      return { ok: false, stderr: 'Error response from daemon: remove: volume is in use - [abc]' };
+    };
+    await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-777', runner);
+    expect(runner.removeCalls).toEqual([taskVol]); // tried once, then waited + reused
+    expect(runner.createCalls).toEqual([]); // NOT recreated — reused the sibling's volume
+  });
+
   it('creates one volume per authConfigPath index', async () => {
     // claude-code has two auth paths.
     const runner = makeRunner();

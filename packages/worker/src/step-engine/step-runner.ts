@@ -30,6 +30,7 @@ import {
   type StepLoopPassRecord,
 } from './step-definition.js';
 import { resolveDagPhase } from './dag-executor.js';
+import { resolveMergePhase } from './merge-resolver.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
 
@@ -814,9 +815,26 @@ async function resolveAgentMiningPhase(
         cliInvocationId: invRow.id,
         status: 'pending',
       })
+      // Idempotent fan-out: if a concurrent/duplicate execution already reserved this
+      // (taskStepId, agentId) slot, skip rather than crash on the unique index. The epoch
+      // guard prevents the cross-generation race; this covers a residual same-epoch
+      // double-delivery. Supersede the invocation we just opened so it is not left orphaned.
+      .onConflictDoNothing({
+        target: [schema.taskStepAgentMinings.taskStepId, schema.taskStepAgentMinings.agentId],
+      })
       .returning();
     const miningRow = mining[0];
-    if (!miningRow) throw new Error('failed to insert task_step_agent_minings row');
+    if (!miningRow) {
+      await db
+        .update(schema.cliInvocations)
+        .set({ supersededAt: new Date() })
+        .where(eq(schema.cliInvocations.id, invRow.id));
+      ctx.logger.warn(
+        { agentId: dispatch.agentId, taskStepId: current.id },
+        'agent mining row already exists (concurrent/duplicate run) — skipping duplicate dispatch',
+      );
+      continue;
+    }
 
     await params.deps.enqueueCliInvocation({
       invocationId: invRow.id,
@@ -1102,7 +1120,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // owns aiFixContext to resolve a merge conflict inside the integration
     // worktree (the generic agent would run at the repo root and would also
     // mis-consume a completed coder invocation). See resolveDagPhase.
-    if (current.aiFixContext && !stepDef.dagExecute) {
+    if (current.aiFixContext && !stepDef.dagExecute && !stepDef.mergeResolve) {
       const fixResult = await resolveAiFixPhase(db, stepDef, current, ctx, params);
       if (!fixResult.resolved) return fixResult.result;
       current = fixResult.current;
@@ -1158,6 +1176,16 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       const dagResult = await resolveDagPhase(db, stepDef, current, ctx, params);
       if (!dagResult.resolved) return dagResult.result;
       current = dagResult.current;
+    }
+
+    // --- Merge-resolution phase (12-worktree-cleanup): merge the feature branch
+    // into its base with an LLM conflict-resolution loop, parking waiting_cli (fix
+    // agent) / waiting_form (user clarification) until the merge commits, then apply
+    // removes the worktree. Mutually exclusive with dagExecute. ---
+    if (stepDef.mergeResolve) {
+      const mergeResult = await resolveMergePhase(db, stepDef, current, ctx, params);
+      if (!mergeResult.resolved) return mergeResult.result;
+      current = mergeResult.current;
     }
 
     const previousIterations = stepIterationsAsRecords(current);

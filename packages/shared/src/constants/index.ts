@@ -105,6 +105,9 @@ export interface TaskJobPayload {
   /** Fix-loop round to materialize/advance the step at (default 0 = original pass). */
   round?: number;
   formValues?: Record<string, unknown>;
+  /** Orchestration epoch this job was enqueued under. handleAdvanceStep skips the
+   *  job when it is older than the task's current epoch (a retry/reset bumped it). */
+  epoch?: number;
 }
 
 /** Payload for `TASK_JOB_NAMES.CLEANUP_REPO_RAG`. The worker drops every

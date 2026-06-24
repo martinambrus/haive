@@ -1,20 +1,14 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { resolveUserGitEnv } from '../../../secrets/user-git-identity.js';
+import { buildMergeFixPrompt } from '../../git-merge.js';
+import { detectOrigin, getOriginUrl } from '../../../repo/git-push.js';
 
 const exec = promisify(execFile);
-
-const FALLBACK_GIT_IDENTITY = {
-  GIT_AUTHOR_NAME: 'Haive',
-  GIT_AUTHOR_EMAIL: 'worker@haive.local',
-  GIT_COMMITTER_NAME: 'Haive',
-  GIT_COMMITTER_EMAIL: 'worker@haive.local',
-};
 
 type CleanupAction = 'merge_remove' | 'remove_only' | 'keep';
 
@@ -28,6 +22,13 @@ interface WorktreeCleanupDetect {
   parentBranch: string | null;
   /** For the manual-delete terminal deep-link on the remove-only path. */
   repositoryId: string | null;
+  /** Whether the repo has a pushable `origin` remote (gates the base-push fields). */
+  hasOrigin: boolean;
+  originUrl: string | null;
+  /** Credential bound to the repo (default selection for the push). */
+  boundCredentialId: string | null;
+  /** The user's stored git credentials, for the push credential picker. */
+  credentials: { id: string; label: string; host: string }[];
 }
 
 interface WorktreeCleanupApply {
@@ -69,6 +70,37 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     requiresCli: false,
   },
 
+  mergeResolve: {
+    requiredCapabilities: ['tool_use', 'file_write'],
+    // Only the merge_remove action performs a merge; keep / remove_only skip the phase.
+    selectedMerge: (formValues) => formValues.action === 'merge_remove',
+    buildFixPrompt: ({ featureBranch, guidance }) =>
+      buildMergeFixPrompt(featureBranch, undefined, guidance),
+    buildClarificationForm: ({ baseBranch, featureBranch, uncertainty }) => ({
+      title: 'Merge conflict — your input needed',
+      description: `The AI is unsure how to resolve the merge of ${featureBranch} into ${baseBranch}.`,
+      fields: [
+        {
+          type: 'note',
+          id: 'agentQuestion',
+          label: "The AI's question",
+          body: uncertainty || 'The AI could not confidently combine both sides.',
+          variant: 'info',
+        },
+        {
+          type: 'text',
+          id: 'mergeGuidance',
+          label: 'How should it resolve this conflict?',
+          placeholder:
+            'e.g. keep both changes; prefer the feature side for file X; renumber the hook…',
+          required: true,
+        },
+      ],
+      submitLabel: 'Send guidance',
+      submitAction: 'clarify',
+    }),
+  },
+
   async detect(ctx: StepContext): Promise<WorktreeCleanupDetect> {
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const output = prev?.output as {
@@ -91,6 +123,10 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         baseBranch: null,
         parentBranch: null,
         repositoryId,
+        hasOrigin: false,
+        originUrl: null,
+        boundCredentialId: null,
+        credentials: [],
       };
     }
     const mode =
@@ -98,11 +134,31 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         ? (output.mode as WorktreeCleanupDetect['mode'])
         : 'unknown';
 
-    // Only the worktree mode needs the parent branch (for the merge safety check).
+    // Only the worktree mode needs the parent branch (merge target) and the push
+    // affordances (origin presence + the user's credentials).
     let parentBranch: string | null = null;
+    let hasOrigin = false;
+    let originUrl: string | null = null;
+    let boundCredentialId: string | null = null;
+    let credentials: { id: string; label: string; host: string }[] = [];
     if (mode === 'worktree') {
       const res = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
       parentBranch = res.code === 0 ? res.stdout.trim() : null;
+      hasOrigin = await detectOrigin(ctx.repoPath);
+      originUrl = hasOrigin ? await getOriginUrl(ctx.repoPath) : null;
+      const repo = repositoryId
+        ? await ctx.db.query.repositories.findFirst({
+            where: eq(schema.repositories.id, repositoryId),
+            columns: { credentialsSecretId: true },
+          })
+        : null;
+      boundCredentialId = repo?.credentialsSecretId ?? null;
+      const rows = await ctx.db.query.repoCredentials.findMany({
+        where: eq(schema.repoCredentials.userId, ctx.userId),
+        columns: { id: true, label: true, host: true },
+        orderBy: [desc(schema.repoCredentials.createdAt)],
+      });
+      credentials = rows.map((r) => ({ id: r.id, label: r.label, host: r.host }));
     }
     return {
       mode,
@@ -111,6 +167,10 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       baseBranch: output.baseBranch ?? null,
       parentBranch,
       repositoryId,
+      hasOrigin,
+      originUrl,
+      boundCredentialId,
+      credentials,
     };
   },
 
@@ -138,20 +198,31 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     const branch = detected.branchName ?? 'this branch';
     const fields: FormField[] = [];
 
-    // Up-front safety surface: if the parent repo is not on the base branch, the
-    // merge will be skipped — warn before the user picks it.
+    // Up-front guard for the cross-branch case (parent checkout moved off the base).
+    // The merge now runs via a transient worktree on the base branch, so it is never
+    // skipped — but without an origin it can only persist locally.
     if (
       detected.parentBranch &&
       detected.baseBranch &&
       detected.parentBranch !== detected.baseBranch
     ) {
-      fields.push({
-        type: 'note',
-        id: 'branchMismatchNote',
-        label: 'Merge unavailable',
-        body: `The parent repo is on **${detected.parentBranch}**, not the base **${detected.baseBranch}**. Merge will be skipped if chosen — switch the parent back to \`${detected.baseBranch}\` and retry to merge.`,
-        variant: 'warning',
-      });
+      fields.push(
+        detected.hasOrigin
+          ? {
+              type: 'note',
+              id: 'branchMismatchNote',
+              label: 'Cross-branch merge',
+              body: `The parent checkout is on **${detected.parentBranch}**, not the base **${detected.baseBranch}**. Haive will merge **${branch}** into **${detected.baseBranch}** via a temporary worktree (your current checkout stays untouched), then optionally push **${detected.baseBranch}** to origin.`,
+              variant: 'info',
+            }
+          : {
+              type: 'note',
+              id: 'branchMismatchNote',
+              label: 'Merge will stay local',
+              body: `The parent checkout is on **${detected.parentBranch}**, not the base **${detected.baseBranch}**. Haive will merge **${branch}** into **${detected.baseBranch}** via a temporary worktree and commit it — so the merge IS saved in this repository. But there is **no origin remote**, so it cannot be pushed anywhere. Add an origin (the Push gate or the repo terminal) and push **${detected.baseBranch}** yourself to put it on a remote.`,
+              variant: 'warning',
+            },
+      );
     }
 
     fields.push(
@@ -188,6 +259,46 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         visibleWhen: { field: 'action', equals: 'remove_only' },
       },
     );
+
+    // Base-branch push — offered only when the repo has a pushable origin. Hidden
+    // entirely for local-only repos (push is impossible there).
+    if (detected.hasOrigin) {
+      const credentialOptions = [
+        ...detected.credentials.map((c) => ({ value: c.id, label: `${c.label} (${c.host})` })),
+        { value: '', label: 'Authenticate manually (no stored credential)' },
+      ];
+      const defaultCredential =
+        detected.boundCredentialId &&
+        detected.credentials.some((c) => c.id === detected.boundCredentialId)
+          ? detected.boundCredentialId
+          : '';
+      fields.push(
+        {
+          type: 'checkbox',
+          id: 'pushBase',
+          label: `Push ${base} to origin (${detected.originUrl ?? 'origin'}) after merging`,
+          default: false,
+          visibleWhen: { field: 'action', equals: 'merge_remove' },
+        },
+        {
+          type: 'select',
+          id: 'credentialId',
+          label: 'Credential to push with',
+          description:
+            'Used only for this push; the token is never written to git config. Choose "manually" for SSH or public remotes.',
+          options: credentialOptions,
+          default: defaultCredential,
+          visibleWhen: { field: 'action', equals: 'merge_remove' },
+        },
+        {
+          type: 'checkbox',
+          id: 'setUpstream',
+          label: 'Set upstream (-u) so future pushes default to origin',
+          default: true,
+          visibleWhen: { field: 'action', equals: 'merge_remove' },
+        },
+      );
+    }
 
     return {
       title: 'Worktree cleanup',
@@ -233,71 +344,35 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       };
     }
 
+    // The merge (action === 'merge_remove') runs in resolveMergePhase BEFORE apply.
+    // Read its terminal outcome to decide whether the worktree may be removed.
     let merged = false;
     let mergeTarget: string | null = null;
     if (action === 'merge_remove') {
-      const { branchName: branch, baseBranch: base, parentBranch } = d;
-      // The merge always lands on the parent repo's checked-out branch (HEAD). The
-      // intended target is the recorded base; tasks created before the base was
-      // recorded fall back to the parent's CURRENT branch — the natural integration
-      // point — so cleanup still merges instead of refusing.
-      mergeTarget = base ?? parentBranch;
-      if (!branch || !mergeTarget) {
+      const row = await ctx.db.query.taskSteps.findFirst({
+        where: eq(schema.taskSteps.id, ctx.taskStepId),
+        columns: { mergeResolveState: true },
+      });
+      const st = row?.mergeResolveState ?? null;
+      merged = st?.merged ?? false;
+      mergeTarget = st?.baseBranch || null;
+      if (!merged) {
+        // The merge did not run (e.g. the parent checkout is off the base branch).
+        // Keep the worktree so the user can integrate manually.
         return {
           action,
           removed: false,
           merged: false,
           branchDeleted: false,
           mode: 'worktree',
-          message:
-            'cannot merge: no branch, or no base/current branch to merge into; worktree kept',
+          message: st?.skipReason
+            ? `merge skipped: ${st.skipReason}; worktree kept.`
+            : 'merge did not run; worktree kept.',
         };
       }
-      // SAFETY (only when the base is known): never merge into the wrong branch — the
-      // parent must still be on the base the worktree came from. When the base is
-      // unknown there is nothing to verify against, so we merge into the parent's
-      // current branch as-is.
-      if (base && parentBranch && parentBranch !== base) {
-        return {
-          action,
-          removed: false,
-          merged: false,
-          branchDeleted: false,
-          mode: 'worktree',
-          message: `merge skipped: parent repo is on '${parentBranch}', not the base '${base}'. Switch it back and retry; worktree kept.`,
-        };
-      }
-      // --no-ff always creates a merge commit, so it needs a committer identity —
-      // the user's git identity when set, else the Haive fallback (same as 10/11b).
-      const userEnv = await resolveUserGitEnv(ctx.db, ctx.userId);
-      const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
-      const merge = await gitRun(
-        ctx.repoPath,
-        ['merge', '--no-ff', branch, '-m', `Merge ${branch}`],
-        commitEnv,
-      );
-      if (merge.code !== 0) {
-        // Conflict (or other failure): abort so the target branch is left clean and
-        // keep the worktree so the user can resolve it by hand.
-        await gitRun(ctx.repoPath, ['merge', '--abort']);
-        ctx.logger.warn(
-          { branch, target: mergeTarget, stderr: merge.stderr },
-          'worktree merge failed; aborted',
-        );
-        return {
-          action,
-          removed: false,
-          merged: false,
-          branchDeleted: false,
-          mode: 'worktree',
-          message: `merge conflict merging ${branch} into ${mergeTarget}; merge aborted and worktree kept so you can resolve it manually.`,
-        };
-      }
-      merged = true;
     }
 
-    // Remove the worktree (both merge_remove and remove_only). git -C targets the
-    // parent repo so it works regardless of the worker's cwd.
+    // Remove the worktree (merge_remove after a successful merge, or remove_only).
     const rm = await gitRun(ctx.repoPath, ['worktree', 'remove', d.worktreePath, '--force']);
     if (rm.code !== 0) {
       ctx.logger.error({ stderr: rm.stderr }, 'git worktree remove failed');
