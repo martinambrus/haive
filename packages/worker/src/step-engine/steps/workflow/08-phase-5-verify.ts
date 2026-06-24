@@ -340,6 +340,11 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     description:
       'Runs the project verification suite (tests, lint, typecheck) against the workspace and records the outcome for gate 2.',
     requiresCli: false,
+    // Under auto-continue, run the detected checks on their defaults (each slot
+    // ticked when a command is detected) instead of parking; a failure routes back
+    // to implement via fixLoop. A 06-run-config pre-answer still wins when present;
+    // manual mode still gates.
+    autoSubmitDefaults: true,
   },
 
   // Fix-loop: a failing verification suite routes back to implementation with the
