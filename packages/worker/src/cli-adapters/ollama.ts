@@ -1,7 +1,14 @@
 import { isOllamaCloudModel } from '@haive/shared';
 import { BaseCliAdapter } from './base-adapter.js';
 import { OLLAMA_THINKING_PROXY_URL } from './ollama-thinking-proxy.js';
-import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from './types.js';
+import type {
+  CliCommandSpec,
+  CliProviderRecord,
+  EnvInjection,
+  InvokeOpts,
+  PluginInstallCommand,
+  PluginInstallOpts,
+} from './types.js';
 
 // In-stack daemon default; remote/cloud providers override via
 // provider.envVars.ANTHROPIC_BASE_URL (a remote host, or https://ollama.com).
@@ -9,6 +16,19 @@ const OLLAMA_DEFAULT_BASE_URL = 'http://ollama:11434';
 // Ollama Cloud endpoint (serves an Anthropic-compatible /v1/messages API).
 // Cloud models (isOllamaCloudModel, @haive/shared) route here by default.
 const OLLAMA_CLOUD_URL = 'https://ollama.com';
+
+// LSP plugin install via the claude binary's plugin marketplace — identical to
+// the claude-code/zai adapters (same backend-agnostic `plugin` subcommands).
+const OLLAMA_LSP_PLUGINS: Record<string, string> = {
+  typescript: 'vtsls',
+  python: 'pyright',
+  go: 'gopls',
+  rust: 'rust-analyzer',
+  php: 'phpactor',
+  java: 'jdtls',
+};
+const OLLAMA_LSP_MARKETPLACE_REF = 'Piebald-AI/claude-code-lsps';
+const OLLAMA_LSP_MARKETPLACE_ID = 'claude-code-lsps';
 
 export class OllamaAdapter extends BaseCliAdapter {
   readonly providerName = 'ollama' as const;
@@ -27,7 +47,10 @@ export class OllamaAdapter extends BaseCliAdapter {
   // short-circuits for authMode 'api_key'.
   readonly supportsCliAuth = true;
   readonly supportsMcp = true;
-  readonly supportsPlugins = false;
+  // The claude binary's `plugin marketplace add` / `plugin install` subcommands
+  // are backend-agnostic — they write into .claude/plugins without a model call,
+  // so they work against the Ollama endpoint exactly as for claude-code/zai.
+  readonly supportsPlugins = true;
   readonly defaultAuthMode = 'api_key' as const;
   // Secrets merge into env verbatim with no remap, so a cloud/remote key must be
   // stored under the env name the claude binary reads.
@@ -120,5 +143,44 @@ export class OllamaAdapter extends BaseCliAdapter {
 
   envInjection(_provider: CliProviderRecord): EnvInjection {
     return { envVars: {}, extraArgs: [] };
+  }
+
+  override buildPluginInstallCommands(
+    provider: CliProviderRecord,
+    opts: PluginInstallOpts,
+  ): PluginInstallCommand[] {
+    const exec = this.resolveExecutable(provider);
+    const cmds: PluginInstallCommand[] = [];
+    const lspPlugins = opts.lspLanguages
+      .map((lang) => OLLAMA_LSP_PLUGINS[lang === 'php-extended' ? 'php' : lang])
+      .filter((v): v is string => !!v);
+    const uniqueLsp = [...new Set(lspPlugins)];
+    if (uniqueLsp.length > 0) {
+      cmds.push({
+        description: `Add ${OLLAMA_LSP_MARKETPLACE_REF} marketplace`,
+        command: exec,
+        args: ['plugin', 'marketplace', 'add', OLLAMA_LSP_MARKETPLACE_REF],
+      });
+      for (const name of uniqueLsp) {
+        cmds.push({
+          description: `Install LSP plugin ${name}`,
+          command: exec,
+          args: ['plugin', 'install', `${name}@${OLLAMA_LSP_MARKETPLACE_ID}`],
+        });
+      }
+    }
+    if (opts.drupalLspPath) {
+      cmds.push({
+        description: 'Add local drupal-lsp marketplace',
+        command: exec,
+        args: ['plugin', 'marketplace', 'add', opts.drupalLspPath],
+      });
+      cmds.push({
+        description: 'Install drupal-php-lsp plugin',
+        command: exec,
+        args: ['plugin', 'install', 'drupal-php-lsp@drupal-lsp-marketplace'],
+      });
+    }
+    return cmds;
   }
 }

@@ -230,7 +230,9 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsSubagents: true,
     supportsCliAuth: true,
     supportsMcp: true,
-    supportsPlugins: false,
+    // The claude binary's `plugin` subcommands install into .claude/plugins with
+    // no model call, so they work against the Ollama endpoint like claude-code/zai.
+    supportsPlugins: true,
     defaultAuthMode: 'api_key',
     // Local Ollama needs no real key (the binary accepts any non-empty token);
     // cloud/remote users store their key UNDER THIS env name (not
