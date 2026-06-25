@@ -18,6 +18,7 @@ import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
 import { loadPreviousStepOutput, pathExists } from './steps/onboarding/_helpers.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
+import { killCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
 import type { DagCoderContext, StepContext, StepDefinition } from './step-definition.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
@@ -1261,6 +1262,27 @@ export async function resolveDagPhase(
     .limit(50);
   const fatalMsg = pickFatalProviderError(endedInvocations);
   if (fatalMsg) {
+    // Cancel sibling coders still in flight — each would re-hit the dead provider and
+    // burn another doomed call. Mark them ended+superseded (supersededAt makes
+    // resumeStepIfLinked skip the spurious advance when their jobs finish) then force-
+    // remove their containers. killCliSandboxesForTask is DDEV-safe: it filters to
+    // `haive-cli-` names, leaving the `haive-ddev-` runtime (same task label) untouched.
+    await db
+      .update(schema.cliInvocations)
+      .set({
+        exitCode: 137,
+        errorMessage: 'cancelled: sibling of a fatal provider failure',
+        endedAt: new Date(),
+        supersededAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.cliInvocations.taskStepId, current.id),
+          isNull(schema.cliInvocations.endedAt),
+          isNull(schema.cliInvocations.supersededAt),
+        ),
+      );
+    await killCliSandboxesForTask(ctx.taskId);
     const updated = await setStepStatus(db, current.id, {
       status: 'failed',
       errorMessage: fatalMsg,

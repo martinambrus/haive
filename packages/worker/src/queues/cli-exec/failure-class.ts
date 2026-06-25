@@ -114,11 +114,24 @@ export function classifyProviderFatal(
   return null;
 }
 
+/** The fatal class encoded in a headlined errorMessage (built by interpretCliFailure),
+ *  or null when the message is not a fatal-provider message. Inverse of
+ *  PROVIDER_FATAL_HEADLINES — lets a consumer derive the UI hint's `reason` from the
+ *  stored message without a DB column. */
+export function fatalClassFromMessage(
+  message: string | null | undefined,
+): ProviderFatalClass | null {
+  if (typeof message !== 'string') return null;
+  for (const cls of Object.keys(PROVIDER_FATAL_HEADLINES) as ProviderFatalClass[]) {
+    if (message.startsWith(PROVIDER_FATAL_HEADLINES[cls])) return cls;
+  }
+  return null;
+}
+
 /** True when an invocation errorMessage was built for a fatal provider failure
  *  (prefixed with one of PROVIDER_FATAL_HEADLINES by interpretCliFailure). Lets
  *  looping consumers (DAG escalation, merge-fix retry) fail fast instead of
  *  spawning more agents against a dead provider. */
 export function isFatalProviderFailure(message: string | null | undefined): boolean {
-  if (typeof message !== 'string') return false;
-  return Object.values(PROVIDER_FATAL_HEADLINES).some((headline) => message.startsWith(headline));
+  return fatalClassFromMessage(message) !== null;
 }

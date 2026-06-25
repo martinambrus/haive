@@ -1866,6 +1866,22 @@ function StepCard({
         </div>
       )}
 
+      {step.errorHint?.type === 'provider_unavailable' && step.status === 'failed' && (
+        <div className="rounded-md border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+          <span className="font-medium">
+            {step.errorHint.providerName
+              ? `Provider ${step.errorHint.providerName} `
+              : 'The CLI provider '}
+            {step.errorHint.reason === 'rate_limit'
+              ? 'is rate-limited or out of quota'
+              : 'returned a server error (temporarily unavailable)'}
+            .
+          </span>{' '}
+          This is a provider outage, not a problem with your code or this task. Retry once the
+          provider recovers.
+        </div>
+      )}
+
       {actionError && (
         <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
           {actionError}

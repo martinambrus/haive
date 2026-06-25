@@ -48,6 +48,16 @@ export type StepErrorHint =
       type: 'local_model_destructive';
       stepId: string;
       providerName: CliProviderName;
+    }
+  | {
+      /** A CLI provider returned a fatal, non-retryable failure within this run
+       *  (rate-limit/quota exhausted, persistent auth, or a 5xx/server outage), so the
+       *  step was failed fast. The UI shows an "outage — retry when the provider
+       *  recovers" banner instead of implying a code defect. `reason` mirrors the
+       *  worker's ProviderFatalClass. */
+      type: 'provider_unavailable';
+      reason: 'rate_limit' | 'auth' | 'server_error';
+      providerName?: CliProviderName;
     };
 
 /** Per-invocation token usage captured from a CLI's structured output.

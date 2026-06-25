@@ -2,7 +2,7 @@ import { rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Queue, Worker, type Job, type JobsOptions } from 'bullmq';
 import Docker from 'dockerode';
-import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
@@ -44,6 +44,7 @@ import { cleanupTaskAuthVolumes } from '../sandbox/task-auth-volume.js';
 import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
+import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import {
   recordFixLoopRequest,
   recordFixLoopAccepted,
@@ -869,6 +870,52 @@ async function handleResult(
     }
     case 'failed': {
       await markTaskFailed(db, ctx.taskId, result.error);
+      // Provider-outage hint: if the step failed on a fatal rate-limit/quota or 5xx
+      // server failure, attach a structured errorHint so the UI shows an
+      // "outage — retry when the provider recovers" banner instead of implying a code
+      // defect. Read from the failing INVOCATION's errorMessage (the raw fatal headline
+      // lives there; the step message may be prefixed e.g. "cli invocation failed: …"),
+      // so this works for the DAG, single-terminal, and merge fail paths alike. Auth is
+      // left to its existing textual message + the cli_login_required hint.
+      const endedInvs = await db
+        .select({
+          errorMessage: schema.cliInvocations.errorMessage,
+          cliProviderId: schema.cliInvocations.cliProviderId,
+        })
+        .from(schema.cliInvocations)
+        .where(
+          and(
+            eq(schema.cliInvocations.taskStepId, result.row.id),
+            isNotNull(schema.cliInvocations.endedAt),
+            isNull(schema.cliInvocations.supersededAt),
+            isNotNull(schema.cliInvocations.errorMessage),
+          ),
+        )
+        .orderBy(desc(schema.cliInvocations.endedAt))
+        .limit(50);
+      const outage = endedInvs
+        .map((r) => ({
+          reason: fatalClassFromMessage(r.errorMessage),
+          cliProviderId: r.cliProviderId,
+        }))
+        .find((r) => r.reason === 'rate_limit' || r.reason === 'server_error');
+      if (outage?.reason) {
+        let providerName: string | undefined;
+        if (outage.cliProviderId) {
+          const prov = await db.query.cliProviders.findFirst({
+            where: eq(schema.cliProviders.id, outage.cliProviderId),
+            columns: { name: true },
+          });
+          providerName = prov?.name ?? undefined;
+        }
+        await db
+          .update(schema.taskSteps)
+          .set({
+            errorHint: { type: 'provider_unavailable', reason: outage.reason, providerName },
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.taskSteps.id, result.row.id));
+      }
       await appendEvent(db, ctx.taskId, result.row.id, 'step.failed', {
         stepId,
         error: result.error,

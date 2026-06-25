@@ -565,6 +565,11 @@ export type StepErrorHint =
       type: 'local_model_destructive';
       stepId: string;
       providerName: string;
+    }
+  | {
+      type: 'provider_unavailable';
+      reason: 'rate_limit' | 'auth' | 'server_error';
+      providerName?: string;
     };
 
 /** One rag_search call's telemetry, surfaced in the discovery step's RAG stats

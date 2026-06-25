@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   classifyProviderFatal,
+  fatalClassFromMessage,
   isFatalProviderFailure,
   PROVIDER_FATAL_HEADLINES,
+  type ProviderFatalClass,
 } from './failure-class.js';
 
 // The EXACT errorMessage captured from the production incident (task 2cac9e07,
@@ -104,5 +106,27 @@ describe('isFatalProviderFailure', () => {
     expect(isFatalProviderFailure('cli invocation failed: TypeError')).toBe(false);
     expect(isFatalProviderFailure(null)).toBe(false);
     expect(isFatalProviderFailure(undefined)).toBe(false);
+  });
+});
+
+describe('fatalClassFromMessage', () => {
+  it('round-trips each headline back to its class', () => {
+    for (const cls of Object.keys(PROVIDER_FATAL_HEADLINES) as ProviderFatalClass[]) {
+      expect(fatalClassFromMessage(`${PROVIDER_FATAL_HEADLINES[cls]} — detail (x)`)).toBe(cls);
+    }
+  });
+
+  it('returns null for a non-headlined message and for null/undefined', () => {
+    expect(fatalClassFromMessage('TypeError: x is not a function')).toBe(null);
+    expect(fatalClassFromMessage(null)).toBe(null);
+    expect(fatalClassFromMessage(undefined)).toBe(null);
+  });
+
+  it('does NOT match a headline that is only embedded mid-message (must be the prefix)', () => {
+    // The single-terminal path stores the step error as "cli invocation failed: <headline>",
+    // so handleResult reads the raw invocation message (prefix = headline) instead.
+    expect(
+      fatalClassFromMessage(`cli invocation failed: ${PROVIDER_FATAL_HEADLINES.rate_limit}`),
+    ).toBe(null);
   });
 });

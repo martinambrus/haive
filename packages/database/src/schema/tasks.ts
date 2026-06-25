@@ -28,7 +28,12 @@ import { containers } from './containers.js';
  */
 type TaskStepErrorHint =
   | { type: 'cli_login_required'; providerId: string; providerName: string }
-  | { type: 'local_model_destructive'; stepId: string; providerName: string };
+  | { type: 'local_model_destructive'; stepId: string; providerName: string }
+  | {
+      type: 'provider_unavailable';
+      reason: 'rate_limit' | 'auth' | 'server_error';
+      providerName?: string;
+    };
 
 export const cliInvocationModeEnum = pgEnum('cli_invocation_mode', [
   'cli',
