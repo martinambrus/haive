@@ -8,6 +8,7 @@ import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { BundleComposer, type BundleComposerEntry } from '@/components/bundle-composer';
 import { GlobalKbStatusPanel } from '@/components/global-kb-status-panel';
 import { MarkdownView, looksLikeMarkdown } from '@/components/markdown/markdown-view';
+import { PersistedDetails } from '@/components/persisted-details';
 import { cn } from '@/lib/cn';
 import { validateRequired, type FormValues } from '@/components/form-validation';
 import { isFieldVisible } from '@/components/form-visibility';
@@ -42,29 +43,44 @@ interface FormRendererProps {
   onSkip?: () => void;
   skipLabel?: string;
   skipDisabled?: boolean;
+  /** When set, the status table + infoSections disclosures remember their open/closed
+   *  state across reloads, keyed under this prefix (e.g. `task-ui:<taskId>:<stepId>`). */
+  persistPrefix?: string;
 }
 
 /** Read-only render of a form's infoSections (the disclosures that show specs /
  *  summaries above the fields). Exported so done steps can re-show the spec for
  *  review after the interactive form is gone. */
-export function InfoSections({ sections }: { sections: FormSchema['infoSections'] }) {
+export function InfoSections({
+  sections,
+  persistPrefix,
+}: {
+  sections: FormSchema['infoSections'];
+  /** When set, each section remembers its open/closed state across reloads under
+   *  `<persistPrefix>:info:<index>`. Omit for in-memory-only (e.g. no task id yet). */
+  persistPrefix?: string;
+}) {
   if (!sections || sections.length === 0) return null;
   return (
     <div className="flex flex-col gap-2">
       {sections.map((section, i) => {
         const isMd = looksLikeMarkdown(section.body);
         return (
-          <details
+          <PersistedDetails
             key={`${section.title}-${i}`}
-            open={section.defaultOpen ?? false}
+            persistKey={persistPrefix ? `${persistPrefix}:info:${i}` : null}
+            defaultOpen={section.defaultOpen ?? false}
             className="rounded-md border border-neutral-800 bg-neutral-950/60"
+            summaryClassName="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900"
+            summary={
+              <>
+                <span className="font-medium">{section.title}</span>
+                {section.preview && (
+                  <span className="ml-2 text-xs text-neutral-400">{section.preview}</span>
+                )}
+              </>
+            }
           >
-            <summary className="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900">
-              <span className="font-medium">{section.title}</span>
-              {section.preview && (
-                <span className="ml-2 text-xs text-neutral-400">{section.preview}</span>
-              )}
-            </summary>
             {isMd ? (
               <div className="border-t border-neutral-800">
                 <MarkdownView body={section.body} enhanced title={section.title} toolbar />
@@ -74,7 +90,7 @@ export function InfoSections({ sections }: { sections: FormSchema['infoSections'
                 {section.body}
               </pre>
             )}
-          </details>
+          </PersistedDetails>
         );
       })}
     </div>
@@ -130,7 +146,15 @@ function StatusRowHead({ item, expandable }: { item: StatusItem; expandable: boo
  *  disclosure that reveals its evidence in place, so each result sits with its detail
  *  instead of in a separate section list. Exported so done/skipped step cards can
  *  re-show the summary read-only, mirroring InfoSections. */
-export function StatusSummary({ items }: { items?: FormSchema['statusSummary'] }) {
+export function StatusSummary({
+  items,
+  persistPrefix,
+}: {
+  items?: FormSchema['statusSummary'];
+  /** When set, each expandable row remembers its open/closed state across reloads
+   *  under `<persistPrefix>:status:<index>`. */
+  persistPrefix?: string;
+}) {
   if (!items || items.length === 0) return null;
   return (
     <div className="overflow-hidden rounded-md border border-neutral-800 bg-neutral-950/60">
@@ -145,14 +169,14 @@ export function StatusSummary({ items }: { items?: FormSchema['statusSummary'] }
         }
         const isMd = looksLikeMarkdown(item.body);
         return (
-          <details
+          <PersistedDetails
             key={`${item.label}-${i}`}
-            open={item.defaultOpen ?? false}
+            persistKey={persistPrefix ? `${persistPrefix}:status:${i}` : null}
+            defaultOpen={item.defaultOpen ?? false}
             className={cn(rowCls, '[&[open]_.caret]:rotate-90')}
+            summaryClassName="cursor-pointer select-none list-none hover:bg-neutral-900 [&::-webkit-details-marker]:hidden"
+            summary={<StatusRowHead item={item} expandable />}
           >
-            <summary className="cursor-pointer select-none list-none hover:bg-neutral-900 [&::-webkit-details-marker]:hidden">
-              <StatusRowHead item={item} expandable />
-            </summary>
             {isMd ? (
               <div className="border-t border-neutral-800">
                 <MarkdownView body={item.body} enhanced title={item.label} toolbar />
@@ -162,7 +186,7 @@ export function StatusSummary({ items }: { items?: FormSchema['statusSummary'] }
                 {item.body}
               </pre>
             )}
-          </details>
+          </PersistedDetails>
         );
       })}
     </div>
@@ -238,6 +262,7 @@ export function FormRenderer({
   onSkip,
   skipLabel,
   skipDisabled = false,
+  persistPrefix,
 }: FormRendererProps) {
   const initial = useMemo(() => buildInitial(schema, initialValues), [schema, initialValues]);
   const [values, setValues] = useState<FormValues>(initial);
@@ -273,8 +298,8 @@ export function FormRenderer({
         )}
       </div>
       {headerSlot}
-      <StatusSummary items={schema.statusSummary} />
-      <InfoSections sections={schema.infoSections} />
+      <StatusSummary items={schema.statusSummary} persistPrefix={persistPrefix} />
+      <InfoSections sections={schema.infoSections} persistPrefix={persistPrefix} />
       {beforeFieldsSlot}
       <div className="flex flex-col gap-4">
         {schema.fields.map((field) =>

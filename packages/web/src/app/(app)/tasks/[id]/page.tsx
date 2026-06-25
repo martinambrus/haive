@@ -38,6 +38,7 @@ import {
   type FormValues,
 } from '@/components/form-renderer';
 import { MarkdownView } from '@/components/markdown/markdown-view';
+import { PersistedDetails } from '@/components/persisted-details';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { TaskSource } from '@/components/task-source';
 import { CommitDiffViewer } from '@/components/commit-diff-viewer';
@@ -46,6 +47,7 @@ import { BrowserVncPanel } from '@/components/terminal/BrowserVncPanel';
 import { InteractiveShell } from '@/components/terminal/InteractiveShell';
 import { autoScrollTerminalsEnabled } from '@/lib/terminal-autoscroll';
 import { usePageTitle } from '@/lib/use-page-title';
+import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
 
@@ -1343,8 +1345,11 @@ function StepCard({
   showAutoContinue,
   onToggleAutoContinue,
 }: StepCardProps) {
-  const [showOutput, setShowOutput] = useState(false);
-  const [showRagStats, setShowRagStats] = useState(false);
+  // Per-task / per-step namespace for remembering this card's collapse/expand state
+  // across reloads (the disclosures, the raw-output + RAG-stats toggles).
+  const uiPrefix = `task-ui:${taskId}:${step.id}`;
+  const [showOutput, setShowOutput] = usePersistedToggle(`${uiPrefix}:output`, false);
+  const [showRagStats, setShowRagStats] = usePersistedToggle(`${uiPrefix}:ragstats`, false);
   const isDiscovery = step.stepId === '03-phase-0a-discovery';
   const schema = step.formSchema as FormSchema | null;
   const initialValues = (step.formValues as FormValues | null) ?? undefined;
@@ -1835,6 +1840,7 @@ function StepCard({
               errorMessage={submitError}
               onSubmit={supportsPresets ? handlePresetSubmit : onSubmit}
               repositoryId={taskRepositoryId}
+              persistPrefix={uiPrefix}
               renderAfterField={
                 hasConnectionFields || supportsPresets ? renderAfterFieldFn : undefined
               }
@@ -1885,19 +1891,21 @@ function StepCard({
           reviewable after the interactive form is gone. */}
       {step.status !== 'waiting_form' && (
         <>
-          <StatusSummary items={schema?.statusSummary} />
-          <InfoSections sections={schema?.infoSections} />
+          <StatusSummary items={schema?.statusSummary} persistPrefix={uiPrefix} />
+          <InfoSections sections={schema?.infoSections} persistPrefix={uiPrefix} />
         </>
       )}
       {(step.summary ?? '').trim().length > 0 && (
-        <details className="rounded-md border border-neutral-800 bg-neutral-950/60">
-          <summary className="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900">
-            <span className="font-medium">What the agent did</span>
-          </summary>
+        <PersistedDetails
+          persistKey={`${uiPrefix}:summary`}
+          className="rounded-md border border-neutral-800 bg-neutral-950/60"
+          summaryClassName="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900"
+          summary={<span className="font-medium">What the agent did</span>}
+        >
           <div className="border-t border-neutral-800">
             <MarkdownView body={step.summary ?? ''} enhanced />
           </div>
-        </details>
+        </PersistedDetails>
       )}
 
       {step.status !== 'waiting_form' && (step.detectOutput !== null || step.output !== null) && (
