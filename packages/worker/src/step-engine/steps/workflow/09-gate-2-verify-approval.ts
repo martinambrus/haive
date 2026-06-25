@@ -1,5 +1,5 @@
 import path from 'node:path';
-import type { FormSchema, InfoSection } from '@haive/shared';
+import type { FormSchema, StatusSummaryItem } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
@@ -14,9 +14,13 @@ import {
 import { ensureDdevWithProgress } from './_app-runtime.js';
 
 interface VerifyGateDetect {
-  testResults: string;
-  lintResults: string;
-  typecheckResults: string;
+  /** Per-slot verify results from 08-phase-5-verify. A check with ran:false was
+   *  skipped (no command detected / unticked) and must NOT be shown as a fail. */
+  verify: {
+    test: { ran: boolean; passed: boolean; output: string } | null;
+    lint: { ran: boolean; passed: boolean; output: string } | null;
+    typecheck: { ran: boolean; passed: boolean; output: string } | null;
+  };
   allPassed: boolean;
   /** Phase 4 pre-test validation result (null when the step didn't run). */
   validation: {
@@ -169,9 +173,9 @@ interface VerifyGateApply {
 }
 
 interface VerifyOutput {
-  test?: { passed?: boolean; output?: string };
-  lint?: { passed?: boolean; output?: string };
-  typecheck?: { passed?: boolean; output?: string };
+  test?: { ran?: boolean; passed?: boolean; output?: string };
+  lint?: { ran?: boolean; passed?: boolean; output?: string };
+  typecheck?: { ran?: boolean; passed?: boolean; output?: string };
   passed?: boolean;
   runtimeSmoke?: {
     ran?: boolean;
@@ -182,11 +186,20 @@ interface VerifyOutput {
   } | null;
 }
 
-function fmtResult(label: string, entry?: { passed?: boolean; output?: string }): string {
-  if (!entry) return `${label}: not run`;
-  const status = entry.passed ? 'PASS' : 'FAIL';
-  const output = (entry.output ?? '').toString().slice(0, 800);
-  return `${label}: ${status}${output ? `\n${output}` : ''}`;
+/** Narrow a stored verify-slot result to what the gate needs. A skipped slot (08
+ *  returns ran:false) stays ran:false so the gate OMITS it rather than showing a
+ *  contradictory "FAIL". null when the slot is absent entirely. */
+function liteCheck(c?: {
+  ran?: boolean;
+  passed?: boolean;
+  output?: string;
+}): { ran: boolean; passed: boolean; output: string } | null {
+  if (!c) return null;
+  return {
+    ran: c.ran !== false,
+    passed: c.passed === true,
+    output: (c.output ?? '').slice(0, 4000),
+  };
 }
 
 /** Pull the browser probe's client-side errors from browser-probe-connect.js stdout
@@ -480,9 +493,11 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       : null;
 
     return {
-      testResults: fmtResult('tests', output.test),
-      lintResults: fmtResult('lint', output.lint),
-      typecheckResults: fmtResult('typecheck', output.typecheck),
+      verify: {
+        test: liteCheck(output.test),
+        lint: liteCheck(output.lint),
+        typecheck: liteCheck(output.typecheck),
+      },
       allPassed: output.passed === true,
       validation,
       testManagement,
@@ -502,24 +517,11 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       detected.testManagement === null || detected.testManagement.testsPassed !== false;
     const b = detected.browser;
     const browserOk = b === null || b.passed;
-    const browserLine = b
-      ? `Browser testing (${b.method}): ${b.method === 'manual' ? 'checklist generated — verify below' : b.passed ? 'PASS' : 'FAIL'}${b.visualVerdict && b.visualVerdict !== 'SKIPPED' ? ` • visual ${b.visualVerdict}` : ''}`
-      : '';
     const cr = detected.codeReview;
     const codeReviewOk = cr === null || !cr.blocking;
-    const codeReviewLine = cr
-      ? `Code review: peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} operational/perf` : ''}${cr.blocking ? ' — BLOCKING' : ''}`
-      : '';
     const cAudit = detected.codeAudit;
-    const codeAuditLine =
-      cAudit && cAudit.findings.length > 0
-        ? `Code audit (broad): ${cAudit.findings.length} finding(s) — advisory`
-        : '';
     const aq = detected.adversarial;
     const adversarialOk = aq === null || !aq.blocking;
-    const adversarialLine = aq
-      ? `Adversarial QA (${aq.level}): ${aq.counts.total} findings (${aq.counts.critical} critical, ${aq.counts.high} high)${aq.blocking ? ' — BLOCKING' : ''}`
-      : '';
     const rs = detected.runtimeSmoke;
     const smokeFailed = rs != null && rs.ran && !rs.passed;
     // A real-browser agent/interactive test that PASSED is a stronger runtime signal
@@ -531,60 +533,28 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       b !== null && !b.skipped && b.passed && (b.method === 'mcp' || b.method === 'interactive');
     const smokeAdvisory = smokeFailed && browserRuntimeAuthoritative;
     const runtimeSmokeOk = !smokeFailed || smokeAdvisory;
-    let runtimeSmokeLine = '';
-    if (rs && smokeFailed) {
-      if (smokeAdvisory) {
-        runtimeSmokeLine = `Runtime smoke: advisory${rs.httpStatus !== null ? ` (HTTP ${rs.httpStatus})` : ''} — browser testing passed; see the smoke note if concerned`;
-      } else if (rs.httpStatus !== null) {
-        runtimeSmokeLine = `Runtime smoke: FAIL — the app responded (HTTP ${rs.httpStatus}) but the page shows a runtime error`;
-      } else {
-        runtimeSmokeLine = 'Runtime smoke: FAIL — the app did not respond';
-      }
-    }
-    const summary = [
-      detected.testResults,
-      detected.lintResults,
-      detected.typecheckResults,
-      '',
-      detected.allPassed
-        ? 'All verification checks passed.'
-        : 'One or more verification checks failed.',
-      v
-        ? `Implementation validation: ${v.verdict}${v.exhaustedBudget ? ' (fix budget exhausted)' : ''}`
-        : '',
-      browserLine,
-      codeReviewLine,
-      codeAuditLine,
-      adversarialLine,
-      runtimeSmokeLine,
-      detected.testManagement ? detected.testManagement.line : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
+    // The verification roll-up is a coloured status table (label + pill), each row
+    // carrying its evidence as an inline disclosure. Skipped checks are OMITTED (a
+    // non-run check is not a failure), so there's no contradictory "FAIL / skipped"
+    // row and no "all passed" line when nothing actually ran.
+    const fenced = (s: string) => ['```', s || '(empty)', '```'].join('\n');
+    const rows: StatusSummaryItem[] = [];
 
-    const infoSections: InfoSection[] = [];
-    if (rs && smokeFailed) {
-      infoSections.push({
-        title: smokeAdvisory ? 'Runtime smoke (advisory)' : 'Runtime smoke failed',
-        preview: rs.httpStatus !== null ? `HTTP ${rs.httpStatus}` : 'no response',
-        body: [
-          smokeAdvisory
-            ? 'Browser testing already passed, so this HTTP smoke is advisory only and did not affect the gate default. Review it only if the browser test might have missed a server-side error.'
-            : '',
-          rs.httpStatus !== null
-            ? `The app was probed at ${rs.url ?? 'its runtime URL'} and responded with HTTP ${rs.httpStatus}, but the response body contains a runtime-error signature (e.g. a PHP fatal or a database-connection error rendered into the page).`
-            : `The app was probed at ${rs.url ?? 'its runtime URL'} but returned no readable HTTP response.`,
-          '',
-          '## Response excerpt',
-          '```',
-          rs.errorExcerpt || '(empty)',
-          '```',
-        ]
-          .filter(Boolean)
-          .join('\n'),
-        defaultOpen: !smokeAdvisory,
+    for (const [label, c] of [
+      ['Tests', detected.verify.test],
+      ['Lint', detected.verify.lint],
+      ['Typecheck', detected.verify.typecheck],
+    ] as const) {
+      if (!c || !c.ran) continue;
+      rows.push({
+        label,
+        status: c.passed ? 'pass' : 'fail',
+        ...(c.passed || !c.output.trim()
+          ? {}
+          : { body: fenced(c.output.slice(0, 4000)), defaultOpen: false }),
       });
     }
+
     if (v) {
       const lines: string[] = [`**Verdict:** ${v.verdict}`];
       if (v.summary) lines.push('', v.summary);
@@ -620,14 +590,29 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       if (v.report) {
         lines.push('', '## Validator report (excerpt)', '', v.report);
       }
-      infoSections.push({
-        title: 'Implementation validation',
-        preview:
-          v.verdict +
-          (v.exhaustedBudget ? ' • budget exhausted' : '') +
-          (v.churnFiles.length > 0 ? ' • did not converge' : ''),
+      const flags = [
+        v.exhaustedBudget ? 'budget exhausted' : '',
+        v.churnFiles.length > 0 ? 'did not converge' : '',
+      ]
+        .filter(Boolean)
+        .join(' • ');
+      rows.push({
+        label: 'Implementation validation',
+        status: v.verdict === 'VALID' ? 'pass' : v.verdict === 'UNPARSEABLE' ? 'warn' : 'fail',
+        statusLabel: v.verdict,
+        detail: flags || undefined,
         body: lines.join('\n'),
         defaultOpen: !validationOk,
+      });
+    }
+
+    if (detected.testManagement) {
+      const tp = detected.testManagement.testsPassed;
+      rows.push({
+        label: 'Test management',
+        status: tp === false ? 'fail' : tp === true ? 'pass' : 'info',
+        statusLabel: tp === false ? 'FAIL' : tp === true ? 'PASS' : 'INFO',
+        detail: detected.testManagement.line.replace(/^Test management[^:]*:\s*/, ''),
       });
     }
 
@@ -648,9 +633,13 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           for (const f of b.failures) lines.push(`- ${f}`);
         }
       }
-      infoSections.push({
-        title: 'Browser testing',
-        preview: b.method === 'manual' ? 'manual checklist' : b.passed ? 'PASS' : 'FAIL',
+      const visual =
+        b.visualVerdict && b.visualVerdict !== 'SKIPPED' ? ` • visual ${b.visualVerdict}` : '';
+      rows.push({
+        label: 'Browser testing',
+        status: b.method === 'manual' ? 'info' : b.passed ? 'pass' : 'fail',
+        statusLabel: b.method === 'manual' ? 'CHECKLIST' : b.passed ? 'PASS' : 'FAIL',
+        detail: `method: ${b.method}${visual}`,
         body: lines.join('\n'),
         defaultOpen: !browserOk || b.method === 'manual',
       });
@@ -677,21 +666,23 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         lines.push('', '## Positives');
         for (const p of cr.positives) lines.push(`- ${p}`);
       }
-      infoSections.push({
-        title: 'Code review',
-        preview: `peer ${cr.peerVerdict} • security ${cr.securityVerdict}${cr.lensFindings.length ? ` • +${cr.lensFindings.length} ops/perf` : ''}${cr.blocking ? ' • BLOCKING' : ''}`,
+      rows.push({
+        label: 'Code review',
+        status: cr.blocking ? 'fail' : 'pass',
+        statusLabel: cr.blocking ? 'BLOCKING' : 'OK',
+        detail: `peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} ops/perf` : ''}`,
         body: lines.join('\n'),
         defaultOpen: cr.blocking,
       });
     }
 
     if (cAudit && cAudit.findings.length > 0) {
-      const lines: string[] = ['## Findings'];
-      for (const f of cAudit.findings) lines.push(`- ${f}`);
-      infoSections.push({
-        title: 'Code audit (broad)',
-        preview: `${cAudit.findings.length} finding(s) • advisory`,
-        body: lines.join('\n'),
+      rows.push({
+        label: 'Code audit (broad)',
+        status: 'info',
+        statusLabel: 'ADVISORY',
+        detail: `${cAudit.findings.length} finding(s)`,
+        body: ['## Findings', ...cAudit.findings.map((f) => `- ${f}`)].join('\n'),
         defaultOpen: false,
       });
     }
@@ -705,18 +696,60 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         lines.push('', '## Findings');
         for (const f of aq.findings) lines.push(`- ${f}`);
       }
-      infoSections.push({
-        title: 'Adversarial QA',
-        preview: `${aq.counts.total} findings${aq.blocking ? ' • BLOCKING' : ''}`,
-        body: lines.join('\n'),
+      rows.push({
+        label: `Adversarial QA (${aq.level})`,
+        status: aq.blocking ? 'fail' : aq.counts.total > 0 ? 'warn' : 'pass',
+        statusLabel: aq.blocking
+          ? 'BLOCKING'
+          : aq.counts.total > 0
+            ? `${aq.counts.total} FINDINGS`
+            : 'CLEAN',
+        detail: `${aq.counts.total} findings (${aq.counts.critical} critical, ${aq.counts.high} high)`,
+        body: aq.findings.length ? lines.join('\n') : undefined,
         defaultOpen: aq.blocking,
+      });
+    }
+
+    if (rs && rs.ran) {
+      const detail = rs.passed
+        ? rs.httpStatus !== null
+          ? `HTTP ${rs.httpStatus}`
+          : undefined
+        : smokeAdvisory
+          ? 'browser testing passed; advisory only'
+          : rs.httpStatus !== null
+            ? `responded HTTP ${rs.httpStatus} but the page shows a runtime error`
+            : 'the app did not respond';
+      const body = rs.passed
+        ? undefined
+        : [
+            smokeAdvisory
+              ? 'Browser testing already passed, so this HTTP smoke is advisory only and did not affect the gate default. Review it only if the browser test might have missed a server-side error.'
+              : '',
+            rs.httpStatus !== null
+              ? `The app was probed at ${rs.url ?? 'its runtime URL'} and responded with HTTP ${rs.httpStatus}, but the response body contains a runtime-error signature (e.g. a PHP fatal or a database-connection error rendered into the page).`
+              : `The app was probed at ${rs.url ?? 'its runtime URL'} but returned no readable HTTP response.`,
+            '',
+            '## Response excerpt',
+            fenced(rs.errorExcerpt),
+          ]
+            .filter(Boolean)
+            .join('\n');
+      rows.push({
+        label: 'Runtime smoke',
+        status: rs.passed ? 'pass' : smokeAdvisory ? 'warn' : 'fail',
+        statusLabel: rs.passed ? 'PASS' : smokeAdvisory ? 'ADVISORY' : 'FAIL',
+        detail,
+        body,
+        defaultOpen: smokeFailed && !smokeAdvisory,
       });
     }
 
     return {
       title: 'Gate 2: Verification approval',
-      description: summary,
-      ...(infoSections.length > 0 ? { infoSections } : {}),
+      description:
+        'Review the verification results below, then approve to continue to the commit gate or reject to iterate on the implementation.',
+      ...(rows.length > 0 ? { statusSummary: rows } : {}),
       fields: [
         {
           type: 'radio',

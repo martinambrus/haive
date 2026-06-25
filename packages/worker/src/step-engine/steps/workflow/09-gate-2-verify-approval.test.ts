@@ -27,12 +27,10 @@ describe('gate-2 restartLoop diagnosis', () => {
   });
 });
 
-describe('gate-2 runtime-smoke surfacing', () => {
+describe('gate-2 status summary', () => {
   const baseDetect = (overrides: Record<string, unknown>) =>
     ({
-      testResults: 'tests: PASS',
-      lintResults: 'lint: not run',
-      typecheckResults: 'typecheck: not run',
+      verify: { test: null, lint: null, typecheck: null },
       allPassed: true,
       validation: null,
       testManagement: null,
@@ -45,11 +43,13 @@ describe('gate-2 runtime-smoke surfacing', () => {
       ...overrides,
     }) as never;
 
+  const form = (detected: never) => gate2VerifyApprovalStep.form!({} as never, detected)!;
   const decisionDefault = (detected: never): string => {
-    const schema = gate2VerifyApprovalStep.form({} as never, detected)!;
-    const field = schema.fields.find((f) => f.id === 'decision') as { default?: string };
+    const field = form(detected).fields.find((f) => f.id === 'decision') as { default?: string };
     return field.default ?? '';
   };
+  const rows = (detected: never) => form(detected).statusSummary ?? [];
+  const row = (detected: never, label: string) => rows(detected).find((r) => r.label === label);
 
   const failSmoke = (httpStatus: number | null) => ({
     ran: true,
@@ -58,43 +58,66 @@ describe('gate-2 runtime-smoke surfacing', () => {
     url: 'https://app.ddev.site',
     errorExcerpt: '<html><body>installer</body></html>',
   });
+  const mcpPass = {
+    method: 'mcp',
+    passed: true,
+    failures: [],
+    visualVerdict: null,
+    checklistMarkdown: null,
+    skipped: false,
+  };
 
-  it('a standalone smoke failure defaults the gate to reject', () => {
-    const detected = baseDetect({ runtimeSmoke: failSmoke(null) });
-    expect(decisionDefault(detected)).toBe('reject');
-    const schema = gate2VerifyApprovalStep.form({} as never, detected)!;
-    expect(schema.description).toContain('Runtime smoke: FAIL');
-    expect(schema.description).toContain('did not respond');
+  it('hides skipped verify checks and shows ran ones with PASS/FAIL', () => {
+    const d = baseDetect({
+      verify: {
+        test: { ran: true, passed: false, output: 'boom' },
+        lint: { ran: false, passed: false, output: 'skipped' },
+        typecheck: { ran: true, passed: true, output: '' },
+      },
+    });
+    const labels = rows(d).map((r) => r.label);
+    expect(labels).toContain('Tests');
+    expect(labels).toContain('Typecheck');
+    expect(labels).not.toContain('Lint'); // ran:false → omitted, not a contradictory FAIL
+    expect(row(d, 'Tests')?.status).toBe('fail');
+    expect(row(d, 'Typecheck')?.status).toBe('pass');
+    expect(form(d).description ?? '').not.toContain('All verification checks passed');
   });
 
-  it('describes a body-error 200 distinctly from a no-response failure', () => {
-    const schema = gate2VerifyApprovalStep.form(
-      {} as never,
-      baseDetect({ runtimeSmoke: failSmoke(200) }),
-    )!;
-    expect(schema.description).toContain('responded (HTTP 200)');
+  it('emits no rows when every verify check was skipped', () => {
+    const d = baseDetect({
+      verify: {
+        test: { ran: false, passed: false, output: 'skipped' },
+        lint: { ran: false, passed: false, output: 'skipped' },
+        typecheck: { ran: false, passed: false, output: 'skipped' },
+      },
+    });
+    expect(rows(d).length).toBe(0);
+  });
+
+  it('a standalone smoke failure defaults the gate to reject', () => {
+    const d = baseDetect({ runtimeSmoke: failSmoke(null) });
+    expect(decisionDefault(d)).toBe('reject');
+    expect(row(d, 'Runtime smoke')?.status).toBe('fail');
+    expect(row(d, 'Runtime smoke')?.statusLabel).toBe('FAIL');
+    expect(row(d, 'Runtime smoke')?.detail).toContain('did not respond');
+  });
+
+  it('marks a body-error 200 distinctly from a no-response failure', () => {
+    const d = baseDetect({ runtimeSmoke: failSmoke(200) });
+    expect(row(d, 'Runtime smoke')?.detail).toContain('responded HTTP 200');
   });
 
   it('demotes the smoke to advisory when a real-browser test passed (default stays approve)', () => {
-    const detected = baseDetect({
-      runtimeSmoke: failSmoke(null),
-      browser: {
-        method: 'mcp',
-        passed: true,
-        failures: [],
-        visualVerdict: null,
-        checklistMarkdown: null,
-        skipped: false,
-      },
-    });
-    expect(decisionDefault(detected)).toBe('approve');
-    const schema = gate2VerifyApprovalStep.form({} as never, detected)!;
-    expect(schema.description).toContain('advisory');
-    expect(schema.description).not.toContain('Runtime smoke: FAIL');
+    const d = baseDetect({ runtimeSmoke: failSmoke(null), browser: mcpPass });
+    expect(decisionDefault(d)).toBe('approve');
+    expect(row(d, 'Runtime smoke')?.status).toBe('warn');
+    expect(row(d, 'Runtime smoke')?.statusLabel).toBe('ADVISORY');
+    expect(row(d, 'Browser testing')?.status).toBe('pass');
   });
 
   it('keeps the smoke a hard fail when a manual checklist is the only browser signal', () => {
-    const detected = baseDetect({
+    const d = baseDetect({
       runtimeSmoke: failSmoke(null),
       browser: {
         method: 'manual',
@@ -105,6 +128,7 @@ describe('gate-2 runtime-smoke surfacing', () => {
         skipped: false,
       },
     });
-    expect(decisionDefault(detected)).toBe('reject');
+    expect(decisionDefault(d)).toBe('reject');
+    expect(row(d, 'Runtime smoke')?.status).toBe('fail');
   });
 });

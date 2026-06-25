@@ -286,9 +286,39 @@ export const infoSectionSchema = z.object({
 
 export type InfoSection = z.infer<typeof infoSectionSchema>;
 
+/** One row of a form's status summary — a clean two-column "item | status" grid
+ *  with a coloured pill, rendered above the fields. Use for an at-a-glance pass/fail
+ *  roll-up (e.g. gate-2's verification results) instead of a plain-text prelude.
+ *  Producers should OMIT rows that don't apply (e.g. a skipped check) rather than
+ *  emit a misleading status. */
+export const statusSummaryItemSchema = z.object({
+  /** Left-column label, e.g. "Tests", "Code review". */
+  label: z.string().min(1),
+  /** Pill colour: pass=green, fail=red, warn=amber, info=neutral. */
+  status: z.enum(['pass', 'fail', 'warn', 'info']),
+  /** Pill text. Defaults to the uppercased status (PASS/FAIL/WARN/INFO) when
+   *  omitted; set it to surface a domain word (VALID, BLOCKING, ADVISORY, …). */
+  statusLabel: z.string().optional(),
+  /** Optional muted sub-line shown next to the label (e.g. "peer REQUEST_CHANGES"). */
+  detail: z.string().optional(),
+  /** Optional expandable content for this row (markdown, same rendering as an
+   *  infoSection body). When present the row becomes a disclosure: the label/pill
+   *  stay visible and the body reveals on click — co-locating each result with its
+   *  evidence instead of a separate section list. */
+  body: z.string().optional(),
+  /** When true (and `body` is set) the row's disclosure renders open on first paint
+   *  (use for failures the user must see). Defaults to closed. */
+  defaultOpen: z.boolean().optional(),
+});
+
+export type StatusSummaryItem = z.infer<typeof statusSummaryItemSchema>;
+
 export const formSchemaSchema = z.object({
   title: z.string().min(1),
   description: z.string().optional(),
+  /** Optional coloured status table rendered between the description and the
+   *  infoSections. Omit non-applicable rows; an empty/absent array renders nothing. */
+  statusSummary: z.array(statusSummaryItemSchema).optional(),
   /** Optional disclosures rendered between description and fields. */
   infoSections: z.array(infoSectionSchema).optional(),
   fields: z.array(formFieldSchema),

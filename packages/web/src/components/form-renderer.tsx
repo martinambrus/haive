@@ -77,6 +77,94 @@ export function InfoSections({ sections }: { sections: FormSchema['infoSections'
   );
 }
 
+const STATUS_PILL: Record<string, string> = {
+  pass: 'border-green-700/50 bg-green-900/60 text-green-300',
+  fail: 'border-red-700/50 bg-red-900/60 text-red-300',
+  warn: 'border-amber-700/50 bg-amber-900/60 text-amber-300',
+  info: 'border-neutral-700 bg-neutral-800 text-neutral-300',
+};
+const STATUS_TEXT: Record<string, string> = {
+  pass: 'PASS',
+  fail: 'FAIL',
+  warn: 'WARN',
+  info: 'INFO',
+};
+
+type StatusItem = NonNullable<FormSchema['statusSummary']>[number];
+
+function StatusRowHead({ item, expandable }: { item: StatusItem; expandable: boolean }) {
+  return (
+    <div className="flex items-center gap-2 px-3 py-2">
+      {expandable && (
+        <svg
+          viewBox="0 0 20 20"
+          className="caret h-3.5 w-3.5 shrink-0 text-neutral-500 transition-transform"
+          fill="currentColor"
+          aria-hidden
+        >
+          <path d="M7 5l6 5-6 5z" />
+        </svg>
+      )}
+      <span className="min-w-0 flex-1 text-sm text-neutral-100">
+        <span className="font-medium">{item.label}</span>
+        {item.detail && <span className="ml-2 text-xs text-neutral-400">{item.detail}</span>}
+      </span>
+      <span
+        className={cn(
+          'shrink-0 rounded border px-2 py-0.5 text-[11px] font-semibold leading-none',
+          STATUS_PILL[item.status] ?? STATUS_PILL.info,
+        )}
+      >
+        {item.statusLabel ?? STATUS_TEXT[item.status]}
+      </span>
+    </div>
+  );
+}
+
+/** Coloured two-column status roll-up: label (+ optional detail) on the left, a
+ *  coloured PASS/FAIL/WARN/INFO pill on the right. A row carrying a `body` becomes a
+ *  disclosure that reveals its evidence in place, so each result sits with its detail
+ *  instead of in a separate section list. Exported so done/skipped step cards can
+ *  re-show the summary read-only, mirroring InfoSections. */
+export function StatusSummary({ items }: { items?: FormSchema['statusSummary'] }) {
+  if (!items || items.length === 0) return null;
+  return (
+    <div className="overflow-hidden rounded-md border border-neutral-800 bg-neutral-950/60">
+      {items.map((item, i) => {
+        const rowCls = 'border-b border-neutral-800 last:border-b-0';
+        if (!item.body) {
+          return (
+            <div key={`${item.label}-${i}`} className={rowCls}>
+              <StatusRowHead item={item} expandable={false} />
+            </div>
+          );
+        }
+        const isMd = looksLikeMarkdown(item.body);
+        return (
+          <details
+            key={`${item.label}-${i}`}
+            open={item.defaultOpen ?? false}
+            className={cn(rowCls, '[&[open]_.caret]:rotate-90')}
+          >
+            <summary className="cursor-pointer select-none list-none hover:bg-neutral-900 [&::-webkit-details-marker]:hidden">
+              <StatusRowHead item={item} expandable />
+            </summary>
+            {isMd ? (
+              <div className="border-t border-neutral-800">
+                <MarkdownView body={item.body} enhanced title={item.label} toolbar />
+              </div>
+            ) : (
+              <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-t border-neutral-800 px-3 py-2 text-xs text-neutral-300">
+                {item.body}
+              </pre>
+            )}
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
 function defaultValueFor(field: FormField): unknown {
   switch (field.type) {
     case 'text':
@@ -180,6 +268,7 @@ export function FormRenderer({
         )}
       </div>
       {headerSlot}
+      <StatusSummary items={schema.statusSummary} />
       <InfoSections sections={schema.infoSections} />
       <div className="flex flex-col gap-4">
         {schema.fields.map((field) =>

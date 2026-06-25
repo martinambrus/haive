@@ -31,7 +31,12 @@ import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
-import { FormRenderer, InfoSections, type FormValues } from '@/components/form-renderer';
+import {
+  FormRenderer,
+  InfoSections,
+  StatusSummary,
+  type FormValues,
+} from '@/components/form-renderer';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { TaskSource } from '@/components/task-source';
@@ -1811,7 +1816,12 @@ function StepCard({
       {/* Done/skipped steps: re-show the spec/summary disclosures (business
           requirements, technical spec, gate reviews, …) read-only so they stay
           reviewable after the interactive form is gone. */}
-      {step.status !== 'waiting_form' && <InfoSections sections={schema?.infoSections} />}
+      {step.status !== 'waiting_form' && (
+        <>
+          <StatusSummary items={schema?.statusSummary} />
+          <InfoSections sections={schema?.infoSections} />
+        </>
+      )}
       {(step.summary ?? '').trim().length > 0 && (
         <details className="rounded-md border border-neutral-800 bg-neutral-950/60">
           <summary className="cursor-pointer select-none px-3 py-2 text-sm text-neutral-200 marker:text-neutral-500 hover:bg-neutral-900">
