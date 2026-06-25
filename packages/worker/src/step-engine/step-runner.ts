@@ -1,4 +1,4 @@
-import { and, desc, eq, isNotNull, isNull, ne } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull, ne } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema, type StepIterationEntry } from '@haive/database';
 import {
@@ -1575,9 +1575,32 @@ async function maybeEnqueueStepSummary(
       .orderBy(desc(schema.cliInvocations.createdAt))
       .limit(1);
     const rawOutput = latest?.rawOutput?.trim();
-    if (!rawOutput) return; // no agent text to summarize
 
-    const prompt = buildStepSummaryPrompt(current.title, output, rawOutput);
+    // Single-agent steps (mode 'cli') summarize the one invocation's final message.
+    // Multi-agent steps (agentMining) have no non-mining invocation on this step —
+    // each reviewer's output lives in its own task_step_agent_minings row — so fall
+    // back to a per-agent breakdown so the panel reflects the whole fan-out.
+    let prompt: string;
+    if (rawOutput) {
+      prompt = buildStepSummaryPrompt(current.title, output, rawOutput);
+    } else if (stepDef.agentMining) {
+      const minings = await db
+        .select({
+          agentId: schema.taskStepAgentMinings.agentId,
+          agentTitle: schema.taskStepAgentMinings.agentTitle,
+          rawOutput: schema.taskStepAgentMinings.rawOutput,
+        })
+        .from(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.taskStepId, current.id))
+        .orderBy(asc(schema.taskStepAgentMinings.createdAt));
+      const agents = minings
+        .map((m) => ({ title: m.agentTitle ?? m.agentId, text: (m.rawOutput ?? '').trim() }))
+        .filter((a) => a.text.length > 0);
+      if (agents.length === 0) return; // no agent text to summarize
+      prompt = buildAgentMiningSummaryPrompt(current.title, output, agents);
+    } else {
+      return; // no agent text to summarize
+    }
     const preferredProviderId = await resolvePreferredCli(
       db,
       params.userId,
@@ -1647,6 +1670,41 @@ function buildStepSummaryPrompt(stepTitle: string, output: unknown, rawOutput: s
     'In 1-3 plain sentences, describe what the agent actually did in this step — what it ' +
       'found, changed, or fixed, and the outcome. Write only the summary itself: no ' +
       'preamble, no headings, no bullet list.',
+  ].join('\n');
+}
+
+/** Multi-agent variant of buildStepSummaryPrompt. agentMining steps (code review,
+ *  discovery, adversarial QA, skill generation) run several agents in parallel, each
+ *  writing its own task_step_agent_minings row. Summarize what EACH agent did so the
+ *  "What the agent did" panel reflects the whole fan-out, not a single terminal. */
+function buildAgentMiningSummaryPrompt(
+  stepTitle: string,
+  output: unknown,
+  agents: Array<{ title: string; text: string }>,
+): string {
+  const structured = JSON.stringify(output ?? {}, null, 2).slice(0, 3000);
+  // Budget the raw text across agents so the prompt stays bounded regardless of how
+  // many agents ran (2-6 depending on QA level).
+  const perAgent = Math.max(800, Math.floor(7000 / Math.max(agents.length, 1)));
+  const blocks = agents
+    .map((a) => [`### ${a.title}`, a.text.slice(0, perAgent)].join('\n'))
+    .join('\n\n');
+  return [
+    `Several automated agents ran in parallel during a workflow step titled "${stepTitle}".`,
+    'Each agent and its final message:',
+    '"""',
+    blocks,
+    '"""',
+    '',
+    'The combined structured result was:',
+    '```json',
+    structured,
+    '```',
+    '',
+    'Summarize what each agent did: one short line per agent in the form ' +
+      '"Agent Name — what it found or concluded", leading each line with the agent name ' +
+      'exactly as given above. End with a final line stating the overall outcome (e.g. the ' +
+      'blocking verdict). Write only the summary: no preamble, no extra headings, no JSON.',
   ].join('\n');
 }
 
