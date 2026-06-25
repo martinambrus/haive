@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
+  parseGlobalCandidates,
   parseInvestigation,
   parseKbSync,
   parseLearningOutput,
@@ -320,5 +321,52 @@ describe('applyLearningOps + readExistingLearnings', () => {
     } finally {
       await rm(ws, { recursive: true, force: true });
     }
+  });
+});
+
+describe('parseGlobalCandidates', () => {
+  it('parses candidates, validates category, dedups ids', () => {
+    const cands = parseGlobalCandidates({
+      globalCandidates: [
+        { title: 'Drupal hook pattern', category: 'best_practice', tech: 'drupal', body: 'a' },
+        { title: 'Drupal hook pattern', category: 'bogus', tech: 'drupal', body: 'b' },
+      ],
+    });
+    expect(cands).toHaveLength(2);
+    expect(cands[0]).toMatchObject({
+      id: 'drupal-hook-pattern',
+      category: 'best_practice',
+      tech: 'drupal',
+    });
+    // unknown category falls back to tech_pattern; colliding slug is disambiguated.
+    expect(cands[1]!.category).toBe('tech_pattern');
+    expect(cands[1]!.id).toBe('drupal-hook-pattern-2');
+  });
+
+  it('drops entries missing title, body, or tech', () => {
+    const cands = parseGlobalCandidates({
+      globalCandidates: [
+        { title: '', tech: 'php', body: 'x' },
+        { title: 'No body', tech: 'php', body: '   ' },
+        { title: 'No tech', tech: '', body: 'x' },
+        { title: 'Keep', tech: 'php', body: 'real' },
+      ],
+    });
+    expect(cands).toHaveLength(1);
+    expect(cands[0]!.title).toBe('Keep');
+  });
+
+  it('returns [] when no globalCandidates key or not an array', () => {
+    expect(parseGlobalCandidates({ entries: [] })).toEqual([]);
+    expect(parseGlobalCandidates({ globalCandidates: 'nope' })).toEqual([]);
+    expect(parseGlobalCandidates(null)).toEqual([]);
+  });
+
+  it('parses from a fenced-json string', () => {
+    const raw =
+      'noise\n```json\n{"globalCandidates":[{"title":"T","category":"tech_pattern","tech":"mariadb","body":"B"}]}\n```\ntail';
+    const cands = parseGlobalCandidates(raw);
+    expect(cands).toHaveLength(1);
+    expect(cands[0]).toMatchObject({ title: 'T', tech: 'mariadb', category: 'tech_pattern' });
   });
 });

@@ -10,7 +10,13 @@ import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
-import { clearTaskPromotedDrafts, promoteToGlobalKbDraft } from '../_global-kb-promote.js';
+import {
+  clearTaskPromotedDrafts,
+  globalKbTopicKey,
+  loadActiveGlobalArticlesForStack,
+  promoteToGlobalKbDraft,
+} from '../_global-kb-promote.js';
+import { loadRepoStackAnchors, techAnchorFacets } from '../_repo-stack.js';
 import { buildTaskHistoryDigest, type TaskHistoryDigest } from './_task-history-digest.js';
 import { KNOWLEDGE_DIFF_ARTIFACT_NAME, buildKnowledgeDiffArtifact } from './_knowledge-diff.js';
 import type { CommitDiffFile } from './_commit-diff.js';
@@ -36,6 +42,12 @@ interface LearningDetect {
   /** Bounded summary of the existing .claude/learnings/ entries (id + title +
    *  excerpt) so the agent can reconcile (dedup / update / delete) against them. */
   existingLearnings: { id: string; title: string; excerpt: string }[];
+  /** Repo's installed-stack anchors (from its onboarding) for version-anchoring a
+   *  promoted global article; null when the repo never completed onboarding. */
+  repoStack: Awaited<ReturnType<typeof loadRepoStackAnchors>>;
+  /** Existing active global house-standard articles matching this repo's stack —
+   *  shown to the agent so it can author an UPDATE (full merged body) vs a new one. */
+  existingGlobalArticles: { title: string; body: string }[];
   /** Stable `.haive/` path the form's knowledge-diff viewer fetches; the file is
    *  written by prepareForm post-llm. null when the worktree has no git repo. */
   knowledgeDiffArtifactPath: string | null;
@@ -90,8 +102,31 @@ interface LearningApply {
   /** True when the user unticked "keep KB sync" and apply reverted the agent's
    *  knowledge_base edits before commit. */
   kbReverted: boolean;
+  /** `global-kb:<id>` refs for the house-standard candidates the user promoted. */
+  promotedCandidates: string[];
   source: 'llm' | 'stub';
 }
+
+/** A portable house-standard article the learning agent proposes for the cross-repo
+ *  global KB (distinct from a bug investigation, which stays standalone). When its
+ *  computed topicKey matches an existing article, the promotion links + supersedes
+ *  it; the agent authors `body` as the full merged article for that case. */
+interface GlobalCandidate {
+  id: string;
+  title: string;
+  body: string;
+  category: 'tech_pattern' | 'best_practice' | 'anti_pattern' | 'quick_reference' | 'general';
+  /** Public tech slug the article is about — drives deterministic version anchoring. */
+  tech: string;
+}
+
+const GLOBAL_CANDIDATE_CATEGORIES = new Set([
+  'tech_pattern',
+  'best_practice',
+  'anti_pattern',
+  'quick_reference',
+  'general',
+]);
 
 const execFileP = promisify(execFile);
 
@@ -185,6 +220,43 @@ export function parseKbSync(raw: unknown): KbSync | null {
     changes.push({ file, op, summary });
   }
   return { classification, changes };
+}
+
+/** Parse the optional `globalCandidates` array (portable house-standard articles)
+ *  the learning agent may emit for cross-repo global-KB promotion. Defensive:
+ *  entries missing title/body/tech are dropped; unknown categories fall back to
+ *  tech_pattern; ids are deduped. */
+export function parseGlobalCandidates(raw: unknown): GlobalCandidate[] {
+  let obj: Record<string, unknown> | null = null;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    obj = raw as Record<string, unknown>;
+  } else if (typeof raw === 'string') {
+    const parsed = parseJsonLoose(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      obj = parsed as Record<string, unknown>;
+    }
+  }
+  const arr = obj?.globalCandidates ?? obj?.global_candidates;
+  if (!Array.isArray(arr)) return [];
+  const out: GlobalCandidate[] = [];
+  const taken = new Set<string>();
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue;
+    const c = item as Record<string, unknown>;
+    const title = typeof c.title === 'string' ? c.title.trim() : '';
+    const body = typeof c.body === 'string' ? c.body : '';
+    const tech = typeof c.tech === 'string' ? c.tech.trim() : '';
+    if (!title || !body.trim() || !tech) continue;
+    const category =
+      typeof c.category === 'string' && GLOBAL_CANDIDATE_CATEGORIES.has(c.category)
+        ? (c.category as GlobalCandidate['category'])
+        : 'tech_pattern';
+    let id = slugify(title) || 'candidate';
+    for (let n = 2; taken.has(id); n++) id = `${slugify(title) || 'candidate'}-${n}`;
+    taken.add(id);
+    out.push({ id, title, body, category, tech });
+  }
+  return out;
 }
 
 /** Discard the learning agent's structured-KB edits (Feature KB Sync) when the user
@@ -530,6 +602,21 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const verifyOutput = (verify?.output as VerifyOutput | null) ?? {};
     const commitOutput = (commit?.output as CommitOutput | null) ?? {};
     const historyDigest = await buildTaskHistoryDigest(ctx.db, ctx.taskId);
+    const repositoryId =
+      (
+        await ctx.db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, ctx.taskId),
+          columns: { repositoryId: true },
+        })
+      )?.repositoryId ?? null;
+    const repoStack = repositoryId ? await loadRepoStackAnchors(ctx.db, repositoryId) : null;
+    const existingGlobalArticles = repoStack
+      ? await loadActiveGlobalArticlesForStack(ctx.db, [
+          repoStack.anchors.framework,
+          repoStack.language,
+          repoStack.anchors.database,
+        ])
+      : [];
     return {
       taskTitle: meta.title,
       taskDescription: meta.description,
@@ -543,6 +630,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       affectedClients: meta.affectedClients,
       historyDigest,
       existingLearnings,
+      repoStack,
+      existingGlobalArticles,
       worktreePath,
       knowledgeDiffArtifactPath: hasGit
         ? path.join(worktreePath, '.haive', KNOWLEDGE_DIFF_ARTIFACT_NAME)
@@ -602,6 +691,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           ? 'This task was a BUG FIX: ALSO produce an `investigation`. In `symptoms`, lead with the observable symptoms and quote the EXACT error strings/messages verbatim — these are the lexical anchor future searches match on; name the affected feature/area. Give the root cause (why/how the bug existed, grounded in the implementation) and the durable lesson for future work. Set its `scope` to "global" ONLY when the lesson is a reusable house standard for any project of this stack (not specific to this repo); otherwise "local".'
           : '',
         '',
+        'GLOBAL KB CANDIDATES (optional, separate from the per-repo learnings above): if this run produced REUSABLE, PORTABLE house-standard knowledge about a PUBLIC tech (a framework/library/language/datastore — NOT this repo\'s own code, names, or paths), add a `globalCandidates` array to the JSON: [ { "title": "<short>", "category": "tech_pattern|best_practice|anti_pattern|quick_reference", "tech": "<public tech slug, e.g. drupal, php, mariadb>", "body": "<full portable markdown article, no repo-specific names/paths>" } ]. Omit it or use [] when nothing is genuinely portable. If a candidate covers the SAME topic as one of the existing global articles shown below, author `body` as the FULL UPDATED article: keep the existing wording VERBATIM where unchanged and only add or adjust what this task learned — the body is diffed against the existing article for human approval, so minimize churn.',
+        '',
         `Task title: ${detected.taskTitle || '(untitled)'}`,
         `Task description: ${detected.taskDescription || '(none)'}`,
         `Feature/area: ${detected.feature ?? '(unspecified)'}`,
@@ -614,6 +705,13 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         detected.existingLearnings.length > 0
           ? detected.existingLearnings.map((l) => `- ${l.id} — ${l.title}: ${l.excerpt}`).join('\n')
           : '(none yet)',
+        '',
+        '=== Existing global house-standard articles for this stack (to UPDATE one, re-use its tech and author the full merged body) ===',
+        detected.existingGlobalArticles.length > 0
+          ? detected.existingGlobalArticles
+              .map((a) => `--- ${a.title} ---\n${a.body.slice(0, 1500)}`)
+              .join('\n\n')
+          : '(none)',
         '',
         '=== What happened during this task (mine this — it is the real, persisted run history) ===',
         detected.historyDigest.text,
@@ -654,6 +752,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const investigation = detected.isBugFix ? parseInvestigation(llmOutput ?? null) : null;
     const kbSync = parseKbSync(llmOutput ?? null);
     const kbChanged = (kbSync?.changes.length ?? 0) > 0;
+    const globalCandidates = parseGlobalCandidates(llmOutput ?? null);
     const infoSections: InfoSection[] = [];
     const insertCount = entries.filter((e) => e.op === 'insert').length;
     const updateCount = entries.filter((e) => e.op === 'update').length;
@@ -700,6 +799,19 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           .map((c) => `- **${c.op.toUpperCase()}** \`${c.file}\`\n  ${c.summary || '(no summary)'}`)
           .join('\n'),
         defaultOpen: true,
+      });
+    }
+    if (globalCandidates.length > 0) {
+      infoSections.push({
+        title: `Global KB candidates (${globalCandidates.length})`,
+        preview: globalCandidates
+          .map((c) => c.title)
+          .join('; ')
+          .slice(0, 80),
+        body: globalCandidates
+          .map((c) => `### [${c.category} · ${c.tech}] ${c.title}\n\n${c.body}`)
+          .join('\n\n---\n\n'),
+        defaultOpen: false,
       });
     }
     return {
@@ -753,6 +865,21 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
               },
             ]
           : []),
+        ...(globalCandidates.length > 0 && detected.repoStack
+          ? [
+              {
+                type: 'multi-select' as const,
+                id: 'acceptGlobalCandidates',
+                label: 'Promote these as GLOBAL KB drafts (cross-repo house standards)',
+                options: globalCandidates.map((c) => ({
+                  value: c.id,
+                  label: c.title,
+                  description: `${c.category} · ${c.tech}`,
+                })),
+                defaults: [] as string[],
+              },
+            ]
+          : []),
         {
           type: 'textarea',
           id: 'reviewerNote',
@@ -770,6 +897,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       keepKbSync?: boolean;
       writeInvestigation?: boolean;
       promoteInvestigationGlobal?: boolean;
+      acceptGlobalCandidates?: string[];
       reviewerNote?: string;
     };
     const reviewerNote = values.reviewerNote ?? '';
@@ -846,6 +974,35 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       }
     }
 
+    // General house-standard candidates: promote each ticked candidate as a global
+    // KB draft, version-anchored from the repo's onboarding stack so the topicKey
+    // matches/updates an existing article deterministically (the LLM's free-form
+    // facets drift). Investigations above stay standalone (no topicKey) by design.
+    const globalCandidates = parseGlobalCandidates(args.llmOutput ?? null);
+    const acceptedIds = new Set(values.acceptGlobalCandidates ?? []);
+    const promotedCandidates: string[] = [];
+    if (acceptedIds.size > 0 && args.detected.repoStack) {
+      const { anchors, projectName } = args.detected.repoStack;
+      for (const c of globalCandidates.filter((c) => acceptedIds.has(c.id))) {
+        const facets = techAnchorFacets(c.tech, {}, anchors);
+        const promo = await promoteToGlobalKbDraft(
+          ctx.db,
+          {
+            userId: ctx.userId,
+            taskId: ctx.taskId,
+            title: c.title,
+            body: c.body,
+            category: c.category,
+            facets,
+            topicKey: globalKbTopicKey(c.category, facets, c.tech) ?? undefined,
+            projectName: projectName ?? undefined,
+          },
+          ctx.logger,
+        );
+        if (promo) promotedCandidates.push(`global-kb:${promo.id}`);
+      }
+    }
+
     ctx.logger.info(
       {
         entries: entries.length,
@@ -855,10 +1012,20 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         kbClassification: kbSync?.classification ?? null,
         kbChanged: kbHasChanges,
         kbReverted,
+        promotedCandidates: promotedCandidates.length,
         source,
       },
       'learning capture complete',
     );
-    return { entries, written, deleted, investigationWritten, kbSync, kbReverted, source };
+    return {
+      entries,
+      written,
+      deleted,
+      investigationWritten,
+      kbSync,
+      kbReverted,
+      promotedCandidates,
+      source,
+    };
   },
 };

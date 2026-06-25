@@ -96,6 +96,48 @@ export function sanitizeGlobalArticle(input: {
   return { title, body };
 }
 
+/** Fetch the active global KB articles whose facets match the given stack tech
+ *  tokens (framework / language / database), so a step can show the agent which
+ *  existing house-standard articles it could update. Best-effort: [] when the
+ *  global KB is off/unavailable or nothing matches. */
+export async function loadActiveGlobalArticlesForStack(
+  db: Database,
+  techs: (string | null)[],
+  limit = 15,
+): Promise<{ title: string; body: string }[]> {
+  const want = new Set(techs.filter((t): t is string => !!t).map((t) => t.toLowerCase()));
+  if (want.size === 0) return [];
+  try {
+    return await withGlobalKb(db, async ({ db: gdb, settings }) => {
+      const rows = await gdb
+        .select({
+          title: globalKbEntries.title,
+          body: globalKbEntries.body,
+          facets: globalKbEntries.facets,
+        })
+        .from(globalKbEntries)
+        .where(
+          and(
+            eq(globalKbEntries.namespace, settings.namespace),
+            eq(globalKbEntries.status, 'active'),
+          ),
+        )
+        .orderBy(desc(globalKbEntries.updatedAt))
+        .limit(80);
+      const matched = rows.filter((r) => {
+        const f = (r.facets ?? {}) as GlobalKbFacets;
+        const vals = [...(f.framework ?? []), ...(f.language ?? []), ...(f.database ?? [])].map(
+          (s) => s.toLowerCase(),
+        );
+        return vals.some((v) => want.has(v));
+      });
+      return matched.slice(0, limit).map((r) => ({ title: r.title, body: r.body }));
+    });
+  } catch {
+    return [];
+  }
+}
+
 /** Promote a generalizable knowledge item to the cross-repo global KB as a DRAFT
  *  (`source='promoted'`). Drafts hold no vectors and are not retrievable until an
  *  admin activates them in Settings → Global KB, so this NEVER touches the

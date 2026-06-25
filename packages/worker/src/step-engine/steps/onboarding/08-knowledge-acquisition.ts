@@ -5,6 +5,7 @@ import type { DetectResult, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
+import { techAnchorFacets } from '../_repo-stack.js';
 import {
   resolveStackVersions,
   type ConfirmedStackValues,
@@ -647,55 +648,10 @@ export function defaultGlobalFacets(entry: KbEntry, detected: KnowledgeDetect): 
   return f;
 }
 
-/** Derive version-anchor facets for a deterministically-promoted tech-bucket entry
- *  from its `tech` slug + the detected stack, anchoring to what is actually
- *  installed: PHP → language+phpMajor; a datastore → database+dbMajor (installed
- *  engine + major); a detected dependency → packages; the framework →
- *  framework+frameworkMajor. When nothing anchors (e.g. jquery/fckeditor with no
- *  detectable version), no anchor is added and the caller keeps the entry local. */
-export function techAnchorFacets(
-  techRaw: string | undefined,
-  base: GlobalKbFacets,
-  detected: KnowledgeDetect,
-): GlobalKbFacets {
-  const f: GlobalKbFacets = { ...base };
-  if (f.packages?.length) return f; // already module-scoped
-  const tech = (techRaw ?? '').trim().toLowerCase();
-  if (!tech) return f;
-
-  // PHP language knowledge.
-  if (tech === 'php' && detected.phpMajor) {
-    f.language = ['php'];
-    f.phpMajor = [detected.phpMajor];
-    return f;
-  }
-  // Datastore knowledge — anchor to the INSTALLED engine + major.
-  const isDbTech =
-    ['mysql', 'mariadb', 'maria', 'sql'].includes(tech) || tech === detected.database;
-  if (isDbTech && detected.database && detected.dbMajor) {
-    const engines = new Set<string>([detected.database]);
-    if (tech === 'mysql' || tech === 'mariadb') engines.add(tech);
-    f.database = [...engines];
-    f.dbMajor = [detected.dbMajor];
-    return f;
-  }
-  // A detected dependency whose package name matches the tech slug.
-  const pkg = detected.packages.find((p) => {
-    const name = (p.split('@')[0] ?? '').toLowerCase();
-    return name === tech || name.split('/').pop() === tech;
-  });
-  if (pkg) {
-    f.packages = [pkg];
-    return f;
-  }
-  // The framework itself.
-  if (detected.framework && tech === detected.framework.toLowerCase() && detected.frameworkMajor) {
-    f.framework = [detected.framework];
-    f.frameworkMajor = [detected.frameworkMajor];
-    return f;
-  }
-  return f; // no anchor derivable → caller keeps it local
-}
+// techAnchorFacets moved to ../_repo-stack.ts so the workflow learning step reuses
+// the same deterministic version-anchoring. Imported above. KnowledgeDetect still
+// satisfies its StackAnchors parameter structurally, so the callers below are
+// unchanged.
 
 /** Default global facets from the detected stack alone (no entry) — used when a
  *  re-routed existing file is promoted to a global draft. */
