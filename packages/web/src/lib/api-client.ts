@@ -577,6 +577,8 @@ export interface RagQueryEntry {
   hitCount: number;
   kbHits: number;
   codeHits: number;
+  runbookHits: number;
+  learningHits: number;
   maxRrf: number;
   maxDense: number;
   createdAt: string;

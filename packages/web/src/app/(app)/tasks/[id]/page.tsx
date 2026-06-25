@@ -2137,13 +2137,18 @@ function RagStatsPanel({ taskId, stepId }: { taskId: string; stepId: string }) {
   const totalHits = queries.reduce((s, q) => s + q.hitCount, 0);
   const totalKb = queries.reduce((s, q) => s + q.kbHits, 0);
   const totalCode = queries.reduce((s, q) => s + q.codeHits, 0);
+  const totalRunbook = queries.reduce((s, q) => s + q.runbookHits, 0);
+  const totalLearning = queries.reduce((s, q) => s + q.learningHits, 0);
   const withHits = queries.filter((q) => q.hitCount > 0).length;
-  // Effectiveness: how often RAG returned anything, and the KB-vs-code split of
-  // the chunks it returned. codePct is the remainder so the two always sum to 100%.
+  // Effectiveness: how often RAG returned anything, and the source-type split of
+  // the chunks it returned. learningPct is the remainder so the four always sum
+  // to 100%.
   const ragUsedPct = queries.length ? Math.round((withHits / queries.length) * 100) : 0;
-  const totalChunks = totalKb + totalCode;
+  const totalChunks = totalKb + totalCode + totalRunbook + totalLearning;
   const kbPct = totalChunks ? Math.round((totalKb / totalChunks) * 100) : 0;
-  const codePct = totalChunks ? 100 - kbPct : 0;
+  const codePct = totalChunks ? Math.round((totalCode / totalChunks) * 100) : 0;
+  const runbookPct = totalChunks ? Math.round((totalRunbook / totalChunks) * 100) : 0;
+  const learningPct = totalChunks ? Math.max(0, 100 - kbPct - codePct - runbookPct) : 0;
 
   return (
     <div className="flex flex-col gap-2">
@@ -2153,6 +2158,8 @@ function RagStatsPanel({ taskId, stepId }: { taskId: string; stepId: string }) {
         <span>{totalHits} hits total</span>
         <span className="text-indigo-300">KB: {totalKb}</span>
         <span className="text-emerald-300">code: {totalCode}</span>
+        <span className="text-amber-300">runbook: {totalRunbook}</span>
+        <span className="text-sky-300">learning: {totalLearning}</span>
       </div>
       <div className="max-h-80 overflow-auto rounded border border-neutral-800">
         <table className="w-full text-left text-[11px]">
@@ -2162,6 +2169,8 @@ function RagStatsPanel({ taskId, stepId }: { taskId: string; stepId: string }) {
               <th className="px-2 py-1 text-right font-medium">hits</th>
               <th className="px-2 py-1 text-right font-medium">kb</th>
               <th className="px-2 py-1 text-right font-medium">code</th>
+              <th className="px-2 py-1 text-right font-medium">runbook</th>
+              <th className="px-2 py-1 text-right font-medium">learning</th>
               <th className="px-2 py-1 text-right font-medium">top rrf</th>
               <th className="px-2 py-1 text-right font-medium">top dense</th>
             </tr>
@@ -2173,6 +2182,8 @@ function RagStatsPanel({ taskId, stepId }: { taskId: string; stepId: string }) {
                 <td className="px-2 py-1 text-right">{q.hitCount}</td>
                 <td className="px-2 py-1 text-right text-indigo-300">{q.kbHits}</td>
                 <td className="px-2 py-1 text-right text-emerald-300">{q.codeHits}</td>
+                <td className="px-2 py-1 text-right text-amber-300">{q.runbookHits}</td>
+                <td className="px-2 py-1 text-right text-sky-300">{q.learningHits}</td>
                 <td className="px-2 py-1 text-right font-mono">{q.maxRrf.toFixed(4)}</td>
                 <td className="px-2 py-1 text-right font-mono">{q.maxDense.toFixed(3)}</td>
               </tr>
@@ -2183,7 +2194,9 @@ function RagStatsPanel({ taskId, stepId }: { taskId: string; stepId: string }) {
       <p className="text-xs text-neutral-400">
         RAG effective <span className="text-neutral-200">{ragUsedPct}%</span> of the time · of
         retrieved chunks <span className="text-indigo-300">{kbPct}% KB</span> /{' '}
-        <span className="text-emerald-300">{codePct}% code</span>
+        <span className="text-emerald-300">{codePct}% code</span> /{' '}
+        <span className="text-amber-300">{runbookPct}% runbook</span> /{' '}
+        <span className="text-sky-300">{learningPct}% learning</span>
       </p>
     </div>
   );

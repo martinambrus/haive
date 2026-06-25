@@ -91,6 +91,8 @@ stepRoutes.get('/:id/steps/:stepId/rag-queries', async (c) => {
       hitCount: schema.ragQueryLog.hitCount,
       kbHits: schema.ragQueryLog.kbHits,
       codeHits: schema.ragQueryLog.codeHits,
+      runbookHits: schema.ragQueryLog.runbookHits,
+      learningHits: schema.ragQueryLog.learningHits,
       maxRrf: schema.ragQueryLog.maxRrf,
       maxDense: schema.ragQueryLog.maxDense,
       createdAt: schema.ragQueryLog.createdAt,
