@@ -49,6 +49,13 @@ export const CONFIG_KEYS = {
   // CLI agents in the cli-exec sandbox). Default true; set 'false' to disable
   // masking for every repo without per-repo edits or a redeploy.
   SECRET_MASK_ENABLED: 'config:sandbox:secretMaskEnabled',
+  // Global switch for mid-run steering (default ON; a kill-switch). When 'true',
+  // every Claude-family CLI step runs in stream-json input mode so a user can
+  // inject steering messages (applied at the next tool-call boundary), and each
+  // steer is mined into the KB. Set 'false' to disable steering everywhere
+  // without a redeploy. Steering is a uniform UX affordance, so this is the only
+  // toggle — there is no per-repo flag.
+  STEERING_ENABLED: 'config:steering:enabled',
 
   APP_URL: 'config:app:url',
 
@@ -89,6 +96,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.CLAWKER_BIN]: '/usr/local/bin/clawker',
   [CONFIG_KEYS.SANDBOX_NETWORK]: 'haive-network',
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
+  [CONFIG_KEYS.STEERING_ENABLED]: 'true',
   [CONFIG_KEYS.APP_URL]: 'http://localhost:3000',
   [CONFIG_KEYS.MAINTENANCE_MODE]: 'false',
   [CONFIG_KEYS.MAINTENANCE_MESSAGE]: 'Maintenance in progress. Please check back shortly.',

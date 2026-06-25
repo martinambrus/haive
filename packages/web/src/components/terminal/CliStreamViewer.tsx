@@ -69,6 +69,13 @@ export function CliStreamViewer({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
+  // Mid-run steering: enabled only when the connected frame reports this
+  // invocation is steerable. The text is delivered to the running CLI's stdin
+  // and applied at its next tool-call boundary.
+  const [steerable, setSteerable] = useState(false);
+  const [steerText, setSteerText] = useState('');
+  const [steering, setSteering] = useState(false);
+  const [steerNotice, setSteerNotice] = useState<string | null>(null);
   const onExitRef = useRef(onExit);
 
   // Tabbed view: Clean (parsed model prose) is the default; Raw is the original
@@ -101,6 +108,27 @@ export function CliStreamViewer({
       setCancelError((err as Error).message ?? 'Cancel failed');
     } finally {
       setCancelling(false);
+    }
+  };
+
+  const sendSteer = async () => {
+    const text = steerText.trim();
+    if (!text || steering) return;
+    setSteering(true);
+    setSteerNotice(null);
+    try {
+      await api.post(`/tasks/${taskId}/steer-active-cli`, { text, invocationId });
+      setSteerText('');
+      setSteerNotice('Steer queued — applies at the next tool call');
+    } catch (err) {
+      const msg = (err as Error).message ?? 'Steer failed';
+      setSteerNotice(
+        /409|not steerable|no active/i.test(msg)
+          ? 'Too late — the run already finished its turn'
+          : msg,
+      );
+    } finally {
+      setSteering(false);
     }
   };
 
@@ -226,6 +254,7 @@ export function CliStreamViewer({
         case 'connected':
           setState('connected');
           setErrorMsg(null);
+          setSteerable(parsed.steerable === true);
           break;
         case 'output':
           if (typeof parsed.data === 'string') {
@@ -372,9 +401,34 @@ export function CliStreamViewer({
           )}
           {errorMsg && <span className="text-red-400">{errorMsg}</span>}
           {cancelError && <span className="text-red-400">cancel: {cancelError}</span>}
+          {steerNotice && <span className="text-indigo-300">{steerNotice}</span>}
         </div>
         {!isReplay && (
           <div className="flex items-center gap-3 text-xs text-neutral-400">
+            {steerable && (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void sendSteer();
+                }}
+                className="flex items-center gap-1"
+              >
+                <input
+                  value={steerText}
+                  onChange={(e) => setSteerText(e.target.value)}
+                  placeholder="Steer the agent…"
+                  disabled={steering || state !== 'connected'}
+                  className="w-48 rounded border border-neutral-700 bg-neutral-900 px-2 py-0.5 text-xs text-neutral-200 placeholder:text-neutral-600 disabled:opacity-50"
+                />
+                <button
+                  type="submit"
+                  disabled={steering || state !== 'connected' || steerText.trim().length === 0}
+                  className="rounded border border-indigo-600 px-2 py-0.5 text-indigo-300 hover:bg-indigo-950 disabled:opacity-50"
+                >
+                  {steering ? 'Sending…' : 'Steer'}
+                </button>
+              </form>
+            )}
             <span>Read-only — use Cancel to stop the running CLI</span>
             <button
               type="button"

@@ -1,4 +1,5 @@
 import { BaseCliAdapter } from './base-adapter.js';
+import { claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
 import type {
   CliCommandSpec,
   CliProviderRecord,
@@ -52,6 +53,7 @@ export class ZaiAdapter extends BaseCliAdapter {
   // Default Z.AI host; a custom Z_AI_API_URL/ANTHROPIC_BASE_URL is added per
   // provider via egressDomains.
   override readonly defaultEgressDomains = ['api.z.ai'];
+  override readonly supportsSteering = true;
 
   buildCliInvocation(
     provider: CliProviderRecord,
@@ -67,20 +69,19 @@ export class ZaiAdapter extends BaseCliAdapter {
       env.ANTHROPIC_API_KEY = token;
     }
     if (env.Z_AI_MODEL) env.CLAUDE_MODEL = env.Z_AI_MODEL;
-    return {
+    const steering = opts.steeringMode === true;
+    const spec: CliCommandSpec = {
       command: this.resolveExecutable(provider),
-      args: this.mergedArgs(provider, [
-        '--dangerously-skip-permissions',
-        '-p',
-        prompt,
-        '--output-format',
-        'stream-json',
-        '--verbose',
-      ]),
+      args: this.mergedArgs(provider, claudeFamilyArgs({ steering, prompt })),
       env,
       cwd: opts.cwd,
       outputFormat: 'claude-stream-json',
     };
+    if (steering) {
+      spec.stdinInitial = steeringUserMessageLine(prompt);
+      spec.steerable = true;
+    }
+    return spec;
   }
 
   override effortEnv(level: string): Record<string, string> {

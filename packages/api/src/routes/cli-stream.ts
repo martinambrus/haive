@@ -47,7 +47,7 @@ export function installCliStreamWebSocket(server: Server, opts: CliStreamWsOptio
           return;
         }
         wss.handleUpgrade(req, socket, head, (ws) => {
-          runStreamSession(ws, invocationId).catch((err) => {
+          runStreamSession(ws, invocationId, ownership.steerable).catch((err) => {
             log.error({ err, invocationId }, 'cli-stream session crashed');
             sendFrame(ws, { type: 'error', message: errorMessage(err) });
             try {
@@ -70,15 +70,22 @@ export function installCliStreamWebSocket(server: Server, opts: CliStreamWsOptio
 interface StreamFrameOut {
   type: 'connected' | 'output' | 'exit' | 'error' | 'pong';
   invocationId?: string;
+  /** On the `connected` frame: whether this invocation accepts mid-run steering
+   *  (drives the web steer box). */
+  steerable?: boolean;
   stream?: 'stdout' | 'stderr' | 'text';
   data?: string;
   code?: number;
   message?: string;
 }
 
-async function runStreamSession(ws: WebSocket, invocationId: string): Promise<void> {
+async function runStreamSession(
+  ws: WebSocket,
+  invocationId: string,
+  steerable: boolean,
+): Promise<void> {
   log.info({ invocationId }, 'cli-stream session opened');
-  sendFrame(ws, { type: 'connected', invocationId });
+  sendFrame(ws, { type: 'connected', invocationId, steerable });
 
   // Dedicated Redis connection — XREAD BLOCK monopolizes the socket.
   const redis = getRedis().duplicate();
@@ -208,11 +215,11 @@ async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: stri
 async function verifyInvocationOwnership(
   invocationId: string,
   userId: string,
-): Promise<{ taskId: string } | null> {
+): Promise<{ taskId: string; steerable: boolean } | null> {
   const db = getDb();
   const inv = await db.query.cliInvocations.findFirst({
     where: eq(schema.cliInvocations.id, invocationId),
-    columns: { taskId: true },
+    columns: { taskId: true, steerable: true },
   });
   if (!inv?.taskId) return null;
   const task = await db.query.tasks.findFirst({
@@ -220,7 +227,7 @@ async function verifyInvocationOwnership(
     columns: { userId: true },
   });
   if (!task || task.userId !== userId) return null;
-  return { taskId: inv.taskId };
+  return { taskId: inv.taskId, steerable: inv.steerable };
 }
 
 function extractInvocationId(rawUrl: string, pathPrefix: string): string | null {

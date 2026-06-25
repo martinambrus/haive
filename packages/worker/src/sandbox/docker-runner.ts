@@ -53,6 +53,16 @@ export interface DockerRunOpts {
   onStdoutChunk?: (chunk: string) => void;
   onStderrChunk?: (chunk: string) => void;
   signal?: AbortSignal;
+  /** Interactive mode: open a writable stdin pipe (docker `-i`) instead of
+   *  ignoring stdin, so a caller can stream input to the running container
+   *  (mid-run steering). Default off keeps the one-shot `docker run` path. */
+  interactive?: boolean;
+  /** Written to the container's stdin immediately after start. Only used when
+   *  interactive (e.g. the prompt as an NDJSON user-message). */
+  stdinInitial?: string;
+  /** Receives the writable attached to the container's stdin so the caller can
+   *  inject more input mid-run. Only invoked when interactive. */
+  onStdinWritable?: (writable: NodeJS.WritableStream) => void;
 }
 
 export interface DockerRunResult {
@@ -103,6 +113,9 @@ async function spawnAndCollect(
     onStderrChunk?: (chunk: string) => void;
     signal?: AbortSignal;
     env?: Record<string, string>;
+    interactive?: boolean;
+    stdinInitial?: string;
+    onStdinWritable?: (writable: NodeJS.WritableStream) => void;
   },
 ): Promise<{
   exitCode: number | null;
@@ -119,10 +132,20 @@ async function spawnAndCollect(
     let timedOut = false;
     let errorMessage: string | undefined;
 
+    const interactive = opts.interactive === true;
     const child = spawn(command, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [interactive ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       env: { ...process.env, ...opts.env },
     });
+
+    if (interactive && child.stdin) {
+      // Swallow EPIPE: stdin can close (container exits, or we end it on the
+      // result latch) while a steer write is in flight; an unhandled 'error'
+      // on the stdin stream would crash the worker process.
+      child.stdin.on('error', () => {});
+      if (opts.stdinInitial) child.stdin.write(opts.stdinInitial);
+      opts.onStdinWritable?.(child.stdin);
+    }
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -159,7 +182,10 @@ async function spawnAndCollect(
       }
     }
 
-    child.stdout.on('data', (chunk: Buffer) => {
+    // stdout/stderr are always 'pipe' (positions 1,2), so never null; the
+    // optional chaining only satisfies the widened ChildProcess type that the
+    // computed stdio array (vs a literal) infers.
+    child.stdout?.on('data', (chunk: Buffer) => {
       if (debugStream) debugStream.write(chunk);
       const text = stdoutDecoder.write(chunk);
       if (text) {
@@ -167,7 +193,7 @@ async function spawnAndCollect(
         opts.onStdoutChunk?.(text);
       }
     });
-    child.stderr.on('data', (chunk: Buffer) => {
+    child.stderr?.on('data', (chunk: Buffer) => {
       const text = stderrDecoder.write(chunk);
       if (text) {
         stderr += text;
@@ -317,18 +343,21 @@ export const defaultDockerRunner: DockerRunner = {
         () => undefined,
       );
 
-    // Plain path: a single `docker run`.
+    // Plain path: a single `docker run`. `-i` keeps the container's stdin open
+    // for mid-run steering when interactive (no `-t`: NDJSON wants a clean pipe).
     if (!opts.connectNetworks?.length) {
-      const result = await spawnAndCollect(
-        'docker',
-        ['run', '--rm', '--name', containerName, ...flagArgs, opts.image, ...opts.cmd],
-        {
-          timeoutMs: opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
-          onStdoutChunk: opts.onStdoutChunk,
-          onStderrChunk: opts.onStderrChunk,
-          signal: opts.signal,
-        },
-      );
+      const runArgs = ['run', '--rm'];
+      if (opts.interactive) runArgs.push('-i');
+      runArgs.push('--name', containerName, ...flagArgs, opts.image, ...opts.cmd);
+      const result = await spawnAndCollect('docker', runArgs, {
+        timeoutMs: opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
+        onStdoutChunk: opts.onStdoutChunk,
+        onStderrChunk: opts.onStderrChunk,
+        signal: opts.signal,
+        interactive: opts.interactive,
+        stdinInitial: opts.stdinInitial,
+        onStdinWritable: opts.onStdinWritable,
+      });
       if (result.timedOut || result.exitCode === null) await forceRemove();
       return result;
     }
@@ -336,11 +365,12 @@ export const defaultDockerRunner: DockerRunner = {
     // Multi-network path: `docker run` takes only one --network, so a second NIC
     // (the internal api-only network) requires create -> network connect -> start
     // (mirrors the squid gateway in egress-gateway.ts).
-    const created = await spawnAndCollect(
-      'docker',
-      ['create', '--rm', '--name', containerName, ...flagArgs, opts.image, ...opts.cmd],
-      { timeoutMs: 30_000 },
-    );
+    // `-i` on create is mandatory for stdin attach: `docker start -a` cannot
+    // attach stdin to a container created without OpenStdin (Hole A).
+    const createArgs = ['create', '--rm'];
+    if (opts.interactive) createArgs.push('-i');
+    createArgs.push('--name', containerName, ...flagArgs, opts.image, ...opts.cmd);
+    const created = await spawnAndCollect('docker', createArgs, { timeoutMs: 30_000 });
     if (created.exitCode !== 0) {
       await forceRemove();
       return created;
@@ -356,11 +386,17 @@ export const defaultDockerRunner: DockerRunner = {
         return connected;
       }
     }
-    const result = await spawnAndCollect('docker', ['start', '--attach', containerName], {
+    const startArgs = ['start', '--attach'];
+    if (opts.interactive) startArgs.push('--interactive');
+    startArgs.push(containerName);
+    const result = await spawnAndCollect('docker', startArgs, {
       timeoutMs: opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
       onStdoutChunk: opts.onStdoutChunk,
       onStderrChunk: opts.onStderrChunk,
       signal: opts.signal,
+      interactive: opts.interactive,
+      stdinInitial: opts.stdinInitial,
+      onStdinWritable: opts.onStdinWritable,
     });
     if (result.timedOut || result.exitCode === null) await forceRemove();
     return result;

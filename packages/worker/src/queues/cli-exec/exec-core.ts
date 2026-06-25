@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CONFIG_KEYS,
+  STEER_IN_CHANNEL_PREFIX,
   configService,
   type CliExecInvocationKind,
   type CliExecJobPayload,
@@ -24,6 +25,9 @@ import { runInSandbox } from '../../sandbox/sandbox-runner.js';
 import { publishCliChunk, wrapStreamCallback } from '../cli-stream-publisher.js';
 import { log, type CliExecDeps, type ExecutionOutcome } from './_shared.js';
 import { createStreamJsonCollector } from './stream.js';
+import { createSteerForwarder, type SteerForwarder } from './steer-forwarder.js';
+import { getRedis } from '../../redis.js';
+import type { Redis } from 'ioredis';
 import {
   createStepStatusUpdater,
   ensureRepoMountWritable,
@@ -288,7 +292,27 @@ export async function executeCliSpec(
         void publishCliChunk(invocationId, 'text', text);
       }
     : undefined;
-  const collector = createStreamJsonCollector(statusCallback, onProseText);
+  // Mid-run steering: for a steerable invocation, subscribe a dedicated Redis
+  // connection to this invocation's steer channel and forward each message to
+  // the CLI's stdin. The collector's onResult latches the forwarder closed (end
+  // stdin so the CLI exits after its turn). See steer-forwarder.ts.
+  const steerable = mergedSpec.steerable === true && !!invocationId;
+  let steer: SteerForwarder | null = null;
+  if (steerable && invocationId) {
+    const channel = `${STEER_IN_CHANNEL_PREFIX}${invocationId}`;
+    // A subscriber connection is mode-locked — duplicate the shared client
+    // rather than reuse it (Hole E). Subscribe BEFORE the spawner starts so an
+    // instantly-published steer isn't missed.
+    const sub: Redis = getRedis().duplicate();
+    steer = createSteerForwarder({ subscriber: sub });
+    await sub.subscribe(channel);
+  }
+
+  const collector = createStreamJsonCollector(
+    statusCallback,
+    onProseText,
+    steer ? steer.onResult : undefined,
+  );
   const codexCollector =
     outputFormat === 'codex-jsonl' ? createCodexJsonlCollector(onProseText) : null;
 
@@ -322,9 +346,11 @@ export async function executeCliSpec(
       onStderrChunk: (chunk: string) => {
         streamBuf.push(chunk);
       },
+      onStdinWritable: steer ? steer.captureWritable : undefined,
     });
   } finally {
     if (usageTimer) clearInterval(usageTimer);
+    if (steer) steer.teardown();
   }
   const streamLog = streamBuf.join('');
   void deps;
@@ -550,7 +576,29 @@ export function formatCliHeader(spec: CliCommandSpec, workdir: string): string {
   const cmdLine = parts.join(' ');
   // ANSI: dim grey for metadata, cyan `$` prompt, default for the command.
   // \r\n keeps xterm aligned across line endings.
-  return `\x1b[2m# workdir: ${workdir}\x1b[0m\r\n` + `\x1b[36m$\x1b[0m ${cmdLine}\r\n`;
+  let header = `\x1b[2m# workdir: ${workdir}\x1b[0m\r\n` + `\x1b[36m$\x1b[0m ${cmdLine}\r\n`;
+  // Steering mode feeds the prompt on stdin (NDJSON), so the command line above
+  // omits it — surface it on its own line so the viewer still shows what was
+  // asked.
+  if (spec.stdinInitial) {
+    const promptText = extractStdinPromptText(spec.stdinInitial);
+    if (promptText) header += `\x1b[2m# stdin prompt: ${promptText}\x1b[0m\r\n`;
+  }
+  return header;
+}
+
+/** Pull the human prompt text out of a steering stdinInitial NDJSON line for the
+ *  terminal header. Returns '' if it isn't the expected user-message shape. */
+function extractStdinPromptText(stdinInitial: string): string {
+  try {
+    const obj = JSON.parse(stdinInitial.trim()) as {
+      message?: { content?: Array<{ type?: string; text?: string }> };
+    };
+    const blocks = obj.message?.content ?? [];
+    return blocks.map((b) => (b.type === 'text' ? (b.text ?? '') : '')).join('');
+  } catch {
+    return '';
+  }
 }
 
 export function createSandboxSpawner(
@@ -587,6 +635,9 @@ export function createSandboxSpawner(
         onStdoutChunk: wrapStreamCallback(invocationId, 'stdout', opts.onStdoutChunk),
         onStderrChunk: wrapStreamCallback(invocationId, 'stderr', opts.onStderrChunk),
         signal: opts.signal,
+        interactive: spec.steerable === true,
+        stdinInitial: spec.stdinInitial,
+        onStdinWritable: opts.onStdinWritable,
       },
       runnerOptions,
     );

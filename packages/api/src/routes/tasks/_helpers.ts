@@ -174,11 +174,12 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
 export async function findActiveCliInvocation(
   db: ReturnType<typeof getDb>,
   taskId: string,
-): Promise<{ id: string; taskStepId: string | null } | null> {
+): Promise<{ id: string; taskStepId: string | null; steerable: boolean } | null> {
   const rows = await db
     .select({
       id: schema.cliInvocations.id,
       taskStepId: schema.cliInvocations.taskStepId,
+      steerable: schema.cliInvocations.steerable,
     })
     .from(schema.cliInvocations)
     .where(

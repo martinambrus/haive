@@ -221,3 +221,19 @@ adminRoutes.put('/config/concurrency', async (c) => {
   log.info({ maxParallelAgents }, 'max parallel agents updated');
   return c.json({ maxParallelAgents });
 });
+
+const steeringSchema = z.object({ enabled: z.boolean() });
+
+// Global mid-run steering kill-switch. The worker reads this at each cli dispatch
+// (within the ~30s config cache), so no live-retune channel is needed.
+adminRoutes.get('/config/steering', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.STEERING_ENABLED, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/steering', async (c) => {
+  const { enabled } = steeringSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.STEERING_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'global steering switch updated');
+  return c.json({ enabled });
+});

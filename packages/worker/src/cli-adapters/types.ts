@@ -17,6 +17,12 @@ export interface InvokeOpts {
    *  provider.effortLevel, then to the adapter's effortScale.max. Adapters
    *  with effortScale=null ignore this option. */
   effortLevel?: string;
+  /** When true, a steering-capable (Claude-family) adapter builds an interactive
+   *  stream-json INPUT invocation (prompt on stdin, mid-run steering) instead of
+   *  the one-shot `-p "<prompt>"` form. Set by the dispatcher only when steering
+   *  is enabled (global + per-repo) AND the adapter supportsSteering. Other
+   *  adapters ignore it. */
+  steeringMode?: boolean;
 }
 
 export interface EffortScale {
@@ -45,6 +51,13 @@ export interface CliCommandSpec {
   env: Record<string, string>;
   cwd?: string;
   outputFormat?: CliOutputFormat;
+  /** Steerable invocation: the spawner opens an interactive stdin pipe and
+   *  writes `stdinInitial`, and exec-core wires a Redis steer channel into it.
+   *  Set by Claude-family adapters in steering mode. */
+  steerable?: boolean;
+  /** Written to the CLI's stdin immediately after start (the prompt as an NDJSON
+   *  user-message). Only present when steerable. */
+  stdinInitial?: string;
 }
 
 export interface SubAgent {

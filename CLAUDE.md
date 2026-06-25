@@ -50,7 +50,7 @@ haive/
 Three queues on Redis:
 
 - `task-queue` runs the orchestrator. One job per task. Owns the step machine and persists every transition to Postgres.
-- `cli-exec-queue` runs the sandbox worker. One job per CLI invocation. Spawns clawker, attaches PTY, streams output via Redis pub/sub.
+- `cli-exec-queue` runs the sandbox worker. One job per CLI invocation. Spawns a per-task Docker sandbox via `docker run`/`create` (`sandbox/docker-runner.ts`) — NOT clawker (clawker backs the persistent terminal/login containers in `sandbox/container-manager.ts`); captures piped stdout/stderr and streams to a Redis Stream (`cli-stream:<invocationId>`). Steerable Claude-family runs keep stdin open (`-i`) so a user steer reaches the CLI mid-run.
 - `env-replicate-queue` runs Dockerfile builds for environment replication.
 
 State source of truth is Postgres. Every step transition, every CLI invocation, every form submission is a row. Crash recovery reads the last row.

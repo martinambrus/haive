@@ -317,6 +317,12 @@ export const TERMINAL_REQUEST_CHANNEL = 'terminal:request';
 export const TERMINAL_IN_CHANNEL_PREFIX = 'terminal:in:';
 export const TERMINAL_OUT_CHANNEL_PREFIX = 'terminal:out:';
 export const TERMINAL_CTL_CHANNEL_PREFIX = 'terminal:ctl:';
+/** Pub/sub channel the api publishes a user's mid-run steering message to, keyed
+ *  by cli invocation id. The worker's cli-exec forwarder subscribes for the life
+ *  of a steerable invocation and writes each message to the running CLI's stdin
+ *  as an NDJSON user-message (applied at the next tool-call boundary). Body is
+ *  the raw steer text. */
+export const STEER_IN_CHANNEL_PREFIX = 'steer:in:';
 /** Pub/sub channel the api publishes to when MAX_PARALLEL_AGENTS changes, so the
  *  worker live-retunes the cli-exec queue concurrency without a restart. Body is
  *  the new clamped integer as a string. */

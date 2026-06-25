@@ -29,18 +29,22 @@ export default function AdminPage() {
   const [maxParallel, setMaxParallel] = useState<number | null>(null);
   const [maxParallelInput, setMaxParallelInput] = useState('');
   const [savingConcurrency, setSavingConcurrency] = useState(false);
+  const [steeringEnabled, setSteeringEnabled] = useState<boolean | null>(null);
+  const [savingSteering, setSavingSteering] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [usersData, healthData, concurrencyData] = await Promise.all([
+      const [usersData, healthData, concurrencyData, steeringData] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
         api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
+        api.get<{ enabled: boolean }>('/admin/config/steering'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
       setMaxParallel(concurrencyData.maxParallelAgents);
       setMaxParallelInput(String(concurrencyData.maxParallelAgents));
+      setSteeringEnabled(steeringData.enabled);
       setError(null);
     } catch (err) {
       const e = err as { status?: number; message?: string };
@@ -103,6 +107,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update concurrency');
     } finally {
       setSavingConcurrency(false);
+    }
+  }
+
+  async function setSteering(next: boolean) {
+    setSavingSteering(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/steering', {
+        enabled: next,
+      });
+      setSteeringEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update steering');
+    } finally {
+      setSavingSteering(false);
     }
   }
 
@@ -220,6 +239,30 @@ export default function AdminPage() {
               {savingConcurrency ? 'Saving...' : 'Save'}
             </Button>
           </div>
+        </Card>
+      )}
+
+      {steeringEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Mid-run steering</CardTitle>
+            <CardDescription>
+              Lets users inject a message into a running Claude-family CLI step (applied at the next
+              tool-call boundary) and mines those nudges into the knowledge base. Global kill-switch
+              across every repo. Takes effect within ~30s; persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={steeringEnabled}
+              disabled={savingSteering}
+              onChange={(e) => void setSteering(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {steeringEnabled ? 'Enabled' : 'Disabled'}
+            {savingSteering && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
         </Card>
       )}
 

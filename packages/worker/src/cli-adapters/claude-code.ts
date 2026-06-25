@@ -1,4 +1,5 @@
 import { BaseCliAdapter } from './base-adapter.js';
+import { claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
 import type {
   CliCommandSpec,
   CliProviderRecord,
@@ -39,22 +40,17 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
   readonly rulesFileMode = 'import' as const;
   override readonly effortScale = CLAUDE_EFFORT_SCALE;
   override readonly defaultEgressDomains = ['api.anthropic.com'];
+  override readonly supportsSteering = true;
 
   buildCliInvocation(
     provider: CliProviderRecord,
     prompt: string,
     opts: InvokeOpts,
   ): CliCommandSpec {
-    return {
+    const steering = opts.steeringMode === true;
+    const spec: CliCommandSpec = {
       command: this.resolveExecutable(provider),
-      args: this.mergedArgs(provider, [
-        '--dangerously-skip-permissions',
-        '-p',
-        prompt,
-        '--output-format',
-        'stream-json',
-        '--verbose',
-      ]),
+      args: this.mergedArgs(provider, claudeFamilyArgs({ steering, prompt })),
       env: {
         // Claude Code caps a single response at 32000 output tokens by default
         // and hard-fails when a step exceeds it (skill generation emits many
@@ -71,6 +67,11 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
       cwd: opts.cwd,
       outputFormat: 'claude-stream-json',
     };
+    if (steering) {
+      spec.stdinInitial = steeringUserMessageLine(prompt);
+      spec.steerable = true;
+    }
+    return spec;
   }
 
   override effortEnv(level: string): Record<string, string> {

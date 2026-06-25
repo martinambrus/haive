@@ -61,6 +61,15 @@ export interface SandboxRunSpec {
   onStdoutChunk?: (chunk: string) => void;
   onStderrChunk?: (chunk: string) => void;
   signal?: AbortSignal;
+  /** Interactive mode: open the container's stdin (docker `-i`) for mid-run
+   *  steering. Default off keeps the one-shot path. */
+  interactive?: boolean;
+  /** Written to the container's stdin immediately after start (the prompt as an
+   *  NDJSON user-message). Only used when interactive. */
+  stdinInitial?: string;
+  /** Receives the container's writable stdin so the caller can inject more
+   *  input mid-run. Only invoked when interactive. */
+  onStdinWritable?: (writable: NodeJS.WritableStream) => void;
 }
 
 export interface SandboxRunnerOptions {
@@ -184,6 +193,9 @@ export async function runInSandbox(
       onStdoutChunk: spec.onStdoutChunk,
       onStderrChunk: spec.onStderrChunk,
       signal: spec.signal,
+      interactive: spec.interactive,
+      stdinInitial: spec.stdinInitial,
+      onStdinWritable: spec.onStdinWritable,
     });
     return { ...result, resolvedCommand, wrapperId };
   } finally {

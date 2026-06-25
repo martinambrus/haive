@@ -15,6 +15,16 @@ export interface SpawnOptions {
   signal?: AbortSignal;
   onStdoutChunk?: (chunk: string) => void;
   onStderrChunk?: (chunk: string) => void;
+  /** Interactive mode: open a writable stdin pipe instead of ignoring stdin,
+   *  so the caller can stream input to the running CLI (mid-run steering).
+   *  Default off keeps stdin 'ignore' (the proven one-shot path). */
+  interactive?: boolean;
+  /** Written to the child's stdin immediately after spawn (e.g. the prompt as
+   *  an NDJSON user-message). Only used when interactive. */
+  stdinInitial?: string;
+  /** Receives the child's writable stdin so a caller can inject more input
+   *  mid-run. Only invoked when interactive. */
+  onStdinWritable?: (writable: NodeJS.WritableStream) => void;
 }
 
 export type CliSpawner = (spec: CliCommandSpec, opts?: SpawnOptions) => Promise<CliExecutionResult>;
@@ -30,11 +40,21 @@ export const defaultCliSpawner: CliSpawner = (spec, opts = {}) => {
     let stdout = '';
     let stderr = '';
 
+    const interactive = opts.interactive === true;
     const child = spawn(spec.command, spec.args, {
       cwd: spec.cwd,
       env: { ...process.env, ...spec.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [interactive ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
+
+    if (interactive && child.stdin) {
+      // Swallow EPIPE on stdin: a steer write may race the stream closing
+      // (process exits / we end it), and an unhandled 'error' on the stdin
+      // stream would crash the worker process.
+      child.stdin.on('error', () => {});
+      if (opts.stdinInitial) child.stdin.write(opts.stdinInitial);
+      opts.onStdinWritable?.(child.stdin);
+    }
 
     const timer = setTimeout(() => {
       timedOut = true;

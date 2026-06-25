@@ -9,11 +9,13 @@ import {
   PROVIDER_SENSITIVE_STEP_IDS,
   renameTaskRequestSchema,
   setCliProviderRequestSchema,
+  STEER_IN_CHANNEL_PREFIX,
   taskActionRequestSchema,
   TASK_JOB_NAMES,
   type TaskJobPayload,
 } from '@haive/shared';
 import { getDb } from '../../db.js';
+import { getRedis } from '../../redis.js';
 import { requireAuth } from '../../middleware/auth.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
@@ -481,6 +483,72 @@ taskRoutes.post('/:id/cancel-active-cli', async (c) => {
   }
   logger.info({ taskId: id, killed, cancelled: active.length }, 'cancel-active-cli');
   return c.json({ ok: true, killed, cancelled: active.length });
+});
+
+/** Max steer message length. Bounds the NDJSON line written to the CLI's stdin
+ *  and the task_events payload. */
+const STEER_TEXT_MAX = 8192;
+
+/** Mid-run steering: deliver a user nudge to the active steerable CLI invocation
+ *  (published to its steer channel; the worker writes it to the CLI's stdin as
+ *  an NDJSON user-message, applied at the next tool-call boundary) AND persist it
+ *  as a `steering.nudge` task_event so KB mining learns from the course-correction. */
+taskRoutes.post('/:id/steer-active-cli', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const body = (await c.req.json().catch(() => ({}))) as { text?: unknown; invocationId?: unknown };
+  const text = typeof body.text === 'string' ? body.text.trim() : '';
+  if (!text) throw new HttpError(400, 'steer text required');
+  if (text.length > STEER_TEXT_MAX) {
+    throw new HttpError(400, `steer text too long (max ${STEER_TEXT_MAX} chars)`);
+  }
+  const db = getDb();
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
+    columns: { id: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+
+  // Target the specific invocation the viewer is showing — a multi-agent step has
+  // many live invocations, so "the active one" is ambiguous. Fall back to the
+  // most-recent active invocation when the caller doesn't pass an id.
+  const invocationId = typeof body.invocationId === 'string' ? body.invocationId : null;
+  let active: { id: string; taskStepId: string | null; steerable: boolean } | null;
+  if (invocationId) {
+    const inv = await db.query.cliInvocations.findFirst({
+      where: and(eq(schema.cliInvocations.id, invocationId), eq(schema.cliInvocations.taskId, id)),
+      columns: { id: true, taskStepId: true, steerable: true, endedAt: true },
+    });
+    if (!inv) throw new HttpError(404, 'CLI invocation not found');
+    if (inv.endedAt) throw new HttpError(409, 'This CLI run already finished');
+    active = { id: inv.id, taskStepId: inv.taskStepId, steerable: inv.steerable };
+  } else {
+    active = await findActiveCliInvocation(db, id);
+  }
+  if (!active) throw new HttpError(409, 'No active CLI invocation to steer');
+  if (!active.steerable) throw new HttpError(409, 'This CLI run is not steerable');
+
+  // Round correlates the steer to the fix/revision round in the mining digest.
+  let round = 0;
+  if (active.taskStepId) {
+    const step = await db.query.taskSteps.findFirst({
+      where: eq(schema.taskSteps.id, active.taskStepId),
+      columns: { round: true },
+    });
+    round = step?.round ?? 0;
+  }
+
+  // Deliver to the worker forwarder (it writes the NDJSON user-message to stdin).
+  await getRedis().publish(`${STEER_IN_CHANNEL_PREFIX}${active.id}`, text);
+  // Persist as a mineable friction signal (the learning step grounds in these).
+  await appendTaskEvent(db, id, active.taskStepId, 'steering.nudge', {
+    text,
+    targetStepId: active.taskStepId,
+    round,
+    source: 'ui',
+  });
+  logger.info({ taskId: id, invocationId: active.id }, 'steer-active-cli');
+  return c.json({ ok: true, invocationId: active.id });
 });
 
 /** Static replay endpoint for an ended CLI invocation. Live invocations should

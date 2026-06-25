@@ -30,9 +30,16 @@ interface StreamJsonCollector {
 export function createStreamJsonCollector(
   onProgress?: (message: string) => void,
   onText?: (text: string) => void,
+  /** Fired once, the first time a `result` event is parsed, regardless of
+   *  subtype (success OR error_max_turns / context overflow / etc). The
+   *  steering forwarder latches on this to close stdin so the CLI exits after
+   *  its turn — keying on getResult()!==null would miss non-success results and
+   *  hang until the SIGKILL timeout. */
+  onResult?: () => void,
 ): StreamJsonCollector {
   let buffer = '';
   let resultText: string | null = null;
+  let resultFired = false;
   let eventCount = 0;
   let malformedLineCount = 0;
   let assistantText = '';
@@ -80,6 +87,10 @@ export function createStreamJsonCollector(
 
     // Extract final result
     if (type === 'result') {
+      if (!resultFired) {
+        resultFired = true;
+        onResult?.();
+      }
       if (typeof subtype === 'string') lastResultSubtype = subtype;
       // Usage rides the result event on ANY subtype (an error_max_turns run
       // still burned tokens) — capture before the success early-return.

@@ -313,6 +313,18 @@ function computeDegradedNote(
   );
 }
 
+/** Mid-run steering is on by default for every Claude-family cli step; the global
+ *  STEERING_ENABLED config is a kill-switch (default true). The dispatcher further
+ *  ANDs this with adapter.supportsSteering, so non-Claude providers ignore it.
+ *  Fail-safe: any config-read error → off (never fail dispatch). */
+async function resolveSteeringEnabled(): Promise<boolean> {
+  try {
+    return await configService.getBoolean(CONFIG_KEYS.STEERING_ENABLED, true);
+  } catch {
+    return false;
+  }
+}
+
 async function resolveLlmPhase(
   db: Database,
   stepDef: StepDefinition,
@@ -484,9 +496,11 @@ async function resolveLlmPhase(
     params.taskId,
     params.ignoreSavedStepClis ?? false,
   );
+  const steeringRequested = await resolveSteeringEnabled();
   const plan = resolveDispatch({
     providers: params.providers,
     preferredProviderId,
+    steeringRequested,
     input: {
       kind: 'prompt',
       prompt,
@@ -534,6 +548,7 @@ async function resolveLlmPhase(
       mode,
       prompt,
       agentTitle: roleLabel,
+      steerable: plan.invocation.kind === 'cli' && plan.invocation.spec.steerable === true,
     })
     .returning();
   const invRow = inserted[0];
@@ -768,10 +783,14 @@ async function resolveAgentMiningPhase(
     params.taskId,
     params.ignoreSavedStepClis ?? false,
   );
+  // Each mining agent is its own Claude-family invocation with its own terminal,
+  // so each is independently steerable (gated globally + by adapter support).
+  const steeringRequested = await resolveSteeringEnabled();
   for (const dispatch of dispatches) {
     const plan = resolveDispatch({
       providers: params.providers,
       preferredProviderId,
+      steeringRequested,
       input: {
         kind: 'prompt',
         prompt: dispatch.prompt,
@@ -800,6 +819,7 @@ async function resolveAgentMiningPhase(
         cliProviderId: plan.providerId,
         mode: 'agent_mining',
         prompt: dispatch.prompt,
+        steerable: plan.invocation.spec.steerable === true,
       })
       .returning();
     const invRow = inv[0];

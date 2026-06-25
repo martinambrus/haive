@@ -423,6 +423,11 @@ export const cliInvocations = pgTable(
      *  (Validator / Fixer, Reviewer / Corrector). The api COALESCEs it with the
      *  mining agent title so the terminal header shows which agent ran. */
     agentTitle: varchar('agent_title', { length: 256 }),
+    /** True when this invocation was dispatched in steering mode (Claude-family,
+     *  stream-json input). The api/web read it to show the steer box, and the
+     *  steer endpoint 409s when false. Set by the step-runner from the dispatch
+     *  plan's spec.steerable. */
+    steerable: boolean('steerable').notNull().default(false),
     /** Set when the step-runner has incorporated this invocation's output
      *  into an apply pass. resolveLlmPhase ignores consumed rows so the
      *  next pass enqueues a fresh invocation. Null = pending or in-flight. */

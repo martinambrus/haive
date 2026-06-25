@@ -43,6 +43,11 @@ export abstract class BaseCliAdapter {
    *  network policy `none`/`allowlist`. Empty = adapter declares none (the
    *  user must add them per provider). */
   readonly defaultEgressDomains: readonly string[] = [];
+  /** Whether this CLI supports mid-run steering: an interactive stream-json
+   *  stdin session into which the user can inject messages the CLI applies at
+   *  the next tool-call boundary. Only Claude-family CLIs (the `claude` binary
+   *  in stream-json input mode) support it; default false. */
+  readonly supportsSteering: boolean = false;
 
   async isAvailable(provider: CliProviderRecord): Promise<boolean> {
     const result = await this.probeExecutable(provider);

@@ -19,6 +19,8 @@ export interface TaskHistoryDigest {
   maxRound: number;
   fixLoopCount: number;
   findingCount: number;
+  /** Mid-run steering events mined from this task (a friction signal). */
+  steerCount: number;
 }
 
 const TIER_TOTAL_CAP: Record<DigestTier, number> = { low: 1500, medium: 6000, high: 20000 };
@@ -205,10 +207,22 @@ export function renderTaskHistoryDigest(
   }
   const findingCount = findings.length;
 
+  // Mid-run steering events = a high-value friction signal (the user only nudges
+  // when the agent drifted). Mine them like gate reactions and let them raise the
+  // tier so a heavily-steered task is learned from in more depth.
+  const steerEvents = events.filter((e) => e.eventType === 'steering.nudge');
+  const steerCount = steerEvents.length;
+  const steers = steerEvents
+    .map((e) => {
+      const p = (e.payload ?? {}) as Record<string, unknown>;
+      return { round: typeof p.round === 'number' ? p.round : 0, text: str(p.text) };
+    })
+    .filter((s) => s.text.trim());
+
   const tier: DigestTier =
-    maxRound >= 3 || fixLoopCount >= 3 || findingCount >= 15 || escalated
+    maxRound >= 3 || fixLoopCount >= 3 || findingCount >= 15 || escalated || steerCount >= 3
       ? 'high'
-      : maxRound === 0 && findingCount <= 3
+      : maxRound === 0 && findingCount <= 3 && steerCount === 0
         ? 'low'
         : 'medium';
 
@@ -240,7 +254,7 @@ export function renderTaskHistoryDigest(
     .slice(0, DIAGNOSIS_COUNT[tier]);
 
   const lines: string[] = [
-    `(complexity: ${tier} — ${maxRound} fix-loop round(s), ${fixLoopCount} loop-back(s), ${findingCount} finding(s)${escalated ? ', escalated to a human gate' : ''})`,
+    `(complexity: ${tier} — ${maxRound} fix-loop round(s), ${fixLoopCount} loop-back(s), ${findingCount} finding(s)${steerCount > 0 ? `, ${steerCount} user steer(s)` : ''}${escalated ? ', escalated to a human gate' : ''})`,
   ];
 
   if (diagnoses.length > 0) {
@@ -255,6 +269,13 @@ export function renderTaskHistoryDigest(
   if (reactions.length > 0) {
     lines.push('', '## Human reviewer reactions');
     for (const r of reactions) lines.push(`- ${r}`);
+  }
+
+  // Mid-run steering — the user course-corrected a running agent. Verbatim and
+  // never truncated away (human signal), like gate reactions.
+  if (steers.length > 0) {
+    lines.push('', '## User steering (mid-run course-corrections)');
+    for (const s of steers) lines.push(`- round ${s.round}: "${clip(s.text, 500)}"`);
   }
 
   if (findings.length > 0) {
@@ -283,5 +304,5 @@ export function renderTaskHistoryDigest(
     text = `${text.slice(0, TIER_TOTAL_CAP[tier])}\n… [digest truncated at ${tier}-tier cap]`;
   }
 
-  return { text, tier, maxRound, fixLoopCount, findingCount };
+  return { text, tier, maxRound, fixLoopCount, findingCount, steerCount };
 }

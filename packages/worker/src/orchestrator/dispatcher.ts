@@ -51,6 +51,12 @@ export interface DispatchRequest {
   preferredProviderId?: string | null;
   input: DispatchInput;
   invokeOpts: InvokeOpts;
+  /** When true, a steering-capable adapter builds an interactive stream-json
+   *  invocation (mid-run steering). Set ONLY by the single watched cli step's
+   *  dispatch when global + per-repo steering are enabled; never by
+   *  agent_mining / subagent dispatches. ANDed with adapter.supportsSteering and
+   *  applied only to a kind:'prompt' invocation. */
+  steeringRequested?: boolean;
   registry?: CliAdapterRegistry;
 }
 
@@ -106,7 +112,14 @@ function buildCliSidePlan(
     if (needsSubagents && !adapter.supportsSubagents) {
       return null;
     }
-    const spec = adapter.buildCliInvocation(provider, req.input.prompt, req.invokeOpts);
+    // Steering applies only to this single watched cli step (kind 'prompt') AND
+    // only when the resolved adapter supports it. Subagent/agent_mining paths
+    // never set steeringRequested.
+    const steeringMode = (req.steeringRequested ?? false) && adapter.supportsSteering;
+    const spec = adapter.buildCliInvocation(provider, req.input.prompt, {
+      ...req.invokeOpts,
+      steeringMode,
+    });
     return {
       mode: 'cli',
       providerId: provider.id,

@@ -1,5 +1,6 @@
 import { isOllamaCloudModel } from '@haive/shared';
 import { BaseCliAdapter } from './base-adapter.js';
+import { claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
 import { OLLAMA_THINKING_PROXY_URL } from './ollama-thinking-proxy.js';
 import type {
   CliCommandSpec,
@@ -62,6 +63,7 @@ export class OllamaAdapter extends BaseCliAdapter {
   // Ollama Cloud host only. Local in-stack models are reached over the models
   // network (not egress); an external remote host is added per provider.
   override readonly defaultEgressDomains = ['ollama.com', '*.ollama.com'];
+  override readonly supportsSteering = true;
 
   buildCliInvocation(
     provider: CliProviderRecord,
@@ -100,22 +102,22 @@ export class OllamaAdapter extends BaseCliAdapter {
     // slower); suppress it since the backend is not Anthropic.
     env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
     env.ANTHROPIC_MODEL = model;
-    return {
+    const steering = opts.steeringMode === true;
+    const spec: CliCommandSpec = {
       command: this.resolveExecutable(provider),
-      args: this.mergedArgs(provider, [
-        '--dangerously-skip-permissions',
-        '-p',
-        prompt,
-        '--output-format',
-        'stream-json',
-        '--verbose',
-        '--model',
-        model,
-      ]),
+      args: this.mergedArgs(
+        provider,
+        claudeFamilyArgs({ steering, prompt, tail: ['--model', model] }),
+      ),
       env,
       cwd: opts.cwd,
       outputFormat: 'claude-stream-json',
     };
+    if (steering) {
+      spec.stdinInitial = steeringUserMessageLine(prompt);
+      spec.steerable = true;
+    }
+    return spec;
   }
 
   override buildShellEnv(
