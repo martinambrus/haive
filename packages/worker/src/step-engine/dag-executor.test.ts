@@ -1,7 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { parseCoderResult, issuePaths, pickFatalProviderError } from './dag-executor.js';
+import {
+  parseCoderResult,
+  issuePaths,
+  pickFatalProviderError,
+  fixRequiredIsCosmetic,
+} from './dag-executor.js';
 import { PROVIDER_FATAL_HEADLINES } from '../queues/cli-exec/failure-class.js';
 import type { StepContext } from './step-definition.js';
+import type { ReviewerOutput } from '@haive/shared';
 
 type InvLike = Parameters<typeof parseCoderResult>[0];
 function inv(partial: Partial<InvLike>): InvLike {
@@ -108,5 +114,67 @@ describe('issuePaths', () => {
     expect(p.worktreePath).toBe('/var/lib/haive/repos/u/r/.haive/worktrees/feature-foo--ISSUE-001');
     // …but the git branch ref keeps the namespacing slash
     expect(p.branchName).toBe('feature/foo--ISSUE-001');
+  });
+});
+
+describe('fixRequiredIsCosmetic', () => {
+  function rv(p: Partial<ReviewerOutput>): ReviewerOutput {
+    return { verdict: 'fix_required', criteria_results: [], issues: [], ...p };
+  }
+  const pass = { criterion: 'c1', passed: true };
+
+  it('true: fix_required, all criteria pass, only a low-severity issue', () => {
+    expect(
+      fixRequiredIsCosmetic(
+        rv({
+          criteria_results: [pass, { criterion: 'c2', passed: true }],
+          issues: [{ severity: 'low', description: 'comment wording nit' }],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('true: fix_required, all criteria pass, no issues at all', () => {
+    expect(fixRequiredIsCosmetic(rv({ criteria_results: [pass] }))).toBe(true);
+  });
+
+  it('false: a criterion failed', () => {
+    expect(
+      fixRequiredIsCosmetic(
+        rv({
+          criteria_results: [pass, { criterion: 'c2', passed: false }],
+          issues: [{ severity: 'low', description: 'nit' }],
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('false: a medium-severity issue is present', () => {
+    expect(
+      fixRequiredIsCosmetic(
+        rv({ criteria_results: [pass], issues: [{ severity: 'medium', description: 'real bug' }] }),
+      ),
+    ).toBe(false);
+  });
+
+  it('false: an issue with no explicit severity', () => {
+    expect(
+      fixRequiredIsCosmetic(
+        rv({ criteria_results: [pass], issues: [{ description: 'unlabeled finding' }] }),
+      ),
+    ).toBe(false);
+  });
+
+  it('false: empty criteria_results (cannot assert criteria pass)', () => {
+    expect(
+      fixRequiredIsCosmetic(
+        rv({ criteria_results: [], issues: [{ severity: 'low', description: 'nit' }] }),
+      ),
+    ).toBe(false);
+  });
+
+  it('false: verdict approve or block, even with passing criteria', () => {
+    expect(fixRequiredIsCosmetic(rv({ verdict: 'approve', criteria_results: [pass] }))).toBe(false);
+    expect(fixRequiredIsCosmetic(rv({ verdict: 'block', criteria_results: [pass] }))).toBe(false);
   });
 });

@@ -559,7 +559,8 @@ function reviewerPrompt(issue: DagIssueRow): string {
     '',
     'Emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
     '{ "verdict": "approve|fix_required|block", "criteria_results": [{ "criterion": "...", "passed": true, "note": "" }], "issues": [{ "severity": "high|medium|low", "file": "path", "description": "...", "suggestion": "..." }] }',
-    'approve = ready to merge. fix_required = non-blocking issues a fix coder can address. block = a fundamental problem that cannot be approved.',
+    'Verdict rules: approve = every acceptance criterion passes — choose approve even if you still have low-severity or cosmetic suggestions; list them under issues and they are tracked as debt, not a merge blocker.',
+    'fix_required = at least one issue makes an acceptance criterion fail and a fix coder can address it. block = a fundamental problem (broken build, security hole, wrong approach) that cannot be approved.',
   ]
     .filter(Boolean)
     .join('\n');
@@ -586,6 +587,20 @@ function parseReviewerOutput(inv: typeof schema.cliInvocations.$inferSelect): Re
   const parsed = reviewerOutputSchema.safeParse(candidate);
   // Unparseable reviewer output → approve (don't block the pipeline on a parse miss).
   return parsed.success ? parsed.data : { verdict: 'approve', criteria_results: [], issues: [] };
+}
+
+/** A fix_required verdict whose own structured signals say the work is done:
+ *  every acceptance criterion passed and every raised issue is explicitly
+ *  low-severity (cosmetic). These resolve as debt instead of looping the
+ *  coder<->reviewer pair on polish. Conservative: an empty criteria list, or
+ *  any issue without an explicit 'low' severity, counts as NOT cosmetic. */
+export function fixRequiredIsCosmetic(v: ReviewerOutput): boolean {
+  return (
+    v.verdict === 'fix_required' &&
+    v.criteria_results.length > 0 &&
+    v.criteria_results.every((c) => c.passed) &&
+    v.issues.every((i) => i.severity === 'low')
+  );
 }
 
 /** Dispatch one review-loop agent (reviewer or fix-coder) into the issue
@@ -701,6 +716,13 @@ async function ingestReviewRun(
     const verdict = parseReviewerOutput(inv);
     if (verdict.verdict === 'approve') return setResolution(ra.db, issue, 'approved');
     if (verdict.verdict === 'block') return setResolution(ra.db, issue, 'failed_unrecoverable');
+    // fix_required whose criteria all pass and whose only issues are cosmetic →
+    // approve (folding the nits into debt) instead of looping on polish.
+    if (fixRequiredIsCosmetic(verdict)) {
+      return verdict.issues.length > 0
+        ? acceptWithDebt(ra.db, issue, verdict.issues)
+        : setResolution(ra.db, issue, 'approved');
+    }
     // fix_required
     const newStuck = issue.stuckCount + 1;
     const newIter = issue.innerIteration + 1;
