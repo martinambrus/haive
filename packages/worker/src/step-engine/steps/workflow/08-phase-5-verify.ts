@@ -273,11 +273,25 @@ const skippedResult = (): CheckResult => ({
 const FATAL_PATTERNS =
   /Fatal error:|Parse error:|Uncaught\b|Call to undefined function|SQLSTATE|Connection (?:refused|was refused)|No such file or directory/i;
 
+// Tail-safe status sentinel. `ddevExec` keeps only the LAST 8000 chars of output
+// (tuned for `ddev start`, whose verdict lands at the END). For `curl -i` the
+// `HTTP/… NNN` status line is at the HEAD, so a response body larger than the kept
+// window pushed it out — the parser then saw no status and reported a false "no HTTP
+// response". curl's `-w` writes this marker AFTER the body, so it always survives the
+// tail-slice. Private contract: we emit it (probe) and we parse it (below); no spaces
+// / quotes / backslashes in the format so it passes through `ddev exec`'s inner shell
+// unmangled. `%{http_code}` is the FINAL response code (matches the last-status-line
+// fallback semantics for the no-redirect case).
+const SMOKE_STATUS_MARKER = 'HAIVE_HTTP_CODE=';
+
 /** Parse a `curl -i` dump into a smoke verdict. Pure (no IO) so it is unit-testable.
- *  Uses the LAST HTTP status line (so a redirect chain reports the final code). A
- *  null status with a command-missing message means the probe binary was absent
- *  (ran:false, not a failure); a null status otherwise means the app never answered
- *  (a failure). */
+ *  Prefers the tail-safe `-w` status marker the probe appends after the body (it
+ *  survives ddevExec's tail-slice when a large body would otherwise push the head
+ *  status line out of the kept window); falls back to the LAST `HTTP/… NNN` status
+ *  line (so a redirect chain still reports the final code) for the app-runner path
+ *  and legacy output without the marker. A null status with a command-missing
+ *  message means the probe binary was absent (ran:false, not a failure); a null
+ *  status otherwise means the app never answered (a failure). */
 export function parseRuntimeSmokeOutput(raw: string): {
   ran: boolean;
   passed: boolean;
@@ -285,16 +299,23 @@ export function parseRuntimeSmokeOutput(raw: string): {
   errorExcerpt: string;
 } {
   const text = raw ?? '';
-  const codes = [...text.matchAll(/HTTP\/\d(?:\.\d)?\s+(\d{3})/g)].map((m) => Number(m[1]));
-  const httpStatus = codes.length > 0 ? codes[codes.length - 1]! : null;
-  const errorExcerpt = text.trim().slice(-1500);
+  const marked = text.match(new RegExp(`${SMOKE_STATUS_MARKER}(\\d{3})`));
+  const lineCodes = [...text.matchAll(/HTTP\/\d(?:\.\d)?\s+(\d{3})/g)].map((m) => Number(m[1]));
+  const httpStatus = marked
+    ? Number(marked[1])
+    : lineCodes.length > 0
+      ? lineCodes[lineCodes.length - 1]!
+      : null;
+  // Drop the sentinel from the human-facing excerpt so it shows the page, not our marker.
+  const cleaned = text.replace(new RegExp(`\\s*${SMOKE_STATUS_MARKER}\\d{3}\\s*$`), '');
+  const errorExcerpt = cleaned.trim().slice(-1500);
   if (
     httpStatus === null &&
     /command not found|executable file not found|not installed|:\s*not found/i.test(text)
   ) {
     return { ran: false, passed: false, httpStatus: null, errorExcerpt };
   }
-  const passed = httpStatus !== null && httpStatus < 500 && !FATAL_PATTERNS.test(text);
+  const passed = httpStatus !== null && httpStatus < 500 && !FATAL_PATTERNS.test(cleaned);
   return { ran: true, passed, httpStatus, errorExcerpt };
 }
 
@@ -310,14 +331,18 @@ async function runRuntimeSmoke(ctx: StepContext): Promise<RuntimeSmoke> {
     const rt = await ensureAppServing(ctx);
     if (rt.mode === 'none') return notProbed(null, 'No servable runtime recorded for this task.');
     if (rt.mode === 'host') return notProbed(rt.url, 'Host runtime is not smoke-probed.');
+    // `-w …%{http_code}` appends the tail-safe status marker AFTER the body (see
+    // SMOKE_STATUS_MARKER). No spaces/quotes/backslashes in the format so it survives
+    // `ddev exec`'s inner shell intact.
+    const probeFlags = `-sS -i -m 20 -w ${SMOKE_STATUS_MARKER}%{http_code}`;
     const output =
       rt.mode === 'ddev'
         ? (
-            await ddevExec(rt.handle, 'exec curl -sS -i -m 20 http://127.0.0.1/', {
+            await ddevExec(rt.handle, `exec curl ${probeFlags} http://127.0.0.1/`, {
               timeoutMs: 30_000,
             })
           ).output
-        : (await appRunnerExec(rt.handle, `curl -sS -i -m 20 ${rt.url}`, { timeoutMs: 30_000 }))
+        : (await appRunnerExec(rt.handle, `curl ${probeFlags} ${rt.url}`, { timeoutMs: 30_000 }))
             .output;
     const parsed = parseRuntimeSmokeOutput(output);
     ctx.logger.info(

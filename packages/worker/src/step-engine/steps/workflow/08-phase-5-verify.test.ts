@@ -121,4 +121,34 @@ describe('parseRuntimeSmokeOutput', () => {
     expect(r.passed).toBe(false);
     expect(r.httpStatus).toBeNull();
   });
+
+  // Regression: a large response body pushes the head `HTTP/… NNN` status line out of
+  // ddevExec's 8000-char tail-slice, leaving only body. The `-w` marker (appended after
+  // the body) must still yield the status — otherwise it reads as a false "no response".
+  it('reads the status from the tail marker when the head status line was truncated', () => {
+    const bodyOnly = '<html><body>Installer step 1</body></html>HAIVE_HTTP_CODE=200';
+    const r = parseRuntimeSmokeOutput(bodyOnly);
+    expect(r.ran).toBe(true);
+    expect(r.passed).toBe(true);
+    expect(r.httpStatus).toBe(200);
+    // The sentinel must not leak into the human-facing excerpt.
+    expect(r.errorExcerpt).not.toContain('HAIVE_HTTP_CODE');
+    expect(r.errorExcerpt).toContain('</html>');
+  });
+
+  it('still fails when the truncated body carries a fatal even with a 200 marker', () => {
+    const r = parseRuntimeSmokeOutput(
+      'Fatal error: Uncaught Error: Call to undefined function foo()\nHAIVE_HTTP_CODE=200',
+    );
+    expect(r.passed).toBe(false);
+    expect(r.httpStatus).toBe(200);
+  });
+
+  it('prefers the marker over a stale head status line', () => {
+    const raw =
+      'HTTP/1.1 500 Internal Server Error\r\n\r\n<html>retry ok</html>HAIVE_HTTP_CODE=200';
+    const r = parseRuntimeSmokeOutput(raw);
+    expect(r.httpStatus).toBe(200);
+    expect(r.passed).toBe(true);
+  });
 });

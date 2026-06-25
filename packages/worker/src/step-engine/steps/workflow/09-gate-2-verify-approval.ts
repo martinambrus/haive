@@ -521,11 +521,26 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       ? `Adversarial QA (${aq.level}): ${aq.counts.total} findings (${aq.counts.critical} critical, ${aq.counts.high} high)${aq.blocking ? ' — BLOCKING' : ''}`
       : '';
     const rs = detected.runtimeSmoke;
-    const runtimeSmokeOk = !rs || !rs.ran || rs.passed;
-    const runtimeSmokeLine =
-      rs && rs.ran && !rs.passed
-        ? `Runtime smoke: FAIL${rs.httpStatus !== null ? ` (HTTP ${rs.httpStatus})` : ''} — the app did not come up cleanly`
-        : '';
+    const smokeFailed = rs != null && rs.ran && !rs.passed;
+    // A real-browser agent/interactive test that PASSED is a stronger runtime signal
+    // than the crude HTTP smoke, so when present the smoke is ADVISORY: still shown,
+    // but it no longer flips the gate default to reject. Manual checklists aren't
+    // authoritative (the human confirms at THIS gate), so they don't demote it; a
+    // FAILED browser test leaves the smoke a hard fail (both point the same way).
+    const browserRuntimeAuthoritative =
+      b !== null && !b.skipped && b.passed && (b.method === 'mcp' || b.method === 'interactive');
+    const smokeAdvisory = smokeFailed && browserRuntimeAuthoritative;
+    const runtimeSmokeOk = !smokeFailed || smokeAdvisory;
+    let runtimeSmokeLine = '';
+    if (rs && smokeFailed) {
+      if (smokeAdvisory) {
+        runtimeSmokeLine = `Runtime smoke: advisory${rs.httpStatus !== null ? ` (HTTP ${rs.httpStatus})` : ''} — browser testing passed; see the smoke note if concerned`;
+      } else if (rs.httpStatus !== null) {
+        runtimeSmokeLine = `Runtime smoke: FAIL — the app responded (HTTP ${rs.httpStatus}) but the page shows a runtime error`;
+      } else {
+        runtimeSmokeLine = 'Runtime smoke: FAIL — the app did not respond';
+      }
+    }
     const summary = [
       detected.testResults,
       detected.lintResults,
@@ -548,22 +563,26 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       .join('\n');
 
     const infoSections: InfoSection[] = [];
-    if (rs && rs.ran && !rs.passed) {
+    if (rs && smokeFailed) {
       infoSections.push({
-        title: 'Runtime smoke failed',
+        title: smokeAdvisory ? 'Runtime smoke (advisory)' : 'Runtime smoke failed',
         preview: rs.httpStatus !== null ? `HTTP ${rs.httpStatus}` : 'no response',
         body: [
-          `The app was booted and probed at ${rs.url ?? 'its runtime URL'} but did not come up cleanly.`,
+          smokeAdvisory
+            ? 'Browser testing already passed, so this HTTP smoke is advisory only and did not affect the gate default. Review it only if the browser test might have missed a server-side error.'
+            : '',
           rs.httpStatus !== null
-            ? `HTTP status: ${rs.httpStatus}`
-            : 'No HTTP response was received from the app.',
+            ? `The app was probed at ${rs.url ?? 'its runtime URL'} and responded with HTTP ${rs.httpStatus}, but the response body contains a runtime-error signature (e.g. a PHP fatal or a database-connection error rendered into the page).`
+            : `The app was probed at ${rs.url ?? 'its runtime URL'} but returned no readable HTTP response.`,
           '',
           '## Response excerpt',
           '```',
           rs.errorExcerpt || '(empty)',
           '```',
-        ].join('\n'),
-        defaultOpen: true,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        defaultOpen: !smokeAdvisory,
       });
     }
     if (v) {
