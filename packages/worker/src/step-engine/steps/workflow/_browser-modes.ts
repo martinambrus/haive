@@ -23,7 +23,7 @@ export function buildBrowserModeOptions(args: {
           },
           {
             value: 'interactive',
-            label: 'Interactive testing — you drive the headed Chrome in the Browser panel',
+            label: 'Manual — you drive the live browser yourself at Gate 2 (verification approval)',
           },
         ]
       : []),

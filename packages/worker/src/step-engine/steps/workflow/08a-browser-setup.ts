@@ -3,9 +3,10 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { buildBrowserModeOptions } from './_browser-modes.js';
 import { resolveBrowserRuntime, type BrowserRuntimeInfo } from './_browser-runtime.js';
 
-/** Browser-test method chosen here; 08a-browser-verify reads it to decide whether
- *  to bring the live browser up and whether to gate (interactive) or run the agent
- *  (mcp). */
+/** Browser-test method chosen here. 'mcp' → 08a-browser-verify runs the automated
+ *  agent test. 'interactive' → 08a is skipped and the human verifies hands-on in the
+ *  live browser at Gate 2. 'skip' → no browser testing at all (Gate 2 hides the
+ *  live browser too). */
 export interface BrowserSetupApply {
   mode: 'mcp' | 'interactive' | 'skip';
   appUrl: string | null;
@@ -45,7 +46,7 @@ export const browserSetupStep: StepDefinition<BrowserRuntimeInfo, BrowserSetupAp
       description: [
         `App URL: ${detected.appUrl ?? '(unknown)'}`,
         hasRuntime
-          ? 'Pick how to verify the app. The next step brings the live browser up: Interactive lets you drive it and Approve/Reject; Automated runs an agent that decides. Skip bypasses browser testing.'
+          ? 'Pick how to verify the app: Automated runs an agent that tests it in the browser now; Manual brings the live browser up at Gate 2 for you to drive; Skip does no browser testing (no live browser at Gate 2 either).'
           : 'No runtime is available to browser-test against, so only Skip is offered.',
       ].join('\n'),
       fields: [

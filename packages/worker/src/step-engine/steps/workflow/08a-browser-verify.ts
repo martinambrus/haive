@@ -401,9 +401,14 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     if (!envTemplate || envTemplate.status !== 'ready') return false;
     const deps = envTemplate.declaredDeps as Record<string, unknown> | null;
     if (!deps?.browserTesting) return false;
-    // Don't run when the user picked Skip at the setup step (08a-browser-setup).
+    // Run ONLY for automated agent testing (mcp). For interactive ("you drive it")
+    // and skip, the human verifies hands-on in the live VNC browser at Gate 2 — which
+    // brings the same per-task browser up — so doing it here AND at the gate is
+    // redundant. A missing setup row (legacy task) defaults to mcp, preserving prior
+    // behavior.
     const setup = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-setup');
-    if ((setup?.output as { mode?: string } | null)?.mode === 'skip') return false;
+    const mode = (setup?.output as { mode?: string } | null)?.mode ?? 'mcp';
+    if (mode !== 'mcp') return false;
     // DDEV-enabled projects run in the per-task runner. `.ddev` lives in the
     // worktree — the implementation may have just written it (add-ddev task).
     const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);

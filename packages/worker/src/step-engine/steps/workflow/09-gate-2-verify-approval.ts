@@ -435,7 +435,13 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       const envTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
       const deps = (envTemplate?.declaredDeps as Record<string, unknown>) ?? {};
       const browserTesting = envTemplate?.status === 'ready' && !!deps.browserTesting;
-      if (browserTesting) {
+      // Respect the browser-method choice: 'skip' means no browser testing at all, so
+      // don't bring the live browser up here either. 'mcp' (automated) and the manual
+      // option both want it. A missing setup row (e.g. the plan_tasklist path has no
+      // browser-method step) is treated as "show it" so manual verification stays possible.
+      const browserSetup = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-setup');
+      const skipBrowser = (browserSetup?.output as { mode?: string } | null)?.mode === 'skip';
+      if (browserTesting && !skipBrowser) {
         // Select the runtime the same way 08a does — by `.ddev` presence, not
         // the template's containerTool — so an add-DDEV task (template non-DDEV
         // but the implementation added `.ddev`) brings up the DDEV runner here
