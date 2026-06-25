@@ -85,12 +85,12 @@ function executionPathVariant(path: ExecutionPath): 'success' | 'info' | 'defaul
   }
 }
 
-/** Pace colour for effort-vs-estimate: <=100% on/under budget (emerald), <=125%
+/** Pace colour for effort-vs-estimate: <=100% on/under budget (emerald), <=105%
  *  slightly over (amber), else over (rose). Shared by the header indicator and
  *  the footer verdict card. */
 function paceColorClass(pct: number): string {
   if (pct <= 100) return 'text-emerald-300';
-  if (pct <= 125) return 'text-amber-300';
+  if (pct <= 105) return 'text-amber-300';
   return 'text-rose-300';
 }
 
@@ -1322,7 +1322,7 @@ function TaskTotalTime({
   const verdictLabel =
     verdictPct <= 100
       ? 'On time / faster'
-      : verdictPct <= 125
+      : verdictPct <= 105
         ? 'Slightly over estimate'
         : 'Over estimate';
   return (
