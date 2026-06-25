@@ -130,22 +130,28 @@ function Gutter({ no }: { no: number | null }) {
 function InlineDiff({ rows }: { rows: InlineRow[] }) {
   return (
     <div className="min-h-0 flex-1 overflow-auto font-mono text-[11px] leading-tight">
-      {rows.map((row, i) => {
-        const cls =
-          row.kind === 'add'
-            ? 'bg-green-950/60 text-green-200'
-            : row.kind === 'remove'
-              ? 'bg-red-950/60 text-red-200'
-              : 'text-neutral-400';
-        const prefix = row.kind === 'add' ? '+' : row.kind === 'remove' ? '-' : ' ';
-        return (
-          <div key={i} className={`flex ${cls}`}>
-            <Gutter no={row.oldNo} />
-            <Gutter no={row.newNo} />
-            <span className="whitespace-pre px-2">{`${prefix} ${row.text}`}</span>
-          </div>
-        );
-      })}
+      {/* w-max sizes the inner block to the widest line so a line's full-width
+          background (min-w-full) spans the whole horizontal scroll extent, not
+          just the container's visible width — otherwise the add/remove tint
+          clips at the right edge when the line overflows. Mirrors SplitDiff. */}
+      <div className="w-max min-w-full">
+        {rows.map((row, i) => {
+          const cls =
+            row.kind === 'add'
+              ? 'bg-green-950/60 text-green-200'
+              : row.kind === 'remove'
+                ? 'bg-red-950/60 text-red-200'
+                : 'text-neutral-400';
+          const prefix = row.kind === 'add' ? '+' : row.kind === 'remove' ? '-' : ' ';
+          return (
+            <div key={i} className={`flex min-w-full ${cls}`}>
+              <Gutter no={row.oldNo} />
+              <Gutter no={row.newNo} />
+              <span className="whitespace-pre px-2">{`${prefix} ${row.text}`}</span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
