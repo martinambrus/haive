@@ -1,13 +1,14 @@
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { FormSchema } from '@haive/shared';
+import type { FormSchema, ExecutionPath } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseConfigRecommendation, markRecommended } from './_gate1-recommendation.js';
 import { buildBrowserModeOptions } from './_browser-modes.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
+import { keepForPath } from '../../../orchestrator/execution-paths.js';
 
 // Run configuration — split out of 06-gate-1-spec-approval so the spec approve/reject
 // decision stays uncluttered (a reject revises back to 04 and never reaches this step).
@@ -30,6 +31,14 @@ interface RunConfigDetect {
   taskAdversarialQaLevel: string | null;
   /** Current task-level max-fix-rounds (the fix-loop cap), used as the form default. */
   taskMaxFixRounds: number;
+  /** Whether 08a-browser-verify runs under this task's execution path. When false
+   *  (e.g. plan_tasklist) the browser-verification options are dead UI and omitted —
+   *  gate-2's live browser is independent (gated on the env browserTesting flag). */
+  runsBrowserVerify: boolean;
+  /** Whether 08d-adversarial-qa runs under this path. When false the QA-level control
+   *  still shows (08c-code-review reads the level for its extra review lenses) but is
+   *  relabelled to "Code review depth" — only the lenses apply, not the Phase 7 agents. */
+  runsAdversarialQa: boolean;
 }
 
 /** Front-loaded run answers for the hands-free stretch to Gate 2 (browser/MCP mode,
@@ -101,8 +110,10 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     }
     const taskRow = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { adversarialQaLevel: true, maxFixRounds: true },
+      columns: { adversarialQaLevel: true, maxFixRounds: true, executionPath: true },
     });
+    // A null execution_path means triage didn't filter the run (full_workflow): every step runs.
+    const execPath = (taskRow?.executionPath ?? 'full_workflow') as ExecutionPath;
 
     return {
       specBody,
@@ -110,6 +121,8 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       appRunnerMode,
       taskAdversarialQaLevel: taskRow?.adversarialQaLevel ?? null,
       taskMaxFixRounds: taskRow?.maxFixRounds ?? 5,
+      runsBrowserVerify: keepForPath('08a-browser-verify', execPath),
+      runsAdversarialQa: keepForPath('08d-adversarial-qa', execPath),
     };
   },
 
@@ -125,7 +138,10 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     skipIf: (args) => (args.detected as RunConfigDetect).specBody.trim().length === 0,
     buildPrompt: (args) => {
       const d = args.detected as RunConfigDetect;
-      const browserChoices = d.ddevMode || d.appRunnerMode ? 'mcp | interactive | skip' : 'skip';
+      const browserChoices =
+        (d.ddevMode || d.appRunnerMode) && d.runsBrowserVerify
+          ? 'mcp | interactive | skip'
+          : 'skip';
       return [
         'Recommend the most appropriate post-implementation verification settings for the coding',
         'task described by the specification below. You are ONLY recommending — do not implement.',
@@ -161,24 +177,37 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     // failed, or returned garbage). Mark the recommended option + use it as the
     // default; otherwise keep the static defaults.
     const rec = parseConfigRecommendation(llmOutput);
+    // When 08d-adversarial-qa is filtered out of this path (e.g. plan_tasklist) the level
+    // still drives 08c-code-review's extra lenses, so keep the control but describe it by
+    // that effect rather than the Phase-7 agent counts that won't run.
     const qa = markRecommended(
-      [
-        { value: 'none', label: 'Skip adversarial QA' },
-        { value: 'poc', label: 'POC — 2 agents (quick)' },
-        { value: 'standard', label: 'Standard — 4 agents' },
-        { value: 'enterprise', label: 'Enterprise — 6 agents' },
-      ],
+      detected.runsAdversarialQa
+        ? [
+            { value: 'none', label: 'Skip adversarial QA' },
+            { value: 'poc', label: 'POC — 2 agents (quick)' },
+            { value: 'standard', label: 'Standard — 4 agents' },
+            { value: 'enterprise', label: 'Enterprise — 6 agents' },
+          ]
+        : [
+            { value: 'none', label: 'Basic — no extra review lens' },
+            { value: 'poc', label: 'POC — no extra review lens' },
+            { value: 'standard', label: 'Standard — adds an operational review lens' },
+            { value: 'enterprise', label: 'Enterprise — adds operational + performance lenses' },
+          ],
       rec.adversarialQaLevel,
       detected.taskAdversarialQaLevel ?? 'none',
     );
-    const browser = markRecommended(
-      buildBrowserModeOptions({
-        ddevMode: detected.ddevMode,
-        appRunnerMode: detected.appRunnerMode,
-      }),
-      rec.browserMode,
-      detected.ddevMode || detected.appRunnerMode ? 'mcp' : 'skip',
-    );
+    // Browser verification (08a) filtered out of this path → omit its fields entirely.
+    const browser = detected.runsBrowserVerify
+      ? markRecommended(
+          buildBrowserModeOptions({
+            ddevMode: detected.ddevMode,
+            appRunnerMode: detected.appRunnerMode,
+          }),
+          rec.browserMode,
+          detected.ddevMode || detected.appRunnerMode ? 'mcp' : 'skip',
+        )
+      : null;
     return {
       title: 'Run configuration',
       description:
@@ -187,9 +216,10 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
         {
           type: 'select',
           id: 'adversarialQaLevel',
-          label: 'Adversarial QA (Phase 7)',
-          description:
-            '2/4/6 adversarial agents attack the implementation before Gate 2. Also sets code-review depth: Standard adds an operational review lens, Enterprise adds a performance lens.',
+          label: detected.runsAdversarialQa ? 'Adversarial QA (Phase 7)' : 'Code review depth',
+          description: detected.runsAdversarialQa
+            ? '2/4/6 adversarial agents attack the implementation before Gate 2. Also sets code-review depth: Standard adds an operational review lens, Enterprise adds a performance lens.'
+            : 'Sets the code-review depth for this run (the Phase 7 adversarial agents are skipped on this path): Standard adds an operational review lens, Enterprise adds a performance lens.',
           options: qa.options,
           default: qa.default,
         },
@@ -245,27 +275,31 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
           label: 'Verify: run typecheck',
           default: true,
         },
-        {
-          type: 'radio',
-          id: 'browserMode',
-          label: 'Browser verification',
-          options: browser.options,
-          default: browser.default,
-        },
-        {
-          type: 'checkbox',
-          id: 'browserCheckConsoleErrors',
-          label: 'Browser: check for console errors',
-          default: true,
-          visibleWhen: { field: 'browserMode', notEquals: 'skip' },
-        },
-        {
-          type: 'checkbox',
-          id: 'browserCheckNetworkErrors',
-          label: 'Browser: check for failed network requests',
-          default: true,
-          visibleWhen: { field: 'browserMode', notEquals: 'skip' },
-        },
+        ...(browser
+          ? [
+              {
+                type: 'radio' as const,
+                id: 'browserMode',
+                label: 'Browser verification',
+                options: browser.options,
+                default: browser.default,
+              },
+              {
+                type: 'checkbox' as const,
+                id: 'browserCheckConsoleErrors',
+                label: 'Browser: check for console errors',
+                default: true,
+                visibleWhen: { field: 'browserMode', notEquals: 'skip' },
+              },
+              {
+                type: 'checkbox' as const,
+                id: 'browserCheckNetworkErrors',
+                label: 'Browser: check for failed network requests',
+                default: true,
+                visibleWhen: { field: 'browserMode', notEquals: 'skip' },
+              },
+            ]
+          : []),
         {
           type: 'radio',
           id: 'testAction',
