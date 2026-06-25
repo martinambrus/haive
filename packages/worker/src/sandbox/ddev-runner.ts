@@ -391,12 +391,52 @@ export async function ddevMigrateDatabase(
   });
 }
 
+export type DdevRecovery = 'reuse' | 'warm-start' | 'cold-boot';
+
+/** Pure decision for how to bring a task's DDEV env up, given what we observed
+ *  about the existing runner. Extracted (and exported) so the recovery logic is
+ *  unit-testable without shelling out to docker (mirrors 07c's `classifyDrift`).
+ *  - `reuse`: the project is already serving — return the existing handle.
+ *  - `warm-start`: the project is down BUT the runner container + nested dockerd
+ *    are alive, so `ddev start` in place recovers it using the cached images
+ *    (no re-pull, no DB loss).
+ *  - `cold-boot`: the runner is gone (or warm-start failed) — rebuild it, which
+ *    re-pulls base images into a fresh nested store. */
+export function decideDdevRecovery(s: {
+  describeOk: boolean;
+  hasPrimaryUrl: boolean;
+  dockerdUp: boolean;
+}): DdevRecovery {
+  if (s.describeOk && s.hasPrimaryUrl) return 'reuse';
+  return s.dockerdUp ? 'warm-start' : 'cold-boot';
+}
+
+/** True when the runner container exists and its nested dockerd answers — i.e.
+ *  an in-place `ddev start` is even possible. Runs `docker info` as ROOT inside
+ *  the runner (NOT via ddevExec/runnerExec, which add `-u ddev`), mirroring the
+ *  readiness probe in startDdevRunner. Swallows its own error and returns false
+ *  (it runs inside the coalesced boot promise — a throw would fail all waiters
+ *  instead of falling through to a cold rebuild). */
+async function runnerDockerdUp(name: string): Promise<boolean> {
+  try {
+    await exec('docker', ['exec', name, 'docker', 'info'], { timeout: 10_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Ensure the task's DDEV env is up and `ddev start`-ed, booting it if not.
  *  Idempotent: returns the existing handle when DDEV is already running (so a
- *  prior `import-db` is preserved); otherwise launches the runner + `ddev start`
- *  and THROWS if start fails. Callers treat a throw as a step failure — e.g. a
- *  task that just implemented `.ddev` (01c skipped early), where the browser-
- *  verify step boots the new config and a boot failure routes back to the dev. */
+ *  prior `import-db` is preserved). Recovery has three paths (decideDdevRecovery):
+ *  `reuse` (already serving), `warm-start` (runner container + nested dockerd
+ *  alive but the project is down — restart in place: no image re-pull, and NO
+ *  snapshot restore so the live nested DB is kept), or `cold-boot` (runner gone —
+ *  rebuild + restore the durability snapshot into the fresh, empty nested DB).
+ *  THROWS if the cold-boot `ddev start` fails. Callers treat a throw as a step
+ *  failure — e.g. a task that just implemented `.ddev` (01c skipped early), where
+ *  the browser-verify step boots the new config and a boot failure routes back
+ *  to the dev. */
 const inFlightDdevBoots = new Map<string, Promise<DdevRunnerHandle>>();
 
 export async function ensureDdevStarted(
@@ -426,9 +466,46 @@ async function ensureDdevStartedInner(
 ): Promise<DdevRunnerHandle> {
   const existing = runnerHandleForTask(taskId, repoSubpath);
   const describe = await ddevExec(existing, 'describe -j', { timeoutMs: 15_000 });
-  if (describe.exitCode === 0 && describe.output.includes('primary_url')) {
-    return existing; // already running — don't re-boot (preserves an imported DB)
+  const describeOk = describe.exitCode === 0;
+  const hasPrimaryUrl = describe.output.includes('primary_url');
+  // Only probe the nested dockerd when describe didn't already prove the project
+  // is up (the cheap path short-circuits the extra docker exec).
+  const dockerdUp = describeOk && hasPrimaryUrl ? true : await runnerDockerdUp(existing.container);
+
+  switch (decideDdevRecovery({ describeOk, hasPrimaryUrl, dockerdUp })) {
+    case 'reuse':
+      return existing; // already serving — don't re-boot (preserves an imported DB)
+    case 'warm-start': {
+      // Container + nested dockerd are alive; only the DDEV project is down (e.g.
+      // a worker hot-reload SIGKILLed an in-flight `ddev` op mid-restart). Restart
+      // the project IN PLACE — the base images are still cached in the surviving
+      // anon /var/lib/docker, so this pulls nothing (only a genuinely-changed
+      // php/db image would). One ~300s attempt: with images cached there is no
+      // multi-GB pull to wait on, so a wedged warm start fails fast into the cold
+      // rebuild below rather than blocking for the cold path's 900s.
+      const warm = await ddevExec(existing, 'start', {
+        onLine: opts.onProgress,
+        timeoutMs: 300_000,
+      });
+      if (warm.exitCode === 0) {
+        // Deliberately NO restoreLatestSnapshot: the container survived, so its
+        // nested DB volume survived and holds the live (possibly newer) DB. A
+        // repo-volume snapshot is OLDER — restoring it here would clobber the
+        // live DB. Skip it even when a snapshot exists.
+        return existing;
+      }
+      log.warn(
+        { taskId, output: warm.output.slice(-800) },
+        'ddev warm-start failed; rebuilding the runner (cold boot)',
+      );
+      break; // fall through to cold-boot — its rm -v clears any wedged state
+    }
+    case 'cold-boot':
+      break;
   }
+
+  // Cold boot: the runner is gone (or warm-start failed), so rebuild it. This
+  // re-pulls base images into a fresh nested /var/lib/docker.
   const handle = await startDdevRunner({ taskId, repoSubpath });
   let start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
   if (start.exitCode !== 0) {
@@ -441,11 +518,11 @@ async function ensureDdevStartedInner(
   if (start.exitCode !== 0) {
     throw new Error(`ddev start failed: ${start.output.slice(-1500)}`);
   }
-  // Cold boot: the prior runner (and its nested DB) is gone — destroyed by the
-  // worker-boot reaper, a daemon/host restart, or task time elapsed — so the
-  // freshly-started DB is empty. A durability snapshot may survive on the repo
-  // volume; restore it so downstream verify/browser testing runs against a
-  // populated DB. No-op (and not an error) when none exists.
+  // The prior runner (and its nested DB) is gone — destroyed by the worker-boot
+  // reaper, a daemon/host restart, or task time elapsed — so the freshly-started
+  // DB is empty. A durability snapshot may survive on the repo volume; restore it
+  // so downstream verify/browser testing runs against a populated DB. No-op (and
+  // not an error) when none exists.
   await restoreLatestSnapshot(handle, taskId);
   return handle;
 }
