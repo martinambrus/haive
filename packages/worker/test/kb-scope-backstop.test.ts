@@ -6,8 +6,10 @@ import {
   hasInstalledVersionAnchor,
   isLikelyRepoOwnPath,
   isRepoOwnPath,
-  techAnchorFacets,
 } from '../src/step-engine/steps/onboarding/08-knowledge-acquisition.js';
+// techAnchorFacets moved out of 08 into _repo-stack so the workflow learning step
+// (11) can reuse it; 08 now imports it from there rather than re-exporting it.
+import { techAnchorFacets } from '../src/step-engine/steps/_repo-stack.js';
 
 // Drupal layout (from FRAMEWORK_PATTERNS) — note: prefixes carry no `web/` docroot.
 const DRUPAL_INCLUDE = ['modules/custom/', 'themes/custom/'];

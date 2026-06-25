@@ -9,6 +9,12 @@ function detectedStub(ddevMode: boolean) {
     ddevMode,
     appRunnerMode: false,
     taskAdversarialQaLevel: null,
+    taskMaxFixRounds: 5,
+    // Path-gates added with execution-path triage: the browser / adversarial-QA
+    // fields only render when those steps run under the task's path. A normal
+    // full-workflow run keeps both, which is the scenario these form tests assert.
+    runsBrowserVerify: true,
+    runsAdversarialQa: true,
   };
 }
 
