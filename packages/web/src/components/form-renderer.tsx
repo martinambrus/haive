@@ -28,6 +28,10 @@ interface FormRendererProps {
    *  Used by 08a to put the live-browser panel at the top so the user can test
    *  the app before the approve/reject decision, without scrolling. */
   headerSlot?: React.ReactNode;
+  /** Content rendered after the status table / infoSections but BEFORE the fields.
+   *  Used by Gate 2 to place the live-browser panel below the verification results
+   *  table yet above the approve/reject decision. */
+  beforeFieldsSlot?: React.ReactNode;
   /** Repository the form is being filled for. Required when the schema
    *  contains a `bundle-composer` field — the composer talks to /api/bundles
    *  on behalf of this repo. */
@@ -229,6 +233,7 @@ export function FormRenderer({
   onValuesChange,
   renderAfterField,
   headerSlot,
+  beforeFieldsSlot,
   repositoryId,
   onSkip,
   skipLabel,
@@ -270,6 +275,7 @@ export function FormRenderer({
       {headerSlot}
       <StatusSummary items={schema.statusSummary} />
       <InfoSections sections={schema.infoSections} />
+      {beforeFieldsSlot}
       <div className="flex flex-col gap-4">
         {schema.fields.map((field) =>
           isFieldVisible(field, values) ? (

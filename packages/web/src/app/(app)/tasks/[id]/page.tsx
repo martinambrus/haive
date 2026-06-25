@@ -1806,6 +1806,15 @@ function StepCard({
                   <BrowserVncPanel taskId={taskId} />
                 ) : undefined
               }
+              beforeFieldsSlot={
+                step.stepId === '09-gate-2-verify-approval' &&
+                (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
+                  ?.available ? (
+                  // Gate-2: the live browser sits BELOW the verification status table but
+                  // ABOVE the approve/reject decision — review the results, test, then decide.
+                  <BrowserVncPanel taskId={taskId} title="Browser — test the app here" />
+                ) : undefined
+              }
               onSkip={step.canSkip ? () => onAction('skip') : undefined}
               skipDisabled={actionBusy}
             />
@@ -1899,6 +1908,7 @@ function StepCard({
       )}
 
       {step.stepId === '09-gate-2-verify-approval' &&
+        step.status !== 'waiting_form' &&
         (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
           ?.available && (
           <BrowserVncPanel
