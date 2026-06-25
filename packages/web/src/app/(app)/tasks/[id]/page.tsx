@@ -1927,6 +1927,7 @@ function StepCard({
         )}
 
       {step.stepId === '11-phase-8-learning' &&
+        step.status === 'waiting_form' &&
         (step.detectOutput as { knowledgeDiffArtifactPath?: string | null } | null)
           ?.knowledgeDiffArtifactPath && (
           <CommitDiffViewer
