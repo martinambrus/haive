@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { APP_RUNNER_LABEL, appRunnerName, logger } from '@haive/shared';
+import { browserCdpUrlForRunner } from './runner-browser-cdp.js';
 
 // Per-task app-runner: a plain (non-DinD) container built from the repo's
 // env-replicate image. It runs a single-process non-DDEV app AND hosts the
@@ -269,20 +270,12 @@ export async function startBrowserDesktop(handle: AppRunnerHandle): Promise<void
   }
 }
 
-/** If the app-runner's headed-browser desktop is up (CDP answering on the 9223
- *  forward), return the DNS URL chrome-devtools connects to so the agent drives the
- *  SAME visible browser the user watches; else null. Mirrors runnerBrowserCdpUrl
- *  (ddev-runner) for the non-DDEV app-runner. */
+/** If the app-runner's headed-browser desktop is up, return the http://<ip>:9223 URL
+ *  chrome-devtools connects to so the agent drives the SAME visible browser the user
+ *  watches; else null. IP not DNS name (see browserCdpUrlForRunner). Mirrors
+ *  runnerBrowserCdpUrl (ddev-runner) for the non-DDEV app-runner. */
 export async function appRunnerBrowserCdpUrl(taskId: string): Promise<string | null> {
-  const name = appRunnerName(taskId);
-  try {
-    await exec('docker', ['exec', name, 'curl', '-fsS', 'http://127.0.0.1:9223/json/version'], {
-      timeout: 8_000,
-    });
-    return `http://${name}:9223`;
-  } catch {
-    return null;
-  }
+  return browserCdpUrlForRunner(appRunnerName(taskId));
 }
 
 /** Tear down every app-runner for a task. Safe to call for any task; returns the
