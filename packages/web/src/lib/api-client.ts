@@ -608,6 +608,9 @@ export interface GlobalKbEntry {
   embedStatus: 'pending' | 'embedded' | 'failed' | 'stale';
   createdAt: string;
   updatedAt: string;
+  /** When set, this draft proposes to update the entry with this id; on activation
+   *  that entry is archived. Used to show an "updates existing" diff in review. */
+  supersedesEntryId: string | null;
   supersededAt: string | null;
 }
 

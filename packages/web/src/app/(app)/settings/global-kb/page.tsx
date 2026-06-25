@@ -1,6 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { diffLines } from 'diff';
 import {
   api,
   releaseGlobalKbEmbedModel,
@@ -78,6 +79,62 @@ const CATEGORIES: GlobalKbEntry['category'][] = [
 ];
 const PER_PAGE = 12;
 
+/** Per-line diff of an update-draft against the article it supersedes, so the
+ *  reviewer sees what changed before approving. baseline = existing article body,
+ *  current = draft body. */
+function GlobalKbDiff({ baseline, current }: { baseline: string; current: string }) {
+  const { lines, added, removed } = useMemo(() => {
+    const parts = diffLines(baseline, current);
+    let a = 0;
+    let r = 0;
+    const out: { kind: 'add' | 'remove' | 'context'; text: string }[] = [];
+    for (const part of parts) {
+      const partLines = part.value.split('\n');
+      // diffLines emits a trailing '' when a segment ends with \n; drop it.
+      if (partLines.length > 0 && partLines[partLines.length - 1] === '') partLines.pop();
+      const kind: 'add' | 'remove' | 'context' = part.added
+        ? 'add'
+        : part.removed
+          ? 'remove'
+          : 'context';
+      for (const text of partLines) {
+        out.push({ kind, text });
+        if (kind === 'add') a += 1;
+        else if (kind === 'remove') r += 1;
+      }
+    }
+    return { lines: out, added: a, removed: r };
+  }, [baseline, current]);
+
+  return (
+    <div className="font-mono text-[11px] leading-tight">
+      <div className="sticky top-0 border-b border-neutral-800 bg-neutral-950 px-2 py-1 text-neutral-500">
+        <span className="text-green-400">+{added}</span>{' '}
+        <span className="text-red-400">-{removed}</span> vs the existing article
+      </div>
+      {lines.length === 0 ? (
+        <div className="px-2 py-1 text-neutral-500">No content changes.</div>
+      ) : (
+        lines.map((line, i) => {
+          const cls =
+            line.kind === 'add'
+              ? 'bg-green-950/60 text-green-200'
+              : line.kind === 'remove'
+                ? 'bg-red-950/60 text-red-200'
+                : 'text-neutral-500';
+          const prefix = line.kind === 'add' ? '+ ' : line.kind === 'remove' ? '- ' : '  ';
+          return (
+            <div key={i} className={`whitespace-pre px-2 ${cls}`}>
+              {prefix}
+              {line.text}
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
 export default function GlobalKbPage() {
   usePageTitle('Global KB');
   const [entries, setEntries] = useState<GlobalKbEntry[] | null>(null);
@@ -92,6 +149,12 @@ export default function GlobalKbPage() {
   const [total, setTotal] = useState(0);
   const [frameworks, setFrameworks] = useState<string[]>([]);
   const [selected, setSelected] = useState<GlobalKbEntry | null>(null);
+  // For an update-draft (supersedesEntryId set): the existing article it replaces,
+  // fetched on open so the modal can diff the draft against it.
+  const [supersededEntry, setSupersededEntry] = useState<{ title: string; body: string } | null>(
+    null,
+  );
+  const [draftView, setDraftView] = useState<'diff' | 'full'>('diff');
   const [repos, setRepos] = useState<Repository[]>([]);
   const [providers, setProviders] = useState<CliProvider[]>([]);
   const [enrich, setEnrich] = useState({
@@ -370,6 +433,28 @@ export default function GlobalKbPage() {
     const t = setInterval(() => void load(), 4000);
     return () => clearInterval(t);
   }, [hasTransient, load]);
+
+  // When an update-draft is opened, fetch the article it supersedes so the modal
+  // can diff against it. Resets to the diff view on each open; a missing/purged
+  // predecessor (404) just falls back to the plain body view.
+  useEffect(() => {
+    setSupersededEntry(null);
+    setDraftView('diff');
+    const supersedesId = selected?.supersedesEntryId;
+    if (!supersedesId) return;
+    let cancelled = false;
+    void api
+      .get<{ entry: GlobalKbEntry }>(`/global-kb/entries/${supersedesId}`)
+      .then((r) => {
+        if (!cancelled) setSupersededEntry({ title: r.entry.title, body: r.entry.body });
+      })
+      .catch(() => {
+        if (!cancelled) setSupersededEntry(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
 
   async function activate(e: GlobalKbEntry) {
     setBusy(true);
@@ -978,9 +1063,42 @@ export default function GlobalKbPage() {
                 )}
               </div>
               <p className="mt-2 text-xs text-neutral-400">{facetsSummary(selected.facets)}</p>
-              <div className="mt-3 min-h-0 flex-1 overflow-y-auto rounded-md border border-neutral-800">
-                <MarkdownView body={selected.body} className="max-h-none overflow-visible" />
-              </div>
+              {supersededEntry ? (
+                <>
+                  <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                    <span className="rounded bg-amber-500/15 px-2 py-0.5 font-medium text-amber-300">
+                      Updates existing: {supersededEntry.title}
+                    </span>
+                    <div className="ml-auto flex overflow-hidden rounded border border-neutral-800">
+                      <button
+                        type="button"
+                        onClick={() => setDraftView('diff')}
+                        className={`px-2 py-1 ${draftView === 'diff' ? 'bg-indigo-950 text-indigo-200' : 'text-neutral-400 hover:bg-neutral-900'}`}
+                      >
+                        Diff
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDraftView('full')}
+                        className={`border-l border-neutral-800 px-2 py-1 ${draftView === 'full' ? 'bg-indigo-950 text-indigo-200' : 'text-neutral-400 hover:bg-neutral-900'}`}
+                      >
+                        Full
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-2 min-h-0 flex-1 overflow-y-auto rounded-md border border-neutral-800">
+                    {draftView === 'diff' ? (
+                      <GlobalKbDiff baseline={supersededEntry.body} current={selected.body} />
+                    ) : (
+                      <MarkdownView body={selected.body} className="max-h-none overflow-visible" />
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="mt-3 min-h-0 flex-1 overflow-y-auto rounded-md border border-neutral-800">
+                  <MarkdownView body={selected.body} className="max-h-none overflow-visible" />
+                </div>
+              )}
               <div className="mt-4 flex items-center justify-center gap-3">
                 {selected.status === 'draft' && (
                   <Button size="sm" disabled={busy} onClick={() => void activate(selected)}>
