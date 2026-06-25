@@ -6,7 +6,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveUserGitEnv } from '../../../secrets/user-git-identity.js';
 
 const exec = promisify(execFile);
@@ -27,6 +27,10 @@ interface WorktreeDetect {
   isClean: boolean;
   /** Pre-filled feature/fix branch name derived from the task title. */
   proposedBranch: string;
+  /** Base branch chosen + freshened by 00a-sync-base. Null when that step skipped
+   *  (no git, no origin) or for an older task created before the step existed; the
+   *  apply falls back to the parent's current branch in that case. */
+  syncedBase: string | null;
 }
 
 interface WorktreeApply {
@@ -166,10 +170,14 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       isBugBranch(title, task?.description ?? null, category),
     );
 
+    // The base branch picked + freshened by 00a-sync-base (runs before this step).
+    const syncPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '00a-sync-base');
+    const syncedBase = (syncPrev?.output as { base?: string | null } | null)?.base ?? null;
+
     const gitDir = path.join(ctx.repoPath, '.git');
     const hasGit = await pathExists(gitDir);
     if (!hasGit) {
-      return { hasGit: false, currentBranch: null, isClean: true, proposedBranch };
+      return { hasGit: false, currentBranch: null, isClean: true, proposedBranch, syncedBase };
     }
     const branch = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
     const status = await gitRun(ctx.repoPath, ['status', '--porcelain']);
@@ -178,6 +186,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       currentBranch: branch.code === 0 ? branch.stdout.trim() : null,
       isClean: status.code === 0 && status.stdout.trim().length === 0,
       proposedBranch,
+      syncedBase,
     };
   },
 
@@ -213,9 +222,11 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
         submitLabel: 'Initialize git & create worktree',
       };
     }
+    // Base is chosen + freshened earlier by 00a-sync-base; show it read-only here.
+    const base = detected.syncedBase ?? detected.currentBranch ?? 'main';
     return {
       title: 'Worktree setup',
-      description: `Current branch: ${detected.currentBranch ?? 'unknown'}. Working tree ${detected.isClean ? 'clean' : 'dirty'}. A new worktree will be created inside the repo at .haive/worktrees/<branch>.`,
+      description: `Base branch: ${base}. Working tree ${detected.isClean ? 'clean' : 'dirty'}. A new worktree will be created inside the repo at .haive/worktrees/<branch>, branched from ${base}.`,
       fields: [
         {
           type: 'text',
@@ -224,12 +235,6 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
           placeholder: 'feature/my-change',
           default: detected.proposedBranch,
           required: true,
-        },
-        {
-          type: 'text',
-          id: 'baseBranch',
-          label: 'Base branch',
-          default: detected.currentBranch ?? 'main',
         },
       ],
       submitLabel: 'Prepare workspace',
@@ -255,7 +260,9 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       await initGitRepo(ctx, initBranch, commitMessage);
       base = initBranch;
     } else {
-      base = values.baseBranch ?? 'main';
+      // Prefer the base 00a-sync-base picked + freshened; fall back to a legacy form
+      // value (older tasks) then the parent's current branch.
+      base = args.detected.syncedBase ?? values.baseBranch ?? args.detected.currentBranch ?? 'main';
     }
 
     await ensureExcludeEntry(ctx.repoPath);

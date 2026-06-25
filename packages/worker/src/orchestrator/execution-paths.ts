@@ -20,8 +20,14 @@ export const MODEL_HEALTH_STEP_ID = '00-model-health-workflow';
 
 /** The pre-flight triage step id. Single source of truth — referenced by the step
  *  definition, the SPINE, and buildRunList (which pulls it to the front, just behind
- *  the model-health canary). */
+ *  the base-sync step). */
 export const TRIAGE_STEP_ID = '00-triage';
+
+/** The pre-branch base-sync step id. Runs after the model-health canary and before
+ *  triage (orderWorkflowRunList pulls it between them): it freshens the local base
+ *  branch from origin so the feature worktree is cut from the latest code and the
+ *  12-worktree-cleanup base push is a fast-forward. Single source of truth. */
+export const SYNC_BASE_STEP_ID = '00a-sync-base';
 
 /** Steps present in every non-full path. 00-triage MUST be in every set so that,
  *  after triage records the path, the next buildRunList still finds it (else
@@ -30,6 +36,7 @@ export const TRIAGE_STEP_ID = '00-triage';
  *  fixLoopOnError) loop back to it. */
 const SPINE: readonly string[] = [
   MODEL_HEALTH_STEP_ID,
+  SYNC_BASE_STEP_ID,
   TRIAGE_STEP_ID,
   '01-worktree-setup',
   '01a-app-boot',
@@ -114,23 +121,28 @@ export interface OrderableStep {
 }
 
 /** Build the ordered run list for a workflow task: the model-health canary first (a
- *  dead model fails loudly before anything else runs), then 00-triage (so the path is
- *  chosen up front), then the env-replicate prelude, then the remaining workflow steps
- *  in their existing order. When a path is set, workflow steps are trimmed to that
- *  path; the env-replicate prelude is never filtered. Both the canary and triage are
- *  in every path set (SPINE), so neither is ever filtered out. Pure (no registry / DB)
- *  so it is unit-testable. */
+ *  dead model fails loudly before anything else runs), then 00a-sync-base (freshen the
+ *  base branch from origin before any decision or branch is made), then 00-triage (so
+ *  the path is chosen up front), then the env-replicate prelude, then the remaining
+ *  workflow steps in their existing order. When a path is set, workflow steps are
+ *  trimmed to that path; the env-replicate prelude is never filtered. The canary,
+ *  base-sync, and triage are all in every path set (SPINE), so none is ever filtered
+ *  out. Pure (no registry / DB) so it is unit-testable. */
 export function orderWorkflowRunList<T extends OrderableStep>(
   main: readonly T[],
   prelude: readonly T[],
   path: ExecutionPath | null,
 ): T[] {
   const health = main.filter((s) => s.metadata.id === MODEL_HEALTH_STEP_ID);
+  const sync = main.filter((s) => s.metadata.id === SYNC_BASE_STEP_ID);
   const triage = main.filter((s) => s.metadata.id === TRIAGE_STEP_ID);
   const rest = main.filter(
-    (s) => s.metadata.id !== MODEL_HEALTH_STEP_ID && s.metadata.id !== TRIAGE_STEP_ID,
+    (s) =>
+      s.metadata.id !== MODEL_HEALTH_STEP_ID &&
+      s.metadata.id !== SYNC_BASE_STEP_ID &&
+      s.metadata.id !== TRIAGE_STEP_ID,
   );
-  const ordered = [...health, ...triage, ...prelude, ...rest];
+  const ordered = [...health, ...sync, ...triage, ...prelude, ...rest];
   if (!path) return ordered;
   return ordered.filter(
     (s) => s.metadata.workflowType === 'env_replicate' || keepForPath(s.metadata.id, path),

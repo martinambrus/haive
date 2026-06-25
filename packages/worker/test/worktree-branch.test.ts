@@ -3,7 +3,9 @@ import {
   isBugBranch,
   proposeBranchName,
   slugifyBranch,
+  worktreeSetupStep,
 } from '../src/step-engine/steps/workflow/01-worktree-setup.js';
+import type { StepContext } from '../src/step-engine/step-definition.js';
 
 describe('isBugBranch', () => {
   it('is true when the task is flagged category=bugfix at creation', () => {
@@ -53,5 +55,27 @@ describe('slugifyBranch', () => {
 
   it('falls back when the input is empty after slugifying', () => {
     expect(slugifyBranch('///')).toBe('feature-task');
+  });
+});
+
+describe('worktreeSetupStep form (base comes from 00a-sync-base)', () => {
+  const ctx = {} as unknown as StepContext;
+  const baseDetect = {
+    hasGit: true as const,
+    currentBranch: 'main',
+    isClean: true,
+    proposedBranch: 'feature/x',
+  };
+
+  it('shows the synced base read-only and drops the editable base field', () => {
+    const s = worktreeSetupStep.form!(ctx, { ...baseDetect, syncedBase: 'develop' })!;
+    expect(s.fields.some((f) => f.id === 'baseBranch')).toBe(false);
+    expect(s.fields.some((f) => f.id === 'branchName')).toBe(true);
+    expect(s.description).toContain('develop');
+  });
+
+  it('falls back to the parent current branch when no synced base was recorded', () => {
+    const s = worktreeSetupStep.form!(ctx, { ...baseDetect, syncedBase: null })!;
+    expect(s.description).toContain('main');
   });
 });
