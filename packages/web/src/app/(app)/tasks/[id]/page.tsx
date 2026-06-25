@@ -1813,6 +1813,20 @@ function StepCard({
                   // Gate-2: the live browser sits BELOW the verification status table but
                   // ABOVE the approve/reject decision — review the results, test, then decide.
                   <BrowserVncPanel taskId={taskId} title="Browser — test the app here" />
+                ) : step.stepId === '11-phase-8-learning' &&
+                  step.status === 'waiting_form' &&
+                  (step.detectOutput as { knowledgeDiffArtifactPath?: string | null } | null)
+                    ?.knowledgeDiffArtifactPath ? (
+                  // Learning: the knowledge diff sits BELOW the drafted-artifact disclosures
+                  // but ABOVE the apply checkboxes / instruction / submit — review what will be
+                  // written, then decide.
+                  <CommitDiffViewer
+                    taskId={taskId}
+                    artifactPath={
+                      (step.detectOutput as { knowledgeDiffArtifactPath: string })
+                        .knowledgeDiffArtifactPath
+                    }
+                  />
                 ) : undefined
               }
               onSkip={step.canSkip ? () => onAction('skip') : undefined}
@@ -1923,18 +1937,6 @@ function StepCard({
           <CommitDiffViewer
             taskId={taskId}
             artifactPath={(step.detectOutput as { diffArtifactPath: string }).diffArtifactPath}
-          />
-        )}
-
-      {step.stepId === '11-phase-8-learning' &&
-        step.status === 'waiting_form' &&
-        (step.detectOutput as { knowledgeDiffArtifactPath?: string | null } | null)
-          ?.knowledgeDiffArtifactPath && (
-          <CommitDiffViewer
-            taskId={taskId}
-            artifactPath={
-              (step.detectOutput as { knowledgeDiffArtifactPath: string }).knowledgeDiffArtifactPath
-            }
           />
         )}
     </Card>
