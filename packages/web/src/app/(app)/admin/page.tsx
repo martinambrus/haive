@@ -31,20 +31,24 @@ export default function AdminPage() {
   const [savingConcurrency, setSavingConcurrency] = useState(false);
   const [steeringEnabled, setSteeringEnabled] = useState<boolean | null>(null);
   const [savingSteering, setSavingSteering] = useState(false);
+  const [fairEnabled, setFairEnabled] = useState<boolean | null>(null);
+  const [savingFair, setSavingFair] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [usersData, healthData, concurrencyData, steeringData] = await Promise.all([
+      const [usersData, healthData, concurrencyData, steeringData, fairData] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
         api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
         api.get<{ enabled: boolean }>('/admin/config/steering'),
+        api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
       setMaxParallel(concurrencyData.maxParallelAgents);
       setMaxParallelInput(String(concurrencyData.maxParallelAgents));
       setSteeringEnabled(steeringData.enabled);
+      setFairEnabled(fairData.enabled);
       setError(null);
     } catch (err) {
       const e = err as { status?: number; message?: string };
@@ -122,6 +126,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update steering');
     } finally {
       setSavingSteering(false);
+    }
+  }
+
+  async function setFair(next: boolean) {
+    setSavingFair(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/fair-scheduling', {
+        enabled: next,
+      });
+      setFairEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update fair scheduling');
+    } finally {
+      setSavingFair(false);
     }
   }
 
@@ -262,6 +281,31 @@ export default function AdminPage() {
             />
             {steeringEnabled ? 'Enabled' : 'Disabled'}
             {savingSteering && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {fairEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Fair scheduling</CardTitle>
+            <CardDescription>
+              Shares the global CLI/agent concurrency fairly across users: each invocation is
+              enqueued with a priority equal to the submitting user&apos;s in-flight backlog, so a
+              freed slot goes to the most-starved user instead of one task&apos;s fan-out tail. Off
+              = plain FIFO. Takes effect within ~30s; persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={fairEnabled}
+              disabled={savingFair}
+              onChange={(e) => void setFair(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {fairEnabled ? 'Enabled' : 'Disabled'}
+            {savingFair && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

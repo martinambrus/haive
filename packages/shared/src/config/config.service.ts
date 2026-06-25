@@ -39,6 +39,12 @@ export const CONFIG_KEYS = {
   // that fails a task/onboarding loudly when the configured model can't emit valid
   // fenced JSON / follow instructions. Default true; set 'false' to skip the canary.
   MODEL_HEALTH_CHECK_ENABLED: 'config:worker:modelHealthCheckEnabled',
+  // Global kill-switch for fair cli-exec scheduling. When 'true' (default), each
+  // CLI invocation is enqueued with a BullMQ priority equal to the enqueuing user's
+  // in-flight invocation backlog, so a freed concurrency slot goes to the most-
+  // starved user instead of the next FIFO job from one task's fan-out. Set 'false'
+  // to restore plain FIFO live without a redeploy.
+  FAIR_SCHEDULING_ENABLED: 'config:worker:fairScheduling',
 
   HOST_REPO_ROOT: 'config:filesystem:hostRepoRoot',
   REPO_STORAGE_PATH: 'config:filesystem:repoStoragePath',
@@ -91,6 +97,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.OLLAMA_CLI_TIMEOUT_MS]: '7200000',
   [CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS]: 'false',
   [CONFIG_KEYS.MODEL_HEALTH_CHECK_ENABLED]: 'true',
+  [CONFIG_KEYS.FAIR_SCHEDULING_ENABLED]: 'true',
   [CONFIG_KEYS.HOST_REPO_ROOT]: '/host-fs',
   [CONFIG_KEYS.REPO_STORAGE_PATH]: '/var/lib/haive/repos',
   [CONFIG_KEYS.CLAWKER_BIN]: '/usr/local/bin/clawker',

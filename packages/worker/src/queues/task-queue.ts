@@ -1,11 +1,13 @@
 import { rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { Queue, Worker, type Job } from 'bullmq';
+import { Queue, Worker, type Job, type JobsOptions } from 'bullmq';
 import Docker from 'dockerode';
 import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
+  CONFIG_KEYS,
+  configService,
   QUEUE_NAMES,
   TASK_JOB_NAMES,
   logger,
@@ -556,14 +558,65 @@ async function loadProviders(db: Database, userId: string): Promise<CliProviderR
   return rows;
 }
 
+/** Fair-scheduling priority: a user's in-flight (enqueued or running, not yet
+ *  ended) CLI invocation count. Used as the BullMQ priority (lower = sooner) so a
+ *  freed concurrency slot is handed to the most-starved user rather than the next
+ *  FIFO job from one task's fan-out. cli_invocations has no user_id, so join
+ *  through tasks; superseded/ended rows are excluded. */
+async function userCliBacklog(db: Database, userId: string): Promise<number> {
+  const rows = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(schema.cliInvocations)
+    .innerJoin(schema.tasks, eq(schema.cliInvocations.taskId, schema.tasks.id))
+    .where(
+      and(
+        eq(schema.tasks.userId, userId),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
+  return rows[0]?.n ?? 0;
+}
+
 const workerDeps: WorkerDeps = {
   async enqueueCliInvocation(payload: CliExecJobPayload): Promise<void> {
-    await getCliExecQueue().add(CLI_EXEC_JOB_NAMES.INVOKE, payload, {
+    const queue = getCliExecQueue();
+    const opts: JobsOptions = {
       attempts: 2,
       backoff: { type: 'exponential', delay: 5000 },
       removeOnComplete: 100,
       removeOnFail: 100,
-    });
+    };
+    // Fair scheduling (kill-switch'd): priority = this user's in-flight CLI
+    // backlog so a freed slot goes to the most-starved user, not the next job in
+    // one task's fan-out. Fail-soft — a stale count only mis-orders, never blocks.
+    try {
+      if (await configService.getBoolean(CONFIG_KEYS.FAIR_SCHEDULING_ENABLED, true)) {
+        const backlog = await userCliBacklog(getDb(), payload.userId);
+        if (backlog > 0) opts.priority = Math.min(backlog, 1_000_000);
+      }
+    } catch (err) {
+      logger.warn({ err, userId: payload.userId }, 'fair-scheduling priority compute failed; FIFO');
+    }
+    await queue.add(CLI_EXEC_JOB_NAMES.INVOKE, payload, opts);
+    // Queued-status visibility: if every slot is busy at enqueue, the job will
+    // wait — mark the invocation so the UI shows an amber "machine busy" banner.
+    // started_at clears it visually at run-start, so no explicit reset is needed.
+    try {
+      const concurrency = await configService.getNumber(CONFIG_KEYS.MAX_PARALLEL_AGENTS, 3);
+      if ((await queue.getActiveCount()) >= concurrency) {
+        await getDb()
+          .update(schema.cliInvocations)
+          .set({
+            statusMessage: `Queued — machine at capacity (${concurrency} parallel slot${
+              concurrency === 1 ? '' : 's'
+            }). Your run starts automatically when a slot frees.`,
+          })
+          .where(eq(schema.cliInvocations.id, payload.invocationId));
+      }
+    } catch (err) {
+      logger.warn({ err, invocationId: payload.invocationId }, 'queued-status mark failed');
+    }
   },
 };
 

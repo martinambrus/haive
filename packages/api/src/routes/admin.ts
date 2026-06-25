@@ -237,3 +237,19 @@ adminRoutes.put('/config/steering', async (c) => {
   log.info({ enabled }, 'global steering switch updated');
   return c.json({ enabled });
 });
+
+const fairSchedulingSchema = z.object({ enabled: z.boolean() });
+
+// Global fair cli-exec scheduling kill-switch. The worker reads this at each
+// enqueue (within the ~30s config cache), so no live-retune channel is needed.
+adminRoutes.get('/config/fair-scheduling', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.FAIR_SCHEDULING_ENABLED, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/fair-scheduling', async (c) => {
+  const { enabled } = fairSchedulingSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.FAIR_SCHEDULING_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'fair scheduling switch updated');
+  return c.json({ enabled });
+});

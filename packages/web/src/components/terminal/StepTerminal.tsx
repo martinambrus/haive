@@ -324,14 +324,25 @@ function InvocationPanel({
       ) : (
         !replayError && <div className="text-xs text-neutral-500">Loading output…</div>
       )}
-      {total > 1 &&
+      {invocation.isActive && invocation.startedAt === null && invocation.statusMessage ? (
+        // Queued: enqueued but no concurrency slot yet. Amber so the user sees the
+        // machine is busy rather than a silent "connected" terminal. Gated on
+        // startedAt===null so it disappears the instant the run begins.
+        <div className="flex items-center gap-2 rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
+          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
+          {invocation.statusMessage}
+        </div>
+      ) : (
+        total > 1 &&
         invocation.isActive &&
+        invocation.startedAt !== null &&
         (invocation.statusMessage ?? (idx > 0 ? statusMessage : null)) && (
           <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">
             <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
             {invocation.statusMessage ?? statusMessage}
           </div>
-        )}
+        )
+      )}
     </div>
   );
 }
