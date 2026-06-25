@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { CliProviderName, FormSchema } from '@haive/shared';
 import {
@@ -50,19 +50,44 @@ const BASE_STAGE_PATHS = [
   '.haive/install.json',
 ];
 
-async function resolveStagePaths(db: Database, userId: string): Promise<string[]> {
+// Rules files onboarding writes that are NOT tracked as onboarding_artifacts, so
+// the artifact union below would miss them: the import stubs (CLAUDE.md/GEMINI.md)
+// and the gemini RTK settings. AGENTS.md is listed too as a fallback for the
+// no-provider-rules case, where it holds only the project-info block and is untracked.
+const EXTRA_RULES_STAGE_PATHS = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', '.gemini/settings.json'];
+
+async function resolveStagePaths(
+  db: Database,
+  userId: string,
+  repositoryId: string | null,
+): Promise<string[]> {
   const providerRows = await db.query.cliProviders.findMany({
     where: eq(schema.cliProviders.userId, userId),
     columns: { name: true, enabled: true },
   });
-  const extra = new Set<string>();
+  const paths = new Set<string>([...BASE_STAGE_PATHS, ...EXTRA_RULES_STAGE_PATHS]);
   for (const row of providerRows) {
     if (!row.enabled) continue;
     const meta = getCliProviderMetadata(row.name as CliProviderName);
-    if (meta.projectAgentsDir) extra.add(`${meta.projectAgentsDir}/`);
-    if (meta.projectSkillsDir) extra.add(`${meta.projectSkillsDir}/`);
+    if (meta.projectAgentsDir) paths.add(`${meta.projectAgentsDir}/`);
+    if (meta.projectSkillsDir) paths.add(`${meta.projectSkillsDir}/`);
   }
-  return [...BASE_STAGE_PATHS, ...Array.from(extra)];
+  // Stage every tracked onboarding artifact for this repo so the AGENTS.md
+  // cli-rules region, RTK settings, workflow-config, commands, Drupal LSP, and any
+  // future tracked template are committed without having to re-list them here.
+  if (repositoryId) {
+    const artifactRows = await db
+      .select({ diskPath: schema.onboardingArtifacts.diskPath })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    for (const r of artifactRows) paths.add(r.diskPath);
+  }
+  return [...paths];
 }
 
 const GIT_IDENTITY = ['-c', 'user.email=haive@local', '-c', 'user.name=Haive Worker'];
@@ -295,7 +320,16 @@ export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboa
       };
     }
 
-    const stagePaths = await resolveStagePaths(ctx.db, ctx.userId);
+    const taskRow = await ctx.db
+      .select({ repositoryId: schema.tasks.repositoryId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, ctx.taskId))
+      .limit(1);
+    const stagePaths = await resolveStagePaths(
+      ctx.db,
+      ctx.userId,
+      taskRow[0]?.repositoryId ?? null,
+    );
     const existingPaths: string[] = [];
     for (const rel of stagePaths) {
       if (await pathExists(path.join(ctx.repoPath, rel))) existingPaths.push(rel);
