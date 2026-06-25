@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, lt } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
@@ -353,4 +353,98 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
     ...entries,
   ].join('\n');
   return block.length > 3000 ? block.slice(0, 3000) : block;
+}
+
+/** Background ledger for the implementation fix pass: what earlier fix rounds already
+ *  changed, what the prior agents recorded as established/ruled out, and the defects
+ *  earlier rounds were asked to fix. Each fix round is a fresh CLI process with no memory
+ *  of prior rounds, so without this it re-derives the same discoveries (e.g. probing for a
+ *  tool that is not in the sandbox). Returns '' on the original pass (round 0). Distinct
+ *  from loadHonoredConstraints (a "do not revert" guard for the validator); this is
+ *  "already done / already ruled out" context for the implementer. */
+export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
+  if (ctx.round <= 0) return '';
+
+  // Prior-round implementation outputs. loadPreviousStepOutput returns only the latest
+  // round, so query every earlier round of the implement step directly.
+  const implRows = await ctx.db
+    .select({ round: schema.taskSteps.round, output: schema.taskSteps.output })
+    .from(schema.taskSteps)
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, ctx.taskId),
+        eq(schema.taskSteps.stepId, FIX_LOOP_TARGET_STEP_ID),
+        lt(schema.taskSteps.round, ctx.round),
+      ),
+    )
+    .orderBy(asc(schema.taskSteps.round));
+
+  const changeLines: string[] = [];
+  const findingLines: string[] = [];
+  for (const r of implRows) {
+    const o = (r.output ?? null) as {
+      summary?: string;
+      notes?: string;
+      environmentFindings?: string;
+    } | null;
+    if (!o) continue;
+    const summary = (o.summary ?? '').trim();
+    if (summary.length > 0) changeLines.push(`- round ${r.round}: ${summary}`);
+    const env = (o.environmentFindings ?? '').trim();
+    if (env.length > 0) findingLines.push(`- round ${r.round}: ${env}`);
+    const notes = (o.notes ?? '').trim();
+    if (notes.length > 0) findingLines.push(`- round ${r.round} (notes): ${notes}`);
+  }
+
+  // Prior diagnoses (the defects earlier rounds were asked to fix), deduped by fingerprint
+  // so a recurring complaint shows once. Earlier rounds only — the current round's defect
+  // is shown separately via loadFixLoopDiagnosis.
+  const evtRows = await ctx.db
+    .select()
+    .from(schema.taskEvents)
+    .where(
+      and(
+        eq(schema.taskEvents.taskId, ctx.taskId),
+        eq(schema.taskEvents.eventType, FIX_LOOP_REQUESTED),
+      ),
+    )
+    .orderBy(desc(schema.taskEvents.createdAt));
+  const seenFp = new Set<string>();
+  const diagnosisLines: string[] = [];
+  for (const r of evtRows) {
+    const p = r.payload as {
+      diagnosis?: string;
+      sourceStepId?: string;
+      round?: number;
+      fingerprint?: string;
+    } | null;
+    if (!p || typeof p.round !== 'number' || p.round >= ctx.round) continue;
+    const diag = cleanDiagnosis((p.diagnosis ?? '').trim());
+    if (diag.length === 0) continue;
+    const fp = p.fingerprint ?? fixLoopFingerprint(p.sourceStepId ?? '', p.diagnosis ?? '');
+    if (seenFp.has(fp)) continue;
+    seenFp.add(fp);
+    const short = diag.length > 400 ? diag.slice(-400) : diag;
+    diagnosisLines.push(`- ${p.sourceStepId ?? 'downstream'} (round ${p.round}): ${short}`);
+  }
+
+  if (changeLines.length === 0 && findingLines.length === 0 && diagnosisLines.length === 0) {
+    return '';
+  }
+
+  const block = [
+    'WHAT EARLIER FIX ROUNDS ALREADY DID / RULED OUT (background only — the current defect to',
+    'fix is stated above; do not repeat this discovery work, build on it):',
+    changeLines.length > 0 ? ['Changes already made:', ...changeLines].join('\n') : '',
+    findingLines.length > 0
+      ? ['Environment / investigation already established:', ...findingLines].join('\n')
+      : '',
+    diagnosisLines.length > 0
+      ? ['Defects addressed in earlier rounds:', ...diagnosisLines].join('\n')
+      : '',
+  ]
+    .filter((s) => s.length > 0)
+    .join('\n\n');
+
+  return block.length > 4000 ? block.slice(0, 4000) : block;
 }

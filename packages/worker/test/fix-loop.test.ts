@@ -11,6 +11,7 @@ import {
   fixLoopFingerprint,
   detectFixLoopOscillation,
   loadHonoredConstraints,
+  loadPriorFixContext,
   FIX_LOOP_ACTION_FIELD,
 } from '../src/step-engine/steps/workflow/_fix-loop.js';
 
@@ -467,6 +468,98 @@ describe('loadHonoredConstraints', () => {
     );
     expect(block).toContain('NEW reason');
     expect(block).not.toContain('OLD reason');
+  });
+});
+
+// --- Layer 2: cross-round fix ledger ------------------------------------------
+
+describe('loadPriorFixContext', () => {
+  // Table-aware mock: loadPriorFixContext queries BOTH task_steps (prior implement
+  // outputs) and task_events (prior diagnoses), so route rows by drizzle table name.
+  function priorCtx(opts: {
+    round: number;
+    implRows?: { round: number; output: unknown }[];
+    events?: { payload: Record<string, unknown> }[];
+  }): StepContext {
+    const db = {
+      select: () => ({
+        from: (table: unknown) => {
+          const name = tableNameOf(table);
+          const rows =
+            name === 'task_steps'
+              ? (opts.implRows ?? [])
+              : name === 'task_events'
+                ? (opts.events ?? [])
+                : [];
+          return { where: () => ({ orderBy: async () => rows }) };
+        },
+      }),
+    } as unknown as Database;
+    return { db, taskId: 't', round: opts.round } as unknown as StepContext;
+  }
+
+  it('returns empty on the original pass (round 0)', async () => {
+    expect(
+      await loadPriorFixContext(
+        priorCtx({ round: 0, implRows: [{ round: 0, output: { summary: 'x' } }] }),
+      ),
+    ).toBe('');
+  });
+
+  it('aggregates prior implement summaries, environmentFindings, and prior diagnoses', async () => {
+    const block = await loadPriorFixContext(
+      priorCtx({
+        round: 2,
+        implRows: [
+          {
+            round: 1,
+            output: {
+              summary: 'added init.php guard',
+              environmentFindings: 'ddev not on PATH in sandbox',
+            },
+          },
+        ],
+        events: [ev('07b-phase-4-validate', 1, 'missing error handling in foo')],
+      }),
+    );
+    expect(block).toContain('WHAT EARLIER FIX ROUNDS');
+    expect(block).toContain('round 1: added init.php guard');
+    expect(block).toContain('ddev not on PATH in sandbox');
+    expect(block).toContain('missing error handling in foo');
+  });
+
+  it('dedups prior diagnoses by fingerprint (same complaint shows once)', async () => {
+    const block = await loadPriorFixContext(
+      priorCtx({
+        round: 3,
+        events: [
+          ev('07b-phase-4-validate', 2, 'missing error handling in foo'),
+          ev('07b-phase-4-validate', 1, 'missing error handling in foo'),
+        ],
+      }),
+    );
+    const occurrences = block.split('missing error handling in foo').length - 1;
+    expect(occurrences).toBe(1);
+  });
+
+  it('excludes the current round and later diagnoses (earlier rounds only)', async () => {
+    const block = await loadPriorFixContext(
+      priorCtx({
+        round: 2,
+        events: [
+          ev('07b-phase-4-validate', 2, 'current-round defect'),
+          ev('08-phase-5-verify', 3, 'later defect'),
+        ],
+      }),
+    );
+    expect(block).toBe('');
+  });
+
+  it('caps an overlong block', async () => {
+    const block = await loadPriorFixContext(
+      priorCtx({ round: 2, implRows: [{ round: 1, output: { summary: 'x'.repeat(8000) } }] }),
+    );
+    expect(block.length).toBeLessThanOrEqual(4000);
   });
 });
 

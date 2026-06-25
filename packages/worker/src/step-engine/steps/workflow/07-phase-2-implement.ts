@@ -4,7 +4,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
-import { loadFixLoopDiagnosis } from './_fix-loop.js';
+import { loadFixLoopDiagnosis, loadPriorFixContext } from './_fix-loop.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { ensureAppServing } from './_app-runtime.js';
 import { startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
@@ -18,6 +18,10 @@ interface ImplementDetect {
   /** Fix-loop diagnosis to address on this round, or null on the original pass
    *  (round 0). When set, the step runs in fix mode (diagnosis-first prompt). */
   fixContext: string | null;
+  /** Background ledger of what earlier fix rounds already did / ruled out (empty on the
+   *  original pass). Injected into the fix prompt so a fresh round-N agent does not redo
+   *  prior discovery work. See loadPriorFixContext. */
+  priorFixContext: string;
   /** Fix-loop round (0 = original implementation pass). */
   round: number;
   /** Env template ready with browserTesting on → a chrome-devtools MCP is wired to
@@ -30,6 +34,9 @@ interface ImplementApply {
   summary: string;
   filesTouched: string[];
   notes: string;
+  /** Agent-reported facts about the sandbox/tooling/runtime it established or ruled out,
+   *  carried into later fix rounds by loadPriorFixContext. '' when none reported. */
+  environmentFindings: string;
   source: 'llm' | 'stub';
 }
 
@@ -47,6 +54,7 @@ export function parseImplementOutput(raw: unknown): {
   summary: string;
   filesTouched: string[];
   notes: string;
+  environmentFindings: string;
 } | null {
   if (!raw) return null;
   let text: string;
@@ -59,6 +67,7 @@ export function parseImplementOutput(raw: unknown): {
         obj.summary,
         obj.filesTouched,
         typeof obj.notes === 'string' ? obj.notes : '',
+        typeof obj.environmentFindings === 'string' ? obj.environmentFindings : '',
       );
     }
     return null;
@@ -76,6 +85,7 @@ export function parseImplementOutput(raw: unknown): {
       obj.summary as string,
       obj.filesTouched,
       typeof obj.notes === 'string' ? (obj.notes as string) : '',
+      typeof obj.environmentFindings === 'string' ? (obj.environmentFindings as string) : '',
     );
   }
   return null;
@@ -85,11 +95,12 @@ function normalise(
   summary: string,
   filesTouchedRaw: unknown,
   notes: string,
-): { summary: string; filesTouched: string[]; notes: string } {
+  environmentFindings: string,
+): { summary: string; filesTouched: string[]; notes: string; environmentFindings: string } {
   const filesTouched = Array.isArray(filesTouchedRaw)
     ? (filesTouchedRaw as unknown[]).filter((v): v is string => typeof v === 'string')
     : [];
-  return { summary, filesTouched, notes };
+  return { summary, filesTouched, notes, environmentFindings };
 }
 
 /** Remove fenced code blocks (```...```), leaving the agent's prose. */
@@ -122,7 +133,7 @@ function collectFileList(obj: Record<string, unknown> | null): string[] {
  *  at all (then apply emits the genuine no-output stub). */
 export function salvageImplementOutput(
   raw: unknown,
-): { summary: string; filesTouched: string[]; notes: string } | null {
+): { summary: string; filesTouched: string[]; notes: string; environmentFindings: string } | null {
   let text = '';
   let obj: Record<string, unknown> | null = null;
   if (typeof raw === 'string') {
@@ -141,13 +152,21 @@ export function salvageImplementOutput(
     objSummary ||
     prose ||
     'The implementation agent ran but returned no readable summary; see the step terminal for its full output.';
-  return { summary: summary.slice(0, 2000), filesTouched: collectFileList(obj), notes: '' };
+  const envFindings =
+    obj && typeof obj.environmentFindings === 'string' ? obj.environmentFindings.trim() : '';
+  return {
+    summary: summary.slice(0, 2000),
+    filesTouched: collectFileList(obj),
+    notes: '',
+    environmentFindings: envFindings.slice(0, 2000),
+  };
 }
 
 function stubImplement(detect: ImplementDetect): {
   summary: string;
   filesTouched: string[];
   notes: string;
+  environmentFindings: string;
 } {
   return {
     summary:
@@ -156,6 +175,7 @@ function stubImplement(detect: ImplementDetect): {
     notes: detect.gateFeedback
       ? `Gate 1 feedback carried forward: ${detect.gateFeedback}`
       : 'No additional notes recorded.',
+    environmentFindings: '',
   };
 }
 
@@ -224,6 +244,8 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       gateFeedback: gateOutput.feedback ?? '',
       // Fix-loop: on a round > 0 re-entry, the diagnosis a downstream step recorded.
       fixContext: await loadFixLoopDiagnosis(ctx),
+      // Background ledger of what earlier fix rounds already did / ruled out (empty on round 0).
+      priorFixContext: await loadPriorFixContext(ctx),
       round: ctx.round,
       browserTesting,
     };
@@ -288,7 +310,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         'Follow the patterns you find; avoid documented anti-patterns.',
         '',
         'When finished emit ONE JSON object inside a ```json fenced code block with the shape:',
-        '{ "summary": "<what changed and why>", "filesTouched": ["path/one", "path/two"], "notes": "<follow-ups or caveats>" }',
+        '{ "summary": "<what changed and why>", "filesTouched": ["path/one", "path/two"], "notes": "<follow-ups or caveats>", "environmentFindings": "<facts you established about the sandbox/tooling/runtime and anything you ruled out, so later fix rounds need not redo it>" }',
         '',
         `Workspace path: ${detected.sandboxWorkspacePath}`,
         `Your current working directory is already set to the workspace path above.`,
@@ -330,6 +352,9 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
           '=== Defect to fix (found downstream) ===',
           detected.fixContext,
           '',
+          ...(detected.priorFixContext
+            ? ['=== Prior fix rounds (background) ===', detected.priorFixContext, '']
+            : []),
           ...common,
           ...browserVerify,
           '',
@@ -370,6 +395,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         summary: parsed.summary,
         filesTouched: parsed.filesTouched,
         notes: parsed.notes,
+        environmentFindings: parsed.environmentFindings,
         source: 'llm',
       };
     }
@@ -390,6 +416,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       summary: stub.summary,
       filesTouched: stub.filesTouched,
       notes: stub.notes,
+      environmentFindings: stub.environmentFindings,
       source: 'stub',
     };
   },
