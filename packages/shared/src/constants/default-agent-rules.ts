@@ -88,6 +88,8 @@ The post-2.1.110 harness regression causes jump-to-conclusion behaviour: hypothe
 
 ---
 
+- The \`ddev\` CLI is not on PATH inside your sandbox. Do not run \`ddev\` or spend time checking whether it is available.
+
 - Only make changes that are directly requested. Keep solutions simple and focused.
 
 - ALWAYS read and understand relevant files before proposing code edits. Do not speculate about code you have not inspected. If the user references a specific file/path, you MUST open and inspect it before explaining or proposing fixes. Be rigorous and persistent in searching code for key facts. Thoroughly review the style, conventions, and abstractions of the codebase before implementing new features or abstractions.
@@ -143,5 +145,6 @@ The post-2.1.110 harness regression causes jump-to-conclusion behaviour: hypothe
 export const KNOWN_DEFAULT_RULES_HASHES: ReadonlySet<string> = new Set([
   '25441d9c27aa9c2304fe86d91518d1677e8090aeea5aa333f682904865dc231a', // per-CLI default (4c6351b)
   '34092f7878ef9461fbe0ec4468ca0e90fcb472c65d989fa3ddda2a1489799302', // expanded default (04495d1)
-  '0cf013f7aa212445b94d38dde2f5efcb343b5a4d72e847cd47f75db6d1d73c47', // current: + match-the-invariant (0e3ae82)
+  '0cf013f7aa212445b94d38dde2f5efcb343b5a4d72e847cd47f75db6d1d73c47', // + match-the-invariant (0e3ae82)
+  'c8962d1ee239a4550a6310fb94ed5c709f2235a356b74be93cff3d350bd44484', // current: + ddev-not-on-PATH rule
 ]);
