@@ -210,8 +210,12 @@ export async function startDdevRunner(params: {
 export async function ddevExec(
   handle: DdevRunnerHandle,
   ddevArgs: string,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; onLine?: (line: string) => void } = {},
 ): Promise<{ exitCode: number; output: string }> {
+  // Live progress requested: stream line-by-line rather than buffering (the
+  // buffered path below returns nothing until a multi-minute op completes).
+  if (opts.onLine)
+    return ddevExecStreaming(handle, ddevArgs, opts.onLine, opts.timeoutMs ?? 600_000);
   const cmd = `cd ${handle.projectDir} && ddev ${ddevArgs}`;
   try {
     const { stdout, stderr } = await exec(
@@ -291,8 +295,9 @@ export async function ddevRegisteredProjectName(handle: DdevRunnerHandle): Promi
  *  new php_version pulls a fresh web image. */
 export async function ddevRestart(
   handle: DdevRunnerHandle,
+  opts: { onLine?: (line: string) => void } = {},
 ): Promise<{ exitCode: number; output: string }> {
-  return ddevExec(handle, 'restart', { timeoutMs: 900_000 });
+  return ddevExec(handle, 'restart', { timeoutMs: 900_000, onLine: opts.onLine });
 }
 
 /** `ddev snapshot --name=<name>` — db backup taken before a destructive migrate.
@@ -300,8 +305,9 @@ export async function ddevRestart(
 export async function ddevSnapshot(
   handle: DdevRunnerHandle,
   name: string,
+  opts: { onLine?: (line: string) => void } = {},
 ): Promise<{ exitCode: number; output: string }> {
-  return ddevExec(handle, `snapshot --name=${name}`, { timeoutMs: 600_000 });
+  return ddevExec(handle, `snapshot --name=${name}`, { timeoutMs: 600_000, onLine: opts.onLine });
 }
 
 /** `ddev snapshot restore <name>` — repopulate the DB from a snapshot. Long
@@ -326,6 +332,7 @@ export async function ddevSafeRename(
   handle: DdevRunnerHandle,
   oldName: string,
   snapshotName: string,
+  opts: { onLine?: (line: string) => void } = {},
 ): Promise<{ exitCode: number; output: string }> {
   const snap = await ddevSnapshot(handle, snapshotName);
   const hadSnapshot = snap.exitCode === 0;
@@ -342,7 +349,7 @@ export async function ddevSafeRename(
       'ddev stop --unlist non-zero (continuing to start under the new name)',
     );
   }
-  const start = await ddevExec(handle, 'start', { timeoutMs: 900_000 });
+  const start = await ddevExec(handle, 'start', { timeoutMs: 900_000, onLine: opts.onLine });
   if (start.exitCode !== 0) return start;
   if (hadSnapshot) {
     const restore = await ddevSnapshotRestore(handle, snapshotName);
@@ -376,8 +383,12 @@ export function ddevMigratedSnapshotName(taskId: string): string {
 export async function ddevMigrateDatabase(
   handle: DdevRunnerHandle,
   target: string,
+  opts: { onLine?: (line: string) => void } = {},
 ): Promise<{ exitCode: number; output: string }> {
-  return ddevExec(handle, `utility migrate-database ${target}`, { timeoutMs: 1_800_000 });
+  return ddevExec(handle, `utility migrate-database ${target}`, {
+    timeoutMs: 1_800_000,
+    onLine: opts.onLine,
+  });
 }
 
 /** Ensure the task's DDEV env is up and `ddev start`-ed, booting it if not.
@@ -419,13 +430,13 @@ async function ensureDdevStartedInner(
     return existing; // already running — don't re-boot (preserves an imported DB)
   }
   const handle = await startDdevRunner({ taskId, repoSubpath });
-  let start = await ddevStartStreaming(handle, opts.onProgress);
+  let start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
   if (start.exitCode !== 0) {
     // A cold first boot builds the project's custom web image, so container
     // readiness can land right at DDEV's default 120s timeout and fail
     // transiently. The images are built now, so one retry usually clears it.
     log.warn({ taskId, output: start.output.slice(-800) }, 'ddev start failed; retrying once');
-    start = await ddevStartStreaming(handle, opts.onProgress);
+    start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
   }
   if (start.exitCode !== 0) {
     throw new Error(`ddev start failed: ${start.output.slice(-1500)}`);
@@ -454,15 +465,18 @@ async function restoreLatestSnapshot(handle: DdevRunnerHandle, taskId: string): 
   log.info({ taskId }, 'no DDEV DB snapshot to restore (first boot or no imported DB)');
 }
 
-/** `ddev start` with live line streaming for progress UI. The buffered ddevExec
- *  returns nothing until the ~2-minute cold boot finishes; this spawns the same
- *  command and calls onLine per output line so callers can surface the current
- *  stage. Returns the identical { exitCode, output } shape (output = tail). */
-function ddevStartStreaming(
+/** Run a ddev subcommand with live per-line streaming for the progress UI. The
+ *  buffered ddevExec returns nothing until a multi-minute op (cold boot, restart,
+ *  import-db, migrate-database) finishes; this spawns the same command and calls
+ *  onLine per output line so callers can surface the current stage. Returns the
+ *  identical { exitCode, output } shape (output = tail). */
+function ddevExecStreaming(
   handle: DdevRunnerHandle,
+  ddevArgs: string,
   onLine?: (line: string) => void,
+  timeoutMs = 900_000,
 ): Promise<{ exitCode: number; output: string }> {
-  const cmd = `cd ${handle.projectDir} && ddev start`;
+  const cmd = `cd ${handle.projectDir} && ddev ${ddevArgs}`;
   return new Promise((resolve) => {
     const child = spawn('docker', ['exec', '-u', 'ddev', handle.container, 'bash', '-lc', cmd]);
     let buf = '';
@@ -487,7 +501,7 @@ function ddevStartStreaming(
       } catch {
         /* already exited */
       }
-    }, 900_000);
+    }, timeoutMs);
     child.on('close', (code) => {
       clearTimeout(timer);
       if (onLine && lineBuf.trim()) onLine(lineBuf);

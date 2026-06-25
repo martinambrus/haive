@@ -10,6 +10,7 @@ import {
   ddevSnapshot,
   ddevMigratedSnapshotName,
 } from '../../../sandbox/ddev-runner.js';
+import { withDdevProgress } from './_app-runtime.js';
 
 // Runs the framework's DB migrations inside the task's DDEV environment, after
 // gate-1 (spec approved) and before implementation. Critical when an old DB was
@@ -167,8 +168,9 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
     }
 
     const handle = runnerHandleForTask(ctx.taskId, d.repoSubpath);
-    await ctx.emitProgress(`Running migrations: ${command}`);
-    const res = await ddevExec(handle, `exec ${command}`, { timeoutMs: 1_800_000 });
+    const res = await withDdevProgress(ctx, `Running migrations: ${command}`, (onLine) =>
+      ddevExec(handle, `exec ${command}`, { timeoutMs: 1_800_000, onLine }),
+    );
     if (res.exitCode !== 0) {
       // Block the pipeline — the recovery options (retry / retry-with-AI / skip)
       // are surfaced on the failed step.
@@ -178,7 +180,9 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
     // Durability snapshot of the migrated DB so a cold boot (worker/host restart)
     // restores the MIGRATED state, not the pre-migration import. Lives on the repo
     // volume; ensureDdevStarted prefers it over the import snapshot. Non-fatal.
-    const snap = await ddevSnapshot(handle, ddevMigratedSnapshotName(ctx.taskId));
+    const snap = await withDdevProgress(ctx, 'Snapshotting the migrated database…', (onLine) =>
+      ddevSnapshot(handle, ddevMigratedSnapshotName(ctx.taskId), { onLine }),
+    );
     if (snap.exitCode !== 0) {
       ctx.logger.warn(
         { taskId: ctx.taskId, output: snap.output.slice(-500) },

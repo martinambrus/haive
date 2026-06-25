@@ -12,7 +12,7 @@ import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseDdevConfig, renderDdevConfig } from '../_ddev-config.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { ddevExec, ddevSnapshot, ddevImportSnapshotName } from '../../../sandbox/ddev-runner.js';
-import { ensureDdevWithProgress } from './_app-runtime.js';
+import { ensureDdevWithProgress, withDdevProgress } from './_app-runtime.js';
 
 // Boots the project's DDEV environment in a per-task nested-Docker runner and
 // imports the uploaded DB dump (then deletes it). Gated on the repo actually
@@ -282,10 +282,12 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
 
     let imported = false;
     if (d.dumpRunnerPath && d.dbUploadId) {
-      await ctx.emitProgress('Importing database dump…');
-      const imp = await ddevExec(handle, `import-db --file=${d.dumpRunnerPath}`, {
-        timeoutMs: 1_800_000,
-      });
+      const imp = await withDdevProgress(ctx, 'Importing database dump…', (onLine) =>
+        ddevExec(handle, `import-db --file=${d.dumpRunnerPath}`, {
+          timeoutMs: 1_800_000,
+          onLine,
+        }),
+      );
       if (imp.exitCode !== 0) {
         throw new Error(`ddev import-db failed: ${imp.output.slice(-1500)}`);
       }
@@ -295,8 +297,9 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
       // daemon / host restart that destroys the runner's nested DB —
       // ensureDdevStarted restores it on a cold boot. Non-fatal: the import
       // already succeeded, and a prior attempt's snapshot may already exist.
-      await ctx.emitProgress('Snapshotting the imported database…');
-      const snap = await ddevSnapshot(handle, ddevImportSnapshotName(ctx.taskId));
+      const snap = await withDdevProgress(ctx, 'Snapshotting the imported database…', (onLine) =>
+        ddevSnapshot(handle, ddevImportSnapshotName(ctx.taskId), { onLine }),
+      );
       if (snap.exitCode !== 0) {
         ctx.logger.warn(
           { taskId: ctx.taskId, output: snap.output.slice(-500) },

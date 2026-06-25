@@ -5,17 +5,13 @@ import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
-import {
-  ensureDdevStarted,
-  startBrowserDesktop,
-  runnerExec,
-  ddevPrimaryUrl,
-} from '../../../sandbox/ddev-runner.js';
+import { startBrowserDesktop, runnerExec, ddevPrimaryUrl } from '../../../sandbox/ddev-runner.js';
 import {
   ensureAppRunnerStarted,
   appRunnerExec,
   startBrowserDesktop as startAppBrowserDesktop,
 } from '../../../sandbox/app-runner.js';
+import { ensureDdevWithProgress } from './_app-runtime.js';
 
 interface VerifyGateDetect {
   testResults: string;
@@ -434,7 +430,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         const ws = await resolveDdevWorkspace(ctx.db, ctx.taskId, ctx.repoPath);
         const isDdev = !!ws && (await pathExists(path.join(ws.workspace, '.ddev', 'config.yaml')));
         if (isDdev && ws) {
-          const handle = await ensureDdevStarted(ctx.taskId, ws.repoSubpath);
+          const handle = await ensureDdevWithProgress(ctx, ws.repoSubpath);
           await startBrowserDesktop(handle);
           const appUrl = pa?.appUrl || (await ddevPrimaryUrl(handle)) || 'http://localhost';
           liveBrowser = { available: true, appUrl };

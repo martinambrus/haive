@@ -15,7 +15,7 @@ import {
   ddevRegisteredProjectName,
   ddevSafeRename,
 } from '../../../sandbox/ddev-runner.js';
-import { ensureDdevWithProgress } from './_app-runtime.js';
+import { ensureDdevWithProgress, withDdevProgress } from './_app-runtime.js';
 
 // Reconciles the per-task DDEV runtime with the post-implementation
 // `.ddev/config.yaml`. 01c-ddev-env booted DDEV ONCE early on the pre-change
@@ -270,8 +270,11 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
       });
       if (!seen.output.includes('HAIVE_MIGRATED')) {
         ctx.throwIfCancelled();
-        await ctx.emitProgress('Snapshotting database before migration…');
-        const snap = await ddevSnapshot(handle, snapshotName);
+        const snap = await withDdevProgress(
+          ctx,
+          'Snapshotting the database before migration…',
+          (onLine) => ddevSnapshot(handle, snapshotName, { onLine }),
+        );
         if (snap.exitCode !== 0) {
           // A snapshot from a prior failed attempt may already exist — tolerate
           // and proceed (the earlier snapshot is still a valid pre-migrate backup).
@@ -281,8 +284,11 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
           );
         }
         ctx.throwIfCancelled();
-        await ctx.emitProgress(`Migrating database to ${drift.migrateTarget}…`);
-        const mig = await ddevMigrateDatabase(handle, drift.migrateTarget);
+        const mig = await withDdevProgress(
+          ctx,
+          `Migrating database to ${drift.migrateTarget}…`,
+          (onLine) => ddevMigrateDatabase(handle, drift.migrateTarget!, { onLine }),
+        );
         if (mig.exitCode !== 0) {
           throw new Error(
             `ddev migrate-database ${drift.migrateTarget} failed (DB backed up as snapshot ` +
@@ -296,8 +302,12 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
       }
 
       ctx.throwIfCancelled();
-      await ctx.emitProgress('Restarting DDEV to apply the migrated database + config…');
-      const r = await ddevRestart(handle);
+      const r = await withDdevProgress(
+        ctx,
+        'Restarting DDEV to apply the migrated database + config…',
+        (onLine) => ddevRestart(handle, { onLine }),
+        { initialLine: 'stopping containers…' },
+      );
       if (r.exitCode !== 0)
         throw new Error(`ddev restart after migrate failed: ${r.output.slice(-1500)}`);
       return {
@@ -323,8 +333,12 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
     const configName = configText ? matchYamlField(configText, 'name') : null;
     if (registeredName && configName && registeredName !== configName) {
       const snapshotName = `haive-pre-rename-${ctx.taskId}`;
-      await ctx.emitProgress(`Renaming DDEV project ${registeredName} → ${configName}…`);
-      const renamed = await ddevSafeRename(handle, registeredName, snapshotName);
+      const renamed = await withDdevProgress(
+        ctx,
+        `Renaming DDEV project ${registeredName} → ${configName}…`,
+        (onLine) => ddevSafeRename(handle, registeredName, snapshotName, { onLine }),
+        { initialLine: 'snapshotting + restarting…' },
+      );
       if (renamed.exitCode !== 0) {
         throw new Error(
           `ddev rename ${registeredName} → ${configName} failed: ${renamed.output.slice(-1500)}`,
@@ -339,8 +353,12 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
         output: `Renamed DDEV project ${registeredName} → ${configName} (snapshot + restart, data preserved).`,
       };
     }
-    await ctx.emitProgress('Restarting DDEV to apply the new configuration…');
-    const r = await ddevRestart(handle);
+    const r = await withDdevProgress(
+      ctx,
+      'Restarting DDEV to apply the new configuration…',
+      (onLine) => ddevRestart(handle, { onLine }),
+      { initialLine: 'stopping containers…' },
+    );
     if (r.exitCode !== 0) throw new Error(`ddev restart failed: ${r.output.slice(-1500)}`);
     return {
       action: 'restart',
