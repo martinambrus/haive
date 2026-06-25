@@ -29,7 +29,7 @@ import { Badge, Button, Card, Input } from '@/components/ui';
 import { CircleDot, Route, FolderGit2 } from 'lucide-react';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
-import { formatDuration } from '@/lib/format-duration';
+import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
 import {
   FormRenderer,
@@ -83,6 +83,32 @@ function executionPathVariant(path: ExecutionPath): 'success' | 'info' | 'defaul
     default:
       return 'default';
   }
+}
+
+/** Pace colour for effort-vs-estimate: <=100% on/under budget (emerald), <=125%
+ *  slightly over (amber), else over (rose). Shared by the header indicator and
+ *  the footer verdict card. */
+function paceColorClass(pct: number): string {
+  if (pct <= 100) return 'text-emerald-300';
+  if (pct <= 125) return 'text-amber-300';
+  return 'text-rose-300';
+}
+
+/** Effort (agent work + your active time) in ms, applying the live user-active
+ *  override to the current gate step so it ticks each second — mirrors the
+ *  footer's effort so the header indicator and the verdict card agree. */
+function liveEffortMs(
+  steps: TaskStep[],
+  userActive: { activeStepId: string | null; displayMs: number },
+  endMs: number,
+): number {
+  const liveSteps = userActive.activeStepId
+    ? steps.map((s) =>
+        s.id === userActive.activeStepId ? { ...s, userActiveMs: userActive.displayMs } : s,
+      )
+    : steps;
+  const { workMs, userActiveMs } = computeTaskTiming(liveSteps, endMs);
+  return workMs + userActiveMs;
 }
 
 function stepStatusVariant(status: StepStatus): BadgeVariant {
@@ -611,6 +637,7 @@ export default function TaskDetailPage() {
               <span className="truncate">{currentStep.title}</span>
             </Badge>
           )}
+          <HeaderPaceChip task={task} steps={steps} userActive={userActive} />
         </div>
       )}
       <div className="flex items-start justify-between gap-4">
@@ -1195,6 +1222,42 @@ function StepTokens({ tokenUsage }: { tokenUsage: TaskStep['tokenUsage'] }) {
 // Task time summary: agent work, idle (time waiting on you), your active time at
 // gates, total effort, and wall clock. Shown live while the task runs (ticks each
 // second) and frozen once it ends. Renders nothing until the task has started.
+/** Live effort-vs-estimate chip for the fixed header (top-right). Owns its own
+ *  1s tick — like TaskTotalTime — so only this chip re-renders each second, not
+ *  the whole task page. Renders nothing unless an estimate is set and the task
+ *  has started; effort freezes at completedAt once done. */
+function HeaderPaceChip({
+  task,
+  steps,
+  userActive,
+}: {
+  task: Task;
+  steps: TaskStep[];
+  userActive: { activeStepId: string | null; displayMs: number };
+}) {
+  const ticking = !!task.startedAt && !task.completedAt;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!ticking) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [ticking]);
+  const estHours = task.estimatedTimeHours ?? 0;
+  if (estHours <= 0 || !task.startedAt) return null;
+  const endMs = task.completedAt ? new Date(task.completedAt).getTime() : now;
+  const effortMs = liveEffortMs(steps, userActive, endMs);
+  const estimateMs = estHours * 3_600_000;
+  const pct = estimateMs > 0 ? (effortMs / estimateMs) * 100 : 0;
+  return (
+    <span
+      className={`ml-auto shrink-0 font-mono text-sm font-semibold ${paceColorClass(pct)}`}
+      title={`Effort vs estimate — ${Math.round(pct)}% of the ${estHours}h estimate`}
+    >
+      {formatHoursMinutes(effortMs)} / {formatHoursMinutes(estimateMs)}
+    </span>
+  );
+}
+
 function TaskTotalTime({
   task,
   steps,
@@ -1249,74 +1312,116 @@ function TaskTotalTime({
   // the 1s interval advances them, but the compact h/m format hides sub-minute
   // changes (a multi-hour task looks frozen). Completed tasks stay compact.
   const fmt = (ms: number) => formatDuration(ms, { alwaysSeconds: !task.completedAt });
+  // Estimate-vs-effort verdict (only when the developer set an estimate and the
+  // task has finished). Same effort basis + colour thresholds as the header chip.
+  const showVerdict =
+    !!task.completedAt && !!task.estimatedTimeHours && task.estimatedTimeHours > 0;
+  const verdictEstimateMs = (task.estimatedTimeHours ?? 0) * 3_600_000;
+  const verdictPct =
+    showVerdict && verdictEstimateMs > 0 ? (effortMs / verdictEstimateMs) * 100 : 0;
+  const verdictLabel =
+    verdictPct <= 100
+      ? 'On time / faster'
+      : verdictPct <= 125
+        ? 'Slightly over estimate'
+        : 'Over estimate';
   return (
-    <Card className="flex items-center justify-between gap-3 py-3">
-      <div className="flex flex-col">
-        <span className="text-sm font-medium text-neutral-200">Total time</span>
-        <span className="text-xs text-neutral-500">
-          {new Date(task.startedAt).toLocaleString()} →{' '}
-          {task.completedAt ? new Date(task.completedAt).toLocaleString() : '(running)'}
-        </span>
-      </div>
-      <div className="flex flex-wrap items-center justify-end gap-x-6 gap-y-2">
-        <div className="flex flex-col items-end">
-          <span className="font-mono text-lg text-indigo-300">{fmt(workMs)}</span>
-          <span className="text-[10px] uppercase tracking-wider text-neutral-500">work</span>
-        </div>
-        <div className="flex flex-col items-end">
-          <span className="font-mono text-lg text-amber-300">{fmt(idleMs)}</span>
-          <span className="text-[10px] uppercase tracking-wider text-neutral-500">idle</span>
-        </div>
-        <div className="flex flex-col items-end">
-          <span className="font-mono text-lg text-emerald-300">{fmt(userActiveMs)}</span>
-          <span className="text-[10px] uppercase tracking-wider text-neutral-500">user</span>
-        </div>
-        <div className="flex flex-col items-end">
-          <span className="font-mono text-lg font-semibold text-rose-300">{fmt(effortMs)}</span>
-          <span
-            className="text-[10px] uppercase tracking-wider text-rose-400/80"
-            title="Agent work + your active time = real task effort"
-          >
-            effort
+    <>
+      <Card className="flex items-center justify-between gap-3 py-3">
+        <div className="flex flex-col">
+          <span className="text-sm font-medium text-neutral-200">Total time</span>
+          <span className="text-xs text-neutral-500">
+            {new Date(task.startedAt).toLocaleString()} →{' '}
+            {task.completedAt ? new Date(task.completedAt).toLocaleString() : '(running)'}
           </span>
         </div>
-        <div className="flex flex-col items-end">
-          <span className="font-mono text-lg text-neutral-100">{fmt(wallMs)}</span>
-          <span className="text-[10px] uppercase tracking-wider text-neutral-500">wall clock</span>
+        <div className="flex flex-wrap items-center justify-end gap-x-6 gap-y-2">
+          <div className="flex flex-col items-end">
+            <span className="font-mono text-lg text-indigo-300">{fmt(workMs)}</span>
+            <span className="text-[10px] uppercase tracking-wider text-neutral-500">work</span>
+          </div>
+          <div className="flex flex-col items-end">
+            <span className="font-mono text-lg text-amber-300">{fmt(idleMs)}</span>
+            <span className="text-[10px] uppercase tracking-wider text-neutral-500">idle</span>
+          </div>
+          <div className="flex flex-col items-end">
+            <span className="font-mono text-lg text-emerald-300">{fmt(userActiveMs)}</span>
+            <span className="text-[10px] uppercase tracking-wider text-neutral-500">user</span>
+          </div>
+          <div className="flex flex-col items-end">
+            <span className="font-mono text-lg font-semibold text-rose-300">{fmt(effortMs)}</span>
+            <span
+              className="text-[10px] uppercase tracking-wider text-rose-400/80"
+              title="Agent work + your active time = real task effort"
+            >
+              effort
+            </span>
+          </div>
+          <div className="flex flex-col items-end">
+            <span className="font-mono text-lg text-neutral-100">{fmt(wallMs)}</span>
+            <span className="text-[10px] uppercase tracking-wider text-neutral-500">
+              wall clock
+            </span>
+          </div>
+          {totalTokens > 0 && (
+            <>
+              <div className="flex flex-col items-end">
+                <span
+                  className="font-mono text-lg text-sky-300"
+                  title={`CLI tokens (provider-native): in ${inputTokens.toLocaleString()} / out ${outputTokens.toLocaleString()} / cache ${cachedTokens.toLocaleString()} / total ${totalTokens.toLocaleString()}`}
+                >
+                  {formatTokens(totalTokens)}
+                </span>
+                <span className="text-[10px] uppercase tracking-wider text-neutral-500">
+                  tokens
+                </span>
+              </div>
+              <div className="flex flex-col items-end">
+                <span
+                  className="font-mono text-lg text-cyan-300"
+                  title={`Cached tokens (cache read + cache write — re-used context): ${cachedTokens.toLocaleString()}`}
+                >
+                  {formatTokens(cachedTokens)}
+                </span>
+                <span className="text-[10px] uppercase tracking-wider text-neutral-500">
+                  cached
+                </span>
+              </div>
+              <div className="flex flex-col items-end">
+                <span
+                  className="font-mono text-lg text-teal-300"
+                  title={`Fresh tokens (input + output — genuinely new): ${freshTokens.toLocaleString()}`}
+                >
+                  {formatTokens(freshTokens)}
+                </span>
+                <span className="text-[10px] uppercase tracking-wider text-neutral-500">
+                  in+out
+                </span>
+              </div>
+            </>
+          )}
         </div>
-        {totalTokens > 0 && (
-          <>
-            <div className="flex flex-col items-end">
-              <span
-                className="font-mono text-lg text-sky-300"
-                title={`CLI tokens (provider-native): in ${inputTokens.toLocaleString()} / out ${outputTokens.toLocaleString()} / cache ${cachedTokens.toLocaleString()} / total ${totalTokens.toLocaleString()}`}
-              >
-                {formatTokens(totalTokens)}
-              </span>
-              <span className="text-[10px] uppercase tracking-wider text-neutral-500">tokens</span>
-            </div>
-            <div className="flex flex-col items-end">
-              <span
-                className="font-mono text-lg text-cyan-300"
-                title={`Cached tokens (cache read + cache write — re-used context): ${cachedTokens.toLocaleString()}`}
-              >
-                {formatTokens(cachedTokens)}
-              </span>
-              <span className="text-[10px] uppercase tracking-wider text-neutral-500">cached</span>
-            </div>
-            <div className="flex flex-col items-end">
-              <span
-                className="font-mono text-lg text-teal-300"
-                title={`Fresh tokens (input + output — genuinely new): ${freshTokens.toLocaleString()}`}
-              >
-                {formatTokens(freshTokens)}
-              </span>
-              <span className="text-[10px] uppercase tracking-wider text-neutral-500">in+out</span>
-            </div>
-          </>
-        )}
-      </div>
-    </Card>
+      </Card>
+      {showVerdict && (
+        <Card className="flex items-center justify-between gap-3 py-3">
+          <div className="flex flex-col">
+            <span className="text-sm font-medium text-neutral-200">Estimate vs effort</span>
+            <span className="text-xs text-neutral-500">
+              Estimated {formatHoursMinutes(verdictEstimateMs)} · actual effort{' '}
+              {formatHoursMinutes(effortMs)}
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className={`font-mono text-lg font-semibold ${paceColorClass(verdictPct)}`}>
+              {Math.round(verdictPct)}%
+            </span>
+            <span className={`text-sm font-medium ${paceColorClass(verdictPct)}`}>
+              {verdictLabel}
+            </span>
+          </div>
+        </Card>
+      )}
+    </>
   );
 }
 

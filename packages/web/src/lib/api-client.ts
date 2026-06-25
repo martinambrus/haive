@@ -397,6 +397,9 @@ export interface Task {
   executionPath?: ExecutionPath | null;
   title: string;
   description: string | null;
+  /** Developer's estimated completion time in decimal hours (set on the new-task
+   *  form; null when not given). Compared against actual effort in the task UI. */
+  estimatedTimeHours?: number | null;
   status: TaskStatus;
   /** Auto-continue: the runner auto-submits info-only forms and gate-1
    *  pre-answers so the workflow runs hands-free between gates. Toggleable

@@ -231,6 +231,7 @@ taskRoutes.post('/', async (c) => {
       autoContinue: body.autoContinue ?? true,
       ignoreSavedStepClis: body.ignoreSavedStepClis ?? false,
       metadata: Object.keys(metadata).length > 0 ? metadata : null,
+      estimatedTimeHours: body.estimatedTimeHours ?? null,
       status: 'created',
     })
     .returning();

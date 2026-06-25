@@ -13,3 +13,14 @@ export function formatDuration(ms: number, opts?: { alwaysSeconds?: boolean }): 
   if (opts?.alwaysSeconds) return `${hours}h ${minutes % 60}m ${seconds}s`;
   return `${hours}h ${minutes % 60}m`;
 }
+
+/** Compact colon-style hours:minutes for the estimate-vs-effort comparison
+ *  (header indicator + footer verdict), e.g. 1h15m -> "1:15", 2.5h -> "2:30",
+ *  45m -> "0:45", 0 -> "0:00". Minutes zero-padded, hours unpadded. Seconds are
+ *  dropped (estimates are hour-scale; the value advances by the minute). */
+export function formatHoursMinutes(ms: number): string {
+  const totalMinutes = Math.floor(Math.max(0, ms) / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}:${String(minutes).padStart(2, '0')}`;
+}

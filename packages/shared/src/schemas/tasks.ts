@@ -61,6 +61,10 @@ export const createTaskRequestSchema = z
     type: workflowTypeSchema,
     title: z.string().min(1).max(512),
     description: z.string().optional(),
+    /** Developer's estimated completion time in decimal hours (0.25, 0.5, 1, 1.5).
+     *  Optional; stored on tasks.estimated_time_hours and compared against actual
+     *  effort (work + user-active) in the task UI. All task types. */
+    estimatedTimeHours: z.number().positive().max(1000).optional(),
     repositoryId: z.string().uuid().optional(),
     cliProviderId: z.string().uuid().optional(),
     envTemplateId: z.string().uuid().optional(),

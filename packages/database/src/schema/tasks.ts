@@ -121,6 +121,12 @@ export const tasks = pgTable(
      *  quick_bugfix, whose step set has neither audit) — read by 04a / 08c2 in their
      *  shouldRun gate. Per-task switch-off; default true so it runs unless opted out. */
     broadAudit: boolean('broad_audit').notNull().default(true),
+    /** Developer's estimated time to complete the task, in decimal hours
+     *  (e.g. 0.25, 0.5, 1, 1.5). Optional, set on the new-task form; compared
+     *  against the actual effort (agent work + user-active time) in the task
+     *  header and a footer verdict card. NULL = no estimate; the comparison
+     *  surfaces stay hidden. doublePrecision so it round-trips as a JS number. */
+    estimatedTimeHours: doublePrecision('estimated_time_hours'),
     /** Execution path chosen by the 00-triage step: 'quick_bugfix' | 'plan_tasklist'
      *  | 'full_workflow'. NULL until triage records it (and on legacy rows); buildRunList
      *  runs the full workflow when unset, and trims the workflow step list to the chosen

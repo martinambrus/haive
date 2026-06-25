@@ -95,6 +95,7 @@ export default function NewTaskPage() {
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const [estimatedTime, setEstimatedTime] = useState('');
   const [repositoryId, setRepositoryId] = useState<string>('');
   const [cliProviderId, setCliProviderId] = useState<string>('');
   const [ignoreSavedStepClis, setIgnoreSavedStepClis] = useState(false);
@@ -258,6 +259,10 @@ export default function NewTaskPage() {
         repositoryId,
       };
       if (description.trim()) body.description = description.trim();
+      const estHours = Number(estimatedTime);
+      if (estimatedTime.trim() && Number.isFinite(estHours) && estHours > 0) {
+        body.estimatedTimeHours = estHours;
+      }
       if (cliProviderId) body.cliProviderId = cliProviderId;
       if (ignoreSavedStepClis) body.ignoreSavedStepClis = true;
       if (type === 'workflow') {
@@ -445,6 +450,23 @@ export default function NewTaskPage() {
             required={inferredType === 'workflow'}
             className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
           />
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="estimatedTime">Estimated time (hours, optional)</Label>
+          <Input
+            id="estimatedTime"
+            type="number"
+            inputMode="decimal"
+            step="0.25"
+            min="0"
+            value={estimatedTime}
+            onChange={(e) => setEstimatedTime(e.target.value)}
+            placeholder="e.g. 1.5"
+          />
+          <p className="text-xs text-neutral-500">
+            Decimal hours (0.25, 0.5, 1, 1.5). Compared against the actual effort spent.
+          </p>
         </div>
 
         <div className="flex flex-col gap-1.5">
