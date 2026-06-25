@@ -9,7 +9,7 @@ import {
 } from '@haive/shared';
 import { resolveDispatch } from '../orchestrator/dispatcher.js';
 import { resolveUserGitEnv } from '../secrets/user-git-identity.js';
-import { gitRun, pushBranch } from '../repo/git-push.js';
+import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
 import { completeMergeHostSide, mergeCommitted } from './git-merge.js';
 import { pathExists } from './steps/onboarding/_helpers.js';
 import { parseJsonLoose } from './steps/_fenced-json.js';
@@ -267,6 +267,124 @@ async function reachDone(
   return { resolved: true, current: { ...current, mergeResolveState: done } };
 }
 
+/** Cap on pre-push base-sync rounds before giving up (origin is a moving target). */
+const MAX_BASE_SYNC_ROUNDS = 3;
+
+/** A merge round committed. If it was the FEATURE merge and a base push is pending,
+ *  integrate origin into the base first (prePushSync) so the push fast-forwards;
+ *  otherwise (base-sync round, or no push) push + finish via reachDone. */
+async function finishMerge(
+  db: Database,
+  stepDef: StepDefinition,
+  current: TaskStepRow,
+  ctx: StepContext,
+  params: AdvanceStepParams,
+  state: MergeResolveState,
+): Promise<MergeResolved> {
+  if (state.pushAfterMerge && !state.pushed && (state.mergeStage ?? 'feature') === 'feature') {
+    return prePushSync(db, stepDef, current, ctx, params, state);
+  }
+  return reachDone(db, current, ctx, state);
+}
+
+/** Best-effort authenticated `git fetch origin <base>` (same credential the push uses).
+ *  Never throws — a failure is surfaced so the caller can warn-and-continue. */
+async function fetchForSync(
+  db: Database,
+  ctx: StepContext,
+  cwd: string,
+  base: string,
+  credentialId: string | undefined,
+): Promise<{ ok: boolean; error: string | null }> {
+  const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
+  const argv: string[] = [];
+  let secret: string | null = null;
+  if (credentialId) {
+    try {
+      const helper = await buildCredentialHelper(db, credentialId, ctx.userId);
+      secret = helper.secret;
+      Object.assign(env, helper.env);
+      argv.push(...helper.argv);
+    } catch (err) {
+      return { ok: false, error: `credential load failed: ${(err as Error).message}` };
+    }
+  }
+  argv.push('fetch', 'origin', base);
+  const res = await gitRun(cwd, argv, env);
+  if (res.code !== 0) {
+    return {
+      ok: false,
+      error: scrubSecret(res.stderr || res.stdout, secret)
+        .trim()
+        .slice(0, 300),
+    };
+  }
+  return { ok: true, error: null };
+}
+
+async function countAhead(cwd: string, range: string): Promise<number> {
+  const res = await gitRun(cwd, ['rev-list', '--count', range]);
+  if (res.code !== 0) return 0;
+  const n = Number.parseInt(res.stdout.trim() || '0', 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Pre-push: bring the base up to date with origin before pushing, so the push is a
+ *  fast-forward. When origin advanced, merge origin/<base> into base through the SAME
+ *  pending/resolving machinery (a 'base-sync' round) so a conflict gets the existing
+ *  fix-agent loop; the mergeStage guard stops that round from re-syncing → the recursion
+ *  is bounded (feature -> base-sync -> push). */
+async function prePushSync(
+  db: Database,
+  stepDef: StepDefinition,
+  current: TaskStepRow,
+  ctx: StepContext,
+  params: AdvanceStepParams,
+  state: MergeResolveState,
+): Promise<MergeResolved> {
+  const base = state.baseBranch;
+  const fv = (current.formValues ?? {}) as { credentialId?: string };
+  const fetched = await fetchForSync(db, ctx, state.mergeDir, base, fv.credentialId || undefined);
+  if (!fetched.ok) {
+    // A flaky link must never block the task: push the local base as-is. If origin did
+    // move, the push fails non-ff exactly as before — recoverable by retry.
+    ctx.logger.warn(
+      { base, err: fetched.error },
+      'pre-push base sync: fetch failed; pushing the local base as-is',
+    );
+    return reachDone(db, current, ctx, state);
+  }
+  const behind = await countAhead(state.mergeDir, `${base}..origin/${base}`);
+  if (behind === 0) {
+    // Origin has not moved since 00a-sync-base — push directly (today's behavior).
+    return reachDone(db, current, ctx, state);
+  }
+  const rounds = state.baseSyncRounds ?? 0;
+  if (rounds >= MAX_BASE_SYNC_ROUNDS) {
+    const row = await halt(
+      db,
+      current,
+      `origin/${base} keeps advancing (${behind} commits behind after ${rounds} sync attempts). Pull ${base} and push it manually — the merge is saved locally.`,
+    );
+    return {
+      resolved: false,
+      result: { status: 'failed', row, error: row.errorMessage ?? 'origin moving' },
+    };
+  }
+  const next: MergeResolveState = {
+    ...state,
+    mergeStage: 'base-sync',
+    featureBranch: `origin/${base}`,
+    phase: 'pending',
+    fixInvocationId: null,
+    pendingQuestion: null,
+    conflictRetries: 0,
+    baseSyncRounds: rounds + 1,
+  };
+  await saveMergeState(db, current.id, next);
+  return resolveMergePhase(db, stepDef, { ...current, mergeResolveState: next }, ctx, params);
+}
+
 /** Unmerged paths in a mid-merge worktree (for the fix prompt). */
 async function conflictFiles(mergeDir: string): Promise<string[]> {
   const res = await gitRun(mergeDir, ['diff', '--name-only', '--diff-filter=U']);
@@ -394,6 +512,8 @@ export async function resolveMergePhase(
       merged: false,
       skipReason: null,
       pushed: false,
+      mergeStage: 'feature',
+      baseSyncRounds: 0,
     };
 
     if (!featureBranch || !mergeTarget) {
@@ -433,7 +553,7 @@ export async function resolveMergePhase(
       commitEnv,
     );
     if (merge.code === 0) {
-      return reachDone(db, current, ctx, state);
+      return finishMerge(db, stepDef, current, ctx, params, state);
     }
     // Conflict: leave the mid-merge LIVE (no --abort) so the fix agent edits it.
     state = { ...state, phase: 'resolving' };
@@ -484,7 +604,7 @@ export async function resolveMergePhase(
       const committed = await completeMergeHostSide(state.mergeDir, commitEnv);
       state = { ...state, fixInvocationId: null };
       if (committed) {
-        return reachDone(db, current, ctx, state);
+        return finishMerge(db, stepDef, current, ctx, params, state);
       }
       // Markers remain → abort this attempt; the dispatch decision below retries or halts.
       await gitRun(state.mergeDir, ['merge', '--abort']);
@@ -520,7 +640,7 @@ export async function resolveMergePhase(
     }
     // Recreate the live merge if it isn't open (after an abort or a crash).
     if (await mergeCommitted(state.mergeDir)) {
-      return reachDone(db, current, ctx, state);
+      return finishMerge(db, stepDef, current, ctx, params, state);
     }
     const open = await gitRun(state.mergeDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
     if (open.code !== 0) {

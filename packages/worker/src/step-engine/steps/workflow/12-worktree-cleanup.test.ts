@@ -56,6 +56,30 @@ async function divergeBase(parent: string, wt: string): Promise<void> {
   await git(parent, ['commit', '-am', 'edit base on main']);
 }
 
+/** Give `parent` an `origin` (a fresh bare) and push its current `main`. */
+async function pushParentMainToOrigin(parent: string): Promise<string> {
+  const bare = await mkdtemp(path.join(tmpdir(), 'wt-origin-'));
+  await git(bare, ['init', '--bare', '-b', 'main']);
+  await git(parent, ['remote', 'add', 'origin', `file://${bare}`]);
+  await git(parent, ['push', '-u', 'origin', 'main']);
+  return bare;
+}
+
+/** Advance origin's `main` by one commit (via an ephemeral clone) so the parent's
+ *  remote-tracking ref goes stale until it next fetches. */
+async function advanceOrigin(bare: string, file: string, content: string): Promise<void> {
+  const seed = await mkdtemp(path.join(tmpdir(), 'wt-seed-'));
+  try {
+    await git(seed, ['clone', `file://${bare}`, '.']);
+    await writeFile(path.join(seed, file), content, 'utf8');
+    await git(seed, ['add', '-A']);
+    await git(seed, ['commit', '-m', `origin: ${file}`]);
+    await git(seed, ['push', 'origin', 'main']);
+  } finally {
+    await rm(seed, { recursive: true, force: true });
+  }
+}
+
 type Det = {
   mode: 'worktree' | 'inplace' | 'no-git' | 'unknown';
   worktreePath: string | null;
@@ -363,6 +387,133 @@ describe('12 merge phase + apply (real git)', () => {
       expect(h.getState()?.pushed).toBe(false);
     } finally {
       await rm(parent, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('12 pre-push base sync (origin advanced after 00a)', () => {
+  it('(d) origin not advanced → pushes directly, no base-sync round', async () => {
+    const { parent, wt } = await setupWorktree();
+    const bare = await pushParentMainToOrigin(parent);
+    try {
+      const { merge, state } = await mergeThenApply(parent, det(wt, { hasOrigin: true }), {
+        action: 'merge_remove',
+        pushBase: true,
+        setUpstream: true,
+      });
+      expect(merge.resolved).toBe(true);
+      expect(state?.pushed).toBe(true);
+      expect(state?.mergeStage).toBe('feature'); // never entered a base-sync round
+      expect(state?.baseSyncRounds ?? 0).toBe(0);
+      expect(await gitCode(bare, ['show', 'main:feature.txt'])).toBe(0);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
+  it('(a) origin advanced on a different file → auto-integrated, push carries both', async () => {
+    const { parent, wt } = await setupWorktree();
+    const bare = await pushParentMainToOrigin(parent);
+    await advanceOrigin(bare, 'origin-new.txt', 'origin\n'); // non-conflicting
+    try {
+      const { merge, state } = await mergeThenApply(parent, det(wt, { hasOrigin: true }), {
+        action: 'merge_remove',
+        pushBase: true,
+      });
+      expect(merge.resolved).toBe(true);
+      expect(state?.pushed).toBe(true);
+      expect(state?.mergeStage).toBe('base-sync'); // a base-sync round ran
+      expect(state?.baseSyncRounds).toBe(1);
+      // Both the feature commit and origin's new commit reached origin.
+      expect(await gitCode(bare, ['show', 'main:feature.txt'])).toBe(0);
+      expect(await gitCode(bare, ['show', 'main:origin-new.txt'])).toBe(0);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
+  it('(b) origin advanced conflicting + resolved fix agent → resolved, then pushed', async () => {
+    const { parent, wt } = await setupWorktree();
+    // The feature also edits base.txt so the base-sync merge (origin/main -> main)
+    // conflicts while the feature -> main merge stays clean.
+    await writeFile(path.join(wt, 'base.txt'), 'feature-edit\n', 'utf8');
+    await git(wt, ['commit', '-am', 'edit base on feature']);
+    const bare = await pushParentMainToOrigin(parent);
+    await advanceOrigin(bare, 'base.txt', 'origin-edit\n');
+    try {
+      // Pre-stage: land the clean feature merge, then open the conflicting base-sync
+      // merge live and have the "agent" resolve base.txt (mirrors the feature fix test).
+      await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+      await git(parent, ['fetch', 'origin', 'main']);
+      await gitCode(parent, ['merge', '--no-ff', 'origin/main', '-m', 'Merge origin/main']);
+      await writeFile(path.join(parent, 'base.txt'), 'resolved\n', 'utf8');
+      const seeded: MergeResolveState = {
+        mode: 'same-branch',
+        phase: 'resolving',
+        baseBranch: 'main',
+        featureBranch: 'origin/main',
+        mergeDir: parent,
+        sandboxMergeDir: parent,
+        fixInvocationId: 'inv1',
+        conflictRetries: 1,
+        pendingQuestion: null,
+        pushAfterMerge: true,
+        merged: false,
+        skipReason: null,
+        pushed: false,
+        mergeStage: 'base-sync',
+        baseSyncRounds: 1,
+      };
+      const h = makeDb({ invocation: { id: 'inv1', endedAt: new Date() } });
+      const ctx = mkCtx(parent, h.db);
+      const merge = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt, { hasOrigin: true }), { action: 'merge_remove', pushBase: true }, seeded),
+        ctx,
+        mkParams(h.db, { providers: [], deps: { enqueueCliInvocation: async () => {} } }),
+      );
+      expect(merge.resolved).toBe(true);
+      expect(h.getState()?.merged).toBe(true);
+      expect(h.getState()?.pushed).toBe(true);
+      // The resolved base.txt and the feature commit reached origin.
+      expect(await gitCode(bare, ['show', 'main:feature.txt'])).toBe(0);
+      expect((await git(bare, ['show', 'main:base.txt'])).trim()).toBe('resolved');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
+  it('(c) origin advanced conflicting + no CLI provider → halts, feature merge kept, nothing pushed', async () => {
+    const { parent, wt } = await setupWorktree();
+    await writeFile(path.join(wt, 'base.txt'), 'feature-edit\n', 'utf8');
+    await git(wt, ['commit', '-am', 'edit base on feature']);
+    const bare = await pushParentMainToOrigin(parent);
+    await advanceOrigin(bare, 'base.txt', 'origin-edit\n');
+    try {
+      const h = makeDb();
+      const ctx = mkCtx(parent, h.db);
+      const merge = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt, { hasOrigin: true }), { action: 'merge_remove', pushBase: true }),
+        ctx,
+        mkParams(h.db), // no providers
+      );
+      expect(merge.resolved).toBe(false);
+      if (!merge.resolved) expect(merge.result.status).toBe('failed');
+      expect(h.getState()?.pushed).toBe(false);
+      // The clean feature merge survives on local main; the base-sync merge was aborted.
+      expect(await gitCode(parent, ['show', 'main:feature.txt'])).toBe(0);
+      expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+      // Nothing reached origin.
+      expect(await gitCode(bare, ['show', 'main:feature.txt'])).not.toBe(0);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
     }
   });
 });

@@ -304,6 +304,14 @@ export interface MergeResolveState {
   skipReason: string | null;
   /** Whether the base branch was pushed to origin (the pushing phase). */
   pushed: boolean;
+  /** Which merge round this state is in. 'feature' = the worktree branch -> base merge;
+   *  'base-sync' = the pre-push round that integrates origin/<base> into base so the
+   *  push fast-forwards. Absent on rows written before this existed → treated as
+   *  'feature'. */
+  mergeStage?: 'feature' | 'base-sync';
+  /** Count of pre-push base-sync rounds run; bounds repeated re-sync when origin keeps
+   *  advancing. Absent → 0. */
+  baseSyncRounds?: number;
 }
 
 export const taskEvents = pgTable(
