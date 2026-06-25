@@ -6,6 +6,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { matchYamlField, parseDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
+import { hashDdevInputs } from '../_ddev-inputs-hash.js';
 import type { DdevBaseline, DdevEnvApply } from './01c-ddev-env.js';
 import {
   runnerExec,
@@ -17,14 +18,16 @@ import {
 } from '../../../sandbox/ddev-runner.js';
 import { ensureDdevWithProgress, withDdevProgress } from './_app-runtime.js';
 
-// Reconciles the per-task DDEV runtime with the post-implementation
-// `.ddev/config.yaml`. 01c-ddev-env booted DDEV ONCE early on the pre-change
-// config; if the implementation upgraded php_version or the database
-// type/version, the still-running env is stale and `ensureDdevStarted` (idempotent)
-// would never re-apply it — so the verify (08) and browser (08a) steps would
-// exercise the wrong runtime. This step, between validation (07b) and verify (08),
-// brings the runner in line:
-//   - php / webserver / docroot change  -> `ddev restart` (data preserved).
+// Reconciles the per-task DDEV runtime with the post-implementation `.ddev/` inputs.
+// 01c-ddev-env booted DDEV ONCE early on the pre-change config; if the implementation
+// edited any authored DDEV input (php_version, the database type/version, a `php/*.ini`,
+// `web-build/Dockerfile`, an extra `docker-compose.*.yaml`/`config.*.yaml`, webserver
+// config, …), the still-running env is stale and `ensureDdevStarted` (idempotent) would
+// never re-apply it — so the verify (08) and browser (08a) steps would exercise the wrong
+// runtime. Drift is detected by hashing the whole authored `.ddev/` tree (git-tracked +
+// untracked, minus DDEV's own gitignored generated files), NOT just config.yaml. This
+// step, between validation (07b) and verify (08), brings the runner in line:
+//   - any authored `.ddev/` input change -> `ddev restart` (data preserved).
 //   - MySQL/MariaDB version or type change -> snapshot + `ddev utility
 //     migrate-database <type>:<version>` (the original dump was consumed at 01c,
 //     so the snapshot is the only rollback), then restart.
@@ -60,8 +63,9 @@ function ddevConfigPath(workspace: string): string {
 /** Classify config drift between the booted baseline and the on-disk target.
  *  DB type/version change wins (it needs a migration, not a restart). `ddev
  *  migrate-database` is MySQL/MariaDB only; a null baseline db type means the
- *  project used DDEV's default (mariadb family), still migratable. A non-db
- *  config edit (php/webserver/docroot/…) shows up as a content-hash difference. */
+ *  project used DDEV's default (mariadb family), still migratable. Any other authored
+ *  `.ddev/` input edit (php ini, web-build Dockerfile, webserver config, docroot, …)
+ *  shows up as a content-hash difference (the hash covers the whole `.ddev/` tree). */
 export function classifyDrift(
   baseline: DdevBaseline,
   target: DdevConfigFields,
@@ -112,7 +116,11 @@ async function loadReconcileState(ctx: StepContext): Promise<{
     const text = await readFile(ddevConfigPath(workspace), 'utf8').catch(() => null);
     if (text !== null) {
       target = parseDdevConfig(text);
-      targetHash = createHash('sha256').update(text).digest('hex');
+      // Hash the whole authored `.ddev/` tree (php ini, web-build Dockerfile, extra
+      // compose/config, …), not just config.yaml — so an input edit outside config.yaml
+      // still drives a restart. Fall back to config.yaml only on a non-git workspace.
+      targetHash =
+        (await hashDdevInputs(workspace)) ?? createHash('sha256').update(text).digest('hex');
     }
   }
 
@@ -366,7 +374,7 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
       snapshotName: null,
       from: baseline.phpVersion,
       to: target.phpVersion,
-      output: `Restarted DDEV to apply config (php ${baseline.phpVersion ?? '?'} -> ${target.phpVersion ?? '?'}).`,
+      output: `Restarted DDEV to apply post-implementation .ddev config changes (php ${baseline.phpVersion ?? '?'} -> ${target.phpVersion ?? '?'}).`,
     };
   },
 };

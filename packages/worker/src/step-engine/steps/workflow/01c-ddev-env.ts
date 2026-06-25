@@ -10,6 +10,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseDdevConfig, renderDdevConfig } from '../_ddev-config.js';
+import { hashDdevInputs } from '../_ddev-inputs-hash.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { ddevExec, ddevSnapshot, ddevImportSnapshotName } from '../../../sandbox/ddev-runner.js';
 import { ensureDdevWithProgress, withDdevProgress } from './_app-runtime.js';
@@ -46,8 +47,9 @@ interface DdevEnvDetect {
 }
 
 /** php/db snapshot of the `.ddev/config.yaml` that was actually booted, plus a
- *  content hash. 07c-ddev-reconcile diffs the post-implementation config against
- *  this to decide between a `ddev restart` (php change) and a DB migration. */
+ *  content hash over the booted authored `.ddev/` input tree (not just config.yaml).
+ *  07c-ddev-reconcile diffs the post-implementation inputs against this to decide
+ *  between a `ddev restart` (any authored `.ddev/` input edit) and a DB migration. */
 export interface DdevBaseline {
   phpVersion: string | null;
   dbType: string | null;
@@ -70,7 +72,10 @@ function ddevConfigPath(workspace: string): string {
 }
 
 /** Read + parse the booted `.ddev/config.yaml` into a baseline. null when the
- *  workspace is unknown or the file is unreadable (caller stores null → 07c skips). */
+ *  workspace is unknown or the file is unreadable (caller stores null → 07c skips).
+ *  `configHash` covers the whole authored `.ddev/` input tree (php ini, web-build
+ *  Dockerfile, extra compose/config, …), falling back to a config.yaml-only hash on
+ *  a non-git workspace — 07c recomputes the same way so both sides stay comparable. */
 async function readDdevBaseline(workspace: string | null): Promise<DdevBaseline | null> {
   if (!workspace) return null;
   const text = await readFile(ddevConfigPath(workspace), 'utf8').catch(() => null);
@@ -80,7 +85,8 @@ async function readDdevBaseline(workspace: string | null): Promise<DdevBaseline 
     phpVersion: parsed.phpVersion,
     dbType: parsed.dbType,
     dbVersion: parsed.dbVersion,
-    configHash: createHash('sha256').update(text).digest('hex'),
+    configHash:
+      (await hashDdevInputs(workspace)) ?? createHash('sha256').update(text).digest('hex'),
   };
 }
 
