@@ -1013,6 +1013,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     let persistedSchema: FormSchema | null = (current.formSchema as FormSchema | null) ?? null;
     if (!persistedSchema && stepDef.form) {
+      // Post-llm / pre-form seam: let the step produce any artifact the form's
+      // web viewer will reference (form() itself is sync). Awaited once, here,
+      // only when the form is first built.
+      if (stepDef.prepareForm) {
+        await stepDef.prepareForm(ctx, detected, llmOutput);
+      }
       persistedSchema = stepDef.form(ctx, detected, llmOutput);
       // Pre-answers render as pre-filled defaults whenever this form DOES stop
       // (manual mode, or auto mode falling back after a validation miss).

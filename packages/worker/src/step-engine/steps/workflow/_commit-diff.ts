@@ -3,7 +3,7 @@ import path from 'node:path';
 
 /** Runs git in `cwd` and returns stdout/stderr/exit code. Matches the gitRun
  *  helper in 10-gate-3-commit.ts so the builder can reuse it. */
-type GitRun = (
+export type GitRun = (
   cwd: string,
   args: string[],
 ) => Promise<{ stdout: string; stderr: string; code: number }>;
@@ -18,11 +18,11 @@ export const COMMIT_DIFF_ARTIFACT_NAME = 'gate3-diff.json';
 // git-show maxBuffer. 512 KB mirrors the api's MAX_FILE_CONTENT_BYTES.
 const PER_FILE_CONTENT_CAP = 512 * 1024;
 // Hard cap on the number of changed files materialised into the artifact.
-const MAX_FILES = 500;
+export const MAX_FILES = 500;
 // Cumulative content budget across all files; once exceeded, remaining files
 // keep their metadata but drop content (truncated) so a pathological diff can't
 // produce a multi-hundred-MB artifact.
-const TOTAL_CONTENT_BUDGET = 16 * 1024 * 1024;
+export const TOTAL_CONTENT_BUDGET = 16 * 1024 * 1024;
 
 export type CommitDiffStatus = 'added' | 'modified' | 'deleted' | 'renamed';
 
@@ -68,7 +68,7 @@ interface PorcelainEntry {
  *  `XY<space><path>`. For renames/copies the destination path is in the XY
  *  record and the source path follows as the next NUL field (verified against
  *  git: `R  new\0old\0`). */
-function parsePorcelainZ(out: string): PorcelainEntry[] {
+export function parsePorcelainZ(out: string): PorcelainEntry[] {
   const tokens = out.split('\0');
   const entries: PorcelainEntry[] = [];
   let i = 0;
@@ -103,7 +103,7 @@ function classify(e: PorcelainEntry): CommitDiffStatus {
   return 'modified';
 }
 
-async function buildFileEntry(
+export async function buildFileEntry(
   workspacePath: string,
   gitRun: GitRun,
   e: PorcelainEntry,

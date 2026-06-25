@@ -270,6 +270,13 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   shouldRun?(ctx: StepContext): Promise<boolean> | boolean;
   detect?(ctx: StepContext): Promise<TDetect>;
   form?(ctx: StepContext, detected: TDetect, llmOutput?: unknown): FormSchema | null;
+  /** Optional async side-effect run AFTER the preForm llm phase and BEFORE the
+   *  (synchronous) form() is built — the seam where a step writes an artifact the
+   *  form's web viewer points at (e.g. 11-phase-8-learning's knowledge-diff JSON,
+   *  which depends on the agent's KB edits that only exist post-llm). Awaited once,
+   *  only when the form is first built; receives the parsed preForm llmOutput.
+   *  No-op for steps that don't declare it. */
+  prepareForm?(ctx: StepContext, detected: TDetect, llmOutput?: unknown): Promise<void>;
   llm?: LlmInvocationSpec;
   agentMining?: AgentMiningSpec;
   /** Re-run the LLM phase up to N times until shouldContinue is false.

@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
@@ -7,11 +7,13 @@ import { schema } from '@haive/database';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { clearTaskPromotedDrafts, promoteToGlobalKbDraft } from '../_global-kb-promote.js';
 import { buildTaskHistoryDigest, type TaskHistoryDigest } from './_task-history-digest.js';
+import { KNOWLEDGE_DIFF_ARTIFACT_NAME, buildKnowledgeDiffArtifact } from './_knowledge-diff.js';
+import type { CommitDiffFile } from './_commit-diff.js';
 
 interface LearningDetect {
   taskTitle: string;
@@ -28,12 +30,26 @@ interface LearningDetect {
    *  the run (per-round diagnoses, findings, human gate reactions, runtime errors),
    *  mined from the persisted history so the agent grounds output in the real run. */
   historyDigest: TaskHistoryDigest;
+  /** The per-task worktree (feature branch) the pipeline operates in — loaded from
+   *  01-worktree-setup, where KB/learnings are written. */
+  worktreePath: string;
+  /** Bounded summary of the existing .claude/learnings/ entries (id + title +
+   *  excerpt) so the agent can reconcile (dedup / update / delete) against them. */
+  existingLearnings: { id: string; title: string; excerpt: string }[];
+  /** Stable `.haive/` path the form's knowledge-diff viewer fetches; the file is
+   *  written by prepareForm post-llm. null when the worktree has no git repo. */
+  knowledgeDiffArtifactPath: string | null;
 }
 
 interface LearningEntry {
   id: string;
   title: string;
   body: string;
+  /** Reconciliation op against the existing .claude/learnings/ set. Defaults to
+   *  'insert'. 'update'/'delete' require targetId to name an existing entry. */
+  op: 'insert' | 'update' | 'delete';
+  /** For update/delete: the existing learning id (filename slug) to act on. */
+  targetId?: string;
 }
 
 interface Investigation {
@@ -65,6 +81,8 @@ interface KbSync {
 interface LearningApply {
   entries: LearningEntry[];
   written: string[];
+  /** Learning files removed by a reconciled `delete` op (relative paths). */
+  deleted: string[];
   investigationWritten: string | null;
   /** Feature KB Sync result: the classification + the structured-KB files the agent
    *  edited in the worktree. null when the agent reported none. */
@@ -76,6 +94,25 @@ interface LearningApply {
 }
 
 const execFileP = promisify(execFile);
+
+/** Runs git in `cwd`, returning stdout/stderr/exit code (never throws) — the
+ *  GitRun contract the shared knowledge/commit diff builder expects. */
+async function gitRun(
+  cwd: string,
+  args: string[],
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  try {
+    const { stdout, stderr } = await execFileP('git', args, { cwd });
+    return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; code?: number };
+    return {
+      stdout: (e.stdout ?? '').toString(),
+      stderr: (e.stderr ?? '').toString(),
+      code: typeof e.code === 'number' ? e.code : 1,
+    };
+  }
+}
 
 /** Valid op values for a reported KB sync change. */
 const KB_SYNC_OPS = new Set(['insert', 'update', 'delete']);
@@ -224,11 +261,23 @@ function normaliseEntries(raw: unknown[]): LearningEntry[] {
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue;
     const entry = item as Record<string, unknown>;
+    const op =
+      typeof entry.op === 'string' && KB_SYNC_OPS.has(entry.op)
+        ? (entry.op as LearningEntry['op'])
+        : 'insert';
+    const targetId =
+      typeof entry.targetId === 'string' && entry.targetId.length > 0 ? entry.targetId : undefined;
     const title = typeof entry.title === 'string' ? entry.title : '';
     const body = typeof entry.body === 'string' ? entry.body : '';
+    // A delete only needs its targetId; insert/update need real content.
+    if (op === 'delete') {
+      if (!targetId) continue;
+      out.push({ id: targetId, title: title || targetId, body, op: 'delete', targetId });
+      continue;
+    }
     if (!title || !body) continue;
     const id = typeof entry.id === 'string' && entry.id.length > 0 ? entry.id : slugify(title);
-    out.push({ id, title, body });
+    out.push({ id, title, body, op, targetId });
   }
   return out;
 }
@@ -236,6 +285,7 @@ function normaliseEntries(raw: unknown[]): LearningEntry[] {
 function stubLearning(detect: LearningDetect): LearningEntry[] {
   const entry: LearningEntry = {
     id: slugify(detect.taskTitle || 'workflow-run'),
+    op: 'insert',
     title: `Workflow run: ${detect.taskTitle || '(untitled)'}`,
     body: [
       `Task: ${detect.taskTitle || '(untitled)'}`,
@@ -254,22 +304,163 @@ function stubLearning(detect: LearningDetect): LearningEntry[] {
   return [entry];
 }
 
-async function writeLearningEntries(
-  workspace: string,
+/** A learning already present in .claude/learnings/ (filename slug = id). */
+interface ExistingLearning {
+  id: string;
+  title: string;
+  /** Full on-disk file content (the diff baseline for an update/delete). */
+  body: string;
+}
+
+/** A reconciled, ready-to-apply learning op: existing-set validation and the
+ *  insert-id collision guard are already resolved, so apply() and the diff builder
+ *  consume the SAME plan and never disagree on what is written. */
+interface PlannedLearningOp {
+  op: 'insert' | 'update' | 'delete';
+  /** Final filename slug written/removed. */
+  id: string;
+  title: string;
+  /** Rendered new body (without the reviewer note, appended at write time); ''
+   *  for a delete. */
+  newBody: string;
+  /** Prior on-disk body; '' for an insert. */
+  oldBody: string;
+}
+
+/** Read the existing learnings so the agent can reconcile against them and the
+ *  diff/apply can update/delete by id. Missing dir -> []. */
+export async function readExistingLearnings(worktree: string): Promise<ExistingLearning[]> {
+  const dir = path.join(worktree, '.claude', 'learnings');
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return [];
+  }
+  const out: ExistingLearning[] = [];
+  for (const name of names) {
+    if (!name.endsWith('.md')) continue;
+    try {
+      const body = await readFile(path.join(dir, name), 'utf8');
+      const title = (body.match(/^#\s+(.+)$/m)?.[1] ?? name.slice(0, -3)).trim();
+      out.push({ id: name.slice(0, -3), title, body });
+    } catch {
+      // unreadable -> skip
+    }
+  }
+  return out;
+}
+
+function renderLearningBody(entry: LearningEntry): string {
+  return `# ${entry.title}\n\n${entry.body}`;
+}
+
+/** First ~200 chars of a learning's prose (minus its `# heading`) — the bounded
+ *  context the prompt shows so the agent can dedup/update without the full body. */
+function learningExcerpt(body: string): string {
+  const prose = body.replace(/^#\s+.+$/m, '').trim();
+  return prose.length > 200 ? `${prose.slice(0, 200)}…` : prose;
+}
+
+/** Pick a free slug for an insert so a title that collides with an existing
+ *  learning never silently overwrites it (the prior append-only data-loss bug). */
+function resolveInsertId(slug: string, taken: Set<string>): string {
+  const base = slug || 'learning';
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) {
+    const candidate = `${base}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/** Validate the parsed entries against the existing set and resolve each into a
+ *  concrete op: an update/delete whose targetId is unknown is downgraded (update
+ *  -> insert, delete -> dropped) so a hallucinated target never overwrites or
+ *  removes the wrong file. logger is set only on the authoritative apply pass. */
+export function planLearningReconciliation(
   entries: LearningEntry[],
+  existing: ExistingLearning[],
+  logger?: StepContext['logger'],
+): PlannedLearningOp[] {
+  const byId = new Map(existing.map((e) => [e.id, e]));
+  const taken = new Set(existing.map((e) => e.id));
+  const plan: PlannedLearningOp[] = [];
+  for (const e of entries) {
+    if (e.op === 'delete') {
+      const target = e.targetId ? byId.get(e.targetId) : undefined;
+      if (!target) {
+        logger?.warn({ targetId: e.targetId }, 'learning delete names an unknown id — dropped');
+        continue;
+      }
+      plan.push({
+        op: 'delete',
+        id: target.id,
+        title: target.title,
+        newBody: '',
+        oldBody: target.body,
+      });
+      continue;
+    }
+    if (e.op === 'update' && e.targetId && byId.has(e.targetId)) {
+      const target = byId.get(e.targetId)!;
+      plan.push({
+        op: 'update',
+        id: target.id,
+        title: e.title,
+        newBody: renderLearningBody(e),
+        oldBody: target.body,
+      });
+      continue;
+    }
+    if (e.op === 'update') {
+      logger?.warn(
+        { targetId: e.targetId },
+        'learning update names an unknown id — inserting instead',
+      );
+    }
+    const id = resolveInsertId(e.id || slugify(e.title), taken);
+    taken.add(id);
+    plan.push({ op: 'insert', id, title: e.title, newBody: renderLearningBody(e), oldBody: '' });
+  }
+  return plan;
+}
+
+/** The planned ops as diff files for the form-gate viewer (synthesized — the new
+ *  learning files are not written until apply). */
+export function learningOpsToDiffFiles(plan: PlannedLearningOp[]): CommitDiffFile[] {
+  return plan.map((p) => ({
+    path: path.join('.claude', 'learnings', `${p.id}.md`),
+    status: p.op === 'insert' ? 'added' : p.op === 'delete' ? 'deleted' : 'modified',
+    binary: false,
+    truncated: false,
+    oldContent: p.oldBody,
+    newContent: p.newBody,
+  }));
+}
+
+/** Apply the reconciled plan to the worktree: write inserts/updates, unlink
+ *  deletes. Gated by the form's writeFiles toggle in the caller. */
+export async function applyLearningOps(
+  worktree: string,
+  plan: PlannedLearningOp[],
   reviewerNote: string,
-): Promise<string[]> {
-  const dir = path.join(workspace, '.claude', 'learnings');
+): Promise<{ written: string[]; deleted: string[] }> {
+  const dir = path.join(worktree, '.claude', 'learnings');
   await mkdir(dir, { recursive: true });
   const note = reviewerNote.trim() ? `\n\n## Reviewer note\n${reviewerNote.trim()}\n` : '';
   const written: string[] = [];
-  for (const entry of entries) {
-    const file = path.join(dir, `${entry.id}.md`);
-    const body = `# ${entry.title}\n\n${entry.body}\n${note}`;
-    await writeFile(file, body, 'utf8');
-    written.push(path.relative(workspace, file));
+  const deleted: string[] = [];
+  for (const p of plan) {
+    const file = path.join(dir, `${p.id}.md`);
+    if (p.op === 'delete') {
+      await rm(file, { force: true });
+      deleted.push(path.relative(worktree, file));
+    } else {
+      await writeFile(file, `${p.newBody}\n${note}`, 'utf8');
+      written.push(path.relative(worktree, file));
+    }
   }
-  return written;
+  return { written, deleted };
 }
 
 /** Write a bug investigation into the knowledge base (auto-RAG-indexed by the
@@ -328,6 +519,13 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const implement = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-phase-2-implement');
     const verify = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08-phase-5-verify');
     const commit = await loadPreviousStepOutput(ctx.db, ctx.taskId, '10-gate-3-commit');
+    const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
+    const worktreePath =
+      (worktree?.output as { worktreePath?: string } | null)?.worktreePath ?? ctx.workspacePath;
+    const hasGit = await pathExists(path.join(worktreePath, '.git'));
+    const existingLearnings = (await readExistingLearnings(worktreePath))
+      .slice(0, 60)
+      .map((e) => ({ id: e.id, title: e.title, excerpt: learningExcerpt(e.body) }));
     const implementOutput = (implement?.output as ImplementOutput | null) ?? {};
     const verifyOutput = (verify?.output as VerifyOutput | null) ?? {};
     const commitOutput = (commit?.output as CommitOutput | null) ?? {};
@@ -344,7 +542,30 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       feature: meta.feature,
       affectedClients: meta.affectedClients,
       historyDigest,
+      existingLearnings,
+      worktreePath,
+      knowledgeDiffArtifactPath: hasGit
+        ? path.join(worktreePath, '.haive', KNOWLEDGE_DIFF_ARTIFACT_NAME)
+        : null,
     };
+  },
+
+  async prepareForm(ctx, detected, llmOutput): Promise<void> {
+    // Post-llm, pre-form: materialise the knowledge-diff the form's web viewer
+    // reads. The agent's Feature KB Sync edits are on disk now (git side); the
+    // learning insert/update/delete ops are synthesized from the parsed output
+    // against the existing learnings (those files are not written until apply).
+    // Always writes — an empty diff renders as "No changes to show". Best-effort:
+    // never block the form on a diff-build error.
+    if (!detected.knowledgeDiffArtifactPath) return;
+    try {
+      const existing = await readExistingLearnings(detected.worktreePath);
+      const parsed = parseLearningOutput(llmOutput ?? null) ?? [];
+      const plan = planLearningReconciliation(parsed, existing);
+      await buildKnowledgeDiffArtifact(detected.worktreePath, gitRun, learningOpsToDiffFiles(plan));
+    } catch (err) {
+      ctx.logger.warn({ err }, 'failed to build learning knowledge diff artifact');
+    }
   },
 
   llm: {
@@ -361,9 +582,15 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         'You are the learning capture phase of an engineering workflow.',
         'Emit ONE JSON object inside a ```json fenced code block with the shape:',
         detected.isBugFix
-          ? '{ "entries": [ { "id": "<kebab-case>", "title": "<short>", "body": "<markdown>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] }, "investigation": { "title": "<short>", "symptoms": "<observable symptoms + the EXACT error strings/messages, verbatim>", "root_cause": "<why/how the bug happened>", "lesson": "<durable lesson for future runs>", "scope": "local | global" } }'
-          : '{ "entries": [ { "id": "<kebab-case>", "title": "<short>", "body": "<markdown>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] } }',
+          ? '{ "entries": [ { "id": "<kebab-case>", "op": "insert|update|delete", "targetId": "<existing learning id; only for update/delete>", "title": "<short>", "body": "<markdown>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] }, "investigation": { "title": "<short>", "symptoms": "<observable symptoms + the EXACT error strings/messages, verbatim>", "root_cause": "<why/how the bug happened>", "lesson": "<durable lesson for future runs>", "scope": "local | global" } }'
+          : '{ "entries": [ { "id": "<kebab-case>", "op": "insert|update|delete", "targetId": "<existing learning id; only for update/delete>", "title": "<short>", "body": "<markdown>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] } }',
         'Each entry must be a reusable lesson grounded in the workflow run. Avoid generic advice.',
+        '',
+        'LEARNINGS RECONCILIATION — you are shown the EXISTING learnings below. For each lesson decide an `op`:',
+        '- "insert" (default) for a NEW lesson no existing learning covers.',
+        '- "update" with `targetId` = an existing learning id when refining/replacing it; put the FULL new content in `body`.',
+        '- "delete" with `targetId` = an existing learning id when this run proved that lesson WRONG or obsolete.',
+        'Only use a `targetId` that EXACTLY matches an id in the existing list (an unknown target is treated as an insert, or dropped for delete). Do not duplicate a lesson that already exists — update it instead.',
         '',
         'KNOWLEDGE BASE SYNC — before emitting the JSON, keep the project knowledge base in sync with what this task changed:',
         '1. CLASSIFY the task: new_feature (adds capability) | feature_update (changes existing behavior) | feature_removal (removes capability) | bug_fix | refactor.',
@@ -382,6 +609,11 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         `Verification passed: ${detected.verifyPassed}`,
         `Commit sha: ${detected.commitSha ?? '(none)'}`,
         `Files touched: ${detected.filesTouched.join(', ') || '(none)'}`,
+        '',
+        '=== Existing learnings (reconcile against these; use their id as targetId) ===',
+        detected.existingLearnings.length > 0
+          ? detected.existingLearnings.map((l) => `- ${l.id} — ${l.title}: ${l.excerpt}`).join('\n')
+          : '(none yet)',
         '',
         '=== What happened during this task (mine this — it is the real, persisted run history) ===',
         detected.historyDigest.text,
@@ -423,14 +655,29 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const kbSync = parseKbSync(llmOutput ?? null);
     const kbChanged = (kbSync?.changes.length ?? 0) > 0;
     const infoSections: InfoSection[] = [];
+    const insertCount = entries.filter((e) => e.op === 'insert').length;
+    const updateCount = entries.filter((e) => e.op === 'update').length;
+    const deleteCount = entries.filter((e) => e.op === 'delete').length;
+    const opTag = (e: LearningEntry): string =>
+      e.op === 'update'
+        ? `UPDATE → ${e.targetId}`
+        : e.op === 'delete'
+          ? `REMOVE → ${e.targetId}`
+          : 'NEW';
     if (entries.length > 0) {
       infoSections.push({
-        title: `Drafted learnings (${entries.length})`,
+        title: `Drafted learnings (${insertCount} new, ${updateCount} updated, ${deleteCount} removed)`,
         preview: entries
-          .map((e) => e.title)
+          .map((e) => `[${opTag(e)}] ${e.title}`)
           .join('; ')
           .slice(0, 80),
-        body: entries.map((e) => `### ${e.title}\n\n${e.body}`).join('\n\n---\n\n'),
+        body: entries
+          .map((e) =>
+            e.op === 'delete'
+              ? `### [${opTag(e)}] ${e.title}`
+              : `### [${opTag(e)}] ${e.title}\n\n${e.body}`,
+          )
+          .join('\n\n---\n\n'),
         defaultOpen: true,
       });
     }
@@ -473,7 +720,10 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         {
           type: 'checkbox',
           id: 'writeFiles',
-          label: 'Write learning entries to .claude/learnings/',
+          label:
+            entries.length > 0
+              ? `Apply learning changes (${insertCount} new, ${updateCount} updated, ${deleteCount} removed) to .claude/learnings/`
+              : 'Write learning entries to .claude/learnings/',
           default: true,
         },
         ...(kbChanged && kbSync
@@ -547,10 +797,15 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const parsed = parseLearningOutput(args.llmOutput ?? null);
     const source: 'llm' | 'stub' = parsed && parsed.length > 0 ? 'llm' : 'stub';
     const entries = parsed && parsed.length > 0 ? parsed : stubLearning(args.detected);
-    const written =
-      values.writeFiles !== false
-        ? await writeLearningEntries(worktreePath, entries, reviewerNote)
-        : [];
+    const existingLearnings = await readExistingLearnings(worktreePath);
+    const plan = planLearningReconciliation(entries, existingLearnings, ctx.logger);
+    let written: string[] = [];
+    let deleted: string[] = [];
+    if (values.writeFiles !== false) {
+      const res = await applyLearningOps(worktreePath, plan, reviewerNote);
+      written = res.written;
+      deleted = res.deleted;
+    }
 
     // Idempotent re-runs (Retry): replace this task's prior promoted drafts so a
     // retry never duplicates them (no-op when the global KB is off).
@@ -595,6 +850,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       {
         entries: entries.length,
         written: written.length,
+        deleted: deleted.length,
         investigationWritten,
         kbClassification: kbSync?.classification ?? null,
         kbChanged: kbHasChanges,
@@ -603,6 +859,6 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       },
       'learning capture complete',
     );
-    return { entries, written, investigationWritten, kbSync, kbReverted, source };
+    return { entries, written, deleted, investigationWritten, kbSync, kbReverted, source };
   },
 };

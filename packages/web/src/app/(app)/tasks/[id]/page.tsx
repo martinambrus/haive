@@ -1925,6 +1925,17 @@ function StepCard({
             artifactPath={(step.detectOutput as { diffArtifactPath: string }).diffArtifactPath}
           />
         )}
+
+      {step.stepId === '11-phase-8-learning' &&
+        (step.detectOutput as { knowledgeDiffArtifactPath?: string | null } | null)
+          ?.knowledgeDiffArtifactPath && (
+          <CommitDiffViewer
+            taskId={taskId}
+            artifactPath={
+              (step.detectOutput as { knowledgeDiffArtifactPath: string }).knowledgeDiffArtifactPath
+            }
+          />
+        )}
     </Card>
   );
 }
