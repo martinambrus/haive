@@ -560,7 +560,10 @@ export default function TaskDetailPage() {
             </Badge>
           )}
           {task.repository && (
-            <Badge variant="info" className="shrink-0 gap-1">
+            <Badge
+              variant="default"
+              className="shrink-0 gap-1 border-violet-800/60 bg-violet-900/60 text-violet-300"
+            >
               <FolderGit2 className="h-3 w-3" />
               {task.repository.name}
             </Badge>
