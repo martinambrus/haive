@@ -109,6 +109,7 @@ export default function TaskDetailPage() {
   const id = params.id;
 
   const [task, setTask] = useState<Task | null>(null);
+  const [promotedDraftCount, setPromotedDraftCount] = useState(0);
   usePageTitle(task ? task.title : 'Task');
   const [steps, setSteps] = useState<TaskStep[]>([]);
   const [events, setEvents] = useState<TaskEvent[]>([]);
@@ -166,6 +167,35 @@ export default function TaskDetailPage() {
       setError((err as Error).message ?? 'Failed to load task');
     }
   }, [id]);
+
+  // Data-driven "review promoted drafts" CTA for a completed task: count this task's
+  // pending global-KB drafts from a live query, refetched on window focus, so the CTA
+  // disappears on its own once they're all activated/deleted — no stale "review" link
+  // weeks later when nothing is pending. 0 (and no CTA) when the global KB is off.
+  useEffect(() => {
+    if (task?.status !== 'completed') {
+      setPromotedDraftCount(0);
+      return;
+    }
+    let cancelled = false;
+    const fetchCount = async () => {
+      try {
+        const res = await api.get<{ total: number }>(
+          `/global-kb/entries?status=draft&sourceTaskId=${id}&pageSize=1`,
+        );
+        if (!cancelled) setPromotedDraftCount(res.total ?? 0);
+      } catch {
+        if (!cancelled) setPromotedDraftCount(0);
+      }
+    };
+    void fetchCount();
+    const onFocus = () => void fetchCount();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [task?.status, id]);
 
   const reloadEvents = useCallback(async () => {
     try {
@@ -742,6 +772,16 @@ export default function TaskDetailPage() {
             );
           })}
           <TaskTotalTime task={task} steps={steps} userActive={userActive} />
+          {task.status === 'completed' && promotedDraftCount > 0 && (
+            <div className="flex justify-center pt-2">
+              <Link href={`/settings/global-kb?status=draft&sourceTaskId=${task.id}`}>
+                <Button>
+                  Review {promotedDraftCount} global KB draft{promotedDraftCount === 1 ? '' : 's'}{' '}
+                  you promoted →
+                </Button>
+              </Link>
+            </div>
+          )}
           {isUpgradeTask && task.status === 'completed' && (
             <div className="flex justify-center pt-2">
               <Link href="/repos">

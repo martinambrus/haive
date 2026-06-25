@@ -386,6 +386,7 @@ globalKbRoutes.get('/entries', async (c) => {
   const status = c.req.query('status');
   const category = c.req.query('category');
   const framework = c.req.query('framework');
+  const sourceTaskId = c.req.query('sourceTaskId');
   const q = c.req.query('q')?.trim();
   const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1')) || 1);
   const pageSize = Math.min(
@@ -397,6 +398,8 @@ globalKbRoutes.get('/entries', async (c) => {
     const conds: SQL[] = [];
     if (status) conds.push(eq(globalKbEntries.status, status as GlobalKbStatus));
     if (category) conds.push(eq(globalKbEntries.category, category as GlobalKbCategory));
+    // Scope to the drafts a given task promoted (the completed-task "review drafts" CTA).
+    if (sourceTaskId) conds.push(eq(globalKbEntries.sourceTaskId, sourceTaskId));
     if (framework) {
       conds.push(sql`jsonb_exists(${globalKbEntries.facets} -> 'framework', ${framework})`);
     }

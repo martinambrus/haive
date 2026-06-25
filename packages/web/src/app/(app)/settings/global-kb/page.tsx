@@ -143,6 +143,9 @@ export default function GlobalKbPage() {
   const [q, setQ] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [categoryFilter, setCategoryFilter] = useState('all');
+  // Set from the completed-task "review drafts" CTA (?sourceTaskId=) to scope the
+  // list to one task's promoted drafts; null = unscoped.
+  const [sourceTaskId, setSourceTaskId] = useState<string | null>(null);
   const [frameworkFilter, setFrameworkFilter] = useState('all');
   const [page, setPage] = useState(1);
   const [debouncedQ, setDebouncedQ] = useState('');
@@ -188,6 +191,10 @@ export default function GlobalKbPage() {
     if (status && ['active', 'draft', 'enriching', 'archived'].includes(status)) {
       setStatusFilter(status);
     }
+    // Arriving from a completed task's "review drafts" CTA (?sourceTaskId=) → scope
+    // the list to the drafts that task promoted.
+    const taskId = params.get('sourceTaskId');
+    if (taskId) setSourceTaskId(taskId);
     // Arriving via the onboarding "Add Global House KB" button (#add) → scroll to
     // the authoring card once the page has laid out.
     if (window.location.hash === '#add') {
@@ -377,6 +384,7 @@ export default function GlobalKbPage() {
       if (statusFilter !== 'all') params.set('status', statusFilter);
       if (categoryFilter !== 'all') params.set('category', categoryFilter);
       if (frameworkFilter !== 'all') params.set('framework', frameworkFilter);
+      if (sourceTaskId) params.set('sourceTaskId', sourceTaskId);
       const res = await api.get<{ entries: GlobalKbEntry[]; total: number; frameworks: string[] }>(
         `/global-kb/entries?${params.toString()}`,
       );
@@ -393,7 +401,7 @@ export default function GlobalKbPage() {
       if (seq !== loadSeq.current) return;
       setLoadError((err as ApiError).message ?? 'Failed to load global KB');
     }
-  }, [page, debouncedQ, statusFilter, categoryFilter, frameworkFilter]);
+  }, [page, debouncedQ, statusFilter, categoryFilter, frameworkFilter, sourceTaskId]);
 
   useEffect(() => {
     void loadConfig();
@@ -416,7 +424,7 @@ export default function GlobalKbPage() {
   // Reset to the first page whenever the query/filters change.
   useEffect(() => {
     setPage(1);
-  }, [debouncedQ, statusFilter, categoryFilter, frameworkFilter]);
+  }, [debouncedQ, statusFilter, categoryFilter, frameworkFilter, sourceTaskId]);
 
   // Fetch whenever the query/filters/page change.
   useEffect(() => {
@@ -895,6 +903,18 @@ export default function GlobalKbPage() {
           publishes a pending auto-promoted draft into retrieval;{' '}
           <span className="text-neutral-300">Delete</span> permanently removes a rule.
         </p>
+        {sourceTaskId && (
+          <div className="flex items-center gap-2 rounded-md border border-indigo-500/40 bg-indigo-500/10 px-3 py-2 text-xs text-indigo-200">
+            <span>Showing only the global-KB drafts promoted by one task.</span>
+            <button
+              type="button"
+              onClick={() => setSourceTaskId(null)}
+              className="font-medium text-indigo-100 underline underline-offset-2 hover:text-white"
+            >
+              Clear task filter
+            </button>
+          </div>
+        )}
       </div>
 
       <FormError message={loadError} />
