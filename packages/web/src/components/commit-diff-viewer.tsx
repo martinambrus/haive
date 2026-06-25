@@ -3,6 +3,7 @@
 import { diffLines } from 'diff';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { API_BASE_URL } from '@/lib/api-client';
+import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 
 // Mirrors the worker artifact shape written by _commit-diff.ts.
 type CommitDiffStatus = 'added' | 'modified' | 'deleted' | 'renamed';
@@ -243,6 +244,12 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
   const [maximized, setMaximized] = useState(false);
   const [leftPct, setLeftPct] = useState(30);
   const [isWide, setIsWide] = useState(false);
+  // Collapsed/expanded, persisted per task so a reload restores the layout. Keyed on
+  // the artifact basename so multiple diffs in one task collapse independently.
+  const [collapsed, setCollapsed] = usePersistedToggle(
+    `task-ui:${taskId}:diff:${artifactPath.split('/').pop() ?? artifactPath}`,
+    false,
+  );
   const containerRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
 
@@ -378,133 +385,150 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-xs text-neutral-400">
-          <span className="font-medium text-neutral-200">Changes</span>
+          <button
+            type="button"
+            onClick={() => {
+              if (!collapsed) setMaximized(false);
+              setCollapsed((v) => !v);
+            }}
+            className="flex items-center gap-1 hover:text-neutral-200"
+            title={collapsed ? 'Show changes' : 'Hide changes'}
+          >
+            <span className="text-neutral-500">{collapsed ? '▶' : '▼'}</span>
+            <span className="font-medium text-neutral-200">Changes</span>
+          </button>
           <span>
             {artifact.fileCount} file{artifact.fileCount === 1 ? '' : 's'}
           </span>
           {artifact.truncated && <span className="text-yellow-400">list truncated</span>}
         </div>
-        <div className="flex items-center gap-2">
-          <div className="flex overflow-hidden rounded border border-neutral-800 text-xs">
+        {!collapsed && (
+          <div className="flex items-center gap-2">
+            <div className="flex overflow-hidden rounded border border-neutral-800 text-xs">
+              <button
+                type="button"
+                onClick={() => setView('inline')}
+                className={`px-2 py-1 ${view === 'inline' ? 'bg-indigo-950 text-indigo-200' : 'text-neutral-400 hover:bg-neutral-900'}`}
+              >
+                Inline
+              </button>
+              <button
+                type="button"
+                onClick={() => setView('split')}
+                className={`border-l border-neutral-800 px-2 py-1 ${view === 'split' ? 'bg-indigo-950 text-indigo-200' : 'text-neutral-400 hover:bg-neutral-900'}`}
+              >
+                Side-by-side
+              </button>
+            </div>
             <button
               type="button"
-              onClick={() => setView('inline')}
-              className={`px-2 py-1 ${view === 'inline' ? 'bg-indigo-950 text-indigo-200' : 'text-neutral-400 hover:bg-neutral-900'}`}
+              onClick={() => setMaximized((v) => !v)}
+              className="rounded border border-neutral-800 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-900"
             >
-              Inline
-            </button>
-            <button
-              type="button"
-              onClick={() => setView('split')}
-              className={`border-l border-neutral-800 px-2 py-1 ${view === 'split' ? 'bg-indigo-950 text-indigo-200' : 'text-neutral-400 hover:bg-neutral-900'}`}
-            >
-              Side-by-side
+              {maximized ? 'Exit fullscreen' : 'Maximize'}
             </button>
           </div>
-          <button
-            type="button"
-            onClick={() => setMaximized((v) => !v)}
-            className="rounded border border-neutral-800 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-900"
+        )}
+      </div>
+
+      {!collapsed && (
+        <div
+          ref={containerRef}
+          className={`grid gap-2 md:gap-0 ${bodyClass}`}
+          style={{
+            gridTemplateColumns: isWide ? `${leftPct}% 6px minmax(0,1fr)` : '1fr',
+            // In maximized mode the body is flex-1 inside the fullscreen overlay,
+            // so it has a definite height. A 1fr row makes that height resolvable
+            // for the panes (h-full) so their inner overflow-auto can scroll.
+            // Without it the implicit auto row grows to the diff content and the
+            // pane never bounds, so nothing scrolls.
+            gridTemplateRows: maximized ? 'minmax(0, 1fr)' : undefined,
+          }}
+        >
+          <div
+            className={`min-h-0 overflow-y-auto rounded-md border border-neutral-800 bg-neutral-950 ${paneHeight}`}
           >
-            {maximized ? 'Exit fullscreen' : 'Maximize'}
-          </button>
-        </div>
-      </div>
-
-      <div
-        ref={containerRef}
-        className={`grid gap-2 md:gap-0 ${bodyClass}`}
-        style={{
-          gridTemplateColumns: isWide ? `${leftPct}% 6px minmax(0,1fr)` : '1fr',
-          // In maximized mode the body is flex-1 inside the fullscreen overlay,
-          // so it has a definite height. A 1fr row makes that height resolvable
-          // for the panes (h-full) so their inner overflow-auto can scroll.
-          // Without it the implicit auto row grows to the diff content and the
-          // pane never bounds, so nothing scrolls.
-          gridTemplateRows: maximized ? 'minmax(0, 1fr)' : undefined,
-        }}
-      >
-        <div
-          className={`min-h-0 overflow-y-auto rounded-md border border-neutral-800 bg-neutral-950 ${paneHeight}`}
-        >
-          {artifact.files.map((file) => {
-            const meta = STATUS_META[file.status];
-            const isSelected = file.path === selected;
-            return (
-              <button
-                key={file.path}
-                type="button"
-                onClick={() => setSelected(file.path)}
-                className={`flex w-full items-center gap-2 border-b border-neutral-800 px-2 py-1.5 text-left text-xs last:border-b-0 ${
-                  isSelected ? 'bg-indigo-950/50' : 'hover:bg-neutral-900'
-                }`}
-                title={file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path}
-              >
-                <span
-                  className={`shrink-0 rounded border px-1 text-[10px] font-medium ${meta.cls}`}
+            {artifact.files.map((file) => {
+              const meta = STATUS_META[file.status];
+              const isSelected = file.path === selected;
+              return (
+                <button
+                  key={file.path}
+                  type="button"
+                  onClick={() => setSelected(file.path)}
+                  className={`flex w-full items-center gap-2 border-b border-neutral-800 px-2 py-1.5 text-left text-xs last:border-b-0 ${
+                    isSelected ? 'bg-indigo-950/50' : 'hover:bg-neutral-900'
+                  }`}
+                  title={file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path}
                 >
-                  {meta.label}
-                </span>
-                <span className="truncate text-neutral-200">{file.path}</span>
-              </button>
-            );
-          })}
-        </div>
+                  <span
+                    className={`shrink-0 rounded border px-1 text-[10px] font-medium ${meta.cls}`}
+                  >
+                    {meta.label}
+                  </span>
+                  <span className="truncate text-neutral-200">{file.path}</span>
+                </button>
+              );
+            })}
+          </div>
 
-        <div
-          onMouseDown={startDrag}
-          role="separator"
-          aria-orientation="vertical"
-          className="hidden cursor-col-resize bg-neutral-800 transition-colors hover:bg-indigo-500 md:block"
-        />
+          <div
+            onMouseDown={startDrag}
+            role="separator"
+            aria-orientation="vertical"
+            className="hidden cursor-col-resize bg-neutral-800 transition-colors hover:bg-indigo-500 md:block"
+          />
 
-        <div
-          className={`flex min-h-0 min-w-0 flex-col rounded-md border border-neutral-800 bg-neutral-950 ${paneHeight}`}
-        >
-          {!selectedFile ? (
-            <div className="p-4 text-xs text-neutral-500">
-              Select a changed file to view its diff.
-            </div>
-          ) : (
-            <>
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5 text-xs">
-                <span className="truncate text-neutral-300" title={selectedFile.path}>
-                  {selectedFile.oldPath
-                    ? `${selectedFile.oldPath} -> ${selectedFile.path}`
-                    : selectedFile.path}
-                </span>
-                <span className="flex shrink-0 items-center gap-2 text-[10px]">
-                  {renderable && (
-                    <span className="text-neutral-500">
-                      <span className="text-green-400">+{added}</span>{' '}
-                      <span className="text-red-400">-{removed}</span>
-                    </span>
-                  )}
-                  {selectedFile.binary && <span className="text-yellow-400">binary</span>}
-                  {selectedFile.truncated && !selectedFile.binary && (
-                    <span className="text-yellow-400">too large</span>
-                  )}
-                </span>
+          <div
+            className={`flex min-h-0 min-w-0 flex-col rounded-md border border-neutral-800 bg-neutral-950 ${paneHeight}`}
+          >
+            {!selectedFile ? (
+              <div className="p-4 text-xs text-neutral-500">
+                Select a changed file to view its diff.
               </div>
-              <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                {selectedFile.binary ? (
-                  <div className="p-4 text-xs text-neutral-400">Binary file — diff not shown.</div>
-                ) : selectedFile.truncated ? (
-                  <div className="p-4 text-xs text-neutral-400">
-                    File too large to diff here. Use the Source tab to view it.
-                  </div>
-                ) : inlineRows.length === 0 ? (
-                  <div className="p-4 text-xs text-neutral-500">No content changes.</div>
-                ) : view === 'inline' ? (
-                  <InlineDiff rows={inlineRows} />
-                ) : (
-                  <SplitDiff rows={splitRows} />
-                )}
-              </div>
-            </>
-          )}
+            ) : (
+              <>
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5 text-xs">
+                  <span className="truncate text-neutral-300" title={selectedFile.path}>
+                    {selectedFile.oldPath
+                      ? `${selectedFile.oldPath} -> ${selectedFile.path}`
+                      : selectedFile.path}
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2 text-[10px]">
+                    {renderable && (
+                      <span className="text-neutral-500">
+                        <span className="text-green-400">+{added}</span>{' '}
+                        <span className="text-red-400">-{removed}</span>
+                      </span>
+                    )}
+                    {selectedFile.binary && <span className="text-yellow-400">binary</span>}
+                    {selectedFile.truncated && !selectedFile.binary && (
+                      <span className="text-yellow-400">too large</span>
+                    )}
+                  </span>
+                </div>
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                  {selectedFile.binary ? (
+                    <div className="p-4 text-xs text-neutral-400">
+                      Binary file — diff not shown.
+                    </div>
+                  ) : selectedFile.truncated ? (
+                    <div className="p-4 text-xs text-neutral-400">
+                      File too large to diff here. Use the Source tab to view it.
+                    </div>
+                  ) : inlineRows.length === 0 ? (
+                    <div className="p-4 text-xs text-neutral-500">No content changes.</div>
+                  ) : view === 'inline' ? (
+                    <InlineDiff rows={inlineRows} />
+                  ) : (
+                    <SplitDiff rows={splitRows} />
+                  )}
+                </div>
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

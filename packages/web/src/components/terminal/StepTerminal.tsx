@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, type CliInvocationOutput, type CliInvocationSummary } from '@/lib/api-client';
+import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import { CliStreamViewer } from './CliStreamViewer';
 import { useAutoScrollTerminals } from '@/lib/terminal-autoscroll';
 import { formatDuration } from '@/lib/format-duration';
@@ -22,7 +23,13 @@ interface StepTerminalProps {
 }
 
 export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: StepTerminalProps) {
-  const [expanded, setExpanded] = useState<boolean>(autoExpand);
+  // Persisted per task so a reload restores whether this step's terminal was open.
+  // autoExpand is only the fallback; the autoExpand-transition effect below still
+  // fires on status changes (guarded against mount, so it never clobbers a restore).
+  const [expanded, setExpanded] = usePersistedToggle(
+    `task-ui:${taskId}:term:${stepRowId}`,
+    autoExpand,
+  );
   const [invocations, setInvocations] = useState<CliInvocationSummary[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useAutoScrollTerminals();

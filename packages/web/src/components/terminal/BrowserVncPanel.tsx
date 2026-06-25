@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiWebSocketUrl } from '@/lib/api-client';
+import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 
 type VncState = 'idle' | 'connecting' | 'connected' | 'error';
 
@@ -19,6 +20,9 @@ interface BrowserVncPanelProps {
    *  connection so a redundant VNC session isn't held open behind later steps.
    *  The user can still re-open it. */
   autoCollapse?: boolean;
+  /** Stable id (e.g. the owning step id) used to persist this panel's collapsed/
+   *  expanded state per task across reloads. Omit to keep it in-memory only. */
+  persistId?: string;
 }
 
 /**
@@ -29,8 +33,13 @@ interface BrowserVncPanelProps {
  * click things agents can't reach (native Chrome popups). noVNC is imported
  * lazily in the browser only — it touches window at module load.
  */
-export function BrowserVncPanel({ taskId, title, autoCollapse }: BrowserVncPanelProps) {
-  const [expanded, setExpanded] = useState(true);
+export function BrowserVncPanel({ taskId, title, autoCollapse, persistId }: BrowserVncPanelProps) {
+  // Persisted per task (when a persistId is given) so a reload restores whether this
+  // panel was open. autoCollapse below is edge-guarded so it never clobbers a restore.
+  const [expanded, setExpanded] = usePersistedToggle(
+    persistId ? `task-ui:${taskId}:vnc:${persistId}` : null,
+    true,
+  );
   const [maximized, setMaximized] = useState(false);
   const [state, setState] = useState<VncState>('idle');
   const [message, setMessage] = useState<string | null>(null);
@@ -143,12 +152,16 @@ export function BrowserVncPanel({ taskId, title, autoCollapse }: BrowserVncPanel
   // Collapse + disconnect once the owning step finishes (e.g. 08a after the
   // workflow moves on), so it doesn't hold a redundant VNC session open behind
   // later steps. Fires once on the false→true edge; re-opening stays manual.
+  const prevAutoCollapse = useRef(autoCollapse);
   useEffect(() => {
-    if (autoCollapse) {
+    // Fire only on the false→true edge (step finishing), NOT on mount — otherwise a
+    // reload of an already-finished step would clobber a persisted "expanded".
+    if (autoCollapse && !prevAutoCollapse.current) {
       disconnect();
       setExpanded(false);
     }
-  }, [autoCollapse, disconnect]);
+    prevAutoCollapse.current = autoCollapse;
+  }, [autoCollapse, disconnect, setExpanded]);
 
   // Maximize = full-page overlay in the SAME window so the user keeps testing
   // without blurring the tab (the user-active timer keeps running). The

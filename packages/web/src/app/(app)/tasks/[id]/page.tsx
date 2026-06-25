@@ -1843,7 +1843,7 @@ function StepCard({
                 step.activeRole !== 'fixer' &&
                 (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
                   ?.available ? (
-                  <BrowserVncPanel taskId={taskId} />
+                  <BrowserVncPanel taskId={taskId} persistId={step.id} />
                 ) : undefined
               }
               beforeFieldsSlot={
@@ -1852,7 +1852,11 @@ function StepCard({
                   ?.available ? (
                   // Gate-2: the live browser sits BELOW the verification status table but
                   // ABOVE the approve/reject decision — review the results, test, then decide.
-                  <BrowserVncPanel taskId={taskId} title="Browser — test the app here" />
+                  <BrowserVncPanel
+                    taskId={taskId}
+                    title="Browser — test the app here"
+                    persistId={step.id}
+                  />
                 ) : step.stepId === '11-phase-8-learning' &&
                   step.status === 'waiting_form' &&
                   (step.detectOutput as { knowledgeDiffArtifactPath?: string | null } | null)
@@ -1952,7 +1956,13 @@ function StepCard({
         step.status !== 'waiting_form' &&
         step.activeRole !== 'fixer' &&
         (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
-          ?.available && <BrowserVncPanel taskId={taskId} autoCollapse={step.status === 'done'} />}
+          ?.available && (
+          <BrowserVncPanel
+            taskId={taskId}
+            autoCollapse={step.status === 'done'}
+            persistId={step.id}
+          />
+        )}
 
       {step.stepId === '08a-browser-verify' && step.activeRole === 'fixer' && (
         <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
@@ -1969,6 +1979,7 @@ function StepCard({
             taskId={taskId}
             title="Browser — test the app here"
             autoCollapse={step.status === 'done' || taskEnded}
+            persistId={step.id}
           />
         )}
 
