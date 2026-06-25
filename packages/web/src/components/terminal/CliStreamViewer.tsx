@@ -40,11 +40,11 @@ interface CliStreamViewerProps {
 }
 
 const KEEPALIVE_INTERVAL_MS = 30_000;
-// How long the Clean tab may stay empty during a live run before we nudge the user
-// toward the Raw tab. Ollama-class models stream thinking/assistant frames (which
+// How long the Clean tab may stay empty during a live run before we auto-switch the
+// user to the Raw tab. Ollama-class models stream thinking/assistant frames (which
 // land in Raw) and may not emit the first parsed `text` frame for a long time,
 // leaving an empty Clean tab looking frozen even though the model is working.
-const RAW_HINT_IDLE_MS = 30_000;
+const RAW_AUTOSWITCH_IDLE_MS = 30_000;
 
 export function CliStreamViewer({
   invocationId,
@@ -84,9 +84,10 @@ export function CliStreamViewer({
   // render raw-only (no tabs) — unchanged from the pre-tabs behavior.
   const [tab, setTab] = useState<TerminalTab>('clean');
   const [cleanText, setCleanText] = useState('');
-  // Set when a live run streams raw output but produces no parsed model prose for
-  // RAW_HINT_IDLE_MS; drives the Raw-tab highlight + hint while the Clean tab is up.
-  const [showRawHint, setShowRawHint] = useState(false);
+  // True once the user clicks either tab on this terminal. Disables all auto-switching
+  // for the rest of this terminal's life — a manual choice always wins. Resets per
+  // terminal because each invocation mounts a fresh CliStreamViewer (keyed by id).
+  const [userPickedTab, setUserPickedTab] = useState(false);
   const cleanScrollRef = useRef<HTMLDivElement | null>(null);
   // Refs to the live terminal + fit addon so the tab-switch effect can re-fit
   // when Raw becomes visible (xterm laid out in a display:none container keeps a
@@ -369,20 +370,36 @@ export function CliStreamViewer({
     if (el) el.scrollTop = el.scrollHeight;
   }, [cleanContent, tab]);
 
-  // Nudge toward the Raw tab when a live run is clearly active (raw bytes flowing)
-  // but the Clean tab is still empty after RAW_HINT_IDLE_MS — the model is working
-  // yet has produced no parsed prose at all. Once any prose lands the hint is
-  // suppressed for the rest of the run; a mid-run gap between frames is normal and
-  // must not re-trigger it. Replay / no raw output / stream end also suppress it.
+  // Auto-switch to the Raw tab when a live run is clearly active (raw bytes flowing)
+  // but the Clean tab is still empty after RAW_AUTOSWITCH_IDLE_MS — the model is
+  // working yet has produced no parsed prose at all (common for Ollama-class models
+  // that stream thinking frames into Raw). Skipped once the user has picked a tab
+  // manually; a user click re-runs this effect (userPickedTab dep) and clears the
+  // pending timer. Replay / no raw output / stream end never arm it.
   useEffect(() => {
     const cleanIsEmpty = cleanText.trim().length === 0;
-    if (isReplay || !cleanSupported || state !== 'connected' || !hasOutput || !cleanIsEmpty) {
-      setShowRawHint(false);
+    if (
+      isReplay ||
+      !cleanSupported ||
+      state !== 'connected' ||
+      !hasOutput ||
+      !cleanIsEmpty ||
+      userPickedTab
+    ) {
       return;
     }
-    const id = setTimeout(() => setShowRawHint(true), RAW_HINT_IDLE_MS);
+    const id = setTimeout(() => setTab('raw'), RAW_AUTOSWITCH_IDLE_MS);
     return () => clearTimeout(id);
-  }, [isReplay, cleanSupported, state, hasOutput, cleanText]);
+  }, [isReplay, cleanSupported, state, hasOutput, cleanText, userPickedTab]);
+
+  // Auto-return to Clean once prose lands, if we auto-switched to Raw and the user
+  // hasn't taken manual control. Default tab is 'clean' and the only non-user path to
+  // 'raw' is the auto-switch above, so `tab === 'raw' && !userPickedTab` uniquely means
+  // "we imposed Raw" — safe to flip back without a separate flag.
+  useEffect(() => {
+    if (isReplay || userPickedTab) return;
+    if (tab === 'raw' && cleanText.trim().length > 0) setTab('clean');
+  }, [cleanText, tab, isReplay, userPickedTab]);
 
   const heightClass = height ?? (fill ? '' : 'h-[400px]');
   const showTabs = cleanSupported;
@@ -444,21 +461,24 @@ export function CliStreamViewer({
 
       {showTabs && (
         <div className="flex items-center gap-1">
-          <TabButton active={tab === 'clean'} onClick={() => setTab('clean')}>
+          <TabButton
+            active={tab === 'clean'}
+            onClick={() => {
+              setUserPickedTab(true);
+              setTab('clean');
+            }}
+          >
             Clean
           </TabButton>
           <TabButton
             active={tab === 'raw'}
-            onClick={() => setTab('raw')}
-            highlight={showRawHint && tab !== 'raw'}
+            onClick={() => {
+              setUserPickedTab(true);
+              setTab('raw');
+            }}
           >
             Raw
           </TabButton>
-          {showRawHint && tab !== 'raw' && (
-            <span className="ml-1 text-[11px] text-amber-300/90">
-              ← The model may be streaming to the Raw tab
-            </span>
-          )}
         </div>
       )}
 
@@ -517,12 +537,10 @@ export function CliStreamViewer({
 function TabButton({
   active,
   onClick,
-  highlight = false,
   children,
 }: {
   active: boolean;
   onClick: () => void;
-  highlight?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -532,9 +550,7 @@ function TabButton({
       className={`rounded border px-2 py-0.5 text-[11px] uppercase tracking-wider ${
         active
           ? 'border-indigo-500/50 bg-indigo-500/15 text-indigo-200'
-          : highlight
-            ? 'animate-pulse border-amber-500/60 bg-amber-500/15 text-amber-200'
-            : 'border-neutral-700 bg-neutral-800/40 text-neutral-400 hover:text-neutral-200'
+          : 'border-neutral-700 bg-neutral-800/40 text-neutral-400 hover:text-neutral-200'
       }`}
     >
       {children}
