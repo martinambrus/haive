@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { parseCoderResult, issuePaths } from './dag-executor.js';
+import { parseCoderResult, issuePaths, pickFatalProviderError } from './dag-executor.js';
+import { PROVIDER_FATAL_HEADLINES } from '../queues/cli-exec/failure-class.js';
 import type { StepContext } from './step-definition.js';
 
 type InvLike = Parameters<typeof parseCoderResult>[0];
@@ -42,6 +43,38 @@ describe('parseCoderResult', () => {
   it('falls back to failed_unrecoverable on a non-zero exit with no json', () => {
     const r = parseCoderResult(inv({ rawOutput: 'crashed', exitCode: 1 }));
     expect(r.outcome).toBe('failed_unrecoverable');
+  });
+});
+
+describe('pickFatalProviderError', () => {
+  const RATE_LIMIT_MSG = `${PROVIDER_FATAL_HEADLINES.rate_limit} — retry once it resets. (429)`;
+
+  it('returns the fatal message when an ended invocation hit a provider wall', () => {
+    expect(pickFatalProviderError([{ errorMessage: RATE_LIMIT_MSG }])).toBe(RATE_LIMIT_MSG);
+  });
+
+  it('finds the fatal even when a successful sibling ended after it (scans all rows)', () => {
+    // orderBy endedAt desc means a later-finishing success can sort first; the scan
+    // must still surface the earlier fatal coder.
+    const rows = [
+      { errorMessage: null },
+      { errorMessage: RATE_LIMIT_MSG },
+      { errorMessage: 'cli invocation failed: TypeError at build.ts:42' },
+    ];
+    expect(pickFatalProviderError(rows)).toBe(RATE_LIMIT_MSG);
+  });
+
+  it('returns null when no invocation is a fatal provider failure', () => {
+    expect(
+      pickFatalProviderError([
+        { errorMessage: null },
+        { errorMessage: 'coder exited 1; no ISSUE_RESULT_JSON parsed' },
+      ]),
+    ).toBe(null);
+  });
+
+  it('returns null for an empty set', () => {
+    expect(pickFatalProviderError([])).toBe(null);
   });
 });
 

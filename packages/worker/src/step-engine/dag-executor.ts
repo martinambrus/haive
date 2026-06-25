@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   dagIssueResultSchema,
@@ -17,6 +17,7 @@ import { resolveUserGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
 import { loadPreviousStepOutput, pathExists } from './steps/onboarding/_helpers.js';
+import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
 import type { DagCoderContext, StepContext, StepDefinition } from './step-definition.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
@@ -241,6 +242,14 @@ export function parseCoderResult(inv: typeof schema.cliInvocations.$inferSelect)
       ? `coder exited ${inv.exitCode}; no ISSUE_RESULT_JSON parsed`
       : 'no ISSUE_RESULT_JSON parsed',
   };
+}
+
+/** First fatal-provider errorMessage among ended invocations, or null. Scans ALL
+ *  rows (not just the most recent) because a successful sibling coder can finish
+ *  AFTER the one that hit a provider wall (429/quota, bad auth, 5xx). Pure so the
+ *  DAG fail-fast guard's decision is unit-testable without a DB. */
+export function pickFatalProviderError(rows: { errorMessage: string | null }[]): string | null {
+  return rows.find((r) => isFatalProviderFailure(r.errorMessage))?.errorMessage ?? null;
 }
 
 /** Commit any uncommitted work in an issue worktree (belt-and-suspenders — the
@@ -1204,6 +1213,38 @@ export async function resolveDagPhase(
   if (!planExists || planExists.mode !== 'dag') {
     // No DAG to run (shouldRun gates on mode==='dag'); finalize trivially.
     return { resolved: true, current };
+  }
+
+  // Fail fast on a fatal provider failure (rate-limit/quota, bad/expired auth, 5xx
+  // outage). Every DAG agent — coder, reviewer, advisor, replanner, merge-fix —
+  // links to THIS step row, so one check at re-entry covers them all. Without it a
+  // depleted-provider failure is swallowed by escalation (advisor → replanner →
+  // accept-with-debt) and every retry re-hits the dead provider, burning calls and
+  // silently degrading an OUTAGE into accepted technical debt. We scan all ended
+  // (not superseded) invocations rather than only the most recent because a
+  // successful sibling coder can finish AFTER the one that hit the wall. The user
+  // retries the task (Retry resumes this step) once the provider is back.
+  const endedInvocations = await db
+    .select({ errorMessage: schema.cliInvocations.errorMessage })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, current.id),
+        isNotNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+        isNotNull(schema.cliInvocations.errorMessage),
+      ),
+    )
+    .orderBy(desc(schema.cliInvocations.endedAt))
+    .limit(50);
+  const fatalMsg = pickFatalProviderError(endedInvocations);
+  if (fatalMsg) {
+    const updated = await setStepStatus(db, current.id, {
+      status: 'failed',
+      errorMessage: fatalMsg,
+      endedAt: new Date(),
+    });
+    return { resolved: false, result: { status: 'failed', row: updated, error: fatalMsg } };
   }
 
   const integration = await loadIntegrationWorktree(db, ctx.taskId);

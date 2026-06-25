@@ -52,9 +52,22 @@ describe('interpretCliFailure', () => {
     expect(msg).toMatch(/re-authenticate/);
   });
 
-  it('leaves non-auth failures untouched', () => {
+  it('headlines a rate-limit / quota failure as a fatal provider error', () => {
     const result = outcome({ errorMessage: 'rate limit exceeded' });
-    expect(interpretCliFailure(result, 'claude-code')).toBe('rate limit exceeded');
+    const msg = interpretCliFailure(result, 'claude-code');
+    expect(msg).toMatch(/Provider rate limit or quota exhausted/);
+    expect(msg).toMatch(/rate limit exceeded/); // original detail preserved in the excerpt
+  });
+
+  it('headlines a 5xx server outage as a fatal provider error', () => {
+    const result = outcome({ rawOutput: 'API Error: 503 Service Unavailable' });
+    const msg = interpretCliFailure(result, 'claude-code');
+    expect(msg).toMatch(/Provider server error/);
+  });
+
+  it('leaves an ordinary (non-fatal) failure untouched', () => {
+    const result = outcome({ errorMessage: 'TypeError: x is not a function' });
+    expect(interpretCliFailure(result, 'claude-code')).toBe('TypeError: x is not a function');
   });
 
   it('treats a killed process (exit 137) as stopped, not auth — even with auth-looking output', () => {

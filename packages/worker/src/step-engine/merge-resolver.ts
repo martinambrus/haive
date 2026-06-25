@@ -12,6 +12,7 @@ import { resolveUserGitEnv } from '../secrets/user-git-identity.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
 import { completeMergeHostSide, mergeCommitted } from './git-merge.js';
 import { pathExists } from './steps/onboarding/_helpers.js';
+import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from './steps/_fenced-json.js';
 import { resolvePreferredCli } from './step-runner.js';
 import type { MergeResolveSpec, StepContext, StepDefinition } from './step-definition.js';
@@ -581,6 +582,22 @@ export async function resolveMergePhase(
       });
       if (!inv || inv.endedAt === null) {
         return { resolved: false, result: { status: 'waiting_cli', row: current } };
+      }
+      // Fatal provider failure (rate-limit/quota, bad/expired auth, 5xx outage) will
+      // not recover this run — abort the live merge and fail instead of spending the
+      // remaining conflictRetries re-dispatching against a dead provider. "Retry with
+      // AI" re-creates the conflict on demand once the provider is back.
+      if (isFatalProviderFailure(inv.errorMessage)) {
+        await db
+          .update(schema.cliInvocations)
+          .set({ consumedAt: new Date() })
+          .where(eq(schema.cliInvocations.id, inv.id));
+        await gitRun(state.mergeDir, ['merge', '--abort']);
+        const row = await halt(db, current, inv.errorMessage ?? 'fatal provider error');
+        return {
+          resolved: false,
+          result: { status: 'failed', row, error: row.errorMessage ?? 'fatal provider error' },
+        };
       }
       await db
         .update(schema.cliInvocations)

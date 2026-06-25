@@ -46,21 +46,11 @@ import {
 import { executeSubAgentNative, executeSubAgentSequential } from './sub-agent.js';
 import { resolveSecretMasks } from './secret-mask.js';
 import { makeUsageSnapshotPersister } from './running-usage.js';
+import { classifyProviderFatal, PROVIDER_FATAL_HEADLINES } from './failure-class.js';
 
 /** Throttle for persisting running token-usage snapshots during a CLI stream.
  *  ~40 writes/min/invocation at most — cheap, safe under the 7-task cap. */
 const RUNNING_USAGE_INTERVAL_MS = 1500;
-
-const AUTH_FAILURE_PATTERNS: RegExp[] = [
-  /\b401\b/,
-  /authentication_error/i,
-  /invalid authentication credentials/i,
-  /\bunauthorized\b/i,
-  /\bunauthenticated\b/i,
-  /please log.?in/i,
-  /not authenticated/i,
-  /token.*(expired|invalid)/i,
-];
 
 const PROVIDER_LOGIN_HINTS: Record<string, string> = {
   'claude-code': 'claude /login',
@@ -101,21 +91,30 @@ export function interpretCliFailure(
     return 'CLI process was stopped before it finished (cancelled or timed out).';
   }
 
-  const haystack = [existing ?? '', result.rawOutput ?? ''].join('\n');
-  const looksLikeAuth = AUTH_FAILURE_PATTERNS.some((p) => p.test(haystack));
-  if (!looksLikeAuth) return existing;
-
-  const apiKeyName = providerName ? PROVIDER_API_KEY_HINTS[providerName] : null;
-  const loginCmd = providerName ? PROVIDER_LOGIN_HINTS[providerName] : null;
-  const hint = apiKeyName
-    ? `check or replace the \`${apiKeyName}\` secret for this provider in Haive settings and then retry this step`
-    : providerName && PROVIDER_HAIVE_LOGIN.has(providerName)
-      ? `log in to ${providerName} from the Haive providers page (Test connection then Log in) and then retry this step`
-      : loginCmd
-        ? `run \`${loginCmd}\` in your terminal and then retry this step`
-        : 're-authenticate your CLI in your terminal and then retry this step';
+  // Persistent provider failures (rate-limit/quota, bad/expired auth, 5xx outage)
+  // will not recover within this run. Headline them with a stable internal prefix
+  // so looping consumers (isFatalProviderFailure → DAG escalation, merge-fix retry)
+  // fail the task fast instead of re-dispatching agents against a dead provider.
+  const fatalClass = classifyProviderFatal(result.exitCode, existing, result.rawOutput);
+  if (!fatalClass) return existing;
   const detail = formatAuthDetail(existing);
-  return `CLI authentication failed — ${hint}.${detail}`;
+  if (fatalClass === 'auth') {
+    const apiKeyName = providerName ? PROVIDER_API_KEY_HINTS[providerName] : null;
+    const loginCmd = providerName ? PROVIDER_LOGIN_HINTS[providerName] : null;
+    const hint = apiKeyName
+      ? `check or replace the \`${apiKeyName}\` secret for this provider in Haive settings and then retry this step`
+      : providerName && PROVIDER_HAIVE_LOGIN.has(providerName)
+        ? `log in to ${providerName} from the Haive providers page (Test connection then Log in) and then retry this step`
+        : loginCmd
+          ? `run \`${loginCmd}\` in your terminal and then retry this step`
+          : 're-authenticate your CLI in your terminal and then retry this step';
+    return `${PROVIDER_FATAL_HEADLINES.auth} — ${hint}.${detail}`;
+  }
+  const hint =
+    fatalClass === 'rate_limit'
+      ? "the provider's usage limit or quota is exhausted; retry this task once it resets"
+      : 'the provider returned a server error (service unavailable); retry this task when it recovers';
+  return `${PROVIDER_FATAL_HEADLINES[fatalClass]} — ${hint}.${detail}`;
 }
 
 // Keep the auth headline readable: the full CLI output stays on the

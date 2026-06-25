@@ -42,3 +42,83 @@ export function classifyStreamFailure(
 export function isOutputTruncationMessage(message: string | null | undefined): boolean {
   return typeof message === 'string' && message.startsWith(OUTPUT_TRUNCATION_HEADLINE);
 }
+
+/* ------------------------------------------------------------------ */
+/* Fatal (non-retryable) provider failures                             */
+/* ------------------------------------------------------------------ */
+
+/** A provider-level failure that will NOT recover within this task run, so
+ *  retrying or escalating (DAG advisor/replanner, merge-fix loop) only burns
+ *  more doomed CLI calls. The right reaction is to fail the task fast; the user
+ *  retries (existing Retry resumes the failed step) once the provider is back.
+ *  - rate_limit: 429 / quota / weekly-or-monthly usage limit exhausted.
+ *  - auth:       persistent 401/403 — credentials invalid/expired, re-auth needed.
+ *  - server_error: provider 5xx / overloaded / service unavailable. */
+export type ProviderFatalClass = 'rate_limit' | 'auth' | 'server_error';
+
+/** Stable headline per fatal class. Used to BUILD the invocation errorMessage
+ *  (exec-core's interpretCliFailure) and to DETECT it downstream
+ *  (isFatalProviderFailure) without a DB column — an internal contract we own
+ *  end-to-end, exactly like OUTPUT_TRUNCATION_HEADLINE above. The 'auth' headline
+ *  intentionally matches the pre-existing "CLI authentication failed —" message
+ *  prefix so the established auth-failure copy is preserved while becoming
+ *  detectable as fatal. */
+export const PROVIDER_FATAL_HEADLINES: Record<ProviderFatalClass, string> = {
+  rate_limit: 'Provider rate limit or quota exhausted',
+  auth: 'CLI authentication failed',
+  server_error: 'Provider server error (service unavailable)',
+};
+
+// Termination/cancellation exit codes — see exec-core's TERMINATION_EXIT_CODES.
+// A stopped process is never a provider-fatal failure.
+const PROVIDER_TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137, 143]);
+
+// --- Volatile upstream text -------------------------------------------------
+// These patterns match text emitted by third-party CLIs / provider APIs. The
+// HTTP status tokens (429 / 5xx / 529) are stable HTTP-contract invariants, but
+// the surrounding prose ("Request rejected", "you have reached your…") is upstream
+// wording that can change. We therefore (a) anchor on the stable status tokens
+// plus a small set of standard phrases, and (b) only classify when the exit code
+// is a REAL failure (see classifyProviderFatal's gate) so a coder that merely
+// prints a status code in *successful* output (exit 0) is never misclassified.
+// Keep tight — bare 5xx is deliberately NOT matched (line numbers, "500ms",
+// "$500" are too false-positive); 5xx must carry HTTP context.
+const RATE_LIMIT_RE =
+  /\b429\b|too[_\s-]?many[_\s-]?requests|\brate[_\s-]?limit(?:ed|ing)?\b|\busage limit\b|quota[_\s-]?(?:exceeded|exhausted|reached|limit)|\boverage\b/i;
+const AUTH_RE =
+  /\b40[13]\b|authentication_error|invalid authentication credentials|\bunauthorized\b|\bunauthenticated\b|permission_error|please log.?in|not authenticated|token.*(?:expired|invalid)/i;
+const SERVER_ERROR_RE =
+  /\b529\b|(?:status|http|error|code|\()[\s:/]*5\d{2}\b|\b5\d{2}\b\s*(?:error|status|service|unavailable|gateway|bad gateway|overloaded)|service unavailable|bad gateway|gateway time-?out|internal server error|\boverloaded\b/i;
+
+/** Classify a fatal (non-retryable) provider failure from an ended invocation's
+ *  fields, or null when the failure is ordinary (retry/escalate as before).
+ *  Gated on a real failure exit code: exit 0 (success), null/130/137/143
+ *  (cancelled/timed-out) are never fatal-provider errors. errorMessage is the
+ *  primary signal (stream.ts already surfaces rate-limit/quota there for
+ *  stream-json CLIs); the rawOutput TAIL is a fallback for CLIs that only print
+ *  the API error to stdout. Auth is checked first (most actionable + preserves
+ *  the existing auth-failure message). */
+export function classifyProviderFatal(
+  exitCode: number | null,
+  errorMessage: string | null,
+  rawOutput: string | null,
+): ProviderFatalClass | null {
+  if (exitCode === null || exitCode === 0 || PROVIDER_TERMINATION_EXIT_CODES.has(exitCode)) {
+    return null;
+  }
+  const tail = typeof rawOutput === 'string' ? rawOutput.slice(-2000) : '';
+  const haystack = `${errorMessage ?? ''}\n${tail}`;
+  if (AUTH_RE.test(haystack)) return 'auth';
+  if (RATE_LIMIT_RE.test(haystack)) return 'rate_limit';
+  if (SERVER_ERROR_RE.test(haystack)) return 'server_error';
+  return null;
+}
+
+/** True when an invocation errorMessage was built for a fatal provider failure
+ *  (prefixed with one of PROVIDER_FATAL_HEADLINES by interpretCliFailure). Lets
+ *  looping consumers (DAG escalation, merge-fix retry) fail fast instead of
+ *  spawning more agents against a dead provider. */
+export function isFatalProviderFailure(message: string | null | undefined): boolean {
+  if (typeof message !== 'string') return false;
+  return Object.values(PROVIDER_FATAL_HEADLINES).some((headline) => message.startsWith(headline));
+}
