@@ -19,12 +19,17 @@ export const CONFIG_KEYS = {
   SMTP_FROM: 'config:email:from',
   SMTP_FROM_NAME: 'config:email:fromName',
 
-  WORKER_CONCURRENCY: 'config:worker:concurrency',
-  // Max CLI/agent invocations that run in parallel: bounds the cli-exec queue
-  // concurrency AND the in-process fan-out limiter (e.g. DAG coders, onboarding
-  // fan-outs). User-tunable per host capacity (>= 1; no upper limit — some
-  // machines handle 10+).
+  // Max CLI/agent invocations that run in parallel GLOBALLY: bounds the cli-exec
+  // queue concurrency AND the in-process fan-out limiter (e.g. DAG coders,
+  // onboarding fan-outs). User-tunable per host capacity (>= 1; no upper limit —
+  // some machines handle 10+).
   MAX_PARALLEL_AGENTS: 'config:worker:maxParallelAgents',
+  // Per-task cap: max CLI/agent invocations a SINGLE task may run at once. Bounds
+  // one task's share of the global pool (above) so a task's fan-out can't seize
+  // every slot. Enforced by deferring a task's over-cap jobs at pickup. >= 1;
+  // only binds when set below MAX_PARALLEL_AGENTS. Replaces the unused
+  // WORKER_CONCURRENCY scaffold key.
+  MAX_PARALLEL_AGENTS_PER_TASK: 'config:worker:maxParallelAgentsPerTask',
   // Minimum CLI-invocation timeout (ms) for Ollama providers. A CLI invocation
   // wraps a whole multi-turn agentic session, and local inference on weak
   // hardware can take many minutes per turn; this floors the per-step timeout so
@@ -92,8 +97,8 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.SMTP_PORT]: '1025',
   [CONFIG_KEYS.SMTP_FROM]: 'no-reply@haive.local',
   [CONFIG_KEYS.SMTP_FROM_NAME]: 'Haive',
-  [CONFIG_KEYS.WORKER_CONCURRENCY]: '5',
   [CONFIG_KEYS.MAX_PARALLEL_AGENTS]: '3',
+  [CONFIG_KEYS.MAX_PARALLEL_AGENTS_PER_TASK]: '5',
   [CONFIG_KEYS.OLLAMA_CLI_TIMEOUT_MS]: '7200000',
   [CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS]: 'false',
   [CONFIG_KEYS.MODEL_HEALTH_CHECK_ENABLED]: 'true',

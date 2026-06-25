@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { Worker, type Job } from 'bullmq';
-import { eq } from 'drizzle-orm';
+import { DelayedError, Worker, type Job } from 'bullmq';
+import { and, eq, isNotNull, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
@@ -585,6 +585,65 @@ async function handleProvisionOllamaModelJob(
   return provisionOllamaProvider(db, provider);
 }
 
+/** How long to defer a job that hit its task's agent cap before BullMQ retries it. */
+const TASK_AGENT_CAP_DEFER_MS = 4000;
+
+/** Per-task agent cap, enforced at job pickup. Counts the task's currently-running
+ *  CLI invocations (started, not ended/superseded) from the DB; if at/over the
+ *  admin MAX_PARALLEL_AGENTS_PER_TASK cap, move this job back to delayed so its
+ *  slot frees for other tasks/users, then throw DelayedError so BullMQ treats it
+ *  as deferred (not failed) and redelivers it later. Fail-open: any error, a
+ *  missing worker token, or the step_summary helper lets the job run rather than
+ *  block. The DB count is authoritative (no counter to leak); ended_at is set on
+ *  every terminal outcome, so a finished agent stops counting against the cap. */
+async function enforceTaskAgentCap(
+  db: Database,
+  payload: CliExecJobPayload,
+  job: Job<CliExecQueuePayload>,
+  token: string | undefined,
+): Promise<void> {
+  if (payload.purpose === 'step_summary' || !token) return;
+  let cap: number;
+  try {
+    cap = Math.max(
+      1,
+      Math.floor(await configService.getNumber(CONFIG_KEYS.MAX_PARALLEL_AGENTS_PER_TASK, 5)),
+    );
+  } catch {
+    return; // config unavailable — don't block the job
+  }
+  let running: number;
+  try {
+    const rows = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(schema.cliInvocations)
+      .where(
+        and(
+          eq(schema.cliInvocations.taskId, payload.taskId),
+          isNotNull(schema.cliInvocations.startedAt),
+          isNull(schema.cliInvocations.endedAt),
+          isNull(schema.cliInvocations.supersededAt),
+        ),
+      );
+    running = rows[0]?.n ?? 0;
+  } catch (err) {
+    log.warn({ err, taskId: payload.taskId }, 'per-task cap count failed; allowing job');
+    return;
+  }
+  if (running < cap) return;
+  try {
+    await job.moveToDelayed(Date.now() + TASK_AGENT_CAP_DEFER_MS, token);
+  } catch (err) {
+    log.warn({ err, taskId: payload.taskId }, 'per-task cap defer failed; allowing job');
+    return;
+  }
+  log.debug(
+    { taskId: payload.taskId, invocationId: payload.invocationId, running, cap },
+    'per-task agent cap reached; deferring invocation',
+  );
+  throw new DelayedError();
+}
+
 export async function startCliExecWorker(
   deps: CliExecDeps = defaultDeps,
 ): Promise<
@@ -619,10 +678,15 @@ export async function startCliExecWorker(
     | void
   >(
     QUEUE_NAMES.CLI_EXEC,
-    async (job: Job<CliExecQueuePayload>) => {
+    async (job: Job<CliExecQueuePayload>, token?: string) => {
       const db = getDb();
       if (job.name === CLI_EXEC_JOB_NAMES.INVOKE) {
-        await handleCliExecJob(db, job.data as CliExecJobPayload, deps);
+        const payload = job.data as CliExecJobPayload;
+        // Per-task cap: if this task already runs its max parallel agents, defer
+        // the job (freeing the slot for others) and let BullMQ redeliver it.
+        // Throws DelayedError on defer; no-op when under the cap.
+        await enforceTaskAgentCap(db, payload, job, token);
+        await handleCliExecJob(db, payload, deps);
         return;
       }
       if (job.name === CLI_EXEC_JOB_NAMES.PROBE) {

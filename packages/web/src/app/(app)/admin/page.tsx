@@ -33,22 +33,29 @@ export default function AdminPage() {
   const [savingSteering, setSavingSteering] = useState(false);
   const [fairEnabled, setFairEnabled] = useState<boolean | null>(null);
   const [savingFair, setSavingFair] = useState(false);
+  const [maxPerTask, setMaxPerTask] = useState<number | null>(null);
+  const [maxPerTaskInput, setMaxPerTaskInput] = useState('');
+  const [savingPerTask, setSavingPerTask] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [usersData, healthData, concurrencyData, steeringData, fairData] = await Promise.all([
-        api.get<{ users: AdminUser[] }>('/admin/users'),
-        api.get<AdminHealthResponse>('/admin/health'),
-        api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
-        api.get<{ enabled: boolean }>('/admin/config/steering'),
-        api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
-      ]);
+      const [usersData, healthData, concurrencyData, steeringData, fairData, perTaskData] =
+        await Promise.all([
+          api.get<{ users: AdminUser[] }>('/admin/users'),
+          api.get<AdminHealthResponse>('/admin/health'),
+          api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
+          api.get<{ enabled: boolean }>('/admin/config/steering'),
+          api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
+          api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
+        ]);
       setUsers(usersData.users);
       setHealth(healthData);
       setMaxParallel(concurrencyData.maxParallelAgents);
       setMaxParallelInput(String(concurrencyData.maxParallelAgents));
       setSteeringEnabled(steeringData.enabled);
       setFairEnabled(fairData.enabled);
+      setMaxPerTask(perTaskData.maxAgentsPerTask);
+      setMaxPerTaskInput(String(perTaskData.maxAgentsPerTask));
       setError(null);
     } catch (err) {
       const e = err as { status?: number; message?: string };
@@ -111,6 +118,28 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update concurrency');
     } finally {
       setSavingConcurrency(false);
+    }
+  }
+
+  async function savePerTask() {
+    const value = Number.parseInt(maxPerTaskInput, 10);
+    if (!Number.isInteger(value) || value < 1) {
+      setError('Max agents per task must be an integer of at least 1.');
+      return;
+    }
+    setSavingPerTask(true);
+    try {
+      const result = await api.put<{ maxAgentsPerTask: number }>(
+        '/admin/config/max-agents-per-task',
+        { maxAgentsPerTask: value },
+      );
+      setMaxPerTask(result.maxAgentsPerTask);
+      setMaxPerTaskInput(String(result.maxAgentsPerTask));
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update per-task cap');
+    } finally {
+      setSavingPerTask(false);
     }
   }
 
@@ -256,6 +285,40 @@ export default function AdminPage() {
               onClick={() => void saveConcurrency()}
             >
               {savingConcurrency ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {maxPerTask !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Per-task agent cap</CardTitle>
+            <CardDescription>
+              Max CLI/agent invocations a single task may run at once. Bounds one task&apos;s share
+              of the global pool above, so one task&apos;s fan-out can&apos;t seize every slot. Must
+              be ≥ 1; only binds when set below the global max. Applies within ~30s; persists across
+              restarts.
+            </CardDescription>
+          </CardHeader>
+          <div className="flex items-end gap-2">
+            <label className="flex flex-col gap-1 text-xs text-neutral-400">
+              Max agents per task
+              <input
+                type="number"
+                min={1}
+                value={maxPerTaskInput}
+                onChange={(e) => setMaxPerTaskInput(e.target.value)}
+                className="w-24 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+              />
+            </label>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={savingPerTask || maxPerTaskInput === String(maxPerTask)}
+              onClick={() => void savePerTask()}
+            >
+              {savingPerTask ? 'Saving...' : 'Save'}
             </Button>
           </div>
         </Card>

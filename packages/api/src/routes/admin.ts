@@ -253,3 +253,24 @@ adminRoutes.put('/config/fair-scheduling', async (c) => {
   log.info({ enabled }, 'fair scheduling switch updated');
   return c.json({ enabled });
 });
+
+const maxAgentsPerTaskSchema = z.object({
+  // Floor of 1; no upper limit. Caps how many CLI/agent invocations a single task
+  // may run at once (read per job pickup within the ~30s config cache).
+  maxAgentsPerTask: z.number().int().min(1),
+});
+
+adminRoutes.get('/config/max-agents-per-task', async (c) => {
+  const maxAgentsPerTask = await configService.getNumber(
+    CONFIG_KEYS.MAX_PARALLEL_AGENTS_PER_TASK,
+    5,
+  );
+  return c.json({ maxAgentsPerTask });
+});
+
+adminRoutes.put('/config/max-agents-per-task', async (c) => {
+  const { maxAgentsPerTask } = maxAgentsPerTaskSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.MAX_PARALLEL_AGENTS_PER_TASK, String(maxAgentsPerTask));
+  log.info({ maxAgentsPerTask }, 'max agents per task updated');
+  return c.json({ maxAgentsPerTask });
+});
