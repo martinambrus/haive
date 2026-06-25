@@ -36,6 +36,10 @@ export function createStreamJsonCollector(
    *  its turn — keying on getResult()!==null would miss non-success results and
    *  hang until the SIGKILL timeout. */
   onResult?: () => void,
+  /** Fired once per parsed `user` event that carries a `tool_result` block — the
+   *  observable tool-call boundary at which Claude drains any stdin-queued steer
+   *  messages. The steering tracker uses this to mark pending steers consumed. */
+  onBoundary?: () => void,
 ): StreamJsonCollector {
   let buffer = '';
   let resultText: string | null = null;
@@ -138,6 +142,21 @@ export function createStreamJsonCollector(
             if (desc) onProgress(desc);
           }
         }
+      }
+    }
+
+    // A `user` event carrying a tool_result marks a completed tool call — the
+    // boundary at which Claude merges any stdin-queued steer messages before its
+    // next turn. (Injected steers are NOT echoed verbatim here, so we key on the
+    // boundary, not on matching the steer text.)
+    if (type === 'user' && onBoundary) {
+      const msg = event.message as Record<string, unknown> | undefined;
+      const content = msg?.content as unknown[] | undefined;
+      if (
+        Array.isArray(content) &&
+        content.some((b) => (b as Record<string, unknown> | null)?.type === 'tool_result')
+      ) {
+        onBoundary();
       }
     }
   }

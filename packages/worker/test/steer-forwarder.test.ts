@@ -37,6 +37,33 @@ describe('createSteerForwarder', () => {
     expect(JSON.parse(written.trim()).message.content[0].text).toBe('focus on perf');
   });
 
+  it('parses a JSON {id,text} payload, writes only the text, and reports onWritten', () => {
+    const sub = fakeSubscriber();
+    const w = fakeWritable();
+    const onWritten = vi.fn();
+    const f = createSteerForwarder({ subscriber: sub as never, onWritten });
+    f.captureWritable(w as never);
+    sub.emitMessage(JSON.stringify({ id: 'steer-1', text: 'focus on perf' }));
+    expect(w.write).toHaveBeenCalledTimes(1);
+    const written = w.write.mock.calls[0]![0] as string;
+    // The NDJSON line carries the text, not the {id,text} envelope.
+    expect(JSON.parse(written.trim()).message.content[0].text).toBe('focus on perf');
+    expect(onWritten).toHaveBeenCalledTimes(1);
+    expect(onWritten).toHaveBeenCalledWith({ id: 'steer-1', text: 'focus on perf' });
+  });
+
+  it('falls back to a bare-string payload with an empty id (rolling-restart safety)', () => {
+    const sub = fakeSubscriber();
+    const w = fakeWritable();
+    const onWritten = vi.fn();
+    const f = createSteerForwarder({ subscriber: sub as never, onWritten });
+    f.captureWritable(w as never);
+    sub.emitMessage('legacy bare text');
+    const written = w.write.mock.calls[0]![0] as string;
+    expect(JSON.parse(written.trim()).message.content[0].text).toBe('legacy bare text');
+    expect(onWritten).toHaveBeenCalledWith({ id: '', text: 'legacy bare text' });
+  });
+
   it('drops a steer that arrives after the result latch (one turn per invocation)', () => {
     const sub = fakeSubscriber();
     const w = fakeWritable();

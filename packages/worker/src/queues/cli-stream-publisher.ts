@@ -12,7 +12,7 @@ const STREAM_MAXLEN = 5000;
  *  who opens the Terminal tab after-the-fact still sees the final output. */
 const STREAM_TTL_SECONDS = 600;
 
-export type StreamFrameKind = 'stdout' | 'stderr' | 'text' | 'exit';
+export type StreamFrameKind = 'stdout' | 'stderr' | 'text' | 'exit' | 'steer_consumed';
 
 export function streamKey(invocationId: string): string {
   return `${STREAM_PREFIX}${invocationId}`;
@@ -38,6 +38,32 @@ export async function publishCliChunk(
     );
   } catch (err) {
     log.warn({ err, invocationId }, 'publishCliChunk failed');
+  }
+}
+
+/** Publish a `steer_consumed` frame: the steer with this client id has been
+ *  drained by the model at a tool-call boundary. The viewer ticks the matching
+ *  list row. Skipped for an empty id (legacy bare-string steer with no id —
+ *  nothing the viewer could correlate it to). */
+export async function publishCliSteerConsumed(
+  invocationId: string | null | undefined,
+  steerId: string,
+): Promise<void> {
+  if (!invocationId || !steerId) return;
+  try {
+    await getRedis().xadd(
+      streamKey(invocationId),
+      'MAXLEN',
+      '~',
+      STREAM_MAXLEN,
+      '*',
+      'stream',
+      'steer_consumed',
+      'id',
+      steerId,
+    );
+  } catch (err) {
+    log.warn({ err, invocationId }, 'publishCliSteerConsumed failed');
   }
 }
 

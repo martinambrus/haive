@@ -68,7 +68,7 @@ export function installCliStreamWebSocket(server: Server, opts: CliStreamWsOptio
 }
 
 interface StreamFrameOut {
-  type: 'connected' | 'output' | 'exit' | 'error' | 'pong';
+  type: 'connected' | 'output' | 'exit' | 'error' | 'pong' | 'steer_consumed';
   invocationId?: string;
   /** On the `connected` frame: whether this invocation accepts mid-run steering
    *  (drives the web steer box). */
@@ -77,6 +77,9 @@ interface StreamFrameOut {
   data?: string;
   code?: number;
   message?: string;
+  /** On the `steer_consumed` frame: the client steer id that was just drained at
+   *  a tool-call boundary, so the viewer can tick the matching list row. */
+  id?: string;
 }
 
 async function runStreamSession(
@@ -153,7 +156,7 @@ async function runStreamSession(
         if (frame.type === 'exit') {
           sendFrame(ws, frame);
           sawExit = true;
-        } else if (frame.type === 'output') {
+        } else if (frame.type === 'output' || frame.type === 'steer_consumed') {
           sendFrame(ws, frame);
         }
       }
@@ -189,6 +192,10 @@ function fieldsToFrame(fields: string[]): StreamFrameOut | null {
     if (typeof data === 'string') {
       return { type: 'output', stream, data };
     }
+  }
+  if (stream === 'steer_consumed') {
+    const id = map.get('id');
+    if (typeof id === 'string') return { type: 'steer_consumed', id };
   }
   return null;
 }

@@ -497,8 +497,16 @@ const STEER_TEXT_MAX = 8192;
 taskRoutes.post('/:id/steer-active-cli', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
-  const body = (await c.req.json().catch(() => ({}))) as { text?: unknown; invocationId?: unknown };
+  const body = (await c.req.json().catch(() => ({}))) as {
+    text?: unknown;
+    invocationId?: unknown;
+    steerId?: unknown;
+  };
   const text = typeof body.text === 'string' ? body.text.trim() : '';
+  // Client-generated id, echoed back on the consumed frame so the viewer ticks
+  // the exact list row (correlates by id, not text — so duplicate-text steers
+  // tick the right rows).
+  const steerId = typeof body.steerId === 'string' ? body.steerId : '';
   if (!text) throw new HttpError(400, 'steer text required');
   if (text.length > STEER_TEXT_MAX) {
     throw new HttpError(400, `steer text too long (max ${STEER_TEXT_MAX} chars)`);
@@ -540,7 +548,12 @@ taskRoutes.post('/:id/steer-active-cli', async (c) => {
   }
 
   // Deliver to the worker forwarder (it writes the NDJSON user-message to stdin).
-  await getRedis().publish(`${STEER_IN_CHANNEL_PREFIX}${active.id}`, text);
+  // The channel payload is JSON {id,text}; the forwarder writes only the text and
+  // uses the id to report consumption back to the viewer.
+  await getRedis().publish(
+    `${STEER_IN_CHANNEL_PREFIX}${active.id}`,
+    JSON.stringify({ id: steerId, text }),
+  );
   // Persist as a mineable friction signal (the learning step grounds in these).
   await appendTaskEvent(db, id, active.taskStepId, 'steering.nudge', {
     text,

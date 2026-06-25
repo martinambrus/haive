@@ -22,10 +22,15 @@ import {
   type SpawnOptions,
 } from '../../cli-executor/index.js';
 import { runInSandbox } from '../../sandbox/sandbox-runner.js';
-import { publishCliChunk, wrapStreamCallback } from '../cli-stream-publisher.js';
+import {
+  publishCliChunk,
+  publishCliSteerConsumed,
+  wrapStreamCallback,
+} from '../cli-stream-publisher.js';
 import { log, type CliExecDeps, type ExecutionOutcome } from './_shared.js';
 import { createStreamJsonCollector } from './stream.js';
 import { createSteerForwarder, type SteerForwarder } from './steer-forwarder.js';
+import { createSteerTracker } from './steer-tracker.js';
 import { getRedis } from '../../redis.js';
 import type { Redis } from 'ioredis';
 import {
@@ -298,13 +303,27 @@ export async function executeCliSpec(
   // stdin so the CLI exits after its turn). See steer-forwarder.ts.
   const steerable = mergedSpec.steerable === true && !!invocationId;
   let steer: SteerForwarder | null = null;
+  // Drains the tracker at each tool-call boundary and publishes a consumed frame
+  // per steer. Defined only for a steerable invocation; passed to the collector.
+  let onSteerBoundary: (() => void) | undefined;
   if (steerable && invocationId) {
     const channel = `${STEER_IN_CHANNEL_PREFIX}${invocationId}`;
     // A subscriber connection is mode-locked — duplicate the shared client
     // rather than reuse it (Hole E). Subscribe BEFORE the spawner starts so an
     // instantly-published steer isn't missed.
     const sub: Redis = getRedis().duplicate();
-    steer = createSteerForwarder({ subscriber: sub });
+    // The forwarder records each written steer; the boundary callback (fed to
+    // the collector below) reports them consumed when Claude drains the queue.
+    const tracker = createSteerTracker();
+    steer = createSteerForwarder({
+      subscriber: sub,
+      onWritten: (s) => tracker.recordWritten(s),
+    });
+    onSteerBoundary = () => {
+      for (const s of tracker.drainConsumed()) {
+        void publishCliSteerConsumed(invocationId, s.id);
+      }
+    };
     await sub.subscribe(channel);
   }
 
@@ -312,6 +331,7 @@ export async function executeCliSpec(
     statusCallback,
     onProseText,
     steer ? steer.onResult : undefined,
+    onSteerBoundary,
   );
   const codexCollector =
     outputFormat === 'codex-jsonl' ? createCodexJsonlCollector(onProseText) : null;

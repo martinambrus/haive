@@ -45,11 +45,18 @@ const KEEPALIVE_INTERVAL_MS = 30_000;
 // land in Raw) and may not emit the first parsed `text` frame for a long time,
 // leaving an empty Clean tab looking frozen even though the model is working.
 const RAW_AUTOSWITCH_IDLE_MS = 30_000;
-// The steer notice ("queued — applies at the next tool call") is informational.
-// The worker emits no "steer applied" frame, and this model streams prose as many
-// small `text` frames, so clearing on the next frame would dismiss it before it can
-// be read. Auto-dismiss on a fixed timer instead so it never sticks forever.
-const STEER_NOTICE_TTL_MS = 10_000;
+
+// A steer's lifecycle in the viewer. `sent` = accepted by the API (queued to the
+// CLI's stdin); `consumed` = drained by the model at a tool-call boundary (the
+// worker's steer_consumed frame); `unconsumed` = the run ended before it drained;
+// `error` = the API rejected it (e.g. the turn already finished).
+type SteerStatus = 'sent' | 'consumed' | 'unconsumed' | 'error';
+interface SteerEntry {
+  id: string;
+  text: string;
+  status: SteerStatus;
+  error?: string;
+}
 
 export function CliStreamViewer({
   invocationId,
@@ -80,7 +87,12 @@ export function CliStreamViewer({
   const [steerable, setSteerable] = useState(false);
   const [steerText, setSteerText] = useState('');
   const [steering, setSteering] = useState(false);
-  const [steerNotice, setSteerNotice] = useState<string | null>(null);
+  // Sent steers for this invocation (live-session only — a page reload resets it).
+  // Rows flip to `consumed` on the worker's steer_consumed frame; any still-`sent`
+  // rows flip to `unconsumed` when the run exits.
+  const [steers, setSteers] = useState<SteerEntry[]>([]);
+  const [steerListOpen, setSteerListOpen] = useState(false);
+  const steerListRef = useRef<HTMLDivElement | null>(null);
   const onExitRef = useRef(onExit);
 
   // Tabbed view: Clean (parsed model prose) is the default; Raw is the original
@@ -104,13 +116,17 @@ export function CliStreamViewer({
     onExitRef.current = onExit;
   }, [onExit]);
 
-  // Auto-dismiss the steer notice so it doesn't linger after the steer is applied.
-  // Re-armed each time the notice text changes (a fresh steer resets it at :sendSteer).
+  // Close the steer-list popover on an outside click.
   useEffect(() => {
-    if (!steerNotice) return;
-    const id = setTimeout(() => setSteerNotice(null), STEER_NOTICE_TTL_MS);
-    return () => clearTimeout(id);
-  }, [steerNotice]);
+    if (!steerListOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (steerListRef.current && !steerListRef.current.contains(e.target as Node)) {
+        setSteerListOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [steerListOpen]);
 
   const cancelActiveCli = async () => {
     if (cancelling) return;
@@ -128,19 +144,18 @@ export function CliStreamViewer({
   const sendSteer = async () => {
     const text = steerText.trim();
     if (!text || steering) return;
+    const id = crypto.randomUUID();
     setSteering(true);
-    setSteerNotice(null);
     try {
-      await api.post(`/tasks/${taskId}/steer-active-cli`, { text, invocationId });
+      await api.post(`/tasks/${taskId}/steer-active-cli`, { text, invocationId, steerId: id });
       setSteerText('');
-      setSteerNotice('Steer queued — applies at the next tool call');
+      setSteers((prev) => [...prev, { id, text, status: 'sent' }]);
     } catch (err) {
       const msg = (err as Error).message ?? 'Steer failed';
-      setSteerNotice(
-        /409|not steerable|no active/i.test(msg)
-          ? 'Too late — the run already finished its turn'
-          : msg,
-      );
+      const friendly = /409|not steerable|no active/i.test(msg)
+        ? 'Too late — the run already finished its turn'
+        : msg;
+      setSteers((prev) => [...prev, { id, text, status: 'error', error: friendly }]);
     } finally {
       setSteering(false);
     }
@@ -296,11 +311,30 @@ export function CliStreamViewer({
         case 'exit':
           setState('closed');
           setHasOutput(true);
+          // The run ended — any steer that never reached a tool-call boundary was
+          // never applied. Flip pending rows so they don't hang as "queued".
+          setSteers((prev) =>
+            prev.some((s) => s.status === 'sent')
+              ? prev.map((s) => (s.status === 'sent' ? { ...s, status: 'unconsumed' } : s))
+              : prev,
+          );
           if (typeof parsed.code === 'number') {
             term.writeln(`\r\n\x1b[36m[CLI exited with code ${parsed.code}]\x1b[0m`);
             onExitRef.current?.(parsed.code);
           }
           break;
+        case 'steer_consumed': {
+          // The model drained this steer at a tool-call boundary — tick its row.
+          const consumedId = typeof parsed.id === 'string' ? parsed.id : null;
+          if (consumedId) {
+            setSteers((prev) =>
+              prev.map((s) =>
+                s.id === consumedId && s.status === 'sent' ? { ...s, status: 'consumed' } : s,
+              ),
+            );
+          }
+          break;
+        }
         case 'error':
           setState('error');
           setErrorMsg(typeof parsed.message === 'string' ? parsed.message : 'stream error');
@@ -418,6 +452,17 @@ export function CliStreamViewer({
   const showTabs = cleanSupported;
   const rawHidden = showTabs && tab !== 'raw';
 
+  // Compact inline status driven by the most recent steer: shows the error or the
+  // "queued" hint, and clears the moment that steer is consumed. The full per-steer
+  // history lives behind the list popover.
+  const latestSteer = steers.length > 0 ? steers[steers.length - 1]! : null;
+  const steerInline =
+    latestSteer?.status === 'error'
+      ? { text: latestSteer.error ?? 'Steer failed', tone: 'error' as const }
+      : latestSteer?.status === 'sent'
+        ? { text: 'Steer queued — applies at the next tool call', tone: 'pending' as const }
+        : null;
+
   return (
     <div className={`flex flex-col gap-2 ${fill ? 'h-full min-h-0' : ''}`}>
       <div className="flex items-center justify-between">
@@ -431,7 +476,11 @@ export function CliStreamViewer({
           )}
           {errorMsg && <span className="text-red-400">{errorMsg}</span>}
           {cancelError && <span className="text-red-400">cancel: {cancelError}</span>}
-          {steerNotice && <span className="text-indigo-300">{steerNotice}</span>}
+          {steerInline && (
+            <span className={steerInline.tone === 'error' ? 'text-red-400' : 'text-indigo-300'}>
+              {steerInline.text}
+            </span>
+          )}
         </div>
         {!isReplay && (
           <div className="flex items-center gap-3 text-xs text-neutral-400">
@@ -458,6 +507,22 @@ export function CliStreamViewer({
                   {steering ? 'Sending…' : 'Steer'}
                 </button>
               </form>
+            )}
+            {steers.length > 0 && (
+              <div className="relative" ref={steerListRef}>
+                <button
+                  type="button"
+                  onClick={() => setSteerListOpen((v) => !v)}
+                  className="flex items-center gap-1 rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800"
+                  title="Sent steers"
+                  aria-label={`Sent steers (${steers.length})`}
+                  aria-expanded={steerListOpen}
+                >
+                  <SteerIcon />
+                  <span className="tabular-nums">{steers.length}</span>
+                </button>
+                {steerListOpen && <SteerList steers={steers} />}
+              </div>
             )}
             <span>Read-only — use Cancel to stop the running CLI</span>
             <button
@@ -652,5 +717,81 @@ function StatusBadge({ state }: { state: ConnectionState }) {
     <span className={`rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wider ${color}`}>
       {state}
     </span>
+  );
+}
+
+// Small message-bubble glyph for the steer-list toggle (inline SVG, no icon dep).
+function SteerIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+// One-glyph status indicator for a steer-list row. Unicode symbols (not emoji).
+function SteerStatusIcon({ status }: { status: SteerStatus }) {
+  switch (status) {
+    case 'consumed':
+      return (
+        <span className="mt-0.5 text-green-400" title="Applied at a tool-call boundary">
+          ✓
+        </span>
+      );
+    case 'sent':
+      return (
+        <span
+          className="mt-0.5 animate-pulse text-amber-400"
+          title="Queued — applies at the next tool call"
+        >
+          •
+        </span>
+      );
+    case 'unconsumed':
+      return (
+        <span className="mt-0.5 text-neutral-500" title="The run ended before this was applied">
+          —
+        </span>
+      );
+    case 'error':
+      return (
+        <span
+          className="mt-0.5 text-red-400"
+          title="Rejected — the run had already finished its turn"
+        >
+          ✗
+        </span>
+      );
+  }
+}
+
+// Popover listing the steers sent this session, newest last, each with its status
+// glyph. Rendered inside the toggle's relative wrapper so an inside click (handled
+// by the parent's click-outside effect) keeps it open.
+function SteerList({ steers }: { steers: SteerEntry[] }) {
+  return (
+    <div className="absolute right-0 top-full z-20 mt-1 max-h-64 w-72 overflow-auto rounded border border-neutral-700 bg-neutral-900 p-2 shadow-lg">
+      <div className="mb-1 px-1 text-[10px] uppercase tracking-wider text-neutral-500">Steers</div>
+      <ul className="flex flex-col gap-1">
+        {steers.map((s) => (
+          <li key={s.id} className="flex items-start gap-2 px-1 py-0.5 text-xs">
+            <SteerStatusIcon status={s.status} />
+            <span className="min-w-0 flex-1 break-words text-neutral-200" title={s.error ?? s.text}>
+              {s.text}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
