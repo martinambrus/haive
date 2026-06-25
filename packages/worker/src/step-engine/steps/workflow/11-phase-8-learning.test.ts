@@ -121,7 +121,6 @@ describe('writeInvestigation', () => {
         ws,
         baseInv,
         'Fix null deref',
-        '',
         '2026-01-01T00:00:00.000Z',
         'checkout',
         ['acme', 'globex'],
@@ -143,7 +142,6 @@ describe('writeInvestigation', () => {
         ws,
         { ...baseInv, symptoms: '' },
         'Task',
-        '',
         '2026-01-01T00:00:00.000Z',
         null,
         [],
@@ -155,6 +153,46 @@ describe('writeInvestigation', () => {
     } finally {
       await rm(ws, { recursive: true, force: true });
     }
+  });
+});
+
+describe('phase8LearningStep apply refine/accept routing', () => {
+  it('records a refine instruction (trimmed) and returns refineRequested without writing', async () => {
+    const events: { eventType: string; payload: { instruction?: string } }[] = [];
+    const ctx = {
+      db: {
+        insert: () => ({
+          values: async (v: { eventType: string; payload: { instruction?: string } }) => {
+            events.push(v);
+          },
+        }),
+      },
+      taskId: 't1',
+      taskStepId: 's1',
+      userId: 'u1',
+      logger: { info: () => {}, warn: () => {} },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const out = await phase8LearningStep.apply(ctx, {
+      formValues: { instruction: '  limit the DDEV article to v1.25.2  ' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out.refineRequested).toBe(true);
+    expect(out.written).toEqual([]);
+    expect(out.promotedCandidates).toEqual([]);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.eventType).toBe('learning.refine');
+    expect(events[0]!.payload.instruction).toBe('limit the DDEV article to v1.25.2');
+  });
+
+  it('reviseLoop self-targets step 11 on refineRequested, else finalizes', () => {
+    const evaluate = phase8LearningStep.reviseLoop!.evaluate;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(evaluate({ refineRequested: true } as any)).toEqual({
+      targetStepId: '11-phase-8-learning',
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(evaluate({ refineRequested: false } as any)).toBeNull();
   });
 });
 
@@ -305,7 +343,7 @@ describe('applyLearningOps + readExistingLearnings', () => {
         ],
       })!;
       const plan = planLearningReconciliation(entries, existing);
-      const res = await applyLearningOps(ws, plan, '');
+      const res = await applyLearningOps(ws, plan);
 
       // collision-guarded insert wrote a new file and left the original untouched
       expect(await readFile(path.join(dir, 'dup.md'), 'utf8')).toBe('# Dup\n\nORIGINAL');

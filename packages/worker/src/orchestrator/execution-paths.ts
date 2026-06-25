@@ -95,6 +95,7 @@ export const PATH_REQUIRED_TARGETS: Record<string, string> = {
   '09-gate-2-verify-approval': '07-phase-2-implement', // restartLoop
   '06-gate-1-spec-approval': '04-phase-0b-pre-planning', // reviseLoop
   '03c-business-requirements-review': '03b-business-requirements', // reviseLoop
+  '11-phase-8-learning': '11-phase-8-learning', // reviseLoop (self-target: refine drafts)
 };
 
 /** Whether a 'workflow' step id runs under the given execution path. full_workflow

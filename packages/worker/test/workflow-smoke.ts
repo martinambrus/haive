@@ -304,7 +304,7 @@ async function main(): Promise<void> {
         commitMessage: '',
       },
       '11-phase-8-learning': {
-        reviewerNote: 'Smoke test: stub pipeline end-to-end.',
+        instruction: '', // blank = accept the drafts (a non-blank instruction would revise-loop)
         writeFiles: true,
       },
       // KB-commit gate (surfaces because the learning phase wrote files). Under

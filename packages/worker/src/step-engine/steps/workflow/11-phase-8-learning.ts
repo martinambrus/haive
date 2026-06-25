@@ -2,7 +2,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
-import { eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -20,6 +20,11 @@ import { loadRepoStackAnchors, techAnchorFacets } from '../_repo-stack.js';
 import { buildTaskHistoryDigest, type TaskHistoryDigest } from './_task-history-digest.js';
 import { KNOWLEDGE_DIFF_ARTIFACT_NAME, buildKnowledgeDiffArtifact } from './_knowledge-diff.js';
 import type { CommitDiffFile } from './_commit-diff.js';
+import {
+  loadOutstandingLearningInstruction,
+  recordLearningAccepted,
+  recordLearningInstruction,
+} from './_learning-feedback.js';
 
 interface LearningDetect {
   taskTitle: string;
@@ -48,6 +53,13 @@ interface LearningDetect {
   /** Existing active global house-standard articles matching this repo's stack —
    *  shown to the agent so it can author an UPDATE (full merged body) vs a new one. */
   existingGlobalArticles: { title: string; body: string }[];
+  /** A reviewer's outstanding refinement instruction (from the prior form submit),
+   *  or '' on a first/accepted pass. When set, buildPrompt steers the agent with it
+   *  and the form re-parks the regenerated drafts for review. */
+  refineInstruction: string;
+  /** The prior agent run's raw output (its drafts) on a refine round, so buildPrompt
+   *  can show "revise THESE". null on a first pass. */
+  priorDrafts: string | null;
   /** Stable `.haive/` path the form's knowledge-diff viewer fetches; the file is
    *  written by prepareForm post-llm. null when the worktree has no git repo. */
   knowledgeDiffArtifactPath: string | null;
@@ -104,6 +116,9 @@ interface LearningApply {
   kbReverted: boolean;
   /** `global-kb:<id>` refs for the house-standard candidates the user promoted. */
   promotedCandidates: string[];
+  /** True when the reviewer submitted a non-blank instruction: apply wrote nothing
+   *  and the reviseLoop re-enters this step to regenerate the drafts. */
+  refineRequested: boolean;
   source: 'llm' | 'stub';
 }
 
@@ -515,11 +530,9 @@ export function learningOpsToDiffFiles(plan: PlannedLearningOp[]): CommitDiffFil
 export async function applyLearningOps(
   worktree: string,
   plan: PlannedLearningOp[],
-  reviewerNote: string,
 ): Promise<{ written: string[]; deleted: string[] }> {
   const dir = path.join(worktree, '.claude', 'learnings');
   await mkdir(dir, { recursive: true });
-  const note = reviewerNote.trim() ? `\n\n## Reviewer note\n${reviewerNote.trim()}\n` : '';
   const written: string[] = [];
   const deleted: string[] = [];
   for (const p of plan) {
@@ -528,7 +541,7 @@ export async function applyLearningOps(
       await rm(file, { force: true });
       deleted.push(path.relative(worktree, file));
     } else {
-      await writeFile(file, `${p.newBody}\n${note}`, 'utf8');
+      await writeFile(file, `${p.newBody}\n`, 'utf8');
       written.push(path.relative(worktree, file));
     }
   }
@@ -542,7 +555,6 @@ export async function writeInvestigation(
   workspace: string,
   inv: Investigation,
   taskTitle: string,
-  reviewerNote: string,
   nowIso: string,
   feature: string | null,
   affectedClients: string[],
@@ -550,7 +562,6 @@ export async function writeInvestigation(
   const dir = path.join(workspace, '.claude', 'knowledge_base', 'investigations');
   await mkdir(dir, { recursive: true });
   const file = path.join(dir, `${slugify(inv.title)}.md`);
-  const note = reviewerNote.trim() ? `\n## Reviewer note\n${reviewerNote.trim()}\n` : '';
   const content = [
     '---',
     `title: ${inv.title}`,
@@ -569,7 +580,6 @@ export async function writeInvestigation(
     '',
     '## Lesson',
     inv.lesson || '(none recorded)',
-    note,
   ].join('\n');
   await writeFile(file, content, 'utf8');
   return path.relative(workspace, file);
@@ -617,6 +627,21 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           repoStack.anchors.database,
         ])
       : [];
+    // Self-target revise channel: a reviewer's outstanding instruction (recorded by a
+    // prior apply) steers this re-run; pair it with the prior run's drafts so the agent
+    // revises THOSE rather than re-deriving from scratch. The prior cli_invocation row
+    // survives the revise reset (superseded, not deleted) under the stable step row id.
+    const refineInstruction = await loadOutstandingLearningInstruction(ctx);
+    const priorDrafts = refineInstruction
+      ? ((
+          await ctx.db
+            .select({ rawOutput: schema.cliInvocations.rawOutput })
+            .from(schema.cliInvocations)
+            .where(eq(schema.cliInvocations.taskStepId, ctx.taskStepId))
+            .orderBy(desc(schema.cliInvocations.createdAt))
+            .limit(1)
+        )[0]?.rawOutput ?? null)
+      : null;
     return {
       taskTitle: meta.title,
       taskDescription: meta.description,
@@ -632,6 +657,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       existingLearnings,
       repoStack,
       existingGlobalArticles,
+      refineInstruction,
+      priorDrafts,
       worktreePath,
       knowledgeDiffArtifactPath: hasGit
         ? path.join(worktreePath, '.haive', KNOWLEDGE_DIFF_ARTIFACT_NAME)
@@ -717,6 +744,19 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         detected.historyDigest.text,
         '',
         'Ground EVERY learning, the investigation, and the KB sync in the SPECIFIC diagnoses, findings, human reactions, and any user steering (mid-run course-corrections) above: quote the real errors/symptoms, name what was planned or implemented wrong and how it was resolved, and fold the human reviewer reactions and steering directives in. A mid-run steer marks a spot where the agent drifted — capture the durable lesson (or runbook step) that would have avoided the need to steer. Do NOT write generic advice. For a bug, the investigation symptoms + root cause must cite the actual diagnosis; the KB sync should reflect what the reviewers and the human actually flagged.',
+        detected.refineInstruction
+          ? [
+              '',
+              '=== REVISION REQUESTED — this is a RE-RUN of the learning capture ===',
+              'A human reviewed your PRIOR drafts (shown below) and asks for a specific change. This OVERRIDES the defaults above wherever they conflict.',
+              `REVIEWER INSTRUCTION: ${detected.refineInstruction}`,
+              'Apply it to whatever artifact it concerns — a learning entry, the investigation, a `.claude/knowledge_base` file (edit it on disk with your tools), or a global-candidate body (e.g. scope an article to a specific version). Treat a clear command as a directive; if the reviewer gives literal text to add, fold it into the most relevant artifact. Re-emit the FULL JSON and leave every draft the instruction does NOT touch byte-for-byte as below.',
+              detected.priorDrafts ? '--- YOUR PRIOR DRAFTS (revise these) ---' : '',
+              detected.priorDrafts ?? '',
+            ]
+              .filter(Boolean)
+              .join('\n')
+          : '',
       ]
         .filter(Boolean)
         .join('\n');
@@ -823,7 +863,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         kbChanged
           ? 'Feature KB sync — the agent updated the knowledge base; review the changes below.'
           : '',
-        'Review the drafts below; approve to write them, add a note to refine, or untick to skip.',
+        'Review the drafts below. Leave the instruction box blank and submit to write them (untick anything to skip); or type an instruction to have the agent revise the drafts and show them again.',
       ]
         .filter(Boolean)
         .join('\n'),
@@ -882,13 +922,21 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           : []),
         {
           type: 'textarea',
-          id: 'reviewerNote',
-          label: 'Comments / refinements (optional, appended to what is written)',
+          id: 'instruction',
+          label:
+            "Instructions to the agent (optional) — refine or correct the drafts (e.g. 'limit the DDEV article to v1.25.2', 'rewrite the X learning to …'). Leave blank to accept the drafts as drafted.",
           rows: 3,
         },
       ],
       submitLabel: 'Capture learnings',
     };
+  },
+
+  reviseLoop: {
+    // A non-blank instruction on the form re-enters THIS step (self-target) to
+    // regenerate the drafts with the reviewer's directive; a blank submit accepts
+    // and finalizes. Uncapped + human-gated — the form re-parks every cycle.
+    evaluate: (out) => (out.refineRequested ? { targetStepId: '11-phase-8-learning' } : null),
   },
 
   async apply(ctx, args): Promise<LearningApply> {
@@ -898,9 +946,31 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       writeInvestigation?: boolean;
       promoteInvestigationGlobal?: boolean;
       acceptGlobalCandidates?: string[];
-      reviewerNote?: string;
+      instruction?: string;
     };
-    const reviewerNote = values.reviewerNote ?? '';
+    const instruction = (values.instruction ?? '').trim();
+    // A non-blank instruction is a STEER, not content: record it and bounce back into
+    // this step (reviseLoop self-target) to regenerate the drafts honoring it. Nothing
+    // is written this pass — writes happen only on a blank "accept" submit.
+    if (instruction) {
+      await recordLearningInstruction(ctx, instruction);
+      ctx.logger.info({ instruction }, 'learning refinement requested; re-running with directive');
+      return {
+        entries: [],
+        written: [],
+        deleted: [],
+        investigationWritten: null,
+        kbSync: null,
+        kbReverted: false,
+        promotedCandidates: [],
+        refineRequested: true,
+        source: 'llm',
+      };
+    }
+    // Accept (blank submit): close the refine channel so a later unrelated run starts
+    // clean, then write the drafts the reviewer approved.
+    await recordLearningAccepted(ctx);
+
     // Write into the worktree (the feature branch), NOT the main checkout. ctx.repoPath
     // is the repo root; 01-worktree-setup created the worktree the rest of the pipeline
     // (07/10/11a/12) operates in, so KB/learnings must land there to be on the branch,
@@ -930,7 +1000,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     let written: string[] = [];
     let deleted: string[] = [];
     if (values.writeFiles !== false) {
-      const res = await applyLearningOps(worktreePath, plan, reviewerNote);
+      const res = await applyLearningOps(worktreePath, plan);
       written = res.written;
       deleted = res.deleted;
     }
@@ -966,7 +1036,6 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           worktreePath,
           investigation,
           args.detected.taskTitle,
-          reviewerNote,
           new Date().toISOString(),
           args.detected.feature,
           args.detected.affectedClients,
@@ -1025,6 +1094,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       kbSync,
       kbReverted,
       promotedCandidates,
+      refineRequested: false,
       source,
     };
   },
