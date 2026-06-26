@@ -9,6 +9,7 @@ import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import { apiWebSocketUrl } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
+import { stripDel } from '@/lib/terminal-sanitize';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
 
@@ -166,7 +167,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
           setTimeout(() => handleResize(), 1000);
           break;
         case 'output':
-          if (typeof parsed.data === 'string') term.write(parsed.data);
+          if (typeof parsed.data === 'string') term.write(stripDel(parsed.data));
           break;
         case 'exit':
           setState('closed');

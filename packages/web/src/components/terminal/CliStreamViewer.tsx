@@ -8,6 +8,7 @@ import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import { api, apiWebSocketUrl } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
+import { stripDel } from '@/lib/terminal-sanitize';
 import { MarkdownView, looksLikeMarkdown } from '@/components/markdown/markdown-view';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
@@ -256,7 +257,7 @@ export function CliStreamViewer({
     // into the terminal and annotate the exit code. No keepalive, no cancel.
     if (isReplay) {
       setState('closed');
-      if (staticOutput) term.write(staticOutput);
+      if (staticOutput) term.write(stripDel(staticOutput));
       if (typeof staticExitCode === 'number') {
         term.writeln(`\r\n\x1b[36m[CLI exited with code ${staticExitCode}]\x1b[0m`);
       }
@@ -314,7 +315,7 @@ export function CliStreamViewer({
                 });
               }
             } else {
-              term.write(parsed.data);
+              term.write(stripDel(parsed.data));
               if (parsed.data.length > 0) setHasOutput(true);
             }
           }

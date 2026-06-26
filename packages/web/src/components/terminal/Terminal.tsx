@@ -13,6 +13,7 @@ import {
   type TerminalSessionSummary,
 } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
+import { stripDel } from '@/lib/terminal-sanitize';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
 
@@ -200,7 +201,7 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
         case 'output':
           if (typeof parsed.data === 'string') {
             const wasEmpty = !firstOutputSeen;
-            term.write(parsed.data);
+            term.write(stripDel(parsed.data));
             if (wasEmpty) {
               firstOutputSeen = true;
               requestAnimationFrame(() => handleResize());
