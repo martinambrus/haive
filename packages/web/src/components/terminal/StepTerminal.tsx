@@ -65,16 +65,21 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
     void reload();
   }, [expanded, reload]);
 
-  // Light polling while any invocation is active so a fresh row appears
-  // without manual refresh. Stops once nothing is active.
+  // Light polling so a fresh invocation row appears without manual refresh.
+  // Poll while the STEP is active (autoExpand), not merely while a known
+  // invocation is active. A multi-CLI step (e.g. 07b validate → implement-fix)
+  // has a gap between two runs where the fetched list shows zero active; keying
+  // the stop on anyActive alone cleared the interval in that gap, so the next
+  // run's terminal never appeared until a manual page refresh. Keep polling
+  // until the step goes idle AND nothing is still streaming.
   useEffect(() => {
     if (!expanded) return;
     if (!invocations) return;
     const anyActive = invocations.some((i) => i.isActive);
-    if (!anyActive) return;
+    if (!autoExpand && !anyActive) return;
     const t = setInterval(() => void reload(), 2000);
     return () => clearInterval(t);
-  }, [expanded, invocations, reload]);
+  }, [expanded, invocations, autoExpand, reload]);
 
   // Scroll the newest RUNNING run into view whenever the set of running runs gains
   // a member — a fresh run starts OR a queued one finally gets a slot (its
