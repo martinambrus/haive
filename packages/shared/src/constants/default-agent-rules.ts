@@ -88,7 +88,7 @@ The post-2.1.110 harness regression causes jump-to-conclusion behaviour: hypothe
 
 ---
 
-- The \`ddev\` CLI is not on PATH inside your sandbox. Do not run \`ddev\` or spend time checking whether it is available.
+- The \`ddev\` CLI is not on PATH inside your sandbox, and you cannot start, restart, or otherwise run DDEV. Do not run \`ddev\` or spend time checking whether it is available. If a fix needs a DDEV environment change (\`php_version\`, the database type/version, a \`php/*.ini\`, \`web-build/Dockerfile\`, webserver config, the docroot, or any other authored file under \`.ddev/\`), edit those files directly and validate the change by reading the config only — you cannot apply or test it yourself. A later automatic step restarts DDEV to apply your \`.ddev/\` edits before the verification step runs, so make the edit, hand it off, and let that step apply it and check whether it worked.
 
 - Only make changes that are directly requested. Keep solutions simple and focused.
 
@@ -146,5 +146,6 @@ export const KNOWN_DEFAULT_RULES_HASHES: ReadonlySet<string> = new Set([
   '25441d9c27aa9c2304fe86d91518d1677e8090aeea5aa333f682904865dc231a', // per-CLI default (4c6351b)
   '34092f7878ef9461fbe0ec4468ca0e90fcb472c65d989fa3ddda2a1489799302', // expanded default (04495d1)
   '0cf013f7aa212445b94d38dde2f5efcb343b5a4d72e847cd47f75db6d1d73c47', // + match-the-invariant (0e3ae82)
-  'c8962d1ee239a4550a6310fb94ed5c709f2235a356b74be93cff3d350bd44484', // current: + ddev-not-on-PATH rule
+  'c8962d1ee239a4550a6310fb94ed5c709f2235a356b74be93cff3d350bd44484', // + ddev-not-on-PATH rule
+  '3a052a7ef7d4d74918fefca987471e71ce340482925f5c974d37aec0a2b58e6f', // current: + ddev change-in-code + auto-restart workflow
 ]);
