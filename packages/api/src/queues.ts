@@ -12,6 +12,8 @@ let bundleQueue: Queue | null = null;
 let globalKbSyncQueue: Queue | null = null;
 let runtimeEnsureQueue: Queue | null = null;
 let runtimeEnsureQueueEvents: QueueEvents | null = null;
+let ideEnsureQueue: Queue | null = null;
+let ideEnsureQueueEvents: QueueEvents | null = null;
 
 export function getRepoQueue(): Queue {
   if (!repoQueue) {
@@ -74,6 +76,25 @@ export function getRuntimeEnsureQueueEvents(): QueueEvents {
   return runtimeEnsureQueueEvents;
 }
 
+/** Queue + QueueEvents for the Editor-tab "ensure IDE" handshake: the api enqueues
+ *  an ensure job when the user opens the editor and awaits its result before
+ *  proxying to the code-server container. */
+export function getIdeEnsureQueue(): Queue {
+  if (!ideEnsureQueue) {
+    ideEnsureQueue = new Queue(QUEUE_NAMES.IDE_ENSURE, { connection: getBullRedis() });
+  }
+  return ideEnsureQueue;
+}
+
+export function getIdeEnsureQueueEvents(): QueueEvents {
+  if (!ideEnsureQueueEvents) {
+    ideEnsureQueueEvents = new QueueEvents(QUEUE_NAMES.IDE_ENSURE, {
+      connection: getBullRedis(),
+    });
+  }
+  return ideEnsureQueueEvents;
+}
+
 export async function closeQueues(): Promise<void> {
   await Promise.allSettled([
     repoQueue?.close(),
@@ -84,6 +105,8 @@ export async function closeQueues(): Promise<void> {
     globalKbSyncQueue?.close(),
     runtimeEnsureQueue?.close(),
     runtimeEnsureQueueEvents?.close(),
+    ideEnsureQueue?.close(),
+    ideEnsureQueueEvents?.close(),
   ]);
   repoQueue = null;
   taskQueue = null;
@@ -93,4 +116,6 @@ export async function closeQueues(): Promise<void> {
   globalKbSyncQueue = null;
   runtimeEnsureQueue = null;
   runtimeEnsureQueueEvents = null;
+  ideEnsureQueue = null;
+  ideEnsureQueueEvents = null;
 }

@@ -255,6 +255,23 @@ adminRoutes.put('/config/browser-access', async (c) => {
   return c.json({ enabled });
 });
 
+const ideEnabledSchema = z.object({ enabled: z.boolean() });
+
+// Global in-task IDE (Editor tab) kill-switch. The api/worker read this within the
+// ~30s config cache; OFF hides the Editor tab and refuses new code-server launches
+// (the read-only Source viewer remains the fallback). Persists across restarts.
+adminRoutes.get('/config/ide', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.IDE_ENABLED, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/ide', async (c) => {
+  const { enabled } = ideEnabledSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.IDE_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'global ide switch updated');
+  return c.json({ enabled });
+});
+
 const fairSchedulingSchema = z.object({ enabled: z.boolean() });
 
 // Global fair cli-exec scheduling kill-switch. The worker reads this at each

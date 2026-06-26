@@ -26,6 +26,7 @@ import { upgradeRoutes } from './routes/upgrades.js';
 import { toolingUpgradeRoutes } from './routes/tooling-upgrades.js';
 import { userSettingsRoutes } from './routes/user-settings.js';
 import { installBrowserVncWebSocket } from './routes/browser-vnc.js';
+import { ideRoutes, installIdeWebSocket } from './routes/ide.js';
 import { installCliLoginBannerWebSocket } from './routes/cli-login-banner.js';
 import { installCliStreamWebSocket } from './routes/cli-stream.js';
 import { installTerminalWebSocket } from './routes/terminal.js';
@@ -71,6 +72,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/tooling', toolingRoutes);
   app.route('/repositories', upgradeRoutes);
   app.route('/repositories', toolingUpgradeRoutes);
+  app.route('/ide', ideRoutes);
 
   return app;
 }
@@ -89,6 +91,7 @@ async function main(): Promise<void> {
   installCliStreamWebSocket(server);
   installCliLoginBannerWebSocket(server);
   installBrowserVncWebSocket(server);
+  installIdeWebSocket(server);
 }
 
 const invokedAsScript =

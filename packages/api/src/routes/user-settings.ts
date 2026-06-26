@@ -180,6 +180,46 @@ userSettingsRoutes.put('/git-identity', async (c) => {
   return c.json({ ok: true });
 });
 
+const DEFAULT_IDE_SETTINGS_JSON = '{\n  "telemetry.telemetryLevel": "off"\n}';
+const MAX_IDE_SETTINGS_BYTES = 64 * 1024;
+
+/** Per-user global code-server settings.json (seeded into every task's IDE at
+ *  launch). Returns the built-in default when the user has no row, so the editor
+ *  textarea always shows valid JSON. */
+userSettingsRoutes.get('/ide', async (c) => {
+  const userId = c.get('userId');
+  const db = getDb();
+  const row = await db.query.userIdeSettings.findFirst({
+    where: eq(schema.userIdeSettings.userId, userId),
+    columns: { settingsJson: true },
+  });
+  return c.json({ settingsJson: row?.settingsJson ?? DEFAULT_IDE_SETTINGS_JSON });
+});
+
+userSettingsRoutes.put('/ide', async (c) => {
+  const userId = c.get('userId');
+  const body = (await c.req.json()) as { settingsJson?: unknown };
+  const settingsJson = body.settingsJson;
+  if (typeof settingsJson !== 'string') throw new HttpError(400, 'settingsJson must be a string');
+  if (Buffer.byteLength(settingsJson, 'utf8') > MAX_IDE_SETTINGS_BYTES) {
+    throw new HttpError(413, 'settings exceed the 64 KiB limit');
+  }
+  try {
+    JSON.parse(settingsJson);
+  } catch {
+    throw new HttpError(400, 'settingsJson must be valid JSON');
+  }
+  const db = getDb();
+  await db
+    .insert(schema.userIdeSettings)
+    .values({ userId, settingsJson })
+    .onConflictDoUpdate({
+      target: schema.userIdeSettings.userId,
+      set: { settingsJson, updatedAt: new Date() },
+    });
+  return c.json({ ok: true });
+});
+
 userSettingsRoutes.get('/notifications', async (c) => {
   const userId = c.get('userId');
   const db = getDb();
