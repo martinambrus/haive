@@ -1537,12 +1537,26 @@ function StepCard({
   // so they stop reconnecting against a torn-down runtime and spamming the console
   // with WebSocket 1006 errors.
   const taskEnded = taskCancelled || taskStatus === 'completed' || taskStatus === 'failed';
+  // The live browser/VNC needs a running task runtime; once the task is completed or
+  // cancelled that runtime is torn down (cleanup/teardown), so hide the browser
+  // panels entirely instead of letting them reconnect to nothing (WebSocket 1006
+  // spam). Failed tasks keep theirs — the runtime may still be up for debugging.
+  const runtimeTornDown = taskCancelled || taskStatus === 'completed';
   const showForm = !taskCancelled && step.status === 'waiting_form' && schema;
   // Auto-skipped steps (shouldRun → false, or detect skipReason) have nothing
   // to retry — they were intentionally bypassed by the runner. Manually-skipped
   // steps remain retryable in case the user changed their mind.
   const isAutoSkipped = step.status === 'skipped' && !step.manuallySkipped;
-  const canRetry = !taskCancelled && !isAutoSkipped && RETRYABLE_STEP_STATUSES.has(step.status);
+  // A completed task has already run its tail steps — worktree-cleanup may have
+  // merged + removed the worktree and deleted the branch, so re-running a step
+  // against a missing workspace/branch would fail or churn the tail. Hide per-step
+  // retry once the task is done (cancelled is excluded above; failed stays
+  // retryable — that is the whole point of retry on a failed step).
+  const canRetry =
+    !taskCancelled &&
+    taskStatus !== 'completed' &&
+    !isAutoSkipped &&
+    RETRYABLE_STEP_STATUSES.has(step.status);
   // Only steps that actually dispatch a CLI (llm | agentMining | dagExecute) get a
   // provider picker; deterministic steps never consume a per-step provider, so the
   // picker would be a dead control. usesCli comes from CLI_DISPATCH_STEP_IDS.
@@ -2059,14 +2073,16 @@ function StepCard({
                 hasConnectionFields || supportsPresets ? renderAfterFieldFn : undefined
               }
               headerSlot={
+                !runtimeTornDown &&
                 step.stepId === '08a-browser-verify' &&
                 step.activeRole !== 'fixer' &&
                 (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
                   ?.available ? (
-                  <BrowserVncPanel taskId={taskId} persistId={step.id} />
+                  <BrowserVncPanel taskId={taskId} autoCollapse={taskEnded} persistId={step.id} />
                 ) : undefined
               }
               beforeFieldsSlot={
+                !runtimeTornDown &&
                 step.stepId === '09-gate-2-verify-approval' &&
                 (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
                   ?.available ? (
@@ -2075,6 +2091,7 @@ function StepCard({
                   <BrowserVncPanel
                     taskId={taskId}
                     title="Browser — test the app here"
+                    autoCollapse={taskEnded}
                     persistId={step.id}
                   />
                 ) : step.stepId === '11-phase-8-learning' &&
@@ -2173,7 +2190,8 @@ function StepCard({
         />
       )}
 
-      {step.stepId === '08a-browser-verify' &&
+      {!runtimeTornDown &&
+        step.stepId === '08a-browser-verify' &&
         step.status !== 'failed' &&
         step.status !== 'waiting_form' &&
         step.activeRole !== 'fixer' &&
@@ -2181,7 +2199,7 @@ function StepCard({
           ?.available && (
           <BrowserVncPanel
             taskId={taskId}
-            autoCollapse={step.status === 'done'}
+            autoCollapse={step.status === 'done' || taskEnded}
             persistId={step.id}
           />
         )}
@@ -2193,7 +2211,8 @@ function StepCard({
         </div>
       )}
 
-      {step.stepId === '09-gate-2-verify-approval' &&
+      {!runtimeTornDown &&
+        step.stepId === '09-gate-2-verify-approval' &&
         step.status !== 'waiting_form' &&
         (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
           ?.available && (
