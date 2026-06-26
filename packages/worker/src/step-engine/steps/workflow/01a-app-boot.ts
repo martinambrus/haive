@@ -502,6 +502,7 @@ export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
           ctx.taskId,
           detected.repoSubpath,
           detected.envImageTag,
+          port,
         );
 
         let installOut = '';

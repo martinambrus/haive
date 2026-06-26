@@ -78,6 +78,10 @@ interface VerifyGateDetect {
     consoleErrors?: string[];
     networkErrors?: string[];
   } | null;
+  /** True when the user chose `direct` browser testing (test in their own browser):
+   *  this gate runs exactly as interactive, but the web shows the URL info box
+   *  instead of the VNC panel. */
+  directAccess: boolean;
   /** Mandatory runtime HTTP smoke from 08-phase-5-verify (null when not probed).
    *  A failure defaults this gate to reject but never auto-reroutes to implement. */
   runtimeSmoke: {
@@ -431,6 +435,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // runner and the non-DDEV app-runner. Best-effort: any failure leaves the
     // gate fully functional, just without the browser panel.
     let liveBrowser: VerifyGateDetect['liveBrowser'] = null;
+    // `direct` (test in own browser) runs this gate exactly like interactive; the web
+    // shows the URL info box instead of the VNC panel when this is set.
+    let directAccess = false;
     try {
       const envTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
       const deps = (envTemplate?.declaredDeps as Record<string, unknown>) ?? {};
@@ -440,7 +447,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       // option both want it. A missing setup row (e.g. the plan_tasklist path has no
       // browser-method step) is treated as "show it" so manual verification stays possible.
       const browserSetup = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-setup');
-      const skipBrowser = (browserSetup?.output as { mode?: string } | null)?.mode === 'skip';
+      const setupMode = (browserSetup?.output as { mode?: string } | null)?.mode;
+      const skipBrowser = setupMode === 'skip';
+      directAccess = setupMode === 'direct';
       if (browserTesting && !skipBrowser) {
         // Select the runtime the same way 08a does — by `.ddev` presence, not
         // the template's containerTool — so an add-DDEV task (template non-DDEV
@@ -467,6 +476,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
               ctx.taskId,
               ws.repoSubpath,
               envTemplate.imageTag,
+              boot.port ?? undefined,
             );
             await startAppBrowserDesktop(handle);
             const appUrl = boot.appUrl || `http://localhost:${boot.port ?? 3000}`;
@@ -512,6 +522,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       codeAudit,
       adversarial,
       liveBrowser,
+      directAccess,
       runtimeSmoke,
     };
   },

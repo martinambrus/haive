@@ -81,6 +81,11 @@ export interface RuntimeEnsureResult {
   ok: boolean;
   url: string | null;
   mode: 'ddev' | 'app-runner' | 'host' | 'none';
+  /** Ways the user can reach the app from their own browser (the fast alternative
+   *  to the VNC pixel stream), computed by the worker from the live runner's
+   *  published ports. Empty/absent when direct access is disabled or no port is
+   *  published. See `TaskAccessEndpoint`. */
+  accessUrls?: TaskAccessEndpoint[];
 }
 
 export const TASK_JOB_NAMES = {
@@ -347,6 +352,50 @@ export function appRunnerName(taskId: string): string {
 /** Docker label marking a container as a per-task app-runner, so task-end
  *  cleanup can find and remove it (mirrors the DDEV runner's haive.ddev label). */
 export const APP_RUNNER_LABEL = 'haive.apprunner';
+
+/** A single way a user can reach a task's running web app from their OWN browser —
+ *  the fast alternative to the VNC pixel stream. The worker emits these after it
+ *  ensures the runtime (it alone can read the runner's live published ports); the
+ *  web "Open in your browser" card renders them as links. `kind` discriminates the
+ *  exposure mechanism:
+ *   - `localhost`     a host-published loopback port (app-runner, and the DDEV http
+ *                     fallback): `http://localhost:<port>`.
+ *   - `ddev-http` / `ddev-https`  the project's `*.ddev.site` name on its published
+ *                     port; the only form that routes correctly for DDEV apps that
+ *                     hard-code their hostname.
+ *   - `proxy-subdomain`  RESERVED for future REMOTE access via an authed api reverse
+ *                     proxy (`<task>.apps.<haive-domain>`). No worker emits this yet
+ *                     — it marks the seam so the remote build slots in without a
+ *                     shape change. */
+export interface TaskAccessEndpoint {
+  kind: 'localhost' | 'ddev-http' | 'ddev-https' | 'proxy-subdomain';
+  /** Short link label, e.g. "Localhost" or "DDEV (HTTPS)". */
+  label: string;
+  /** Absolute URL the user opens in their browser. */
+  url: string;
+  /** True when the browser trusts the TLS cert without a warning (the stable baked
+   *  CA covers `ddev-https` once the user installs it); omitted for plain http. */
+  trusted?: boolean;
+}
+
+/** Deterministic loopback host port for publishing a task's runtime to the user's
+ *  browser (direct browser access). Keyed on the taskId so a task's URL stays
+ *  stable across runner restarts, drawn from the ephemeral range 49152–65535.
+ *  `slot` separates a DDEV runner's https (0) and http (1) ports; `attempt` shifts
+ *  the candidate when a host-port bind collides (the worker retries with the next
+ *  attempt). Pure (FNV-1a) so the worker and any caller derive the same value. */
+export function taskHostPort(taskId: string, slot = 0, attempt = 0): number {
+  const RANGE_START = 49152;
+  const RANGE_SIZE = 65536 - RANGE_START; // 16384 ephemeral ports
+  let h = 2166136261; // FNV-1a offset basis
+  const key = `${taskId}:${slot}`;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  const base = (h >>> 0) % RANGE_SIZE;
+  return RANGE_START + ((base + attempt * 257) % RANGE_SIZE);
+}
 /** Two minutes of grace after the last WS disconnect before a session's
  *  container is reaped. Long enough to survive a tab nav-away-and-return,
  *  short enough that abandoned sessions don't pile up under WSL's container

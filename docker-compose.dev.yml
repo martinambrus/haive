@@ -50,6 +50,7 @@ services:
       - haive_repos:/var/lib/haive/repos
       - haive_bundles:/var/lib/haive/bundles
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - haive_ddev_ca:/var/lib/haive/ddev-ca:ro
     command: sh -c "pnpm --filter @haive/database build && pnpm --filter @haive/shared build && pnpm --filter @haive/api dev"
     environment:
       NODE_ENV: development

@@ -2,7 +2,14 @@ import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { APP_RUNNER_LABEL, appRunnerName, logger } from '@haive/shared';
+import {
+  APP_RUNNER_LABEL,
+  appRunnerName,
+  logger,
+  CONFIG_KEYS,
+  configService,
+  type TaskAccessEndpoint,
+} from '@haive/shared';
 import { browserCdpUrlForRunner } from './runner-browser-cdp.js';
 
 // Per-task app-runner: a plain (non-DinD) container built from the repo's
@@ -104,9 +111,25 @@ export async function startAppRunner(params: {
   repoSubpath: string;
   /** The env-replicate image tag to run. */
   imageTag: string;
+  /** The port the app listens on inside the runner. When set and direct browser
+   *  access is enabled, it is published to an ephemeral 127.0.0.1 host port so the
+   *  user can open the app in their own browser (the fast VNC alternative). */
+  appPort?: number;
 }): Promise<AppRunnerHandle> {
   const name = appRunnerName(params.taskId);
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
+
+  // Direct browser access (default on, global kill-switch): publish the app port
+  // to an ephemeral loopback host port so the user can hit http://localhost:<H>
+  // directly. Bound to 127.0.0.1 only (no LAN exposure); Docker assigns the host
+  // port, read back later by appRunnerAccessUrls. Gated so the flag-OFF path is
+  // byte-for-byte the old no-publish behavior (the rollback).
+  const publishArgs: string[] = [];
+  if (params.appPort) {
+    const directAccess = await configService.getBoolean(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, true);
+    if (directAccess) publishArgs.push('-p', `127.0.0.1::${params.appPort}`);
+  }
+
   await exec(
     'docker',
     [
@@ -120,6 +143,7 @@ export async function startAppRunner(params: {
       `${APP_RUNNER_LABEL}=1`,
       '-v',
       `${REPO_VOLUME}:/repos`,
+      ...publishArgs,
       params.imageTag,
       'sleep',
       'infinity',
@@ -159,12 +183,13 @@ export async function ensureAppRunnerStarted(
   taskId: string,
   repoSubpath: string,
   imageTag: string,
+  appPort?: number,
 ): Promise<AppRunnerHandle> {
   // Coalesce concurrent boots of the same task (08a apply + VNC runtime-ensure)
   // into one — two startAppRunner calls would collide on the container name.
   const inFlight = inFlightAppRunnerBoots.get(taskId);
   if (inFlight) return inFlight;
-  const boot = ensureAppRunnerStartedInner(taskId, repoSubpath, imageTag);
+  const boot = ensureAppRunnerStartedInner(taskId, repoSubpath, imageTag, appPort);
   inFlightAppRunnerBoots.set(taskId, boot);
   try {
     return await boot;
@@ -177,6 +202,7 @@ async function ensureAppRunnerStartedInner(
   taskId: string,
   repoSubpath: string,
   imageTag: string,
+  appPort?: number,
 ): Promise<AppRunnerHandle> {
   const name = appRunnerName(taskId);
   if (await isRunning(name)) {
@@ -185,7 +211,7 @@ async function ensureAppRunnerStartedInner(
   if (await containerExists(name)) {
     await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
   }
-  return startAppRunner({ taskId, repoSubpath, imageTag });
+  return startAppRunner({ taskId, repoSubpath, imageTag, appPort });
 }
 
 /** Run a command inside the app-runner (as the image's default user, in the
@@ -276,6 +302,40 @@ export async function startBrowserDesktop(handle: AppRunnerHandle): Promise<void
  *  runnerBrowserCdpUrl (ddev-runner) for the non-DDEV app-runner. */
 export async function appRunnerBrowserCdpUrl(taskId: string): Promise<string | null> {
   return browserCdpUrlForRunner(appRunnerName(taskId));
+}
+
+/** The user-facing URL(s) for opening this task's app in their OWN browser: the
+ *  loopback host port Docker published for the app port, as http://localhost:<H>.
+ *  Reads the live mapping from Docker (the source of truth for the actual host
+ *  port). Empty when nothing is published — direct access disabled at runner
+ *  start, or the app port is unknown. */
+export async function appRunnerAccessUrls(
+  taskId: string,
+  appPort: number | null,
+): Promise<TaskAccessEndpoint[]> {
+  if (!appPort) return [];
+  try {
+    const { stdout } = await exec('docker', ['port', appRunnerName(taskId), `${appPort}/tcp`], {
+      timeout: 10_000,
+    });
+    const hostPort = parsePublishedPort(stdout);
+    if (!hostPort) return [];
+    return [{ kind: 'localhost', label: 'Localhost', url: `http://localhost:${hostPort}` }];
+  } catch {
+    return [];
+  }
+}
+
+/** Parse `docker port` output (e.g. `127.0.0.1:49215`, possibly multi-line for
+ *  v4/v6) down to the host port number, or null. */
+export function parsePublishedPort(dockerPortStdout: string): number | null {
+  const line = dockerPortStdout
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  if (!line) return null;
+  const m = line.match(/:(\d+)\s*$/);
+  return m ? Number(m[1]) : null;
 }
 
 /** Tear down every app-runner for a task. Safe to call for any task; returns the

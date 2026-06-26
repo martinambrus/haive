@@ -47,7 +47,7 @@ export type RuntimeMode = 'ddev' | 'app-runner' | 'host' | 'none';
  *  runtime is recorded for the task. */
 export type ServingRuntime =
   | { mode: 'ddev'; url: string; handle: DdevRunnerHandle }
-  | { mode: 'app-runner'; url: string; handle: AppRunnerHandle }
+  | { mode: 'app-runner'; url: string; handle: AppRunnerHandle; port: number | null }
   | { mode: 'host'; url: string }
   | { mode: 'none'; url: null };
 
@@ -141,7 +141,12 @@ export async function ensureAppServing(ctx: AppRuntimeCtx): Promise<ServingRunti
 
   if (spec.mode === 'app-runner' && spec.repoSubpath && spec.envImageTag) {
     await ctx.emitProgress?.('Ensuring the app-runner is up…');
-    const handle = await ensureAppRunnerStarted(ctx.taskId, spec.repoSubpath, spec.envImageTag);
+    const handle = await ensureAppRunnerStarted(
+      ctx.taskId,
+      spec.repoSubpath,
+      spec.envImageTag,
+      spec.port ?? undefined,
+    );
     // A cold container recreate (worker reload, daemon restart, host reboot)
     // brings the container back as `sleep infinity` but NOT the dev server — so
     // probe the port and relaunch the recorded boot command when it's dead.
@@ -155,7 +160,7 @@ export async function ensureAppServing(ctx: AppRuntimeCtx): Promise<ServingRunti
       }
     }
     const url = spec.knownUrl ?? (spec.port ? `http://localhost:${spec.port}` : 'http://localhost');
-    return { mode: 'app-runner', url, handle };
+    return { mode: 'app-runner', url, handle, port: spec.port };
   }
 
   if (spec.mode === 'host') {

@@ -6,6 +6,7 @@ import { pathExists } from '../onboarding/_helpers.js';
 import { loadAppBootOutput, resolveDdevWorkspace } from './_task-meta.js';
 import { ddevUrlFromConfigText } from '../_ddev-config.js';
 import { ddevPrimaryUrl, runnerHandleForTask } from '../../../sandbox/ddev-runner.js';
+import { CONFIG_KEYS, configService } from '@haive/shared';
 
 /** Per-task browser-test runtime resolved WITHOUT bringing anything up: whether
  *  browser testing is available, whether the app runs in the per-task DDEV runner
@@ -15,6 +16,9 @@ import { ddevPrimaryUrl, runnerHandleForTask } from '../../../sandbox/ddev-runne
 export interface BrowserRuntimeInfo {
   browserTesting: boolean;
   available: boolean;
+  /** Whether the global direct-browser-access feature is on, so the run-config /
+   *  08a forms can offer the `direct` (test-in-your-own-browser) mode. */
+  directAvailable: boolean;
   skipReason: string | null;
   /** App runs in the per-task DDEV runner (headless check runs inside it). */
   ddevMode: boolean;
@@ -38,9 +42,11 @@ export async function resolveBrowserRuntime(ctx: StepContext): Promise<BrowserRu
   const envTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
   const deps = (envTemplate?.declaredDeps as Record<string, unknown>) ?? {};
   const browserTesting = !!deps.browserTesting;
+  const directAvailable = await configService.getBoolean(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, true);
   const base: BrowserRuntimeInfo = {
     browserTesting,
     available: false,
+    directAvailable,
     skipReason: null,
     ddevMode: false,
     appRunnerMode: false,
@@ -68,6 +74,7 @@ export async function resolveBrowserRuntime(ctx: StepContext): Promise<BrowserRu
     return {
       browserTesting: true,
       available: true,
+      directAvailable,
       skipReason: null,
       ddevMode: true,
       appRunnerMode: false,
@@ -94,6 +101,7 @@ export async function resolveBrowserRuntime(ctx: StepContext): Promise<BrowserRu
   return {
     browserTesting: true,
     available: true,
+    directAvailable,
     skipReason: null,
     ddevMode: false,
     appRunnerMode,

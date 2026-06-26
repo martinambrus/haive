@@ -60,6 +60,13 @@ export const CONFIG_KEYS = {
   // CLI agents in the cli-exec sandbox). Default true; set 'false' to disable
   // masking for every repo without per-repo edits or a redeploy.
   SECRET_MASK_ENABLED: 'config:sandbox:secretMaskEnabled',
+  // Global kill-switch for direct browser access: when 'true' (default), each
+  // per-task runner publishes its app port to 127.0.0.1 at startup so the user
+  // can open the app in their own browser (localhost + *.ddev.site URLs), a fast
+  // alternative to the VNC pixel stream. Set 'false' to stop publishing host
+  // ports everywhere (runners start with no -p, exactly the pre-feature behavior)
+  // without a redeploy. Read at runner START, so a mid-task flip needs a restart.
+  BROWSER_DIRECT_ACCESS: 'config:sandbox:browserDirectAccess',
   // Global switch for mid-run steering (default ON; a kill-switch). When 'true',
   // every Claude-family CLI step runs in stream-json input mode so a user can
   // inject steering messages (applied at the next tool-call boundary), and each

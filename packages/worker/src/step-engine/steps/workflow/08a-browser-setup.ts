@@ -5,10 +5,12 @@ import { resolveBrowserRuntime, type BrowserRuntimeInfo } from './_browser-runti
 
 /** Browser-test method chosen here. 'mcp' → 08a-browser-verify runs the automated
  *  agent test. 'interactive' → 08a is skipped and the human verifies hands-on in the
- *  live browser at Gate 2. 'skip' → no browser testing at all (Gate 2 hides the
- *  live browser too). */
+ *  live (in-app VNC) browser at Gate 2. 'direct' → like interactive, but the human
+ *  tests in their OWN browser via a published URL (no VNC): 08a-verify / Gate-2 run
+ *  the interactive gate and surface a directAccess flag instead of the VNC panel.
+ *  'skip' → no browser testing at all (Gate 2 hides the live browser too). */
 export interface BrowserSetupApply {
-  mode: 'mcp' | 'interactive' | 'skip';
+  mode: 'mcp' | 'interactive' | 'direct' | 'skip';
   appUrl: string | null;
   checkConsoleErrors: boolean;
   checkNetworkErrors: boolean;
@@ -57,6 +59,7 @@ export const browserSetupStep: StepDefinition<BrowserRuntimeInfo, BrowserSetupAp
           options: buildBrowserModeOptions({
             ddevMode: detected.ddevMode,
             appRunnerMode: detected.appRunnerMode,
+            directAvailable: detected.directAvailable,
           }),
           default: hasRuntime ? 'mcp' : 'skip',
           required: true,
@@ -94,7 +97,13 @@ export const browserSetupStep: StepDefinition<BrowserRuntimeInfo, BrowserSetupAp
       checkNetworkErrors?: boolean;
     };
     const mode: BrowserSetupApply['mode'] =
-      v.mode === 'interactive' ? 'interactive' : v.mode === 'skip' ? 'skip' : 'mcp';
+      v.mode === 'interactive'
+        ? 'interactive'
+        : v.mode === 'direct'
+          ? 'direct'
+          : v.mode === 'skip'
+            ? 'skip'
+            : 'mcp';
     ctx.logger.info({ mode }, 'browser test method chosen');
     return {
       mode,

@@ -31,6 +31,8 @@ export default function AdminPage() {
   const [savingConcurrency, setSavingConcurrency] = useState(false);
   const [steeringEnabled, setSteeringEnabled] = useState<boolean | null>(null);
   const [savingSteering, setSavingSteering] = useState(false);
+  const [browserAccessEnabled, setBrowserAccessEnabled] = useState<boolean | null>(null);
+  const [savingBrowserAccess, setSavingBrowserAccess] = useState(false);
   const [fairEnabled, setFairEnabled] = useState<boolean | null>(null);
   const [savingFair, setSavingFair] = useState(false);
   const [maxPerTask, setMaxPerTask] = useState<number | null>(null);
@@ -39,20 +41,29 @@ export default function AdminPage() {
 
   const load = useCallback(async () => {
     try {
-      const [usersData, healthData, concurrencyData, steeringData, fairData, perTaskData] =
-        await Promise.all([
-          api.get<{ users: AdminUser[] }>('/admin/users'),
-          api.get<AdminHealthResponse>('/admin/health'),
-          api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
-          api.get<{ enabled: boolean }>('/admin/config/steering'),
-          api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
-          api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
-        ]);
+      const [
+        usersData,
+        healthData,
+        concurrencyData,
+        steeringData,
+        browserAccessData,
+        fairData,
+        perTaskData,
+      ] = await Promise.all([
+        api.get<{ users: AdminUser[] }>('/admin/users'),
+        api.get<AdminHealthResponse>('/admin/health'),
+        api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
+        api.get<{ enabled: boolean }>('/admin/config/steering'),
+        api.get<{ enabled: boolean }>('/admin/config/browser-access'),
+        api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
+        api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
+      ]);
       setUsers(usersData.users);
       setHealth(healthData);
       setMaxParallel(concurrencyData.maxParallelAgents);
       setMaxParallelInput(String(concurrencyData.maxParallelAgents));
       setSteeringEnabled(steeringData.enabled);
+      setBrowserAccessEnabled(browserAccessData.enabled);
       setFairEnabled(fairData.enabled);
       setMaxPerTask(perTaskData.maxAgentsPerTask);
       setMaxPerTaskInput(String(perTaskData.maxAgentsPerTask));
@@ -155,6 +166,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update steering');
     } finally {
       setSavingSteering(false);
+    }
+  }
+
+  async function setBrowserAccess(next: boolean) {
+    setSavingBrowserAccess(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/browser-access', {
+        enabled: next,
+      });
+      setBrowserAccessEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update browser access');
+    } finally {
+      setSavingBrowserAccess(false);
     }
   }
 
@@ -344,6 +370,31 @@ export default function AdminPage() {
             />
             {steeringEnabled ? 'Enabled' : 'Disabled'}
             {savingSteering && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {browserAccessEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Direct browser access</CardTitle>
+            <CardDescription>
+              Lets a task publish its running app to a loopback host port so users can test it in
+              their OWN browser (localhost + *.ddev.site URLs) instead of the in-app VNC stream.
+              Ports bind 127.0.0.1 only. Global kill-switch across every repo; OFF reverts to
+              VNC-only. Read at runner start — a mid-task flip needs Stop/Retry to take effect.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={browserAccessEnabled}
+              disabled={savingBrowserAccess}
+              onChange={(e) => void setBrowserAccess(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {browserAccessEnabled ? 'Enabled' : 'Disabled'}
+            {savingBrowserAccess && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

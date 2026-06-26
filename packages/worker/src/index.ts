@@ -20,6 +20,7 @@ import {
 import { closeRedis } from './redis.js';
 import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
 import { ensureOllamaModels } from './sandbox/ollama-provision.js';
+import { ensureDdevCa } from './sandbox/ddev-runner.js';
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 
@@ -65,6 +66,12 @@ async function main(): Promise<void> {
   // background; per-model failures are logged, not fatal.
   void ensureOllamaModels(getDb()).catch((err) => {
     logger.warn({ err }, 'ollama model provisioning on boot failed');
+  });
+  // Generate the shared DDEV mkcert CA once (into its named volume) so direct
+  // browser access can serve a trusted https://<name>.ddev.site. Non-blocking: a
+  // DDEV task racing a fresh boot falls back to a throwaway CA for that one run.
+  void ensureDdevCa().catch((err) => {
+    logger.warn({ err }, 'shared DDEV CA generation on boot failed');
   });
 
   // Terminal subsystem: session manager subscribes to terminal:request and

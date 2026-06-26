@@ -238,6 +238,23 @@ adminRoutes.put('/config/steering', async (c) => {
   return c.json({ enabled });
 });
 
+const browserAccessSchema = z.object({ enabled: z.boolean() });
+
+// Global direct-browser-access kill-switch. The worker reads this at runner START
+// (within the ~30s config cache); OFF stops new runners publishing a loopback host
+// port, so a task reverts to VNC-only. A mid-task flip needs a runner restart.
+adminRoutes.get('/config/browser-access', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/browser-access', async (c) => {
+  const { enabled } = browserAccessSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'direct browser access switch updated');
+  return c.json({ enabled });
+});
+
 const fairSchedulingSchema = z.object({ enabled: z.boolean() });
 
 // Global fair cli-exec scheduling kill-switch. The worker reads this at each

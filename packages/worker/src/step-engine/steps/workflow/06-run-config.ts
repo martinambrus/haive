@@ -2,6 +2,7 @@ import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, ExecutionPath } from '@haive/shared';
+import { CONFIG_KEYS, configService } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
@@ -39,6 +40,9 @@ interface RunConfigDetect {
    *  still shows (08c-code-review reads the level for its extra review lenses) but is
    *  relabelled to "Code review depth" — only the lenses apply, not the Phase 7 agents. */
   runsAdversarialQa: boolean;
+  /** Whether the global direct-browser-access feature is on, so the browser-mode
+   *  picker can offer `direct` (manual testing in the user's own browser). */
+  directAvailable: boolean;
 }
 
 /** Front-loaded run answers for the hands-free stretch to Gate 2 (browser/MCP mode,
@@ -114,6 +118,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     });
     // A null execution_path means triage didn't filter the run (full_workflow): every step runs.
     const execPath = (taskRow?.executionPath ?? 'full_workflow') as ExecutionPath;
+    const directAvailable = await configService.getBoolean(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, true);
 
     return {
       specBody,
@@ -123,6 +128,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       taskMaxFixRounds: taskRow?.maxFixRounds ?? 5,
       runsBrowserVerify: keepForPath('08a-browser-verify', execPath),
       runsAdversarialQa: keepForPath('08d-adversarial-qa', execPath),
+      directAvailable,
     };
   },
 
@@ -203,6 +209,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
           buildBrowserModeOptions({
             ddevMode: detected.ddevMode,
             appRunnerMode: detected.appRunnerMode,
+            directAvailable: detected.directAvailable,
           }),
           rec.browserMode,
           detected.ddevMode || detected.appRunnerMode ? 'mcp' : 'skip',
@@ -380,6 +387,15 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
         runTest: runConfig.verifyRunTest,
         runLint: runConfig.verifyRunLint,
         runTypecheck: runConfig.verifyRunTypecheck,
+      },
+      // Propagate the chosen browser mode to BOTH the setup step (whose output
+      // 08a-verify / Gate-2 read to drive the live browser + the directAccess flag)
+      // and the verify step's own form, so 06 is the single browser-mode source of
+      // truth. 06 never auto-submits, so this is the user's explicit choice.
+      '08a-browser-setup': {
+        mode: runConfig.browserMode,
+        checkConsoleErrors: runConfig.browserCheckConsoleErrors,
+        checkNetworkErrors: runConfig.browserCheckNetworkErrors,
       },
       '08a-browser-verify': {
         mode: runConfig.browserMode,

@@ -4,7 +4,14 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { ddevRunnerName, logger } from '@haive/shared';
+import {
+  ddevRunnerName,
+  logger,
+  CONFIG_KEYS,
+  configService,
+  taskHostPort,
+  type TaskAccessEndpoint,
+} from '@haive/shared';
 import { browserCdpUrlForRunner } from './runner-browser-cdp.js';
 
 // Per-task DDEV environment via nested Docker (DinD). DDEV can't run against the
@@ -148,28 +155,88 @@ export async function startDdevRunner(params: {
   // conflict. So give the rm room AND retry the run once after a forced removal,
   // instead of failing the boot — this conflict was the recurring VNC "Connection
   // closed (1006)" surfacing through the runtime-ensure job.
-  const runArgs = [
-    'run',
-    '-d',
-    '--privileged',
-    '--name',
-    name,
-    '--label',
-    `haive.task.id=${params.taskId}`,
-    '--label',
-    'haive.ddev=1',
-    '-v',
-    `${REPO_VOLUME}:/repos`,
-    tag,
-  ];
+  // Direct browser access (default on): publish the DDEV router ports to MATCHING
+  // loopback host ports (host port == container port == router port) so the app's
+  // own canonical URLs/redirects carry the right port instead of bouncing to a
+  // portless, unpublished :443. Deterministic per task (stable URL across
+  // restarts); on a host-port collision bump to the next candidate. The chosen
+  // ports are stamped as labels (read back by ddevAccessUrls) and the runner's
+  // router is pointed at them below. Flag OFF => no -p, the pre-feature behavior.
+  const directAccess = await configService.getBoolean(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, true);
+  const caMount = ddevCaMountArgs();
+  const buildRunArgs = (attempt: number): { args: string[]; ports: DdevPublishedPorts | null } => {
+    let publish: string[] = [];
+    let ports: DdevPublishedPorts | null = null;
+    if (directAccess) {
+      const https = taskHostPort(params.taskId, 0, attempt);
+      const http = taskHostPort(params.taskId, 1, attempt);
+      ports = { https, http };
+      publish = [
+        '-p',
+        `127.0.0.1:${https}:${https}`,
+        '-p',
+        `127.0.0.1:${http}:${http}`,
+        '--label',
+        `${DDEV_HTTPS_PORT_LABEL}=${https}`,
+        '--label',
+        `${DDEV_HTTP_PORT_LABEL}=${http}`,
+      ];
+    }
+    return {
+      ports,
+      args: [
+        'run',
+        '-d',
+        '--privileged',
+        '--name',
+        name,
+        '--label',
+        `haive.task.id=${params.taskId}`,
+        '--label',
+        'haive.ddev=1',
+        ...publish,
+        ...caMount,
+        '-v',
+        `${REPO_VOLUME}:/repos`,
+        tag,
+      ],
+    };
+  };
+
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 90_000 }).catch(() => {});
-  try {
-    await exec('docker', runArgs, { timeout: 60_000 });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (!/already in use/i.test(msg)) throw err;
-    await exec('docker', ['rm', '-f', '-v', name], { timeout: 90_000 }).catch(() => {});
-    await exec('docker', runArgs, { timeout: 60_000 });
+  let chosenPorts: DdevPublishedPorts | null = null;
+  let started = false;
+  const maxAttempts = directAccess ? 5 : 1;
+  for (let attempt = 0; attempt < maxAttempts && !started; attempt++) {
+    const { args, ports } = buildRunArgs(attempt);
+    try {
+      await exec('docker', args, { timeout: 60_000 });
+      chosenPorts = ports;
+      started = true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Name conflict: a stale runner survived the rm timeout — force-remove and
+      // retry the SAME ports once.
+      if (/already in use/i.test(msg)) {
+        await exec('docker', ['rm', '-f', '-v', name], { timeout: 90_000 }).catch(() => {});
+        try {
+          await exec('docker', args, { timeout: 60_000 });
+          chosenPorts = ports;
+          started = true;
+        } catch (err2) {
+          const msg2 = err2 instanceof Error ? err2.message : String(err2);
+          if (directAccess && isHostPortCollision(msg2)) continue; // bump ports, retry
+          throw err2;
+        }
+        continue;
+      }
+      // Host-port collision: the deterministic port is taken — bump and retry.
+      if (directAccess && isHostPortCollision(msg)) continue;
+      throw err;
+    }
+  }
+  if (!started) {
+    throw new Error('ddev runner failed to start (host-port allocation exhausted)');
   }
 
   // Second NIC on the internal sandbox network (same one sandboxes + the api
@@ -202,8 +269,151 @@ export async function startDdevRunner(params: {
     await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
     throw new Error('ddev runner nested dockerd did not start');
   }
+
+  // Point DDEV's router at the SAME ports we published, so the cold-boot `ddev
+  // start` brings the router up on them and primary_url / canonical redirects
+  // carry the published port. Global config = per-runner here (one project per
+  // runner). Best-effort: a failure only degrades the direct-access ddev.site URL,
+  // so warn rather than fail the whole boot (VNC + in-container access still work).
+  if (directAccess && chosenPorts) {
+    await exec(
+      'docker',
+      [
+        'exec',
+        '-u',
+        'ddev',
+        name,
+        'bash',
+        '-lc',
+        `ddev config global --router-https-port=${chosenPorts.https} --router-http-port=${chosenPorts.http}`,
+      ],
+      { timeout: 30_000 },
+    ).catch((err) => {
+      log.warn(
+        { name, err: err instanceof Error ? err.message : String(err) },
+        'ddev router-port config failed; direct-access ddev.site URL may not work',
+      );
+    });
+  }
   log.info({ taskId: params.taskId, container: name }, 'ddev runner started');
   return { container: name, projectDir: `/repos/${params.repoSubpath}` };
+}
+
+// --- Direct browser access (DDEV) ---------------------------------------------
+
+/** Docker labels stamping a DDEV runner's published https/http host ports (the
+ *  actual post-retry values), read back by ddevAccessUrls so the surfaced URLs are
+ *  correct even when a host-port collision bumped the deterministic candidate. */
+const DDEV_HTTPS_PORT_LABEL = 'haive.ddev.httpsport';
+const DDEV_HTTP_PORT_LABEL = 'haive.ddev.httpport';
+
+interface DdevPublishedPorts {
+  https: number;
+  http: number;
+}
+
+/** True when a `docker run` error means the requested host port is already taken. */
+export function isHostPortCollision(msg: string): boolean {
+  return /port is already allocated|address already in use|bind for .* failed|ports are not available/i.test(
+    msg,
+  );
+}
+
+/** Shared mkcert CA volume (generated once on worker boot) mounted RO into every
+ *  runner so all per-task DDEV certs share ONE CA the user trusts once, instead of
+ *  a per-runner throwaway. The api also mounts it (read-only) to serve rootCA.pem. */
+const DDEV_CA_VOLUME = process.env.DDEV_CA_VOLUME || 'haive_ddev_ca';
+const DDEV_CA_MOUNT_PATH = '/home/ddev/.local/share/mkcert';
+let ddevCaReady = false;
+
+/** Mount args for the shared CA, but only once worker boot has generated it; else
+ *  empty so the runner's entrypoint mints a per-runner throwaway CA (https still
+ *  works, just untrusted until the user clicks through). */
+function ddevCaMountArgs(): string[] {
+  return ddevCaReady ? ['-v', `${DDEV_CA_VOLUME}:${DDEV_CA_MOUNT_PATH}`] : [];
+}
+
+/** Generate the shared mkcert CA into its named volume once (idempotent). Runs on
+ *  worker boot. The CA files are chowned to uid 1000 so the runner's `ddev` user
+ *  can read the signing key. Best-effort: on failure ddevCaReady stays false and
+ *  runners fall back to per-runner throwaway CAs. */
+export async function ensureDdevCa(): Promise<void> {
+  if (ddevCaReady) return;
+  const tag = await ensureDdevRunnerImage();
+  await exec('docker', ['volume', 'create', DDEV_CA_VOLUME], { timeout: 15_000 }).catch(() => {});
+  await exec(
+    'docker',
+    [
+      'run',
+      '--rm',
+      '-v',
+      `${DDEV_CA_VOLUME}:/caroot`,
+      '--entrypoint',
+      'bash',
+      tag,
+      '-lc',
+      'CAROOT=/caroot mkcert -install >/dev/null 2>&1 || true; chown -R 1000:1000 /caroot; test -f /caroot/rootCA.pem',
+    ],
+    { timeout: 90_000 },
+  );
+  ddevCaReady = true;
+  log.info({ volume: DDEV_CA_VOLUME }, 'shared DDEV CA ready');
+}
+
+/** The user-facing URLs for opening this task's DDEV app in their OWN browser: the
+ *  project's *.ddev.site name on its published https/http ports (the only form that
+ *  routes for DDEV apps that hard-code their hostname) plus a localhost fallback.
+ *  Ports come from the runner's labels (the real post-retry values); the hostname
+ *  from the live primary_url. Empty when nothing was published (direct access off
+ *  at runner start). */
+export async function ddevAccessUrls(
+  handle: DdevRunnerHandle,
+  taskId: string,
+): Promise<TaskAccessEndpoint[]> {
+  const ports = await readDdevPublishedPorts(ddevRunnerName(taskId));
+  if (!ports) return [];
+  const primary = await ddevPrimaryUrl(handle);
+  let host: string | null = null;
+  try {
+    if (primary) host = new URL(primary).hostname;
+  } catch {
+    host = null;
+  }
+  if (!host) return [];
+  return [
+    {
+      kind: 'ddev-https',
+      label: 'DDEV (HTTPS)',
+      url: `https://${host}:${ports.https}`,
+      trusted: ddevCaReady,
+    },
+    { kind: 'ddev-http', label: 'DDEV (HTTP)', url: `http://${host}:${ports.http}` },
+    { kind: 'localhost', label: 'Localhost', url: `http://localhost:${ports.http}` },
+  ];
+}
+
+/** Read a DDEV runner's published host ports from its labels, or null when direct
+ *  access was off at start (no labels stamped). */
+async function readDdevPublishedPorts(name: string): Promise<DdevPublishedPorts | null> {
+  try {
+    const { stdout } = await exec(
+      'docker',
+      [
+        'inspect',
+        '-f',
+        `{{index .Config.Labels "${DDEV_HTTPS_PORT_LABEL}"}},{{index .Config.Labels "${DDEV_HTTP_PORT_LABEL}"}}`,
+        name,
+      ],
+      { timeout: 8_000 },
+    );
+    const [hs, ht] = stdout.trim().split(',');
+    const https = Number(hs);
+    const http = Number(ht);
+    if (!Number.isFinite(https) || !Number.isFinite(http) || !https || !http) return null;
+    return { https, http };
+  } catch {
+    return null;
+  }
 }
 
 /** Run a ddev subcommand inside the runner as the non-root `ddev` user, in the

@@ -20,7 +20,7 @@ import {
 
 const exec = promisify(execFile);
 
-type BrowserMode = 'headless' | 'interactive' | 'mcp' | 'manual' | 'skip';
+type BrowserMode = 'headless' | 'interactive' | 'direct' | 'mcp' | 'manual' | 'skip';
 const ROLE_TESTER = 'tester';
 const ROLE_FIXER = 'fixer';
 
@@ -33,8 +33,13 @@ interface BrowserVerifyDetect {
   skipReason: string | null;
   appUrl: string | null;
   browserTesting: boolean;
-  /** Method chosen at 08a-browser-setup (mcp | interactive | skip). */
+  /** Method chosen at 08a-browser-setup, normalized for behavior (mcp | interactive
+   *  | skip); `direct` is folded into `interactive` here and surfaced via the
+   *  `directAccess` flag below. */
   mode: BrowserMode;
+  /** True when the user chose `direct` (test in their own browser): the gate runs
+   *  exactly like interactive, but the web shows the URL info box, not the VNC panel. */
+  directAccess: boolean;
   appBooted: boolean;
   /** When true the app runs in the per-task DDEV runner, so the headless-Chrome
    *  check runs INSIDE the runner (where <name>.ddev.site resolves). */
@@ -424,8 +429,13 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     // legacy task created before the split has no setup row).
     const setup = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-setup');
     const setupOut = (setup?.output as { mode?: string; appUrl?: string } | null) ?? null;
-    const mode = ((setupOut?.mode as BrowserMode | undefined) ??
+    const rawMode = ((setupOut?.mode as BrowserMode | undefined) ??
       (rt.ddevMode || rt.appRunnerMode ? 'mcp' : 'skip')) as BrowserMode;
+    // `direct` runs the interactive gate (browser up for agents, manual approval) but
+    // the user tests in their OWN browser — so fold it into interactive for all
+    // behavior and surface directAccess for the web (URL info box instead of VNC).
+    const directAccess = rawMode === 'direct';
+    const mode: BrowserMode = directAccess ? 'interactive' : rawMode;
     const baseDetect = {
       browserTesting: rt.browserTesting,
       ddevMode: rt.ddevMode,
@@ -437,6 +447,7 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       available: rt.available,
       skipReason: rt.skipReason,
       mode,
+      directAccess,
     };
     if (!rt.available || mode === 'skip') {
       return { ...baseDetect, spec: '', implementationFiles: [], liveBrowser: null };

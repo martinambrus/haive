@@ -7,6 +7,7 @@ import {
   logger,
   type RuntimeEnsurePayload,
   type RuntimeEnsureResult,
+  type TaskAccessEndpoint,
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
@@ -14,8 +15,14 @@ import {
   ensureAppServing,
   type AppRuntimeCtx,
 } from '../step-engine/steps/workflow/_app-runtime.js';
-import { startBrowserDesktop as startDdevBrowserDesktop } from '../sandbox/ddev-runner.js';
-import { startBrowserDesktop as startAppBrowserDesktop } from '../sandbox/app-runner.js';
+import {
+  startBrowserDesktop as startDdevBrowserDesktop,
+  ddevAccessUrls,
+} from '../sandbox/ddev-runner.js';
+import {
+  startBrowserDesktop as startAppBrowserDesktop,
+  appRunnerAccessUrls,
+} from '../sandbox/app-runner.js';
 
 // The worker side of the VNC "ensure runtime" handshake. The api enqueues a job
 // here when the live Browser panel opens; the worker brings the task's app +
@@ -44,10 +51,18 @@ export async function ensureRuntimeForTask(taskId: string): Promise<RuntimeEnsur
 
   const ctx: AppRuntimeCtx = { db, taskId, repoPath, logger: log };
   const runtime = await ensureAppServing(ctx);
-  // Bring up the headed-browser desktop the VNC bridge attaches to (mirrors 08a).
-  if (runtime.mode === 'ddev') await startDdevBrowserDesktop(runtime.handle);
-  else if (runtime.mode === 'app-runner') await startAppBrowserDesktop(runtime.handle);
-  return { ok: runtime.mode !== 'none', url: runtime.url, mode: runtime.mode };
+  // Bring up the headed-browser desktop the VNC bridge attaches to (mirrors 08a),
+  // and collect the direct-browser-access URLs from the live runner so the user can
+  // open the app in their own browser — a fast alternative to the VNC pixel stream.
+  let accessUrls: TaskAccessEndpoint[] = [];
+  if (runtime.mode === 'ddev') {
+    await startDdevBrowserDesktop(runtime.handle);
+    accessUrls = await ddevAccessUrls(runtime.handle, taskId);
+  } else if (runtime.mode === 'app-runner') {
+    await startAppBrowserDesktop(runtime.handle);
+    accessUrls = await appRunnerAccessUrls(taskId, runtime.port);
+  }
+  return { ok: runtime.mode !== 'none', url: runtime.url, mode: runtime.mode, accessUrls };
 }
 
 export function startRuntimeEnsureWorker(): Worker<RuntimeEnsurePayload, RuntimeEnsureResult> {

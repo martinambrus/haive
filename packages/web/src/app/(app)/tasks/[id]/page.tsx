@@ -44,10 +44,46 @@ import { TaskSource } from '@/components/task-source';
 import { CommitDiffViewer } from '@/components/commit-diff-viewer';
 import { StepTerminal } from '@/components/terminal/StepTerminal';
 import { BrowserVncPanel } from '@/components/terminal/BrowserVncPanel';
+import { BrowserDirectPanel } from '@/components/terminal/BrowserDirectPanel';
 import { InteractiveShell } from '@/components/terminal/InteractiveShell';
 import { autoScrollTerminalsEnabled } from '@/lib/terminal-autoscroll';
 import { usePageTitle } from '@/lib/use-page-title';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
+
+/** Pick the live-browser surface for a step: the URL info box when the user chose
+ *  `direct` (test in your own browser) mode, else the in-app VNC panel when the
+ *  in-container headed browser is up, else nothing. */
+function liveBrowserPanel(
+  step: { id: string; detectOutput: unknown },
+  taskId: string,
+  opts: { autoCollapse: boolean; title?: string },
+) {
+  const det = step.detectOutput as {
+    liveBrowser?: { available?: boolean };
+    directAccess?: boolean;
+  } | null;
+  if (det?.directAccess) {
+    return (
+      <BrowserDirectPanel
+        taskId={taskId}
+        title={opts.title}
+        autoCollapse={opts.autoCollapse}
+        persistId={step.id}
+      />
+    );
+  }
+  if (det?.liveBrowser?.available) {
+    return (
+      <BrowserVncPanel
+        taskId={taskId}
+        title={opts.title}
+        autoCollapse={opts.autoCollapse}
+        persistId={step.id}
+      />
+    );
+  }
+  return null;
+}
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
 
@@ -2075,25 +2111,19 @@ function StepCard({
               headerSlot={
                 !runtimeTornDown &&
                 step.stepId === '08a-browser-verify' &&
-                step.activeRole !== 'fixer' &&
-                (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
-                  ?.available ? (
-                  <BrowserVncPanel taskId={taskId} autoCollapse={taskEnded} persistId={step.id} />
-                ) : undefined
+                step.activeRole !== 'fixer'
+                  ? liveBrowserPanel(step, taskId, { autoCollapse: taskEnded })
+                  : undefined
               }
               beforeFieldsSlot={
-                !runtimeTornDown &&
-                step.stepId === '09-gate-2-verify-approval' &&
-                (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
-                  ?.available ? (
-                  // Gate-2: the live browser sits BELOW the verification status table but
-                  // ABOVE the approve/reject decision — review the results, test, then decide.
-                  <BrowserVncPanel
-                    taskId={taskId}
-                    title="Browser — test the app here"
-                    autoCollapse={taskEnded}
-                    persistId={step.id}
-                  />
+                !runtimeTornDown && step.stepId === '09-gate-2-verify-approval' ? (
+                  // Gate-2: the live browser (or, in direct mode, the URL info box) sits
+                  // BELOW the verification status table but ABOVE the approve/reject
+                  // decision — review the results, test, then decide.
+                  liveBrowserPanel(step, taskId, {
+                    autoCollapse: taskEnded,
+                    title: 'Browser — test the app here',
+                  })
                 ) : step.stepId === '11-phase-8-learning' &&
                   step.status === 'waiting_form' &&
                   (step.detectOutput as { knowledgeDiffArtifactPath?: string | null } | null)
@@ -2195,14 +2225,7 @@ function StepCard({
         step.status !== 'failed' &&
         step.status !== 'waiting_form' &&
         step.activeRole !== 'fixer' &&
-        (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
-          ?.available && (
-          <BrowserVncPanel
-            taskId={taskId}
-            autoCollapse={step.status === 'done' || taskEnded}
-            persistId={step.id}
-          />
-        )}
+        liveBrowserPanel(step, taskId, { autoCollapse: step.status === 'done' || taskEnded })}
 
       {step.stepId === '08a-browser-verify' && step.activeRole === 'fixer' && (
         <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
@@ -2214,15 +2237,10 @@ function StepCard({
       {!runtimeTornDown &&
         step.stepId === '09-gate-2-verify-approval' &&
         step.status !== 'waiting_form' &&
-        (step.detectOutput as { liveBrowser?: { available?: boolean } } | null)?.liveBrowser
-          ?.available && (
-          <BrowserVncPanel
-            taskId={taskId}
-            title="Browser — test the app here"
-            autoCollapse={step.status === 'done' || taskEnded}
-            persistId={step.id}
-          />
-        )}
+        liveBrowserPanel(step, taskId, {
+          autoCollapse: step.status === 'done' || taskEnded,
+          title: 'Browser — test the app here',
+        })}
 
       {step.stepId === '10-gate-3-commit' &&
         (step.detectOutput as { diffArtifactPath?: string | null } | null)?.diffArtifactPath && (
