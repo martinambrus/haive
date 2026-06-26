@@ -1333,10 +1333,25 @@ export async function reconcileOrphanedCliSteps(db: Database): Promise<void> {
 }
 
 async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<void> {
+  const now = new Date();
   await db
     .update(schema.tasks)
-    .set({ status: 'cancelled', completedAt: new Date(), updatedAt: new Date() })
+    .set({ status: 'cancelled', completedAt: now, updatedAt: now })
     .where(eq(schema.tasks.id, payload.taskId));
+  // The task is terminal now, but its active/parked step rows are still in a
+  // non-terminal state (e.g. a run_app hold step left at waiting_form) — that
+  // shows a live form on a cancelled task. step_status has no 'cancelled' value,
+  // so mark them failed (mirrors the Stop path) with a clear reason. Only
+  // non-terminal rows are touched, so re-running this is a no-op.
+  await db
+    .update(schema.taskSteps)
+    .set({ status: 'failed', errorMessage: 'Task cancelled', endedAt: now, updatedAt: now })
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, payload.taskId),
+        inArray(schema.taskSteps.status, ['pending', 'running', 'waiting_form', 'waiting_cli']),
+      ),
+    );
   await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
   await maybeUnloadTaskEmbedModel(db, payload.taskId);

@@ -1,4 +1,4 @@
-import { and, eq, notInArray } from 'drizzle-orm';
+import { and, eq, inArray, notInArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   TASK_JOB_NAMES,
@@ -31,6 +31,20 @@ export async function cancelTaskRow(
     .update(schema.tasks)
     .set({ status: 'cancelled', completedAt: now, updatedAt: now })
     .where(eq(schema.tasks.id, taskId));
+  // Transition any non-terminal step rows so a cancelled task never shows a live
+  // step (e.g. a run_app hold step parked at waiting_form). step_status has no
+  // 'cancelled' value, so mark them failed (mirrors the Stop path). The worker's
+  // handleCancelTask repeats this idempotently; doing it here makes the UI
+  // consistent immediately instead of after the CANCEL job runs.
+  await tx
+    .update(schema.taskSteps)
+    .set({ status: 'failed', errorMessage: 'Task cancelled', endedAt: now, updatedAt: now })
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, taskId),
+        inArray(schema.taskSteps.status, ['pending', 'running', 'waiting_form', 'waiting_cli']),
+      ),
+    );
   await tx.insert(schema.taskEvents).values({
     taskId,
     taskStepId: null,
