@@ -1,7 +1,6 @@
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { CONFIG_KEYS, configService } from '@haive/shared';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
@@ -59,7 +58,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
   metadata: {
     id: '99-run-app-ready',
     workflowType: 'run_app',
-    index: 0,
+    index: 1,
     title: 'App is running',
     description:
       'The app is up. Browse or test it via the in-app VNC or your own browser, edit it from the Terminal tab, then finish to optionally commit your edits and tear everything down.',
@@ -67,6 +66,17 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
   },
 
   async detect(ctx: StepContext): Promise<RunAppReadyDetect> {
+    // The viewing-mode gate (98-choose-view) picked exactly one surface. Bring up
+    // only that one: 'vnc' navigates the in-runner browser so the VNC view opens ON
+    // the app; 'direct' shows the user a URL for their own browser and never starts
+    // the VNC desktop (it only slows their session). Default 'vnc' (e.g. legacy rows
+    // or direct-access globally off).
+    const viewChoice = await loadPreviousStepOutput(ctx.db, ctx.taskId, '98-choose-view');
+    const viewMode =
+      (viewChoice?.output as { viewMode?: string } | null)?.viewMode === 'direct'
+        ? 'direct'
+        : 'vnc';
+
     // The preceding runtime step (01c-ddev-env / 01a-app-boot) brought the app up;
     // re-ensure here so a worker reload between steps can't leave the user staring
     // at a dead app. Idempotent; best-effort (a failure still renders the gate).
@@ -77,14 +87,15 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       mode = runtime.mode;
       appUrl = runtime.url;
       // Navigate the in-runner headed browser to the app so the VNC view opens ON
-      // the running app instead of a blank browser (mirrors 08a/gate-2). Best-effort
-      // — a navigation failure must not block the gate from rendering.
-      if (runtime.mode === 'ddev') {
+      // the running app instead of a blank browser (mirrors 08a/gate-2). VNC mode
+      // only — own-browser mode skips the desktop entirely. Best-effort: a
+      // navigation failure must not block the gate from rendering.
+      if (viewMode === 'vnc' && runtime.mode === 'ddev') {
         await startBrowserDesktop(runtime.handle);
         await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
           timeoutMs: 60_000,
         });
-      } else if (runtime.mode === 'app-runner') {
+      } else if (viewMode === 'vnc' && runtime.mode === 'app-runner') {
         await startAppBrowserDesktop(runtime.handle);
         await appRunnerExec(
           runtime.handle,
@@ -99,7 +110,9 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       );
     }
 
-    const directAccess = await configService.getBoolean(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, true);
+    // Surface exactly the chosen surface: own-browser only in 'direct' mode, VNC
+    // only in 'vnc' mode. The web renders whichever is set, with no toggle.
+    const directAccess = viewMode === 'direct';
 
     // The runtime live-binds the per-task worktree; commit-back acts on it.
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
@@ -133,7 +146,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     return {
       mode,
       appUrl,
-      liveBrowser: mode === 'none' ? null : { available: true, appUrl },
+      liveBrowser: viewMode === 'vnc' && mode !== 'none' ? { available: true, appUrl } : null,
       directAccess,
       workspacePath,
       hasGit,

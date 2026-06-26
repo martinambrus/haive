@@ -140,6 +140,7 @@ async function buildRunAppRunList(
     stepRegistry.require('01-declare-deps'),
     stepRegistry.require('01-worktree-setup'),
   ];
+  const chooseView = stepRegistry.require('98-choose-view');
   const ready = stepRegistry.require('99-run-app-ready');
 
   const envTemplate = await getTaskEnvTemplate(db, ctx.taskId);
@@ -158,7 +159,7 @@ async function buildRunAppRunList(
       stepRegistry.require('01a-app-boot'),
     ];
   }
-  return [...prefix, ...runtime, ready];
+  return [...prefix, ...runtime, chooseView, ready];
 }
 
 async function resolveTaskContext(
