@@ -46,6 +46,11 @@ const KEEPALIVE_INTERVAL_MS = 30_000;
 // leaving an empty Clean tab looking frozen even though the model is working.
 const RAW_AUTOSWITCH_IDLE_MS = 30_000;
 
+// How close to the bottom (px) the Clean tab must be for auto-scroll to stay
+// engaged. Above this gap we treat the user as having scrolled up to read and
+// stop pinning to the latest output until they scroll back to the bottom.
+const CLEAN_STICK_THRESHOLD_PX = 24;
+
 // A steer's lifecycle in the viewer. `sent` = accepted by the API (queued to the
 // CLI's stdin); `consumed` = drained by the model at a tool-call boundary (the
 // worker's steer_consumed frame); `unconsumed` = the run ended before it drained;
@@ -106,6 +111,12 @@ export function CliStreamViewer({
   // terminal because each invocation mounts a fresh CliStreamViewer (keyed by id).
   const [userPickedTab, setUserPickedTab] = useState(false);
   const cleanScrollRef = useRef<HTMLDivElement | null>(null);
+  // Stick-to-bottom gate for the Clean tab. True while the user is at (or near)
+  // the bottom; flipped false the moment they scroll up to read, so streaming
+  // frames stop yanking them down, and re-armed when they scroll back to the
+  // bottom. A ref (not state) — handleCleanScroll fires per frame and must not
+  // trigger a re-render.
+  const cleanStickRef = useRef(true);
   // Refs to the live terminal + fit addon so the tab-switch effect can re-fit
   // when Raw becomes visible (xterm laid out in a display:none container keeps a
   // zero size until re-fit).
@@ -411,11 +422,25 @@ export function CliStreamViewer({
   // real characters, so stripping bare \r is all the escaping the prose needs.
   const cleanContent = (isReplay ? (staticCleanOutput ?? '') : cleanText).replace(/\r/g, '');
 
-  // Keep the Clean panel pinned to the latest output as it streams.
+  // Keep the Clean panel pinned to the latest output as it streams — but only
+  // while the user is at (or near) the bottom. Once they scroll up to read we
+  // stop forcing them down; auto-scroll re-engages when they scroll back to the
+  // bottom (handleCleanScroll re-arms cleanStickRef). The container remounts on a
+  // tab switch, so a re-entry while still pinned lands on the newest output.
   useEffect(() => {
     const el = cleanScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && cleanStickRef.current) el.scrollTop = el.scrollHeight;
   }, [cleanContent, tab]);
+
+  // Re-arm the stick-to-bottom gate when the user is within the threshold of the
+  // bottom, disarm it otherwise. Programmatic scrolls from the effect above land
+  // at the bottom and so keep the gate armed (no feedback loop).
+  const handleCleanScroll = () => {
+    const el = cleanScrollRef.current;
+    if (!el) return;
+    cleanStickRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight <= CLEAN_STICK_THRESHOLD_PX;
+  };
 
   // Auto-switch to the Raw tab when a live run is clearly active (raw bytes flowing)
   // but the Clean tab is still empty after RAW_AUTOSWITCH_IDLE_MS — the model is
@@ -579,6 +604,7 @@ export function CliStreamViewer({
         {showTabs && tab === 'clean' && (
           <div
             ref={cleanScrollRef}
+            onScroll={handleCleanScroll}
             className="h-full w-full overflow-auto rounded border border-neutral-800 bg-[#0a0a0a]"
           >
             {cleanContent.length === 0 ? (
