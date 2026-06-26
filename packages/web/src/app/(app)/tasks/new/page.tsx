@@ -249,7 +249,9 @@ export default function NewTaskPage() {
       : onboardingStatus?.onboarded
         ? 'workflow'
         : 'onboarding';
-    const finalTitle = title.trim() || (isRunApp ? 'Run app' : '');
+    const repoName = repos?.find((r) => r.id === repositoryId)?.name;
+    const finalTitle =
+      title.trim() || (isRunApp ? (repoName ? `run ${repoName} app` : 'Run app') : '');
     if (!finalTitle) {
       setError('Title is required');
       return;
@@ -472,55 +474,59 @@ export default function NewTaskPage() {
           </p>
         </div>
 
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="title">Title</Label>
-          <Input
-            id="title"
-            type="text"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder={
-              inferredType === 'run_app'
-                ? 'Run app'
-                : inferredType === 'workflow'
-                  ? 'Implement feature X'
-                  : 'Onboard repo'
-            }
-            required={!isRunApp}
-          />
-        </div>
+        {!isRunApp && (
+          <>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="title">Title</Label>
+              <Input
+                id="title"
+                type="text"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder={
+                  inferredType === 'run_app'
+                    ? 'Run app'
+                    : inferredType === 'workflow'
+                      ? 'Implement feature X'
+                      : 'Onboard repo'
+                }
+                required={!isRunApp}
+              />
+            </div>
 
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="description">
-            Description{inferredType === 'workflow' ? '' : ' (optional)'}
-          </Label>
-          <textarea
-            id="description"
-            rows={3}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="What should the workflow accomplish? Be specific — this drives knowledge mining and planning."
-            required={inferredType === 'workflow'}
-            className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-          />
-        </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="description">
+                Description{inferredType === 'workflow' ? '' : ' (optional)'}
+              </Label>
+              <textarea
+                id="description"
+                rows={3}
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="What should the workflow accomplish? Be specific — this drives knowledge mining and planning."
+                required={inferredType === 'workflow'}
+                className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
 
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="estimatedTime">Estimated time (hours, optional)</Label>
-          <Input
-            id="estimatedTime"
-            type="number"
-            inputMode="decimal"
-            step="0.25"
-            min="0"
-            value={estimatedTime}
-            onChange={(e) => setEstimatedTime(e.target.value)}
-            placeholder="e.g. 1.5"
-          />
-          <p className="text-xs text-neutral-500">
-            Decimal hours (0.25, 0.5, 1, 1.5). Compared against the actual effort spent.
-          </p>
-        </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="estimatedTime">Estimated time (hours, optional)</Label>
+              <Input
+                id="estimatedTime"
+                type="number"
+                inputMode="decimal"
+                step="0.25"
+                min="0"
+                value={estimatedTime}
+                onChange={(e) => setEstimatedTime(e.target.value)}
+                placeholder="e.g. 1.5"
+              />
+              <p className="text-xs text-neutral-500">
+                Decimal hours (0.25, 0.5, 1, 1.5). Compared against the actual effort spent.
+              </p>
+            </div>
+          </>
+        )}
 
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center justify-between gap-2">
