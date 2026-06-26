@@ -902,7 +902,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           where: eq(schema.tasks.id, taskId),
           columns: { status: true },
         });
-        if (statusRow?.status === 'cancelled') {
+        // Abort the in-flight step when the task is stopped out-of-band. A user
+        // Cancel sets the task `cancelled`; a user Stop (cancel-active-cli) sets
+        // it `failed`. Both must reach a running deterministic apply loop — which
+        // only polls this flag, not its own step row — or Stop can't halt a long
+        // run like RAG-populate (it would keep embedding after the click).
+        if (statusRow?.status === 'cancelled' || statusRow?.status === 'failed') {
           controller.abort();
         }
       } catch (err) {
