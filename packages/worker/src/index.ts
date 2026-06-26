@@ -20,6 +20,7 @@ import {
 } from './queues/task-queue.js';
 import { closeRedis } from './redis.js';
 import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
+import { reapOrphanedTaskAuthVolumes } from './sandbox/auth-volume-reaper.js';
 import { ensureOllamaModels } from './sandbox/ollama-provision.js';
 import { ensureDdevCa } from './sandbox/ddev-runner.js';
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
@@ -34,6 +35,12 @@ async function main(): Promise<void> {
   // re-spawn fresh containers without name/state collisions.
   await reapAllCliSandboxes('worker boot').catch((err) => {
     logger.warn({ err }, 'cli sandbox reap on boot failed');
+  });
+  // Reap per-task CLI auth volumes orphaned by a prior worker that died mid-teardown
+  // (the leak cleanupTaskContainers can't recover after the fact). Keeps live tasks'
+  // volumes + all per-user/per-provider auth volumes.
+  await reapOrphanedTaskAuthVolumes(getDb()).catch((err) => {
+    logger.warn({ err }, 'orphan auth-volume reap on boot failed');
   });
 
   const repoWorker = startRepoWorker(repoStoragePath);
