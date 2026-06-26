@@ -45,6 +45,7 @@ import { cleanupTaskAuthVolumes } from '../sandbox/task-auth-volume.js';
 import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { killTaskIdeContainers } from '../sandbox/ide-runner.js';
+import { removeTaskWorktree } from '../repo/worktree-remove.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
@@ -428,6 +429,30 @@ async function cleanupTaskContainers(
     }
   } catch (err) {
     logger.warn({ err, taskId, reason }, 'cleanup-task-auth-volumes failed');
+  }
+
+  // Remove the feature worktree on cancel only. On completion 12-worktree-cleanup
+  // owns this (and a `keep` choice there must be respected); on 'failed' the runtime
+  // is kept for recovery, so a later cancel reaps it then. A task cancelled before
+  // step 12 would otherwise leak its worktree dir into the haive_repos volume.
+  if (reason === 'cancelled') {
+    try {
+      const wt = await removeTaskWorktree(db, taskId);
+      if (wt.removed) {
+        await appendEvent(db, taskId, null, 'worktree.removed', {
+          reason,
+          worktreePath: wt.worktreePath,
+          method: wt.method,
+        });
+      } else if (wt.error) {
+        logger.warn(
+          { taskId, worktreePath: wt.worktreePath, err: wt.error },
+          'worktree removal failed',
+        );
+      }
+    } catch (err) {
+      logger.warn({ err, taskId, reason }, 'cleanup-task-worktree failed');
+    }
   }
 
   if (reason === 'cancelled') {
