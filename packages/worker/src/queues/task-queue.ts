@@ -1093,25 +1093,36 @@ async function handleAdvanceStep(
     return;
   }
 
-  // Same-step duplicate guard. The other-step guard above uses `ne(stepId)`, so
-  // it does NOT catch two advance-step jobs for the SAME step+round running at
-  // once — which the task worker's concurrency (5) allows when two triggers (or
-  // a redelivery racing the original) enqueue the same step. Each would run a
-  // full apply() in parallel (observed as two RAG-populate embedding loops after
-  // a worker reload, double CPU). Yield to a LIVE sibling found in BullMQ's
-  // active set: a dead worker's job is no longer `active`, so a genuine
-  // stalled-recovery re-delivery still proceeds. Tiebreak on job id (lower id —
-  // the earlier enqueue — wins) so two simultaneous jobs can't both yield and
-  // strand the step.
-  if (jobId != null) {
+  const existingRows = await db
+    .select()
+    .from(schema.taskSteps)
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, ctx.taskId),
+        eq(schema.taskSteps.stepId, payload.stepId),
+        eq(schema.taskSteps.round, round),
+      ),
+    )
+    .limit(1);
+  const existing = existingRows[0];
+
+  // Same-step duplicate guard: only meaningful once an apply() is ACTUALLY
+  // running (step status 'running'). The task worker's concurrency (5) lets a
+  // second advance-step job for the same step+round+epoch start a parallel
+  // apply() — observed as two RAG-populate embed loops (double CPU) after a
+  // worker reload. If the step is already 'running', another delivery set it so;
+  // yield to the live sibling in BullMQ's active set (tiebreak on job id, lower
+  // wins, so two can't both yield). Gating on 'running' is what keeps this from
+  // skipping a legit waiting_form submit / pending first run — with no apply in
+  // flight there is nothing to duplicate, and a stale "active" zombie job (a dead
+  // worker's, whose 30-min lock has not expired) must NOT block the step from
+  // advancing. A genuinely orphaned 'running' step recovers via its own job's
+  // same-id stalled re-delivery (excluded below by `j.id === jobId`).
+  if (existing?.status === 'running' && jobId != null) {
     const activeJobs = await getTaskQueue().getActive();
     const sibling = activeJobs.find((j) => {
       if (j.id == null || j.id === jobId || j.name !== TASK_JOB_NAMES.ADVANCE_STEP) return false;
       const d = j.data as TaskJobPayload;
-      // Same step+round AND same orchestration epoch. A different-epoch job is a
-      // superseded retry (the epoch guard skips it on its own delivery), not a
-      // true duplicate — never yield to it, or a retry could stall behind a
-      // lingering old-epoch job.
       return (
         d.taskId === ctx.taskId &&
         d.stepId === payload.stepId &&
@@ -1128,18 +1139,6 @@ async function handleAdvanceStep(
     }
   }
 
-  const existingRows = await db
-    .select()
-    .from(schema.taskSteps)
-    .where(
-      and(
-        eq(schema.taskSteps.taskId, ctx.taskId),
-        eq(schema.taskSteps.stepId, payload.stepId),
-        eq(schema.taskSteps.round, round),
-      ),
-    )
-    .limit(1);
-  const existing = existingRows[0];
   // Finalized out-of-band — a user Skip via the api set this step to 'skipped'.
   // Don't re-run it; advance to the next step from the registry run list (the api
   // can't see unmaterialized future steps to compute the next step itself).
