@@ -1022,7 +1022,11 @@ async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<v
   await handleResult(db, ctx, first.metadata.id, result);
 }
 
-async function handleAdvanceStep(db: Database, payload: TaskJobPayload): Promise<void> {
+async function handleAdvanceStep(
+  db: Database,
+  payload: TaskJobPayload,
+  jobId?: string,
+): Promise<void> {
   const ctx = await resolveTaskContext(db, payload.taskId);
   if (!ctx) {
     logger.warn({ taskId: payload.taskId }, 'advance-step: task not found');
@@ -1087,6 +1091,41 @@ async function handleAdvanceStep(db: Database, payload: TaskJobPayload): Promise
       'advance-step skipped: another step is already active (stale/duplicate job)',
     );
     return;
+  }
+
+  // Same-step duplicate guard. The other-step guard above uses `ne(stepId)`, so
+  // it does NOT catch two advance-step jobs for the SAME step+round running at
+  // once — which the task worker's concurrency (5) allows when two triggers (or
+  // a redelivery racing the original) enqueue the same step. Each would run a
+  // full apply() in parallel (observed as two RAG-populate embedding loops after
+  // a worker reload, double CPU). Yield to a LIVE sibling found in BullMQ's
+  // active set: a dead worker's job is no longer `active`, so a genuine
+  // stalled-recovery re-delivery still proceeds. Tiebreak on job id (lower id —
+  // the earlier enqueue — wins) so two simultaneous jobs can't both yield and
+  // strand the step.
+  if (jobId != null) {
+    const activeJobs = await getTaskQueue().getActive();
+    const sibling = activeJobs.find((j) => {
+      if (j.id == null || j.id === jobId || j.name !== TASK_JOB_NAMES.ADVANCE_STEP) return false;
+      const d = j.data as TaskJobPayload;
+      // Same step+round AND same orchestration epoch. A different-epoch job is a
+      // superseded retry (the epoch guard skips it on its own delivery), not a
+      // true duplicate — never yield to it, or a retry could stall behind a
+      // lingering old-epoch job.
+      return (
+        d.taskId === ctx.taskId &&
+        d.stepId === payload.stepId &&
+        (d.round ?? 0) === round &&
+        (d.epoch ?? null) === (payload.epoch ?? null)
+      );
+    });
+    if (sibling && Number(jobId) > Number(sibling.id)) {
+      logger.warn(
+        { taskId: ctx.taskId, stepId: payload.stepId, round, jobId, siblingJobId: sibling.id },
+        'advance-step skipped: same step already running in another job (duplicate)',
+      );
+      return;
+    }
   }
 
   const existingRows = await db
@@ -1312,7 +1351,7 @@ export function startTaskWorker(): Worker<TaskWorkerPayload> {
         if (job.name === TASK_JOB_NAMES.START) {
           await handleStartTask(db, payload);
         } else if (job.name === TASK_JOB_NAMES.ADVANCE_STEP) {
-          await handleAdvanceStep(db, payload);
+          await handleAdvanceStep(db, payload, job.id);
         } else if (job.name === TASK_JOB_NAMES.CANCEL) {
           await handleCancelTask(db, payload);
         } else {
