@@ -215,6 +215,11 @@ export const taskSteps = pgTable(
      *  on iteration count without parsing the JSONB blob. */
     iterationCount: integer('iteration_count').notNull().default(0),
     statusMessage: text('status_message'),
+    /** Non-fatal advisory shown as a standalone amber banner on the step (during
+     *  and after the run), separate from the last-writer-wins status_message so a
+     *  per-file progress line can't bury it. Set e.g. when RAG embeddings fall back
+     *  to CPU because the GPU is unavailable. Null = no warning. */
+    warningMessage: text('warning_message'),
     /** Human-readable recap of what this step's LLM agent did, shown as the
      *  collapsible "What the agent did" panel on the done card. Populated from
      *  the apply output's curated summary (findingsSummary/summary/notes) when

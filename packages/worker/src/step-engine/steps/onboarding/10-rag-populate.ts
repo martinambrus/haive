@@ -29,7 +29,7 @@ import {
   vectorLiteral,
   EMBED_BATCH_SIZE,
 } from './_rag-embed.js';
-import { detectEmbedDevice, type EmbedDevice } from '../_embed-device.js';
+import { detectEmbedDevice, embedDeviceWarning, type EmbedDevice } from '../_embed-device.js';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -753,7 +753,13 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           );
         }
       }
-      const cpuTag = embedDevice === 'cpu' ? ' [CPU embeddings — GPU unavailable, slow]' : '';
+      // Surface a CPU fallback as a standalone amber banner on the step (set once;
+      // a per-file progress line would otherwise bury it). Clears to null on a
+      // healthy/unknown run so a stale warning from a prior pass does not linger.
+      await ctx.db
+        .update(schema.taskSteps)
+        .set({ warningMessage: embedDeviceWarning(embedDevice) })
+        .where(eq(schema.taskSteps.id, ctx.taskStepId));
 
       let kbChunkCount = 0;
       let codeChunkCount = 0;
@@ -767,7 +773,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       for (let fi = 0; fi < totalKb; fi += 1) {
         ctx.throwIfCancelled();
         const file = detected.kbFiles[fi]!;
-        await ctx.emitProgress(`Indexing KB (${fi + 1}/${totalKb}): ${file.relPath}${cpuTag}`);
+        await ctx.emitProgress(`Indexing KB (${fi + 1}/${totalKb}): ${file.relPath}`);
 
         let text: string;
         try {
@@ -809,7 +815,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       for (let fi = 0; fi < totalCode; fi += 1) {
         ctx.throwIfCancelled();
         const file = detected.codeFiles[fi]!;
-        await ctx.emitProgress(`Indexing code (${fi + 1}/${totalCode}): ${file.relPath}${cpuTag}`);
+        await ctx.emitProgress(`Indexing code (${fi + 1}/${totalCode}): ${file.relPath}`);
 
         let text: string;
         try {
@@ -861,7 +867,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
 
       await ctx.emitProgress(
         `RAG ${mode} complete: embedded ${chunksEmbedded}, skipped ${chunksSkipped}, deleted ${chunksDeleted} ` +
-          `(${kbChunkCount} KB chunks from ${kbFileCount} files, ${codeChunkCount} code chunks from ${codeFileCount} files).${cpuTag}`,
+          `(${kbChunkCount} KB chunks from ${kbFileCount} files, ${codeChunkCount} code chunks from ${codeFileCount} files).`,
       );
 
       ctx.logger.info(

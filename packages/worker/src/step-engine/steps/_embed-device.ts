@@ -41,3 +41,15 @@ export async function detectEmbedDevice(
   if (placement === 'gpu') return 'gpu';
   return 'unknown';
 }
+
+/** User-facing advisory for a step's warning banner, or null when there is
+ *  nothing to warn about. Only a CPU fallback (under GPU mode) warrants one. */
+export function embedDeviceWarning(device: EmbedDevice): string | null {
+  if (device !== 'cpu') return null;
+  return (
+    'GPU unavailable — embeddings are running on the CPU, so RAG indexing is much ' +
+    'slower than usual. This usually means the host GPU driver was upgraded without ' +
+    'a reboot. To restore GPU speed: from Windows run `wsl --shutdown`, restart Docker ' +
+    'Desktop and re-run dev-up (or reboot). Indexing will still finish either way.'
+  );
+}

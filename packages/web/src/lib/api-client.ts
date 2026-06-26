@@ -478,6 +478,9 @@ export interface TaskStep {
   formValues: Record<string, unknown> | null;
   output: unknown;
   statusMessage: string | null;
+  /** Non-fatal advisory shown as a standalone amber banner (e.g. RAG embeddings
+   *  running on CPU because the GPU is unavailable). Null = no warning. */
+  warningMessage: string | null;
   /** Human-readable recap of what this step's LLM agent did — shown as the
    *  collapsible "What the agent did" panel. Null on deterministic-only steps
    *  or before the async summarizer fills it. */

@@ -25,7 +25,7 @@ import {
   vectorLiteral,
   EMBED_BATCH_SIZE,
 } from '../onboarding/_rag-embed.js';
-import { detectEmbedDevice, type EmbedDevice } from '../_embed-device.js';
+import { detectEmbedDevice, embedDeviceWarning, type EmbedDevice } from '../_embed-device.js';
 
 /* ------------------------------------------------------------------ */
 /* Shared RAG indexing — used by 02-pre-rag-sync (run start, indexes  */
@@ -218,7 +218,13 @@ export async function runRagIndexSync(
         embedDevice = await detectEmbedDevice(ctx.logger, prefs.ollamaUrl!, prefs.embeddingModel!);
       }
     }
-    const cpuTag = embedDevice === 'cpu' ? ' [CPU embeddings — GPU unavailable, slow]' : '';
+    // Surface a CPU fallback as a standalone amber banner on the step (set once;
+    // a per-file progress line would otherwise bury it). Clears to null on a
+    // healthy/unknown run so a stale warning from a prior pass does not linger.
+    await ctx.db
+      .update(schema.taskSteps)
+      .set({ warningMessage: embedDeviceWarning(embedDevice) })
+      .where(eq(schema.taskSteps.id, ctx.taskStepId));
 
     // Resolve repository_id — required for dedup. Without it we'd be re-embedding
     // the same content on every task. Bail with a logged warning rather than
@@ -255,7 +261,7 @@ export async function runRagIndexSync(
     for (let fi = 0; fi < allFiles.length; fi += 1) {
       const { relPath, sourceType } = allFiles[fi]!;
       processedPaths.add(relPath);
-      await ctx.emitProgress(`Syncing (${fi + 1}/${allFiles.length}): ${relPath}${cpuTag}`);
+      await ctx.emitProgress(`Syncing (${fi + 1}/${allFiles.length}): ${relPath}`);
 
       let text: string;
       try {
@@ -433,7 +439,7 @@ export async function runRagIndexSync(
     }
 
     await ctx.emitProgress(
-      `RAG sync complete: ${inserted} inserted, ${updated} updated, ${skipped} unchanged, ${deleted} deleted.${cpuTag}`,
+      `RAG sync complete: ${inserted} inserted, ${updated} updated, ${skipped} unchanged, ${deleted} deleted.`,
     );
     ctx.logger.info({ inserted, updated, skipped, deleted }, 'rag sync complete');
     return {
