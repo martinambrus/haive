@@ -7,6 +7,7 @@ import { cn } from '@/lib/cn';
 const SETTINGS_TABS = [
   { href: '/settings/account', label: 'Account' },
   { href: '/settings/cli-providers', label: 'CLI Providers' },
+  { href: '/settings/ide', label: 'Editor' },
   { href: '/settings/credentials', label: 'Git Credentials' },
   { href: '/settings/git-identity', label: 'Git Identity' },
   { href: '/settings/global-kb', label: 'Global KB' },

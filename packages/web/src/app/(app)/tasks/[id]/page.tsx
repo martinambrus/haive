@@ -40,7 +40,7 @@ import {
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { PersistedDetails } from '@/components/persisted-details';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
-import { TaskSource } from '@/components/task-source';
+import { EditorTab } from '@/components/editor/editor-tab';
 import { CommitDiffViewer } from '@/components/commit-diff-viewer';
 import { StepTerminal } from '@/components/terminal/StepTerminal';
 import { BrowserVncPanel } from '@/components/terminal/BrowserVncPanel';
@@ -161,7 +161,7 @@ function stepStatusVariant(status: StepStatus): BadgeVariant {
   }
 }
 
-type Tab = 'steps' | 'source' | 'terminal' | 'activity';
+type Tab = 'steps' | 'editor' | 'terminal' | 'activity';
 
 interface TaskDetailResponse {
   task: Task;
@@ -832,8 +832,8 @@ export default function TaskDetailPage() {
         <TabButton active={tab === 'steps'} onClick={() => setTab('steps')}>
           Steps
         </TabButton>
-        <TabButton active={tab === 'source'} onClick={() => setTab('source')}>
-          Source
+        <TabButton active={tab === 'editor'} onClick={() => setTab('editor')}>
+          Editor
         </TabButton>
         <TabButton active={tab === 'terminal'} onClick={() => setTab('terminal')}>
           Terminal
@@ -927,7 +927,7 @@ export default function TaskDetailPage() {
         </div>
       )}
 
-      {tab === 'source' && <TaskSource taskId={id} />}
+      {tab === 'editor' && <EditorTab taskId={id} taskStatus={task?.status ?? 'running'} />}
 
       {tab === 'terminal' && (
         <TerminalTab

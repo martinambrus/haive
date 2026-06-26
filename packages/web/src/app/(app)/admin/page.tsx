@@ -31,6 +31,8 @@ export default function AdminPage() {
   const [savingConcurrency, setSavingConcurrency] = useState(false);
   const [steeringEnabled, setSteeringEnabled] = useState<boolean | null>(null);
   const [savingSteering, setSavingSteering] = useState(false);
+  const [ideEnabled, setIdeEnabled] = useState<boolean | null>(null);
+  const [savingIde, setSavingIde] = useState(false);
   const [browserAccessEnabled, setBrowserAccessEnabled] = useState<boolean | null>(null);
   const [savingBrowserAccess, setSavingBrowserAccess] = useState(false);
   const [fairEnabled, setFairEnabled] = useState<boolean | null>(null);
@@ -46,6 +48,7 @@ export default function AdminPage() {
         healthData,
         concurrencyData,
         steeringData,
+        ideData,
         browserAccessData,
         fairData,
         perTaskData,
@@ -54,6 +57,7 @@ export default function AdminPage() {
         api.get<AdminHealthResponse>('/admin/health'),
         api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
         api.get<{ enabled: boolean }>('/admin/config/steering'),
+        api.get<{ enabled: boolean }>('/admin/config/ide'),
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
         api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
         api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
@@ -63,6 +67,7 @@ export default function AdminPage() {
       setMaxParallel(concurrencyData.maxParallelAgents);
       setMaxParallelInput(String(concurrencyData.maxParallelAgents));
       setSteeringEnabled(steeringData.enabled);
+      setIdeEnabled(ideData.enabled);
       setBrowserAccessEnabled(browserAccessData.enabled);
       setFairEnabled(fairData.enabled);
       setMaxPerTask(perTaskData.maxAgentsPerTask);
@@ -166,6 +171,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update steering');
     } finally {
       setSavingSteering(false);
+    }
+  }
+
+  async function setIde(next: boolean) {
+    setSavingIde(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/ide', {
+        enabled: next,
+      });
+      setIdeEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update editor switch');
+    } finally {
+      setSavingIde(false);
     }
   }
 
@@ -370,6 +390,30 @@ export default function AdminPage() {
             />
             {steeringEnabled ? 'Enabled' : 'Disabled'}
             {savingSteering && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {ideEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>In-task editor (IDE)</CardTitle>
+            <CardDescription>
+              The Editor tab runs a browser VS Code (code-server) on each task&apos;s worktree.
+              Global kill-switch: OFF hides the Editor tab and refuses new editor launches (the
+              read-only Source viewer remains). Takes effect within ~30s; persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={ideEnabled}
+              disabled={savingIde}
+              onChange={(e) => void setIde(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {ideEnabled ? 'Enabled' : 'Disabled'}
+            {savingIde && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

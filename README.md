@@ -144,6 +144,39 @@ pnpm format
 pnpm format:check
 ```
 
+## Browser IDE (Editor tab)
+
+Each task's Editor tab runs a full browser VS Code (code-server) on the task's
+workspace, reverse-proxied through the authenticated API exactly like the Terminal
+and VNC tabs. It replaces the old read-only Source viewer (which remains as the
+fallback when the editor is unavailable).
+
+- Workspace rooting: the editor is mounted on the task's git worktree ONLY (volume
+  subpath), so the repo root and sibling worktrees are physically absent — a
+  terminal inside the editor cannot escape to them. For worktree tasks there is no
+  in-IDE git panel by design (the deterministic workflow owns all commits/merges);
+  non-worktree tasks mount the full repo and get working git.
+- Extensions: installed from the Open VSX registry (the Microsoft Marketplace is
+  licensed to MS products only, so Pylance, C#, C/C++, Remote-\*, and Live Share are
+  unavailable). Extensions live on a per-user Docker volume — install once, present
+  in every task you open.
+- Settings: per-user global settings.json at Settings → Editor (seeded into every
+  editor session); per-project overrides in the repo's `.vscode/settings.json`,
+  which VS Code layers on top.
+- Lifecycle: lazy-started when you open the tab; never reaped while the tab is open;
+  gracefully stopped 30 minutes after it closes. Unsaved (hot-exit) buffers live on
+  a per-task volume that survives the reap, so reopening restores them.
+- Image: pinned `codercom/code-server` (see `CODE_SERVER_IMAGE`). The first open
+  pulls it (the tab shows a downloading state); optionally pre-pull with
+  `docker pull codercom/code-server:<tag>` to avoid that wait.
+- Kill-switch: Admin → "In-task editor (IDE)" (`config:ide:enabled`). OFF hides the
+  Editor tab and refuses launches; the read-only Source viewer remains.
+- Security: the editor sees the real worktree files and gets a worktree-scoped
+  shell — the same human-trust model as the existing Terminal tab. The AI
+  secret-file masking does NOT apply to the human editor. code-server runs with
+  auth disabled, bound only to the internal sandbox network (never host-published);
+  the API proxy (cookie-JWT + task ownership) is the sole auth boundary.
+
 ## Hardening
 
 ### Multi-user isolation
