@@ -444,6 +444,18 @@ export default function TaskDetailPage() {
     }
   }
 
+  // Stop the running CLI step without ending the task (vs runAction('cancel'),
+  // which tears everything down). Leaves the task open/restartable.
+  async function stopActiveCli() {
+    setActionError(null);
+    try {
+      await api.post(`/tasks/${id}/cancel-active-cli`, {});
+      await reload();
+    } catch (err) {
+      setActionError((err as Error).message ?? 'Stop failed');
+    }
+  }
+
   async function runStepAction(
     step: TaskStep,
     action: StepAction,
@@ -628,6 +640,10 @@ export default function TaskDetailPage() {
   const backHref = isUpgradeTask ? '/repos' : '/tasks';
   const backLabel = isUpgradeTask ? 'Back to repositories' : 'Back to tasks';
   const canCancel = !['completed', 'cancelled'].includes(task.status);
+  // A CLI step is actively executing. The Stop buttons (top-right + the running
+  // step row) target it: stop the CLI, keep the environment, task stays open.
+  // Cancel, by contrast, ends the whole task and tears the environment down.
+  const stepRunning = steps.some((s) => s.status === 'running' || s.status === 'waiting_cli');
   const canRetry = task.status === 'failed';
   // A failed task failed AT a step. The top-level Retry must re-run that step
   // (reset it + downstream, re-execute), which is exactly the per-step Retry —
@@ -738,12 +754,30 @@ export default function TaskDetailPage() {
               Retry
             </Button>
           )}
+          {stepRunning && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                if (confirm('Stop the running step? The task stays open so you can restart it.'))
+                  void stopActiveCli();
+              }}
+              title="Stop the running CLI for the current step. Keeps the environment; the task stays open and restartable."
+            >
+              Stop
+            </Button>
+          )}
           {canCancel && (
             <Button
               variant="destructive"
               size="sm"
               onClick={() => {
-                if (confirm('Cancel this task?')) void runAction('cancel');
+                if (
+                  confirm(
+                    'Cancel this task? This stops the running step, tears down the environment, and ends the task.',
+                  )
+                )
+                  void runAction('cancel');
               }}
             >
               Cancel
@@ -817,6 +851,7 @@ export default function TaskDetailPage() {
                     const target = steps.find((s) => s.stepId === sid);
                     if (target) await runStepAction(target, 'retry');
                   }}
+                  onStop={() => void stopActiveCli()}
                   onCliLogin={() => openCliLoginForStep(step)}
                   providers={providers}
                   taskCliProviderId={task.cliProviderId ?? null}
@@ -1045,6 +1080,9 @@ interface StepCardProps {
   /** Retry an arbitrary step by id (not just this card's own step). Used by the
    *  03c review card to re-run the previous business-requirements step. */
   onRetryStep: (stepId: string) => Promise<void>;
+  /** Stop the running CLI for this step without re-running it (vs onAction('retry'),
+   *  which stops AND re-runs). Same effect as the top-right Stop. */
+  onStop: () => void;
 }
 
 const ACTIONABLE_STATUSES: ReadonlySet<StepStatus> = new Set([
@@ -1474,6 +1512,7 @@ function StepCard({
   actionError,
   onAction,
   onRetryStep,
+  onStop,
   onCliLogin,
   providers,
   taskCliProviderId,
@@ -1780,6 +1819,19 @@ function StepCard({
               title="Reset and re-run the business-requirements step with your rejection feedback pre-filled, so the agent re-drafts addressing it. Retrying THIS step would only re-review the same draft."
             >
               Re-run business requirements
+            </Button>
+          )}
+          {(step.status === 'running' || step.status === 'waiting_cli') && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                if (confirm('Stop this step? It stops without re-running; the task stays open.'))
+                  onStop();
+              }}
+              title="Stop the running CLI for this step. Keeps the environment; the task stays open and restartable. Use Stop & retry to stop and immediately re-run."
+            >
+              Stop
             </Button>
           )}
           {canRetry &&

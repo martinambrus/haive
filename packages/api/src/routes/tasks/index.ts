@@ -376,6 +376,90 @@ taskRoutes.patch('/:id', async (c) => {
   return c.json({ task: updated[0] });
 });
 
+/** Force-stop a task's current activity so it leaves the running state. Marks
+ *  every still-live cli-exec invocation superseded+ended (exit 137) AND fails
+ *  whatever step is stuck in running/waiting_cli — including a frozen
+ *  DETERMINISTIC step with no invocation at all (e.g. one orphaned by a worker
+ *  restart), which has nothing in cli_invocations to cancel and would otherwise
+ *  be un-stoppable. Supersede + step writes are committed BEFORE the cli
+ *  sandboxes are killed, so the dying cli-exec job's `resumeStepIfLinked` is a
+ *  no-op (it skips the advance for a superseded invocation — see resolvers.ts)
+ *  and can't clobber the caller's terminal state. With `failTask`, also drops
+ *  the task to `failed` (restartable) — used by Stop / cancel-active-cli. The
+ *  task `cancel` action passes `failTask:false` and sets `cancelled` itself
+ *  afterwards; without the supersede-first step its `cancelled` gets clobbered
+ *  back to `failed` by the dying job, forcing the user to click Cancel twice. */
+async function stopActiveCliInvocations(
+  db: ReturnType<typeof getDb>,
+  taskId: string,
+  opts: { failTask: boolean },
+): Promise<{ killed: number; cancelled: number; stopped: number }> {
+  const now = new Date();
+  // Supersede every still-live invocation first (committed before the kill) so
+  // the dying cli-exec job's resume is a no-op and can't clobber the caller's
+  // terminal state.
+  const active = await db
+    .select({ id: schema.cliInvocations.id })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskId, taskId),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
+  for (const inv of active) {
+    await db
+      .update(schema.cliInvocations)
+      .set({
+        exitCode: 137,
+        errorMessage: 'CLI cancelled by user',
+        endedAt: now,
+        supersededAt: now,
+      })
+      .where(eq(schema.cliInvocations.id, inv.id));
+  }
+  // Fail whatever step is stuck in running/waiting_cli. This covers BOTH a CLI
+  // step (whose invocation we just superseded) AND a frozen deterministic step
+  // with no live invocation — otherwise un-stoppable because there is nothing
+  // in cli_invocations to cancel. Steps run one-at-a-time per task, so this only
+  // ever hits the single active step.
+  const stopped = await db
+    .update(schema.taskSteps)
+    .set({
+      status: 'failed',
+      errorMessage: 'Stopped by user',
+      endedAt: now,
+      statusMessage: null,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, taskId),
+        inArray(schema.taskSteps.status, ['running', 'waiting_cli']),
+      ),
+    )
+    .returning({ id: schema.taskSteps.id });
+  if (opts.failTask && (active.length > 0 || stopped.length > 0)) {
+    // Drop the task to `failed` (restartable) from any non-terminal state — incl.
+    // `waiting_user`, which a half-finished step transition can leave behind.
+    await db
+      .update(schema.tasks)
+      .set({ status: 'failed', errorMessage: 'Stopped by user', updatedAt: now })
+      .where(
+        and(
+          eq(schema.tasks.id, taskId),
+          inArray(schema.tasks.status, ['running', 'queued', 'waiting_user']),
+        ),
+      );
+  }
+  // Force-remove the cli sandboxes AFTER the supersede writes commit, so the
+  // dying job's resume sees the superseded row and skips its advance. Narrowed
+  // to `haive-cli-*` (sandbox-kill.ts) so the DDEV/app runtime survives.
+  const killed = await killTaskSandboxes(taskId);
+  return { killed, cancelled: active.length, stopped: stopped.length };
+}
+
 taskRoutes.post('/:id/action', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -392,6 +476,11 @@ taskRoutes.post('/:id/action', async (c) => {
       if (task.status === 'completed' || task.status === 'cancelled') {
         return c.json({ ok: true, status: task.status });
       }
+      // Stop any still-running CLI first (supersede its invocation) so the dying
+      // cli-exec job's resume is a no-op and can't clobber `cancelled` back to
+      // `failed` — otherwise Cancel needs two clicks. Then cancel + enqueue the
+      // full teardown job (tears down the DDEV/app runtime too).
+      await stopActiveCliInvocations(db, id, { failTask: false });
       await cancelTaskRow(db, id, { by: userId });
       await enqueueCancelJob(id, userId);
       return c.json({ ok: true, status: 'cancelled' });
@@ -428,62 +517,11 @@ taskRoutes.post('/:id/cancel-active-cli', async (c) => {
   });
   if (!task) throw new HttpError(404, 'Task not found');
 
-  // Best-effort: force-remove any live sandbox container(s) for the task.
-  const killed = await killTaskSandboxes(id);
-
-  // Then finalize the active invocation(s) and fail their step + the task
-  // DIRECTLY, so cancel unsticks the UI immediately and does not depend on the
-  // worker noticing. This is essential when no container was found (killed=0) —
-  // e.g. it was already reaped by a worker restart and the cli-exec job is stuck
-  // on its 30-min lock. Marking the row ended+superseded also makes a later
-  // redelivery of that job a no-op (see handleCliExecJob).
-  const now = new Date();
-  const active = await db
-    .select()
-    .from(schema.cliInvocations)
-    .where(
-      and(
-        eq(schema.cliInvocations.taskId, id),
-        isNull(schema.cliInvocations.endedAt),
-        isNull(schema.cliInvocations.supersededAt),
-      ),
-    );
-  for (const inv of active) {
-    await db
-      .update(schema.cliInvocations)
-      .set({
-        exitCode: 137,
-        errorMessage: 'CLI cancelled by user',
-        endedAt: now,
-        supersededAt: now,
-      })
-      .where(eq(schema.cliInvocations.id, inv.id));
-    if (inv.taskStepId) {
-      await db
-        .update(schema.taskSteps)
-        .set({
-          status: 'failed',
-          errorMessage: 'CLI cancelled by user',
-          endedAt: now,
-          statusMessage: null,
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(schema.taskSteps.id, inv.taskStepId),
-            inArray(schema.taskSteps.status, ['running', 'waiting_cli']),
-          ),
-        );
-    }
-  }
-  if (active.length > 0) {
-    await db
-      .update(schema.tasks)
-      .set({ status: 'failed', errorMessage: 'CLI cancelled by user', updatedAt: now })
-      .where(and(eq(schema.tasks.id, id), inArray(schema.tasks.status, ['running', 'queued'])));
-  }
-  logger.info({ taskId: id, killed, cancelled: active.length }, 'cancel-active-cli');
-  return c.json({ ok: true, killed, cancelled: active.length });
+  // Stop the running CLI (supersede its invocation, fail the step + task) and
+  // force-remove only the cli sandboxes — the DDEV/app runtime is left running.
+  const { killed, cancelled, stopped } = await stopActiveCliInvocations(db, id, { failTask: true });
+  logger.info({ taskId: id, killed, cancelled, stopped }, 'cancel-active-cli');
+  return c.json({ ok: true, killed, cancelled, stopped });
 });
 
 /** Max steer message length. Bounds the NDJSON line written to the CLI's stdin
