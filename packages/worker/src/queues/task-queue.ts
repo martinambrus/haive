@@ -507,7 +507,11 @@ async function cleanupTaskContainers(
     }
   }
 
-  if (reason === 'cancelled') {
+  // Reap the per-task env image on a definitive end. cleanupTaskEnvImage
+  // reference-counts by envTemplateId (skips if any task still shares the
+  // template), so this is safe for completion too — and completion is the common
+  // case that otherwise leaked the image. Keep it on 'failed' for recovery.
+  if (reason === 'cancelled' || reason === 'completed') {
     try {
       await cleanupTaskEnvImage(db, taskId, reason);
     } catch (err) {
