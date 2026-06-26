@@ -45,6 +45,7 @@ import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { fatalClassFromMessage } from './cli-exec/failure-class.js';
+import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
 import {
   recordFixLoopRequest,
   recordFixLoopAccepted,
@@ -239,6 +240,9 @@ async function markTaskFailed(db: Database, taskId: string, message: string): Pr
   await cleanupTaskContainers(db, taskId, 'failed');
   await maybeUnloadTaskEmbedModel(db, taskId);
   await unloadTaskOllamaCliModels(db, taskId);
+  // A failed kb_author enrich leaves its global KB entry stuck in 'enriching'; mark
+  // it 'failed' so the KB view can show a retry / go-to-task affordance.
+  await reconcileKbAuthorEntryOnTaskEnd(db, taskId, 'failed', logger);
 }
 
 /** After a task reaches a terminal state, evict its RAG embedding model from
@@ -1241,6 +1245,9 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
   await maybeUnloadTaskEmbedModel(db, payload.taskId);
   await unloadTaskOllamaCliModels(db, payload.taskId);
+  // A cancelled kb_author enrich should not leave an orphan global KB entry behind;
+  // delete the still-enriching row so it disappears from the KB view too.
+  await reconcileKbAuthorEntryOnTaskEnd(db, payload.taskId, 'cancelled', logger);
 }
 
 async function handleCleanupRepoRag(db: Database, payload: RepoRagCleanupPayload): Promise<void> {

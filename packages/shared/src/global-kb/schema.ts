@@ -36,7 +36,7 @@ export type GlobalKbCategory =
   | 'best_practice'
   | 'quick_reference';
 
-export type GlobalKbStatus = 'skeleton' | 'enriching' | 'draft' | 'active' | 'archived';
+export type GlobalKbStatus = 'skeleton' | 'enriching' | 'draft' | 'active' | 'archived' | 'failed';
 
 export type GlobalKbSource = 'user' | 'promoted';
 

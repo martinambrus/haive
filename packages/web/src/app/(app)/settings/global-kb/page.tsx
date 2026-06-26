@@ -45,6 +45,7 @@ const STATUS_VARIANT: Record<string, 'success' | 'error' | 'warning' | 'default'
   active: 'success',
   draft: 'warning',
   archived: 'default',
+  failed: 'error',
 };
 
 interface GlobalKbConfig {
@@ -168,6 +169,7 @@ export default function GlobalKbPage() {
   const [repos, setRepos] = useState<Repository[]>([]);
   const [providers, setProviders] = useState<CliProvider[]>([]);
   const [enrich, setEnrich] = useState({
+    title: '',
     notes: '',
     repoId: '',
     cliProviderId: '',
@@ -195,7 +197,7 @@ export default function GlobalKbPage() {
     // Arriving via the onboarding "review drafts" link (?status=draft) → pre-filter
     // the list to the bucket the caller wants.
     const status = params.get('status');
-    if (status && ['active', 'draft', 'enriching', 'archived'].includes(status)) {
+    if (status && ['active', 'draft', 'enriching', 'archived', 'failed'].includes(status)) {
       setStatusFilter(status);
     }
     // Arriving from a completed task's "review drafts" CTA (?sourceTaskId=) → scope
@@ -449,12 +451,14 @@ export default function GlobalKbPage() {
     return () => clearInterval(t);
   }, [hasTransient, load]);
 
-  // When an update-draft is opened, fetch the article it supersedes so the modal
-  // can diff against it. Resets to the diff view on each open; a missing/purged
-  // predecessor (404) just falls back to the plain body view.
+  // When an entry that supersedes another is opened, fetch the predecessor so the
+  // modal can diff against it. A draft defaults to the diff (the reviewer is deciding
+  // whether to approve the change); a non-draft promoted article (active/archived)
+  // defaults to its full body, with the diff available as opt-in history. A
+  // missing/purged predecessor (404) just falls back to the plain body view.
   useEffect(() => {
     setSupersededEntry(null);
-    setDraftView('diff');
+    setDraftView(selected?.status === 'draft' ? 'diff' : 'full');
     const supersedesId = selected?.supersedesEntryId;
     if (!supersedesId) return;
     let cancelled = false;
@@ -485,10 +489,25 @@ export default function GlobalKbPage() {
   }
 
   async function remove(e: GlobalKbEntry) {
-    if (!window.confirm(`Delete "${e.title}" permanently? This cannot be undone.`)) return;
+    const msg = e.sourceTaskId
+      ? `Delete "${e.title}" permanently and cancel its enrichment task? This cannot be undone.`
+      : `Delete "${e.title}" permanently? This cannot be undone.`;
+    if (!window.confirm(msg)) return;
     setBusy(true);
     try {
       await api.delete(`/global-kb/entries/${e.id}`);
+      // Deleting an enrich article would otherwise leave its kb_author task
+      // dangling (e.g. failed but never cancelled). Cancel it too — best-effort,
+      // since the article is already gone: a cancel hiccup must not block the
+      // list refresh. The action route no-ops for completed/cancelled tasks and
+      // flips a failed/running one to cancelled (with full teardown).
+      if (e.sourceTaskId) {
+        try {
+          await api.post(`/tasks/${e.sourceTaskId}/action`, { action: 'cancel' });
+        } catch {
+          /* leave the now article-less task as-is; cancellable from Tasks */
+        }
+      }
       setSelected((s) => (s?.id === e.id ? null : s));
       await load();
     } catch (err) {
@@ -498,7 +517,43 @@ export default function GlobalKbPage() {
     }
   }
 
+  // Cancel an in-progress enrichment from the KB view: cancel the underlying
+  // kb_author task; the worker then deletes this still-enriching row, and the list
+  // poll drops it on the next refresh.
+  async function cancelEnrich(e: GlobalKbEntry) {
+    if (!e.sourceTaskId) return;
+    if (!window.confirm(`Cancel enriching "${e.title}"? The draft entry is discarded.`)) return;
+    setBusy(true);
+    try {
+      await api.post(`/tasks/${e.sourceTaskId}/action`, { action: 'cancel' });
+      await load();
+    } catch (err) {
+      setLoadError((err as ApiError).message ?? 'Cancel failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Retry a failed enrichment: re-run the kb_author enrich step. Its detect phase
+  // flips the entry back to 'enriching' and the list poll picks it up.
+  async function retryEnrich(e: GlobalKbEntry) {
+    if (!e.sourceTaskId) return;
+    setBusy(true);
+    try {
+      await api.post(`/tasks/${e.sourceTaskId}/steps/01-kb-enrich/action`, { action: 'retry' });
+      await load();
+    } catch (err) {
+      setLoadError((err as ApiError).message ?? 'Retry failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function runEnrich() {
+    if (!enrich.title.trim()) {
+      setEnrichError('Give the article a title.');
+      return;
+    }
     if (!enrich.notes.trim()) {
       setEnrichError('Write something for the AI to work from.');
       return;
@@ -511,6 +566,7 @@ export default function GlobalKbPage() {
     setEnrichError(null);
     try {
       await api.post('/global-kb/enrich', {
+        title: enrich.title,
         seedText: enrich.notes,
         repositoryId: enrich.repoId,
         cliProviderId: enrich.cliProviderId,
@@ -521,7 +577,7 @@ export default function GlobalKbPage() {
             : {}),
         },
       });
-      setEnrich({ ...enrich, notes: '' });
+      setEnrich({ ...enrich, title: '', notes: '' });
       await load();
     } catch (err) {
       setEnrichError((err as ApiError).message ?? 'Enrichment failed to start');
@@ -762,13 +818,24 @@ export default function GlobalKbPage() {
         <CardHeader>
           <CardTitle>Add a house rule</CardTitle>
           <CardDescription>
-            Write a rule — generic or detailed; name modules, paste URLs. Pick a repository so the
-            AI can read its stack and extract the right framework + major versions. It derives the
-            title, category and facets itself and files the entry automatically — as a new one, or
-            an update of a matching rule already in the KB.
+            Set a title you'll recognize, then write the rule — generic or detailed; name modules,
+            paste URLs. Pick a repository so the AI can read its stack and extract the right
+            framework + major versions. It keeps your title, derives the category and facets, and
+            files the entry automatically — as a new one, or an update of a matching rule already in
+            the KB.
           </CardDescription>
         </CardHeader>
         <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="enrich-title">Title</Label>
+            <Input
+              id="enrich-title"
+              value={enrich.title}
+              onChange={(e) => setEnrich({ ...enrich, title: e.target.value })}
+              maxLength={300}
+              placeholder="A title you'll recognize, e.g. Drupal 11 paragraphs nesting limit"
+            />
+          </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="enrich-notes">House rules / notes</Label>
             <textarea
@@ -877,6 +944,7 @@ export default function GlobalKbPage() {
             <option value="draft">draft</option>
             <option value="enriching">enriching</option>
             <option value="archived">archived</option>
+            <option value="failed">failed</option>
           </select>
           <select
             value={categoryFilter}
@@ -935,33 +1003,35 @@ export default function GlobalKbPage() {
       ) : (
         <div className="flex flex-col gap-2">
           {rows.map((e) => {
-            const enriching = e.status === 'enriching' || e.status === 'skeleton';
+            const inProgress = e.status === 'enriching' || e.status === 'skeleton';
+            const failed = e.status === 'failed';
+            const clickable = !inProgress && !failed;
             return (
               <Card
                 key={e.id}
                 className={
-                  enriching
-                    ? 'p-4'
-                    : 'cursor-pointer p-4 transition-colors hover:border-neutral-700'
+                  clickable
+                    ? 'cursor-pointer p-4 transition-colors hover:border-neutral-700'
+                    : 'p-4'
                 }
-                onClick={enriching ? undefined : () => setSelected(e)}
-                role={enriching ? undefined : 'button'}
-                tabIndex={enriching ? undefined : 0}
+                onClick={clickable ? () => setSelected(e) : undefined}
+                role={clickable ? 'button' : undefined}
+                tabIndex={clickable ? 0 : undefined}
                 onKeyDown={
-                  enriching
-                    ? undefined
-                    : (ev) => {
+                  clickable
+                    ? (ev) => {
                         if (ev.key === 'Enter' || ev.key === ' ') {
                           ev.preventDefault();
                           setSelected(e);
                         }
                       }
+                    : undefined
                 }
               >
                 <div className="flex flex-col gap-1.5">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium text-neutral-50">{e.title}</span>
-                    {enriching ? (
+                    {inProgress ? (
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-300">
                         <span className="h-3 w-3 animate-spin rounded-full border-2 border-sky-400/40 border-t-sky-300" />
                         {e.status === 'skeleton' ? 'queued' : 'enriching'}
@@ -976,20 +1046,64 @@ export default function GlobalKbPage() {
                         {e.embedStatus}
                       </Badge>
                     )}
-                    {!enriching && (
-                      <div className="ml-auto flex items-center gap-2">
-                        {e.status === 'draft' && (
-                          <Button
-                            size="sm"
-                            disabled={busy}
-                            onClick={(ev) => {
-                              ev.stopPropagation();
-                              void activate(e);
-                            }}
-                          >
-                            Activate
-                          </Button>
-                        )}
+                    <div className="ml-auto flex items-center gap-2">
+                      {inProgress && e.sourceTaskId && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={busy}
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            void cancelEnrich(e);
+                          }}
+                          title="Cancel the enrichment task and discard this entry"
+                        >
+                          Cancel
+                        </Button>
+                      )}
+                      {failed && e.sourceTaskId && (
+                        <Button
+                          size="sm"
+                          disabled={busy}
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            void retryEnrich(e);
+                          }}
+                          title="Re-run the enrichment task"
+                        >
+                          Retry
+                        </Button>
+                      )}
+                      {failed && e.sourceTaskId && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={busy}
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            window.open(
+                              `/tasks/${e.sourceTaskId}`,
+                              '_blank',
+                              'noopener,noreferrer',
+                            );
+                          }}
+                        >
+                          Go to task
+                        </Button>
+                      )}
+                      {e.status === 'draft' && (
+                        <Button
+                          size="sm"
+                          disabled={busy}
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            void activate(e);
+                          }}
+                        >
+                          Activate
+                        </Button>
+                      )}
+                      {!inProgress && (
                         <Button
                           size="sm"
                           variant="destructive"
@@ -1001,8 +1115,8 @@ export default function GlobalKbPage() {
                         >
                           Delete
                         </Button>
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                     <p className="text-xs text-neutral-400">{facetsSummary(e.facets)}</p>
@@ -1014,12 +1128,17 @@ export default function GlobalKbPage() {
                         onClick={(ev) => ev.stopPropagation()}
                         className="text-xs font-medium text-indigo-400 hover:text-indigo-300"
                       >
-                        {enriching ? 'Watch task ↗' : 'View task ↗'}
+                        {inProgress ? 'Watch task ↗' : 'View task ↗'}
                       </a>
                     )}
-                    {enriching && (
+                    {inProgress && (
                       <span className="text-xs text-neutral-500">
                         Reading the repo in the background — activates automatically when done.
+                      </span>
+                    )}
+                    {failed && (
+                      <span className="text-xs text-red-400">
+                        Enrichment failed — retry, or open the task for details.
                       </span>
                     )}
                   </div>

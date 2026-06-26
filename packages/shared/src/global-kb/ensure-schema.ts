@@ -42,7 +42,7 @@ export async function ensureGlobalKbSchema(
       body TEXT NOT NULL,
       category TEXT NOT NULL CHECK (category IN ('general','tech_pattern','anti_pattern','best_practice','quick_reference')),
       facets jsonb NOT NULL DEFAULT '{}'::jsonb,
-      status TEXT NOT NULL CHECK (status IN ('skeleton','enriching','draft','active','archived')),
+      status TEXT NOT NULL CHECK (status IN ('skeleton','enriching','draft','active','archived','failed')),
       source TEXT NOT NULL CHECK (source IN ('user','promoted')),
       source_task_id uuid,
       source_repo_id uuid,
@@ -69,6 +69,15 @@ export async function ensureGlobalKbSchema(
   // activation. Additive column for pre-existing DBs.
   await conn.pg.unsafe(
     `ALTER TABLE ${ENTRIES_TABLE} ADD COLUMN IF NOT EXISTS supersedes_entry_id uuid`,
+  );
+  // Widen the status CHECK to allow 'failed' on pre-existing DBs — a kb_author
+  // enrich task that fails leaves its entry in a terminal 'failed' state. Idempotent:
+  // drop the inline-named constraint and re-add it with the full value set.
+  await conn.pg.unsafe(
+    `ALTER TABLE ${ENTRIES_TABLE} DROP CONSTRAINT IF EXISTS ${ENTRIES_TABLE}_status_check`,
+  );
+  await conn.pg.unsafe(
+    `ALTER TABLE ${ENTRIES_TABLE} ADD CONSTRAINT ${ENTRIES_TABLE}_status_check CHECK (status IN ('skeleton','enriching','draft','active','archived','failed'))`,
   );
 
   // 2. Global vector table — the per-project ai_rag_embeddings shape PLUS

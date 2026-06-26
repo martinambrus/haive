@@ -187,6 +187,25 @@ export function vectorLiteral(values: number[]): string {
   return `[${values.map((v) => v.toFixed(6)).join(',')}]`;
 }
 
+/** Cosine similarity of two embedding vectors, in [-1, 1]. Returns 0 when either
+ *  vector is empty, the lengths differ, or a vector has zero magnitude — callers
+ *  treat 0 as "no signal" so a degenerate input can never read as a false match. */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length === 0 || a.length !== b.length) return 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i]!;
+    const y = b[i]!;
+    dot += x * y;
+    na += x * x;
+    nb += y * y;
+  }
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  return denom === 0 ? 0 : dot / denom;
+}
+
 /** Embed a single query string, falling back to the deterministic hash
  *  embedding when Ollama is unreachable or errors. Mirrors the populate
  *  path's behaviour so query vectors live in the same space as stored rows. */

@@ -613,7 +613,7 @@ export interface GlobalKbEntry {
   body: string;
   category: 'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
   facets: GlobalKbFacets;
-  status: 'skeleton' | 'enriching' | 'draft' | 'active' | 'archived';
+  status: 'skeleton' | 'enriching' | 'draft' | 'active' | 'archived' | 'failed';
   source: 'user' | 'promoted';
   sourceTaskId: string | null;
   sourceRepoId: string | null;

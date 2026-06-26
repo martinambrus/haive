@@ -1,4 +1,4 @@
-import { and, desc, eq, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   globalKbEntries,
@@ -7,6 +7,7 @@ import {
   type GlobalKbCategory,
   type GlobalKbFacets,
 } from '@haive/shared/global-kb';
+import { confirmSupersedeByEmbedding, SUPERSEDE_CANDIDATE_LIMIT } from './_global-kb-similarity.js';
 
 export interface GlobalKbPromotion {
   userId: string;
@@ -169,10 +170,11 @@ export async function promoteToGlobalKbDraft(
       // first, so this matches OTHER tasks' or already-activated entries.
       let supersedesEntryId: string | null = null;
       if (promotion.topicKey) {
-        const [existing] = await gdb
+        const candidates = await gdb
           .select({
             id: globalKbEntries.id,
             status: globalKbEntries.status,
+            title: globalKbEntries.title,
             body: globalKbEntries.body,
           })
           .from(globalKbEntries)
@@ -185,24 +187,41 @@ export async function promoteToGlobalKbDraft(
               ne(globalKbEntries.status, 'archived'),
             ),
           )
-          // Prefer linking to the canonical active entry; else the newest.
+          // Prefer the canonical active entry; else the newest.
           .orderBy(
             sql`case when ${globalKbEntries.status} = 'active' then 0 else 1 end`,
             desc(globalKbEntries.createdAt),
           )
-          .limit(1);
-        if (existing) {
-          if (existing.body.trim() === clean.body.trim()) {
-            log.info(
-              { topicKey: promotion.topicKey, existingId: existing.id },
-              'global KB promotion skipped (identical content already present)',
-            );
-            return { id: existing.id, deduped: true, supersedesEntryId: null };
-          }
-          supersedesEntryId = existing.id;
+          .limit(SUPERSEDE_CANDIDATE_LIMIT);
+        // Exact duplicate of any same-key entry: nothing new to add, skip the insert.
+        const identical = candidates.find((c) => c.body.trim() === clean.body.trim());
+        if (identical) {
           log.info(
-            { topicKey: promotion.topicKey, existingId: existing.id, status: existing.status },
-            'global KB promotion linked to existing topic for merge',
+            { topicKey: promotion.topicKey, existingId: identical.id },
+            'global KB promotion skipped (identical content already present)',
+          );
+          return { id: identical.id, deduped: true, supersedesEntryId: null };
+        }
+        // Supersede an existing entry ONLY when embeddings confirm it is the SAME
+        // article — the coarse topicKey (category:tech) groups unrelated articles on
+        // one tech, so it can't decide identity. No confirmed match (or ollama
+        // unavailable) -> insert an INDEPENDENT new draft; never clobber a different
+        // article that merely shares the key.
+        if (candidates.length > 0) {
+          supersedesEntryId = await confirmSupersedeByEmbedding(
+            { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
+            `${clean.title}\n\n${clean.body}`,
+            candidates.map((c) => ({
+              id: c.id,
+              status: c.status,
+              text: `${c.title}\n\n${c.body}`,
+            })),
+          );
+          log.info(
+            { topicKey: promotion.topicKey, candidates: candidates.length, supersedesEntryId },
+            supersedesEntryId
+              ? 'global KB promotion linked to existing topic (similarity-confirmed)'
+              : 'global KB promotion kept independent (no same-article match)',
           );
         }
       }
@@ -310,5 +329,52 @@ export async function clearTaskPromotedDrafts(
   } catch (err) {
     log.warn({ err, taskId }, 'global KB draft cleanup failed (skipped)');
     return 0;
+  }
+}
+
+/** When a kb_author enrich task ends without producing a real article, reconcile its
+ *  linked global KB entry (only while still `skeleton`/`enriching`): a FAILED task marks
+ *  the entry `failed` (kept so the user can retry from the KB view); a CANCELLED task
+ *  deletes it (the user abandoned it, so the orphan row is removed). No-op for a
+ *  non-kb_author task or a disabled global KB. Best-effort: never throws — it runs
+ *  inside task teardown and must not break it. */
+export async function reconcileKbAuthorEntryOnTaskEnd(
+  db: Database,
+  taskId: string,
+  outcome: 'failed' | 'cancelled',
+  log: PromoteLogger,
+): Promise<void> {
+  try {
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { type: true },
+    });
+    if (task?.type !== 'kb_author') return;
+    const settings = await resolveGlobalKbSettings();
+    if (!settings.enabled) return;
+    await withGlobalKb(db, async ({ db: gdb }) => {
+      const where = and(
+        eq(globalKbEntries.sourceTaskId, taskId),
+        inArray(globalKbEntries.status, ['skeleton', 'enriching']),
+      );
+      if (outcome === 'cancelled') {
+        const removed = await gdb
+          .delete(globalKbEntries)
+          .where(where)
+          .returning({ id: globalKbEntries.id });
+        if (removed.length)
+          log.info({ taskId, removed: removed.length }, 'kb_author entry removed on task cancel');
+      } else {
+        const updated = await gdb
+          .update(globalKbEntries)
+          .set({ status: 'failed', updatedAt: new Date() })
+          .where(where)
+          .returning({ id: globalKbEntries.id });
+        if (updated.length)
+          log.info({ taskId, updated: updated.length }, 'kb_author entry marked failed');
+      }
+    });
+  } catch (err) {
+    log.warn({ err, taskId, outcome }, 'kb_author entry reconcile on task end failed (skipped)');
   }
 }

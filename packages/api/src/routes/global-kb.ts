@@ -86,8 +86,11 @@ async function enqueueSync(
 }
 
 const enrichSchema = z.object({
-  // Free-text house rules — the only content input. The kb_author task derives
-  // the title, category and version facets itself by reading the chosen repo.
+  // User-set title — used verbatim for the entry and the task title (so the user
+  // recognizes their own articles). Max matches the canonical title length (300).
+  title: z.string().min(1).max(300),
+  // Free-text house rules — the body the kb_author task reads and enriches. The
+  // task derives the category and version facets itself by reading the chosen repo.
   seedText: z.string().min(1),
   namespace: z.string().min(1).max(120).optional(),
   repositoryId: z.string().uuid(),
@@ -309,21 +312,14 @@ globalKbRoutes.post('/enrich', async (c) => {
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
 
-  const firstLine =
-    data.seedText
-      .split('\n')
-      .map((s) => s.trim())
-      .find(Boolean) ?? '';
-  const placeholderTitle = firstLine.slice(0, 80) || 'Untitled house rule';
-
   const entry = await withGlobalKb(db, async ({ db: gdb, settings }) => {
     const [row] = await gdb
       .insert(globalKbEntries)
       .values({
         namespace: data.namespace || settings.namespace,
         userId,
-        // Placeholders; the kb_author LLM overwrites title/category/facets/body.
-        title: placeholderTitle,
+        // User-set title is authoritative; the LLM overwrites category/facets/body.
+        title: data.title,
         seedText: data.seedText,
         body: data.seedText,
         category: 'general',
@@ -341,7 +337,8 @@ globalKbRoutes.post('/enrich', async (c) => {
     .values({
       userId,
       type: 'kb_author',
-      title: `Enrich: ${firstLine || data.seedText}`.slice(0, 512),
+      title: `Enrich: ${data.title}`.slice(0, 512),
+      description: data.seedText,
       repositoryId: data.repositoryId,
       cliProviderId: data.cliProviderId,
       metadata: {
@@ -510,7 +507,10 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
     if (row && set.status === 'active' && row.supersedesEntryId) {
       const [archived] = await db
         .update(globalKbEntries)
-        .set({ status: 'archived', supersededAt: new Date(), updatedAt: new Date() })
+        // Record the archive time via supersededAt, but DON'T bump updatedAt: the
+        // list sorts by updatedAt desc, so bumping it would float the just-archived
+        // old article above its replacement. Leaving updatedAt keeps it in place.
+        .set({ status: 'archived', supersededAt: new Date() })
         .where(
           and(
             eq(globalKbEntries.id, row.supersedesEntryId),

@@ -1,9 +1,15 @@
 import { and, desc, eq, inArray, ne } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { globalKbEntries, withGlobalKb, type GlobalKbFacets } from '@haive/shared/global-kb';
+import {
+  globalKbEntries,
+  resolveGlobalKbSettings,
+  withGlobalKb,
+  type GlobalKbFacets,
+} from '@haive/shared/global-kb';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import { confirmSupersedeByEmbedding } from '../_global-kb-similarity.js';
 import { syncGlobalKbEntry } from '../../../queues/global-kb-sync-queue.js';
 
 // Repo-anchored global-KB authoring (plan serialized-crunching-aurora). The task
@@ -52,13 +58,15 @@ interface ExistingEntry {
 interface KbAuthorDetect {
   entryId: string | null;
   namespace: string;
+  // User-set title — authoritative, the LLM does not derive its own.
+  title: string;
   seedText: string;
   existing: ExistingEntry[];
 }
 
 interface KbAuthorApply {
   entryId: string | null;
-  status: 'active' | 'skipped';
+  status: 'active' | 'draft' | 'skipped';
   mode: 'new' | 'update';
   sections: number;
 }
@@ -79,15 +87,6 @@ async function loadEntryId(ctx: StepContext): Promise<string | null> {
   });
   const md = task?.metadata as { globalKbEntryId?: string } | null;
   return md?.globalKbEntryId ?? null;
-}
-
-function firstLine(text: string): string {
-  return (
-    text
-      .split('\n')
-      .map((s) => s.trim())
-      .find(Boolean) ?? ''
-  );
 }
 
 function buildEnrichPrompt(detected: KbAuthorDetect): string {
@@ -115,6 +114,9 @@ function buildEnrichPrompt(detected: KbAuthorDetect): string {
     'directory. You have file tools to read it, and — only if network egress is permitted —',
     'web access. Do not assume internet access; if a fetch fails, rely on the repository alone.',
     '',
+    '## The title (user-set — write the article under THIS exact title; do not change it)',
+    detected.title || '(untitled)',
+    '',
     "## The author's notes (free text — the house rule to capture)",
     detected.seedText || '(empty)',
     '',
@@ -131,15 +133,14 @@ function buildEnrichPrompt(detected: KbAuthorDetect): string {
     '4. Decide whether this rule already exists above. If it is the SAME rule (same topic / module /',
     '   scope) as one listed, set mode="update" and targetId to that id — you will REPLACE it with a',
     '   complete, improved article that incorporates the new notes. Otherwise set mode="new".',
-    `5. Derive a concise TITLE, the best CATEGORY (one of: ${CATEGORIES.join(', ')}), the version`,
-    '   FACETS, and write the full, self-contained markdown article BODY.',
+    `5. Pick the best CATEGORY (one of: ${CATEGORIES.join(', ')}) and the version FACETS, then`,
+    '   write the full, self-contained markdown article BODY under the user-set title above.',
     '',
     '## Output — emit EXACTLY ONE fenced ```json block and nothing else:',
     '```json',
     '{',
     '  "mode": "new" | "update",',
     '  "targetId": "<the existing id when mode=update; omit otherwise>",',
-    '  "title": "<concise title>",',
     '  "category": "<one of the categories listed above>",',
     '  "facets": {',
     '    "framework": ["<e.g. drupal>"],',
@@ -260,6 +261,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
       return {
         entryId,
         namespace: entry.namespace,
+        title: entry.title,
         seedText: entry.seedText ?? entry.body,
         existing,
       };
@@ -272,7 +274,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
     timeoutMs: 30 * 60 * 1000,
     bypassStub: (args) => {
       const d = args.detected as KbAuthorDetect;
-      const title = firstLine(d.seedText).slice(0, 80) || 'Untitled house rule';
+      const title = d.title.trim() || 'Untitled house rule';
       return {
         mode: 'new',
         title,
@@ -293,8 +295,7 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
     if (!parsed && !args.isFinalLlmAttempt) {
       throw new RetryableParseError('kb enrichment output unparseable — retrying');
     }
-    const title =
-      parsed?.title?.trim() || firstLine(detected.seedText).slice(0, 80) || 'Untitled house rule';
+    const title = detected.title.trim() || 'Untitled house rule';
     const category = normCategory(parsed?.category);
     const facets = cleanFacets(parsed?.facets);
     const body =
@@ -303,17 +304,51 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
         : `# ${title}\n\n${detected.seedText}`;
 
     // The model may flag this as an update of an existing rule; only honor a
-    // targetId we actually showed it (else fall back to inserting the skeleton).
+    // targetId we actually showed it (else treat it as a new entry).
     const existingIds = new Set(detected.existing.map((e) => e.id));
-    const { isUpdate, targetId } = resolveWriteTarget(parsed, skeletonId, existingIds);
+    const intent = resolveWriteTarget(parsed, skeletonId, existingIds);
 
-    const namespace = await withGlobalKb(ctx.db, async ({ db }) => {
-      const now = new Date();
-      if (isUpdate) {
-        // Fold the new article into the matched entry; drop the transient skeleton
-        // (just the user's seed text — the real content goes onto the target).
-        await db.delete(globalKbEntries).where(eq(globalKbEntries.id, skeletonId));
+    // Confirm a proposed update with real embeddings BEFORE letting it supersede:
+    // the model picks the target from titles/excerpts and can mis-match unrelated
+    // articles. A confirmed update lands as a DRAFT that supersedes the target (the
+    // user reviews the before/after diff and activates it, which archives the old
+    // one); an unconfirmed proposal — or ollama being unavailable — is downgraded to
+    // a brand-new entry, so a wrong match can never silently overwrite a good article.
+    let confirmedUpdate = false;
+    if (intent.isUpdate) {
+      const settings = await resolveGlobalKbSettings();
+      const target = await withGlobalKb(ctx.db, async ({ db }) =>
+        db.query.globalKbEntries.findFirst({
+          where: eq(globalKbEntries.id, intent.targetId),
+          columns: { title: true, body: true, status: true },
+        }),
+      );
+      if (target) {
+        const match = await confirmSupersedeByEmbedding(
+          { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
+          `${title}\n\n${body}`,
+          [
+            {
+              id: intent.targetId,
+              status: target.status,
+              text: `${target.title}\n\n${target.body}`,
+            },
+          ],
+        );
+        confirmedUpdate = match === intent.targetId;
       }
+      if (!confirmedUpdate) {
+        ctx.logger.info(
+          { skeletonId, proposedTargetId: intent.targetId },
+          'kb enrich: update target not similarity-confirmed → writing as a new entry',
+        );
+      }
+    }
+
+    // Either way the SKELETON row carries the article. A confirmed update becomes a
+    // draft superseding the target (target left active + untouched until the user
+    // activates the draft); otherwise it goes live immediately as a new entry.
+    const namespace = await withGlobalKb(ctx.db, async ({ db }) => {
       const [row] = await db
         .update(globalKbEntries)
         .set({
@@ -321,34 +356,40 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
           category,
           facets,
           body,
-          status: 'active',
+          status: confirmedUpdate ? 'draft' : 'active',
+          supersedesEntryId: confirmedUpdate ? intent.targetId : null,
           embedStatus: 'pending',
-          updatedAt: now,
+          updatedAt: new Date(),
         })
-        .where(eq(globalKbEntries.id, targetId))
+        .where(eq(globalKbEntries.id, skeletonId))
         .returning({ namespace: globalKbEntries.namespace });
       return row?.namespace ?? detected.namespace;
     });
 
-    // Auto-activate: embed now (no manual Activate step) so the entry is
-    // retrievable immediately. Mirrors the API's enqueueSync, run inline.
-    try {
-      await syncGlobalKbEntry({ entryId: targetId, namespace, reason: 'upsert' });
-    } catch (err) {
-      ctx.logger.warn(
-        { err, entryId: targetId },
-        'global KB embed after enrich failed; entry is active but unembedded',
-      );
+    // Auto-activate ONLY the new path: embed now so it's retrievable immediately.
+    // A confirmed update is a draft (drafts hold no vectors) until the user reviews
+    // and activates it — activation re-embeds via the API's enqueueSync.
+    if (!confirmedUpdate) {
+      try {
+        await syncGlobalKbEntry({ entryId: skeletonId, namespace, reason: 'upsert' });
+      } catch (err) {
+        ctx.logger.warn(
+          { err, entryId: skeletonId },
+          'global KB embed after enrich failed; entry is active but unembedded',
+        );
+      }
     }
 
     ctx.logger.info(
-      { entryId: targetId, mode: isUpdate ? 'update' : 'new', enriched: !!parsed?.body },
-      'kb enrichment complete → active',
+      { entryId: skeletonId, mode: confirmedUpdate ? 'update' : 'new', enriched: !!parsed?.body },
+      confirmedUpdate
+        ? 'kb enrichment complete → draft (awaiting review)'
+        : 'kb enrichment complete → active',
     );
     return {
-      entryId: targetId,
-      status: 'active',
-      mode: isUpdate ? 'update' : 'new',
+      entryId: skeletonId,
+      status: confirmedUpdate ? 'draft' : 'active',
+      mode: confirmedUpdate ? 'update' : 'new',
       sections: (body.match(/^##\s/gm) ?? []).length,
     };
   },
