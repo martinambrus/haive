@@ -107,29 +107,36 @@ function GlobalKbDiff({ baseline, current }: { baseline: string; current: string
   }, [baseline, current]);
 
   return (
-    <div className="font-mono text-[11px] leading-tight">
-      <div className="sticky top-0 border-b border-neutral-800 bg-neutral-950 px-2 py-1 text-neutral-500">
+    // w-max sizes this block to the widest line so each line's background spans
+    // the whole horizontal scroll extent (min-w-full keeps it at least the
+    // visible width); otherwise the add/remove tint clips at the right edge when
+    // a line overflows. Mirrors CommitDiffViewer.InlineDiff.
+    <div className="w-max min-w-full font-mono text-[11px] leading-tight">
+      <div className="sticky top-0 z-10 min-w-full border-b border-neutral-800 bg-neutral-950 px-2 py-1 text-neutral-500">
         <span className="text-green-400">+{added}</span>{' '}
         <span className="text-red-400">-{removed}</span> vs the existing article
       </div>
       {lines.length === 0 ? (
-        <div className="px-2 py-1 text-neutral-500">No content changes.</div>
+        <div className="min-w-full px-2 py-1 text-neutral-500">No content changes.</div>
       ) : (
-        lines.map((line, i) => {
-          const cls =
-            line.kind === 'add'
-              ? 'bg-green-950/60 text-green-200'
-              : line.kind === 'remove'
-                ? 'bg-red-950/60 text-red-200'
-                : 'text-neutral-500';
-          const prefix = line.kind === 'add' ? '+ ' : line.kind === 'remove' ? '- ' : '  ';
-          return (
-            <div key={i} className={`whitespace-pre px-2 ${cls}`}>
-              {prefix}
-              {line.text}
-            </div>
-          );
-        })
+        // pb-3 keeps the last line clear of the overlay horizontal scrollbar.
+        <div className="pb-3">
+          {lines.map((line, i) => {
+            const cls =
+              line.kind === 'add'
+                ? 'bg-green-950/60 text-green-200'
+                : line.kind === 'remove'
+                  ? 'bg-red-950/60 text-red-200'
+                  : 'text-neutral-500';
+            const prefix = line.kind === 'add' ? '+ ' : line.kind === 'remove' ? '- ' : '  ';
+            return (
+              <div key={i} className={`min-w-full whitespace-pre px-2 ${cls}`}>
+                {prefix}
+                {line.text}
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -1106,7 +1113,7 @@ export default function GlobalKbPage() {
                       </button>
                     </div>
                   </div>
-                  <div className="mt-2 min-h-0 flex-1 overflow-y-auto rounded-md border border-neutral-800">
+                  <div className="mt-2 min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable] rounded-md border border-neutral-800">
                     {draftView === 'diff' ? (
                       <GlobalKbDiff baseline={supersededEntry.body} current={selected.body} />
                     ) : (

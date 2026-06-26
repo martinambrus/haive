@@ -399,25 +399,32 @@ function DiffDisclosure({ details }: DiffDisclosureProps) {
       <summary className="cursor-pointer select-none px-2 py-1 text-neutral-400 hover:text-neutral-200">
         {summary}
       </summary>
-      <div className="max-h-96 overflow-auto border-t border-neutral-800 font-mono text-[11px] leading-tight">
+      <div className="max-h-96 overflow-auto [scrollbar-gutter:stable] border-t border-neutral-800 font-mono text-[11px] leading-tight">
         {lines.length === 0 ? (
           <div className="px-2 py-1 text-neutral-500">No content changes.</div>
         ) : (
-          lines.map((line, i) => {
-            const cls =
-              line.kind === 'add'
-                ? 'bg-green-950/60 text-green-200'
-                : line.kind === 'remove'
-                  ? 'bg-red-950/60 text-red-200'
-                  : 'text-neutral-500';
-            const prefix = line.kind === 'add' ? '+ ' : line.kind === 'remove' ? '- ' : '  ';
-            return (
-              <div key={i} className={cn('whitespace-pre px-2', cls)}>
-                {prefix}
-                {line.text}
-              </div>
-            );
-          })
+          // w-max sizes this block to the widest line so each line's background
+          // spans the whole horizontal scroll extent (min-w-full keeps it at
+          // least the visible width); otherwise the add/remove tint clips at the
+          // right edge when a line overflows. pb-3 keeps the last line clear of
+          // the overlay horizontal scrollbar. Mirrors CommitDiffViewer.InlineDiff.
+          <div className="w-max min-w-full pb-3">
+            {lines.map((line, i) => {
+              const cls =
+                line.kind === 'add'
+                  ? 'bg-green-950/60 text-green-200'
+                  : line.kind === 'remove'
+                    ? 'bg-red-950/60 text-red-200'
+                    : 'text-neutral-500';
+              const prefix = line.kind === 'add' ? '+ ' : line.kind === 'remove' ? '- ' : '  ';
+              return (
+                <div key={i} className={cn('min-w-full whitespace-pre px-2', cls)}>
+                  {prefix}
+                  {line.text}
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
     </details>
