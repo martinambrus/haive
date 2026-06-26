@@ -44,9 +44,11 @@ export function BrowserVncPanel({ taskId, title, autoCollapse, persistId }: Brow
   const [state, setState] = useState<VncState>('idle');
   const [message, setMessage] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const rfbRef = useRef<{ disconnect(): void; clipboardPasteFrom(text: string): void } | null>(
-    null,
-  );
+  const rfbRef = useRef<{
+    disconnect(): void;
+    clipboardPasteFrom(text: string): void;
+    sendKey(keysym: number, code: string, down?: boolean): void;
+  } | null>(null);
   // Auto-reconnect bookkeeping (see MAX_CONNECT_RETRIES): connectedRef tells a
   // dropped live session apart from a not-yet-ready runtime; the timer holds the
   // pending reconnect; connectRef lets the disconnect handler call the latest
@@ -134,13 +136,34 @@ export function BrowserVncPanel({ taskId, title, autoCollapse, persistId }: Brow
   // automatically. canPaste hides the button where the clipboard API is unavailable
   // (a non-secure context — plain HTTP on a non-localhost origin).
   const canPaste = typeof navigator !== 'undefined' && !!navigator.clipboard?.readText;
+  const [pasteNote, setPasteNote] = useState<string | null>(null);
   const pasteIntoBrowser = useCallback(async () => {
+    const rfb = rfbRef.current;
+    if (!rfb) return;
+    let text: string;
     try {
-      const text = await navigator.clipboard.readText();
-      if (text) rfbRef.current?.clipboardPasteFrom(text);
+      text = await navigator.clipboard.readText();
     } catch {
-      /* permission denied or clipboard unavailable */
+      // Permission denied / no gesture — surface a hint instead of a silent no-op.
+      setPasteNote('Allow clipboard access, then click Paste again');
+      setTimeout(() => setPasteNote(null), 4000);
+      return;
     }
+    if (!text) return;
+    // Load the remote clipboard, THEN inject Ctrl+V so the paste actually lands in the
+    // focused remote field. clipboardPasteFrom alone only sets the remote clipboard —
+    // the user would otherwise have to press Ctrl+V inside the VNC themselves, which
+    // is the unreliable two-step we are replacing. The short delay lets x11vnc register
+    // the cut text before the keystroke asks for it. Keysyms: 0xffe3 = Control_L, 0x76 = 'v'.
+    rfb.clipboardPasteFrom(text);
+    setTimeout(() => {
+      const r = rfbRef.current;
+      if (!r) return;
+      r.sendKey(0xffe3, 'ControlLeft', true);
+      r.sendKey(0x76, 'KeyV', true);
+      r.sendKey(0x76, 'KeyV', false);
+      r.sendKey(0xffe3, 'ControlLeft', false);
+    }, 150);
   }, []);
 
   useEffect(() => {
@@ -205,12 +228,13 @@ export function BrowserVncPanel({ taskId, title, autoCollapse, persistId }: Brow
           {state === 'connected' && <span className="ml-2 text-emerald-400">● live</span>}
           {state === 'connecting' && <span className="ml-2 text-neutral-500">starting…</span>}
         </span>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          {pasteNote && <span className="text-xs text-amber-400">{pasteNote}</span>}
           {expanded && state === 'connected' && canPaste && (
             <button
               type="button"
               onClick={() => void pasteIntoBrowser()}
-              title="Paste your clipboard into the remote browser"
+              title="Paste your clipboard into the focused field in the remote browser"
               className="text-xs text-indigo-400 underline"
             >
               Paste

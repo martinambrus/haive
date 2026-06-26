@@ -9,6 +9,9 @@ declare module '@novnc/novnc' {
     disconnect(): void;
     /** Send text to the remote's clipboard (client → server paste). */
     clipboardPasteFrom(text: string): void;
+    /** Inject a key event into the remote. keysym is X11 (e.g. 0xffe3 = Control_L,
+     *  0x76 = 'v'); code is the DOM physical key (e.g. 'ControlLeft', 'KeyV'). */
+    sendKey(keysym: number, code: string, down?: boolean): void;
     addEventListener(type: string, listener: (e: Event) => void): void;
   }
 }
