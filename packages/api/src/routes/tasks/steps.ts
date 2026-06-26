@@ -7,7 +7,6 @@ import {
   logger,
   MERGE_CLARIFICATION_ANSWERED_EVENT,
   setCliProviderRequestSchema,
-  SKIPPABLE_STEP_IDS,
   stepActionRequestSchema,
   STEP_CLI_ROLES,
   submitStepRequestSchema,
@@ -25,6 +24,7 @@ import {
   enrichStepsWithCliStats,
   enrichStepsWithCliPreferences,
   enrichStepsWithSkipFlag,
+  isStepSkippable,
   propagateModelHealthCliToTaskDefault,
 } from './_helpers.js';
 
@@ -575,8 +575,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
 
   if (body.action === 'skip') {
     // Skip is disabled across the workflow except on the steps that opt in
-    // (metadata.allowSkip) — currently only the DB-migration step.
-    if (!SKIPPABLE_STEP_IDS.includes(stepId)) {
+    // (metadata.allowSkip), plus 01-worktree-setup for run_app (skip = run from
+    // the project root instead of an isolated worktree/branch).
+    if (!isStepSkippable(stepId, task.type)) {
       throw new HttpError(409, 'This step cannot be skipped');
     }
     if (step.status !== 'failed' && step.status !== 'waiting_form') {

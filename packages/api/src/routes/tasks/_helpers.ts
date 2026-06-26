@@ -363,6 +363,15 @@ export async function enrichStepsWithActiveRole<
   });
 }
 
+/** Whether the user Skip action is permitted on a step. Beyond the static
+ *  SKIPPABLE_STEP_IDS (steps whose StepDefinition opts in via allowSkip), a
+ *  run_app task may skip 01-worktree-setup to run from the project root instead
+ *  of an isolated branch/worktree. The skip handler enforces the same rule. */
+export function isStepSkippable(stepId: string, workflowType?: string | null): boolean {
+  if (SKIPPABLE_STEP_IDS.includes(stepId)) return true;
+  return workflowType === 'run_app' && stepId === '01-worktree-setup';
+}
+
 export async function enrichStepsWithSkipFlag<
   T extends { id: string; status: string; stepId: string },
 >(
@@ -371,11 +380,16 @@ export async function enrichStepsWithSkipFlag<
   steps: T[],
 ): Promise<(T & { manuallySkipped: boolean; canSkip: boolean })[]> {
   // canSkip: the step opts into the user-facing Skip action (the skip handler
-  // enforces the same SKIPPABLE_STEP_IDS list). Drives the web's Skip button.
+  // enforces the same rule). Task-type-aware so run_app can skip the worktree.
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { type: true },
+  });
+  const workflowType = task?.type ?? null;
   const withFlags = (s: T, manuallySkipped: boolean) => ({
     ...s,
     manuallySkipped,
-    canSkip: SKIPPABLE_STEP_IDS.includes(s.stepId),
+    canSkip: isStepSkippable(s.stepId, workflowType),
   });
   const skippedIds = steps.filter((s) => s.status === 'skipped').map((s) => s.id);
   if (skippedIds.length === 0) return steps.map((s) => withFlags(s, false));

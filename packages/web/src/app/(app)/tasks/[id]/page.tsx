@@ -554,7 +554,9 @@ export default function TaskDetailPage() {
         : action === 'abort'
           ? 'Abort this step and cancel the task? The environment will be torn down.'
           : action === 'skip'
-            ? 'Skip this step and continue to the next step?'
+            ? step.stepId === '01-worktree-setup'
+              ? 'Work from the project root (the repo’s current branch) instead of an isolated branch/worktree? You can still commit your edits at the end.'
+              : 'Skip this step and continue to the next step?'
             : action === 'resume'
               ? step.iterationCount > 0
                 ? `Resume this step from the last completed pass (${step.iterationCount} kept) with the currently-selected CLI?`
@@ -2002,9 +2004,13 @@ function StepCard({
                   variant="secondary"
                   disabled={actionBusy}
                   onClick={() => onAction('skip')}
-                  title="Skip this optional step and continue to the next one."
+                  title={
+                    step.stepId === '01-worktree-setup'
+                      ? 'Run from the project root (the repo’s current branch) instead of creating an isolated branch/worktree.'
+                      : 'Skip this optional step and continue to the next one.'
+                  }
                 >
-                  Skip
+                  {step.stepId === '01-worktree-setup' ? 'Skip — work from project root' : 'Skip'}
                 </Button>
               )}
               {step.status === 'failed' && (
