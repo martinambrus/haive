@@ -2208,6 +2208,9 @@ function StepCard({
                 ) : undefined
               }
               onSkip={step.canSkip ? () => onAction('skip') : undefined}
+              skipLabel={
+                step.stepId === '01-worktree-setup' ? 'Skip — work from project root' : undefined
+              }
               skipDisabled={actionBusy}
             />
           </div>
