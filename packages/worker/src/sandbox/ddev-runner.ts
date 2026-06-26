@@ -272,9 +272,15 @@ export async function startDdevRunner(params: {
 
   // Point DDEV's router at the SAME ports we published, so the cold-boot `ddev
   // start` brings the router up on them and primary_url / canonical redirects
-  // carry the published port. Global config = per-runner here (one project per
-  // runner). Best-effort: a failure only degrades the direct-access ddev.site URL,
-  // so warn rather than fail the whole boot (VNC + in-container access still work).
+  // carry the published port. AND bind the router on all interfaces inside the
+  // runner: by default DDEV's nested router publishes on the runner's loopback
+  // only (127.0.0.1), but our host `-p 127.0.0.1:P:P` forwards to the runner's
+  // bridge IP, so without bind-all the host publish reaches nothing (connection
+  // reset). This config runs BEFORE the first `ddev start`, so the router is
+  // created with the right binding (no recreate needed). Global config =
+  // per-runner here (one project per runner). Best-effort: a failure only
+  // degrades the direct-access ddev.site URL, so warn rather than fail the whole
+  // boot (VNC + in-container access still work).
   if (directAccess && chosenPorts) {
     await exec(
       'docker',
@@ -285,7 +291,7 @@ export async function startDdevRunner(params: {
         name,
         'bash',
         '-lc',
-        `ddev config global --router-https-port=${chosenPorts.https} --router-http-port=${chosenPorts.http}`,
+        `ddev config global --router-https-port=${chosenPorts.https} --router-http-port=${chosenPorts.http} --router-bind-all-interfaces=true`,
       ],
       { timeout: 30_000 },
     ).catch((err) => {
