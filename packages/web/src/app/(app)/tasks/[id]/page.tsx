@@ -85,37 +85,68 @@ function liveBrowserPanel(
   return null;
 }
 
-/** run_app hold step (99-run-app-ready): show BOTH live-app surfaces — the in-app
- *  VNC and the user's own browser — plus the session commit-diff. Unlike
- *  liveBrowserPanel's either/or, run_app offers both viewing modes at once so the
- *  user can pick. Gated by the step's detect flags (liveBrowser/directAccess). */
-function runAppReadyPanels(
-  step: { id: string; detectOutput: unknown },
-  taskId: string,
-  opts: { autoCollapse: boolean },
-) {
+/** run_app hold step (99-run-app-ready): the live-app viewer. The user picks ONE
+ *  viewing mode — the in-app VNC (default) or their own browser — and only that
+ *  surface shows. "Own browser" is offered only when the global direct-access flag
+ *  is on (detect.directAccess); VNC is the default because it streams through the
+ *  api WebSocket bridge and works even when the in-DinD app port isn't reachable
+ *  from the user's host browser. The session commit-diff renders below either way. */
+function RunAppReadyPanels({
+  step,
+  taskId,
+  autoCollapse,
+}: {
+  step: { id: string; detectOutput: unknown };
+  taskId: string;
+  autoCollapse: boolean;
+}) {
   const det = step.detectOutput as {
     liveBrowser?: { available?: boolean };
     directAccess?: boolean;
     diffArtifactPath?: string | null;
   } | null;
+  const vncAvailable = !!det?.liveBrowser?.available;
+  const directAvailable = !!det?.directAccess;
+  const [mode, setMode] = useState<'vnc' | 'direct'>('vnc');
+  // VNC unavailable but direct is → fall to direct so something always shows.
+  const effective = !vncAvailable && directAvailable ? 'direct' : mode;
+  const showDirect = effective === 'direct' && directAvailable;
+
+  const tabClass = (active: boolean) =>
+    `rounded-md border px-3 py-1.5 text-xs transition-colors ${
+      active
+        ? 'border-indigo-500 bg-indigo-950/40 text-indigo-200'
+        : 'border-neutral-800 bg-neutral-950 text-neutral-300 hover:border-neutral-700'
+    }`;
+
   return (
     <div className="flex flex-col gap-3">
-      {det?.liveBrowser?.available && (
-        <BrowserVncPanel
-          taskId={taskId}
-          title="In-app browser (VNC)"
-          autoCollapse={opts.autoCollapse}
-          persistId={`${step.id}-vnc`}
-        />
+      {vncAvailable && directAvailable && (
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setMode('vnc')} className={tabClass(!showDirect)}>
+            In-app browser (VNC)
+          </button>
+          <button type="button" onClick={() => setMode('direct')} className={tabClass(showDirect)}>
+            Open in my own browser
+          </button>
+        </div>
       )}
-      {det?.directAccess && (
+      {showDirect ? (
         <BrowserDirectPanel
           taskId={taskId}
           title="Open in your own browser"
-          autoCollapse={opts.autoCollapse}
+          autoCollapse={autoCollapse}
           persistId={`${step.id}-direct`}
         />
+      ) : (
+        vncAvailable && (
+          <BrowserVncPanel
+            taskId={taskId}
+            title="In-app browser (VNC)"
+            autoCollapse={autoCollapse}
+            persistId={`${step.id}-vnc`}
+          />
+        )
       )}
       {det?.diffArtifactPath && (
         <CommitDiffViewer taskId={taskId} artifactPath={det.diffArtifactPath} />
@@ -2156,7 +2187,7 @@ function StepCard({
               }
               beforeFieldsSlot={
                 !runtimeTornDown && step.stepId === '99-run-app-ready' ? (
-                  runAppReadyPanels(step, taskId, { autoCollapse: taskEnded })
+                  <RunAppReadyPanels step={step} taskId={taskId} autoCollapse={taskEnded} />
                 ) : !runtimeTornDown && step.stepId === '09-gate-2-verify-approval' ? (
                   // Gate-2: the live browser (or, in direct mode, the URL info box) sits
                   // BELOW the verification status table but ABOVE the approve/reject

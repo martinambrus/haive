@@ -6,6 +6,11 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { ensureAppServing } from '../workflow/_app-runtime.js';
+import { runnerExec, startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
+import {
+  appRunnerExec,
+  startBrowserDesktop as startAppBrowserDesktop,
+} from '../../../sandbox/app-runner.js';
 import { buildCommitDiffArtifact } from '../workflow/_commit-diff.js';
 import { resolveUserGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../../../repo/git-push.js';
@@ -71,8 +76,27 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       const runtime = await ensureAppServing(ctx);
       mode = runtime.mode;
       appUrl = runtime.url;
+      // Navigate the in-runner headed browser to the app so the VNC view opens ON
+      // the running app instead of a blank browser (mirrors 08a/gate-2). Best-effort
+      // — a navigation failure must not block the gate from rendering.
+      if (runtime.mode === 'ddev') {
+        await startBrowserDesktop(runtime.handle);
+        await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${appUrl}'`, {
+          timeoutMs: 60_000,
+        });
+      } else if (runtime.mode === 'app-runner') {
+        await startAppBrowserDesktop(runtime.handle);
+        await appRunnerExec(
+          runtime.handle,
+          `node /opt/browser/browser-probe-connect.js '${appUrl}'`,
+          { timeoutMs: 60_000 },
+        );
+      }
     } catch (err) {
-      ctx.logger.warn({ err, taskId: ctx.taskId }, 'run-app-ready: ensureAppServing failed');
+      ctx.logger.warn(
+        { err, taskId: ctx.taskId },
+        'run-app-ready: runtime/browser bring-up failed',
+      );
     }
 
     const directAccess = await configService.getBoolean(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, true);
