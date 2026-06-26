@@ -169,6 +169,9 @@ export default function TaskDetailPage() {
   // re-runs when the terminal mounts (not only when the active step changes).
   const prevScrollKeyRef = useRef<string | null>(null);
   const scrollTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  // One-shot guard so the scroll-to-bottom-on-completion fires once per
+  // completion (reset if the task leaves 'completed', e.g. a retry).
+  const completedScrolledRef = useRef(false);
   const titleRowRef = useRef<HTMLDivElement>(null);
   const [titleStripVisible, setTitleStripVisible] = useState(false);
 
@@ -330,6 +333,38 @@ export default function TaskDetailPage() {
 
   // Clear any pending scroll retries on unmount.
   useEffect(() => () => scrollTimersRef.current.forEach(clearTimeout), []);
+
+  // When the task completes, trailing CTAs render BELOW the last step: the
+  // KB-draft "Review N drafts" button, the upgrade "Back to repositories"
+  // button, and the total-time row. The active-step auto-scroll above stops
+  // firing on completion (no step is active anymore), so the view is left at
+  // the final step's header and those buttons sit off-screen. Scroll the
+  // container's bottom into view once, when the task finishes. Keyed on `tab`
+  // too: if completion lands while another tab is showing, the steps container
+  // is unmounted (ref null) — re-run so the scroll fires when steps is shown.
+  useEffect(() => {
+    const container = stepsContainerRef.current;
+    if (!container) return;
+    if (task?.status !== 'completed') {
+      completedScrolledRef.current = false;
+      return;
+    }
+    if (completedScrolledRef.current) return;
+    completedScrolledRef.current = true;
+    // Cancel pending active-step re-scroll timers so they can't yank the view
+    // back up to the final step header after we reach the bottom.
+    scrollTimersRef.current.forEach(clearTimeout);
+    scrollTimersRef.current = [];
+    const scrollToBottom = () => {
+      container.lastElementChild?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    };
+    scrollToBottom();
+    // The just-finished step's terminal collapses a tick later, shifting the
+    // layout; re-apply so the final position accounts for the shorter page.
+    [150, 400, 800].forEach((delay) =>
+      scrollTimersRef.current.push(setTimeout(scrollToBottom, delay)),
+    );
+  }, [task?.status, tab]);
 
   useEffect(() => {
     api
