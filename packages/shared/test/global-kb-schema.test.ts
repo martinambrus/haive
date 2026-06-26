@@ -52,7 +52,9 @@ describe('ensureGlobalKbSchema', () => {
     expect(sql).toContain(
       "category IN ('general','tech_pattern','anti_pattern','best_practice','quick_reference')",
     );
-    expect(sql).toContain("status IN ('skeleton','enriching','draft','active','archived')");
+    expect(sql).toContain(
+      "status IN ('skeleton','enriching','draft','active','archived','failed')",
+    );
     // Facet filter support: broad default-jsonb_ops GIN + per-array expression GIN.
     expect(sql).toContain('USING GIN (facets)');
     expect(sql).toContain("USING GIN ((facets->'framework'))");
