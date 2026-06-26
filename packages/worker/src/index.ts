@@ -5,6 +5,7 @@ import { getRedis } from './redis.js';
 import { scheduleBundleGitSyncTick, startBundleWorker } from './queues/bundle-queue.js';
 import { scheduleGlobalKbPurge, startGlobalKbSyncWorker } from './queues/global-kb-sync-queue.js';
 import { startRuntimeEnsureWorker } from './queues/runtime-ensure-queue.js';
+import { startIdeEnsureWorker } from './queues/ide-ensure-queue.js';
 import {
   closeCliExecQueue,
   scheduleCliVersionRefresh,
@@ -22,6 +23,7 @@ import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
 import { ensureOllamaModels } from './sandbox/ollama-provision.js';
 import { ensureDdevCa } from './sandbox/ddev-runner.js';
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
+import { IdeSessionReaper } from './sandbox/ide-session-reaper.js';
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 
 async function main(): Promise<void> {
@@ -42,6 +44,9 @@ async function main(): Promise<void> {
   // Serves the api's VNC "ensure runtime" requests: brings the task's app +
   // headed-browser desktop back up on demand (e.g. after a worker-boot reap).
   const runtimeEnsureWorker = startRuntimeEnsureWorker();
+  // Serves the api's Editor-tab "ensure IDE" requests: lazily launches the task's
+  // code-server container when the user opens the editor.
+  const ideEnsureWorker = startIdeEnsureWorker();
   // Recover steps a prior worker orphaned mid-CLI (their sandboxes were reaped
   // above): fail or resume them so they never hang in waiting_cli after a restart.
   await reconcileOrphanedCliSteps(getDb()).catch((err) => {
@@ -81,6 +86,10 @@ async function main(): Promise<void> {
   await terminalManager.start();
   const terminalReaper = new TerminalSessionReaper({ redis: getRedis() });
   terminalReaper.start();
+  // Lazy IDE: idle reaper grace-stops a code-server container 30 min after its
+  // editor tab closes (refcount==0 + lastSeenAt stale). No-op until an open arrives.
+  const ideReaper = new IdeSessionReaper({ redis: getRedis() });
+  ideReaper.start();
 
   logger.info('haive-worker ready');
 
@@ -91,6 +100,7 @@ async function main(): Promise<void> {
     // to the queue will be redelivered once the lock expires; the next
     // worker pid reaps orphan containers on boot.
     terminalReaper.stop();
+    ideReaper.stop();
     await terminalManager.stop().catch((err) => {
       logger.warn({ err }, 'terminal manager stop failed');
     });
@@ -101,6 +111,7 @@ async function main(): Promise<void> {
       cliExecWorker.close(true),
       globalKbSyncWorker.close(true),
       runtimeEnsureWorker.close(true),
+      ideEnsureWorker.close(true),
       closeTaskQueue(),
       closeCliExecQueue(),
     ]);

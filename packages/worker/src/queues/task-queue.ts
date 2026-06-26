@@ -10,6 +10,7 @@ import {
   configService,
   QUEUE_NAMES,
   TASK_JOB_NAMES,
+  ideSessionKey,
   logger,
   type CliExecJobPayload,
   type RepoRagCleanupPayload,
@@ -43,6 +44,7 @@ import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import { cleanupTaskAuthVolumes } from '../sandbox/task-auth-volume.js';
 import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
+import { killTaskIdeContainers } from '../sandbox/ide-runner.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
@@ -395,6 +397,23 @@ async function cleanupTaskContainers(
       }
     } catch (err) {
       logger.warn({ err, taskId, reason }, 'cleanup-app-runners failed');
+    }
+    // Per-task browser IDE (code-server). Keep on 'failed' like the runtimes so the
+    // user can still inspect/edit after a failure; tear down (container + per-task
+    // user-data volume) and drop the session entry on a definitive end.
+    try {
+      const killedIde = await killTaskIdeContainers(taskId);
+      await getRedis()
+        .del(ideSessionKey(taskId))
+        .catch(() => undefined);
+      if (killedIde > 0) {
+        await appendEvent(db, taskId, null, 'ide_containers.destroyed', {
+          reason,
+          count: killedIde,
+        });
+      }
+    } catch (err) {
+      logger.warn({ err, taskId, reason }, 'cleanup-ide-containers failed');
     }
   }
 

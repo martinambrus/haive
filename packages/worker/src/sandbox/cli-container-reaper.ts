@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { APP_RUNNER_LABEL, logger } from '@haive/shared';
+import { APP_RUNNER_LABEL, IDE_RUNNER_LABEL, logger } from '@haive/shared';
 
 const log = logger.child({ module: 'cli-container-reaper' });
 
@@ -14,19 +14,21 @@ const log = logger.child({ module: 'cli-container-reaper' });
  *  Two passes (label + name prefix) are unioned so a shell container that
  *  somehow lost its labels still gets reaped via the deterministic name. */
 export async function reapAllCliSandboxes(reason: string): Promise<number> {
-  const [labelIds, shellIds, ddevIds, appRunnerIds] = await Promise.all([
+  const [labelIds, shellIds, ddevIds, appRunnerIds, ideIds] = await Promise.all([
     listSandboxIdsByFilter('label=haive.task.id'),
     listSandboxIdsByFilter('name=haive-shell-'),
     listSandboxIdsByFilter('label=haive.ddev'),
     listSandboxIdsByFilter(`label=${APP_RUNNER_LABEL}`),
+    listSandboxIdsByFilter(`label=${IDE_RUNNER_LABEL}`),
   ]);
-  // The durable per-task runners (DDEV DinD + non-DDEV app-runner) carry
-  // haive.task.id but are NOT orphaned CLI sandboxes — they're long-lived task
-  // infra that ensureAppServing recovers on demand. Reaping them on every worker
-  // restart forced a slow cold re-boot (DDEV re-pulls its images into a fresh
-  // /var/lib/docker), surfacing as the VNC "Connection closed (1006)". Preserve
-  // them; only the short-lived CLI sandboxes + terminal shells get reaped.
-  const durable = new Set([...ddevIds, ...appRunnerIds]);
+  // The durable per-task runners (DDEV DinD + non-DDEV app-runner + browser IDE)
+  // carry haive.task.id but are NOT orphaned CLI sandboxes — they're long-lived
+  // task infra. Reaping the runtimes on every worker restart forced a slow cold
+  // re-boot (DDEV re-pulls its images), surfacing as the VNC "Connection closed
+  // (1006)"; reaping an open IDE would kill the user's live editor session. The
+  // IDE's own idle reaper grace-stops it after the tab closes. Preserve them all;
+  // only the short-lived CLI sandboxes + terminal shells get reaped.
+  const durable = new Set([...ddevIds, ...appRunnerIds, ...ideIds]);
   const ids = Array.from(new Set([...labelIds, ...shellIds])).filter((id) => !durable.has(id));
   if (ids.length === 0) return 0;
   log.warn(
