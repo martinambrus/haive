@@ -88,8 +88,9 @@ export default function NewTaskPage() {
   const searchParams = useSearchParams();
   const queryRepoId = searchParams.get('repositoryId');
   // run_app: a deterministic "run this repository" task (no implementation pipeline).
-  // Entered from the repo card's "Run app" button (?mode=run_app).
-  const isRunApp = searchParams.get('mode') === 'run_app';
+  // Preset from the repo card's "Run app" button (?mode=run_app); also selectable
+  // here via the task-type toggle below.
+  const [isRunApp, setIsRunApp] = useState(searchParams.get('mode') === 'run_app');
   const presetAppliedRef = useRef(false);
   const [repos, setRepos] = useState<Repository[] | null>(null);
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
@@ -436,6 +437,39 @@ export default function NewTaskPage() {
               )}
             </div>
           )}
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <Label>What to do with this repository</Label>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setIsRunApp(false)}
+              className={`flex-1 rounded-md border px-3 py-2 text-sm transition-colors ${
+                !isRunApp
+                  ? 'border-indigo-500 bg-indigo-950/40 text-indigo-200'
+                  : 'border-neutral-800 bg-neutral-950 text-neutral-300 hover:border-neutral-700'
+              }`}
+            >
+              Run the workflow
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsRunApp(true)}
+              className={`flex-1 rounded-md border px-3 py-2 text-sm transition-colors ${
+                isRunApp
+                  ? 'border-indigo-500 bg-indigo-950/40 text-indigo-200'
+                  : 'border-neutral-800 bg-neutral-950 text-neutral-300 hover:border-neutral-700'
+              }`}
+            >
+              Just run the app
+            </button>
+          </div>
+          <p className="text-xs text-neutral-500">
+            {isRunApp
+              ? 'Bring the app up (DDEV / container) so you can browse, test, and edit it live. No code changes unless you commit at the end.'
+              : 'Run the autonomous workflow — onboarding for a fresh repo, the implementation workflow once onboarded.'}
+          </p>
         </div>
 
         <div className="flex flex-col gap-1.5">
