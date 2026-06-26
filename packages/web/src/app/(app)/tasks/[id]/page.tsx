@@ -1640,6 +1640,12 @@ function StepCard({
     taskStatus !== 'completed' &&
     !isAutoSkipped &&
     RETRYABLE_STEP_STATUSES.has(step.status);
+  // No per-step action is possible once the task is terminally cancelled or
+  // completed — there is nothing left to do on it, so every action button is
+  // hidden. A FAILED task is deliberately excluded (canActOnStep stays true) so
+  // its failed step keeps Retry / Retry with AI / Abort for recovery. Gates the
+  // whole action-button group below (the stepId label stays visible).
+  const canActOnStep = !taskCancelled && taskStatus !== 'completed';
   // Only steps that actually dispatch a CLI (llm | agentMining | dagExecute) get a
   // provider picker; deterministic steps never consume a per-step provider, so the
   // picker would be a dead control. usesCli comes from CLI_DISPATCH_STEP_IDS.
@@ -1908,105 +1914,111 @@ function StepCard({
           )}
         </div>
         <div className="flex items-center gap-2">
-          {step.stepId === '03c-business-requirements-review' && step.status === 'failed' && (
-            <Button
-              size="sm"
-              disabled={actionBusy}
-              onClick={() => void onRetryStep('03b-business-requirements')}
-              title="Reset and re-run the business-requirements step with your rejection feedback pre-filled, so the agent re-drafts addressing it. Retrying THIS step would only re-review the same draft."
-            >
-              Re-run business requirements
-            </Button>
-          )}
-          {(step.status === 'running' || step.status === 'waiting_cli') && (
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => {
-                if (confirm('Stop this step? It stops without re-running; the task stays open.'))
-                  onStop();
-              }}
-              title="Stop the running CLI for this step. Keeps the environment; the task stays open and restartable. Use Stop & retry to stop and immediately re-run."
-            >
-              Stop
-            </Button>
-          )}
-          {canRetry &&
-            (() => {
-              const isActive = step.status === 'running' || step.status === 'waiting_cli';
-              const label = isActive ? 'Stop & retry' : 'Retry';
-              const title = isActive
-                ? 'Stop the running CLI for this step (and any downstream activity), then re-run from this step'
-                : 'Reset this step and re-run it (downstream steps will also reset)';
-              return (
+          {canActOnStep && (
+            <>
+              {step.stepId === '03c-business-requirements-review' && step.status === 'failed' && (
+                <Button
+                  size="sm"
+                  disabled={actionBusy}
+                  onClick={() => void onRetryStep('03b-business-requirements')}
+                  title="Reset and re-run the business-requirements step with your rejection feedback pre-filled, so the agent re-drafts addressing it. Retrying THIS step would only re-review the same draft."
+                >
+                  Re-run business requirements
+                </Button>
+              )}
+              {(step.status === 'running' || step.status === 'waiting_cli') && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    if (
+                      confirm('Stop this step? It stops without re-running; the task stays open.')
+                    )
+                      onStop();
+                  }}
+                  title="Stop the running CLI for this step. Keeps the environment; the task stays open and restartable. Use Stop & retry to stop and immediately re-run."
+                >
+                  Stop
+                </Button>
+              )}
+              {canRetry &&
+                (() => {
+                  const isActive = step.status === 'running' || step.status === 'waiting_cli';
+                  const label = isActive ? 'Stop & retry' : 'Retry';
+                  const title = isActive
+                    ? 'Stop the running CLI for this step (and any downstream activity), then re-run from this step'
+                    : 'Reset this step and re-run it (downstream steps will also reset)';
+                  return (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={actionBusy}
+                      onClick={() => onAction('retry')}
+                      title={title}
+                    >
+                      {actionBusy ? (isActive ? 'Stopping…' : 'Retrying…') : label}
+                    </Button>
+                  );
+                })()}
+              {step.status === 'failed' && (
                 <Button
                   size="sm"
                   variant="secondary"
                   disabled={actionBusy}
-                  onClick={() => onAction('retry')}
-                  title={title}
+                  onClick={() => onAction('retry_ai')}
+                  title="Spawn an AI agent to diagnose and fix the failure, then re-run this step automatically. Uses the step's CLI provider."
                 >
-                  {actionBusy ? (isActive ? 'Stopping…' : 'Retrying…') : label}
+                  Retry with AI
                 </Button>
-              );
-            })()}
-          {step.status === 'failed' && (
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={actionBusy}
-              onClick={() => onAction('retry_ai')}
-              title="Spawn an AI agent to diagnose and fix the failure, then re-run this step automatically. Uses the step's CLI provider."
-            >
-              Retry with AI
-            </Button>
-          )}
-          {step.errorHint?.type === 'local_model_destructive' && step.status === 'failed' && (
-            <Button
-              size="sm"
-              disabled={actionBusy}
-              onClick={() => onAction('retry', { overrideLocalModel: true })}
-              title="Run this step on the current local model despite the reliability warning. Bypasses the block for this step only — other steps keep the guard."
-            >
-              {actionBusy ? 'Overriding…' : 'Override and run'}
-            </Button>
-          )}
-          {step.status === 'failed' &&
-            (step.iterationCount > 0 || (step.cliRoles?.length ?? 0) > 0) && (
-              <Button
-                size="sm"
-                disabled={actionBusy}
-                onClick={() => onAction('resume')}
-                title="Continue this multi-pass step from where it failed. If a CLI ran out of credits, pick a different one above first. Completed passes are kept; a first-pass failure re-runs from the start with the new CLI."
-              >
-                {actionBusy
-                  ? 'Resuming…'
-                  : step.iterationCount > 0
-                    ? `Resume (keep ${step.iterationCount} pass${step.iterationCount === 1 ? '' : 'es'})`
-                    : 'Resume (new CLI)'}
-              </Button>
-            )}
-          {(step.status === 'failed' || step.status === 'waiting_form') && step.canSkip && (
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={actionBusy}
-              onClick={() => onAction('skip')}
-              title="Skip this optional step and continue to the next one."
-            >
-              Skip
-            </Button>
-          )}
-          {step.status === 'failed' && (
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={actionBusy}
-              onClick={() => onAction('abort')}
-              title="Give up on this step and cancel the task (tears down the environment)."
-            >
-              Abort
-            </Button>
+              )}
+              {step.errorHint?.type === 'local_model_destructive' && step.status === 'failed' && (
+                <Button
+                  size="sm"
+                  disabled={actionBusy}
+                  onClick={() => onAction('retry', { overrideLocalModel: true })}
+                  title="Run this step on the current local model despite the reliability warning. Bypasses the block for this step only — other steps keep the guard."
+                >
+                  {actionBusy ? 'Overriding…' : 'Override and run'}
+                </Button>
+              )}
+              {step.status === 'failed' &&
+                (step.iterationCount > 0 || (step.cliRoles?.length ?? 0) > 0) && (
+                  <Button
+                    size="sm"
+                    disabled={actionBusy}
+                    onClick={() => onAction('resume')}
+                    title="Continue this multi-pass step from where it failed. If a CLI ran out of credits, pick a different one above first. Completed passes are kept; a first-pass failure re-runs from the start with the new CLI."
+                  >
+                    {actionBusy
+                      ? 'Resuming…'
+                      : step.iterationCount > 0
+                        ? `Resume (keep ${step.iterationCount} pass${step.iterationCount === 1 ? '' : 'es'})`
+                        : 'Resume (new CLI)'}
+                  </Button>
+                )}
+              {(step.status === 'failed' || step.status === 'waiting_form') && step.canSkip && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={actionBusy}
+                  onClick={() => onAction('skip')}
+                  title="Skip this optional step and continue to the next one."
+                >
+                  Skip
+                </Button>
+              )}
+              {step.status === 'failed' && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={actionBusy}
+                  onClick={() => onAction('abort')}
+                  title="Give up on this step and cancel the task (tears down the environment)."
+                >
+                  Abort
+                </Button>
+              )}
+            </>
           )}
           <span className="font-mono text-xs text-neutral-500">{step.stepId}</span>
         </div>
