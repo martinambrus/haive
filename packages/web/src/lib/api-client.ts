@@ -349,7 +349,7 @@ export interface Container {
   destroyedAt: string | null;
 }
 
-export type WorkflowType = 'onboarding' | 'workflow' | 'onboarding_upgrade';
+export type WorkflowType = 'onboarding' | 'workflow' | 'onboarding_upgrade' | 'run_app';
 
 /** Execution path chosen at the 00-triage step (workflow tasks). Mirrors
  *  ExecutionPath in @haive/shared; redefined here so the browser bundle never

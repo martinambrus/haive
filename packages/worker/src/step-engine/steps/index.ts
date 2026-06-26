@@ -6,6 +6,7 @@ import { registerOnboardingSteps } from './onboarding/index.js';
 import { registerOnboardingUpgradeSteps } from './onboarding-upgrade/index.js';
 import { registerWorkflowSteps } from './workflow/index.js';
 import { registerKbAuthorSteps } from './kb-author/index.js';
+import { registerRunAppSteps } from './run-app/index.js';
 
 export {
   registerOnboardingSteps,
@@ -13,6 +14,7 @@ export {
   registerWorkflowSteps,
   registerOnboardingUpgradeSteps,
   registerKbAuthorSteps,
+  registerRunAppSteps,
 };
 
 export function registerAllSteps(registry: StepRegistry): void {
@@ -21,6 +23,7 @@ export function registerAllSteps(registry: StepRegistry): void {
   registerWorkflowSteps(registry);
   registerOnboardingUpgradeSteps(registry);
   registerKbAuthorSteps(registry);
+  registerRunAppSteps(registry);
   assertProviderSensitiveListInSync(registry);
   assertCliDispatchListInSync(registry);
   assertPathStepSetsClosed(registry);

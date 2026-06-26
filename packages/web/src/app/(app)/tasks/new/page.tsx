@@ -87,6 +87,9 @@ export default function NewTaskPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryRepoId = searchParams.get('repositoryId');
+  // run_app: a deterministic "run this repository" task (no implementation pipeline).
+  // Entered from the repo card's "Run app" button (?mode=run_app).
+  const isRunApp = searchParams.get('mode') === 'run_app';
   const presetAppliedRef = useRef(false);
   const [repos, setRepos] = useState<Repository[] | null>(null);
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
@@ -232,19 +235,24 @@ export default function NewTaskPage() {
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (!title.trim()) {
-      setError('Title is required');
-      return;
-    }
     if (!repositoryId) {
       setError('Repository is required');
       return;
     }
-    if (!onboardingStatus) {
+    if (!isRunApp && !onboardingStatus) {
       setError('Waiting for onboarding status check');
       return;
     }
-    const type: WorkflowType = onboardingStatus.onboarded ? 'workflow' : 'onboarding';
+    const type: WorkflowType = isRunApp
+      ? 'run_app'
+      : onboardingStatus?.onboarded
+        ? 'workflow'
+        : 'onboarding';
+    const finalTitle = title.trim() || (isRunApp ? 'Run app' : '');
+    if (!finalTitle) {
+      setError('Title is required');
+      return;
+    }
     if (type === 'workflow' && !description.trim()) {
       setError('Description is required for workflow tasks');
       return;
@@ -255,7 +263,7 @@ export default function NewTaskPage() {
     try {
       const body: Record<string, unknown> = {
         type,
-        title: title.trim(),
+        title: finalTitle,
         repositoryId,
       };
       if (description.trim()) body.description = description.trim();
@@ -275,7 +283,7 @@ export default function NewTaskPage() {
         if (clients.length > 0) body.affectedClients = clients;
       }
 
-      if (type === 'workflow' && dumpFile) {
+      if ((type === 'workflow' || type === 'run_app') && dumpFile) {
         setDumpUploading(true);
         try {
           body.dbUploadId = await chunkedUploadDbDump({
@@ -300,11 +308,13 @@ export default function NewTaskPage() {
   }
 
   const readyRepos = repos?.filter((r) => r.status === 'ready') ?? [];
-  const inferredType: WorkflowType | null = onboardingStatus
-    ? onboardingStatus.onboarded
-      ? 'workflow'
-      : 'onboarding'
-    : null;
+  const inferredType: WorkflowType | null = isRunApp
+    ? 'run_app'
+    : onboardingStatus
+      ? onboardingStatus.onboarded
+        ? 'workflow'
+        : 'onboarding'
+      : null;
 
   const selectedProvider = (providers ?? []).find((p) => p.id === cliProviderId) ?? null;
   const selectedProviderMeta = selectedProvider
@@ -330,10 +340,13 @@ export default function NewTaskPage() {
     <div className="flex max-w-2xl flex-col gap-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-neutral-50">New task</h1>
+          <h1 className="text-2xl font-bold text-neutral-50">
+            {isRunApp ? 'Run app' : 'New task'}
+          </h1>
           <p className="text-sm text-neutral-400">
-            Workflow type is auto-detected from the selected repository. Onboarded repos run the
-            autonomous workflow; fresh repos run onboarding.
+            {isRunApp
+              ? 'Bring this repository’s app up so you can browse, test, and edit it live. Optionally restore a database dump. Nothing in your repo changes unless you commit at the end.'
+              : 'Workflow type is auto-detected from the selected repository. Onboarded repos run the autonomous workflow; fresh repos run onboarding.'}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -432,8 +445,14 @@ export default function NewTaskPage() {
             type="text"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder={inferredType === 'workflow' ? 'Implement feature X' : 'Onboard repo'}
-            required
+            placeholder={
+              inferredType === 'run_app'
+                ? 'Run app'
+                : inferredType === 'workflow'
+                  ? 'Implement feature X'
+                  : 'Onboard repo'
+            }
+            required={!isRunApp}
           />
         </div>
 
@@ -519,7 +538,7 @@ export default function NewTaskPage() {
           )}
         </div>
 
-        {inferredType === 'workflow' && (
+        {(inferredType === 'workflow' || inferredType === 'run_app') && (
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="dbDump">Database dump (optional)</Label>
             <input
@@ -629,8 +648,14 @@ export default function NewTaskPage() {
         <FormError message={error} />
 
         <div>
-          <Button type="submit" disabled={submitting || !onboardingStatus}>
-            {submitting ? 'Creating...' : 'Create task'}
+          <Button type="submit" disabled={submitting || (!isRunApp && !onboardingStatus)}>
+            {submitting
+              ? isRunApp
+                ? 'Starting...'
+                : 'Creating...'
+              : isRunApp
+                ? 'Start app'
+                : 'Create task'}
           </Button>
         </div>
       </form>

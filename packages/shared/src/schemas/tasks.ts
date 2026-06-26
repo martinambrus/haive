@@ -1,6 +1,11 @@
 import { z } from 'zod';
 
-export const workflowTypeSchema = z.enum(['onboarding', 'workflow', 'onboarding_upgrade']);
+export const workflowTypeSchema = z.enum([
+  'onboarding',
+  'workflow',
+  'onboarding_upgrade',
+  'run_app',
+]);
 
 /** Execution path for a workflow task, chosen at the 00-triage step. quick_bugfix
  *  hands the CLI the problem directly; plan_tasklist drafts a spec and runs a

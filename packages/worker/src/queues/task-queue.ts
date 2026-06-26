@@ -46,6 +46,7 @@ import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { killTaskIdeContainers } from '../sandbox/ide-runner.js';
 import { removeTaskWorktree } from '../repo/worktree-remove.js';
+import { getTaskEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
@@ -104,7 +105,10 @@ interface ResolvedTaskContext {
   orchestrationEpoch: number;
 }
 
-async function buildRunList(ctx: ResolvedTaskContext): Promise<StepDefinition[]> {
+async function buildRunList(ctx: ResolvedTaskContext, db: Database): Promise<StepDefinition[]> {
+  // run_app assembles its own mode-aware list from steps reused BY ID (there is no
+  // full registered list for the type — only the 99-run-app-ready gate is native).
+  if (ctx.workflowType === 'run_app') return buildRunAppRunList(ctx, db);
   const main = stepRegistry.listByWorkflow(ctx.workflowType);
   // Only implementation-workflow tasks branch by execution path; onboarding,
   // onboarding_upgrade, kb_author, etc. run their full registered list unchanged.
@@ -119,6 +123,42 @@ async function buildRunList(ctx: ResolvedTaskContext): Promise<StepDefinition[]>
   // canary + triage + the spine, so the just-finished step is always present in the
   // filtered list.
   return orderWorkflowRunList(main, prelude, ctx.executionPath);
+}
+
+/** Assemble a run_app task's run list. The env + runtime steps are reused BY ID
+ *  from the workflow / env-replicate sets; the runtime tail is chosen from the
+ *  container tool 01-declare-deps persisted into the env template. Before declare-
+ *  deps has run the tool is unknown, so the tail is empty and is filled in on the
+ *  next rebuild (handleResult rebuilds the list after every step). The prefix
+ *  [declare-deps, worktree-setup] is stable and 99-run-app-ready is always last, so
+ *  the forward walk (findIndex(stepId)+1) stays correct as the tail grows. */
+async function buildRunAppRunList(
+  ctx: ResolvedTaskContext,
+  db: Database,
+): Promise<StepDefinition[]> {
+  const prefix = [
+    stepRegistry.require('01-declare-deps'),
+    stepRegistry.require('01-worktree-setup'),
+  ];
+  const ready = stepRegistry.require('99-run-app-ready');
+
+  const envTemplate = await getTaskEnvTemplate(db, ctx.taskId);
+  const containerTool = (envTemplate?.declaredDeps as { containerTool?: string } | null | undefined)
+    ?.containerTool;
+
+  let runtime: StepDefinition[] = [];
+  if (containerTool === 'ddev') {
+    runtime = [stepRegistry.require('01c-ddev-env')];
+  } else if (containerTool) {
+    // Non-DDEV (none / docker / docker-compose): build the env image, then boot the
+    // app in the app-runner (01a-app-boot's optional LLM infers the run command).
+    runtime = [
+      stepRegistry.require('02-generate-dockerfile'),
+      stepRegistry.require('03-build-image'),
+      stepRegistry.require('01a-app-boot'),
+    ];
+  }
+  return [...prefix, ...runtime, ready];
 }
 
 async function resolveTaskContext(
@@ -431,11 +471,22 @@ async function cleanupTaskContainers(
     logger.warn({ err, taskId, reason }, 'cleanup-task-auth-volumes failed');
   }
 
-  // Remove the feature worktree on cancel only. On completion 12-worktree-cleanup
-  // owns this (and a `keep` choice there must be respected); on 'failed' the runtime
-  // is kept for recovery, so a later cancel reaps it then. A task cancelled before
-  // step 12 would otherwise leak its worktree dir into the haive_repos volume.
-  if (reason === 'cancelled') {
+  // Remove the feature worktree. On cancel: always (a task cancelled before its
+  // worktree-cleanup step would leak the dir into the haive_repos volume). On
+  // completion: only for task types with NO worktree-cleanup step of their own —
+  // run_app has no 12-worktree-cleanup, so its Finish would otherwise leak the
+  // worktree; workflow completion still defers to step 12 (whose `keep` choice must
+  // be respected). On 'failed' the runtime is kept for recovery, so a later cancel
+  // reaps it then.
+  let removeWorktree = reason === 'cancelled';
+  if (reason === 'completed') {
+    const t = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { type: true },
+    });
+    if (t?.type === 'run_app') removeWorktree = true;
+  }
+  if (removeWorktree) {
     try {
       const wt = await removeTaskWorktree(db, taskId);
       if (wt.removed) {
@@ -682,7 +733,7 @@ async function handleResult(
       await appendEvent(db, ctx.taskId, result.row.id, `step.${result.status}`, {
         stepId,
       });
-      const steps = await buildRunList(ctx);
+      const steps = await buildRunList(ctx, db);
       const idx = steps.findIndex((s) => s.metadata.id === stepId);
       const next = idx >= 0 ? steps[idx + 1] : undefined;
       if (next) {
@@ -999,7 +1050,7 @@ async function resolveFixLoopGate(
     // remaining chain runs to gate 2 with the issues recorded but unresolved.
     await recordFixLoopAccepted(db, ctx.taskId, gateRow.id);
     await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.accepted', { round });
-    const steps = await buildRunList(ctx);
+    const steps = await buildRunList(ctx, db);
     const idx = steps.findIndex((s) => s.metadata.id === gateRow.stepId);
     const next = idx >= 0 ? steps[idx + 1] : undefined;
     if (next) {
@@ -1048,7 +1099,7 @@ async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<v
   await markTaskRunning(db, ctx.taskId);
   await appendEvent(db, ctx.taskId, null, 'task.running', {});
 
-  const steps = await buildRunList(ctx);
+  const steps = await buildRunList(ctx, db);
   const first = steps[0];
   if (!first) {
     await markTaskFailed(db, ctx.taskId, `no steps registered for workflow ${ctx.workflowType}`);

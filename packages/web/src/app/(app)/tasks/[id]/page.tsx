@@ -85,6 +85,45 @@ function liveBrowserPanel(
   return null;
 }
 
+/** run_app hold step (99-run-app-ready): show BOTH live-app surfaces — the in-app
+ *  VNC and the user's own browser — plus the session commit-diff. Unlike
+ *  liveBrowserPanel's either/or, run_app offers both viewing modes at once so the
+ *  user can pick. Gated by the step's detect flags (liveBrowser/directAccess). */
+function runAppReadyPanels(
+  step: { id: string; detectOutput: unknown },
+  taskId: string,
+  opts: { autoCollapse: boolean },
+) {
+  const det = step.detectOutput as {
+    liveBrowser?: { available?: boolean };
+    directAccess?: boolean;
+    diffArtifactPath?: string | null;
+  } | null;
+  return (
+    <div className="flex flex-col gap-3">
+      {det?.liveBrowser?.available && (
+        <BrowserVncPanel
+          taskId={taskId}
+          title="In-app browser (VNC)"
+          autoCollapse={opts.autoCollapse}
+          persistId={`${step.id}-vnc`}
+        />
+      )}
+      {det?.directAccess && (
+        <BrowserDirectPanel
+          taskId={taskId}
+          title="Open in your own browser"
+          autoCollapse={opts.autoCollapse}
+          persistId={`${step.id}-direct`}
+        />
+      )}
+      {det?.diffArtifactPath && (
+        <CommitDiffViewer taskId={taskId} artifactPath={det.diffArtifactPath} />
+      )}
+    </div>
+  );
+}
+
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
 
 function taskStatusVariant(status: TaskStatus): BadgeVariant {
@@ -2116,7 +2155,9 @@ function StepCard({
                   : undefined
               }
               beforeFieldsSlot={
-                !runtimeTornDown && step.stepId === '09-gate-2-verify-approval' ? (
+                !runtimeTornDown && step.stepId === '99-run-app-ready' ? (
+                  runAppReadyPanels(step, taskId, { autoCollapse: taskEnded })
+                ) : !runtimeTornDown && step.stepId === '09-gate-2-verify-approval' ? (
                   // Gate-2: the live browser (or, in direct mode, the URL info box) sits
                   // BELOW the verification status table but ABOVE the approve/reject
                   // decision — review the results, test, then decide.

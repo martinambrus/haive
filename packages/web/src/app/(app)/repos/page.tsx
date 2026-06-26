@@ -235,6 +235,13 @@ function RepoCard(props: RepoCardProps) {
               <Button size="sm">Create task</Button>
             </Link>
           )}
+          {repo.status === 'ready' && (
+            <Link href={`/tasks/new?repositoryId=${repo.id}&mode=run_app`}>
+              <Button variant="secondary" size="sm">
+                Run app
+              </Button>
+            </Link>
+          )}
           {repo.status === 'ready' && !isReadOnlyLocalRepo(repo) && (
             <Link href={`/repos/${repo.id}/terminal`}>
               <Button variant="secondary" size="sm">

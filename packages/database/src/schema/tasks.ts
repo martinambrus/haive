@@ -52,6 +52,10 @@ export const workflowTypeEnum = pgEnum('workflow_type', [
   // Repo-anchored global-KB enrichment: expands a user skeleton into a
   // version-scoped global KB draft by reading the chosen repo (plan §5.1/§5.3).
   'kb_author',
+  // Deterministic-first "run this repository": brings the per-task runtime up
+  // (DDEV or app-runner) so the user can browse/test/edit the live app, then a
+  // Finish button tears it all down. No implementation pipeline / triage.
+  'run_app',
 ]);
 export const taskStatusEnum = pgEnum('task_status', [
   'created',
