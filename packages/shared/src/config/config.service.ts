@@ -75,6 +75,13 @@ export const CONFIG_KEYS = {
   // toggle — there is no per-repo flag.
   STEERING_ENABLED: 'config:steering:enabled',
 
+  // Global kill-switch for the in-task browser IDE (code-server Editor tab).
+  // When 'true' (default), the web exposes the Editor tab and the api/worker
+  // lazily launch a per-task code-server container. Set 'false' to hide the
+  // Editor tab and refuse IDE launches everywhere (the read-only Source viewer
+  // remains the fallback) without a redeploy.
+  IDE_ENABLED: 'config:ide:enabled',
+
   APP_URL: 'config:app:url',
 
   ENCRYPTION_KEY: 'bootstrap:encryptionKey',
@@ -116,6 +123,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.SANDBOX_NETWORK]: 'haive-network',
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
   [CONFIG_KEYS.STEERING_ENABLED]: 'true',
+  [CONFIG_KEYS.IDE_ENABLED]: 'true',
   [CONFIG_KEYS.APP_URL]: 'http://localhost:3000',
   [CONFIG_KEYS.MAINTENANCE_MODE]: 'false',
   [CONFIG_KEYS.MAINTENANCE_MESSAGE]: 'Maintenance in progress. Please check back shortly.',

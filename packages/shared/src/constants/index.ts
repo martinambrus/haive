@@ -24,6 +24,7 @@ export const QUEUE_NAMES = {
   BUNDLE: 'haive-bundle',
   GLOBAL_KB_SYNC: 'haive-global-kb-sync',
   RUNTIME_ENSURE: 'haive-runtime-ensure',
+  IDE_ENSURE: 'haive-ide-ensure',
 } as const;
 
 export const REPO_JOB_NAMES = {
@@ -86,6 +87,26 @@ export interface RuntimeEnsureResult {
    *  published ports. Empty/absent when direct access is disabled or no port is
    *  published. See `TaskAccessEndpoint`. */
   accessUrls?: TaskAccessEndpoint[];
+}
+
+export const IDE_ENSURE_JOB_NAMES = {
+  ENSURE: 'ensure-ide',
+} as const;
+
+/** Payload for `IDE_ENSURE_JOB_NAMES.ENSURE`. The api enqueues this when the user
+ *  opens the Editor tab; the worker lazily launches the task's code-server
+ *  container (spawning task containers is worker-only). */
+export interface IdeEnsurePayload {
+  taskId: string;
+  userId: string;
+}
+
+/** Result the worker returns for an ide-ensure job. `ok=false` with a `reason`
+ *  when the IDE can't be started (e.g. the task has no editable volume-backed
+ *  repo, or the global IDE kill-switch is off). */
+export interface IdeEnsureResult {
+  ok: boolean;
+  reason?: string;
 }
 
 export const TASK_JOB_NAMES = {
@@ -352,6 +373,53 @@ export function appRunnerName(taskId: string): string {
 /** Docker label marking a container as a per-task app-runner, so task-end
  *  cleanup can find and remove it (mirrors the DDEV runner's haive.ddev label). */
 export const APP_RUNNER_LABEL = 'haive.apprunner';
+
+/** Name of a task's per-task browser-IDE (code-server) container. Shared because
+ *  the api reverse-proxies the editor by this DNS name on the internal sandbox
+ *  network (the /ide HTTP+WS proxy) while the worker creates and destroys it. */
+export function ideRunnerName(taskId: string): string {
+  return `haive-ide-${taskId.slice(0, 8)}`;
+}
+/** Docker label marking a container as a per-task browser-IDE, so task-end
+ *  cleanup finds it and the worker-boot reaper spares it while a session is live
+ *  (mirrors the app-runner's haive.apprunner label). */
+export const IDE_RUNNER_LABEL = 'haive.ide';
+/** Port code-server binds inside the IDE container (its default). Reached by the
+ *  api proxy over the sandbox network by container name; never host-published. */
+export const IDE_INTERNAL_PORT = 8080;
+/** Pinned code-server image. Defaults to the Open VSX extension gallery (the
+ *  Microsoft Marketplace is licensed to MS products only). Bump deliberately. */
+export const CODE_SERVER_IMAGE = 'codercom/code-server:4.126.0';
+/** Grace after the editor tab closes (the last proxied connection drops) before
+ *  the IDE container is gracefully stopped + removed. Long, because an open editor
+ *  must never be reaped and a brief nav-away should survive; the per-task
+ *  user-data volume persists across the reap so unsaved (hot-exit) buffers live. */
+export const IDE_IDLE_GRACE_MS = 30 * 60_000;
+/** Per-USER volume holding code-server extensions: install once, mounted into
+ *  every task's IDE for that user. userSlug mirrors the cli-auth volume slug. */
+export function ideExtensionsVolumeName(userId: string): string {
+  const userSlug = userId.replace(/-/g, '').slice(0, 12);
+  return `haive_ide_ext_${userSlug}`;
+}
+/** Per-TASK volume holding code-server user-data: the global settings.json seeded
+ *  at launch, workbench state, and hot-exit backups. Persists across the idle-grace
+ *  container reap so reopening restores unsaved work; destroyed only at task end. */
+export function ideUserDataVolumeName(taskId: string): string {
+  const taskSlug = taskId.replace(/-/g, '').slice(0, 12);
+  return `haive_ide_udata_${taskSlug}`;
+}
+/** True for any IDE-owned Docker volume (extensions or user-data), so cleanup can
+ *  target them precisely without touching unrelated volumes. */
+export function isIdeVolume(name: string): boolean {
+  return name.startsWith('haive_ide_ext_') || name.startsWith('haive_ide_udata_');
+}
+/** Redis hash key for a task's IDE session. The api owns refcount + lastSeenAt as
+ *  proxied connections open/close; the worker's idle reaper reads them to grace-
+ *  stop the container. One per task (the IDE has a single workspace = the task). */
+export const IDE_SESSION_PREFIX = 'ide:session:';
+export function ideSessionKey(taskId: string): string {
+  return `${IDE_SESSION_PREFIX}${taskId}`;
+}
 
 /** A single way a user can reach a task's running web app from their OWN browser —
  *  the fast alternative to the VNC pixel stream. The worker emits these after it
