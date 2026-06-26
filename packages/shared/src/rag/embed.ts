@@ -123,6 +123,36 @@ export async function listResidentOllamaModels(
   }
 }
 
+export type EmbedDevicePlacement = 'gpu' | 'cpu' | 'not_resident' | 'unreachable';
+
+/** Where Ollama actually loaded a model — GPU (VRAM) vs CPU (RAM). Reads `/api/ps`
+ *  and inspects the model's `size_vram`: > 0 means layers are resident on the GPU,
+ *  0 means a full CPU fallback. A CPU fallback while a GPU is present is the
+ *  signature of a driver/runtime mismatch (e.g. the host GPU driver was upgraded
+ *  without a reboot — `nvidia-smi` and the container runtime still pass, but
+ *  `cuInit` fails, so Ollama silently loads on CPU and embeds far slower).
+ *  Returns 'not_resident' when the model isn't loaded (caller can't conclude
+ *  placement) and 'unreachable' when Ollama can't be reached. Never throws —
+ *  mirrors listResidentOllamaModels. */
+export async function getOllamaModelPlacement(
+  url: string,
+  model: string,
+  timeoutMs = 5000,
+): Promise<EmbedDevicePlacement> {
+  try {
+    const resp = await fetch(`${url}/api/ps`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!resp.ok) return 'unreachable';
+    const data = (await resp.json()) as {
+      models?: Array<{ name?: string; model?: string; size_vram?: number }>;
+    };
+    const m = (data.models ?? []).find((x) => x.name === model || x.model === model);
+    if (!m) return 'not_resident';
+    return (m.size_vram ?? 0) > 0 ? 'gpu' : 'cpu';
+  } catch {
+    return 'unreachable';
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Deterministic hash embedding fallback                               */
 /* ------------------------------------------------------------------ */

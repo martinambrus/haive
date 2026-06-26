@@ -29,6 +29,7 @@ import {
   vectorLiteral,
   EMBED_BATCH_SIZE,
 } from './_rag-embed.js';
+import { detectEmbedDevice, type EmbedDevice } from '../_embed-device.js';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -61,6 +62,9 @@ export interface RagPopulateApply {
   usedPgvector: boolean;
   ragMode: RagMode;
   usedOllama: boolean;
+  /** Whether embeddings ran on the GPU or silently fell back to CPU. 'unknown'
+   *  when Ollama wasn't used or the host has no GPU (nothing to warn about). */
+  embeddingDevice: EmbedDevice;
   /** How the index was populated this run. */
   mode: 'incremental' | 'full';
   /** Chunks actually embedded + (up)serted this run. */
@@ -636,6 +640,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         usedPgvector: false,
         ragMode: 'none',
         usedOllama: false,
+        embeddingDevice: 'unknown',
         mode: 'full',
         chunksEmbedded: 0,
         chunksSkipped: 0,
@@ -665,6 +670,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         usedPgvector: false,
         ragMode: detected.ragMode,
         usedOllama: false,
+        embeddingDevice: 'unknown',
         mode: 'full',
         chunksEmbedded: 0,
         chunksSkipped: 0,
@@ -729,6 +735,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       // a multi-billion-parameter embedding model on CPU) can take longer to load
       // than a single embed's timeout, so otherwise every batch aborts → slow hash
       // fallback. keep_alive (set in ollamaEmbed) then keeps it resident all run.
+      let embedDevice: EmbedDevice = 'unknown';
       if (useOllama) {
         await ctx.emitProgress('Warming embedding model (first load can take a minute)...');
         const warmed = await warmOllamaModel(detected.ollamaUrl!, detected.embeddingModel!);
@@ -736,7 +743,17 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           { model: detected.embeddingModel, warmed },
           warmed ? 'embedding model warmed' : 'embedding model warmup failed (will hash-fallback)',
         );
+        // After warm the model is resident, so /api/ps reports GPU vs CPU placement.
+        // detectEmbedDevice warns loudly if it fell back to CPU under GPU mode.
+        if (warmed) {
+          embedDevice = await detectEmbedDevice(
+            ctx.logger,
+            detected.ollamaUrl!,
+            detected.embeddingModel!,
+          );
+        }
       }
+      const cpuTag = embedDevice === 'cpu' ? ' [CPU embeddings — GPU unavailable, slow]' : '';
 
       let kbChunkCount = 0;
       let codeChunkCount = 0;
@@ -750,7 +767,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       for (let fi = 0; fi < totalKb; fi += 1) {
         ctx.throwIfCancelled();
         const file = detected.kbFiles[fi]!;
-        await ctx.emitProgress(`Indexing KB (${fi + 1}/${totalKb}): ${file.relPath}`);
+        await ctx.emitProgress(`Indexing KB (${fi + 1}/${totalKb}): ${file.relPath}${cpuTag}`);
 
         let text: string;
         try {
@@ -792,7 +809,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       for (let fi = 0; fi < totalCode; fi += 1) {
         ctx.throwIfCancelled();
         const file = detected.codeFiles[fi]!;
-        await ctx.emitProgress(`Indexing code (${fi + 1}/${totalCode}): ${file.relPath}`);
+        await ctx.emitProgress(`Indexing code (${fi + 1}/${totalCode}): ${file.relPath}${cpuTag}`);
 
         let text: string;
         try {
@@ -844,7 +861,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
 
       await ctx.emitProgress(
         `RAG ${mode} complete: embedded ${chunksEmbedded}, skipped ${chunksSkipped}, deleted ${chunksDeleted} ` +
-          `(${kbChunkCount} KB chunks from ${kbFileCount} files, ${codeChunkCount} code chunks from ${codeFileCount} files).`,
+          `(${kbChunkCount} KB chunks from ${kbFileCount} files, ${codeChunkCount} code chunks from ${codeFileCount} files).${cpuTag}`,
       );
 
       ctx.logger.info(
@@ -873,6 +890,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         usedPgvector,
         ragMode: detected.ragMode,
         usedOllama: useOllama,
+        embeddingDevice: embedDevice,
         mode,
         chunksEmbedded,
         chunksSkipped,

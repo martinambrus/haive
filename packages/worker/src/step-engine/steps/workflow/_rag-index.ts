@@ -25,6 +25,7 @@ import {
   vectorLiteral,
   EMBED_BATCH_SIZE,
 } from '../onboarding/_rag-embed.js';
+import { detectEmbedDevice, type EmbedDevice } from '../_embed-device.js';
 
 /* ------------------------------------------------------------------ */
 /* Shared RAG indexing — used by 02-pre-rag-sync (run start, indexes  */
@@ -102,6 +103,9 @@ export interface RagSyncResult {
   updated: number;
   skipped: number;
   deleted: number;
+  /** Whether embeddings ran on the GPU or silently fell back to CPU. 'unknown'
+   *  when Ollama wasn't used or the host has no GPU (nothing to warn about). */
+  embeddingDevice: EmbedDevice;
 }
 
 export interface RagSyncResolved {
@@ -178,6 +182,7 @@ const EMPTY_RESULT = (reason: string): RagSyncResult => ({
   updated: 0,
   skipped: 0,
   deleted: 0,
+  embeddingDevice: 'unknown',
 });
 
 /** Incremental, content-hash-deduped RAG index of `opts.repoPath`'s KB + code.
@@ -197,6 +202,7 @@ export async function runRagIndexSync(
     await ctx.emitProgress('Ensuring RAG schema...');
     const { usedPgvector } = await ensureRagSchema(conn);
     const useOllama = ollamaReachable && !!prefs.ollamaUrl && !!prefs.embeddingModel;
+    let embedDevice: EmbedDevice = 'unknown';
     if (useOllama) {
       // Warm the embedding model once so a cold (slow-to-load) model does not
       // time out every batch into hash fallback; keep_alive keeps it resident.
@@ -206,7 +212,13 @@ export async function runRagIndexSync(
         { model: prefs.embeddingModel, warmed },
         warmed ? 'embedding model warmed' : 'embedding model warmup failed (will hash-fallback)',
       );
+      // After warm the model is resident, so /api/ps reports GPU vs CPU placement.
+      // detectEmbedDevice warns loudly if it fell back to CPU under GPU mode.
+      if (warmed) {
+        embedDevice = await detectEmbedDevice(ctx.logger, prefs.ollamaUrl!, prefs.embeddingModel!);
+      }
     }
+    const cpuTag = embedDevice === 'cpu' ? ' [CPU embeddings — GPU unavailable, slow]' : '';
 
     // Resolve repository_id — required for dedup. Without it we'd be re-embedding
     // the same content on every task. Bail with a logged warning rather than
@@ -243,7 +255,7 @@ export async function runRagIndexSync(
     for (let fi = 0; fi < allFiles.length; fi += 1) {
       const { relPath, sourceType } = allFiles[fi]!;
       processedPaths.add(relPath);
-      await ctx.emitProgress(`Syncing (${fi + 1}/${allFiles.length}): ${relPath}`);
+      await ctx.emitProgress(`Syncing (${fi + 1}/${allFiles.length}): ${relPath}${cpuTag}`);
 
       let text: string;
       try {
@@ -421,10 +433,18 @@ export async function runRagIndexSync(
     }
 
     await ctx.emitProgress(
-      `RAG sync complete: ${inserted} inserted, ${updated} updated, ${skipped} unchanged, ${deleted} deleted.`,
+      `RAG sync complete: ${inserted} inserted, ${updated} updated, ${skipped} unchanged, ${deleted} deleted.${cpuTag}`,
     );
     ctx.logger.info({ inserted, updated, skipped, deleted }, 'rag sync complete');
-    return { performed: true, reason: 'sync completed', inserted, updated, skipped, deleted };
+    return {
+      performed: true,
+      reason: 'sync completed',
+      inserted,
+      updated,
+      skipped,
+      deleted,
+      embeddingDevice: embedDevice,
+    };
   } finally {
     await conn.close();
   }

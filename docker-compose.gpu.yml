@@ -13,3 +13,13 @@ services:
     runtime: nvidia
     environment:
       NVIDIA_VISIBLE_DEVICES: ${OLLAMA_GPU_DEVICE:-all}
+  # Tell the worker the stack was booted in GPU mode. The worker uses this to
+  # detect and warn loudly when an embedding model silently loads on CPU despite
+  # a GPU being present (the classic symptom of a GPU driver/runtime mismatch,
+  # e.g. the host driver was upgraded without a reboot — nvidia-smi and the
+  # container runtime still pass, but cuInit fails and Ollama falls back to CPU,
+  # making RAG ingestion far slower). Set only in this file, which dev-up.sh
+  # layers exclusively on GPU hosts, so CPU-only hosts never warn.
+  worker:
+    environment:
+      HAIVE_GPU_EXPECTED: "1"
