@@ -1,4 +1,6 @@
 import { Worker, type Job } from 'bullmq';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
   IDE_ENSURE_JOB_NAMES,
@@ -28,6 +30,18 @@ export async function ensureIdeForTask(taskId: string, userId: string): Promise<
   const enabled = await configService.getBoolean(CONFIG_KEYS.IDE_ENABLED, true);
   if (!enabled) return { ok: false, reason: 'disabled' };
   const db = getDb();
+  // Never (re)start an editor for a task that has ended: its worktree/branch is
+  // reaped on cancel/complete, so a fresh editor would be a dangling, broken
+  // session rooted at a path that no longer exists. 'failed' stays editable for
+  // recovery (its runtime is kept) — mirrors the killTaskIdeContainers teardown
+  // gate (reason !== 'failed') and the Editor tab's read-only fallback.
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { status: true },
+  });
+  if (task && (task.status === 'completed' || task.status === 'cancelled')) {
+    return { ok: false, reason: 'task-ended' };
+  }
   const settingsJson = await resolveIdeSettingsJson(db, userId);
   const handle = await ensureIdeRunnerStarted(db, taskId, userId, settingsJson);
   if (!handle) return { ok: false, reason: 'no-editable-repo' };
