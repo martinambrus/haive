@@ -214,6 +214,32 @@ export function createBuildImageStep(
           },
           'docker build complete',
         );
+        // Reap the SUPERSEDED image: the rebuild moved the tag to the new image,
+        // orphaning the previous build's ID as a dangling <none>. Remove it by ID
+        // (targeted — never a blanket prune, so other projects' dangling images are
+        // untouched). Guards: skip when the old ref IS the tag we just built (would
+        // untag the new image) and when the build produced the same ID (no-op
+        // rebuild). Best-effort — a live container still on the old image blocks
+        // removal, which is acceptable; it dangles until that container ends.
+        if (
+          detected.currentImageId &&
+          detected.currentImageId !== imageTag &&
+          buildResult.imageId &&
+          buildResult.imageId !== detected.currentImageId
+        ) {
+          const rm = await runner.remove(detected.currentImageId);
+          if (rm.ok) {
+            ctx.logger.info(
+              { oldImageId: detected.currentImageId, newImageId: buildResult.imageId },
+              'reaped superseded env image',
+            );
+          } else {
+            ctx.logger.warn(
+              { oldImageId: detected.currentImageId, stderr: rm.stderr },
+              'superseded env image removal failed (left dangling)',
+            );
+          }
+        }
         return {
           envTemplateId: detected.envTemplateId,
           imageTag,
