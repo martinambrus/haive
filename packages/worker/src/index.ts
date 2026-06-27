@@ -21,6 +21,7 @@ import {
 import { closeRedis } from './redis.js';
 import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
 import { reapOrphanedTaskAuthVolumes } from './sandbox/auth-volume-reaper.js';
+import { reapOrphanEnvTemplates } from './sandbox/env-template-reaper.js';
 import { ensureOllamaModels } from './sandbox/ollama-provision.js';
 import { ensureDdevCa } from './sandbox/ddev-runner.js';
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
@@ -41,6 +42,12 @@ async function main(): Promise<void> {
   // volumes + all per-user/per-provider auth volumes.
   await reapOrphanedTaskAuthVolumes(getDb()).catch((err) => {
     logger.warn({ err }, 'orphan auth-volume reap on boot failed');
+  });
+  // Reap env templates that never reached 'ready' and have no live task — leftovers
+  // from a task that ended before its image built (or a crash mid-build). The 'ready'
+  // dockerfile-hash reuse cache is left intact (only repo-delete GCs that).
+  await reapOrphanEnvTemplates(getDb()).catch((err) => {
+    logger.warn({ err }, 'orphan env-template reap on boot failed');
   });
 
   const repoWorker = startRepoWorker(repoStoragePath);
