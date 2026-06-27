@@ -197,6 +197,15 @@ function proxyWsUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, task
         lines.push(`Host: ${host}:${IDE_INTERNAL_PORT}`);
         continue;
       }
+      // code-server enforces a WebSocket origin check: the Origin host must equal the
+      // Host header, or it answers 403 (the client then sees a 1006 abnormal close).
+      // The browser's Origin is the api (e.g. http://localhost:3001), so rewrite it to
+      // match the upstream Host. Safe here — the api proxy is the auth boundary and the
+      // container is never host-published, so the rebind/CSRF guard is redundant.
+      if (k.toLowerCase() === 'origin') {
+        lines.push(`Origin: http://${host}:${IDE_INTERNAL_PORT}`);
+        continue;
+      }
       if (Array.isArray(v)) {
         for (const vv of v) lines.push(`${k}: ${vv}`);
       } else if (v !== undefined) {
