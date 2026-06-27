@@ -510,15 +510,15 @@ async function cleanupTaskContainers(
     }
   }
 
-  // Reap the per-task env image on a definitive end. cleanupTaskEnvImage
-  // reference-counts by envTemplateId (skips while any task still shares the
-  // template) and deletes the row + image, so completion reaps the leaked per-task
-  // images. EXCLUDE env_replicate on completion: its env_template (status ready +
-  // built image) is the deliverable, meant to persist for reuse — only a cancel
-  // (an abandoned, half-built template) reaps it.
-  const reapEnvImage =
-    reason === 'cancelled' || (reason === 'completed' && completedType !== 'env_replicate');
-  if (reapEnvImage) {
+  // Reap the env template + image ONLY on cancel. cleanupTaskEnvImage deletes the
+  // env_templates ROW (not just the docker image), and that row is a reusable
+  // deliverable: env-replicate builds it (status ready + built image) for later tasks
+  // to reuse via tasks.env_template_id. Reaping on completion deleted a freshly built
+  // template before anything could reuse it — and env-replicate runs as the prelude of
+  // a 'workflow' task, so it cannot be told apart by task type. Reaping genuinely
+  // leaked per-task build images on completion needs a separate path that does not
+  // drop the reusable row.
+  if (reason === 'cancelled') {
     try {
       await cleanupTaskEnvImage(db, taskId, reason);
     } catch (err) {
