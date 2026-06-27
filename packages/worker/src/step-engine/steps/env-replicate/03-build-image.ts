@@ -65,13 +65,33 @@ export function createBuildImageStep(
       if (!row.generatedDockerfile) {
         throw new Error('dockerfile not generated yet; run step 02 first');
       }
+      let currentImageId = row.builtImageId;
+      let status = row.status;
+      // A 'ready' row is the dockerfile-hash reuse cache and apply() trusts it to
+      // skip the build. But the docker image it names can vanish (host reset,
+      // external prune, GC) while the row still says 'ready' — then the skip would
+      // leave every downstream step pointing at a missing image. Verify the image
+      // still exists; if it is gone, treat the row as not-built so this step
+      // rebuilds it. apply() then rewrites status→ready with a fresh builtImageId,
+      // self-healing the stale row (no DB write here keeps detect re-runnable).
+      if (status === 'ready' && currentImageId) {
+        const probe = await runner.inspect(currentImageId);
+        if (!probe.exists) {
+          ctx.logger.warn(
+            { envTemplateId: row.id, builtImageId: currentImageId },
+            'ready env image missing on host; rebuilding',
+          );
+          currentImageId = null;
+          status = 'pending';
+        }
+      }
       return {
         envTemplateId: row.id,
         name: row.name,
         baseImage: row.baseImage,
         dockerfile: row.generatedDockerfile,
-        currentImageId: row.builtImageId,
-        status: row.status,
+        currentImageId,
+        status,
       };
     },
 

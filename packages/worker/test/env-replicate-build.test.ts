@@ -149,6 +149,103 @@ describe('createBuildImageStep.apply', () => {
   });
 });
 
+describe('createBuildImageStep.detect', () => {
+  function makeDetectCtx(row: Record<string, unknown>): StepContext {
+    const db = {
+      query: {
+        tasks: { findFirst: async () => ({ envTemplateId: row.id }) },
+        envTemplates: { findFirst: async () => row },
+      },
+    } as unknown as Database;
+    return {
+      taskId: '11111111-2222-3333-4444-555555555555',
+      taskStepId: 'step-1',
+      userId: 'user-1',
+      repoPath: '/tmp/repo',
+      workspacePath: '/tmp/repo',
+      cliProviderId: null,
+      db,
+      logger: logger.child({ test: 'env-replicate-detect' }),
+      emitProgress: async () => {},
+    };
+  }
+
+  const readyRow = {
+    id: 'env-1',
+    name: 'task-abcdef01',
+    baseImage: 'ubuntu:24.04',
+    generatedDockerfile: 'FROM ubuntu:24.04\n',
+    builtImageId: 'sha256:abc',
+    status: 'ready',
+  };
+
+  it('rebuilds a ready row whose image vanished (inspect reports missing)', async () => {
+    const inspected: string[] = [];
+    const runner: DockerRunner = {
+      build: async () => {
+        throw new Error('detect must not build');
+      },
+      run: async () => {
+        throw new Error('detect must not run');
+      },
+      inspect: async (ref) => {
+        inspected.push(ref);
+        return { exists: false, imageId: null };
+      },
+    } as unknown as DockerRunner;
+    const step = createBuildImageStep(runner);
+    const detected = await step.detect(makeDetectCtx(readyRow));
+    expect(inspected).toEqual(['sha256:abc']);
+    // image gone → treat as not built so apply() rebuilds and self-heals the row
+    expect(detected.currentImageId).toBeNull();
+    expect(detected.status).toBe('pending');
+  });
+
+  it('reuses a ready row whose image still exists', async () => {
+    const inspected: string[] = [];
+    const runner: DockerRunner = {
+      build: async () => {
+        throw new Error('detect must not build');
+      },
+      run: async () => {
+        throw new Error('detect must not run');
+      },
+      inspect: async (ref) => {
+        inspected.push(ref);
+        return { exists: true, imageId: ref };
+      },
+    } as unknown as DockerRunner;
+    const step = createBuildImageStep(runner);
+    const detected = await step.detect(makeDetectCtx(readyRow));
+    expect(inspected).toEqual(['sha256:abc']);
+    expect(detected.currentImageId).toBe('sha256:abc');
+    expect(detected.status).toBe('ready');
+  });
+
+  it('does not inspect a not-yet-built (pending) row', async () => {
+    let inspectCalls = 0;
+    const runner: DockerRunner = {
+      build: async () => {
+        throw new Error('detect must not build');
+      },
+      run: async () => {
+        throw new Error('detect must not run');
+      },
+      inspect: async () => {
+        inspectCalls += 1;
+        return { exists: true, imageId: null };
+      },
+    } as unknown as DockerRunner;
+    const step = createBuildImageStep(runner);
+    const detected = await step.detect(
+      makeDetectCtx({ ...readyRow, builtImageId: null, status: 'pending' }),
+    );
+    expect(inspectCalls).toBe(0);
+    expect(detected.currentImageId).toBeNull();
+    expect(detected.status).toBe('pending');
+  });
+});
+
 describe('createBuildImageStep.form', () => {
   const inertRunner: DockerRunner = {
     build: async () => {
