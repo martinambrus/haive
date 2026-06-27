@@ -1,12 +1,11 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { api, API_BASE_URL, type ApiError, type TaskStatus } from '@/lib/api-client';
+import { api, API_BASE_URL, type ApiError } from '@/lib/api-client';
 import { TaskSource } from '@/components/task-source';
 
 interface EditorTabProps {
   taskId: string;
-  taskStatus: TaskStatus;
 }
 
 interface EnsureIdeResponse {
@@ -15,11 +14,6 @@ interface EnsureIdeResponse {
   pending?: boolean;
   reason?: string;
 }
-
-// Tasks whose containers are torn down at end → no live editor; fall back to the
-// read-only source viewer. 'failed' keeps its runtime for recovery, so it stays
-// editable.
-const ENDED_READONLY: ReadonlySet<TaskStatus> = new Set<TaskStatus>(['completed', 'cancelled']);
 
 const RETRY_DELAY_MS = 2500;
 
@@ -32,15 +26,13 @@ type EditorState = 'starting' | 'ready' | 'unavailable' | 'error';
  *  while this tab is mounted; switching away unmounts the iframe, and the worker
  *  grace-stops the container 30 min later. Falls back to the read-only file viewer
  *  when the IDE is disabled, unavailable for the repo, or the task has ended. */
-export function EditorTab({ taskId, taskStatus }: EditorTabProps) {
-  const readOnly = ENDED_READONLY.has(taskStatus);
+export function EditorTab({ taskId }: EditorTabProps) {
   const [state, setState] = useState<EditorState>('starting');
   const [message, setMessage] = useState<string>('');
   const [attemptKey, setAttemptKey] = useState(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (readOnly) return;
     let cancelled = false;
     setState('starting');
     setMessage('');
@@ -87,18 +79,7 @@ export function EditorTab({ taskId, taskStatus }: EditorTabProps) {
       cancelled = true;
       clearTimer();
     };
-  }, [taskId, readOnly, attemptKey]);
-
-  if (readOnly) {
-    return (
-      <div className="space-y-2">
-        <p className="text-xs text-neutral-500">
-          This task has ended — showing the workspace read-only.
-        </p>
-        <TaskSource taskId={taskId} />
-      </div>
-    );
-  }
+  }, [taskId, attemptKey]);
 
   if (state === 'ready') {
     return (

@@ -486,6 +486,16 @@ export default function TaskDetailPage() {
     activeWaitingStep?.userActiveMs ?? 0,
   );
 
+  // The Editor tab is disabled outright for completed/cancelled tasks: their worktree
+  // and branch are reaped at task end, so even the read-only source would be empty and
+  // a fresh editor would be rooted at a path that no longer exists. 'failed' stays
+  // editable (its runtime is kept for recovery). Switch away if the user is sitting on
+  // the Editor tab at the moment the task ends.
+  const editorDisabled = task?.status === 'completed' || task?.status === 'cancelled';
+  useEffect(() => {
+    if (editorDisabled && tab === 'editor') setTab('steps');
+  }, [editorDisabled, tab]);
+
   async function submitStep(step: TaskStep, values: FormValues) {
     setSubmitting(step.stepId);
     setSubmitError(null);
@@ -881,7 +891,11 @@ export default function TaskDetailPage() {
         <TabButton active={tab === 'steps'} onClick={() => setTab('steps')}>
           Steps
         </TabButton>
-        <TabButton active={tab === 'editor'} onClick={() => setTab('editor')}>
+        <TabButton
+          active={tab === 'editor'}
+          onClick={() => setTab('editor')}
+          disabled={editorDisabled}
+        >
           Editor
         </TabButton>
         <TabButton active={tab === 'terminal'} onClick={() => setTab('terminal')}>
@@ -976,7 +990,7 @@ export default function TaskDetailPage() {
         </div>
       )}
 
-      {tab === 'editor' && <EditorTab taskId={id} taskStatus={task?.status ?? 'running'} />}
+      {tab === 'editor' && !editorDisabled && <EditorTab taskId={id} />}
 
       {tab === 'terminal' && (
         <TerminalTab
