@@ -110,12 +110,19 @@ describe('cancelTaskRow', () => {
     const { tx, recorded } = makeFakeTx();
     await cancelTaskRow(tx, 'task-1', { by: 'user-1' });
 
-    expect(recorded.updateCalls).toHaveLength(1);
+    expect(recorded.updateCalls).toHaveLength(2);
     expect(recorded.updateCalls[0].table).toBe(schema.tasks);
     expect(recorded.updateCalls[0].set).toMatchObject({
       status: 'cancelled',
       completedAt: fixedNow,
       updatedAt: fixedNow,
+    });
+    // Non-terminal step rows are also flipped to failed so a cancelled task never
+    // shows a live step (e.g. a run_app hold parked at waiting_form).
+    expect(recorded.updateCalls[1].table).toBe(schema.taskSteps);
+    expect(recorded.updateCalls[1].set).toMatchObject({
+      status: 'failed',
+      errorMessage: 'Task cancelled',
     });
   });
 
@@ -160,7 +167,8 @@ describe('cancelTaskRow', () => {
       },
     };
     await cancelTaskRow(wrappedTx as never, 'task-1', { by: 'user-1' });
-    expect(order).toEqual(['update', 'insert']);
+    // Two updates (task row, then non-terminal step rows) both precede the insert.
+    expect(order).toEqual(['update', 'update', 'insert']);
   });
 });
 
@@ -184,9 +192,12 @@ describe('cancelOpenTasksForRepo', () => {
     const result = await cancelOpenTasksForRepo(tx, 'repo-1', 'user-1');
 
     expect(result).toEqual(open);
-    expect(recorded.updateCalls).toHaveLength(3);
+    // Each task → cancelTaskRow → two updates (task row + non-terminal step rows).
+    expect(recorded.updateCalls).toHaveLength(6);
     expect(recorded.insertCalls).toHaveLength(3);
-    for (const call of recorded.updateCalls) {
+    const taskUpdates = recorded.updateCalls.filter((call) => call.table === schema.tasks);
+    expect(taskUpdates).toHaveLength(3);
+    for (const call of taskUpdates) {
       expect(call.set).toMatchObject({ status: 'cancelled' });
     }
     for (const call of recorded.insertCalls) {
