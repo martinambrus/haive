@@ -475,18 +475,21 @@ async function cleanupTaskContainers(
   // Remove the feature worktree. On cancel: always (a task cancelled before its
   // worktree-cleanup step would leak the dir into the haive_repos volume). On
   // completion: only for task types with NO worktree-cleanup step of their own —
-  // run_app has no 12-worktree-cleanup, so its Finish would otherwise leak the
-  // worktree; workflow completion still defers to step 12 (whose `keep` choice must
-  // be respected). On 'failed' the runtime is kept for recovery, so a later cancel
-  // reaps it then.
-  let removeWorktree = reason === 'cancelled';
+  // A few completion-time cleanups depend on the task type — fetch it once.
+  let completedType: string | null = null;
   if (reason === 'completed') {
     const t = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, taskId),
       columns: { type: true },
     });
-    if (t?.type === 'run_app') removeWorktree = true;
+    completedType = t?.type ?? null;
   }
+
+  // run_app has no 12-worktree-cleanup, so its Finish would otherwise leak the
+  // worktree; workflow completion still defers to step 12 (whose `keep` choice must
+  // be respected). On 'failed' the runtime is kept for recovery, so a later cancel
+  // reaps it then.
+  const removeWorktree = reason === 'cancelled' || completedType === 'run_app';
   if (removeWorktree) {
     try {
       const wt = await removeTaskWorktree(db, taskId);
@@ -508,10 +511,14 @@ async function cleanupTaskContainers(
   }
 
   // Reap the per-task env image on a definitive end. cleanupTaskEnvImage
-  // reference-counts by envTemplateId (skips if any task still shares the
-  // template), so this is safe for completion too — and completion is the common
-  // case that otherwise leaked the image. Keep it on 'failed' for recovery.
-  if (reason === 'cancelled' || reason === 'completed') {
+  // reference-counts by envTemplateId (skips while any task still shares the
+  // template) and deletes the row + image, so completion reaps the leaked per-task
+  // images. EXCLUDE env_replicate on completion: its env_template (status ready +
+  // built image) is the deliverable, meant to persist for reuse — only a cancel
+  // (an abandoned, half-built template) reaps it.
+  const reapEnvImage =
+    reason === 'cancelled' || (reason === 'completed' && completedType !== 'env_replicate');
+  if (reapEnvImage) {
     try {
       await cleanupTaskEnvImage(db, taskId, reason);
     } catch (err) {
