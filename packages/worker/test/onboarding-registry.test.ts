@@ -28,6 +28,7 @@ describe('onboarding registry', () => {
       '09-qa',
       '09_1-qa-suggestions',
       '09_2-qa-resolve',
+      '09_3-qa-review',
       '09_5-skill-generation',
       '09_6-skill-verification',
       '09_6_4-global-kb-merge',
@@ -38,7 +39,8 @@ describe('onboarding registry', () => {
       '12-post-onboarding',
     ]);
     expect(steps.map((s) => s.metadata.index)).toEqual([
-      0, 1, 2, 3, 4, 4.5, 5.5, 6, 7, 8, 9, 10, 10.25, 10.5, 11, 12, 12.4, 12.5, 13, 14, 15, 16,
+      0, 1, 2, 3, 4, 4.5, 5.5, 6, 7, 8, 9, 10, 10.25, 10.5, 10.75, 11, 12, 12.4, 12.5, 13, 14, 15,
+      16,
     ]);
   });
 

@@ -235,6 +235,10 @@ export const accordionItemSchema = z.object({
   title: z.string().min(1),
   description: z.string().optional(),
   fields: z.array(leafFormFieldSchema),
+  /** When true the item renders expanded on first paint instead of collapsed.
+   *  Use when the user should see the item's content up front (e.g. the Q&A
+   *  review gate shows each answer by default). Defaults to collapsed. */
+  defaultOpen: z.boolean().optional(),
 });
 
 export type AccordionItem = z.infer<typeof accordionItemSchema>;

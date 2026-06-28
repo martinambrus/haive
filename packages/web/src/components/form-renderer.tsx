@@ -489,6 +489,7 @@ function AccordionField({ field, values, onChange, disabled }: AccordionFieldPro
         {field.items.map((item, idx) => (
           <details
             key={`${field.id}-item-${idx}`}
+            open={item.defaultOpen ?? false}
             className="border-b border-neutral-800 last:border-b-0"
           >
             <summary className="cursor-pointer select-none px-3 py-2 text-sm text-neutral-100 hover:bg-neutral-900">

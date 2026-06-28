@@ -157,6 +157,7 @@ export const CLI_DISPATCH_STEP_IDS: readonly string[] = [
   '09-qa',
   '09_1-qa-suggestions',
   '09_2-qa-resolve',
+  '09_3-qa-review',
   '09_5-skill-generation',
   '09_6_4-global-kb-merge',
   '11-final-review',

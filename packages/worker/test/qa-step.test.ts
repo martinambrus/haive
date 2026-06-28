@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -13,7 +13,6 @@ import {
   collectAgentAnswers,
   parseQaResolveOutput,
   QaResolveParseError,
-  sanitizeKbRelPath,
   splitUserQuestions,
   knowledgeQaResolveStep,
   type KnowledgeQaResolveDetect,
@@ -266,96 +265,94 @@ describe('collectAgentAnswers', () => {
 /* ------------------------------------------------------------------ */
 
 describe('parseQaResolveOutput', () => {
-  it('parses a full valid output', () => {
+  it('parses a full valid output with inline proposedWrite', () => {
     const raw = fence({
-      kbWrites: [
-        {
-          relPath: 'BUSINESS_LOGIC.md',
-          section: 'Order delivery',
-          content: 'Long markdown body.',
-        },
-      ],
       answers: [
         {
           question: 'How does delivery work?',
           answer: 'Partial...',
           source: 'code',
-          citedFile: '.claude/knowledge_base/BUSINESS_LOGIC.md',
+          citedFile: 'src/order.ts',
+          proposedWrite: {
+            relPath: 'BUSINESS_LOGIC.md',
+            section: 'Order delivery',
+            content: 'Long markdown body.',
+          },
         },
       ],
       unanswered: [{ question: 'X?', reason: 'Not in code' }],
     });
     const out = parseQaResolveOutput(raw);
-    expect(out.kbWrites).toHaveLength(1);
     expect(out.answers).toHaveLength(1);
+    expect(out.answers[0]!.proposedWrite?.section).toBe('Order delivery');
     expect(out.unanswered).toHaveLength(1);
   });
 
-  it('accepts empty arrays (when no input questions)', () => {
-    const raw = fence({ kbWrites: [], answers: [], unanswered: [] });
+  it('omits proposedWrite for source kb (answer already in KB)', () => {
+    const raw = fence({
+      answers: [
+        {
+          question: 'Where is auth?',
+          answer: 'See KB.',
+          source: 'kb',
+          citedFile: '.claude/knowledge_base/AUTH.md',
+        },
+      ],
+      unanswered: [],
+    });
     const out = parseQaResolveOutput(raw);
-    expect(out.kbWrites).toEqual([]);
+    expect(out.answers).toHaveLength(1);
+    expect(out.answers[0]!.proposedWrite).toBeUndefined();
+  });
+
+  it('accepts empty arrays (when no input questions)', () => {
+    const raw = fence({ answers: [], unanswered: [] });
+    const out = parseQaResolveOutput(raw);
+    expect(out.answers).toEqual([]);
+    expect(out.unanswered).toEqual([]);
   });
 
   it('treats missing arrays as empty', () => {
     const raw = fence({});
     const out = parseQaResolveOutput(raw);
-    expect(out.kbWrites).toEqual([]);
     expect(out.answers).toEqual([]);
     expect(out.unanswered).toEqual([]);
   });
 
   it('throws when source is invalid', () => {
     const raw = fence({
-      kbWrites: [],
       answers: [{ question: 'q', answer: 'a', source: 'bogus' }],
       unanswered: [],
     });
     expect(() => parseQaResolveOutput(raw)).toThrow(/source/);
   });
 
-  it('throws when kbWrites missing required field', () => {
+  it('throws when proposedWrite is required (source code) but absent', () => {
     const raw = fence({
-      kbWrites: [{ relPath: 'X.md', section: 'Y' }],
+      answers: [{ question: 'q', answer: 'a', source: 'code' }],
+      unanswered: [],
+    });
+    expect(() => parseQaResolveOutput(raw)).toThrow(/proposedWrite required/);
+  });
+
+  it('throws when proposedWrite is missing a required field', () => {
+    const raw = fence({
+      answers: [
+        {
+          question: 'q',
+          answer: 'a',
+          source: 'code',
+          proposedWrite: { relPath: 'X.md', section: 'Y' },
+        },
+      ],
+      unanswered: [],
     });
     expect(() => parseQaResolveOutput(raw)).toThrow(/content/);
   });
 });
 
 /* ------------------------------------------------------------------ */
-/* sanitizeKbRelPath                                                   */
-/* ------------------------------------------------------------------ */
-
-describe('sanitizeKbRelPath', () => {
-  it('accepts a normal path and adds .md if missing', () => {
-    const out = sanitizeKbRelPath('BUSINESS_LOGIC');
-    expect(out.ok).toBe(true);
-    if (out.ok) expect(out.normalized).toBe('BUSINESS_LOGIC.md');
-  });
-  it('preserves an existing .md extension', () => {
-    const out = sanitizeKbRelPath('QA/foo.md');
-    expect(out.ok).toBe(true);
-    if (out.ok) expect(out.normalized).toBe('QA/foo.md');
-  });
-  it('strips a leading .claude/knowledge_base/ prefix', () => {
-    const out = sanitizeKbRelPath('.claude/knowledge_base/BUSINESS_LOGIC.md');
-    expect(out.ok).toBe(true);
-    if (out.ok) expect(out.normalized).toBe('BUSINESS_LOGIC.md');
-  });
-  it('rejects absolute paths', () => {
-    expect(sanitizeKbRelPath('/etc/passwd').ok).toBe(false);
-  });
-  it('rejects ".." segments', () => {
-    expect(sanitizeKbRelPath('../escape.md').ok).toBe(false);
-    expect(sanitizeKbRelPath('a/../b.md').ok).toBe(false);
-  });
-  it('rejects empty paths', () => {
-    expect(sanitizeKbRelPath('').ok).toBe(false);
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/* knowledgeQaResolveStep.apply (writes KB files)                      */
+/* knowledgeQaResolveStep.apply (gather-only — no KB write)            */
 /* ------------------------------------------------------------------ */
 
 describe('knowledgeQaResolveStep.apply', () => {
@@ -381,7 +378,7 @@ describe('knowledgeQaResolveStep.apply', () => {
       workspacePath: tmpRoot,
       sandboxWorkdir: '/repo',
       cliProviderId: null,
-      // The apply function only uses repoPath + logger; the rest is stubbed.
+      // The apply function only uses logger; the rest is stubbed.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       db: undefined as any,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -390,66 +387,35 @@ describe('knowledgeQaResolveStep.apply', () => {
     };
   }
 
-  it('appends a section to an existing KB file', async () => {
-    const target = path.join(kbDir, 'BUSINESS_LOGIC.md');
-    await writeFile(target, '# Business Logic\n\n## Existing\n\nold.\n', 'utf8');
+  it('gathers answers + unanswered and counts, writing nothing to the KB', async () => {
     const llmOutput = fence({
-      kbWrites: [{ relPath: 'BUSINESS_LOGIC.md', section: 'Order delivery', content: 'New body.' }],
-      answers: [],
-      unanswered: [],
+      answers: [
+        {
+          question: 'How does delivery work?',
+          answer: 'Partial completes the item only.',
+          source: 'code',
+          citedFile: 'src/order.ts',
+          proposedWrite: {
+            relPath: 'BUSINESS_LOGIC.md',
+            section: 'Order delivery',
+            content: 'New body.',
+          },
+        },
+      ],
+      unanswered: [{ question: 'Why cron?', reason: 'No scheduler found in code.' }],
     });
     const out = await knowledgeQaResolveStep.apply(makeCtx(), {
       detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
       formValues: { userQuestions: 'q1?\nq2?' },
       llmOutput,
     });
-    const final = await readFile(target, 'utf8');
-    expect(final).toContain('## Existing');
-    expect(final).toContain('## Order delivery');
-    expect(final).toContain('New body.');
-    expect(out.kbWritten).toHaveLength(1);
-    expect(out.kbWritten[0]!.relPath).toBe('.claude/knowledge_base/BUSINESS_LOGIC.md');
+    expect(out.answers).toHaveLength(1);
+    expect(out.answers[0]!.proposedWrite?.section).toBe('Order delivery');
+    expect(out.unanswered).toHaveLength(1);
     expect(out.userQuestionCount).toBe(2);
     expect(out.agentQuestionCount).toBe(0);
-  });
-
-  it('creates a new KB file (and parent dir) when the path does not exist', async () => {
-    const llmOutput = fence({
-      kbWrites: [
-        { relPath: 'QA/order-delivery.md', section: 'Partial delivery', content: 'Body.' },
-      ],
-      answers: [],
-      unanswered: [],
-    });
-    await knowledgeQaResolveStep.apply(makeCtx(), {
-      detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
-      formValues: { userQuestions: '' },
-      llmOutput,
-    });
-    const created = await readFile(path.join(kbDir, 'QA', 'order-delivery.md'), 'utf8');
-    expect(created).toContain('# QA / order-delivery');
-    expect(created).toContain('## Partial delivery');
-    expect(created).toContain('Body.');
-  });
-
-  it('records skipped writes for unsafe paths instead of writing', async () => {
-    const llmOutput = fence({
-      kbWrites: [
-        { relPath: '../escape.md', section: 'X', content: 'Y' },
-        { relPath: 'OK.md', section: 'OK section', content: 'OK body' },
-      ],
-      answers: [],
-      unanswered: [],
-    });
-    const out = await knowledgeQaResolveStep.apply(makeCtx(), {
-      detected: { agentQuestions: [], explicitNoQuestions: true, kbFiles: [] },
-      formValues: { userQuestions: '' },
-      llmOutput,
-    });
-    expect(out.kbWritten).toHaveLength(1);
-    expect(out.kbWritten[0]!.relPath).toBe('.claude/knowledge_base/OK.md');
-    expect(out.kbSkipped).toHaveLength(1);
-    expect(out.kbSkipped[0]!.relPath).toBe('../escape.md');
+    // Nothing is written here — that is 09_3-qa-review's job.
+    expect(await readdir(kbDir)).toHaveLength(0);
   });
 
   it('throws when LLM output is unparseable, surfacing failure for retry', async () => {

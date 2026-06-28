@@ -63,15 +63,21 @@ describe('nested-fence regression across HIGH parsers', () => {
     expect(result?.[1].id).toBe('b');
   });
 
-  it('parseQaResolveOutput keeps kbWrites.content with nested fences', () => {
+  it('parseQaResolveOutput keeps answers[].proposedWrite.content with nested fences', () => {
     const result = parseQaResolveOutput(
       wrap({
-        kbWrites: [{ relPath: 'docs/x.md', section: 'Patterns', content: fencedBody }],
-        answers: [],
+        answers: [
+          {
+            question: 'How do the patterns work?',
+            answer: 'See the proposed section.',
+            source: 'code',
+            proposedWrite: { relPath: 'docs/x.md', section: 'Patterns', content: fencedBody },
+          },
+        ],
         unanswered: [],
       }),
     );
-    expect(result.kbWrites).toHaveLength(1);
-    expect(result.kbWrites[0].content).toBe(fencedBody);
+    expect(result.answers).toHaveLength(1);
+    expect(result.answers[0].proposedWrite?.content).toBe(fencedBody);
   });
 });

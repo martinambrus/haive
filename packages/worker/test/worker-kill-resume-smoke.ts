@@ -165,6 +165,7 @@ async function main(): Promise<void> {
       },
       '09-qa': {},
       '09_2-qa-resolve': { userQuestions: '' },
+      '09_3-qa-review': {},
       '09_5-skill-generation': { maxSkills: 3 },
       '09_7-rag-source-selection': { selectedDirs: [] },
       '10-rag-populate': { truncateExisting: true },

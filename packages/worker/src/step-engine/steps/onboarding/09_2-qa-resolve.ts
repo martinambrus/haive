@@ -1,9 +1,8 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import path from 'node:path';
 import type { FormField, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from './_helpers.js';
+import { loadPreviousStepOutput } from './_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import type { KbWrite } from './_kb-write.js';
 import type { KbFileSummary, KnowledgeQaPrepApply } from './09-qa.js';
 import type { EnrichedAgentQuestion, KnowledgeQaSuggestionsApply } from './09_1-qa-suggestions.js';
 
@@ -11,18 +10,16 @@ import type { EnrichedAgentQuestion, KnowledgeQaSuggestionsApply } from './09_1-
 /* Types                                                               */
 /* ------------------------------------------------------------------ */
 
-export interface KbWrite {
-  /** Path relative to `.claude/knowledge_base/`. Sanitized in apply. */
-  relPath: string;
-  section: string;
-  content: string;
-}
-
 export interface AnswerRecord {
   question: string;
   answer: string;
   source: 'kb' | 'code' | 'user';
   citedFile?: string;
+  /** Proposed KB section to write for this answer. Present for source `code`
+   *  and `user` (the new section to add); absent for `kb` (already in the KB).
+   *  09_2 does NOT write it — 09_3-qa-review applies confirmed proposals after
+   *  the human reviews the answers. */
+  proposedWrite?: KbWrite;
 }
 
 export interface UnansweredRecord {
@@ -37,8 +34,6 @@ export interface KnowledgeQaResolveDetect {
 }
 
 export interface KnowledgeQaResolveApply {
-  kbWritten: { relPath: string; section: string }[];
-  kbSkipped: { relPath: string; reason: string }[];
   userQuestionCount: number;
   agentQuestionCount: number;
   answers: AnswerRecord[];
@@ -48,7 +43,6 @@ export interface KnowledgeQaResolveApply {
 const USER_QUESTIONS_FIELD = 'userQuestions';
 const AGENT_ANSWER_PREFIX = 'agentAnswer__';
 const AGENT_QUESTIONS_ACCORDION_ID = 'agent-questions';
-const KB_ROOT = path.join('.claude', 'knowledge_base');
 
 /* ------------------------------------------------------------------ */
 /* Form generation                                                     */
@@ -64,7 +58,7 @@ function userQuestionsField(hasAgentQuestions: boolean): FormField {
     label: 'Your questions for the LLM (one per line, no cap)',
     description: [
       intro,
-      'For each question, the LLM will: (1) check the knowledge base; (2) if the answer is not there, scan the code; (3) write a knowledge-base section with the answer so every later task inherits it.',
+      'For each question, the LLM will: (1) check the knowledge base; (2) if the answer is not there, scan the code; (3) propose a knowledge-base section with the answer. You review and confirm or correct every answer in the next step before anything is written.',
       '',
       'Examples of useful questions:',
       '- How will the state of an order change if only a single product in the order is marked as delivered?',
@@ -88,7 +82,7 @@ export function buildResolveForm(detected: KnowledgeQaResolveDetect): FormSchema
       title: 'Knowledge base Q&A',
       description: noteSuffix,
       fields,
-      submitLabel: 'Submit and update KB',
+      submitLabel: 'Find answers',
     };
   }
 
@@ -132,7 +126,7 @@ export function buildResolveForm(detected: KnowledgeQaResolveDetect): FormSchema
     title: 'Knowledge base Q&A',
     description: `The LLM identified ${detected.agentQuestions.length} ambiguous areas. Expand any to answer; leave the rest collapsed. Then ask your own questions in the bottom textarea.`,
     fields,
-    submitLabel: 'Submit and update KB',
+    submitLabel: 'Find answers',
   };
 }
 
@@ -205,12 +199,18 @@ function buildPrompt(args: LlmBuildArgs): string {
     'Two inputs from the user are below: (a) answers to questions YOU asked in the previous step,',
     '(b) brand-new questions the user is asking YOU.',
     '',
-    'Your job is to update the knowledge base so that every later task inherits this knowledge.',
-    'For (a): write the user-supplied answer into the appropriate KB file as a new section.',
+    'For every question produce an ANSWER and, when the answer should be saved, a PROPOSED',
+    'knowledge-base write. Do NOT write any files yourself — emit the proposed write inline. It is',
+    'applied only AFTER the user reviews and confirms your answers in the next step.',
+    '',
+    'For (a): the user supplied the answer — echo it as the answer with source "user" and propose a',
+    'KB section containing it.',
     'For (b): for each user question, follow this lookup chain:',
-    '  1. Search the KB files listed below. If the answer is already there, reference the file in your answer (no KB write needed).',
-    '  2. If not in KB, use your file-reading tools to search the codebase. If found, write a new KB section with the answer.',
-    '  3. If neither KB nor code can answer, mark the question as unanswered with a brief reason.',
+    '  1. Search the KB files listed below. If the answer is already there, set source "kb", reference',
+    '     the file in citedFile, and OMIT proposedWrite (it is already saved).',
+    '  2. If not in KB, use your file-reading tools to search the codebase. If found, set source',
+    '     "code", cite the file you read in citedFile, and include a proposedWrite with the new section.',
+    '  3. If neither KB nor code can answer, add the question to "unanswered" with a brief reason.',
     '',
     'Call your file-reading tools DIRECTLY — issue the actual tool calls; do NOT narrate intent',
     '("Let me check…") and then end your turn without a tool call or the final JSON.',
@@ -229,19 +229,17 @@ function buildPrompt(args: LlmBuildArgs): string {
     'Emit exactly ONE JSON object inside a ```json fenced code block:',
     '```',
     '{',
-    '  "kbWrites": [',
-    '    {',
-    '      "relPath": "BUSINESS_LOGIC.md",',
-    '      "section": "Order partial-delivery semantics",',
-    '      "content": "Multi-paragraph markdown content to APPEND under a new H2 heading."',
-    '    }',
-    '  ],',
     '  "answers": [',
     '    {',
     '      "question": "<the user question or agent question text>",',
     '      "answer": "<the actual answer>",',
     '      "source": "kb | code | user",',
-    '      "citedFile": ".claude/knowledge_base/BUSINESS_LOGIC.md"',
+    '      "citedFile": ".claude/knowledge_base/BUSINESS_LOGIC.md",',
+    '      "proposedWrite": {',
+    '        "relPath": "BUSINESS_LOGIC.md",',
+    '        "section": "Order partial-delivery semantics",',
+    '        "content": "Multi-paragraph markdown content to APPEND under a new H2 heading."',
+    '      }',
     '    }',
     '  ],',
     '  "unanswered": [',
@@ -251,20 +249,21 @@ function buildPrompt(args: LlmBuildArgs): string {
     '```',
     '',
     'Field rules:',
-    '- kbWrites.relPath: path RELATIVE to `.claude/knowledge_base/`. No `..`, no leading `/`.',
+    '- answers.source: `kb` if the answer was already in the KB (then OMIT proposedWrite); `code` if you',
+    '  found it in the code; `user` for agent questions answered by the user.',
+    '- answers.proposedWrite: REQUIRED for source `code` and `user`; OMITTED for source `kb`.',
+    '- proposedWrite.relPath: path RELATIVE to `.claude/knowledge_base/`. No `..`, no leading `/`.',
     '  Pick an existing file when possible (see list above); only create new files when no existing',
     '  file fits. New files belong under `QA/<slug>.md` unless a canonical home is obvious.',
-    '- kbWrites.section: an H2 heading that will be appended to the file (do not include the `## ` prefix).',
-    '- kbWrites.content: markdown body for that section. No leading/trailing blank lines.',
-    '- answers.source: `kb` if the answer was already in the KB; `code` if you found it in the code',
-    '  (and produced a kbWrites entry for it); `user` for agent questions answered by the user.',
+    '- proposedWrite.section: an H2 heading that will be appended to the file (do not include the `## ` prefix).',
+    '- proposedWrite.content: markdown body for that section. No leading/trailing blank lines.',
     '- unanswered: include any user question for which neither KB nor code provided an answer.',
     '',
     'Constraints:',
     `- ${detected.agentQuestions.length} agent questions were posed; ${agentAnswers.length} were answered. Only the answered ones need processing.`,
     `- ${userQuestions.length} new user questions to process.`,
     '- Do not emit prose outside the fenced JSON block.',
-    '- An empty JSON object (no kbWrites, no answers) is acceptable ONLY if both input lists were empty.',
+    '- An empty JSON object (no answers) is acceptable ONLY if both input lists were empty.',
     '- Your FINAL message MUST be the ```json block — never narration or a tool result.',
   ].join('\n');
 }
@@ -281,7 +280,6 @@ export class QaResolveParseError extends Error {
 }
 
 interface ParsedResolve {
-  kbWrites: KbWrite[];
   answers: AnswerRecord[];
   unanswered: UnansweredRecord[];
 }
@@ -305,34 +303,38 @@ export function parseQaResolveOutput(raw: unknown): ParsedResolve {
   return validateResolve(parsed);
 }
 
+/** Parse an answer's optional `proposedWrite`. Required for source `code`/`user`
+ *  (the new section to add), absent/ignored for `kb` (already in the KB). */
+function parseProposedWrite(raw: unknown, source: 'kb' | 'code' | 'user'): KbWrite | undefined {
+  if (raw === undefined || raw === null) {
+    if (source === 'kb') return undefined;
+    throw new QaResolveParseError(`answers.proposedWrite required for source "${source}"`);
+  }
+  if (typeof raw !== 'object') {
+    throw new QaResolveParseError('answers.proposedWrite must be an object');
+  }
+  const v = raw as Record<string, unknown>;
+  if (typeof v.relPath !== 'string' || v.relPath.length === 0) {
+    throw new QaResolveParseError('answers.proposedWrite.relPath missing or empty');
+  }
+  if (typeof v.section !== 'string' || v.section.length === 0) {
+    throw new QaResolveParseError('answers.proposedWrite.section missing or empty');
+  }
+  if (typeof v.content !== 'string' || v.content.length === 0) {
+    throw new QaResolveParseError('answers.proposedWrite.content missing or empty');
+  }
+  return { relPath: v.relPath, section: v.section, content: v.content };
+}
+
 function validateResolve(parsed: unknown): ParsedResolve {
   if (!parsed || typeof parsed !== 'object') {
     throw new QaResolveParseError('LLM output is not an object');
   }
   const obj = parsed as Record<string, unknown>;
-  const kbWritesRaw = obj.kbWrites ?? [];
   const answersRaw = obj.answers ?? [];
   const unansweredRaw = obj.unanswered ?? [];
-  if (!Array.isArray(kbWritesRaw) || !Array.isArray(answersRaw) || !Array.isArray(unansweredRaw)) {
-    throw new QaResolveParseError('"kbWrites", "answers", and "unanswered" must be arrays');
-  }
-
-  const kbWrites: KbWrite[] = [];
-  for (const item of kbWritesRaw as unknown[]) {
-    if (!item || typeof item !== 'object') {
-      throw new QaResolveParseError('kbWrites entry is not an object');
-    }
-    const v = item as Record<string, unknown>;
-    if (typeof v.relPath !== 'string' || v.relPath.length === 0) {
-      throw new QaResolveParseError('kbWrites.relPath missing or empty');
-    }
-    if (typeof v.section !== 'string' || v.section.length === 0) {
-      throw new QaResolveParseError('kbWrites.section missing or empty');
-    }
-    if (typeof v.content !== 'string' || v.content.length === 0) {
-      throw new QaResolveParseError('kbWrites.content missing or empty');
-    }
-    kbWrites.push({ relPath: v.relPath, section: v.section, content: v.content });
+  if (!Array.isArray(answersRaw) || !Array.isArray(unansweredRaw)) {
+    throw new QaResolveParseError('"answers" and "unanswered" must be arrays');
   }
 
   const answers: AnswerRecord[] = [];
@@ -350,11 +352,13 @@ function validateResolve(parsed: unknown): ParsedResolve {
     if (v.citedFile !== undefined && typeof v.citedFile !== 'string') {
       throw new QaResolveParseError('answers.citedFile must be a string when present');
     }
+    const proposedWrite = parseProposedWrite(v.proposedWrite, v.source);
     answers.push({
       question: v.question,
       answer: v.answer,
       source: v.source,
       ...(typeof v.citedFile === 'string' ? { citedFile: v.citedFile } : {}),
+      ...(proposedWrite ? { proposedWrite } : {}),
     });
   }
 
@@ -370,99 +374,7 @@ function validateResolve(parsed: unknown): ParsedResolve {
     unanswered.push({ question: v.question, reason: v.reason });
   }
 
-  return { kbWrites, answers, unanswered };
-}
-
-/* ------------------------------------------------------------------ */
-/* KB write execution                                                  */
-/* ------------------------------------------------------------------ */
-
-export interface SafeRelPath {
-  ok: true;
-  normalized: string;
-}
-export interface UnsafeRelPath {
-  ok: false;
-  reason: string;
-}
-export type RelPathCheck = SafeRelPath | UnsafeRelPath;
-
-/** Reject paths that escape the KB dir or contain unsafe segments. */
-export function sanitizeKbRelPath(rel: string): RelPathCheck {
-  if (typeof rel !== 'string' || rel.length === 0) {
-    return { ok: false, reason: 'empty path' };
-  }
-  if (rel.startsWith('/') || rel.startsWith('\\')) {
-    return { ok: false, reason: 'absolute path not allowed' };
-  }
-  // Strip a leading `.claude/knowledge_base/` if the LLM included it.
-  let normalized = rel.replace(/^\.claude[/\\]knowledge_base[/\\]/, '');
-  if (normalized.length === 0) {
-    return { ok: false, reason: 'empty after stripping KB prefix' };
-  }
-  const parts = normalized.split(/[\\/]/);
-  if (parts.some((p) => p === '..' || p === '.')) {
-    return { ok: false, reason: '"." or ".." segment not allowed' };
-  }
-  if (!normalized.endsWith('.md')) normalized += '.md';
-  return { ok: true, normalized };
-}
-
-function appendSection(
-  existing: string,
-  section: string,
-  content: string,
-  isoStamp: string,
-): string {
-  const trimmedExisting = existing.endsWith('\n') ? existing : `${existing}\n`;
-  const day = isoStamp.slice(0, 10);
-  return [
-    trimmedExisting.trimEnd(),
-    '',
-    `## ${section} (added ${day})`,
-    '',
-    content.trim(),
-    '',
-  ].join('\n');
-}
-
-async function applyKbWrites(
-  repoRoot: string,
-  writes: KbWrite[],
-  nowIso: string,
-): Promise<{
-  written: { relPath: string; section: string }[];
-  skipped: { relPath: string; reason: string }[];
-}> {
-  const written: { relPath: string; section: string }[] = [];
-  const skipped: { relPath: string; reason: string }[] = [];
-  const kbDir = path.join(repoRoot, KB_ROOT);
-
-  for (const write of writes) {
-    const check = sanitizeKbRelPath(write.relPath);
-    if (!check.ok) {
-      skipped.push({ relPath: write.relPath, reason: check.reason });
-      continue;
-    }
-    const fullPath = path.join(kbDir, check.normalized);
-    const dir = path.dirname(fullPath);
-    await mkdir(dir, { recursive: true });
-    let existing = '';
-    if (await pathExists(fullPath)) {
-      try {
-        existing = await readFile(fullPath, 'utf8');
-      } catch {
-        existing = '';
-      }
-    }
-    const next =
-      existing.length === 0
-        ? `# ${check.normalized.replace(/\.md$/, '').replace(/[/\\]/g, ' / ')}\n\n## ${write.section} (added ${nowIso.slice(0, 10)})\n\n${write.content.trim()}\n`
-        : appendSection(existing, write.section, write.content, nowIso);
-    await writeFile(fullPath, next, 'utf8');
-    written.push({ relPath: path.join(KB_ROOT, check.normalized), section: write.section });
-  }
-  return { written, skipped };
+  return { answers, unanswered };
 }
 
 /* ------------------------------------------------------------------ */
@@ -477,9 +389,9 @@ export const knowledgeQaResolveStep: StepDefinition<
     id: '09_2-qa-resolve',
     workflowType: 'onboarding',
     index: 10.5,
-    title: 'Knowledge base Q&A — answers',
+    title: 'Knowledge base Q&A — find answers',
     description:
-      'You answer the LLM questions from the previous step (optional) and ask your own questions. The LLM checks the knowledge base, scans the code if needed, and writes new KB sections.',
+      'You answer the LLM questions from the previous step (optional) and ask your own questions. The LLM checks the knowledge base, scans the code if needed, and PROPOSES KB sections. Nothing is written yet — you confirm or correct each answer in the next step.',
     requiresCli: true,
   },
 
@@ -513,7 +425,7 @@ export const knowledgeQaResolveStep: StepDefinition<
     buildPrompt,
     timeoutMs: 60 * 60 * 1000,
     retry: { maxAttempts: 3, retryOn: (err) => err instanceof QaResolveParseError },
-    bypassStub: () => ({ kbWrites: [], answers: [], unanswered: [] }),
+    bypassStub: () => ({ answers: [], unanswered: [] }),
   },
 
   async apply(ctx, args): Promise<KnowledgeQaResolveApply> {
@@ -523,27 +435,18 @@ export const knowledgeQaResolveStep: StepDefinition<
     const userQuestionCount = splitUserQuestions(values[USER_QUESTIONS_FIELD]).length;
     const agentQuestionCount = collectAgentAnswers(detected.agentQuestions, values).length;
 
-    const { written, skipped } = await applyKbWrites(
-      ctx.repoPath,
-      parsed.kbWrites,
-      new Date().toISOString(),
-    );
-
     ctx.logger.info(
       {
-        kbWritten: written.length,
-        kbSkipped: skipped.length,
         userQuestionCount,
         agentQuestionCount,
         answerCount: parsed.answers.length,
         unansweredCount: parsed.unanswered.length,
+        proposedWriteCount: parsed.answers.filter((a) => a.proposedWrite).length,
       },
-      'qa-resolve apply complete',
+      'qa-resolve apply complete (answers gathered; KB write deferred to 09_3-qa-review)',
     );
 
     return {
-      kbWritten: written,
-      kbSkipped: skipped,
       userQuestionCount,
       agentQuestionCount,
       answers: parsed.answers,
