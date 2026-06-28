@@ -149,7 +149,10 @@ async function buildRunAppRunList(
 
   let runtime: StepDefinition[] = [];
   if (containerTool === 'ddev') {
-    runtime = [stepRegistry.require('01c-ddev-env')];
+    // 01c brings DDEV up + imports the uploaded dump; 06a then runs the framework
+    // DB migrations (drush updatedb / artisan migrate / …) so an imported DB matches
+    // the code before browsing. 06a self-gates on .ddev/config.yaml and is skippable.
+    runtime = [stepRegistry.require('01c-ddev-env'), stepRegistry.require('06a-db-migrate')];
   } else if (containerTool) {
     // Non-DDEV (none / docker / docker-compose): build the env image, then boot the
     // app in the app-runner (01a-app-boot's optional LLM infers the run command).
