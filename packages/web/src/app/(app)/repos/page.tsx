@@ -61,6 +61,18 @@ export default function ReposPage() {
     }
   }
 
+  // Re-run the clone/copy/scan for a repo whose import failed (status 'error'),
+  // e.g. after fixing invalid credentials. refresh-tree resets the repo to
+  // 'cloning' and re-enqueues the job, which re-reads the credential fresh.
+  async function handleRetry(id: string) {
+    try {
+      await api.post(`/repos/${id}/refresh-tree`, {});
+      await reload();
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to retry clone');
+    }
+  }
+
   function toggleExpand(repo: Repository) {
     if (expandedRepoId === repo.id) {
       setExpandedRepoId(null);
@@ -138,6 +150,7 @@ export default function ReposPage() {
               pendingExclusions={pendingExclusions}
               onExpand={() => toggleExpand(repo)}
               onDelete={() => handleDelete(repo.id)}
+              onRetry={() => handleRetry(repo.id)}
               onTogglePath={(p) => togglePath(repo.id, p)}
             />
           ))}
@@ -153,11 +166,12 @@ interface RepoCardProps {
   pendingExclusions: Set<string>;
   onExpand: () => void;
   onDelete: () => void;
+  onRetry: () => Promise<void>;
   onTogglePath: (path: string) => void;
 }
 
 function RepoCard(props: RepoCardProps) {
-  const { repo, expanded, pendingExclusions, onExpand, onDelete, onTogglePath } = props;
+  const { repo, expanded, pendingExclusions, onExpand, onDelete, onRetry, onTogglePath } = props;
 
   const topLevelPaths = useMemo(() => deriveTopLevelPaths(repo.fileTree), [repo.fileTree]);
   const canEdit = repo.status === 'ready' && topLevelPaths.length > 0;
@@ -165,6 +179,16 @@ function RepoCard(props: RepoCardProps) {
 
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+
+  async function handleRetryClick() {
+    setRetrying(true);
+    try {
+      await onRetry();
+    } finally {
+      setRetrying(false);
+    }
+  }
 
   async function downloadArchive() {
     setDownloading(true);
@@ -257,6 +281,11 @@ function RepoCard(props: RepoCardProps) {
           {canEdit && (
             <Button variant="secondary" size="sm" onClick={onExpand}>
               {expanded ? 'Close' : 'Exclusions'}
+            </Button>
+          )}
+          {repo.status === 'error' && (
+            <Button variant="secondary" size="sm" onClick={handleRetryClick} disabled={retrying}>
+              {retrying ? 'Retrying...' : 'Retry'}
             </Button>
           )}
           <Button variant="destructive" size="sm" onClick={onDelete}>
