@@ -1,7 +1,10 @@
 import { asc, eq } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
+import { logger } from '@haive/shared';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
+
+const log = logger.child({ module: 'attachments-context' });
 
 /** Prepend a compact "attached files" notice to a step's LLM prompt when the task
  *  has user-uploaded attachments. The prompt flows through the dispatcher to every
@@ -16,11 +19,19 @@ export async function augmentPromptWithAttachments(
   taskId: string,
   prompt: string,
 ): Promise<string> {
-  const rows = await db.query.taskAttachments.findMany({
-    where: eq(schema.taskAttachments.taskId, taskId),
-    orderBy: asc(schema.taskAttachments.createdAt),
-    columns: { filename: true, description: true },
-  });
+  let rows: Array<{ filename: string; description: string | null }>;
+  try {
+    rows = await db.query.taskAttachments.findMany({
+      where: eq(schema.taskAttachments.taskId, taskId),
+      orderBy: asc(schema.taskAttachments.createdAt),
+      columns: { filename: true, description: true },
+    });
+  } catch (err) {
+    // Attachments are optional context — never fail a step because the lookup
+    // failed (transient DB error, etc.). Degrade to the unchanged prompt.
+    log.warn({ err, taskId }, 'failed to load task attachments for prompt context');
+    return prompt;
+  }
   if (rows.length === 0) return prompt;
 
   const dir = `${SANDBOX_WORKDIR}/.haive/task-uploads/${taskId}`;
