@@ -15,6 +15,7 @@ import { getDb } from '../db.js';
 import { hashPassword } from '../auth/password.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
+import { recordAuditEvent } from '../lib/audit.js';
 
 const log = logger.child({ module: 'admin' });
 
@@ -104,7 +105,12 @@ adminRoutes.post('/users/:id/action', async (c) => {
         updatedAt: now,
       })
       .where(eq(schema.users.id, targetUserId));
-    log.info({ targetUserId, callerUserId }, 'user deactivated');
+    await recordAuditEvent(db, {
+      actorUserId: callerUserId,
+      action: 'user.deactivate',
+      targetType: 'user',
+      targetId: targetUserId,
+    });
     return c.json({ ok: true, action: 'deactivate' });
   }
 
@@ -113,7 +119,12 @@ adminRoutes.post('/users/:id/action', async (c) => {
       .update(schema.users)
       .set({ status: 'active', updatedAt: now })
       .where(eq(schema.users.id, targetUserId));
-    log.info({ targetUserId, callerUserId }, 'user activated');
+    await recordAuditEvent(db, {
+      actorUserId: callerUserId,
+      action: 'user.activate',
+      targetType: 'user',
+      targetId: targetUserId,
+    });
     return c.json({ ok: true, action: 'activate' });
   }
 
@@ -128,7 +139,12 @@ adminRoutes.post('/users/:id/action', async (c) => {
         updatedAt: now,
       })
       .where(eq(schema.users.id, targetUserId));
-    log.info({ targetUserId, callerUserId }, 'user password reset');
+    await recordAuditEvent(db, {
+      actorUserId: callerUserId,
+      action: 'user.reset_password',
+      targetType: 'user',
+      targetId: targetUserId,
+    });
     return c.json({ ok: true, action: 'reset_password', temporaryPassword });
   }
 
@@ -141,7 +157,13 @@ adminRoutes.post('/users/:id/action', async (c) => {
       .update(schema.users)
       .set({ role: body.role, updatedAt: now })
       .where(eq(schema.users.id, targetUserId));
-    log.info({ targetUserId, callerUserId, role: body.role }, 'user role changed');
+    await recordAuditEvent(db, {
+      actorUserId: callerUserId,
+      action: 'user.set_role',
+      targetType: 'user',
+      targetId: targetUserId,
+      metadata: { role: body.role },
+    });
     return c.json({ ok: true, action: 'set_role', role: body.role });
   }
 

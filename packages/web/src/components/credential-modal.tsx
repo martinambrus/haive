@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { api, type ApiError } from '@/lib/api-client';
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
@@ -17,9 +17,19 @@ interface CredentialModalProps {
   open: boolean;
   onClose: () => void;
   onCreated: (credential: CredentialRow) => void;
+  // When set, the modal edits this credential instead of creating a new one.
+  credential?: CredentialRow | null;
+  onUpdated?: (credential: CredentialRow) => void;
 }
 
-export function CredentialModal({ open, onClose, onCreated }: CredentialModalProps) {
+export function CredentialModal({
+  open,
+  onClose,
+  onCreated,
+  credential = null,
+  onUpdated,
+}: CredentialModalProps) {
+  const isEdit = credential !== null;
   const [label, setLabel] = useState('');
   const [host, setHost] = useState('');
   const [username, setUsername] = useState('');
@@ -27,46 +37,52 @@ export function CredentialModal({ open, onClose, onCreated }: CredentialModalPro
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
-  function reset() {
-    setLabel('');
-    setHost('');
+  // Re-initialise each time the modal opens: pre-fill label/host when editing
+  // (username/secret stay blank — the encrypted values are never sent to the
+  // client, so blank means "keep current"); all blank when adding.
+  useEffect(() => {
+    if (!open) return;
+    setLabel(credential?.label ?? '');
+    setHost(credential?.host ?? '');
     setUsername('');
     setSecret('');
     setError(null);
     setPending(false);
-  }
-
-  function handleClose() {
-    reset();
-    onClose();
-  }
+  }, [open, credential]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
     setPending(true);
     try {
-      const res = await api.post<{ credential: CredentialRow }>('/repo-credentials', {
-        label: label.trim(),
-        host: host.trim(),
-        username: username.trim(),
-        secret,
-      });
-      onCreated(res.credential);
-      reset();
+      if (isEdit && credential) {
+        const res = await api.put<{ credential: CredentialRow }>(
+          `/repo-credentials/${credential.id}`,
+          { label: label.trim(), host: host.trim(), username: username.trim(), secret },
+        );
+        onUpdated?.(res.credential);
+      } else {
+        const res = await api.post<{ credential: CredentialRow }>('/repo-credentials', {
+          label: label.trim(),
+          host: host.trim(),
+          username: username.trim(),
+          secret,
+        });
+        onCreated(res.credential);
+      }
       onClose();
     } catch (err) {
-      setError((err as ApiError).message ?? 'Failed to create credential');
+      setError((err as ApiError).message ?? `Failed to ${isEdit ? 'update' : 'create'} credential`);
     } finally {
       setPending(false);
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && handleClose()}>
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add git credential</DialogTitle>
+          <DialogTitle>{isEdit ? 'Edit git credential' : 'Add git credential'}</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
@@ -117,9 +133,11 @@ export function CredentialModal({ open, onClose, onCreated }: CredentialModalPro
               id="cred-username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              required
+              required={!isEdit}
               maxLength={255}
-              placeholder="git username or token name"
+              placeholder={
+                isEdit ? 'leave blank to keep current username' : 'git username or token name'
+              }
             />
           </div>
 
@@ -130,8 +148,10 @@ export function CredentialModal({ open, onClose, onCreated }: CredentialModalPro
               type="password"
               value={secret}
               onChange={(e) => setSecret(e.target.value)}
-              required
-              placeholder="personal access token or password"
+              required={!isEdit}
+              placeholder={
+                isEdit ? 'leave blank to keep current secret' : 'personal access token or password'
+              }
             />
           </div>
 
@@ -139,9 +159,9 @@ export function CredentialModal({ open, onClose, onCreated }: CredentialModalPro
 
           <div className="flex gap-2">
             <Button type="submit" disabled={pending}>
-              {pending ? 'Saving...' : 'Save credential'}
+              {pending ? 'Saving...' : isEdit ? 'Save changes' : 'Save credential'}
             </Button>
-            <Button type="button" variant="secondary" onClick={handleClose}>
+            <Button type="button" variant="secondary" onClick={onClose}>
               Cancel
             </Button>
           </div>

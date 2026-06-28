@@ -19,6 +19,7 @@ export default function CredentialsPage() {
   const [error, setError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [editing, setEditing] = useState<CredentialRow | null>(null);
 
   useEffect(() => {
     api
@@ -83,6 +84,9 @@ export default function CredentialsPage() {
                 <span className="text-xs text-neutral-500">
                   {new Date(cred.createdAt).toLocaleDateString()}
                 </span>
+                <Button variant="secondary" size="sm" onClick={() => setEditing(cred)}>
+                  Edit
+                </Button>
                 <Button
                   variant="destructive"
                   size="sm"
@@ -98,13 +102,25 @@ export default function CredentialsPage() {
       )}
 
       <CredentialModal
-        open={modalOpen}
-        onClose={() => setModalOpen(false)}
+        open={modalOpen || editing !== null}
+        credential={editing}
+        onClose={() => {
+          setModalOpen(false);
+          setEditing(null);
+        }}
         onCreated={(cred) => {
           setCredentials((prev) => [
             { ...cred, createdAt: new Date().toISOString() },
             ...(prev ?? []),
           ]);
+        }}
+        onUpdated={(cred) => {
+          setCredentials(
+            (prev) =>
+              prev?.map((c) =>
+                c.id === cred.id ? { ...c, label: cred.label, host: cred.host } : c,
+              ) ?? null,
+          );
         }}
       />
     </div>
