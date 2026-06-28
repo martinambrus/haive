@@ -799,6 +799,46 @@ export interface AdminHealthResponse {
   timestamp: string;
 }
 
+export interface AuditEvent {
+  id: string;
+  actorUserId: string;
+  actorEmail: string | null;
+  action: string;
+  targetType: string;
+  targetId: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface AuditListResponse {
+  events: AuditEvent[];
+  total: number;
+  facets: { actions: string[]; targetTypes: string[] };
+}
+
+export interface AuditListParams {
+  action?: string;
+  targetType?: string;
+  actorUserId?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export function listAuditEvents(params: AuditListParams): Promise<AuditListResponse> {
+  const qs = new URLSearchParams();
+  if (params.action) qs.set('action', params.action);
+  if (params.targetType) qs.set('targetType', params.targetType);
+  if (params.actorUserId) qs.set('actorUserId', params.actorUserId);
+  if (params.from) qs.set('from', params.from);
+  if (params.to) qs.set('to', params.to);
+  if (params.limit != null) qs.set('limit', String(params.limit));
+  if (params.offset != null) qs.set('offset', String(params.offset));
+  const query = qs.toString();
+  return api.get<AuditListResponse>(`/admin/audit${query ? `?${query}` : ''}`);
+}
+
 export interface TerminalSessionSummary {
   id: string;
   containerId: string;

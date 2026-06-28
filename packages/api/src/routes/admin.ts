@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { Hono } from 'hono';
-import { and, desc, eq, gte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_CONCURRENCY_CHANNEL,
@@ -72,6 +72,90 @@ adminRoutes.get('/users', async (c) => {
   }));
 
   return c.json({ users });
+});
+
+// Audit log viewer: paginated + filterable read over the append-only
+// audit_events trail. Actor email is joined from users (LEFT JOIN — null for a
+// since-deleted user; the audit row itself has no FK and survives).
+adminRoutes.get('/audit', async (c) => {
+  const db = getDb();
+  const q = c.req.query();
+
+  const action = q.action || undefined;
+  const targetType = q.targetType || undefined;
+  const actorUserId = q.actorUserId || undefined;
+  const fromDate = q.from ? new Date(q.from) : undefined;
+  const toDate = q.to ? new Date(q.to) : undefined;
+  const limit = Math.min(200, Math.max(1, Number.parseInt(q.limit ?? '50', 10) || 50));
+  const offset = Math.max(0, Number.parseInt(q.offset ?? '0', 10) || 0);
+
+  const conditions: SQL[] = [];
+  if (action) conditions.push(eq(schema.auditEvents.action, action));
+  if (targetType) conditions.push(eq(schema.auditEvents.targetType, targetType));
+  if (actorUserId) conditions.push(eq(schema.auditEvents.actorUserId, actorUserId));
+  if (fromDate && !Number.isNaN(fromDate.getTime()))
+    conditions.push(gte(schema.auditEvents.createdAt, fromDate));
+  if (toDate && !Number.isNaN(toDate.getTime()))
+    conditions.push(lte(schema.auditEvents.createdAt, toDate));
+  const where = conditions.length ? and(...conditions) : undefined;
+
+  const rows = await db
+    .select({
+      id: schema.auditEvents.id,
+      actorUserId: schema.auditEvents.actorUserId,
+      actorEmailEncrypted: schema.users.emailEncrypted,
+      action: schema.auditEvents.action,
+      targetType: schema.auditEvents.targetType,
+      targetId: schema.auditEvents.targetId,
+      metadata: schema.auditEvents.metadata,
+      createdAt: schema.auditEvents.createdAt,
+    })
+    .from(schema.auditEvents)
+    .leftJoin(schema.users, eq(schema.users.id, schema.auditEvents.actorUserId))
+    .where(where)
+    .orderBy(desc(schema.auditEvents.createdAt))
+    .limit(limit)
+    .offset(offset);
+
+  const countRows = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(schema.auditEvents)
+    .where(where);
+  const total = countRows[0]?.count ?? 0;
+
+  const fieldKey = await configService.getEncryptionKey();
+  const events = rows.map((r) => ({
+    id: r.id,
+    actorUserId: r.actorUserId,
+    actorEmail: r.actorEmailEncrypted ? decryptEmail(r.actorEmailEncrypted, fieldKey) : null,
+    action: r.action,
+    targetType: r.targetType,
+    targetId: r.targetId,
+    metadata: r.metadata,
+    createdAt: r.createdAt.toISOString(),
+  }));
+
+  // Distinct values for the filter dropdowns (data-driven, so new action types
+  // appear without a code change). Cheap — both columns are indexed.
+  const [actionFacets, typeFacets] = await Promise.all([
+    db
+      .selectDistinct({ action: schema.auditEvents.action })
+      .from(schema.auditEvents)
+      .orderBy(schema.auditEvents.action),
+    db
+      .selectDistinct({ targetType: schema.auditEvents.targetType })
+      .from(schema.auditEvents)
+      .orderBy(schema.auditEvents.targetType),
+  ]);
+
+  return c.json({
+    events,
+    total,
+    facets: {
+      actions: actionFacets.map((r) => r.action),
+      targetTypes: typeFacets.map((r) => r.targetType),
+    },
+  });
 });
 
 adminRoutes.post('/users/:id/action', async (c) => {
