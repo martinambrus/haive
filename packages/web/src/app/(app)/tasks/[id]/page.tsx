@@ -486,12 +486,24 @@ export default function TaskDetailPage() {
     activeWaitingStep?.userActiveMs ?? 0,
   );
 
-  // The Editor tab is disabled outright for completed/cancelled tasks: their worktree
-  // and branch are reaped at task end, so even the read-only source would be empty and
-  // a fresh editor would be rooted at a path that no longer exists. 'failed' stays
-  // editable (its runtime is kept for recovery). Switch away if the user is sitting on
-  // the Editor tab at the moment the task ends.
-  const editorDisabled = task?.status === 'completed' || task?.status === 'cancelled';
+  // The Editor opens the task's GIT WORKTREE as its sole workspace folder, so the tab is
+  // gated two ways:
+  //  - Disabled outright for completed/cancelled tasks: the worktree and branch are reaped
+  //    at task end, so even a read-only source would be empty and a fresh editor would be
+  //    rooted at a path that no longer exists. 'failed' stays editable (runtime kept for
+  //    recovery).
+  //  - Disabled until the worktree exists. Worktree-using types (workflow, run_app — see
+  //    buildRunList / SPINE) create it in the mandatory 01-worktree-setup step; opening the
+  //    editor earlier would root at the repo checkout (wrong folder) or a path not there
+  //    yet. Step rows are created lazily, so the readiness signal must be POSITIVE — that
+  //    step present AND done. Other types (onboarding) edit the repo root and have no
+  //    worktree step, so they are not worktree-gated.
+  // Switch away if the user is sitting on the Editor tab while it is (or becomes) disabled.
+  const usesWorktree = task?.type === 'workflow' || task?.type === 'run_app';
+  const worktreeReady =
+    !usesWorktree || steps.some((s) => s.stepId === '01-worktree-setup' && s.status === 'done');
+  const editorDisabled =
+    task?.status === 'completed' || task?.status === 'cancelled' || !worktreeReady;
   useEffect(() => {
     if (editorDisabled && tab === 'editor') setTab('steps');
   }, [editorDisabled, tab]);
