@@ -100,15 +100,30 @@ function RunAppReadyPanels({
   autoCollapse: boolean;
 }) {
   const det = step.detectOutput as {
+    mode?: string;
     liveBrowser?: { available?: boolean };
     directAccess?: boolean;
     diffArtifactPath?: string | null;
   } | null;
   const showVnc = !!det?.liveBrowser?.available;
   const showDirect = !showVnc && !!det?.directAccess;
+  // mode 'none' = nothing was runnable (no DDEV config, no dev script/Dockerfile).
+  // Surface it clearly so the user isn't left staring at an empty "starting" panel.
+  const nothingRunnable = det?.mode === 'none';
 
   return (
     <div className="flex flex-col gap-3">
+      {nothingRunnable && (
+        <div className="rounded-md border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-sm text-amber-200">
+          <p className="font-medium">No runnable runtime detected</p>
+          <p className="mt-1 text-xs text-amber-200/80">
+            This project has nothing to run — no DDEV config and no dev script or Dockerfile. Pick
+            DDEV in the dependency step (Haive builds a .ddev config from the detected versions) or
+            add a dev script / Dockerfile, then retry the runtime step. You can also just finish to
+            tear everything down.
+          </p>
+        </div>
+      )}
       {showVnc && (
         <BrowserVncPanel
           taskId={taskId}

@@ -159,15 +159,26 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
   },
 
   form(_ctx, detected): FormSchema {
-    const lines = [
-      detected.appUrl
-        ? `The app is running at ${detected.appUrl}.`
-        : 'The app runtime is starting.',
-      'Browse or test it in the panels below, or edit it from the Terminal tab — your edits are live in the running app.',
-      '',
-      'When you are done, finish to tear down the environment. Optionally commit your',
-      'session edits back to this task’s branch first.',
-    ];
+    // mode 'none' = the runtime tail found nothing to boot (no DDEV config and no
+    // dev script/Dockerfile). Say so plainly + how to make it runnable, instead of
+    // the misleading "starting" text that would otherwise strand the user here.
+    const lines =
+      detected.mode === 'none'
+        ? [
+            'No runnable runtime was detected for this project — there is nothing to browse, test, or edit here.',
+            'To make it runnable: choose DDEV in the dependency step (Haive generates a .ddev config from the detected versions and boots it), or add a dev script / Dockerfile so the app-runner can start it — then Retry from the runtime step.',
+            '',
+            'You can finish now to tear everything down.',
+          ]
+        : [
+            detected.appUrl
+              ? `The app is running at ${detected.appUrl}.`
+              : 'The app runtime is starting.',
+            'Browse or test it in the panels below, or edit it from the Terminal tab — your edits are live in the running app.',
+            '',
+            'When you are done, finish to tear down the environment. Optionally commit your',
+            'session edits back to this task’s branch first.',
+          ];
     const fields: FormSchema['fields'] = [
       {
         type: 'checkbox',
