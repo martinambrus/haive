@@ -41,6 +41,7 @@ import { MarkdownView } from '@/components/markdown/markdown-view';
 import { PersistedDetails } from '@/components/persisted-details';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { EditorTab } from '@/components/editor/editor-tab';
+import { AttachmentsPanel } from '@/components/attachments/attachments-panel';
 import { CommitDiffViewer } from '@/components/commit-diff-viewer';
 import { StepTerminal } from '@/components/terminal/StepTerminal';
 import { BrowserVncPanel } from '@/components/terminal/BrowserVncPanel';
@@ -223,7 +224,7 @@ function stepStatusVariant(status: StepStatus): BadgeVariant {
   }
 }
 
-type Tab = 'steps' | 'editor' | 'terminal' | 'activity';
+type Tab = 'steps' | 'editor' | 'terminal' | 'activity' | 'attachments';
 
 interface TaskDetailResponse {
   task: Task;
@@ -931,6 +932,9 @@ export default function TaskDetailPage() {
         <TabButton active={tab === 'activity'} onClick={() => setTab('activity')}>
           Activity
         </TabButton>
+        <TabButton active={tab === 'attachments'} onClick={() => setTab('attachments')}>
+          Attachments
+        </TabButton>
       </div>
 
       {tab === 'steps' && (
@@ -1018,6 +1022,8 @@ export default function TaskDetailPage() {
       )}
 
       {tab === 'editor' && !editorDisabled && <EditorTab taskId={id} />}
+
+      {tab === 'attachments' && <AttachmentsPanel taskId={id} />}
 
       {tab === 'terminal' && (
         <TerminalTab

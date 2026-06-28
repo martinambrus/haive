@@ -8,6 +8,7 @@ import {
   CONFIG_KEYS,
   configService,
   decryptEmail,
+  DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   logger,
 } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -307,4 +308,25 @@ adminRoutes.put('/config/max-agents-per-task', async (c) => {
   await configService.set(CONFIG_KEYS.MAX_PARALLEL_AGENTS_PER_TASK, String(maxAgentsPerTask));
   log.info({ maxAgentsPerTask }, 'max agents per task updated');
   return c.json({ maxAgentsPerTask });
+});
+
+const attachmentMaxBytesSchema = z.object({
+  // Floor 1 KiB; no hard upper limit (host disk bounds it). Per-file cap for task
+  // attachments, read by the upload endpoint within the ~30s config cache.
+  maxBytes: z.number().int().min(1024),
+});
+
+adminRoutes.get('/config/attachment-max-bytes', async (c) => {
+  const maxBytes = await configService.getNumber(
+    CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES,
+    DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
+  );
+  return c.json({ maxBytes });
+});
+
+adminRoutes.put('/config/attachment-max-bytes', async (c) => {
+  const { maxBytes } = attachmentMaxBytesSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES, String(maxBytes));
+  log.info({ maxBytes }, 'task attachment max bytes updated');
+  return c.json({ maxBytes });
 });

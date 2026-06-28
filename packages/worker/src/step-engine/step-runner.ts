@@ -33,6 +33,7 @@ import { resolveDagPhase } from './dag-executor.js';
 import { resolveMergePhase } from './merge-resolver.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
+import { augmentPromptWithAttachments } from './attachments-context.js';
 
 const log = logger.child({ module: 'step-runner' });
 
@@ -473,7 +474,7 @@ async function resolveLlmPhase(
   // same-iteration retry is underway; route even iteration 0 through the iteration
   // builder so its shrink hint (truncationRetries) reaches the first pass too.
   const truncationRetries = stepDef.loop ? await countTrailingTruncations(db, current.id) : 0;
-  const prompt =
+  let prompt =
     (upcomingIteration > 0 || truncationRetries > 0) && stepDef.loop?.buildIterationPrompt
       ? stepDef.loop.buildIterationPrompt({
           detected,
@@ -483,6 +484,9 @@ async function resolveLlmPhase(
           truncationRetries,
         })
       : llmSpec.buildPrompt({ detected, formValues: formValues ?? {} });
+  // Make every CLI adapter aware of user-attached task files (the prompt flows
+  // through the dispatcher unchanged). No-op when the task has no attachments.
+  prompt = await augmentPromptWithAttachments(db, params.taskId, prompt);
   // Multi-CLI loop steps pick a role per iteration (e.g. reviewer vs corrector);
   // the resolved provider differs per role. Non-loop steps resolve 'default'.
   const role = stepDef.loop?.resolveRole?.(upcomingIteration) ?? 'default';

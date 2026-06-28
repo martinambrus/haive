@@ -122,6 +122,52 @@ export function releaseGlobalKbEmbedModel(): void {
   }).catch(() => {});
 }
 
+/** A user-uploaded reference file attached to a task. Mirrors the shared
+ *  TaskAttachment shape locally to keep the @haive/shared barrel out of the
+ *  browser bundle. */
+export interface TaskAttachment {
+  id: string;
+  taskId: string;
+  filename: string;
+  sizeBytes: number;
+  contentType: string | null;
+  description: string | null;
+  createdAt: string;
+}
+
+/** Upload one file as a task attachment. Posts the raw file body (streamed
+ *  server-side, cap-enforced) with metadata in the query string, bypassing the
+ *  JSON `request` wrapper. */
+export async function uploadTaskAttachment(
+  taskId: string,
+  file: File,
+  description?: string,
+): Promise<TaskAttachment> {
+  const params = new URLSearchParams({ filename: file.name });
+  if (description) params.set('description', description);
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/attachments?${params.toString()}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file,
+  });
+  if (!res.ok) {
+    const b = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(b.error ?? `Failed to upload ${file.name} (HTTP ${res.status})`);
+  }
+  const data = (await res.json()) as { attachment: TaskAttachment };
+  return data.attachment;
+}
+
+export async function listTaskAttachments(taskId: string): Promise<TaskAttachment[]> {
+  const data = await api.get<{ attachments: TaskAttachment[] }>(`/tasks/${taskId}/attachments`);
+  return data.attachments;
+}
+
+export async function deleteTaskAttachment(taskId: string, attachmentId: string): Promise<void> {
+  await api.delete(`/tasks/${taskId}/attachments/${attachmentId}`);
+}
+
 export interface User {
   id: string;
   email: string;

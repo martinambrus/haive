@@ -3,6 +3,10 @@ import { randomBytes } from 'node:crypto';
 import { createRedisConnection } from '../utils/redis-factory.js';
 import { logger } from '../logger/index.js';
 
+/** Default per-file cap for task attachments (25 MiB). Admin-tunable via
+ *  CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES. */
+export const DEFAULT_TASK_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+
 export const CONFIG_KEYS = {
   DATABASE_URL: 'config:database:url',
   API_PORT: 'config:server:apiPort',
@@ -82,6 +86,11 @@ export const CONFIG_KEYS = {
   // remains the fallback) without a redeploy.
   IDE_ENABLED: 'config:ide:enabled',
 
+  // Per-file size cap (bytes) for user-uploaded task attachments. Enforced by the
+  // attachment upload endpoint (streamed; aborts once the byte count exceeds it).
+  // Admin-tunable; default DEFAULT_TASK_ATTACHMENT_MAX_BYTES (25 MiB).
+  TASK_ATTACHMENT_MAX_BYTES: 'config:tasks:attachmentMaxBytes',
+
   APP_URL: 'config:app:url',
 
   ENCRYPTION_KEY: 'bootstrap:encryptionKey',
@@ -124,6 +133,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
   [CONFIG_KEYS.STEERING_ENABLED]: 'true',
   [CONFIG_KEYS.IDE_ENABLED]: 'true',
+  [CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES]: String(DEFAULT_TASK_ATTACHMENT_MAX_BYTES),
   [CONFIG_KEYS.APP_URL]: 'http://localhost:3000',
   [CONFIG_KEYS.MAINTENANCE_MODE]: 'false',
   [CONFIG_KEYS.MAINTENANCE_MESSAGE]: 'Maintenance in progress. Please check back shortly.',

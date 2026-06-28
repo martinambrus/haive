@@ -7,6 +7,7 @@ import { usePageTitle } from '@/lib/use-page-title';
 import {
   api,
   API_BASE_URL,
+  uploadTaskAttachment,
   type CliProvider,
   type CliProviderCatalogEntry,
   type OnboardingStatus,
@@ -120,6 +121,8 @@ export default function NewTaskPage() {
   const [dumpFile, setDumpFile] = useState<File | null>(null);
   const [dumpProgress, setDumpProgress] = useState(0);
   const [dumpUploading, setDumpUploading] = useState(false);
+  const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
+  const [attachmentUploading, setAttachmentUploading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -303,6 +306,17 @@ export default function NewTaskPage() {
       }
 
       const data = await api.post<{ task: Task }>('/tasks', body);
+      if (attachmentFiles.length > 0) {
+        setAttachmentUploading(true);
+        try {
+          for (const f of attachmentFiles) await uploadTaskAttachment(data.task.id, f);
+        } catch {
+          // The task is already created; the task page's Attachments panel is the
+          // retry surface, so navigate there rather than blocking on a failed file.
+        } finally {
+          setAttachmentUploading(false);
+        }
+      }
       router.push(`/tasks/${data.task.id}`);
     } catch (err) {
       setError((err as Error).message ?? 'Failed to create task');
@@ -598,6 +612,29 @@ export default function NewTaskPage() {
             </p>
             {dumpUploading && (
               <p className="text-xs text-indigo-300">Uploading dump… {dumpProgress}%</p>
+            )}
+          </div>
+        )}
+
+        {repositoryId && (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="attachments">Attachments (optional)</Label>
+            <input
+              id="attachments"
+              type="file"
+              multiple
+              onChange={(e) => setAttachmentFiles(Array.from(e.target.files ?? []))}
+              className="block w-full text-sm text-neutral-300 file:mr-3 file:rounded-md file:border-0 file:bg-neutral-800 file:px-3 file:py-1.5 file:text-sm file:text-neutral-100 hover:file:bg-neutral-700"
+            />
+            <p className="text-xs text-neutral-500">
+              Reference files (docs, screenshots, sample data) the AI agent can read while it works.
+              Stored with the task; you can add or remove more later on the task page.
+            </p>
+            {attachmentFiles.length > 0 && (
+              <p className="text-xs text-neutral-400">
+                {attachmentFiles.length} file(s) selected
+                {attachmentUploading ? ' — uploading…' : ''}
+              </p>
             )}
           </div>
         )}

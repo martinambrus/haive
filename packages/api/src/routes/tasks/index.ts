@@ -34,6 +34,7 @@ import {
 import { fileRoutes } from './files.js';
 import { stepRoutes } from './steps.js';
 import { browserAccessRoutes } from './browser-access.js';
+import { attachmentRoutes } from './attachments.js';
 
 export const taskRoutes = new Hono<AppEnv>();
 
@@ -759,3 +760,7 @@ taskRoutes.route('/', fileRoutes);
 // Direct browser-access routes (/:id/access-urls, /:id/ddev-ca): open the task's
 // running app in your own browser as a fast alternative to the VNC pixel stream.
 taskRoutes.route('/', browserAccessRoutes);
+
+// Task file attachments (/:id/attachments...): user-uploaded reference files the
+// AI CLI agent reads from the task workspace.
+taskRoutes.route('/', attachmentRoutes);

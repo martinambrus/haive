@@ -2,6 +2,7 @@ export * from './form.js';
 export * from './auth.js';
 export * from './repos.js';
 export * from './db-dumps.js';
+export * from './task-attachments.js';
 export * from './bundles.js';
 export * from './tasks.js';
 export * from './dag.js';

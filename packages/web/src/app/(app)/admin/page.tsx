@@ -41,6 +41,10 @@ export default function AdminPage() {
   const [maxPerTaskInput, setMaxPerTaskInput] = useState('');
   const [savingPerTask, setSavingPerTask] = useState(false);
 
+  const [attachmentMaxBytes, setAttachmentMaxBytes] = useState<number | null>(null);
+  const [attachmentMaxMbInput, setAttachmentMaxMbInput] = useState('');
+  const [savingAttachmentMax, setSavingAttachmentMax] = useState(false);
+
   const load = useCallback(async () => {
     try {
       const [
@@ -52,6 +56,7 @@ export default function AdminPage() {
         browserAccessData,
         fairData,
         perTaskData,
+        attachmentData,
       ] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
@@ -61,6 +66,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
         api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
         api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
+        api.get<{ maxBytes: number }>('/admin/config/attachment-max-bytes'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
@@ -72,6 +78,10 @@ export default function AdminPage() {
       setFairEnabled(fairData.enabled);
       setMaxPerTask(perTaskData.maxAgentsPerTask);
       setMaxPerTaskInput(String(perTaskData.maxAgentsPerTask));
+      setAttachmentMaxBytes(attachmentData.maxBytes);
+      setAttachmentMaxMbInput(
+        String(Math.round((attachmentData.maxBytes / 1024 / 1024) * 100) / 100),
+      );
       setError(null);
     } catch (err) {
       const e = err as { status?: number; message?: string };
@@ -156,6 +166,28 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update per-task cap');
     } finally {
       setSavingPerTask(false);
+    }
+  }
+
+  async function saveAttachmentMax() {
+    const mb = Number.parseFloat(attachmentMaxMbInput);
+    if (!Number.isFinite(mb) || mb < 1) {
+      setError('Max attachment size must be at least 1 MB.');
+      return;
+    }
+    const bytes = Math.round(mb * 1024 * 1024);
+    setSavingAttachmentMax(true);
+    try {
+      const result = await api.put<{ maxBytes: number }>('/admin/config/attachment-max-bytes', {
+        maxBytes: bytes,
+      });
+      setAttachmentMaxBytes(result.maxBytes);
+      setAttachmentMaxMbInput(String(Math.round((result.maxBytes / 1024 / 1024) * 100) / 100));
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update attachment size limit');
+    } finally {
+      setSavingAttachmentMax(false);
     }
   }
 
@@ -365,6 +397,39 @@ export default function AdminPage() {
               onClick={() => void savePerTask()}
             >
               {savingPerTask ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {attachmentMaxBytes !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Task attachment size</CardTitle>
+            <CardDescription>
+              Maximum size per uploaded task attachment. Users attach reference files (docs,
+              screenshots, sample data) the AI agent reads while it works. Applies within ~30s;
+              persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <div className="flex items-end gap-2">
+            <label className="flex flex-col gap-1 text-xs text-neutral-400">
+              Max size (MB)
+              <input
+                type="number"
+                min={1}
+                value={attachmentMaxMbInput}
+                onChange={(e) => setAttachmentMaxMbInput(e.target.value)}
+                className="w-24 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+              />
+            </label>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={savingAttachmentMax}
+              onClick={() => void saveAttachmentMax()}
+            >
+              {savingAttachmentMax ? 'Saving...' : 'Save'}
             </Button>
           </div>
         </Card>
