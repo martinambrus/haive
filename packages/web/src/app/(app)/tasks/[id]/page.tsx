@@ -1574,6 +1574,21 @@ function resetSuffix(resetsAt: string | null, now: number): string {
   return d > 0 ? ` (resets in ${d}d ${h}h)` : ` (resets in ${h}h ${m}m)`;
 }
 
+/** Compact time-to-reset for the inline chip (the verbose form lives in the tooltip):
+ *  "46m", "3h 20m", "2d 4h", or "now". Empty when the window carries no reset time. */
+function resetShort(resetsAt: string | null, now: number): string {
+  if (!resetsAt) return '';
+  const ms = new Date(resetsAt).getTime() - now;
+  if (ms <= 0) return 'now';
+  const totalMin = Math.floor(ms / 60_000);
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
 /** Per-window remaining-% colour (claude-hud scheme): green >25% left, amber 10-25%
  *  (75-90% used), red <=10% (>=90% used). Each window is coloured on its own value. */
 function usageRemainingColor(remaining: number): string {
@@ -1647,14 +1662,18 @@ function HeaderUsageChip({
       title={`${name} subscription usage — ${tooltip}${snap.stale ? '   (stale)' : ''}`}
     >
       <span className="text-neutral-400">{name}</span>
-      {windows.map((x, i) => (
-        <span key={x.label} className="flex items-center gap-1.5">
-          {i > 0 && <span className="h-3 w-px bg-neutral-600" aria-hidden />}
-          <span className={usageRemainingColor(100 - x.w.usedPct)}>
-            {x.label} {100 - x.w.usedPct}%
+      {windows.map((x, i) => {
+        const remaining = 100 - x.w.usedPct;
+        const reset = resetShort(x.w.resetsAt, now);
+        return (
+          <span key={x.label} className="flex items-center gap-1.5">
+            {i > 0 && <span className="h-3 w-px bg-neutral-600" aria-hidden />}
+            <span className={usageRemainingColor(remaining)}>
+              {remaining}%{reset ? ` [${reset}]` : ''}
+            </span>
           </span>
-        </span>
-      ))}
+        );
+      })}
     </span>
   );
 }
