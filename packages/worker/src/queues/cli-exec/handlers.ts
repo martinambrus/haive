@@ -3,8 +3,9 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DelayedError, Worker, type Job } from 'bullmq';
-import { and, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import {
   CLI_EXEC_JOB_NAMES,
   CONFIG_CONCURRENCY_CHANNEL,
@@ -515,6 +516,25 @@ export async function handleSignOutJob(
     const result = await runner.volumeRemove(name);
     if (result.ok) removed.push(name);
     else failed.push({ name, stderr: result.stderr });
+  }
+
+  // Claude's subscription login lives in the env-injected CLAUDE_CODE_OAUTH_TOKEN secret
+  // (the login flow even strips it out of envVars), NOT in a volume file — so removing
+  // volumes alone leaves the provider authenticated and the next login skips browser auth.
+  // Delete the login + usage-tracking token secrets to log out for real. A user-entered
+  // BYOK key (apiKeyEnvName, e.g. ANTHROPIC_AUTH_TOKEN) is not a login artifact -> kept.
+  if (provider.name === 'claude-code') {
+    await db
+      .delete(schema.cliProviderSecrets)
+      .where(
+        and(
+          eq(schema.cliProviderSecrets.providerId, provider.id),
+          inArray(schema.cliProviderSecrets.secretName, [
+            'CLAUDE_CODE_OAUTH_TOKEN',
+            CLAUDE_USAGE_OAUTH_SECRET,
+          ]),
+        ),
+      );
   }
 
   if (failed.length === 0) {
