@@ -1312,16 +1312,26 @@ async function handleAdvanceStep(
   await handleResult(db, ctx, payload.stepId, result);
 }
 
-/** Recover steps orphaned by a prior worker that died mid-CLI. On boot no worker
- *  is alive and any sandbox was just reaped, so a step still in `waiting_cli` will
- *  never resume on its own: resolveLlmPhase sees an invocation with endedAt=null
- *  and waits forever. Mark that dead invocation ended (which also makes any
- *  re-delivered cli-exec job a no-op — handlers skip ended invocations) and
- *  re-drive the step: one whose CLI DID finish + record resumes (exit 0 → apply
- *  → advance), an orphaned one fails (retryable). `waiting_form` user gates and
- *  `running` steps (recovered by advance-step stalled re-delivery) are untouched. */
-export async function reconcileOrphanedCliSteps(db: Database): Promise<void> {
-  const stuck = await db
+/** Recover steps orphaned by a prior worker that died mid-step (graceful restart,
+ *  crash, or power loss). On boot no worker is alive and any sandbox was just reaped,
+ *  so a stuck step never resumes on its own. Two passes:
+ *
+ *  1. `waiting_cli`: resolveLlmPhase is waiting on an invocation with endedAt=null
+ *     that will never complete. Mark that dead invocation ended (also makes any
+ *     re-delivered cli-exec job a no-op — handlers skip ended invocations) and
+ *     re-drive: a step whose CLI DID finish + record resumes (exit 0 → apply →
+ *     advance), an orphaned one fails (retryable).
+ *  2. `running`: the advance-step JOB itself died mid-execution. Its zombie sits in
+ *     BullMQ's active list under a 30-min lock, so the same-step duplicate guard
+ *     blocks any retry until that lock expires. Reset the step (resetStepAndDownstream
+ *     also bumps the task's orchestration epoch) and re-drive at the NEW epoch: the
+ *     duplicate guard matches siblings by epoch so the new advance is not blocked, and
+ *     the zombie is skipped by the epoch guard when BullMQ eventually redelivers it. No
+ *     BullMQ/redis surgery, so it is safe regardless of worker count.
+ *
+ *  `waiting_form` user gates are durable (no in-flight job) and left untouched. */
+export async function reconcileOrphanedSteps(db: Database): Promise<void> {
+  const stuckCli = await db
     .select({
       taskId: schema.taskSteps.taskId,
       stepId: schema.taskSteps.stepId,
@@ -1332,9 +1342,12 @@ export async function reconcileOrphanedCliSteps(db: Database): Promise<void> {
     .from(schema.taskSteps)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
     .where(and(eq(schema.taskSteps.status, 'waiting_cli'), eq(schema.tasks.status, 'running')));
-  if (stuck.length === 0) return;
-  logger.warn({ count: stuck.length }, 'reconciling waiting_cli steps orphaned by worker restart');
-  for (const s of stuck) {
+  if (stuckCli.length > 0)
+    logger.warn(
+      { count: stuckCli.length },
+      'reconciling waiting_cli steps orphaned by worker restart',
+    );
+  for (const s of stuckCli) {
     try {
       const [inv] = await db
         .select({ id: schema.cliInvocations.id })
@@ -1364,6 +1377,42 @@ export async function reconcileOrphanedCliSteps(db: Database): Promise<void> {
       logger.info({ taskId: s.taskId, stepId: s.stepId }, 'reconciled orphaned waiting_cli step');
     } catch (err) {
       logger.error({ err, taskId: s.taskId, stepId: s.stepId }, 'reconcile orphaned step failed');
+    }
+  }
+
+  // Pass 2: steps left `running` because the advance-step job died mid-execution.
+  const stuckRunning = await db
+    .select({
+      taskId: schema.taskSteps.taskId,
+      stepId: schema.taskSteps.stepId,
+      round: schema.taskSteps.round,
+      userId: schema.tasks.userId,
+    })
+    .from(schema.taskSteps)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+    .where(and(eq(schema.taskSteps.status, 'running'), eq(schema.tasks.status, 'running')));
+  if (stuckRunning.length > 0)
+    logger.warn(
+      { count: stuckRunning.length },
+      'reconciling running steps orphaned by worker restart',
+    );
+  for (const s of stuckRunning) {
+    try {
+      // resetStepAndDownstream supersedes the step's open invocations, resets it to
+      // pending, and bumps the task epoch so the orphaned zombie advance job no longer
+      // matches the same-step duplicate guard; re-drive at that new epoch.
+      const reset = await resetStepAndDownstream(db, s.taskId, s.stepId, s.round);
+      if (!reset) continue;
+      await enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, reset.newEpoch);
+      logger.info(
+        { taskId: s.taskId, stepId: s.stepId, epoch: reset.newEpoch },
+        'reconciled orphaned running step',
+      );
+    } catch (err) {
+      logger.error(
+        { err, taskId: s.taskId, stepId: s.stepId },
+        'reconcile orphaned running step failed',
+      );
     }
   }
 }

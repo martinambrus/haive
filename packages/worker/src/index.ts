@@ -16,7 +16,7 @@ import { startRepoWorker } from './queues/repo-queue.js';
 import {
   closeTaskQueue,
   reconcileEmbedModelResidency,
-  reconcileOrphanedCliSteps,
+  reconcileOrphanedSteps,
   startTaskWorker,
 } from './queues/task-queue.js';
 import { closeRedis } from './redis.js';
@@ -65,10 +65,11 @@ async function main(): Promise<void> {
   // Gentle background poller: reads each logged-in provider's subscription
   // usage-window endpoint (~5 min) so the task header can show 5h/weekly meters.
   const usagePollWorker = startUsagePollWorker();
-  // Recover steps a prior worker orphaned mid-CLI (their sandboxes were reaped
-  // above): fail or resume them so they never hang in waiting_cli after a restart.
-  await reconcileOrphanedCliSteps(getDb()).catch((err) => {
-    logger.warn({ err }, 'orphaned-cli-step reconciliation on boot failed');
+  // Recover steps a prior worker orphaned mid-step (their sandboxes were reaped
+  // above): resume waiting_cli steps and re-drive running steps whose advance-step
+  // job died mid-execution, so neither hangs after a restart/crash/power loss.
+  await reconcileOrphanedSteps(getDb()).catch((err) => {
+    logger.warn({ err }, 'orphaned-step reconciliation on boot failed');
   });
   // Recover embed-model unloads a prior worker missed (died mid terminal-transition
   // before sending keep_alive:0): evict any resident RAG model no live task needs.
