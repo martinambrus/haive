@@ -28,7 +28,13 @@ const DIRECTIVES: Record<TersenessLevel, string> = {
  *  out in the directive text). Default level is 'full'. Read from the ~30s config
  *  cache, so a change applies to subsequent dispatches without a redeploy. */
 export async function augmentPromptWithTerseness(prompt: string): Promise<string> {
-  const raw = await configService.get(CONFIG_KEYS.TERSENESS_LEVEL);
-  const level: TersenessLevel = raw === 'lite' || raw === 'ultra' ? raw : 'full';
-  return prompt + DIRECTIVES[level];
+  try {
+    const raw = await configService.get(CONFIG_KEYS.TERSENESS_LEVEL);
+    const level: TersenessLevel = raw === 'lite' || raw === 'ultra' ? raw : 'full';
+    return prompt + DIRECTIVES[level];
+  } catch {
+    // Best-effort: a config-read failure (uninitialised configService in a unit test,
+    // or a transient backend blip) must never fail the step. Skip the directive.
+    return prompt;
+  }
 }
