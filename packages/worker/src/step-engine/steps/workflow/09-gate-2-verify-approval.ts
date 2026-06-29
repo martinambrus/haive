@@ -1,5 +1,8 @@
 import path from 'node:path';
+import { eq } from 'drizzle-orm';
+import { CONFIG_KEYS, configService } from '@haive/shared';
 import type { FormSchema, StatusSummaryItem } from '@haive/shared';
+import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
@@ -82,6 +85,9 @@ interface VerifyGateDetect {
    *  this gate runs exactly as interactive, but the web shows the URL info box
    *  instead of the VNC panel. */
   directAccess: boolean;
+  /** True when the task opted into direct database access (and the global switch is on):
+   *  the web shows the DB connection panel alongside the gate. Independent of directAccess. */
+  dbAccess: boolean;
   /** Mandatory runtime HTTP smoke from 08-phase-5-verify (null when not probed).
    *  A failure defaults this gate to reject but never auto-reroutes to implement. */
   runtimeSmoke: {
@@ -508,6 +514,16 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         }
       : null;
 
+    // Direct database access is independent of the browser choice: surface the DB panel
+    // whenever the task opted in and the global switch is on.
+    const dbTaskRow = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { exposeDbPort: true },
+    });
+    const dbAccess =
+      (dbTaskRow?.exposeDbPort ?? false) &&
+      (await configService.getBoolean(CONFIG_KEYS.DB_DIRECT_ACCESS, true));
+
     return {
       verify: {
         test: liteCheck(output.test),
@@ -523,6 +539,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       adversarial,
       liveBrowser,
       directAccess,
+      dbAccess,
       runtimeSmoke,
     };
   },

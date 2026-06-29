@@ -38,6 +38,8 @@ export default function AdminPage() {
   const [savingDebugMode, setSavingDebugMode] = useState(false);
   const [browserAccessEnabled, setBrowserAccessEnabled] = useState<boolean | null>(null);
   const [savingBrowserAccess, setSavingBrowserAccess] = useState(false);
+  const [dbAccessEnabled, setDbAccessEnabled] = useState<boolean | null>(null);
+  const [savingDbAccess, setSavingDbAccess] = useState(false);
   const [fairEnabled, setFairEnabled] = useState<boolean | null>(null);
   const [savingFair, setSavingFair] = useState(false);
   const [maxPerTask, setMaxPerTask] = useState<number | null>(null);
@@ -58,6 +60,7 @@ export default function AdminPage() {
         ideData,
         debugModeData,
         browserAccessData,
+        dbAccessData,
         fairData,
         perTaskData,
         attachmentData,
@@ -69,6 +72,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/ide'),
         api.get<{ enabled: boolean }>('/admin/config/debug-mode'),
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
+        api.get<{ enabled: boolean }>('/admin/config/db-access'),
         api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
         api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
         api.get<{ maxBytes: number }>('/admin/config/attachment-max-bytes'),
@@ -81,6 +85,7 @@ export default function AdminPage() {
       setIdeEnabled(ideData.enabled);
       setDebugModeEnabled(debugModeData.enabled);
       setBrowserAccessEnabled(browserAccessData.enabled);
+      setDbAccessEnabled(dbAccessData.enabled);
       setFairEnabled(fairData.enabled);
       setMaxPerTask(perTaskData.maxAgentsPerTask);
       setMaxPerTaskInput(String(perTaskData.maxAgentsPerTask));
@@ -254,6 +259,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update browser access');
     } finally {
       setSavingBrowserAccess(false);
+    }
+  }
+
+  async function setDbAccess(next: boolean) {
+    setSavingDbAccess(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/db-access', {
+        enabled: next,
+      });
+      setDbAccessEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update database access');
+    } finally {
+      setSavingDbAccess(false);
     }
   }
 
@@ -558,6 +578,32 @@ export default function AdminPage() {
             />
             {browserAccessEnabled ? 'Enabled' : 'Disabled'}
             {savingBrowserAccess && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {dbAccessEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Direct database access</CardTitle>
+            <CardDescription>
+              Lets a task expose its DDEV project database on a loopback host port so users can
+              connect a local DB client (mysql/psql/DataGrip) to localhost on the published port
+              while developing. Opt-in per task (default off); the port binds 127.0.0.1 only. Global
+              kill-switch across every repo; OFF refuses the opt-in everywhere. Read at runner start
+              — a mid-task flip needs Stop/Retry to take effect.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={dbAccessEnabled}
+              disabled={savingDbAccess}
+              onChange={(e) => void setDbAccess(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {dbAccessEnabled ? 'Enabled' : 'Disabled'}
+            {savingDbAccess && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

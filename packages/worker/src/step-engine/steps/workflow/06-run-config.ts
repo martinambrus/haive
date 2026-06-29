@@ -43,6 +43,12 @@ interface RunConfigDetect {
   /** Whether the global direct-browser-access feature is on, so the browser-mode
    *  picker can offer `direct` (manual testing in the user's own browser). */
   directAvailable: boolean;
+  /** Whether the global direct-database-access feature is on AND this task has a DDEV
+   *  runtime, so the form can offer the per-task db-port opt-in (DDEV-only feature). */
+  dbExposeAvailable: boolean;
+  /** Current task-level expose_db_port column, the checkbox default so an API-set or
+   *  prior value survives into the form. */
+  taskExposeDbPort: boolean;
 }
 
 /** Front-loaded run answers for the hands-free stretch to Gate 2 (browser/MCP mode,
@@ -62,6 +68,7 @@ interface RunConfig {
   browserCheckNetworkErrors: boolean;
   testAction: string;
   testRunTests: boolean;
+  exposeDbPort: boolean;
   /** Fix-loop cap: automatic fix rounds before the loop escalates to the user. */
   maxFixRounds: number;
 }
@@ -114,11 +121,17 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     }
     const taskRow = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { adversarialQaLevel: true, maxFixRounds: true, executionPath: true },
+      columns: {
+        adversarialQaLevel: true,
+        maxFixRounds: true,
+        executionPath: true,
+        exposeDbPort: true,
+      },
     });
     // A null execution_path means triage didn't filter the run (full_workflow): every step runs.
     const execPath = (taskRow?.executionPath ?? 'full_workflow') as ExecutionPath;
     const directAvailable = await configService.getBoolean(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, true);
+    const dbAvailable = await configService.getBoolean(CONFIG_KEYS.DB_DIRECT_ACCESS, true);
 
     return {
       specBody,
@@ -129,6 +142,8 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       runsBrowserVerify: keepForPath('08a-browser-verify', execPath),
       runsAdversarialQa: keepForPath('08d-adversarial-qa', execPath),
       directAvailable,
+      dbExposeAvailable: dbAvailable && ddevMode,
+      taskExposeDbPort: taskRow?.exposeDbPort ?? false,
     };
   },
 
@@ -307,6 +322,21 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
               },
             ]
           : []),
+        // Direct database access — an INDEPENDENT opt-in (not tied to the browser mode):
+        // exposes this task's DDEV database on a loopback host port so a local DB client
+        // can connect while developing. DDEV-only + global-flag-gated via dbExposeAvailable.
+        ...(detected.dbExposeAvailable
+          ? [
+              {
+                type: 'checkbox' as const,
+                id: 'exposeDbPort',
+                label: 'Expose the database port to my machine',
+                description:
+                  'Publishes this project’s DDEV database on a loopback port (127.0.0.1) so you can connect a local DB client (mysql/psql/DataGrip) while developing. Off by default; independent of the browser option.',
+                default: detected.taskExposeDbPort,
+              },
+            ]
+          : []),
         {
           type: 'radio',
           id: 'testAction',
@@ -367,6 +397,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       browserCheckNetworkErrors: bool(values.browserCheckNetworkErrors, true),
       testAction: str(values.testAction, 'manage'),
       testRunTests: bool(values.testRunTests, true),
+      exposeDbPort: bool(values.exposeDbPort, false),
       maxFixRounds: num(values.maxFixRounds, 5),
     };
 
@@ -416,6 +447,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
         adversarialQaLevel:
           runConfig.adversarialQaLevel !== 'none' ? runConfig.adversarialQaLevel : null,
         maxFixRounds: runConfig.maxFixRounds,
+        exposeDbPort: runConfig.exposeDbPort,
         preAnswers,
         updatedAt: new Date(),
       })

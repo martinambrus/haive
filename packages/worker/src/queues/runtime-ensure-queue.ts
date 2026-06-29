@@ -13,6 +13,7 @@ import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
   ensureAppServing,
+  resolveDdevDbAccess,
   type AppRuntimeCtx,
 } from '../step-engine/steps/workflow/_app-runtime.js';
 import {
@@ -58,6 +59,10 @@ export async function ensureRuntimeForTask(taskId: string): Promise<RuntimeEnsur
   if (runtime.mode === 'ddev') {
     await startDdevBrowserDesktop(runtime.handle);
     accessUrls = await ddevAccessUrls(runtime.handle, taskId);
+    // Append the database endpoint when the task opted into db access (gated inside
+    // resolveDdevDbAccess on the global DB switch + the per-task flag). Independent of the
+    // browser flag, so the /db-access route surfaces it even when browser access is off.
+    accessUrls = accessUrls.concat(await resolveDdevDbAccess(db, taskId, runtime.handle));
   } else if (runtime.mode === 'app-runner') {
     await startAppBrowserDesktop(runtime.handle);
     accessUrls = await appRunnerAccessUrls(taskId, runtime.port);

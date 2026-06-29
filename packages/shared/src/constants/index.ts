@@ -434,16 +434,29 @@ export function ideSessionKey(taskId: string): string {
  *   - `proxy-subdomain`  RESERVED for future REMOTE access via an authed api reverse
  *                     proxy (`<task>.apps.<haive-domain>`). No worker emits this yet
  *                     — it marks the seam so the remote build slots in without a
- *                     shape change. */
+ *                     shape change.
+ *   - `database`      a DDEV project's database on a published loopback port (opt-in
+ *                     per task). `url` is a ready connection URI; engine/host/port/
+ *                     user/password/database carry the parts a local DB client needs.
+ *                     Remote DB access will ride the same `proxy-subdomain` seam. */
 export interface TaskAccessEndpoint {
-  kind: 'localhost' | 'ddev-http' | 'ddev-https' | 'proxy-subdomain';
+  kind: 'localhost' | 'ddev-http' | 'ddev-https' | 'proxy-subdomain' | 'database';
   /** Short link label, e.g. "Localhost" or "DDEV (HTTPS)". */
   label: string;
-  /** Absolute URL the user opens in their browser. */
+  /** Absolute URL the user opens in their browser. For `database` this is a ready
+   *  connection URI (e.g. `mysql://db:db@127.0.0.1:<port>/db`), not a browser link. */
   url: string;
   /** True when the browser trusts the TLS cert without a warning (the stable baked
    *  CA covers `ddev-https` once the user installs it); omitted for plain http. */
   trusted?: boolean;
+  /** Database-endpoint parts (kind `database` only), rendered as copyable fields.
+   *  `engine` is the DDEV db type: `mysql` | `mariadb` | `postgres`. */
+  engine?: string;
+  host?: string;
+  port?: number;
+  user?: string;
+  password?: string;
+  database?: string;
 }
 
 /** Deterministic loopback host port for publishing a task's runtime to the user's

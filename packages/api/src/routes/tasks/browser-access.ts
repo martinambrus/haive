@@ -80,6 +80,36 @@ browserAccessRoutes.get('/:id/access-urls', async (c) => {
   }
 });
 
+/** Database-access endpoint for a task: the SAME coalesced runtime-ensure handshake as the
+ *  browser /access-urls route (shared jobId), but gated on the DB kill-switch — NOT the
+ *  browser one — and returns only the `database`-kind endpoints. Decoupled so db access
+ *  works even when an admin turned browser access off. `pending` (202) = ensure still
+ *  running; the client retries. */
+browserAccessRoutes.get('/:id/db-access', async (c) => {
+  const userId = c.get('userId');
+  const taskId = c.req.param('id');
+  await requireOwnedTask(taskId, userId);
+
+  const enabled = await configService.getBoolean(CONFIG_KEYS.DB_DIRECT_ACCESS, true);
+  if (!enabled) return c.json({ enabled: false, accessUrls: [] as TaskAccessEndpoint[] });
+
+  try {
+    const job = await getRuntimeEnsureQueue().add(
+      RUNTIME_ENSURE_JOB_NAMES.ENSURE,
+      { taskId, userId } satisfies RuntimeEnsurePayload,
+      { jobId: `ensure-${taskId}`, removeOnComplete: true, removeOnFail: true },
+    );
+    const result = (await job.waitUntilFinished(
+      getRuntimeEnsureQueueEvents(),
+      ACCESS_ENSURE_TIMEOUT_MS,
+    )) as RuntimeEnsureResult;
+    const accessUrls = (result?.accessUrls ?? []).filter((e) => e.kind === 'database');
+    return c.json({ enabled: true, accessUrls });
+  } catch {
+    return c.json({ enabled: true, accessUrls: [] as TaskAccessEndpoint[], pending: true }, 202);
+  }
+});
+
 /** Ensure the task's browser IDE (code-server) is up before the Editor tab loads
  *  it in an iframe. Same coalesced ensure-and-await handshake as the VNC panel
  *  (shared jobId `ensure-ide-<taskId>`). 202 `pending` means the ensure (incl. a

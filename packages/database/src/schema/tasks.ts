@@ -137,6 +137,13 @@ export const tasks = pgTable(
      *  fixtures run with no debug overhead. Re-read at every runner start (survives
      *  warm-recover). Gated behind the global CONFIG_KEYS.DEBUG_MODE_ENABLED switch. */
     debugMode: boolean('debug_mode').notNull().default(false),
+    /** Direct database access: when true the per-task DDEV runtime exposes the
+     *  project's database on the loopback host port the runner reserved at start
+     *  (a socat hop to the nested db container), so a local DB client can connect to
+     *  127.0.0.1:<port>. Chosen on 06-run-config (workflow) / 98-choose-view (run_app);
+     *  default off so a DB is never exposed without an explicit opt-in. Re-read at
+     *  every runner bring-up. Gated behind the global CONFIG_KEYS.DB_DIRECT_ACCESS switch. */
+    exposeDbPort: boolean('expose_db_port').notNull().default(false),
     /** Developer's estimated time to complete the task, in decimal hours
      *  (e.g. 0.25, 0.5, 1, 1.5). Optional, set on the new-task form; compared
      *  against the actual effort (agent work + user-active time) in the task

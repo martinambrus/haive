@@ -288,6 +288,7 @@ async function main(): Promise<void> {
         browserCheckNetworkErrors: false,
         testAction: 'skip',
         testRunTests: false,
+        exposeDbPort: false,
         // Lowest valid option (3/5/10) — keeps the loop short while still proving
         // several rounds materialise before the cap escalates to the gate.
         maxFixRounds: '3',

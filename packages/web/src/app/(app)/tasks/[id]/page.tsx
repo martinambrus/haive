@@ -46,6 +46,7 @@ import { CommitDiffViewer } from '@/components/commit-diff-viewer';
 import { StepTerminal } from '@/components/terminal/StepTerminal';
 import { BrowserVncPanel } from '@/components/terminal/BrowserVncPanel';
 import { BrowserDirectPanel } from '@/components/terminal/BrowserDirectPanel';
+import { DatabaseAccessPanel } from '@/components/terminal/DatabaseAccessPanel';
 import { InteractiveShell } from '@/components/terminal/InteractiveShell';
 import { autoScrollTerminalsEnabled } from '@/lib/terminal-autoscroll';
 import { usePageTitle } from '@/lib/use-page-title';
@@ -62,28 +63,35 @@ function liveBrowserPanel(
   const det = step.detectOutput as {
     liveBrowser?: { available?: boolean };
     directAccess?: boolean;
+    dbAccess?: boolean;
   } | null;
-  if (det?.directAccess) {
-    return (
-      <BrowserDirectPanel
-        taskId={taskId}
-        title={opts.title}
-        autoCollapse={opts.autoCollapse}
-        persistId={step.id}
-      />
-    );
-  }
-  if (det?.liveBrowser?.available) {
-    return (
-      <BrowserVncPanel
-        taskId={taskId}
-        title={opts.title}
-        autoCollapse={opts.autoCollapse}
-        persistId={step.id}
-      />
-    );
-  }
-  return null;
+  // The browser surface (own-browser URL box OR in-app VNC) and the DB connection box are
+  // independent: a task may want neither, either, or both. Render them as siblings.
+  const browser = det?.directAccess ? (
+    <BrowserDirectPanel
+      taskId={taskId}
+      title={opts.title}
+      autoCollapse={opts.autoCollapse}
+      persistId={step.id}
+    />
+  ) : det?.liveBrowser?.available ? (
+    <BrowserVncPanel
+      taskId={taskId}
+      title={opts.title}
+      autoCollapse={opts.autoCollapse}
+      persistId={step.id}
+    />
+  ) : null;
+  const dbPanel = det?.dbAccess ? (
+    <DatabaseAccessPanel taskId={taskId} autoCollapse={opts.autoCollapse} persistId={step.id} />
+  ) : null;
+  if (!browser && !dbPanel) return null;
+  return (
+    <>
+      {browser}
+      {dbPanel}
+    </>
+  );
 }
 
 /** run_app hold step (99-run-app-ready): the live-app viewer. The viewing mode was
@@ -104,6 +112,7 @@ function RunAppReadyPanels({
     mode?: string;
     liveBrowser?: { available?: boolean };
     directAccess?: boolean;
+    dbAccess?: boolean;
     diffArtifactPath?: string | null;
   } | null;
   const showVnc = !!det?.liveBrowser?.available;
@@ -139,6 +148,14 @@ function RunAppReadyPanels({
           title="Open in your own browser"
           autoCollapse={autoCollapse}
           persistId={`${step.id}-direct`}
+        />
+      )}
+      {det?.dbAccess && (
+        <DatabaseAccessPanel
+          taskId={taskId}
+          title="Connect to the database"
+          autoCollapse={autoCollapse}
+          persistId={`${step.id}-db`}
         />
       )}
       {det?.diffArtifactPath && (

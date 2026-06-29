@@ -4,6 +4,7 @@ import {
   isHostPortCollision,
   parseProcNetRouteGateway,
   renderXdebugIni,
+  ddevDbInternalPort,
 } from './ddev-runner.js';
 
 // Pure recovery-path decision for ensureDdevStartedInner. The orchestrator gathers
@@ -131,5 +132,19 @@ describe('renderXdebugIni', () => {
     // against re-adding the band-aid that once masked a real infinite-recursion bug.)
     expect(renderXdebugIni('10.0.0.1', 2)).not.toContain('max_nesting_level');
     expect(renderXdebugIni('10.0.0.1', 3)).not.toContain('max_nesting_level');
+  });
+});
+
+describe('ddevDbInternalPort', () => {
+  // The db socat hop forwards to this port inside the project network; a wrong value
+  // is a silent connection failure (postgres on 3306 refuses), so pin the mapping.
+  it('maps the DDEV db engine to its container port', () => {
+    expect(ddevDbInternalPort('postgres')).toBe(5432);
+    expect(ddevDbInternalPort('mysql')).toBe(3306);
+    expect(ddevDbInternalPort('mariadb')).toBe(3306);
+  });
+  it('defaults unknown / absent engines to 3306 (DDEV runs mariadb by default)', () => {
+    expect(ddevDbInternalPort('')).toBe(3306);
+    expect(ddevDbInternalPort('sqlite')).toBe(3306);
   });
 });

@@ -71,6 +71,14 @@ export const CONFIG_KEYS = {
   // ports everywhere (runners start with no -p, exactly the pre-feature behavior)
   // without a redeploy. Read at runner START, so a mid-task flip needs a restart.
   BROWSER_DIRECT_ACCESS: 'config:sandbox:browserDirectAccess',
+  // Global kill-switch for direct database access: when 'true' (default), each
+  // per-task DDEV runner reserves a loopback host port at startup that a user can
+  // expose their project's database on (opt-in per task), so a local DB client can
+  // connect to 127.0.0.1:<port>. Set 'false' to stop reserving the port and refuse
+  // the per-task opt-in everywhere, without a redeploy. Read at runner START (the
+  // port reservation) and per bring-up (the socat listener), so a mid-task flip
+  // needs a runner restart to change the reservation.
+  DB_DIRECT_ACCESS: 'config:sandbox:dbDirectAccess',
   // Global switch for mid-run steering (default ON; a kill-switch). When 'true',
   // every Claude-family CLI step runs in stream-json input mode so a user can
   // inject steering messages (applied at the next tool-call boundary), and each

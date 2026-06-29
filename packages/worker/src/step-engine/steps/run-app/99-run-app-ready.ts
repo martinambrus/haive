@@ -2,6 +2,7 @@ import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
+import { CONFIG_KEYS, configService } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { ensureAppServing } from '../workflow/_app-runtime.js';
@@ -31,6 +32,9 @@ interface RunAppReadyDetect {
   liveBrowser: { available: boolean; appUrl: string | null } | null;
   /** Drives the own-browser URL panel (BrowserDirectPanel); the global feature flag. */
   directAccess: boolean;
+  /** Drives the DB connection panel (DatabaseAccessPanel) when the task opted into direct
+   *  database access and the global switch is on. Independent of the viewing mode. */
+  dbAccess: boolean;
   // Commit-back preview of the per-task worktree the runtime serves.
   workspacePath: string;
   hasGit: boolean;
@@ -113,6 +117,15 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     // Surface exactly the chosen surface: own-browser only in 'direct' mode, VNC
     // only in 'vnc' mode. The web renders whichever is set, with no toggle.
     const directAccess = viewMode === 'direct';
+    // Direct database access is independent of the viewing mode: show the DB panel whenever
+    // the task opted in and the global switch is on.
+    const dbTaskRow = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { exposeDbPort: true },
+    });
+    const dbAccess =
+      (dbTaskRow?.exposeDbPort ?? false) &&
+      (await configService.getBoolean(CONFIG_KEYS.DB_DIRECT_ACCESS, true));
 
     // The runtime live-binds the per-task worktree; commit-back acts on it.
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
@@ -148,6 +161,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       appUrl,
       liveBrowser: viewMode === 'vnc' && mode !== 'none' ? { available: true, appUrl } : null,
       directAccess,
+      dbAccess,
       workspacePath,
       hasGit,
       branch,

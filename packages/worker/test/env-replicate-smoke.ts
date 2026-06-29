@@ -244,6 +244,7 @@ async function main(): Promise<void> {
         browserCheckNetworkErrors: false,
         testAction: 'skip',
         testRunTests: false,
+        exposeDbPort: false,
         maxFixRounds: '5',
       },
       '07-phase-2-implement': { instructions: '' },

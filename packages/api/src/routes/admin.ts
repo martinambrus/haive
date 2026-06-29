@@ -397,6 +397,25 @@ adminRoutes.put('/config/debug-mode', async (c) => {
   return c.json({ enabled });
 });
 
+const dbAccessSchema = z.object({ enabled: z.boolean() });
+
+// Global direct-database-access kill-switch. The worker reads it at runner START
+// (the loopback db-port reservation) and per bring-up (the socat listener), within
+// the ~30s config cache; OFF stops new runners reserving the db port and refuses the
+// per-task opt-in everywhere, so no task can expose its database. A mid-task flip
+// needs a runner restart to change the reservation. Persists across restarts.
+adminRoutes.get('/config/db-access', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.DB_DIRECT_ACCESS, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/db-access', async (c) => {
+  const { enabled } = dbAccessSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.DB_DIRECT_ACCESS, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'direct database access switch updated');
+  return c.json({ enabled });
+});
+
 const fairSchedulingSchema = z.object({ enabled: z.boolean() });
 
 // Global fair cli-exec scheduling kill-switch. The worker reads this at each

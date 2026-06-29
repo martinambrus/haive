@@ -173,15 +173,22 @@ export async function startDdevRunner(params: {
   // ports are stamped as labels (read back by ddevAccessUrls) and the runner's
   // router is pointed at them below. Flag OFF => no -p, the pre-feature behavior.
   const directAccess = await configService.getBoolean(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, true);
+  // Direct database access (default on): like the app ports, this gates ONLY the
+  // create-time RESERVATION of a loopback host port (slot 2), never the per-task opt-in.
+  // 01c boots the runner before the opt-in is chosen at 06, and DDEV recovery reuses the
+  // runner without recreating, so the port must be reserved up front; the per-task opt-in
+  // later starts a socat hop onto it (maybeExposeDdevDbPort). The reserved port refuses
+  // connections until that listener exists, so a non-opted-in task stays fully closed.
+  const dbAccess = await configService.getBoolean(CONFIG_KEYS.DB_DIRECT_ACCESS, true);
   const caMount = ddevCaMountArgs();
   const buildRunArgs = (attempt: number): { args: string[]; ports: DdevPublishedPorts | null } => {
-    let publish: string[] = [];
+    const publish: string[] = [];
     let ports: DdevPublishedPorts | null = null;
     if (directAccess) {
       const https = taskHostPort(params.taskId, 0, attempt);
       const http = taskHostPort(params.taskId, 1, attempt);
       ports = { https, http };
-      publish = [
+      publish.push(
         '-p',
         `127.0.0.1:${https}:${https}`,
         '-p',
@@ -190,7 +197,14 @@ export async function startDdevRunner(params: {
         `${DDEV_HTTPS_PORT_LABEL}=${https}`,
         '--label',
         `${DDEV_HTTP_PORT_LABEL}=${http}`,
-      ];
+      );
+    }
+    // DB port reservation (slot 2). Kept OUT of `ports`/chosenPorts: it is a socat hop,
+    // not a DDEV-router port, so it must not feed the router-port config below. The
+    // actual (post-collision) value is stamped as a label, read back by ddevDbAccess.
+    if (dbAccess) {
+      const db = taskHostPort(params.taskId, 2, attempt);
+      publish.push('-p', `127.0.0.1:${db}:${db}`, '--label', `${DDEV_DB_PORT_LABEL}=${db}`);
     }
     return {
       ports,
@@ -216,7 +230,7 @@ export async function startDdevRunner(params: {
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 90_000 }).catch(() => {});
   let chosenPorts: DdevPublishedPorts | null = null;
   let started = false;
-  const maxAttempts = directAccess ? 5 : 1;
+  const maxAttempts = directAccess || dbAccess ? 5 : 1;
   for (let attempt = 0; attempt < maxAttempts && !started; attempt++) {
     const { args, ports } = buildRunArgs(attempt);
     try {
@@ -235,13 +249,13 @@ export async function startDdevRunner(params: {
           started = true;
         } catch (err2) {
           const msg2 = err2 instanceof Error ? err2.message : String(err2);
-          if (directAccess && isHostPortCollision(msg2)) continue; // bump ports, retry
+          if ((directAccess || dbAccess) && isHostPortCollision(msg2)) continue; // bump ports, retry
           throw err2;
         }
         continue;
       }
       // Host-port collision: the deterministic port is taken — bump and retry.
-      if (directAccess && isHostPortCollision(msg)) continue;
+      if ((directAccess || dbAccess) && isHostPortCollision(msg)) continue;
       throw err;
     }
   }
@@ -322,6 +336,12 @@ export async function startDdevRunner(params: {
  *  correct even when a host-port collision bumped the deterministic candidate. */
 const DDEV_HTTPS_PORT_LABEL = 'haive.ddev.httpsport';
 const DDEV_HTTP_PORT_LABEL = 'haive.ddev.httpport';
+
+/** Docker label stamping a DDEV runner's reserved loopback DB host port (the actual
+ *  post-collision value), read back by ddevDbAccess + the socat hop. Present only when
+ *  db access was on at runner start; absent => the port was never reserved, so the DB
+ *  can't be exposed without a runner recreate. */
+const DDEV_DB_PORT_LABEL = 'haive.ddev.dbport';
 
 interface DdevPublishedPorts {
   https: number;
@@ -430,6 +450,61 @@ async function readDdevPublishedPorts(name: string): Promise<DdevPublishedPorts 
   } catch {
     return null;
   }
+}
+
+// --- Direct database access (DDEV) --------------------------------------------
+
+/** A DDEV runner's reserved loopback DB host port (the post-collision value), or null
+ *  when db access was off at runner start (no label stamped → nothing to expose). The
+ *  authoritative source for both the socat listen port and the surfaced connection. */
+export async function readDdevDbPort(name: string): Promise<number | null> {
+  try {
+    const { stdout } = await exec(
+      'docker',
+      ['inspect', '-f', `{{index .Config.Labels "${DDEV_DB_PORT_LABEL}"}}`, name],
+      { timeout: 8_000 },
+    );
+    const port = Number(stdout.trim());
+    return Number.isFinite(port) && port ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The TCP port the DDEV db container listens on inside the project network, by engine:
+ *  3306 for mysql/mariadb, 5432 for postgres (DDEV's db service defaults). */
+export function ddevDbInternalPort(engine: string): number {
+  return engine === 'postgres' ? 5432 : 3306;
+}
+
+/** The connection endpoint for the task's DDEV database when exposed on the host: the
+ *  reserved loopback port (from the runner label) with DDEV's well-known default
+ *  credentials, as a `database`-kind TaskAccessEndpoint the web renders as copyable
+ *  fields + a ready connection URI. Empty when the port wasn't reserved (db access off
+ *  at runner start). The CALLER gates on the per-task opt-in + the global flag. */
+export async function ddevDbAccess(taskId: string, engine: string): Promise<TaskAccessEndpoint[]> {
+  const port = await readDdevDbPort(ddevRunnerName(taskId));
+  if (!port) return [];
+  const isPostgres = engine === 'postgres';
+  const host = '127.0.0.1';
+  const user = 'db';
+  const password = 'db';
+  const database = 'db';
+  const scheme = isPostgres ? 'postgresql' : 'mysql';
+  const label = isPostgres ? 'PostgreSQL' : engine === 'mariadb' ? 'MariaDB' : 'MySQL';
+  return [
+    {
+      kind: 'database',
+      label,
+      url: `${scheme}://${user}:${password}@${host}:${port}/${database}`,
+      engine,
+      host,
+      port,
+      user,
+      password,
+      database,
+    },
+  ];
 }
 
 /** Run a ddev subcommand inside the runner as the non-root `ddev` user, in the
@@ -1103,6 +1178,49 @@ async function ensureDdevNodeForward(handle: DdevRunnerHandle): Promise<void> {
     { timeout: 10_000 },
   ).catch(() => {});
   await startRunnerForward(handle.container, XDEBUG_NODE_PORT, `${webIp}:${XDEBUG_NODE_PORT}`);
+}
+
+/** Expose the task's DDEV database on the runner's reserved loopback host port: a socat
+ *  hop `runner:<dbPort> -> <nested db container IP>:<internalPort>`, so a host client
+ *  hitting `127.0.0.1:<dbPort>` (the create-time `-p`) reaches the project DB. The db
+ *  container IP drifts across a `ddev restart`/cold-boot (like the web IP), so always
+ *  refresh: drop any existing forwarder on the port, then start a fresh one to the CURRENT
+ *  IP. No-op when db access was off at runner start (no reserved port) or the project has
+ *  no reachable `db` service (sqlite / `omit_containers: [db]`). Best-effort: logs, never
+ *  throws. */
+export async function ensureDdevDbForward(
+  handle: DdevRunnerHandle,
+  taskId: string,
+  engine: string,
+): Promise<void> {
+  const dbPort = await readDdevDbPort(handle.container);
+  if (!dbPort) return; // db access was off at runner start — nothing reserved to serve
+  // The DDEV web container resolves `db` to the db container on the project network; the
+  // runner (the db container's docker host) reaches that IP directly, same as the
+  // node-forward web IP. Empty/no-resolve => no db service to expose.
+  const res = await ddevExec(handle, 'exec getent hosts db', { timeoutMs: 15_000 });
+  const dbIp = res.output.match(/\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/)?.[1];
+  if (!dbIp) {
+    log.info(
+      { taskId, container: handle.container },
+      'ddev db service not resolvable; db port not exposed',
+    );
+    return;
+  }
+  const internalPort = ddevDbInternalPort(engine);
+  // pkill runs as its own exec (process `pkill`, excludes its own pid) so it never matches
+  // itself; after it port `dbPort` is free, so startRunnerForward's port guard starts the
+  // fresh forwarder to the current IP.
+  await exec(
+    'docker',
+    ['exec', '-u', 'ddev', handle.container, 'pkill', '-f', `socat.*TCP-LISTEN:${dbPort}`],
+    { timeout: 10_000 },
+  ).catch(() => {});
+  await startRunnerForward(handle.container, dbPort, `${dbIp}:${internalPort}`);
+  log.info(
+    { taskId, container: handle.container, dbPort, engine },
+    'ddev db port exposed on host loopback',
+  );
 }
 
 /** Tear down every DinD runner for a task (container + its anon docker volume).

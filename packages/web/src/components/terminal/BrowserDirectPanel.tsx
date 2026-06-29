@@ -11,7 +11,7 @@ import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 // VNC bridge uses, so it returns once the app is serving and its port is published.
 
 interface AccessEndpoint {
-  kind: 'localhost' | 'ddev-http' | 'ddev-https' | 'proxy-subdomain';
+  kind: 'localhost' | 'ddev-http' | 'ddev-https' | 'proxy-subdomain' | 'database';
   label: string;
   url: string;
   trusted?: boolean;
@@ -65,8 +65,12 @@ export function BrowserDirectPanel({
         setState('disabled');
         return;
       }
-      if (data.accessUrls.length > 0) {
-        setUrls(data.accessUrls);
+      // Browser-only: a `database` endpoint can ride the same accessUrls payload (the
+      // DatabaseAccessPanel renders that). Drop it here, and base ready/empty on the
+      // browser subset — else a db-only payload would flip to 'ready' with an empty list.
+      const browserUrls = data.accessUrls.filter((u) => u.kind !== 'database');
+      if (browserUrls.length > 0) {
+        setUrls(browserUrls);
         retriesRef.current = 0;
         setState('ready');
         return;

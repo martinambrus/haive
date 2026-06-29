@@ -1,15 +1,23 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
-import { logger, ideRunnerName } from '@haive/shared';
+import {
+  logger,
+  ideRunnerName,
+  CONFIG_KEYS,
+  configService,
+  type TaskAccessEndpoint,
+} from '@haive/shared';
 import { schema, type Database } from '@haive/database';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { pathExists } from '../onboarding/_helpers.js';
-import { ddevUrlFromConfigText } from '../_ddev-config.js';
+import { ddevUrlFromConfigText, parseDdevConfig } from '../_ddev-config.js';
 import {
   ensureDdevStarted,
   ensureDdevXdebug,
+  ensureDdevDbForward,
+  ddevDbAccess,
   ddevPrimaryUrl,
   type DdevRunnerHandle,
 } from '../../../sandbox/ddev-runner.js';
@@ -225,6 +233,11 @@ export async function ensureDdevWithProgress(
   // minimal; runs on EVERY DDEV bring-up (first boot, warm-recover, cold-boot) so a
   // gateway change across a cold-boot is re-applied. Never fails the bring-up.
   await maybeWireDdevXdebug(ctx, handle, repoSubpath);
+  // Direct database access: when the task opted in, (re)expose its DDEV database on the
+  // runner's reserved loopback host port (a socat hop to the nested db container) so a
+  // local DB client can connect. Idempotent; runs on EVERY bring-up (re-resolves the db
+  // IP after a restart). Never fails the bring-up.
+  await maybeExposeDdevDbPort(ctx, handle, repoSubpath);
   return handle;
 }
 
@@ -255,5 +268,74 @@ async function maybeWireDdevXdebug(
       { taskId: ctx.taskId, err: err instanceof Error ? err.message : String(err) },
       'xdebug wiring failed (app unaffected)',
     );
+  }
+}
+
+/** Worker-side root of the haive_repos volume (the worktree's .ddev/config.yaml lives at
+ *  <root>/<repoSubpath>/.ddev/config.yaml). Mirrors ddev-runner's XDEBUG_REPO_STORAGE_ROOT. */
+const REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
+
+/** The task's DDEV database engine from the worktree config: `mariadb` | `mysql` |
+ *  `postgres`. DDEV runs a mariadb db container by default when the config omits the
+ *  `database:` block (Haive-generated configs do), so a null/absent type means mariadb —
+ *  NOT "no database". Actual reachability is self-gated downstream (getent hosts db). */
+async function resolveTaskDbEngine(repoSubpath: string): Promise<string> {
+  const cfgPath = path.join(REPO_STORAGE_ROOT, repoSubpath, '.ddev', 'config.yaml');
+  const text = await readFile(cfgPath, 'utf8').catch(() => null);
+  return (text ? parseDdevConfig(text).dbType : null) ?? 'mariadb';
+}
+
+/** Expose a db-opt-in task's DDEV database on the runner's reserved loopback host port
+ *  (no-op otherwise). Reads the task's expose_db_port flag + the global kill-switch and,
+ *  when both on, resolves the engine and (re)starts the socat hop. Best-effort: swallows
+ *  errors so a db-exposure failure never breaks the DDEV bring-up the caller depends on. */
+async function maybeExposeDdevDbPort(
+  ctx: Pick<AppRuntimeCtx, 'taskId' | 'db'>,
+  handle: DdevRunnerHandle,
+  repoSubpath: string,
+): Promise<void> {
+  // Whole body is best-effort: the task lookup is inside the try too, so a transient
+  // schema mismatch (column not yet migrated) or a mock db without the column never
+  // breaks the DDEV bring-up the caller depends on.
+  try {
+    const task = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { exposeDbPort: true },
+    });
+    if (!task?.exposeDbPort) return;
+    if (!(await configService.getBoolean(CONFIG_KEYS.DB_DIRECT_ACCESS, true))) return;
+    const engine = await resolveTaskDbEngine(repoSubpath);
+    await ensureDdevDbForward(handle, ctx.taskId, engine);
+  } catch (err) {
+    rtLog.warn(
+      { taskId: ctx.taskId, err: err instanceof Error ? err.message : String(err) },
+      'db-port exposure failed (app unaffected)',
+    );
+  }
+}
+
+/** The db-access endpoints (kind `database`) for a task that opted into db exposure with
+ *  the global switch on; empty otherwise. The runtime-ensure surface appends these to
+ *  accessUrls so the /db-access route and the browser /access-urls route read the same job
+ *  result. Engine from the worktree config (mariadb default); repoSubpath from the handle. */
+export async function resolveDdevDbAccess(
+  db: Database,
+  taskId: string,
+  handle: DdevRunnerHandle,
+): Promise<TaskAccessEndpoint[]> {
+  // Best-effort surface: any failure (schema mismatch, missing column) yields no db
+  // endpoint rather than breaking the runtime-ensure that also drives the VNC panel.
+  try {
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { exposeDbPort: true },
+    });
+    if (!task?.exposeDbPort) return [];
+    if (!(await configService.getBoolean(CONFIG_KEYS.DB_DIRECT_ACCESS, true))) return [];
+    const repoSubpath = handle.projectDir.replace(/^\/repos\//, '');
+    const engine = await resolveTaskDbEngine(repoSubpath);
+    return await ddevDbAccess(taskId, engine);
+  } catch {
+    return [];
   }
 }
