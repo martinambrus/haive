@@ -256,6 +256,16 @@ export async function executeCliSpec(
     mergedSpec.env.ANTHROPIC_AUTH_TOKEN = mergedSpec.env.OLLAMA_API_KEY;
     mergedSpec.env.ANTHROPIC_API_KEY = mergedSpec.env.OLLAMA_API_KEY;
   }
+  // Global opt-in: when prompt-caching-1h is ON, ask the claude binary to use the
+  // 1-hour cache TTL (default 5-min on API-key/Bedrock; subscription is already 1h).
+  // Gated on the claude-family stream-json output so codex/gemini are untouched;
+  // harmless on non-Anthropic claude-family backends (zai/ollama ignore the flag).
+  if (
+    mergedSpec.outputFormat === 'claude-stream-json' &&
+    (await configService.getBoolean(CONFIG_KEYS.PROMPT_CACHING_1H, false))
+  ) {
+    mergedSpec.env.ENABLE_PROMPT_CACHING_1H = '1';
+  }
   const spawner: CliSpawner = createSandboxSpawner(
     wrapperContent,
     sandboxImage,

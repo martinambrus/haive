@@ -345,6 +345,25 @@ adminRoutes.put('/config/steering', async (c) => {
   return c.json({ enabled });
 });
 
+const promptCaching1hSchema = z.object({ enabled: z.boolean() });
+
+// Global 1-hour prompt-cache TTL opt-in (default OFF). When ON, claude-family cli-exec
+// invocations set ENABLE_PROMPT_CACHING_1H=1 so API-key/Bedrock/Vertex runs use the 1h
+// cache TTL (subscription auth is already 1h). 1h cache write costs 2x base input vs the
+// 5-min default's 1.25x, so leave OFF unless steps reuse the prefix within the hour. The
+// worker reads it per cli dispatch (~30s config cache); no redeploy needed.
+adminRoutes.get('/config/prompt-caching-1h', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.PROMPT_CACHING_1H, false);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/prompt-caching-1h', async (c) => {
+  const { enabled } = promptCaching1hSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.PROMPT_CACHING_1H, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'global prompt-caching-1h switch updated');
+  return c.json({ enabled });
+});
+
 const browserAccessSchema = z.object({ enabled: z.boolean() });
 
 // Global direct-browser-access kill-switch. The worker reads this at runner START

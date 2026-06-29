@@ -44,6 +44,8 @@ export default function AdminPage() {
   const [savingDdevRegistryCache, setSavingDdevRegistryCache] = useState(false);
   const [fairEnabled, setFairEnabled] = useState<boolean | null>(null);
   const [savingFair, setSavingFair] = useState(false);
+  const [promptCaching1hEnabled, setPromptCaching1hEnabled] = useState<boolean | null>(null);
+  const [savingPromptCaching1h, setSavingPromptCaching1h] = useState(false);
   const [maxPerTask, setMaxPerTask] = useState<number | null>(null);
   const [maxPerTaskInput, setMaxPerTaskInput] = useState('');
   const [savingPerTask, setSavingPerTask] = useState(false);
@@ -67,6 +69,7 @@ export default function AdminPage() {
         fairData,
         perTaskData,
         attachmentData,
+        promptCaching1hData,
       ] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
@@ -80,6 +83,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
         api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
         api.get<{ maxBytes: number }>('/admin/config/attachment-max-bytes'),
+        api.get<{ enabled: boolean }>('/admin/config/prompt-caching-1h'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
@@ -92,6 +96,7 @@ export default function AdminPage() {
       setDbAccessEnabled(dbAccessData.enabled);
       setDdevRegistryCacheEnabled(ddevRegistryCacheData.enabled);
       setFairEnabled(fairData.enabled);
+      setPromptCaching1hEnabled(promptCaching1hData.enabled);
       setMaxPerTask(perTaskData.maxAgentsPerTask);
       setMaxPerTaskInput(String(perTaskData.maxAgentsPerTask));
       setAttachmentMaxBytes(attachmentData.maxBytes);
@@ -219,6 +224,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update steering');
     } finally {
       setSavingSteering(false);
+    }
+  }
+
+  async function setPromptCaching1h(next: boolean) {
+    setSavingPromptCaching1h(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/prompt-caching-1h', {
+        enabled: next,
+      });
+      setPromptCaching1hEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update prompt caching');
+    } finally {
+      setSavingPromptCaching1h(false);
     }
   }
 
@@ -523,6 +543,32 @@ export default function AdminPage() {
             />
             {steeringEnabled ? 'Enabled' : 'Disabled'}
             {savingSteering && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {promptCaching1hEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>1-hour prompt cache (claude-family)</CardTitle>
+            <CardDescription>
+              Opts API-key / Bedrock / Vertex claude-family CLI steps into the 1-hour prompt-cache
+              TTL (subscription auth already uses 1h). The 1h cache write costs 2x base input vs the
+              5-min default&apos;s 1.25x, so enable this only when steps reuse the cached prefix
+              within the hour &mdash; check the per-step token panel (cache read vs write). Default
+              OFF; takes effect within ~30s, persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={promptCaching1hEnabled}
+              disabled={savingPromptCaching1h}
+              onChange={(e) => void setPromptCaching1h(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {promptCaching1hEnabled ? 'Enabled' : 'Disabled'}
+            {savingPromptCaching1h && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

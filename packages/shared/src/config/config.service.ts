@@ -54,6 +54,14 @@ export const CONFIG_KEYS = {
   // starved user instead of the next FIFO job from one task's fan-out. Set 'false'
   // to restore plain FIFO live without a redeploy.
   FAIR_SCHEDULING_ENABLED: 'config:worker:fairScheduling',
+  // Global opt-in (default OFF) for the 1-hour prompt-cache TTL on Claude-family CLI
+  // steps. When 'true', cli-exec sets ENABLE_PROMPT_CACHING_1H=1 so API-key / Bedrock /
+  // Vertex claude runs use the 1h cache TTL (subscription auth is already 1h
+  // automatically). The 1h cache write costs 2x base input vs the 5-min default's 1.25x,
+  // so it only pays off when a step reuses the cached prefix 2+ times within the hour;
+  // leave OFF unless the per-step token panel shows that reuse. Read per cli dispatch
+  // (~30s config cache); a flip needs no redeploy.
+  PROMPT_CACHING_1H: 'config:caching:promptCaching1h',
 
   HOST_REPO_ROOT: 'config:filesystem:hostRepoRoot',
   REPO_STORAGE_PATH: 'config:filesystem:repoStoragePath',
@@ -151,6 +159,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS]: 'false',
   [CONFIG_KEYS.MODEL_HEALTH_CHECK_ENABLED]: 'true',
   [CONFIG_KEYS.FAIR_SCHEDULING_ENABLED]: 'true',
+  [CONFIG_KEYS.PROMPT_CACHING_1H]: 'false',
   [CONFIG_KEYS.HOST_REPO_ROOT]: '/host-fs',
   [CONFIG_KEYS.REPO_STORAGE_PATH]: '/var/lib/haive/repos',
   [CONFIG_KEYS.CLAWKER_BIN]: '/usr/local/bin/clawker',
