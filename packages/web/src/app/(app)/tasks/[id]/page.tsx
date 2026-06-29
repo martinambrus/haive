@@ -297,6 +297,12 @@ export default function TaskDetailPage() {
   // fix loop_back) makes the active step jump BACKWARD to a lower stepIndex; forward flow
   // only ever increases it. Used to force the follow-scroll on a backward jump.
   const prevActiveStepIndexRef = useRef<number | null>(null);
+  // The previously-active step's id, captured null-tick resistant (updated only
+  // when an active step exists, so a transient "no active step" tick between
+  // steps — e.g. a 0s auto-advancing 06a-db-migrate — doesn't wipe it). Used to
+  // tell whether the user is still looking at the just-finished step when the
+  // active step advances forward to one that's below the fold.
+  const prevActiveIdRef = useRef<string | null>(null);
   // One-shot guard so the scroll-to-bottom-on-completion fires once per
   // completion (reset if the task leaves 'completed', e.g. a retry).
   const completedScrolledRef = useRef(false);
@@ -414,11 +420,13 @@ export default function TaskDetailPage() {
     // so a transient "no active step" tick between steps doesn't reset the baseline.
     const activeStepIndex = activeStep?.stepIndex ?? null;
     const prevActiveStepIndex = prevActiveStepIndexRef.current;
+    const prevActiveId = prevActiveIdRef.current;
     const loopReentry =
       activeStepIndex !== null &&
       prevActiveStepIndex !== null &&
       activeStepIndex < prevActiveStepIndex;
     if (activeStepIndex !== null) prevActiveStepIndexRef.current = activeStepIndex;
+    if (activeId !== null) prevActiveIdRef.current = activeId;
     const showsTerminal =
       (activeStep?.cliInvocationCount ?? 0) > 0 &&
       (activeStep?.status === 'running' || activeStep?.status === 'waiting_cli');
@@ -471,9 +479,23 @@ export default function TaskDetailPage() {
       const activeStepEl = container.querySelector(`[data-step-id="${activeId}"]`);
       const rect = activeStepEl?.getBoundingClientRect();
       const activeStepInView = !rect || (rect.top < window.innerHeight && rect.bottom > 0);
+      // A forward advance lands the new active step below the fold whenever the
+      // just-finished step's card filled the viewport (e.g. confirming the tall
+      // 06-run-config form, which then auto-advances 0s through 06a-db-migrate into
+      // 06b): the new step is off-screen, so the in-view guard below would wrongly
+      // skip the follow. Treat "the previously-active step is still in view" as "the
+      // user is still watching the flow" and follow forward anyway. This stays
+      // distinct from a user who scrolled far away during a long run — there the prev
+      // step is off-screen too, so the guard still holds and we don't yank them.
+      const prevActiveEl = prevActiveId
+        ? container.querySelector(`[data-step-id="${prevActiveId}"]`)
+        : null;
+      const prevRect = prevActiveEl?.getBoundingClientRect();
+      const prevActiveInView =
+        !!prevRect && prevRect.top < window.innerHeight && prevRect.bottom > 0;
       // A loop re-entry (backward jump) overrides the don't-yank-if-off-screen guard: the
       // user just rejected / triggered a re-run and should be followed to the re-entered step.
-      if (didInitialScrollRef.current && !activeStepInView && !loopReentry) {
+      if (didInitialScrollRef.current && !activeStepInView && !prevActiveInView && !loopReentry) {
         prevScrollKeyRef.current = scrollKey;
         return;
       }
