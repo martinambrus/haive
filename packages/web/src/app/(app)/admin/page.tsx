@@ -46,6 +46,8 @@ export default function AdminPage() {
   const [savingFair, setSavingFair] = useState(false);
   const [promptCaching1hEnabled, setPromptCaching1hEnabled] = useState<boolean | null>(null);
   const [savingPromptCaching1h, setSavingPromptCaching1h] = useState(false);
+  const [tersenessLevel, setTersenessLevel] = useState<string | null>(null);
+  const [savingTerseness, setSavingTerseness] = useState(false);
   const [maxPerTask, setMaxPerTask] = useState<number | null>(null);
   const [maxPerTaskInput, setMaxPerTaskInput] = useState('');
   const [savingPerTask, setSavingPerTask] = useState(false);
@@ -70,6 +72,7 @@ export default function AdminPage() {
         perTaskData,
         attachmentData,
         promptCaching1hData,
+        tersenessData,
       ] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
@@ -84,6 +87,7 @@ export default function AdminPage() {
         api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
         api.get<{ maxBytes: number }>('/admin/config/attachment-max-bytes'),
         api.get<{ enabled: boolean }>('/admin/config/prompt-caching-1h'),
+        api.get<{ level: string }>('/admin/config/terseness'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
@@ -97,6 +101,7 @@ export default function AdminPage() {
       setDdevRegistryCacheEnabled(ddevRegistryCacheData.enabled);
       setFairEnabled(fairData.enabled);
       setPromptCaching1hEnabled(promptCaching1hData.enabled);
+      setTersenessLevel(tersenessData.level);
       setMaxPerTask(perTaskData.maxAgentsPerTask);
       setMaxPerTaskInput(String(perTaskData.maxAgentsPerTask));
       setAttachmentMaxBytes(attachmentData.maxBytes);
@@ -239,6 +244,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update prompt caching');
     } finally {
       setSavingPromptCaching1h(false);
+    }
+  }
+
+  async function setTerseness(next: string) {
+    setSavingTerseness(true);
+    try {
+      const result = await api.put<{ level: string }>('/admin/config/terseness', {
+        level: next,
+      });
+      setTersenessLevel(result.level);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update terseness');
+    } finally {
+      setSavingTerseness(false);
     }
   }
 
@@ -569,6 +589,33 @@ export default function AdminPage() {
             />
             {promptCaching1hEnabled ? 'Enabled' : 'Disabled'}
             {savingPromptCaching1h && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {tersenessLevel !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Output terseness</CardTitle>
+            <CardDescription>
+              Global style directive appended to every CLI step&apos;s main prompt, controlling how
+              terse the model&apos;s PROSE output is. Structured output (JSON, code, diffs, specs)
+              and the reasoning channel are always left exact and untouched. lite = lightest, full =
+              default, ultra = most aggressive. Takes effect within ~30s; persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <select
+              value={tersenessLevel}
+              disabled={savingTerseness}
+              onChange={(e) => void setTerseness(e.target.value)}
+              className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm"
+            >
+              <option value="lite">lite</option>
+              <option value="full">full</option>
+              <option value="ultra">ultra</option>
+            </select>
+            {savingTerseness && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

@@ -364,6 +364,24 @@ adminRoutes.put('/config/prompt-caching-1h', async (c) => {
   return c.json({ enabled });
 });
 
+const tersenessSchema = z.object({ level: z.enum(['lite', 'full', 'ultra']) });
+
+// Global output terseness level (lite | full | ultra; default full). Appended as a
+// prose-only style directive to each CLI step's main prompt — structured output, code,
+// and specs are carved out, and reasoning is untouched. The worker reads it per cli
+// dispatch (~30s config cache); a change needs no redeploy.
+adminRoutes.get('/config/terseness', async (c) => {
+  const level = (await configService.get(CONFIG_KEYS.TERSENESS_LEVEL)) ?? 'full';
+  return c.json({ level });
+});
+
+adminRoutes.put('/config/terseness', async (c) => {
+  const { level } = tersenessSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.TERSENESS_LEVEL, level);
+  log.info({ level }, 'global terseness level updated');
+  return c.json({ level });
+});
+
 const browserAccessSchema = z.object({ enabled: z.boolean() });
 
 // Global direct-browser-access kill-switch. The worker reads this at runner START

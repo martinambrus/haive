@@ -34,6 +34,7 @@ import { resolveMergePhase } from './merge-resolver.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
 import { augmentPromptWithAttachments } from './attachments-context.js';
+import { augmentPromptWithTerseness } from './terseness-context.js';
 
 const log = logger.child({ module: 'step-runner' });
 
@@ -490,6 +491,9 @@ async function resolveLlmPhase(
   // Make every CLI adapter aware of user-attached task files (the prompt flows
   // through the dispatcher unchanged). No-op when the task has no attachments.
   prompt = await augmentPromptWithAttachments(db, params.taskId, prompt);
+  // Append the global, admin-configured terseness directive (prose only; structured
+  // output and reasoning are carved out / untouched). Default level is 'full'.
+  prompt = await augmentPromptWithTerseness(prompt);
   // Multi-CLI loop steps pick a role per iteration (e.g. reviewer vs corrector);
   // the resolved provider differs per role. Non-loop steps resolve 'default'.
   const role = stepDef.loop?.resolveRole?.(upcomingIteration) ?? 'default';

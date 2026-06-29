@@ -141,7 +141,20 @@ export const CONFIG_KEYS = {
   GLOBAL_KB_EMBED_MODEL: 'config:globalKb:embedModel',
   GLOBAL_KB_EMBED_DIMS: 'config:globalKb:embedDims',
   GLOBAL_KB_ARCHIVE_RETENTION_DAYS: 'config:globalKb:archiveRetentionDays',
+
+  // Global terseness level for agent OUTPUT prose, applied as a directive appended to
+  // each CLI step's main prompt (lite | full | ultra; default full). Only the model's
+  // prose is affected — the directive carves out JSON/code/diffs/specs so structured
+  // output stays exact, and reasoning (extended thinking) is a separate channel left
+  // untouched. The manifest-hashed agent .md files keep the fixed 'full' block; this
+  // level governs only the runtime step-prompt injection. Read per cli dispatch (~30s
+  // config cache); a change needs no redeploy.
+  TERSENESS_LEVEL: 'config:output:tersenessLevel',
 } as const;
+
+/** Allowed terseness levels for CONFIG_KEYS.TERSENESS_LEVEL (output prose only). */
+export const TERSENESS_LEVELS = ['lite', 'full', 'ultra'] as const;
+export type TersenessLevel = (typeof TERSENESS_LEVELS)[number];
 
 const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.API_PORT]: '3001',
@@ -181,6 +194,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.GLOBAL_KB_MODE]: 'internal',
   [CONFIG_KEYS.GLOBAL_KB_NAMESPACE]: 'default',
   [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS]: '2560',
+  [CONFIG_KEYS.TERSENESS_LEVEL]: 'full',
 };
 
 export class ConfigService {
