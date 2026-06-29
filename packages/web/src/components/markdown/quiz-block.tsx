@@ -1,8 +1,34 @@
 'use client';
 
 import { useState } from 'react';
+import ReactMarkdown, { type Components } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { cn } from '@/lib/cn';
 import type { ParsedQuiz } from './quiz-parser';
+
+/** Renders quiz prompt/option/explanation strings as inline markdown. The `p`
+ *  override unwraps the block paragraph so output is phrasing content only
+ *  (text, `<em>`, `<strong>`, `<code>`, `<a>`) — safe both next to the Q-number
+ *  span and inside an option `<button>`, where a nested `<p>`/`<div>` would be
+ *  invalid. Links open in a new tab to match MarkdownView. */
+const INLINE_COMPONENTS: Components = {
+  p: ({ children }) => <>{children}</>,
+  a({ node: _node, children, ...rest }) {
+    return (
+      <a {...rest} target="_blank" rel="noopener noreferrer">
+        {children}
+      </a>
+    );
+  },
+};
+
+function InlineMarkdown({ text }: { text: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={INLINE_COMPONENTS}>
+      {text}
+    </ReactMarkdown>
+  );
+}
 
 /** Interactive comprehension quiz rendered from the spec's final
  *  `## Comprehension Quiz` section. Click an answer to reveal whether it was
@@ -36,7 +62,7 @@ export function QuizBlock({ quiz }: { quiz: ParsedQuiz }) {
           <div key={qIdx} className="flex flex-col gap-1.5">
             <p className="text-sm text-neutral-100">
               <span className="mr-1.5 font-mono text-xs text-neutral-500">Q{qIdx + 1}</span>
-              {question.prompt}
+              <InlineMarkdown text={question.prompt} />
             </p>
             <div className="flex flex-col gap-1">
               {question.options.map((option, oIdx) => {
@@ -65,7 +91,7 @@ export function QuizBlock({ quiz }: { quiz: ParsedQuiz }) {
                         {option.correct ? '✓' : isPicked ? '✗' : '·'}
                       </span>
                     )}
-                    {option.text}
+                    <InlineMarkdown text={option.text} />
                   </button>
                 );
               })}
@@ -77,8 +103,12 @@ export function QuizBlock({ quiz }: { quiz: ParsedQuiz }) {
                 ) : (
                   <span className="font-medium text-red-400">Not quite. </span>
                 )}
-                {question.explanation ??
-                  `The correct answer is: ${question.options.find((o) => o.correct)?.text ?? ''}`}
+                <InlineMarkdown
+                  text={
+                    question.explanation ??
+                    `The correct answer is: ${question.options.find((o) => o.correct)?.text ?? ''}`
+                  }
+                />
               </p>
             )}
           </div>
