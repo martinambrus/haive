@@ -287,6 +287,12 @@ export default function TaskDetailPage() {
   // re-runs when the terminal mounts (not only when the active step changes).
   const prevScrollKeyRef = useRef<string | null>(null);
   const scrollTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  // One-shot guard: the very first auto-scroll after the page loads is allowed
+  // even when the active step is off-screen (brings it into view). Every scroll
+  // after that is gated on the active step being in view, so the page never
+  // yanks a user who scrolled away to re-read an earlier step. Reset on task id
+  // change (the route component can persist across :id changes).
+  const didInitialScrollRef = useRef(false);
   // One-shot guard so the scroll-to-bottom-on-completion fires once per
   // completion (reset if the task leaves 'completed', e.g. a retry).
   const completedScrolledRef = useRef(false);
@@ -421,6 +427,22 @@ export default function TaskDetailPage() {
         return true;
       };
 
+      // Follow the active step into view only when the user is already looking
+      // at it. If they've scrolled away (e.g. up to re-read an earlier step's
+      // review output), don't yank the page to the newly-active step or its
+      // terminal. The first scroll after load is exempt so the initially
+      // off-screen active step is still brought into view. The transition key
+      // is consumed either way, so a skipped scroll won't re-fire when the user
+      // scrolls back on their own.
+      const activeStepEl = container.querySelector(`[data-step-id="${activeId}"]`);
+      const rect = activeStepEl?.getBoundingClientRect();
+      const activeStepInView = !rect || (rect.top < window.innerHeight && rect.bottom > 0);
+      if (didInitialScrollRef.current && !activeStepInView) {
+        prevScrollKeyRef.current = scrollKey;
+        return;
+      }
+      didInitialScrollRef.current = true;
+
       if (!showsTerminal || !auto) {
         scrollToHeader();
         // The just-finished step's terminal collapses a tick later (its
@@ -451,6 +473,13 @@ export default function TaskDetailPage() {
 
   // Clear any pending scroll retries on unmount.
   useEffect(() => () => scrollTimersRef.current.forEach(clearTimeout), []);
+
+  // The route component can survive an :id change without remounting; reset the
+  // initial-scroll guard so a freshly opened task still scrolls to its active
+  // step once.
+  useEffect(() => {
+    didInitialScrollRef.current = false;
+  }, [id]);
 
   // When the task completes, trailing CTAs render BELOW the last step: the
   // KB-draft "Review N drafts" button, the upgrade "Back to repositories"
