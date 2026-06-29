@@ -15,8 +15,11 @@ const log = logger.child({ module: 'step-context-usage' });
  *
  * Best-effort: skips deterministic steps (no CLI invocations -> peak 0 -> columns stay
  * null) and is called inside a .catch() at the finalize so it never fails a step.
+ *
+ * Returns the provider id whose allowance this step consumed (the peak invocation's),
+ * or null for a deterministic step — the caller uses it to refresh the usage meters.
  */
-export async function writeStepContextUsage(db: Database, stepId: string): Promise<void> {
+export async function writeStepContextUsage(db: Database, stepId: string): Promise<string | null> {
   const invs = await db
     .select({
       tokenUsage: schema.cliInvocations.tokenUsage,
@@ -43,7 +46,7 @@ export async function writeStepContextUsage(db: Database, stepId: string): Promi
       peakProviderId = r.cliProviderId;
     }
   }
-  if (peak <= 0) return; // deterministic step / no usable token data -> leave columns null
+  if (peak <= 0) return null; // deterministic step / no usable token data -> leave columns null
 
   let providerName: string | null = null;
   let model: string | null = null;
@@ -91,4 +94,5 @@ export async function writeStepContextUsage(db: Database, stepId: string): Promi
     { stepId, peak, windowSize, leftPct, usageFiveHourPct, usageSevenDayPct, usageDailyPct },
     'recorded step context + allowance usage',
   );
+  return peakProviderId;
 }

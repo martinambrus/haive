@@ -22,6 +22,7 @@ import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { isOutputTruncationMessage } from '../queues/cli-exec/failure-class.js';
+import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
 import {
   TaskCancelledError,
   type AgentMiningResult,
@@ -1474,10 +1475,18 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     });
 
     // Surface B: freeze context-window usage on the finished step (best-effort; never
-    // blocks completion). No-op for deterministic steps (no CLI invocations).
-    await writeStepContextUsage(db, current.id).catch((err) => {
+    // blocks completion). No-op for deterministic steps (no CLI invocations). Returns
+    // the provider whose allowance this step consumed, or null.
+    const usageProviderId = await writeStepContextUsage(db, current.id).catch((err) => {
       log.warn({ err, stepId: meta.id }, 'failed to record step context usage');
+      return null;
     });
+    // A CLI step just consumed subscription allowance — kick a gentle usage poll so the
+    // header meters and this step's stamp reflect it promptly (throttled per provider).
+    if (usageProviderId)
+      await enqueueUsagePollTick().catch((err) => {
+        log.warn({ err, stepId: meta.id }, 'failed to enqueue usage poll after step');
+      });
 
     return { status: 'done', row: done, output };
   } catch (err) {

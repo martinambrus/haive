@@ -38,6 +38,23 @@ const BACKOFF_MAX_MS = 6 * 60 * 60 * 1000;
 /** Per-provider 429 backoff, kept in-process (the poll worker is a singleton). */
 const backoff = new Map<string, { until: number; strikes: number }>();
 
+// Extra cushion over a vendor's documented minimum so clock drift / vendor-side
+// rounding can't push a call under the limit and trigger a permanent 429.
+const POLL_LEEWAY_MS = 10 * 1000;
+// Minimum time between actual vendor calls per provider. The repeatable 5-min tick
+// always clears this; the extra step-finish-triggered ticks (enqueueUsagePollTick) are
+// throttled to it so a burst of finishing steps can't hammer a rate-limited endpoint.
+// Claude 429s permanently below ~180s; others are undocumented -> a gentle default.
+const MIN_POLL_INTERVAL_MS: Partial<Record<CliProviderName, number>> = {
+  'claude-code': 180 * 1000 + POLL_LEEWAY_MS,
+};
+const DEFAULT_MIN_POLL_INTERVAL_MS = 60 * 1000 + POLL_LEEWAY_MS;
+
+/** Per-provider time of the last actual vendor call (in-process; the poll worker is a
+ *  singleton). Drives the min-interval throttle; cleared on restart, where a fresh boot
+ *  poll is fine. */
+const lastPollAt = new Map<string, number>();
+
 let queueSingleton: Queue | null = null;
 function getUsagePollQueue(): Queue {
   if (!queueSingleton) {
@@ -60,6 +77,14 @@ export async function scheduleUsagePollTick(): Promise<void> {
     { every: POLL_BASE_INTERVAL_MS },
     { name: POLL_JOB_NAME, opts: { removeOnComplete: true, removeOnFail: 10 } },
   );
+}
+
+/** Enqueue a one-off poll tick (e.g. right after an LLM step finishes) so the header
+ *  usage meters + the per-step stamp refresh promptly instead of only on the 5-min
+ *  repeatable. The per-provider min-interval throttle in pollProvider keeps it gentle —
+ *  a vendor is never called more often than its rate limit allows. */
+export async function enqueueUsagePollTick(): Promise<void> {
+  await getUsagePollQueue().add(POLL_JOB_NAME, {}, { removeOnComplete: true, removeOnFail: 10 });
 }
 
 interface ProviderRow {
@@ -198,8 +223,14 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
   const bo = backoff.get(provider.id);
   if (bo && Date.now() < bo.until) return; // still backing off after a 429
 
+  // Min-interval throttle: never call a vendor more often than its rate limit allows.
+  // The 5-min repeatable tick always clears this; step-finish-triggered ticks may not.
+  const minInterval = MIN_POLL_INTERVAL_MS[provider.name] ?? DEFAULT_MIN_POLL_INTERVAL_MS;
+  if (Date.now() - (lastPollAt.get(provider.id) ?? 0) < minInterval) return;
+
   const creds = await resolveToken(db, provider, cfg);
   if (!creds) return; // not logged in / no token -> skip silently (no error row)
+  lastPollAt.set(provider.id, Date.now()); // record the actual vendor-call time
 
   const ctx: UsageFetchContext = {
     providerName: provider.name,
