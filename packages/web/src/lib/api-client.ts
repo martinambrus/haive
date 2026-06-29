@@ -559,6 +559,12 @@ export interface TaskStep {
   /** Non-fatal advisory: the step's LLM output could not be parsed and it fell back
    *  to a deterministic stub. Status stays 'done'; shown as an amber banner. */
   degradedNote: string | null;
+  /** Surface B: context-window usage frozen at step completion (display-only audit
+   *  trail). contextLeftPercent = 100 - round(peak prompt tokens / window * 100). Null
+   *  on deterministic steps and rows finished before this feature shipped. */
+  contextLeftPercent: number | null;
+  contextTokens: number | null;
+  contextWindowSize: number | null;
   startedAt: string | null;
   endedAt: string | null;
   createdAt: string;

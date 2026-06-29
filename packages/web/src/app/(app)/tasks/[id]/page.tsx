@@ -1470,6 +1470,23 @@ function StepTokens({ tokenUsage }: { tokenUsage: TaskStep['tokenUsage'] }) {
   );
 }
 
+// Surface B: context-window headroom frozen when this step finished (audit trail).
+// Renders nothing on deterministic steps (no CLI invocations -> null columns).
+function StepContextLeft({ step }: { step: TaskStep }) {
+  if (step.contextLeftPercent == null) return null;
+  const left = step.contextLeftPercent;
+  const color = left <= 10 ? 'text-red-400' : left <= 25 ? 'text-amber-400' : 'text-emerald-300';
+  const title =
+    step.contextTokens != null && step.contextWindowSize != null
+      ? `Context at finish: ${step.contextTokens.toLocaleString()} / ${step.contextWindowSize.toLocaleString()} prompt tokens — ${left}% of the window left`
+      : `Context ${left}% left at finish`;
+  return (
+    <span className={`font-mono text-xs ${color}`} title={title}>
+      ctx {left}%
+    </span>
+  );
+}
+
 // Task time summary: agent work, idle (time waiting on you), your active time at
 // gates, total effort, and wall clock. Shown live while the task runs (ticks each
 // second) and frozen once it ends. Renders nothing until the task has started.
@@ -2135,6 +2152,7 @@ function StepCard({
             taskCompletedAt={taskCompletedAt}
           />
           <StepTokens tokenUsage={step.tokenUsage} />
+          <StepContextLeft step={step} />
           <UserActiveDuration ms={userActiveDisplayMs} />
           {step.iterationCount > 0 && (
             <span

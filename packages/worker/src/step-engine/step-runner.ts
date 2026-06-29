@@ -35,6 +35,7 @@ import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
 import { augmentPromptWithAttachments } from './attachments-context.js';
 import { augmentPromptWithTerseness } from './terseness-context.js';
+import { writeStepContextUsage } from './step-context-usage.js';
 
 const log = logger.child({ module: 'step-runner' });
 
@@ -1470,6 +1471,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       degradedNote,
       statusMessage: null,
       endedAt: new Date(),
+    });
+
+    // Surface B: freeze context-window usage on the finished step (best-effort; never
+    // blocks completion). No-op for deterministic steps (no CLI invocations).
+    await writeStepContextUsage(db, current.id).catch((err) => {
+      log.warn({ err, stepId: meta.id }, 'failed to record step context usage');
     });
 
     return { status: 'done', row: done, output };
