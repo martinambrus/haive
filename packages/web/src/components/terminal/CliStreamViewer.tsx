@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -660,8 +660,13 @@ function splitThink(content: string): CleanSegment[] {
 
 // Renders Clean-tab prose, folding <think> reasoning into collapsed disclosures.
 // The outer scroll container owns padding/scroll; this just lays out the segments.
-function CleanProse({ content }: { content: string }) {
-  const segments = splitThink(content);
+const CleanProse = memo(function CleanProse({ content }: { content: string }) {
+  // splitThink scans the whole accumulated body; memoize on content so a steer-box
+  // keystroke (re-renders the parent CliStreamViewer but does not change content)
+  // skips both the scan and — via the memo wrapper — this entire subtree. During
+  // live streaming content grows each frame, so only the changed tail segment's
+  // MarkdownView (itself memoized on body) re-parses; finalized segments bail.
+  const segments = useMemo(() => splitThink(content), [content]);
   return (
     <div className="p-3">
       {segments.map((seg, idx) =>
@@ -673,7 +678,7 @@ function CleanProse({ content }: { content: string }) {
       )}
     </div>
   );
-}
+});
 
 // One non-think prose segment. Markdown when it looks like it (react-markdown v10, no
 // rehype-raw — escapes embedded HTML, strips javascript: URLs, safe for untrusted CLI

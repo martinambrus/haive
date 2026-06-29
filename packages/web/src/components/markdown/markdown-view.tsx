@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown, { type Components, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -150,7 +150,7 @@ function hasCollapsibleContent(segments: Segment[]): boolean {
  *  diagrams, side-by-side before/after pairs, collapsed long code blocks
  *  with an expand/collapse-all toolbar. Non-spec bodies are unaffected —
  *  without those conventions this renders exactly like plain ReactMarkdown. */
-export function MarkdownView({
+function MarkdownViewImpl({
   body,
   enhanced = true,
   className,
@@ -300,3 +300,11 @@ export function MarkdownView({
     </div>
   );
 }
+
+// react-markdown@10's <Markdown> rebuilds its processor and re-parses the whole
+// body on EVERY render (no internal memo). Memoize on the props (all primitives —
+// shallow compare is exact) so a parent re-render (the task page's 2s poll, a
+// sibling timer tick, or a keystroke in a steer/form input) never re-parses an
+// unchanged body. This is what made long-task pages lock up and typing lag ~1s
+// per letter — each keystroke was re-running micromark over every visible body.
+export const MarkdownView = memo(MarkdownViewImpl);
