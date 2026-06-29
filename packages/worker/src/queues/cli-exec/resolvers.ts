@@ -488,7 +488,7 @@ export async function resolveTaskSandboxWorkdir(db: Database, taskId: string): P
 
 const STATUS_THROTTLE_MS = 2_000;
 const STATUS_STALE_MS = 30_000;
-const STATUS_DEFAULT_MESSAGE = 'Waiting for AI analysis...';
+export const STATUS_DEFAULT_MESSAGE = 'Waiting for AI analysis...';
 
 export function createStepStatusUpdater(
   db: Database,

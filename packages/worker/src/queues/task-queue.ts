@@ -720,7 +720,8 @@ const workerDeps: WorkerDeps = {
     await queue.add(CLI_EXEC_JOB_NAMES.INVOKE, payload, opts);
     // Queued-status visibility: if every slot is busy at enqueue, the job will
     // wait — mark the invocation so the UI shows an amber "machine busy" banner.
-    // started_at clears it visually at run-start, so no explicit reset is needed.
+    // The handler overwrites this at run-start (handlers.ts started_at write), so
+    // the queued text never leaks into the running (blue) status banner.
     try {
       const concurrency = await configService.getNumber(CONFIG_KEYS.MAX_PARALLEL_AGENTS, 3);
       if ((await queue.getActiveCount()) >= concurrency) {
