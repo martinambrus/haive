@@ -7,7 +7,6 @@ export type CliAuthMode = CliProviderRecord['authMode'];
 export interface InvokeOpts {
   cwd?: string;
   timeoutMs?: number;
-  modelOverride?: string;
   signal?: AbortSignal;
   extraEnv?: Record<string, string>;
   sessionId?: string;

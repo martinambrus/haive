@@ -167,12 +167,6 @@ export abstract class BaseCliAdapter {
     const dedupedStored = stored.filter((tok) => !baseSet.has(tok));
     return [...dedupedStored, ...base];
   }
-
-  protected effectiveModel(opts: InvokeOpts): string {
-    if (opts.modelOverride) return opts.modelOverride;
-    if (this.defaultModel) return this.defaultModel;
-    throw new Error(`${this.providerName} has no default model configured`);
-  }
 }
 
 export async function probeVersion(

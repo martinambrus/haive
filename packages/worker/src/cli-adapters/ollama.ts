@@ -71,7 +71,7 @@ export class OllamaAdapter extends BaseCliAdapter {
     opts: InvokeOpts,
   ): CliCommandSpec {
     const env = this.mergedEnv(provider, opts);
-    const model = opts.modelOverride ?? provider.model ?? this.defaultModel;
+    const model = provider.model ?? this.defaultModel;
     if (!model) {
       throw new Error('ollama provider requires a model (set the provider model field)');
     }
