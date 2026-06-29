@@ -878,7 +878,20 @@ async function handleResult(
       }
       // Uncapped restarts (human gate-2 reject) skip the cap entirely — the developer is
       // the bound, not max_fix_rounds — and fall through to re-enter implementation below.
-      if (!result.uncapped && nextRound > cap) {
+      // Count fix rounds actually entered (each appends fix_loop.started) rather than the
+      // absolute round: a human spec revision forks the round forward without spending the
+      // auto-fix budget, so keying the cap on nextRound would silently cost a fix attempt.
+      const startedRows = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(schema.taskEvents)
+        .where(
+          and(
+            eq(schema.taskEvents.taskId, ctx.taskId),
+            eq(schema.taskEvents.eventType, 'fix_loop.started'),
+          ),
+        );
+      const priorFixRounds = startedRows[0]?.n ?? 0;
+      if (!result.uncapped && priorFixRounds + 1 > cap) {
         // Cap reached → escalate to an interactive gate (Continue / Accept / Abort)
         // parked on the source step, instead of failing. Record the fix request for the
         // next round up front so "Continue" can re-enter implementation immediately; it
@@ -946,23 +959,27 @@ async function handleResult(
     }
     case 'revise': {
       // A review step asked to revise an EARLIER generator step instead of failing
-      // (e.g. 03c reject → re-mine 03b). Reset the target + its downstream and re-enter
-      // the target in the SAME round — no round bump and no cap, because the loop is
-      // human-gated (the review form re-parks every cycle). The target reads its revise
-      // feedback from task_events, which resetStepAndDownstream deliberately preserves.
+      // (e.g. gate-1 reject → re-plan 04, 03c reject → re-mine 03b). No cap, because the
+      // loop is human-gated (the review form re-parks every cycle). The target reads its
+      // revise feedback from task_events, which survives across rounds.
       const target = stepRegistry.require(result.targetStepId);
+      // The learning loop (11-phase-8-learning) revises ITSELF — keep it in place in the
+      // SAME round (iterative draft polish, one card). The spec gates revise an EARLIER
+      // step, so FORK a new round: each attempt becomes its own forward card (history
+      // preserved, per-card timer, terminal re-opens on the fresh row) — mirrors loop_back.
+      const selfLoop = result.targetStepId === result.sourceStepId;
+      const targetRound = selfLoop ? result.row.round : result.row.round + 1;
       await appendEvent(db, ctx.taskId, result.row.id, 'step.revise', {
         stepId,
         sourceStepId: result.sourceStepId,
         targetStepId: result.targetStepId,
+        round: targetRound,
       });
-      const reset = await resetStepAndDownstream(
-        db,
-        ctx.taskId,
-        result.targetStepId,
-        result.row.round,
-      );
-      if (!reset) {
+      const reset = await resetStepAndDownstream(db, ctx.taskId, result.targetStepId, targetRound);
+      // An in-place self-revise REQUIRES the existing row. A forked round legitimately has
+      // no row yet — reset is then a crash-safety no-op (only resets a stale terminal row),
+      // exactly as in loop_back; upsertRow materializes the fresh round-N rows.
+      if (selfLoop && !reset) {
         await markTaskFailed(
           db,
           ctx.taskId,
@@ -975,14 +992,14 @@ async function handleResult(
         ctx.taskId,
         target.metadata.id,
         computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
-        result.row.round,
+        targetRound,
       );
       await enqueueAdvance(
         ctx.taskId,
         ctx.userId,
         target.metadata.id,
-        result.row.round,
-        reset.newEpoch,
+        targetRound,
+        reset?.newEpoch ?? ctx.orchestrationEpoch,
       );
       return;
     }

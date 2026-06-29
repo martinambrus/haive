@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormSchema } from '@haive/shared';
 // Import the pure timing helper from its dedicated subpath, NOT the package
 // barrel — the barrel pulls server-only utils (ioredis -> dns) that break the
@@ -293,6 +293,10 @@ export default function TaskDetailPage() {
   // yanks a user who scrolled away to re-read an earlier step. Reset on task id
   // change (the route component can persist across :id changes).
   const didInitialScrollRef = useRef(false);
+  // The active step's stepIndex on the previous render. A loop re-entry (gate revise or
+  // fix loop_back) makes the active step jump BACKWARD to a lower stepIndex; forward flow
+  // only ever increases it. Used to force the follow-scroll on a backward jump.
+  const prevActiveStepIndexRef = useRef<number | null>(null);
   // One-shot guard so the scroll-to-bottom-on-completion fires once per
   // completion (reset if the task leaves 'completed', e.g. a retry).
   const completedScrolledRef = useRef(false);
@@ -374,6 +378,25 @@ export default function TaskDetailPage() {
     if (tab === 'activity') void reloadEvents();
   }, [tab, reloadEvents]);
 
+  // Header label for each round > 0 group (keyed by the group's first step row id).
+  // A round group is named by the step it RE-ENTERS at: the spec gates fork a new round
+  // at 04 / 03b ("Spec revision"), the auto-fix loop re-enters at 07 ("Fix loop").
+  // Numbered per-kind, not by the raw round int (the two kinds interleave rounds).
+  const roundGroupLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    let specN = 0;
+    let fixN = 0;
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i]!;
+      if (step.round > 0 && (i === 0 || steps[i - 1]!.round !== step.round)) {
+        const isSpecRevision =
+          step.stepId === '04-phase-0b-pre-planning' || step.stepId === '03b-business-requirements';
+        labels.set(step.id, isSpecRevision ? `Spec revision #${++specN}` : `Fix loop #${++fixN}`);
+      }
+    }
+    return labels;
+  }, [steps]);
+
   // Auto-scroll to the active step when it changes. For a step that shows a
   // terminal (running / waiting_cli with at least one CLI run) scroll to the
   // END of the last terminal so its output is fully in view, rather than the
@@ -385,6 +408,17 @@ export default function TaskDetailPage() {
       (s) => s.status === 'waiting_form' || s.status === 'running' || s.status === 'waiting_cli',
     );
     const activeId = activeStep?.id ?? null;
+    // Loop re-entry: a gate revise / fix loop_back re-enters an EARLIER step, so the active
+    // step's stepIndex drops below the previously-active one (forward flow only increases
+    // it). Capture the prior value first, then update the ref to the latest non-null index
+    // so a transient "no active step" tick between steps doesn't reset the baseline.
+    const activeStepIndex = activeStep?.stepIndex ?? null;
+    const prevActiveStepIndex = prevActiveStepIndexRef.current;
+    const loopReentry =
+      activeStepIndex !== null &&
+      prevActiveStepIndex !== null &&
+      activeStepIndex < prevActiveStepIndex;
+    if (activeStepIndex !== null) prevActiveStepIndexRef.current = activeStepIndex;
     const showsTerminal =
       (activeStep?.cliInvocationCount ?? 0) > 0 &&
       (activeStep?.status === 'running' || activeStep?.status === 'waiting_cli');
@@ -437,7 +471,9 @@ export default function TaskDetailPage() {
       const activeStepEl = container.querySelector(`[data-step-id="${activeId}"]`);
       const rect = activeStepEl?.getBoundingClientRect();
       const activeStepInView = !rect || (rect.top < window.innerHeight && rect.bottom > 0);
-      if (didInitialScrollRef.current && !activeStepInView) {
+      // A loop re-entry (backward jump) overrides the don't-yank-if-off-screen guard: the
+      // user just rejected / triggered a re-run and should be followed to the re-entered step.
+      if (didInitialScrollRef.current && !activeStepInView && !loopReentry) {
         prevScrollKeyRef.current = scrollKey;
         return;
       }
@@ -1017,17 +1053,17 @@ export default function TaskDetailPage() {
               No steps recorded yet. The task worker will populate them once it starts.
             </div>
           )}
-          {steps.map((step, i) => {
-            // Fix-loop rounds: the same stepId recurs once per round (round 0 = the
-            // original pass). Mark the start of each round > 0 group with a header.
-            const showLoopHeader =
-              step.round > 0 && (i === 0 || steps[i - 1]!.round !== step.round);
+          {steps.map((step) => {
+            // Re-entry rounds: the same stepId recurs once per round (round 0 = the
+            // original pass). Mark the start of each round > 0 group with a kind-aware
+            // header (spec revision vs fix loop) computed in roundGroupLabels.
+            const loopHeader = roundGroupLabels.get(step.id) ?? null;
             return (
               <div key={step.id} data-step-id={step.id}>
-                {showLoopHeader && (
+                {loopHeader && (
                   <div className="mb-2 mt-5 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-amber-400/80">
                     <span className="h-px flex-1 bg-amber-400/20" />
-                    Fix loop #{step.round}
+                    {loopHeader}
                     <span className="h-px flex-1 bg-amber-400/20" />
                   </div>
                 )}
