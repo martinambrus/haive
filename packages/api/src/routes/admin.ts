@@ -345,6 +345,24 @@ adminRoutes.put('/config/steering', async (c) => {
   return c.json({ enabled });
 });
 
+const usageWindowSchema = z.object({ enabled: z.boolean() });
+
+// Global kill-switch for the subscription usage-window display. When ON (default),
+// the worker's gentle poller refreshes each logged-in provider's 5h/weekly meters
+// and the task header shows the active step's CLI windows. The poller reads this
+// each tick (within the ~30s config cache); a flip needs no redeploy.
+adminRoutes.get('/config/usage-window', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.USAGE_WINDOW_ENABLED, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/usage-window', async (c) => {
+  const { enabled } = usageWindowSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.USAGE_WINDOW_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'global usage-window switch updated');
+  return c.json({ enabled });
+});
+
 const promptCaching1hSchema = z.object({ enabled: z.boolean() });
 
 // Global 1-hour prompt-cache TTL opt-in (default OFF). When ON, claude-family cli-exec

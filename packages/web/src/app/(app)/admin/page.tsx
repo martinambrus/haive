@@ -32,6 +32,8 @@ export default function AdminPage() {
   const [savingConcurrency, setSavingConcurrency] = useState(false);
   const [steeringEnabled, setSteeringEnabled] = useState<boolean | null>(null);
   const [savingSteering, setSavingSteering] = useState(false);
+  const [usageWindowEnabled, setUsageWindowEnabled] = useState<boolean | null>(null);
+  const [savingUsageWindow, setSavingUsageWindow] = useState(false);
   const [ideEnabled, setIdeEnabled] = useState<boolean | null>(null);
   const [savingIde, setSavingIde] = useState(false);
   const [debugModeEnabled, setDebugModeEnabled] = useState<boolean | null>(null);
@@ -76,6 +78,7 @@ export default function AdminPage() {
         promptCaching1hData,
         tersenessData,
         reviewDistillData,
+        usageWindowData,
       ] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
@@ -92,6 +95,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/prompt-caching-1h'),
         api.get<{ level: string }>('/admin/config/terseness'),
         api.get<{ enabled: boolean }>('/admin/config/review-fanout-distill'),
+        api.get<{ enabled: boolean }>('/admin/config/usage-window'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
@@ -107,6 +111,7 @@ export default function AdminPage() {
       setPromptCaching1hEnabled(promptCaching1hData.enabled);
       setTersenessLevel(tersenessData.level);
       setReviewDistillEnabled(reviewDistillData.enabled);
+      setUsageWindowEnabled(usageWindowData.enabled);
       setMaxPerTask(perTaskData.maxAgentsPerTask);
       setMaxPerTaskInput(String(perTaskData.maxAgentsPerTask));
       setAttachmentMaxBytes(attachmentData.maxBytes);
@@ -234,6 +239,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update steering');
     } finally {
       setSavingSteering(false);
+    }
+  }
+
+  async function setUsageWindow(next: boolean) {
+    setSavingUsageWindow(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/usage-window', {
+        enabled: next,
+      });
+      setUsageWindowEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update usage-window display');
+    } finally {
+      setSavingUsageWindow(false);
     }
   }
 
@@ -583,6 +603,31 @@ export default function AdminPage() {
             />
             {steeringEnabled ? 'Enabled' : 'Disabled'}
             {savingSteering && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {usageWindowEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Subscription usage display</CardTitle>
+            <CardDescription>
+              Shows each logged-in CLI provider&apos;s 5-hour and weekly subscription windows in the
+              task header, following the active step&apos;s CLI. A gentle background poller reads
+              each vendor&apos;s usage endpoint. Global kill-switch; takes effect within ~30s and
+              persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={usageWindowEnabled}
+              disabled={savingUsageWindow}
+              onChange={(e) => void setUsageWindow(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {usageWindowEnabled ? 'Enabled' : 'Disabled'}
+            {savingUsageWindow && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

@@ -25,6 +25,7 @@ export const QUEUE_NAMES = {
   GLOBAL_KB_SYNC: 'haive-global-kb-sync',
   RUNTIME_ENSURE: 'haive-runtime-ensure',
   IDE_ENSURE: 'haive-ide-ensure',
+  USAGE_POLL: 'haive-usage-poll',
 } as const;
 
 export const REPO_JOB_NAMES = {

@@ -27,7 +27,17 @@ import {
   type SandboxImageBuildJobPayload,
 } from '@haive/shared';
 import { HttpError, type AppEnv } from '../context.js';
+import { z } from 'zod';
+import {
+  CLAUDE_USAGE_OAUTH_SECRET,
+  buildClaudeAuthorizeUrl,
+  claudeTokensHaveUsageScope,
+  createClaudePkceChallenge,
+  exchangeClaudeAuthCode,
+  parseClaudeAuthCode,
+} from '@haive/shared/claude-oauth';
 import { getDb } from '../db.js';
+import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getCliExecQueue, getCliExecQueueEvents } from '../queues.js';
 
@@ -676,6 +686,145 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
       updatedAt: schema.cliProviderSecrets.updatedAt,
     });
   return c.json({ secret: inserted[0]! }, 201);
+});
+
+// ---- Claude usage-tracking OAuth (PKCE) ----
+// Mints a user:profile-scoped token for GET /api/oauth/usage, stored as the
+// CLAUDE_USAGE_OAUTH secret. Separate from CLAUDE_CODE_OAUTH_TOKEN (the setup-token
+// used to RUN claude, which is user:inference-only and 403s on the usage endpoint).
+// Pure server-side OAuth: the user authorizes in their own browser and pastes back the
+// code#state the callback page shows — no container, no claude binary, no TUI driving.
+const USAGE_AUTH_STATE_TTL_S = 600; // 10 min for the browser round-trip
+const usageAuthCompleteSchema = z.object({ code: z.string().min(1) });
+
+function usageAuthStateKey(userId: string, providerId: string): string {
+  return `usage-auth:claude:${userId}:${providerId}`;
+}
+
+async function upsertProviderSecretValue(
+  db: Database,
+  providerId: string,
+  secretName: string,
+  value: string,
+): Promise<void> {
+  const masterKek = await secretsService.getMasterKek();
+  const envelope = envelopeEncrypt(value, masterKek);
+  const fingerprint = computeKeyFingerprint(value);
+  await db
+    .insert(schema.cliProviderSecrets)
+    .values({
+      providerId,
+      secretName,
+      encryptedValue: envelope.encryptedValue,
+      encryptedDek: envelope.encryptedDek,
+      fingerprint,
+    })
+    .onConflictDoUpdate({
+      target: [schema.cliProviderSecrets.providerId, schema.cliProviderSecrets.secretName],
+      set: {
+        encryptedValue: envelope.encryptedValue,
+        encryptedDek: envelope.encryptedDek,
+        fingerprint,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+cliProviderRoutes.post('/:providerId/usage-auth/start', async (c) => {
+  const userId = c.get('userId');
+  const providerId = c.req.param('providerId');
+  const db = getDb();
+  const provider = await db.query.cliProviders.findFirst({
+    where: and(eq(schema.cliProviders.id, providerId), eq(schema.cliProviders.userId, userId)),
+    columns: { id: true, name: true },
+  });
+  if (!provider) throw new HttpError(404, 'CLI provider not found');
+  if (provider.name !== 'claude-code') {
+    throw new HttpError(400, 'Usage tracking auth is only available for Claude Code providers');
+  }
+  const { verifier, challenge, state } = createClaudePkceChallenge();
+  await getRedis().set(
+    usageAuthStateKey(userId, providerId),
+    JSON.stringify({ verifier, state }),
+    'EX',
+    USAGE_AUTH_STATE_TTL_S,
+  );
+  return c.json({ authorizeUrl: buildClaudeAuthorizeUrl(challenge, state) });
+});
+
+cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
+  const userId = c.get('userId');
+  const providerId = c.req.param('providerId');
+  const body = usageAuthCompleteSchema.parse(await c.req.json());
+  const db = getDb();
+  await loadOwnedProvider(db, userId, providerId);
+
+  const redis = getRedis();
+  const stashKey = usageAuthStateKey(userId, providerId);
+  const stashed = await redis.get(stashKey);
+  if (!stashed) throw new HttpError(400, 'Authorization expired or not started; please restart.');
+  const { verifier, state: expectedState } = JSON.parse(stashed) as {
+    verifier: string;
+    state: string;
+  };
+
+  const { code, state } = parseClaudeAuthCode(body.code);
+  if (state && state !== expectedState) {
+    throw new HttpError(400, 'OAuth state mismatch; please restart the authorization.');
+  }
+  let tokens;
+  try {
+    tokens = await exchangeClaudeAuthCode(code, verifier, state ?? expectedState);
+  } catch (err) {
+    throw new HttpError(400, err instanceof Error ? err.message : 'Token exchange failed');
+  }
+  if (!claudeTokensHaveUsageScope(tokens)) {
+    throw new HttpError(
+      400,
+      'The granted token is missing the user:profile scope required for usage tracking.',
+    );
+  }
+  await redis.del(stashKey);
+  await upsertProviderSecretValue(
+    db,
+    providerId,
+    CLAUDE_USAGE_OAUTH_SECRET,
+    JSON.stringify(tokens),
+  );
+  return c.json({ connected: true, scopes: tokens.scopes, expiresAt: tokens.expiresAt });
+});
+
+// Connection status for the UI. Presence of the secret = connected; we don't decrypt
+// just to report it (a revoked token surfaces later as an error usage-snapshot).
+cliProviderRoutes.get('/:providerId/usage-auth', async (c) => {
+  const userId = c.get('userId');
+  const providerId = c.req.param('providerId');
+  const db = getDb();
+  await loadOwnedProvider(db, userId, providerId);
+  const row = await db.query.cliProviderSecrets.findFirst({
+    where: and(
+      eq(schema.cliProviderSecrets.providerId, providerId),
+      eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
+    ),
+    columns: { updatedAt: true },
+  });
+  return c.json({ connected: !!row, connectedAt: row?.updatedAt ?? null });
+});
+
+cliProviderRoutes.delete('/:providerId/usage-auth', async (c) => {
+  const userId = c.get('userId');
+  const providerId = c.req.param('providerId');
+  const db = getDb();
+  await loadOwnedProvider(db, userId, providerId);
+  await db
+    .delete(schema.cliProviderSecrets)
+    .where(
+      and(
+        eq(schema.cliProviderSecrets.providerId, providerId),
+        eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
+      ),
+    );
+  return c.json({ connected: false });
 });
 
 cliProviderRoutes.delete('/:providerId/secrets/:secretName', async (c) => {

@@ -95,6 +95,14 @@ export const CONFIG_KEYS = {
   // toggle — there is no per-repo flag.
   STEERING_ENABLED: 'config:steering:enabled',
 
+  // Global kill-switch for the subscription usage-window display (claude-hud-style
+  // 5h/weekly meters in the task header). When 'true' (default), a gentle background
+  // poller reads each logged-in provider's (undocumented) usage endpoint and the task
+  // header shows the active step's CLI windows. Set 'false' to stop all usage polling
+  // and hide the chip everywhere without a redeploy. Read by the poller each tick
+  // (~30s config cache).
+  USAGE_WINDOW_ENABLED: 'config:usage:windowEnabled',
+
   // Global kill-switch for the in-task browser IDE (code-server Editor tab).
   // When 'true' (default), the web exposes the Editor tab and the api/worker
   // lazily launch a per-task code-server container. Set 'false' to hide the
@@ -186,6 +194,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.SANDBOX_NETWORK]: 'haive-network',
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
   [CONFIG_KEYS.STEERING_ENABLED]: 'true',
+  [CONFIG_KEYS.USAGE_WINDOW_ENABLED]: 'true',
   [CONFIG_KEYS.IDE_ENABLED]: 'true',
   [CONFIG_KEYS.DEBUG_MODE_ENABLED]: 'true',
   [CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED]: 'true',

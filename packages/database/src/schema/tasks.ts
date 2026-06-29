@@ -281,6 +281,15 @@ export const taskSteps = pgTable(
      *  measured client-side and posted in increments; pauses while the agent
      *  works. Lets the UI report effort = active work + user active time. */
     userActiveMs: integer('user_active_ms').notNull().default(0),
+    /** Surface B audit trail: context-window usage frozen at step completion.
+     *  context_tokens = peak single-invocation prompt-side tokens
+     *  (input + cacheRead + cacheCreation) over this step's non-superseded CLI
+     *  invocations; context_window_size = that model's max context;
+     *  context_left_percent = 100 - round(tokens / window * 100). All null on
+     *  deterministic (no-CLI) steps and on rows finalized before this feature. */
+    contextLeftPercent: integer('context_left_percent'),
+    contextTokens: integer('context_tokens'),
+    contextWindowSize: integer('context_window_size'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },

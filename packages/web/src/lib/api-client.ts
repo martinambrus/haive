@@ -345,6 +345,25 @@ export interface CliProvider {
   updatedAt: string;
 }
 
+export interface UsageWindow {
+  usedPct: number;
+  resetsAt: string | null;
+}
+
+/** A provider's latest subscription usage-window snapshot (worker-polled). `usedPct` is
+ *  0-100 CONSUMED; the header chip shows remaining = 100 - usedPct (matching each
+ *  vendor's own "% left" view). Absent window fields = that provider has no such window. */
+export interface UsageWindowSnapshot {
+  providerId: string;
+  providerName: string;
+  fiveHour?: UsageWindow;
+  sevenDay?: UsageWindow;
+  daily?: UsageWindow;
+  fetchedAt: string;
+  stale: boolean;
+  status: 'ok' | 'error';
+}
+
 export interface CliProviderSecret {
   id: string;
   secretName: string;

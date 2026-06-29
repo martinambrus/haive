@@ -46,6 +46,10 @@
     "./timing": {
       "types": "./dist/step-engine/timing.d.ts",
       "import": "./dist/step-engine/timing.js"
+    },
+    "./claude-oauth": {
+      "types": "./dist/cli-providers/claude-oauth.d.ts",
+      "import": "./dist/cli-providers/claude-oauth.js"
     }
   },
   "scripts": {

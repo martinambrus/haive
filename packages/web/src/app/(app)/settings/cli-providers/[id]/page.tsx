@@ -7,6 +7,7 @@ import { api, type CliProvider, type CliProviderCatalogEntry } from '@/lib/api-c
 import { Card, CardDescription, CardHeader, CardTitle, FormError } from '@/components/ui';
 import { CliProviderForm } from '@/components/cli-provider-form';
 import { CliProviderTest } from '@/components/cli-provider-test';
+import { ClaudeUsageAuth } from '@/components/claude-usage-auth';
 import { usePageTitle } from '@/lib/use-page-title';
 
 export default function EditCliProviderPage() {
@@ -80,6 +81,8 @@ export default function EditCliProviderPage() {
           onLoginCompleted={() => setSecretsReloadNonce((n) => n + 1)}
         />
       </Card>
+
+      {provider.name === 'claude-code' && <ClaudeUsageAuth providerId={provider.id} />}
     </div>
   );
 }

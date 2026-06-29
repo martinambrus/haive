@@ -24,6 +24,8 @@ import {
   type TaskStatus,
   type TaskStep,
   type StepStatus,
+  type UsageWindow,
+  type UsageWindowSnapshot,
 } from '@/lib/api-client';
 import { Badge, Button, Card, Input } from '@/components/ui';
 import { CircleDot, Route, FolderGit2 } from 'lucide-react';
@@ -813,6 +815,13 @@ export default function TaskDetailPage() {
       s.status === 'failed',
   );
 
+  // The subscription-usage chip follows the CLI of the step the run is parked on (or the
+  // task default): a Codex step shows Codex's windows, a Claude step shows Claude's.
+  const usageProviderId = currentStep?.preferredCliProviderId ?? task.cliProviderId ?? null;
+  const usageProvider = usageProviderId
+    ? (providers.find((p) => p.id === usageProviderId) ?? null)
+    : null;
+
   return (
     <div className="flex flex-col gap-6">
       {titleStripVisible && (
@@ -839,7 +848,14 @@ export default function TaskDetailPage() {
               <span className="truncate">{currentStep.title}</span>
             </Badge>
           )}
-          <HeaderPaceChip task={task} steps={steps} userActive={userActive} />
+          <div className="ml-auto flex shrink-0 items-center gap-3">
+            <HeaderUsageChip
+              providerId={usageProviderId}
+              providerName={usageProvider?.name ?? null}
+              providerLabel={usageProvider?.label ?? null}
+            />
+            <HeaderPaceChip task={task} steps={steps} userActive={userActive} />
+          </div>
         </div>
       )}
       <div className="flex items-start justify-between gap-4">
@@ -1489,6 +1505,108 @@ function HeaderPaceChip({
       title={`Effort vs estimate — ${Math.round(pct)}% of the ${estHours}h estimate`}
     >
       {formatHoursMinutes(effortMs)} / {formatHoursMinutes(estimateMs)}
+    </span>
+  );
+}
+
+// Short display names for the usage chip (the CLI "type", not the user's clone label).
+const CLI_USAGE_LABEL: Partial<Record<CliProviderName, string>> = {
+  'claude-code': 'Claude',
+  codex: 'Codex',
+  gemini: 'Gemini',
+  zai: 'Z.ai',
+};
+
+function resetSuffix(resetsAt: string | null, now: number): string {
+  if (!resetsAt) return '';
+  const ms = new Date(resetsAt).getTime() - now;
+  if (ms <= 0) return ' (resetting)';
+  const totalMin = Math.floor(ms / 60_000);
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  return d > 0 ? ` (resets in ${d}d ${h}h)` : ` (resets in ${h}h ${m}m)`;
+}
+
+/**
+ * Subscription usage chip: each window's REMAINING percentage for the provider the
+ * current step runs on (used = vendor-reported; remaining = 100 - used, matching the
+ * vendor's own "% left" view). Polls /usage-window gently (~60s). Renders nothing when
+ * the provider has no readable window, isn't connected, or the snapshot errored; dims
+ * when stale. Colour reflects the tightest remaining window.
+ */
+function HeaderUsageChip({
+  providerId,
+  providerName,
+  providerLabel,
+}: {
+  providerId: string | null;
+  providerName: CliProviderName | null;
+  providerLabel: string | null;
+}) {
+  const [snapshots, setSnapshots] = useState<UsageWindowSnapshot[] | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () =>
+      api
+        .get<{ snapshots: UsageWindowSnapshot[] }>('/usage-window')
+        .then((d) => {
+          if (!cancelled) setSnapshots(d.snapshots);
+        })
+        .catch(() => {
+          if (!cancelled) setSnapshots([]);
+        });
+    void load();
+    const t = setInterval(() => void load(), 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, []);
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  if (!providerId || !snapshots) return null;
+  const snap = snapshots.find((s) => s.providerId === providerId);
+  if (!snap || snap.status !== 'ok') return null;
+
+  const windows: { label: string; w: UsageWindow }[] = [];
+  if (snap.fiveHour) windows.push({ label: '5h', w: snap.fiveHour });
+  if (snap.sevenDay) windows.push({ label: 'wk', w: snap.sevenDay });
+  if (snap.daily) windows.push({ label: 'day', w: snap.daily });
+  if (windows.length === 0) return null;
+
+  const minRemaining = Math.min(...windows.map((x) => 100 - x.w.usedPct));
+  const color =
+    minRemaining <= 10
+      ? 'text-red-400'
+      : minRemaining <= 25
+        ? 'text-amber-400'
+        : 'text-emerald-400';
+  const name =
+    (providerName && CLI_USAGE_LABEL[providerName]) || providerLabel || providerName || 'CLI';
+  const tooltip = windows
+    .map((x) => `${x.label}: ${100 - x.w.usedPct}% left${resetSuffix(x.w.resetsAt, now)}`)
+    .join('   ·   ');
+
+  return (
+    <span
+      className={`flex shrink-0 items-center gap-1.5 font-mono text-xs font-semibold ${color} ${
+        snap.stale ? 'opacity-50' : ''
+      }`}
+      title={`${name} subscription usage — ${tooltip}${snap.stale ? '   (stale)' : ''}`}
+    >
+      <span className="text-neutral-400">{name}</span>
+      {windows.map((x) => (
+        <span key={x.label}>
+          {x.label} {100 - x.w.usedPct}%
+        </span>
+      ))}
     </span>
   );
 }

@@ -19,6 +19,7 @@ import {
   CardHeader,
   CardTitle,
   FormError,
+  Input,
 } from '@/components/ui';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { usePageTitle } from '@/lib/use-page-title';
@@ -49,6 +50,14 @@ interface SignOutState {
   error: string | null;
 }
 
+interface UsageConnectState {
+  busy: boolean;
+  /** Set once the authorize round-trip starts: reveals the code#state paste input. */
+  authorizeUrl: string | null;
+  message: string | null;
+  error: string | null;
+}
+
 export default function CliProvidersPage() {
   usePageTitle('CLI Providers');
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
@@ -56,6 +65,10 @@ export default function CliProvidersPage() {
   const [error, setError] = useState<string | null>(null);
   const [testStates, setTestStates] = useState<Record<string, TestState>>({});
   const [signOutStates, setSignOutStates] = useState<Record<string, SignOutState>>({});
+  const [usageStates, setUsageStates] = useState<Record<string, UsageConnectState>>({});
+  const [usageCodes, setUsageCodes] = useState<Record<string, string>>({});
+  /** Per-claude-provider usage-tracking connection status (drives Connect vs Disconnect). */
+  const [usageConnected, setUsageConnected] = useState<Record<string, boolean>>({});
   const [cloningIds, setCloningIds] = useState<Record<string, boolean>>({});
   const [upgradingIds, setUpgradingIds] = useState<Record<string, boolean>>({});
   const { requireCliLogin } = useCliLogin();
@@ -86,6 +99,17 @@ export default function CliProvidersPage() {
       ]);
       setProviders(providersData.providers);
       setCatalog(catalogData.providers);
+      // Usage-tracking connection status for each claude provider (Connect vs Disconnect).
+      const claudeProviders = providersData.providers.filter((p) => p.name === 'claude-code');
+      const statuses = await Promise.all(
+        claudeProviders.map((p) =>
+          api
+            .get<{ connected: boolean }>(`/cli-providers/${p.id}/usage-auth`)
+            .then((r) => [p.id, r.connected] as const)
+            .catch(() => [p.id, false] as const),
+        ),
+      );
+      setUsageConnected(Object.fromEntries(statuses));
     } catch (err) {
       setError((err as Error).message ?? 'Failed to load CLI providers');
     }
@@ -183,6 +207,106 @@ export default function CliProvidersPage() {
     }
   }
 
+  // Claude usage-tracking OAuth (PKCE), same flow as the provider edit page: open the
+  // authorize URL in a new tab, then paste back the code#state to mint a user:profile token.
+  async function handleStartUsage(p: CliProvider) {
+    setUsageStates((s) => ({
+      ...s,
+      [p.id]: { busy: true, authorizeUrl: null, message: null, error: null },
+    }));
+    try {
+      const { authorizeUrl } = await api.post<{ authorizeUrl: string }>(
+        `/cli-providers/${p.id}/usage-auth/start`,
+      );
+      window.open(authorizeUrl, '_blank', 'noopener,noreferrer');
+      setUsageStates((s) => ({
+        ...s,
+        [p.id]: { busy: false, authorizeUrl, message: null, error: null },
+      }));
+    } catch (err) {
+      setUsageStates((s) => ({
+        ...s,
+        [p.id]: {
+          busy: false,
+          authorizeUrl: null,
+          message: null,
+          error: (err as Error).message ?? 'Failed to start authorization',
+        },
+      }));
+    }
+  }
+
+  async function handleCompleteUsage(p: CliProvider) {
+    const code = (usageCodes[p.id] ?? '').trim();
+    if (!code) return;
+    const authorizeUrl = usageStates[p.id]?.authorizeUrl ?? null;
+    setUsageStates((s) => ({
+      ...s,
+      [p.id]: { busy: true, authorizeUrl, message: null, error: null },
+    }));
+    try {
+      await api.post(`/cli-providers/${p.id}/usage-auth/complete`, { code });
+      setUsageStates((s) => ({
+        ...s,
+        [p.id]: {
+          busy: false,
+          authorizeUrl: null,
+          message: 'Usage tracking connected.',
+          error: null,
+        },
+      }));
+      setUsageConnected((s) => ({ ...s, [p.id]: true }));
+      setUsageCodes((s) => ({ ...s, [p.id]: '' }));
+    } catch (err) {
+      setUsageStates((s) => ({
+        ...s,
+        [p.id]: {
+          busy: false,
+          authorizeUrl,
+          message: null,
+          error: (err as Error).message ?? 'Failed to complete authorization',
+        },
+      }));
+    }
+  }
+
+  async function handleDisconnectUsage(p: CliProvider) {
+    if (
+      !confirm(
+        `Disconnect usage tracking for ${p.label}? The task header will stop showing its 5h/weekly windows until you reconnect.`,
+      )
+    ) {
+      return;
+    }
+    setUsageStates((s) => ({
+      ...s,
+      [p.id]: { busy: true, authorizeUrl: null, message: null, error: null },
+    }));
+    try {
+      await api.delete(`/cli-providers/${p.id}/usage-auth`);
+      setUsageConnected((s) => ({ ...s, [p.id]: false }));
+      setUsageStates((s) => ({
+        ...s,
+        [p.id]: {
+          busy: false,
+          authorizeUrl: null,
+          message: 'Usage tracking disconnected.',
+          error: null,
+        },
+      }));
+    } catch (err) {
+      setUsageStates((s) => ({
+        ...s,
+        [p.id]: {
+          busy: false,
+          authorizeUrl: null,
+          message: null,
+          error: (err as Error).message ?? 'Failed to disconnect',
+        },
+      }));
+    }
+  }
+
   async function handleTest(id: string) {
     setTestStates((s) => ({ ...s, [id]: { testing: true, result: null, error: null } }));
     try {
@@ -241,6 +365,7 @@ export default function CliProvidersPage() {
                     LOGIN_RECOVERABLE.includes(cliAuthStatus);
                   const showSignOut = LOGIN_SUPPORTED.includes(p.name) && p.authStatus === 'ok';
                   const signOutState = signOutStates[p.id];
+                  const usageState = usageStates[p.id];
                   return (
                     <Card key={p.id}>
                       <div className="flex items-start justify-between gap-4">
@@ -293,6 +418,28 @@ export default function CliProvidersPage() {
                               {signOutState?.busy ? 'Signing out...' : 'Sign out'}
                             </Button>
                           )}
+                          {p.name === 'claude-code' &&
+                            (usageConnected[p.id] ? (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => handleDisconnectUsage(p)}
+                                disabled={usageState?.busy === true}
+                                title="Stop tracking Claude's subscription usage and delete the stored usage token"
+                              >
+                                {usageState?.busy ? 'Working...' : 'Disconnect usage'}
+                              </Button>
+                            ) : (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => handleStartUsage(p)}
+                                disabled={usageState?.busy === true}
+                                title="Authorize a usage-scoped token so the task header can show Claude's 5h/weekly windows"
+                              >
+                                {usageState?.busy ? 'Connecting...' : 'Connect usage'}
+                              </Button>
+                            ))}
                           {upgradeLatest && (
                             <Button
                               size="sm"
@@ -354,6 +501,48 @@ export default function CliProvidersPage() {
                             <p className="font-mono text-red-400">{signOutState.error}</p>
                           ) : (
                             <p className="font-mono text-neutral-300">{signOutState.message}</p>
+                          )}
+                        </div>
+                      )}
+                      {usageState?.authorizeUrl && (
+                        <div className="mt-3 flex flex-col gap-2 border-t border-neutral-800 pt-3">
+                          <p className="text-xs text-neutral-400">
+                            Approve access in the new tab (or{' '}
+                            <a
+                              href={usageState.authorizeUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-indigo-400 underline"
+                            >
+                              open it
+                            </a>
+                            ), then paste the code it shows (code#state):
+                          </p>
+                          <div className="flex gap-2">
+                            <Input
+                              value={usageCodes[p.id] ?? ''}
+                              onChange={(e) =>
+                                setUsageCodes((s) => ({ ...s, [p.id]: e.target.value }))
+                              }
+                              placeholder="code#state"
+                              className="h-8 text-xs"
+                            />
+                            <Button
+                              size="sm"
+                              onClick={() => handleCompleteUsage(p)}
+                              disabled={!usageCodes[p.id]?.trim() || usageState.busy}
+                            >
+                              Complete
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                      {(usageState?.error || usageState?.message) && !usageState?.authorizeUrl && (
+                        <div className="mt-3 border-t border-neutral-800 pt-3 text-xs">
+                          {usageState.error ? (
+                            <p className="font-mono text-red-400">{usageState.error}</p>
+                          ) : (
+                            <p className="font-mono text-emerald-400">{usageState.message}</p>
                           )}
                         </div>
                       )}

@@ -6,6 +6,7 @@ import { scheduleBundleGitSyncTick, startBundleWorker } from './queues/bundle-qu
 import { scheduleGlobalKbPurge, startGlobalKbSyncWorker } from './queues/global-kb-sync-queue.js';
 import { startRuntimeEnsureWorker } from './queues/runtime-ensure-queue.js';
 import { startIdeEnsureWorker } from './queues/ide-ensure-queue.js';
+import { scheduleUsagePollTick, startUsagePollWorker } from './queues/usage-poll-queue.js';
 import {
   closeCliExecQueue,
   scheduleCliVersionRefresh,
@@ -61,6 +62,9 @@ async function main(): Promise<void> {
   // Serves the api's Editor-tab "ensure IDE" requests: lazily launches the task's
   // code-server container when the user opens the editor.
   const ideEnsureWorker = startIdeEnsureWorker();
+  // Gentle background poller: reads each logged-in provider's subscription
+  // usage-window endpoint (~5 min) so the task header can show 5h/weekly meters.
+  const usagePollWorker = startUsagePollWorker();
   // Recover steps a prior worker orphaned mid-CLI (their sandboxes were reaped
   // above): fail or resume them so they never hang in waiting_cli after a restart.
   await reconcileOrphanedCliSteps(getDb()).catch((err) => {
@@ -79,6 +83,9 @@ async function main(): Promise<void> {
   });
   await scheduleGlobalKbPurge().catch((err) => {
     logger.warn({ err }, 'failed to schedule global KB archive purge');
+  });
+  await scheduleUsagePollTick().catch((err) => {
+    logger.warn({ err }, 'failed to schedule usage-window poll tick');
   });
   // Pre-pull declared local Ollama models so a fresh stack is usable without a
   // manual pull. Non-blocking: boot completes while large pulls run in the
@@ -137,6 +144,7 @@ async function main(): Promise<void> {
       globalKbSyncWorker.close(true),
       runtimeEnsureWorker.close(true),
       ideEnsureWorker.close(true),
+      usagePollWorker.close(true),
       closeTaskQueue(),
       closeCliExecQueue(),
     ]);
