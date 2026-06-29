@@ -479,9 +479,17 @@ export async function executeCliSpec(
 
   if (collector.isStreamJson() && streamResult === null) {
     const reason = collector.getNoResultReason() ?? 'LLM emitted no result event';
+    // No `result` event (run killed/timed-out/aborted, e.g. exit 137). Store the
+    // assistant prose that DID stream — NOT result.stdout, which is the full raw
+    // NDJSON: it becomes the Clean tab's replay source (raw_output ->
+    // staticCleanOutput) and would render as raw protocol, ballooning Clean to MBs.
+    // The full raw stream stays in streamLog (the Raw tab). Falls back to
+    // result.stdout only when no prose streamed at all — preserving prior behavior
+    // and the provider-fatal rawOutput tail scan for that case.
+    const partialProse = collector.getAssistantText() || result.stdout;
     return {
       exitCode: result.exitCode,
-      rawOutput: result.stdout,
+      rawOutput: partialProse,
       parsedOutput: null,
       errorMessage:
         result.error ??
