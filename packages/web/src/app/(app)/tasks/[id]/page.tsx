@@ -1574,12 +1574,18 @@ function resetSuffix(resetsAt: string | null, now: number): string {
   return d > 0 ? ` (resets in ${d}d ${h}h)` : ` (resets in ${h}h ${m}m)`;
 }
 
+/** Per-window remaining-% colour (claude-hud scheme): green >25% left, amber 10-25%
+ *  (75-90% used), red <=10% (>=90% used). Each window is coloured on its own value. */
+function usageRemainingColor(remaining: number): string {
+  return remaining <= 10 ? 'text-red-400' : remaining <= 25 ? 'text-amber-400' : 'text-emerald-400';
+}
+
 /**
  * Subscription usage chip: each window's REMAINING percentage for the provider the
  * current step runs on (used = vendor-reported; remaining = 100 - used, matching the
  * vendor's own "% left" view). Polls /usage-window gently (~60s). Renders nothing when
  * the provider has no readable window, isn't connected, or the snapshot errored; dims
- * when stale. Colour reflects the tightest remaining window.
+ * when stale. Each window is coloured independently on its own remaining headroom.
  */
 function HeaderUsageChip({
   providerId,
@@ -1627,13 +1633,6 @@ function HeaderUsageChip({
   if (snap.daily) windows.push({ label: 'day', w: snap.daily });
   if (windows.length === 0) return null;
 
-  const minRemaining = Math.min(...windows.map((x) => 100 - x.w.usedPct));
-  const color =
-    minRemaining <= 10
-      ? 'text-red-400'
-      : minRemaining <= 25
-        ? 'text-amber-400'
-        : 'text-emerald-400';
   const name =
     (providerName && CLI_USAGE_LABEL[providerName]) || providerLabel || providerName || 'CLI';
   const tooltip = windows
@@ -1642,7 +1641,7 @@ function HeaderUsageChip({
 
   return (
     <span
-      className={`mx-2 flex shrink-0 items-center gap-1.5 font-mono text-xs font-semibold ${color} ${
+      className={`mx-2 flex shrink-0 items-center gap-1.5 font-mono text-xs font-semibold ${
         snap.stale ? 'opacity-50' : ''
       }`}
       title={`${name} subscription usage — ${tooltip}${snap.stale ? '   (stale)' : ''}`}
@@ -1651,7 +1650,7 @@ function HeaderUsageChip({
       {windows.map((x, i) => (
         <span key={x.label} className="flex items-center gap-1.5">
           {i > 0 && <span className="h-3 w-px bg-neutral-600" aria-hidden />}
-          <span>
+          <span className={usageRemainingColor(100 - x.w.usedPct)}>
             {x.label} {100 - x.w.usedPct}%
           </span>
         </span>
