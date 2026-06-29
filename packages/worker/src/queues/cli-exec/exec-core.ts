@@ -29,6 +29,7 @@ import {
 } from '../cli-stream-publisher.js';
 import { log, type CliExecDeps, type ExecutionOutcome } from './_shared.js';
 import { createStreamJsonCollector } from './stream.js';
+import { looksLikeJson, proseForClean } from './clean-output.js';
 import { createSteerForwarder, type SteerForwarder } from './steer-forwarder.js';
 import { createSteerTracker } from './steer-tracker.js';
 import { getRedis } from '../../redis.js';
@@ -405,9 +406,10 @@ export async function executeCliSpec(
       };
     }
     // JSONL stream without an agent message — partial usage is still recorded.
+    // No prose to recover; keep the raw codex JSONL out of the Clean tab.
     return {
       exitCode: result.exitCode,
-      rawOutput: result.stdout,
+      rawOutput: proseForClean('', result.stdout),
       parsedOutput: null,
       errorMessage:
         result.error ??
@@ -486,7 +488,7 @@ export async function executeCliSpec(
     // The full raw stream stays in streamLog (the Raw tab). Falls back to
     // result.stdout only when no prose streamed at all — preserving prior behavior
     // and the provider-fatal rawOutput tail scan for that case.
-    const partialProse = collector.getAssistantText() || result.stdout;
+    const partialProse = proseForClean(collector.getAssistantText(), result.stdout);
     return {
       exitCode: result.exitCode,
       rawOutput: partialProse,
@@ -521,11 +523,32 @@ export async function executeCliSpec(
         streamLog,
       };
     }
+    // Extraction failed. A JSON envelope here (the wrapper we could not unwrap,
+    // or crash output) must not reach Clean — empty raw_output instead of raw
+    // JSON. Plain text (an older binary that ignored --output-format json) is
+    // genuine prose and falls through to the plain return below.
+    if (looksLikeJson(result.stdout)) {
+      return {
+        exitCode: result.exitCode,
+        rawOutput: '',
+        parsedOutput: null,
+        errorMessage: formatCliErrorMessage(
+          result.exitCode,
+          result.stderr,
+          result.stdout,
+          result.error,
+        ),
+        tokenUsage: null,
+        streamLog,
+      };
+    }
   }
 
+  // Plain/last-resort path (no structured format, or a collector that saw zero
+  // events). Keep stdout as prose unless it is actually machine protocol.
   return {
     exitCode: result.exitCode,
-    rawOutput: result.stdout,
+    rawOutput: proseForClean('', result.stdout),
     parsedOutput: tryJsonParse(result.stdout),
     errorMessage: formatCliErrorMessage(
       result.exitCode,
