@@ -47,7 +47,7 @@ export function QuizBlock({ quiz }: { quiz: ParsedQuiz }) {
   ).length;
 
   return (
-    <div className="my-3 flex flex-col gap-3 rounded-md border border-indigo-900/60 bg-indigo-950/20 p-3">
+    <div className="my-3 flex flex-col gap-5 rounded-md border border-indigo-900/60 bg-indigo-950/20 p-3">
       <div className="flex items-baseline justify-between gap-2">
         <h4 className="text-sm font-semibold text-indigo-200">Comprehension quiz</h4>
         <span className="text-xs text-neutral-400">
