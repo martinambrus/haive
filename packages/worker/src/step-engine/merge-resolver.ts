@@ -413,7 +413,7 @@ async function dispatchFixAgent(
     conflictFiles: await conflictFiles(state.mergeDir),
     guidance,
   });
-  const preferred = await resolvePreferredCli(
+  const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     db,
     params.userId,
     stepDef.metadata.id,
@@ -427,7 +427,7 @@ async function dispatchFixAgent(
     providers: params.providers!,
     preferredProviderId: preferred,
     input: { kind: 'prompt', prompt, capabilities: spec.requiredCapabilities },
-    invokeOpts: { cwd: state.sandboxMergeDir },
+    invokeOpts: { cwd: state.sandboxMergeDir, effortLevel: preferredEffort ?? undefined },
   });
   if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return null;
   const inv = await db

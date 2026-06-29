@@ -242,7 +242,14 @@ cliProviderRoutes.get('/', async (c) => {
     where: eq(schema.cliProviders.userId, userId),
     orderBy: [desc(schema.cliProviders.createdAt)],
   });
-  return c.json({ providers: rows });
+  // Attach each provider's adapter effortScale (the per-CLI reasoning levels, or
+  // null for knob-less CLIs) so the task UI can populate the per-step effort
+  // dropdown and hide it for CLIs without an effort knob.
+  const providers = rows.map((p) => ({
+    ...p,
+    effortScale: CLI_PROVIDER_CATALOG[p.name].effortScale,
+  }));
+  return c.json({ providers });
 });
 
 cliProviderRoutes.get('/:id', async (c) => {

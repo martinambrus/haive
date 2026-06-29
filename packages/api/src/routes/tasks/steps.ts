@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  CLI_PROVIDER_CATALOG,
   clarifyStepRequestSchema,
   logger,
   MERGE_CLARIFICATION_ANSWERED_EVENT,
@@ -11,6 +12,7 @@ import {
   STEP_CLI_ROLES,
   submitStepRequestSchema,
   TASK_JOB_NAMES,
+  type CliProviderName,
   type TaskJobPayload,
 } from '@haive/shared';
 import { getDb } from '../../db.js';
@@ -27,6 +29,16 @@ import {
   isStepSkippable,
   propagateModelHealthCliToTaskDefault,
 } from './_helpers.js';
+
+/** Validate a requested per-step effort against the resolved provider's effortScale.
+ *  Returns the level only when the CLI has an effort knob and the value is in-scale;
+ *  otherwise null (so a knob-less CLI, or a stale level such as claude 'max' on codex,
+ *  is simply not stored). */
+function clampEffort(name: CliProviderName, level: string | null | undefined): string | null {
+  if (!level) return null;
+  const scale = CLI_PROVIDER_CATALOG[name].effortScale;
+  return scale && scale.values.includes(level) ? level : null;
+}
 
 export const stepRoutes = new Hono<AppEnv>();
 
@@ -749,16 +761,29 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       });
       if (!provider) throw new HttpError(404, 'CLI provider not found');
       if (!provider.enabled) throw new HttpError(409, 'CLI provider is disabled');
+      const effortLevel = clampEffort(provider.name, body.effortLevel);
       await db
         .insert(schema.userStepCliRolePreferences)
-        .values({ userId, stepId, role, cliProviderId: body.cliProviderId, explicit: true })
+        .values({
+          userId,
+          stepId,
+          role,
+          cliProviderId: body.cliProviderId,
+          effortLevel,
+          explicit: true,
+        })
         .onConflictDoUpdate({
           target: [
             schema.userStepCliRolePreferences.userId,
             schema.userStepCliRolePreferences.stepId,
             schema.userStepCliRolePreferences.role,
           ],
-          set: { cliProviderId: body.cliProviderId, explicit: true, updatedAt: new Date() },
+          set: {
+            cliProviderId: body.cliProviderId,
+            effortLevel,
+            explicit: true,
+            updatedAt: new Date(),
+          },
         });
     } else {
       await db
@@ -809,12 +834,18 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     });
     if (!provider) throw new HttpError(404, 'CLI provider not found');
     if (!provider.enabled) throw new HttpError(409, 'CLI provider is disabled');
+    const effortLevel = clampEffort(provider.name, body.effortLevel);
     await db
       .insert(schema.userStepCliPreferences)
-      .values({ userId, stepId, cliProviderId: body.cliProviderId, explicit: true })
+      .values({ userId, stepId, cliProviderId: body.cliProviderId, effortLevel, explicit: true })
       .onConflictDoUpdate({
         target: [schema.userStepCliPreferences.userId, schema.userStepCliPreferences.stepId],
-        set: { cliProviderId: body.cliProviderId, explicit: true, updatedAt: new Date() },
+        set: {
+          cliProviderId: body.cliProviderId,
+          effortLevel,
+          explicit: true,
+          updatedAt: new Date(),
+        },
       });
   } else {
     await db

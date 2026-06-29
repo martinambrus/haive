@@ -76,9 +76,11 @@ async function loadLastCompletedFormValues(
 }
 
 /** Returns the user's explicit per-step CLI override (set via the task UI),
- *  validated as enabled. Falls back to the task default when no explicit
- *  override exists or the override's provider is disabled/deleted. Legacy
- *  auto-recorded rows (explicit=false) are ignored so the task provider wins. */
+ *  validated as enabled, plus the effort/reasoning override stored beside it on
+ *  the same preference row (null when none). Falls back to the task default CLI
+ *  (and null effort) when no explicit override exists or the override's provider
+ *  is disabled/deleted. Legacy auto-recorded rows (explicit=false) are ignored so
+ *  the task provider wins. */
 export async function resolvePreferredCli(
   db: Database,
   userId: string,
@@ -88,7 +90,7 @@ export async function resolvePreferredCli(
   role: string = 'default',
   taskId?: string,
   ignoreSaved = false,
-): Promise<string | null> {
+): Promise<{ cliProviderId: string | null; effortLevel: string | null }> {
   // When the task set ignore_saved_step_clis, a saved pref is honored only where
   // the user explicitly (re)set it WITHIN this task (a task_step_cli_touched
   // marker for that exact role); otherwise the step falls back to the task
@@ -120,7 +122,7 @@ export async function resolvePreferredCli(
     if (roleRow) {
       const p = providers.find((p) => p.id === roleRow.cliProviderId);
       if (p && p.enabled && (!ignoreSaved || (await isTouched(role)))) {
-        return roleRow.cliProviderId;
+        return { cliProviderId: roleRow.cliProviderId, effortLevel: roleRow.effortLevel };
       }
     }
   }
@@ -131,13 +133,14 @@ export async function resolvePreferredCli(
       eq(schema.userStepCliPreferences.explicit, true),
     ),
   });
-  if (!row) return fallback;
+  if (!row) return { cliProviderId: fallback, effortLevel: null };
   const provider = providers.find((p) => p.id === row.cliProviderId);
-  if (!provider || !provider.enabled) return fallback;
+  if (!provider || !provider.enabled) return { cliProviderId: fallback, effortLevel: null };
   // Gate the 'default' read by its own marker so a flagged multi-role step can't
   // leak a pre-existing default pref via the role->default fallthrough above.
-  if (ignoreSaved && !(await isTouched('default'))) return fallback;
-  return row.cliProviderId;
+  if (ignoreSaved && !(await isTouched('default')))
+    return { cliProviderId: fallback, effortLevel: null };
+  return { cliProviderId: row.cliProviderId, effortLevel: row.effortLevel };
 }
 
 export interface WorkerDeps {
@@ -490,16 +493,17 @@ async function resolveLlmPhase(
   // Multi-CLI loop steps pick a role per iteration (e.g. reviewer vs corrector);
   // the resolved provider differs per role. Non-loop steps resolve 'default'.
   const role = stepDef.loop?.resolveRole?.(upcomingIteration) ?? 'default';
-  const preferredProviderId = await resolvePreferredCli(
-    db,
-    params.userId,
-    stepDef.metadata.id,
-    params.cliProviderId ?? null,
-    params.providers,
-    role,
-    params.taskId,
-    params.ignoreSavedStepClis ?? false,
-  );
+  const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
+    await resolvePreferredCli(
+      db,
+      params.userId,
+      stepDef.metadata.id,
+      params.cliProviderId ?? null,
+      params.providers,
+      role,
+      params.taskId,
+      params.ignoreSavedStepClis ?? false,
+    );
   const steeringRequested = await resolveSteeringEnabled();
   const plan = resolveDispatch({
     providers: params.providers,
@@ -512,6 +516,7 @@ async function resolveLlmPhase(
     },
     invokeOpts: {
       cwd: params.workspacePath,
+      effortLevel: preferredEffort ?? undefined,
     },
   });
 
@@ -563,6 +568,7 @@ async function resolveLlmPhase(
     taskStepId: current.id,
     userId: params.userId,
     cliProviderId: plan.providerId,
+    effortLevel: preferredEffort ?? undefined,
     kind: payloadKind,
     spec: plan.invocation.spec,
     timeoutMs: llmSpec.timeoutMs,
@@ -644,21 +650,22 @@ async function resolveAiFixPhase(
     'Make minimal, correct edits. The step re-runs automatically after you finish — do NOT run it yourself. When done, stop.',
   ].join('\n');
 
-  const preferredProviderId = await resolvePreferredCli(
-    db,
-    params.userId,
-    stepDef.metadata.id,
-    params.cliProviderId ?? null,
-    params.providers,
-    'default',
-    params.taskId,
-    params.ignoreSavedStepClis ?? false,
-  );
+  const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
+    await resolvePreferredCli(
+      db,
+      params.userId,
+      stepDef.metadata.id,
+      params.cliProviderId ?? null,
+      params.providers,
+      'default',
+      params.taskId,
+      params.ignoreSavedStepClis ?? false,
+    );
   const plan = resolveDispatch({
     providers: params.providers,
     preferredProviderId,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
-    invokeOpts: { cwd: params.workspacePath },
+    invokeOpts: { cwd: params.workspacePath, effortLevel: preferredEffort ?? undefined },
   });
   if (plan.mode === 'skip' || !plan.invocation) {
     const failed = await updateRow(db, current.id, {
@@ -701,6 +708,7 @@ async function resolveAiFixPhase(
     taskStepId: current.id,
     userId: params.userId,
     cliProviderId: plan.providerId,
+    effortLevel: preferredEffort ?? undefined,
     kind: payloadKind,
     spec: plan.invocation.spec,
     timeoutMs: 30 * 60 * 1000,
@@ -777,16 +785,17 @@ async function resolveAgentMiningPhase(
     return { resolved: true, results: [], current };
   }
 
-  const preferredProviderId = await resolvePreferredCli(
-    db,
-    params.userId,
-    stepDef.metadata.id,
-    params.cliProviderId ?? null,
-    params.providers,
-    'default',
-    params.taskId,
-    params.ignoreSavedStepClis ?? false,
-  );
+  const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
+    await resolvePreferredCli(
+      db,
+      params.userId,
+      stepDef.metadata.id,
+      params.cliProviderId ?? null,
+      params.providers,
+      'default',
+      params.taskId,
+      params.ignoreSavedStepClis ?? false,
+    );
   // Each mining agent is its own Claude-family invocation with its own terminal,
   // so each is independently steerable (gated globally + by adapter support).
   const steeringRequested = await resolveSteeringEnabled();
@@ -800,7 +809,7 @@ async function resolveAgentMiningPhase(
         prompt: dispatch.prompt,
         capabilities: spec.requiredCapabilities,
       },
-      invokeOpts: { cwd: params.workspacePath },
+      invokeOpts: { cwd: params.workspacePath, effortLevel: preferredEffort ?? undefined },
     });
 
     if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
@@ -1617,21 +1626,22 @@ async function maybeEnqueueStepSummary(
     } else {
       return; // no agent text to summarize
     }
-    const preferredProviderId = await resolvePreferredCli(
-      db,
-      params.userId,
-      stepDef.metadata.id,
-      params.cliProviderId ?? null,
-      providers,
-      'default',
-      params.taskId,
-      params.ignoreSavedStepClis ?? false,
-    );
+    const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
+      await resolvePreferredCli(
+        db,
+        params.userId,
+        stepDef.metadata.id,
+        params.cliProviderId ?? null,
+        providers,
+        'default',
+        params.taskId,
+        params.ignoreSavedStepClis ?? false,
+      );
     const plan = resolveDispatch({
       providers,
       preferredProviderId,
       input: { kind: 'prompt', prompt, capabilities: [] },
-      invokeOpts: { cwd: params.workspacePath },
+      invokeOpts: { cwd: params.workspacePath, effortLevel: preferredEffort ?? undefined },
     });
     const invocation = plan.invocation;
     if (plan.mode === 'skip' || !invocation || invocation.kind !== 'cli') return;

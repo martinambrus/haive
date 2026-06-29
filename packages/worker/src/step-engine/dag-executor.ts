@@ -385,7 +385,7 @@ async function startConflictFix(
 async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<string | null> {
   const { db, params, stepDef, current, integration, providers, deps } = m;
   const prompt = buildMergeFixPrompt(issue.branchName ?? '', issue.title ?? undefined);
-  const preferred = await resolvePreferredCli(
+  const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     db,
     params.userId,
     stepDef.metadata.id,
@@ -399,7 +399,7 @@ async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<
     providers,
     preferredProviderId: preferred,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
-    invokeOpts: { cwd: integration.sandboxPath },
+    invokeOpts: { cwd: integration.sandboxPath, effortLevel: preferredEffort ?? undefined },
   });
   if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return null;
   const inv = await db
@@ -614,7 +614,7 @@ async function spawnReviewAgent(
   prompt: string,
   capabilities: StepCapability[],
 ): Promise<boolean> {
-  const preferred = await resolvePreferredCli(
+  const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     ra.db,
     ra.params.userId,
     ra.stepDef.metadata.id,
@@ -628,7 +628,10 @@ async function spawnReviewAgent(
     providers: ra.providers,
     preferredProviderId: preferred,
     input: { kind: 'prompt', prompt, capabilities },
-    invokeOpts: { cwd: issue.sandboxWorktreePath ?? undefined },
+    invokeOpts: {
+      cwd: issue.sandboxWorktreePath ?? undefined,
+      effortLevel: preferredEffort ?? undefined,
+    },
   });
   if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return false;
   const inv = await ra.db
@@ -1008,7 +1011,7 @@ async function ingestAdvisor(
 
 async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promise<boolean> {
   const prompt = replannerPrompt(ea.plan, failed);
-  const preferred = await resolvePreferredCli(
+  const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     ea.db,
     ea.params.userId,
     ea.stepDef.metadata.id,
@@ -1022,7 +1025,7 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
     providers: ea.providers,
     preferredProviderId: preferred,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use'] },
-    invokeOpts: { cwd: ea.params.workspacePath },
+    invokeOpts: { cwd: ea.params.workspacePath, effortLevel: preferredEffort ?? undefined },
   });
   if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return false;
   const inv = await ea.db
@@ -1364,7 +1367,7 @@ export async function resolveDagPhase(
       (i) => i.outcome === 'pending' && i.cliInvocationId === null,
     );
     if (undispatched.length > 0) {
-      const preferred = await resolvePreferredCli(
+      const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
         db,
         params.userId,
         stepDef.metadata.id,
@@ -1382,7 +1385,10 @@ export async function resolveDagPhase(
           providers,
           preferredProviderId: preferred,
           input: { kind: 'prompt', prompt, capabilities: spec.requiredCapabilities },
-          invokeOpts: { cwd: issue.sandboxWorktreePath ?? undefined },
+          invokeOpts: {
+            cwd: issue.sandboxWorktreePath ?? undefined,
+            effortLevel: preferredEffort ?? undefined,
+          },
         });
         if (
           planDispatch.mode === 'skip' ||

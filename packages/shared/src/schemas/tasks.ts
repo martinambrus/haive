@@ -170,6 +170,11 @@ export const setCliProviderRequestSchema = z.object({
   /** Which round of the step to act on (see stepActionRequestSchema). Omitted →
    *  latest round. */
   round: z.number().int().nonnegative().optional(),
+  /** Optional per-step effort/reasoning override stored beside the CLI for this
+   *  (step, role). Null/omitted clears it (the step uses the provider's configured
+   *  effort). Validated against the resolved provider's effortScale server-side; an
+   *  out-of-scale value (e.g. claude 'max' on codex) is dropped. */
+  effortLevel: z.string().max(32).nullable().optional(),
 });
 
 export type SetCliProviderRequest = z.infer<typeof setCliProviderRequestSchema>;

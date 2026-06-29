@@ -322,6 +322,10 @@ export interface CliProvider {
   authMode: CliAuthMode;
   cliVersion: string | null;
   effortLevel: string | null;
+  /** The adapter's effort scale (reasoning levels), or null for CLIs with no effort
+   *  knob. Attached by GET /cli-providers so the task UI can build the per-step
+   *  effort dropdown and hide it for knob-less CLIs. */
+  effortScale: EffortScaleMetadata | null;
   model: string | null;
   modelfile: string | null;
   modelProvisionStatus: CliModelProvisionStatus;
@@ -545,11 +549,16 @@ export interface TaskStep {
    *  used provider after dispatch. The dropdown defaults to this when
    *  present; falls back to the task-level cliProviderId otherwise. */
   preferredCliProviderId: string | null;
+  /** Per-(user, step) effort override (null = use the provider's configured
+   *  effort); drives the per-step effort dropdown's selected value. */
+  preferredEffortLevel: string | null;
   /** Multi-CLI steps (e.g. spec-quality) expose role descriptors and the
    *  currently-selected provider per role; the step card renders one dropdown
    *  per role instead of the single CLI dropdown. */
   cliRoles?: { id: string; label: string }[];
   cliRoleProviders?: Record<string, string | null>;
+  /** Per-role effort override for multi-CLI steps; parallels cliRoleProviders. */
+  cliRoleEfforts?: Record<string, string | null>;
   /** True iff this step was skipped via the user-clicked "Skip" action.
    *  Auto-skipped steps (shouldRun → false, or detect setting skipReason)
    *  have this as false. Used to hide the retry button on auto-skips. */

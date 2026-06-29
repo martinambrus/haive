@@ -163,6 +163,10 @@ export const userStepCliPreferences = pgTable(
      *  Legacy auto-recorded rows default to false and are ignored by the
      *  runner and UI so the task-level provider choice is honored. */
     explicit: boolean('explicit').notNull().default(false),
+    /** Optional per-step effort/reasoning-level override stored beside the CLI.
+     *  NULL = no override (adapter falls back to provider.effortLevel, then max).
+     *  Validated against the resolved provider's effortScale at save and dispatch. */
+    effortLevel: text('effort_level'),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
   (table) => [uniqueIndex('user_step_cli_pref_pk').on(table.userId, table.stepId)],
@@ -186,6 +190,8 @@ export const userStepCliRolePreferences = pgTable(
       .notNull()
       .references(() => cliProviders.id, { onDelete: 'cascade' }),
     explicit: boolean('explicit').notNull().default(false),
+    /** Per-role effort override; see userStepCliPreferences.effortLevel. */
+    effortLevel: text('effort_level'),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
   (table) => [uniqueIndex('user_step_cli_role_pref_pk').on(table.userId, table.stepId, table.role)],

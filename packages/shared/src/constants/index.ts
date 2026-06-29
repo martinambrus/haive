@@ -207,6 +207,10 @@ export interface CliExecJobPayload {
   taskStepId: string | null;
   userId: string;
   cliProviderId: string | null;
+  /** Per-step effort/reasoning override resolved alongside cliProviderId. For
+   *  kind='cli'/'agent_mining' it is already baked into spec; the sub-agent kinds
+   *  rebuild the spec worker-side and read this to honor the step's effort. */
+  effortLevel?: string;
   kind: CliExecInvocationKind;
   spec: unknown;
   timeoutMs?: number;

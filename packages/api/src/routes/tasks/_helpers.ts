@@ -87,15 +87,21 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
 ): Promise<
   (T & {
     preferredCliProviderId: string | null;
+    /** Per-step effort override (null = use the provider's configured effort);
+     *  drives the per-step effort dropdown's selected value. */
+    preferredEffortLevel: string | null;
     /** Present only for multi-CLI steps (STEP_CLI_ROLES); drives the per-role
      *  dropdowns and their currently-selected providers in the UI. */
     cliRoles?: readonly CliRoleDescriptor[];
     cliRoleProviders?: Record<string, string | null>;
+    cliRoleEfforts?: Record<string, string | null>;
   })[]
 > {
   const stepIds = [...new Set(steps.map((s) => s.stepId))];
   const byStep = new Map<string, string>();
+  const byStepEffort = new Map<string, string | null>();
   const roleByStep = new Map<string, Map<string, string>>();
+  const roleEffortByStep = new Map<string, Map<string, string | null>>();
   // When the task opted out of saved per-step prefs (ignore_saved_step_clis),
   // only prefs the user explicitly (re)set WITHIN this task are honored — tracked
   // by task_step_cli_touched. Load that touched set once and gate each surfaced
@@ -125,7 +131,10 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
           eq(schema.userStepCliPreferences.explicit, true),
         ),
       );
-    for (const p of prefs) byStep.set(p.stepId, p.cliProviderId);
+    for (const p of prefs) {
+      byStep.set(p.stepId, p.cliProviderId);
+      byStepEffort.set(p.stepId, p.effortLevel);
+    }
 
     // Per-role prefs, only for steps that declare CLI roles.
     const roleStepIds = stepIds.filter((sid) => STEP_CLI_ROLES[sid]);
@@ -144,12 +153,16 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
         const m = roleByStep.get(p.stepId) ?? new Map<string, string>();
         m.set(p.role, p.cliProviderId);
         roleByStep.set(p.stepId, m);
+        const me = roleEffortByStep.get(p.stepId) ?? new Map<string, string | null>();
+        me.set(p.role, p.effortLevel);
+        roleEffortByStep.set(p.stepId, me);
       }
     }
   }
   return steps.map((s) => {
     const roles = STEP_CLI_ROLES[s.stepId];
     const roleProviders = roleByStep.get(s.stepId) ?? new Map<string, string>();
+    const roleEfforts = roleEffortByStep.get(s.stepId) ?? new Map<string, string | null>();
     const touchedRoles = touchedByStep.get(s.stepId);
     // Under ignoreSaved a saved pref surfaces only where a marker exists for that
     // exact role; gating the 'default' read by its own marker stops a flagged
@@ -159,11 +172,15 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
     return {
       ...s,
       preferredCliProviderId: honor('default', byStep.get(s.stepId) ?? null),
+      preferredEffortLevel: honor('default', byStepEffort.get(s.stepId) ?? null),
       ...(roles
         ? {
             cliRoles: roles,
             cliRoleProviders: Object.fromEntries(
               roles.map((r) => [r.id, honor(r.id, roleProviders.get(r.id) ?? null)]),
+            ),
+            cliRoleEfforts: Object.fromEntries(
+              roles.map((r) => [r.id, honor(r.id, roleEfforts.get(r.id) ?? null)]),
             ),
           }
         : {}),

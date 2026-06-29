@@ -689,14 +689,19 @@ export default function TaskDetailPage() {
     cliProviderId: string | null,
     role: string | undefined,
     round: number,
+    effortLevel?: string,
   ) {
     setStepProviderBusy(stepId);
     setStepProviderError(null);
     try {
+      // effortLevel omitted (a CLI-only change) clears the stored effort server-side,
+      // so the dropdown resets to the new CLI's default on reload; sent (an effort
+      // change) pins the effective CLI + the chosen effort for this (step, role).
       await api.patch(`/tasks/${id}/steps/${stepId}/cli-provider`, {
         cliProviderId,
         round,
         ...(role ? { role } : {}),
+        ...(effortLevel !== undefined ? { effortLevel } : {}),
       });
       await reload();
     } catch (err) {
@@ -1012,8 +1017,8 @@ export default function TaskDetailPage() {
                   cliError={
                     stepProviderError?.stepId === step.stepId ? stepProviderError.message : null
                   }
-                  onChangeCli={(cliProviderId, role) =>
-                    changeStepProvider(step.stepId, cliProviderId, role, step.round)
+                  onChangeCli={(cliProviderId, role, effortLevel) =>
+                    changeStepProvider(step.stepId, cliProviderId, role, step.round, effortLevel)
                   }
                   autoContinue={task.autoContinue}
                   autoContinueBusy={autoContinueBusy}
@@ -1225,7 +1230,7 @@ interface StepCardProps {
   taskCliProviderId: string | null;
   cliBusy: boolean;
   cliError: string | null;
-  onChangeCli: (cliProviderId: string | null, role?: string) => Promise<void>;
+  onChangeCli: (cliProviderId: string | null, role?: string, effortLevel?: string) => Promise<void>;
   /** Task-level auto-continue flag, shown as a checkbox on the CURRENT step
    *  card only (passed steps can't be auto-continued anymore). */
   autoContinue: boolean;
@@ -1754,6 +1759,39 @@ function StepCard({
     </>
   );
 
+  // Per-step effort dropdown: given the effective provider for a (step, role) and the
+  // remembered effort, render a select of that CLI's effort scale, or null when the CLI
+  // has no effort knob (effortScale === null) so the control hides entirely. A CLI change
+  // clears the stored effort server-side, so on the next reload this re-derives its
+  // options + selected value from the NEW provider (claude 'max' drops on a switch to
+  // codex, which exposes 'xhigh'; switching to gemini/ollama hides the dropdown).
+  const effortSelectFor = (
+    providerId: string,
+    rememberedEffort: string | null | undefined,
+    roleId?: string,
+  ): React.ReactNode => {
+    const prov = providers.find((p) => p.id === providerId);
+    const scale = prov?.effortScale ?? null;
+    if (!scale) return null;
+    const value = rememberedEffort ?? prov?.effortLevel ?? scale.max;
+    return (
+      <select
+        aria-label="reasoning effort"
+        title="Reasoning/effort level for this step's CLI (overrides the CLI's default)"
+        disabled={cliLocked || cliBusy}
+        value={value}
+        onChange={(e) => void onChangeCli(providerId || null, roleId, e.target.value)}
+        className={cliSelectClass}
+      >
+        {scale.values.map((v) => (
+          <option key={v} value={v}>
+            {v}
+          </option>
+        ))}
+      </select>
+    );
+  };
+
   // Detect tooling step fields for inline connection test buttons
   const hasConnectionFields =
     showForm &&
@@ -1910,6 +1948,11 @@ function StepCard({
                   >
                     {cliOptions}
                   </select>
+                  {effortSelectFor(
+                    step.cliRoleProviders?.[roleDesc.id] ?? taskCliProviderId ?? '',
+                    step.cliRoleEfforts?.[roleDesc.id],
+                    roleDesc.id,
+                  )}
                 </div>
               ))
             ) : (
@@ -1926,6 +1969,7 @@ function StepCard({
                 >
                   {cliOptions}
                 </select>
+                {effortSelectFor(effectiveCliProviderId, step.preferredEffortLevel)}
               </>
             ))}
           {showCliPicker && cliLocked && (
