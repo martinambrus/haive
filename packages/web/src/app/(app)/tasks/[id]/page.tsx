@@ -512,12 +512,18 @@ export default function TaskDetailPage() {
   //    buildRunList / SPINE) create it in the mandatory 01-worktree-setup step; opening the
   //    editor earlier would root at the repo checkout (wrong folder) or a path not there
   //    yet. Step rows are created lazily, so the readiness signal must be POSITIVE — that
-  //    step present AND done. Other types (onboarding) edit the repo root and have no
-  //    worktree step, so they are not worktree-gated.
+  //    step present AND done, OR skipped: run_app may skip 01-worktree-setup to run from
+  //    the repo root, and the IDE then roots there (resolveDdevWorkspace's repo-root
+  //    fallback), so a skipped step is just as "ready" as a done one. Other types
+  //    (onboarding) edit the repo root and have no worktree step, so they are not
+  //    worktree-gated.
   // Switch away if the user is sitting on the Editor tab while it is (or becomes) disabled.
   const usesWorktree = task?.type === 'workflow' || task?.type === 'run_app';
   const worktreeReady =
-    !usesWorktree || steps.some((s) => s.stepId === '01-worktree-setup' && s.status === 'done');
+    !usesWorktree ||
+    steps.some(
+      (s) => s.stepId === '01-worktree-setup' && (s.status === 'done' || s.status === 'skipped'),
+    );
   const editorDisabled =
     task?.status === 'completed' || task?.status === 'cancelled' || !worktreeReady;
   useEffect(() => {
