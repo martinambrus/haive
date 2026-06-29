@@ -1594,7 +1594,7 @@ function HeaderUsageChip({
 
   const windows: { label: string; w: UsageWindow }[] = [];
   if (snap.fiveHour) windows.push({ label: '5h', w: snap.fiveHour });
-  if (snap.sevenDay) windows.push({ label: 'wk', w: snap.sevenDay });
+  if (snap.sevenDay) windows.push({ label: 'week', w: snap.sevenDay });
   if (snap.daily) windows.push({ label: 'day', w: snap.daily });
   if (windows.length === 0) return null;
 
@@ -1613,15 +1613,18 @@ function HeaderUsageChip({
 
   return (
     <span
-      className={`flex shrink-0 items-center gap-1.5 font-mono text-xs font-semibold ${color} ${
+      className={`mx-2 flex shrink-0 items-center gap-1.5 font-mono text-xs font-semibold ${color} ${
         snap.stale ? 'opacity-50' : ''
       }`}
       title={`${name} subscription usage — ${tooltip}${snap.stale ? '   (stale)' : ''}`}
     >
       <span className="text-neutral-400">{name}</span>
-      {windows.map((x) => (
-        <span key={x.label}>
-          {x.label} {100 - x.w.usedPct}%
+      {windows.map((x, i) => (
+        <span key={x.label} className="flex items-center gap-1.5">
+          {i > 0 && <span className="h-3 w-px bg-neutral-600" aria-hidden />}
+          <span>
+            {x.label} {100 - x.w.usedPct}%
+          </span>
         </span>
       ))}
     </span>
