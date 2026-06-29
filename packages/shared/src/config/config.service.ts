@@ -102,6 +102,15 @@ export const CONFIG_KEYS = {
   // cache; persists across restarts.
   DEBUG_MODE_ENABLED: 'config:debug:enabled',
 
+  // Global kill-switch for the DDEV image pull-through cache. When 'true' (default),
+  // each per-task DDEV runner routes its nested dockerd Docker Hub pulls through a
+  // shared registry mirror (a singleton registry:2 proxy on a persistent volume), so a
+  // repo's DDEV base images are pulled from Hub once and served locally to every later
+  // task instead of re-pulled per task (the runner's nested image store is dropped at
+  // teardown). Read at runner START; OFF => runners pull direct from Docker Hub (a
+  // mid-task flip needs Stop/Retry). Persists across restarts.
+  DDEV_REGISTRY_CACHE_ENABLED: 'config:ddev:registryCache',
+
   // Per-file size cap (bytes) for user-uploaded task attachments. Enforced by the
   // attachment upload endpoint (streamed; aborts once the byte count exceeds it).
   // Admin-tunable; default DEFAULT_TASK_ATTACHMENT_MAX_BYTES (25 MiB).
@@ -150,6 +159,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.STEERING_ENABLED]: 'true',
   [CONFIG_KEYS.IDE_ENABLED]: 'true',
   [CONFIG_KEYS.DEBUG_MODE_ENABLED]: 'true',
+  [CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED]: 'true',
   [CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES]: String(DEFAULT_TASK_ATTACHMENT_MAX_BYTES),
   [CONFIG_KEYS.APP_URL]: 'http://localhost:3000',
   [CONFIG_KEYS.MAINTENANCE_MODE]: 'false',

@@ -40,6 +40,8 @@ export default function AdminPage() {
   const [savingBrowserAccess, setSavingBrowserAccess] = useState(false);
   const [dbAccessEnabled, setDbAccessEnabled] = useState<boolean | null>(null);
   const [savingDbAccess, setSavingDbAccess] = useState(false);
+  const [ddevRegistryCacheEnabled, setDdevRegistryCacheEnabled] = useState<boolean | null>(null);
+  const [savingDdevRegistryCache, setSavingDdevRegistryCache] = useState(false);
   const [fairEnabled, setFairEnabled] = useState<boolean | null>(null);
   const [savingFair, setSavingFair] = useState(false);
   const [maxPerTask, setMaxPerTask] = useState<number | null>(null);
@@ -61,6 +63,7 @@ export default function AdminPage() {
         debugModeData,
         browserAccessData,
         dbAccessData,
+        ddevRegistryCacheData,
         fairData,
         perTaskData,
         attachmentData,
@@ -73,6 +76,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/debug-mode'),
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
         api.get<{ enabled: boolean }>('/admin/config/db-access'),
+        api.get<{ enabled: boolean }>('/admin/config/ddev-registry-cache'),
         api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
         api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
         api.get<{ maxBytes: number }>('/admin/config/attachment-max-bytes'),
@@ -86,6 +90,7 @@ export default function AdminPage() {
       setDebugModeEnabled(debugModeData.enabled);
       setBrowserAccessEnabled(browserAccessData.enabled);
       setDbAccessEnabled(dbAccessData.enabled);
+      setDdevRegistryCacheEnabled(ddevRegistryCacheData.enabled);
       setFairEnabled(fairData.enabled);
       setMaxPerTask(perTaskData.maxAgentsPerTask);
       setMaxPerTaskInput(String(perTaskData.maxAgentsPerTask));
@@ -274,6 +279,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update database access');
     } finally {
       setSavingDbAccess(false);
+    }
+  }
+
+  async function setDdevRegistryCache(next: boolean) {
+    setSavingDdevRegistryCache(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/ddev-registry-cache', {
+        enabled: next,
+      });
+      setDdevRegistryCacheEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update DDEV image cache');
+    } finally {
+      setSavingDdevRegistryCache(false);
     }
   }
 
@@ -604,6 +624,34 @@ export default function AdminPage() {
             />
             {dbAccessEnabled ? 'Enabled' : 'Disabled'}
             {savingDbAccess && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {ddevRegistryCacheEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>DDEV image cache</CardTitle>
+            <CardDescription>
+              Routes each task&apos;s DDEV runner Docker Hub pulls through a shared pull-through
+              cache (a registry mirror on a persistent volume), so a repo&apos;s DDEV base images
+              are pulled once and served locally to every later task instead of re-pulled per task.
+              Global kill-switch across every repo; OFF makes runners pull direct from Docker Hub.
+              Read at runner start — a mid-task flip needs Stop/Retry. To reclaim disk, remove the
+              haive-ddev-registry container and haive_ddev_registry_cache volume (re-created on next
+              worker boot).
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={ddevRegistryCacheEnabled}
+              disabled={savingDdevRegistryCache}
+              onChange={(e) => void setDdevRegistryCache(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {ddevRegistryCacheEnabled ? 'Enabled' : 'Disabled'}
+            {savingDdevRegistryCache && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

@@ -180,6 +180,19 @@ export async function startDdevRunner(params: {
   // later starts a socat hop onto it (maybeExposeDdevDbPort). The reserved port refuses
   // connections until that listener exists, so a non-opted-in task stays fully closed.
   const dbAccess = await configService.getBoolean(CONFIG_KEYS.DB_DIRECT_ACCESS, true);
+  // Route the runner's nested dockerd Hub pulls through the shared pull-through cache
+  // (when enabled) so DDEV base images come from the local mirror instead of a fresh
+  // Hub pull per task. Read at runner START like the access flags above; the mirror is
+  // ensured here (idempotent) so flipping the flag on takes effect on the next task
+  // with no worker restart. OFF => no env => clean dockerd, direct pulls.
+  const registryCacheEnabled = await configService.getBoolean(
+    CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED,
+    true,
+  );
+  if (registryCacheEnabled) await ensureDdevRegistryCache();
+  const registryEnv = registryCacheEnabled
+    ? ['-e', `DDEV_REGISTRY_DAEMON_JSON=${buildRegistryDaemonJson(ddevRegistryMirrorUrl())}`]
+    : [];
   const caMount = ddevCaMountArgs();
   const buildRunArgs = (attempt: number): { args: string[]; ports: DdevPublishedPorts | null } => {
     const publish: string[] = [];
@@ -220,6 +233,7 @@ export async function startDdevRunner(params: {
         'haive.ddev=1',
         ...publish,
         ...caMount,
+        ...registryEnv,
         '-v',
         `${REPO_VOLUME}:/repos`,
         tag,
@@ -394,6 +408,122 @@ export async function ensureDdevCa(): Promise<void> {
   );
   ddevCaReady = true;
   log.info({ volume: DDEV_CA_VOLUME }, 'shared DDEV CA ready');
+}
+
+// --- DDEV image pull-through cache (registry mirror) --------------------------
+
+/** Singleton registry pull-through cache shared by ALL per-task DDEV runners. A
+ *  per-task runner's nested image store is an anon /var/lib/docker volume dropped at
+ *  teardown, and the runner name is per-task, so without this every new task on a
+ *  repo cold-pulls the DDEV base images (ddev-webserver/router/ssh-agent + db) from
+ *  Docker Hub again. This `registry:2` proxy pulls each layer from Hub ONCE and
+ *  serves it locally to every later runner. Backed by a NAMED volume so the cache
+ *  survives task teardown, worker restart, and host reboot. Reaper-safe: no
+ *  haive.task.id label and no name-prefix sweep matches it, so nothing reaps it. */
+const DDEV_REGISTRY_CONTAINER = 'haive-ddev-registry';
+const DDEV_REGISTRY_VOLUME = 'haive_ddev_registry_cache';
+const DDEV_REGISTRY_PORT = 5000;
+let registryCacheReady = false;
+
+/** In-cluster URL the runners point their nested dockerd at; resolved by container
+ *  name on the internal sandbox network (both the runner and the mirror join it). */
+export function ddevRegistryMirrorUrl(): string {
+  return `http://${DDEV_REGISTRY_CONTAINER}:${DDEV_REGISTRY_PORT}`;
+}
+
+/** The `/etc/docker/daemon.json` a runner writes to route its Hub pulls through the
+ *  mirror. `registry-mirrors` needs the full URL; the plaintext HTTP mirror must ALSO
+ *  be in `insecure-registries` (host:port, no scheme) or dockerd refuses it. Pure (no
+ *  I/O) so it's unit-tested — the worker renders it and passes it to the runner via
+ *  env (DDEV_REGISTRY_DAEMON_JSON), the entrypoint writes it verbatim before dockerd. */
+export function buildRegistryDaemonJson(mirrorUrl: string): string {
+  const hostPort = mirrorUrl.replace(/^https?:\/\//, '');
+  return JSON.stringify({
+    'registry-mirrors': [mirrorUrl],
+    'insecure-registries': [hostPort],
+  });
+}
+
+/** True when the named container exists AND is running. One cheap inspect (mirrors
+ *  runnerDockerdUp's shape); false on any error (absent/created/exited). */
+async function containerRunning(name: string): Promise<boolean> {
+  try {
+    const { stdout } = await exec('docker', ['inspect', '-f', '{{.State.Running}}', name], {
+      timeout: 10_000,
+    });
+    return stdout.trim() === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/** Ensure the singleton DDEV registry pull-through cache is up. Idempotent: a no-op
+ *  once provisioned (process-flagged like ensureDdevCa) and it ADOPTS an already-
+ *  running mirror across a worker restart instead of recreating it. Dual-homed:
+ *  started on the worker's default (egress) bridge so it can proxy
+ *  registry-1.docker.io, then connected to the INTERNAL sandbox network so each
+ *  egress-less runner resolves it by name. Best-effort — logs and returns on failure;
+ *  the runner then just pulls direct from Docker Hub (today's behavior). */
+export async function ensureDdevRegistryCache(): Promise<void> {
+  if (registryCacheReady) return;
+  try {
+    // Adopt a mirror a prior worker (or --restart) already brought up — don't
+    // rm+recreate a healthy one (it would briefly drop in-flight pulls; the cache
+    // volume would survive but the disruption is pointless).
+    if (await containerRunning(DDEV_REGISTRY_CONTAINER)) {
+      registryCacheReady = true;
+      return;
+    }
+    // Drop any stale stopped container squatting the name (prior boot crash).
+    await exec('docker', ['rm', '-f', DDEV_REGISTRY_CONTAINER], { timeout: 30_000 }).catch(
+      () => {},
+    );
+    await exec('docker', ['volume', 'create', DDEV_REGISTRY_VOLUME], { timeout: 15_000 }).catch(
+      () => {},
+    );
+    await exec(
+      'docker',
+      [
+        'run',
+        '-d',
+        '--restart',
+        'unless-stopped',
+        '--name',
+        DDEV_REGISTRY_CONTAINER,
+        '--label',
+        'haive.role=ddev-registry-cache',
+        '-e',
+        'REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io',
+        '-v',
+        `${DDEV_REGISTRY_VOLUME}:/var/lib/registry`,
+        'registry:2',
+      ],
+      { timeout: 120_000 },
+    );
+    // Join the internal sandbox network so runners reach it by DNS name (the mirror
+    // keeps the default bridge for its own upstream Hub pulls).
+    const sandboxNetwork = process.env.SANDBOX_NETWORK;
+    if (sandboxNetwork) {
+      await exec('docker', ['network', 'connect', sandboxNetwork, DDEV_REGISTRY_CONTAINER], {
+        timeout: 15_000,
+      }).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/already exists in network/.test(msg)) {
+          log.warn({ err: msg, sandboxNetwork }, 'ddev registry cache network connect failed');
+        }
+      });
+    }
+    registryCacheReady = true;
+    log.info(
+      { container: DDEV_REGISTRY_CONTAINER, volume: DDEV_REGISTRY_VOLUME },
+      'ddev registry pull-through cache ready',
+    );
+  } catch (err) {
+    log.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      'ddev registry cache ensure failed (runners will pull direct from Docker Hub)',
+    );
+  }
 }
 
 /** The user-facing URLs for opening this task's DDEV app in their OWN browser: the

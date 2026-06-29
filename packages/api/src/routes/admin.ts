@@ -416,6 +416,24 @@ adminRoutes.put('/config/db-access', async (c) => {
   return c.json({ enabled });
 });
 
+const ddevRegistryCacheSchema = z.object({ enabled: z.boolean() });
+
+// Global DDEV image pull-through cache kill-switch. The worker reads this at runner
+// START (within the ~30s config cache); OFF stops new runners routing their nested
+// dockerd Hub pulls through the shared registry mirror (they pull direct from Docker
+// Hub). A mid-task flip needs Stop/Retry. Persists across restarts.
+adminRoutes.get('/config/ddev-registry-cache', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/ddev-registry-cache', async (c) => {
+  const { enabled } = ddevRegistryCacheSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'ddev registry cache switch updated');
+  return c.json({ enabled });
+});
+
 const fairSchedulingSchema = z.object({ enabled: z.boolean() });
 
 // Global fair cli-exec scheduling kill-switch. The worker reads this at each

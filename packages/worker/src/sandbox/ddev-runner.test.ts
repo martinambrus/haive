@@ -5,6 +5,8 @@ import {
   parseProcNetRouteGateway,
   renderXdebugIni,
   ddevDbInternalPort,
+  ddevRegistryMirrorUrl,
+  buildRegistryDaemonJson,
 } from './ddev-runner.js';
 
 // Pure recovery-path decision for ensureDdevStartedInner. The orchestrator gathers
@@ -146,5 +148,32 @@ describe('ddevDbInternalPort', () => {
   it('defaults unknown / absent engines to 3306 (DDEV runs mariadb by default)', () => {
     expect(ddevDbInternalPort('')).toBe(3306);
     expect(ddevDbInternalPort('sqlite')).toBe(3306);
+  });
+});
+
+describe('ddev registry pull-through cache config', () => {
+  // The runner's nested dockerd routes Hub pulls through the mirror only if the
+  // daemon.json names it as a registry-mirror AND lists it insecure (it's plaintext
+  // HTTP) — miss either and dockerd silently pulls direct, defeating the cache. The
+  // worker renders this and passes it to the runner via env, so pin the shape.
+  it('mirror URL is the in-cluster container name on the registry port', () => {
+    expect(ddevRegistryMirrorUrl()).toBe('http://haive-ddev-registry:5000');
+  });
+
+  it('daemon.json sets registry-mirrors (full URL) + insecure-registries (host:port)', () => {
+    const json = JSON.parse(buildRegistryDaemonJson('http://haive-ddev-registry:5000')) as Record<
+      string,
+      string[]
+    >;
+    expect(json['registry-mirrors']).toEqual(['http://haive-ddev-registry:5000']);
+    expect(json['insecure-registries']).toEqual(['haive-ddev-registry:5000']);
+  });
+
+  it('strips the http(s) scheme for the insecure-registries entry', () => {
+    const json = JSON.parse(buildRegistryDaemonJson('https://mirror.example:5000')) as Record<
+      string,
+      string[]
+    >;
+    expect(json['insecure-registries']).toEqual(['mirror.example:5000']);
   });
 });

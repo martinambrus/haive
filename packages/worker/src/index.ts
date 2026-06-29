@@ -1,4 +1,4 @@
-import { logger } from '@haive/shared';
+import { logger, configService, CONFIG_KEYS } from '@haive/shared';
 import { bootstrap } from './bootstrap.js';
 import { getDb } from './db.js';
 import { getRedis } from './redis.js';
@@ -23,7 +23,7 @@ import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
 import { reapOrphanedTaskAuthVolumes } from './sandbox/auth-volume-reaper.js';
 import { reapOrphanEnvTemplates } from './sandbox/env-template-reaper.js';
 import { ensureOllamaModels } from './sandbox/ollama-provision.js';
-import { ensureDdevCa } from './sandbox/ddev-runner.js';
+import { ensureDdevCa, ensureDdevRegistryCache } from './sandbox/ddev-runner.js';
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
 import { IdeSessionReaper } from './sandbox/ide-session-reaper.js';
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
@@ -91,6 +91,17 @@ async function main(): Promise<void> {
   // DDEV task racing a fresh boot falls back to a throwaway CA for that one run.
   void ensureDdevCa().catch((err) => {
     logger.warn({ err }, 'shared DDEV CA generation on boot failed');
+  });
+  // Pre-warm the shared DDEV registry pull-through cache so a repo's DDEV base images
+  // are pulled from Docker Hub once and served locally to every later task (the
+  // per-task runner's nested image store is dropped at teardown). Flag-gated +
+  // non-blocking; a DDEV task racing a cold boot just pulls direct that one run.
+  void (async () => {
+    if (await configService.getBoolean(CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED, true)) {
+      await ensureDdevRegistryCache();
+    }
+  })().catch((err) => {
+    logger.warn({ err }, 'ddev registry cache provisioning on boot failed');
   });
 
   // Terminal subsystem: session manager subscribes to terminal:request and
