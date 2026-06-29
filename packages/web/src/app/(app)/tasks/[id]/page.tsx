@@ -1536,19 +1536,61 @@ function StepTokens({ tokenUsage }: { tokenUsage: TaskStep['tokenUsage'] }) {
   );
 }
 
-// Surface B: context-window headroom frozen when this step finished (audit trail).
-// Renders nothing on deterministic steps (no CLI invocations -> null columns).
-function StepContextLeft({ step }: { step: TaskStep }) {
-  if (step.contextLeftPercent == null) return null;
-  const left = step.contextLeftPercent;
-  const color = left <= 10 ? 'text-red-400' : left <= 25 ? 'text-amber-400' : 'text-emerald-300';
-  const title =
-    step.contextTokens != null && step.contextWindowSize != null
-      ? `Context at finish: ${step.contextTokens.toLocaleString()} / ${step.contextWindowSize.toLocaleString()} prompt tokens — ${left}% of the window left`
-      : `Context ${left}% left at finish`;
+// Surface B: a historical stamp frozen when this step finished — context-window
+// headroom plus the subscription allowance (5h / weekly / daily) remaining at that
+// moment, so you can watch the allowance drop step by step. Mirrors the top header
+// chip's look (mono text, vertical dividers, per-value colour, side padding); no
+// reset time here — that lives only in the header. Each value is a bare percentage
+// with its own hover title. Renders nothing on deterministic steps / when no usage
+// data was captured.
+function StepUsageStamp({ step }: { step: TaskStep }) {
+  const parts: { key: string; remaining: number; title: string }[] = [];
+  if (step.contextLeftPercent != null) {
+    const tokens =
+      step.contextTokens != null && step.contextWindowSize != null
+        ? ` (${step.contextTokens.toLocaleString()} / ${step.contextWindowSize.toLocaleString()} prompt tokens)`
+        : '';
+    parts.push({
+      key: 'ctx',
+      remaining: step.contextLeftPercent,
+      title: `Context window remaining when this step finished — ${step.contextLeftPercent}%${tokens}`,
+    });
+  }
+  if (step.usageFiveHourPct != null) {
+    const r = 100 - step.usageFiveHourPct;
+    parts.push({
+      key: '5h',
+      remaining: r,
+      title: `5-hour subscription allowance remaining when this step finished — ${r}%`,
+    });
+  }
+  if (step.usageSevenDayPct != null) {
+    const r = 100 - step.usageSevenDayPct;
+    parts.push({
+      key: 'wk',
+      remaining: r,
+      title: `Weekly subscription allowance remaining when this step finished — ${r}%`,
+    });
+  }
+  if (step.usageDailyPct != null) {
+    const r = 100 - step.usageDailyPct;
+    parts.push({
+      key: 'day',
+      remaining: r,
+      title: `Daily subscription allowance remaining when this step finished — ${r}%`,
+    });
+  }
+  if (parts.length === 0) return null;
   return (
-    <span className={`font-mono text-xs ${color}`} title={title}>
-      ctx {left}%
+    <span className="flex shrink-0 items-center gap-1.5 px-2 font-mono text-xs">
+      {parts.map((p, i) => (
+        <span key={p.key} className="flex items-center gap-1.5">
+          {i > 0 && <span className="h-3 w-px bg-neutral-600" aria-hidden />}
+          <span className={usageRemainingColor(p.remaining)} title={p.title}>
+            {p.remaining}%
+          </span>
+        </span>
+      ))}
     </span>
   );
 }
@@ -2239,7 +2281,6 @@ function StepCard({
             taskCompletedAt={taskCompletedAt}
           />
           <StepTokens tokenUsage={step.tokenUsage} />
-          <StepContextLeft step={step} />
           <UserActiveDuration ms={userActiveDisplayMs} />
           {step.iterationCount > 0 && (
             <span
@@ -2255,6 +2296,9 @@ function StepCard({
           )}
         </div>
         <div className="flex items-center gap-2">
+          {/* Surface B stamp pinned to the right, just left of the action buttons
+              (centering read as random since each step's left content differs). */}
+          <StepUsageStamp step={step} />
           {canActOnStep && (
             <>
               {step.stepId === '03c-business-requirements-review' && step.status === 'failed' && (

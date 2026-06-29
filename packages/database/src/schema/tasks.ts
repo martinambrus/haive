@@ -290,6 +290,14 @@ export const taskSteps = pgTable(
     contextLeftPercent: integer('context_left_percent'),
     contextTokens: integer('context_tokens'),
     contextWindowSize: integer('context_window_size'),
+    /** Surface B audit trail: the provider's subscription-allowance USED% (0-100),
+     *  frozen at step completion from the usage_window_snapshots row of the step's
+     *  CLI provider, so the finished step shows allowance-at-finish (the UI renders
+     *  remaining = 100 - used). All null on deterministic steps, when usage tracking
+     *  is not connected for the provider, and on rows finalized before this feature. */
+    usageFiveHourPct: integer('usage_five_hour_pct'),
+    usageSevenDayPct: integer('usage_seven_day_pct'),
+    usageDailyPct: integer('usage_daily_pct'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },

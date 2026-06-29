@@ -565,6 +565,12 @@ export interface TaskStep {
   contextLeftPercent: number | null;
   contextTokens: number | null;
   contextWindowSize: number | null;
+  /** Surface B audit trail: subscription-allowance USED% (0-100) frozen at step
+   *  completion from the step provider's usage snapshot (UI shows remaining =
+   *  100 - used). Null on deterministic steps / when usage tracking isn't connected. */
+  usageFiveHourPct: number | null;
+  usageSevenDayPct: number | null;
+  usageDailyPct: number | null;
   startedAt: string | null;
   endedAt: string | null;
   createdAt: string;

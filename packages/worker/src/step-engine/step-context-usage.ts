@@ -47,6 +47,9 @@ export async function writeStepContextUsage(db: Database, stepId: string): Promi
 
   let providerName: string | null = null;
   let model: string | null = null;
+  let usageFiveHourPct: number | null = null;
+  let usageSevenDayPct: number | null = null;
+  let usageDailyPct: number | null = null;
   if (peakProviderId) {
     const p = await db.query.cliProviders.findFirst({
       where: eq(schema.cliProviders.id, peakProviderId),
@@ -54,6 +57,18 @@ export async function writeStepContextUsage(db: Database, stepId: string): Promi
     });
     providerName = p?.name ?? null;
     model = p?.model ?? null;
+    // Historical allowance stamp: freeze the provider's subscription-window USED%
+    // (5h / weekly / daily) as of this step's finish, from the latest poll snapshot.
+    // Null unless usage tracking is connected and the last poll succeeded.
+    const snap = await db.query.usageWindowSnapshots.findFirst({
+      where: eq(schema.usageWindowSnapshots.providerId, peakProviderId),
+      columns: { fiveHourPct: true, sevenDayPct: true, dailyPct: true, status: true },
+    });
+    if (snap && snap.status === 'ok') {
+      usageFiveHourPct = snap.fiveHourPct ?? null;
+      usageSevenDayPct = snap.sevenDayPct ?? null;
+      usageDailyPct = snap.dailyPct ?? null;
+    }
   }
 
   const windowSize = resolveContextWindow(providerName, model);
@@ -65,9 +80,15 @@ export async function writeStepContextUsage(db: Database, stepId: string): Promi
       contextTokens: peak,
       contextWindowSize: windowSize,
       contextLeftPercent: leftPct,
+      usageFiveHourPct,
+      usageSevenDayPct,
+      usageDailyPct,
       updatedAt: new Date(),
     })
     .where(eq(schema.taskSteps.id, stepId));
 
-  log.debug({ stepId, peak, windowSize, leftPct }, 'recorded step context usage');
+  log.debug(
+    { stepId, peak, windowSize, leftPct, usageFiveHourPct, usageSevenDayPct, usageDailyPct },
+    'recorded step context + allowance usage',
+  );
 }
