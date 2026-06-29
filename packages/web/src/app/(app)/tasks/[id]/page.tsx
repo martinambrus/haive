@@ -913,14 +913,15 @@ export default function TaskDetailPage() {
               <span className="truncate">{currentStep.title}</span>
             </Badge>
           )}
-          <div className="ml-auto flex shrink-0 items-center gap-3">
-            <HeaderUsageChip
-              providerId={usageProviderId}
-              providerName={usageProvider?.name ?? null}
-              providerLabel={usageProvider?.label ?? null}
-            />
-            <HeaderPaceChip task={task} steps={steps} userActive={userActive} />
-          </div>
+          {/* Usage chip centers in the gap between the left badges and the right
+              pace chip: its ml-auto + the pace chip's own ml-auto split the free
+              space evenly on each side. Collapses to the strip's gap-3 at low res. */}
+          <HeaderUsageChip
+            providerId={usageProviderId}
+            providerName={usageProvider?.name ?? null}
+            providerLabel={usageProvider?.label ?? null}
+          />
+          <HeaderPaceChip task={task} steps={steps} userActive={userActive} />
         </div>
       )}
       <div className="flex items-start justify-between gap-4">
@@ -1692,7 +1693,7 @@ function HeaderUsageChip({
 
   return (
     <span
-      className={`mx-2 flex shrink-0 items-center gap-1.5 font-mono text-xs font-semibold ${
+      className={`ml-auto flex shrink-0 items-center gap-1.5 px-2 font-mono text-xs font-semibold ${
         snap.stale ? 'opacity-50' : ''
       }`}
       title={`${name} subscription usage — ${tooltip}${snap.stale ? '   (stale)' : ''}`}
