@@ -48,6 +48,8 @@ export default function AdminPage() {
   const [savingPromptCaching1h, setSavingPromptCaching1h] = useState(false);
   const [tersenessLevel, setTersenessLevel] = useState<string | null>(null);
   const [savingTerseness, setSavingTerseness] = useState(false);
+  const [reviewDistillEnabled, setReviewDistillEnabled] = useState<boolean | null>(null);
+  const [savingReviewDistill, setSavingReviewDistill] = useState(false);
   const [maxPerTask, setMaxPerTask] = useState<number | null>(null);
   const [maxPerTaskInput, setMaxPerTaskInput] = useState('');
   const [savingPerTask, setSavingPerTask] = useState(false);
@@ -73,6 +75,7 @@ export default function AdminPage() {
         attachmentData,
         promptCaching1hData,
         tersenessData,
+        reviewDistillData,
       ] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
@@ -88,6 +91,7 @@ export default function AdminPage() {
         api.get<{ maxBytes: number }>('/admin/config/attachment-max-bytes'),
         api.get<{ enabled: boolean }>('/admin/config/prompt-caching-1h'),
         api.get<{ level: string }>('/admin/config/terseness'),
+        api.get<{ enabled: boolean }>('/admin/config/review-fanout-distill'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
@@ -102,6 +106,7 @@ export default function AdminPage() {
       setFairEnabled(fairData.enabled);
       setPromptCaching1hEnabled(promptCaching1hData.enabled);
       setTersenessLevel(tersenessData.level);
+      setReviewDistillEnabled(reviewDistillData.enabled);
       setMaxPerTask(perTaskData.maxAgentsPerTask);
       setMaxPerTaskInput(String(perTaskData.maxAgentsPerTask));
       setAttachmentMaxBytes(attachmentData.maxBytes);
@@ -259,6 +264,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update terseness');
     } finally {
       setSavingTerseness(false);
+    }
+  }
+
+  async function setReviewDistill(next: boolean) {
+    setSavingReviewDistill(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/review-fanout-distill', {
+        enabled: next,
+      });
+      setReviewDistillEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update review distill');
+    } finally {
+      setSavingReviewDistill(false);
     }
   }
 
@@ -616,6 +636,33 @@ export default function AdminPage() {
               <option value="ultra">ultra</option>
             </select>
             {savingTerseness && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {reviewDistillEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Condense code-review fan-out spec</CardTitle>
+            <CardDescription>
+              Opt-in (default OFF). The parallel code-review agents (peer, security, lenses) each
+              embed the full spec in their own prompt, and prompt caching can&apos;t dedup it
+              (separate sessions). When on, the spec is condensed for the reviewers and the full
+              spec is written to a worktree file they can Read on demand &mdash; lossy but
+              retrievable. Leave off until the per-step token panel shows the review fan-out is a
+              heavy share. Takes effect within ~30s, persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={reviewDistillEnabled}
+              disabled={savingReviewDistill}
+              onChange={(e) => void setReviewDistill(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {reviewDistillEnabled ? 'Enabled' : 'Disabled'}
+            {savingReviewDistill && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

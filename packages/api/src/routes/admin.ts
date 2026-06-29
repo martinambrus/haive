@@ -382,6 +382,23 @@ adminRoutes.put('/config/terseness', async (c) => {
   return c.json({ level });
 });
 
+const reviewFanoutDistillSchema = z.object({ enabled: z.boolean() });
+
+// Opt-in (default off): condense the spec passed to the 08c code-review fan-out (full
+// spec written to a worktree artifact reviewers can Read). The worker reads it in 08c
+// detect per task; a change needs no redeploy.
+adminRoutes.get('/config/review-fanout-distill', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.REVIEW_FANOUT_DISTILL, false);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/review-fanout-distill', async (c) => {
+  const { enabled } = reviewFanoutDistillSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.REVIEW_FANOUT_DISTILL, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'global review-fanout-distill switch updated');
+  return c.json({ enabled });
+});
+
 const browserAccessSchema = z.object({ enabled: z.boolean() });
 
 // Global direct-browser-access kill-switch. The worker reads this at runner START

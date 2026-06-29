@@ -150,6 +150,13 @@ export const CONFIG_KEYS = {
   // level governs only the runtime step-prompt injection. Read per cli dispatch (~30s
   // config cache); a change needs no redeploy.
   TERSENESS_LEVEL: 'config:output:tersenessLevel',
+
+  // Opt-in (default off): condense the spec passed to the 08c code-review fan-out and
+  // write the full spec to a worktree artifact reviewers can Read on demand. Trims the
+  // duplicated spec input across the parallel reviewers; lossy but retrievable. Caching
+  // can't dedup the fan-out (separate sessions), so this is the only lever — kept off by
+  // default until token metrics justify it.
+  REVIEW_FANOUT_DISTILL: 'config:output:reviewFanoutDistill',
 } as const;
 
 /** Allowed terseness levels for CONFIG_KEYS.TERSENESS_LEVEL (output prose only). */
@@ -195,6 +202,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.GLOBAL_KB_NAMESPACE]: 'default',
   [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS]: '2560',
   [CONFIG_KEYS.TERSENESS_LEVEL]: 'full',
+  [CONFIG_KEYS.REVIEW_FANOUT_DISTILL]: 'false',
 };
 
 export class ConfigService {

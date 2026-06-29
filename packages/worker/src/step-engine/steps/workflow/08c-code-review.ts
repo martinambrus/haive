@@ -12,6 +12,9 @@ import { parseJsonLoose } from '../_fenced-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
+import { promises as fs } from 'node:fs';
+import { join } from 'node:path';
+import { CONFIG_KEYS, configService } from '@haive/shared';
 
 // Phase 6 — Code review (legacy phase6-code-review.md). After test management
 // and before gate 2, two reviewers run IN PARALLEL via agent mining: a
@@ -37,6 +40,9 @@ interface CodeReviewDetect {
   debtBlock: string;
   /** Task adversarial-QA level, reused to gate the extra review lenses. */
   level: QaLevel;
+  /** Condensed spec for the review fan-out, set only when REVIEW_FANOUT_DISTILL is on
+   *  and the spec was actually trimmed; reviewers fall back to the full `spec`. */
+  specForReview?: string;
 }
 
 interface PeerFinding {
@@ -293,6 +299,37 @@ export function lensesForLevel(level: QaLevel): ReviewLensDef[] {
   return [];
 }
 
+const REVIEW_SPEC_RELPATH = '.haive/review-context/spec.md';
+// Body lines kept under each heading before the section tail is dropped.
+const REVIEW_SPEC_HEAD_LINES = 8;
+
+// Condense a markdown spec for the review fan-out: keep every heading plus a bounded
+// lead of each section, drop the verbose tail. Deterministic, no LLM. Returns
+// dropped:false (spec unchanged) when nothing was trimmed, so the caller skips the
+// on-disk artifact + pointer. When trimmed, the full spec is written to disk and a
+// pointer to REVIEW_SPEC_RELPATH is appended so reviewers can Read any omitted section.
+function condenseSpecForReview(spec: string): { text: string; dropped: boolean } {
+  const out: string[] = [];
+  let bodyKept = 0;
+  let dropped = false;
+  for (const line of spec.split('\n')) {
+    if (/^#{1,6}\s/.test(line)) {
+      out.push(line);
+      bodyKept = 0;
+    } else if (bodyKept < REVIEW_SPEC_HEAD_LINES) {
+      out.push(line);
+      bodyKept++;
+    } else {
+      dropped = true;
+    }
+  }
+  if (!dropped) return { text: spec, dropped: false };
+  return {
+    text: `${out.join('\n').trim()}\n\n[Spec condensed for review. Full spec on disk — Read \`${REVIEW_SPEC_RELPATH}\` for any omitted section.]`,
+    dropped: true,
+  };
+}
+
 function reviewAssignment(d: CodeReviewDetect): string {
   return [
     d.implementationFiles.length > 0
@@ -303,7 +340,7 @@ function reviewAssignment(d: CodeReviewDetect): string {
     ...SEARCH_LADDER,
     '',
     '=== Spec (what the change must deliver) ===',
-    d.spec || '(no spec recorded)',
+    d.specForReview || d.spec || '(no spec recorded)',
     '',
     INSIGHTS_INSTRUCTION,
   ]
@@ -423,6 +460,21 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         (plan?.output as { spec?: string } | null)?.spec) ||
       '';
 
+    // Opt-in fan-out spec condensing (default off). The parallel reviewers each embed
+    // the spec in their own prompt and prompt caching can't dedup it (separate
+    // sessions), so when enabled we trim the spec for the prompt and drop the full spec
+    // to a worktree artifact the reviewers can Read on demand.
+    let specForReview: string | undefined;
+    if (spec && (await configService.getBoolean(CONFIG_KEYS.REVIEW_FANOUT_DISTILL, false))) {
+      const condensed = condenseSpecForReview(spec);
+      if (condensed.dropped) {
+        const dir = join(wt.worktreePath, '.haive', 'review-context');
+        await fs.mkdir(dir, { recursive: true });
+        await fs.writeFile(join(dir, 'spec.md'), spec, 'utf8');
+        specForReview = condensed.text;
+      }
+    }
+
     // DAG debt: documented compromises reviewers must not flag (07b pattern).
     let debtBlock = '';
     const dagPlan = await ctx.db.query.taskDagPlans.findFirst({
@@ -459,6 +511,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
 
     return {
       spec,
+      specForReview,
       implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
       debtBlock,
       level,
