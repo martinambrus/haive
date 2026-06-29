@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -25,6 +25,16 @@ const exec = promisify(execFile);
 const log = logger.child({ module: 'ddev-runner' });
 
 const REPO_VOLUME = 'haive_repos';
+
+/** Worker-side root of the haive_repos volume (same mount the runner sees at
+ *  /repos). Used to write the per-task xdebug ini straight into the worktree. */
+const XDEBUG_REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
+
+/** Xdebug 3 DBGp port the IDE's php-debug listener binds and the runner forwards. */
+const XDEBUG_PORT = 9003;
+
+/** Node --inspect port forwarded runner->web for debugging Node under DDEV (Lane C1). */
+const XDEBUG_NODE_PORT = 9229;
 
 /** Build context for the runner image (Dockerfile + entrypoint). Resolves
  *  relative to this module (src/sandbox or dist/sandbox -> ../../docker/
@@ -847,6 +857,252 @@ export async function startBrowserDesktop(handle: DdevRunnerHandle): Promise<voi
  *  See browserCdpUrlForRunner. Only called when chrome-devtools is enabled. */
 export async function runnerBrowserCdpUrl(taskId: string): Promise<string | null> {
   return browserCdpUrlForRunner(ddevRunnerName(taskId));
+}
+
+// --- On-demand step-debugging (Xdebug) ---------------------------------------
+
+/** Parse the default-route gateway from a Linux `/proc/net/route` dump. The
+ *  gateway is a little-endian hex quad on the row whose Destination is 00000000.
+ *  Used instead of `ip route` so it works regardless of whether iproute2 is in the
+ *  DDEV web image. Returns a dotted-quad string or null. */
+export function parseProcNetRouteGateway(text: string): string | null {
+  for (const line of text.split('\n')) {
+    const cols = line.trim().split(/\s+/);
+    // cols: Iface Destination Gateway Flags ... — default route Destination=00000000.
+    if (cols.length >= 3 && cols[1] === '00000000' && /^[0-9A-Fa-f]{8}$/.test(cols[2] ?? '')) {
+      const hex = cols[2]!;
+      const octets = [hex.slice(6, 8), hex.slice(4, 6), hex.slice(2, 4), hex.slice(0, 2)].map((h) =>
+        parseInt(h, 16),
+      );
+      return octets.join('.');
+    }
+  }
+  return null;
+}
+
+/** The IP the nested PHP (L3) container uses to reach the runner (L2): its default
+ *  route gateway, read from /proc/net/route INSIDE the DDEV web container via `ddev
+ *  exec`. This — NOT host.docker.internal — is the correct xdebug.client_host in this
+ *  DinD topology (host.docker.internal resolves to the outer Docker-Desktop host,
+ *  above the runner, where nothing in the haive stack listens). Null when it can't
+ *  be resolved (caller skips the xdebug wiring rather than misconfigure it). */
+async function resolveRunnerGateway(handle: DdevRunnerHandle): Promise<string | null> {
+  const res = await ddevExec(handle, 'exec cat /proc/net/route', { timeoutMs: 20_000 });
+  if (res.exitCode !== 0) return null;
+  return parseProcNetRouteGateway(res.output);
+}
+
+/** Routing-only xdebug ini written into the worktree's .ddev/php/ (loaded last —
+ *  the zz- prefix sorts after DDEV's 20-xdebug.ini so these win). It sets ONLY the
+ *  connect-back target + trigger mode; the xdebug MODE (on/off) stays controlled by
+ *  `ddev xdebug on/off`.
+ *
+ *  The setting NAMES changed between Xdebug 2 (PHP <= 7.1 in DDEV) and Xdebug 3
+ *  (PHP >= 7.2), and each major silently ignores the other's keys — so emitting the
+ *  wrong set is a no-op and DBGp goes nowhere. We key on the ACTUAL probed major:
+ *  - Xdebug 3: client_host + discover_client_host=0 (force the explicit host, else
+ *    DDEV dials the request origin — the nested router) + start_with_request=trigger.
+ *  - Xdebug 2: remote_host + remote_connect_back=0 (the pre-3 equivalent of
+ *    discover off) + remote_autostart=0 (trigger-only; overrides DDEV's =1 so only
+ *    XDEBUG_SESSION-triggered requests break, not every page load). */
+export function renderXdebugIni(gateway: string, major: number): string {
+  const header = [
+    '; Managed by Haive on-demand step-debugging. Routes Xdebug DBGp to the',
+    '; code-server "Listen for Xdebug" listener via a socat forward on the runner.',
+  ];
+  const body =
+    major >= 3
+      ? [
+          `xdebug.client_host=${gateway}`,
+          `xdebug.client_port=${XDEBUG_PORT}`,
+          'xdebug.discover_client_host=0',
+          'xdebug.start_with_request=trigger',
+        ]
+      : [
+          'xdebug.remote_enable=1',
+          `xdebug.remote_host=${gateway}`,
+          `xdebug.remote_port=${XDEBUG_PORT}`,
+          'xdebug.remote_connect_back=0',
+          'xdebug.remote_autostart=0',
+        ];
+  // Deliberately NOT overriding xdebug.max_nesting_level: DDEV's default (1000) is a
+  // safety net that surfaces runaway/infinite recursion as a fast, clean "Maximum
+  // function nesting level reached" abort instead of a slow OOM — which is exactly
+  // what you want while debugging (it's how a real infinite-recursion app bug was
+  // first spotted). Haive's ini sets ONLY the DBGp routing; it doesn't second-guess
+  // DDEV's other xdebug defaults. (A legit app that genuinely recurses >1000 is rare
+  // and is a standard, documented xdebug situation the developer can tune themselves.)
+  return [...header, ...body, ''].join('\n');
+}
+
+/** Probe the running web container's Xdebug MAJOR version so renderXdebugIni emits
+ *  the matching setting names. Keys on the real extension version (the invariant),
+ *  not a PHP-version guess. Requires xdebug loaded — the caller enables it first.
+ *  `php -v` prints e.g. "with Xdebug v2.5.5". Defaults to 3 (current DDEV default)
+ *  when the line is absent/unparseable. */
+async function resolveXdebugMajor(handle: DdevRunnerHandle): Promise<number> {
+  const res = await ddevExec(handle, 'exec php -v', { timeoutMs: 30_000 });
+  const m = res.output.match(/Xdebug v(\d+)\./i);
+  return m && m[1] ? Number(m[1]) : 3;
+}
+
+/** Start a persistent TCP forwarder on the runner: runner:<listenPort> -> <target>.
+ *  Uses a DETACHED `docker exec -d` + `exec socat` — a backgrounded `socat … &`
+ *  inside a normal `docker exec` does NOT survive (docker reaps the exec's child when
+ *  the foreground command returns). Idempotent via a PORT probe, NOT `pgrep -f`: the
+ *  guard's own command line contains the socat invocation, so `pgrep -f "socat…"`
+ *  matches itself and would never start. fork+reuseaddr; a NAME target is re-resolved
+ *  per connection (survives a recreate) and need not exist yet (the listener binds
+ *  immediately, resolves on first connect). Best-effort — logs and continues. */
+async function startRunnerForward(
+  runner: string,
+  listenPort: number,
+  target: string,
+): Promise<void> {
+  const guarded =
+    `(</dev/tcp/127.0.0.1/${listenPort}) 2>/dev/null && exit 0 || ` +
+    `exec socat "TCP-LISTEN:${listenPort},fork,reuseaddr" "TCP:${target}"`;
+  await exec('docker', ['exec', '-d', '-u', 'ddev', runner, 'bash', '-c', guarded], {
+    timeout: 15_000,
+  }).catch((err) => {
+    log.warn(
+      { runner, listenPort, target, err: err instanceof Error ? err.message : String(err) },
+      'runner TCP forward start failed',
+    );
+  });
+}
+
+const XDEBUG_INI_RELPATH = ['.ddev', 'php', 'zz-haive-xdebug.ini'];
+
+/** Wire on-demand Xdebug step-debugging for a running DDEV project so the IDE's
+ *  php-debug listener receives DBGp. Idempotent + restart-minimal:
+ *   1. resolve the runner gateway the PHP container routes through;
+ *   1b. enable xdebug + probe its MAJOR version (2.x vs 3.x use different setting
+ *       names) so the ini is rendered with keys the installed extension honors;
+ *   2. write .ddev/php/zz-haive-xdebug.ini (host=gateway, trigger-only) — only when
+ *      its content changed (gateway drift across a cold-boot, or first enable);
+ *   3. forward runner:9003 -> <ide>:9003 with a socat fork listener (pgrep-guarded,
+ *      mirrors start-browser-desktop.sh); the IDE need not be up yet (fork resolves
+ *      the target per connection);
+ *   4. `ddev restart` ONLY when the ini changed (to copy it into the web container's
+ *      php conf.d), then `ddev xdebug on` (loads the extension + debug mode).
+ *  Best-effort: a gateway-resolution failure logs and returns without touching the
+ *  project, so a debug-setup hiccup never breaks the app's DDEV bring-up. */
+export async function ensureDdevXdebug(
+  handle: DdevRunnerHandle,
+  opts: {
+    repoSubpath: string;
+    ideContainer: string;
+    onProgress?: (line: string) => void;
+  },
+): Promise<void> {
+  const gateway = await resolveRunnerGateway(handle);
+  if (!gateway) {
+    log.warn(
+      { container: handle.container },
+      'xdebug: could not resolve runner gateway — skipping step-debug wiring (app unaffected)',
+    );
+    return;
+  }
+
+  // Enable xdebug up front so the version probe sees a loaded extension (`php -v`
+  // omits the version line when xdebug is off); harmless when already on. The MAJOR
+  // version decides which setting names the ini must use — Xdebug 2.x and 3.x keys
+  // are mutually ignored, so the wrong set is a silent no-op.
+  const preOn = await ddevExec(handle, 'xdebug on', { timeoutMs: 120_000 });
+  if (preOn.exitCode !== 0) {
+    log.warn(
+      { container: handle.container, output: preOn.output.slice(-300) },
+      'xdebug: initial `ddev xdebug on` non-zero (continuing; version probe may default to 3)',
+    );
+  }
+  const major = await resolveXdebugMajor(handle);
+
+  const iniPath = path.join(XDEBUG_REPO_STORAGE_ROOT, opts.repoSubpath, ...XDEBUG_INI_RELPATH);
+  const desired = renderXdebugIni(gateway, major);
+  const prev = await readFile(iniPath, 'utf8').catch(() => null);
+  const changed = prev !== desired;
+  if (changed) {
+    await mkdir(path.dirname(iniPath), { recursive: true });
+    await writeFile(iniPath, desired, 'utf8');
+    // New file is worker(root)-owned inside the 1000-owned worktree; chown so the
+    // ddev user (uid 1000) reads it when DDEV copies .ddev/php/*.ini into conf.d.
+    await exec('chown', ['-R', '1000:1000', path.dirname(iniPath)], { timeout: 15_000 }).catch(
+      () => {},
+    );
+  }
+
+  // socat forward on the runner: runner:9003 -> <ide>:9003. The runner resolves the
+  // IDE by name on the sandbox network (re-resolved per connection, so it survives an
+  // IDE recreate); the IDE need not be up yet — fork binds 9003 now and resolves the
+  // target when PHP first connects.
+  await startRunnerForward(handle.container, XDEBUG_PORT, `${opts.ideContainer}:${XDEBUG_PORT}`);
+
+  // A freshly-written .ddev/php ini is only copied into the web container's php
+  // conf.d at a (re)start, so restart when it changed. Unchanged (warm-recover)
+  // skips the restart — just (re)assert xdebug on, which is cheap and idempotent.
+  if (changed) {
+    opts.onProgress?.('Applying Xdebug configuration (ddev restart)…');
+    const restart = await ddevExec(handle, 'restart', {
+      timeoutMs: 900_000,
+      onLine: opts.onProgress,
+    });
+    if (restart.exitCode !== 0) {
+      log.warn(
+        { container: handle.container, output: restart.output.slice(-500) },
+        'xdebug: ddev restart after ini write non-zero (continuing to xdebug on)',
+      );
+    }
+  }
+  // Re-assert on: a `ddev restart` above resets xdebug to the project default
+  // (typically off), so enable it again. Idempotent + cheap when already on.
+  const on = await ddevExec(handle, 'xdebug on', { timeoutMs: 120_000 });
+  if (on.exitCode !== 0) {
+    log.warn(
+      { container: handle.container, output: on.output.slice(-300) },
+      'xdebug: `ddev xdebug on` non-zero',
+    );
+    return;
+  }
+  log.info(
+    { container: handle.container, gateway, major, ide: opts.ideContainer },
+    'xdebug wired for task',
+  );
+
+  // Lane C1: also forward runner:9229 -> <DDEV web container>:9229 so the Editor tab
+  // can attach to a Node --inspect running INSIDE the DDEV web container (e.g. a
+  // project that runs Node under DDEV with NODE_OPTIONS=--inspect; harmless when
+  // nothing listens). The web container is nested in the runner's dockerd, so the
+  // runner reaches it by its own IP (post-restart value). Re-forwards only when the
+  // IP changed (idempotent across warm-recover); best-effort.
+  await ensureDdevNodeForward(handle);
+}
+
+/** Forward runner:9229 -> the DDEV web container's :9229 (Lane C1). The web IP can
+ *  change across a restart, so always refresh: drop any existing 9229 forwarder, then
+ *  start a fresh detached one to the CURRENT IP. The runner is on the same nested
+ *  bridge as the web container, so it reaches the IP directly. Best-effort. */
+async function ensureDdevNodeForward(handle: DdevRunnerHandle): Promise<void> {
+  const res = await ddevExec(handle, 'exec hostname -i', { timeoutMs: 15_000 });
+  const webIp = res.output.match(/\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/)?.[1];
+  if (!webIp) return;
+  // pkill runs as its own exec (process is `pkill`, which excludes its own pid) so it
+  // never matches itself. After it, port 9229 is free, so startRunnerForward's port
+  // guard proceeds to start the fresh forwarder to the current IP.
+  await exec(
+    'docker',
+    [
+      'exec',
+      '-u',
+      'ddev',
+      handle.container,
+      'pkill',
+      '-f',
+      `socat.*TCP-LISTEN:${XDEBUG_NODE_PORT}`,
+    ],
+    { timeout: 10_000 },
+  ).catch(() => {});
+  await startRunnerForward(handle.container, XDEBUG_NODE_PORT, `${webIp}:${XDEBUG_NODE_PORT}`);
 }
 
 /** Tear down every DinD runner for a task (container + its anon docker volume).

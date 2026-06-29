@@ -3,6 +3,7 @@ import { makeModelHealthStep } from '../_model-health.js';
 import { syncBaseStep } from './00a-sync-base.js';
 import { triageStep } from './00-triage.js';
 import { worktreeSetupStep } from './01-worktree-setup.js';
+import { debugModeStep } from './01-debug-mode.js';
 import { installPluginsStep } from './01b-install-plugins.js';
 import { appBootStep } from './01a-app-boot.js';
 import { ddevEnvStep } from './01c-ddev-env.js';
@@ -45,6 +46,7 @@ export {
   syncBaseStep,
   triageStep,
   worktreeSetupStep,
+  debugModeStep,
   installPluginsStep,
   appBootStep,
   ddevEnvStep,
@@ -89,6 +91,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(syncBaseStep);
   registry.register(triageStep);
   registry.register(worktreeSetupStep);
+  registry.register(debugModeStep);
   registry.register(installPluginsStep);
   registry.register(appBootStep);
   registry.register(ddevEnvStep);

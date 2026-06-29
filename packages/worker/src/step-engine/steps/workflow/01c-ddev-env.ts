@@ -123,11 +123,14 @@ async function detectWebserverType(workspace: string): Promise<string | null> {
   return null;
 }
 
-/** Render a `.ddev/config.yaml` from the declared deps (php/db) + repo name. */
+/** Render a `.ddev/config.yaml` from the declared deps (php/db) + repo name.
+ *  `nodeInspect` adds a web_environment NODE_OPTIONS so a Node process under DDEV is
+ *  debuggable (Lane C1) — only set when the task opted into debug AND node is declared. */
 async function buildProposedConfig(
   ctx: StepContext,
   deps: Record<string, unknown>,
   webserverType: string | null,
+  nodeInspect: boolean,
 ): Promise<string> {
   const versions = (deps.versions as Record<string, string | null> | undefined) ?? {};
   const database = (deps.database as { kind?: string; version?: string | null } | undefined) ?? {};
@@ -138,6 +141,7 @@ async function buildProposedConfig(
     dbType: database.kind ?? null,
     dbVersion: database.version ?? null,
     webserverType,
+    nodeInspect,
   });
 }
 
@@ -181,7 +185,17 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
           deps.webserver === 'apache-fpm' || deps.webserver === 'nginx-fpm' ? deps.webserver : null;
         const webserverType =
           declaredWebserver ?? (ws ? await detectWebserverType(ws.workspace) : null);
-        proposedConfig = await buildProposedConfig(ctx, deps, webserverType);
+        // Lane C1: only when this task opted into debug AND the env declares Node, so
+        // a Node process under DDEV opens an inspector. PHP-only projects get no
+        // web_environment entry (the common case).
+        const debugTask = await ctx.db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, ctx.taskId),
+          columns: { debugMode: true },
+        });
+        const nodeDeclared =
+          Array.isArray(deps.runtimes) && (deps.runtimes as unknown[]).includes('node');
+        const nodeInspect = Boolean(debugTask?.debugMode) && nodeDeclared;
+        proposedConfig = await buildProposedConfig(ctx, deps, webserverType, nodeInspect);
       }
     }
 

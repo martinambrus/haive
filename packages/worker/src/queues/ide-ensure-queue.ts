@@ -42,7 +42,7 @@ export async function ensureIdeForTask(taskId: string, userId: string): Promise<
   if (task && (task.status === 'completed' || task.status === 'cancelled')) {
     return { ok: false, reason: 'task-ended' };
   }
-  const settingsJson = await resolveIdeSettingsJson(db, userId);
+  const settingsJson = await resolveIdeSettingsJson(db, userId, taskId);
   const handle = await ensureIdeRunnerStarted(db, taskId, userId, settingsJson);
   if (!handle) return { ok: false, reason: 'no-editable-repo' };
   return { ok: true };

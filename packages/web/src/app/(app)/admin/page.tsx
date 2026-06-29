@@ -34,6 +34,8 @@ export default function AdminPage() {
   const [savingSteering, setSavingSteering] = useState(false);
   const [ideEnabled, setIdeEnabled] = useState<boolean | null>(null);
   const [savingIde, setSavingIde] = useState(false);
+  const [debugModeEnabled, setDebugModeEnabled] = useState<boolean | null>(null);
+  const [savingDebugMode, setSavingDebugMode] = useState(false);
   const [browserAccessEnabled, setBrowserAccessEnabled] = useState<boolean | null>(null);
   const [savingBrowserAccess, setSavingBrowserAccess] = useState(false);
   const [fairEnabled, setFairEnabled] = useState<boolean | null>(null);
@@ -54,6 +56,7 @@ export default function AdminPage() {
         concurrencyData,
         steeringData,
         ideData,
+        debugModeData,
         browserAccessData,
         fairData,
         perTaskData,
@@ -64,6 +67,7 @@ export default function AdminPage() {
         api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
         api.get<{ enabled: boolean }>('/admin/config/steering'),
         api.get<{ enabled: boolean }>('/admin/config/ide'),
+        api.get<{ enabled: boolean }>('/admin/config/debug-mode'),
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
         api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
         api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
@@ -75,6 +79,7 @@ export default function AdminPage() {
       setMaxParallelInput(String(concurrencyData.maxParallelAgents));
       setSteeringEnabled(steeringData.enabled);
       setIdeEnabled(ideData.enabled);
+      setDebugModeEnabled(debugModeData.enabled);
       setBrowserAccessEnabled(browserAccessData.enabled);
       setFairEnabled(fairData.enabled);
       setMaxPerTask(perTaskData.maxAgentsPerTask);
@@ -219,6 +224,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update editor switch');
     } finally {
       setSavingIde(false);
+    }
+  }
+
+  async function setDebugMode(next: boolean) {
+    setSavingDebugMode(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/debug-mode', {
+        enabled: next,
+      });
+      setDebugModeEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update debug mode switch');
+    } finally {
+      setSavingDebugMode(false);
     }
   }
 
@@ -487,6 +507,32 @@ export default function AdminPage() {
             />
             {ideEnabled ? 'Enabled' : 'Disabled'}
             {savingIde && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {debugModeEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Step debugging</CardTitle>
+            <CardDescription>
+              Lets each task offer an on-demand debug toggle (the 01-debug-mode step) that wires
+              step-debugging into the live runtime — PHP via Xdebug for DDEV apps, client-side
+              JavaScript via the in-app (VNC) browser, and Node via --inspect — so breakpoints work
+              from the Editor tab. Global kill-switch: OFF skips that step everywhere (tasks run
+              with no debug overhead). Takes effect within ~30s; persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={debugModeEnabled}
+              disabled={savingDebugMode}
+              onChange={(e) => void setDebugMode(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {debugModeEnabled ? 'Enabled' : 'Disabled'}
+            {savingDebugMode && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

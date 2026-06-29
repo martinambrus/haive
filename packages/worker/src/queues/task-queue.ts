@@ -130,8 +130,11 @@ async function buildRunList(ctx: ResolvedTaskContext, db: Database): Promise<Ste
  *  container tool 01-declare-deps persisted into the env template. Before declare-
  *  deps has run the tool is unknown, so the tail is empty and is filled in on the
  *  next rebuild (handleResult rebuilds the list after every step). The prefix
- *  [declare-deps, worktree-setup] is stable and 99-run-app-ready is always last, so
- *  the forward walk (findIndex(stepId)+1) stays correct as the tail grows. */
+ *  [declare-deps, worktree-setup, debug-mode] is stable and 99-run-app-ready is
+ *  always last, so the forward walk (findIndex(stepId)+1) stays correct as the tail
+ *  grows. 01-debug-mode precedes the runtime (it self-skips when the global debug
+ *  kill-switch is off) so a run_app session — the prime "run it and poke at it"
+ *  surface — can opt into step-debugging before DDEV / the app-runner comes up. */
 async function buildRunAppRunList(
   ctx: ResolvedTaskContext,
   db: Database,
@@ -139,6 +142,7 @@ async function buildRunAppRunList(
   const prefix = [
     stepRegistry.require('01-declare-deps'),
     stepRegistry.require('01-worktree-setup'),
+    stepRegistry.require('01-debug-mode'),
   ];
   const chooseView = stepRegistry.require('98-choose-view');
   const ready = stepRegistry.require('99-run-app-ready');

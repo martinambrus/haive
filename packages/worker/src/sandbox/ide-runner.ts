@@ -6,6 +6,8 @@ import {
   CODE_SERVER_IMAGE,
   IDE_INTERNAL_PORT,
   IDE_RUNNER_LABEL,
+  appRunnerName,
+  ddevRunnerName,
   ideExtensionsVolumeName,
   ideRunnerName,
   ideUserDataVolumeName,
@@ -268,7 +270,109 @@ async function ensureIdeRunnerStartedInner(
   const { extVolume, udataVolume } = await ensureIdeVolumes(taskId, userId, settingsJson);
   const handle = await startIdeRunner({ taskId, workspaceSubpath, extVolume, udataVolume });
   await waitForIdeReady(name, 15_000);
+  await setupIdeDebugging(db, taskId, name);
   return handle;
+}
+
+// code-server bundles its own Node (not on PATH); used to run the in-container TCP
+// forwarders since the image has no socat.
+const IDE_BUNDLED_NODE = '/usr/lib/code-server/lib/node';
+// 9003 (Xdebug) is forwarded runner->ide (see ddev-runner); only these two are
+// forwarded ide->runner so the launch configs can use localhost.
+const IDE_CDP_PORT = 9223; // browser CDP (Lane B)
+const IDE_NODE_INSPECT_PORT = 9229; // node --inspect (Lane C)
+
+/** When the task opted into debug mode, prepare the Editor tab for step-debugging:
+ *  install the PHP/Xdebug debugger from Open VSX (the built-in js-debug already
+ *  covers the JS/Node lanes), and stand up the IDE-side TCP forwards so the seeded
+ *  launch configs can use stable `localhost` addresses. No-op when debug is off. */
+async function setupIdeDebugging(db: Database, taskId: string, name: string): Promise<void> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { debugMode: true },
+  });
+  if (!task?.debugMode) return;
+  await installXdebugExtension(taskId, name);
+  await setupIdeDebugForwards(taskId, name);
+}
+
+/** Install xdebug.php-debug into the per-user /ext volume (Open VSX is code-server's
+ *  default registry). Idempotent (--force); /ext persists per user so this is a fast
+ *  no-op after the first debug task. Best-effort. */
+async function installXdebugExtension(taskId: string, name: string): Promise<void> {
+  try {
+    await exec(
+      'docker',
+      [
+        'exec',
+        name,
+        'code-server',
+        '--install-extension',
+        'xdebug.php-debug',
+        '--extensions-dir',
+        '/ext',
+        '--force',
+      ],
+      { timeout: 120_000 },
+    );
+    log.info({ taskId, container: name }, 'installed xdebug.php-debug for debug-mode task');
+  } catch (err) {
+    log.warn(
+      { taskId, err: err instanceof Error ? err.message : String(err) },
+      'php-debug extension install failed (PHP step-debug unavailable until installed)',
+    );
+  }
+}
+
+/** Forward the IDE container's localhost CDP (9223) + node-inspect (9229) ports to
+ *  the task's runtime runner, so js-debug "Attach to Chrome"/"Attach to Node" can
+ *  target a stable `localhost` instead of the runner's dynamic IP (and avoid Chrome's
+ *  Host-header rejection of a DNS-name target). The target is whichever per-task
+ *  runner exists — the DDEV DinD runner or the app-runner — both of which host the
+ *  CDP browser at :9223 and (under debug) expose node at :9229. Resolved by docker
+ *  DNS name PER CONNECTION, so it survives a runner recreate. When no runner exists
+ *  yet (Editor opened before the runtime is up) the forwards are skipped; reopening
+ *  the Editor after the runtime is up re-establishes them. Best-effort. */
+async function setupIdeDebugForwards(taskId: string, name: string): Promise<void> {
+  const ddevRunner = ddevRunnerName(taskId);
+  const appRunner = appRunnerName(taskId);
+  const target = (await containerExists(ddevRunner))
+    ? ddevRunner
+    : (await containerExists(appRunner))
+      ? appRunner
+      : null;
+  if (!target) {
+    log.info({ taskId }, 'ide debug forwards skipped — no runtime runner up yet (reopen later)');
+    return;
+  }
+  await startIdeForward(name, IDE_CDP_PORT, target, IDE_CDP_PORT);
+  await startIdeForward(name, IDE_NODE_INSPECT_PORT, target, IDE_NODE_INSPECT_PORT);
+}
+
+/** Start a detached TCP forwarder inside the IDE container: 127.0.0.1:<localPort>
+ *  -> <targetHost>:<targetPort>, using code-server's bundled Node (the image has no
+ *  socat). The target host is re-resolved per connection (createServer -> connect),
+ *  so a runner recreate (same DNS name, new IP) keeps working. Idempotent: a second
+ *  instance exits cleanly when the listen port is already bound. Best-effort. */
+async function startIdeForward(
+  ideName: string,
+  localPort: number,
+  targetHost: string,
+  targetPort: number,
+): Promise<void> {
+  const code =
+    `const net=require('net');` +
+    `const s=net.createServer(c=>{const u=net.connect(${targetPort},'${targetHost}');` +
+    `c.on('error',()=>u.destroy());u.on('error',()=>c.destroy());c.pipe(u);u.pipe(c);});` +
+    `s.on('error',()=>process.exit(0));s.listen(${localPort},'127.0.0.1');`;
+  await exec('docker', ['exec', '-d', ideName, IDE_BUNDLED_NODE, '-e', code], {
+    timeout: 15_000,
+  }).catch((err) => {
+    log.warn(
+      { ideName, localPort, targetHost, err: err instanceof Error ? err.message : String(err) },
+      'ide debug forward start failed',
+    );
+  });
 }
 
 /** Gracefully stop the task's IDE container (SIGTERM via `docker stop`, giving

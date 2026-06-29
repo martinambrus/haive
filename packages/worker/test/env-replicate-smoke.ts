@@ -219,6 +219,7 @@ async function main(): Promise<void> {
         branchName: 'feature/env-smoke',
         baseBranch: 'main',
       },
+      '01-debug-mode': { enableDebug: false },
       '02-pre-rag-sync': { runSync: false },
       '03-phase-0a-discovery': { extraContext: '' },
       '03b-business-requirements': { guidance: '' },

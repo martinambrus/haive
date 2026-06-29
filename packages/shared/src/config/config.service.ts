@@ -86,6 +86,14 @@ export const CONFIG_KEYS = {
   // remains the fallback) without a redeploy.
   IDE_ENABLED: 'config:ide:enabled',
 
+  // Global kill-switch for on-demand step-debugging. When 'true' (default), the
+  // 01-debug-mode step is offered (asks per task whether to wire step-debugging into
+  // the runtime: PHP/Xdebug under DDEV, JS via the VNC browser CDP, Node --inspect).
+  // Set 'false' to skip that step everywhere (tasks run with debug_mode off, no debug
+  // overhead) without a redeploy. Read by the step's shouldRun within the ~30s config
+  // cache; persists across restarts.
+  DEBUG_MODE_ENABLED: 'config:debug:enabled',
+
   // Per-file size cap (bytes) for user-uploaded task attachments. Enforced by the
   // attachment upload endpoint (streamed; aborts once the byte count exceeds it).
   // Admin-tunable; default DEFAULT_TASK_ATTACHMENT_MAX_BYTES (25 MiB).
@@ -133,6 +141,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
   [CONFIG_KEYS.STEERING_ENABLED]: 'true',
   [CONFIG_KEYS.IDE_ENABLED]: 'true',
+  [CONFIG_KEYS.DEBUG_MODE_ENABLED]: 'true',
   [CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES]: String(DEFAULT_TASK_ATTACHMENT_MAX_BYTES),
   [CONFIG_KEYS.APP_URL]: 'http://localhost:3000',
   [CONFIG_KEYS.MAINTENANCE_MODE]: 'false',

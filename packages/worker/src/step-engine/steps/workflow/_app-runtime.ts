@@ -1,13 +1,15 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { logger } from '@haive/shared';
-import type { Database } from '@haive/database';
+import { eq } from 'drizzle-orm';
+import { logger, ideRunnerName } from '@haive/shared';
+import { schema, type Database } from '@haive/database';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { pathExists } from '../onboarding/_helpers.js';
 import { ddevUrlFromConfigText } from '../_ddev-config.js';
 import {
   ensureDdevStarted,
+  ensureDdevXdebug,
   ddevPrimaryUrl,
   type DdevRunnerHandle,
 } from '../../../sandbox/ddev-runner.js';
@@ -209,13 +211,49 @@ export async function withDdevProgress<T>(
  *  ~2-minute cold boot never looks frozen. Shared by 01c-ddev-env, 07c-ddev-
  *  reconcile, and ensureAppServing. Throws whatever ensureDdevStarted throws. */
 export async function ensureDdevWithProgress(
-  ctx: Pick<AppRuntimeCtx, 'taskId' | 'emitProgress'>,
+  ctx: Pick<AppRuntimeCtx, 'taskId' | 'emitProgress' | 'db'>,
   repoSubpath: string,
 ): Promise<DdevRunnerHandle> {
-  return withDdevProgress(
+  const handle = await withDdevProgress(
     ctx,
     'Ensuring the DDEV environment is up…',
     (onLine) => ensureDdevStarted(ctx.taskId, repoSubpath, { onProgress: onLine }),
     { initialLine: 'starting containers…' },
   );
+  // On-demand step-debugging: when the task opted into debug mode, (re)wire Xdebug
+  // so the Editor tab's php-debug listener receives DBGp. Idempotent + restart-
+  // minimal; runs on EVERY DDEV bring-up (first boot, warm-recover, cold-boot) so a
+  // gateway change across a cold-boot is re-applied. Never fails the bring-up.
+  await maybeWireDdevXdebug(ctx, handle, repoSubpath);
+  return handle;
+}
+
+const rtLog = logger.child({ module: 'app-runtime' });
+
+/** Wire Xdebug for a debug-mode task's DDEV env (no-op otherwise). Reads the task's
+ *  debug_mode flag and, when set, points Xdebug at the runner gateway + forwards
+ *  9003 to the task's IDE container. Best-effort: swallows errors so a debug-setup
+ *  failure never breaks the DDEV bring-up the caller depends on. */
+async function maybeWireDdevXdebug(
+  ctx: Pick<AppRuntimeCtx, 'taskId' | 'emitProgress' | 'db'>,
+  handle: DdevRunnerHandle,
+  repoSubpath: string,
+): Promise<void> {
+  const task = await ctx.db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { debugMode: true },
+  });
+  if (!task?.debugMode) return;
+  try {
+    await ensureDdevXdebug(handle, {
+      repoSubpath,
+      ideContainer: ideRunnerName(ctx.taskId),
+      onProgress: (line) => void ctx.emitProgress?.(line),
+    });
+  } catch (err) {
+    rtLog.warn(
+      { taskId: ctx.taskId, err: err instanceof Error ? err.message : String(err) },
+      'xdebug wiring failed (app unaffected)',
+    );
+  }
 }

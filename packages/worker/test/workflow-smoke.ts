@@ -231,6 +231,11 @@ async function main(): Promise<void> {
         useWorktree: false,
         baseBranch: 'main',
       },
+      // Debug-mode gate (runs by default; global DEBUG_MODE_ENABLED defaults on). Off
+      // keeps the smoke runtime free of Xdebug / --inspect overhead.
+      '01-debug-mode': {
+        enableDebug: false,
+      },
       '02-pre-rag-sync': {
         runSync: false,
       },

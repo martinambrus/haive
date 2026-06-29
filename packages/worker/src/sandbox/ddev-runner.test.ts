@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { decideDdevRecovery, isHostPortCollision } from './ddev-runner.js';
+import {
+  decideDdevRecovery,
+  isHostPortCollision,
+  parseProcNetRouteGateway,
+  renderXdebugIni,
+} from './ddev-runner.js';
 
 // Pure recovery-path decision for ensureDdevStartedInner. The orchestrator gathers
 // the three booleans by shelling out (ddev describe / docker info) and then routes
@@ -64,5 +69,67 @@ describe('isHostPortCollision', () => {
     expect(isHostPortCollision('no such image: ddev-runner:latest')).toBe(false);
     expect(isHostPortCollision('Cannot connect to the Docker daemon')).toBe(false);
     expect(isHostPortCollision('')).toBe(false);
+  });
+});
+
+describe('parseProcNetRouteGateway', () => {
+  // Xdebug's client_host must be the gateway the nested PHP (L3) container routes
+  // through to reach the runner. We read it from /proc/net/route (no iproute2 dep);
+  // the default-route gateway is a little-endian hex quad. This fixture is the real
+  // output captured from a running DDEV web container (gateway 172.20.0.1).
+  const REAL = [
+    'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT',
+    'eth1\t00000000\t010014AC\t0003\t0\t0\t0\t00000000\t0\t0\t0',
+    'eth0\t000013AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0',
+    'eth1\t000014AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0',
+  ].join('\n');
+
+  it('decodes the little-endian default-route gateway (real fixture -> 172.20.0.1)', () => {
+    expect(parseProcNetRouteGateway(REAL)).toBe('172.20.0.1');
+  });
+
+  it('skips the header and non-default routes, decoding only Destination 00000000', () => {
+    // 0100A8C0 little-endian -> 192.168.0.1
+    const text = 'Iface\tDestination\tGateway\n' + 'eth0\t00000000\t0100A8C0\t0003\t0\t0\t0';
+    expect(parseProcNetRouteGateway(text)).toBe('192.168.0.1');
+  });
+
+  it('returns null when there is no default route or the table is empty', () => {
+    expect(parseProcNetRouteGateway('Iface\tDestination\tGateway')).toBeNull();
+    expect(parseProcNetRouteGateway('eth0\t000013AC\t00000000\t0001')).toBeNull();
+    expect(parseProcNetRouteGateway('')).toBeNull();
+  });
+});
+
+describe('renderXdebugIni', () => {
+  // The setting NAMES differ between Xdebug majors and each ignores the other's keys,
+  // so emitting the wrong set is a silent no-op (DBGp goes nowhere). These tests lock
+  // the per-major output — a regression here is invisible until a live debug session.
+  it('Xdebug 3 uses client_* + start_with_request=trigger (not remote_*)', () => {
+    const ini = renderXdebugIni('172.20.0.1', 3);
+    expect(ini).toContain('xdebug.client_host=172.20.0.1');
+    expect(ini).toContain('xdebug.client_port=9003');
+    expect(ini).toContain('xdebug.discover_client_host=0');
+    expect(ini).toContain('xdebug.start_with_request=trigger');
+    expect(ini).not.toContain('xdebug.remote_host');
+  });
+
+  it('Xdebug 2 uses remote_* + autostart/connect_back off (not client_*)', () => {
+    const ini = renderXdebugIni('172.20.0.1', 2);
+    expect(ini).toContain('xdebug.remote_enable=1');
+    expect(ini).toContain('xdebug.remote_host=172.20.0.1');
+    expect(ini).toContain('xdebug.remote_port=9003');
+    expect(ini).toContain('xdebug.remote_connect_back=0');
+    expect(ini).toContain('xdebug.remote_autostart=0');
+    expect(ini).not.toContain('xdebug.client_host');
+    expect(ini).not.toContain('start_with_request');
+  });
+
+  it('does NOT override max_nesting_level (keeps the DDEV safety-net default)', () => {
+    // DDEV's default cap surfaces runaway recursion as a fast clean abort instead of a
+    // slow OOM — useful while debugging. The ini sets only DBGp routing. (Guards
+    // against re-adding the band-aid that once masked a real infinite-recursion bug.)
+    expect(renderXdebugIni('10.0.0.1', 2)).not.toContain('max_nesting_level');
+    expect(renderXdebugIni('10.0.0.1', 3)).not.toContain('max_nesting_level');
   });
 });

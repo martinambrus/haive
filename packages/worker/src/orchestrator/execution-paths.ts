@@ -39,6 +39,7 @@ const SPINE: readonly string[] = [
   SYNC_BASE_STEP_ID,
   TRIAGE_STEP_ID,
   '01-worktree-setup',
+  '01-debug-mode',
   '01a-app-boot',
   '01b-install-plugins',
   '01c-ddev-env',

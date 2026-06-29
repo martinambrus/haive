@@ -130,6 +130,13 @@ export const tasks = pgTable(
      *  quick_bugfix, whose step set has neither audit) — read by 04a / 08c2 in their
      *  shouldRun gate. Per-task switch-off; default true so it runs unless opted out. */
     broadAudit: boolean('broad_audit').notNull().default(true),
+    /** On-demand step-debugging: when true the per-task runtime is brought up with
+     *  step-debugging wired (PHP/Xdebug under DDEV, JS via the VNC browser CDP, Node
+     *  --inspect), so the Editor tab can attach. Chosen on the 01-debug-mode step
+     *  (asked once before any runtime starts); default off so existing tasks and
+     *  fixtures run with no debug overhead. Re-read at every runner start (survives
+     *  warm-recover). Gated behind the global CONFIG_KEYS.DEBUG_MODE_ENABLED switch. */
+    debugMode: boolean('debug_mode').notNull().default(false),
     /** Developer's estimated time to complete the task, in decimal hours
      *  (e.g. 0.25, 0.5, 1, 1.5). Optional, set on the new-task form; compared
      *  against the actual effort (agent work + user-active time) in the task

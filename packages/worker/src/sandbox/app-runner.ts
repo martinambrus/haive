@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { eq } from 'drizzle-orm';
 import {
   APP_RUNNER_LABEL,
   appRunnerName,
@@ -10,6 +11,8 @@ import {
   configService,
   type TaskAccessEndpoint,
 } from '@haive/shared';
+import { schema } from '@haive/database';
+import { getDb } from '../db.js';
 import { browserCdpUrlForRunner } from './runner-browser-cdp.js';
 
 // Per-task app-runner: a plain (non-DinD) container built from the repo's
@@ -115,6 +118,9 @@ export async function startAppRunner(params: {
    *  access is enabled, it is published to an ephemeral 127.0.0.1 host port so the
    *  user can open the app in their own browser (the fast VNC alternative). */
   appPort?: number;
+  /** On-demand step-debugging: when true, set NODE_OPTIONS so the app's Node process
+   *  starts a debugger on 0.0.0.0:9229, reachable from the Editor tab (Lane C2). */
+  debugMode?: boolean;
 }): Promise<AppRunnerHandle> {
   const name = appRunnerName(params.taskId);
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
@@ -130,6 +136,12 @@ export async function startAppRunner(params: {
     if (directAccess) publishArgs.push('-p', `127.0.0.1::${params.appPort}`);
   }
 
+  // Lane C2: a debug-mode task gets NODE_OPTIONS so the app's Node process opens an
+  // inspector on 0.0.0.0:9229 (reachable on the sandbox network; the Editor tab's
+  // localhost:9229 forward bridges to it). Container-wide, so it works for direct
+  // `node` boots; npm/yarn wrappers grab 9229 first and may need a manual tweak.
+  const debugEnvArgs = params.debugMode ? ['-e', 'NODE_OPTIONS=--inspect=0.0.0.0:9229'] : [];
+
   await exec(
     'docker',
     [
@@ -144,6 +156,7 @@ export async function startAppRunner(params: {
       '-v',
       `${REPO_VOLUME}:/repos`,
       ...publishArgs,
+      ...debugEnvArgs,
       params.imageTag,
       'sleep',
       'infinity',
@@ -211,7 +224,26 @@ async function ensureAppRunnerStartedInner(
   if (await containerExists(name)) {
     await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
   }
-  return startAppRunner({ taskId, repoSubpath, imageTag, appPort });
+  // Read the task's debug flag here (single point) so the container is created with
+  // the Node inspector when debug mode is on, without threading the flag through
+  // every ensureAppRunnerStarted caller. Best-effort: a lookup failure just means
+  // no inspector (app still runs).
+  const debugMode = await isTaskDebugMode(taskId);
+  return startAppRunner({ taskId, repoSubpath, imageTag, appPort, debugMode });
+}
+
+/** Whether the task opted into step-debugging (tasks.debug_mode). Swallows lookup
+ *  errors (returns false) so app-runner startup never fails over the debug flag. */
+async function isTaskDebugMode(taskId: string): Promise<boolean> {
+  try {
+    const task = await getDb().query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { debugMode: true },
+    });
+    return task?.debugMode === true;
+  } catch {
+    return false;
+  }
 }
 
 /** Run a command inside the app-runner (as the image's default user, in the

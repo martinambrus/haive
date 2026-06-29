@@ -70,6 +70,11 @@ export interface DdevConfigInput {
   dbVersion?: string | null;
   docroot?: string | null;
   webserverType?: string | null;
+  /** On-demand step-debugging (Lane C1): when true, emit a web_environment entry
+   *  setting NODE_OPTIONS so a Node process running INSIDE the DDEV web container
+   *  opens an inspector on 0.0.0.0:9229 (reachable from the Editor tab via the
+   *  runner forward). Only meaningful for projects that run Node under DDEV. */
+  nodeInspect?: boolean;
 }
 
 const DDEV_DB_TYPES = new Set(['mariadb', 'mysql', 'postgres']);
@@ -101,6 +106,10 @@ export function renderDdevConfig(input: DdevConfigInput): string {
     lines.push('database:');
     lines.push(`  type: ${dbType}`);
     if (input.dbVersion) lines.push(`  version: "${input.dbVersion}"`);
+  }
+  if (input.nodeInspect) {
+    lines.push('web_environment:');
+    lines.push('  - "NODE_OPTIONS=--inspect=0.0.0.0:9229"');
   }
   return lines.join('\n') + '\n';
 }

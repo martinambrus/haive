@@ -379,6 +379,24 @@ adminRoutes.put('/config/ide', async (c) => {
   return c.json({ enabled });
 });
 
+const debugModeSchema = z.object({ enabled: z.boolean() });
+
+// Global on-demand step-debugging kill-switch. The worker reads it in the
+// 01-debug-mode step's shouldRun (within the ~30s config cache); OFF skips that step
+// everywhere so tasks run with debug_mode off (no Xdebug / --inspect overhead).
+// Persists across restarts.
+adminRoutes.get('/config/debug-mode', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.DEBUG_MODE_ENABLED, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/debug-mode', async (c) => {
+  const { enabled } = debugModeSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.DEBUG_MODE_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'global debug-mode switch updated');
+  return c.json({ enabled });
+});
+
 const fairSchedulingSchema = z.object({ enabled: z.boolean() });
 
 // Global fair cli-exec scheduling kill-switch. The worker reads this at each
