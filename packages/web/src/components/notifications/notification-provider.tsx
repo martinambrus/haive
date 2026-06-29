@@ -130,6 +130,7 @@ export function NotificationProvider() {
     hasCustomSound: false,
   });
   const soundUrlRef = useRef<string | null>(null);
+  const swRegRef = useRef<ServiceWorkerRegistration | null>(null);
 
   const fetchSoundBlob = useCallback(async () => {
     try {
@@ -181,6 +182,42 @@ export function NotificationProvider() {
       if (soundUrlRef.current) URL.revokeObjectURL(soundUrlRef.current);
     };
   }, [loadSettings]);
+
+  // Register the notification service worker once. It owns OS-notification
+  // display and click routing (see public/sw.js). `ready` resolves with an
+  // ACTIVE registration — required by showNotification — so swRegRef only ever
+  // holds a usable worker; until then the OS-notif branch in handleEvent skips
+  // (toast + sound still fire). register() is idempotent under StrictMode.
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+    let cancelled = false;
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.ready
+      .then((reg) => {
+        if (!cancelled) swRegRef.current = reg;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Answer the service worker's "which route are you on?" probe (public/sw.js).
+  // On a notification click the worker asks every open tab for its LIVE
+  // pathname — it cannot observe client-side (App Router) navigations via
+  // WindowClient.url — so the tab that pushed to /tasks/:id reports it here and
+  // gets focused instead of a duplicate tab being opened.
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: string } | null;
+      if (data?.type === 'query-route' && event.ports[0]) {
+        event.ports[0].postMessage({ path: window.location.pathname });
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', onMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', onMessage);
+  }, []);
 
   // Maintain this tab's cross-tab "viewing" claim. Only a visible, focused tab on
   // a /tasks/:id route claims that task; the claim refreshes on a heartbeat and is
@@ -312,25 +349,24 @@ export function NotificationProvider() {
       if (
         typeof Notification !== 'undefined' &&
         Notification.permission === 'granted' &&
-        !document.hasFocus()
+        !document.hasFocus() &&
+        swRegRef.current
       ) {
-        try {
-          const n = new Notification(`Haive — ${e.title}`, {
+        // Display + click routing live in the service worker (public/sw.js): a
+        // shared worker can focus the tab already showing the task — or open a
+        // new one — whereas a page-scoped Notification click only reaches the
+        // arbitrary tab that built it. Fire-and-forget; failures are non-fatal.
+        void swRegRef.current
+          .showNotification(`Haive — ${e.title}`, {
             body: bodyFor(e.status),
             tag: e.taskId,
-          });
-          n.onclick = () => {
-            window.focus();
-            router.push(`/tasks/${e.taskId}`);
-            n.close();
-          };
-        } catch {
-          // notification construction can throw on some platforms — ignore
-        }
+            data: { url: `/tasks/${e.taskId}` },
+          })
+          .catch(() => {});
       }
       markSeen(e); // surfaced once — other tabs/sessions skip it from here on
     },
-    [playSound, router],
+    [playSound],
   );
 
   useEffect(() => {
