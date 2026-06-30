@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, API_BASE_URL, type Repository } from '@/lib/api-client';
 import { Button, Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
 import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
@@ -13,16 +13,6 @@ function statusVariant(status: Repository['status']) {
   if (status === 'ready') return 'success' as const;
   if (status === 'error') return 'error' as const;
   return 'warning' as const;
-}
-
-function deriveTopLevelPaths(fileTree: string[] | null): string[] {
-  if (!fileTree) return [];
-  const set = new Set<string>();
-  for (const file of fileTree) {
-    const head = file.split('/')[0];
-    if (head) set.add(head);
-  }
-  return Array.from(set).sort();
 }
 
 function normalizeExclusion(value: string): string {
@@ -173,7 +163,7 @@ interface RepoCardProps {
 function RepoCard(props: RepoCardProps) {
   const { repo, expanded, pendingExclusions, onExpand, onDelete, onRetry, onTogglePath } = props;
 
-  const topLevelPaths = useMemo(() => deriveTopLevelPaths(repo.fileTree), [repo.fileTree]);
+  const topLevelPaths = repo.topLevelPaths ?? [];
   const canEdit = repo.status === 'ready' && topLevelPaths.length > 0;
   const excludedCount = repo.excludedPaths?.length ?? 0;
 

@@ -188,7 +188,10 @@ export interface Repository {
   statusMessage: string | null;
   detectedFramework: string | null;
   detectedLanguages: Record<string, number> | null;
-  fileTree: string[] | null;
+  /** Top-level dir/file names only (server-derived). The full fileTree is no
+   *  longer shipped in the list payload. Absent on the single-repo detail
+   *  endpoint, which has no consumer that renders it. */
+  topLevelPaths?: string[];
   excludedPaths: string[] | null;
   selectedPaths: string[] | null;
   sizeBytes: number | null;

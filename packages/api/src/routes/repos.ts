@@ -72,6 +72,20 @@ function deriveRepoName(opts: {
   return 'unnamed-repo';
 }
 
+// Top-level entries (first path segment, deduped + sorted) of a repo's file
+// tree. Precomputed here for the list endpoint so its response carries only
+// these — not the full, unbounded fileTree — and the web doesn't rescan the
+// whole tree on every poll. Mirrors the exclusions validator's segmenting.
+function deriveTopLevelPaths(fileTree: string[] | null): string[] {
+  if (!fileTree) return [];
+  const set = new Set<string>();
+  for (const file of fileTree) {
+    const head = file.split('/')[0];
+    if (head) set.add(head);
+  }
+  return Array.from(set).sort();
+}
+
 export const repoRoutes = new Hono<AppEnv>();
 
 repoRoutes.use('*', requireAuth);
@@ -114,7 +128,15 @@ repoRoutes.get('/', async (c) => {
 
   const repositories = rows.map((repo) => {
     const counts = countsByRepo.get(repo.id) ?? { open: 0, active: 0 };
-    return { ...repo, openTaskCount: counts.open, activeTaskCount: counts.active };
+    // Strip the full fileTree (large, and this list is polled every 5s) and ship
+    // only the top-level paths the list UI actually renders.
+    const { fileTree, ...rest } = repo;
+    return {
+      ...rest,
+      topLevelPaths: deriveTopLevelPaths(fileTree),
+      openTaskCount: counts.open,
+      activeTaskCount: counts.active,
+    };
   });
 
   return c.json({ repositories });
