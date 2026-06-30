@@ -57,6 +57,12 @@ export function BrowserVncPanel({ taskId, title, autoCollapse, persistId }: Brow
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectedRef = useRef(false);
   const connectRef = useRef<() => void>(() => {});
+  // Set once a live session drops (most commonly the task completing and its
+  // runtime being torn down). Suppresses the auto-reconnect below so we don't race
+  // a gone bridge — that reconnect's rejected upgrade is what made noVNC log a
+  // 1006 "Failed when connecting" console error on every completion. Cleared on an
+  // explicit user reconnect (Retry / Show).
+  const liveDropRef = useRef(false);
 
   const disconnect = useCallback(() => {
     if (retryTimerRef.current) {
@@ -91,12 +97,20 @@ export function BrowserVncPanel({ taskId, title, autoCollapse, persistId }: Brow
       });
       rfb.addEventListener('disconnect', () => {
         rfbRef.current = null;
-        // A live session that dropped → go idle. Never reached 'connected' → the
-        // runtime is still coming up (the api gates the bridge until DDEV/app is
-        // ready), so retry quietly until it's up or the cap is hit.
+        // A live session that dropped → don't auto-reconnect. The runtime is
+        // usually gone (the task completed and tore it down), so a reconnect just
+        // races a torn-down bridge whose rejected upgrade closes 1006 mid-handshake
+        // and noVNC logs "Failed when connecting" to the console (which the Next dev
+        // overlay surfaces). Surface a manual Retry instead; on task completion the
+        // autoCollapse effect collapses this panel a moment later anyway.
+        // (Never reached 'connected' → the runtime is still coming up; the api gates
+        // the bridge until DDEV/app is ready, so retry quietly until it's up or the
+        // cap is hit.)
         if (connectedRef.current) {
           connectedRef.current = false;
-          setState('idle');
+          liveDropRef.current = true;
+          setMessage('Browser session ended.');
+          setState('error');
           return;
         }
         if (retriesRef.current < MAX_CONNECT_RETRIES) {
@@ -127,6 +141,7 @@ export function BrowserVncPanel({ taskId, title, autoCollapse, persistId }: Brow
 
   const retry = useCallback(() => {
     retriesRef.current = 0;
+    liveDropRef.current = false;
     setMessage(null);
     void connect();
   }, [connect]);
@@ -167,7 +182,7 @@ export function BrowserVncPanel({ taskId, title, autoCollapse, persistId }: Brow
   }, []);
 
   useEffect(() => {
-    if (expanded && state === 'idle' && !rfbRef.current) void connect();
+    if (expanded && state === 'idle' && !rfbRef.current && !liveDropRef.current) void connect();
   }, [expanded, state, connect]);
 
   useEffect(() => () => disconnect(), [disconnect]);
@@ -267,6 +282,10 @@ export function BrowserVncPanel({ taskId, title, autoCollapse, persistId }: Brow
               if (expanded) {
                 disconnect();
                 setMaximized(false);
+              } else {
+                // Re-opening after a hide/auto-collapse → allow a fresh connect even
+                // if a prior live session had dropped.
+                liveDropRef.current = false;
               }
               setExpanded((v) => !v);
             }}
