@@ -52,8 +52,7 @@ APP_SERVICES=(api worker web)
 # prevents the parallel-tsc corruption when several services build it at once.
 build_libs() {
   say "Building @haive/database + @haive/shared (single writer)..."
-  dc run --rm --no-deps --entrypoint sh api -c \
-    "pnpm --filter @haive/database build && pnpm --filter @haive/shared build"
+  dc run --rm dev-libs
 }
 
 rebuild_one() {
@@ -74,7 +73,7 @@ rebuild_one() {
 
 rebuild_all() {
   say "Full rebuild: recreating app images + node_modules volumes. Data volumes untouched."
-  dc rm -fs "${APP_SERVICES[@]}" || true
+  dc rm -fs dev-libs "${APP_SERVICES[@]}" || true
   docker volume rm "${NM_VOLUMES[@]}" 2>/dev/null || true
   dc build "${APP_SERVICES[@]}"
   gpu_note
@@ -83,12 +82,12 @@ rebuild_all() {
 
 reset_stack() {
   say "Reset: full rebuild + wiping compiled dist/tsbuildinfo (stale/corrupt-build recovery). All data preserved."
-  dc rm -fs "${APP_SERVICES[@]}" || true
+  dc rm -fs dev-libs "${APP_SERVICES[@]}" || true
   docker volume rm "${NM_VOLUMES[@]}" 2>/dev/null || true
-  dc build "${APP_SERVICES[@]}"
+  dc build dev-libs "${APP_SERVICES[@]}"
   # Wipe the bind-mount compiled artifacts inside a container (host rm hits
   # EACCES on root-owned files); recreates the fresh volumes in the same pass.
-  dc run --rm --no-deps --entrypoint sh api -c \
+  dc run --rm --no-deps --entrypoint sh dev-libs -c \
     "rm -rf packages/shared/dist packages/database/dist packages/shared/*.tsbuildinfo packages/database/*.tsbuildinfo"
   gpu_note
   dc up -d
@@ -130,7 +129,7 @@ case "$cmd" in
   logs)          dc logs -f "$@" ;;
   status|ps)     dc ps ;;
   libs)          build_libs ;;
-  restart)       build_libs; gpu_note; dc up -d --force-recreate "$@" ;;
+  restart)       dc rm -fs dev-libs >/dev/null 2>&1 || true; gpu_note; dc up -d --force-recreate "$@" ;;
   rebuild)       if [ "$#" -eq 0 ]; then rebuild_all; else for s in "$@"; do rebuild_one "$s"; done; fi ;;
   reset)         reset_stack ;;
   sandbox-build) dc --profile sandbox build cli-sandbox ;;

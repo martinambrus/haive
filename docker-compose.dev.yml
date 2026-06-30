@@ -35,9 +35,33 @@ services:
       - haive-network
     restart: "no"
 
+  # One-shot: build @haive/database + @haive/shared exactly once, before api/worker/
+  # web start (they gate on it via depends_on: service_completed_successfully). A
+  # single writer for packages/{shared,database}/dist prevents the parallel-tsc
+  # incremental-state corruption that happens when each service builds the libs on boot.
+  dev-libs:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+      target: deps
+    container_name: haive-dev-libs
+    working_dir: /app
+    volumes:
+      - .:/app
+      - haive_node_modules_root:/app/node_modules
+      - haive_node_modules_shared:/app/packages/shared/node_modules
+      - haive_node_modules_database:/app/packages/database/node_modules
+    command: sh -c "pnpm --filter @haive/database build && pnpm --filter @haive/shared build"
+    networks:
+      - haive-network
+    restart: "no"
+
   api:
     build:
       target: deps
+    depends_on:
+      dev-libs:
+        condition: service_completed_successfully
     ports:
       - "3001:3001"
     volumes:
@@ -51,7 +75,7 @@ services:
       - haive_bundles:/var/lib/haive/bundles
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
       - haive_ddev_ca:/var/lib/haive/ddev-ca:ro
-    command: sh -c "pnpm --filter @haive/database build && pnpm --filter @haive/shared build && pnpm --filter @haive/api dev"
+    command: sh -c "pnpm --filter @haive/api dev"
     environment:
       NODE_ENV: development
       HOST_REPO_ROOT: /host-fs
@@ -62,6 +86,9 @@ services:
   worker:
     build:
       target: deps
+    depends_on:
+      dev-libs:
+        condition: service_completed_successfully
     volumes:
       - .:/app
       - haive_node_modules_root:/app/node_modules
@@ -74,7 +101,7 @@ services:
       - haive_bundles:/var/lib/haive/bundles
       - haive_wrappers:/var/lib/haive/wrappers
       - haive_squid_configs:/var/lib/haive/squid-configs
-    command: sh -c "pnpm --filter @haive/database build && pnpm --filter @haive/shared build && pnpm --filter @haive/worker dev"
+    command: sh -c "pnpm --filter @haive/worker dev"
     environment:
       NODE_ENV: development
       HOST_REPO_ROOT: /host-fs
@@ -87,6 +114,11 @@ services:
   web:
     build:
       target: deps
+    depends_on:
+      api:
+        condition: service_started
+      dev-libs:
+        condition: service_completed_successfully
     ports:
       - "3000:3000"
     volumes:
@@ -95,7 +127,7 @@ services:
       - haive_node_modules_web:/app/packages/web/node_modules
       - haive_node_modules_shared:/app/packages/shared/node_modules
       - haive_web_next:/app/packages/web/.next
-    command: sh -c "pnpm --filter @haive/shared build && pnpm --filter @haive/web dev"
+    command: sh -c "pnpm --filter @haive/web dev"
     environment:
       NODE_ENV: development
 
