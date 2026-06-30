@@ -36,7 +36,7 @@ interface BrowserVncPanelProps {
 export function BrowserVncPanel({ taskId, title, autoCollapse, persistId }: BrowserVncPanelProps) {
   // Persisted per task (when a persistId is given) so a reload restores whether this
   // panel was open. autoCollapse below is edge-guarded so it never clobbers a restore.
-  const [expanded, setExpanded] = usePersistedToggle(
+  const [expanded, setExpanded, setExpandedAuto] = usePersistedToggle(
     persistId ? `task-ui:${taskId}:vnc:${persistId}` : null,
     true,
   );
@@ -179,12 +179,15 @@ export function BrowserVncPanel({ taskId, title, autoCollapse, persistId }: Brow
   useEffect(() => {
     // Fire only on the false→true edge (step finishing), NOT on mount — otherwise a
     // reload of an already-finished step would clobber a persisted "expanded".
+    // setExpandedAuto is the ephemeral setter: the programmatic collapse stays
+    // in-memory (no localStorage write), so a remount restores the open-by-default
+    // fallback; only the user's toggle persists.
     if (autoCollapse && !prevAutoCollapse.current) {
       disconnect();
-      setExpanded(false);
+      setExpandedAuto(false);
     }
     prevAutoCollapse.current = autoCollapse;
-  }, [autoCollapse, disconnect, setExpanded]);
+  }, [autoCollapse, disconnect, setExpandedAuto]);
 
   // Maximize = full-page overlay in the SAME window so the user keeps testing
   // without blurring the tab (the user-active timer keeps running). The

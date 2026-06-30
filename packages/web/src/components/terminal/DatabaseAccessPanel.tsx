@@ -51,7 +51,7 @@ export function DatabaseAccessPanel({
   autoCollapse,
   persistId,
 }: DatabaseAccessPanelProps) {
-  const [expanded, setExpanded] = usePersistedToggle(
+  const [expanded, setExpanded, setExpandedAuto] = usePersistedToggle(
     persistId ? `task-ui:${taskId}:db:${persistId}` : null,
     true,
   );
@@ -106,11 +106,14 @@ export function DatabaseAccessPanel({
   );
 
   // Collapse once the owning step finishes (false→true edge only, not on mount).
+  // Ephemeral setter: this programmatic collapse stays in-memory and never writes
+  // localStorage, so a remount restores the open-by-default fallback instead of a
+  // stale collapsed flag. Only the user's toggle persists.
   const prevAutoCollapse = useRef(autoCollapse);
   useEffect(() => {
-    if (autoCollapse && !prevAutoCollapse.current) setExpanded(false);
+    if (autoCollapse && !prevAutoCollapse.current) setExpandedAuto(false);
     prevAutoCollapse.current = autoCollapse;
-  }, [autoCollapse, setExpanded]);
+  }, [autoCollapse, setExpandedAuto]);
 
   const retry = useCallback(() => {
     retriesRef.current = 0;

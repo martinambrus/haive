@@ -45,7 +45,7 @@ export function BrowserDirectPanel({
   autoCollapse,
   persistId,
 }: BrowserDirectPanelProps) {
-  const [expanded, setExpanded] = usePersistedToggle(
+  const [expanded, setExpanded, setExpandedAuto] = usePersistedToggle(
     persistId ? `task-ui:${taskId}:direct:${persistId}` : null,
     true,
   );
@@ -104,11 +104,13 @@ export function BrowserDirectPanel({
 
   // Collapse once the owning step finishes (false→true edge only, not on mount, so a
   // reload of an already-finished step doesn't clobber a persisted "expanded").
+  // Ephemeral setter so this programmatic collapse never writes localStorage; only
+  // the user's toggle persists, and a remount restores the open-by-default fallback.
   const prevAutoCollapse = useRef(autoCollapse);
   useEffect(() => {
-    if (autoCollapse && !prevAutoCollapse.current) setExpanded(false);
+    if (autoCollapse && !prevAutoCollapse.current) setExpandedAuto(false);
     prevAutoCollapse.current = autoCollapse;
-  }, [autoCollapse, setExpanded]);
+  }, [autoCollapse, setExpandedAuto]);
 
   const retry = useCallback(() => {
     retriesRef.current = 0;
