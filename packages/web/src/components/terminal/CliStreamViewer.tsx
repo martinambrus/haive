@@ -421,7 +421,10 @@ export function CliStreamViewer({
 
   // CR-only sequences confuse HTML pre-wrap; JSON.parse already turned \n/\t into
   // real characters, so stripping bare \r is all the escaping the prose needs.
-  const cleanContent = (isReplay ? (staticCleanOutput ?? '') : cleanText).replace(/\r/g, '');
+  const cleanContent = useMemo(
+    () => (isReplay ? (staticCleanOutput ?? '') : cleanText).replace(/\r/g, ''),
+    [isReplay, staticCleanOutput, cleanText],
+  );
 
   // Keep the Clean panel pinned to the latest output as it streams — but only
   // while the user is at (or near) the bottom. Once they scroll up to read we

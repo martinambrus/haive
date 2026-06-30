@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormSchema } from '@haive/shared';
 // Import the pure timing helper from its dedicated subpath, NOT the package
 // barrel — the barrel pulls server-only utils (ioredis -> dns) that break the
@@ -1946,7 +1946,7 @@ function TaskTotalTime({
   );
 }
 
-function StepCard({
+function StepCardImpl({
   step,
   taskId,
   taskStatus,
@@ -2727,6 +2727,35 @@ function StepCard({
     </Card>
   );
 }
+
+// StepCard's handler props (onSubmit/onAction/…) are inline arrows recreated on
+// every TaskDetailPage render, so a default React.memo never bails. They are pure
+// derivations of the data props, and the 2s status poll re-renders every card with
+// fresh handlers anyway — so the equality check safely skips them and compares only
+// the data props. Net effect: the 1s user-active timer tick at the page root stops
+// re-rendering all N step cards; only the active card (whose userActiveDisplayMs
+// changes each second) re-renders. (Verified: the handlers close over only id/api/
+// reload/setters/steps — none over the sub-2s timer state — so a skipped handler is
+// never staler than the 2s poll that refreshes them.)
+const STEP_CARD_FN_PROPS = new Set<keyof StepCardProps>([
+  'onSubmit',
+  'onAction',
+  'onRetryStep',
+  'onStop',
+  'onCliLogin',
+  'onChangeCli',
+  'onToggleAutoContinue',
+]);
+
+function stepCardPropsEqual(prev: Readonly<StepCardProps>, next: Readonly<StepCardProps>): boolean {
+  for (const key of Object.keys(next) as (keyof StepCardProps)[]) {
+    if (STEP_CARD_FN_PROPS.has(key)) continue;
+    if (!Object.is(prev[key], next[key])) return false;
+  }
+  return true;
+}
+
+const StepCard = memo(StepCardImpl, stepCardPropsEqual);
 
 // Lazy-loaded RAG retrieval stats for the discovery step: the rag_search calls
 // made during the step, with the KB-vs-code hit split + top scores. `code`

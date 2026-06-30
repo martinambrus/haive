@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { api, type Task, type TaskListResponse, type TaskStatus } from '@/lib/api-client';
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { formatDuration } from '@/lib/format-duration';
@@ -31,6 +31,67 @@ const TYPE_LABELS: Record<string, string> = {
   onboarding_upgrade: 'Onboarding upgrade',
   env_replicate: 'Env replicate', // legacy tasks only
 };
+
+// Memoized list row. The 3s poll replaces the tasks array each tick (new refs →
+// rows re-render, acceptable), but typing in the search box re-renders TasksPage
+// WITHOUT changing the tasks array — so memo bails and a keystroke no longer
+// reconciles all loaded rows. Props are just `task`; everything else it uses is a
+// module-level helper.
+const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
+  return (
+    <Link href={`/tasks/${task.id}`} className="block">
+      <Card className="flex flex-col gap-2 transition-colors hover:border-indigo-700">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-semibold text-neutral-50">{task.title}</h2>
+            <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
+            <Badge>{TYPE_LABELS[task.type]}</Badge>
+            {task.repository && <Badge variant="info">repo: {task.repository.name}</Badge>}
+          </div>
+          <span className="text-xs text-neutral-500">
+            {new Date(task.createdAt).toLocaleString()}
+          </span>
+        </div>
+        {task.description && <p className="text-xs text-neutral-400">{task.description}</p>}
+        <div className="flex items-center gap-3 text-xs text-neutral-500">
+          <span>Step index: {task.currentStepIndex}</span>
+          {task.currentStepId && <span>Current: {task.currentStepId}</span>}
+          {task.errorMessage && <span className="text-red-400">{task.errorMessage}</span>}
+        </div>
+        {task.timing && task.startedAt && (
+          <div className="flex flex-wrap items-center gap-3 font-mono text-xs">
+            <span className="text-neutral-300" title="Wall clock since the task started">
+              wall {formatDuration(task.timing.wallMs)}
+            </span>
+            <span
+              className="text-indigo-400"
+              title="Agent active work time (idle waits and gaps excluded)"
+            >
+              work {formatDuration(task.timing.workMs)}
+            </span>
+            <span className="text-amber-400" title="Time the task sat waiting on you">
+              idle {formatDuration(task.timing.idleMs)}
+            </span>
+            <span
+              className="text-emerald-400"
+              title="Your active time at gates (focused while it waited)"
+            >
+              user {formatDuration(task.timing.userActiveMs)}
+            </span>
+            {task.tokenUsage && task.tokenUsage.totalTokens > 0 && (
+              <span
+                className="text-sky-300"
+                title={`CLI tokens (provider-native): in ${task.tokenUsage.inputTokens.toLocaleString()} / out ${task.tokenUsage.outputTokens.toLocaleString()} / total ${task.tokenUsage.totalTokens.toLocaleString()}`}
+              >
+                {formatTokens(task.tokenUsage.totalTokens)} tok
+              </span>
+            )}
+          </div>
+        )}
+      </Card>
+    </Link>
+  );
+});
 
 const FILTER_SELECT_CLASS =
   'h-9 rounded-md border border-neutral-800 bg-neutral-950 px-2 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500';
@@ -319,57 +380,7 @@ export default function TasksPage() {
       {tasks && tasks.length > 0 && (
         <div className="grid gap-3">
           {tasks.map((task) => (
-            <Link key={task.id} href={`/tasks/${task.id}`} className="block">
-              <Card className="flex flex-col gap-2 transition-colors hover:border-indigo-700">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <h2 className="text-lg font-semibold text-neutral-50">{task.title}</h2>
-                    <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
-                    <Badge>{TYPE_LABELS[task.type]}</Badge>
-                    {task.repository && <Badge variant="info">repo: {task.repository.name}</Badge>}
-                  </div>
-                  <span className="text-xs text-neutral-500">
-                    {new Date(task.createdAt).toLocaleString()}
-                  </span>
-                </div>
-                {task.description && <p className="text-xs text-neutral-400">{task.description}</p>}
-                <div className="flex items-center gap-3 text-xs text-neutral-500">
-                  <span>Step index: {task.currentStepIndex}</span>
-                  {task.currentStepId && <span>Current: {task.currentStepId}</span>}
-                  {task.errorMessage && <span className="text-red-400">{task.errorMessage}</span>}
-                </div>
-                {task.timing && task.startedAt && (
-                  <div className="flex flex-wrap items-center gap-3 font-mono text-xs">
-                    <span className="text-neutral-300" title="Wall clock since the task started">
-                      wall {formatDuration(task.timing.wallMs)}
-                    </span>
-                    <span
-                      className="text-indigo-400"
-                      title="Agent active work time (idle waits and gaps excluded)"
-                    >
-                      work {formatDuration(task.timing.workMs)}
-                    </span>
-                    <span className="text-amber-400" title="Time the task sat waiting on you">
-                      idle {formatDuration(task.timing.idleMs)}
-                    </span>
-                    <span
-                      className="text-emerald-400"
-                      title="Your active time at gates (focused while it waited)"
-                    >
-                      user {formatDuration(task.timing.userActiveMs)}
-                    </span>
-                    {task.tokenUsage && task.tokenUsage.totalTokens > 0 && (
-                      <span
-                        className="text-sky-300"
-                        title={`CLI tokens (provider-native): in ${task.tokenUsage.inputTokens.toLocaleString()} / out ${task.tokenUsage.outputTokens.toLocaleString()} / total ${task.tokenUsage.totalTokens.toLocaleString()}`}
-                      >
-                        {formatTokens(task.tokenUsage.totalTokens)} tok
-                      </span>
-                    )}
-                  </div>
-                )}
-              </Card>
-            </Link>
+            <TaskRow key={task.id} task={task} />
           ))}
         </div>
       )}
