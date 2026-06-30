@@ -75,7 +75,10 @@ rebuild_all() {
   say "Full rebuild: recreating app images + node_modules volumes. Data volumes untouched."
   dc rm -fs dev-libs "${APP_SERVICES[@]}" || true
   docker volume rm "${NM_VOLUMES[@]}" 2>/dev/null || true
-  dc build "${APP_SERVICES[@]}"
+  # Build dev-libs too: it starts first (the depends_on gate) and mounts the shared
+  # root node_modules volume, so a stale dev-libs image repopulates root with OLD
+  # deps even though api/worker/web were rebuilt. Keep its image in lockstep.
+  dc build dev-libs "${APP_SERVICES[@]}"
   gpu_note
   dc up -d
 }
