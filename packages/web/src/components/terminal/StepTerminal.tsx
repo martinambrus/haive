@@ -26,7 +26,7 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
   // Persisted per task so a reload restores whether this step's terminal was open.
   // autoExpand is only the fallback; the autoExpand-transition effect below still
   // fires on status changes (guarded against mount, so it never clobbers a restore).
-  const [expanded, setExpanded] = usePersistedToggle(
+  const [expanded, setExpanded, setExpandedAuto] = usePersistedToggle(
     `task-ui:${taskId}:term:${stepRowId}`,
     autoExpand,
   );
@@ -38,12 +38,19 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
 
   // Sync expanded state to autoExpand transitions only — not on every render.
   // This way: a step starts running → terminal pops open; the step finishes →
-  // terminal collapses so focus moves to the next active step. Manual toggles
-  // in between persist until the next autoExpand transition.
+  // terminal collapses so focus moves to the next active step. Uses the EPHEMERAL
+  // setter so these programmatic transitions never touch localStorage — only an
+  // explicit user toggle (the button below) persists. Otherwise the auto-collapse
+  // when the step ends would store '0', and a retry — which supersedes the step's
+  // invocations (count → 0) so this terminal unmounts, then remounts once the
+  // re-run's invocation appears while the step is already running — would restore
+  // that stale '0' and stay hidden (the open-on-running guard can't fire: there's
+  // no false→true transition at mount). A user's manual toggle still persists and
+  // wins across reloads.
   const prevAutoExpand = useRef(autoExpand);
   useEffect(() => {
     if (autoExpand !== prevAutoExpand.current) {
-      setExpanded(autoExpand);
+      setExpandedAuto(autoExpand);
       prevAutoExpand.current = autoExpand;
     }
   }, [autoExpand]);
