@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Duplex } from 'node:stream';
 import Docker from 'dockerode';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   TERMINAL_CTL_CHANNEL_PREFIX,
@@ -19,7 +19,11 @@ import {
 import type { Redis } from 'ioredis';
 import { createRedisConnection } from '@haive/shared';
 import { ensureShellContainer } from './terminal-container.js';
-import { resolveRepoMount, resolveTaskRepoMount } from '../queues/cli-exec-queue.js';
+import {
+  resolveRepoMount,
+  resolveTaskRepoMount,
+  resolveTaskSandboxWorkdir,
+} from '../queues/cli-exec-queue.js';
 import type { DockerVolumeMount } from '../sandbox/docker-runner.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type { McpServerSpec } from '../sandbox/mcp-config.js';
@@ -215,8 +219,27 @@ export class TerminalSessionManager {
       });
       if (!task) return { ok: false, error: 'task not found' };
       if (task.userId !== req.userId) return { ok: false, error: 'task not owned by user' };
-      if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
+      // Enabled on 'failed' (the worktree + runtime survive for recovery) — mirrors
+      // the Editor tab. Only a definitive end (completed/cancelled) reaps the
+      // worktree, so only those disable the shell.
+      if (task.status === 'completed' || task.status === 'cancelled') {
         return { ok: false, error: `task is ${task.status} - terminal disabled` };
+      }
+      // Worktree-gated like the Editor tab: workflow/run_app shells must wait until
+      // 01-worktree-setup has run. Opening earlier would create the persistent tmux
+      // session in the repo root (wrong branch) and it would never move to the
+      // worktree. 'skipped' counts as ready (run_app may run from the repo root).
+      if (task.type === 'workflow' || task.type === 'run_app') {
+        const wt = await this.db.query.taskSteps.findFirst({
+          where: and(
+            eq(schema.taskSteps.taskId, taskId),
+            eq(schema.taskSteps.stepId, '01-worktree-setup'),
+          ),
+          columns: { status: true },
+        });
+        if (!wt || (wt.status !== 'done' && wt.status !== 'skipped')) {
+          return { ok: false, error: 'task worktree not ready - terminal preparing' };
+        }
       }
       repoMount = await resolveTaskRepoMount(this.db, taskId).catch(() => null);
       mcpServers = await this.buildMcpServers(req.userId, taskId);
@@ -283,13 +306,21 @@ export class TerminalSessionManager {
       if (typeof v !== 'string') continue;
       execEnv.push(`${k}=${v}`);
     }
+    // Task shells start in the git worktree (the branch the workflow is editing),
+    // not the repo root — mirrors the CLI agents' cwd (dag-executor) so the shell,
+    // git, and the agent all act on the same working copy. The repo root is still
+    // mounted (so the worktree's `.git` file resolves and git works), only the cwd
+    // is the worktree. Falls back to the repo root when there's no worktree (skipped
+    // 01-worktree-setup). Repo-scope shells stay at the repo root.
+    const ptyWorkingDir =
+      scope === 'task' ? await resolveTaskSandboxWorkdir(this.db, scopeId) : SANDBOX_WORKDIR;
     const ptyHandle = await this.docker.getContainer(ensured.containerName).exec({
       Cmd: tmuxCommand,
       AttachStdin: true,
       AttachStdout: true,
       AttachStderr: true,
       Tty: true,
-      WorkingDir: '/haive/workdir',
+      WorkingDir: ptyWorkingDir,
       Env: execEnv,
     });
     const ptyStream = (await ptyHandle.start({

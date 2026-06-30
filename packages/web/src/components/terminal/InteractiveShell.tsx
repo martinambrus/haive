@@ -28,13 +28,18 @@ interface InteractiveShellProps {
   /** When true, the parent task moved to a terminal state and the shell
    *  should refuse to mount / show a disabled banner. */
   disabled?: boolean;
+  /** Why the shell is disabled, selecting the banner copy. 'preparing' = the
+   *  task worktree isn't ready yet (gated like the Editor tab); 'ended' = the
+   *  task reached a definitive end (completed/cancelled) and the sandbox is
+   *  gone. Defaults to 'ended'. */
+  disabledReason?: 'ended' | 'preparing';
   fill?: boolean;
 }
 
 const KEEPALIVE_INTERVAL_MS = 30_000;
 
 export function InteractiveShell(props: InteractiveShellProps) {
-  const { cliProviderId, disabled = false, fill = false } = props;
+  const { cliProviderId, disabled = false, disabledReason = 'ended', fill = false } = props;
   const scope = props.scope ?? 'task';
   const scopeId = scope === 'repo' ? props.repositoryId : props.taskId;
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -224,11 +229,22 @@ export function InteractiveShell(props: InteractiveShellProps) {
   }, [scope, scopeId, cliProviderId, disabled]);
 
   if (disabled) {
+    if (disabledReason === 'preparing') {
+      return (
+        <div className="flex flex-col gap-2 rounded border border-neutral-800 bg-neutral-950 p-6 text-sm text-neutral-400">
+          <p>
+            Terminal is preparing. It opens once the task&apos;s git worktree has been created (step
+            01-worktree-setup) so the shell starts on the task branch. This tab enables
+            automatically when the worktree is ready.
+          </p>
+        </div>
+      );
+    }
     return (
       <div className="flex flex-col gap-2 rounded border border-neutral-800 bg-neutral-950 p-6 text-sm text-neutral-400">
         <p>
-          Terminal is disabled because the task has ended (completed, failed, or cancelled). The
-          per-task sandbox container has been torn down.
+          Terminal is disabled because the task has ended (completed or cancelled). The per-task
+          sandbox container has been torn down.
         </p>
         <p>
           To run a shell against this repository&apos;s checkout, open a standalone terminal from

@@ -635,6 +635,18 @@ export default function TaskDetailPage() {
   useEffect(() => {
     if (editorDisabled && tab === 'editor') setTab('steps');
   }, [editorDisabled, tab]);
+  // The Terminal shell is gated exactly like the Editor: enabled on 'failed' (the
+  // worktree + sandbox survive for recovery), disabled on completed/cancelled (the
+  // worktree is reaped) and until 01-worktree-setup has prepared the worktree —
+  // otherwise the shell's persistent tmux session would be rooted at the repo
+  // checkout (wrong branch). Mirrors terminal-session-manager's openSession gate.
+  const terminalDisabled =
+    task?.status === 'completed' || task?.status === 'cancelled' || !worktreeReady;
+  const terminalDisabledReason: 'ended' | 'preparing' =
+    task?.status === 'completed' || task?.status === 'cancelled' ? 'ended' : 'preparing';
+  useEffect(() => {
+    if (terminalDisabled && tab === 'terminal') setTab('steps');
+  }, [terminalDisabled, tab]);
 
   async function submitStep(step: TaskStep, values: FormValues) {
     setSubmitting(step.stepId);
@@ -1058,7 +1070,11 @@ export default function TaskDetailPage() {
         >
           Editor
         </TabButton>
-        <TabButton active={tab === 'terminal'} onClick={() => setTab('terminal')}>
+        <TabButton
+          active={tab === 'terminal'}
+          onClick={() => setTab('terminal')}
+          disabled={terminalDisabled}
+        >
           Terminal
         </TabButton>
         <TabButton active={tab === 'activity'} onClick={() => setTab('activity')}>
@@ -1160,7 +1176,8 @@ export default function TaskDetailPage() {
       {tab === 'terminal' && (
         <TerminalTab
           taskId={id}
-          taskStatus={task.status}
+          disabled={terminalDisabled}
+          disabledReason={terminalDisabledReason}
           repositoryId={task.repositoryId}
           repositoryName={task.repository?.name ?? null}
           providers={providers}
@@ -1243,7 +1260,8 @@ function TabButton({
 
 interface TerminalTabProps {
   taskId: string;
-  taskStatus: TaskStatus;
+  disabled: boolean;
+  disabledReason: 'ended' | 'preparing';
   repositoryId: string | null;
   repositoryName: string | null;
   providers: CliProvider[];
@@ -1253,15 +1271,14 @@ interface TerminalTabProps {
 
 function TerminalTab({
   taskId,
-  taskStatus,
+  disabled,
+  disabledReason,
   repositoryId,
   repositoryName,
   providers,
   selectedCliProviderId,
   onSelectCliProvider,
 }: TerminalTabProps) {
-  const terminalDisabled =
-    taskStatus === 'completed' || taskStatus === 'failed' || taskStatus === 'cancelled';
   const enabledProviders = providers.filter((p) => p.enabled);
   const usableProviders = enabledProviders.length > 0 ? enabledProviders : providers;
 
@@ -1285,7 +1302,7 @@ function TerminalTab({
           <select
             value={selectedCliProviderId ?? ''}
             onChange={(e) => onSelectCliProvider(e.target.value)}
-            disabled={terminalDisabled}
+            disabled={disabled}
             className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {usableProviders.map((p) => (
@@ -1305,7 +1322,8 @@ function TerminalTab({
           repositoryId={repositoryId ?? undefined}
           repositoryName={repositoryName}
           cliProviderId={selectedCliProviderId}
-          disabled={terminalDisabled}
+          disabled={disabled}
+          disabledReason={disabledReason}
         />
       )}
     </div>
