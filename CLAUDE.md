@@ -13,7 +13,7 @@ The legacy markdown step content has been ported into TypeScript step modules un
 - Drizzle ORM on PostgreSQL 18, postgres.js driver
 - BullMQ on Redis 8 (noeviction policy is required)
 - Uploaded repo archives live in the `haive_repos` named volume (shared by api and worker); Mailpit for dev SMTP
-- Docker Compose orchestrates everything; `docker compose up` is the only supported boot path
+- Docker Compose orchestrates everything; the dev stack is driven by `scripts/dev.sh` (aliased `pnpm docker:dev`), which wraps `docker compose up` with the dev override and GPU layering
 - clawker (Apache 2.0 Go binary) wrapped via child_process for per-task Docker sandboxes; pinned at worker image build time
 
 ## Monorepo layout
@@ -86,8 +86,8 @@ Secret-file masking (default on, Tier 1): before each cli-exec invocation the wo
 - `pnpm test` runs Vitest across the workspace.
 - `pnpm test:e2e` runs Playwright against the dev compose stack.
 - `pnpm db:push` runs `drizzle-kit push` against the database in `DATABASE_URL`.
-- `pnpm docker:dev` boots `docker-compose.yml` plus the dev override.
-- `pnpm docker:down` stops everything.
+- `pnpm docker:dev` (alias for `scripts/dev.sh up`) boots `docker-compose.yml` plus the dev override, GPU-aware. The script also exposes `rebuild`/`reset`/`restart`/`libs`/`logs`/`status` — run `pnpm docker help`.
+- `pnpm docker:down` (alias for `scripts/dev.sh down`) stops everything; it keeps all data volumes (never `-v`).
 
 The api and worker packages depend at build time on `@haive/shared` and `@haive/database`. Always build those two first when running anything outside of turbo.
 

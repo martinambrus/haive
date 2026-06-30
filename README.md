@@ -116,19 +116,27 @@ Testing
 
 ## Development
 
+Everything builds and runs inside containers — never `pnpm install` or
+`pnpm --filter … build` on the host (it writes root-owned `node_modules` and
+poisons the bind-mounted `dist`). Manage the whole stack with `scripts/dev.sh`,
+aliased as `pnpm docker:dev` and `pnpm docker <cmd>`:
+
+| Command                     | What it does                                                                                                                                                     |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm docker:dev`           | Boot the stack (GPU-aware). Alias for `scripts/dev.sh up`.                                                                                                       |
+| `pnpm docker:down`          | Stop the stack; keeps all data (never `-v`).                                                                                                                     |
+| `pnpm docker restart [svc]` | Recreate the stack (or one service) with the shared libs rebuilt once.                                                                                           |
+| `pnpm docker logs [svc]`    | Follow logs.                                                                                                                                                     |
+| `pnpm docker status`        | Show service status.                                                                                                                                             |
+| `pnpm docker libs`          | Rebuild `@haive/shared` + `@haive/database` after editing their source.                                                                                          |
+| `pnpm docker rebuild [svc]` | Pick up a dependency/lockfile change (rebuild image + recreate node_modules volumes). No args = full rebuild; a root/shared/database dep needs the full rebuild. |
+| `pnpm docker reset`         | Full rebuild + wipe compiled `dist` to recover a stale/corrupt build. Preserves all data.                                                                        |
+
+`rebuild`/`reset` only touch the `node_modules` and `.next` caches — data volumes
+(postgres/redis/repos/…), your own `ddev-*` projects, and per-task runtimes are
+never touched. Never run `down -v` or `docker volume prune` against this stack.
+
 ```bash
-# Install dependencies on host (optional; docker:dev does this inside containers)
-pnpm install
-
-# Build shared + database first (required by api/worker/web)
-pnpm --filter @haive/shared build
-pnpm --filter @haive/database build
-
-# Per-package dev
-pnpm dev:api
-pnpm dev:worker
-pnpm dev:web
-
 # Database
 pnpm db:generate    # drizzle-kit generate (writes new migration files)
 pnpm db:push        # drizzle-kit push (apply schema directly, dev only)

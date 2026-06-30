@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 # --- compose wrapper ---------------------------------------------------------
 # Always layer base + dev override. Add the GPU override only when an NVIDIA GPU
 # is actually usable by Docker — a failed nvidia device reservation hard-errors
-# the service, so compose cannot gate this on its own (ported from dev-up.sh).
+# the service, so compose cannot gate this on its own.
 FILES=(-f docker-compose.yml -f docker-compose.dev.yml)
 GPU_MODE="CPU"
 if command -v nvidia-smi >/dev/null 2>&1 \

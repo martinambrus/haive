@@ -1,4 +1,4 @@
-# GPU override for Ollama. Included automatically by scripts/dev-up.sh (pnpm
+# GPU override for Ollama. Included automatically by scripts/dev.sh (pnpm
 # docker:dev) only when an NVIDIA GPU AND the nvidia container runtime are present.
 # Kept out of the base + dev compose so the stack boots on any host (CPU Ollama);
 # this layers GPU access on top. A multi-billion-parameter embedding model is far
@@ -7,7 +7,7 @@
 # By default Ollama uses ALL detected NVIDIA GPUs. On a multi-GPU host, pin it to
 # a single card by index or UUID via OLLAMA_GPU_DEVICE in .env (e.g.
 # OLLAMA_GPU_DEVICE=1 or OLLAMA_GPU_DEVICE=GPU-<uuid>). CPU-only machines never
-# load this file (dev-up.sh gates it), so the automatic CPU fallback is unaffected.
+# load this file (scripts/dev.sh gates it), so the automatic CPU fallback is unaffected.
 services:
   ollama:
     runtime: nvidia
@@ -18,7 +18,7 @@ services:
   # a GPU being present (the classic symptom of a GPU driver/runtime mismatch,
   # e.g. the host driver was upgraded without a reboot — nvidia-smi and the
   # container runtime still pass, but cuInit fails and Ollama falls back to CPU,
-  # making RAG ingestion far slower). Set only in this file, which dev-up.sh
+  # making RAG ingestion far slower). Set only in this file, which scripts/dev.sh
   # layers exclusively on GPU hosts, so CPU-only hosts never warn.
   worker:
     environment:
