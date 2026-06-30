@@ -134,7 +134,11 @@ async function buildRunList(ctx: ResolvedTaskContext, db: Database): Promise<Ste
  *  always last, so the forward walk (findIndex(stepId)+1) stays correct as the tail
  *  grows. 01-debug-mode precedes the runtime (it self-skips when the global debug
  *  kill-switch is off) so a run_app session — the prime "run it and poke at it"
- *  surface — can opt into step-debugging before DDEV / the app-runner comes up. */
+ *  surface — can opt into step-debugging before DDEV / the app-runner comes up.
+ *  98-choose-view ALSO precedes the runtime (not just 99-run-app-ready): the
+ *  VNC-vs-own-browser choice writes tasks.direct_access, which the runner reads at
+ *  CREATE to decide host-port publishing (fixed at cold boot, never reconfigured) —
+ *  mirrors 01d-browser-access in the workflow pipeline. */
 async function buildRunAppRunList(
   ctx: ResolvedTaskContext,
   db: Database,
@@ -166,7 +170,7 @@ async function buildRunAppRunList(
       stepRegistry.require('01a-app-boot'),
     ];
   }
-  return [...prefix, ...runtime, chooseView, ready];
+  return [...prefix, chooseView, ...runtime, ready];
 }
 
 async function resolveTaskContext(
