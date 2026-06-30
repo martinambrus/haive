@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM node:24-alpine AS base
+FROM node:26-alpine AS base
 # docker-cli: api shells out to `docker rm -f` to interrupt sandbox CLI
 # containers when the user clicks Stop & Retry on a running step. The
 # socket mount is supplied by docker-compose; the binary must live in the
