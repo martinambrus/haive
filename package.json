@@ -33,7 +33,7 @@
   },
   "packageManager": "pnpm@9.15.4",
   "devDependencies": {
-    "@playwright/test": "^1.58.2",
+    "@playwright/test": "^1.61.1",
     "@types/node": "^25.3.5",
     "husky": "^9.1.7",
     "lint-staged": "^16.4.0",
