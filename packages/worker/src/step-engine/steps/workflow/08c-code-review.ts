@@ -274,6 +274,27 @@ const PERFORMANCE_PERSONA = [
   'from the changed-files list and read them directly).',
 ] as const;
 
+const SIMPLICITY_PERSONA = [
+  'You are the Simplicity Reviewer. Review the change AS WRITTEN for over-engineering and missed',
+  'reuse — the bloat angle a feature-focused review under-weights — and NEVER rewrite the code (the',
+  'author owns it). Raise every issue as a finding with the concern named in the issue:',
+  '- Reuse missed: new code that re-implements a helper, util, or pattern already in the repo, or',
+  '  that the language standard library or an already-installed dependency already provides. Name the',
+  '  existing thing the change should have used.',
+  '- Needless dependency: a newly added dependency that the standard library or a dependency already',
+  '  in the project already covers.',
+  '- Needless abstraction: an interface, layer, generic, or configurability added for a single',
+  '  current caller with no requested second use.',
+  '- YAGNI: code for a requirement that was not asked for — speculative options, unreached branches,',
+  '  dead parameters.',
+  'Do NOT flag validation, error handling, security, or accessibility as bloat — those are never',
+  'over-engineering (a separate reviewer owns them). Do NOT re-report plain code duplication the peer',
+  'reviewer already covers; focus on reuse-of-existing and unnecessary-new. Every finding needs a',
+  'file + line, the offending snippet, and a concrete fix (name the simpler existing path). Report',
+  'EVERY finding in full — never just counts. Do NOT edit code and do NOT run git (it is unavailable',
+  'here — work from the changed-files list and read them directly).',
+] as const;
+
 interface ReviewLensDef {
   id: string;
   title: string;
@@ -283,19 +304,20 @@ interface ReviewLensDef {
 // Extra review lenses layered on peer + security, gated by the task's adversarial-QA
 // level. They cover quality dimensions the single peer-reviewer blob under-serves and
 // that no 08d adversary re-derives (observability, operational readiness,
-// migration/rollback safety, backward compat, documentation; and data-access
-// performance) — so a miss there is otherwise final. Order matters: lensesForLevel
-// slices this cumulatively.
+// migration/rollback safety, backward compat, documentation; data-access performance;
+// and missed reuse / over-engineering) — so a miss there is otherwise final. Order
+// matters: lensesForLevel slices this cumulatively.
 const REVIEW_LENSES: ReviewLensDef[] = [
   { id: 'operational-reviewer', title: 'Operational Reviewer', persona: OPERATIONAL_PERSONA },
   { id: 'performance-reviewer', title: 'Performance Reviewer', persona: PERFORMANCE_PERSONA },
+  { id: 'simplicity-reviewer', title: 'Simplicity Reviewer', persona: SIMPLICITY_PERSONA },
 ];
 
 /** Cumulative roster by level: none/poc add nothing, standard adds operational,
- *  enterprise adds operational + performance. Exported for the unit test. */
+ *  enterprise adds operational + performance + simplicity. Exported for the unit test. */
 export function lensesForLevel(level: QaLevel): ReviewLensDef[] {
   if (level === 'standard') return REVIEW_LENSES.slice(0, 1);
-  if (level === 'enterprise') return REVIEW_LENSES.slice(0, 2);
+  if (level === 'enterprise') return REVIEW_LENSES.slice(0, 3);
   return [];
 }
 

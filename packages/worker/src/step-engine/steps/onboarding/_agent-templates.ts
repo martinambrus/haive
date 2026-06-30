@@ -219,6 +219,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       '**Correctness** — Verify the change does what the spec says, handles edge cases, and matches the existing contract.',
       '**Security** — Flag injection risks, unsafe deserialization, authentication flaws, and leaked secrets.',
       '**Convention adherence** — Compare the diff against existing patterns in the repository and the knowledge base.',
+      '**Needless complexity** — Flag new code, abstraction, or dependency that re-implements an existing helper or that a standard-library feature or already-installed dependency already covers; name the existing thing it should have used. Never flag validation, error handling, or security as bloat.',
       '**Signal severity** — Group findings as blocker / major / minor / nit so the author can triage.',
     ],
     whenInvoked: [

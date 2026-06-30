@@ -103,10 +103,11 @@ describe('lensesForLevel', () => {
     expect(lensesForLevel('standard').map((l) => l.id)).toEqual(['operational-reviewer']);
   });
 
-  it('adds operational + performance at enterprise', () => {
+  it('adds operational + performance + simplicity at enterprise', () => {
     expect(lensesForLevel('enterprise').map((l) => l.id)).toEqual([
       'operational-reviewer',
       'performance-reviewer',
+      'simplicity-reviewer',
     ]);
   });
 });

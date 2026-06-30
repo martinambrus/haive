@@ -120,6 +120,8 @@ The post-2.1.110 harness regression causes jump-to-conclusion behaviour: hypothe
 
 - Simplicity first: write the minimum code that solves the problem, nothing speculative. No features beyond what was asked, no abstractions for single-use code, no configurability that was not requested, and no error handling for impossible scenarios. If you write 200 lines and it could be 50, rewrite it.
 
+- Reuse before writing: before adding new code, search the repo and stop at the first that fits — an existing helper, util, or pattern already here (reuse it, do not re-implement), the language standard library, or an already-installed dependency. Add a new dependency only when none of these cover a real need. Mark a deliberate shortcut with a comment naming its ceiling and upgrade path (e.g. a naive O(n^2) scan, fine under ~1k rows, index it if it grows): a marked shortcut is a decision, an unmarked one is a latent bug. Reuse and minimalism never override validation at trust boundaries, error handling, or security — simplify the solution, not the safety.
+
 - Surgical changes: touch only what you must. Do not improve adjacent code, comments, or formatting; do not refactor what is not broken; match the existing style even if you would do it differently. Remove only the imports, variables, and functions your own changes made unused; do not delete pre-existing dead code unless asked, mention it instead. Keep each change the smallest unit still worth reviewing, prefer several small focused commits over one large batch, and never bundle a refactor, a bug fix, and a feature into one change.
 
 - Goal-driven execution: turn each task into a verifiable goal before starting. "Add validation" becomes "write tests for invalid inputs, then make them pass"; "fix the bug" becomes "write a test that reproduces it, then make it pass"; "refactor X" becomes "ensure tests pass before and after". For multi-step tasks, state a brief plan with a verification check for each step.
@@ -147,5 +149,6 @@ export const KNOWN_DEFAULT_RULES_HASHES: ReadonlySet<string> = new Set([
   '34092f7878ef9461fbe0ec4468ca0e90fcb472c65d989fa3ddda2a1489799302', // expanded default (04495d1)
   '0cf013f7aa212445b94d38dde2f5efcb343b5a4d72e847cd47f75db6d1d73c47', // + match-the-invariant (0e3ae82)
   'c8962d1ee239a4550a6310fb94ed5c709f2235a356b74be93cff3d350bd44484', // + ddev-not-on-PATH rule
-  '3a052a7ef7d4d74918fefca987471e71ce340482925f5c974d37aec0a2b58e6f', // current: + ddev change-in-code + auto-restart workflow
+  '3a052a7ef7d4d74918fefca987471e71ce340482925f5c974d37aec0a2b58e6f', // + ddev change-in-code + auto-restart workflow
+  'a2afb02998cfbe4fd9b19eabcbc8958c136402d7fb65e5e1237f6921c7c0c9bd', // current: + reuse-before-writing rung
 ]);
