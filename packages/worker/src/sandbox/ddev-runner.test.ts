@@ -3,6 +3,7 @@ import {
   decideDdevRecovery,
   isHostPortCollision,
   parseProcNetRouteGateway,
+  parseDdevPrimaryUrl,
   renderXdebugIni,
   ddevDbInternalPort,
   ddevRegistryMirrorUrl,
@@ -175,5 +176,35 @@ describe('ddev registry pull-through cache config', () => {
       string[]
     >;
     expect(json['insecure-registries']).toEqual(['mirror.example:5000']);
+  });
+});
+
+// Regression for the gate-2 / VNC "navigates to localhost, ERR_CONNECTION_REFUSED"
+// bug: `ddev describe -j` prepends stray log lines (a PHP warning here) before the
+// describe payload, and the old indexOf('{')..lastIndexOf('}') slice spanned both
+// objects -> JSON.parse threw -> null -> callers fell back to http://localhost.
+describe('parseDdevPrimaryUrl', () => {
+  const payload = (url: string) =>
+    JSON.stringify({ level: 'info', msg: 'Project Information...', raw: { primary_url: url } });
+
+  it('returns primary_url from a clean single-object describe', () => {
+    expect(parseDdevPrimaryUrl(payload('https://x.ddev.site:8443'))).toBe(
+      'https://x.ddev.site:8443',
+    );
+  });
+
+  it('returns primary_url even when a log line precedes the payload (the real bug)', () => {
+    const warning = JSON.stringify({
+      level: 'info',
+      msg: "PHP Warning:  Module 'mysql' already loaded in Unknown on line 0",
+      time: '2026-06-30T00:11:05Z',
+    });
+    const out = `${warning}\n${payload('https://rs-ollama2.ddev.site:51650')}\n`;
+    expect(parseDdevPrimaryUrl(out)).toBe('https://rs-ollama2.ddev.site:51650');
+  });
+
+  it('returns null when no line carries raw.primary_url', () => {
+    expect(parseDdevPrimaryUrl('{"level":"info","msg":"no url here"}\n')).toBeNull();
+    expect(parseDdevPrimaryUrl('')).toBeNull();
   });
 });

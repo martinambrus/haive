@@ -665,22 +665,36 @@ export async function ddevExec(
   }
 }
 
+/** Extract `raw.primary_url` from `ddev ... -j` output. The `-j` flag emits
+ *  newline-delimited JSON, one object per line, and the describe payload (the
+ *  object carrying `.raw.primary_url`) can be PRECEDED by stray log lines — e.g. a
+ *  PHP `{"level":"info","msg":"PHP Warning: Module 'mysql' already loaded..."}` from
+ *  the project's php config. A naive indexOf('{')..lastIndexOf('}') slice then spans
+ *  two objects and JSON.parse throws ("Extra data"), so the URL is silently lost and
+ *  callers fall back to localhost. Scan line-by-line and return the first object that
+ *  actually carries raw.primary_url. (Embedded newlines in the describe table are
+ *  JSON-escaped `\n`, not real line breaks, so split('\n') only splits object
+ *  boundaries.) Null when no line yields a primary_url. */
+export function parseDdevPrimaryUrl(output: string): string | null {
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as { raw?: { primary_url?: string } };
+      if (parsed.raw?.primary_url) return parsed.raw.primary_url;
+    } catch {
+      // Not a complete JSON object on this line (log noise / truncation) — skip it.
+    }
+  }
+  return null;
+}
+
 /** The DDEV project's primary URL, via `ddev describe -j` inside the runner.
  *  Null when the project isn't running or the output can't be parsed. */
 export async function ddevPrimaryUrl(handle: DdevRunnerHandle): Promise<string | null> {
   const res = await ddevExec(handle, 'describe -j', { timeoutMs: 30_000 });
   if (res.exitCode !== 0) return null;
-  const start = res.output.indexOf('{');
-  const end = res.output.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  try {
-    const parsed = JSON.parse(res.output.slice(start, end + 1)) as {
-      raw?: { primary_url?: string };
-    };
-    return parsed.raw?.primary_url ?? null;
-  } catch {
-    return null;
-  }
+  return parseDdevPrimaryUrl(res.output);
 }
 
 /** Parse DDEV's registry file (`~/.ddev/project_list.yaml`) for the project name registered
