@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM node:24-alpine AS base
+FROM node:26-alpine AS base
 # Native build deps + git/unzip for repo ops + docker CLI for sandbox orchestration.
 RUN apk add --no-cache \
       python3 make g++ libc6-compat \
