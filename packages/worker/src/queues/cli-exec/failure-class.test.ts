@@ -62,6 +62,22 @@ describe('classifyProviderFatal', () => {
     expect(classifyProviderFatal(1, null, raw)).toBe('rate_limit');
   });
 
+  it('classifies the real codex usage-limit turn.failed event (original failing input) as rate_limit', () => {
+    // Exact provider error from task 9759446e / step 08c2 — reachable via
+    // providerErrorScan (raw stdout+stderr) because rawOutput is sanitized for Clean.
+    const scan =
+      '{"type":"turn.failed","error":{"message":"You\'ve hit your usage limit. ' +
+      'Upgrade to Pro (https://chatgpt.com/explore/pro), visit ' +
+      'https://chatgpt.com/codex/settings/usage to purchase more credits."}}';
+    expect(classifyProviderFatal(1, 'Reading additional input from stdin...', scan)).toBe(
+      'rate_limit',
+    );
+  });
+
+  it('cannot classify when the scan is empty (the regression an emptied rawOutput causes)', () => {
+    expect(classifyProviderFatal(1, 'Reading additional input from stdin...', '')).toBe(null);
+  });
+
   // --- Negatives: must NOT fail the task fast --------------------------------
 
   it('returns null for a successful run even if the output mentions a status code', () => {

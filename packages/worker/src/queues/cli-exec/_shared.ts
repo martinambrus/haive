@@ -65,6 +65,13 @@ export interface ExecutionOutcome {
    *  execution path doesn't capture a stream (e.g. agent-mining trace
    *  serialized post-hoc). */
   streamLog?: string | null;
+  /** Raw CLI stdout+stderr tail (NO header/prompt) used ONLY to classify
+   *  provider-fatal failures (rate-limit/auth/5xx). rawOutput is sanitized for
+   *  the Clean tab and may be prose or empty, so it can no longer carry the API
+   *  error the classifier needs; this carries it. Excludes the header/prompt
+   *  (which streamLog includes) so a task spec mentioning "rate limit"/"401"
+   *  cannot false-positive. Set on failure-capable branches only. */
+  providerErrorScan?: string;
 }
 
 /**

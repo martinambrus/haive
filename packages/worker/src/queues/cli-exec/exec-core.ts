@@ -96,7 +96,11 @@ export function interpretCliFailure(
   // will not recover within this run. Headline them with a stable internal prefix
   // so looping consumers (isFatalProviderFailure → DAG escalation, merge-fix retry)
   // fail the task fast instead of re-dispatching agents against a dead provider.
-  const fatalClass = classifyProviderFatal(result.exitCode, existing, result.rawOutput);
+  const fatalClass = classifyProviderFatal(
+    result.exitCode,
+    existing,
+    result.providerErrorScan ?? result.rawOutput,
+  );
   if (!fatalClass) return existing;
   const detail = formatAuthDetail(existing);
   if (fatalClass === 'auth') {
@@ -383,6 +387,12 @@ export async function executeCliSpec(
     if (steer) steer.teardown();
   }
   const streamLog = streamBuf.join('');
+  // Raw CLI stdout+stderr tail for provider-fatal classification. rawOutput is
+  // now sanitized for the Clean tab (prose or empty), so it can no longer carry
+  // an API error the classifier needs. Excludes the header/prompt (which
+  // streamLog includes) so a task spec mentioning "rate limit"/"401" cannot
+  // false-positive. See interpretCliFailure / classifyProviderFatal.
+  const providerErrorScan = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.slice(-4000);
   void deps;
 
   if (codexCollector && codexCollector.isJsonl()) {
@@ -418,6 +428,7 @@ export async function executeCliSpec(
         'codex emitted no agent message',
       tokenUsage,
       streamLog,
+      providerErrorScan,
     };
   }
   // codexCollector with zero events: old binary ignored --json — fall through
@@ -500,6 +511,7 @@ export async function executeCliSpec(
       // Tokens were burned even without a result event (e.g. error_max_turns).
       tokenUsage: collector.getTokenUsage(),
       streamLog,
+      providerErrorScan,
     };
   }
 
@@ -540,6 +552,7 @@ export async function executeCliSpec(
         ),
         tokenUsage: null,
         streamLog,
+        providerErrorScan,
       };
     }
   }
@@ -558,6 +571,7 @@ export async function executeCliSpec(
     ),
     tokenUsage: collector.getTokenUsage(),
     streamLog,
+    providerErrorScan,
   };
 }
 
@@ -577,28 +591,31 @@ export function formatCliErrorMessage(
 ): string | null {
   if (spawnError) return spawnError;
   if (exitCode === 0) return null;
-  const stderrTail = stripBenignConfigNoise(stderr);
+  const stderrTail = stripBenignCliNoise(stderr);
   if (stderrTail.length > 0) return stderrTail.slice(-2000);
-  const stdoutTail = stdout.trim();
+  const stdoutTail = stripBenignCliNoise(stdout);
   if (stdoutTail.length > 0) return stdoutTail.slice(-2000);
   return `cli exited with code ${exitCode ?? 'unknown'}`;
 }
 
-// claude-code prints a benign advisory to STDERR when its `.claude.json` seed is
-// absent ("Claude configuration file not found … A backup file exists … restore
-// by running: cp …"). It then continues with a fallback, so this is noise, not a
-// failure cause. On a real failure the genuine error (e.g. "API Error: Unable to
-// connect to API (ConnectionRefused)") lands on STDOUT, but this advisory was the
-// stderr tail and masked it. Strip the advisory lines so the real error — or the
-// stdout fallback below — surfaces. The full text stays in rawOutput/streamLog.
-const CONFIG_NOISE_LINE =
-  /^(Claude configuration file not found at:|A backup file exists at:|You can manually restore it by running:)/;
+// CLIs print benign advisories that are NOT failure causes but were becoming the
+// surfaced error (each was the stderr/stdout tail and masked the real message):
+//  - claude-code, when its `.claude.json` seed is absent ("Claude configuration
+//    file not found … A backup file exists … restore by running: cp …"); it then
+//    continues with a fallback.
+//  - codex, "Reading additional input from stdin..." — printed while it keeps
+//    stdin open for steering; the real error (e.g. "You've hit your usage limit")
+//    lands on the other stream / later in the same one.
+// Strip these lines so the genuine error — or the stdout fallback — surfaces. The
+// full text stays in rawOutput/streamLog. The advisory strings are volatile
+// upstream wording: if reworded we simply stop stripping (show it), never crash.
+const BENIGN_CLI_NOISE_LINE =
+  /^(Claude configuration file not found at:|A backup file exists at:|You can manually restore it by running:|Reading additional input from stdin)/;
 
-function stripBenignConfigNoise(stderr: string): string {
-  if (!stderr.includes('Claude configuration file not found')) return stderr.trim();
-  return stderr
+function stripBenignCliNoise(text: string): string {
+  return text
     .split('\n')
-    .filter((line) => !CONFIG_NOISE_LINE.test(line.trim()))
+    .filter((line) => !BENIGN_CLI_NOISE_LINE.test(line.trim()))
     .join('\n')
     .trim();
 }
