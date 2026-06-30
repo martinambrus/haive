@@ -86,7 +86,7 @@ Queues, cache, database
 Schemas and logging
 
 - [Zod](https://zod.dev/) 4
-- [pino](https://getpino.io/) + [pino-pretty](https://github.com/pinojs/pino-pretty)
+- [pino](https://getpino.io/)
 
 Web UI
 
