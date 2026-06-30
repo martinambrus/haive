@@ -59,7 +59,6 @@ export const browserSetupStep: StepDefinition<BrowserRuntimeInfo, BrowserSetupAp
           options: buildBrowserModeOptions({
             ddevMode: detected.ddevMode,
             appRunnerMode: detected.appRunnerMode,
-            directAvailable: detected.directAvailable,
           }),
           default: hasRuntime ? 'mcp' : 'skip',
           required: true,

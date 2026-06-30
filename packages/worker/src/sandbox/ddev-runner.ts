@@ -13,6 +13,7 @@ import {
   type TaskAccessEndpoint,
 } from '@haive/shared';
 import { browserCdpUrlForRunner } from './runner-browser-cdp.js';
+import { resolveTaskDirectAccess } from './_browser-access.js';
 
 // Per-task DDEV environment via nested Docker (DinD). DDEV can't run against the
 // shared host daemon here (repos live in the haive_repos NAMED VOLUME, which the
@@ -165,14 +166,16 @@ export async function startDdevRunner(params: {
   // conflict. So give the rm room AND retry the run once after a forced removal,
   // instead of failing the boot — this conflict was the recurring VNC "Connection
   // closed (1006)" surfacing through the runtime-ensure job.
-  // Direct browser access (default on): publish the DDEV router ports to MATCHING
-  // loopback host ports (host port == container port == router port) so the app's
-  // own canonical URLs/redirects carry the right port instead of bouncing to a
-  // portless, unpublished :443. Deterministic per task (stable URL across
-  // restarts); on a host-port collision bump to the next candidate. The chosen
-  // ports are stamped as labels (read back by ddevAccessUrls) and the runner's
-  // router is pointed at them below. Flag OFF => no -p, the pre-feature behavior.
-  const directAccess = await configService.getBoolean(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, true);
+  // Direct browser access (per-task, global kill-switch): publish the DDEV router ports
+  // to MATCHING loopback host ports (host port == container port == router port) so the
+  // app's own canonical URLs/redirects carry the right port instead of bouncing to a
+  // portless, unpublished :443. Deterministic per task (stable URL across restarts); on
+  // a host-port collision bump to the next candidate. The chosen ports are stamped as
+  // labels (read back by ddevAccessUrls) and the runner's router is pointed at them
+  // below. resolveTaskDirectAccess => the 01b-browser-access opt-in (chosen BEFORE this
+  // boot) AND the global flag; OFF/default => no -p and DDEV keeps its portless 80/443
+  // router (VNC-only) — the robust default + the rollback.
+  const directAccess = await resolveTaskDirectAccess(params.taskId);
   // Direct database access (default on): like the app ports, this gates ONLY the
   // create-time RESERVATION of a loopback host port (slot 2), never the per-task opt-in.
   // 01c boots the runner before the opt-in is chosen at 06, and DDEV recovery reuses the

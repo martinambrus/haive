@@ -144,6 +144,15 @@ export const tasks = pgTable(
      *  default off so a DB is never exposed without an explicit opt-in. Re-read at
      *  every runner bring-up. Gated behind the global CONFIG_KEYS.DB_DIRECT_ACCESS switch. */
     exposeDbPort: boolean('expose_db_port').notNull().default(false),
+    /** Per-task direct browser access: when true the per-task runtime publishes its
+     *  app to a loopback host port (DDEV also reconfigures its router to those custom
+     *  ports), so the user opens the app in their OWN browser via the URLs the task
+     *  surfaces. Chosen on 01b-browser-access (workflow) / 98-choose-view (run_app),
+     *  BEFORE the runner boots; default false => DDEV stays on portless 80/443 and
+     *  nothing is published (VNC-only), the robust default for apps that hard-code
+     *  their own host. Re-read at every runner start (survives warm-recover). Gated
+     *  behind the global CONFIG_KEYS.BROWSER_DIRECT_ACCESS kill-switch. */
+    directAccess: boolean('direct_access').notNull().default(false),
     /** Developer's estimated time to complete the task, in decimal hours
      *  (e.g. 0.25, 0.5, 1, 1.5). Optional, set on the new-task form; compared
      *  against the actual effort (agent work + user-active time) in the task

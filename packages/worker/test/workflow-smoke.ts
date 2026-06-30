@@ -236,6 +236,11 @@ async function main(): Promise<void> {
       '01-debug-mode': {
         enableDebug: false,
       },
+      // Browser-access gate (runs when a runtime exists; global flag defaults on). 'vnc'
+      // keeps the smoke on DDEV's portless default ports — no host publishing.
+      '01d-browser-access': {
+        accessMode: 'vnc',
+      },
       '02-pre-rag-sync': {
         runSync: false,
       },

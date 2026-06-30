@@ -42,6 +42,7 @@ const SPINE: readonly string[] = [
   '01-debug-mode',
   '01a-app-boot',
   '01b-install-plugins',
+  '01d-browser-access',
   '01c-ddev-env',
   '02-pre-rag-sync',
   '06a-db-migrate',

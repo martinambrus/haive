@@ -5,6 +5,7 @@ import { triageStep } from './00-triage.js';
 import { worktreeSetupStep } from './01-worktree-setup.js';
 import { debugModeStep } from './01-debug-mode.js';
 import { installPluginsStep } from './01b-install-plugins.js';
+import { browserAccessStep } from './01d-browser-access.js';
 import { appBootStep } from './01a-app-boot.js';
 import { ddevEnvStep } from './01c-ddev-env.js';
 import { preRagSyncStep } from './02-pre-rag-sync.js';
@@ -48,6 +49,7 @@ export {
   worktreeSetupStep,
   debugModeStep,
   installPluginsStep,
+  browserAccessStep,
   appBootStep,
   ddevEnvStep,
   preRagSyncStep,
@@ -93,6 +95,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(worktreeSetupStep);
   registry.register(debugModeStep);
   registry.register(installPluginsStep);
+  registry.register(browserAccessStep);
   registry.register(appBootStep);
   registry.register(ddevEnvStep);
   registry.register(preRagSyncStep);

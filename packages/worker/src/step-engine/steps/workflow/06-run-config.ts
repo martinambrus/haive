@@ -40,9 +40,6 @@ interface RunConfigDetect {
    *  still shows (08c-code-review reads the level for its extra review lenses) but is
    *  relabelled to "Code review depth" — only the lenses apply, not the Phase 7 agents. */
   runsAdversarialQa: boolean;
-  /** Whether the global direct-browser-access feature is on, so the browser-mode
-   *  picker can offer `direct` (manual testing in the user's own browser). */
-  directAvailable: boolean;
   /** Whether the global direct-database-access feature is on AND this task has a DDEV
    *  runtime, so the form can offer the per-task db-port opt-in (DDEV-only feature). */
   dbExposeAvailable: boolean;
@@ -130,7 +127,6 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     });
     // A null execution_path means triage didn't filter the run (full_workflow): every step runs.
     const execPath = (taskRow?.executionPath ?? 'full_workflow') as ExecutionPath;
-    const directAvailable = await configService.getBoolean(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, true);
     const dbAvailable = await configService.getBoolean(CONFIG_KEYS.DB_DIRECT_ACCESS, true);
 
     return {
@@ -141,7 +137,6 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       taskMaxFixRounds: taskRow?.maxFixRounds ?? 5,
       runsBrowserVerify: keepForPath('08a-browser-verify', execPath),
       runsAdversarialQa: keepForPath('08d-adversarial-qa', execPath),
-      directAvailable,
       dbExposeAvailable: dbAvailable && ddevMode,
       taskExposeDbPort: taskRow?.exposeDbPort ?? false,
     };
@@ -224,7 +219,6 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
           buildBrowserModeOptions({
             ddevMode: detected.ddevMode,
             appRunnerMode: detected.appRunnerMode,
-            directAvailable: detected.directAvailable,
           }),
           rec.browserMode,
           detected.ddevMode || detected.appRunnerMode ? 'mcp' : 'skip',

@@ -3,17 +3,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
-import {
-  APP_RUNNER_LABEL,
-  appRunnerName,
-  logger,
-  CONFIG_KEYS,
-  configService,
-  type TaskAccessEndpoint,
-} from '@haive/shared';
+import { APP_RUNNER_LABEL, appRunnerName, logger, type TaskAccessEndpoint } from '@haive/shared';
 import { schema } from '@haive/database';
 import { getDb } from '../db.js';
 import { browserCdpUrlForRunner } from './runner-browser-cdp.js';
+import { resolveTaskDirectAccess } from './_browser-access.js';
 
 // Per-task app-runner: a plain (non-DinD) container built from the repo's
 // env-replicate image. It runs a single-process non-DDEV app AND hosts the
@@ -125,14 +119,15 @@ export async function startAppRunner(params: {
   const name = appRunnerName(params.taskId);
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
 
-  // Direct browser access (default on, global kill-switch): publish the app port
-  // to an ephemeral loopback host port so the user can hit http://localhost:<H>
-  // directly. Bound to 127.0.0.1 only (no LAN exposure); Docker assigns the host
-  // port, read back later by appRunnerAccessUrls. Gated so the flag-OFF path is
-  // byte-for-byte the old no-publish behavior (the rollback).
+  // Direct browser access (per-task, global kill-switch): publish the app port to an
+  // ephemeral loopback host port so the user can hit http://localhost:<H> directly.
+  // Bound to 127.0.0.1 only (no LAN exposure); Docker assigns the host port, read back
+  // later by appRunnerAccessUrls. resolveTaskDirectAccess => the 01b-browser-access
+  // (workflow) / 98-choose-view (run_app) opt-in AND the global flag; default/off path
+  // is byte-for-byte the old no-publish behavior (the rollback).
   const publishArgs: string[] = [];
   if (params.appPort) {
-    const directAccess = await configService.getBoolean(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, true);
+    const directAccess = await resolveTaskDirectAccess(params.taskId);
     if (directAccess) publishArgs.push('-p', `127.0.0.1::${params.appPort}`);
   }
 

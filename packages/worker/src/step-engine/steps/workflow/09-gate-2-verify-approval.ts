@@ -15,6 +15,7 @@ import {
   startBrowserDesktop as startAppBrowserDesktop,
 } from '../../../sandbox/app-runner.js';
 import { ensureDdevWithProgress } from './_app-runtime.js';
+import { resolveTaskDirectAccess } from '../../../sandbox/_browser-access.js';
 
 interface VerifyGateDetect {
   /** Per-slot verify results from 08-phase-5-verify. A check with ran:false was
@@ -441,8 +442,10 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // runner and the non-DDEV app-runner. Best-effort: any failure leaves the
     // gate fully functional, just without the browser panel.
     let liveBrowser: VerifyGateDetect['liveBrowser'] = null;
-    // `direct` (test in own browser) runs this gate exactly like interactive; the web
-    // shows the URL info box instead of the VNC panel when this is set.
+    // directAccess (test in your OWN browser vs the in-app VNC) is the per-task 01d
+    // choice; read it from the column (resolveTaskDirectAccess) so the gate's surface
+    // matches how the runner booted. The web shows the URL info box instead of the VNC
+    // panel when this is set.
     let directAccess = false;
     try {
       const envTemplate = await getTaskEnvTemplate(ctx.db, ctx.taskId);
@@ -455,7 +458,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       const browserSetup = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-setup');
       const setupMode = (browserSetup?.output as { mode?: string } | null)?.mode;
       const skipBrowser = setupMode === 'skip';
-      directAccess = setupMode === 'direct';
+      directAccess = await resolveTaskDirectAccess(ctx.taskId);
       if (browserTesting && !skipBrowser) {
         // Select the runtime the same way 08a does — by `.ddev` presence, not
         // the template's containerTool — so an add-DDEV task (template non-DDEV

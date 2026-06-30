@@ -114,11 +114,15 @@ export const chooseViewStep: StepDefinition<ChooseViewDetect, ChooseViewApply> =
     // (maybeExposeDdevDbPort) and the surface (resolveDdevDbAccess) read it. Only
     // meaningful when the field was shown (DDEV + global on); defaults false otherwise.
     const exposeDbPort = v.exposeDbPort === true;
+    // Persist the access surface onto the task too: 99-run-app-ready's runtime bring-up
+    // (startDdevRunner / app-runner via resolveTaskDirectAccess) reads tasks.direct_access
+    // to decide host-port publishing, so run_app honors the chosen surface like workflow.
+    const directAccess = viewMode === 'direct';
     await ctx.db
       .update(schema.tasks)
-      .set({ exposeDbPort, updatedAt: new Date() })
+      .set({ exposeDbPort, directAccess, updatedAt: new Date() })
       .where(eq(schema.tasks.id, ctx.taskId));
-    ctx.logger.info({ viewMode, exposeDbPort }, 'run-app viewing mode chosen');
+    ctx.logger.info({ viewMode, exposeDbPort, directAccess }, 'run-app viewing mode chosen');
     return { viewMode };
   },
 };

@@ -17,6 +17,7 @@ import {
   appRunnerExec,
   startBrowserDesktop as startAppBrowserDesktop,
 } from '../../../sandbox/app-runner.js';
+import { resolveTaskDirectAccess } from '../../../sandbox/_browser-access.js';
 
 const exec = promisify(execFile);
 
@@ -431,11 +432,13 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     const setupOut = (setup?.output as { mode?: string; appUrl?: string } | null) ?? null;
     const rawMode = ((setupOut?.mode as BrowserMode | undefined) ??
       (rt.ddevMode || rt.appRunnerMode ? 'mcp' : 'skip')) as BrowserMode;
-    // `direct` runs the interactive gate (browser up for agents, manual approval) but
-    // the user tests in their OWN browser — so fold it into interactive for all
-    // behavior and surface directAccess for the web (URL info box instead of VNC).
-    const directAccess = rawMode === 'direct';
-    const mode: BrowserMode = directAccess ? 'interactive' : rawMode;
+    // directAccess (test in your OWN browser vs the in-app VNC) is the per-task choice
+    // made at 01d-browser-access — read it from the column (resolveTaskDirectAccess),
+    // the single source of truth, so the web surface matches how the runner actually
+    // booted. The legacy `direct` browserMode (removed from the picker) folds to
+    // interactive; the surface is now decided by the column, not the mode.
+    const directAccess = await resolveTaskDirectAccess(ctx.taskId);
+    const mode: BrowserMode = rawMode === 'direct' ? 'interactive' : rawMode;
     const baseDetect = {
       browserTesting: rt.browserTesting,
       ddevMode: rt.ddevMode,
