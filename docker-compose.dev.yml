@@ -17,7 +17,7 @@ services:
       - "11434:11434"
 
   db-migrate:
-    image: node:24-alpine
+    image: node:26-alpine
     container_name: haive-db-migrate
     depends_on:
       postgres:
@@ -28,7 +28,8 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-haive}:${POSTGRES_PASSWORD:-haive_dev_password}@postgres:5432/${POSTGRES_DB:-haive}
     command: >
-      sh -c "corepack enable &&
+      sh -c "npm install -g corepack@latest &&
+             corepack enable &&
              pnpm install --frozen-lockfile=false &&
              pnpm --filter @haive/database push --force"
     networks:

@@ -1,14 +1,16 @@
 # syntax=docker/dockerfile:1.7
-FROM node:24-alpine AS base
+FROM node:26-alpine AS base
 # docker-cli: api shells out to `docker rm -f` to interrupt sandbox CLI
 # containers when the user clicks Stop & Retry on a running step. The
 # socket mount is supplied by docker-compose; the binary must live in the
 # image. Install once in the base layer so dev (`target: deps`) and prod
 # (`production`) both have it.
 RUN apk add --no-cache python3 make g++ libc6-compat docker-cli
-# corepack downloads pnpm from the npm registry with no retry; a transient
-# ECONNRESET fails the whole build (seen in CI), so retry up to 3 times.
-RUN corepack enable && \
+# Node 26 unbundled corepack, so install it before enabling. corepack then
+# downloads pnpm from the npm registry with no retry; a transient ECONNRESET
+# fails the whole build (seen in CI), so retry up to 3 times.
+RUN npm install -g corepack@latest && \
+    corepack enable && \
     for i in 1 2 3; do \
       corepack prepare pnpm@9.15.4 --activate && break || { [ "$i" = 3 ] && exit 1; sleep 5; }; \
     done

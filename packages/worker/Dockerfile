@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM node:24-alpine AS base
+FROM node:26-alpine AS base
 # Native build deps + git/unzip for repo ops + docker CLI for sandbox orchestration.
 RUN apk add --no-cache \
       python3 make g++ libc6-compat \
@@ -8,9 +8,11 @@ RUN apk add --no-cache \
 # Host-mounted repos have a different UID than the worker process; bypass git's
 # safe.directory ownership check so repo ops don't fail with "dubious ownership".
 RUN git config --system --add safe.directory '*'
-# corepack downloads pnpm from the npm registry with no retry; a transient
-# ECONNRESET fails the whole build (seen in CI), so retry up to 3 times.
-RUN corepack enable && \
+# Node 26 unbundled corepack, so install it before enabling. corepack then
+# downloads pnpm from the npm registry with no retry; a transient ECONNRESET
+# fails the whole build (seen in CI), so retry up to 3 times.
+RUN npm install -g corepack@latest && \
+    corepack enable && \
     for i in 1 2 3; do \
       corepack prepare pnpm@9.15.4 --activate && break || { [ "$i" = 3 ] && exit 1; sleep 5; }; \
     done

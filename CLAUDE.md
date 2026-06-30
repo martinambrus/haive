@@ -7,7 +7,7 @@ The legacy markdown step content has been ported into TypeScript step modules un
 ## Stack
 
 - pnpm workspace monorepo, turborepo
-- Node 24, TypeScript 5.7, ES2024 target, NodeNext modules
+- Node 26, TypeScript 5.7, ES2024 target, NodeNext modules
 - Hono 4 REST API on port 3001
 - Next.js 16 + React 19 + Tailwind 4 web UI on port 3000
 - Drizzle ORM on PostgreSQL 18, postgres.js driver

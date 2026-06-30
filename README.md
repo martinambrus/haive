@@ -58,7 +58,7 @@ See [CLAUDE.md](./CLAUDE.md) for monorepo layout, package boundaries, convention
 
 Runtime and tooling
 
-- [Node.js](https://nodejs.org/) 24
+- [Node.js](https://nodejs.org/) 26
 - [TypeScript](https://www.typescriptlang.org/) 5.7
 - [pnpm](https://pnpm.io/) workspaces
 - [Turborepo](https://turborepo.com/)
