@@ -18,6 +18,10 @@ interface ImplementDetect {
   /** Fix-loop diagnosis to address on this round, or null on the original pass
    *  (round 0). When set, the step runs in fix mode (diagnosis-first prompt). */
   fixContext: string | null;
+  /** True when fixContext came from a human reject gate (Gate 2 hands-on verification or the
+   *  adversarial-QA gate) — the prompt then frames it as an authoritative directive rather than
+   *  filterable tool output. False for machine-sourced diagnoses. See HUMAN_REJECT_SOURCES. */
+  fixIsHuman: boolean;
   /** Background ledger of what earlier fix rounds already did / ruled out (empty on the
    *  original pass). Injected into the fix prompt so a fresh round-N agent does not redo
    *  prior discovery work. See loadPriorFixContext. */
@@ -237,13 +241,16 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       spec = [title ? `# ${title}` : '', description].filter((s) => s.length > 0).join('\n\n');
       if (specSummary.length === 0) specSummary = title;
     }
+    // Fix-loop: on a round > 0 re-entry, the diagnosis a downstream step recorded, plus whether
+    // it came from a human reject gate (authoritative) vs a machine check (filterable output).
+    const fix = await loadFixLoopDiagnosis(ctx);
     return {
       specSummary,
       spec,
       sandboxWorkspacePath: worktreeOutput.sandboxWorktreePath,
       gateFeedback: gateOutput.feedback ?? '',
-      // Fix-loop: on a round > 0 re-entry, the diagnosis a downstream step recorded.
-      fixContext: await loadFixLoopDiagnosis(ctx),
+      fixContext: fix?.diagnosis ?? null,
+      fixIsHuman: fix?.humanSourced ?? false,
       // Background ledger of what earlier fix rounds already did / ruled out (empty on round 0).
       priorFixContext: await loadPriorFixContext(ctx),
       round: ctx.round,
@@ -341,13 +348,35 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       // Fix pass (round > 0): lead with the defect + a "fix only this" framing, THEN
       // append the full spec as supporting context — the implementation already exists.
       if (detected.fixContext) {
+        // A human reject gate (Gate 2 hands-on verification, or the adversarial-QA gate where the
+        // developer hand-picked findings to fix) is an AUTHORITATIVE directive: the developer saw
+        // these problems in the running app and wants them ALL fixed. A machine check
+        // (build/test/runtime/review) emits raw tool output that may carry banner noise and the
+        // odd false positive — there the agent should extract the real failure. Frame the two
+        // differently so a problem a human reported is never quietly judged "not relevant enough".
+        const fixFraming = detected.fixIsHuman
+          ? [
+              'You are the implementation phase of an engineering workflow, running a FIX PASS.',
+              'A developer tested the running application and REJECTED it; their findings are below.',
+              'Treat them as an AUTHORITATIVE DIRECTIVE, not a suggestion or a passing observation:',
+              'address EVERY problem the developer reported. Do NOT dismiss any item as cosmetic,',
+              'expected, framework-native, pre-existing, harmless, or out of scope — the developer',
+              'saw it and is directing you to fix it. If after investigating you are convinced one',
+              'item genuinely should not be changed, you must STILL fix the rest and state plainly',
+              'in your notes which item you left and exactly why — never silently skip a reported',
+              'problem. Keep the diff focused on the reported problems; the rest of the',
+              'implementation already exists and passed.',
+            ]
+          : [
+              'You are the implementation phase of an engineering workflow, running a FIX PASS.',
+              'A later step found a BLOCKING defect in the current implementation. Fix ONLY the',
+              'issue(s) below by editing files in the workspace. Keep the diff minimal and do not',
+              're-do unrelated work — the rest of the implementation already exists and passed.',
+              'The diagnosis below is raw tool/agent output and may include unrelated banner or',
+              'promotional text — identify the actual error or failure it reports and fix that.',
+            ];
         return [
-          'You are the implementation phase of an engineering workflow, running a FIX PASS.',
-          'A later step found a BLOCKING defect in the current implementation. Fix ONLY the',
-          'issue(s) below by editing files in the workspace. Keep the diff minimal and do not',
-          're-do unrelated work — the rest of the implementation already exists and passed.',
-          'The diagnosis below is raw tool/agent output and may include unrelated banner or',
-          'promotional text — identify the actual error or failure it reports and fix that.',
+          ...fixFraming,
           '',
           '=== Defect to fix (found downstream) ===',
           detected.fixContext,

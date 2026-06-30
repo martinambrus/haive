@@ -271,9 +271,21 @@ export async function detectFixLoopOscillation(
   };
 }
 
-/** The diagnosis the implementation step should fix on this round, or null on the
+/** Source steps whose fix-loop diagnosis is a HUMAN reviewer's directive — their hands-on
+ *  findings at Gate 2, or the findings they explicitly selected (plus instructions) at the
+ *  adversarial-QA gate. These are authoritative and complete: the developer saw the problem in
+ *  the running app and is directing the fix. NOT raw machine tool output to be filtered for "the
+ *  real error". The implement fix prompt frames the two differently (see 07-phase-2-implement).
+ *  08a-browser-verify is intentionally absent: it runs only in automated (mcp) mode, so its
+ *  loop-backs are machine console/network dumps, not a person's observations. */
+const HUMAN_REJECT_SOURCES = new Set(['09-gate-2-verify-approval', '08d2-adversarial-qa-review']);
+
+/** The diagnosis the implementation step should fix on this round, with whether it came from a
+ *  human reject gate (authoritative, every item required) vs a machine check. Null on the
  *  original pass (round 0) or when no recorded request matches the current round. */
-export async function loadFixLoopDiagnosis(ctx: StepContext): Promise<string | null> {
+export async function loadFixLoopDiagnosis(
+  ctx: StepContext,
+): Promise<{ diagnosis: string; humanSourced: boolean } | null> {
   if (ctx.round <= 0) return null;
   const rows = await ctx.db
     .select()
@@ -286,10 +298,11 @@ export async function loadFixLoopDiagnosis(ctx: StepContext): Promise<string | n
     )
     .orderBy(desc(schema.taskEvents.createdAt));
   for (const r of rows) {
-    const p = r.payload as { diagnosis?: string; round?: number } | null;
+    const p = r.payload as { diagnosis?: string; round?: number; sourceStepId?: string } | null;
     if (p?.round === ctx.round) {
       const d = cleanDiagnosis((p.diagnosis ?? '').trim());
-      return d.length > 0 ? d : null;
+      if (d.length === 0) return null;
+      return { diagnosis: d, humanSourced: HUMAN_REJECT_SOURCES.has(p.sourceStepId ?? '') };
     }
   }
   return null;

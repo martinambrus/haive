@@ -81,6 +81,7 @@ describe('phase2ImplementStep fix-pass browser guidance', () => {
     sandboxWorkspacePath: '/ws',
     gateFeedback: '',
     fixContext: null,
+    fixIsHuman: false,
     priorFixContext: '',
     round: 0,
     browserTesting: false,
@@ -98,6 +99,25 @@ describe('phase2ImplementStep fix-pass browser guidance', () => {
   it('omits the browser block on the original pass (no fixContext)', () => {
     const p = prompt({ fixContext: null, round: 0, browserTesting: true });
     expect(p).not.toContain('=== Verify in the browser');
+  });
+
+  it('frames a human-sourced reject as an authoritative directive, not filterable tool output', () => {
+    const p = prompt({
+      fixContext: 'deprecation notices + infinite reload',
+      round: 1,
+      fixIsHuman: true,
+    });
+    expect(p).toContain('AUTHORITATIVE DIRECTIVE');
+    expect(p).toContain('framework-native'); // the exact dismissal we must forbid
+    expect(p).toContain('never silently skip a reported');
+    // The machine "extract the real error and ignore the rest" caveat must NOT appear.
+    expect(p).not.toContain('raw tool/agent output');
+  });
+
+  it('keeps the filter-the-noise framing for a machine-sourced diagnosis', () => {
+    const p = prompt({ fixContext: 'curl: (7) Failed to connect', round: 1, fixIsHuman: false });
+    expect(p).toContain('raw tool/agent output');
+    expect(p).not.toContain('AUTHORITATIVE DIRECTIVE');
   });
 });
 
@@ -124,6 +144,7 @@ describe('phase2ImplementStep prior-fix-rounds ledger', () => {
     sandboxWorkspacePath: '/ws',
     gateFeedback: '',
     fixContext: null,
+    fixIsHuman: false,
     priorFixContext: '',
     round: 0,
     browserTesting: false,

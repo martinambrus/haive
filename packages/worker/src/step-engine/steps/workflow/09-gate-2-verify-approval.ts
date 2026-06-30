@@ -259,8 +259,11 @@ function formatRejectDiagnosis(
   const f = feedback.trim();
   const parts = [
     'Developer verification at Gate 2 rejected the implementation after hands-on testing.',
+    "The findings below are the developer's own observations from using the running app — they",
+    'are authoritative and in scope. Address every one; do not dismiss any as cosmetic, expected,',
+    'framework-native, pre-existing, or out of scope.',
     '',
-    'Findings to fix:',
+    'Findings to fix (all required):',
     f.length > 0
       ? f
       : '(no specific findings provided — re-check the implementation against the spec and the reported errors)',
