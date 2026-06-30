@@ -40,7 +40,7 @@
     "postgres": "^3.4.5",
     "prettier": "^3.4.2",
     "tsx": "^4.19.2",
-    "turbo": "^2.3.3",
+    "turbo": "^2.10.1",
     "typescript": "^5.7.3",
     "vitest": "^4.0.18"
   },
@@ -49,7 +49,14 @@
   },
   "pnpm": {
     "overrides": {
-      "drizzle-orm": "0.45.1"
+      "drizzle-orm": "0.45.2",
+      "protobufjs": "^7.6.3",
+      "@grpc/grpc-js": "^1.14.4",
+      "dompurify": "^3.4.11",
+      "uuid@11": "^11.1.1",
+      "ws": "^8.21.0",
+      "postcss": "^8.5.16",
+      "esbuild": "^0.28.1"
     }
   }
 }

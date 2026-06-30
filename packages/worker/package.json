@@ -38,7 +38,7 @@
     "@haive/shared": "workspace:*",
     "bullmq": "^5.34.8",
     "dockerode": "^4.0.4",
-    "drizzle-orm": "0.45.1",
+    "drizzle-orm": "0.45.2",
     "ioredis": "^5.4.2",
     "jsonrepair": "^3.14.0",
     "prom-client": "^15.1.3",
