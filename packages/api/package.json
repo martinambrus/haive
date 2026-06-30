@@ -24,7 +24,7 @@
     "bullmq": "^5.34.8",
     "dockerode": "^4.0.4",
     "drizzle-orm": "0.45.1",
-    "hono": "^4.7.4",
+    "hono": "^4.12.25",
     "ioredis": "^5.4.2",
     "jsonwebtoken": "^9.0.2",
     "prom-client": "^15.1.3",
