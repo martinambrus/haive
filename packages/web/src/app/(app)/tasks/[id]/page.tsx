@@ -243,6 +243,17 @@ function stepStatusVariant(status: StepStatus): BadgeVariant {
   }
 }
 
+/** Compact "in-place loop pass" badge text for a step that loops without a rejection
+ *  round (spec-quality review/correct, learning). Multi-CLI alternating steps count one
+ *  user-facing round per N passes (N = role count); single-pass loops show raw iterations.
+ *  Callers guard on iterationCount > 0. */
+function iterationBadgeLabel(step: Pick<TaskStep, 'iterationCount' | 'cliRoles'>): string {
+  const loopPassesPerRound = step.cliRoles?.length ?? 1;
+  return loopPassesPerRound > 1
+    ? `round ×${Math.ceil(step.iterationCount / loopPassesPerRound)}`
+    : `iter ×${step.iterationCount}`;
+}
+
 type Tab = 'steps' | 'editor' | 'terminal' | 'activity' | 'attachments';
 
 interface TaskDetailResponse {
@@ -384,12 +395,16 @@ export default function TaskDetailPage() {
     if (tab === 'activity') void reloadEvents();
   }, [tab, reloadEvents]);
 
-  // Header label for each round > 0 group (keyed by the group's first step row id).
-  // A round group is named by the step it RE-ENTERS at: the spec gates fork a new round
-  // at 04 / 03b ("Spec revision"), the auto-fix loop re-enters at 07 ("Fix loop").
-  // Numbered per-kind, not by the raw round int (the two kinds interleave rounds).
-  const roundGroupLabels = useMemo(() => {
-    const labels = new Map<string, string>();
+  // Labels for each round > 0 group, derived in one pass so the divider and the fixed-
+  // header badge stay consistent. A round group is named by the step it RE-ENTERS at: the
+  // spec gates fork a new round at 04 / 03b ("Spec revision"), the auto-fix loop re-enters
+  // at 07 ("Fix loop"). Numbered per-kind, not by the raw round int (the two kinds
+  // interleave rounds). byStepId → divider text at the group's first row ("Spec revision
+  // #1"); byRound → compact suffix for ANY row in that round ("spec rev 1") so the header
+  // badge can label a mid-group step too.
+  const roundLabels = useMemo(() => {
+    const byStepId = new Map<string, string>();
+    const byRound = new Map<number, string>();
     let specN = 0;
     let fixN = 0;
     for (let i = 0; i < steps.length; i++) {
@@ -397,10 +412,18 @@ export default function TaskDetailPage() {
       if (step.round > 0 && (i === 0 || steps[i - 1]!.round !== step.round)) {
         const isSpecRevision =
           step.stepId === '04-phase-0b-pre-planning' || step.stepId === '03b-business-requirements';
-        labels.set(step.id, isSpecRevision ? `Spec revision #${++specN}` : `Fix loop #${++fixN}`);
+        if (isSpecRevision) {
+          const n = ++specN;
+          byStepId.set(step.id, `Spec revision #${n}`);
+          byRound.set(step.round, `spec rev ${n}`);
+        } else {
+          const n = ++fixN;
+          byStepId.set(step.id, `Fix loop #${n}`);
+          byRound.set(step.round, `fix loop ${n}`);
+        }
       }
     }
-    return labels;
+    return { byStepId, byRound };
   }, [steps]);
 
   // Auto-scroll to the active step when it changes. For a step that shows a
@@ -914,6 +937,22 @@ export default function TaskDetailPage() {
       s.status === 'failed',
   );
 
+  // Fixed-header badge suffix: which rejection round / in-place loop pass the parked step
+  // is on. Round context (spec rev / fix loop) wins; otherwise an in-place loop counter.
+  // Null on the original pass (round 0, no iterations) so no empty "()" is ever shown.
+  const currentStepIterSuffix = !currentStep
+    ? null
+    : currentStep.round > 0
+      ? (roundLabels.byRound.get(currentStep.round) ?? null)
+      : currentStep.iterationCount > 0
+        ? iterationBadgeLabel(currentStep)
+        : null;
+  const currentStepBadgeText = !currentStep
+    ? ''
+    : currentStepIterSuffix
+      ? `${currentStep.title} (${currentStepIterSuffix})`
+      : currentStep.title;
+
   // The subscription-usage chip follows the CLI of the step the run is parked on (or the
   // task default): a Codex step shows Codex's windows, a Claude step shows Claude's.
   const usageProviderId = currentStep?.preferredCliProviderId ?? task.cliProviderId ?? null;
@@ -942,9 +981,9 @@ export default function TaskDetailPage() {
             </Badge>
           )}
           {currentStep && (
-            <Badge variant="warning" className="min-w-0 shrink gap-1" title={currentStep.title}>
+            <Badge variant="warning" className="min-w-0 shrink gap-1" title={currentStepBadgeText}>
               <CircleDot className="h-3 w-3 shrink-0" />
-              <span className="truncate">{currentStep.title}</span>
+              <span className="truncate">{currentStepBadgeText}</span>
             </Badge>
           )}
           {/* Usage chip centers in the gap between the left badges and the right
@@ -1095,8 +1134,8 @@ export default function TaskDetailPage() {
           {steps.map((step) => {
             // Re-entry rounds: the same stepId recurs once per round (round 0 = the
             // original pass). Mark the start of each round > 0 group with a kind-aware
-            // header (spec revision vs fix loop) computed in roundGroupLabels.
-            const loopHeader = roundGroupLabels.get(step.id) ?? null;
+            // header (spec revision vs fix loop) computed in roundLabels.byStepId.
+            const loopHeader = roundLabels.byStepId.get(step.id) ?? null;
             return (
               <div key={step.id} data-step-id={step.id}>
                 {loopHeader && (
@@ -2046,10 +2085,7 @@ function StepCardImpl({
   // Multi-CLI alternating steps (cliRoles) count one user-facing round per N
   // passes (N = role count: review + correct = 2). Show rounds, not raw passes.
   const loopPassesPerRound = step.cliRoles?.length ?? 1;
-  const iterBadgeLabel =
-    loopPassesPerRound > 1
-      ? `round ×${Math.ceil(step.iterationCount / loopPassesPerRound)}`
-      : `iter ×${step.iterationCount}`;
+  const iterBadgeLabel = iterationBadgeLabel(step);
   const cliSelectClass =
     'h-8 max-w-xs rounded-md border border-neutral-800 bg-neutral-950 px-2 text-xs text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-50';
   const cliOptions = (
