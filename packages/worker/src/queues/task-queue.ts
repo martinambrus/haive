@@ -263,6 +263,14 @@ async function markTaskRunningWithStep(
       currentStepId: stepId,
       currentStepIndex: stepIndex,
       currentRound: round,
+      // Clear any stale terminal fields. A worker restart mid-run fails the
+      // orphaned step (markTaskFailed), which stamps completedAt + errorMessage
+      // and status=failed; the auto-resume then re-enters here to flip back to
+      // running. Left unset, the stale completedAt freezes the UI wall clock at
+      // failure-minus-start (and kills the live tick, since ticking keys on
+      // !completedAt), and the stale errorMessage leaks onto the running task.
+      completedAt: null,
+      errorMessage: null,
       updatedAt: new Date(),
     })
     .where(eq(schema.tasks.id, taskId));
