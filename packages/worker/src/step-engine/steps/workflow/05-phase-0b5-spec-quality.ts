@@ -4,6 +4,7 @@ import { STEP_CLI_ROLES, type FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 
 interface SpecQualityDetect {
@@ -331,11 +332,7 @@ const REVIEW_RULES = [
   '',
   'Codebase cross-check — for every file, function, or "follow the pattern from X" claim in',
   'the spec, confirm it actually exists and does what the spec says, in this order:',
-  '1. `rag_search` FIRST — call the haive-rag tool with focused queries (symbol/component',
-  '   names, the pattern referenced). It does a semantic + lexical search over the indexed',
-  '   code AND knowledge base; prefer it over blind grepping.',
-  '2. If rag_search returns nothing useful, READ the relevant `.claude/knowledge_base/` files.',
-  '3. If still not enough, Grep / Read the codebase directly for the symbols you need.',
+  ...retrievalGuidanceLines(),
   'A reference to code that does not exist is a BLOCKING_AMBIGUITY.',
   '',
   'OUTPUT FORMAT IS STRICT: reply with a SINGLE JSON object inside one ```json fence. Do',
@@ -369,10 +366,7 @@ const CORRECT_RULES = [
   'Do NOT blindly trust the reviewer. For EACH finding, FIRST validate it yourself against',
   'the actual spec text and the codebase: confirm the issue is real, correctly described,',
   'relevant to THIS spec, and not already addressed. To check the codebase, use this order:',
-  '1. `rag_search` FIRST — query the haive-rag tool for the relevant symbols/patterns',
-  '   (semantic + lexical search over the indexed code and knowledge base).',
-  '2. If rag_search returns nothing useful, READ the relevant `.claude/knowledge_base/` files.',
-  '3. If still not enough, Grep / Read the codebase directly.',
+  ...retrievalGuidanceLines(),
   'Apply a fix ONLY for findings you have validated as real and relevant. Ignore findings',
   'that are wrong, irrelevant, out of scope, or already handled — do not touch the spec for',
   'those. When you do fix something, edit the spec minimally and precisely; do not rewrite',
@@ -401,8 +395,8 @@ const SELF_REVIEW_FALLBACK = [
   '=== No usable reviewer findings this round ===',
   'The reviewer pass produced no parseable findings. Do your OWN review of the spec against',
   `these dimensions: ${QUALITY_DIMENSIONS.join(', ')}.`,
-  'Validate every candidate gap against the actual spec text and the codebase (rag_search',
-  'first, then .claude/knowledge_base, then Grep/Read). Fix ONLY error-level gaps you can',
+  'Validate every candidate gap against the actual spec text and the codebase (discover with',
+  'rag_search, then ground with LSP + grep). Fix ONLY error-level gaps you can',
   'confirm would make the implementer build the wrong thing, miss a requirement, or get',
   'blocked. If you find no such gap, return the current spec unchanged in amendedSpec with',
   'an empty "accepted" list.',

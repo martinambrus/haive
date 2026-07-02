@@ -2896,11 +2896,17 @@ function RagStatsPanel({ taskId, stepId }: { taskId: string; stepId: string }) {
         </table>
       </div>
       <p className="text-xs text-neutral-400">
-        RAG effective <span className="text-neutral-200">{ragUsedPct}%</span> of the time · of
-        retrieved chunks <span className="text-indigo-300">{kbPct}% KB</span> /{' '}
+        Discovery hit-rate <span className="text-neutral-200">{ragUsedPct}%</span> — share of
+        queries that returned at least one pointer · of retrieved chunks{' '}
+        <span className="text-indigo-300">{kbPct}% KB</span> /{' '}
         <span className="text-emerald-300">{codePct}% code</span> /{' '}
         <span className="text-amber-300">{runbookPct}% runbook</span> /{' '}
         <span className="text-sky-300">{learningPct}% learning</span>
+      </p>
+      <p className="text-[11px] leading-relaxed text-neutral-500">
+        RAG is a discovery tool: these counts measure pointers surfaced, not work done. The agent
+        grounds every lead with LSP + grep against the real files — that step is intentionally not
+        measured here, so a low hit-rate is not a low-quality signal.
       </p>
     </div>
   );

@@ -8,6 +8,7 @@ import type {
   StepDefinition,
 } from '../../step-definition.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { pathExists } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { loadAgentPersonas, type AgentPersona } from './_agent-loader.js';
@@ -143,15 +144,7 @@ function buildAgentMiningPrompt(
     'builds or tests, or any other mutating command, and do NOT ask clarifying questions.',
     '',
     '=== How to research — follow this order ===',
-    '1. `rag_search` FIRST. Call the haive-rag tool with focused queries from your specialty',
-    '   and the task below (key terms, component/symbol names, error symptoms, and the',
-    '   feature/area name when one is given). It does a',
-    '   semantic + lexical search over BOTH the knowledge base and the code — prefer it over',
-    '   guessing or blind grepping.',
-    '2. If rag_search returns nothing useful, READ the relevant knowledge-base files under',
-    '   `.claude/knowledge_base/` (the index is listed below).',
-    '3. If that is still not enough, GREP / read the codebase directly for the symbols or',
-    '   terms you need.',
+    ...retrievalGuidanceLines(),
     'Ground your analysis in what you actually retrieve, and stay strictly read-only throughout.',
     '',
     '=== Task being analyzed (DO NOT execute) ===',

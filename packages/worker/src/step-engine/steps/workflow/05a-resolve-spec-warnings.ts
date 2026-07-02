@@ -4,6 +4,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { parseCorrectorOutput } from './05-phase-0b5-spec-quality.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 
 // The spec-quality (05) amended spec is written here so the user can hand-edit
@@ -87,10 +88,7 @@ const FIX_RULES = [
   'Do NOT blindly trust the reviewer. For EACH finding, FIRST validate it against the actual',
   'spec text and the codebase: confirm it is real, correctly described, relevant, and not',
   'already addressed. To check the codebase, use this order:',
-  '1. `rag_search` FIRST — query the haive-rag tool for the relevant symbols/patterns',
-  '   (semantic + lexical search over the indexed code and knowledge base).',
-  '2. If rag_search returns nothing useful, READ the relevant `.claude/knowledge_base/` files.',
-  '3. If still not enough, Grep / Read the codebase directly.',
+  ...retrievalGuidanceLines(),
   'Fix ONLY the findings you validated as real and relevant; ignore the rest. Edit the spec',
   'minimally and precisely — do not add polish, expand scope, or reword what already works.',
   "Preserve the spec's presentation sections verbatim unless a finding targets them: the",

@@ -3,6 +3,7 @@ import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 
 // 04a — broad spec audit (report-only). A single one-shot reviewer reads the
@@ -52,9 +53,7 @@ const AUDIT_RULES = [
   '',
   'Verify every code / file / "follow the pattern from X" claim against the actual codebase,',
   'in this order:',
-  '1. `rag_search` FIRST — semantic + lexical search over the indexed code and knowledge base.',
-  '2. If that returns nothing useful, READ the relevant `.claude/knowledge_base/` files.',
-  '3. If still not enough, Grep / Read the codebase directly.',
+  ...retrievalGuidanceLines(),
   'A reference to code that does not exist is an error finding.',
   '',
   'Blast radius — for every component, contract, schema, or shared state this change touches,',

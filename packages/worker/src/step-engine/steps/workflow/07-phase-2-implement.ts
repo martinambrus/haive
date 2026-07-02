@@ -3,6 +3,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { loadFixLoopDiagnosis, loadPriorFixContext } from './_fix-loop.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
@@ -310,10 +311,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       // Shared guidance + output contract used by both the original and fix passes.
       const common = [
         'Before implementing, search for the existing patterns the spec references, in this order:',
-        '1. `rag_search` FIRST — query the haive-rag tool for the symbols/components/patterns involved',
-        '   (semantic + lexical search over the indexed code AND knowledge base); prefer it over blind grepping.',
-        '2. If rag_search is unavailable or returns nothing useful, READ the relevant `.claude/knowledge_base/` files.',
-        '3. If still not enough, Grep / Read the codebase directly for the symbols you need.',
+        ...retrievalGuidanceLines(),
         'Follow the patterns you find; avoid documented anti-patterns.',
         '',
         'When finished emit ONE JSON object inside a ```json fenced code block with the shape:',
