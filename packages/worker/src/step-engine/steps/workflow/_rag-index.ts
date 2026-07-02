@@ -2,6 +2,11 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import {
+  ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
+  ONBOARDING_TOOLING_SCHEMA_VERSION,
+} from '@haive/shared';
+import type { OnboardingEnvironmentMirror, OnboardingToolingMirror } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { isDeniedPath, loadScopeExcludeGlobs } from '../onboarding/_scope.js';
@@ -123,8 +128,23 @@ export interface RagSyncResolved {
   projectName: string;
 }
 
-/** Resolve the repo's RAG prefs + project name from its most recent onboarding
- *  (04-tooling-infrastructure + 01-env-detect outputs). Shared by both steps'
+/** Map a persisted 04-tooling `tooling` object to RAG sync prefs. Shared by the
+ *  repo-mirror read and the onboarding-task-output fallback. */
+function toRagPrefs(t: Record<string, unknown>): RagToolingPrefs {
+  return {
+    ragMode: ((t.ragMode as string) ?? 'none') as RagMode,
+    ragConnectionString: (t.ragConnectionString as string) || null,
+    ollamaUrl: (t.ollamaUrl as string) || null,
+    embeddingModel: (t.embeddingModel as string) || null,
+    embeddingDimensions: typeof t.embeddingDimensions === 'number' ? t.embeddingDimensions : 2560,
+  };
+}
+
+/** Resolve the repo's RAG prefs + project name. Prefers the repo-level
+ *  onboarding mirror (repositories.onboarding_tooling / onboarding_environment),
+ *  which survives a clone to another machine; falls back to the most recent
+ *  onboarding task's step outputs (04-tooling-infrastructure + 01-env-detect)
+ *  for repos onboarded before the mirror columns existed. Shared by both steps'
  *  detect phases. */
 export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncResolved> {
   const taskRow = await ctx.db.query.tasks.findFirst({
@@ -136,33 +156,55 @@ export async function resolveRagSyncPrefs(ctx: StepContext): Promise<RagSyncReso
   let projectName = 'default';
 
   if (repositoryId) {
-    const onboardingTask = await ctx.db.query.tasks.findFirst({
-      where: and(eq(schema.tasks.repositoryId, repositoryId), eq(schema.tasks.type, 'onboarding')),
-      orderBy: [desc(schema.tasks.createdAt)],
+    // Col-first: the repo mirror is authoritative when present.
+    const repo = await ctx.db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, repositoryId),
+      columns: { onboardingTooling: true, onboardingEnvironment: true },
     });
+    const toolingMirror = repo?.onboardingTooling as OnboardingToolingMirror | null | undefined;
+    const envMirror = repo?.onboardingEnvironment as OnboardingEnvironmentMirror | null | undefined;
 
-    if (onboardingTask) {
-      const toolingPrev = await loadPreviousStepOutput(
-        ctx.db,
-        onboardingTask.id,
-        '04-tooling-infrastructure',
-      );
-      if (toolingPrev?.output) {
-        const o = toolingPrev.output as { tooling?: Record<string, unknown> };
-        const t = o.tooling ?? {};
-        ragPrefs = {
-          ragMode: ((t.ragMode as string) ?? 'none') as RagMode,
-          ragConnectionString: (t.ragConnectionString as string) || null,
-          ollamaUrl: (t.ollamaUrl as string) || null,
-          embeddingModel: (t.embeddingModel as string) || null,
-          embeddingDimensions:
-            typeof t.embeddingDimensions === 'number' ? t.embeddingDimensions : 2560,
-        };
+    if (
+      toolingMirror?.schemaVersion === ONBOARDING_TOOLING_SCHEMA_VERSION &&
+      toolingMirror.tooling
+    ) {
+      ragPrefs = toRagPrefs(toolingMirror.tooling);
+    }
+    if (envMirror?.schemaVersion === ONBOARDING_ENVIRONMENT_SCHEMA_VERSION) {
+      const p = (envMirror.envDetectData as { project?: { name?: string } } | undefined)?.project;
+      projectName = p?.name ?? 'default';
+    }
+
+    // Fallback to the onboarding task outputs for whatever the mirror lacked
+    // (legacy repos, or a mirror missing the project name).
+    if (!ragPrefs || projectName === 'default') {
+      const onboardingTask = await ctx.db.query.tasks.findFirst({
+        where: and(
+          eq(schema.tasks.repositoryId, repositoryId),
+          eq(schema.tasks.type, 'onboarding'),
+        ),
+        orderBy: [desc(schema.tasks.createdAt)],
+      });
+
+      if (onboardingTask) {
+        if (!ragPrefs) {
+          const toolingPrev = await loadPreviousStepOutput(
+            ctx.db,
+            onboardingTask.id,
+            '04-tooling-infrastructure',
+          );
+          if (toolingPrev?.output) {
+            const o = toolingPrev.output as { tooling?: Record<string, unknown> };
+            ragPrefs = toRagPrefs(o.tooling ?? {});
+          }
+        }
+        if (projectName === 'default') {
+          const envPrev = await loadPreviousStepOutput(ctx.db, onboardingTask.id, '01-env-detect');
+          const envData = (envPrev?.detect as { data?: { project?: { name?: string } } } | null)
+            ?.data;
+          projectName = envData?.project?.name ?? 'default';
+        }
       }
-
-      const envPrev = await loadPreviousStepOutput(ctx.db, onboardingTask.id, '01-env-detect');
-      const envData = (envPrev?.detect as { data?: { project?: { name?: string } } } | null)?.data;
-      projectName = envData?.project?.name ?? 'default';
     }
   }
 

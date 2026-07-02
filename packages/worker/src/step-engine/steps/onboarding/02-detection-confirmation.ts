@@ -1,4 +1,7 @@
-import type { DetectResult, FormSchema } from '@haive/shared';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import { ONBOARDING_ENVIRONMENT_SCHEMA_VERSION } from '@haive/shared';
+import type { DetectResult, FormSchema, OnboardingEnvironmentMirror } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
 import type { EnvDetectApply } from './01-env-detect.js';
@@ -370,6 +373,44 @@ export const detectionConfirmationStep: StepDefinition<
 
   async apply(ctx, args) {
     ctx.logger.info({ values: args.formValues }, 'detection confirmed');
+
+    // Mirror the detected+confirmed environment onto the repo row so a later
+    // workflow task — or a fresh clone on another machine — can resolve the
+    // stack WITHOUT the onboarding task's step outputs (rows never leave the
+    // origin DB). Stores the RAW 01-env-detect detect `.data` (exactly what
+    // loadRepoStackAnchors reads) plus the confirmed form values (which become
+    // this step's output.values). Best-effort: the mirror is supplementary to
+    // the still-working task lookup, so its write must never fail the step.
+    try {
+      const envPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
+      const envDetectData = ((envPrev?.detect as DetectResult | null)?.data ?? {}) as Record<
+        string,
+        unknown
+      >;
+      const mirror: OnboardingEnvironmentMirror = {
+        schemaVersion: ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
+        envDetectData,
+        confirmedValues: args.formValues,
+      };
+      const taskRow = await ctx.db
+        .select({ repositoryId: schema.tasks.repositoryId })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.id, ctx.taskId))
+        .limit(1);
+      const repositoryId = taskRow[0]?.repositoryId ?? null;
+      if (repositoryId) {
+        await ctx.db
+          .update(schema.repositories)
+          .set({
+            onboardingEnvironment: mirror as unknown as Record<string, unknown>,
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.repositories.id, repositoryId));
+      }
+    } catch (err) {
+      ctx.logger.warn({ err }, 'detection-confirmation: failed to mirror onboarding_environment');
+    }
+
     return { confirmed: true, values: args.formValues };
   },
 };

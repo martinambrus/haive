@@ -59,6 +59,23 @@ export const repositories = pgTable(
      *  NULL = onboarding has not produced a list yet (the repos-page exclusion
      *  editor stays hidden). Distinct from secretMask* which hides secret files. */
     scopeExcludeGlobs: jsonb('scope_exclude_globs').$type<string[]>(),
+    /** Repo-level snapshot of the onboarding-derived ENVIRONMENT (raw 01-env-detect
+     *  `.data` + 02-detection-confirmation confirmed values), so a workflow task can
+     *  resolve the repo's stack WITHOUT looking up the onboarding task's step
+     *  outputs — which don't exist after a fresh clone on another machine. Written
+     *  by 02-detection-confirmation.apply, restored on clone from
+     *  `.haive-data/environment.json`. Shape = @haive/shared OnboardingEnvironmentMirror
+     *  (kept loose here to avoid a database->shared import cycle). NULL = not onboarded
+     *  (consumers fall back to the onboarding-task lookup). */
+    onboardingEnvironment: jsonb('onboarding_environment').$type<Record<string, unknown>>(),
+    /** Repo-level snapshot of the onboarding-derived TOOLING prefs (the
+     *  04-tooling-infrastructure `output.tooling`: ragMode, embeddingModel, etc. —
+     *  incl. machine-specific infra like ollamaUrl for LOCAL use). Written by
+     *  04-tooling-infrastructure.apply, restored on clone from `.haive-data/tooling.json`
+     *  MINUS the infra keys (those don't travel between machines). Shape =
+     *  @haive/shared OnboardingToolingMirror. NULL = fall back to the onboarding-task
+     *  04-tooling output lookup. */
+    onboardingTooling: jsonb('onboarding_tooling').$type<Record<string, unknown>>(),
     storagePath: text('storage_path'),
     sizeBytes: integer('size_bytes'),
     credentialsSecretId: uuid('credentials_secret_id').references(() => repoCredentials.id, {

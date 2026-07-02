@@ -2,7 +2,16 @@ import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import type { FormSchema, FormValues } from '@haive/shared';
+import {
+  ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
+  ONBOARDING_TOOLING_SCHEMA_VERSION,
+} from '@haive/shared';
+import type {
+  FormSchema,
+  FormValues,
+  OnboardingEnvironmentMirror,
+  OnboardingToolingMirror,
+} from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import { deriveEnvTemplateName, getTaskEnvTemplate, linkTaskToEnvTemplate } from './_shared.js';
 
@@ -18,6 +27,26 @@ const ONBOARDING_LSP_TO_ENV_KEY: Record<string, LspKey> = {
 
 async function loadOnboardingLspKeys(db: Database, repositoryId: string | null): Promise<LspKey[]> {
   if (!repositoryId) return [];
+  const toLspKeys = (langs: unknown): LspKey[] => {
+    if (!Array.isArray(langs)) return [];
+    return langs
+      .filter((v): v is string => typeof v === 'string')
+      .map((l) => ONBOARDING_LSP_TO_ENV_KEY[l])
+      .filter((v): v is LspKey => !!v);
+  };
+
+  // Prefer the repo-level onboarding mirror (survives a clone to another
+  // machine); fall back to the onboarding task's 04-tooling step output for
+  // repos onboarded before the mirror column existed (no backfill).
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, repositoryId),
+    columns: { onboardingTooling: true },
+  });
+  const mirror = repo?.onboardingTooling as OnboardingToolingMirror | null | undefined;
+  if (mirror?.schemaVersion === ONBOARDING_TOOLING_SCHEMA_VERSION && mirror.tooling) {
+    return toLspKeys((mirror.tooling as { lspLanguages?: unknown }).lspLanguages);
+  }
+
   const rows = await db
     .select({ output: schema.taskSteps.output })
     .from(schema.taskSteps)
@@ -33,12 +62,7 @@ async function loadOnboardingLspKeys(db: Database, repositoryId: string | null):
     .orderBy(desc(schema.taskSteps.endedAt))
     .limit(1);
   const out = rows[0]?.output as { tooling?: { lspLanguages?: unknown } } | null;
-  const langs = out?.tooling?.lspLanguages;
-  if (!Array.isArray(langs)) return [];
-  return langs
-    .filter((v): v is string => typeof v === 'string')
-    .map((l) => ONBOARDING_LSP_TO_ENV_KEY[l])
-    .filter((v): v is LspKey => !!v);
+  return toLspKeys(out?.tooling?.lspLanguages);
 }
 
 // Map an onboarding-confirmed primaryLanguage / framework to the env-replicate
@@ -105,21 +129,35 @@ export async function loadOnboardingDetection(
   repositoryId: string | null,
 ): Promise<OnboardingDetection | null> {
   if (!repositoryId) return null;
-  const rows = await db
-    .select({ output: schema.taskSteps.output })
-    .from(schema.taskSteps)
-    .innerJoin(schema.tasks, eq(schema.taskSteps.taskId, schema.tasks.id))
-    .where(
-      and(
-        eq(schema.tasks.repositoryId, repositoryId),
-        eq(schema.tasks.type, 'onboarding'),
-        eq(schema.taskSteps.stepId, '02-detection-confirmation'),
-        eq(schema.taskSteps.status, 'done'),
-      ),
-    )
-    .orderBy(desc(schema.taskSteps.endedAt))
-    .limit(1);
-  const values = (rows[0]?.output as { values?: Record<string, unknown> } | null)?.values;
+
+  // Prefer the repo-level onboarding mirror (survives a clone to another
+  // machine); fall back to the onboarding task's 02-detection-confirmation
+  // output for repos onboarded before the mirror column existed.
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, repositoryId),
+    columns: { onboardingEnvironment: true },
+  });
+  const mirror = repo?.onboardingEnvironment as OnboardingEnvironmentMirror | null | undefined;
+  let values: Record<string, unknown> | undefined;
+  if (mirror?.schemaVersion === ONBOARDING_ENVIRONMENT_SCHEMA_VERSION) {
+    values = mirror.confirmedValues;
+  } else {
+    const rows = await db
+      .select({ output: schema.taskSteps.output })
+      .from(schema.taskSteps)
+      .innerJoin(schema.tasks, eq(schema.taskSteps.taskId, schema.tasks.id))
+      .where(
+        and(
+          eq(schema.tasks.repositoryId, repositoryId),
+          eq(schema.tasks.type, 'onboarding'),
+          eq(schema.taskSteps.stepId, '02-detection-confirmation'),
+          eq(schema.taskSteps.status, 'done'),
+        ),
+      )
+      .orderBy(desc(schema.taskSteps.endedAt))
+      .limit(1);
+    values = (rows[0]?.output as { values?: Record<string, unknown> } | null)?.values;
+  }
   if (!values) return null;
 
   const str = (k: string): string | null => {

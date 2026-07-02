@@ -102,6 +102,61 @@ export interface RepoJobPayload {
   archiveFormat?: ArchiveFormat;
 }
 
+/* ------------------------------------------------------------------ */
+/* Onboarding repo-level mirror (repositories.onboarding_*  +  .haive-data/)  */
+/* ------------------------------------------------------------------ */
+
+export const ONBOARDING_ENVIRONMENT_SCHEMA_VERSION = 1;
+export const ONBOARDING_TOOLING_SCHEMA_VERSION = 1;
+
+/** Machine-specific tooling keys stripped from the committed `.haive-data/tooling.json`
+ *  mirror (they do not travel between machines). Kept in the DB column for LOCAL use. */
+export const ONBOARDING_TOOLING_INFRA_KEYS = ['ragConnectionString', 'ollamaUrl'] as const;
+
+/** Repo-level snapshot of an onboarded repo's detected+confirmed ENVIRONMENT.
+ *  Persisted on `repositories.onboarding_environment` and mirrored to
+ *  `.haive-data/environment.json`. Stores the RAW structures the stack resolvers
+ *  already parse (`loadRepoStackAnchors` -> `resolveStackVersions`), so reading the
+ *  column is a drop-in for the old "find onboarding task + read its 01/02 outputs"
+ *  lookup that returns nothing after a fresh clone. */
+export interface OnboardingEnvironmentMirror {
+  schemaVersion: number;
+  /** The `01-env-detect` detect `.data` object (project/container/stack/paths/...). */
+  envDetectData: Record<string, unknown>;
+  /** The `02-detection-confirmation` confirmed form values. */
+  confirmedValues: Record<string, unknown>;
+}
+
+/** Repo-level snapshot of an onboarded repo's TOOLING prefs. Persisted on
+ *  `repositories.onboarding_tooling` and mirrored (MINUS `ONBOARDING_TOOLING_INFRA_KEYS`)
+ *  to `.haive-data/tooling.json`. `tooling` is the `04-tooling-infrastructure`
+ *  `output.tooling` object (ragMode, embeddingModel, embeddingDimensions, ...). */
+export interface OnboardingToolingMirror {
+  schemaVersion: number;
+  tooling: Record<string, unknown>;
+}
+
+export const ONBOARDING_EXCLUSIONS_SCHEMA_VERSION = 1;
+
+/** Committed mirror of `repositories.scope_exclude_globs` (`.haive-data/exclusions.json`),
+ *  so a fresh clone restores the onboarding/RAG scope denylist. DENYLIST semantics:
+ *  unlisted paths stay in scope. Restored into the column on clone by persistDetection. */
+export interface OnboardingExclusionsMirror {
+  schemaVersion: number;
+  scopeExcludeGlobs: string[];
+}
+
+/** Relative paths of the committed onboarding-mirror files under `.haive-data/`.
+ *  Written at 12-post-onboarding from the repo's onboarding_* columns; read back
+ *  on clone by persistDetection. Kept here so both the writer (worker) and any
+ *  reader share one source of truth for the filenames. */
+export const HAIVE_DATA_DIR = '.haive-data';
+export const HAIVE_DATA_FILES = {
+  environment: `${HAIVE_DATA_DIR}/environment.json`,
+  tooling: `${HAIVE_DATA_DIR}/tooling.json`,
+  exclusions: `${HAIVE_DATA_DIR}/exclusions.json`,
+} as const;
+
 export type CustomBundleSourceType = 'zip' | 'git';
 export type CustomBundleStatus = 'active' | 'syncing' | 'failed';
 export type CustomBundleItemKind = 'agent' | 'skill';

@@ -1,6 +1,7 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import type { DetectResult } from '@haive/shared';
+import { ONBOARDING_ENVIRONMENT_SCHEMA_VERSION } from '@haive/shared';
+import type { DetectResult, OnboardingEnvironmentMirror } from '@haive/shared';
 import {
   resolveStackVersions,
   type ConfirmedStackValues,
@@ -100,25 +101,42 @@ export async function loadRepoStackAnchors(
   db: Database,
   repositoryId: string,
 ): Promise<{ anchors: StackAnchors; language: string | null; projectName: string | null } | null> {
-  const [task] = await db
-    .select({ id: schema.tasks.id })
-    .from(schema.tasks)
-    .where(
-      and(
-        eq(schema.tasks.repositoryId, repositoryId),
-        eq(schema.tasks.type, 'onboarding'),
-        eq(schema.tasks.status, 'completed'),
-      ),
-    )
-    .orderBy(desc(schema.tasks.completedAt))
+  // Prefer the repo-level onboarding mirror — it survives a clone to another
+  // machine, where the onboarding task's rows/step outputs don't exist. Fall
+  // back to the onboarding task's outputs for repos onboarded before the mirror
+  // column existed (no backfill).
+  const [repo] = await db
+    .select({ onboardingEnvironment: schema.repositories.onboardingEnvironment })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
-  if (!task) return null;
+  const mirror = repo?.onboardingEnvironment as OnboardingEnvironmentMirror | null | undefined;
 
-  const envPrev = await loadPreviousStepOutput(db, task.id, '01-env-detect');
-  const data = ((envPrev?.detect as DetectResult | null)?.data ?? {}) as EnvDetectShape;
-  const confirmedPrev = await loadPreviousStepOutput(db, task.id, '02-detection-confirmation');
-  const confirmed =
-    (confirmedPrev?.output as { values?: ConfirmedStackValues } | null)?.values ?? null;
+  let data: EnvDetectShape;
+  let confirmed: ConfirmedStackValues | null;
+  if (mirror && mirror.schemaVersion === ONBOARDING_ENVIRONMENT_SCHEMA_VERSION) {
+    data = (mirror.envDetectData ?? {}) as EnvDetectShape;
+    confirmed = (mirror.confirmedValues as ConfirmedStackValues | undefined) ?? null;
+  } else {
+    const [task] = await db
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(
+          eq(schema.tasks.repositoryId, repositoryId),
+          eq(schema.tasks.type, 'onboarding'),
+          eq(schema.tasks.status, 'completed'),
+        ),
+      )
+      .orderBy(desc(schema.tasks.completedAt))
+      .limit(1);
+    if (!task) return null;
+
+    const envPrev = await loadPreviousStepOutput(db, task.id, '01-env-detect');
+    data = ((envPrev?.detect as DetectResult | null)?.data ?? {}) as EnvDetectShape;
+    const confirmedPrev = await loadPreviousStepOutput(db, task.id, '02-detection-confirmation');
+    confirmed = (confirmedPrev?.output as { values?: ConfirmedStackValues } | null)?.values ?? null;
+  }
 
   const { phpMajor, database, dbMajor } = resolveStackVersions(data, confirmed);
   const project = data.project ?? {};

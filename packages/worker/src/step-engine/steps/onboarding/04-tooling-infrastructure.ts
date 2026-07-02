@@ -2,7 +2,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { DetectResult, FormSchema } from '@haive/shared';
+import { ONBOARDING_TOOLING_SCHEMA_VERSION } from '@haive/shared';
+import type { DetectResult, FormSchema, OnboardingToolingMirror } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   buildDefaultMcpServers,
@@ -376,9 +377,23 @@ export const toolingInfrastructureStep: StepDefinition<
       .limit(1);
     const repositoryId = taskRow[0]?.repositoryId ?? null;
     if (repositoryId) {
+      // Mirror tooling prefs onto the repo row (see the onboarding_tooling
+      // column) so resolveRagSyncPrefs can read the repo directly instead of
+      // hunting the onboarding task's 04 output — which is gone after a clone.
+      // The machine-specific infra keys (ollamaUrl, ragConnectionString) stay
+      // here for LOCAL use; the committed .haive-data/tooling.json mirror strips
+      // them.
+      const toolingMirror: OnboardingToolingMirror = {
+        schemaVersion: ONBOARDING_TOOLING_SCHEMA_VERSION,
+        tooling,
+      };
       await ctx.db
         .update(schema.repositories)
-        .set({ rtkEnabled, updatedAt: new Date() })
+        .set({
+          rtkEnabled,
+          onboardingTooling: toolingMirror as unknown as Record<string, unknown>,
+          updatedAt: new Date(),
+        })
         .where(eq(schema.repositories.id, repositoryId));
     } else {
       ctx.logger.warn(

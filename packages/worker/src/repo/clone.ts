@@ -1,9 +1,20 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { logger, type ArchiveFormat, type RepoJobPayload } from '@haive/shared';
+import {
+  logger,
+  HAIVE_DATA_FILES,
+  ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
+  ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
+  ONBOARDING_TOOLING_SCHEMA_VERSION,
+  type ArchiveFormat,
+  type OnboardingEnvironmentMirror,
+  type OnboardingExclusionsMirror,
+  type OnboardingToolingMirror,
+  type RepoJobPayload,
+} from '@haive/shared';
 import { detectFromDirectory } from './framework-detect.js';
 import { buildCredentialHelper } from './git-push.js';
 
@@ -73,6 +84,78 @@ export function gitSetOriginUrl(dest: string, url: string): Promise<void> {
   });
 }
 
+/** Restore onboarding-derived DB state from a repo's committed `.haive-data/`
+ *  mirror (written at 12-post-onboarding), so a repo onboarded on one machine
+ *  and cloned to another recovers its scope denylist + stack/tooling without
+ *  re-running onboarding. Non-clobbering: only fills columns that are currently
+ *  NULL, so a live local onboarding (or an earlier import) is never overwritten
+ *  and a re-scan/refresh is a no-op once populated. schemaVersion-gated so a
+ *  future mirror-format bump is ignored rather than mis-parsed. The tooling
+ *  mirror already has the machine-specific infra keys stripped, so consumers on
+ *  the new machine fall back to its local defaults. */
+async function importHaiveDataMirror(
+  db: Database,
+  repositoryId: string,
+  storagePath: string,
+): Promise<void> {
+  const [repo] = await db
+    .select({
+      onboardingEnvironment: schema.repositories.onboardingEnvironment,
+      onboardingTooling: schema.repositories.onboardingTooling,
+      scopeExcludeGlobs: schema.repositories.scopeExcludeGlobs,
+    })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  if (!repo) return;
+
+  const readJson = async <T>(rel: string): Promise<T | null> => {
+    try {
+      return JSON.parse(await readFile(path.join(storagePath, rel), 'utf8')) as T;
+    } catch {
+      return null;
+    }
+  };
+
+  const updates: Partial<{
+    onboardingEnvironment: Record<string, unknown>;
+    onboardingTooling: Record<string, unknown>;
+    scopeExcludeGlobs: string[];
+  }> = {};
+
+  if (repo.onboardingEnvironment == null) {
+    const env = await readJson<OnboardingEnvironmentMirror>(HAIVE_DATA_FILES.environment);
+    if (env?.schemaVersion === ONBOARDING_ENVIRONMENT_SCHEMA_VERSION) {
+      updates.onboardingEnvironment = env as unknown as Record<string, unknown>;
+    }
+  }
+  if (repo.onboardingTooling == null) {
+    const tooling = await readJson<OnboardingToolingMirror>(HAIVE_DATA_FILES.tooling);
+    if (tooling?.schemaVersion === ONBOARDING_TOOLING_SCHEMA_VERSION) {
+      updates.onboardingTooling = tooling as unknown as Record<string, unknown>;
+    }
+  }
+  if (repo.scopeExcludeGlobs == null) {
+    const excl = await readJson<OnboardingExclusionsMirror>(HAIVE_DATA_FILES.exclusions);
+    if (
+      excl?.schemaVersion === ONBOARDING_EXCLUSIONS_SCHEMA_VERSION &&
+      Array.isArray(excl.scopeExcludeGlobs)
+    ) {
+      updates.scopeExcludeGlobs = excl.scopeExcludeGlobs;
+    }
+  }
+
+  if (Object.keys(updates).length === 0) return;
+  await db
+    .update(schema.repositories)
+    .set({ ...updates, updatedAt: new Date() })
+    .where(eq(schema.repositories.id, repositoryId));
+  logger.info(
+    { repositoryId, imported: Object.keys(updates) },
+    'restored onboarding state from .haive-data mirror',
+  );
+}
+
 async function persistDetection(
   db: Database,
   repositoryId: string,
@@ -92,6 +175,15 @@ async function persistDetection(
       updatedAt: new Date(),
     })
     .where(eq(schema.repositories.id, repositoryId));
+
+  // Best-effort: a fresh clone of an already-onboarded repo restores its
+  // onboarding-derived columns from the committed .haive-data/ mirror. Never
+  // fail the scan/clone over a missing or malformed mirror.
+  try {
+    await importHaiveDataMirror(db, repositoryId, storagePath);
+  } catch (err) {
+    logger.warn({ err, repositoryId }, 'haive-data mirror import failed (non-fatal)');
+  }
 }
 
 export async function handleScan(payload: RepoJobPayload, db: Database): Promise<void> {

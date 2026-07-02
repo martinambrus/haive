@@ -10,10 +10,12 @@ import {
   type CliExecJobPayload,
   type CliNetworkPolicy,
   type CliProviderName,
+  type OnboardingToolingMirror,
   type TaskJobPayload,
   TASK_JOB_NAMES,
   isReadOnlyLocalRepo,
   CONFIG_KEYS,
+  ONBOARDING_TOOLING_SCHEMA_VERSION,
   configService,
 } from '@haive/shared';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
@@ -164,19 +166,32 @@ async function resolveRagMcpConfig(
       columns: { repositoryId: true },
     });
     if (task?.repositoryId) {
-      const rows = await db
-        .select({ output: schema.taskSteps.output })
-        .from(schema.taskSteps)
-        .innerJoin(schema.tasks, eq(schema.taskSteps.taskId, schema.tasks.id))
-        .where(
-          and(
-            eq(schema.tasks.repositoryId, task.repositoryId),
-            eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
-          ),
-        )
-        .orderBy(desc(schema.taskSteps.createdAt))
-        .limit(1);
-      ragMode = readRagMode(rows[0]?.output);
+      // Prefer the repo-level onboarding mirror (survives a clone, where the
+      // onboarding task's step outputs don't exist); fall back to the repo's
+      // most recent onboarding 04-tooling output for legacy repos.
+      const repo = await db.query.repositories.findFirst({
+        where: eq(schema.repositories.id, task.repositoryId),
+        columns: { onboardingTooling: true },
+      });
+      const mirror = repo?.onboardingTooling as OnboardingToolingMirror | null | undefined;
+      if (mirror?.schemaVersion === ONBOARDING_TOOLING_SCHEMA_VERSION && mirror.tooling) {
+        ragMode = readRagMode({ tooling: mirror.tooling });
+      }
+      if (!ragMode) {
+        const rows = await db
+          .select({ output: schema.taskSteps.output })
+          .from(schema.taskSteps)
+          .innerJoin(schema.tasks, eq(schema.taskSteps.taskId, schema.tasks.id))
+          .where(
+            and(
+              eq(schema.tasks.repositoryId, task.repositoryId),
+              eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
+            ),
+          )
+          .orderBy(desc(schema.taskSteps.createdAt))
+          .limit(1);
+        ragMode = readRagMode(rows[0]?.output);
+      }
     }
   }
   if (!ragMode || ragMode === 'none') return disabled;
@@ -230,6 +245,22 @@ async function loadUserMcpServers(db: Database, taskId: string): Promise<Record<
     columns: { repositoryId: true },
   });
   if (!task?.repositoryId) return {};
+
+  // Prefer the repo-level onboarding mirror (survives a clone, where the
+  // onboarding task's step outputs don't exist — the committed
+  // .claude/mcp_settings.json file is NOT read back at runtime, this DB record
+  // is the source); fall back to the repo's most recent onboarding 04-tooling
+  // output for legacy repos.
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, task.repositoryId),
+    columns: { onboardingTooling: true },
+  });
+  const mirror = repo?.onboardingTooling as OnboardingToolingMirror | null | undefined;
+  if (mirror?.schemaVersion === ONBOARDING_TOOLING_SCHEMA_VERSION && mirror.tooling) {
+    const fromMirror = parse({ tooling: mirror.tooling });
+    if (fromMirror) return fromMirror;
+  }
+
   const rows = await db
     .select({ output: schema.taskSteps.output })
     .from(schema.taskSteps)

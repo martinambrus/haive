@@ -1,9 +1,16 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { CliProviderName, FormSchema } from '@haive/shared';
+import type {
+  CliProviderName,
+  FormSchema,
+  OnboardingEnvironmentMirror,
+  OnboardingExclusionsMirror,
+  OnboardingToolingMirror,
+} from '@haive/shared';
 import {
   buildCliRulesBlock,
   CLI_RULES_DISK_PATH,
@@ -12,7 +19,10 @@ import {
   CLI_RULES_TEMPLATE_KIND,
   getCliProviderMetadata,
   getHaiveVersion,
+  HAIVE_DATA_FILES,
   normalizeContent,
+  ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
+  ONBOARDING_TOOLING_INFRA_KEYS,
   sha256Hex,
 } from '@haive/shared';
 import type { Database } from '@haive/database';
@@ -48,6 +58,10 @@ const BASE_STAGE_PATHS = [
   '.claude/workflow-checkpoint.json',
   '.claude/project-config.yaml',
   '.haive/install.json',
+  // Committed onboarding mirror (environment/tooling/exclusions), so a fresh
+  // clone restores its onboarding-derived DB state. A distinct dir from `.haive/`
+  // (which workflow tasks add to `.git/info/exclude`), so it is never excluded.
+  '.haive-data/',
 ];
 
 // Rules files onboarding writes that are NOT tracked as onboarding_artifacts, so
@@ -249,6 +263,71 @@ async function recordOnboardingArtifacts(
   return { rowsWritten: rows.length, installManifestWritten, warnings };
 }
 
+/** Write the committed `.haive-data/` onboarding mirror from the repo's
+ *  onboarding_* columns (already populated by steps 02/04/06_7). A fresh clone
+ *  on another machine restores its onboarding-derived DB state from these files
+ *  via persistDetection, since the onboarding task's rows never travel. Runs
+ *  always (independent of the commit checkbox); the files are staged by
+ *  resolveStagePaths (BASE_STAGE_PATHS) when the user opts into a commit. The
+ *  tooling file drops the machine-specific infra keys (ollamaUrl,
+ *  ragConnectionString) — those do not move between machines. */
+async function writeHaiveDataMirror(
+  ctx: StepContext,
+  repositoryId: string,
+): Promise<{ filesWritten: string[]; warnings: string[] }> {
+  const warnings: string[] = [];
+  const filesWritten: string[] = [];
+
+  const [repo] = await ctx.db
+    .select({
+      onboardingEnvironment: schema.repositories.onboardingEnvironment,
+      onboardingTooling: schema.repositories.onboardingTooling,
+      scopeExcludeGlobs: schema.repositories.scopeExcludeGlobs,
+    })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  if (!repo) {
+    warnings.push('haive-data mirror: repository row not found, skipping');
+    return { filesWritten, warnings };
+  }
+
+  const writeJson = async (rel: string, value: unknown): Promise<void> => {
+    const abs = path.join(ctx.repoPath, rel);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    filesWritten.push(rel);
+  };
+
+  const env = repo.onboardingEnvironment as OnboardingEnvironmentMirror | null;
+  if (env) await writeJson(HAIVE_DATA_FILES.environment, env);
+
+  const tooling = repo.onboardingTooling as OnboardingToolingMirror | null;
+  if (tooling?.tooling) {
+    const stripped: Record<string, unknown> = { ...tooling.tooling };
+    for (const k of ONBOARDING_TOOLING_INFRA_KEYS) delete stripped[k];
+    const mirror: OnboardingToolingMirror = {
+      schemaVersion: tooling.schemaVersion,
+      tooling: stripped,
+    };
+    await writeJson(HAIVE_DATA_FILES.tooling, mirror);
+  }
+
+  const globs = repo.scopeExcludeGlobs as string[] | null;
+  if (globs) {
+    const mirror: OnboardingExclusionsMirror = {
+      schemaVersion: ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
+      scopeExcludeGlobs: globs,
+    };
+    await writeJson(HAIVE_DATA_FILES.exclusions, mirror);
+  }
+
+  if (filesWritten.length > 0) {
+    ctx.logger.info({ filesWritten }, 'haive-data onboarding mirror written');
+  }
+  return { filesWritten, warnings };
+}
+
 export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboardingOutput> = {
   metadata: {
     id: '12-post-onboarding',
@@ -307,6 +386,26 @@ export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboa
       const message = err instanceof Error ? err.message : String(err);
       warnings.push(`onboarding-artifacts recording failed: ${message}`);
       ctx.logger.warn({ err }, 'onboarding-artifacts recording failed');
+    }
+
+    // Write the committed .haive-data/ mirror from the onboarding_* columns so a
+    // fresh clone restores its onboarding-derived DB state. Always runs (like the
+    // artifact recording above); staged by resolveStagePaths when committing.
+    const mirrorTaskRow = await ctx.db
+      .select({ repositoryId: schema.tasks.repositoryId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, ctx.taskId))
+      .limit(1);
+    const mirrorRepositoryId = mirrorTaskRow[0]?.repositoryId ?? null;
+    if (mirrorRepositoryId) {
+      try {
+        const res = await writeHaiveDataMirror(ctx, mirrorRepositoryId);
+        warnings.push(...res.warnings);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        warnings.push(`haive-data mirror write failed: ${message}`);
+        ctx.logger.warn({ err }, 'haive-data mirror write failed');
+      }
     }
 
     if (values.commit !== true) {
