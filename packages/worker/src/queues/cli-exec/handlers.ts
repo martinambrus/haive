@@ -58,6 +58,7 @@ import {
   STATUS_DEFAULT_MESSAGE,
 } from './resolvers.js';
 import { markProvidersReady, probeCliPath, removeOrphanedPreviousImage } from './images.js';
+import { foldCliParkOnResume, markCliParkBegin } from '../cli-park-timing.js';
 
 export async function handleCliExecJob(
   db: Database,
@@ -91,6 +92,12 @@ export async function handleCliExecJob(
     // message; the statusUpdater later refines it to the actual tool/activity.
     .set({ startedAt: new Date(), statusMessage: STATUS_DEFAULT_MESSAGE })
     .where(eq(schema.cliInvocations.id, row.id));
+
+  // Work resumed: this invocation is now running, so close any waiting_cli park the step
+  // accrued (initial queue wait, or a rate-limit/allowance park between waves) by folding
+  // the elapsed span into idle_ms. Guarded/atomic — the first invocation of a parallel batch
+  // folds; the rest no-op.
+  if (payload.taskStepId) await foldCliParkOnResume(db, payload.taskStepId);
 
   if (payload.agentMiningId) {
     await db
@@ -162,6 +169,12 @@ export async function handleCliExecJob(
         .where(eq(schema.taskStepAgentMinings.id, payload.agentMiningId));
     }
 
+    // Park-begin candidate: this invocation just ended. If it was the last one running for
+    // the step and the step is still waiting_cli (didn't advance — a rate-limit/allowance
+    // failure, or more agents still queued), stamp the wait so the ensuing gap bills as idle,
+    // not work. Guarded/atomic — no-ops while any sibling invocation is still running.
+    if (payload.taskStepId) await markCliParkBegin(db, payload.taskStepId);
+
     await resumeStepIfLinked(payload, result.exitCode === 0, finalErrorMessage);
   } catch (err) {
     const durationMs = Date.now() - startedAt;
@@ -197,6 +210,10 @@ export async function handleCliExecJob(
         .set({ errorHint: err.hint, updatedAt: new Date() })
         .where(eq(schema.taskSteps.id, payload.taskStepId));
     }
+    // Park-begin candidate (mirror of the success path): a failed invocation — including a
+    // rate-limit/allowance fatal — that leaves the step in waiting_cli should have the ensuing
+    // wait billed as idle, not work.
+    if (payload.taskStepId) await markCliParkBegin(db, payload.taskStepId);
     await resumeStepIfLinked(payload, false, message);
     throw err;
   }

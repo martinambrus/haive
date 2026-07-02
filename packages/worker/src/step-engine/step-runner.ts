@@ -912,6 +912,17 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
   const row = await upsertRow(db, taskId, stepDef, round, params.runSeq);
 
+  // Terminal short-circuit. A `done`/`skipped` row reaching advanceStep is always a
+  // stale/duplicate advance job or a resume walk passing back through already-finished
+  // steps — a genuine re-run always arrives as `pending` (resetStepAndDownstream). Re-running
+  // the phases here re-executes detect/apply and, worse, re-stamps `endedAt = now` on the
+  // completion write below, inflating the step's wall span (and thus its billed "work") by
+  // the entire parked/idle gap since it first finished. Return the stored row untouched.
+  // Mirrors handleAdvanceStep's `skipped` guard; placed here so handleStartTask's direct
+  // advanceStep(steps[0]) call is covered on retry/resume too.
+  if (row.status === 'done') return { status: 'done', row, output: row.output };
+  if (row.status === 'skipped') return { status: 'skipped', row };
+
   const controller = new AbortController();
   const throwIfCancelled = (): void => {
     if (controller.signal.aborted) {

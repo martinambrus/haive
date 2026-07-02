@@ -28,7 +28,7 @@ function toMs(v: Date | string | null): number | null {
 /** Active-work / idle / user-active breakdown for a task, summed across its
  *  steps. Mirrors the per-step figures the task page shows: work is each step's
  *  wall-clock span minus its idle (time waiting on the user) minus the live open
- *  wait of a step still in `waiting_form`; a step that has not ended yet uses
+ *  wait of a step still in `waiting_form` (or parked in `waiting_cli`); a step that has not ended yet uses
  *  `nowMs` as its end. Pure, so the api list endpoint and the web detail page
  *  compute identical numbers. Wall clock (start -> end of the whole task) is the
  *  caller's job — it comes from the task row, not the steps. */
@@ -45,12 +45,18 @@ export function computeTaskTiming(steps: TaskTimingStep[], nowMs: number): TaskT
     const ended = toMs(s.endedAt);
     const end = ended ?? nowMs;
     const waitStart = toMs(s.waitingStartedAt);
-    // A step sitting in waiting_form is accruing idle time right now; count the
-    // ongoing wait so idle ticks live and is excluded from work below. On submit
-    // the server folds this same span into idle_ms and clears waitingStartedAt,
-    // so there is no double-count across the transition.
+    // A step accruing non-work wait right now: either sitting in waiting_form (waiting on
+    // the user) or parked in waiting_cli with NO invocation currently running (waiting on a
+    // CLI slot / a rate-limit reset). Count the ongoing wait so idle ticks live and is
+    // excluded from work below. waitingStartedAt is the invariant: for waiting_cli the worker
+    // sets it only while no invocation runs and clears+folds it into idle_ms when one starts,
+    // so an actively-running CLI step has waitStart === null and its span still bills as work.
+    // On the fold the server adds this same span to idle_ms and clears waitingStartedAt, so
+    // there is no double-count across the transition.
     const openWait =
-      ended === null && s.status === 'waiting_form' && waitStart !== null
+      ended === null &&
+      (s.status === 'waiting_form' || s.status === 'waiting_cli') &&
+      waitStart !== null
         ? Math.max(0, nowMs - waitStart)
         : 0;
     idleMs += openWait;

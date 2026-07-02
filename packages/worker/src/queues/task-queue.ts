@@ -62,6 +62,7 @@ import {
 } from '../step-engine/steps/workflow/_fix-loop.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 import { resetStepAndDownstream } from './_step-reset.js';
+import { markCliParkBegin } from './cli-park-timing.js';
 import { unloadTaskOllamaCliModels } from '../sandbox/ollama-provision.js';
 
 let registered = false;
@@ -822,6 +823,11 @@ async function handleResult(
           updatedAt: new Date(),
         })
         .where(eq(schema.tasks.id, ctx.taskId));
+      // Park-begin candidate: the step just entered waiting_cli. If its invocations are still
+      // only queued (none running yet — e.g. deferred by the per-task agent cap), stamp the
+      // wait as idle; the first invocation to start running folds it back. Guarded/atomic, so
+      // it no-ops if an invocation is already running (re-entry while agents are mid-flight).
+      await markCliParkBegin(db, result.row.id);
       await appendEvent(db, ctx.taskId, result.row.id, 'step.waiting_cli', { stepId });
       return;
     }
