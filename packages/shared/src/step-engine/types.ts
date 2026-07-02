@@ -119,6 +119,7 @@ export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
   '04-tooling-infrastructure',
   '07_5-verify-files',
   '09_5-skill-generation',
+  '09_5b-skill-repair',
   '09_6-skill-verification',
   '11-final-review',
   '01b-install-plugins',
@@ -159,6 +160,7 @@ export const CLI_DISPATCH_STEP_IDS: readonly string[] = [
   '09_2-qa-resolve',
   '09_3-qa-review',
   '09_5-skill-generation',
+  '09_5b-skill-repair',
   '09_6_4-global-kb-merge',
   '11-final-review',
   // workflow

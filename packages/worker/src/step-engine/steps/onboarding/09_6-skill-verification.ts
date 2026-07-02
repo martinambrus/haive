@@ -16,6 +16,10 @@ const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
  *  broken/deficient skills (reviseLoop target). */
 const SKILL_GENERATION_STEP_ID = '09_5-skill-generation';
 
+/** Targeted-repair step this verification routes to when the user opts to repair only the
+ *  failing skills (reviseLoop target — cheap alternative to a full 09_5 regeneration). */
+const SKILL_REPAIR_STEP_ID = '09_5b-skill-repair';
+
 /** Issue text recorded for a skill whose SKILL.md is valid but has no sub-skill
  *  leaf docs — the disk-side signal of a truncated 09_5 generation. Only added for
  *  NON-bundle skills (a user-supplied bundle skill may legitimately be flat). */
@@ -32,7 +36,7 @@ function dedupe(ids: string[]): string[] {
 /** Repo-relative skill ids that came from custom bundles (06_3). They are
  *  user-supplied and may legitimately be flat (no sub-skills), so the sub-skill
  *  deficiency check skips them. Mirrors loadBundleSkills' query in 09_5. */
-async function loadBundleSkillIds(ctx: StepContext): Promise<Set<string>> {
+export async function loadBundleSkillIds(ctx: StepContext): Promise<Set<string>> {
   const out = new Set<string>();
   const taskRow = await ctx.db
     .select({ repositoryId: schema.tasks.repositoryId })
@@ -85,18 +89,25 @@ export interface SkillVerificationDetect {
    *  a mirror that 09_5 failed to write (or that diverged) is caught, not just the
    *  active CLI's copy. */
   skillTargetDirs: string[];
+  /** The user's enabled CLI providers, for the gate's optional "CLI for the fix"
+   *  dropdown ({id, label}). 0–1 providers hides the dropdown (nothing to choose). */
+  cliOptions: { id: string; label: string }[];
+  /** The task's current/resolved provider (ctx.cliProviderId) — the dropdown's
+   *  pre-selected default so leaving it unchanged keeps today's behavior. */
+  currentCliId: string | null;
 }
 
 export interface SkillVerificationApply {
   checks: SkillCheck[];
   passed: boolean;
   /** The user's gate decision when issues were found: 'accept' ships the skills
-   *  as-is, 'regenerate' re-runs 09_5 via reviseLoop. 'none' when there were no
-   *  issues and the form auto-skipped. */
-  decision: 'none' | 'accept' | 'regenerate';
+   *  as-is, 'repair' re-runs only the failing skills via 09_5b, 'regenerate' re-runs
+   *  the full 09_5. All routed via reviseLoop. 'none' when there were no issues and
+   *  the form auto-skipped. */
+  decision: 'none' | 'accept' | 'repair' | 'regenerate';
 }
 
-interface ParsedSkill {
+export interface ParsedSkill {
   name: string | null;
   description: string | null;
   hasTitle: boolean;
@@ -106,7 +117,7 @@ interface ParsedSkill {
 const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---/;
 const FOLDED_DESC_RE = /^description:\s*>\s*\n([\s\S]*?)(?=\n[A-Za-z][^\n]*:|\n*$)/m;
 
-function parseSkillMarkdown(text: string): ParsedSkill {
+export function parseSkillMarkdown(text: string): ParsedSkill {
   const fm = text.match(FRONTMATTER_RE);
   let name: string | null = null;
   let description: string | null = null;
@@ -136,7 +147,7 @@ function parseSkillMarkdown(text: string): ParsedSkill {
   };
 }
 
-async function listSkillDirs(repo: string, skillsDir: string): Promise<string[]> {
+export async function listSkillDirs(repo: string, skillsDir: string): Promise<string[]> {
   const root = path.join(repo, ...skillsDirParts(skillsDir));
   if (!(await pathExists(root))) return [];
   try {
@@ -272,6 +283,31 @@ export async function checkSkill(
   };
 }
 
+/** Provider the fix should run on, or null for "no change / not applicable". Pure so the
+ *  gate → target-step routing is unit-tested without a DB. Only a repair/regenerate whose
+ *  chosen provider is enabled AND differs from the current model records a preference;
+ *  anything else leaves the current model (no spurious sticky write). */
+export interface GateCliChoice {
+  targetStepId: string;
+  cliProviderId: string;
+}
+
+export function resolveGateCliChoice(args: {
+  decision: SkillVerificationApply['decision'];
+  repairCli: string | undefined;
+  currentCliId: string | null;
+  enabledIds: string[];
+}): GateCliChoice | null {
+  const { decision, repairCli, currentCliId, enabledIds } = args;
+  if (decision !== 'repair' && decision !== 'regenerate') return null;
+  if (!repairCli || repairCli === currentCliId) return null;
+  if (!enabledIds.includes(repairCli)) return null;
+  return {
+    targetStepId: decision === 'repair' ? SKILL_REPAIR_STEP_ID : SKILL_GENERATION_STEP_ID,
+    cliProviderId: repairCli,
+  };
+}
+
 export const skillVerificationStep: StepDefinition<
   SkillVerificationDetect,
   SkillVerificationApply
@@ -334,7 +370,24 @@ export const skillVerificationStep: StepDefinition<
       },
       'skill verification detect complete',
     );
-    return { checks, missingFileIds, brokenStructureIds, deficientSubSkillIds, skillTargetDirs };
+    // Enabled CLI providers for the gate's optional "CLI for the fix" dropdown. The
+    // chosen provider is recorded (in apply) as the target step's preference so the
+    // forked repair/regenerate round runs on it. Mirrors 12-post-onboarding's enumeration.
+    const providerRows = await ctx.db.query.cliProviders.findMany({
+      where: and(eq(schema.cliProviders.userId, ctx.userId), eq(schema.cliProviders.enabled, true)),
+      columns: { id: true, label: true },
+    });
+    const cliOptions = providerRows.map((p) => ({ id: p.id, label: p.label }));
+
+    return {
+      checks,
+      missingFileIds,
+      brokenStructureIds,
+      deficientSubSkillIds,
+      skillTargetDirs,
+      cliOptions,
+      currentCliId: ctx.cliProviderId,
+    };
   },
 
   // No issues → null form → the step auto-advances (clean libraries never gate).
@@ -363,55 +416,115 @@ export const skillVerificationStep: StepDefinition<
         defaultOpen: true,
       },
     ];
+    // Decision radio + an optional "CLI for the fix" picker shown only for the two fix
+    // routes (visibleWhen decision != accept). Offered only when the user has more than one
+    // enabled provider — with 0–1 there is nothing to choose.
+    const fields: FormSchema['fields'] = [
+      {
+        type: 'radio',
+        id: 'decision',
+        label: 'How should these skill issues be handled?',
+        options: [
+          { value: 'accept', label: 'Accept as-is — keep the skills despite the issues' },
+          { value: 'repair', label: 'Repair — re-run only the failing skills (fast)' },
+          { value: 'regenerate', label: 'Regenerate — re-run the full skill library (slow)' },
+        ],
+        default: 'accept',
+        required: true,
+      },
+    ];
+    if (detected.cliOptions.length > 1) {
+      const options = detected.cliOptions.map((o) => ({ value: o.id, label: o.label }));
+      const hasCurrent =
+        detected.currentCliId !== null && options.some((o) => o.value === detected.currentCliId);
+      fields.push({
+        type: 'select',
+        id: 'repairCli',
+        label: 'CLI for the fix',
+        description:
+          'Which CLI/model runs the repair or regeneration. Defaults to the task’s current model.',
+        options,
+        default: hasCurrent ? (detected.currentCliId as string) : undefined,
+        visibleWhen: { field: 'decision', notEquals: 'accept' },
+      });
+    }
     return {
       title: 'Skill verification found issues',
       description: [
         'One or more generated skills are missing, structurally broken, or have no',
-        'sub-skill leaf docs. Accept them as-is, or regenerate — the skill-generation',
-        'step (09_5) re-runs and the result comes back here for another check.',
+        'sub-skill leaf docs. Accept them as-is, repair only the failing skills (one agent',
+        'each — fast), or regenerate the whole library (slow). Either fix comes back here',
+        'for another check.',
       ].join(' '),
       infoSections,
-      fields: [
-        {
-          type: 'radio',
-          id: 'decision',
-          label: 'How should these skill issues be handled?',
-          options: [
-            { value: 'accept', label: 'Accept as-is — keep the skills despite the issues' },
-            { value: 'regenerate', label: 'Regenerate — re-run skill generation (09_5)' },
-          ],
-          default: 'accept',
-          required: true,
-        },
-      ],
+      fields,
       submitLabel: 'Apply decision',
     };
   },
 
-  // Regenerate re-enters 09_5 (reset + re-run in the same round); the regenerated
-  // skills come back through this step for another verification. Accept / no-issues
-  // returns null and the step finalizes. Human-gated and uncapped — the user breaks
-  // the cycle by choosing Accept.
+  // Repair routes to 09_5b (fixes only the failing skills); Regenerate re-enters 09_5 (full
+  // re-run). Both fork a new round and come back through this step for another verification.
+  // Accept / no-issues returns null and the step finalizes. Human-gated and uncapped — the
+  // user breaks the cycle by choosing Accept.
   reviseLoop: {
     evaluate: (out) =>
-      out.decision === 'regenerate' ? { targetStepId: SKILL_GENERATION_STEP_ID } : null,
+      out.decision === 'repair'
+        ? { targetStepId: SKILL_REPAIR_STEP_ID }
+        : out.decision === 'regenerate'
+          ? { targetStepId: SKILL_GENERATION_STEP_ID }
+          : null,
   },
 
   async apply(ctx, args): Promise<SkillVerificationApply> {
     const detected = args.detected as SkillVerificationDetect;
-    const values = args.formValues as { decision?: string };
+    const values = args.formValues as { decision?: string; repairCli?: string };
     const passed = detected.checks.every((c) => c.passed);
     const decision: SkillVerificationApply['decision'] = passed
       ? 'none'
       : values.decision === 'regenerate'
         ? 'regenerate'
-        : 'accept';
+        : values.decision === 'repair'
+          ? 'repair'
+          : 'accept';
+
+    // When the user picked a CLI for the fix, record it as the target step's per-step
+    // preference so the forked repair (09_5b) / regenerate (09_5) round dispatches on it.
+    // Mirrors the per-step CLI picker's write (userStepCliPreferences + a touched marker);
+    // resolvePreferredCli reads it at dispatch. Only a real change from the current model is
+    // written, so an unchanged dropdown never mints a sticky preference.
+    const cliChoice = resolveGateCliChoice({
+      decision,
+      repairCli: typeof values.repairCli === 'string' ? values.repairCli : undefined,
+      currentCliId: detected.currentCliId,
+      enabledIds: detected.cliOptions.map((o) => o.id),
+    });
+    if (cliChoice) {
+      await ctx.db
+        .insert(schema.userStepCliPreferences)
+        .values({
+          userId: ctx.userId,
+          stepId: cliChoice.targetStepId,
+          cliProviderId: cliChoice.cliProviderId,
+          explicit: true,
+        })
+        .onConflictDoUpdate({
+          target: [schema.userStepCliPreferences.userId, schema.userStepCliPreferences.stepId],
+          set: { cliProviderId: cliChoice.cliProviderId, explicit: true, updatedAt: new Date() },
+        });
+      await ctx.db
+        .insert(schema.taskStepCliTouched)
+        .values({ taskId: ctx.taskId, stepId: cliChoice.targetStepId, role: 'default' })
+        .onConflictDoNothing();
+    }
+
     ctx.logger.info(
       {
         passed,
         decision,
         missing: detected.missingFileIds.length,
         broken: detected.brokenStructureIds.length,
+        fixCli: cliChoice?.cliProviderId ?? null,
+        fixCliStep: cliChoice?.targetStepId ?? null,
       },
       'skill verification apply complete',
     );

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import {
   checkSkill,
+  resolveGateCliChoice,
   skillVerificationStep,
   type SkillCheck,
   type SkillVerificationDetect,
@@ -132,7 +133,11 @@ describe('checkSkill', () => {
   });
 });
 
-function detectStub(checks: SkillCheck[]): SkillVerificationDetect {
+function detectStub(
+  checks: SkillCheck[],
+  cliOptions: { id: string; label: string }[] = [],
+  currentCliId: string | null = null,
+): SkillVerificationDetect {
   return {
     checks,
     missingFileIds: checks
@@ -143,6 +148,8 @@ function detectStub(checks: SkillCheck[]): SkillVerificationDetect {
       .map((c) => c.skillId),
     deficientSubSkillIds: [],
     skillTargetDirs: [SKILLS_DIR],
+    cliOptions,
+    currentCliId,
   };
 }
 
@@ -174,12 +181,18 @@ describe('skillVerificationStep gate (gap 3)', () => {
     const radio = form!.fields.find((f) => f.id === 'decision');
     expect(radio?.type).toBe('radio');
     // 'accept' default => an auto-continue task never auto-selects the uncapped
-    // regenerate route.
+    // repair/regenerate routes.
     expect((radio as { default?: string }).default).toBe('accept');
+    // Repair is offered between accept and regenerate.
+    const opts = (radio as { options: { value: string }[] }).options.map((o) => o.value);
+    expect(opts).toEqual(['accept', 'repair', 'regenerate']);
   });
 
-  it('reviseLoop targets 09_5 only on regenerate', () => {
+  it('reviseLoop routes repair→09_5b and regenerate→09_5', () => {
     const evaluate = skillVerificationStep.reviseLoop!.evaluate;
+    expect(evaluate({ checks: [], passed: false, decision: 'repair' })).toEqual({
+      targetStepId: '09_5b-skill-repair',
+    });
     expect(evaluate({ checks: [], passed: false, decision: 'regenerate' })).toEqual({
       targetStepId: '09_5-skill-generation',
     });
@@ -216,5 +229,186 @@ describe('skillVerificationStep gate (gap 3)', () => {
       previousIterations: [],
     });
     expect(accept.decision).toBe('accept');
+
+    const repair = await skillVerificationStep.apply(ctxStub, {
+      detected: broken,
+      formValues: { decision: 'repair' },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(repair.passed).toBe(false);
+    expect(repair.decision).toBe('repair');
+  });
+});
+
+describe('resolveGateCliChoice', () => {
+  const enabled = ['p1', 'p2'];
+  it('returns null for accept / none', () => {
+    expect(
+      resolveGateCliChoice({
+        decision: 'accept',
+        repairCli: 'p2',
+        currentCliId: 'p1',
+        enabledIds: enabled,
+      }),
+    ).toBeNull();
+    expect(
+      resolveGateCliChoice({
+        decision: 'none',
+        repairCli: 'p2',
+        currentCliId: 'p1',
+        enabledIds: enabled,
+      }),
+    ).toBeNull();
+  });
+
+  it('routes repair to 09_5b and regenerate to 09_5 with the chosen provider', () => {
+    expect(
+      resolveGateCliChoice({
+        decision: 'repair',
+        repairCli: 'p2',
+        currentCliId: 'p1',
+        enabledIds: enabled,
+      }),
+    ).toEqual({ targetStepId: '09_5b-skill-repair', cliProviderId: 'p2' });
+    expect(
+      resolveGateCliChoice({
+        decision: 'regenerate',
+        repairCli: 'p2',
+        currentCliId: 'p1',
+        enabledIds: enabled,
+      }),
+    ).toEqual({ targetStepId: '09_5-skill-generation', cliProviderId: 'p2' });
+  });
+
+  it('returns null when the pick equals the current model, is unknown/disabled, or absent', () => {
+    expect(
+      resolveGateCliChoice({
+        decision: 'repair',
+        repairCli: 'p1',
+        currentCliId: 'p1',
+        enabledIds: enabled,
+      }),
+    ).toBeNull();
+    expect(
+      resolveGateCliChoice({
+        decision: 'repair',
+        repairCli: 'pX',
+        currentCliId: 'p1',
+        enabledIds: enabled,
+      }),
+    ).toBeNull();
+    expect(
+      resolveGateCliChoice({
+        decision: 'repair',
+        repairCli: undefined,
+        currentCliId: 'p1',
+        enabledIds: enabled,
+      }),
+    ).toBeNull();
+  });
+});
+
+describe('skillVerificationStep CLI-for-the-fix field', () => {
+  const broken = [makeCheck({ skillId: 'bad', passed: false, issues: ['SKILL.md empty'] })];
+
+  it('adds a repairCli select (visibleWhen != accept) when the user has >1 enabled provider', () => {
+    const detected = detectStub(
+      broken,
+      [
+        { id: 'p1', label: 'Claude' },
+        { id: 'p2', label: 'Codex' },
+      ],
+      'p1',
+    );
+    const form = skillVerificationStep.form!(ctxStub, detected)!;
+    const sel = form.fields.find((f) => f.id === 'repairCli');
+    expect(sel?.type).toBe('select');
+    expect((sel as { visibleWhen?: unknown }).visibleWhen).toEqual({
+      field: 'decision',
+      notEquals: 'accept',
+    });
+    expect((sel as { default?: string }).default).toBe('p1');
+    expect((sel as { options: { value: string }[] }).options.map((o) => o.value)).toEqual([
+      'p1',
+      'p2',
+    ]);
+  });
+
+  it('omits the picker when the user has <=1 enabled provider', () => {
+    const one = detectStub(broken, [{ id: 'p1', label: 'Claude' }], 'p1');
+    expect(
+      skillVerificationStep.form!(ctxStub, one)!.fields.find((f) => f.id === 'repairCli'),
+    ).toBeUndefined();
+    const none = detectStub(broken, [], null);
+    expect(
+      skillVerificationStep.form!(ctxStub, none)!.fields.find((f) => f.id === 'repairCli'),
+    ).toBeUndefined();
+  });
+});
+
+describe('skillVerificationStep.apply CLI write', () => {
+  const makeFakeDb = (sink: Record<string, unknown>[]) =>
+    ({
+      insert: () => ({
+        values: (vals: Record<string, unknown>) => {
+          sink.push(vals);
+          return { onConflictDoUpdate: async () => {}, onConflictDoNothing: async () => {} };
+        },
+      }),
+    }) as unknown as StepContext['db'];
+
+  const brokenDetect = (cur: string) =>
+    detectStub(
+      [makeCheck({ skillId: 'bad', passed: false, issues: ['SKILL.md empty'] })],
+      [
+        { id: 'p1', label: 'Claude' },
+        { id: 'p2', label: 'Codex' },
+      ],
+      cur,
+    );
+
+  it('records the chosen CLI as the target step pref (+touched) for repair', async () => {
+    const inserts: Record<string, unknown>[] = [];
+    const ctx = {
+      userId: 'u1',
+      taskId: 't1',
+      db: makeFakeDb(inserts),
+      logger: { info: () => {} },
+    } as unknown as StepContext;
+    const out = await skillVerificationStep.apply(ctx, {
+      detected: brokenDetect('p1'),
+      formValues: { decision: 'repair', repairCli: 'p2' },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(out.decision).toBe('repair');
+    expect(inserts).toContainEqual(
+      expect.objectContaining({
+        stepId: '09_5b-skill-repair',
+        cliProviderId: 'p2',
+        explicit: true,
+      }),
+    );
+    expect(inserts).toContainEqual(
+      expect.objectContaining({ stepId: '09_5b-skill-repair', role: 'default' }),
+    );
+  });
+
+  it('writes nothing when the pick equals the current model', async () => {
+    const inserts: Record<string, unknown>[] = [];
+    const ctx = {
+      userId: 'u1',
+      taskId: 't1',
+      db: makeFakeDb(inserts),
+      logger: { info: () => {} },
+    } as unknown as StepContext;
+    await skillVerificationStep.apply(ctx, {
+      detected: brokenDetect('p1'),
+      formValues: { decision: 'repair', repairCli: 'p1' },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(inserts).toEqual([]);
   });
 });
