@@ -14,6 +14,8 @@ let runtimeEnsureQueue: Queue | null = null;
 let runtimeEnsureQueueEvents: QueueEvents | null = null;
 let ideEnsureQueue: Queue | null = null;
 let ideEnsureQueueEvents: QueueEvents | null = null;
+let ddevControlQueue: Queue | null = null;
+let ddevControlQueueEvents: QueueEvents | null = null;
 
 export function getRepoQueue(): Queue {
   if (!repoQueue) {
@@ -95,6 +97,24 @@ export function getIdeEnsureQueueEvents(): QueueEvents {
   return ideEnsureQueueEvents;
 }
 
+/** Queue + QueueEvents for the ddev-control MCP: the api enqueues a status/logs/restart
+ *  job (from the sandbox MCP call) and awaits the worker's result before responding. */
+export function getDdevControlQueue(): Queue {
+  if (!ddevControlQueue) {
+    ddevControlQueue = new Queue(QUEUE_NAMES.DDEV_CONTROL, { connection: getBullRedis() });
+  }
+  return ddevControlQueue;
+}
+
+export function getDdevControlQueueEvents(): QueueEvents {
+  if (!ddevControlQueueEvents) {
+    ddevControlQueueEvents = new QueueEvents(QUEUE_NAMES.DDEV_CONTROL, {
+      connection: getBullRedis(),
+    });
+  }
+  return ddevControlQueueEvents;
+}
+
 export async function closeQueues(): Promise<void> {
   await Promise.allSettled([
     repoQueue?.close(),
@@ -107,6 +127,8 @@ export async function closeQueues(): Promise<void> {
     runtimeEnsureQueueEvents?.close(),
     ideEnsureQueue?.close(),
     ideEnsureQueueEvents?.close(),
+    ddevControlQueue?.close(),
+    ddevControlQueueEvents?.close(),
   ]);
   repoQueue = null;
   taskQueue = null;
@@ -118,4 +140,6 @@ export async function closeQueues(): Promise<void> {
   runtimeEnsureQueueEvents = null;
   ideEnsureQueue = null;
   ideEnsureQueueEvents = null;
+  ddevControlQueue = null;
+  ddevControlQueueEvents = null;
 }

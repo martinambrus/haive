@@ -53,6 +53,15 @@ export interface BuildDefaultMcpServersOptions {
   ragApiUrl?: string;
   /** Task-scoped bearer token the rag proxy presents to the API. */
   ragToken?: string;
+  /** Enable the ddev-control MCP server (ddev_status/ddev_logs/ddev_restart via the
+   *  API). Requires ddevControlServerPath, ddevApiUrl, and ddevToken to also be set. */
+  includeDdevControl?: boolean;
+  /** Container path of the bind-mounted ddev-control MCP server script. */
+  ddevControlServerPath?: string;
+  /** Base URL of the Haive API the ddev proxy calls (e.g. http://api:3001). */
+  ddevApiUrl?: string;
+  /** Task-scoped bearer token the ddev proxy presents to the API. */
+  ddevToken?: string;
 }
 
 /** Chromium binary path inside browserTesting sandboxes. The env-template
@@ -121,6 +130,18 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
       env: {
         RAG_API_URL: opts.ragApiUrl,
         RAG_TASK_TOKEN: opts.ragToken,
+      },
+    });
+  }
+
+  if (opts.includeDdevControl && opts.ddevControlServerPath && opts.ddevApiUrl && opts.ddevToken) {
+    servers.push({
+      name: 'ddev-control',
+      command: 'node',
+      args: [opts.ddevControlServerPath],
+      env: {
+        DDEV_API_URL: opts.ddevApiUrl,
+        DDEV_TASK_TOKEN: opts.ddevToken,
       },
     });
   }

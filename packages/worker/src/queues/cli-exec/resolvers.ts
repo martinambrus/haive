@@ -13,6 +13,8 @@ import {
   type TaskJobPayload,
   TASK_JOB_NAMES,
   isReadOnlyLocalRepo,
+  CONFIG_KEYS,
+  configService,
 } from '@haive/shared';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import {
@@ -26,6 +28,7 @@ import {
   serversToJsonObject,
 } from '../../sandbox/mcp-config.js';
 import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
+import { DDEV_MCP_SERVER_JS, DDEV_MCP_SERVER_PATH } from '../../sandbox/ddev-mcp-server.js';
 import { runnerBrowserCdpUrl } from '../../sandbox/ddev-runner.js';
 import { appRunnerBrowserCdpUrl } from '../../sandbox/app-runner.js';
 import { signRagToken } from '@haive/shared/rag';
@@ -277,6 +280,8 @@ export async function resolveMcpExtraFiles(
   // chrome-devtools is gated on a ready envTemplate with browserTesting.
   let includeChromeDevtools = false;
   let chromeDevtoolsMcpVersion: string | null = null;
+  // ddev-control is gated on the task being a DDEV task (declared container tool).
+  let isDdevTask = false;
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: { envTemplateId: true },
@@ -289,11 +294,24 @@ export async function resolveMcpExtraFiles(
     if (envTemplate && envTemplate.status === 'ready') {
       const deps = envTemplate.declaredDeps as Record<string, unknown> | null;
       includeChromeDevtools = !!deps?.browserTesting;
+      isDdevTask = deps?.containerTool === 'ddev';
       // Operative chrome-devtools-mcp pin for this repo (null = latest).
       chromeDevtoolsMcpVersion =
         (deps?.chromeDevtoolsMcpVersion as string | null | undefined) ?? null;
     }
   }
+
+  // ddev-control MCP: enabled for a DDEV task when the global kill-switch is on and a
+  // secret is present to mint the task token. Not for rag-only (mining) invocations —
+  // isDdevTask is only set inside the !ragOnly branch above.
+  const ddevSecret = process.env.CONFIG_ENCRYPTION_KEY;
+  const ddevControlEnabled =
+    isDdevTask &&
+    !!ddevSecret &&
+    (await configService.getBoolean(CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED, true));
+  const ddevToken = ddevControlEnabled ? signRagToken(taskId, ddevSecret as string) : '';
+  const ddevApiUrl =
+    process.env.DDEV_API_INTERNAL_URL || process.env.RAG_API_INTERNAL_URL || 'http://api:3001';
 
   const rag = await resolveRagMcpConfig(db, taskId);
 
@@ -314,6 +332,10 @@ export async function resolveMcpExtraFiles(
     ragServerPath: RAG_MCP_SERVER_PATH,
     ragApiUrl: rag.apiUrl,
     ragToken: rag.token,
+    includeDdevControl: ddevControlEnabled,
+    ddevControlServerPath: DDEV_MCP_SERVER_PATH,
+    ddevApiUrl,
+    ddevToken,
   });
 
   // User's custom MCP servers (.claude/mcp_settings.json) merged additively so
@@ -329,6 +351,9 @@ export async function resolveMcpExtraFiles(
   const ragFiles: SandboxExtraFile[] = rag.enabled
     ? [{ containerPath: RAG_MCP_SERVER_PATH, content: RAG_MCP_SERVER_JS }]
     : [];
+  const ddevFiles: SandboxExtraFile[] = ddevControlEnabled
+    ? [{ containerPath: DDEV_MCP_SERVER_PATH, content: DDEV_MCP_SERVER_JS }]
+    : [];
 
   // Gemini reads MCP servers from the SAME settings.json that holds
   // `selectedAuthType`. Bind-mounting an MCP-only file at that path
@@ -337,14 +362,14 @@ export async function resolveMcpExtraFiles(
   // task auth volume in-place instead, so the auth fields survive.
   if (providerName === 'gemini') {
     await mergeGeminiMcpIntoSettings(taskId, serversToJsonObject(servers, userServers));
-    return { files: ragFiles, extraArgs: [] };
+    return { files: [...ragFiles, ...ddevFiles], extraArgs: [] };
   }
 
   const config = buildMcpConfigForCli(providerName, servers, SANDBOX_USER_HOME, userServers);
   if (!config) return empty;
 
   return {
-    files: [{ containerPath: config.path, content: config.content }, ...ragFiles],
+    files: [{ containerPath: config.path, content: config.content }, ...ragFiles, ...ddevFiles],
     extraArgs: config.cliArgs ?? [],
   };
 }

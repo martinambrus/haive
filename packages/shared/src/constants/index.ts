@@ -25,6 +25,7 @@ export const QUEUE_NAMES = {
   GLOBAL_KB_SYNC: 'haive-global-kb-sync',
   RUNTIME_ENSURE: 'haive-runtime-ensure',
   IDE_ENSURE: 'haive-ide-ensure',
+  DDEV_CONTROL: 'haive-ddev-control',
   USAGE_POLL: 'haive-usage-poll',
 } as const;
 
@@ -88,6 +89,31 @@ export interface RuntimeEnsureResult {
    *  published ports. Empty/absent when direct access is disabled or no port is
    *  published. See `TaskAccessEndpoint`. */
   accessUrls?: TaskAccessEndpoint[];
+}
+
+export const DDEV_CONTROL_JOB_NAMES = {
+  RUN: 'ddev-control',
+} as const;
+
+/** Payload for `DDEV_CONTROL_JOB_NAMES.RUN`. The api enqueues this when a task's AI
+ *  CLI calls the ddev-control MCP (status/logs/restart); the worker resolves the
+ *  per-task DDEV runner handle and runs the matching `ddev` command via ddevExec
+ *  (docker access is worker-only). `service` selects a ddev service for logs (e.g.
+ *  'db'); `tail` bounds the returned log lines. */
+export interface DdevControlPayload {
+  taskId: string;
+  action: 'status' | 'logs' | 'restart';
+  service?: string;
+  tail?: number;
+}
+
+/** Result the worker returns for a ddev-control job. `output` is the (bounded)
+ *  combined stdout+stderr; `ok` is false with `error` set when the command failed or
+ *  no runner could be resolved. */
+export interface DdevControlResult {
+  ok: boolean;
+  output: string;
+  error?: string;
 }
 
 export const IDE_ENSURE_JOB_NAMES = {

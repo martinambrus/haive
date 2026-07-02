@@ -49,6 +49,37 @@ describe('buildDefaultMcpServers', () => {
     });
     expect(servers.map((s) => s.name)).toEqual(['postgres']);
   });
+
+  it('includes the ddev-control server when enabled with its path/url/token', () => {
+    const servers = buildDefaultMcpServers({
+      repoPath: '/workspace/repo',
+      includeDdevControl: true,
+      ddevControlServerPath: '/haive/haive-ddev-mcp.mjs',
+      ddevApiUrl: 'http://api:3001',
+      ddevToken: 'tok-123',
+    });
+    const ddev = servers.find((s) => s.name === 'ddev-control');
+    expect(ddev?.command).toBe('node');
+    expect(ddev?.args).toEqual(['/haive/haive-ddev-mcp.mjs']);
+    expect(ddev?.env).toEqual({ DDEV_API_URL: 'http://api:3001', DDEV_TASK_TOKEN: 'tok-123' });
+  });
+
+  it('omits ddev-control when disabled or missing its token/path', () => {
+    expect(
+      buildDefaultMcpServers({ repoPath: '/r', includeDdevControl: false }).find(
+        (s) => s.name === 'ddev-control',
+      ),
+    ).toBeUndefined();
+    // all four fields are required — enabled but no token → still omitted
+    expect(
+      buildDefaultMcpServers({
+        repoPath: '/r',
+        includeDdevControl: true,
+        ddevControlServerPath: '/haive/haive-ddev-mcp.mjs',
+        ddevApiUrl: 'http://api:3001',
+      }).find((s) => s.name === 'ddev-control'),
+    ).toBeUndefined();
+  });
 });
 
 describe('additive merge of user MCP servers', () => {

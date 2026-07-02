@@ -506,6 +506,24 @@ adminRoutes.put('/config/ddev-registry-cache', async (c) => {
   return c.json({ enabled });
 });
 
+const ddevControlSchema = z.object({ enabled: z.boolean() });
+
+// Global ddev-control MCP kill-switch. When ON (default), a DDEV task's AI CLI gets the
+// ddev-control MCP (ddev_status / ddev_logs / ddev_restart) so it can inspect and recover
+// its OWN runner when the app 404s. The worker reads this at cli-exec build time (within
+// the ~30s config cache); OFF stops injecting the server everywhere. Persists across restarts.
+adminRoutes.get('/config/ddev-control', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/ddev-control', async (c) => {
+  const { enabled } = ddevControlSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'ddev-control MCP switch updated');
+  return c.json({ enabled });
+});
+
 const fairSchedulingSchema = z.object({ enabled: z.boolean() });
 
 // Global fair cli-exec scheduling kill-switch. The worker reads this at each

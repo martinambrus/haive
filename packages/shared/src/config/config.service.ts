@@ -118,6 +118,13 @@ export const CONFIG_KEYS = {
   // cache; persists across restarts.
   DEBUG_MODE_ENABLED: 'config:debug:enabled',
 
+  // Global kill-switch for the DDEV-control MCP. When 'true' (default), a DDEV task's
+  // AI CLI gets a `ddev-control` MCP server (ddev_status / ddev_logs / ddev_restart)
+  // that proxies through the api to the worker's ddevExec, so the agent can inspect and
+  // recover its OWN per-task DDEV when the app 404s. Set 'false' to stop injecting that
+  // server everywhere (no redeploy). Read at cli-exec invocation build time.
+  DDEV_CONTROL_MCP_ENABLED: 'config:ddev:controlMcpEnabled',
+
   // Global kill-switch for the DDEV image pull-through cache. When 'true' (default),
   // each per-task DDEV runner routes its nested dockerd Docker Hub pulls through a
   // shared registry mirror (a singleton registry:2 proxy on a persistent volume), so a
@@ -197,6 +204,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.USAGE_WINDOW_ENABLED]: 'true',
   [CONFIG_KEYS.IDE_ENABLED]: 'true',
   [CONFIG_KEYS.DEBUG_MODE_ENABLED]: 'true',
+  [CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED]: 'true',
   [CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED]: 'true',
   [CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES]: String(DEFAULT_TASK_ATTACHMENT_MAX_BYTES),
   [CONFIG_KEYS.APP_URL]: 'http://localhost:3000',

@@ -44,6 +44,8 @@ export default function AdminPage() {
   const [savingDbAccess, setSavingDbAccess] = useState(false);
   const [ddevRegistryCacheEnabled, setDdevRegistryCacheEnabled] = useState<boolean | null>(null);
   const [savingDdevRegistryCache, setSavingDdevRegistryCache] = useState(false);
+  const [ddevControlEnabled, setDdevControlEnabled] = useState<boolean | null>(null);
+  const [savingDdevControl, setSavingDdevControl] = useState(false);
   const [fairEnabled, setFairEnabled] = useState<boolean | null>(null);
   const [savingFair, setSavingFair] = useState(false);
   const [promptCaching1hEnabled, setPromptCaching1hEnabled] = useState<boolean | null>(null);
@@ -72,6 +74,7 @@ export default function AdminPage() {
         browserAccessData,
         dbAccessData,
         ddevRegistryCacheData,
+        ddevControlData,
         fairData,
         perTaskData,
         attachmentData,
@@ -89,6 +92,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
         api.get<{ enabled: boolean }>('/admin/config/db-access'),
         api.get<{ enabled: boolean }>('/admin/config/ddev-registry-cache'),
+        api.get<{ enabled: boolean }>('/admin/config/ddev-control'),
         api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
         api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
         api.get<{ maxBytes: number }>('/admin/config/attachment-max-bytes'),
@@ -107,6 +111,7 @@ export default function AdminPage() {
       setBrowserAccessEnabled(browserAccessData.enabled);
       setDbAccessEnabled(dbAccessData.enabled);
       setDdevRegistryCacheEnabled(ddevRegistryCacheData.enabled);
+      setDdevControlEnabled(ddevControlData.enabled);
       setFairEnabled(fairData.enabled);
       setPromptCaching1hEnabled(promptCaching1hData.enabled);
       setTersenessLevel(tersenessData.level);
@@ -374,6 +379,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update DDEV image cache');
     } finally {
       setSavingDdevRegistryCache(false);
+    }
+  }
+
+  async function setDdevControl(next: boolean) {
+    setSavingDdevControl(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/ddev-control', {
+        enabled: next,
+      });
+      setDdevControlEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update DDEV-control MCP');
+    } finally {
+      setSavingDdevControl(false);
     }
   }
 
@@ -837,6 +857,32 @@ export default function AdminPage() {
             />
             {ddevRegistryCacheEnabled ? 'Enabled' : 'Disabled'}
             {savingDdevRegistryCache && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {ddevControlEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>DDEV control (agent MCP)</CardTitle>
+            <CardDescription>
+              Gives a DDEV task&apos;s AI CLI a ddev-control MCP with ddev_status, ddev_logs, and
+              ddev_restart tools, so the agent can inspect and recover its OWN per-task DDEV runner
+              when the app 404s instead of guessing at a code bug. Global kill-switch across every
+              repo; OFF stops injecting the server everywhere. Read at cli-exec build time (a
+              mid-task flip applies to the next CLI invocation).
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={ddevControlEnabled}
+              disabled={savingDdevControl}
+              onChange={(e) => void setDdevControl(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {ddevControlEnabled ? 'Enabled' : 'Disabled'}
+            {savingDdevControl && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

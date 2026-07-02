@@ -6,6 +6,7 @@ import { scheduleBundleGitSyncTick, startBundleWorker } from './queues/bundle-qu
 import { scheduleGlobalKbPurge, startGlobalKbSyncWorker } from './queues/global-kb-sync-queue.js';
 import { startRuntimeEnsureWorker } from './queues/runtime-ensure-queue.js';
 import { startIdeEnsureWorker } from './queues/ide-ensure-queue.js';
+import { startDdevControlWorker } from './queues/ddev-control-queue.js';
 import { scheduleUsagePollTick, startUsagePollWorker } from './queues/usage-poll-queue.js';
 import {
   closeCliExecQueue,
@@ -62,6 +63,9 @@ async function main(): Promise<void> {
   // Serves the api's Editor-tab "ensure IDE" requests: lazily launches the task's
   // code-server container when the user opens the editor.
   const ideEnsureWorker = startIdeEnsureWorker();
+  // Serves the ddev-control MCP: runs ddev status/logs/restart inside the task's runner
+  // when its AI CLI calls the tool (docker access is worker-only).
+  const ddevControlWorker = startDdevControlWorker();
   // Gentle background poller: reads each logged-in provider's subscription
   // usage-window endpoint (~5 min) so the task header can show 5h/weekly meters.
   const usagePollWorker = startUsagePollWorker();
@@ -145,6 +149,7 @@ async function main(): Promise<void> {
       globalKbSyncWorker.close(true),
       runtimeEnsureWorker.close(true),
       ideEnsureWorker.close(true),
+      ddevControlWorker.close(true),
       usagePollWorker.close(true),
       closeTaskQueue(),
       closeCliExecQueue(),
