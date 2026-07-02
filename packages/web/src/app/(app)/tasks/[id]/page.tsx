@@ -1753,6 +1753,11 @@ function usageRemainingColor(remaining: number): string {
   return remaining <= 10 ? 'text-red-400' : remaining <= 25 ? 'text-amber-400' : 'text-emerald-400';
 }
 
+/** Progress-bar fill colour for the usage chip, same thresholds as usageRemainingColor. */
+function usageBarColor(remaining: number): string {
+  return remaining <= 10 ? 'bg-red-500' : remaining <= 25 ? 'bg-amber-500' : 'bg-emerald-500';
+}
+
 /**
  * Subscription usage chip: each window's REMAINING percentage for the provider the
  * current step runs on (used = vendor-reported; remaining = 100 - used, matching the
@@ -1826,9 +1831,17 @@ function HeaderUsageChip({
         return (
           <span key={x.label} className="flex items-center gap-1.5">
             {i > 0 && <span className="h-3 w-px bg-neutral-600" aria-hidden />}
-            <span className={usageRemainingColor(remaining)}>
-              {remaining}%{reset ? ` [${reset}]` : ''}
+            <span className="relative h-3.5 w-[50px] shrink-0 overflow-hidden rounded-sm bg-neutral-800 ring-1 ring-white/70">
+              <span
+                className={`absolute inset-y-0 left-0 ${usageBarColor(remaining)}`}
+                style={{ width: `${Math.max(0, Math.min(100, remaining))}%` }}
+                aria-hidden
+              />
+              <span className="absolute inset-0 flex items-center justify-center text-[11px] font-semibold leading-none text-neutral-50 [text-shadow:0_0_2px_#000,0_1px_1px_#000]">
+                {remaining}%
+              </span>
             </span>
+            {reset && <span className="text-neutral-400">{reset}</span>}
           </span>
         );
       })}
