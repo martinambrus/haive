@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
@@ -45,8 +46,8 @@ const AUDIT_RULES = [
   'missing requirements, partial implementations, contradictions with the spec, and silently',
   'wrong behavior.',
   '',
-  'When you need conventions or context, search in this order: 1. `rag_search` FIRST,',
-  '2. `.claude/knowledge_base/`, 3. Grep / Read the codebase.',
+  'When you need conventions or context, search in this order:',
+  ...retrievalGuidanceLines(),
   '',
   'Blast radius — for every symbol whose signature, behavior, or schema this change modifies,',
   'use `rag_search` / grep to find its callers and dependents across the codebase and flag any',

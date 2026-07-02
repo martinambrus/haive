@@ -8,6 +8,7 @@ import type {
   AgentMiningResult,
 } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { collectImplementationFiles } from './_impl-changes.js';
@@ -198,7 +199,7 @@ export function computeBlocking(
 
 const SEARCH_LADDER = [
   'When you need conventions or context, search in this order:',
-  '1. `rag_search` FIRST, 2. `.claude/knowledge_base/`, 3. Grep / Read the codebase.',
+  ...retrievalGuidanceLines(),
 ] as const;
 
 const PEER_PERSONA = [

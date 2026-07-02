@@ -289,6 +289,7 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
         detected.isBugFix
           ? '- RUN-BOOKS (`.claude/knowledge_base/investigations/`): past bug investigations (symptom → root cause → fix). This task is a BUG FIX — search them FIRST for this class of bug; quote the prior symptom/root cause and ground the Approach in what resolved it before.'
           : '- RUN-BOOKS (`.claude/knowledge_base/investigations/`): past bug investigations. Lower priority for this NEW-FEATURE task, but still worth checking when extending a historically-buggy area.',
+        'Then GROUND every lead with LSP + grep against the CURRENT files on disk (on hits too, not as a fallback): the index can be stale, so a rag_search snippet is a lead to confirm, never the source of truth.',
         '',
         'Presentation conventions for the spec body (the Haive web renderer detects and upgrades these):',
         '1. REQUIRED final section `## Comprehension Quiz` with 3-5 questions that test understanding',

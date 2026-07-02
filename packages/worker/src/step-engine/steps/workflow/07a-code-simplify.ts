@@ -4,6 +4,7 @@ import { schema } from '@haive/database';
 import { STEP_CLI_ROLES } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 
@@ -90,9 +91,7 @@ function priorSimplifier(previous: StepLoopPassRecord[]): SimplifyApply | null {
 
 const SEARCH_LADDER = [
   'When you need existing patterns or context, search in this order:',
-  '1. `rag_search` FIRST (semantic + lexical over the indexed code and knowledge base),',
-  '2. then the relevant `.claude/knowledge_base/` files,',
-  '3. then Grep / Read the codebase directly.',
+  ...retrievalGuidanceLines(),
 ] as const;
 
 // The code-simplifier agent definition, vendored from Anthropic's open-source

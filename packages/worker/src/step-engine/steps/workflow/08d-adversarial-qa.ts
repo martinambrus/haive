@@ -8,6 +8,7 @@ import type {
   AgentMiningResult,
 } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput } from './_task-meta.js';
@@ -146,7 +147,7 @@ export function adversaryIdsForLevel(level: QaLevel): string[] {
 
 const SEARCH_LADDER = [
   'When you need context, search in this order:',
-  '1. `rag_search` FIRST, 2. `.claude/knowledge_base/`, 3. Grep / Read the codebase.',
+  ...retrievalGuidanceLines(),
 ] as const;
 
 const SAFETY = [

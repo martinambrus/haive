@@ -3,6 +3,7 @@ import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 
 // Insight collection (legacy insight-collection.md). Agents may append a
 // `## INSIGHTS` block to their output noting OPTIONAL improvements out of scope
@@ -84,7 +85,7 @@ async function collectInsights(ctx: StepContext): Promise<Insight[]> {
 
 const SEARCH_LADDER = [
   'When you need context, search in this order:',
-  '1. `rag_search` FIRST, 2. `.claude/knowledge_base/`, 3. Grep / Read the codebase.',
+  ...retrievalGuidanceLines(),
 ] as const;
 
 export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {

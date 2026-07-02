@@ -6,6 +6,7 @@ import { STEP_CLI_ROLES } from '@haive/shared';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
+import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
@@ -177,9 +178,7 @@ function accumulatedFixes(previous: StepLoopPassRecord[]): string[] {
 
 const SEARCH_LADDER = [
   'When you need existing patterns or context, search in this order:',
-  '1. `rag_search` FIRST (semantic + lexical over the indexed code and knowledge base),',
-  '2. then the relevant `.claude/knowledge_base/` files,',
-  '3. then Grep / Read the codebase directly.',
+  ...retrievalGuidanceLines(),
 ] as const;
 
 // Condensed Visual Inspection Protocol (the onboarded integration-tester agent
