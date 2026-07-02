@@ -100,7 +100,8 @@ describe('onboarding registry', () => {
     });
     const lsp = schema!.fields.find((f) => f.id === 'lspLanguages');
     expect(lsp?.type).toBe('multi-select');
-    expect((lsp as { defaults: string[] }).defaults).toEqual(['php']);
+    // Single PHP LSP survivor now — all PHP (generic or CMS) defaults to it.
+    expect((lsp as { defaults: string[] }).defaults).toEqual(['php-extended']);
   });
 
   it('tooling infrastructure defaults to php-extended for Drupal frameworks', () => {

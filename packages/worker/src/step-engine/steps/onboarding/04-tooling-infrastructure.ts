@@ -54,11 +54,10 @@ interface EnvDetectData {
 }
 
 const LSP_OPTIONS: { value: string; label: string }[] = [
-  { value: 'php', label: 'Intelephense (PHP)' },
-  {
-    value: 'php-extended',
-    label: 'Intelephense + CMS extensions (.inc, .module, .install, .theme, .profile)',
-  },
+  // Single PHP LSP option — plain `php` dropped (it and `php-extended` now install
+  // the same intelephense binary + drupal-php-lsp plugin with CMS-extension
+  // handling). Legacy `php` selections still work; they map to the survivor.
+  { value: 'php-extended', label: 'Intelephense (PHP)' },
   { value: 'typescript', label: 'vtsls (TypeScript / JavaScript)' },
   { value: 'python', label: 'Pyright (Python)' },
   { value: 'go', label: 'gopls (Go)' },
@@ -70,7 +69,6 @@ const LSP_OPTIONS: { value: string; label: string }[] = [
  *  it uses, for surfacing the version badge. rust/java map to unpinnable servers
  *  (rust-analyzer, jdtls) that have no cached version → no badge. */
 const LSP_OPTION_TO_TOOL: Record<string, string> = {
-  php: 'intelephense',
   'php-extended': 'intelephense',
   typescript: 'vtsls',
   python: 'pyright',
@@ -79,20 +77,12 @@ const LSP_OPTION_TO_TOOL: Record<string, string> = {
   java: 'jdtls',
 };
 
-/** Frameworks that use non-standard PHP file extensions (.inc, .module, etc.) */
-const PHP_EXTENDED_FRAMEWORKS = new Set([
-  'drupal',
-  'drupal7',
-  'drupal8',
-  'drupal9',
-  'drupal10',
-  'laravel',
-]);
-
-function defaultLspForLanguage(lang: string, framework: string, hasPhpExtended: boolean): string[] {
+function defaultLspForLanguage(lang: string): string[] {
   switch (lang) {
     case 'php':
-      return [hasPhpExtended || PHP_EXTENDED_FRAMEWORKS.has(framework) ? 'php-extended' : 'php'];
+      // Single PHP LSP now (drupal-php-lsp plugin + intelephense, CMS extensions
+      // handled). Legacy `php` selections still resolve to this survivor.
+      return ['php-extended'];
     case 'javascript':
     case 'typescript':
       return ['typescript'];
@@ -315,11 +305,7 @@ export const toolingInfrastructureStep: StepDefinition<
               : `WARNING: ${detected.cliDisplayName ?? 'the current CLI'} does not support plugin install in haive. LSP servers will still be baked into the project image, but LSP plugins will not be installed into the CLI until you switch to a CLI that supports them (e.g. Claude Code, Z.AI, Qwen). `) +
             'Pick one or more language servers to install. Leave empty to skip LSP installation.',
           options: lspOptions,
-          defaults: defaultLspForLanguage(
-            detected.primaryLanguage,
-            detected.framework,
-            detected.hasPhpExtendedExtensions,
-          ),
+          defaults: defaultLspForLanguage(detected.primaryLanguage),
         },
         {
           type: 'checkbox',

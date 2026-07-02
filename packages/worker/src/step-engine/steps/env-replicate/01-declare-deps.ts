@@ -15,12 +15,16 @@ import type {
 import type { StepDefinition } from '../../step-definition.js';
 import { deriveEnvTemplateName, getTaskEnvTemplate, linkTaskToEnvTemplate } from './_shared.js';
 
+// Both PHP language keys map to the single surviving env key (intelephense-extended):
+// after the PHP-LSP consolidation plain php and php-extended are the same server
+// (intelephense + drupal-php-lsp with CMS extensions). Legacy `php` selections
+// therefore converge to the survivor here too.
 const ONBOARDING_LSP_TO_ENV_KEY: Record<string, LspKey> = {
   typescript: 'vtsls',
   python: 'pyright',
   go: 'gopls',
   rust: 'rust-analyzer',
-  php: 'intelephense',
+  php: 'intelephense-extended',
   'php-extended': 'intelephense-extended',
   java: 'jdtls',
 };
@@ -268,11 +272,10 @@ const DB_OPTIONS: { value: DatabaseKind; label: string }[] = [
 ];
 
 const LSP_OPTIONS: { value: LspKey; label: string }[] = [
-  { value: 'intelephense', label: 'Intelephense (PHP)' },
-  {
-    value: 'intelephense-extended',
-    label: 'Intelephense + CMS extensions (.inc, .module, .install)',
-  },
+  // Single PHP LSP option — plain `intelephense` dropped (duplicate of the
+  // extended one after the PHP-LSP consolidation). Legacy key still installs
+  // fine; migration 0084 normalizes stored repo values.
+  { value: 'intelephense-extended', label: 'Intelephense (PHP)' },
   { value: 'vtsls', label: 'vtsls (TypeScript/JavaScript)' },
   { value: 'pyright', label: 'Pyright (Python)' },
   { value: 'gopls', label: 'gopls (Go)' },

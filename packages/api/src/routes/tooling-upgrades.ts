@@ -42,8 +42,12 @@ const LSP_KEY_TO_TOOL: Record<string, ToolName> = {
 
 /** Selectable LSP servers (env keys) for the per-repo tooling management page. */
 const LSP_SERVER_OPTIONS: { value: string; label: string }[] = [
-  { value: 'intelephense', label: 'Intelephense (PHP)' },
-  { value: 'intelephense-extended', label: 'Intelephense + CMS extensions (PHP)' },
+  // Single PHP LSP option. The plain `intelephense` key was dropped — it and
+  // `intelephense-extended` install the same intelephense binary + the same
+  // drupal-php-lsp plugin (with CMS-extension handling), so they were duplicates.
+  // The legacy `intelephense` key is still accepted by consumers and normalized to
+  // this survivor by migration 0084.
+  { value: 'intelephense-extended', label: 'Intelephense (PHP)' },
   { value: 'vtsls', label: 'vtsls (TypeScript / JavaScript)' },
   { value: 'pyright', label: 'Pyright (Python)' },
   { value: 'gopls', label: 'gopls (Go)' },
