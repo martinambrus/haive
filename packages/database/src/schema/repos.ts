@@ -46,8 +46,19 @@ export const repositories = pgTable(
     detectedFramework: varchar('detected_framework', { length: 64 }),
     detectedLanguages: jsonb('detected_languages').$type<Record<string, number>>(),
     fileTree: jsonb('file_tree').$type<string[]>(),
-    excludedPaths: jsonb('excluded_paths').$type<string[]>(),
-    selectedPaths: jsonb('selected_paths').$type<string[]>(),
+    /** Onboarding/RAG scope exclusion list: gitignore-style path globs excluded
+     *  from the expensive onboarding mining steps (08 knowledge-acquisition,
+     *  09-qa, 09_5 skill-generation) and from RAG population / task-end reindex.
+     *  DENYLIST semantics: a path NOT listed here is IN scope (including brand-new
+     *  folders from later tasks), so new features are auto-mined/indexed; only
+     *  listed paths (built-in framework code — Drupal core/contrib, vendor, ...)
+     *  are skipped. Seeded during onboarding (06_7) by a deterministic scan of
+     *  NO_RECURSE dirs + framework patterns + composer installer-paths + gitignore,
+     *  then user-editable via the onboarding picker and the repos-page tree editor.
+     *  Agents (06_5-agent-discovery) intentionally ignore this and stay full-repo.
+     *  NULL = onboarding has not produced a list yet (the repos-page exclusion
+     *  editor stays hidden). Distinct from secretMask* which hides secret files. */
+    scopeExcludeGlobs: jsonb('scope_exclude_globs').$type<string[]>(),
     storagePath: text('storage_path'),
     sizeBytes: integer('size_bytes'),
     credentialsSecretId: uuid('credentials_secret_id').references(() => repoCredentials.id, {

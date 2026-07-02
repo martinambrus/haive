@@ -5,6 +5,7 @@ import type { DetectResult, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
+import { isDeniedPath, loadScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
 import { techAnchorFacets } from '../_repo-stack.js';
 import {
   resolveStackVersions,
@@ -43,6 +44,9 @@ interface KnowledgeDetect {
   customCode: { include: string[]; exclude: string[] };
   /** Transient — file tree for LLM prompt, stripped before persisting. */
   __fileTree?: string;
+  /** Transient — per-repo scope deny list; drives the soft-scope prompt section.
+   *  Stripped before persisting. */
+  __scopeExclude?: string[];
   /** Transient — README excerpt for LLM prompt context. */
   __readmeExcerpt?: string;
   /** Transient — pre-existing KB files (from a prior orchestration) the LLM
@@ -108,12 +112,16 @@ const IGNORE_DIRS = new Set([
   '.ddev',
 ]);
 
-async function collectShortFileTree(repoPath: string): Promise<string> {
+async function collectShortFileTree(
+  repoPath: string,
+  exclude: readonly string[] = [],
+): Promise<string> {
   const files = await listFilesMatching(
     repoPath,
     (rel, isDir) => {
       const parts = rel.split('/');
       if (parts.some((p) => IGNORE_DIRS.has(p))) return false;
+      if (isDeniedPath(rel, exclude)) return false;
       if (isDir) return false;
       return true;
     },
@@ -175,6 +183,7 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
   const detected = args.detected as KnowledgeDetect;
   const fileTree =
     (detected as unknown as Record<string, string>).__fileTree ?? '(no file tree available)';
+  const scopeExclude = (detected as unknown as Record<string, string[]>).__scopeExclude ?? [];
   const readme =
     (detected as unknown as Record<string, string>).__readmeExcerpt ?? '(no README found)';
   const existingKb = detected.__existingKb ?? [];
@@ -223,13 +232,16 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     fileTree,
     '```',
     '',
+    ...scopeInstructionLines(scopeExclude),
     '## README excerpt',
     readme,
     '',
     ...existingKbLines,
     '## Instructions',
     '',
-    'Use your file-reading tools to deeply explore this repository. Do NOT rely only on the partial file tree above.',
+    scopeExclude.length > 0
+      ? 'Use your file-reading tools to deeply explore THIS PROJECT\'S OWN code — the in-scope directories. Do NOT rely only on the partial file tree above, and do NOT crawl the out-of-scope third-party/built-in directories listed under "Mining scope".'
+      : 'Use your file-reading tools to deeply explore this repository. Do NOT rely only on the partial file tree above.',
     'Systematically investigate:',
     '',
     '1. **Architecture & patterns**: Read key source files to understand the architecture.',
@@ -1243,8 +1255,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       confirmed,
     );
 
+    const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
     await ctx.emitProgress('Collecting file tree for LLM orientation...');
-    const fileTree = await collectShortFileTree(ctx.repoPath);
+    const fileTree = await collectShortFileTree(ctx.repoPath, scopeExclude);
 
     await ctx.emitProgress('Reading README...');
     const readmeExcerpt = await readReadmeExcerpt(ctx.repoPath);
@@ -1276,6 +1289,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       packages,
       customCode,
       __fileTree: fileTree,
+      __scopeExclude: scopeExclude,
       __readmeExcerpt: readmeExcerpt ?? undefined,
       __existingKb: existingKb.length > 0 ? existingKb : undefined,
     };
@@ -1462,6 +1476,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
 
     // Strip transient fields
     delete (detected as unknown as Record<string, unknown>).__fileTree;
+    delete (detected as unknown as Record<string, unknown>).__scopeExclude;
     delete (detected as unknown as Record<string, unknown>).__readmeExcerpt;
     delete (detected as unknown as Record<string, unknown>).__existingKb;
 

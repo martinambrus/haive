@@ -62,7 +62,10 @@ export const createRepoRequestSchema = z
 export type CreateRepoRequest = z.infer<typeof createRepoRequestSchema>;
 
 export const updateRepoExclusionsRequestSchema = z.object({
-  excludedPaths: z.array(z.string().min(1).max(1024)).max(1024),
+  /** The onboarding/RAG scope deny list (repositories.scope_exclude_globs):
+   *  directory path globs excluded from mining + RAG. Nested paths allowed
+   *  (e.g. "web/modules/contrib"). */
+  scopeExcludeGlobs: z.array(z.string().min(1).max(1024)).max(1024),
 });
 
 export type UpdateRepoExclusionsRequest = z.infer<typeof updateRepoExclusionsRequestSchema>;

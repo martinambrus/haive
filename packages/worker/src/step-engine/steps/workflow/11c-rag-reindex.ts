@@ -2,6 +2,7 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { probeOllama } from '../onboarding/_rag-embed.js';
+import { loadScopeExcludeGlobs } from '../onboarding/_scope.js';
 import type { RagMode, RagToolingPrefs } from '../onboarding/_rag-connection.js';
 import {
   collectKbFiles,
@@ -73,8 +74,9 @@ export const ragReindexStep: StepDefinition<RagReindexDetect, RagReindexApply> =
 
     if (resolved.ragConfigured && resolved.ragToolingPrefs) {
       await ctx.emitProgress('Counting source files...');
+      const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
       kbFileCount = (await collectKbFiles(worktreePath)).length;
-      codeFileCount = (await collectCodeFiles(worktreePath)).length;
+      codeFileCount = (await collectCodeFiles(worktreePath, scopeExclude)).length;
 
       if (resolved.ragToolingPrefs.ollamaUrl) {
         await ctx.emitProgress('Testing Ollama connectivity...');

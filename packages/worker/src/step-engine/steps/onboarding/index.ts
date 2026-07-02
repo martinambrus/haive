@@ -7,6 +7,7 @@ import { toolingInfrastructureStep } from './04-tooling-infrastructure.js';
 import { globalKbStep } from './04_5-global-kb.js';
 import { customBundlesStep } from './06_3-custom-bundles.js';
 import { agentDiscoveryStep } from './06_5-agent-discovery.js';
+import { scopeSelectionStep } from './06_7-scope-selection.js';
 import { generateFilesStep } from './07-generate-files.js';
 import { verifyFilesStep } from './07_5-verify-files.js';
 import { knowledgeAcquisitionStep } from './08-knowledge-acquisition.js';
@@ -32,6 +33,7 @@ export {
   globalKbStep,
   customBundlesStep,
   agentDiscoveryStep,
+  scopeSelectionStep,
   generateFilesStep,
   verifyFilesStep,
   knowledgeAcquisitionStep,
@@ -59,6 +61,7 @@ export function registerOnboardingSteps(registry: StepRegistry): void {
   registry.register(globalKbStep);
   registry.register(customBundlesStep);
   registry.register(agentDiscoveryStep);
+  registry.register(scopeSelectionStep);
   registry.register(generateFilesStep);
   registry.register(verifyFilesStep);
   registry.register(knowledgeAcquisitionStep);

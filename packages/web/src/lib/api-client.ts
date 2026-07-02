@@ -192,8 +192,10 @@ export interface Repository {
    *  longer shipped in the list payload. Absent on the single-repo detail
    *  endpoint, which has no consumer that renders it. */
   topLevelPaths?: string[];
-  excludedPaths: string[] | null;
-  selectedPaths: string[] | null;
+  /** Onboarding/RAG scope deny list (repositories.scope_exclude_globs). NULL when
+   *  onboarding has not produced a scope yet — the repos-page exclusions editor
+   *  stays hidden until then. */
+  scopeExcludeGlobs: string[] | null;
   sizeBytes: number | null;
   openTaskCount: number;
   activeTaskCount: number;

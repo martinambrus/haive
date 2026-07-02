@@ -4,6 +4,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { isDeniedPath, loadScopeExcludeGlobs } from '../onboarding/_scope.js';
 import {
   resolveRagConnection,
   ensureRagSchema,
@@ -81,13 +82,20 @@ export async function collectKbFiles(repo: string): Promise<string[]> {
   return out.sort();
 }
 
-export async function collectCodeFiles(repo: string): Promise<string[]> {
+export async function collectCodeFiles(
+  repo: string,
+  exclude: readonly string[] = [],
+): Promise<string[]> {
   const codeExts = new Set(Object.keys(CODE_EXTENSIONS));
   const files = await listFilesMatching(
     repo,
     (rel, isDir) => {
       const parts = rel.split('/');
       if (parts.some((p) => CODE_IGNORE_DIRS.has(p))) return false;
+      // Per-repo onboarding scope deny list (06_7): keep task-end re-index scoped
+      // to this project's own code, same as onboarding. New folders not on the
+      // list stay in scope. Empty list → no-op.
+      if (isDeniedPath(rel, exclude)) return false;
       if (isDir) return false;
       return codeExts.has(path.extname(rel).toLowerCase());
     },
@@ -247,8 +255,9 @@ export async function runRagIndexSync(
     let skipped = 0;
     let deleted = 0;
 
+    const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
     const kbFiles = await collectKbFiles(repoPath);
-    const codeFiles = await collectCodeFiles(repoPath);
+    const codeFiles = await collectCodeFiles(repoPath, scopeExclude);
 
     const allFiles: Array<{ relPath: string; sourceType: RagSourceType }> = [
       ...kbFiles.map((r) => ({ relPath: r, sourceType: classifyKbSourceType(r) })),

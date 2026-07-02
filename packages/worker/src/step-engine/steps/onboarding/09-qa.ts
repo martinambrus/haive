@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { DetectResult } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
+import { isDeniedPath, loadScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 
 /* ------------------------------------------------------------------ */
@@ -30,6 +31,8 @@ export interface KnowledgeQaPrepDetect {
   kbFiles: KbFileSummary[];
   /** Transient — file tree handed to the LLM prompt; stripped before persisting. */
   __fileTree?: string;
+  /** Transient — per-repo scope deny list; drives the soft-scope prompt section. */
+  __scopeExclude?: string[];
 }
 
 export interface KnowledgeQaPrepApply {
@@ -112,12 +115,16 @@ async function collectKbDir(rootDir: string, current: string, out: KbFileSummary
   }
 }
 
-async function collectShortFileTree(repoPath: string): Promise<string> {
+async function collectShortFileTree(
+  repoPath: string,
+  exclude: readonly string[] = [],
+): Promise<string> {
   const files = await listFilesMatching(
     repoPath,
     (rel, isDir) => {
       const parts = rel.split('/');
       if (parts.some((p) => IGNORE_DIRS.has(p))) return false;
+      if (isDeniedPath(rel, exclude)) return false;
       if (isDir) return false;
       return true;
     },
@@ -137,6 +144,7 @@ async function collectShortFileTree(repoPath: string): Promise<string> {
 function buildPrompt(args: LlmBuildArgs): string {
   const detected = args.detected as KnowledgeQaPrepDetect;
   const fileTree = detected.__fileTree ?? '(no file tree available)';
+  const scopeExclude = detected.__scopeExclude ?? [];
   const kbList =
     detected.kbFiles.length > 0
       ? detected.kbFiles.map((f) => `- ${f.relPath} — ${f.title}`).join('\n')
@@ -160,6 +168,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     fileTree,
     '```',
     '',
+    ...scopeInstructionLines(scopeExclude),
     '## Instructions',
     '',
     'Call your file-reading tools DIRECTLY to explore this repository — actually issue the',
@@ -332,8 +341,9 @@ export const knowledgeQaPrepStep: StepDefinition<KnowledgeQaPrepDetect, Knowledg
     await ctx.emitProgress('Listing existing knowledge base...');
     const kbFiles = await listKbFiles(ctx.repoPath);
 
+    const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
     await ctx.emitProgress('Collecting file tree for LLM orientation...');
-    const fileTree = await collectShortFileTree(ctx.repoPath);
+    const fileTree = await collectShortFileTree(ctx.repoPath, scopeExclude);
 
     await ctx.emitProgress(
       `Project context gathered (${kbFiles.length} KB files, ${fileTree.split('\n').length} source files). Waiting for AI question generation...`,
@@ -343,7 +353,7 @@ export const knowledgeQaPrepStep: StepDefinition<KnowledgeQaPrepDetect, Knowledg
       { framework, language, kbFileCount: kbFiles.length },
       'qa-prep detect complete',
     );
-    return { framework, language, kbFiles, __fileTree: fileTree };
+    return { framework, language, kbFiles, __fileTree: fileTree, __scopeExclude: scopeExclude };
   },
 
   llm: {

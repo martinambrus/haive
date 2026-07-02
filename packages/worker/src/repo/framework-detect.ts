@@ -6,8 +6,6 @@ export interface DetectionResult {
   framework: FrameworkName | null;
   languages: Record<string, number>;
   fileTree: string[];
-  excludedPaths: string[];
-  selectedPaths: string[];
   sizeBytes: number;
 }
 
@@ -71,8 +69,7 @@ export async function detectFromDirectory(rootDir: string): Promise<DetectionRes
   const framework = detectFramework(fileTree);
   const languages = detectLanguages(fileTree);
   const sizeBytes = await calculateSize(rootDir);
-  const { excludedPaths, selectedPaths } = computePathSelection(fileTree, framework);
-  return { framework, languages, fileTree, excludedPaths, selectedPaths, sizeBytes };
+  return { framework, languages, fileTree, sizeBytes };
 }
 
 export async function buildFileTree(dir: string, prefix = ''): Promise<string[]> {
@@ -167,29 +164,4 @@ async function calculateSize(dir: string): Promise<number> {
     }
   }
   return total;
-}
-
-export function computePathSelection(
-  fileTree: string[],
-  framework: FrameworkName | null,
-): { excludedPaths: string[]; selectedPaths: string[] } {
-  const config = framework ? FRAMEWORK_PATTERNS[framework] : FRAMEWORK_PATTERNS.general;
-
-  const excludedPaths: string[] = [...(config.excludePaths ?? [])];
-  const customPaths: string[] = [...(config.customPaths ?? [])];
-
-  const topDirs = new Set<string>();
-  for (const file of fileTree) {
-    const segment = file.split('/')[0];
-    if (segment) topDirs.add(segment);
-  }
-
-  const selectedPaths =
-    customPaths.length > 0
-      ? customPaths.filter((p) => fileTree.some((f) => f.startsWith(p.replace(/\/$/, ''))))
-      : Array.from(topDirs).filter(
-          (d) => !excludedPaths.some((e) => d.startsWith(e.replace(/\/$/, ''))),
-        );
-
-  return { excludedPaths, selectedPaths };
 }

@@ -1,6 +1,7 @@
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { probeOllama } from '../onboarding/_rag-embed.js';
+import { loadScopeExcludeGlobs } from '../onboarding/_scope.js';
 import type { RagMode, RagToolingPrefs } from '../onboarding/_rag-connection.js';
 import {
   collectKbFiles,
@@ -58,8 +59,9 @@ export const preRagSyncStep: StepDefinition<RagSyncDetect, RagSyncApply> = {
 
     if (resolved.ragConfigured && resolved.ragToolingPrefs) {
       await ctx.emitProgress('Counting source files...');
+      const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
       kbFileCount = (await collectKbFiles(ctx.repoPath)).length;
-      codeFileCount = (await collectCodeFiles(ctx.repoPath)).length;
+      codeFileCount = (await collectCodeFiles(ctx.repoPath, scopeExclude)).length;
 
       if (resolved.ragToolingPrefs.ollamaUrl) {
         await ctx.emitProgress('Testing Ollama connectivity...');

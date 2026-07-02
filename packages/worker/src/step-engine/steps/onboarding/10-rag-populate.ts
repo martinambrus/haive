@@ -5,6 +5,7 @@ import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
+import { loadScopeExcludeGlobs } from './_scope.js';
 import {
   resolveRagConnection,
   ensureRagSchema,
@@ -507,7 +508,12 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       } | null
     )?.data;
     const projectName = envData?.project?.name ?? 'default';
-    const excludePaths = envData?.paths?.customCodePaths?.exclude ?? [];
+    // Union the legacy 01-env-detect exclude heuristic with the authoritative
+    // per-repo onboarding scope deny list (06_7). The deny list is the single
+    // source of truth for what stays out of mining AND RAG; when it is empty
+    // (06_7 skipped / pre-feature repo) this reduces to the old behavior.
+    const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
+    const excludePaths = [...(envData?.paths?.customCodePaths?.exclude ?? []), ...scopeExclude];
 
     // Load selected folders and extension set from step 09_7
     const ragSourcePrev = await loadPreviousStepOutput(

@@ -1,0 +1,15 @@
+-- Onboarding/RAG scope exclusion list (gitignore-style path globs). Excludes
+-- built-in framework code (Drupal core/contrib, vendor, ...) from the expensive
+-- onboarding mining steps (08 knowledge-acquisition, 09-qa, 09_5 skill-generation)
+-- and from RAG population / task-end reindex. DENYLIST: unlisted paths (incl. new
+-- folders from future tasks) stay in scope, so features auto-mine/index; only the
+-- listed built-ins are skipped. Seeded by a light LLM structure-detect at
+-- onboarding, user-editable. Agents (06_5) intentionally ignore it and stay
+-- full-repo. NULL = onboarding has not produced a list yet.
+--
+-- Supersedes the dead excluded_paths/selected_paths for scan scoping (those are
+-- dropped in a later, separate migration once their — currently non-existent —
+-- consumers are migrated). Distinct from secret_mask_* (which hides secret files).
+--
+-- Additive + idempotent: safe to re-run on every environment via `drizzle-kit push`.
+ALTER TABLE "repositories" ADD COLUMN IF NOT EXISTS "scope_exclude_globs" jsonb;

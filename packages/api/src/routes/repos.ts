@@ -13,6 +13,7 @@ import {
   updateRepoExclusionsRequestSchema,
   type ArchiveFormat,
 } from '@haive/shared';
+import { buildScopeTree } from '@haive/shared/scope-tree';
 import { getDb } from '../db.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -570,6 +571,31 @@ repoRoutes.get('/:id', async (c) => {
   return c.json({ repository: repo });
 });
 
+// Live deep+hidden directory tree for the repos-page scope editor. Walked on
+// demand off the shared haive_repos volume (NOT the flat, non-hidden fileTree
+// column, which cannot represent nested/hidden dirs). Returns the nested tree
+// plus the current deny list so the editor can pre-tick excluded subtrees.
+repoRoutes.get('/:id/scope-tree', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const db = getDb();
+  const repo = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    columns: {
+      id: true,
+      status: true,
+      storagePath: true,
+      localPath: true,
+      scopeExcludeGlobs: true,
+    },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+  const root = repo.storagePath ?? repo.localPath;
+  if (!root) throw new HttpError(409, 'Repository has no on-disk path yet');
+  const tree = await buildScopeTree(root);
+  return c.json({ tree, scopeExcludeGlobs: repo.scopeExcludeGlobs ?? [] });
+});
+
 repoRoutes.patch('/:id/exclusions', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -578,44 +604,27 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
 
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
-    columns: { id: true, fileTree: true, excludedPaths: true },
+    columns: { id: true },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
 
-  const fileTree = repo.fileTree ?? [];
-  const topLevel = new Set<string>();
-  for (const file of fileTree) {
-    const segment = file.split('/')[0];
-    if (segment) topLevel.add(segment);
-  }
-  // Also accept paths already stored as exclusions (e.g. framework defaults
-  // like .git, .DS_Store that buildFileTree skips during scanning)
-  const existingExcluded = new Set(
-    (repo.excludedPaths ?? []).map((p) => p.replace(/^\/+|\/+$/g, '')),
-  );
-  const invalid = body.excludedPaths.filter((p) => {
-    const head = p.replace(/^\/+/, '').split('/')[0];
-    if (!head) return true;
-    return !topLevel.has(head) && !existingExcluded.has(head);
-  });
-  if (invalid.length > 0) {
-    throw new HttpError(400, `Unknown paths: ${invalid.slice(0, 5).join(', ')}`);
-  }
-
-  const selectedPaths = Array.from(topLevel).filter(
-    (d) => !body.excludedPaths.some((e) => d === e.replace(/^\/+|\/+$/g, '')),
-  );
+  // Normalize (strip surrounding slashes) + drop empties. Nested globs are
+  // allowed and NOT validated against the tree: the deny list tolerates a glob
+  // that matches nothing (isDeniedPath simply won't fire), matching how the
+  // onboarding scope-picker (06_7) persists its frontier.
+  const scopeExcludeGlobs = Array.from(
+    new Set(
+      body.scopeExcludeGlobs.map((p) => p.replace(/^\/+|\/+$/g, '')).filter((p) => p.length > 0),
+    ),
+  ).sort();
 
   const updated = await db
     .update(schema.repositories)
-    .set({
-      excludedPaths: body.excludedPaths,
-      selectedPaths,
-      updatedAt: new Date(),
-    })
+    .set({ scopeExcludeGlobs, updatedAt: new Date() })
     .where(eq(schema.repositories.id, id))
     .returning();
-  return c.json({ repository: updated[0]! });
+  const { fileTree: _drop, ...rest } = updated[0]!;
+  return c.json({ repository: rest });
 });
 
 const ONBOARDING_MARKERS = [

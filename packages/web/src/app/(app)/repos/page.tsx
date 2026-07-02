@@ -2,8 +2,10 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import type { TreeNode } from '@haive/shared';
 import { api, API_BASE_URL, type Repository } from '@/lib/api-client';
 import { Button, Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
+import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
 import { ToolingUpgradeBanner } from '@/components/tooling-upgrade-banner';
 import { usePageTitle } from '@/lib/use-page-title';
@@ -15,8 +17,68 @@ function statusVariant(status: Repository['status']) {
   return 'warning' as const;
 }
 
-function normalizeExclusion(value: string): string {
-  return value.replace(/^\/+|\/+$/g, '');
+/* ------------------------------------------------------------------ */
+/* Scope-tree <-> deny-list conversion (mirrors onboarding step 06_7)  */
+/* ------------------------------------------------------------------ */
+
+function collectAllPaths(nodes: TreeNode[]): string[] {
+  const out: string[] = [];
+  for (const n of nodes) {
+    out.push(n.path);
+    if (n.children) out.push(...collectAllPaths(n.children));
+  }
+  return out;
+}
+
+/** A path is covered by the deny list when it IS a deny glob or sits under one. */
+function isCoveredByDeny(p: string, deny: readonly string[]): boolean {
+  for (const d of deny) {
+    if (p === d || p.startsWith(`${d}/`)) return true;
+  }
+  return false;
+}
+
+/** The DirectoryTreeSelect value is the INCLUDED set (every node in scope listed
+ *  explicitly). Derive it from the stored deny list = every tree path not denied. */
+function includedFromDeny(tree: TreeNode[], deny: readonly string[]): string[] {
+  return collectAllPaths(tree).filter((p) => !isCoveredByDeny(p, deny));
+}
+
+/** The exclusion frontier: descend ONLY into included nodes, so the first
+ *  un-included node on each path becomes one deny entry covering its whole
+ *  subtree. Mirror of 06_7's collectDenyFrontier. */
+function denyFromIncluded(tree: TreeNode[], included: Set<string>, out: string[]): void {
+  for (const node of tree) {
+    if (included.has(node.path)) {
+      if (node.children) denyFromIncluded(node.children, included, out);
+    } else {
+      out.push(node.path);
+    }
+  }
+}
+
+/** Split total file counts by whether each node is currently included. Each node
+ *  contributes its OWN direct fileCount to in-scope or ignored by its membership. */
+function fileCountsFromIncluded(
+  tree: TreeNode[],
+  included: Set<string>,
+): { inScope: number; ignored: number } {
+  let inScope = 0;
+  let ignored = 0;
+  function walk(nodes: TreeNode[]) {
+    for (const n of nodes) {
+      if (included.has(n.path)) inScope += n.fileCount ?? 0;
+      else ignored += n.fileCount ?? 0;
+      if (n.children) walk(n.children);
+    }
+  }
+  walk(tree);
+  return { inScope, ignored };
+}
+
+interface ScopeTreeState {
+  tree: TreeNode[];
+  included: Set<string>;
 }
 
 export default function ReposPage() {
@@ -24,7 +86,9 @@ export default function ReposPage() {
   const [repos, setRepos] = useState<Repository[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expandedRepoId, setExpandedRepoId] = useState<string | null>(null);
-  const [pendingExclusions, setPendingExclusions] = useState<Set<string>>(new Set());
+  const [scope, setScope] = useState<ScopeTreeState | null>(null);
+  const [scopeLoading, setScopeLoading] = useState(false);
+  const [scopeError, setScopeError] = useState<string | null>(null);
 
   async function reload() {
     try {
@@ -63,31 +127,41 @@ export default function ReposPage() {
     }
   }
 
-  function toggleExpand(repo: Repository) {
+  async function toggleExpand(repo: Repository) {
     if (expandedRepoId === repo.id) {
       setExpandedRepoId(null);
+      setScope(null);
+      setScopeError(null);
       return;
     }
-    const initial = new Set<string>((repo.excludedPaths ?? []).map(normalizeExclusion));
-    setPendingExclusions(initial);
     setExpandedRepoId(repo.id);
-  }
-
-  function togglePath(repoId: string, path: string) {
-    setPendingExclusions((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      void saveExclusions(repoId, next);
-      return next;
-    });
-  }
-
-  async function saveExclusions(repoId: string, paths: Set<string>) {
+    setScope(null);
+    setScopeError(null);
+    setScopeLoading(true);
     try {
-      await api.patch(`/repos/${repoId}/exclusions`, {
-        excludedPaths: Array.from(paths).sort(),
+      const data = await api.get<{ tree: TreeNode[]; scopeExcludeGlobs: string[] }>(
+        `/repos/${repo.id}/scope-tree`,
+      );
+      setScope({
+        tree: data.tree,
+        included: new Set(includedFromDeny(data.tree, data.scopeExcludeGlobs ?? [])),
       });
+    } catch (err) {
+      setScopeError((err as Error).message ?? 'Failed to load directory tree');
+    } finally {
+      setScopeLoading(false);
+    }
+  }
+
+  async function handleChangeIncluded(repoId: string, includedPaths: string[]) {
+    const tree = scope?.tree;
+    if (!tree) return;
+    const included = new Set(includedPaths);
+    setScope((s) => (s ? { ...s, included } : s));
+    const deny: string[] = [];
+    denyFromIncluded(tree, included, deny);
+    try {
+      await api.patch(`/repos/${repoId}/exclusions`, { scopeExcludeGlobs: deny.sort() });
       await reload();
     } catch (err) {
       setError((err as Error).message ?? 'Failed to update exclusions');
@@ -137,11 +211,13 @@ export default function ReposPage() {
               key={repo.id}
               repo={repo}
               expanded={expandedRepoId === repo.id}
-              pendingExclusions={pendingExclusions}
+              scope={expandedRepoId === repo.id ? scope : null}
+              scopeLoading={expandedRepoId === repo.id && scopeLoading}
+              scopeError={expandedRepoId === repo.id ? scopeError : null}
               onExpand={() => toggleExpand(repo)}
               onDelete={() => handleDelete(repo.id)}
               onRetry={() => handleRetry(repo.id)}
-              onTogglePath={(p) => togglePath(repo.id, p)}
+              onChangeIncluded={(paths) => handleChangeIncluded(repo.id, paths)}
             />
           ))}
         </div>
@@ -153,19 +229,33 @@ export default function ReposPage() {
 interface RepoCardProps {
   repo: Repository;
   expanded: boolean;
-  pendingExclusions: Set<string>;
+  scope: ScopeTreeState | null;
+  scopeLoading: boolean;
+  scopeError: string | null;
   onExpand: () => void;
   onDelete: () => void;
   onRetry: () => Promise<void>;
-  onTogglePath: (path: string) => void;
+  onChangeIncluded: (paths: string[]) => void;
 }
 
 function RepoCard(props: RepoCardProps) {
-  const { repo, expanded, pendingExclusions, onExpand, onDelete, onRetry, onTogglePath } = props;
+  const {
+    repo,
+    expanded,
+    scope,
+    scopeLoading,
+    scopeError,
+    onExpand,
+    onDelete,
+    onRetry,
+    onChangeIncluded,
+  } = props;
 
-  const topLevelPaths = repo.topLevelPaths ?? [];
-  const canEdit = repo.status === 'ready' && topLevelPaths.length > 0;
-  const excludedCount = repo.excludedPaths?.length ?? 0;
+  // The exclusions editor is available once onboarding has produced a scope deny
+  // list (scopeExcludeGlobs !== null). Before that there is nothing to edit.
+  const canEditScope = repo.status === 'ready' && repo.scopeExcludeGlobs !== null;
+  const excludedCount = repo.scopeExcludeGlobs?.length ?? 0;
+  const counts = scope ? fileCountsFromIncluded(scope.tree, scope.included) : null;
 
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
@@ -268,7 +358,7 @@ function RepoCard(props: RepoCardProps) {
               {downloading ? 'Zipping...' : 'Download'}
             </Button>
           )}
-          {canEdit && (
+          {canEditScope && (
             <Button variant="secondary" size="sm" onClick={onExpand}>
               {expanded ? 'Close' : 'Exclusions'}
             </Button>
@@ -300,32 +390,33 @@ function RepoCard(props: RepoCardProps) {
         <UpgradeAvailableBanner repositoryId={repo.id} repositoryName={repo.name} />
       )}
       {repo.status === 'ready' && <ToolingUpgradeBanner repositoryId={repo.id} />}
-      {expanded && canEdit && (
+      {expanded && canEditScope && (
         <div className="mt-2 border-t border-neutral-800 pt-3">
-          <p className="mb-2 text-sm font-semibold text-neutral-100">Top-level exclusions</p>
-          <p className="mb-3 text-xs text-neutral-500">
-            Uncheck directories to include them in ingestion, or check to exclude them. Applies to
-            KB mining, RAG, and analysis steps.
-          </p>
-          <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
-            {topLevelPaths.map((p) => {
-              const isExcluded = pendingExclusions.has(p);
-              return (
-                <label
-                  key={p}
-                  className="flex items-center gap-2 rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-sm text-neutral-100"
-                >
-                  <input
-                    type="checkbox"
-                    checked={isExcluded}
-                    onChange={() => onTogglePath(p)}
-                    className="h-4 w-4 rounded border-neutral-700 bg-neutral-900 accent-indigo-500"
-                  />
-                  <span className={isExcluded ? 'text-neutral-500 line-through' : ''}>{p}</span>
-                </label>
-              );
-            })}
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-sm font-semibold text-neutral-100">Onboarding &amp; RAG scope</p>
+            {counts && (
+              <p className="text-xs text-neutral-400">
+                {counts.inScope} file{counts.inScope === 1 ? '' : 's'} in scope
+                <span className="text-neutral-600"> · </span>
+                {counts.ignored} ignored
+              </p>
+            )}
           </div>
+          <p className="mb-3 text-xs text-neutral-500">
+            Ticked directories are mined by the knowledge-base &amp; skill steps and indexed into
+            RAG. Untick built-in / vendored directories (Drupal core, contrib, vendor, node_modules,
+            ...) to keep onboarding fast and focused on this project&apos;s own code. New folders
+            added later are included automatically.
+          </p>
+          {scopeLoading && <p className="text-sm text-neutral-500">Scanning directories...</p>}
+          {scopeError && <p className="text-sm text-red-400">{scopeError}</p>}
+          {scope && (
+            <DirectoryTreeSelect
+              tree={scope.tree}
+              value={[...scope.included]}
+              onChange={(paths) => onChangeIncluded(paths)}
+            />
+          )}
         </div>
       )}
     </Card>

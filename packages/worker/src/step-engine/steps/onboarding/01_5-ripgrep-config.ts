@@ -4,6 +4,7 @@ import type { DetectResult, FrameworkName } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
 import { RG_BUILTIN_TYPES, KNOWN_LANGUAGE_EXTENSIONS } from './_extension-registry.js';
+import { NO_RECURSE_DIRS } from '@haive/shared/scope-tree';
 
 /** Extensions that might contain PHP code even though they're not *.php */
 const PHP_CANDIDATE_EXTENSIONS = new Set([
@@ -124,6 +125,11 @@ async function scanExtensions(
     repoPath,
     (rel, isDir) => {
       if (isDir) return false;
+      // Keep the extension set describing THIS project's own code: skip build /
+      // vendored output dirs (dist, build, .next, venv, target, ...) so their
+      // generated file types don't pollute the .ripgreprc + RAG extension set.
+      // (walk() already skips node_modules/.git/vendor.)
+      if (rel.split('/').some((p) => NO_RECURSE_DIRS.has(p))) return false;
       const ext = resolveExtension(rel);
       return ext !== null && !isAlreadyCovered(ext);
     },

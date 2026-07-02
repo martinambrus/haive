@@ -47,6 +47,10 @@
       "types": "./dist/step-engine/timing.d.ts",
       "import": "./dist/step-engine/timing.js"
     },
+    "./scope-tree": {
+      "types": "./dist/repo/scope-tree.d.ts",
+      "import": "./dist/repo/scope-tree.js"
+    },
     "./claude-oauth": {
       "types": "./dist/cli-providers/claude-oauth.d.ts",
       "import": "./dist/cli-providers/claude-oauth.js"

@@ -15,6 +15,7 @@ import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
 import { jsonrepair } from 'jsonrepair';
 import type { KbFileSummary } from './09-qa.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
+import { isDeniedPath, loadScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
 
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
 
@@ -38,6 +39,8 @@ interface SkillGenDetect {
   bundleSkills: SkillEntry[];
   /** Transient — file tree handed to the LLM prompt; stripped before persisting. */
   __fileTree?: string;
+  /** Transient — per-repo scope deny list; drives the soft-scope prompt section. */
+  __scopeExclude?: string[];
 }
 
 interface SkillGenApply {
@@ -207,12 +210,16 @@ async function collectKbDir(rootDir: string, current: string, out: KbFileSummary
   }
 }
 
-export async function collectShortFileTree(repoPath: string): Promise<string> {
+export async function collectShortFileTree(
+  repoPath: string,
+  exclude: readonly string[] = [],
+): Promise<string> {
   const files = await listFilesMatching(
     repoPath,
     (rel, isDir) => {
       const parts = rel.split('/');
       if (parts.some((p) => IGNORE_DIRS.has(p))) return false;
+      if (isDeniedPath(rel, exclude)) return false;
       if (isDir) return false;
       return true;
     },
@@ -713,6 +720,7 @@ function buildSkillPrompt(
       : '';
 
   const fileTree = detected.__fileTree ?? '(no file tree available)';
+  const scopeExclude = detected.__scopeExclude ?? [];
   const kbList =
     detected.kbFiles.length > 0
       ? detected.kbFiles
@@ -818,10 +826,13 @@ function buildSkillPrompt(
     fileTree,
     '```',
     '',
+    ...scopeInstructionLines(scopeExclude),
     hints.length > 0 ? `## User-supplied hints about likely skill domains\n\n${hints}\n` : '',
     '## Your task',
     '',
-    'Use your file-reading tools (Read, Grep, Glob) to deeply explore this repository, then:',
+    scopeExclude.length > 0
+      ? 'Use your file-reading tools (Read, Grep, Glob) to deeply explore THIS PROJECT\'S OWN code — the in-scope directories, not the out-of-scope third-party/built-in dirs listed under "Mining scope" — then:'
+      : 'Use your file-reading tools (Read, Grep, Glob) to deeply explore this repository, then:',
     taskLine,
     '',
     '## Required structure for the skill',
@@ -896,8 +907,9 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     await ctx.emitProgress('Loading bundle skills...');
     const bundleSkills = await loadBundleSkills(ctx);
 
+    const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
     await ctx.emitProgress('Collecting file tree for LLM orientation...');
-    const fileTree = await collectShortFileTree(ctx.repoPath);
+    const fileTree = await collectShortFileTree(ctx.repoPath, scopeExclude);
 
     ctx.logger.info(
       {
@@ -918,6 +930,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       skillTargetDirs,
       bundleSkills,
       __fileTree: fileTree,
+      __scopeExclude: scopeExclude,
     };
   },
 

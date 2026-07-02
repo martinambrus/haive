@@ -85,8 +85,6 @@ async function persistDetection(
       fileTree: detection.fileTree,
       detectedFramework: detection.framework,
       detectedLanguages: detection.languages,
-      excludedPaths: detection.excludedPaths,
-      selectedPaths: detection.selectedPaths,
       sizeBytes: detection.sizeBytes,
       storagePath,
       status: 'ready',
