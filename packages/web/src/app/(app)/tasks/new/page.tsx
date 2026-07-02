@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Lock, Unlock } from 'lucide-react';
 import { usePageTitle } from '@/lib/use-page-title';
 import {
   api,
@@ -551,28 +552,53 @@ export default function NewTaskPage() {
               </Button>
             </Link>
           </div>
-          <select
-            id="cliProviderId"
-            value={cliProviderId}
-            onChange={(e) => setCliProviderId(e.target.value)}
-            className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-          >
-            <option value="">(none — deterministic steps only)</option>
-            {(providers ?? []).map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label} ({p.name})
-              </option>
-            ))}
-          </select>
-          <label className="mt-2 flex items-center gap-2 text-sm text-neutral-100">
-            <input
-              type="checkbox"
-              checked={ignoreSavedStepClis}
-              onChange={(e) => setIgnoreSavedStepClis(e.target.checked)}
-              className="h-4 w-4 rounded border-neutral-700 bg-neutral-950"
-            />
-            Use this CLI for every step (this task only)
-          </label>
+          <div className="flex items-center gap-2">
+            <select
+              id="cliProviderId"
+              value={cliProviderId}
+              onChange={(e) => setCliProviderId(e.target.value)}
+              className="h-10 min-w-0 flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+            >
+              <option value="">(none — deterministic steps only)</option>
+              {(providers ?? []).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label} ({p.name})
+                </option>
+              ))}
+            </select>
+            {/* Two-state lock: on = force this CLI on every step for this task
+                only (ignoreSavedStepClis). Styled HTML tooltip (not the native
+                title attr) mirrors InfoTooltip in form-renderer; anchored right-0
+                so it stays inside the form. */}
+            <span className="group/lock relative inline-flex shrink-0">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={ignoreSavedStepClis}
+                aria-label="Use this CLI for every step (this task only)"
+                onClick={() => setIgnoreSavedStepClis((v) => !v)}
+                className={`inline-flex h-10 w-10 items-center justify-center rounded-md border transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500 ${
+                  ignoreSavedStepClis
+                    ? 'border-indigo-500 bg-indigo-950/40 text-indigo-300'
+                    : 'border-neutral-800 bg-neutral-950 text-neutral-400 hover:border-neutral-700 hover:text-neutral-200'
+                }`}
+              >
+                {ignoreSavedStepClis ? (
+                  <Lock className="h-4 w-4" />
+                ) : (
+                  <Unlock className="h-4 w-4" />
+                )}
+              </button>
+              <span
+                role="tooltip"
+                className="pointer-events-none absolute right-0 top-full z-30 mt-2 w-64 whitespace-pre-line rounded-md border border-neutral-700 bg-neutral-900 px-3 py-2 text-xs font-normal leading-relaxed text-neutral-200 opacity-0 shadow-xl transition-opacity duration-150 group-hover/lock:opacity-100"
+              >
+                {ignoreSavedStepClis
+                  ? 'Locked: using this CLI for every step (this task only). Click to unlock.'
+                  : 'Unlocked: use this CLI for every step (this task only). Click to lock.'}
+              </span>
+            </span>
+          </div>
           <p className="text-xs text-neutral-500">
             Ignores your saved per-step CLI choices and defaults every step to the CLI above, for
             this task only — your saved choices are left untouched. Steps you change manually during
