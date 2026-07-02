@@ -2034,7 +2034,12 @@ function StepCardImpl({
   const uiPrefix = `task-ui:${taskId}:${step.id}`;
   const [showOutput, setShowOutput] = usePersistedToggle(`${uiPrefix}:output`, false);
   const [showRagStats, setShowRagStats] = usePersistedToggle(`${uiPrefix}:ragstats`, false);
-  const isDiscovery = step.stepId === '03-phase-0a-discovery';
+  // RAG stats are available for any step that ran an agent (rag_search only
+  // fires during a CLI invocation). Attribution is by time window server-side,
+  // so no per-step wiring is needed; the panel shows "none recorded" for the
+  // rare agent step that made no rag_search. Deterministic/form-only steps
+  // (cliInvocationCount 0) never call rag, so they get no toggle.
+  const ranAgent = step.cliInvocationCount > 0;
   const schema = step.formSchema as FormSchema | null;
   const initialValues = (step.formValues as FormValues | null) ?? undefined;
   const taskCancelled = taskStatus === 'cancelled';
@@ -2729,7 +2734,7 @@ function StepCardImpl({
         </div>
       )}
 
-      {isDiscovery && step.startedAt && (
+      {ranAgent && step.startedAt && (
         <button
           type="button"
           onClick={() => setShowRagStats((v) => !v)}
@@ -2738,7 +2743,7 @@ function StepCardImpl({
           {showRagStats ? 'Hide' : 'Show'} RAG stats
         </button>
       )}
-      {isDiscovery && showRagStats && <RagStatsPanel taskId={taskId} stepId={step.stepId} />}
+      {ranAgent && showRagStats && <RagStatsPanel taskId={taskId} stepId={step.stepId} />}
 
       {step.cliInvocationCount > 0 && (
         <StepTerminal
