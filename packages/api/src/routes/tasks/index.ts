@@ -301,13 +301,20 @@ taskRoutes.get('/:id', async (c) => {
     .select()
     .from(schema.taskSteps)
     .where(eq(schema.taskSteps.taskId, id))
-    // Chronological (creation) order, NOT stepIndex alone: a fix loop re-runs the
-    // 07->08a steps as NEW rows with the same stepIndex but a higher round, created
-    // when the loop re-enters. Ordering by createdAt lays them out in run order — the
-    // round-0 sequence, then the round-1 fix-loop sequence, then the post-loop steps —
-    // and makes same-stepIndex rounds deterministic (round 1 after round 0, not
-    // arbitrarily on top, which is what the heap order did). stepIndex breaks ties.
-    .orderBy(asc(schema.taskSteps.createdAt), asc(schema.taskSteps.stepIndex));
+    // Run-list order: sort by run_seq (the step's position in buildRunList, stamped by
+    // the worker), monotonic with true run order even for steps reused across task types
+    // (the env_replicate prelude in a workflow, run_app's choose-view/env steps) or
+    // inserted mid-pipeline on a resumed task — cases where createdAt (created out of run
+    // order) and stepIndex alone (global offset, not run-monotonic for reused steps) both
+    // misorder. round is primary so a fix loop's round-N rows (same step, higher round)
+    // stay grouped after round 0. Legacy rows with null run_seq fall back to createdAt
+    // (Postgres sorts NULLs last on ASC); stepIndex is the final tiebreak.
+    .orderBy(
+      asc(schema.taskSteps.round),
+      asc(schema.taskSteps.runSeq),
+      asc(schema.taskSteps.createdAt),
+      asc(schema.taskSteps.stepIndex),
+    );
   const enriched = await enrichStepsWithCliPreferences(
     db,
     userId,

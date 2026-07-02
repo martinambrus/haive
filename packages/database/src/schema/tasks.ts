@@ -220,6 +220,14 @@ export const taskSteps = pgTable(
       .references(() => tasks.id, { onDelete: 'cascade' }),
     stepId: varchar('step_id', { length: 128 }).notNull(),
     stepIndex: doublePrecision('step_index').notNull(),
+    /** Display-only ordering key: the step's position in the task's run list
+     *  (buildRunList) at the time it was advanced. Unlike step_index (a global
+     *  offset+metadata.index that is NOT monotonic with run order for steps reused
+     *  across task types — the env_replicate prelude in a workflow, run_app's
+     *  choose-view/env steps), run_seq always matches true run order, so the step
+     *  list sorts by (round, run_seq). Nullable: stamped by the worker on advance
+     *  and backfilled on boot; legacy rows fall back to created_at ordering. */
+    runSeq: integer('run_seq'),
     /** Fix-loop round (0 = original pass). A blocking downstream defect re-enters
      *  at 07-implement and re-runs the chain as round+1; each round materializes
      *  its own rows. Unique per (task_id, step_id, round). */

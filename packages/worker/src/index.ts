@@ -15,6 +15,7 @@ import {
 } from './queues/cli-exec-queue.js';
 import { startRepoWorker } from './queues/repo-queue.js';
 import {
+  backfillMissingRunSeq,
   closeTaskQueue,
   reconcileEmbedModelResidency,
   reconcileOrphanedSteps,
@@ -74,6 +75,11 @@ async function main(): Promise<void> {
   // job died mid-execution, so neither hangs after a restart/crash/power loss.
   await reconcileOrphanedSteps(getDb()).catch((err) => {
     logger.warn({ err }, 'orphaned-step reconciliation on boot failed');
+  });
+  // Backfill run_seq (the run-order display key) on step rows created before it was
+  // stamped, so already-in-flight task lists sort correctly without needing a re-advance.
+  await backfillMissingRunSeq(getDb()).catch((err) => {
+    logger.warn({ err }, 'run_seq backfill on boot failed');
   });
   // Recover embed-model unloads a prior worker missed (died mid terminal-transition
   // before sending keep_alive:0): evict any resident RAG model no live task needs.

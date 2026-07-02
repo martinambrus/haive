@@ -55,11 +55,19 @@ stepRoutes.get('/:id/steps', async (c) => {
     .select()
     .from(schema.taskSteps)
     .where(eq(schema.taskSteps.taskId, id))
-    // Chronological (creation) order — kept identical to GET /tasks/:id (index.ts):
-    // createdAt reflects fix-loop run order (round-0 sequence, then the round-1 block,
-    // then post-loop round-0 steps), whereas a round-primary sort would hoist the
-    // post-loop steps above the round-1 block. stepIndex breaks ties.
-    .orderBy(asc(schema.taskSteps.createdAt), asc(schema.taskSteps.stepIndex));
+    // Run-list order — kept identical to GET /tasks/:id (index.ts). run_seq is the
+    // step's position in buildRunList (worker-stamped), monotonic with true run order
+    // even for steps reused across task types or inserted mid-pipeline on a resumed task
+    // — cases where createdAt (created out of run order) and stepIndex alone (global
+    // offset, not run-monotonic for reused steps) both misorder. round is primary so a
+    // fix loop's round-N rows (same step, higher round) stay grouped after round 0.
+    // Legacy rows with null run_seq fall back to createdAt (Postgres sorts NULLs last).
+    .orderBy(
+      asc(schema.taskSteps.round),
+      asc(schema.taskSteps.runSeq),
+      asc(schema.taskSteps.createdAt),
+      asc(schema.taskSteps.stepIndex),
+    );
   const enriched = await enrichStepsWithCliPreferences(
     db,
     userId,

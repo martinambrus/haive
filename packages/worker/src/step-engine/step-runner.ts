@@ -164,6 +164,10 @@ export interface AdvanceStepParams {
   stepDef: StepDefinition;
   /** Fix-loop round to materialize/run the step at (default 0 = original pass). */
   round?: number;
+  /** The step's position in the task's run list (buildRunList index), stamped onto
+   *  task_steps.run_seq for run-order display. Undefined leaves run_seq null (the row
+   *  then falls back to created_at ordering until a boot backfill fills it in). */
+  runSeq?: number;
   formValues?: FormValues;
   providers?: CliProviderRecord[];
   deps?: WorkerDeps;
@@ -906,7 +910,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
   const meta = stepDef.metadata;
   const round = params.round ?? 0;
 
-  const row = await upsertRow(db, taskId, stepDef, round);
+  const row = await upsertRow(db, taskId, stepDef, round, params.runSeq);
 
   const controller = new AbortController();
   const throwIfCancelled = (): void => {
@@ -1548,6 +1552,7 @@ async function upsertRow(
   taskId: string,
   stepDef: StepDefinition,
   round: number,
+  runSeq?: number,
 ): Promise<TaskStepRow> {
   const meta = stepDef.metadata;
   const existing = await db
@@ -1561,13 +1566,27 @@ async function upsertRow(
       ),
     )
     .limit(1);
-  if (existing[0]) return existing[0];
+  if (existing[0]) {
+    // Self-heal a row created before its run-list position was known (or before
+    // run_seq existed) so its display order corrects without waiting for the boot
+    // backfill. Only fills a null — never overwrites a stamped position.
+    if (runSeq != null && existing[0].runSeq == null) {
+      const [updated] = await db
+        .update(schema.taskSteps)
+        .set({ runSeq })
+        .where(eq(schema.taskSteps.id, existing[0].id))
+        .returning();
+      return updated ?? existing[0];
+    }
+    return existing[0];
+  }
   const inserted = await db
     .insert(schema.taskSteps)
     .values({
       taskId,
       stepId: meta.id,
       stepIndex: computeGlobalStepIndex(meta.workflowType, meta.index),
+      runSeq: runSeq ?? null,
       round,
       title: meta.title,
       status: 'pending',

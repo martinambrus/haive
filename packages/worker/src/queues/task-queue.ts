@@ -1164,6 +1164,8 @@ async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<v
     cliProviderId: ctx.cliProviderId,
     ignoreSavedStepClis: ctx.ignoreSavedStepClis,
     stepDef: first,
+    // first === steps[0], so its run-list position (run_seq) is 0.
+    runSeq: 0,
     providers,
     deps: workerDeps,
   });
@@ -1306,6 +1308,10 @@ async function handleAdvanceStep(
 
   const formValues = payload.formValues ?? existing?.formValues ?? undefined;
 
+  // Stamp the step's position in the run list as run_seq (the run-order display key).
+  const runList = await buildRunList(ctx, db);
+  const runIdx = runList.findIndex((s) => s.metadata.id === payload.stepId);
+
   const providers = await loadProviders(db, ctx.userId);
   const result = await advanceStep({
     db,
@@ -1317,6 +1323,7 @@ async function handleAdvanceStep(
     ignoreSavedStepClis: ctx.ignoreSavedStepClis,
     stepDef,
     round,
+    runSeq: runIdx >= 0 ? runIdx : undefined,
     formValues,
     providers,
     deps: workerDeps,
@@ -1425,6 +1432,49 @@ export async function reconcileOrphanedSteps(db: Database): Promise<void> {
         { err, taskId: s.taskId, stepId: s.stepId },
         'reconcile orphaned running step failed',
       );
+    }
+  }
+}
+
+/** Backfill task_steps.run_seq for rows created before it was stamped. run_seq is the
+ *  step's index in buildRunList — the run-order display key the step list sorts by. Only
+ *  non-terminal tasks are processed (the lists a user is actively watching); terminal tasks
+ *  keep run_seq null and fall back to created_at ordering (their single-pass display was
+ *  already correct). Per-task try/catch so one task with an unresolvable repo cannot abort
+ *  the pass. One-time: once stamped, a task's rows are no longer null and are skipped next
+ *  boot. All rounds of a step share its run-list position, so the update keys on step_id. */
+export async function backfillMissingRunSeq(db: Database): Promise<void> {
+  const tasks = await db
+    .selectDistinct({ taskId: schema.taskSteps.taskId })
+    .from(schema.taskSteps)
+    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
+    .where(
+      and(
+        isNull(schema.taskSteps.runSeq),
+        inArray(schema.tasks.status, ['created', 'running', 'waiting_user', 'failed']),
+      ),
+    );
+  if (tasks.length === 0) return;
+  logger.info({ count: tasks.length }, 'backfilling run_seq for non-terminal tasks');
+  for (const { taskId } of tasks) {
+    try {
+      const ctx = await resolveTaskContext(db, taskId);
+      if (!ctx) continue;
+      const runList = await buildRunList(ctx, db);
+      for (let i = 0; i < runList.length; i++) {
+        await db
+          .update(schema.taskSteps)
+          .set({ runSeq: i })
+          .where(
+            and(
+              eq(schema.taskSteps.taskId, taskId),
+              eq(schema.taskSteps.stepId, runList[i]!.metadata.id),
+              isNull(schema.taskSteps.runSeq),
+            ),
+          );
+      }
+    } catch (err) {
+      logger.warn({ err, taskId }, 'run_seq backfill failed for task');
     }
   }
 }
