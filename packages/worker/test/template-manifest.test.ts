@@ -69,17 +69,17 @@ describe('template manifest', () => {
     }
   });
 
-  it('expansion is gated by context: drupal-lsp files only emit when lspLanguages contains php-extended', () => {
-    const noLsp = expandManifestFor(REFERENCE_CONTEXT);
-    const lsp: TemplateRenderContext = {
-      ...REFERENCE_CONTEXT,
-      lspLanguages: ['php-extended'],
-    };
-    const withLsp = expandManifestFor(lsp);
+  it('expansion is gated by context: local PHP LSP plugin files emit for php and php-extended', () => {
     const pluginPaths = (rs: ReturnType<typeof expandManifestFor>) =>
       rs.filter((r) => r.templateKind === 'plugin-file').map((r) => r.diskPath);
-    expect(pluginPaths(noLsp).length).toBe(0);
-    expect(pluginPaths(withLsp).length).toBeGreaterThan(0);
+    // No PHP LSP selected -> no local plugin files.
+    expect(pluginPaths(expandManifestFor(REFERENCE_CONTEXT)).length).toBe(0);
+    // Both plain php and php-extended emit the local drupal-php-lsp plugin
+    // (the marketplace has no intelephense plugin, so all PHP LSP is local).
+    for (const lang of ['php', 'php-extended']) {
+      const withLsp = expandManifestFor({ ...REFERENCE_CONTEXT, lspLanguages: [lang] });
+      expect(pluginPaths(withLsp).length, `${lang} should emit plugin files`).toBeGreaterThan(0);
+    }
   });
 
   it('agent targets fan-out: multiple target dirs produce one rendering per target', () => {

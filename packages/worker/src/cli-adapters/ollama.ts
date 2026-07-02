@@ -20,12 +20,14 @@ const OLLAMA_CLOUD_URL = 'https://ollama.com';
 
 // LSP plugin install via the claude binary's plugin marketplace — identical to
 // the claude-code/zai adapters (same backend-agnostic `plugin` subcommands).
+// PHP intentionally absent — see the CLAUDE_LSP_PLUGINS note in claude-code.ts.
+// Haive installs no phpactor binary; PHP LSP is intelephense via the local
+// drupal-php-lsp plugin, so php must not map to the marketplace phpactor plugin.
 const OLLAMA_LSP_PLUGINS: Record<string, string> = {
   typescript: 'vtsls',
   python: 'pyright',
   go: 'gopls',
   rust: 'rust-analyzer',
-  php: 'phpactor',
   java: 'jdtls',
 };
 const OLLAMA_LSP_MARKETPLACE_REF = 'Piebald-AI/claude-code-lsps';

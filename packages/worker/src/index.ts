@@ -25,6 +25,7 @@ import { closeRedis } from './redis.js';
 import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
 import { reapOrphanedTaskAuthVolumes } from './sandbox/auth-volume-reaper.js';
 import { reapOrphanEnvTemplates } from './sandbox/env-template-reaper.js';
+import { reapStaleComposedImages } from './sandbox/composed-image-reaper.js';
 import { ensureOllamaModels } from './sandbox/ollama-provision.js';
 import { ensureDdevCa, ensureDdevRegistryCache } from './sandbox/ddev-runner.js';
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
@@ -51,6 +52,14 @@ async function main(): Promise<void> {
   // dockerfile-hash reuse cache is left intact (only repo-delete GCs that).
   await reapOrphanEnvTemplates(getDb()).catch((err) => {
     logger.warn({ err }, 'orphan env-template reap on boot failed');
+  });
+  // Evict stale composed sandbox images (haive-sandbox:<hash>) — hash-cached for
+  // cross-task reuse but never previously reaped, so they leaked one per build.
+  // Age-gated + skips images backing a running container; an evicted tag a live
+  // task still needs just rebuilds on next use. Runs after the container reap
+  // above so nothing composed is mid-use here.
+  await reapStaleComposedImages().catch((err) => {
+    logger.warn({ err }, 'stale composed-image reap on boot failed');
   });
 
   const repoWorker = startRepoWorker(repoStoragePath);

@@ -4,6 +4,12 @@ import { buildProviderInstallLines } from '../cli-versions/codegen.js';
 
 export const SANDBOX_CORE_IMAGE = 'haive-cli-sandbox:latest';
 
+/** Docker repository for per-task COMPOSED sandbox images (`haive-sandbox:<hash>`),
+ *  distinct from the SANDBOX_CORE_IMAGE base. Each unique (env-template, provider,
+ *  rtk) combination yields one hash-tagged image, reused across tasks. The
+ *  composed-image reaper filters on this repo to evict stale tags. */
+export const COMPOSED_IMAGE_REPO = 'haive-sandbox';
+
 export interface SandboxImageComposition {
   tag: string;
   hash: string;
@@ -69,7 +75,7 @@ export function composeSandboxImage(input: ComposeInput): SandboxImageCompositio
   const hash = createHash('sha256').update(hashInput, 'utf8').digest('hex').slice(0, 16);
 
   return {
-    tag: `haive-sandbox:${hash}`,
+    tag: `${COMPOSED_IMAGE_REPO}:${hash}`,
     hash,
     dockerfileBody,
     hasEnvTemplate: input.envTemplateDockerfile !== null,

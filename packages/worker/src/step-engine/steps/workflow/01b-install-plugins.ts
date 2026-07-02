@@ -3,6 +3,7 @@ import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { wantsLocalPhpLsp } from '../onboarding/07-generate-files.js';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { LspLanguage, PluginInstallCommand } from '../../../cli-adapters/types.js';
 import { runInSandbox } from '../../../sandbox/sandbox-runner.js';
@@ -141,9 +142,7 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
     const sandboxWorkdir = await resolveTaskSandboxWorkdir(ctx.db, ctx.taskId);
     const drupalRelBase = DRUPAL_LSP_BASE_BY_PROVIDER[provider.name] ?? null;
     const drupalLspPath =
-      lspLanguages.includes('php-extended') && drupalRelBase
-        ? `${sandboxWorkdir}/${drupalRelBase}`
-        : null;
+      wantsLocalPhpLsp(lspLanguages) && drupalRelBase ? `${sandboxWorkdir}/${drupalRelBase}` : null;
 
     const pluginOpts: Parameters<NonNullable<typeof adapter.buildPluginInstallCommands>>[1] = {
       repoRoot: sandboxWorkdir,

@@ -15,12 +15,16 @@ const CLAUDE_EFFORT_SCALE: EffortScale = {
   max: 'max',
 };
 
+// PHP is intentionally absent: the Piebald-AI/claude-code-lsps marketplace has
+// no intelephense plugin (only phpactor, whose binary Haive does not install).
+// Haive standardizes PHP LSP on intelephense via its own local drupal-php-lsp
+// plugin (installed for php and php-extended alike), so php must NOT resolve to
+// the marketplace phpactor plugin here.
 const CLAUDE_LSP_PLUGINS: Record<string, string> = {
   typescript: 'vtsls',
   python: 'pyright',
   go: 'gopls',
   rust: 'rust-analyzer',
-  php: 'phpactor',
   java: 'jdtls',
 };
 const CLAUDE_LSP_MARKETPLACE_REF = 'Piebald-AI/claude-code-lsps';

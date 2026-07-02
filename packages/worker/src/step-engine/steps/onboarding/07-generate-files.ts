@@ -349,6 +349,17 @@ export const DRUPAL_LSP_FILES: { rel: string; content: string }[] = DRUPAL_LSP_T
   ],
 );
 
+/** Whether a repo's selected LSP languages want Haive's local PHP LSP plugin
+ *  (drupal-php-lsp: intelephense via `.lsp.json`). Covers BOTH plain `php` and
+ *  `php-extended` — the Piebald-AI/claude-code-lsps marketplace has no
+ *  intelephense plugin, so ALL PHP LSP goes through this local plugin rather
+ *  than the marketplace. Shared by the file generator (this step), the template
+ *  manifest (artifact tracking), and 01b-install-plugins (plugin install) so the
+ *  three gates never drift out of sync. */
+export function wantsLocalPhpLsp(lspLanguages: readonly string[]): boolean {
+  return lspLanguages.includes('php') || lspLanguages.includes('php-extended');
+}
+
 /** All known agent specs: baselines + framework extras. */
 function allKnownAgents(framework: string | null): Map<string, AgentSpec> {
   const map = new Map<string, AgentSpec>();
@@ -528,7 +539,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
         `${t.dir}/README.md`,
         ...agents.map((a) => `${t.dir}/${a.id}.${agentExt(t.format)}`),
       ]),
-      ...(lspLanguages.includes('php-extended') ? DRUPAL_LSP_FILES.map((f) => f.rel) : []),
+      ...(wantsLocalPhpLsp(lspLanguages) ? DRUPAL_LSP_FILES.map((f) => f.rel) : []),
       '.claude/mcp_settings.json',
       'AGENTS.md',
       ...Array.from(rulesFiles),
@@ -673,7 +684,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
         await writeIfAllowed(`${target.dir}/README.md`, agentsIndexMarkdown(agents, indexExt));
       }
     }
-    if (detected.lspLanguages.includes('php-extended')) {
+    if (wantsLocalPhpLsp(detected.lspLanguages)) {
       for (const f of DRUPAL_LSP_FILES) {
         await writeIfAllowed(f.rel, f.content + '\n');
       }

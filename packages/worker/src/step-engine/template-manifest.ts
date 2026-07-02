@@ -22,6 +22,7 @@ import {
 import {
   agentsIndexMarkdown,
   DRUPAL_LSP_FILES,
+  wantsLocalPhpLsp,
   type ProjectInfo,
   workflowConfigJson,
 } from './steps/onboarding/07-generate-files.js';
@@ -199,11 +200,13 @@ function buildPluginFileItem(
     kind: 'plugin-file',
     schemaVersion: 1,
     render(ctx: TemplateRenderContext): TemplateRendering[] {
-      // Drupal LSP plugin files are only emitted when the php-extended LSP is
-      // selected. Keeping the gating here means a template removal (LSP
-      // disabled) surfaces as `obsolete` at upgrade time rather than
-      // silently.
-      if (!ctx.lspLanguages.includes('php-extended')) return [];
+      // Local PHP LSP plugin files are emitted whenever PHP LSP is selected
+      // (plain php or php-extended — see wantsLocalPhpLsp). Keeping the gating
+      // here means a template removal (PHP LSP disabled) surfaces as `obsolete`
+      // at upgrade time rather than silently. REFERENCE_CONTEXT has no PHP LSP,
+      // so this renders [] for the contentHash either way — widening the
+      // condition does not change any item hash.
+      if (!wantsLocalPhpLsp(ctx.lspLanguages)) return [];
       return [{ diskPath, content: `${content}\n` }];
     },
   };

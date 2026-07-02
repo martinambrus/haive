@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
-import type { CliProviderRecord, InvokeOpts, SubAgentSpec } from '../src/cli-adapters/types.js';
+import type {
+  CliProviderRecord,
+  InvokeOpts,
+  LspLanguage,
+  SubAgentSpec,
+} from '../src/cli-adapters/types.js';
 
 type ProviderOverrides = Partial<CliProviderRecord> & Pick<CliProviderRecord, 'id' | 'name'>;
 
@@ -171,4 +176,39 @@ describe('adapter outputFormat declarations', () => {
     const spec = adapter.buildCliInvocation(provider, 'hello', opts);
     expect(spec.args).toEqual(['-p', 'hello', '--output-format', 'json']);
   });
+});
+
+// The Piebald-AI/claude-code-lsps marketplace has no intelephense plugin (only
+// phpactor, whose binary Haive never installs). PHP LSP is intelephense via the
+// local drupal-php-lsp plugin, so PHP must NOT resolve to the marketplace
+// phpactor plugin in any claude-family adapter. These lock that in.
+describe('claude-family LSP plugin install (php uses local intelephense, not marketplace phpactor)', () => {
+  for (const name of ['claude-code', 'zai', 'ollama'] as const) {
+    const adapter = cliAdapterRegistry.get(name);
+    const provider = makeProvider({ id: `p-${name}`, name });
+    const drupalLspPath = `/work/repo/.claude/plugins/drupal-php-lsp`;
+    const flatArgs = (langs: LspLanguage[], withDrupal = true): string =>
+      adapter.buildPluginInstallCommands!(
+        provider,
+        withDrupal
+          ? { repoRoot: '/work/repo', lspLanguages: langs, drupalLspPath }
+          : { repoRoot: '/work/repo', lspLanguages: langs },
+      )
+        .flatMap((c) => c.args)
+        .join(' ');
+
+    for (const lang of ['php', 'php-extended'] as const) {
+      it(`${name}: ${lang} installs drupal-php-lsp and never phpactor`, () => {
+        const flat = flatArgs([lang]);
+        expect(flat).not.toContain('phpactor');
+        expect(flat).toContain('drupal-php-lsp@drupal-lsp-marketplace');
+      });
+    }
+
+    it(`${name}: typescript still installs the marketplace vtsls plugin`, () => {
+      const flat = flatArgs(['typescript'], false);
+      expect(flat).toContain('vtsls@claude-code-lsps');
+      expect(flat).not.toContain('phpactor');
+    });
+  }
 });
