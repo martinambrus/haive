@@ -254,6 +254,11 @@ function RepoCard(props: RepoCardProps) {
   // The exclusions editor is available once onboarding has produced a scope deny
   // list (scopeExcludeGlobs !== null). Before that there is nothing to edit.
   const canEditScope = repo.status === 'ready' && repo.scopeExcludeGlobs !== null;
+  // A ready repo with onboarding markers still absent. Show a yellow badge and
+  // route its primary CTA to onboarding — the new-task page auto-selects the
+  // onboarding flow for a non-onboarded repo. (undefined = unknown → treat as
+  // onboarded so nothing is hidden on a stale payload.)
+  const notOnboarded = repo.status === 'ready' && repo.onboarded === false;
   const excludedCount = repo.scopeExcludeGlobs?.length ?? 0;
   const counts = scope ? fileCountsFromIncluded(scope.tree, scope.included) : null;
 
@@ -304,6 +309,7 @@ function RepoCard(props: RepoCardProps) {
           <div className="flex items-center gap-2">
             <h2 className="text-lg font-semibold text-neutral-50">{repo.name}</h2>
             <Badge variant={statusVariant(repo.status)}>{repo.status}</Badge>
+            {notOnboarded && <Badge variant="warning">not onboarded yet</Badge>}
             {repo.detectedFramework && <Badge>{repo.detectedFramework}</Badge>}
             {excludedCount > 0 && (
               <Badge variant="warning">
@@ -334,12 +340,17 @@ function RepoCard(props: RepoCardProps) {
           {repo.statusMessage && <p className="mt-1 text-xs text-red-400">{repo.statusMessage}</p>}
         </div>
         <div className="flex gap-2">
-          {repo.status === 'ready' && (
+          {notOnboarded && (
+            <Link href={`/tasks/new?repositoryId=${repo.id}`}>
+              <Button size="sm">Onboard</Button>
+            </Link>
+          )}
+          {repo.status === 'ready' && !notOnboarded && (
             <Link href={`/tasks/new?repositoryId=${repo.id}`}>
               <Button size="sm">Create task</Button>
             </Link>
           )}
-          {repo.status === 'ready' && (
+          {repo.status === 'ready' && !notOnboarded && (
             <Link href={`/tasks/new?repositoryId=${repo.id}&mode=run_app`}>
               <Button variant="secondary" size="sm">
                 Run app

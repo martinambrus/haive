@@ -127,18 +127,29 @@ repoRoutes.get('/', async (c) => {
     countsByRepo.set(row.repositoryId, entry);
   }
 
-  const repositories = rows.map((repo) => {
-    const counts = countsByRepo.get(repo.id) ?? { open: 0, active: 0 };
-    // Strip the full fileTree (large, and this list is polled every 5s) and ship
-    // only the top-level paths the list UI actually renders.
-    const { fileTree, ...rest } = repo;
-    return {
-      ...rest,
-      topLevelPaths: deriveTopLevelPaths(fileTree),
-      openTaskCount: counts.open,
-      activeTaskCount: counts.active,
-    };
-  });
+  const repositories = await Promise.all(
+    rows.map(async (repo) => {
+      const counts = countsByRepo.get(repo.id) ?? { open: 0, active: 0 };
+      // Strip the full fileTree (large, and this list is polled every 5s) and ship
+      // only the top-level paths the list UI actually renders.
+      const { fileTree, ...rest } = repo;
+      // Onboarded flag drives the "not onboarded yet" badge + Onboard CTA on the
+      // repos page. Only meaningful for ready repos (cloning/error have no tree);
+      // the check is a few parallel stats per repo.
+      const root = repo.storagePath ?? repo.localPath;
+      const onboarded =
+        repo.status === 'ready' && root
+          ? (await checkOnboardingMarkers(root)).missing.length === 0
+          : false;
+      return {
+        ...rest,
+        topLevelPaths: deriveTopLevelPaths(fileTree),
+        openTaskCount: counts.open,
+        activeTaskCount: counts.active,
+        onboarded,
+      };
+    }),
+  );
 
   return c.json({ repositories });
 });
@@ -634,6 +645,21 @@ const ONBOARDING_MARKERS = [
   '.claude/workflow-config.json',
 ];
 
+/** A repo is "onboarded" once all ONBOARDING_MARKERS exist on disk. Marker
+ *  checks run in parallel; results keep marker order so the detail endpoint's
+ *  present/missing lists stay stable. */
+async function checkOnboardingMarkers(
+  root: string,
+): Promise<{ present: string[]; missing: string[] }> {
+  const results = await Promise.all(
+    ONBOARDING_MARKERS.map(async (rel) => [rel, await pathExists(path.join(root, rel))] as const),
+  );
+  return {
+    present: results.filter(([, ok]) => ok).map(([rel]) => rel),
+    missing: results.filter(([, ok]) => !ok).map(([rel]) => rel),
+  };
+}
+
 const ONBOARDING_RESET_DIRS = ['.claude'];
 const ONBOARDING_RESET_FILES = ['.ripgreprc'];
 const ONBOARDING_RULES_FILES = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md'];
@@ -686,12 +712,7 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
   const db = getDb();
   const root = await resolveRepoRoot(db, userId, id);
 
-  const present: string[] = [];
-  const missing: string[] = [];
-  for (const rel of ONBOARDING_MARKERS) {
-    if (await pathExists(path.join(root, rel))) present.push(rel);
-    else missing.push(rel);
-  }
+  const { present, missing } = await checkOnboardingMarkers(root);
   return c.json({ onboarded: missing.length === 0, present, missing });
 });
 
