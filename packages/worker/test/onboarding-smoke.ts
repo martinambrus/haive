@@ -156,6 +156,7 @@ async function main(): Promise<void> {
       '06_5-agent-discovery': {
         acceptedAgents: [],
       },
+      '06_7-scope-selection': { selectedDirs: [] },
       '07-generate-files': {
         overwrite: true,
       },

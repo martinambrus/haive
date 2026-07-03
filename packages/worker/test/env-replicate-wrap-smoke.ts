@@ -233,6 +233,7 @@ async function main(): Promise<void> {
         lspLanguages: ['typescript'],
       },
       '06_5-agent-discovery': { acceptedAgents: [] },
+      '06_7-scope-selection': { selectedDirs: [] },
       '07-generate-files': { overwrite: true },
       '08-knowledge-acquisition': {
         manualTopics: 'testing\ndocumentation',

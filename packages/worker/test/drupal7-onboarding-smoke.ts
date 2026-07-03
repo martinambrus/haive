@@ -180,6 +180,7 @@ async function main(): Promise<void> {
       '06_5-agent-discovery': {
         acceptedAgents: ['drupal7-module-dev'],
       },
+      '06_7-scope-selection': { selectedDirs: [] },
       '07-generate-files': {
         overwrite: true,
       },

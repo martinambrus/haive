@@ -222,6 +222,7 @@ async function main(): Promise<void> {
           'learning-recorder',
         ],
       },
+      '06_7-scope-selection': { selectedDirs: [] },
       '07-generate-files': {
         overwrite: true,
       },
