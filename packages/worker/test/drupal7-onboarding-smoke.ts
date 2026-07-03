@@ -172,7 +172,7 @@ async function main(): Promise<void> {
         ragMode: 'none',
         ragConnectionString: '',
         mcpSettingsJson: '',
-        lspLanguages: ['php'],
+        lspLanguages: ['php-extended'],
       },
       '06_3-custom-bundles': {
         bundles: [],
