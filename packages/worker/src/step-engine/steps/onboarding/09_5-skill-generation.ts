@@ -15,7 +15,12 @@ import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
 import { jsonrepair } from 'jsonrepair';
 import type { KbFileSummary } from './09-qa.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
-import { isDeniedPath, loadMiningScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
+import {
+  isDeniedPath,
+  loadMiningScopeExcludeGlobs,
+  noSubagentInstructionLines,
+  scopeInstructionLines,
+} from './_scope.js';
 
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
 
@@ -827,6 +832,7 @@ function buildSkillPrompt(
     '```',
     '',
     ...scopeInstructionLines(scopeExclude),
+    ...noSubagentInstructionLines(),
     hints.length > 0 ? `## User-supplied hints about likely skill domains\n\n${hints}\n` : '',
     '## Your task',
     '',

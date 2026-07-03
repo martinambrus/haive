@@ -75,6 +75,30 @@ export function scopeInstructionLines(exclude: readonly string[]): string[] {
   ];
 }
 
+/** Unconditional "work as a single agent" block for a mining prompt. Tells the
+ *  CLI agent not to spawn its OWN sub-agents during mining. Haive already fans
+ *  mining out across agents at the orchestration layer (one cli-exec per
+ *  capability), so a sub-agent the model spawns here only duplicates work and
+ *  multiplies token cost. This is the uniform baseline across every CLI: the hard
+ *  levers (claude-family `--disallowedTools Agent`, amp `amp.tools.disable`,
+ *  gemini/codex settings) enforce it where a lever exists; for antigravity, which
+ *  has NO such lever, this prompt is the only control. Names the per-CLI spawn
+ *  tools explicitly so one wording covers claude-family/amp/gemini/codex/agy.
+ *  Unconditional (unlike scopeInstructionLines) — always returned. */
+export function noSubagentInstructionLines(): string[] {
+  return [
+    '## Single-agent execution — HARD CONSTRAINT',
+    'Do ALL of this work yourself, in this one agent. Do NOT spawn, delegate to, or fan out',
+    'into sub-agents, parallel agents, background agents or workers. If a tool for launching',
+    'agents or parallel tasks exists (for example a Task, Agent, spawn_agent, invoke_agent or',
+    'background-task tool), do NOT call it — call your file-reading and search tools (Read,',
+    'Grep, Glob) directly instead. Mining is already parallelised across agents at the',
+    'orchestration layer; a sub-agent you spawn here only duplicates work and multiplies token',
+    'cost.',
+    '',
+  ];
+}
+
 /** Raw repo-level RAG scope deny list, preserving NULL (never set) vs `[]` (set to
  *  empty = index everything). 09_7 uses this to distinguish "remember the stored
  *  RAG scope" from "no stored scope yet → default from the mining pick / seed".

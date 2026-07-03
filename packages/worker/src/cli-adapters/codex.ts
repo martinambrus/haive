@@ -58,6 +58,15 @@ export class CodexAdapter extends BaseCliAdapter {
         'exec',
         '--json',
         '--dangerously-bypass-approvals-and-sandbox',
+        // Disable Codex's own multi-agent/subagent system (features.multi_agent_v2,
+        // whose MultiAgentMode can proactively spawn Collab subagents). Haive never
+        // uses Codex's native subagents (supportsSubagents=false — the sub-agent
+        // emulator emits a sequential script instead), so a mining agent spawning
+        // its own agents only duplicates work and burns tokens. `--disable <feature>`
+        // == `-c features.<name>=false`; unknown features are ignored (no
+        // --strict-config), so this fails safe if the feature is renamed upstream.
+        '--disable',
+        'multi_agent_v2',
         ...reasoningArgs,
         '--skip-git-repo-check',
         prompt,

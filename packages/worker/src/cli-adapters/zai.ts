@@ -74,7 +74,10 @@ export class ZaiAdapter extends BaseCliAdapter {
     const steering = opts.steeringMode === true;
     const spec: CliCommandSpec = {
       command: this.resolveExecutable(provider),
-      args: this.mergedArgs(provider, claudeFamilyArgs({ steering, prompt })),
+      args: this.mergedArgs(
+        provider,
+        claudeFamilyArgs({ steering, prompt, disallowedTools: opts.disallowedTools }),
+      ),
       env,
       cwd: opts.cwd,
       outputFormat: 'claude-stream-json',

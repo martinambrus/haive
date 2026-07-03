@@ -65,6 +65,53 @@ describe('claude-code buildCliInvocation', () => {
   });
 });
 
+describe('disallowedTools threads through every claude-family adapter', () => {
+  const denyAt = (args: string[]): string[] => {
+    const i = args.indexOf('--disallowedTools');
+    return i < 0 ? [] : args.slice(i + 1, i + 2);
+  };
+
+  it('claude-code one-shot: --disallowedTools Agent present', () => {
+    const spec = new ClaudeCodeAdapter().buildCliInvocation(provider(), 'do x', {
+      disallowedTools: ['Agent'],
+    });
+    expect(denyAt(spec.args)).toEqual(['Agent']);
+  });
+
+  it('claude-code steering: --disallowedTools Agent present', () => {
+    const spec = new ClaudeCodeAdapter().buildCliInvocation(provider(), 'do x', {
+      steeringMode: true,
+      disallowedTools: ['Agent'],
+    });
+    expect(denyAt(spec.args)).toEqual(['Agent']);
+  });
+
+  it('zai: --disallowedTools Agent present', () => {
+    const spec = new ZaiAdapter().buildCliInvocation(provider(), 'do x', {
+      disallowedTools: ['Agent'],
+    });
+    expect(denyAt(spec.args)).toEqual(['Agent']);
+  });
+
+  it('ollama: --disallowedTools Agent present and ordered before --model', () => {
+    const spec = new OllamaAdapter().buildCliInvocation(provider({ model: 'llama3' }), 'do x', {
+      disallowedTools: ['Agent'],
+    });
+    expect(denyAt(spec.args)).toEqual(['Agent']);
+    expect(spec.args.indexOf('--disallowedTools')).toBeLessThan(spec.args.indexOf('--model'));
+  });
+
+  it('omitted → no --disallowedTools flag (unchanged default)', () => {
+    for (const spec of [
+      new ClaudeCodeAdapter().buildCliInvocation(provider(), 'do x', {}),
+      new ZaiAdapter().buildCliInvocation(provider(), 'do x', {}),
+      new OllamaAdapter().buildCliInvocation(provider({ model: 'llama3' }), 'do x', {}),
+    ]) {
+      expect(spec.args).not.toContain('--disallowedTools');
+    }
+  });
+});
+
 describe('ollama steering variant keeps --model', () => {
   it('steering args include --input-format and --model <model>', () => {
     const spec = new OllamaAdapter().buildCliInvocation(provider({ model: 'llama3' }), 'do x', {

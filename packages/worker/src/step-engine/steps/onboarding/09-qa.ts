@@ -3,7 +3,12 @@ import path from 'node:path';
 import type { DetectResult } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
-import { isDeniedPath, loadMiningScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
+import {
+  isDeniedPath,
+  loadMiningScopeExcludeGlobs,
+  noSubagentInstructionLines,
+  scopeInstructionLines,
+} from './_scope.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 
 /* ------------------------------------------------------------------ */
@@ -169,6 +174,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     '```',
     '',
     ...scopeInstructionLines(scopeExclude),
+    ...noSubagentInstructionLines(),
     '## Instructions',
     '',
     'Call your file-reading tools DIRECTLY to explore the in-scope directories — actually issue the',

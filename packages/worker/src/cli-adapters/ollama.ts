@@ -109,7 +109,12 @@ export class OllamaAdapter extends BaseCliAdapter {
       command: this.resolveExecutable(provider),
       args: this.mergedArgs(
         provider,
-        claudeFamilyArgs({ steering, prompt, tail: ['--model', model] }),
+        claudeFamilyArgs({
+          steering,
+          prompt,
+          tail: ['--model', model],
+          disallowedTools: opts.disallowedTools,
+        }),
       ),
       env,
       cwd: opts.cwd,

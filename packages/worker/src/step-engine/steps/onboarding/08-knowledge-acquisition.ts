@@ -5,7 +5,12 @@ import type { DetectResult, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
-import { isDeniedPath, loadMiningScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
+import {
+  isDeniedPath,
+  loadMiningScopeExcludeGlobs,
+  noSubagentInstructionLines,
+  scopeInstructionLines,
+} from './_scope.js';
 import { techAnchorFacets } from '../_repo-stack.js';
 import {
   resolveStackVersions,
@@ -233,6 +238,7 @@ function buildKnowledgePrompt(args: LlmBuildArgs): string {
     '```',
     '',
     ...scopeInstructionLines(scopeExclude),
+    ...noSubagentInstructionLines(),
     '## README excerpt',
     readme,
     '',

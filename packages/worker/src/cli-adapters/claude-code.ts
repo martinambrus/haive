@@ -52,13 +52,11 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
     opts: InvokeOpts,
   ): CliCommandSpec {
     const steering = opts.steeringMode === true;
-    const baseArgs = claudeFamilyArgs({ steering, prompt });
-    // Deny specific tools (e.g. `Agent` for onboarding mining, to stop a mining
-    // agent spawning its own sub-agents). Honored even under
-    // --dangerously-skip-permissions (deny beats allow). Claude-family only.
-    if (opts.disallowedTools && opts.disallowedTools.length > 0) {
-      baseArgs.push('--disallowedTools', ...opts.disallowedTools);
-    }
+    const baseArgs = claudeFamilyArgs({
+      steering,
+      prompt,
+      disallowedTools: opts.disallowedTools,
+    });
     const spec: CliCommandSpec = {
       command: this.resolveExecutable(provider),
       args: this.mergedArgs(provider, baseArgs),

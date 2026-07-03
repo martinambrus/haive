@@ -170,6 +170,15 @@ describe('adapter outputFormat declarations', () => {
     expect(spec.args[spec.args.length - 1]).toBe('hello');
   });
 
+  it('codex disables its multi-agent feature (no autonomous subagent fan-out)', () => {
+    const adapter = cliAdapterRegistry.get('codex');
+    const provider = makeProvider({ id: 'p-codex', name: 'codex' });
+    const spec = adapter.buildCliInvocation(provider, 'hello', opts);
+    const i = spec.args.indexOf('--disable');
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(spec.args[i + 1]).toBe('multi_agent_v2');
+  });
+
   it('gemini requests JSON output mode', () => {
     const adapter = cliAdapterRegistry.get('gemini');
     const provider = makeProvider({ id: 'p-gemini', name: 'gemini' });

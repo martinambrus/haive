@@ -1,10 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import type { TreeNode } from '@haive/shared';
-import { collectDenyFrontier, isDeniedPath, scopeInstructionLines } from './_scope.js';
+import {
+  collectDenyFrontier,
+  isDeniedPath,
+  noSubagentInstructionLines,
+  scopeInstructionLines,
+} from './_scope.js';
 
 function node(path: string, children?: TreeNode[]): TreeNode {
   return { path, label: path.split('/').pop() ?? path, children } as TreeNode;
 }
+
+describe('noSubagentInstructionLines', () => {
+  it('always returns a hard block naming the per-CLI spawn tools', () => {
+    const text = noSubagentInstructionLines().join('\n');
+    expect(text).toContain('HARD CONSTRAINT');
+    // uniform wording covers every CLI family's spawn tool
+    for (const tool of ['Task', 'Agent', 'spawn_agent', 'invoke_agent']) {
+      expect(text).toContain(tool);
+    }
+    expect(text).toContain('Do NOT');
+  });
+});
 
 describe('collectDenyFrontier', () => {
   // themes/{custom,contrib,gin}, libraries/{custom,contrib}, vendor(leaf)

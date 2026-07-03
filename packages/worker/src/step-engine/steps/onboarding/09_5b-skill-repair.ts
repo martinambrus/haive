@@ -9,7 +9,11 @@ import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../ste
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { loadPreviousStepOutput, pathExists, resolveSkillTargetDirs } from './_helpers.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
-import { loadMiningScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
+import {
+  loadMiningScopeExcludeGlobs,
+  noSubagentInstructionLines,
+  scopeInstructionLines,
+} from './_scope.js';
 import {
   collectShortFileTree,
   hasSubSkills,
@@ -153,6 +157,7 @@ function buildSkillRepairPrompt(opts: {
     '```',
     '',
     ...scopeInstructionLines(opts.scopeExclude),
+    ...noSubagentInstructionLines(),
     '## Your task',
     '',
     'Use your read-only tools (Read, Grep, Glob, Bash for read-only commands) to explore the',
