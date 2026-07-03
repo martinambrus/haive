@@ -171,7 +171,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     ...scopeInstructionLines(scopeExclude),
     '## Instructions',
     '',
-    'Call your file-reading tools DIRECTLY to explore this repository — actually issue the',
+    'Call your file-reading tools DIRECTLY to explore the in-scope directories — actually issue the',
     'tool calls. Do NOT narrate intent (e.g. "Let me check the TODO file") and then end your',
     'turn; a turn that stops on narration without a tool call or the final JSON is a failure.',
     'For each ambiguous area:',

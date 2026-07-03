@@ -40,21 +40,37 @@ export function isDeniedPath(rel: string, exclude: readonly string[]): boolean {
   return false;
 }
 
-/** Soft-scope instruction lines for a mining prompt. Tells the agent to mine only
- *  this project's own code and treat the excluded directories as third-party /
- *  built-in — reachable with read tools for context, but never mined or indexed.
- *  Returns `[]` when there is no deny list (nothing to say), so callers can spread
- *  it unconditionally. */
+/** Hard-scope instruction lines for a mining prompt. Confines the agent to the
+ *  project's own in-scope directories: it may read/grep/glob only inside them, and
+ *  may step out ONLY to follow a single named reference from an in-scope file — never
+ *  to browse. Framed as an allow-first sandbox (not a soft "please avoid") to stop
+ *  the agent crawling huge framework/vendor/contrib trees and burning tokens — the
+ *  dominant token cost of onboarding. Returns `[]` when there is no deny list
+ *  (nothing to constrain), so callers can spread it unconditionally. */
 export function scopeInstructionLines(exclude: readonly string[]): string[] {
   if (exclude.length === 0) return [];
   return [
-    '## Mining scope (IMPORTANT)',
-    "Mine, analyse and index ONLY this project's own code. The partial file tree above is already",
-    'filtered to the in-scope directories. The directories listed below are third-party or',
-    'framework built-ins and are OUT OF SCOPE — do NOT mine, summarise or index them (you MAY',
-    "still open an individual file there for context when this project's own code references it):",
+    '## Mining scope — HARD CONSTRAINT',
+    "Read, grep, glob, mine and index files ONLY inside this project's own in-scope",
+    'directories (those shown in the file tree above). Treat the in-scope set as a sandbox:',
+    'your exploration MUST stay inside it. Being thorough means being thorough WITHIN scope —',
+    'never widening the search to the rest of the repository.',
+    '',
+    'The directories below are third-party / framework / generated code and are OUT OF SCOPE.',
+    'Do NOT open, read, grep, list, sample or crawl them to discover or document anything, and',
+    'never treat their code as a subject to mine in its own right:',
     ...exclude.map((g) => `- ${g}`),
-    'Any directory not listed above is in scope by default, including new folders added later.',
+    '',
+    'The ONE permitted exception is a targeted reference lookup: when a specific in-scope file',
+    'references a symbol defined out of scope (a parent class it extends, a service it injects,',
+    'a function it imports), you MAY open THAT ONE referenced file to understand the in-scope',
+    'code, then return to the in-scope set. That is following a single reference — never a',
+    'browse. Do NOT enumerate, survey or "look around" an out-of-scope directory to see what',
+    'is there.',
+    '',
+    'Why this matters: out-of-scope trees (framework core, vendored/contrib packages) are',
+    'enormous; crawling them burns large amounts of tokens and documents code this project did',
+    'not write. Stay in scope; step out only to the single file a specific in-scope line names.',
     '',
   ];
 }

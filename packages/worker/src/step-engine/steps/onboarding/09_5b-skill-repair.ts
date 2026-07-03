@@ -9,7 +9,7 @@ import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../ste
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { loadPreviousStepOutput, pathExists, resolveSkillTargetDirs } from './_helpers.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
-import { loadMiningScopeExcludeGlobs } from './_scope.js';
+import { loadMiningScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
 import {
   collectShortFileTree,
   hasSubSkills,
@@ -62,6 +62,8 @@ interface SkillRepairDetect {
   kbFiles: KbFileSummary[];
   /** Transient file tree for agent orientation; mirrors 09_5's __fileTree. */
   __fileTree?: string;
+  /** Transient per-task mining deny list; drives the hard-scope prompt section. */
+  __scopeExclude?: string[];
 }
 
 interface SkillRepairApply {
@@ -103,6 +105,7 @@ function buildSkillRepairPrompt(opts: {
   language: string | null;
   kbFiles: KbFileSummary[];
   fileTree: string;
+  scopeExclude: string[];
   skillsDir: string;
 }): string {
   const issuesBlock = opts.issues.map((i) => `- ${i}`).join('\n');
@@ -149,10 +152,11 @@ function buildSkillRepairPrompt(opts: {
     opts.fileTree || '(no file tree available)',
     '```',
     '',
+    ...scopeInstructionLines(opts.scopeExclude),
     '## Your task',
     '',
-    'Use your read-only tools (Read, Grep, Glob, Bash for read-only commands) to explore this',
-    `repository for the \`${opts.skillId}\` capability, then emit a corrected, COMPLETE skill as JSON.`,
+    'Use your read-only tools (Read, Grep, Glob, Bash for read-only commands) to explore the',
+    `in-scope directories for the \`${opts.skillId}\` capability, then emit a corrected, COMPLETE skill as JSON.`,
     'You MUST return the corrected skill (a `skills` array of length 1). Do NOT return an empty',
     'array — this is a repair, the skill is required.',
     '',
@@ -296,7 +300,15 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
       { targetDirs: skillTargetDirs, failing: failingSkills.length },
       'skill repair detect complete',
     );
-    return { failingSkills, skillTargetDirs, framework, language, kbFiles, __fileTree: fileTree };
+    return {
+      failingSkills,
+      skillTargetDirs,
+      framework,
+      language,
+      kbFiles,
+      __fileTree: fileTree,
+      __scopeExclude: scopeExclude,
+    };
   },
 
   // One repair agent per failing skill (parallel, capped by the runner). agentId = skillId so
@@ -321,6 +333,7 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
           language: det.language,
           kbFiles: det.kbFiles,
           fileTree,
+          scopeExclude: det.__scopeExclude ?? [],
           skillsDir: primary,
         }),
       }));
