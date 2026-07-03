@@ -404,7 +404,7 @@ function RepoCard(props: RepoCardProps) {
       {expanded && canEditScope && (
         <div className="mt-2 border-t border-neutral-800 pt-3">
           <div className="mb-2 flex items-center justify-between">
-            <p className="text-sm font-semibold text-neutral-100">Onboarding &amp; RAG scope</p>
+            <p className="text-sm font-semibold text-neutral-100">RAG scope</p>
             {counts && (
               <p className="text-xs text-neutral-400">
                 {counts.inScope} file{counts.inScope === 1 ? '' : 's'} in scope
@@ -414,10 +414,10 @@ function RepoCard(props: RepoCardProps) {
             )}
           </div>
           <p className="mb-3 text-xs text-neutral-500">
-            Ticked directories are mined by the knowledge-base &amp; skill steps and indexed into
-            RAG. Untick built-in / vendored directories (Drupal core, contrib, vendor, node_modules,
-            ...) to keep onboarding fast and focused on this project&apos;s own code. New folders
-            added later are included automatically.
+            Ticked directories are indexed into RAG (the cross-task semantic search index). Untick
+            built-in / vendored directories (Drupal core, contrib, vendor, node_modules, ...) to
+            keep the RAG index focused on this project&apos;s own code. New folders added later are
+            included automatically.
           </p>
           {scopeLoading && <p className="text-sm text-neutral-500">Scanning directories...</p>}
           {scopeError && <p className="text-sm text-red-400">{scopeError}</p>}

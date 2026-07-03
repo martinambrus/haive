@@ -1,44 +1,44 @@
-import type { FormField, FormSchema, TreeNode } from '@haive/shared';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import type { DetectResult, FormSchema, TreeNode } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
 import { buildFullExtensionSet, type ExtensionInfo } from './_extension-registry.js';
 import { buildScopeTree } from '@haive/shared/scope-tree';
-import { isDeniedPath, loadScopeExcludeGlobs } from './_scope.js';
+import { computeSeedExcludeGlobs } from './_scope-seed.js';
+import {
+  collectAllPaths,
+  collectDefaults,
+  collectDenyFrontier,
+  loadRepoScopeExcludeGlobs,
+  readComposerJson,
+  readGitignore,
+  resolveRepositoryId,
+  sumFileCount,
+} from './_scope.js';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
 /* ------------------------------------------------------------------ */
 
 interface RagSourceSelectionDetect {
+  framework: string | null;
+  tree: TreeNode[];
+  /** Directories pre-unticked in the picker (the default RAG deny list). */
+  defaultExcludeGlobs: string[];
   extensionSet: string[];
-  /** The per-repo onboarding scope deny list (06_7) — directories NOT indexed. */
-  scopeExclude: string[];
-  inScopeFileCount: number;
-  /** Top-level in-scope directory labels, for the confirmation summary. */
-  inScopeTopDirs: string[];
+  totalCodeFiles: number;
 }
 
 export interface RagSourceSelectionApply {
-  /** Retired: RAG scope is now the 06_7 deny list, applied in 10-rag-populate.
-   *  Emitted empty so any legacy reader falls back to no allow-filter. */
-  selectedDirs: string[];
+  /** The RAG deny list (exclusion frontier) persisted to
+   *  repositories.scope_exclude_globs — the repo-level global RAG scope. */
+  excludeGlobs: string[];
+  includedDirCount: number;
   extensionSet: string[];
-}
-
-/* ------------------------------------------------------------------ */
-/* Helpers                                                             */
-/* ------------------------------------------------------------------ */
-
-/** Sum code-file counts for in-scope nodes only — a node the deny list excludes
- *  drops its whole subtree from the count. */
-function sumInScopeFiles(nodes: TreeNode[], exclude: readonly string[]): number {
-  let total = 0;
-  for (const node of nodes) {
-    if (isDeniedPath(node.path, exclude)) continue;
-    total += node.fileCount ?? 0;
-    if (node.children) total += sumInScopeFiles(node.children, exclude);
-  }
-  return total;
+  /** Legacy allow-list, retired — emitted empty so 10-rag-populate's optional
+   *  dir-filter stays inert (RAG scope is the deny list now). */
+  selectedDirs: string[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -52,104 +52,131 @@ export const ragSourceSelectionStep: StepDefinition<
   metadata: {
     id: '09_7-rag-source-selection',
     workflowType: 'onboarding',
+    // Right before 10-rag-populate (14): choose what RAG indexes for this repo.
     index: 13,
-    title: 'RAG source confirmation',
+    title: 'RAG index scope',
     description:
-      "Confirms what the RAG index will cover. Scope is inherited from the onboarding scope selection (06_7) — this project's own code, minus the excluded built-in / vendored directories. Read-only; change scope on the scope-selection step or in repository settings.",
+      "Pick which directories are indexed into RAG (cross-task semantic search) for this repository. Built-in framework code (Drupal core/contrib, vendor, ...) is pre-excluded so the index stays focused on this project's own code. This is the repo-level global RAG scope — saved on the repository, reused by every task, and editable later in repository settings. It defaults to your onboarding mining selection.",
     requiresCli: false,
   },
 
   async detect(ctx: StepContext): Promise<RagSourceSelectionDetect> {
-    // Extension set carries over from 01_5 (drives which file types get indexed).
+    await ctx.emitProgress('Loading project metadata...');
+    const envPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
+    const envData = (envPrev?.detect as DetectResult | null)?.data as
+      | { project?: { framework?: string } }
+      | undefined;
+    const framework = envData?.project?.framework ?? null;
+
     await ctx.emitProgress('Loading extension data...');
     const rgPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01_5-ripgrep-config');
     const rgOutput = rgPrev?.output as { extensions?: ExtensionInfo[] } | null;
     const extensionSet = buildFullExtensionSet(rgOutput?.extensions ?? []);
 
-    // Scope = the authoritative 06_7 deny list. Empty when 06_7 was skipped or the
-    // user kept everything in scope.
-    const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
-
-    await ctx.emitProgress('Scanning in-scope directories...');
+    await ctx.emitProgress('Scanning directories...');
     const tree = await buildScopeTree(
       ctx.repoPath,
       extensionSet.size > 0 ? { extensions: extensionSet } : {},
     );
-    const inScopeFileCount = sumInScopeFiles(tree, scopeExclude);
-    const inScopeTopDirs = tree
-      .filter(
-        (n) =>
-          !isDeniedPath(n.path, scopeExclude) &&
-          ((n.fileCount ?? 0) > 0 || (n.children?.length ?? 0) > 0),
-      )
-      .map((n) => n.label);
 
+    // Default the RAG deny list to (in order): the repo's stored RAG scope
+    // (re-onboard / repo-settings memory), else THIS run's mining pick (06_7),
+    // else the deterministic framework seed. `null` from the raw repo read means
+    // "never set" (fall through); `[]` means "index everything" (respected).
+    const repoRaw = await loadRepoScopeExcludeGlobs(ctx.db, ctx.taskId);
+    const miningPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06_7-scope-selection');
+    const miningExclude = (miningPrev?.output as { excludeGlobs?: string[] } | null)?.excludeGlobs;
+    const composer = await readComposerJson(ctx.repoPath);
+    const gitignore = await readGitignore(ctx.repoPath);
+    const seedExclude = computeSeedExcludeGlobs({
+      composer,
+      gitignore,
+      framework,
+      treePaths: collectAllPaths(tree),
+    });
+    const defaultExcludeGlobs =
+      repoRaw ?? (Array.isArray(miningExclude) ? miningExclude : seedExclude);
+
+    const totalCodeFiles = sumFileCount(tree);
     await ctx.emitProgress(
-      `RAG will index ~${inScopeFileCount} code file(s); ${scopeExclude.length} director(ies) excluded.`,
+      `Found ${totalCodeFiles} code files across ${collectAllPaths(tree).length} directories.`,
     );
     ctx.logger.info(
-      { extensionCount: extensionSet.size, excludeCount: scopeExclude.length, inScopeFileCount },
-      'rag source confirmation detect complete',
+      { framework, totalCodeFiles, defaultExcludeCount: defaultExcludeGlobs.length },
+      'rag-source-selection detect complete',
     );
 
     return {
+      framework,
+      tree,
+      defaultExcludeGlobs,
       extensionSet: [...extensionSet],
-      scopeExclude,
-      inScopeFileCount,
-      inScopeTopDirs,
+      totalCodeFiles,
     };
   },
 
   form(_ctx, detected): FormSchema {
-    const exts = detected.extensionSet.length
-      ? detected.extensionSet.slice(0, 40).join(' ')
-      : '(none detected)';
-
-    const fields: FormField[] = [
-      {
-        type: 'note',
-        id: 'scopeSummary',
-        label: 'RAG index scope',
-        body:
-          `The RAG index will cover approximately **${detected.inScopeFileCount}** code file(s) from ` +
-          `this project's own code` +
-          (detected.inScopeTopDirs.length
-            ? `, across: ${detected.inScopeTopDirs.join(', ')}.`
-            : '.'),
-      },
-    ];
-    if (detected.scopeExclude.length > 0) {
-      fields.push({
-        type: 'note',
-        id: 'scopeExcluded',
-        label: 'Excluded from indexing',
-        body:
-          'These directories are out of scope (set on the scope-selection step) and will NOT be indexed:\n' +
-          detected.scopeExclude.map((g) => `- \`${g}\``).join('\n'),
-      });
+    if (detected.tree.length === 0) {
+      return {
+        title: 'RAG index scope',
+        description: 'No directories found to scope. RAG will index the repository root only.',
+        fields: [],
+        submitLabel: 'Continue to RAG indexing',
+      };
     }
-    fields.push({
-      type: 'note',
-      id: 'scopeExtensions',
-      label: 'Indexed file types',
-      body: `Extensions indexed into RAG: ${exts}`,
-    });
-
+    const defaults = collectDefaults(detected.tree, detected.defaultExcludeGlobs);
     return {
-      title: 'RAG source confirmation',
-      description:
-        'Review what the RAG index will cover. Scope is inherited from the onboarding scope selection — there is nothing to pick here.',
-      fields,
-      submitLabel: 'Continue to RAG indexing',
+      title: 'Select the code to index into RAG',
+      description: [
+        `Found ${detected.totalCodeFiles} code files.`,
+        'Ticked directories are indexed into the RAG semantic-search index reused across every task.',
+        'Built-in framework code (Drupal core/contrib, vendor, node_modules, ...) is pre-unticked — leave it off to keep the RAG index focused on this project’s own code.',
+        'This is the repository’s global RAG scope: it is saved on the repo (editable later in repository settings). It defaults to your onboarding mining selection — adjust it if RAG should cover more or less.',
+        'Un-ticked directories become the repo RAG exclusion list; new folders added by later tasks are included automatically.',
+      ].join(' '),
+      fields: [
+        {
+          type: 'directory-tree',
+          id: 'selectedDirs',
+          label: 'Directories to index into RAG',
+          tree: detected.tree,
+          defaults,
+        },
+      ],
+      submitLabel: 'Save RAG scope',
     };
   },
 
   async apply(ctx, args): Promise<RagSourceSelectionApply> {
     const detected = args.detected as RagSourceSelectionDetect;
+    const values = args.formValues as { selectedDirs?: string[] };
+    const selected = new Set(values.selectedDirs ?? []);
+
+    const excludeGlobs: string[] = [];
+    collectDenyFrontier(detected.tree, selected, excludeGlobs);
+    excludeGlobs.sort();
+
+    const repositoryId = await resolveRepositoryId(ctx.db, ctx.taskId);
+    if (repositoryId) {
+      await ctx.db
+        .update(schema.repositories)
+        .set({ scopeExcludeGlobs: excludeGlobs, updatedAt: new Date() })
+        .where(eq(schema.repositories.id, repositoryId));
+    } else {
+      ctx.logger.warn(
+        'rag-source-selection: no repositoryId for task, RAG deny list not persisted',
+      );
+    }
+
     ctx.logger.info(
-      { extensionCount: detected.extensionSet.length, excludeCount: detected.scopeExclude.length },
-      'rag source confirmation complete',
+      { excludeCount: excludeGlobs.length, selectedCount: selected.size },
+      'rag-source-selection apply complete',
     );
-    return { selectedDirs: [], extensionSet: detected.extensionSet };
+    return {
+      excludeGlobs,
+      includedDirCount: selected.size,
+      extensionSet: detected.extensionSet,
+      selectedDirs: [],
+    };
   },
 };

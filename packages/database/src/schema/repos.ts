@@ -46,18 +46,18 @@ export const repositories = pgTable(
     detectedFramework: varchar('detected_framework', { length: 64 }),
     detectedLanguages: jsonb('detected_languages').$type<Record<string, number>>(),
     fileTree: jsonb('file_tree').$type<string[]>(),
-    /** Onboarding/RAG scope exclusion list: gitignore-style path globs excluded
-     *  from the expensive onboarding mining steps (08 knowledge-acquisition,
-     *  09-qa, 09_5 skill-generation) and from RAG population / task-end reindex.
-     *  DENYLIST semantics: a path NOT listed here is IN scope (including brand-new
-     *  folders from later tasks), so new features are auto-mined/indexed; only
-     *  listed paths (built-in framework code — Drupal core/contrib, vendor, ...)
-     *  are skipped. Seeded during onboarding (06_7) by a deterministic scan of
-     *  NO_RECURSE dirs + framework patterns + composer installer-paths + gitignore,
-     *  then user-editable via the onboarding picker and the repos-page tree editor.
-     *  Agents (06_5-agent-discovery) intentionally ignore this and stay full-repo.
-     *  NULL = onboarding has not produced a list yet (the repos-page exclusion
-     *  editor stays hidden). Distinct from secretMask* which hides secret files. */
+    /** Repo-level RAG scope exclusion list: gitignore-style path globs excluded
+     *  from RAG population (onboarding 10-rag-populate) and task-end reindex
+     *  (02-pre-rag-sync / 11c-rag-reindex). DENYLIST semantics: a path NOT listed
+     *  here is IN scope (including brand-new folders from later tasks), so new
+     *  features are auto-indexed; only listed paths (built-in framework code —
+     *  Drupal core/contrib, vendor, ...) are skipped. Chosen during onboarding at
+     *  the 09_7-rag-source-selection step (seeded from the mining pick / framework
+     *  patterns) and user-editable later via the repos-page tree editor. This is
+     *  the RAG scope ONLY — the KB + skill mining scope (08/09-qa/09_5/09_5b) is
+     *  task-local, kept in 06_7's step output, and is NOT stored here. NULL =
+     *  onboarding has not produced a list yet (the repos-page editor stays hidden).
+     *  Distinct from secretMask* which hides secret files. */
     scopeExcludeGlobs: jsonb('scope_exclude_globs').$type<string[]>(),
     /** Repo-level snapshot of the onboarding-derived ENVIRONMENT (raw 01-env-detect
      *  `.data` + 02-detection-confirmation confirmed values), so a workflow task can
