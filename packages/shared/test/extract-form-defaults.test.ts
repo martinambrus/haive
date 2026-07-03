@@ -82,4 +82,63 @@ describe('extractFormDefaults', () => {
     const result = validateFormValues(schema, extractFormDefaults(schema));
     expect(result.success).toBe(false);
   });
+
+  // Regression: a directory-tree field was missing from coerceField's switch, so
+  // validateFormValues SILENTLY stripped the submitted paths (the scope pickers
+  // sent their selection but apply saw {} -> empty mining/RAG scope).
+  it('validateFormValues preserves a directory-tree selection (not stripped)', () => {
+    const schema: FormSchema = {
+      title: 't',
+      fields: [
+        {
+          type: 'directory-tree',
+          id: 'selectedDirs',
+          label: 'Dirs',
+          tree: [{ path: 'themes', label: 'themes' }],
+          defaults: [],
+        },
+      ],
+    };
+    const result = validateFormValues(schema, {
+      selectedDirs: ['themes/custom', 'themes/gin', 'libraries/custom'],
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toEqual({
+        selectedDirs: ['themes/custom', 'themes/gin', 'libraries/custom'],
+      });
+    }
+  });
+
+  it('validateFormValues rejects a non-string[] directory-tree value', () => {
+    const schema: FormSchema = {
+      title: 't',
+      fields: [
+        {
+          type: 'directory-tree',
+          id: 'selectedDirs',
+          label: 'Dirs',
+          tree: [{ path: 'themes', label: 'themes' }],
+          defaults: [],
+        },
+      ],
+    };
+    expect(validateFormValues(schema, { selectedDirs: [1, 2] }).success).toBe(false);
+  });
+
+  it('extractFormDefaults includes a directory-tree field defaults', () => {
+    const schema: FormSchema = {
+      title: 't',
+      fields: [
+        {
+          type: 'directory-tree',
+          id: 'selectedDirs',
+          label: 'Dirs',
+          tree: [{ path: 'src', label: 'src' }],
+          defaults: ['src'],
+        },
+      ],
+    };
+    expect(extractFormDefaults(schema)).toEqual({ selectedDirs: ['src'] });
+  });
 });

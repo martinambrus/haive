@@ -139,20 +139,40 @@ export function collectDefaults(tree: TreeNode[], deny: readonly string[]): stri
   return collectAllPaths(tree).filter((p) => !isDeniedPath(p, deny));
 }
 
-/** The exclusion frontier: descend ONLY into selected nodes, so the first
- *  un-selected node on each path is recorded and its whole subtree is excluded by
- *  that single entry (mirrors the directory-tree value invariant).
+/** The exclusion frontier: the minimal deny list equivalent to "keep exactly the
+ *  selected paths in scope". A subtree collapses to ONE deny entry when nothing in
+ *  it is selected; otherwise we descend so only its unselected branches are denied.
  *
- *  v1 limitation: excluding a dir excludes its entire subtree; re-including a
- *  descendant of an excluded dir is not representable — untick at the leaf. */
+ *  This makes bottom-up selection work: ticking a single subfolder (e.g.
+ *  `themes/custom`) keeps it in scope and denies its siblings, instead of the parent
+ *  `themes` swallowing the whole subtree. A parent need NOT itself be in the selected
+ *  set for one of its descendants to survive — which is exactly how the web tree
+ *  reports a partially-ticked parent (child paths present, parent path absent). */
 export function collectDenyFrontier(tree: TreeNode[], selected: Set<string>, out: string[]): void {
-  for (const node of tree) {
-    if (selected.has(node.path)) {
-      if (node.children) collectDenyFrontier(node.children, selected, out);
-    } else {
-      out.push(node.path);
-    }
+  for (const node of tree) denyFrontierNode(node, selected, out);
+}
+
+/** Records `node`'s minimal deny frontier into `out`; returns true when the node or
+ *  any descendant is selected (kept in scope). Bottom-up (children first) so a
+ *  fully-unselected subtree collapses to a single entry for `node`. */
+function denyFrontierNode(node: TreeNode, selected: Set<string>, out: string[]): boolean {
+  const children = node.children ?? [];
+  if (children.length === 0) {
+    if (selected.has(node.path)) return true; // selected leaf -> kept in scope
+    out.push(node.path); // unselected leaf -> its own deny entry
+    return false;
   }
+  const childOut: string[] = [];
+  let anyKept = selected.has(node.path);
+  for (const child of children) {
+    if (denyFrontierNode(child, selected, childOut)) anyKept = true;
+  }
+  if (!anyKept) {
+    out.push(node.path); // nothing under here is wanted -> collapse to one entry
+    return false;
+  }
+  out.push(...childOut); // partially wanted -> keep the finer child frontier
+  return true;
 }
 
 /** Parsed composer.json (or null) — a seed input for computeSeedExcludeGlobs. */

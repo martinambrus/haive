@@ -120,6 +120,18 @@ function coerceField(field: FormField, raw: unknown, issues: string[]): unknown 
       return raw;
     case 'file-upload':
       return raw;
+    case 'directory-tree': {
+      // Selected directory paths. Validated as a string[]; paths are checked
+      // against the tree downstream (unknown paths are simply not kept in scope),
+      // so no per-option allow-list here. A MISSING case previously fell through to
+      // `default: return undefined`, which silently STRIPPED the whole selection
+      // (the mining/RAG scope pickers submitted their paths but apply saw {}).
+      if (!Array.isArray(raw) || raw.some((v) => typeof v !== 'string')) {
+        issues.push(`${field.id}: expected string[]`);
+        return undefined;
+      }
+      return raw as string[];
+    }
     default:
       return undefined;
   }
@@ -136,6 +148,7 @@ function defaultFor(field: FormField): unknown {
     case 'radio-with-textarea':
       return 'default' in field ? (field.default ?? null) : null;
     case 'multi-select':
+    case 'directory-tree':
       return field.defaults ?? [];
     case 'checkbox':
       return field.default ?? false;

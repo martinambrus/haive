@@ -44,17 +44,37 @@ function includedFromDeny(tree: TreeNode[], deny: readonly string[]): string[] {
   return collectAllPaths(tree).filter((p) => !isCoveredByDeny(p, deny));
 }
 
-/** The exclusion frontier: descend ONLY into included nodes, so the first
- *  un-included node on each path becomes one deny entry covering its whole
- *  subtree. Mirror of 06_7's collectDenyFrontier. */
+/** The exclusion frontier: the minimal deny list equivalent to keeping exactly the
+ *  included paths. A subtree collapses to ONE deny entry when nothing in it is
+ *  included; otherwise we descend so only its un-included branches are denied. A
+ *  parent need NOT itself be in the included set for a descendant to survive — which
+ *  is how DirectoryTreeSelect reports a partially-ticked parent (child paths present,
+ *  parent path absent). Mirror of 06_7/09_7's collectDenyFrontier in _scope.ts. */
 function denyFromIncluded(tree: TreeNode[], included: Set<string>, out: string[]): void {
-  for (const node of tree) {
-    if (included.has(node.path)) {
-      if (node.children) denyFromIncluded(node.children, included, out);
-    } else {
-      out.push(node.path);
-    }
+  for (const node of tree) denyNodeFromIncluded(node, included, out);
+}
+
+/** Records `node`'s minimal deny frontier into `out`; returns true when the node or
+ *  any descendant is included. Bottom-up so a fully-excluded subtree collapses to one
+ *  entry, but a single included descendant keeps its branch alive. */
+function denyNodeFromIncluded(node: TreeNode, included: Set<string>, out: string[]): boolean {
+  const children = node.children ?? [];
+  if (children.length === 0) {
+    if (included.has(node.path)) return true;
+    out.push(node.path);
+    return false;
   }
+  const childOut: string[] = [];
+  let anyKept = included.has(node.path);
+  for (const child of children) {
+    if (denyNodeFromIncluded(child, included, childOut)) anyKept = true;
+  }
+  if (!anyKept) {
+    out.push(node.path);
+    return false;
+  }
+  out.push(...childOut);
+  return true;
 }
 
 /** Split total file counts by whether each node is currently included. Each node
