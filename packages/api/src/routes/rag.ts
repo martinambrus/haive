@@ -73,7 +73,17 @@ async function resolveRunbookBoost(db: ReturnType<typeof getDb>, taskId: string)
 async function resolveTaskRagContext(
   db: ReturnType<typeof getDb>,
   taskId: string,
-): Promise<{ prefs: RagToolingPrefs; projectName: string; facets: ProjectFacetSet }> {
+): Promise<{
+  prefs: RagToolingPrefs;
+  projectName: string;
+  facets: ProjectFacetSet;
+  repositoryId: string | null;
+}> {
+  const taskRow = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { repositoryId: true },
+  });
+  const repositoryId = taskRow?.repositoryId ?? null;
   let toolingOutput = (
     await db.query.taskSteps.findFirst({
       where: and(
@@ -100,14 +110,10 @@ async function resolveTaskRagContext(
   )?.output;
 
   if (!toolingOutput || !envDetect) {
-    const task = await db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, taskId),
-      columns: { repositoryId: true },
-    });
-    if (task?.repositoryId) {
+    if (taskRow?.repositoryId) {
       const onboarding = await db.query.tasks.findFirst({
         where: and(
-          eq(schema.tasks.repositoryId, task.repositoryId),
+          eq(schema.tasks.repositoryId, taskRow.repositoryId),
           eq(schema.tasks.type, 'onboarding'),
         ),
         orderBy: [desc(schema.tasks.createdAt)],
@@ -159,6 +165,7 @@ async function resolveTaskRagContext(
     prefs: prefsFromTooling(toolingOutput),
     projectName,
     facets: extractProjectFacets(envDetect, confirmed),
+    repositoryId,
   };
 }
 
@@ -231,7 +238,7 @@ ragRoutes.post('/search', async (c) => {
   const effectiveTopK = topK ?? DEFAULT_RAG_SEARCH_CONFIG.topK;
 
   const db = getDb();
-  const { prefs, projectName, facets } = await resolveTaskRagContext(db, taskId);
+  const { prefs, projectName, facets, repositoryId } = await resolveTaskRagContext(db, taskId);
 
   // --- Local (per-repo) search: unchanged behaviour. ragMode 'none' contributes
   // no local hits; a local failure is still a hard 500 (no facet filter here, so
@@ -248,10 +255,18 @@ ragRoutes.post('/search', async (c) => {
           dimensions: prefs.embeddingDimensions,
         });
         const runbookBoost = await resolveRunbookBoost(db, taskId);
-        const hits = await ragHybridSearch(conn, vec, query, {
-          runbookBoost,
-          ...(topK ? { topK } : {}),
-        });
+        // Scope per-repo (internal mode) so a project-name-keyed RAG database
+        // shared by co-tenant repos never returns another repo's chunks. External/
+        // ddev stores are the user's own schema (may lack repository_id) — unscoped.
+        const localRepoId = prefs.ragMode === 'internal' ? (repositoryId ?? undefined) : undefined;
+        const hits = await ragHybridSearch(
+          conn,
+          vec,
+          query,
+          { runbookBoost, ...(topK ? { topK } : {}) },
+          undefined,
+          localRepoId,
+        );
         localHits = hits.map((h) => ({ ...h, scope: 'local' as const }));
       }
     } catch (err) {

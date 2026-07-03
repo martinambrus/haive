@@ -165,42 +165,73 @@ function buildFacetClause(
  *
  *  `filter` is the GLOBAL-KB-only namespace + facet predicate (plan §3.4). It is
  *  applied INSIDE the dense and lexical candidate CTEs (before LIMIT) so the
- *  candidate pool is not starved by post-filtering. Omit it for per-repo
- *  searches: the SQL is then identical to the original. */
+ *  candidate pool is not starved by post-filtering.
+ *
+ *  `repositoryId` is the LOCAL per-repo scope: when set (internal mode), every
+ *  candidate CTE is filtered to that repository_id so co-tenant repos sharing a
+ *  project-name-keyed RAG database never leak into each other's results. Omit it
+ *  for the global KB (which is cross-project by design). */
 export async function ragHybridSearch(
   conn: RagConnection,
   queryVec: number[],
   queryText: string,
   config: Partial<RagSearchConfig> = {},
   filter?: RagFacetFilter,
+  repositoryId?: string,
 ): Promise<RagSearchHit[]> {
   const cfg = { ...DEFAULT_RAG_SEARCH_CONFIG, ...config };
   const usePgvector = await hasVectorColumn(conn);
+  const dims = conn.embeddingDimensions;
 
   let rows: RawRow[];
 
   if (usePgvector) {
     const qv = vectorLiteral(queryVec);
-    // Base params are $1..$9; facet params (if any) start at $10.
+    // Base params are $1..$9; facet params (if any) start at $10; the run-book
+    // boost param follows the facets; the optional repository_id filter is last.
     const fc = filter ? buildFacetClause(filter, 10) : null;
-    const denseWhere = fc ? `WHERE ${fc.core}` : '';
-    const lexFacet = fc ? `\n          AND ${fc.core}` : '';
-    // Run-book RRF multiplier param goes AFTER the base ($1..$9) + facet params so
-    // facet numbering is untouched: $10 with no facet, else just past the facets.
     const boostParam = 9 + (fc?.params.length ?? 0) + 1;
-    rows = (await conn.pg.unsafe(
-      `
+    const repoParam = repositoryId ? boostParam + 1 : 0;
+    const repoCond = repositoryId ? `repository_id = $${repoParam}` : null;
+    // The dense and lexical candidate CTEs share the same namespace + facet +
+    // repository predicates. Local search passes repositoryId (per-repo isolation);
+    // the global KB passes the facet filter. They are mutually exclusive today but
+    // combine cleanly (AND) if both are ever supplied.
+    const conds = [fc?.core, repoCond].filter(Boolean) as string[];
+    const denseWhere = conds.length ? `WHERE ${conds.join('\n          AND ')}` : '';
+    const lexExtra = conds.map((c) => `\n          AND ${c}`).join('');
+    // pgvector's HNSW index (idx_rag_vector_hnsw) is built on the `vector::halfvec(dims)`
+    // cast, so the dense candidate CTE must ORDER BY the SAME cast to use it — an
+    // uncast `vector <=>` falls back to a full sequential scan. The outer `dense`
+    // CTE re-derives d_rank over the returned pool and recomputes dense_sim at full
+    // `vector` precision for the relevance gate.
+    //
+    // We deliberately do NOT raise hnsw.ef_search: on modest tables that inflates
+    // the planner's estimated HNSW cost past a plain seq-scan+sort and reverts the
+    // dense CTE to a full scan (measured: ef_search=100 -> 430ms seq scan vs the
+    // default's 5ms index scan). At the default ef_search the planner keeps the
+    // index, and its candidate count is ample for the RRF fusion below. A selective
+    // repo/facet filter is served by a bitmap index scan + exact sort (the planner's
+    // own choice) — fast and exact — so no iterative_scan GUC (and thus no
+    // transaction wrapper) is needed.
+    const sqlText = `
       WITH q AS (
-        SELECT $1::vector AS qv, plainto_tsquery('english', $2) AS qq
+        SELECT $1::vector AS qv, ($1::vector)::halfvec(${dims}) AS qvh,
+               plainto_tsquery('english', $2) AS qq
+      ),
+      dense_c AS (
+        SELECT id, vector,
+               (vector::halfvec(${dims})) <=> (SELECT qvh FROM q) AS hd
+        FROM ${RAG_TABLE}
+        ${denseWhere}
+        ORDER BY (vector::halfvec(${dims})) <=> (SELECT qvh FROM q)
+        LIMIT $3
       ),
       dense AS (
         SELECT id,
-               row_number() OVER (ORDER BY vector <=> (SELECT qv FROM q)) AS d_rank,
+               row_number() OVER (ORDER BY hd) AS d_rank,
                1 - (vector <=> (SELECT qv FROM q)) AS dense_sim
-        FROM ${RAG_TABLE}
-        ${denseWhere}
-        ORDER BY vector <=> (SELECT qv FROM q)
-        LIMIT $3
+        FROM dense_c
       ),
       lex AS (
         SELECT id,
@@ -209,7 +240,7 @@ export async function ragHybridSearch(
                ) AS l_rank,
                ts_rank_cd(content_tsv, (SELECT qq FROM q)) AS ts
         FROM ${RAG_TABLE}
-        WHERE content_tsv @@ (SELECT qq FROM q)${lexFacet}
+        WHERE content_tsv @@ (SELECT qq FROM q)${lexExtra}
         ORDER BY ts DESC
         LIMIT $3
       ),
@@ -242,27 +273,33 @@ export async function ragHybridSearch(
          OR COALESCE(l.ts, 0) > 0
       ORDER BY rrf DESC
       LIMIT $8
-      `,
-      [
-        qv,
-        queryText,
-        cfg.candidatePool,
-        cfg.rrfK,
-        cfg.denseFloor,
-        cfg.denseWeight,
-        cfg.lexWeight,
-        cfg.topK,
-        cfg.codeDenseFloor,
-        ...(fc?.params ?? []),
-        cfg.runbookBoost,
-      ],
-    )) as unknown as RawRow[];
+      `;
+    const params = [
+      qv,
+      queryText,
+      cfg.candidatePool,
+      cfg.rrfK,
+      cfg.denseFloor,
+      cfg.denseWeight,
+      cfg.lexWeight,
+      cfg.topK,
+      cfg.codeDenseFloor,
+      ...(fc?.params ?? []),
+      cfg.runbookBoost,
+      ...(repositoryId ? [repositoryId] : []),
+    ];
+    rows = (await conn.pg.unsafe(sqlText, params)) as unknown as RawRow[];
   } else {
     // jsonb-fallback store has no vector column: lexical-only ranking.
-    // Base params are $1..$3; facet params (if any) start at $4.
+    // Base params are $1..$3; facet params (if any) start at $4; the run-book
+    // boost follows the facets; the optional repository_id filter is last.
     const fc = filter ? buildFacetClause(filter, 4) : null;
-    const lexFacet = fc ? ` AND ${fc.core}` : '';
     const boostParamJ = 3 + (fc?.params.length ?? 0) + 1;
+    const repoParamJ = repositoryId ? boostParamJ + 1 : 0;
+    const conds = [fc?.core, repositoryId ? `repository_id = $${repoParamJ}` : null].filter(
+      Boolean,
+    ) as string[];
+    const lexExtra = conds.map((c) => ` AND ${c}`).join('');
     rows = (await conn.pg.unsafe(
       `
       WITH q AS (SELECT plainto_tsquery('english', $1) AS qq)
@@ -277,11 +314,18 @@ export async function ragHybridSearch(
           ORDER BY ts_rank_cd(content_tsv, (SELECT qq FROM q)) DESC
         ))) * (CASE WHEN source_type = 'runbook' THEN $${boostParamJ}::double precision ELSE 1 END) AS rrf
       FROM ${RAG_TABLE}
-      WHERE content_tsv @@ (SELECT qq FROM q)${lexFacet}
+      WHERE content_tsv @@ (SELECT qq FROM q)${lexExtra}
       ORDER BY rrf DESC
       LIMIT $3
       `,
-      [queryText, cfg.rrfK, cfg.topK, ...(fc?.params ?? []), cfg.runbookBoost],
+      [
+        queryText,
+        cfg.rrfK,
+        cfg.topK,
+        ...(fc?.params ?? []),
+        cfg.runbookBoost,
+        ...(repositoryId ? [repositoryId] : []),
+      ],
     )) as unknown as RawRow[];
   }
 
