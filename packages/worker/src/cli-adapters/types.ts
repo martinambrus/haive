@@ -22,6 +22,12 @@ export interface InvokeOpts {
    *  is enabled (global + per-repo) AND the adapter supportsSteering. Other
    *  adapters ignore it. */
   steeringMode?: boolean;
+  /** Claude-family only: tool names passed to `--disallowedTools` (a deny-list;
+   *  deny beats allow and is honored even under --dangerously-skip-permissions).
+   *  Set for onboarding mining invocations to `['Agent']` so a mining agent cannot
+   *  spawn its own Claude Code sub-agents (uncontrolled token fan-out). Non-claude
+   *  adapters ignore it. */
+  disallowedTools?: string[];
 }
 
 export interface EffortScale {

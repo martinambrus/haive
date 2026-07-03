@@ -42,6 +42,24 @@ const log = logger.child({ module: 'step-runner' });
 
 export type TaskStepRow = typeof schema.taskSteps.$inferSelect;
 
+/** Onboarding mining steps whose agents must NOT spawn their own Claude Code
+ *  sub-agents (the `Agent` tool). Haive already fans these out deterministically
+ *  (09_5's agentMining batch + skill-gen loop; 08/09-qa single agents), so letting
+ *  each agent recursively spawn more sub-agents just multiplies token spend with no
+ *  orchestration control. Workflow steps that rely on native Task()/Agent sub-agent
+ *  emulation are intentionally NOT listed here. */
+const SUBAGENT_DISALLOWED_STEP_IDS = new Set<string>([
+  '08-knowledge-acquisition',
+  '09-qa',
+  '09_5-skill-generation',
+  '09_5b-skill-repair',
+]);
+
+/** `['Agent']` for a mining step (blocks native sub-agent spawning), else undefined. */
+function miningDisallowedTools(stepId: string): string[] | undefined {
+  return SUBAGENT_DISALLOWED_STEP_IDS.has(stepId) ? ['Agent'] : undefined;
+}
+
 /** Loads the submitted `formValues` from the most recent successfully completed
  *  task (same repository, same user, same workflow type) whose row for this step
  *  id finished (status 'done') with non-null form values. Returns undefined when
@@ -527,6 +545,7 @@ async function resolveLlmPhase(
     invokeOpts: {
       cwd: params.workspacePath,
       effortLevel: preferredEffort ?? undefined,
+      disallowedTools: miningDisallowedTools(stepDef.metadata.id),
     },
   });
 
@@ -819,7 +838,11 @@ async function resolveAgentMiningPhase(
         prompt: dispatch.prompt,
         capabilities: spec.requiredCapabilities,
       },
-      invokeOpts: { cwd: params.workspacePath, effortLevel: preferredEffort ?? undefined },
+      invokeOpts: {
+        cwd: params.workspacePath,
+        effortLevel: preferredEffort ?? undefined,
+        disallowedTools: miningDisallowedTools(stepDef.metadata.id),
+      },
     });
 
     if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
