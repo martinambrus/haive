@@ -9,7 +9,7 @@ import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../ste
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { loadPreviousStepOutput, pathExists, resolveSkillTargetDirs } from './_helpers.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
-import { loadScopeExcludeGlobs } from './_scope.js';
+import { loadMiningScopeExcludeGlobs } from './_scope.js';
 import {
   collectShortFileTree,
   hasSubSkills,
@@ -288,7 +288,7 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
     const framework = envData?.project?.framework ?? null;
     const language = envData?.project?.primaryLanguage ?? null;
     const kbFiles = await listKbFiles(ctx.repoPath);
-    const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
+    const scopeExclude = await loadMiningScopeExcludeGlobs(ctx.db, ctx.taskId);
     const fileTree =
       failingSkills.length > 0 ? await collectShortFileTree(ctx.repoPath, scopeExclude) : '';
 

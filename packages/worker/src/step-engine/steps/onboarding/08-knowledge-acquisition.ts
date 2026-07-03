@@ -5,7 +5,7 @@ import type { DetectResult, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
-import { isDeniedPath, loadScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
+import { isDeniedPath, loadMiningScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
 import { techAnchorFacets } from '../_repo-stack.js';
 import {
   resolveStackVersions,
@@ -1255,7 +1255,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       confirmed,
     );
 
-    const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
+    const scopeExclude = await loadMiningScopeExcludeGlobs(ctx.db, ctx.taskId);
     await ctx.emitProgress('Collecting file tree for LLM orientation...');
     const fileTree = await collectShortFileTree(ctx.repoPath, scopeExclude);
 

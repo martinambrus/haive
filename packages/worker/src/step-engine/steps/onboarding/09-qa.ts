@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { DetectResult } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
-import { isDeniedPath, loadScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
+import { isDeniedPath, loadMiningScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 
 /* ------------------------------------------------------------------ */
@@ -341,7 +341,7 @@ export const knowledgeQaPrepStep: StepDefinition<KnowledgeQaPrepDetect, Knowledg
     await ctx.emitProgress('Listing existing knowledge base...');
     const kbFiles = await listKbFiles(ctx.repoPath);
 
-    const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
+    const scopeExclude = await loadMiningScopeExcludeGlobs(ctx.db, ctx.taskId);
     await ctx.emitProgress('Collecting file tree for LLM orientation...');
     const fileTree = await collectShortFileTree(ctx.repoPath, scopeExclude);
 

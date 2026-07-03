@@ -15,7 +15,7 @@ import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
 import { jsonrepair } from 'jsonrepair';
 import type { KbFileSummary } from './09-qa.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
-import { isDeniedPath, loadScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
+import { isDeniedPath, loadMiningScopeExcludeGlobs, scopeInstructionLines } from './_scope.js';
 
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
 
@@ -907,7 +907,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     await ctx.emitProgress('Loading bundle skills...');
     const bundleSkills = await loadBundleSkills(ctx);
 
-    const scopeExclude = await loadScopeExcludeGlobs(ctx.db, ctx.taskId);
+    const scopeExclude = await loadMiningScopeExcludeGlobs(ctx.db, ctx.taskId);
     await ctx.emitProgress('Collecting file tree for LLM orientation...');
     const fileTree = await collectShortFileTree(ctx.repoPath, scopeExclude);
 

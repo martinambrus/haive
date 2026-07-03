@@ -1,13 +1,17 @@
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
-import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
 import type { DetectResult, FormSchema, TreeNode } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
 import { buildFullExtensionSet, type ExtensionInfo } from './_extension-registry.js';
 import { buildScopeTree } from '@haive/shared/scope-tree';
 import { computeSeedExcludeGlobs } from './_scope-seed.js';
+import {
+  collectAllPaths,
+  collectDefaults,
+  collectDenyFrontier,
+  readComposerJson,
+  readGitignore,
+  sumFileCount,
+} from './_scope.js';
 
 interface ScopeSelectionDetect {
   framework: string | null;
@@ -18,92 +22,12 @@ interface ScopeSelectionDetect {
 }
 
 interface ScopeSelectionApply {
-  /** Persisted deny list (the exclusion frontier) written to
-   *  repositories.scope_exclude_globs. */
+  /** Task-scoped mining deny list (the exclusion frontier). Stored ONLY in this
+   *  step's output (NOT the repo) and read by the KB + skill mining steps
+   *  (08/09-qa/09_5/09_5b) via loadMiningScopeExcludeGlobs. The repo-level RAG
+   *  scope is chosen separately at 09_7-rag-source-selection. */
   excludeGlobs: string[];
   includedDirCount: number;
-}
-
-/* ------------------------------------------------------------------ */
-/* Tree helpers                                                        */
-/* ------------------------------------------------------------------ */
-
-function collectAllPaths(nodes: TreeNode[]): string[] {
-  const out: string[] = [];
-  for (const node of nodes) {
-    out.push(node.path);
-    if (node.children) out.push(...collectAllPaths(node.children));
-  }
-  return out;
-}
-
-function sumFileCount(nodes: TreeNode[]): number {
-  let total = 0;
-  for (const node of nodes) {
-    total += node.fileCount ?? 0;
-    if (node.children) total += sumFileCount(node.children);
-  }
-  return total;
-}
-
-/** A path is covered by the seed when it IS a seed glob or sits UNDER one, so the
- *  whole excluded subtree starts unticked. */
-function isCoveredBySeed(p: string, seed: readonly string[]): boolean {
-  for (const s of seed) {
-    if (p === s || p.startsWith(`${s}/`)) return true;
-  }
-  return false;
-}
-
-/** Default selection = every tree dir NOT covered by the seed. The picker checkbox
- *  treats a parent as fully-checked only when all descendants are in the value set,
- *  so defaults must list every included node explicitly. */
-function collectDefaults(tree: TreeNode[], seed: readonly string[]): string[] {
-  return collectAllPaths(tree).filter((p) => !isCoveredBySeed(p, seed));
-}
-
-/** The exclusion frontier: the shallowest un-selected dirs. Descend ONLY into
- *  selected nodes, so the first un-selected node on each path is recorded and its
- *  whole subtree is excluded by that single entry. Mirrors the directory-tree
- *  component invariant (a selected — even indeterminate — node keeps its own path
- *  in the value set; an un-selected node's path is absent).
- *
- *  v1 limitation: excluding a dir excludes its entire subtree; re-including a
- *  descendant of an excluded dir is not representable here — untick at the leaf. */
-function collectDenyFrontier(tree: TreeNode[], selected: Set<string>, out: string[]): void {
-  for (const node of tree) {
-    if (selected.has(node.path)) {
-      if (node.children) collectDenyFrontier(node.children, selected, out);
-    } else {
-      out.push(node.path);
-    }
-  }
-}
-
-async function resolveRepositoryId(ctx: StepContext): Promise<string | null> {
-  const rows = await ctx.db
-    .select({ repositoryId: schema.tasks.repositoryId })
-    .from(schema.tasks)
-    .where(eq(schema.tasks.id, ctx.taskId))
-    .limit(1);
-  return rows[0]?.repositoryId ?? null;
-}
-
-async function readComposerJson(repoPath: string): Promise<unknown> {
-  try {
-    const text = await readFile(path.join(repoPath, 'composer.json'), 'utf8');
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-async function readGitignore(repoPath: string): Promise<string | null> {
-  try {
-    return await readFile(path.join(repoPath, '.gitignore'), 'utf8');
-  } catch {
-    return null;
-  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -115,12 +39,12 @@ export const scopeSelectionStep: StepDefinition<ScopeSelectionDetect, ScopeSelec
     id: '06_7-scope-selection',
     workflowType: 'onboarding',
     // After 06_5-agent-discovery (index 6, stays full-repo) and before
-    // 07-generate-files (7) / 08-knowledge-acquisition — so the deny list is in
+    // 07-generate-files (7) / 08-knowledge-acquisition — so the mining scope is in
     // place before the expensive agentic mining steps read the repo.
     index: 6.5,
-    title: 'Onboarding scope selection',
+    title: 'Onboarding mining scope',
     description:
-      'Pick which directories the onboarding mining steps (knowledge base, skills) and RAG index. Built-in framework code (Drupal core/contrib, vendor, ...) is pre-excluded so the expensive agentic steps only read this project’s own code. Un-ticked directories are stored as the per-repo scope exclusion list.',
+      'Pick which directories the onboarding mining steps (knowledge base, skills) analyse. Built-in framework code (Drupal core/contrib, vendor, ...) is pre-excluded so the expensive agentic steps only read this project’s own code. This scopes KB + skill mining for THIS onboarding run only and is not saved on the repo; the RAG index scope is chosen separately at the RAG step.',
     requiresCli: false,
   },
 
@@ -167,9 +91,8 @@ export const scopeSelectionStep: StepDefinition<ScopeSelectionDetect, ScopeSelec
   form(_ctx, detected): FormSchema {
     if (detected.tree.length === 0) {
       return {
-        title: 'Onboarding scope',
-        description:
-          'No directories found to scope. Onboarding will read the repository root only.',
+        title: 'Onboarding mining scope',
+        description: 'No directories found to scope. Mining will read the repository root only.',
         fields: [],
         submitLabel: 'Continue',
       };
@@ -179,15 +102,15 @@ export const scopeSelectionStep: StepDefinition<ScopeSelectionDetect, ScopeSelec
       title: 'Select the code to mine',
       description: [
         `Found ${detected.totalCodeFiles} code files.`,
-        'Ticked directories are read by the knowledge-base and skill mining steps and indexed into RAG.',
+        'Ticked directories are what the knowledge-base and skill mining steps analyse.',
         'Built-in framework code (Drupal core/contrib, vendor, node_modules, ...) is pre-unticked — leave it off to keep onboarding fast and focused on this project’s own code.',
-        'Un-ticked directories become the per-repo scope exclusion list; new folders added by later tasks are included automatically.',
+        'Un-ticked directories are skipped by the mining steps for this onboarding run; new folders added by later tasks are included automatically.',
       ].join(' '),
       fields: [
         {
           type: 'directory-tree',
           id: 'selectedDirs',
-          label: 'Directories to mine + index',
+          label: 'Directories to mine',
           tree: detected.tree,
           defaults,
         },
@@ -201,23 +124,16 @@ export const scopeSelectionStep: StepDefinition<ScopeSelectionDetect, ScopeSelec
     const values = args.formValues as { selectedDirs?: string[] };
     const selected = new Set(values.selectedDirs ?? []);
 
+    // Task-scoped: the mining deny list lives ONLY in this step's output, read by
+    // the KB + skill mining steps. It is NOT written to the repo — the repo-level
+    // scope_exclude_globs is the RAG scope, owned by 09_7-rag-source-selection.
     const excludeGlobs: string[] = [];
     collectDenyFrontier(detected.tree, selected, excludeGlobs);
     excludeGlobs.sort();
 
-    const repositoryId = await resolveRepositoryId(ctx);
-    if (repositoryId) {
-      await ctx.db
-        .update(schema.repositories)
-        .set({ scopeExcludeGlobs: excludeGlobs, updatedAt: new Date() })
-        .where(eq(schema.repositories.id, repositoryId));
-    } else {
-      ctx.logger.warn('scope-selection: no repositoryId for task, deny list not persisted');
-    }
-
     ctx.logger.info(
       { excludeCount: excludeGlobs.length, selectedCount: selected.size },
-      'scope-selection apply complete',
+      'scope-selection apply complete (task-scoped mining)',
     );
     return { excludeGlobs, includedDirCount: selected.size };
   },
