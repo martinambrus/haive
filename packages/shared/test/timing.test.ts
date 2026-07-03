@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { computeTaskTiming, type TaskTimingStep } from '../src/step-engine/timing.js';
+import {
+  computeStepContribution,
+  computeTaskTiming,
+  type TaskTimingStep,
+} from '../src/step-engine/timing.js';
 
 // Fixed clock so the tests are deterministic (no argless Date usage).
 const BASE = Date.UTC(2026, 0, 1, 0, 0, 0);
@@ -90,5 +94,64 @@ describe('computeTaskTiming', () => {
     );
     expect(t.workMs).toBe(130 * MIN); // 10 (pre-park) + 120 (done)
     expect(t.idleMs).toBe(190 * MIN); // 200 - 10 park
+  });
+
+  it('adds carried_* from prior runs on top of the current run', () => {
+    // Current run: 30 min of work (done at t=30). Prior runs contributed 45 work,
+    // 12 idle, 8 user. Totals must be the sum of both.
+    const t = computeTaskTiming(
+      [
+        step({
+          status: 'done',
+          endedAt: at(30),
+          userActiveMs: 2 * MIN,
+          carriedWorkMs: 45 * MIN,
+          carriedIdleMs: 12 * MIN,
+          carriedUserActiveMs: 8 * MIN,
+        }),
+      ],
+      now(30),
+    );
+    expect(t.workMs).toBe((30 + 45) * MIN);
+    expect(t.idleMs).toBe(12 * MIN);
+    expect(t.userActiveMs).toBe((2 + 8) * MIN);
+  });
+});
+
+describe('computeStepContribution', () => {
+  it('splits a still-open running step into work (no idle/sit by default)', () => {
+    const c = computeStepContribution(step({ status: 'running', idleMs: 3 * MIN }), now(20));
+    expect(c.workMs).toBe(17 * MIN); // 20 span - 3 idle
+    expect(c.idleMs).toBe(3 * MIN);
+  });
+
+  it('returns zero work for a step that never started but keeps stored idle/user', () => {
+    const c = computeStepContribution(
+      step({ startedAt: null, status: 'pending', idleMs: 1000, userActiveMs: 500 }),
+      now(10),
+    );
+    expect(c).toEqual({ workMs: 0, idleMs: 1000, userActiveMs: 500 });
+  });
+
+  it('does NOT fold a failed step sit by default (read path)', () => {
+    // Failed run: worked 10 min then failed/ended at t=10; sat failed until now (t=60).
+    const c = computeStepContribution(step({ status: 'failed', endedAt: at(10) }), now(60));
+    expect(c.workMs).toBe(10 * MIN);
+    expect(c.idleMs).toBe(0); // the 50-min sit is NOT counted on the read path
+  });
+
+  it('folds a failed step sit into idle when foldSit=true (reset fold) and reconciles wall', () => {
+    // Same failed run; at retry (now=t=60) the fold counts the 50-min sit as idle so
+    // carried_work + carried_idle == the full attempt span (60 min from start).
+    const c = computeStepContribution(step({ status: 'failed', endedAt: at(10) }), now(60), true);
+    expect(c.workMs).toBe(10 * MIN);
+    expect(c.idleMs).toBe(50 * MIN);
+    expect(c.workMs + c.idleMs).toBe(60 * MIN); // == now - startedAt
+  });
+
+  it('foldSit does not add a sit for a non-failed (done) step', () => {
+    const c = computeStepContribution(step({ status: 'done', endedAt: at(30) }), now(200), true);
+    expect(c.workMs).toBe(30 * MIN);
+    expect(c.idleMs).toBe(0); // done, not failed → no sit despite foldSit
   });
 });

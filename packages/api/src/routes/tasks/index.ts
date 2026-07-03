@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  computeStepContribution,
   computeTaskTiming,
   createTaskRequestSchema,
   expandTaskStatusFilter,
@@ -108,6 +109,9 @@ taskRoutes.get('/', async (c) => {
           userActiveMs: schema.taskSteps.userActiveMs,
           waitingStartedAt: schema.taskSteps.waitingStartedAt,
           status: schema.taskSteps.status,
+          carriedWorkMs: schema.taskSteps.carriedWorkMs,
+          carriedIdleMs: schema.taskSteps.carriedIdleMs,
+          carriedUserActiveMs: schema.taskSteps.carriedUserActiveMs,
         })
         .from(schema.taskSteps)
         .where(inArray(schema.taskSteps.taskId, taskIds))
@@ -702,28 +706,45 @@ taskRoutes.patch('/:id/cli-provider', async (c) => {
   // dir, etc.). Terminal (done/failed/skipped/cancelled) steps are left
   // alone — rewriting history would be confusing. form_values is preserved
   // so the user's prior submission flows into the regenerated schema.
+  // Select the steps to invalidate first, so each finishing run's timing can be folded
+  // into carried_* before zeroing (mirrors the retry / worker reset — a plain reset
+  // discards the prior run and undercounts effort). foldSit counts a failed step's
+  // fail->retry wait as idle. Per-row update because each contributes differently; this
+  // path also zeroes user_active_ms (the old blanket update omitted it, leaving a stale
+  // value that the fold now carries over correctly).
   const invalidated = await db
-    .update(schema.taskSteps)
-    .set({
-      status: 'pending',
-      detectOutput: null,
-      formSchema: null,
-      statusMessage: null,
-      startedAt: null,
-      endedAt: null,
-      errorMessage: null,
-      idleMs: 0,
-      waitingStartedAt: null,
-      updatedAt: new Date(),
-    })
+    .select()
+    .from(schema.taskSteps)
     .where(
       and(
         eq(schema.taskSteps.taskId, id),
         inArray(schema.taskSteps.stepId, [...PROVIDER_SENSITIVE_STEP_IDS]),
         inArray(schema.taskSteps.status, ['pending', 'running', 'waiting_form', 'waiting_cli']),
       ),
-    )
-    .returning({ stepId: schema.taskSteps.stepId });
+    );
+  const invalidateNow = new Date();
+  for (const r of invalidated) {
+    const contrib = computeStepContribution(r, invalidateNow.getTime(), r.status === 'failed');
+    await db
+      .update(schema.taskSteps)
+      .set({
+        status: 'pending',
+        detectOutput: null,
+        formSchema: null,
+        statusMessage: null,
+        startedAt: null,
+        endedAt: null,
+        errorMessage: null,
+        idleMs: 0,
+        waitingStartedAt: null,
+        userActiveMs: 0,
+        carriedWorkMs: r.carriedWorkMs + contrib.workMs,
+        carriedIdleMs: r.carriedIdleMs + contrib.idleMs,
+        carriedUserActiveMs: r.carriedUserActiveMs + contrib.userActiveMs,
+        updatedAt: invalidateNow,
+      })
+      .where(eq(schema.taskSteps.id, r.id));
+  }
 
   if (invalidated.length > 0) {
     await appendTaskEvent(db, id, null, 'task.provider_sensitive_steps_invalidated', {

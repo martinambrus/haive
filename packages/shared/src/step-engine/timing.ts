@@ -8,6 +8,12 @@ export interface TaskTimingStep {
   userActiveMs: number | null;
   waitingStartedAt: Date | string | null;
   status: string;
+  /** Work / idle / user-active (ms) folded in from PRIOR runs of this step by a
+   *  retry/revise/reset, added on top of the current run below. Optional so a caller
+   *  that has not selected the columns (treated as 0) still satisfies the shape. */
+  carriedWorkMs?: number | null;
+  carriedIdleMs?: number | null;
+  carriedUserActiveMs?: number | null;
 }
 
 export interface TaskTiming {
@@ -25,42 +31,69 @@ function toMs(v: Date | string | null): number | null {
   return Number.isNaN(t) ? null : t;
 }
 
-/** Active-work / idle / user-active breakdown for a task, summed across its
- *  steps. Mirrors the per-step figures the task page shows: work is each step's
- *  wall-clock span minus its idle (time waiting on the user) minus the live open
- *  wait of a step still in `waiting_form` (or parked in `waiting_cli`); a step that has not ended yet uses
- *  `nowMs` as its end. Pure, so the api list endpoint and the web detail page
- *  compute identical numbers. Wall clock (start -> end of the whole task) is the
- *  caller's job — it comes from the task row, not the steps. */
+/** Work / idle / user-active the CURRENT run of one step contributes, using the
+ *  rule the task page shows: work is the step's span (start -> ended, or `nowMs` if
+ *  still open) minus its idle and minus the live open wait; idle is stored idle plus
+ *  that open wait; user-active is the stored focused subset. A step with no
+ *  `startedAt` contributes no work but still surfaces any stored idle/user (matches
+ *  the historical sum). Pure — shared by `computeTaskTiming` (read path) and the
+ *  reset fold (which snapshots a finishing run before its timing is zeroed).
+ *
+ *  `foldSit` (reset fold only): also count a FAILED step's ended -> now dead-wait as
+ *  idle, so retrying after a failure (e.g. a rate-limit sit) attributes that wait to
+ *  the step and `carried_work + carried_idle` equals the full attempt span. Off on
+ *  the read path, so viewing a failed task is unchanged. */
+export function computeStepContribution(
+  step: TaskTimingStep,
+  nowMs: number,
+  foldSit = false,
+): TaskTiming {
+  const stepIdle = step.idleMs ?? 0;
+  const userActiveMs = step.userActiveMs ?? 0;
+  const start = toMs(step.startedAt);
+  if (start === null) return { workMs: 0, idleMs: stepIdle, userActiveMs };
+  const ended = toMs(step.endedAt);
+  const end = ended ?? nowMs;
+  const waitStart = toMs(step.waitingStartedAt);
+  // A step accruing non-work wait right now: either sitting in waiting_form (waiting on
+  // the user) or parked in waiting_cli with NO invocation currently running (waiting on a
+  // CLI slot / a rate-limit reset). Count the ongoing wait so idle ticks live and is
+  // excluded from work below. waitingStartedAt is the invariant: for waiting_cli the worker
+  // sets it only while no invocation runs and clears+folds it into idle_ms when one starts,
+  // so an actively-running CLI step has waitStart === null and its span still bills as work.
+  // On the fold the server adds this same span to idle_ms and clears waitingStartedAt, so
+  // there is no double-count across the transition.
+  const openWait =
+    ended === null &&
+    (step.status === 'waiting_form' || step.status === 'waiting_cli') &&
+    waitStart !== null
+      ? Math.max(0, nowMs - waitStart)
+      : 0;
+  const sit =
+    foldSit && ended !== null && step.status === 'failed' ? Math.max(0, nowMs - ended) : 0;
+  return {
+    workMs: Math.max(0, end - start - stepIdle - openWait),
+    idleMs: stepIdle + openWait + sit,
+    userActiveMs,
+  };
+}
+
+/** Active-work / idle / user-active breakdown for a task, summed across its steps.
+ *  Each step's CURRENT run (via `computeStepContribution`) plus any timing carried
+ *  over from prior runs (`carried_*`, folded in by a retry/reset), so the totals
+ *  report the full step across all restarts, not just the latest attempt. Pure, so
+ *  the api list endpoint and the web detail page compute identical numbers. Wall
+ *  clock (start -> end of the whole task) is the caller's job — it comes from the
+ *  task row, not the steps. */
 export function computeTaskTiming(steps: TaskTimingStep[], nowMs: number): TaskTiming {
   let workMs = 0;
   let idleMs = 0;
   let userActiveMs = 0;
   for (const s of steps) {
-    const stepIdle = s.idleMs ?? 0;
-    idleMs += stepIdle;
-    userActiveMs += s.userActiveMs ?? 0;
-    const start = toMs(s.startedAt);
-    if (start === null) continue;
-    const ended = toMs(s.endedAt);
-    const end = ended ?? nowMs;
-    const waitStart = toMs(s.waitingStartedAt);
-    // A step accruing non-work wait right now: either sitting in waiting_form (waiting on
-    // the user) or parked in waiting_cli with NO invocation currently running (waiting on a
-    // CLI slot / a rate-limit reset). Count the ongoing wait so idle ticks live and is
-    // excluded from work below. waitingStartedAt is the invariant: for waiting_cli the worker
-    // sets it only while no invocation runs and clears+folds it into idle_ms when one starts,
-    // so an actively-running CLI step has waitStart === null and its span still bills as work.
-    // On the fold the server adds this same span to idle_ms and clears waitingStartedAt, so
-    // there is no double-count across the transition.
-    const openWait =
-      ended === null &&
-      (s.status === 'waiting_form' || s.status === 'waiting_cli') &&
-      waitStart !== null
-        ? Math.max(0, nowMs - waitStart)
-        : 0;
-    idleMs += openWait;
-    workMs += Math.max(0, end - start - stepIdle - openWait);
+    const c = computeStepContribution(s, nowMs);
+    workMs += c.workMs + (s.carriedWorkMs ?? 0);
+    idleMs += c.idleMs + (s.carriedIdleMs ?? 0);
+    userActiveMs += c.userActiveMs + (s.carriedUserActiveMs ?? 0);
   }
   return { workMs, idleMs, userActiveMs };
 }

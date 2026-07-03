@@ -298,6 +298,15 @@ export const taskSteps = pgTable(
      *  measured client-side and posted in increments; pauses while the agent
      *  works. Lets the UI report effort = active work + user active time. */
     userActiveMs: integer('user_active_ms').notNull().default(0),
+    /** Timing carried over from PRIOR runs of this step (ms). A retry/revise/reset
+     *  zeroes the live started_at/ended_at/idle_ms/user_active_ms so the current run
+     *  measures cleanly; before zeroing it folds the finished run's work/idle/user
+     *  contribution into these accumulators. Timing readers add carried_* on top of
+     *  the current run, so work/idle/effort reflect the FULL step across all restarts
+     *  instead of only the latest attempt. Default 0; legacy rows carry nothing. */
+    carriedWorkMs: integer('carried_work_ms').notNull().default(0),
+    carriedIdleMs: integer('carried_idle_ms').notNull().default(0),
+    carriedUserActiveMs: integer('carried_user_active_ms').notNull().default(0),
     /** Surface B audit trail: context-window usage frozen at step completion.
      *  context_tokens = peak single-invocation prompt-side tokens
      *  (input + cacheRead + cacheCreation) over this step's non-superseded CLI

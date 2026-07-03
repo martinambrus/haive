@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { computeStepContribution } from '@haive/shared/timing';
 import {
   CLI_PROVIDER_CATALOG,
   clarifyStepRequestSchema,
@@ -376,31 +377,43 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       // retry would re-run the LLM but reuse the stale form schema.
       // formValues is cleared so the user re-confirms inputs against the
       // (possibly different) regenerated schema.
-      await tx
-        .update(schema.taskSteps)
-        .set({
-          status: 'pending',
-          detectOutput: null,
-          formSchema: null,
-          formValues: null,
-          output: null,
-          // Loop state must reset too. Leaving a stale iterationCount/iterations
-          // makes a retried loop step (e.g. spec quality) resume at the old count —
-          // past its budget — and carry the prior passes forward instead of starting
-          // a clean loop.
-          iterations: [],
-          iterationCount: 0,
-          statusMessage: null,
-          errorMessage: null,
-          errorHint: null,
-          startedAt: null,
-          endedAt: null,
-          idleMs: 0,
-          waitingStartedAt: null,
-          userActiveMs: 0,
-          updatedAt: now,
-        })
-        .where(inArray(schema.taskSteps.id, allStepIds));
+      // Zero the live timing per row, but first fold the finishing run's work/idle/
+      // user into carried_* so the step's timing survives the retry (a plain reset
+      // discards the prior run, undercounting effort). foldSit counts a failed step's
+      // fail->retry wait as idle so wall reconciles. Per-row because each contributes
+      // differently. Mirrors resetStepAndDownstream in the worker.
+      const resetRows = [step, ...downstream.filter((r) => r.status !== 'pending')];
+      for (const r of resetRows) {
+        const contrib = computeStepContribution(r, now.getTime(), r.status === 'failed');
+        await tx
+          .update(schema.taskSteps)
+          .set({
+            status: 'pending',
+            detectOutput: null,
+            formSchema: null,
+            formValues: null,
+            output: null,
+            // Loop state must reset too. Leaving a stale iterationCount/iterations
+            // makes a retried loop step (e.g. spec quality) resume at the old count —
+            // past its budget — and carry the prior passes forward instead of starting
+            // a clean loop.
+            iterations: [],
+            iterationCount: 0,
+            statusMessage: null,
+            errorMessage: null,
+            errorHint: null,
+            startedAt: null,
+            endedAt: null,
+            idleMs: 0,
+            waitingStartedAt: null,
+            userActiveMs: 0,
+            carriedWorkMs: r.carriedWorkMs + contrib.workMs,
+            carriedIdleMs: r.carriedIdleMs + contrib.idleMs,
+            carriedUserActiveMs: r.carriedUserActiveMs + contrib.userActiveMs,
+            updatedAt: now,
+          })
+          .where(eq(schema.taskSteps.id, r.id));
+      }
       // Per-step "Override and run": only the clicked step bypasses the
       // unsafe-for-local-models guard on re-run. A plain retry sets this false
       // (re-arming the guard); the override button sets it true. Scoped to
@@ -747,7 +760,21 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       eq(schema.taskSteps.stepId, stepId),
       body.round !== undefined ? eq(schema.taskSteps.round, body.round) : undefined,
     ),
-    columns: { id: true, status: true, iterationCount: true, round: true },
+    columns: {
+      id: true,
+      status: true,
+      iterationCount: true,
+      round: true,
+      // Timing fields for the carried_* fold when this change resets the step below.
+      startedAt: true,
+      endedAt: true,
+      idleMs: true,
+      userActiveMs: true,
+      waitingStartedAt: true,
+      carriedWorkMs: true,
+      carriedIdleMs: true,
+      carriedUserActiveMs: true,
+    },
     orderBy: desc(schema.taskSteps.round),
   });
   if (!step) throw new HttpError(404, 'Step not found');
@@ -926,6 +953,10 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     await db
       .delete(schema.taskStepAgentMinings)
       .where(eq(schema.taskStepAgentMinings.taskStepId, step.id));
+    // Fold the finishing run's timing into carried_* before zeroing, so switching the
+    // CLI and re-running the step keeps its accrued work/idle/effort (same as retry).
+    const now = new Date();
+    const contrib = computeStepContribution(step, now.getTime(), step.status === 'failed');
     await db
       .update(schema.taskSteps)
       .set({
@@ -939,7 +970,10 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
         idleMs: 0,
         waitingStartedAt: null,
         userActiveMs: 0,
-        updatedAt: new Date(),
+        carriedWorkMs: step.carriedWorkMs + contrib.workMs,
+        carriedIdleMs: step.carriedIdleMs + contrib.idleMs,
+        carriedUserActiveMs: step.carriedUserActiveMs + contrib.userActiveMs,
+        updatedAt: now,
       })
       .where(eq(schema.taskSteps.id, step.id));
     // Mirror the retry/resume handlers: a failed task must leave the failed state

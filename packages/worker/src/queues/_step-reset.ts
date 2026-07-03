@@ -1,5 +1,6 @@
 import { and, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { computeStepContribution } from '@haive/shared/timing';
 
 // Reset a step + its downstream back to `pending` so the worker re-runs the step from
 // detect. Used by the `revise` route (handleResult): a review step asks to re-run an
@@ -64,27 +65,39 @@ export async function resetStepAndDownstream(
       .where(inArray(schema.taskStepAgentMinings.taskStepId, allStepIds));
     // Clearing formSchema is essential: the runner only re-renders the form when the
     // persisted schema is null. formValues is cleared so the regenerated form re-decides.
-    await tx
-      .update(schema.taskSteps)
-      .set({
-        status: 'pending',
-        detectOutput: null,
-        formSchema: null,
-        formValues: null,
-        output: null,
-        iterations: [],
-        iterationCount: 0,
-        statusMessage: null,
-        errorMessage: null,
-        errorHint: null,
-        startedAt: null,
-        endedAt: null,
-        idleMs: 0,
-        waitingStartedAt: null,
-        userActiveMs: 0,
-        updatedAt: now,
-      })
-      .where(inArray(schema.taskSteps.id, allStepIds));
+    // Zero the live timing per row, but first fold the finishing run's work/idle/user
+    // into carried_* so the step's timing survives the restart (a plain reset would
+    // discard the prior run, making the effort timer undercount). foldSit counts a
+    // failed step's fail->retry dead-wait as idle so wall reconciles. Per-row (not a
+    // blanket update) because each row's contribution differs.
+    const resetRows = [target, ...downstream.filter((r) => r.status !== 'pending')];
+    for (const r of resetRows) {
+      const c = computeStepContribution(r, now.getTime(), r.status === 'failed');
+      await tx
+        .update(schema.taskSteps)
+        .set({
+          status: 'pending',
+          detectOutput: null,
+          formSchema: null,
+          formValues: null,
+          output: null,
+          iterations: [],
+          iterationCount: 0,
+          statusMessage: null,
+          errorMessage: null,
+          errorHint: null,
+          startedAt: null,
+          endedAt: null,
+          idleMs: 0,
+          waitingStartedAt: null,
+          userActiveMs: 0,
+          carriedWorkMs: r.carriedWorkMs + c.workMs,
+          carriedIdleMs: r.carriedIdleMs + c.idleMs,
+          carriedUserActiveMs: r.carriedUserActiveMs + c.userActiveMs,
+          updatedAt: now,
+        })
+        .where(eq(schema.taskSteps.id, r.id));
+    }
     // Bump the task's orchestration epoch so any advance-step job queued under the
     // prior epoch (a stale/duplicate job) is skipped by handleAdvanceStep — the
     // worker-side equivalent of the API retry's epoch bump.

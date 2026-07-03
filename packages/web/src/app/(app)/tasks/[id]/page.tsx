@@ -1154,7 +1154,9 @@ export default function TaskDetailPage() {
                   taskCompletedAt={task.completedAt}
                   taskRepositoryId={task.repositoryId}
                   userActiveDisplayMs={
-                    userActive.activeStepId === step.id ? userActive.displayMs : step.userActiveMs
+                    (userActive.activeStepId === step.id
+                      ? userActive.displayMs
+                      : step.userActiveMs) + step.carriedUserActiveMs
                   }
                   submitting={submitting === step.stepId}
                   submitError={submitting === step.stepId ? submitError : null}
@@ -1538,6 +1540,7 @@ function StepDuration({
   waitingStartedAt,
   status,
   taskCompletedAt,
+  carriedWorkMs,
 }: {
   startedAt: string | null;
   endedAt: string | null;
@@ -1545,6 +1548,9 @@ function StepDuration({
   waitingStartedAt: string | null;
   status: StepStatus;
   taskCompletedAt: string | null;
+  /** Work (ms) from prior runs of this step, added on top of the current run so a
+   *  retried step shows its full work, not just the latest attempt. */
+  carriedWorkMs: number;
 }) {
   const stepEndedAt = endedAt ?? taskCompletedAt;
   const ticking = !!startedAt && !stepEndedAt;
@@ -1561,7 +1567,7 @@ function StepDuration({
     !stepEndedAt && status === 'waiting_form' && waitingStartedAt
       ? Math.max(0, now - new Date(waitingStartedAt).getTime())
       : 0;
-  const workMs = Math.max(0, end - start - idleMs - openWaitMs);
+  const workMs = Math.max(0, end - start - idleMs - openWaitMs) + carriedWorkMs;
   const waiting = !stepEndedAt && status === 'waiting_form';
   const color = stepEndedAt ? 'text-neutral-500' : waiting ? 'text-amber-300' : 'text-indigo-300';
   return (
@@ -2373,6 +2379,7 @@ function StepCardImpl({
             waitingStartedAt={step.waitingStartedAt}
             status={step.status}
             taskCompletedAt={taskCompletedAt}
+            carriedWorkMs={step.carriedWorkMs}
           />
           <StepTokens tokenUsage={step.tokenUsage} />
           <UserActiveDuration ms={userActiveDisplayMs} />

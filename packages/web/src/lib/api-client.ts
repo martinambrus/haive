@@ -651,6 +651,12 @@ export interface TaskStep {
    *  it waited for input — the active-viewing subset of idleMs, measured in the
    *  browser and posted in increments. Pauses while the agent works. */
   userActiveMs: number;
+  /** Work / idle / user-active (ms) carried over from PRIOR runs of this step
+   *  (folded in by a retry/reset). Added on top of the current run so the per-step
+   *  and task-level timers report the full step across restarts. 0 when never reset. */
+  carriedWorkMs: number;
+  carriedIdleMs: number;
+  carriedUserActiveMs: number;
 }
 
 export type StepErrorHint =
