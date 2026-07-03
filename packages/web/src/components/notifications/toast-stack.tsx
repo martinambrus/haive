@@ -4,21 +4,22 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { cn } from '@/lib/cn';
-import type { NotifiableStatus } from './transitions';
+import type { AttentionKind } from './transitions';
 
 export interface AttentionToast {
   /** `${taskId}:${status}` — dedupe key. */
   key: string;
   taskId: string;
   title: string;
-  status: NotifiableStatus;
+  status: AttentionKind;
   message: string;
 }
 
-const TOAST_TINT: Record<NotifiableStatus, { border: string; label: string }> = {
+const TOAST_TINT: Record<AttentionKind, { border: string; label: string }> = {
   waiting_user: { border: 'border-amber-800/60', label: 'text-amber-300' },
   failed: { border: 'border-red-800/60', label: 'text-red-300' },
   completed: { border: 'border-emerald-800/60', label: 'text-emerald-300' },
+  allowance_replenished: { border: 'border-emerald-800/60', label: 'text-emerald-300' },
 };
 
 /** Persistent attention toasts (no auto-dismiss): clicking the body opens the

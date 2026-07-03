@@ -153,6 +153,23 @@ export const tasks = pgTable(
      *  their own host. Re-read at every runner start (survives warm-recover). Gated
      *  behind the global CONFIG_KEYS.BROWSER_DIRECT_ACCESS kill-switch. */
     directAccess: boolean('direct_access').notNull().default(false),
+    /** Allowance-back watch: set when a task FAILS on a provider rate-limit/quota
+     *  (ProviderFatalClass.rate_limit) for a usage-readable CLI. Points at the depleted
+     *  cli_provider so the usage poller knows which snapshot to watch. NULL = no watch.
+     *  Cleared on replenishment (below) and on retry/resume/cancel. */
+    awaitingAllowanceProviderId: uuid('awaiting_allowance_provider_id').references(
+      () => cliProviders.id,
+      { onDelete: 'set null' },
+    ),
+    /** The "blocked until" moment captured at arm time: the LATEST *_reset_at among the
+     *  provider's windows that were >= EXHAUSTED_PCT in its usage snapshot. NULL when
+     *  unknown (no snapshot yet, or a provider that exposes no reset, e.g. zai). */
+    allowanceResetAt: timestamp('allowance_reset_at'),
+    /** Stamped by the usage poller when the depleted allowance has replenished (the
+     *  captured reset passed, or the snapshot's max consumed % fell below RECOVERED_PCT).
+     *  Null -> set flip is the signal the web notifier diffs to fire the "allowance is
+     *  back" browser notification. Cleared on retry/resume/cancel so a re-failure re-arms. */
+    allowanceReplenishedAt: timestamp('allowance_replenished_at'),
     /** Developer's estimated time to complete the task, in decimal hours
      *  (e.g. 0.25, 0.5, 1, 1.5). Optional, set on the new-task form; compared
      *  against the actual effort (agent work + user-active time) in the task

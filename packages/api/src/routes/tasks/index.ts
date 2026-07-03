@@ -142,6 +142,9 @@ taskRoutes.get('/', async (c) => {
       timing: { wallMs, workMs, idleMs, userActiveMs },
       tokenUsage: tokensByTask.get(t.id) ?? null,
       currentWaitStartedAt: waitStart ? waitStart.toISOString() : null,
+      allowanceReplenishedAt: t.allowanceReplenishedAt
+        ? t.allowanceReplenishedAt.toISOString()
+        : null,
     };
   });
   return c.json({ tasks, total, page, pageSize, repositories });

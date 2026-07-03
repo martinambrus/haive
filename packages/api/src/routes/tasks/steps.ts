@@ -19,7 +19,7 @@ import {
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
-import { cancelTaskRow, enqueueCancelJob } from '../../lib/cancel-task.js';
+import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   appendTaskEvent,
@@ -433,6 +433,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           // Bump the orchestration epoch so any advance-step job still queued from
           // before this retry is skipped as stale (a retry stops in-flight work first).
           orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
+          ...CLEAR_ALLOWANCE_WATCH,
           updatedAt: now,
         })
         .where(eq(schema.tasks.id, id))
@@ -521,7 +522,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       .where(eq(schema.taskSteps.id, step.id));
     await db
       .update(schema.tasks)
-      .set({ status: 'running', errorMessage: null, updatedAt: now })
+      .set({ status: 'running', errorMessage: null, ...CLEAR_ALLOWANCE_WATCH, updatedAt: now })
       .where(and(eq(schema.tasks.id, id), inArray(schema.tasks.status, ['failed', 'queued'])));
     await appendTaskEvent(db, id, step.id, 'step.resume', {
       stepId,
@@ -590,7 +591,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       .where(eq(schema.taskSteps.id, step.id));
     await db
       .update(schema.tasks)
-      .set({ status: 'running', errorMessage: null, updatedAt: now })
+      .set({ status: 'running', errorMessage: null, ...CLEAR_ALLOWANCE_WATCH, updatedAt: now })
       .where(and(eq(schema.tasks.id, id), inArray(schema.tasks.status, ['failed', 'queued'])));
     await appendTaskEvent(db, id, step.id, 'step.retry_ai', { stepId, note: body.note ?? null });
     await getTaskQueue().add(
@@ -640,7 +641,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       });
       await tx
         .update(schema.tasks)
-        .set({ status: 'running', errorMessage: null, updatedAt: now })
+        .set({ status: 'running', errorMessage: null, ...CLEAR_ALLOWANCE_WATCH, updatedAt: now })
         .where(eq(schema.tasks.id, id));
     });
     // The api can't see unmaterialized future steps, so it can't compute the next

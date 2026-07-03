@@ -49,6 +49,9 @@ import { removeTaskWorktree } from '../repo/worktree-remove.js';
 import { getTaskEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { fatalClassFromMessage } from './cli-exec/failure-class.js';
+import { enqueueUsagePollTick } from './usage-poll-queue.js';
+import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
+import { constrainingResetAt } from '../usage-window/allowance-watch.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
 import {
   recordFixLoopRequest,
@@ -1069,6 +1072,48 @@ async function handleResult(
             updatedAt: new Date(),
           })
           .where(eq(schema.taskSteps.id, result.row.id));
+
+        // Allowance-back watch (notify-only): if the fatal reason is a provider rate-limit/
+        // quota AND we can read that provider's usage window, arm a SILENT watch on the task
+        // so the usage poller can notify the user once the allowance replenishes. Capture the
+        // window the task is blocked until (latest reset over the exhausted windows) so the
+        // poller can fire on the authoritative vendor reset, not just a %-drop. No event/
+        // notification here — the task-failed notification already told the user it stopped.
+        if (
+          outage.reason === 'rate_limit' &&
+          outage.cliProviderId &&
+          providerName &&
+          providerName in USAGE_PROVIDERS
+        ) {
+          const [snap] = await db
+            .select({
+              fiveHourPct: schema.usageWindowSnapshots.fiveHourPct,
+              fiveHourResetAt: schema.usageWindowSnapshots.fiveHourResetAt,
+              sevenDayPct: schema.usageWindowSnapshots.sevenDayPct,
+              sevenDayResetAt: schema.usageWindowSnapshots.sevenDayResetAt,
+              dailyPct: schema.usageWindowSnapshots.dailyPct,
+              dailyResetAt: schema.usageWindowSnapshots.dailyResetAt,
+            })
+            .from(schema.usageWindowSnapshots)
+            .where(eq(schema.usageWindowSnapshots.providerId, outage.cliProviderId))
+            .limit(1);
+          const resetAt = snap ? constrainingResetAt(snap) : null;
+          await db
+            .update(schema.tasks)
+            .set({
+              awaitingAllowanceProviderId: outage.cliProviderId,
+              allowanceResetAt: resetAt,
+              allowanceReplenishedAt: null,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.tasks.id, ctx.taskId));
+          // Refresh the snapshot now, and wake the poller AT the reset so detection isn't up
+          // to a full 5-min tick late. Both are best-effort (the repeatable tick is the floor).
+          await enqueueUsagePollTick();
+          if (resetAt && resetAt.getTime() > Date.now()) {
+            await enqueueUsagePollTick({ delayMs: resetAt.getTime() - Date.now() });
+          }
+        }
       }
       await appendEvent(db, ctx.taskId, result.row.id, 'step.failed', {
         stepId,

@@ -5,7 +5,13 @@ import { usePathname, useRouter } from 'next/navigation';
 import { api, API_BASE_URL, type NotificationSettings, type Task } from '@/lib/api-client';
 import { playChime } from './chime';
 import { ToastStack, type AttentionToast } from './toast-stack';
-import { detectTransitions, snapshotIdentities, type TaskTransitionEvent } from './transitions';
+import {
+  detectTransitions,
+  detectAllowanceReplenished,
+  snapshotIdentities,
+  snapshotAllowance,
+  type TaskTransitionEvent,
+} from './transitions';
 
 const POLL_MS = 5_000;
 const SETTINGS_CHANGED_EVENT = 'haive:notification-settings-changed';
@@ -105,6 +111,8 @@ function bodyFor(status: TaskTransitionEvent['status']): string {
       return 'Task failed';
     case 'completed':
       return 'Task completed';
+    case 'allowance_replenished':
+      return 'Allowance is back — ready to retry';
   }
 }
 
@@ -125,6 +133,9 @@ export function NotificationProvider() {
 
   const [toasts, setToasts] = useState<AttentionToast[]>([]);
   const prevRef = useRef<Map<string, string> | null>(null);
+  // Separate prev-map for the allowance-back channel (taskId -> replenished stamp), diffed
+  // independently of the status channel so the two never clobber each other's baseline.
+  const prevAllowanceRef = useRef<Map<string, string> | null>(null);
   const settingsRef = useRef<{ soundEnabled: boolean; hasCustomSound: boolean }>({
     soundEnabled: true,
     hasCustomSound: false,
@@ -379,6 +390,10 @@ export function NotificationProvider() {
         const events = detectTransitions(prevRef.current, data.tasks);
         prevRef.current = snapshotIdentities(data.tasks);
         for (const event of events) handleEvent(event);
+        // Separate channel: fire once when a rate-limit-failed task's CLI allowance returns.
+        const allowanceEvents = detectAllowanceReplenished(prevAllowanceRef.current, data.tasks);
+        prevAllowanceRef.current = snapshotAllowance(data.tasks);
+        for (const event of allowanceEvents) handleEvent(event);
       } catch {
         // offline or auth refresh in flight — try again next tick
       }

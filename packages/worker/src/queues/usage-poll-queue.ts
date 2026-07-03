@@ -1,5 +1,5 @@
 import { Queue, Worker, type Job } from 'bullmq';
-import { eq } from 'drizzle-orm';
+import { and, eq, inArray, isNull, isNotNull } from 'drizzle-orm';
 import {
   CONFIG_KEYS,
   QUEUE_NAMES,
@@ -16,6 +16,7 @@ import {
   type ClaudeOauthTokens,
 } from '@haive/shared/claude-oauth';
 import { USAGE_PROVIDERS, type ProviderUsageConfig } from '../usage-window/fetchers/index.js';
+import { constrainingResetAt, allowanceVerdict } from '../usage-window/allowance-watch.js';
 import {
   readAuthVolumeFile,
   readProviderSecretToken,
@@ -83,8 +84,13 @@ export async function scheduleUsagePollTick(): Promise<void> {
  *  usage meters + the per-step stamp refresh promptly instead of only on the 5-min
  *  repeatable. The per-provider min-interval throttle in pollProvider keeps it gentle —
  *  a vendor is never called more often than its rate limit allows. */
-export async function enqueueUsagePollTick(): Promise<void> {
-  await getUsagePollQueue().add(POLL_JOB_NAME, {}, { removeOnComplete: true, removeOnFail: 10 });
+export async function enqueueUsagePollTick(opts?: { delayMs?: number }): Promise<void> {
+  const delay = opts?.delayMs && opts.delayMs > 0 ? { delay: Math.floor(opts.delayMs) } : {};
+  await getUsagePollQueue().add(
+    POLL_JOB_NAME,
+    {},
+    { removeOnComplete: true, removeOnFail: 10, ...delay },
+  );
 }
 
 interface ProviderRow {
@@ -270,13 +276,105 @@ async function runUsagePollTick(db: Database): Promise<void> {
     },
   })) as ProviderRow[];
   const targets = providers.filter((p) => supported.has(p.name));
-  if (targets.length === 0) return;
 
-  for (let i = 0; i < targets.length; i += FETCH_CONCURRENCY) {
-    const batch = targets.slice(i, i + FETCH_CONCURRENCY);
-    await Promise.allSettled(batch.map((p) => pollProvider(db, p)));
+  if (targets.length > 0) {
+    for (let i = 0; i < targets.length; i += FETCH_CONCURRENCY) {
+      const batch = targets.slice(i, i + FETCH_CONCURRENCY);
+      await Promise.allSettled(batch.map((p) => pollProvider(db, p)));
+    }
+    log.debug({ count: targets.length }, 'usage poll tick complete');
   }
-  log.debug({ count: targets.length }, 'usage poll tick complete');
+
+  // Allowance-back watch: after refreshing snapshots, notify any task that failed on a
+  // provider rate-limit whose allowance has since replenished. Runs even when no provider
+  // is currently pollable, so a task can still resolve off an existing snapshot / passed reset.
+  await checkAllowanceReplenishment(db);
+}
+
+/** Notify-only detect half of the allowance-back watch. For every task the arm path parked
+ *  (status='failed', awaiting_allowance_provider_id set, not yet replenished), decide whether
+ *  the depleted provider's allowance is back and, if so, stamp allowance_replenished_at (the
+ *  signal the web notifier diffs) + clear the watch + append a task_events row. "Back" =
+ *  the captured vendor reset has passed (authoritative) OR the snapshot's max consumed %
+ *  fell below RECOVERED_PCT (covers providers with no readable reset, e.g. zai, and early
+ *  recovery). Reads only stored snapshots, so it ignores the per-provider 429 backoff. */
+async function checkAllowanceReplenishment(db: Database): Promise<void> {
+  const armed = await db
+    .select({
+      id: schema.tasks.id,
+      providerId: schema.tasks.awaitingAllowanceProviderId,
+      resetAt: schema.tasks.allowanceResetAt,
+    })
+    .from(schema.tasks)
+    .where(
+      and(
+        isNotNull(schema.tasks.awaitingAllowanceProviderId),
+        isNull(schema.tasks.allowanceReplenishedAt),
+        eq(schema.tasks.status, 'failed'),
+      ),
+    );
+  if (armed.length === 0) return;
+
+  // One snapshot read per distinct provider (several tasks can await the same one).
+  const providerIds = [...new Set(armed.map((a) => a.providerId).filter((p): p is string => !!p))];
+  const snaps = await db
+    .select({
+      providerId: schema.usageWindowSnapshots.providerId,
+      status: schema.usageWindowSnapshots.status,
+      fiveHourPct: schema.usageWindowSnapshots.fiveHourPct,
+      fiveHourResetAt: schema.usageWindowSnapshots.fiveHourResetAt,
+      sevenDayPct: schema.usageWindowSnapshots.sevenDayPct,
+      sevenDayResetAt: schema.usageWindowSnapshots.sevenDayResetAt,
+      dailyPct: schema.usageWindowSnapshots.dailyPct,
+      dailyResetAt: schema.usageWindowSnapshots.dailyResetAt,
+    })
+    .from(schema.usageWindowSnapshots)
+    .where(inArray(schema.usageWindowSnapshots.providerId, providerIds));
+  const snapById = new Map(snaps.map((s) => [s.providerId, s]));
+
+  const now = Date.now();
+  for (const task of armed) {
+    if (!task.providerId) continue;
+    const snap = snapById.get(task.providerId);
+    // Backfill the reset if the arm path couldn't capture it (no snapshot yet) but the
+    // window is now visible — so a later tick can fire on the authoritative reset.
+    let resetAt = task.resetAt;
+    if (!resetAt && snap) resetAt = constrainingResetAt(snap) ?? null;
+
+    const verdict = allowanceVerdict({
+      resetAt,
+      windows: snap ?? null,
+      snapshotOk: snap?.status === 'ok',
+      now,
+    });
+
+    if (!verdict.back) {
+      // Not back yet. Persist a freshly-backfilled reset so the next tick can fire on it.
+      if (resetAt && resetAt !== task.resetAt) {
+        await db
+          .update(schema.tasks)
+          .set({ allowanceResetAt: resetAt, updatedAt: new Date() })
+          .where(eq(schema.tasks.id, task.id));
+      }
+      continue;
+    }
+
+    await db
+      .update(schema.tasks)
+      .set({
+        allowanceReplenishedAt: new Date(),
+        awaitingAllowanceProviderId: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.tasks.id, task.id));
+    await db.insert(schema.taskEvents).values({
+      taskId: task.id,
+      taskStepId: null,
+      eventType: 'task.allowance_replenished',
+      payload: { providerId: task.providerId, via: verdict.via },
+    });
+    log.info({ taskId: task.id, providerId: task.providerId }, 'allowance replenished; notifying');
+  }
 }
 
 export function startUsagePollWorker(): Worker {

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { detectTransitions, snapshotIdentities } from './transitions';
+import {
+  detectTransitions,
+  snapshotIdentities,
+  detectAllowanceReplenished,
+  snapshotAllowance,
+} from './transitions';
 
 const task = (
   id: string,
@@ -151,5 +156,72 @@ describe('snapshotIdentities', () => {
     expect(snap.size).toBe(2);
     expect(snap.has('a')).toBe(true);
     expect(snap.has('b')).toBe(true);
+  });
+});
+
+// Replenishment task: a task carrying an allowance-back stamp (or null).
+const rtask = (
+  id: string,
+  status: string,
+  allowanceReplenishedAt: string | null,
+  title = `Task ${id}`,
+) => ({ id, title, status, currentStepId: null, allowanceReplenishedAt });
+
+describe('detectAllowanceReplenished', () => {
+  it('first poll surfaces already-replenished FAILED tasks as baseline events only', () => {
+    const events = detectAllowanceReplenished(null, [
+      rtask('a', 'failed', '2026-07-03T00:00:00Z'),
+      rtask('b', 'failed', null), // failed but not replenished
+      rtask('c', 'running', '2026-07-03T00:00:00Z'), // replenished but not failed
+    ]);
+    expect(events.map((e) => e.taskId)).toEqual(['a']);
+    expect(events[0]!.status).toBe('allowance_replenished');
+    expect(events[0]!.baseline).toBe(true);
+    expect(events[0]!.currentWaitStartedAt).toBe('2026-07-03T00:00:00Z');
+  });
+
+  it('fires on the empty->set flip for a failed task', () => {
+    const prev = snapshotAllowance([rtask('a', 'failed', null)]);
+    const events = detectAllowanceReplenished(prev, [rtask('a', 'failed', '2026-07-03T01:00:00Z')]);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.baseline).toBe(false);
+    expect(events[0]!.currentWaitStartedAt).toBe('2026-07-03T01:00:00Z');
+  });
+
+  it('does not re-fire while the replenishment stamp is unchanged', () => {
+    const prev = snapshotAllowance([rtask('a', 'failed', '2026-07-03T01:00:00Z')]);
+    expect(
+      detectAllowanceReplenished(prev, [rtask('a', 'failed', '2026-07-03T01:00:00Z')]),
+    ).toEqual([]);
+  });
+
+  it('re-fires when a later re-recovery stamps a fresh time (new episode)', () => {
+    const prev = snapshotAllowance([rtask('a', 'failed', '2026-07-03T01:00:00Z')]);
+    const events = detectAllowanceReplenished(prev, [rtask('a', 'failed', '2026-07-03T09:00:00Z')]);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.currentWaitStartedAt).toBe('2026-07-03T09:00:00Z');
+  });
+
+  it('only fires for failed tasks — a stamp on a non-failed task is ignored', () => {
+    const prev = snapshotAllowance([rtask('a', 'running', null)]);
+    expect(
+      detectAllowanceReplenished(prev, [rtask('a', 'running', '2026-07-03T01:00:00Z')]),
+    ).toEqual([]);
+  });
+
+  it('does not fire for a failed task that never replenished', () => {
+    const prev = snapshotAllowance([rtask('a', 'failed', null)]);
+    expect(detectAllowanceReplenished(prev, [rtask('a', 'failed', null)])).toEqual([]);
+  });
+});
+
+describe('snapshotAllowance', () => {
+  it('maps each task to its replenishment stamp, empty string when absent', () => {
+    const snap = snapshotAllowance([
+      rtask('a', 'failed', '2026-07-03T01:00:00Z'),
+      rtask('b', 'failed', null),
+    ]);
+    expect(snap.get('a')).toBe('2026-07-03T01:00:00Z');
+    expect(snap.get('b')).toBe('');
   });
 });

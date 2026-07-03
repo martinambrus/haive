@@ -17,6 +17,17 @@ type Db = ReturnType<typeof getDb>;
  *  the transaction callback's argument type. */
 type DbOrTx = Db | Parameters<Parameters<Db['transaction']>[0]>[0];
 
+/** Clears the allowance-back watch columns (notify-only). Spread into any `tasks`
+ *  update that moves a task OUT of the failed-armed state (retry/resume/retry_ai/skip/
+ *  cancel), so a later usage-poll tick can't stamp a stale "allowance is back" signal and
+ *  a re-failure re-arms cleanly. Kept here (the shared cancel helper) so all clear sites
+ *  reference one definition. */
+export const CLEAR_ALLOWANCE_WATCH = {
+  awaitingAllowanceProviderId: null,
+  allowanceResetAt: null,
+  allowanceReplenishedAt: null,
+};
+
 /** Mark a single task row as cancelled and append the activity event.
  *  Caller is responsible for enqueueing the BullMQ CANCEL job (via
  *  enqueueCancelJob) AFTER any surrounding transaction commits — enqueueing
@@ -29,7 +40,7 @@ export async function cancelTaskRow(
   const now = new Date();
   await tx
     .update(schema.tasks)
-    .set({ status: 'cancelled', completedAt: now, updatedAt: now })
+    .set({ status: 'cancelled', completedAt: now, ...CLEAR_ALLOWANCE_WATCH, updatedAt: now })
     .where(eq(schema.tasks.id, taskId));
   // Transition any non-terminal step rows so a cancelled task never shows a live
   // step (e.g. a run_app hold step parked at waiting_form). step_status has no

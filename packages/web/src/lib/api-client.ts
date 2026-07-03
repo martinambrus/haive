@@ -490,6 +490,10 @@ export interface Task {
    *  wait occurrence so the notifier re-fires when a task re-enters the same gate
    *  after a restart. List endpoint only. */
   currentWaitStartedAt?: string | null;
+  /** ISO time the depleted-allowance watch was marked replenished (list endpoint only).
+   *  Null until a task that failed on a provider rate-limit has its allowance come back;
+   *  the notifier diffs its null->set flip to fire the "allowance is back" notification. */
+  allowanceReplenishedAt?: string | null;
   containerId: string | null;
   worktreePath: string | null;
   errorMessage: string | null;
