@@ -42,15 +42,23 @@ const log = logger.child({ module: 'step-runner' });
 
 export type TaskStepRow = typeof schema.taskSteps.$inferSelect;
 
-/** Onboarding mining steps whose agents must NOT spawn their own Claude Code
- *  sub-agents (the `Agent` tool). Haive already fans these out deterministically
- *  (09_5's agentMining batch + skill-gen loop; 08/09-qa single agents), so letting
- *  each agent recursively spawn more sub-agents just multiplies token spend with no
- *  orchestration control. Workflow steps that rely on native Task()/Agent sub-agent
- *  emulation are intentionally NOT listed here. */
+/** Onboarding mining/analysis steps whose agents must NOT spawn their own Claude
+ *  Code sub-agents (the `Agent` tool). Haive already fans these out
+ *  deterministically (09_5's agentMining batch + skill-gen loop; the rest are
+ *  single agents), so letting each agent recursively spawn more sub-agents just
+ *  multiplies token spend with no orchestration control. Covers the KB/skills
+ *  mining steps (08, 09-qa, 09_5, 09_5b) AND the agent-discovery + QA-resolve
+ *  flow (06_5, 09_1, 09_2), which also read the codebase via the CLI. Only
+ *  claude-family honors this arg; codex/gemini/amp are disabled globally at the
+ *  adapter/image layer, and antigravity relies on the prompt-level block.
+ *  Workflow steps that rely on native Task()/Agent sub-agent emulation are
+ *  intentionally NOT listed here. */
 const SUBAGENT_DISALLOWED_STEP_IDS = new Set<string>([
+  '06_5-agent-discovery',
   '08-knowledge-acquisition',
   '09-qa',
+  '09_1-qa-suggestions',
+  '09_2-qa-resolve',
   '09_5-skill-generation',
   '09_5b-skill-repair',
 ]);

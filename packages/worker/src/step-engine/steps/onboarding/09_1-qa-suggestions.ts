@@ -2,6 +2,7 @@ import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-defin
 import { loadPreviousStepOutput } from './_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import type { AgentQuestion, KnowledgeQaPrepApply } from './09-qa.js';
+import { noSubagentInstructionLines } from './_scope.js';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -60,6 +61,7 @@ function buildPrompt(args: LlmBuildArgs): string {
     'For each question below, propose 0 to 4 short candidate answers — phrasings the user could click instead of typing.',
     'The user always has a free-text fallback, so suggestions need not cover every case. Quality over quantity.',
     '',
+    ...noSubagentInstructionLines(),
     '## Project context',
     `Framework: ${detected.framework ?? 'unknown'}`,
     `Language: ${detected.language ?? 'unknown'}`,

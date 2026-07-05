@@ -25,6 +25,7 @@ import {
   renderTechInventoryTable,
   type TechInventory,
 } from './_tech-inventory.js';
+import { noSubagentInstructionLines } from './_scope.js';
 
 export interface AgentCandidate {
   id: string;
@@ -554,6 +555,7 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     'SKILLS = business / domain knowledge (what an "inspection" is, the order-fulfilment state machine, which fields belong to which form).',
     'You are picking AGENTS only. Do NOT propose agents whose value would come from understanding business entities, workflows, or domain rules — those become skills in a later step.',
     '',
+    ...noSubagentInstructionLines(),
     '## Project info',
     `Framework: ${detected.framework ?? 'unknown'}`,
     `Language: ${detected.language ?? 'unknown'}`,

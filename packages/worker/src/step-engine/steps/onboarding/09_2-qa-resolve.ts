@@ -1,6 +1,11 @@
 import type { FormField, FormSchema } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
+import {
+  loadMiningScopeExcludeGlobs,
+  noSubagentInstructionLines,
+  scopeInstructionLines,
+} from './_scope.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import type { KbWrite } from './_kb-write.js';
 import type { KbFileSummary, KnowledgeQaPrepApply } from './09-qa.js';
@@ -31,6 +36,10 @@ export interface KnowledgeQaResolveDetect {
   agentQuestions: EnrichedAgentQuestion[];
   explicitNoQuestions: boolean;
   kbFiles: KbFileSummary[];
+  /** Task-scoped mining deny list (06_7) so QA-resolve code searches stay inside
+   *  the allowed folders — same scope the KB/skill mining steps use. Empty when
+   *  no scope was set. Consumed by scopeInstructionLines in buildPrompt. */
+  __scopeExclude?: string[];
 }
 
 export interface KnowledgeQaResolveApply {
@@ -172,6 +181,7 @@ export function collectAgentAnswers(
 
 function buildPrompt(args: LlmBuildArgs): string {
   const detected = args.detected as KnowledgeQaResolveDetect;
+  const scopeExclude = detected.__scopeExclude ?? [];
   const values = args.formValues as Record<string, unknown>;
   const userQuestions = splitUserQuestions(values[USER_QUESTIONS_FIELD]);
   const agentAnswers = collectAgentAnswers(detected.agentQuestions, values);
@@ -215,6 +225,8 @@ function buildPrompt(args: LlmBuildArgs): string {
     'Call your file-reading tools DIRECTLY — issue the actual tool calls; do NOT narrate intent',
     '("Let me check…") and then end your turn without a tool call or the final JSON.',
     '',
+    ...scopeInstructionLines(scopeExclude),
+    ...noSubagentInstructionLines(),
     '## Existing knowledge base files',
     kbList,
     '',
@@ -409,11 +421,13 @@ export const knowledgeQaResolveStep: StepDefinition<
       enrichedOutput?.enrichedQuestions ??
       (prepOutput?.agentQuestions ?? []).map((q) => ({ ...q, suggestedAnswers: [] }));
 
+    const scopeExclude = await loadMiningScopeExcludeGlobs(ctx.db, ctx.taskId);
+
     ctx.logger.info(
       { agentQuestionCount: agentQuestions.length, kbFileCount: kbFiles.length },
       'qa-resolve detect complete',
     );
-    return { agentQuestions, explicitNoQuestions, kbFiles };
+    return { agentQuestions, explicitNoQuestions, kbFiles, __scopeExclude: scopeExclude };
   },
 
   form(_ctx, detected): FormSchema {
