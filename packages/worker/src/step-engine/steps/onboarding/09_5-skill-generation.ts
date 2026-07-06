@@ -836,9 +836,18 @@ function buildSkillPrompt(
     hints.length > 0 ? `## User-supplied hints about likely skill domains\n\n${hints}\n` : '',
     '## Your task',
     '',
+    'You are producing ONE skill for ONE capability, so you need only the NARROW SLICE of code that',
+    'implements THAT capability — not a survey of the project. Reading many files just to "explore"',
+    'is the single biggest token cost here and is NOT wanted: a dozen well-chosen files is plenty;',
+    'reading dozens means you are over-exploring. Work in a targeted way:',
+    '',
+    "1. Use the knowledge base above (especially BUSINESS_LOGIC.md) to fix this capability's exact",
+    '   terminology and the module / service / class / route / hook / field names it likely uses.',
     scopeExclude.length > 0
-      ? 'Use your file-reading tools (Read, Grep, Glob) to deeply explore THIS PROJECT\'S OWN code — the in-scope directories, not the out-of-scope third-party/built-in dirs listed under "Mining scope" — then:'
-      : 'Use your file-reading tools (Read, Grep, Glob) to deeply explore this repository, then:',
+      ? '2. GREP the in-scope directories for those terms (never the out-of-scope dirs listed under "Mining scope") to LOCATE the few files that implement this capability. Lead with Grep/Glob to find the right files — do NOT read files one by one just to discover what is where.'
+      : '2. GREP the repository for those terms to LOCATE the few files that implement this capability. Lead with Grep/Glob to find the right files — do NOT read files one by one just to discover what is where.',
+    '3. Read ONLY the located files and their DIRECT dependencies (a parent class, an injected service, a helper an in-scope file imports). Stop as soon as you understand THIS capability — do not open unrelated files or walk the whole tree.',
+    '4. Then:',
     taskLine,
     '',
     '## Required structure for the skill',
