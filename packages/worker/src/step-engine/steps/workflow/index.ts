@@ -38,6 +38,7 @@ import { insightsTriageStep } from './08e-insights-triage.js';
 import { gate2VerifyApprovalStep } from './09-gate-2-verify-approval.js';
 import { gate3CommitStep } from './10-gate-3-commit.js';
 import { phase8LearningStep } from './11-phase-8-learning.js';
+import { skillSyncStep } from './11d-skill-sync.js';
 import { kbCommitStep } from './11b-kb-commit.js';
 import { ragReindexStep } from './11c-rag-reindex.js';
 import { gate4PushStep } from './11a-gate-4-push.js';
@@ -82,6 +83,7 @@ export {
   gate2VerifyApprovalStep,
   gate3CommitStep,
   phase8LearningStep,
+  skillSyncStep,
   kbCommitStep,
   ragReindexStep,
   gate4PushStep,
@@ -128,6 +130,7 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(gate2VerifyApprovalStep);
   registry.register(gate3CommitStep);
   registry.register(phase8LearningStep);
+  registry.register(skillSyncStep);
   registry.register(kbCommitStep);
   registry.register(ragReindexStep);
   registry.register(gate4PushStep);

@@ -7,7 +7,12 @@ import { schema } from '@haive/database';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import {
+  loadPreviousStepOutput,
+  pathExists,
+  resolveSkillTargetDirs,
+} from '../onboarding/_helpers.js';
+import { readDiskSkillSummaries } from '../onboarding/09_5b-skill-repair.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import {
@@ -47,6 +52,10 @@ interface LearningDetect {
   /** Bounded summary of the existing .claude/learnings/ entries (id + title +
    *  excerpt) so the agent can reconcile (dedup / update / delete) against them. */
   existingLearnings: { id: string; title: string; excerpt: string }[];
+  /** Bounded summary of the installed skills (id + title + description) so the agent
+   *  can decide which capability the task touched and pick a real skillId for a
+   *  feature_update / feature_removal. Empty when the repo has no skills. */
+  existingSkills: { id: string; title: string; description: string }[];
   /** Repo's installed-stack anchors (from its onboarding) for version-anchoring a
    *  promoted global article; null when the repo never completed onboarding. */
   repoStack: Awaited<ReturnType<typeof loadRepoStackAnchors>>;
@@ -102,6 +111,19 @@ interface KbSync {
   changes: KbSyncChange[];
 }
 
+/** One skill the learning agent decided this task built/changed/removed — a DECISION
+ *  only (no skill body). Bodies are generated later by 11d-skill-sync from these ops,
+ *  mirroring how Feature KB Sync classifies the change but generation is deferred. */
+export type SkillSyncOpKind = 'new_feature' | 'feature_update' | 'feature_removal';
+export interface SkillSyncOp {
+  op: SkillSyncOpKind;
+  /** feature_update / feature_removal: the existing on-disk skill id to act on. */
+  skillId?: string;
+  /** new_feature: the capability name to base the new skill on. */
+  capability?: string;
+  rationale: string;
+}
+
 interface LearningApply {
   entries: LearningEntry[];
   written: string[];
@@ -114,6 +136,9 @@ interface LearningApply {
   /** True when the user unticked "keep KB sync" and apply reverted the agent's
    *  knowledge_base edits before commit. */
   kbReverted: boolean;
+  /** Skill Sync: the reviewer-approved decisions 11d-skill-sync consumes — new/update
+   *  ops to (re)generate and removal ops to delete. null when none proposed or kept. */
+  skillSync: { newUpdate: SkillSyncOp[]; remove: SkillSyncOp[] } | null;
   /** `global-kb:<id>` refs for the house-standard candidates the user promoted. */
   promotedCandidates: string[];
   /** True when the reviewer submitted a non-blank instruction: apply wrote nothing
@@ -235,6 +260,51 @@ export function parseKbSync(raw: unknown): KbSync | null {
     changes.push({ file, op, summary });
   }
   return { classification, changes };
+}
+
+/** Valid op values for a skill-sync decision. */
+const SKILL_SYNC_OPS = new Set(['new_feature', 'feature_update', 'feature_removal']);
+
+/** Parse the optional `skillSync.ops` decision block the learning agent emits (mirrors
+ *  parseKbSync). Decision-only: op + (skillId for update/removal | capability for
+ *  new_feature) + rationale — never a skill body. Defensive: unknown ops are dropped; an
+ *  update/removal whose skillId is not in `existingSkillIds` is dropped so a hallucinated
+ *  id can never mis-target a real skill; a new_feature without a capability is dropped. */
+export function parseSkillSync(raw: unknown, existingSkillIds: Set<string>): SkillSyncOp[] {
+  let obj: Record<string, unknown> | null = null;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    obj = raw as Record<string, unknown>;
+  } else if (typeof raw === 'string') {
+    const parsed = parseJsonLoose(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      obj = parsed as Record<string, unknown>;
+    }
+  }
+  const ss = obj?.skillSync ?? obj?.skill_sync;
+  if (!ss || typeof ss !== 'object') return [];
+  const rawOps = Array.isArray((ss as Record<string, unknown>).ops)
+    ? ((ss as Record<string, unknown>).ops as unknown[])
+    : [];
+  const out: SkillSyncOp[] = [];
+  for (const o of rawOps) {
+    if (!o || typeof o !== 'object') continue;
+    const oo = o as Record<string, unknown>;
+    const op =
+      typeof oo.op === 'string' && SKILL_SYNC_OPS.has(oo.op) ? (oo.op as SkillSyncOpKind) : null;
+    if (!op) continue;
+    const rationale = typeof oo.rationale === 'string' ? oo.rationale : '';
+    if (op === 'new_feature') {
+      const capability = typeof oo.capability === 'string' ? oo.capability.trim() : '';
+      if (!capability) continue;
+      out.push({ op, capability, rationale });
+      continue;
+    }
+    // feature_update / feature_removal: skillId must name an existing on-disk skill.
+    const skillId = typeof oo.skillId === 'string' ? oo.skillId.trim() : '';
+    if (!skillId || !existingSkillIds.has(skillId)) continue;
+    out.push({ op, skillId, rationale });
+  }
+  return out;
 }
 
 /** Parse the optional `globalCandidates` array (portable house-standard articles)
@@ -608,6 +678,13 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const existingLearnings = (await readExistingLearnings(worktreePath))
       .slice(0, 60)
       .map((e) => ({ id: e.id, title: e.title, excerpt: learningExcerpt(e.body) }));
+    // Installed skills (from the primary skills dir) so the agent can pick a real
+    // skillId for an update/removal. Reads the worktree (feature branch), like learnings.
+    const skillDirs = await resolveSkillTargetDirs(ctx.db, ctx.userId, ['.claude/skills']);
+    const existingSkills =
+      skillDirs.length > 0
+        ? (await readDiskSkillSummaries(worktreePath, skillDirs[0]!)).slice(0, 60)
+        : [];
     const implementOutput = (implement?.output as ImplementOutput | null) ?? {};
     const verifyOutput = (verify?.output as VerifyOutput | null) ?? {};
     const commitOutput = (commit?.output as CommitOutput | null) ?? {};
@@ -655,6 +732,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       affectedClients: meta.affectedClients,
       historyDigest,
       existingLearnings,
+      existingSkills,
       repoStack,
       existingGlobalArticles,
       refineInstruction,
@@ -698,8 +776,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         'You are the learning capture phase of an engineering workflow.',
         'Emit ONE JSON object inside a ```json fenced code block with the shape:',
         detected.isBugFix
-          ? '{ "entries": [ { "id": "<kebab-case>", "op": "insert|update|delete", "targetId": "<existing learning id; only for update/delete>", "title": "<short>", "body": "<markdown>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] }, "investigation": { "title": "<short>", "symptoms": "<observable symptoms + the EXACT error strings/messages, verbatim>", "root_cause": "<why/how the bug happened>", "lesson": "<durable lesson for future runs>", "scope": "local | global" } }'
-          : '{ "entries": [ { "id": "<kebab-case>", "op": "insert|update|delete", "targetId": "<existing learning id; only for update/delete>", "title": "<short>", "body": "<markdown>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] } }',
+          ? '{ "entries": [ { "id": "<kebab-case>", "op": "insert|update|delete", "targetId": "<existing learning id; only for update/delete>", "title": "<short>", "body": "<markdown>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] }, "investigation": { "title": "<short>", "symptoms": "<observable symptoms + the EXACT error strings/messages, verbatim>", "root_cause": "<why/how the bug happened>", "lesson": "<durable lesson for future runs>", "scope": "local | global" }, "skillSync": { "ops": [ { "op": "new_feature|feature_update|feature_removal", "skillId": "<existing skill id; update/removal only>", "capability": "<capability name; new_feature only>", "rationale": "<one line>" } ] } }'
+          : '{ "entries": [ { "id": "<kebab-case>", "op": "insert|update|delete", "targetId": "<existing learning id; only for update/delete>", "title": "<short>", "body": "<markdown>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] }, "skillSync": { "ops": [ { "op": "new_feature|feature_update|feature_removal", "skillId": "<existing skill id; update/removal only>", "capability": "<capability name; new_feature only>", "rationale": "<one line>" } ] } }',
         'Each entry must be a reusable lesson grounded in the workflow run. Avoid generic advice.',
         '',
         'LEARNINGS RECONCILIATION — you are shown the EXISTING learnings below. For each lesson decide an `op`:',
@@ -714,6 +792,13 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         '3. new_feature / feature_update / feature_removal → find where the feature belongs (search `rag_search` FIRST, then `.claude/knowledge_base/INDEX.md`), then EDIT the structured `.claude/knowledge_base/*.md` files IN PLACE with your file tools: INSERT a section for a new feature, UPDATE the existing section for a change (correct now-stale text; leave no contradictions), DELETE the section for a removal. Document business purpose, key rules, tables/fields, and access control using the target file’s conventions. Keep `INDEX.md` in sync when you add or remove a file.',
         '4. KB GAP DETECTION: if the run surfaced domain knowledge that was MISSING from the KB (a rule discovered from code, a constraint, an edge case), append it to the right KB file.',
         '5. Report EVERY knowledge_base file you changed in `kbSync.changes`. Do NOT edit `.claude/knowledge_base/investigations/` — that is recorded separately below.',
+        '',
+        'SKILL SYNC — after classifying the task above, keep the project SKILLS (capability guides under `.claude/skills/`) in sync with what this task changed. DECIDE ONLY here: do NOT create, edit, or write any skill file and do NOT emit skill bodies — a later step regenerates the affected skill from your decision. Add a `"skillSync": { "ops": [ ... ] }` field to the JSON:',
+        '- new_feature (the task ADDED a capability that no existing skill covers) → { "op": "new_feature", "capability": "<the capability name>", "rationale": "<one line: what it does>" }.',
+        '- feature_update (the task CHANGED a capability an existing skill covers) → { "op": "feature_update", "skillId": "<an id from the Existing skills list below>", "rationale": "<one line: what changed>" }.',
+        '- feature_removal (the task REMOVED a capability an existing skill covers) → { "op": "feature_removal", "skillId": "<an id from the Existing skills list below>", "rationale": "<one line: why it is gone>" }.',
+        '- bug_fix / refactor → the capability set is unchanged; emit "ops": [].',
+        'Use a `skillId` ONLY from the Existing skills list below (an unknown id is dropped). Emit one op per affected capability — usually zero or one. Keep this consistent with the KB sync classification above.',
         detected.isBugFix
           ? 'This task was a BUG FIX: ALSO produce an `investigation`. In `symptoms`, lead with the observable symptoms and quote the EXACT error strings/messages verbatim — these are the lexical anchor future searches match on; name the affected feature/area. Give the root cause (why/how the bug existed, grounded in the implementation) and the durable lesson for future work. Set its `scope` to "global" ONLY when the lesson is a reusable house standard for any project of this stack (not specific to this repo); otherwise "local".'
           : '',
@@ -731,6 +816,13 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         '=== Existing learnings (reconcile against these; use their id as targetId) ===',
         detected.existingLearnings.length > 0
           ? detected.existingLearnings.map((l) => `- ${l.id} — ${l.title}: ${l.excerpt}`).join('\n')
+          : '(none yet)',
+        '',
+        '=== Existing skills (pick a skillId from here for a feature_update / feature_removal) ===',
+        detected.existingSkills.length > 0
+          ? detected.existingSkills
+              .map((s) => `- ${s.id} — ${s.title}: ${s.description}`)
+              .join('\n')
           : '(none yet)',
         '',
         '=== Existing global house-standard articles for this stack (to UPDATE one, re-use its tech and author the full merged body) ===',
@@ -793,6 +885,12 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const kbSync = parseKbSync(llmOutput ?? null);
     const kbChanged = (kbSync?.changes.length ?? 0) > 0;
     const globalCandidates = parseGlobalCandidates(llmOutput ?? null);
+    const skillOps = parseSkillSync(
+      llmOutput ?? null,
+      new Set(detected.existingSkills.map((s) => s.id)),
+    );
+    const skillNewUpdate = skillOps.filter((o) => o.op !== 'feature_removal');
+    const skillRemovals = skillOps.filter((o) => o.op === 'feature_removal');
     const infoSections: InfoSection[] = [];
     const insertCount = entries.filter((e) => e.op === 'insert').length;
     const updateCount = entries.filter((e) => e.op === 'update').length;
@@ -841,6 +939,27 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         defaultOpen: true,
       });
     }
+    if (skillOps.length > 0) {
+      infoSections.push({
+        title: `Skill sync (${skillNewUpdate.length} new/updated, ${skillRemovals.length} removed)`,
+        preview: skillOps
+          .map((o) => (o.op === 'new_feature' ? o.capability : o.skillId))
+          .join('; ')
+          .slice(0, 80),
+        body: skillOps
+          .map((o) => {
+            const label =
+              o.op === 'new_feature'
+                ? `NEW: ${o.capability}`
+                : o.op === 'feature_update'
+                  ? `UPDATE: ${o.skillId}`
+                  : `REMOVE: ${o.skillId}`;
+            return `- **${label}** — ${o.rationale || '(no rationale)'}`;
+          })
+          .join('\n'),
+        defaultOpen: true,
+      });
+    }
     if (globalCandidates.length > 0) {
       infoSections.push({
         title: `Global KB candidates (${globalCandidates.length})`,
@@ -862,6 +981,9 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         detected.isBugFix ? 'Bug fix — a knowledge-base investigation was drafted below.' : '',
         kbChanged
           ? 'Feature KB sync — the agent updated the knowledge base; review the changes below.'
+          : '',
+        skillOps.length > 0
+          ? 'Skill sync — the agent proposed skill changes for what this task built/changed/removed; review below.'
           : '',
         'Review the drafts below. Leave the instruction box blank and submit to write them (untick anything to skip); or type an instruction to have the agent revise the drafts and show them again.',
       ]
@@ -885,6 +1007,26 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
                 id: 'keepKbSync',
                 label: `Keep the knowledge-base sync edits (${kbSync.changes.length} file${kbSync.changes.length === 1 ? '' : 's'}); untick to revert them`,
                 default: true,
+              },
+            ]
+          : []),
+        ...(skillNewUpdate.length > 0
+          ? [
+              {
+                type: 'checkbox' as const,
+                id: 'keepSkillSync',
+                label: `Generate/update ${skillNewUpdate.length} skill${skillNewUpdate.length === 1 ? '' : 's'} for what this task changed`,
+                default: true,
+              },
+            ]
+          : []),
+        ...(skillRemovals.length > 0
+          ? [
+              {
+                type: 'checkbox' as const,
+                id: 'applySkillRemovals',
+                label: `Delete ${skillRemovals.length} skill${skillRemovals.length === 1 ? '' : 's'} for removed capabilities (off by default)`,
+                default: false,
               },
             ]
           : []),
@@ -943,6 +1085,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const values = args.formValues as {
       writeFiles?: boolean;
       keepKbSync?: boolean;
+      keepSkillSync?: boolean;
+      applySkillRemovals?: boolean;
       writeInvestigation?: boolean;
       promoteInvestigationGlobal?: boolean;
       acceptGlobalCandidates?: string[];
@@ -962,6 +1106,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         investigationWritten: null,
         kbSync: null,
         kbReverted: false,
+        skillSync: null,
         promotedCandidates: [],
         refineRequested: true,
         source: 'llm',
@@ -1072,6 +1217,23 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       }
     }
 
+    // Skill Sync: carry the reviewer-approved decisions to 11d-skill-sync (which
+    // generates/updates/deletes the skill files). new/update gated by keepSkillSync
+    // (default on); removals gated by applySkillRemovals (default off). No generation
+    // here — 11d does the bounded per-skill CLI work post-approval.
+    const skillOps = parseSkillSync(
+      args.llmOutput ?? null,
+      new Set(args.detected.existingSkills.map((s) => s.id)),
+    );
+    const skillNewUpdate =
+      values.keepSkillSync !== false ? skillOps.filter((o) => o.op !== 'feature_removal') : [];
+    const skillRemovals =
+      values.applySkillRemovals === true ? skillOps.filter((o) => o.op === 'feature_removal') : [];
+    const skillSync =
+      skillNewUpdate.length > 0 || skillRemovals.length > 0
+        ? { newUpdate: skillNewUpdate, remove: skillRemovals }
+        : null;
+
     ctx.logger.info(
       {
         entries: entries.length,
@@ -1081,6 +1243,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         kbClassification: kbSync?.classification ?? null,
         kbChanged: kbHasChanges,
         kbReverted,
+        skillSyncOps: (skillSync?.newUpdate.length ?? 0) + (skillSync?.remove.length ?? 0),
         promotedCandidates: promotedCandidates.length,
         source,
       },
@@ -1093,6 +1256,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       investigationWritten,
       kbSync,
       kbReverted,
+      skillSync,
       promotedCandidates,
       refineRequested: false,
       source,

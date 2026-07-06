@@ -6,6 +6,7 @@ import {
   parseGlobalCandidates,
   parseInvestigation,
   parseKbSync,
+  parseSkillSync,
   parseLearningOutput,
   writeInvestigation,
   phase8LearningStep,
@@ -14,6 +15,78 @@ import {
   applyLearningOps,
   readExistingLearnings,
 } from './11-phase-8-learning.js';
+
+describe('parseSkillSync', () => {
+  const existing = new Set(['fleet-search', 'boat-catalogue']);
+
+  it('parses new_feature (capability) and update/removal (existing skillId)', () => {
+    const ops = parseSkillSync(
+      {
+        skillSync: {
+          ops: [
+            { op: 'new_feature', capability: 'Daily Rental', rationale: 'adds rentals' },
+            { op: 'feature_update', skillId: 'fleet-search', rationale: 'search changed' },
+            { op: 'feature_removal', skillId: 'boat-catalogue', rationale: 'gone' },
+          ],
+        },
+      },
+      existing,
+    );
+    expect(ops).toHaveLength(3);
+    expect(ops[0]).toEqual({
+      op: 'new_feature',
+      capability: 'Daily Rental',
+      rationale: 'adds rentals',
+    });
+    expect(ops[1]).toEqual({
+      op: 'feature_update',
+      skillId: 'fleet-search',
+      rationale: 'search changed',
+    });
+    expect(ops[2]!.op).toBe('feature_removal');
+  });
+
+  it('drops an update/removal whose skillId is not an existing skill', () => {
+    const ops = parseSkillSync(
+      {
+        skillSync: {
+          ops: [
+            { op: 'feature_update', skillId: 'does-not-exist', rationale: 'x' },
+            { op: 'feature_removal', skillId: 'also-missing', rationale: 'y' },
+          ],
+        },
+      },
+      existing,
+    );
+    expect(ops).toEqual([]);
+  });
+
+  it('drops a new_feature without a capability and any unknown op', () => {
+    const ops = parseSkillSync(
+      {
+        skillSync: {
+          ops: [
+            { op: 'new_feature', rationale: 'no capability' },
+            { op: 'frobnicate', skillId: 'fleet-search' },
+          ],
+        },
+      },
+      existing,
+    );
+    expect(ops).toEqual([]);
+  });
+
+  it('parses a fenced JSON string, tolerates the skill_sync alias, and returns [] when absent', () => {
+    const ops = parseSkillSync(
+      '```json\n{"skill_sync":{"ops":[{"op":"feature_update","skillId":"fleet-search","rationale":"z"}]}}\n```',
+      existing,
+    );
+    expect(ops).toHaveLength(1);
+    expect(ops[0]!.skillId).toBe('fleet-search');
+    expect(parseSkillSync({ entries: [] }, existing)).toEqual([]);
+    expect(parseSkillSync(null, existing)).toEqual([]);
+  });
+});
 
 describe('parseKbSync', () => {
   it('parses classification + changes and drops invalid ops / empty files', () => {

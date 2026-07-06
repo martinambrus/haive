@@ -61,6 +61,7 @@ const SUBAGENT_DISALLOWED_STEP_IDS = new Set<string>([
   '09_2-qa-resolve',
   '09_5-skill-generation',
   '09_5b-skill-repair',
+  '11d-skill-sync',
 ]);
 
 /** `['Agent']` for a mining step (blocks native sub-agent spawning), else undefined. */

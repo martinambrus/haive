@@ -113,6 +113,7 @@ export const SKIPPABLE_STEP_IDS: readonly string[] = [
   '11a-gate-4-push',
   '11b-kb-commit',
   '11c-rag-reindex',
+  '11d-skill-sync',
 ];
 
 export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
@@ -123,6 +124,7 @@ export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
   '09_6-skill-verification',
   '11-final-review',
   '01b-install-plugins',
+  '11d-skill-sync',
 ];
 
 /** The model-health canary step ids (one per pipeline). The canary validates the
@@ -186,6 +188,7 @@ export const CLI_DISPATCH_STEP_IDS: readonly string[] = [
   '08d-adversarial-qa',
   '08e-insights-triage',
   '11-phase-8-learning',
+  '11d-skill-sync',
   // kb-author
   '01-kb-enrich',
 ];

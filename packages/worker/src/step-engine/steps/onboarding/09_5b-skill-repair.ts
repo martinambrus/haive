@@ -176,7 +176,7 @@ function buildSkillRepairPrompt(opts: {
 /** Read every skill dir under `dir` and return {id, description} for the README index.
  *  `skillsReadmeMarkdown` only renders id + description in the table, so title is passed as
  *  the id (unused). Keeps the index consistent after a repair rewrites descriptions. */
-async function readDiskSkillSummaries(
+export async function readDiskSkillSummaries(
   repoPath: string,
   dir: string,
 ): Promise<{ id: string; title: string; description: string }[]> {
