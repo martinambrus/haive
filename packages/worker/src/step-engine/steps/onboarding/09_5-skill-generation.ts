@@ -46,6 +46,11 @@ interface SkillGenDetect {
   __fileTree?: string;
   /** Transient — per-repo scope deny list; drives the soft-scope prompt section. */
   __scopeExclude?: string[];
+  /** Transient — per-capability BUSINESS_LOGIC.md section bodies, keyed by the exact
+   *  capability name (an H2 heading). Inlined into that capability's parallel skill
+   *  agent prompt so the agent gets its precise domain description without re-reading
+   *  the KB from disk. Only present for capabilities that have a section. */
+  __capabilitySections?: Record<string, string>;
 }
 
 interface SkillGenApply {
@@ -111,6 +116,10 @@ export type {
 
 const DEFAULT_MAX_SKILLS = 15;
 const HARD_MAX_SKILLS = 30;
+// Defensive cap on the BUSINESS_LOGIC.md section body inlined into a per-capability
+// skill agent's prompt. A single capability's section is small by design; this only
+// guards against a pathologically long section bloating the prompt.
+const MAX_INLINE_SECTION_CHARS = 8000;
 /** Consecutive dry (zero-new-skill) loop passes tolerated before the skill-gen
  *  loop gives up — bounds in-loop re-rolls of a flaky/empty single-skill pass. */
 const MAX_EMPTY_PASSES = 2;
@@ -149,6 +158,33 @@ function parseKbFile(text: string): { title: string; sectionHeadings: string[] }
   return { title, sectionHeadings };
 }
 
+/** Split a KB markdown document into its H2 sections WITH bodies, keyed by the
+ *  exact (trimmed) heading text — the same string deriveRequiredDomains yields as
+ *  a capability name. A section body is every line after its `## heading` up to the
+ *  next `## ` (H3+ stay inside the body), trimmed. Used to inline one capability's
+ *  already-mined domain description into that capability's skill-agent prompt so the
+ *  agent need not re-read the KB from disk. */
+function parseKbSectionBodies(text: string): Record<string, string> {
+  const sections: Record<string, string> = {};
+  let heading: string | null = null;
+  let buf: string[] = [];
+  const flush = () => {
+    if (heading !== null) sections[heading] = buf.join('\n').trim();
+  };
+  for (const raw of text.split('\n')) {
+    const h2 = /^##\s+(.+)$/.exec(raw.trimEnd());
+    if (h2 && h2[1]) {
+      flush();
+      heading = h2[1].trim();
+      buf = [];
+      continue;
+    }
+    if (heading !== null) buf.push(raw);
+  }
+  flush();
+  return sections;
+}
+
 export async function listKbFiles(repoRoot: string): Promise<KbFileSummary[]> {
   const kbDir = path.join(repoRoot, '.claude', 'knowledge_base');
   if (!(await pathExists(kbDir))) return [];
@@ -167,10 +203,14 @@ const NON_DOMAIN_SECTION_RE =
  *  knowledge base — the H2 sections of BUSINESS_LOGIC.md. Each section is a
  *  capability that should map to a skill. Returns [] when BUSINESS_LOGIC.md is
  *  absent, so callers degrade gracefully. */
-export function deriveRequiredDomains(kbFiles: KbFileSummary[]): string[] {
-  const biz = kbFiles.find(
+function findBusinessLogicKb(kbFiles: KbFileSummary[]): KbFileSummary | undefined {
+  return kbFiles.find(
     (f) => /(^|\/)business[_-]?logic\.md$/i.test(f.relPath) || /business[_-]?logic/i.test(f.id),
   );
+}
+
+export function deriveRequiredDomains(kbFiles: KbFileSummary[]): string[] {
+  const biz = findBusinessLogicKb(kbFiles);
   const seen = new Set<string>();
   const out: string[] = [];
   for (const heading of biz?.sectionHeadings ?? []) {
@@ -180,6 +220,39 @@ export function deriveRequiredDomains(kbFiles: KbFileSummary[]): string[] {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(name);
+  }
+  return out;
+}
+
+/** Read BUSINESS_LOGIC.md once and return, per required capability, its H2 section
+ *  body — the precise, already-mined domain description that capability's skill
+ *  agent needs to grep-target code WITHOUT re-reading the KB. Only required
+ *  capabilities are kept, to bound the detect payload; each body is capped. Returns
+ *  {} when BUSINESS_LOGIC.md is absent or unreadable, so callers degrade to the
+ *  read-the-KB-from-disk path. */
+async function loadCapabilitySections(
+  repoRoot: string,
+  kbFiles: KbFileSummary[],
+  requiredDomains: string[],
+): Promise<Record<string, string>> {
+  if (requiredDomains.length === 0) return {};
+  const biz = findBusinessLogicKb(kbFiles);
+  if (!biz) return {};
+  let text: string;
+  try {
+    text = await readFile(path.join(repoRoot, biz.relPath), 'utf8');
+  } catch {
+    return {};
+  }
+  const all = parseKbSectionBodies(text);
+  const out: Record<string, string> = {};
+  for (const cap of requiredDomains) {
+    const body = all[cap];
+    if (!body) continue;
+    out[cap] =
+      body.length > MAX_INLINE_SECTION_CHARS
+        ? body.slice(0, MAX_INLINE_SECTION_CHARS) + '\n[...section truncated]'
+        : body;
   }
   return out;
 }
@@ -726,6 +799,26 @@ function buildSkillPrompt(
 
   const fileTree = detected.__fileTree ?? '(no file tree available)';
   const scopeExclude = detected.__scopeExclude ?? [];
+  // When a parallel dispatch pins one capability, inline THAT capability's
+  // already-mined BUSINESS_LOGIC.md section so the agent gets its precise domain
+  // description without re-reading the KB from disk — the whole point of the
+  // per-capability fan-out is one narrow slice of context, not a KB re-scan.
+  const inlinedSection = targetCapability
+    ? detected.__capabilitySections?.[targetCapability]
+    : undefined;
+  const inlinedSectionBlock = inlinedSection
+    ? [
+        `## Domain knowledge for "${targetCapability}" (from BUSINESS_LOGIC.md — already mined; do NOT re-read the KB for this)`,
+        '',
+        'This is the exact, already-mined description of the ONE capability you are producing a skill for.',
+        'Treat it as ground truth for terminology and for the module / service / class / route / hook /',
+        'field names to grep for. You do NOT need to open BUSINESS_LOGIC.md or any other KB file for this',
+        'capability — the relevant text is right here.',
+        '',
+        inlinedSection,
+        '',
+      ].join('\n')
+    : '';
   const kbList =
     detected.kbFiles.length > 0
       ? detected.kbFiles
@@ -825,6 +918,7 @@ function buildSkillPrompt(
     reservedSection,
     coveredSection,
     checklistSection,
+    inlinedSectionBlock,
     '## Repository overview (partial file tree)',
     '',
     '```',
@@ -841,8 +935,9 @@ function buildSkillPrompt(
     'is the single biggest token cost here and is NOT wanted: a dozen well-chosen files is plenty;',
     'reading dozens means you are over-exploring. Work in a targeted way:',
     '',
-    "1. Use the knowledge base above (especially BUSINESS_LOGIC.md) to fix this capability's exact",
-    '   terminology and the module / service / class / route / hook / field names it likely uses.',
+    inlinedSection
+      ? '1. The domain description for this capability is inlined above under "Domain knowledge for ..." — read THAT, do not re-open BUSINESS_LOGIC.md or any other KB file. From it, fix the capability\'s exact terminology and the module / service / class / route / hook / field names it likely uses.'
+      : "1. Use the knowledge base above (especially BUSINESS_LOGIC.md) to fix this capability's exact terminology and the module / service / class / route / hook / field names it likely uses.",
     scopeExclude.length > 0
       ? '2. GREP the in-scope directories for those terms (never the out-of-scope dirs listed under "Mining scope") to LOCATE the few files that implement this capability. Lead with Grep/Glob to find the right files — do NOT read files one by one just to discover what is where.'
       : '2. GREP the repository for those terms to LOCATE the few files that implement this capability. Lead with Grep/Glob to find the right files — do NOT read files one by one just to discover what is where.',
@@ -918,6 +1013,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     await ctx.emitProgress('Listing existing knowledge base...');
     const kbFiles = await listKbFiles(ctx.repoPath);
     const requiredDomains = deriveRequiredDomains(kbFiles);
+    const capabilitySections = await loadCapabilitySections(ctx.repoPath, kbFiles, requiredDomains);
 
     await ctx.emitProgress('Loading bundle skills...');
     const bundleSkills = await loadBundleSkills(ctx);
@@ -946,6 +1042,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
       bundleSkills,
       __fileTree: fileTree,
       __scopeExclude: scopeExclude,
+      __capabilitySections: capabilitySections,
     };
   },
 

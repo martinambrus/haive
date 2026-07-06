@@ -213,6 +213,19 @@ describe('skill-generation truncation shrink', () => {
     expect(iterPrompt(2)).toMatch(/at most 4/);
     expect(iterPrompt(3)).toMatch(/at most 3/);
   });
+
+  it('does not inline capability sections in the sequential loop path (no pinned capability)', () => {
+    const p = skillGenerationStep.loop!.buildIterationPrompt!({
+      detected: { ...detected, __capabilitySections: { A: 'Alpha body text' } },
+      formValues: {},
+      iteration: 1,
+      previousIterations: [],
+      truncationRetries: 0,
+    });
+    expect(p).not.toContain('Domain knowledge for');
+    expect(p).not.toContain('Alpha body text');
+    expect(p).toContain('Use the knowledge base above');
+  });
 });
 
 describe('skill-generation parallel deterministic', () => {
@@ -355,6 +368,35 @@ describe('skill-generation parallel deterministic', () => {
     expect(dispatches).toHaveLength(5);
     expect(new Set(dispatches.map((d) => d.agentId)).size).toBe(5);
     expect(dispatches[0]!.prompt).toMatch(/EXACTLY ONE skill for this specific capability/);
+  });
+
+  it('inlines only the pinned capability BUSINESS_LOGIC.md section into each agent prompt', async () => {
+    const dispatches = await withBypass(undefined, () =>
+      skillGenerationStep.agentMining!.selectAgents({
+        ctx: fakeCtx,
+        detected: {
+          ...det(['Alpha', 'Beta', 'Gamma']),
+          __capabilitySections: {
+            Alpha: 'Alpha syncs the boat catalogue via alpha_service.',
+            Beta: 'Beta renders the fleet search form.',
+          },
+        },
+        formValues: {},
+        llmOutput: undefined,
+      }),
+    );
+    const byCap = (c: string) => dispatches.find((d) => d.agentTitle === c)!.prompt;
+
+    // Alpha's agent gets Alpha's section body + the do-not-re-read step 1...
+    expect(byCap('Alpha')).toContain('Domain knowledge for "Alpha"');
+    expect(byCap('Alpha')).toContain('Alpha syncs the boat catalogue via alpha_service.');
+    expect(byCap('Alpha')).toMatch(/read THAT, do not re-open/);
+    // ...and NOT another capability's section — each agent gets one narrow slice.
+    expect(byCap('Alpha')).not.toContain('Beta renders the fleet search form.');
+
+    // Gamma has no section → no inlined block, falls back to the read-the-KB step 1.
+    expect(byCap('Gamma')).not.toContain('Domain knowledge for');
+    expect(byCap('Gamma')).toContain('Use the knowledge base above');
   });
 
   it('selectAgents returns [] for discovery (<3 capabilities) and under test bypass', async () => {
