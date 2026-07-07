@@ -34,8 +34,8 @@ importers:
         specifier: ^3.4.5
         version: 3.4.9
       prettier:
-        specifier: ^3.4.2
-        version: 3.8.2
+        specifier: ^3.9.4
+        version: 3.9.4
       tsx:
         specifier: ^4.19.2
         version: 4.21.0
@@ -2451,8 +2451,8 @@ packages:
     resolution: {integrity: sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw==}
     engines: {node: '>=12'}
 
-  prettier@3.8.2:
-    resolution: {integrity: sha512-8c3mgTe0ASwWAJK+78dpviD+A8EqhndQPUBpNUIPt6+xWlIigCwfN01lWr9MAede4uqXGTEKeQWTvzb3vjia0Q==}
+  prettier@3.9.4:
+    resolution: {integrity: sha512-yWG/o/4oJfo036EKAfK6ACAoDOfHeRHx4tuxkfBZiauURiaSmYwlpOr5LQqKtIkRD2z1PLteme2WoxEnj4tHTg==}
     engines: {node: '>=14'}
     hasBin: true
 
@@ -5105,7 +5105,7 @@ snapshots:
 
   postgres@3.4.9: {}
 
-  prettier@3.8.2: {}
+  prettier@3.9.4: {}
 
   process-nextick-args@2.0.1: {}
 
