@@ -33,6 +33,7 @@ import {
 import { listSkillDirs, loadBundleSkillIds } from '../onboarding/09_6-skill-verification.js';
 import { readDiskSkillSummaries } from '../onboarding/09_5b-skill-repair.js';
 import type { SkillSyncOp } from './11-phase-8-learning.js';
+import { requireUsableGit } from '../../../repo/git-workspace.js';
 
 const execFileP = promisify(execFile);
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
@@ -471,7 +472,9 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     let committed = false;
     let commitSha: string | null = null;
     const changed = generated.length > 0 || removed.length > 0;
-    const hasGit = changed && (await pathExists(path.join(worktree, '.git')));
+    // Only probed when there is something to commit; throws on a corrupt repo so the
+    // generated skills are not silently left uncommitted.
+    const hasGit = changed && (await requireUsableGit(worktree));
     if (hasGit) {
       const present: string[] = [];
       for (const dir of targetDirs) {

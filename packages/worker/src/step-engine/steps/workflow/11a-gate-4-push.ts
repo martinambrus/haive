@@ -1,9 +1,8 @@
-import path from 'node:path';
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
   detectOrigin,
   ensureOrigin,
@@ -11,6 +10,7 @@ import {
   gitRun,
   pushBranch,
 } from '../../../repo/git-push.js';
+import { requireUsableGit } from '../../../repo/git-workspace.js';
 
 const MANUAL_CREDENTIAL_VALUE = '';
 
@@ -82,8 +82,9 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       host: r.host,
     }));
 
-    const hasGit = await pathExists(path.join(workspacePath, '.git'));
-    if (!hasGit) {
+    // Throws on a corrupt repo: silently offering "(no git)" would hide the branch
+    // the user asked to push.
+    if (!(await requireUsableGit(workspacePath))) {
       return {
         hasGit: false,
         workspacePath,

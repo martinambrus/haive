@@ -1,9 +1,7 @@
-import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { pathExists } from '../onboarding/_helpers.js';
 import {
   buildCredentialHelper,
   detectOrigin,
@@ -11,6 +9,7 @@ import {
   scrubSecret,
 } from '../../../repo/git-push.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
+import { requireUsableGit } from '../../../repo/git-workspace.js';
 
 // Pre-branch base sync. Runs after the model-health canary and before triage (the
 // explicit pull in orderWorkflowRunList places it there). Brings the LOCAL base
@@ -116,8 +115,9 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       parentBranch: null,
     };
 
-    const hasGit = await pathExists(path.join(ctx.repoPath, '.git'));
-    if (!hasGit) return empty;
+    // Throws on a corrupt repo: skipping the base sync silently would branch the
+    // feature worktree off a stale base.
+    if (!(await requireUsableGit(ctx.repoPath))) return empty;
 
     const cur = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
     const currentBranch = cur.code === 0 ? cur.stdout.trim() : null;

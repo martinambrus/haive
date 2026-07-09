@@ -7,11 +7,7 @@ import { schema } from '@haive/database';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
-import {
-  loadPreviousStepOutput,
-  pathExists,
-  resolveSkillTargetDirs,
-} from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import { readDiskSkillSummaries } from '../onboarding/09_5b-skill-repair.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
@@ -30,6 +26,7 @@ import {
   recordLearningAccepted,
   recordLearningInstruction,
 } from './_learning-feedback.js';
+import { gitWorkspaceStatus } from '../../../repo/git-workspace.js';
 
 interface LearningDetect {
   taskTitle: string;
@@ -674,7 +671,13 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const worktreePath =
       (worktree?.output as { worktreePath?: string } | null)?.worktreePath ?? ctx.workspacePath;
-    const hasGit = await pathExists(path.join(worktreePath, '.git'));
+    // Gates a viewer artifact only, so a corrupt repo degrades instead of failing the
+    // step — but it is logged rather than silently indistinguishable from "no git".
+    const gitStatus = await gitWorkspaceStatus(worktreePath);
+    if (gitStatus === 'broken') {
+      ctx.logger.warn({ worktreePath }, 'worktree git is unusable; skipping knowledge diff');
+    }
+    const hasGit = gitStatus === 'ok';
     const existingLearnings = (await readExistingLearnings(worktreePath))
       .slice(0, 60)
       .map((e) => ({ id: e.id, title: e.title, excerpt: learningExcerpt(e.body) }));

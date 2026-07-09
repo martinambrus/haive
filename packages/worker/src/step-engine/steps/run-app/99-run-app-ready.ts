@@ -1,10 +1,9 @@
-import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import { CONFIG_KEYS, configService } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { ensureAppServing } from '../workflow/_app-runtime.js';
 import { runnerExec, startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
 import {
@@ -14,6 +13,7 @@ import {
 import { buildCommitDiffArtifact } from '../workflow/_commit-diff.js';
 import { resolveUserGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../../../repo/git-push.js';
+import { gitWorkspaceStatus } from '../../../repo/git-workspace.js';
 
 // Git identity fallback when the user has no name/email on file — mirrors
 // 10-gate-3-commit so a commit-back never fails for a missing identity.
@@ -131,7 +131,13 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const worktreeOutput = prev?.output as { worktreePath?: string } | null;
     const workspacePath = worktreeOutput?.worktreePath ?? ctx.workspacePath;
-    const hasGit = await pathExists(path.join(workspacePath, '.git'));
+    // The runtime must keep serving, so a corrupt repo degrades to "no git" (the
+    // commit-back affordance hides) rather than failing the readiness step.
+    const gitStatus = await gitWorkspaceStatus(workspacePath);
+    if (gitStatus === 'broken') {
+      ctx.logger.warn({ workspacePath }, 'worktree git is unusable; commit-back disabled');
+    }
+    const hasGit = gitStatus === 'ok';
 
     let branch: string | null = null;
     let hasOrigin = false;

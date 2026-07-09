@@ -5,6 +5,7 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveUserGitEnv } from '../../../secrets/user-git-identity.js';
+import { requireUsableGit } from '../../../repo/git-workspace.js';
 
 const exec = promisify(execFile);
 
@@ -111,14 +112,18 @@ export const kbCommitStep: StepDefinition<KbCommitDetect, KbCommitApply> = {
 
   async detect(ctx: StepContext): Promise<KbCommitDetect> {
     const workspacePath = await resolveWorkspace(ctx);
-    const hasGit = await pathExists(path.join(workspacePath, '.git'));
-    if (!hasGit) {
+    // Throws on a corrupt repo rather than reporting "(no git)" and skipping the
+    // KB commit — a broken gitfile is not an absent one.
+    if (!(await requireUsableGit(workspacePath))) {
       return { hasGit: false, workspacePath, dirtyFiles: [], statusSummary: '(no git)' };
     }
     // Porcelain over the KB pathspecs surfaces both modified (` M`) and untracked
     // (`??`) files — a first-time investigation file is untracked, so `git diff`
     // would miss it. The 3-char status prefix is stripped for the display path.
     const status = await gitRun(workspacePath, ['status', '--porcelain', '--', ...KB_PATHSPECS]);
+    if (status.code !== 0) {
+      throw new Error(`git status failed in ${workspacePath}: ${status.stderr || status.stdout}`);
+    }
     const lines = status.stdout
       .split('\n')
       .map((l) => l.replace(/\r$/, ''))
