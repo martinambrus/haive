@@ -18,13 +18,14 @@ import { log } from './_shared.js';
 const execFileAsync = promisify(execFile);
 
 /**
- * Secret masking is enabled for this repo but could not be applied faithfully.
+ * Secret masking could not be applied faithfully, and we cannot prove it was off.
  *
  * Fail closed: never run a CLI agent against a repo whose secrets we know we failed
- * to hide. Callers let this propagate — handleCliExecJob records it on the invocation
- * (exit -1) and fails the step, so the user sees why and can Retry after adjusting
- * the allow globs. Disabling masking (per repo, or the global kill-switch) skips the
- * scan entirely and never raises this.
+ * to hide — nor against one we cannot resolve well enough to know. Callers let this
+ * propagate — handleCliExecJob records it on the invocation (exit -1) and fails the
+ * step, so the user sees why and can Retry after adjusting the allow globs. Disabling
+ * masking (per repo, or the global kill-switch) skips the scan entirely and never
+ * raises this.
  */
 export class SecretMaskError extends Error {
   constructor(message: string) {
@@ -59,7 +60,12 @@ export async function resolveSecretMasks(
     where: eq(schema.tasks.id, taskId),
     columns: { userId: true, repositoryId: true },
   });
-  if (!task?.repositoryId) return [];
+  // No task row: we cannot resolve what would be mounted, so we cannot claim there is
+  // nothing to hide. A repo-less task is different — resolveTaskRepoMount returns null
+  // on the same condition, so no repo tree reaches the sandbox and there is genuinely
+  // nothing to mask.
+  if (!task) throw new SecretMaskError(`secret-mask: task ${taskId} not found`);
+  if (!task.repositoryId) return [];
 
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, task.repositoryId),
@@ -71,14 +77,25 @@ export async function resolveSecretMasks(
       secretMaskDenyExtend: true,
     },
   });
-  if (!repo || !repo.secretMaskEnabled) return [];
+  // The row is what tells us whether masking is on for this repo and which globs
+  // apply. Without it, "no masks" would be a guess dressed up as a decision — the FK
+  // is ON DELETE SET NULL, so a live repositoryId pointing at nothing is a torn state,
+  // not a repo-less task.
+  if (!repo) {
+    throw new SecretMaskError(
+      `secret-mask: repository ${task.repositoryId} for task ${taskId} not found`,
+    );
+  }
+  if (!repo.secretMaskEnabled) return [];
 
-  // Worker-visible repo root (the same tree mounted at SANDBOX_WORKDIR): the
-  // /host-fs bind for local-path repos, else the named-volume subpath the worker
-  // sees under WORKER_REPO_STORAGE_ROOT (mirrors resolveTaskRepoMount).
+  // Worker-visible repo root (the same tree mounted at SANDBOX_WORKDIR), mirroring
+  // resolveTaskRepoMount: only a /host-fs path (local-path repo) is used verbatim.
+  // Every other repo — including one whose storage_path was never written — is mounted
+  // from the named-volume subpath under WORKER_REPO_STORAGE_ROOT, so the tree reaches
+  // the sandbox either way and must be scanned either way. Bailing on a null path here
+  // left that tree mounted and unmasked.
   const storagePath = repo.storagePath ?? repo.localPath;
-  if (!storagePath) return [];
-  const workerRoot = storagePath.startsWith(HOST_REPO_ROOT + '/')
+  const workerRoot = storagePath?.startsWith(HOST_REPO_ROOT + '/')
     ? storagePath
     : posix.join(WORKER_REPO_STORAGE_ROOT, `${task.userId}/${task.repositoryId}`);
 
