@@ -1,4 +1,3 @@
-import path from 'node:path';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { schema, type Database, type MergeResolveState } from '@haive/database';
@@ -15,6 +14,7 @@ import { pathExists } from './steps/onboarding/_helpers.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from './steps/_fenced-json.js';
 import { resolvePreferredCli } from './step-runner.js';
+import { worktreeDirName, worktreeDirPaths } from '../repo/worktree-paths.js';
 import type { MergeResolveSpec, StepContext, StepDefinition } from './step-definition.js';
 import type { AdvanceStepParams, AdvanceStepResult, TaskStepRow } from './step-runner.js';
 
@@ -177,20 +177,13 @@ async function saveMergeState(
     .where(eq(schema.taskSteps.id, stepRowId));
 }
 
-const WORKTREE_SUBDIR = '.haive/worktrees';
-
 /** Host + sandbox paths for a transient worktree checked out on the base branch.
- *  The dir name flattens slashes (mirrors 01-worktree-setup) and suffixes `--base`
- *  so it never collides with a feature worktree. .haive/ is already git-excluded. */
+ *  Suffixes `--base` so it never collides with a feature worktree. */
 function baseWorktreePaths(
   ctx: StepContext,
   base: string,
 ): { worktreePath: string; sandboxWorktreePath: string } {
-  const dirName = `${base.replace(/\//g, '-')}--base`;
-  return {
-    worktreePath: path.join(ctx.repoPath, WORKTREE_SUBDIR, dirName),
-    sandboxWorktreePath: `${ctx.sandboxWorkdir}/${WORKTREE_SUBDIR}/${dirName}`,
-  };
+  return worktreeDirPaths(ctx.repoPath, ctx.sandboxWorkdir, `${worktreeDirName(base)}--base`);
 }
 
 /** Add (or reuse) a worktree checked out on the base branch. Safe only when base is

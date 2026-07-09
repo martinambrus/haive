@@ -22,6 +22,7 @@ import { killCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
 import type { DagCoderContext, StepContext, StepDefinition } from './step-definition.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
+import { worktreeDirName, worktreeDirPaths } from '../repo/worktree-paths.js';
 import type {
   AdvanceStepParams,
   AdvanceStepResult,
@@ -126,13 +127,8 @@ export function issuePaths(ctx: StepContext, integration: IntegrationWorktree, i
   // with the integration branch ref `<branch>` (git stores refs as files, so
   // refs/heads/<branch> being a file blocks creating refs/heads/<branch>/<issue>).
   const branchName = `${integration.branch}--${issueKey}`;
-  // The integration branch may be namespaced (feature/…, fix/…); flatten its slash
-  // for the on-disk dir so the worktree stays one level under .haive/worktrees
-  // (the branch ref keeps the slash).
-  const dirName = branchName.replace(/\//g, '-');
   return {
-    worktreePath: `${ctx.repoPath}/.haive/worktrees/${dirName}`,
-    sandboxWorktreePath: `${ctx.sandboxWorkdir}/.haive/worktrees/${dirName}`,
+    ...worktreeDirPaths(ctx.repoPath, ctx.sandboxWorkdir, worktreeDirName(branchName)),
     branchName,
   };
 }
