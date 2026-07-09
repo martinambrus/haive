@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -82,6 +82,71 @@ describe('removeWorktreeDir', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  // Task 82949225: a sandbox agent rewrote the gitfile to its container-side path, so
+  // `git worktree remove` died with "is not a .git file" and the worktree survived.
+  it('repairs a gitfile poisoned with a container path, then removes via git', async () => {
+    const { root, wt } = await setupRepoWithWorktree();
+    try {
+      await writeFile(
+        path.join(wt, '.git'),
+        'gitdir: /haive/workdir/.git/worktrees/feat\n',
+        'utf8',
+      );
+      const res = await removeWorktreeDir(root, wt);
+      expect(res.removed).toBe(true);
+      expect(res.method).toBe('git');
+      expect(await exists(wt)).toBe(false);
+      expect((await git(root, ['worktree', 'list'])).trim().split('\n')).toHaveLength(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // Step 12 keys its (loud) failure on removed === false, so an unremovable worktree
+  // must report failure rather than claim success. Unprivileged only: root ignores DAC.
+  it.skipIf(process.getuid?.() === 0)(
+    'reports removed:false with an error when the tree cannot be deleted',
+    async () => {
+      const { root, wt } = await setupRepoWithWorktree();
+      const parentOfWt = path.dirname(wt);
+      try {
+        // Read-only PARENT: chmod -R u+w on the worktree itself cannot fix this, so
+        // unlinking the worktree's own directory entry stays impossible.
+        await chmod(parentOfWt, 0o555);
+        const res = await removeWorktreeDir(root, wt);
+        expect(res.removed).toBe(false);
+        expect(res.method).toBeNull();
+        expect(res.error).toBeTruthy();
+        expect(await exists(wt)).toBe(true);
+      } finally {
+        await chmod(parentOfWt, 0o755).catch(() => undefined);
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // Drupal ships sites/default at 0555. Root ignores DAC, so this only exercises the
+  // chmod fallback when the suite runs unprivileged — as the worker does (USER node).
+  it.skipIf(process.getuid?.() === 0)(
+    'removes a worktree containing a 0555 directory',
+    async () => {
+      const { root, wt } = await setupRepoWithWorktree();
+      try {
+        const locked = path.join(wt, 'sites', 'default');
+        await mkdir(locked, { recursive: true });
+        await writeFile(path.join(locked, 'settings.php'), '<?php\n', 'utf8');
+        await chmod(locked, 0o555);
+
+        const res = await removeWorktreeDir(root, wt);
+        expect(res.removed).toBe(true);
+        expect(await exists(wt)).toBe(false);
+      } finally {
+        await exec('chmod', ['-R', 'u+w', root]).catch(() => undefined);
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 /** db stub: the task row carries the durable columns, the repositories row the repo

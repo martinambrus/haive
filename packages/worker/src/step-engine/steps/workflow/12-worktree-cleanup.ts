@@ -7,6 +7,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { detectOrigin, getOriginUrl } from '../../../repo/git-push.js';
+import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
 
 const exec = promisify(execFile);
 
@@ -373,17 +374,17 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     }
 
     // Remove the worktree (merge_remove after a successful merge, or remove_only).
-    const rm = await gitRun(ctx.repoPath, ['worktree', 'remove', d.worktreePath, '--force']);
-    if (rm.code !== 0) {
-      ctx.logger.error({ stderr: rm.stderr }, 'git worktree remove failed');
-      return {
-        action,
-        removed: false,
-        merged,
-        branchDeleted: false,
-        mode: 'worktree',
-        message: `${merged ? 'merged, but ' : ''}git worktree remove failed: ${rm.stderr || rm.stdout}`,
-      };
+    // removeWorktreeDir repairs a poisoned gitfile, then falls back from
+    // `git worktree remove` to a chmod-then-rm for read-only trees (Drupal's 0555
+    // sites/default). Failing here must be loud: returning `done` with removed:false
+    // reported success while the worktree and its branch survived. The merge commit
+    // is already durable, so a Retry re-enters with mergeResolve short-circuiting.
+    const removal = await removeWorktreeDir(ctx.repoPath, d.worktreePath);
+    if (!removal.removed) {
+      ctx.logger.error({ err: removal.error }, 'worktree removal failed');
+      throw new Error(
+        `${merged ? `merged ${d.branchName} into ${mergeTarget}, but ` : ''}removing the worktree at ${d.worktreePath} failed: ${removal.error ?? 'unknown error'}`,
+      );
     }
 
     // Safe branch delete ONLY after a successful merge (git branch -d refuses an
@@ -404,6 +405,9 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     parts.push(`removed worktree ${d.worktreePath}`);
     if (branchDeleted) parts.push(`deleted branch ${d.branchName}`);
     else if (action === 'remove_only') parts.push(`kept branch ${d.branchName}`);
+    // A requested delete that git refused must not read as a silent success.
+    else if (values.deleteBranch && d.branchName)
+      parts.push(`branch ${d.branchName} NOT deleted (git refused; see worker log)`);
 
     ctx.logger.info({ action, merged, branchDeleted }, 'worktree cleanup complete');
     return {

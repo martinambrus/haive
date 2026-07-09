@@ -107,16 +107,37 @@ export async function removeTaskWorktree(
   return { ...removal, branch, branchDeleted };
 }
 
+/** Recursive delete that survives read-only directories. Drupal ships
+ *  `sites/default` at mode 0555, so nothing may unlink inside it and both
+ *  `git worktree remove --force` and a plain rm fail with EACCES/EPERM. */
+async function forceRemoveDir(dir: string): Promise<void> {
+  try {
+    await rm(dir, { recursive: true, force: true });
+    return;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'EACCES' && code !== 'EPERM') throw err;
+  }
+  await exec('chmod', ['-R', 'u+w', dir]);
+  await rm(dir, { recursive: true, force: true });
+}
+
 /** The IO half of {@link removeTaskWorktree}, split out so the git-vs-rmdir
  *  branching is unit-testable against a real temp repo without stubbing the db.
- *  Prefers `git worktree remove --force` (clears the parent's .git/worktrees admin
- *  entry too); falls back to a plain recursive rm + best-effort prune when there is
- *  no reachable parent .git (repoRoot null, or the parent repo was reset). */
+ *
+ *  Repairs the worktree's gitfile first: a CLI agent that rewrote it to a
+ *  container-side path (its host gitdir does not resolve inside the sandbox) leaves
+ *  `git worktree remove` failing with "is not a .git file". Then prefers
+ *  `git worktree remove --force` (clears the parent's .git/worktrees admin entry
+ *  too); falls back to a recursive rm + best-effort prune when there is no reachable
+ *  parent .git (repoRoot null, or the parent repo was reset). */
 export async function removeWorktreeDir(
   repoRoot: string | null,
   worktreePath: string,
 ): Promise<WorktreeRemovalResult> {
   if (repoRoot) {
+    // Best effort: a no-op when the gitfile is already sane.
+    await exec('git', ['-C', repoRoot, 'worktree', 'repair', worktreePath]).catch(() => undefined);
     try {
       await exec('git', ['-C', repoRoot, 'worktree', 'remove', '--force', worktreePath]);
       return { removed: true, worktreePath, method: 'git' };
@@ -126,7 +147,7 @@ export async function removeWorktreeDir(
   }
 
   try {
-    await rm(worktreePath, { recursive: true, force: true });
+    await forceRemoveDir(worktreePath);
     if (repoRoot) {
       await exec('git', ['-C', repoRoot, 'worktree', 'prune']).catch(() => undefined);
     }
