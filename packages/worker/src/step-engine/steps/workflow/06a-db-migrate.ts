@@ -168,6 +168,41 @@ export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
     }
 
     const handle = runnerHandleForTask(ctx.taskId, d.repoSubpath);
+
+    // Pre-flight (Drupal): `drush updatedb` requires a bootstrappable, installed
+    // site with a wired DB connection. On a site that was never installed — no
+    // sites/default/settings.php, DDEV project `type: php` (so no auto-generated
+    // settings.ddev.php), empty database — drush cannot bootstrap and updatedb
+    // dies with an OPAQUE "Bootstrap failed. Run your command with -vvv"
+    // (the real "database connection is not defined: default" is only under -vvv).
+    // That hard-blocks the whole pipeline with no actionable reason, yet there is
+    // nothing to migrate on such a site. So probe the DB connection first and skip
+    // gracefully (with a clear note) instead of failing. `drush status
+    // --field=db-status` reports "Connected" ONLY when the connection is live
+    // (empty when the site can't bootstrap) — a stable, documented drush field
+    // that exits 0 either way, so we key on the value, not the exit code.
+    if (d.framework === 'drupal') {
+      const probe = await ddevExec(handle, 'exec drush status --field=db-status', {
+        timeoutMs: 60_000,
+      });
+      if (!/connected/i.test(probe.output)) {
+        ctx.logger.warn(
+          { taskId: ctx.taskId, probe: probe.output.slice(-300) },
+          '06a-db-migrate: Drupal has no live DB connection — skipping migration (site not installed / DB not wired)',
+        );
+        return {
+          ran: false,
+          skipped: true,
+          passed: true,
+          command,
+          output:
+            'Drupal has no live database connection (site not installed, or settings.php + DDEV DB not wired) — ' +
+            'drush updatedb would fail to bootstrap, so the migration was skipped. If this site should have a ' +
+            'migratable database, set the DDEV project type to "drupal" and import the database, then retry.',
+        };
+      }
+    }
+
     const res = await withDdevProgress(ctx, `Running migrations: ${command}`, (onLine) =>
       ddevExec(handle, `exec ${command}`, { timeoutMs: 1_800_000, onLine }),
     );
