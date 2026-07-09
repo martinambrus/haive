@@ -8,6 +8,11 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveUserGitEnv } from '../../../secrets/user-git-identity.js';
+import {
+  WORKTREE_SUBDIR,
+  sandboxWorktreePath,
+  worktreeDirName,
+} from '../../../repo/worktree-paths.js';
 
 const exec = promisify(execFile);
 
@@ -18,7 +23,6 @@ const FALLBACK_GIT_IDENTITY = {
   GIT_COMMITTER_EMAIL: 'worker@haive.local',
 };
 
-const WORKTREE_SUBDIR = '.haive/worktrees';
 const EXCLUDE_MARKER = '.haive/';
 
 interface WorktreeDetect {
@@ -249,9 +253,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       commitMessage?: string;
     };
     const branchName = slugifyBranch(values.branchName ?? 'feature-task');
-    // Branch may be namespaced (feature/…, fix/…); the worktree DIRECTORY name
-    // flattens the slash so the on-disk layout stays one level under .haive/worktrees.
-    const dirName = branchName.replace(/\//g, '-');
+    const dirName = worktreeDirName(branchName);
     let base: string;
 
     if (!args.detected.hasGit) {
@@ -303,18 +305,21 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       );
     }
 
-    const sandboxWorktreePath = `${ctx.sandboxWorkdir}/${WORKTREE_SUBDIR}/${dirName}`;
+    const sandboxWorktree = sandboxWorktreePath(ctx.sandboxWorkdir, branchName);
     // Durable record for the cancel reaper (removeTaskWorktree). This step's `output`
     // is not enough: a Retry cascade nulls it while the worktree stays on disk.
     await ctx.db
       .update(schema.tasks)
       .set({ worktreePath, worktreeBranch: branchName })
       .where(eq(schema.tasks.id, ctx.taskId));
-    ctx.logger.info({ worktreePath, sandboxWorktreePath, branchName, base }, 'worktree created');
+    ctx.logger.info(
+      { worktreePath, sandboxWorktreePath: sandboxWorktree, branchName, base },
+      'worktree created',
+    );
     return {
       mode: 'worktree',
       worktreePath,
-      sandboxWorktreePath,
+      sandboxWorktreePath: sandboxWorktree,
       branchName,
       baseBranch: base,
     };

@@ -47,6 +47,7 @@ import {
 import { getDb } from '../../db.js';
 import { getTaskQueue } from '../task-queue.js';
 import { CliLoginRequiredError, log } from './_shared.js';
+import { sandboxWorktreePath } from '../../repo/worktree-paths.js';
 import { resolveSandboxImageTag } from './images.js';
 
 export async function resolveProviderNameForPayload(
@@ -539,7 +540,18 @@ export async function resolveTaskSandboxWorkdir(db: Database, taskId: string): P
     columns: { output: true },
   });
   const output = row?.output as { sandboxWorktreePath?: string } | null;
-  return output?.sandboxWorktreePath ?? SANDBOX_WORKDIR;
+  if (output?.sandboxWorktreePath) return output.sandboxWorktreePath;
+
+  // A Retry cascade nulls that step output (_step-reset) while the worktree stays on
+  // disk. Falling straight through to SANDBOX_WORKDIR would run the agent in the
+  // PARENT checkout instead of its worktree, and would silently drop the worktree
+  // gitfile mask. The task row survives a reset; rebuild the path from the branch.
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { worktreeBranch: true },
+  });
+  if (task?.worktreeBranch) return sandboxWorktreePath(SANDBOX_WORKDIR, task.worktreeBranch);
+  return SANDBOX_WORKDIR;
 }
 
 const STATUS_THROTTLE_MS = 2_000;
