@@ -1,5 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { mkdir, open, readFile, writeFile } from 'node:fs/promises';
+import { createGunzip } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -668,6 +670,160 @@ export async function ddevExec(
   }
 }
 
+/** How a DB dump has to be fed to DDEV. */
+export interface DumpImportFormat {
+  /** The dump is a pg_dump ARCHIVE (`-Fc` custom or `-Ft` tar) rather than plain
+   *  SQL, so it has to go through pg_restore before anything can psql it. */
+  pgRestore: boolean;
+  /** The file itself is gzip-compressed (someone ran `gzip dump.backup`), so it
+   *  has to be inflated before the archive underneath can be read. */
+  gzipped: boolean;
+}
+
+/** Enough of the dump to cover the tar `ustar` magic at offset 257. */
+const DUMP_HEAD_BYTES = 512;
+
+/** Offset of the `ustar` magic in a POSIX tar header. */
+const TAR_MAGIC_OFFSET = 257;
+
+/** The head of `workerPath`, or null when it cannot be read. */
+async function readHead(workerPath: string, n: number): Promise<Buffer | null> {
+  const fh = await open(workerPath, 'r').catch(() => null);
+  if (!fh) return null;
+  try {
+    const buf = Buffer.alloc(n);
+    const { bytesRead } = await fh.read(buf, 0, n, 0);
+    return buf.subarray(0, bytesRead);
+  } catch {
+    return null;
+  } finally {
+    await fh.close();
+  }
+}
+
+/** The head of `workerPath` AFTER gzip inflation, without reading (or inflating)
+ *  the whole file — a dump is gigabytes. Null when it does not inflate. */
+function readGunzippedHead(workerPath: string, n: number): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    const src = createReadStream(workerPath);
+    const gz = createGunzip();
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+    const done = (value: Buffer | null): void => {
+      if (settled) return;
+      settled = true;
+      src.destroy();
+      gz.destroy();
+      resolve(value);
+    };
+    src.on('error', () => done(null));
+    // Tearing the stream down at `n` bytes makes gz emit a premature-close error;
+    // `settled` swallows it, as it does any real inflate failure (-> null).
+    gz.on('error', () => done(null));
+    gz.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+      total += chunk.length;
+      if (total >= n) done(Buffer.concat(chunks).subarray(0, n));
+    });
+    gz.on('end', () => done(Buffer.concat(chunks)));
+    src.pipe(gz);
+  });
+}
+
+/** Whether `head` opens a pg_dump archive, i.e. something only pg_restore reads.
+ *
+ *  - `-Fc` (custom; pgAdmin's "Backup" and most PostgreSQL tooling) starts with the
+ *    ASCII magic `PGDMP`.
+ *  - `-Ft` (tar) is a POSIX tar whose FIRST member is the archive's own `toc.dat`.
+ *    That first-member check is what separates it from a user tarball wrapped around
+ *    a `.sql` file, which `ddev import-db` unpacks perfectly well on its own and
+ *    which must therefore keep taking the plain path.
+ *
+ *  Plain-SQL dumps match neither. */
+function isPgArchiveHead(head: Buffer): boolean {
+  if (head.subarray(0, 5).toString('latin1') === 'PGDMP') return true;
+  return (
+    head.length >= TAR_MAGIC_OFFSET + 5 &&
+    head.subarray(TAR_MAGIC_OFFSET, TAR_MAGIC_OFFSET + 5).toString('latin1') === 'ustar' &&
+    head.subarray(0, 8).toString('latin1') === 'toc.dat\0'
+  );
+}
+
+/** Classify a dump by its CONTENT, on the WORKER filesystem (the haive_repos
+ *  volume), before it is handed to the runner. Content, not filename: PostgreSQL
+ *  backups carry whatever extension the tool that wrote them felt like
+ *  (`.backup`, `.dump`, `.pgsql`, none at all).
+ *
+ *  An unreadable file classifies as plain — the import then takes the plain path
+ *  and `ddev import-db` reports the real problem. */
+export async function sniffDumpFormat(workerPath: string): Promise<DumpImportFormat> {
+  const raw = await readHead(workerPath, DUMP_HEAD_BYTES);
+  if (!raw) return { pgRestore: false, gzipped: false };
+  const gzipped = raw.length >= 2 && raw[0] === 0x1f && raw[1] === 0x8b;
+  const head = gzipped ? await readGunzippedHead(workerPath, DUMP_HEAD_BYTES) : raw;
+  if (!head) return { pgRestore: false, gzipped };
+  return { pgRestore: isPgArchiveHead(head), gzipped };
+}
+
+/** Shell command (run in the runner, from `projectDir`) that loads `dumpRunnerPath`
+ *  into the project's DDEV database.
+ *
+ *  `ddev import-db` only ever accepts plain SQL — optionally gzipped or wrapped in a
+ *  tar/zip archive around a `.sql` — because it pipes the bytes straight into
+ *  `mysql`/`psql`. A pg_dump archive is a binary container that psql cannot read, so
+ *  ddev rejects it up front ("provided path is not a .sql file or archive") and it
+ *  never reaches the db container.
+ *
+ *  So convert first: `pg_restore` ships in the postgres db container (version-matched
+ *  to the engine, unlike anything on the runner), reads the archive on stdin — both
+ *  the custom and the tar format restore sequentially, no seeking — and writes plain
+ *  SQL on stdout, which is piped into `ddev import-db` on stdin. DDEV therefore still
+ *  owns the drop/recreate of the database and its post-import hooks; only the format
+ *  conversion is added. An externally gzipped archive gets a `gzip -dc` stage in
+ *  front (ddev only inflates by extension, and only for `.sql.gz`).
+ *
+ *  `--no-owner --no-privileges` because the dump's original roles do not exist in
+ *  DDEV (it has a single `db` role) and their `ALTER ... OWNER TO` / `GRANT`
+ *  statements would otherwise error out. `pipefail` so a failing pg_restore is not
+ *  masked by a `ddev import-db` that happily imports the truncated stream it received.
+ *
+ *  `dumpRunnerPath` is interpolated unquoted, as the plain path always was: it is
+ *  built by the api from `_uploads/<uuid>/db-<uuid>.<ext>` with `ext` restricted to
+ *  `[a-z0-9.]{1,16}` (see dumpDiskExtension). */
+export function buildDdevImportCommand(
+  projectDir: string,
+  dumpRunnerPath: string,
+  format: DumpImportFormat,
+): string {
+  if (!format.pgRestore) return `cd ${projectDir} && ddev import-db --file=${dumpRunnerPath}`;
+  const restore = 'ddev exec -s db pg_restore --no-owner --no-privileges -f -';
+  const toSql = format.gzipped
+    ? `gzip -dc < ${dumpRunnerPath} | ${restore}`
+    : `${restore} < ${dumpRunnerPath}`;
+  return `cd ${projectDir} && set -o pipefail && ${toSql} | ddev import-db`;
+}
+
+/** Import a DB dump into the project's DDEV database, streaming progress lines.
+ *  `format` comes from sniffDumpFormat (see buildDdevImportCommand). */
+export function ddevImportDb(
+  handle: DdevRunnerHandle,
+  dumpRunnerPath: string,
+  opts: {
+    format?: DumpImportFormat;
+    timeoutMs?: number;
+    onLine?: (line: string) => void;
+  } = {},
+): Promise<{ exitCode: number; output: string }> {
+  const format = opts.format ?? { pgRestore: false, gzipped: false };
+  return runnerShellStreaming(
+    handle,
+    buildDdevImportCommand(handle.projectDir, dumpRunnerPath, format),
+    opts.onLine,
+    opts.timeoutMs ?? 1_800_000,
+  );
+}
+
 /** Extract `raw.primary_url` from `ddev ... -j` output. The `-j` flag emits
  *  newline-delimited JSON, one object per line, and the describe payload (the
  *  object carrying `.raw.primary_url`) can be PRECEDED by stray log lines — e.g. a
@@ -1002,7 +1158,22 @@ function ddevExecStreaming(
   onLine?: (line: string) => void,
   timeoutMs = 900_000,
 ): Promise<{ exitCode: number; output: string }> {
-  const cmd = `cd ${handle.projectDir} && ddev ${ddevArgs}`;
+  return runnerShellStreaming(
+    handle,
+    `cd ${handle.projectDir} && ddev ${ddevArgs}`,
+    onLine,
+    timeoutMs,
+  );
+}
+
+/** Streaming counterpart of runnerExec: an arbitrary shell command in the runner
+ *  (as `ddev`), per-line callback, same { exitCode, output } shape. */
+function runnerShellStreaming(
+  handle: DdevRunnerHandle,
+  cmd: string,
+  onLine?: (line: string) => void,
+  timeoutMs = 900_000,
+): Promise<{ exitCode: number; output: string }> {
   return new Promise((resolve) => {
     const child = spawn('docker', ['exec', '-u', 'ddev', handle.container, 'bash', '-lc', cmd]);
     let buf = '';

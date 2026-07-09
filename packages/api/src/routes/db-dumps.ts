@@ -26,10 +26,10 @@ function repoStorageRoot(): string {
 
 /** Best-effort DB dump format label by extension. `.sql.gz` is checked before
  *  `.sql`. Unrecognized extensions are NOT rejected — they fall back to `dump`
- *  and the actual `ddev import-db` restore is the real arbiter of whether a dump
- *  loads (PostgreSQL backups in particular carry arbitrary extensions like
- *  `.backup`). This is a display label only; the import auto-detects the format
- *  from the on-disk file (see dumpDiskExtension). */
+ *  and the actual restore is the real arbiter of whether a dump loads (PostgreSQL
+ *  backups in particular carry arbitrary extensions like `.backup`). This is a
+ *  display label only; the import step sniffs the on-disk file's magic bytes to
+ *  tell a pg_dump archive from plain SQL (see sniffDumpFormat). */
 export function detectDumpFormat(filename: string): DbDumpFormat {
   const lower = filename.toLowerCase();
   if (lower.endsWith('.sql.gz')) return 'sql.gz';

@@ -12,7 +12,13 @@ import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseDdevConfig, renderDdevConfig } from '../_ddev-config.js';
 import { hashDdevInputs } from '../_ddev-inputs-hash.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
-import { ddevExec, ddevSnapshot, ddevImportSnapshotName } from '../../../sandbox/ddev-runner.js';
+import {
+  ddevImportDb,
+  ddevSnapshot,
+  ddevImportSnapshotName,
+  sniffDumpFormat,
+  type DumpImportFormat,
+} from '../../../sandbox/ddev-runner.js';
 import { ensureDdevWithProgress, withDdevProgress } from './_app-runtime.js';
 
 // Boots the project's DDEV environment in a per-task nested-Docker runner and
@@ -301,12 +307,38 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
     const handle = await ensureDdevWithProgress(ctx, d.repoSubpath);
 
     let imported = false;
-    if (d.dumpRunnerPath && d.dbUploadId) {
+    const dumpRunnerPath = d.dumpRunnerPath;
+    if (dumpRunnerPath && d.dbUploadId) {
+      // A pg_dump archive can't go through `ddev import-db` alone; it is restored
+      // with pg_restore inside the db container first. Classified by magic bytes,
+      // not by the filename, which carries no reliable extension (`.backup`,
+      // `.dump`, `.pgsql`, …).
+      const format: DumpImportFormat = d.dumpWorkerPath
+        ? await sniffDumpFormat(d.dumpWorkerPath)
+        : { pgRestore: false, gzipped: false };
+      if (format.pgRestore) {
+        // pg_restore only exists in a postgres db container. An absent `database:`
+        // block means DDEV's mariadb default, so a null dbType is still "not
+        // postgres"; only an unreadable config leaves the engine unknown, and then
+        // the restore itself reports the mismatch.
+        const cfgText = d.workspace
+          ? await readFile(ddevConfigPath(d.workspace), 'utf8').catch(() => null)
+          : null;
+        if (cfgText !== null && parseDdevConfig(cfgText).dbType !== 'postgres') {
+          throw new Error(
+            'The uploaded dump is a PostgreSQL archive (pg_dump -Fc/-Ft), but this ' +
+              "project's DDEV database is not postgres. Upload a plain .sql dump, or switch the " +
+              'project to a postgres database.',
+          );
+        }
+        await ctx.emitProgress(
+          format.gzipped
+            ? 'Dump is a gzipped PostgreSQL archive — inflating it and restoring it with pg_restore'
+            : 'Dump is a PostgreSQL archive — restoring it with pg_restore',
+        );
+      }
       const imp = await withDdevProgress(ctx, 'Importing database dump…', (onLine) =>
-        ddevExec(handle, `import-db --file=${d.dumpRunnerPath}`, {
-          timeoutMs: 1_800_000,
-          onLine,
-        }),
+        ddevImportDb(handle, dumpRunnerPath, { format, timeoutMs: 1_800_000, onLine }),
       );
       if (imp.exitCode !== 0) {
         throw new Error(`ddev import-db failed: ${imp.output.slice(-1500)}`);
