@@ -2,8 +2,9 @@ import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { computeSecretMasks } from '../src/queues/cli-exec/secret-mask.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SECRET_MASK_LIMIT } from '@haive/shared';
+import { computeSecretMasks, SecretMaskError } from '../src/queues/cli-exec/secret-mask.js';
 
 function run(cmd: string, args: string[], cwd: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -124,6 +125,33 @@ describe('computeSecretMasks', () => {
     expect(p.has('/work/committed.key')).toBe(false); // parent copy: tracked
     expect(p.has('/work/.haive/worktrees/feature-x/committed.key')).toBe(false); // worktree copy
     expect(wt.endsWith('feature-x')).toBe(true);
+  });
+
+  // Masking an arbitrary subset would leave the rest readable — the exact outcome the
+  // deny-list exists to prevent. Fail closed instead of truncating silently.
+  it('refuses the invocation when matches exceed the cap', async () => {
+    const dir = path.join(root, 'certs');
+    await mkdir(dir, { recursive: true });
+    await Promise.all(
+      Array.from({ length: SECRET_MASK_LIMIT + 1 }, (_, i) =>
+        writeFile(path.join(dir, `.env.${i}`), 'S\n'),
+      ),
+    );
+
+    const err = await computeSecretMasks(root, {}, '/work').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SecretMaskError);
+    expect((err as Error).message).toContain(`${SECRET_MASK_LIMIT + 1}`);
+    // The heaviest directory is named, since the fix is an allow glob over it.
+    expect((err as Error).message).toContain('certs');
+  });
+
+  it('emits masks in a deterministic order', async () => {
+    await writeFile(path.join(root, 'b.pem'), 'B\n');
+    await writeFile(path.join(root, 'a.pem'), 'A\n');
+    await writeFile(path.join(root, '.env'), 'E\n');
+
+    const paths = (await computeSecretMasks(root, {}, '/work')).map((m) => m.containerPath);
+    expect(paths).toEqual([...paths].sort());
   });
 
   it('allow un-masks a file and denyExtend masks extra globs', async () => {

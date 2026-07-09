@@ -18,6 +18,22 @@ import { log } from './_shared.js';
 const execFileAsync = promisify(execFile);
 
 /**
+ * Secret masking is enabled for this repo but could not be applied faithfully.
+ *
+ * Fail closed: never run a CLI agent against a repo whose secrets we know we failed
+ * to hide. Callers let this propagate — handleCliExecJob records it on the invocation
+ * (exit -1) and fails the step, so the user sees why and can Retry after adjusting
+ * the allow globs. Disabling masking (per repo, or the global kill-switch) skips the
+ * scan entirely and never raises this.
+ */
+export class SecretMaskError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SecretMaskError';
+  }
+}
+
+/**
  * Empty read-only file masks for a task's secret files, to bind-mount over the
  * matching paths inside the cli-exec sandbox so the AI CLI agent reads nothing
  * instead of the real contents (CLI-agnostic read-block).
@@ -75,8 +91,11 @@ export async function resolveSecretMasks(
 /**
  * Pure filesystem core (no DB/config): glob `workerRoot` for the effective
  * secret deny-list, drop carve-outs (handled via the ignore set) and tracked
- * files, cap the count, and return empty-content masks targeted at
- * `containerWorkdir`. Exposed for unit testing against a fixture tree.
+ * files, and return empty-content masks targeted at `containerWorkdir`. Exposed for
+ * unit testing against a fixture tree.
+ *
+ * Throws {@link SecretMaskError} rather than masking a partial set: a scan that fails,
+ * or a match count over SECRET_MASK_LIMIT, means some secrets would stay readable.
  */
 export async function computeSecretMasks(
   workerRoot: string,
@@ -96,25 +115,50 @@ export async function computeSecretMasks(
       followSymbolicLinks: false,
     });
   } catch (err) {
-    log.warn({ err, workerRoot }, 'secret-mask glob failed; applying no masks');
-    return [];
+    // A missing root returns [] rather than throwing, so a throw here is a real I/O
+    // or permission fault. Returning no masks would hand the agent every secret the
+    // scan was meant to hide, with only a log line to show for it.
+    throw new SecretMaskError(
+      `secret-mask scan of ${workerRoot} failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
   if (matches.length === 0) return [];
 
-  // Tier 1: mask untracked files only.
-  let rels = await filterUntracked(workerRoot, matches);
+  // Tier 1: mask untracked files only. Sorted so the set is reproducible run to run.
+  const rels = (await filterUntracked(workerRoot, matches)).sort();
   if (rels.length === 0) return [];
 
+  // Masking an arbitrary subset leaves the remainder readable, which is the one
+  // outcome the deny-list exists to prevent. Refuse the invocation instead: the cap is
+  // pathological (real repos match single digits), and both escape hatches — the
+  // repo's secret_mask_allow globs and the masking toggles — are user-reachable.
   if (rels.length > SECRET_MASK_LIMIT) {
-    log.warn(
-      { matched: rels.length, limit: SECRET_MASK_LIMIT },
-      'secret-mask matches exceed limit; masking the first N and dropping the rest',
+    throw new SecretMaskError(
+      `secret-mask matched ${rels.length} untracked secret files, over the ${SECRET_MASK_LIMIT} cap ` +
+        `(largest: ${summarizeByDir(rels)}). Masking only some would leave the rest readable by the ` +
+        'agent. Narrow the set with the repository\'s "Secret mask allow" globs on the tooling ' +
+        'settings page, or turn secret masking off for this repository to run unmasked.',
     );
-    rels = rels.slice(0, SECRET_MASK_LIMIT);
   }
 
   log.info({ masked: rels.length }, 'secret-mask: hiding files from CLI agent');
   return rels.map((rel) => ({ containerPath: posix.join(containerWorkdir, rel), content: '' }));
+}
+
+/** `dir (n), dir (n), …` for the heaviest directories — the actionable part of an
+ *  overflow error, since the fix is an allow glob over one of them. */
+function summarizeByDir(rels: string[], top = 3): string {
+  const counts = new Map<string, number>();
+  for (const rel of rels) {
+    const slash = rel.lastIndexOf('/');
+    const dir = slash === -1 ? '.' : rel.slice(0, slash);
+    counts.set(dir, (counts.get(dir) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, top)
+    .map(([dir, n]) => `${dir} (${n})`)
+    .join(', ');
 }
 
 const WORKTREE_PREFIX = `${WORKTREE_SUBDIR}/`;
