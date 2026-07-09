@@ -46,6 +46,7 @@ import {
 } from './resolvers.js';
 import { executeSubAgentNative, executeSubAgentSequential } from './sub-agent.js';
 import { resolveSecretMasks } from './secret-mask.js';
+import { worktreeGitfileMask } from './gitfile-mask.js';
 import { makeUsageSnapshotPersister } from './running-usage.js';
 import { classifyProviderFatal, PROVIDER_FATAL_HEADLINES } from './failure-class.js';
 
@@ -157,7 +158,12 @@ export async function executeByKind(
   // Empty-file masks hiding deny-listed secret files from the agent (Tier 1,
   // untracked-only). Applied to every cli-exec kind; the app runtime mounts the
   // same repo volume WITHOUT these masks, so the running app still sees them.
-  const maskFiles = await resolveSecretMasks(db, payload.taskId);
+  // The worktree gitfile mask rides the same mechanism but is an integrity control,
+  // not a secrecy one — it is never gated by the secret-mask kill-switch.
+  const maskFiles = [
+    ...(await resolveSecretMasks(db, payload.taskId)),
+    ...worktreeGitfileMask(sandboxWorkdir),
+  ];
   switch (payload.kind) {
     case 'cli':
     case 'agent_mining': {
