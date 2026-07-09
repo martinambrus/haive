@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { stat } from 'node:fs/promises';
 import { posix } from 'node:path';
 import { promisify } from 'node:util';
 import { glob } from 'tinyglobby';
@@ -111,8 +112,9 @@ export async function resolveSecretMasks(
  * files, and return empty-content masks targeted at `containerWorkdir`. Exposed for
  * unit testing against a fixture tree.
  *
- * Throws {@link SecretMaskError} rather than masking a partial set: a scan that fails,
- * or a match count over SECRET_MASK_LIMIT, means some secrets would stay readable.
+ * Throws {@link SecretMaskError} rather than masking a partial set: an unreadable
+ * root, a scan that fails, or a match count over SECRET_MASK_LIMIT all mean some
+ * secrets would stay readable.
  */
 export async function computeSecretMasks(
   workerRoot: string,
@@ -120,6 +122,24 @@ export async function computeSecretMasks(
   containerWorkdir: string = SANDBOX_WORKDIR,
 ): Promise<SandboxExtraFile[]> {
   const { deny, ignore } = computeEffectiveSecretGlobs(opts);
+
+  // Glob answers "no matches" for a root that does not exist, which is byte-identical
+  // to "this repo holds no secrets". The sandbox mount does not go through this path —
+  // resolveTaskRepoMount binds the volume subpath or the host dir regardless — so a
+  // workerRoot that points nowhere (REPO_STORAGE_ROOT / HOST_REPO_ROOT misconfigured,
+  // the volume unmounted, a repo whose files were never written) would mount the real
+  // tree and mask nothing, silently and for every repo. Assert the tree exists before
+  // trusting the scan that reads it.
+  const rootStat = await stat(workerRoot).catch(() => null);
+  if (!rootStat?.isDirectory()) {
+    throw new SecretMaskError(
+      `secret-mask root ${workerRoot} is not a readable directory, so a scan of it would ` +
+        'report no secrets whether or not the repository has any. Refusing the invocation ' +
+        'instead of running the agent unmasked. Either the repository was never cloned to ' +
+        "that path, or the worker's REPO_STORAGE_ROOT / HOST_REPO_ROOT mounts are wrong — " +
+        'the two are indistinguishable from here, and one of them leaks.',
+    );
+  }
 
   let matches: string[];
   try {
@@ -132,9 +152,9 @@ export async function computeSecretMasks(
       followSymbolicLinks: false,
     });
   } catch (err) {
-    // A missing root returns [] rather than throwing, so a throw here is a real I/O
-    // or permission fault. Returning no masks would hand the agent every secret the
-    // scan was meant to hide, with only a log line to show for it.
+    // The root exists (asserted above), so a throw here is a real I/O or permission
+    // fault. Returning no masks would hand the agent every secret the scan was meant
+    // to hide, with only a log line to show for it.
     throw new SecretMaskError(
       `secret-mask scan of ${workerRoot} failed: ${err instanceof Error ? err.message : String(err)}`,
     );

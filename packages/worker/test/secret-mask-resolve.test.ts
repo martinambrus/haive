@@ -62,6 +62,21 @@ describe('resolveSecretMasks', () => {
     expect(masks).toEqual([{ containerPath: '/haive/workdir/.env', content: '' }]);
   });
 
+  it('throws rather than reporting a clean scan when the repo tree is not where we look', async () => {
+    // A wrong REPO_STORAGE_ROOT, an unmounted volume, or a repo whose files were never
+    // written all look like "this repo has no secrets" to the scan, while the sandbox
+    // mount still binds the real tree.
+    await rm(path.join(storageRoot, USER_ID), { recursive: true, force: true });
+
+    const err = await resolveSecretMasks(
+      fakeDb({ userId: USER_ID, repositoryId: REPO_ID }, enabledRepo),
+      TASK_ID,
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(SecretMaskError);
+    expect((err as Error).message).toContain('is not a readable directory');
+  });
+
   it('throws rather than reporting a clean scan when the task row is missing', async () => {
     const err = await resolveSecretMasks(fakeDb(undefined, enabledRepo), TASK_ID).catch(
       (e: unknown) => e,
