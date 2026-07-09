@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
+import { stableStringify } from './01-declare-deps.js';
 import {
   findEnvTemplateByHash,
   getTaskEnvTemplate,
@@ -61,6 +62,35 @@ export const generateDockerfileStep: StepDefinition<
       declaredDeps,
       currentDockerfile: dockerfile,
     };
+  },
+
+  /** Prior-task reuse replays the last completed task's Dockerfile text, which is how a
+   *  hand-edit carries forward across tasks. But that text was rendered from THAT task's
+   *  declared deps: when 01-declare-deps has since picked up a change (a DDEV project the
+   *  repo gained, a database it now declares), replaying it silently reverts the whole
+   *  environment — apply() hashes the stale text, finds the prior task's env template, and
+   *  relinks this task to it, discarding the row 01 just wrote. Everything downstream that
+   *  reads declaredDeps (01c-ddev-env, 01a-app-boot, 01d-browser-access) then sees the old
+   *  environment.
+   *
+   *  Resolve it structurally rather than by inspecting the Dockerfile text: the reused
+   *  bytes identify the template they were saved on, so compare that template's declared
+   *  deps with this task's. Equal deps means the difference is a hand-edit worth keeping.
+   *  Different deps means the text can no longer speak for this environment — drop it and
+   *  take the freshly rendered Dockerfile detect() built from the current deps. */
+  async reconcileReusedFormValues(ctx, detected, reused) {
+    const dockerfile = String(reused.dockerfile ?? '').trim();
+    if (!dockerfile) return reused;
+    const source = await findEnvTemplateByHash(ctx.db, ctx.userId, hashDockerfile(dockerfile));
+    const sameDeps =
+      !!source &&
+      stableStringify(source.declaredDeps ?? {}) === stableStringify(detected.declaredDeps);
+    if (sameDeps) return reused;
+    ctx.logger.info(
+      { envTemplateId: detected.envTemplateId, sourceEnvTemplateId: source?.id ?? null },
+      'reused dockerfile predates a declared-deps change; re-rendering from current deps',
+    );
+    return { ...reused, dockerfile: detected.currentDockerfile };
   },
 
   form(_ctx, detected): FormSchema {

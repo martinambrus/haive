@@ -527,6 +527,10 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     };
   },
 
+  reconcileReusedFormValues(_ctx, detected, reused) {
+    return reconcileStaleDeps(detected, reused as DeclareDepsFormValues);
+  },
+
   async apply(ctx, args) {
     const values = args.formValues as DeclareDepsFormValues;
     const baseImage = computeBaseImage(values.containerTool);
@@ -648,6 +652,42 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
   },
 };
 
+/** Prior-task reuse (metadata.reuseLastCompletedFormValues) auto-submits the last
+ *  completed task's answers verbatim. Those answers can be stale: a repo with no
+ *  container tool and no database when that task ran may have gained a DDEV project
+ *  since — which is exactly what an "add ddev" task does. Replayed unchanged, the
+ *  stale `containerTool: 'none'` lands in declaredDeps and 01c-ddev-env's shouldRun
+ *  never fires, so the DDEV stack the repo now carries is never brought up.
+ *
+ *  Only a reused 'none' — the "nothing found" sentinel of either select — is
+ *  refreshed from this task's detection. A tool or database the user picked is
+ *  never overwritten, including when it has since disappeared from the repo.
+ *  Manual mode never reaches here (reuse is auto-continue-gated) and already shows
+ *  the freshly detected values as its form defaults. */
+export function reconcileStaleDeps(
+  detected: DeclareDepsDetect,
+  reused: DeclareDepsFormValues,
+): DeclareDepsFormValues {
+  const patch: Partial<DeclareDepsFormValues> = {};
+
+  if (reused.containerTool === 'none' && detected.containerTool !== 'none') {
+    patch.containerTool = detected.containerTool;
+    // The webserver select is hidden while the container tool is not DDEV, so the
+    // prior task's value for it carries no user intent — take the .htaccess-derived
+    // default rather than letting apply() fall back to nginx for an Apache app.
+    if (detected.containerTool === 'ddev') patch.webserver = detected.webserver;
+  }
+
+  if (reused.databaseKind === 'none' && detected.database.kind !== 'none') {
+    patch.databaseKind = detected.database.kind;
+    if (!reused.databaseVersion && detected.database.version) {
+      patch.databaseVersion = detected.database.version;
+    }
+  }
+
+  return Object.keys(patch).length > 0 ? { ...reused, ...patch } : reused;
+}
+
 /** Stable, key-sorted JSON serialization for comparing two declared-deps
  *  objects regardless of property order (arrays keep their order, which is
  *  semantically meaningful). Used to decide whether a re-declared dependency
@@ -665,7 +705,7 @@ export function stableStringify(value: unknown): string {
   return JSON.stringify(value) ?? 'null';
 }
 
-interface DeclareDepsFormValues extends FormValues {
+export interface DeclareDepsFormValues extends FormValues {
   runtimes: LanguageKey[];
   nodeVersion?: string;
   phpVersion?: string;

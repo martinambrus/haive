@@ -277,6 +277,17 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
    *  only when the form is first built; receives the parsed preForm llmOutput.
    *  No-op for steps that don't declare it. */
   prepareForm?(ctx: StepContext, detected: TDetect, llmOutput?: unknown): Promise<void>;
+  /** Only for steps with `metadata.reuseLastCompletedFormValues`. The runner replays
+   *  a prior completed task's answers verbatim, so they can be STALE against the repo
+   *  as it stands today. This hook gets a last look at those answers, alongside this
+   *  task's fresh `detect()` output, and returns the set to auto-submit. Called before
+   *  validation. Only refresh a value the prior task can no longer speak for — an
+   *  answer the user actually chose must survive. */
+  reconcileReusedFormValues?(
+    ctx: StepContext,
+    detected: TDetect,
+    reused: FormValues,
+  ): Promise<FormValues> | FormValues;
   llm?: LlmInvocationSpec;
   agentMining?: AgentMiningSpec;
   /** Re-run the LLM phase up to N times until shouldContinue is false.

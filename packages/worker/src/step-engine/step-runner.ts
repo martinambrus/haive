@@ -1137,7 +1137,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         // mode, even for a form that set its own autoSubmit. undefined when not
         // opted in, the task has no repository, or no prior completed task has this
         // form filled.
-        const reuseCandidate =
+        const reusedValues =
           autoContinue &&
           !stepPreAnswer &&
           meta.reuseLastCompletedFormValues &&
@@ -1149,6 +1149,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
                 stepId: meta.id,
               })
             : undefined;
+        // Those answers are a snapshot of the repo as it was when the prior task ran.
+        // A step whose answers can go stale (declare-deps: the repo gained a DDEV
+        // project since) refreshes them against this task's detect() output before
+        // they are auto-submitted, so the reuse path cannot replay a value the fresh
+        // scan already contradicts.
+        const reuseCandidate =
+          reusedValues && stepDef.reconcileReusedFormValues
+            ? await stepDef.reconcileReusedFormValues(ctx, detected, reusedValues)
+            : reusedValues;
         // Candidate precedence: a gate pre-answer wins; else a prior completed
         // task's reused values; else a zero-field info form auto-passes with {};
         // else a step that opts in via metadata.autoSubmitDefaults (or the form's

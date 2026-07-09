@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
-import type { FormSchema } from '@haive/shared';
+import type { FormSchema, FormValues } from '@haive/shared';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
@@ -180,9 +180,26 @@ function makeProvider(): CliProviderRecord {
 }
 
 /** A deterministic env-replicate-style step: detect + a 2-field form + apply,
- *  no CLI. Opts into prior-task reuse unless `optIn: false`. */
-function reuseFormStep(opts?: { optIn?: boolean }): StepDefinition {
+ *  no CLI. Opts into prior-task reuse unless `optIn: false`. `reconcile` installs a
+ *  reconcileReusedFormValues hook that records every call it receives. */
+function reuseFormStep(opts?: {
+  optIn?: boolean;
+  reconcile?: { calls: { detected: unknown; reused: FormValues }[]; result: FormValues };
+}): StepDefinition {
+  const reconcile = opts?.reconcile;
   return {
+    ...(reconcile
+      ? {
+          reconcileReusedFormValues(
+            _ctx: unknown,
+            detected: unknown,
+            reused: FormValues,
+          ): FormValues {
+            reconcile.calls.push({ detected, reused });
+            return reconcile.result;
+          },
+        }
+      : {}),
     metadata: {
       id: 'reuse-form-step',
       workflowType: 'env_replicate',
@@ -309,6 +326,59 @@ describe('advanceStep prior-task form-value reuse', () => {
     expect(state.reuseQueried).toBe(true);
     expect(result.status).toBe('waiting_form');
     expect(state.taskStepRow.formValues).toBeNull();
+  });
+
+  it('reconciles reused values against this task’s detection before auto-submitting', async () => {
+    // Stands in for declare-deps refreshing a stale containerTool='none' from the
+    // fresh repo scan: the hook's output, not the raw prior answers, is submitted.
+    const reconcile = {
+      calls: [] as { detected: unknown; reused: FormValues }[],
+      result: { name: 'Acme', color: 'red' } as FormValues,
+    };
+    const state = freshState({ priorFormValues: { name: 'Acme', color: 'green' } });
+    const result = await advanceStep(runParams(state, reuseFormStep({ reconcile })));
+    expect(result.status).toBe('done');
+    expect(reconcile.calls).toHaveLength(1);
+    expect(reconcile.calls[0]?.detected).toEqual({ ready: true });
+    expect(reconcile.calls[0]?.reused).toEqual({ name: 'Acme', color: 'green' });
+    expect(state.taskStepRow.formValues).toEqual({ name: 'Acme', color: 'red' });
+    expect((state.taskStepRow.output as { received?: unknown }).received).toEqual({
+      name: 'Acme',
+      color: 'red',
+    });
+  });
+
+  it('does not reconcile when there is no prior completed task to reuse', async () => {
+    const reconcile = {
+      calls: [] as { detected: unknown; reused: FormValues }[],
+      result: { name: 'Acme', color: 'red' } as FormValues,
+    };
+    const state = freshState({ priorFormValues: null });
+    const result = await advanceStep(runParams(state, reuseFormStep({ reconcile })));
+    expect(reconcile.calls).toHaveLength(0);
+    expect(result.status).toBe('waiting_form');
+  });
+
+  it('does not reconcile a gate pre-answer', async () => {
+    const reconcile = {
+      calls: [] as { detected: unknown; reused: FormValues }[],
+      result: { name: 'Acme', color: 'red' } as FormValues,
+    };
+    const state = freshState({
+      taskRow: {
+        id: 'task-1',
+        status: 'running',
+        autoContinue: true,
+        preAnswers: { 'reuse-form-step': { name: 'Gate', color: 'green' } },
+        repositoryId: 'repo-1',
+        type: 'env_replicate',
+      },
+      priorFormValues: { name: 'Acme', color: 'green' },
+    });
+    const result = await advanceStep(runParams(state, reuseFormStep({ reconcile })));
+    expect(reconcile.calls).toHaveLength(0);
+    expect(result.status).toBe('done');
+    expect(state.taskStepRow.formValues).toEqual({ name: 'Gate', color: 'green' });
   });
 
   it('lets a gate pre-answer take precedence over reused values', async () => {
