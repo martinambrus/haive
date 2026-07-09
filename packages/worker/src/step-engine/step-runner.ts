@@ -231,6 +231,7 @@ type UpdatePatch = Partial<{
   errorHint: TaskStepRow['errorHint'];
   degradedNote: string | null;
   aiFixContext: { priorError: string; priorOutput: string } | null;
+  pauseFormOnRetry: boolean;
   startedAt: Date;
   endedAt: Date;
 }>;
@@ -1122,6 +1123,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       // its own `autoSubmit` flag — for an info-only form with nothing to decide
       // (e.g. 06b's single-agent decision).
       if (
+        // A plain manual Retry set pauseFormOnRetry to force this step to STOP at
+        // its form even under auto-continue — suppress every auto-submit variant
+        // (pre-answer / reuse / zero-field / step defaults / form autoSubmit) so the
+        // user can inspect and edit. Cleared on park below (one-shot).
+        !current.pauseFormOnRetry &&
         (autoContinue || persistedSchema.autoSubmit === true) &&
         (persistedSchema.submitAction ?? 'submit') === 'submit'
       ) {
@@ -1181,7 +1187,13 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         }
       }
       if (!formValues) {
-        current = await updateRow(db, current.id, { status: 'waiting_form' });
+        current = await updateRow(db, current.id, {
+          status: 'waiting_form',
+          // One-shot: a manual Retry set pauseFormOnRetry to force this park instead
+          // of auto-submitting. Clear it here so the pause never leaks into a later
+          // automatic re-run (fix-loop / revise / gate loop-back) of this same step.
+          ...(current.pauseFormOnRetry ? { pauseFormOnRetry: false } : {}),
+        });
         return {
           status: 'waiting_form',
           row: current,

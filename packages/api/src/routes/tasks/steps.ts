@@ -340,10 +340,25 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // sequentially within a task, so all `haive.task.id`-labelled containers
     // belong to the active step). The killed CLI process exits with non-zero
     // and the cli_invocations rows are about to be marked superseded anyway.
+    // Downstream = steps that run AFTER this one in TRUE run order. run_seq (the
+    // buildRunList position — the same key the task-detail endpoint sorts by) is
+    // run-monotonic; step_index is a static per-workflow-type offset that is NOT
+    // run-monotonic once step families interleave (env-replicate prelude spliced into a
+    // workflow, run_app env steps). Keying downstream on step_index reset the wrong set
+    // (missed earlier-running reused steps; swept genuinely-earlier ones). Fall back to
+    // step_index only for legacy rows with no run_seq.
+    const targetSeq = step.runSeq;
     const downstream = await db
       .select()
       .from(schema.taskSteps)
-      .where(and(eq(schema.taskSteps.taskId, id), gt(schema.taskSteps.stepIndex, step.stepIndex)));
+      .where(
+        and(
+          eq(schema.taskSteps.taskId, id),
+          targetSeq != null
+            ? gt(schema.taskSteps.runSeq, targetSeq)
+            : gt(schema.taskSteps.stepIndex, step.stepIndex),
+        ),
+      );
 
     const cascadeIsActive =
       step.status === 'running' ||
@@ -418,9 +433,17 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       // unsafe-for-local-models guard on re-run. A plain retry sets this false
       // (re-arming the guard); the override button sets it true. Scoped to
       // step.id so the downstream cascade keeps its own override state.
+      // pauseFormOnRetry: a plain Retry makes the clicked step STOP at its form
+      // even under auto-continue, so the user can edit a form that would otherwise
+      // auto-submit. "Override and run" is an explicit run-it-now, so it does NOT
+      // pause (hence `!== true`). One-shot — step-runner clears it on park. Scoped
+      // to step.id like the override; the downstream cascade keeps auto-continuing.
       await tx
         .update(schema.taskSteps)
-        .set({ localModelOverride: body.overrideLocalModel === true })
+        .set({
+          localModelOverride: body.overrideLocalModel === true,
+          pauseFormOnRetry: body.overrideLocalModel !== true,
+        })
         .where(eq(schema.taskSteps.id, step.id));
       const bumped = await tx
         .update(schema.tasks)
@@ -429,7 +452,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           errorMessage: null,
           completedAt: null,
           currentStepId: stepId,
-          currentStepIndex: step.stepIndex,
+          // run_seq (run-monotonic order), not step_index — mirrors the worker's
+          // resolveCurrentStepIndex so the "Step index" label reflects true run order.
+          currentStepIndex: step.runSeq ?? step.stepIndex,
           // Bump the orchestration epoch so any advance-step job still queued from
           // before this retry is skipped as stale (a retry stops in-flight work first).
           orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,

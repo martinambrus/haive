@@ -35,6 +35,11 @@ export async function resetStepAndDownstream(
   const target = targetRows[0];
   if (!target) return null;
 
+  // Downstream by TRUE run order (run_seq = buildRunList position), NOT step_index —
+  // a static per-workflow-type offset that is not run-monotonic once step families
+  // interleave (env-replicate prelude in a workflow). Mirrors the API retry reset.
+  // Fall back to step_index only for legacy rows with no run_seq.
+  const targetSeq = target.runSeq;
   const downstream = await db
     .select()
     .from(schema.taskSteps)
@@ -42,7 +47,9 @@ export async function resetStepAndDownstream(
       and(
         eq(schema.taskSteps.taskId, taskId),
         eq(schema.taskSteps.round, round),
-        gt(schema.taskSteps.stepIndex, target.stepIndex),
+        targetSeq != null
+          ? gt(schema.taskSteps.runSeq, targetSeq)
+          : gt(schema.taskSteps.stepIndex, target.stepIndex),
       ),
     );
   const downstreamToReset = downstream.filter((r) => r.status !== 'pending').map((r) => r.id);

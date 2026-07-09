@@ -304,10 +304,13 @@ export default function TaskDetailPage() {
   // yanks a user who scrolled away to re-read an earlier step. Reset on task id
   // change (the route component can persist across :id changes).
   const didInitialScrollRef = useRef(false);
-  // The active step's stepIndex on the previous render. A loop re-entry (gate revise or
-  // fix loop_back) makes the active step jump BACKWARD to a lower stepIndex; forward flow
-  // only ever increases it. Used to force the follow-scroll on a backward jump.
-  const prevActiveStepIndexRef = useRef<number | null>(null);
+  // The active step's run_seq on the previous render. A loop re-entry (gate revise or
+  // fix loop_back) makes the active step jump BACKWARD to a lower run_seq; forward flow
+  // only ever increases it. Used to force the follow-scroll on a backward jump. Keyed on
+  // run_seq (the true run order) NOT step_index — a static per-workflow-type offset that
+  // is not run-monotonic when step families interleave (env-replicate prelude in a
+  // workflow), so a forward advance across families would look like a backward jump.
+  const prevActiveRunSeqRef = useRef<number | null>(null);
   // The previously-active step's id, captured null-tick resistant (updated only
   // when an active step exists, so a transient "no active step" tick between
   // steps — e.g. a 0s auto-advancing 06a-db-migrate — doesn't wipe it). Used to
@@ -426,6 +429,22 @@ export default function TaskDetailPage() {
     return { byStepId, byRound };
   }, [steps]);
 
+  // run_seq of the "frontier" step — the one the run is currently parked on / working
+  // (running / waiting_form / waiting_cli), or a failed task's failed step. Every step
+  // AFTER it in run order is pending and gets reset + re-run whenever an at-or-before
+  // step is retried, so those downstream steps must not offer their own Retry/Stop/Skip
+  // actions (the orchestrator's concurrency guard would just skip acting on them, which
+  // reads as "nothing happened"). Upstream (done) steps keep their Retry. Uses run_seq,
+  // NOT step_index (a static per-workflow-type offset, not run-monotonic when step
+  // families interleave — e.g. an env-replicate prelude spliced into a workflow).
+  const frontierRunSeq = useMemo(() => {
+    const active =
+      steps.find(
+        (s) => s.status === 'running' || s.status === 'waiting_form' || s.status === 'waiting_cli',
+      ) ?? steps.find((s) => s.status === 'failed');
+    return active?.runSeq ?? null;
+  }, [steps]);
+
   // Auto-scroll to the active step when it changes. For a step that shows a
   // terminal (running / waiting_cli with at least one CLI run) scroll to the
   // END of the last terminal so its output is fully in view, rather than the
@@ -438,17 +457,15 @@ export default function TaskDetailPage() {
     );
     const activeId = activeStep?.id ?? null;
     // Loop re-entry: a gate revise / fix loop_back re-enters an EARLIER step, so the active
-    // step's stepIndex drops below the previously-active one (forward flow only increases
-    // it). Capture the prior value first, then update the ref to the latest non-null index
-    // so a transient "no active step" tick between steps doesn't reset the baseline.
-    const activeStepIndex = activeStep?.stepIndex ?? null;
-    const prevActiveStepIndex = prevActiveStepIndexRef.current;
+    // step's run_seq drops below the previously-active one (forward flow only increases it).
+    // Capture the prior value first, then update the ref to the latest non-null run_seq so a
+    // transient "no active step" tick between steps doesn't reset the baseline.
+    const activeRunSeq = activeStep?.runSeq ?? null;
+    const prevActiveRunSeq = prevActiveRunSeqRef.current;
     const prevActiveId = prevActiveIdRef.current;
     const loopReentry =
-      activeStepIndex !== null &&
-      prevActiveStepIndex !== null &&
-      activeStepIndex < prevActiveStepIndex;
-    if (activeStepIndex !== null) prevActiveStepIndexRef.current = activeStepIndex;
+      activeRunSeq !== null && prevActiveRunSeq !== null && activeRunSeq < prevActiveRunSeq;
+    if (activeRunSeq !== null) prevActiveRunSeqRef.current = activeRunSeq;
     if (activeId !== null) prevActiveIdRef.current = activeId;
     const showsTerminal =
       (activeStep?.cliInvocationCount ?? 0) > 0 &&
@@ -729,8 +746,15 @@ export default function TaskDetailPage() {
     action: StepAction,
     opts?: { overrideLocalModel?: boolean },
   ) {
-    const downstreamCount = steps.filter(
-      (s) => s.stepIndex > step.stepIndex && s.status !== 'pending',
+    // Downstream by TRUE run order (run_seq): retrying re-runs the WHOLE tail after
+    // this step — pending steps run too, non-pending ones are also reset first — so
+    // count EVERY later step, which is what the user sees in the list. (Counting only
+    // non-pending undercounts to ~1 whenever the tail hasn't run yet.) Fall back to
+    // step_index for legacy rows with no run_seq.
+    const downstreamCount = steps.filter((s) =>
+      step.runSeq != null && s.runSeq != null
+        ? s.runSeq > step.runSeq
+        : s.stepIndex > step.stepIndex,
     ).length;
     const label = opts?.overrideLocalModel
       ? 'Run this step on the current local model anyway?\n\nLocal models are unreliable at rewriting long-lived project files (skills, agents, config) and may produce low-quality or damaging output. Proceed only if you understand the risk.'
@@ -1136,6 +1160,10 @@ export default function TaskDetailPage() {
             // original pass). Mark the start of each round > 0 group with a kind-aware
             // header (spec revision vs fix loop) computed in roundLabels.byStepId.
             const loopHeader = roundLabels.byStepId.get(step.id) ?? null;
+            // Steps after the frontier get reset + re-run on any at-or-before retry, so
+            // they hide their own action buttons (see frontierRunSeq).
+            const isDownstreamOfActive =
+              frontierRunSeq != null && step.runSeq != null && step.runSeq > frontierRunSeq;
             return (
               <div key={step.id} data-step-id={step.id}>
                 {loopHeader && (
@@ -1149,6 +1177,7 @@ export default function TaskDetailPage() {
                   only offered there; passed steps can't be auto-continued. */}
                 <StepCard
                   step={step}
+                  isDownstreamOfActive={isDownstreamOfActive}
                   taskId={task.id}
                   taskStatus={task.status}
                   taskCompletedAt={task.completedAt}
@@ -1373,6 +1402,10 @@ function TerminalTab({
 
 interface StepCardProps {
   step: TaskStep;
+  /** True when this step runs AFTER the frontier (active/failed) step in run order.
+   *  Such steps are pending and get reset + re-run on any at-or-before retry, so their
+   *  per-step action buttons (Retry / Stop / Skip / ...) are hidden. */
+  isDownstreamOfActive: boolean;
   taskId: string;
   taskStatus: TaskStatus;
   /** Caps step timers when the task ended without the step itself ending. */
@@ -2024,6 +2057,7 @@ function TaskTotalTime({
 
 function StepCardImpl({
   step,
+  isDownstreamOfActive,
   taskId,
   taskStatus,
   taskCompletedAt,
@@ -2091,7 +2125,7 @@ function StepCardImpl({
   // hidden. A FAILED task is deliberately excluded (canActOnStep stays true) so
   // its failed step keeps Retry / Retry with AI / Abort for recovery. Gates the
   // whole action-button group below (the stepId label stays visible).
-  const canActOnStep = !taskCancelled && taskStatus !== 'completed';
+  const canActOnStep = !taskCancelled && taskStatus !== 'completed' && !isDownstreamOfActive;
   // Only steps that actually dispatch a CLI (llm | agentMining | dagExecute) get a
   // provider picker; deterministic steps never consume a per-step provider, so the
   // picker would be a dead control. usesCli comes from CLI_DISPATCH_STEP_IDS.

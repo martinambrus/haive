@@ -317,4 +317,66 @@ describe('advanceStep auto-continue', () => {
     );
     expect(result.status).toBe('waiting_form');
   });
+
+  it('pauseFormOnRetry stops an autoSubmitDefaults step at its form and clears the flag', async () => {
+    // A user clicked Retry on a step that would normally auto-submit its defaults.
+    const state = freshState();
+    state.taskStepRow.pauseFormOnRetry = true;
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const result = await run(
+      state,
+      makeStep({ form: () => QUESTION_FORM, autoSubmitDefaults: true }),
+    );
+    expect(result.status).toBe('waiting_form');
+    expect(state.taskStepRow.status).toBe('waiting_form');
+    // One-shot: cleared on park so a later automatic re-run auto-continues normally.
+    expect(state.taskStepRow.pauseFormOnRetry).toBe(false);
+  });
+
+  it('pauseFormOnRetry stops zero-field info forms that would otherwise auto-pass', async () => {
+    const state = freshState();
+    state.taskStepRow.pauseFormOnRetry = true;
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const result = await run(state, makeStep({ form: () => ZERO_FIELD_FORM }));
+    expect(result.status).toBe('waiting_form');
+    expect(state.taskStepRow.pauseFormOnRetry).toBe(false);
+  });
+
+  it('pauseFormOnRetry stops a gate pre-answer from auto-submitting on retry', async () => {
+    const state = freshState();
+    state.taskStepRow.pauseFormOnRetry = true;
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: { 'cfg-step': { action: 'skip' } },
+    };
+    const result = await run(state, makeStep({ form: () => QUESTION_FORM }));
+    expect(result.status).toBe('waiting_form');
+    // The pre-answer still overlays as an editable default the user can change.
+    const schema = state.taskStepRow.formSchema as FormSchema;
+    const radio = schema.fields.find((f) => f.id === 'action');
+    expect(radio && 'default' in radio ? radio.default : undefined).toBe('skip');
+  });
+
+  it('pauseFormOnRetry stops a self-autoSubmit form even when auto-continue is off', async () => {
+    const state = freshState();
+    state.taskStepRow.pauseFormOnRetry = true;
+    state.taskRow = { id: 'task-1', autoContinue: false, preAnswers: null };
+    const selfSubmit: FormSchema = { ...QUESTION_FORM, autoSubmit: true };
+    const result = await run(state, makeStep({ form: () => selfSubmit }));
+    expect(result.status).toBe('waiting_form');
+  });
+
+  it('pauseFormOnRetry does not block the submit that follows the pause', async () => {
+    // The guard lives only in the pre-submit branch, so submitting the parked form
+    // (params.formValues present) runs straight to apply regardless of the flag.
+    const state = freshState();
+    state.taskStepRow.pauseFormOnRetry = true;
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const result = await run(state, makeStep({ form: () => QUESTION_FORM }), {
+      action: 'update',
+      flag: true,
+    });
+    expect(result.status).toBe('done');
+  });
 });

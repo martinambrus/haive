@@ -551,6 +551,11 @@ export interface TaskStep {
   taskId: string;
   stepId: string;
   stepIndex: number;
+  /** buildRunList position — the TRUE run-order key. step_index is a static
+   *  per-workflow-type offset and is NOT run-monotonic when step families interleave
+   *  (env-replicate prelude spliced into a workflow). Null for legacy rows predating
+   *  run_seq; the task-detail endpoint sorts by it. */
+  runSeq: number | null;
   /** Fix-loop round (0 = original pass). The same stepId recurs once per round. */
   round: number;
   title: string;

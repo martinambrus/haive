@@ -234,6 +234,33 @@ async function markTaskRunning(db: Database, taskId: string): Promise<void> {
     .where(eq(schema.tasks.id, taskId));
 }
 
+/** current_step_index mirrors the current step's run_seq (buildRunList position — the
+ *  run-monotonic order key), NOT step_index (a static per-workflow-type offset that is
+ *  not run-monotonic once step families interleave, e.g. an env-replicate prelude spliced
+ *  into a workflow). Reads run_seq from the step row; falls back to the caller's static
+ *  index only when the row is not yet materialized (advancing to a not-yet-run next step,
+ *  whose run_seq is stamped a moment later when it parks — the label is read while parked). */
+async function resolveCurrentStepIndex(
+  db: Database,
+  taskId: string,
+  stepId: string,
+  round: number,
+  fallbackIndex: number,
+): Promise<number> {
+  const rows = await db
+    .select({ runSeq: schema.taskSteps.runSeq })
+    .from(schema.taskSteps)
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, taskId),
+        eq(schema.taskSteps.stepId, stepId),
+        eq(schema.taskSteps.round, round),
+      ),
+    )
+    .limit(1);
+  return rows[0]?.runSeq ?? fallbackIndex;
+}
+
 async function markTaskWaiting(
   db: Database,
   taskId: string,
@@ -241,12 +268,13 @@ async function markTaskWaiting(
   stepIndex: number,
   round = 0,
 ): Promise<void> {
+  const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
   await db
     .update(schema.tasks)
     .set({
       status: 'waiting_user',
       currentStepId: stepId,
-      currentStepIndex: stepIndex,
+      currentStepIndex,
       currentRound: round,
       updatedAt: new Date(),
     })
@@ -260,12 +288,13 @@ async function markTaskRunningWithStep(
   stepIndex: number,
   round = 0,
 ): Promise<void> {
+  const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
   await db
     .update(schema.tasks)
     .set({
       status: 'running',
       currentStepId: stepId,
-      currentStepIndex: stepIndex,
+      currentStepIndex,
       currentRound: round,
       // Clear any stale terminal fields. A worker restart mid-run fails the
       // orphaned step (markTaskFailed), which stamps completedAt + errorMessage
@@ -818,10 +847,10 @@ async function handleResult(
         .set({
           status: 'running',
           currentStepId: stepId,
-          currentStepIndex: computeGlobalStepIndex(
-            stepDef.metadata.workflowType,
-            stepDef.metadata.index,
-          ),
+          // run_seq (run-monotonic), not step_index; result.row is this step's own row.
+          currentStepIndex:
+            result.row.runSeq ??
+            computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
           currentRound: result.row.round,
           updatedAt: new Date(),
         })

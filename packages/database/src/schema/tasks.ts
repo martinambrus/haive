@@ -302,6 +302,15 @@ export const taskSteps = pgTable(
      *  on a local Ollama model without the ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS env
      *  flag. Per-step; a plain Retry resets it to false (re-arms the guard). */
     localModelOverride: boolean('local_model_override').notNull().default(false),
+    /** One-shot marker set by a plain Retry (never "Override and run"): make this
+     *  step STOP at its form on the retry even under auto-continue, so the user can
+     *  inspect and edit a form that would otherwise auto-submit (autoSubmitDefaults /
+     *  form autoSubmit / gate pre-answer / reuse-last-values / zero-field info form).
+     *  step-runner suppresses auto-submit while this is set and clears it the moment
+     *  the step parks at waiting_form, so the pause is strictly one-shot and never
+     *  leaks into an automatic re-run (fix-loop / revise / gate loop-back). Scoped to
+     *  the clicked step only; the downstream cascade keeps auto-continuing. */
+    pauseFormOnRetry: boolean('pause_form_on_retry').notNull().default(false),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
     /** Accumulated time (ms) the step spent idle waiting for user input

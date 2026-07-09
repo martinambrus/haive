@@ -1,0 +1,12 @@
+-- One-shot "stop at the form on manual retry" marker. Under auto-continue a step
+-- whose form opts into auto-submit (autoSubmitDefaults / form.autoSubmit / a gate
+-- pre-answer / reuse-last-completed-values / a zero-field info form) normally blows
+-- straight through its form. A user who clicks Retry on such a step wants to inspect
+-- and edit that form, not silently re-submit the defaults. The API retry handler
+-- sets this true on the clicked step ONLY (and never for "Override and run", which is
+-- an explicit run-it-now); step-runner suppresses auto-submit while it is set and
+-- clears it the instant the step parks at waiting_form, so the pause is strictly
+-- one-shot and never leaks into an automatic re-run (fix-loop / revise / gate
+-- loop-back). Scoped to the clicked step; the downstream cascade keeps auto-continuing.
+-- Additive + idempotent: safe to re-run on every environment via `drizzle-kit push`.
+ALTER TABLE "task_steps" ADD COLUMN IF NOT EXISTS "pause_form_on_retry" boolean NOT NULL DEFAULT false;
