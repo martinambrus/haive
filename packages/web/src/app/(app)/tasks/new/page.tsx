@@ -624,7 +624,7 @@ export default function NewTaskPage() {
             <input
               id="dbDump"
               type="file"
-              accept=".sql,.sql.gz,.dump"
+              accept=".sql,.sql.gz,.dump,.backup"
               onChange={(e) => {
                 setDumpFile(e.target.files?.[0] ?? null);
                 setDumpProgress(0);
@@ -633,8 +633,8 @@ export default function NewTaskPage() {
             />
             <p className="text-xs text-neutral-500">
               Uploaded before the task runs and imported into the temporary environment, so
-              migrations run against your real data. Accepts .sql, .sql.gz, .dump. Deleted
-              immediately after import.
+              migrations run against your real data. Accepts .sql, .sql.gz, .dump, .backup and any
+              other database dump file — the import validates it. Deleted immediately after import.
             </p>
             {dumpUploading && (
               <p className="text-xs text-indigo-300">Uploading dump… {dumpProgress}%</p>

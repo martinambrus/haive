@@ -24,13 +24,34 @@ function repoStorageRoot(): string {
   return process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
 }
 
-/** DB dump format by extension. `.sql.gz` is checked before `.sql`. */
-export function detectDumpFormat(filename: string): DbDumpFormat | null {
+/** Best-effort DB dump format label by extension. `.sql.gz` is checked before
+ *  `.sql`. Unrecognized extensions are NOT rejected — they fall back to `dump`
+ *  and the actual `ddev import-db` restore is the real arbiter of whether a dump
+ *  loads (PostgreSQL backups in particular carry arbitrary extensions like
+ *  `.backup`). This is a display label only; the import auto-detects the format
+ *  from the on-disk file (see dumpDiskExtension). */
+export function detectDumpFormat(filename: string): DbDumpFormat {
   const lower = filename.toLowerCase();
   if (lower.endsWith('.sql.gz')) return 'sql.gz';
   if (lower.endsWith('.sql')) return 'sql';
-  if (lower.endsWith('.dump')) return 'dump';
-  return null;
+  return 'dump';
+}
+
+/** On-disk extension for the saved dump, preserving the uploaded file's own
+ *  extension so `ddev import-db` can auto-detect compression/archive format. The
+ *  result becomes part of a path interpolated into a shell `ddev import-db
+ *  --file=…`, so it is restricted to a safe charset; anything outside it (or an
+ *  extensionless name) falls back to `dump`. */
+export function dumpDiskExtension(filename: string): string {
+  const base = path.basename(filename).toLowerCase();
+  let ext = 'dump';
+  if (base.endsWith('.sql.gz')) {
+    ext = 'sql.gz';
+  } else {
+    const dot = base.lastIndexOf('.');
+    if (dot > 0 && dot < base.length - 1) ext = base.slice(dot + 1);
+  }
+  return /^[a-z0-9.]{1,16}$/.test(ext) ? ext : 'dump';
 }
 
 function sessionFromRow(row: typeof schema.dbUploads.$inferSelect) {
@@ -66,9 +87,6 @@ dbDumpRoutes.post('/upload/init', async (c) => {
     throw new HttpError(413, `dump exceeds ${maxUploadBytes()} bytes limit`);
   }
   const format = detectDumpFormat(body.filename);
-  if (!format) {
-    throw new HttpError(400, 'unsupported dump format (allowed: .sql, .sql.gz, .dump)');
-  }
 
   const uploadDir = path.join(repoStorageRoot(), '_uploads', userId);
   await mkdir(uploadDir, { recursive: true });
@@ -87,7 +105,7 @@ dbDumpRoutes.post('/upload/init', async (c) => {
     .returning();
   const session = inserted[0]!;
 
-  const ext = format === 'sql.gz' ? 'sql.gz' : format;
+  const ext = dumpDiskExtension(body.filename);
   const dumpPath = path.join(uploadDir, `db-${session.id}.${ext}.partial`);
   const fh = await open(dumpPath, 'w');
   await fh.close();
