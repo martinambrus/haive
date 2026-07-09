@@ -422,7 +422,15 @@ export function renderDockerfile(baseImage: string, rawDeps: Record<string, unkn
   lines.push('WORKDIR /workspace');
   lines.push('');
 
-  if (deps.preinstallDeps && deps.packageManagers) {
+  // For DDEV projects the app and its dependencies live inside DDEV, not this
+  // sandbox image: the app runtimes are deliberately not apt-installed here (see
+  // the PHP and database-client skips above), so a preinstall block would run
+  // `composer install` / `npm ci` against a missing runtime and abort the build
+  // (`composer: not found`, exit 127). DDEV installs the deps itself — app-boot
+  // runs `composer install` inside the DDEV runner — and the built sandbox image
+  // bind-mounts the repo at SANDBOX_WORKDIR, not /workspace, so anything baked
+  // here is orphaned anyway. Skip the bake entirely for DDEV.
+  if (deps.preinstallDeps && deps.packageManagers && deps.containerTool !== 'ddev') {
     for (const [language, manager] of Object.entries(deps.packageManagers)) {
       if (!manager) continue;
       const block = renderDepInstallBlock(language, manager);
