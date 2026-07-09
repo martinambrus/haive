@@ -69,8 +69,10 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const worktreeOutput = prev?.output as { worktreePath?: string } | null;
     const workspacePath = worktreeOutput?.worktreePath ?? ctx.workspacePath;
-    const hasGit = await pathExists(path.join(workspacePath, '.git'));
-    if (!hasGit) {
+    // Probe for the `.git` entry before asking git anything. Absent means a genuine
+    // no-git workspace; it also stops git's upward discovery from silently reporting
+    // the PARENT repo's status for a worktree nested under it.
+    if (!(await pathExists(path.join(workspacePath, '.git')))) {
       return {
         hasGit: false,
         workspacePath,
@@ -81,7 +83,24 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         diffArtifactTruncated: false,
       };
     }
+    // A `.git` that exists still proves nothing: a linked worktree's `.git` is a
+    // gitfile whose gitdir can dangle. Present-but-unusable is corruption, not an
+    // empty tree — reporting it as "0 dirty files" defaults the commit checkbox off
+    // and silently drops the whole changeset.
+    const inWorkTree = await gitRun(workspacePath, ['rev-parse', '--is-inside-work-tree']);
+    if (inWorkTree.code !== 0 || inWorkTree.stdout.trim() !== 'true') {
+      throw new Error(
+        `${workspacePath} has a .git entry but git cannot use it: ${
+          inWorkTree.stderr.trim() || inWorkTree.stdout.trim() || `exit ${inWorkTree.code}`
+        }`,
+      );
+    }
     const status = await gitRun(workspacePath, ['status', '--porcelain']);
+    if (status.code !== 0) {
+      throw new Error(
+        `git status failed in ${workspacePath}: ${status.stderr.trim() || status.stdout.trim()}`,
+      );
+    }
     const dirtyFiles = status.stdout.split('\n').filter((line) => line.trim().length > 0).length;
     const diffStat = await gitRun(workspacePath, ['diff', '--stat', 'HEAD']);
     const summary =
