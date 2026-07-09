@@ -246,7 +246,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
       // Real dollars only from METERED providers (claude-code/codex/gemini). Local
       // (ollama) and subscription (amp/antigravity) and mispriced (zai) costUsd is
       // Anthropic-price fiction and must not inflate the headline — see costBasis.
-      costUsd: sql<number>`coalesce(sum((${tu} ->> 'costUsd')::numeric) filter (where ${schema.cliProviders.name}::text = any(${COST_METERED_PROVIDERS}::text[])), 0)::double precision`,
+      costUsd: sql<number>`coalesce(sum((${tu} ->> 'costUsd')::numeric) filter (where ${schema.cliProviders.name}::text in ${COST_METERED_PROVIDERS}), 0)::double precision`,
     })
     .from(schema.cliInvocations)
     .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
@@ -319,7 +319,7 @@ export async function sumTaskTokens(
       // Real dollars only from METERED providers (claude-code/codex/gemini). Local
       // (ollama) and subscription (amp/antigravity) and mispriced (zai) costUsd is
       // Anthropic-price fiction and must not inflate the headline — see costBasis.
-      costUsd: sql<number>`coalesce(sum((${tu} ->> 'costUsd')::numeric) filter (where ${schema.cliProviders.name}::text = any(${COST_METERED_PROVIDERS}::text[])), 0)::double precision`,
+      costUsd: sql<number>`coalesce(sum((${tu} ->> 'costUsd')::numeric) filter (where ${schema.cliProviders.name}::text in ${COST_METERED_PROVIDERS}), 0)::double precision`,
     })
     .from(schema.cliInvocations)
     .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
