@@ -256,9 +256,23 @@ function iterationBadgeLabel(step: Pick<TaskStep, 'iterationCount' | 'cliRoles'>
 
 type Tab = 'steps' | 'editor' | 'terminal' | 'activity' | 'attachments';
 
+// Mirrors @haive/api TaskProviderUsage (kept local per the barrel-avoidance rule).
+interface TaskProviderUsage {
+  provider: string;
+  /** 'metered' | 'subscription' | 'local' | 'estimate' — costUsd is real only for metered. */
+  costBasis: string;
+  invocations: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  costUsd: number;
+}
+
 interface TaskDetailResponse {
   task: Task;
   steps: TaskStep[];
+  providerBreakdown: TaskProviderUsage[];
 }
 
 export default function TaskDetailPage() {
@@ -266,6 +280,7 @@ export default function TaskDetailPage() {
   const id = params.id;
 
   const [task, setTask] = useState<Task | null>(null);
+  const [providerBreakdown, setProviderBreakdown] = useState<TaskProviderUsage[]>([]);
   const [promotedDraftCount, setPromotedDraftCount] = useState(0);
   usePageTitle(task ? task.title : 'Task');
   const [steps, setSteps] = useState<TaskStep[]>([]);
@@ -342,6 +357,7 @@ export default function TaskDetailPage() {
       const data = await api.get<TaskDetailResponse>(`/tasks/${id}`);
       setTask(data.task);
       setSteps(data.steps);
+      setProviderBreakdown(data.providerBreakdown ?? []);
     } catch (err) {
       setError((err as Error).message ?? 'Failed to load task');
     }
@@ -1218,7 +1234,12 @@ export default function TaskDetailPage() {
               </div>
             );
           })}
-          <TaskTotalTime task={task} steps={steps} userActive={userActive} />
+          <TaskTotalTime
+            task={task}
+            steps={steps}
+            userActive={userActive}
+            providerBreakdown={providerBreakdown}
+          />
           {task.status === 'completed' && promotedDraftCount > 0 && (
             <div className="flex justify-center pt-2">
               <Link href={`/settings/global-kb?status=draft&sourceTaskId=${task.id}`}>
@@ -1892,10 +1913,12 @@ function TaskTotalTime({
   task,
   steps,
   userActive,
+  providerBreakdown,
 }: {
   task: Task;
   steps: TaskStep[];
   userActive: { activeStepId: string | null; displayMs: number };
+  providerBreakdown: TaskProviderUsage[];
 }) {
   const ticking = !!task.startedAt && !task.completedAt;
   const [now, setNow] = useState(() => Date.now());
@@ -2032,6 +2055,45 @@ function TaskTotalTime({
           )}
         </div>
       </Card>
+      {providerBreakdown.length > 0 && (
+        <Card className="py-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="text-sm font-medium text-neutral-200">Tokens by provider</span>
+            <span className="text-[11px] text-neutral-500">
+              cost is real for metered providers only — local / subscription / estimate show tokens
+              only
+            </span>
+          </div>
+          <div className="space-y-1">
+            {providerBreakdown.map((p) => {
+              const cache = p.cacheReadTokens + p.cacheCreationTokens;
+              const metered = p.costBasis === 'metered';
+              return (
+                <div
+                  key={p.provider}
+                  className="flex items-center justify-between gap-3 text-xs"
+                  title={`${p.invocations} invocation(s) — input ${p.inputTokens.toLocaleString()} / output ${p.outputTokens.toLocaleString()} / cache ${cache.toLocaleString()}`}
+                >
+                  <span className="flex items-center gap-2">
+                    <span className="font-mono text-neutral-200">{p.provider}</span>
+                    <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-neutral-400">
+                      {p.costBasis}
+                    </span>
+                  </span>
+                  <span className="flex items-center gap-3 font-mono text-neutral-400">
+                    <span>in {formatTokens(p.inputTokens)}</span>
+                    <span>out {formatTokens(p.outputTokens)}</span>
+                    <span className="text-cyan-400/80">cache {formatTokens(cache)}</span>
+                    <span className={metered ? 'text-emerald-300' : 'text-neutral-600'}>
+                      {metered ? `~$${p.costUsd.toFixed(2)}` : '—'}
+                    </span>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
       {showVerdict && (
         <Card className="flex items-center justify-between gap-3 py-3">
           <div className="flex flex-col">

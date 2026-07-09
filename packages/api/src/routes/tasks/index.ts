@@ -31,6 +31,7 @@ import {
   enrichStepsWithSkipFlag,
   findActiveCliInvocation,
   sumTaskTokens,
+  sumTaskProviderBreakdown,
 } from './_helpers.js';
 import { fileRoutes } from './files.js';
 import { stepRoutes } from './steps.js';
@@ -334,12 +335,13 @@ taskRoutes.get('/:id', async (c) => {
   const withActiveRole = await enrichStepsWithActiveRole(db, id, withStats);
   const steps = enrichStepsWithCliUsage(withActiveRole);
   const active = await findActiveCliInvocation(db, id);
+  const providerBreakdown = await sumTaskProviderBreakdown(db, id);
   const taskWithActive = {
     ...task,
     activeCliInvocationId: active?.id ?? null,
     activeCliStepId: active?.taskStepId ?? null,
   };
-  return c.json({ task: taskWithActive, steps });
+  return c.json({ task: taskWithActive, steps, providerBreakdown });
 });
 
 taskRoutes.patch('/:id', async (c) => {

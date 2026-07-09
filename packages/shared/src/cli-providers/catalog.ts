@@ -58,6 +58,18 @@ export interface CliProviderMetadata {
    *  current generator only emits markdown, so codex agent writes are
    *  skipped until a TOML emitter exists. Null iff projectAgentsDir is null. */
   agentFileFormat: 'markdown' | 'toml' | null;
+  /** Whether this provider's reported costUsd is a trustworthy real backend price.
+   *  - 'metered': real per-token price from the provider's own backend (claude-code,
+   *    codex, gemini) — sum + display as $.
+   *  - 'subscription': flat-plan CLI, no meaningful per-token price (amp, antigravity).
+   *  - 'local': free local compute; the claude binary reports Anthropic-price FICTION
+   *    against a local endpoint (ollama).
+   *  - 'estimate': metered backend, but the claude binary MISPRICES it against
+   *    Anthropic's table (zai/GLM overstates ~10x) — reported, but not real $.
+   *  Only 'metered' cost is summed as real dollars in the token telemetry; the rest are
+   *  shown token-only with the basis label. Raw costUsd is still persisted per
+   *  invocation for observability. */
+  costBasis: 'metered' | 'subscription' | 'local' | 'estimate';
 }
 
 const CLAUDE_LIKE_EFFORT_SCALE: EffortScaleMetadata = {
@@ -79,6 +91,7 @@ const CODEX_EFFORT_SCALE: EffortScaleMetadata = {
 export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> = {
   'claude-code': {
     name: 'claude-code',
+    costBasis: 'metered',
     displayName: 'Claude Code',
     description:
       "Anthropic's first-class CLI for Claude. Native sub-agent support via the Task tool.",
@@ -100,6 +113,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   },
   codex: {
     name: 'codex',
+    costBasis: 'metered',
     displayName: 'OpenAI Codex',
     description: "OpenAI's Codex CLI. Native sub-agent orchestration.",
     defaultExecutable: 'codex',
@@ -125,6 +139,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   },
   gemini: {
     name: 'gemini',
+    costBasis: 'metered',
     displayName: 'Google Gemini',
     description: 'Google Gemini CLI. Native sub-agents via markdown agent definitions.',
     defaultExecutable: 'gemini',
@@ -153,6 +168,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   },
   amp: {
     name: 'amp',
+    costBasis: 'subscription',
     displayName: 'Sourcegraph Amp',
     description: 'Sourcegraph Amp CLI. Native sub-agents spawn parallel mini-Amp threads.',
     defaultExecutable: 'amp',
@@ -172,6 +188,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   },
   zai: {
     name: 'zai',
+    costBasis: 'estimate',
     displayName: 'Z.AI',
     description: 'Z.AI CLI. Wraps the Claude binary with Anthropic-compatible env vars.',
     defaultExecutable: 'claude',
@@ -191,6 +208,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   },
   antigravity: {
     name: 'antigravity',
+    costBasis: 'subscription',
     displayName: 'Google Antigravity',
     description:
       'Google Antigravity CLI (agy). Subscription coding via Continue-with-Google sign-in.',
@@ -220,6 +238,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
   },
   ollama: {
     name: 'ollama',
+    costBasis: 'local',
     displayName: 'Ollama',
     description:
       "Ollama models (local, remote server, or Ollama Cloud). Reuses the Claude binary against Ollama's Anthropic-compatible endpoint; set the model and base URL per provider.",
@@ -251,6 +270,17 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
 };
 
 export const CLI_PROVIDER_LIST: CliProviderMetadata[] = Object.values(CLI_PROVIDER_CATALOG);
+
+/** Provider names whose reported costUsd is a real backend price (safe to sum as $).
+ *  Used by the token telemetry to keep local/subscription/mispriced $ out of the
+ *  headline cost. See CliProviderMetadata.costBasis. */
+export const COST_METERED_PROVIDERS: CliProviderName[] = CLI_PROVIDER_LIST.filter(
+  (p) => p.costBasis === 'metered',
+).map((p) => p.name);
+
+export function isCostMetered(name: CliProviderName): boolean {
+  return CLI_PROVIDER_CATALOG[name].costBasis === 'metered';
+}
 
 export function getCliProviderMetadata(name: CliProviderName): CliProviderMetadata {
   return CLI_PROVIDER_CATALOG[name];

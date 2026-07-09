@@ -3,9 +3,13 @@ import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_DISPATCH_STEP_IDS,
+  CLI_PROVIDER_CATALOG,
+  COST_METERED_PROVIDERS,
+  isCostMetered,
   MODEL_HEALTH_STEP_IDS,
   SKIPPABLE_STEP_IDS,
   STEP_CLI_ROLES,
+  type CliProviderName,
   type CliRoleDescriptor,
   type CliTokenUsage,
 } from '@haive/shared';
@@ -239,9 +243,13 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
       totalTokens: sql<number>`coalesce(sum((${tu} ->> 'totalTokens')::numeric), 0)::int`,
       cacheReadTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheReadTokens')::numeric), 0)::int`,
       cacheCreationTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheCreationTokens')::numeric), 0)::int`,
-      costUsd: sql<number>`coalesce(sum((${tu} ->> 'costUsd')::numeric), 0)::double precision`,
+      // Real dollars only from METERED providers (claude-code/codex/gemini). Local
+      // (ollama) and subscription (amp/antigravity) and mispriced (zai) costUsd is
+      // Anthropic-price fiction and must not inflate the headline — see costBasis.
+      costUsd: sql<number>`coalesce(sum((${tu} ->> 'costUsd')::numeric) filter (where ${schema.cliProviders.name}::text = any(${COST_METERED_PROVIDERS}::text[])), 0)::double precision`,
     })
     .from(schema.cliInvocations)
+    .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
     .where(
       and(eq(schema.cliInvocations.taskId, taskId), isNull(schema.cliInvocations.supersededAt)),
     )
@@ -308,9 +316,13 @@ export async function sumTaskTokens(
       totalTokens: sql<number>`coalesce(sum((${tu} ->> 'totalTokens')::numeric), 0)::int`,
       cacheReadTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheReadTokens')::numeric), 0)::int`,
       cacheCreationTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheCreationTokens')::numeric), 0)::int`,
-      costUsd: sql<number>`coalesce(sum((${tu} ->> 'costUsd')::numeric), 0)::double precision`,
+      // Real dollars only from METERED providers (claude-code/codex/gemini). Local
+      // (ollama) and subscription (amp/antigravity) and mispriced (zai) costUsd is
+      // Anthropic-price fiction and must not inflate the headline — see costBasis.
+      costUsd: sql<number>`coalesce(sum((${tu} ->> 'costUsd')::numeric) filter (where ${schema.cliProviders.name}::text = any(${COST_METERED_PROVIDERS}::text[])), 0)::double precision`,
     })
     .from(schema.cliInvocations)
+    .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
     .where(
       and(
         inArray(schema.cliInvocations.taskId, taskIds),
@@ -338,6 +350,72 @@ export async function sumTaskTokens(
     });
   }
   return out;
+}
+
+export interface TaskProviderUsage {
+  /** CliProviderName of the invocations. */
+  provider: string;
+  /** CliProviderMetadata.costBasis — 'metered' | 'subscription' | 'local' | 'estimate'. */
+  costBasis: string;
+  invocations: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  /** Real dollars — metered providers only (0 for local/subscription/estimate). */
+  costUsd: number;
+}
+
+/** Per-provider token/cost split for a task's detail page. Tokens sum across ALL
+ *  providers (always real); costUsd is metered-only so local/subscription/mispriced $
+ *  never inflate the headline. Ordered by token volume (the primary metric). Same
+ *  superseded/non-null-step filter as the other aggregations. */
+export async function sumTaskProviderBreakdown(
+  db: ReturnType<typeof getDb>,
+  taskId: string,
+): Promise<TaskProviderUsage[]> {
+  const tu = schema.cliInvocations.tokenUsage;
+  const rows = await db
+    .select({
+      provider: schema.cliProviders.name,
+      invocations: sql<number>`count(*)::int`,
+      inputTokens: sql<number>`coalesce(sum((${tu} ->> 'inputTokens')::numeric), 0)::int`,
+      outputTokens: sql<number>`coalesce(sum((${tu} ->> 'outputTokens')::numeric), 0)::int`,
+      cacheReadTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheReadTokens')::numeric), 0)::int`,
+      cacheCreationTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheCreationTokens')::numeric), 0)::int`,
+      costUsd: sql<number>`coalesce(sum((${tu} ->> 'costUsd')::numeric), 0)::double precision`,
+    })
+    .from(schema.cliInvocations)
+    .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
+    .where(
+      and(
+        eq(schema.cliInvocations.taskId, taskId),
+        isNull(schema.cliInvocations.supersededAt),
+        isNotNull(schema.cliInvocations.taskStepId),
+      ),
+    )
+    .groupBy(schema.cliProviders.name);
+
+  const out: TaskProviderUsage[] = [];
+  for (const row of rows) {
+    if (!row.provider) continue; // provider row deleted (cli_provider_id set null) — skip
+    const name = row.provider as CliProviderName;
+    const inputTokens = Number(row.inputTokens) || 0;
+    const outputTokens = Number(row.outputTokens) || 0;
+    const invocations = Number(row.invocations) || 0;
+    if (inputTokens === 0 && outputTokens === 0 && invocations === 0) continue;
+    out.push({
+      provider: name,
+      costBasis: CLI_PROVIDER_CATALOG[name].costBasis,
+      invocations,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens: Number(row.cacheReadTokens) || 0,
+      cacheCreationTokens: Number(row.cacheCreationTokens) || 0,
+      costUsd: isCostMetered(name) ? Number(row.costUsd) || 0 : 0,
+    });
+  }
+  return out.sort((a, b) => b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens));
 }
 
 /** Reverse-lookup the role of each waiting_cli step's LIVE cli invocation (from its
