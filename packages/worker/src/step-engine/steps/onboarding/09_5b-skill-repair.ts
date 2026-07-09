@@ -41,11 +41,34 @@ const STEP_ID = '09_5b-skill-repair';
  *  separate requested/consumed marker (which could desync if apply throws). */
 const STEP_REVISE_EVENT = 'step.revise';
 
-/** One repair agent's request. `maxSub`/`bodyLen` reuse 09_5's non-truncation mandate — a
- *  single skill's JSON is exactly one 09_5 loop-pass worth of output, which already fits the
- *  model's ceiling, so no shrink is needed. */
+/** Baseline (shrink level 0) repair size — one 09_5 loop-pass worth of output. A large
+ *  domain (many services) can still overflow the model's output ceiling at this size and
+ *  truncate mid-JSON, which surfaces as "no sub-skills". So a skill whose verification
+ *  signals truncation is repaired SMALLER, and shrinks further each repair round it
+ *  survives — mirroring 09_5's truncationRetries — so it converges instead of re-truncating
+ *  at the same size forever. */
 const REPAIR_MAX_SUB = 8;
 const REPAIR_BODY_LEN = '100-250';
+
+/** A truncation-type verification failure: the checkSkill signals that mean the prior
+ *  (re)generation was cut off before a complete skill was emitted (its JSON never closed,
+ *  so no valid sub-skills survived). */
+function isTruncationFailure(issues: string[]): boolean {
+  return issues.some((i) => /truncat|no sub-skills/i.test(i));
+}
+
+/** Per-skill repair size. A truncation failure starts one shrink level down; every repair
+ *  round the skill survives shrinks it further (8 -> 6 -> 4 -> floor 3 sub-skills, shorter
+ *  bodies), so a stubborn large skill converges to a small-but-COMPLETE skill. */
+function computeRepairSize(
+  issues: string[],
+  round: number,
+): { maxSub: number; bodyLen: string; shrunk: boolean } {
+  const shrink = (isTruncationFailure(issues) ? 1 : 0) + Math.max(0, round - 1);
+  const maxSub = Math.max(3, REPAIR_MAX_SUB - 2 * shrink);
+  const bodyLen = shrink > 0 ? '80-150' : REPAIR_BODY_LEN;
+  return { maxSub, bodyLen, shrunk: shrink > 0 };
+}
 
 interface FailingSkill {
   skillId: string;
@@ -54,6 +77,12 @@ interface FailingSkill {
   /** First ~2000 chars of the current (broken) SKILL.md, or null when it is missing/
    *  unreadable. Handed to the agent so a structural fix can preserve the correct parts. */
   skillMdExcerpt: string | null;
+  /** Repair-request size for this skill (computeRepairSize) — shrinks for a truncation
+   *  failure and each round the skill survives, so a large skill re-repairs SMALLER. */
+  maxSub: number;
+  bodyLen: string;
+  /** True when maxSub/bodyLen were shrunk below baseline — drives the "emit smaller" note. */
+  shrunk: boolean;
 }
 
 interface SkillRepairDetect {
@@ -111,7 +140,13 @@ function buildSkillRepairPrompt(opts: {
   fileTree: string;
   scopeExclude: string[];
   skillsDir: string;
+  maxSub: number;
+  bodyLen: string;
+  shrunk: boolean;
 }): string {
+  const shrinkNote = opts.shrunk
+    ? `## A previous attempt was cut off — produce a SMALLER, COMPLETE skill\n\nThe prior (re)generation of this skill was truncated before it finished (its JSON never closed, so no valid sub-skills survived). This time emit at MOST ${opts.maxSub} sub-skills with ${opts.bodyLen}-line bodies and be concise — a COMPLETE smaller skill is required; another cut-off response fails the same way. Emit ONLY the JSON, with at most a one-sentence preface.\n`
+    : '';
   const issuesBlock = opts.issues.map((i) => `- ${i}`).join('\n');
   const existingBlock = opts.skillMdExcerpt
     ? [
@@ -131,6 +166,7 @@ function buildSkillRepairPrompt(opts: {
     'You are a senior software engineer REPAIRING one existing Claude Code SKILL for this',
     'specific codebase. The skill failed automated verification and must be corrected.',
     '',
+    shrinkNote,
     `## Skill to repair: \`${opts.skillId}\``,
     '',
     `Keep this id EXACTLY — it is the on-disk directory name under \`${opts.skillsDir}/\`. Do NOT rename it`,
@@ -160,12 +196,19 @@ function buildSkillRepairPrompt(opts: {
     ...noSubagentInstructionLines(),
     '## Your task',
     '',
-    'Use your read-only tools (Read, Grep, Glob, Bash for read-only commands) to explore the',
-    `in-scope directories for the \`${opts.skillId}\` capability, then emit a corrected, COMPLETE skill as JSON.`,
+    'Work grep-first — do NOT read whole files up front. The knowledge base above and the',
+    `current SKILL.md already describe this capability; use them as your map. Then, ${
+      opts.scopeExclude.length > 0 ? 'within the in-scope directories,' : ''
+    } confirm`,
+    'specifics with TARGETED searches only:',
+    `- \`grep\`/\`Glob\` for the exact symbols, routes, or config keys the \`${opts.skillId}\` capability names.`,
+    '- Read ONLY the specific lines a grep hit points to (use ranges), never a whole file to "get oriented".',
+    'Skip re-reading anything the knowledge base or the broken SKILL.md already states — trust it and',
+    'move on. Then emit a corrected, COMPLETE skill as JSON.',
     'You MUST return the corrected skill (a `skills` array of length 1). Do NOT return an empty',
     'array — this is a repair, the skill is required.',
     '',
-    ...buildSkillContractBlocks(REPAIR_MAX_SUB, REPAIR_BODY_LEN),
+    ...buildSkillContractBlocks(opts.maxSub, opts.bodyLen),
   ].join('\n');
 }
 
@@ -284,7 +327,13 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
           if (excerpt) break;
         }
       }
-      failingSkills.push({ skillId, issues: Array.from(issueSet), skillMdExcerpt: excerpt });
+      const issues = Array.from(issueSet);
+      failingSkills.push({
+        skillId,
+        issues,
+        skillMdExcerpt: excerpt,
+        ...computeRepairSize(issues, ctx.round),
+      });
     }
     failingSkills.sort((a, b) => a.skillId.localeCompare(b.skillId));
 
@@ -340,6 +389,9 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
           fileTree,
           scopeExclude: det.__scopeExclude ?? [],
           skillsDir: primary,
+          maxSub: f.maxSub,
+          bodyLen: f.bodyLen,
+          shrunk: f.shrunk,
         }),
       }));
     },
