@@ -550,6 +550,8 @@ async function cleanupTaskContainers(
           reason,
           worktreePath: wt.worktreePath,
           method: wt.method,
+          branch: wt.branch,
+          branchDeleted: wt.branchDeleted,
         });
       } else if (wt.error) {
         logger.warn(

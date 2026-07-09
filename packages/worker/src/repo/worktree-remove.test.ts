@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, it, expect } from 'vitest';
-import { removeWorktreeDir } from './worktree-remove.js';
+import type { Database } from '@haive/database';
+import { removeTaskWorktree, removeWorktreeDir } from './worktree-remove.js';
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -77,6 +78,101 @@ describe('removeWorktreeDir', () => {
       const res = await removeWorktreeDir(null, wt);
       expect(res).toMatchObject({ removed: true, method: 'rmdir' });
       expect(await exists(wt)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+/** db stub: the task row carries the durable columns, the repositories row the repo
+ *  root, and the 01-worktree-setup step row whatever `stepOutput` says (null models a
+ *  Retry cascade having wiped it). */
+function mkDb(
+  task: { worktreePath: string | null; worktreeBranch: string | null },
+  storagePath: string,
+  stepOutput: unknown = null,
+): Database {
+  return {
+    query: {
+      tasks: { findFirst: async () => ({ repositoryId: 'r1', ...task }) },
+      repositories: { findFirst: async () => ({ storagePath }) },
+    },
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          orderBy: () => ({ limit: () => Promise.resolve([{ output: stepOutput }]) }),
+        }),
+      }),
+    }),
+  } as unknown as Database;
+}
+
+async function branchExists(root: string, branch: string): Promise<boolean> {
+  try {
+    await git(root, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe('removeTaskWorktree', () => {
+  // The task-27706aba leak: Retry cascaded over 01-worktree-setup and nulled its
+  // output, so the reaper could no longer find the worktree it had created.
+  it('removes the worktree from the task row even when the step output was reset', async () => {
+    const { root, wt } = await setupRepoWithWorktree();
+    try {
+      const db = mkDb({ worktreePath: wt, worktreeBranch: 'feat' }, root, null);
+      const res = await removeTaskWorktree(db, 'task1');
+      expect(res.removed).toBe(true);
+      expect(await exists(wt)).toBe(false);
+      // 'feat' has no commits of its own, so the safe delete succeeds.
+      expect(res.branchDeleted).toBe(true);
+      expect(await branchExists(root, 'feat')).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to the step output for tasks predating the columns', async () => {
+    const { root, wt } = await setupRepoWithWorktree();
+    try {
+      const db = mkDb({ worktreePath: null, worktreeBranch: null }, root, {
+        mode: 'worktree',
+        worktreePath: wt,
+        branchName: 'feat',
+      });
+      const res = await removeTaskWorktree(db, 'task1');
+      expect(res.removed).toBe(true);
+      expect(await exists(wt)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps an unmerged branch: cancel must not destroy committed work', async () => {
+    const { root, wt } = await setupRepoWithWorktree();
+    try {
+      await writeFile(path.join(wt, 'work.txt'), 'wip\n', 'utf8');
+      await git(wt, ['add', '-A']);
+      await git(wt, ['commit', '-m', 'work on the feature branch']);
+
+      const db = mkDb({ worktreePath: wt, worktreeBranch: 'feat' }, root, null);
+      const res = await removeTaskWorktree(db, 'task1');
+      expect(res.removed).toBe(true);
+      expect(res.branchDeleted).toBe(false);
+      expect(await branchExists(root, 'feat')).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('no-ops when neither the task row nor the step output names a worktree', async () => {
+    const { root } = await setupRepoWithWorktree();
+    try {
+      const db = mkDb({ worktreePath: null, worktreeBranch: null }, root, null);
+      const res = await removeTaskWorktree(db, 'task1');
+      expect(res).toMatchObject({ removed: false, worktreePath: null, method: null });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

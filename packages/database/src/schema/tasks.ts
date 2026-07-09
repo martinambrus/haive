@@ -112,7 +112,14 @@ export const tasks = pgTable(
     currentStepId: varchar('current_step_id', { length: 128 }),
     currentStepIndex: doublePrecision('current_step_index').notNull().default(0),
     containerId: varchar('container_id', { length: 255 }),
+    /** Durable record of the feature worktree 01-worktree-setup created, written by
+     *  that step's apply. The cancel reaper (removeTaskWorktree) used to read this
+     *  from the step's `output`, which a Retry cascade nulls (_step-reset) while
+     *  leaving the worktree on disk — so the worktree and its branch leaked. Task
+     *  rows survive a step reset; step outputs do not. Left set on terminal tasks as
+     *  an audit record. */
     worktreePath: text('worktree_path'),
+    worktreeBranch: text('worktree_branch'),
     memoryLimitMb: integer('memory_limit_mb'),
     cpuLimitMilli: integer('cpu_limit_milli'),
     metadata: jsonb('metadata').$type<Record<string, unknown>>(),

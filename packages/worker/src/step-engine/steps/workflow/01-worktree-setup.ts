@@ -304,6 +304,12 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     }
 
     const sandboxWorktreePath = `${ctx.sandboxWorkdir}/${WORKTREE_SUBDIR}/${dirName}`;
+    // Durable record for the cancel reaper (removeTaskWorktree). This step's `output`
+    // is not enough: a Retry cascade nulls it while the worktree stays on disk.
+    await ctx.db
+      .update(schema.tasks)
+      .set({ worktreePath, worktreeBranch: branchName })
+      .where(eq(schema.tasks.id, ctx.taskId));
     ctx.logger.info({ worktreePath, sandboxWorktreePath, branchName, base }, 'worktree created');
     return {
       mode: 'worktree',
