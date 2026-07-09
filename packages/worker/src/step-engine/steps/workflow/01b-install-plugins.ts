@@ -14,6 +14,8 @@ import {
   resolveTaskRepoMount,
   resolveTaskSandboxWorkdir,
 } from '../../../queues/cli-exec-queue.js';
+import { resolveSecretMasks } from '../../../queues/cli-exec/secret-mask.js';
+import { worktreeGitfileMask } from '../../../queues/cli-exec/gitfile-mask.js';
 
 /** Per-CLI project-scope plugin directory for drupal-php-lsp. Must match the
  *  DRUPAL_LSP_TARGET_BASES in onboarding step 07. */
@@ -212,6 +214,15 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
     const mounts: DockerVolumeMount[] = [...authMounts];
     if (repoMount) mounts.push(repoMount);
 
+    // This step runs third-party plugin code against the mounted repo with network
+    // access, but reaches runInSandbox directly rather than through exec-core, so it
+    // used to receive neither mask. Same set exec-core applies: deny-listed secret
+    // files, plus the worktree gitfile the agent contract says must be unusable.
+    const maskFiles = [
+      ...(await resolveSecretMasks(ctx.db, ctx.taskId)),
+      ...worktreeGitfileMask(sandboxWorkdir),
+    ];
+
     const executed: InstallPluginsApply['executed'] = [];
     for (const cmd of detected.commands) {
       await ctx.emitProgress(cmd.description);
@@ -231,6 +242,7 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
         timeoutMs: 180_000,
       };
       if (wrapperContent) runSpec.wrapperContent = wrapperContent;
+      if (maskFiles.length > 0) runSpec.extraFiles = maskFiles;
       const result = await runInSandbox(runSpec, runnerOptions);
 
       const stdoutTail = result.stdout.slice(-1000);
