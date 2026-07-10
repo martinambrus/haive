@@ -221,6 +221,10 @@ export interface StepApplyArgs<TDetect = unknown> {
    *  agentMining.retry): apply() must DEGRADE rather than throw MiningRetryError.
    *  Undefined for callers that don't set it (treated as final). */
   isFinalMiningAttempt?: boolean;
+  /** True when a MiningWaveError dispatched nothing (every named agent already had a
+   *  row, or no provider was available): apply() must proceed WITHOUT the second wave's
+   *  results rather than ask for it again. Undefined on the first apply of a wave. */
+  miningWaveExhausted?: boolean;
 }
 
 /** Throw from apply() on an unrecoverable LLM parse failure to trigger llm.retry
@@ -244,6 +248,31 @@ export class MiningRetryError extends Error {
     super(message ?? `agent output unusable, re-roll: ${agentIds.join(', ')}`);
     this.name = 'MiningRetryError';
     this.agentIds = agentIds;
+  }
+}
+
+/**
+ * Throw from apply() of an agentMining step to dispatch a SECOND wave of agents whose
+ * prompts depend on what the first wave found — a refuter per blocking review finding,
+ * say. The runner enqueues them as fresh rows, parks the step, and calls apply() again
+ * once they finish, with the whole set (first wave + second) in `agentMiningResults`.
+ *
+ * The step engine offers no other way to do this. `selectAgents` runs before the first
+ * dispatch, so it cannot see any findings; `loop` re-enters only the LLM phase, never
+ * the mining fan-out; and resolveAgentMiningPhase short-circuits the moment any mining
+ * row exists.
+ *
+ * apply() decides whether to throw by looking for the second wave's agents in
+ * `agentMiningResults` — it must NOT throw once they are present, or the step never
+ * settles. `args.miningWaveExhausted` covers the case where the runner could dispatch
+ * none of them. Distinct from MiningRetryError, which re-rolls agents that already ran.
+ */
+export class MiningWaveError extends Error {
+  readonly dispatches: AgentMiningDispatch[];
+  constructor(dispatches: AgentMiningDispatch[], message?: string) {
+    super(message ?? `second mining wave requested: ${dispatches.length} agent(s)`);
+    this.name = 'MiningWaveError';
+    this.dispatches = dispatches;
   }
 }
 

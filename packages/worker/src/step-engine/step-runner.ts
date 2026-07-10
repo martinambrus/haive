@@ -26,6 +26,7 @@ import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
 import {
   TaskCancelledError,
   MiningRetryError,
+  MiningWaveError,
   type AgentMiningDispatch,
   type AgentMiningResult,
   type StepContext,
@@ -1418,11 +1419,62 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         isFinalMiningAttempt,
       });
     } catch (applyErr) {
+      // A second mining wave: agents whose prompts depend on what the first wave found.
+      // Fresh rows, so the fan-out barrier re-parks the step; apply() runs again with
+      // both waves in agentMiningResults. See MiningWaveError for why no other phase
+      // can express this.
+      if (
+        applyErr instanceof MiningWaveError &&
+        stepDef.agentMining &&
+        !stepDef.loop &&
+        params.providers &&
+        params.deps
+      ) {
+        const dispatched = await dispatchMiningAgents(
+          db,
+          stepDef,
+          current,
+          ctx,
+          params,
+          applyErr.dispatches,
+          null,
+        );
+        if (dispatched > 0) {
+          ctx.logger.info(
+            { stepId: meta.id, agentIds: applyErr.dispatches.map((d) => d.agentId) },
+            'second mining wave dispatched',
+          );
+          const parked = await updateRow(db, current.id, {
+            status: 'waiting_cli',
+            statusMessage: `Running ${dispatched} follow-up agent(s)...`,
+          });
+          return { status: 'waiting_cli', row: parked };
+        }
+        // Nothing went out: every agent already had a row, or no provider could take
+        // them (dispatchMiningAgents wrote those rows as failed). Parking would hang the
+        // step on a barrier with nothing pending, so run apply() again and tell it the
+        // wave is not coming. It must not ask a second time.
+        ctx.logger.warn(
+          { stepId: meta.id, agentIds: applyErr.dispatches.map((d) => d.agentId) },
+          'second mining wave dispatched no agents; continuing without it',
+        );
+        output = await stepDef.apply(ctx, {
+          detected,
+          formValues: formValues ?? {},
+          llmOutput,
+          agentMiningResults,
+          iteration,
+          previousIterations,
+          isFinalLlmAttempt,
+          isFinalMiningAttempt,
+          miningWaveExhausted: true,
+        });
+      }
       // agentMining.retry: a reviewer that ran but emitted prose instead of its JSON
       // contract is re-rolled on its own, leaving the other agents' completed rows
       // alone. Re-running one agent is far cheaper than the alternatives: a fix round
       // through implementation, or a developer reject at the gate.
-      if (applyErr instanceof MiningRetryError && miningRetry && !stepDef.loop) {
+      else if (applyErr instanceof MiningRetryError && miningRetry && !stepDef.loop) {
         const requeued = await retryMiningAgents(
           db,
           stepDef,

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
 import { advanceStep } from '../src/step-engine/step-runner.js';
-import { MiningRetryError } from '../src/step-engine/step-definition.js';
+import { MiningRetryError, MiningWaveError } from '../src/step-engine/step-definition.js';
 import type { StepApplyArgs, StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 
@@ -23,6 +23,9 @@ interface MockState {
   miningRows: MiningRow[];
   updates: Record<string, unknown>[];
   inserts: { table: string; row: Record<string, unknown> }[];
+  /** Simulate the (task_step_id, agent_id) unique index rejecting a mining insert, so
+   *  onConflictDoNothing().returning() yields no row and nothing is enqueued. */
+  miningInsertConflicts?: boolean;
 }
 
 function tableNameOf(table: unknown): string {
@@ -70,7 +73,12 @@ function makeMockDb(state: MockState): Database {
         };
         return {
           returning: async () => commit(),
-          onConflictDoNothing: () => ({ returning: async () => commit() }),
+          onConflictDoNothing: () => ({
+            returning: async () =>
+              state.miningInsertConflicts && tableName === 'task_step_agent_minings'
+                ? []
+                : commit(),
+          }),
           onConflictDoUpdate: async () => {
             state.inserts.push({ table: tableName, row: v });
           },
@@ -202,6 +210,47 @@ function miningStep(unreadable: string[], applyCalls: StepApplyArgs[]): StepDefi
   } as unknown as StepDefinition;
 }
 
+/** A mining step whose apply() asks for a SECOND wave (one refuter per finding) the
+ *  first time it runs, and settles once those agents' results are present — the exact
+ *  contract 08c's refutation pass implements. */
+function waveStep(applyCalls: StepApplyArgs[], waveAgentIds: string[]): StepDefinition {
+  return {
+    metadata: {
+      id: 'test-mining-step',
+      workflowType: 'workflow',
+      index: 0,
+      title: 'test',
+      description: 'test',
+      requiresCli: true,
+    },
+    async detect() {
+      return { foo: 'bar' };
+    },
+    form() {
+      return null;
+    },
+    agentMining: {
+      requiredCapabilities: [],
+      async selectAgents() {
+        return [{ agentId: 'peer-reviewer', agentTitle: 'peer-reviewer', prompt: 'review' }];
+      },
+    },
+    async apply(_ctx, args) {
+      applyCalls.push(args);
+      const present = new Set((args.agentMiningResults ?? []).map((r) => r.agentId));
+      const missing = waveAgentIds.filter((id) => !present.has(id));
+      // Never ask twice: once the wave's rows exist (or the runner says none are
+      // coming), settle. Otherwise the step would park on a barrier forever.
+      if (missing.length > 0 && !args.miningWaveExhausted) {
+        throw new MiningWaveError(
+          missing.map((id) => ({ agentId: id, agentTitle: id, prompt: `refute ${id}` })),
+        );
+      }
+      return { refuted: missing.length === 0, waveExhausted: args.miningWaveExhausted === true };
+    },
+  } as unknown as StepDefinition;
+}
+
 function run(db: Database, stepDef: StepDefinition, enqueued: CliExecJobPayload[]) {
   return advanceStep({
     db,
@@ -322,5 +371,70 @@ describe('advanceStep agentMining retry', () => {
     expect(applyCalls).toHaveLength(1);
     expect(applyCalls[0]!.isFinalMiningAttempt).toBe(false);
     expect(enqueued).toHaveLength(0);
+  });
+});
+
+describe('advanceStep agentMining second wave', () => {
+  it('dispatches the wave and parks, leaving the first wave’s row alone', async () => {
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(
+      makeMockDb(state),
+      waveStep(applyCalls, ['refute-abc', 'refute-def']),
+      enqueued,
+    );
+
+    expect(result.status).toBe('waiting_cli');
+    expect(applyCalls).toHaveLength(1);
+
+    // one fresh row + one job per wave agent; the reviewer's row is never updated
+    expect(enqueued.map((e) => e.agentMiningId)).toHaveLength(2);
+    const miningInserts = state.inserts.filter((i) => i.table === 'task_step_agent_minings');
+    expect(miningInserts.map((i) => i.row.agentId)).toEqual(['refute-abc', 'refute-def']);
+    expect(miningInserts.every((i) => i.row.status === 'pending')).toBe(true);
+    expect(state.updates.filter((u) => u.table === 'task_step_agent_minings')).toHaveLength(0);
+  });
+
+  it('settles without asking again once the wave’s results are present', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1),
+      miningRow('refute-abc', 1),
+      miningRow('refute-def', 1),
+    ]);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(
+      makeMockDb(state),
+      waveStep(applyCalls, ['refute-abc', 'refute-def']),
+      enqueued,
+    );
+
+    expect(result.status).toBe('done');
+    expect(applyCalls).toHaveLength(1);
+    expect(enqueued).toHaveLength(0);
+    if (result.status === 'done') {
+      expect(result.output).toEqual({ refuted: true, waveExhausted: false });
+    }
+  });
+
+  it('continues without the wave rather than parking on a barrier nothing will clear', async () => {
+    // Every insert loses the (task_step_id, agent_id) race, so no job is enqueued and no
+    // row goes pending. Parking here would hang the step forever; apply must be re-run
+    // and told the wave is not coming.
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    state.miningInsertConflicts = true;
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), waveStep(applyCalls, ['refute-abc']), enqueued);
+
+    expect(result.status).toBe('done');
+    expect(enqueued).toHaveLength(0);
+    expect(applyCalls).toHaveLength(2);
+    expect(applyCalls[0]!.miningWaveExhausted).toBeUndefined();
+    expect(applyCalls[1]!.miningWaveExhausted).toBe(true);
+    if (result.status === 'done') {
+      expect(result.output).toEqual({ refuted: false, waveExhausted: true });
+    }
   });
 });
