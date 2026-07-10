@@ -72,6 +72,12 @@ export interface ExecutionOutcome {
    *  (which streamLog includes) so a task spec mentioning "rate limit"/"401"
    *  cannot false-positive. Set on failure-capable branches only. */
   providerErrorScan?: string;
+  /** antigravity only: the tail of agy's own `--log-file`, captured out of the
+   *  sandbox. agy writes provider-fatal errors (quota/auth/5xx) ONLY here and exits
+   *  0 with empty stdout, so this is the sole signal interpretCliFailure can classify
+   *  (via classifyAntigravityDiagnostic). Kept SEPARATE from providerErrorScan so the
+   *  model's answer text never enters the fatal scan. */
+  providerDiagnosticLog?: string;
 }
 
 /**

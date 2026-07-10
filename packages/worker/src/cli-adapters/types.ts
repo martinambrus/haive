@@ -63,6 +63,14 @@ export interface CliCommandSpec {
   /** Written to the CLI's stdin immediately after start (the prompt as an NDJSON
    *  user-message). Only present when steerable. */
   stdinInitial?: string;
+  /** When set, the sandbox runner mounts a WRITABLE directory at
+   *  `captureFile.containerDir` and, after the run, reads `<containerDir>/<fileName>`
+   *  back out as `CliExecutionResult.capturedLog`. Used to recover a CLI's own log
+   *  file out of the `--rm` sandbox — agy (antigravity) writes provider-fatal errors
+   *  (quota/auth/5xx) ONLY to its log and exits 0 with empty output, so that log is
+   *  the sole classifiable signal. Set by the antigravity adapter alongside its
+   *  `--log-file` arg; no other adapter uses it. */
+  captureFile?: { containerDir: string; fileName: string };
 }
 
 export interface SubAgent {

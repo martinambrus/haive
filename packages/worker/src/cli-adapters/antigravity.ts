@@ -1,6 +1,15 @@
 import { BaseCliAdapter } from './base-adapter.js';
 import type { CliCommandSpec, CliProviderRecord, EnvInjection, InvokeOpts } from './types.js';
 
+// agy reports provider-fatal errors (quota 429 / auth / 5xx) ONLY to its log file
+// while exiting 0 with empty stdout, so Haive redirects that log via `--log-file` to
+// a fixed path inside a writable capture mount and reads it back for fatal-error
+// classification. See interpretCliFailure / classifyAntigravityDiagnostic. The dir is
+// a dedicated sandbox mount point (not the repo/workdir), so a fixed path is safe —
+// one invocation per container.
+export const AGY_LOG_DIR = '/haive/agy-log';
+export const AGY_LOG_FILE = 'agy.log';
+
 export class AntigravityAdapter extends BaseCliAdapter {
   readonly providerName = 'antigravity' as const;
   readonly defaultExecutable = 'agy';
@@ -42,10 +51,19 @@ export class AntigravityAdapter extends BaseCliAdapter {
       command: this.resolveExecutable(provider),
       // agy has no --output-format/stream-json (plain text print), so this
       // mirrors gemini's plain -p. --dangerously-skip-permissions keeps tool
-      // use non-interactive during autonomous step execution.
-      args: this.mergedArgs(provider, ['--dangerously-skip-permissions', '-p', prompt]),
+      // use non-interactive during autonomous step execution. --log-file is placed
+      // BEFORE -p so a greedy -p can't swallow it; agy writes provider-fatal errors
+      // ONLY to that log (exiting 0), which the runner reads back via captureFile.
+      args: this.mergedArgs(provider, [
+        '--dangerously-skip-permissions',
+        '--log-file',
+        `${AGY_LOG_DIR}/${AGY_LOG_FILE}`,
+        '-p',
+        prompt,
+      ]),
       env: this.mergedEnv(provider, opts),
       cwd: opts.cwd,
+      captureFile: { containerDir: AGY_LOG_DIR, fileName: AGY_LOG_FILE },
     };
   }
 

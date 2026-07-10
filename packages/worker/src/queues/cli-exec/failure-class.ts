@@ -114,6 +114,43 @@ export function classifyProviderFatal(
   return null;
 }
 
+// agy (Google Antigravity) exits 0 and prints NOTHING on a provider-fatal error,
+// writing it only to its --log-file as a glog line, e.g.:
+//   E0710 .. log.go:398] agent executor error: RESOURCE_EXHAUSTED (code 429): Individual quota reached .. Resets in 167h.
+// We anchor on agy's gRPC status token QUALIFIED by the executor-error/(code NNN) line
+// shape — NOT the generic RATE_LIMIT_RE — because the debug log can carry repo file
+// text the agent read (a source file discussing "429"/"quota" would false-positive on
+// a healthy run). A gRPC token appearing in logged repo content lacks that line shape.
+const AGY_FATAL_LINE_RE = /agent executor error:|\(code\s+\d+\)/i;
+const AGY_STATUS_CLASS: ReadonlyArray<readonly [RegExp, ProviderFatalClass]> = [
+  [/\bRESOURCE_EXHAUSTED\b/, 'rate_limit'],
+  [/\b(?:UNAUTHENTICATED|PERMISSION_DENIED)\b/, 'auth'],
+  [/\b(?:UNAVAILABLE|INTERNAL|DEADLINE_EXCEEDED)\b/, 'server_error'],
+];
+
+/** Classify a provider-fatal error from agy's captured log tail (antigravity only).
+ *  agy swallows quota/auth/5xx to its log and exits 0 with empty output, so this is
+ *  the only classifiable signal — see interpretCliFailure, which gates the call on
+ *  empty output. Returns the fatal class plus the matched line (glog prefix stripped)
+ *  for the message detail, or null when the log shows no executor-level fatal status. */
+export function classifyAntigravityDiagnostic(
+  log: string | null | undefined,
+): { class: ProviderFatalClass; detail: string } | null {
+  if (typeof log !== 'string' || log.length === 0) return null;
+  for (const raw of log.split('\n')) {
+    if (!AGY_FATAL_LINE_RE.test(raw)) continue;
+    for (const [re, cls] of AGY_STATUS_CLASS) {
+      if (re.test(raw)) {
+        // Strip the leading glog prefix ("E0710 12:34:56.7 10 log.go:398] ") so the
+        // detail reads as the human error ("RESOURCE_EXHAUSTED (code 429): .. Resets in …").
+        const detail = raw.replace(/^[EIWF]\d{4}\s+[\d:.]+\s+\d+\s+\S+\]\s*/, '').trim();
+        return { class: cls, detail };
+      }
+    }
+  }
+  return null;
+}
+
 /** The fatal class encoded in a headlined errorMessage (built by interpretCliFailure),
  *  or null when the message is not a fatal-provider message. Inverse of
  *  PROVIDER_FATAL_HEADLINES — lets a consumer derive the UI hint's `reason` from the

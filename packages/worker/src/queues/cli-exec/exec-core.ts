@@ -49,7 +49,12 @@ import { executeSubAgentNative, executeSubAgentSequential } from './sub-agent.js
 import { resolveSecretMasks } from './secret-mask.js';
 import { worktreeGitfileMask } from './gitfile-mask.js';
 import { makeUsageSnapshotPersister } from './running-usage.js';
-import { classifyProviderFatal, PROVIDER_FATAL_HEADLINES } from './failure-class.js';
+import {
+  classifyAntigravityDiagnostic,
+  classifyProviderFatal,
+  PROVIDER_FATAL_HEADLINES,
+  type ProviderFatalClass,
+} from './failure-class.js';
 
 /** Throttle for persisting running token-usage snapshots during a CLI stream.
  *  ~40 writes/min/invocation at most — cheap, safe under the 7-task cap. */
@@ -89,6 +94,22 @@ export function interpretCliFailure(
   providerName: string | null,
 ): string | null {
   const existing = result.errorMessage ?? null;
+  // agy (antigravity) swallows provider-fatal errors to its own log file and ALWAYS
+  // exits 0 with empty output, so the exit-code gate below can't see them. Classify
+  // from the captured agy diagnostic log — anchored on agy's gRPC error structure and
+  // gated on EMPTY output so a transient-429-then-success run (non-empty output whose
+  // log still mentions 429) is never misclassified. Above the exit-0/termination
+  // returns so it also catches a hypothetical future agy that exits non-zero.
+  if (
+    providerName === 'antigravity' &&
+    result.parsedOutput == null &&
+    (result.rawOutput ?? '').trim().length === 0
+  ) {
+    const agy = classifyAntigravityDiagnostic(result.providerDiagnosticLog ?? null);
+    if (agy) {
+      return buildProviderFatalMessage(agy.class, providerName, formatAuthDetail(agy.detail));
+    }
+  }
   if (result.exitCode === 0) return existing;
   if (result.exitCode === null || TERMINATION_EXIT_CODES.has(result.exitCode)) {
     return 'CLI process was stopped before it finished (cancelled or timed out).';
@@ -104,7 +125,17 @@ export function interpretCliFailure(
     result.providerErrorScan ?? result.rawOutput,
   );
   if (!fatalClass) return existing;
-  const detail = formatAuthDetail(existing);
+  return buildProviderFatalMessage(fatalClass, providerName, formatAuthDetail(existing));
+}
+
+/** Build the headlined provider-fatal errorMessage for a class + detail. Shared by the
+ *  exit-code path (interpretCliFailure) and the antigravity exit-0 diagnostic-log path.
+ *  `detail` is the parenthesized excerpt already formatted by formatAuthDetail. */
+function buildProviderFatalMessage(
+  fatalClass: ProviderFatalClass,
+  providerName: string | null,
+  detail: string,
+): string {
   if (fatalClass === 'auth') {
     const apiKeyName = providerName ? PROVIDER_API_KEY_HINTS[providerName] : null;
     const loginCmd = providerName ? PROVIDER_LOGIN_HINTS[providerName] : null;
@@ -581,7 +612,9 @@ export async function executeCliSpec(
   }
 
   // Plain/last-resort path (no structured format, or a collector that saw zero
-  // events). Keep stdout as prose unless it is actually machine protocol.
+  // events). Keep stdout as prose unless it is actually machine protocol. antigravity
+  // lands here (no outputFormat); its captured agy log rides providerDiagnosticLog for
+  // the exit-0 fatal classification in interpretCliFailure.
   return {
     exitCode: result.exitCode,
     rawOutput: proseForClean('', result.stdout),
@@ -595,6 +628,7 @@ export async function executeCliSpec(
     tokenUsage: collector.getTokenUsage(),
     streamLog,
     providerErrorScan,
+    providerDiagnosticLog: result.capturedLog ?? undefined,
   };
 }
 
@@ -793,6 +827,9 @@ export function createSandboxSpawner(
         interactive: spec.steerable === true,
         stdinInitial: spec.stdinInitial,
         onStdinWritable: opts.onStdinWritable,
+        // Set only by the antigravity adapter — recover agy's own log file (where it
+        // reports provider-fatal errors while exiting 0) out of the --rm sandbox.
+        captureDir: spec.captureFile,
       },
       runnerOptions,
     );
@@ -803,6 +840,7 @@ export function createSandboxSpawner(
       durationMs: result.durationMs,
       timedOut: result.timedOut,
       error: result.error,
+      capturedLog: result.capturedLog,
     };
   };
 }

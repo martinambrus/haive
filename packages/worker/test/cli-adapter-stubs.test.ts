@@ -135,10 +135,19 @@ describe('antigravity adapter', () => {
     expect(adapter.rulesFileMode).toBe('native');
   });
 
-  it('builds a non-interactive agy invocation: --dangerously-skip-permissions -p <prompt>', () => {
+  it('builds a non-interactive agy invocation with --log-file (before -p) and captureFile', () => {
     const spec = adapter.buildCliInvocation(provider, 'hello', opts);
     expect(spec.command).toBe('agy');
-    expect(spec.args).toEqual(['--dangerously-skip-permissions', '-p', 'hello']);
+    expect(spec.args).toEqual([
+      '--dangerously-skip-permissions',
+      '--log-file',
+      '/haive/agy-log/agy.log',
+      '-p',
+      'hello',
+    ]);
+    // captureFile drives the runner's writable log mount + readback — agy reports
+    // provider-fatal errors (quota/auth/5xx) ONLY to its log while exiting 0.
+    expect(spec.captureFile).toEqual({ containerDir: '/haive/agy-log', fileName: 'agy.log' });
   });
 });
 

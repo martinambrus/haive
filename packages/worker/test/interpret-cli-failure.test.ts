@@ -90,6 +90,45 @@ describe('interpretCliFailure', () => {
     expect(interpretCliFailure(outcome({ exitCode: 143 }), 'codex')).toMatch(/stopped/);
   });
 
+  it('surfaces an antigravity quota failure that agy swallowed to exit 0 + empty output', () => {
+    // agy reports quota/auth/5xx ONLY to its log while exiting 0 with empty output;
+    // the captured log rides providerDiagnosticLog and is classified despite exit 0.
+    const result = outcome({
+      exitCode: 0,
+      rawOutput: '',
+      parsedOutput: null,
+      providerDiagnosticLog:
+        'I0710 16:10:11 10 server_oauth.go:212] applyAuthResult: email=x\n' +
+        'E0710 16:10:20.298253 10 log.go:398] agent executor error: RESOURCE_EXHAUSTED (code 429): ' +
+        'Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 167h1m31s.',
+    });
+    const msg = interpretCliFailure(result, 'antigravity');
+    expect(msg).toMatch(/Provider rate limit or quota exhausted/);
+    expect(msg).toMatch(/Resets in 167h1m31s\./); // agy's reset ETA carried into the detail
+  });
+
+  it('does NOT classify antigravity when output is non-empty (transient 429 then success)', () => {
+    // agy retried past a transient 429 and produced a real answer; the log still
+    // mentions 429 but the run succeeded, so it must not be failed.
+    const result = outcome({
+      exitCode: 0,
+      rawOutput: '{"agentQuestions":[],"explicitNoQuestions":true}',
+      parsedOutput: { explicitNoQuestions: true },
+      providerDiagnosticLog:
+        'E0710 1 10 log.go:398] agent executor error: RESOURCE_EXHAUSTED (code 429): transient',
+    });
+    expect(interpretCliFailure(result, 'antigravity')).toBeNull();
+  });
+
+  it('does not misclassify antigravity on a healthy empty run with no fatal log line', () => {
+    const result = outcome({
+      exitCode: 0,
+      rawOutput: '',
+      providerDiagnosticLog: 'I0710 1 10 server.go:1] conversation done',
+    });
+    expect(interpretCliFailure(result, 'antigravity')).toBeNull();
+  });
+
   it('caps the auth detail excerpt instead of dumping the whole blob', () => {
     const result = outcome({
       exitCode: 1,

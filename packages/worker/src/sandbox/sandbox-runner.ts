@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, chown, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { chmod } from 'node:fs/promises';
 import { logger, type CliNetworkPolicy } from '@haive/shared';
 import {
   defaultDockerRunner,
@@ -23,6 +22,14 @@ export const SANDBOX_WORKDIR = '/haive/workdir';
 export const SANDBOX_USER = 'node';
 export const SANDBOX_USER_HOME = '/home/node';
 const DEFAULT_WORKDIR = SANDBOX_WORKDIR;
+// uid:gid the sandbox runs as (SANDBOX_USER = node). A captured-log dir is chowned
+// to this so the CLI (running as node) can write its log into the writable mount.
+const SANDBOX_UID = 1000;
+const SANDBOX_GID = 1000;
+// Only the tail of a captured CLI log is needed for fatal-error classification (the
+// provider-fatal line is near the end); cap the readback so a verbose debug log
+// can't balloon memory.
+const CAPTURE_TAIL_LIMIT = 32_768;
 
 // In-stack Ollama daemon hostnames. When a CLI's ANTHROPIC_BASE_URL targets one
 // of these, the sandbox joins the models network to reach the daemon directly,
@@ -70,6 +77,11 @@ export interface SandboxRunSpec {
   /** Receives the container's writable stdin so the caller can inject more
    *  input mid-run. Only invoked when interactive. */
   onStdinWritable?: (writable: NodeJS.WritableStream) => void;
+  /** When set, mount a WRITABLE dir at `containerDir` and read
+   *  `<containerDir>/<fileName>` back out as `SandboxRunResult.capturedLog` after the
+   *  run. Recovers a CLI's own log file from the `--rm` sandbox — agy logs
+   *  provider-fatal errors there while exiting 0 with empty stdout. */
+  captureDir?: { containerDir: string; fileName: string };
 }
 
 export interface SandboxRunnerOptions {
@@ -93,6 +105,8 @@ export interface SandboxRunnerOptions {
 export interface SandboxRunResult extends DockerRunResult {
   resolvedCommand: string;
   wrapperId: string | null;
+  /** Tail of the captured CLI log when `spec.captureDir` was set, else null. */
+  capturedLog?: string | null;
 }
 
 /**
@@ -129,6 +143,7 @@ export async function runInSandbox(
   let resolvedCommand = spec.command;
   let gateway: EgressGateway | null = null;
   const extraFileDirs: string[] = [];
+  let captureHostDir: string | null = null;
 
   try {
     const egress = options.egressDomains ?? [];
@@ -175,6 +190,25 @@ export async function runInSandbox(
       }
     }
 
+    // Writable capture dir: mount a fresh per-run subdir of the wrappers volume at
+    // `containerDir` so the CLI can write its log into it (agy reports provider-fatal
+    // errors ONLY to its log, exiting 0). Chowned to the sandbox uid because the CLI
+    // runs as node; read back + cleaned up after the run.
+    if (spec.captureDir) {
+      const captureId = randomUUID();
+      captureHostDir = join(wrapperWorkerRoot, captureId);
+      await mkdir(captureHostDir, { recursive: true });
+      await chown(captureHostDir, SANDBOX_UID, SANDBOX_GID).catch((err: unknown) => {
+        log.warn({ err, captureHostDir }, 'failed to chown capture dir');
+      });
+      mounts.push({
+        source: volumeName,
+        subpath: captureId,
+        target: spec.captureDir.containerDir,
+        readOnly: false,
+      });
+    }
+
     const modelsHost = inStackModelsHost(spec.env);
     const network = resolveDockerNetwork(policy, gateway);
     const env = mergeProxyEnv(spec.env, gateway, modelsHost);
@@ -197,7 +231,16 @@ export async function runInSandbox(
       stdinInitial: spec.stdinInitial,
       onStdinWritable: spec.onStdinWritable,
     });
-    return { ...result, resolvedCommand, wrapperId };
+    // Read the captured log back out of the volume (best-effort, tail-capped). Done
+    // before the `finally` removes the dir. A missing file (CLI wrote nothing) or a
+    // read error yields null — never throws.
+    let capturedLog: string | null = null;
+    if (captureHostDir && spec.captureDir) {
+      capturedLog = await readFile(join(captureHostDir, spec.captureDir.fileName), 'utf8')
+        .then((t) => (t.length > CAPTURE_TAIL_LIMIT ? t.slice(-CAPTURE_TAIL_LIMIT) : t))
+        .catch(() => null);
+    }
+    return { ...result, resolvedCommand, wrapperId, capturedLog };
   } finally {
     if (wrapperWorkerPath) {
       const wrapperDir = dirname(wrapperWorkerPath);
@@ -208,6 +251,11 @@ export async function runInSandbox(
     for (const efDir of extraFileDirs) {
       rm(efDir, { recursive: true, force: true }).catch((err: unknown) => {
         log.warn({ err, efDir }, 'failed to cleanup extra file dir');
+      });
+    }
+    if (captureHostDir) {
+      rm(captureHostDir, { recursive: true, force: true }).catch((err: unknown) => {
+        log.warn({ err, captureHostDir }, 'failed to cleanup capture dir');
       });
     }
     if (gateway) {

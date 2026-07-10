@@ -8,6 +8,10 @@ export interface CliExecutionResult {
   durationMs: number;
   timedOut: boolean;
   error?: string;
+  /** Tail of a CLI's own log file captured out of the sandbox when the spec set
+   *  `captureFile` (antigravity only — agy logs provider-fatal errors there while
+   *  exiting 0 with empty stdout). Null/undefined for every other invocation. */
+  capturedLog?: string | null;
 }
 
 export interface SpawnOptions {

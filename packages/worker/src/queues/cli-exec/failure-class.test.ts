@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  classifyAntigravityDiagnostic,
   classifyProviderFatal,
   fatalClassFromMessage,
   isFatalProviderFailure,
@@ -108,6 +109,60 @@ describe('classifyProviderFatal', () => {
 
   it('does not treat a bare number like "500ms" / "$500" in failed output as a server error', () => {
     expect(classifyProviderFatal(1, 'build failed after 500ms; budget was $500', null)).toBe(null);
+  });
+});
+
+describe('classifyAntigravityDiagnostic', () => {
+  // The EXACT agy quota line captured from a real exhausted-quota run (glog-prefixed,
+  // and agy doubles the error text). Verifies the fix against the original input.
+  const AGY_QUOTA_LINE =
+    'E0710 16:10:20.298253    10 log.go:398] agent executor error: RESOURCE_EXHAUSTED (code 429): ' +
+    'Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 167h1m31s.: ' +
+    'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 167h1m31s.';
+
+  it('classifies the real agy quota line as rate_limit and strips the glog prefix', () => {
+    const r = classifyAntigravityDiagnostic(
+      `I0710 16:10:11 10 server_oauth.go:1] info\n${AGY_QUOTA_LINE}\n`,
+    );
+    expect(r?.class).toBe('rate_limit');
+    expect(r?.detail.startsWith('agent executor error:')).toBe(true);
+    expect(r?.detail).toContain('Resets in 167h1m31s.');
+  });
+
+  it('maps agy gRPC auth / server statuses to their classes', () => {
+    expect(
+      classifyAntigravityDiagnostic(
+        'E0710 1 10 log.go:1] agent executor error: UNAUTHENTICATED (code 401): bad',
+      )?.class,
+    ).toBe('auth');
+    expect(
+      classifyAntigravityDiagnostic(
+        'E0710 1 10 log.go:1] agent executor error: PERMISSION_DENIED (code 403): no',
+      )?.class,
+    ).toBe('auth');
+    expect(
+      classifyAntigravityDiagnostic(
+        'E0710 1 10 log.go:1] agent executor error: UNAVAILABLE (code 503): down',
+      )?.class,
+    ).toBe('server_error');
+  });
+
+  it('does NOT match a gRPC token in logged repo content (no executor-error / (code N) line shape)', () => {
+    // A source file the agent read that discusses rate limiting — must not fail a healthy run.
+    const log =
+      'I0710 1 10 tool.go:1] read file: // RESOURCE_EXHAUSTED means back off on 429 rate limit';
+    expect(classifyAntigravityDiagnostic(log)).toBe(null);
+  });
+
+  it('does NOT match a (code N) line that carries no gRPC fatal status', () => {
+    const log = 'I0710 1 10 tool.go:1] read file: return http.Error(w, "busy", (code 429))';
+    expect(classifyAntigravityDiagnostic(log)).toBe(null);
+  });
+
+  it('returns null for empty/absent log and a clean run', () => {
+    expect(classifyAntigravityDiagnostic(null)).toBe(null);
+    expect(classifyAntigravityDiagnostic('')).toBe(null);
+    expect(classifyAntigravityDiagnostic('I0710 1 10 server.go:1] conversation done')).toBe(null);
   });
 });
 
