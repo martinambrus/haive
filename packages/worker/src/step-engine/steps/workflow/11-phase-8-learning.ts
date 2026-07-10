@@ -7,6 +7,7 @@ import { schema } from '@haive/database';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
+import { hasFileLineEvidence } from './_review-findings.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import { readDiskSkillSummaries } from '../onboarding/09_5b-skill-repair.js';
 import { loadTaskMeta } from './_task-meta.js';
@@ -189,21 +190,11 @@ async function gitRun(
 /** Valid op values for a reported KB sync change. */
 const KB_SYNC_OPS = new Set(['insert', 'update', 'delete']);
 
-/**
- * A concrete `path/to/file.ext:123` citation. The extension must start with a letter so
- * a version string (`1.2:30`) or a timestamp cannot pose as evidence.
- *
- * This is the one admission rule the parser can enforce. The other two — "CI already
- * catches it" and "the model knows it from general training" — are stated in the prompt
- * and cannot be checked mechanically; a lesson with no citation is the shape they both
- * take in practice, because neither has anything in THIS run to point at.
- */
-const FILE_LINE_EVIDENCE_RE = /[\w./-]*\w\.[A-Za-z][A-Za-z0-9]{0,11}:\d+/;
-
-/** Does any of these texts cite a file and a line from this run? */
-export function hasFileLineEvidence(...texts: (string | undefined | null)[]): boolean {
-  return texts.some((t) => typeof t === 'string' && FILE_LINE_EVIDENCE_RE.test(t));
-}
+// The admission bar's one machine-checkable rule is a file:line citation
+// (hasFileLineEvidence, shared with the refuter in _review-findings.ts). The other two —
+// "CI already catches it" and "the model knows it from general training" — are stated in
+// the prompt and cannot be checked mechanically; an uncited lesson is the shape they both
+// take in practice, because neither has anything in THIS run to point at.
 
 /** A bug-fix task is flagged at creation (tasks.metadata.category) or inferred
  *  from the title/description as a fallback. */

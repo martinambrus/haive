@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { MiningRetryError } from '../../step-definition.js';
+import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import type {
   StepContext,
   StepDefinition,
@@ -11,15 +11,19 @@ import type {
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
-import { parseReviewJson } from './_agent-json.js';
+import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { CONFIG_KEYS, configService } from '@haive/shared';
-import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
+import { coerceReviewSeverity, isBlockingSeverity, severityRank } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
-import { recordReviewFindings } from './_review-findings.js';
+import {
+  findingFingerprint,
+  hasFileLineEvidence,
+  recordReviewFindings,
+} from './_review-findings.js';
 
 // Phase 6 — Code review (legacy phase6-code-review.md). After test management
 // and before gate 2, two reviewers run IN PARALLEL via agent mining: a
@@ -57,6 +61,10 @@ interface PeerFinding {
   issue: string;
   snippet?: string;
   fix?: string;
+  /** Set by the refutation pass: a refuter disproved this finding with a cited
+   *  file:line. It stops blocking and stops reaching the implementer, but stays
+   *  visible at gate 2 as advisory. Never set by a reviewer. */
+  refuted?: boolean;
 }
 interface SecurityFinding {
   severity: ReviewSeverity;
@@ -68,6 +76,7 @@ interface SecurityFinding {
   snippet?: string;
   attack?: string;
   fix?: string;
+  refuted?: boolean;
 }
 
 interface ReviewLensResult {
@@ -88,6 +97,8 @@ interface CodeReviewApply {
    *  part of the change went unreviewed. Distinct from `blocking`: the reviewer failed,
    *  not the code, so it must not spend a fix round — but gate 2 must not report OK. */
   reviewIncomplete: boolean;
+  /** Blocking findings a refuter disproved. 0 when the pass is off or nothing blocked. */
+  refutedCount: number;
   counts: { peer: number; securityCriticalHigh: number };
 }
 
@@ -216,6 +227,196 @@ export function computeBlocking(
     ...lenses.flatMap((l) => l.findings ?? []),
   ];
   return findings.some((f) => isBlockingSeverity(f.severity));
+}
+
+/* ------------------------------------------------------------------ */
+/* Refutation pass (CONFIG_KEYS.REVIEW_REFUTE_ENABLED, default on).     */
+/*                                                                     */
+/* A blocking finding routes the change back through implementation and */
+/* spends one of the capped fix rounds. 08d already makes its adversaries*/
+/* prove an exploit with a non-destructive PoC before it counts; this is */
+/* the same evidence bar, applied to 08c. One refuter per blocking       */
+/* finding, dispatched as a second mining wave once the reviewers have   */
+/* spoken (see MiningWaveError).                                        */
+/*                                                                     */
+/* Fail CLOSED, deliberately, and against the plan this came from. A    */
+/* refuter dismisses a finding ONLY on positive evidence, cited at a    */
+/* file and line, that the finding is wrong. "Uncertain" leaves it      */
+/* blocking, and so does an unreadable or failed refuter. Dismissing on */
+/* uncertainty would be right if a false positive only cost attention   */
+/* (DoorDash's case: an engineer ignores the bot). Here gate 2 defaults */
+/* to APPROVE when nothing blocks, so a wrongly-dismissed critical is a */
+/* security bug one click from shipping, while a wrongly-KEPT finding   */
+/* costs one fix round. The asymmetry decides the default.              */
+/* ------------------------------------------------------------------ */
+
+const REFUTER_PREFIX = 'refute-';
+
+/** One sandboxed CLI invocation per refuter, so the fan-out is bounded. A round with more
+ *  blocking findings than this is going back to the implementer regardless of how many we
+ *  disprove; the overflow stands unrefuted (fail closed) and is logged. */
+const MAX_REFUTERS = 10;
+
+/** One blocking finding, paired with the refuter that will try to disprove it. */
+export interface RefutableFinding {
+  reviewerId: string;
+  fingerprint: string;
+  agentId: string;
+  severity: ReviewSeverity;
+  path: string;
+  lines: string;
+  issue: string;
+  fix: string;
+}
+
+/** Deterministic, so the agent id is the same on the apply() that dispatches the wave
+ *  and on the apply() that reads its results. */
+function refuterAgentId(fingerprint: string): string {
+  return `${REFUTER_PREFIX}${fingerprint.slice(0, 16)}`;
+}
+
+/** Every critical/high finding across all reviewers — exactly the ones that cost a fix
+ *  round. Medium/low are advisory already and are never refuted: the invocation would
+ *  buy nothing. */
+export function collectRefutable(
+  peer: { findings: PeerFinding[] },
+  security: { findings: SecurityFinding[] },
+  lenses: ReviewLensResult[],
+): RefutableFinding[] {
+  const rows: { reviewerId: string; f: PeerFinding | SecurityFinding }[] = [
+    ...peer.findings.map((f) => ({ reviewerId: 'peer-reviewer', f: f as PeerFinding })),
+    ...security.findings.map((f) => ({ reviewerId: 'security-code-reviewer', f })),
+    ...lenses.flatMap((l) => l.findings.map((f) => ({ reviewerId: l.id, f: f as PeerFinding }))),
+  ];
+  const out: RefutableFinding[] = [];
+  const seen = new Set<string>();
+  for (const { reviewerId, f } of rows) {
+    if (!isBlockingSeverity(f.severity)) continue;
+    const path = f.path ?? '';
+    const fingerprint = findingFingerprint(reviewerId, path, f.issue);
+    if (seen.has(fingerprint)) continue; // one refuter per distinct finding
+    seen.add(fingerprint);
+    const lines = 'lines' in f ? (f.lines ?? '') : String((f as SecurityFinding).line ?? '');
+    out.push({
+      reviewerId,
+      fingerprint,
+      agentId: refuterAgentId(fingerprint),
+      severity: f.severity,
+      path,
+      lines,
+      issue: f.issue,
+      fix: f.fix ?? '',
+    });
+  }
+  return out;
+}
+
+const refutationSchema = z.object({
+  refuted: z.boolean(),
+  reason: z.string().optional(),
+  evidence: z.string().optional(),
+});
+
+/** A finding is dismissed only when the refuter says so AND cites a file:line for why.
+ *  Anything else — no verdict, no citation, unreadable output — leaves it standing. */
+export function isRefuted(raw: unknown): boolean {
+  const parsed = parseAgentJson(raw, (candidate) => {
+    if (!hasAnyKey(candidate, ['refuted'])) return null;
+    const r = refutationSchema.safeParse(candidate);
+    return r.success ? r.data : null;
+  });
+  if (!parsed?.refuted) return false;
+  // `evidence` only, never `reason`: a refuter that merely restates the finding's own
+  // location in its prose has cited nothing it read.
+  return hasFileLineEvidence(parsed.evidence);
+}
+
+function buildRefutePrompt(d: CodeReviewDetect, f: RefutableFinding): string {
+  return [
+    'You are a REFUTER. A code reviewer raised the finding below against a change, and',
+    'acting on it will send the whole change back to be reimplemented. Your job is to try',
+    'to DISPROVE it by reading the actual code — not to agree with it, and not to fix it.',
+    '',
+    'Refute the finding ONLY if you can show it is wrong. It is wrong when the code path is',
+    'unreachable, the value cannot take the state described, the case is already handled',
+    'elsewhere, the cited code does not exist or does not say what the reviewer claims, or',
+    'the finding is out of scope for this change.',
+    '',
+    'If you cannot show that — if the finding might be right, if you are unsure, or if you',
+    'cannot find the code — then it STANDS. Say refuted: false. An uncertain refutation is',
+    'a wrong one: a real defect dismissed here reaches the developer marked as disproved.',
+    '',
+    `Finding (from ${f.reviewerId}, severity ${f.severity}):`,
+    `  location: ${f.path || '(unspecified)'}${f.lines ? `:${f.lines}` : ''}`,
+    `  issue: ${f.issue}`,
+    f.fix ? `  proposed fix: ${f.fix}` : '',
+    '',
+    'Do NOT edit code and do NOT run git.',
+    ...SEARCH_LADDER,
+    '',
+    'Emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
+    '{ "refuted": true|false, "reason": "<why the finding is wrong, or why it stands>", "evidence": "<path/to/file.ext:LINE you read that proves it>" }',
+    'A `refuted: true` with no `evidence` citing a real path/to/file.ext:LINE is IGNORED and',
+    'the finding stands. Cite the line you actually read.',
+    '',
+    '=== Spec (the intended behavior) ===',
+    d.specForReview || d.spec || '(no spec recorded)',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/** Downgrade a reviewer's verdict when every blocking finding behind it was refuted: the
+ *  verdict was a summary of those findings, and nothing is left to summarise. A reviewer
+ *  that raised no blocking finding keeps its verdict — there was nothing to refute, so
+ *  a bare REQUEST_CHANGES/VULNERABLE still blocks. */
+function adjustVerdict<T extends { severity: ReviewSeverity; refuted?: boolean }>(
+  verdict: string,
+  findings: T[],
+  fallback: string,
+): string {
+  const blockingFindings = findings.filter((f) => isBlockingSeverity(f.severity));
+  if (blockingFindings.length === 0) return verdict;
+  return blockingFindings.every((f) => f.refuted) ? fallback : verdict;
+}
+
+/** Mark every blocking finding its refuter disproved, and downgrade the verdicts that
+ *  rested entirely on those findings. Mutates in place; returns how many were dismissed. */
+export function applyRefutations(
+  results: AgentMiningResult[],
+  peer: { verdict: string; findings: PeerFinding[] },
+  security: { verdict: string; findings: SecurityFinding[] },
+  lenses: ReviewLensResult[],
+): number {
+  const dismissed = new Set<string>();
+  for (const f of collectRefutable(peer, security, lenses)) {
+    if (isRefuted(miningResult(results, f.agentId))) dismissed.add(f.fingerprint);
+  }
+  if (dismissed.size === 0) return 0;
+
+  let count = 0;
+  const mark = (reviewerId: string, findings: (PeerFinding | SecurityFinding)[]): void => {
+    for (const f of findings) {
+      if (!isBlockingSeverity(f.severity)) continue;
+      if (!dismissed.has(findingFingerprint(reviewerId, f.path ?? '', f.issue))) continue;
+      f.refuted = true;
+      count++;
+    }
+  };
+  mark('peer-reviewer', peer.findings);
+  mark('security-code-reviewer', security.findings);
+  for (const lens of lenses) mark(lens.id, lens.findings);
+
+  peer.verdict = adjustVerdict(peer.verdict, peer.findings, 'DISCUSS');
+  security.verdict = adjustVerdict(security.verdict, security.findings, 'NEEDS_FIXES');
+  for (const lens of lenses) lens.verdict = adjustVerdict(lens.verdict, lens.findings, 'DISCUSS');
+  return count;
+}
+
+/** The findings that still stand. Refuted ones surface at gate 2 but never block, never
+ *  reach the implementer, and never enter the task-history digest. */
+function live<T extends { refuted?: boolean }>(findings: T[]): T[] {
+  return findings.filter((f) => !f.refuted);
 }
 
 const SEARCH_LADDER = [
@@ -487,23 +688,28 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
   fixLoop: {
     evaluate: (out) => {
       if (!out.blocking) return null;
+      // Refuted findings are dropped, not annotated: the implementer must not spend a
+      // capped fix round arguing with a claim a refuter already disproved. They stay
+      // visible at gate 2, where a human can disagree.
+      const peerFindings = live(out.peer.findings);
+      const securityFindings = live(out.security.findings);
       // One element: `parts` is joined with a blank line, so the preamble must arrive
       // as a single block rather than one paragraph per line.
       const parts: string[] = [VALIDATE_THEN_ACT];
-      if (out.peer.findings.length) {
+      if (peerFindings.length) {
         parts.push(
           '### Peer review\n' +
-            out.peer.findings
+            peerFindings
               .map(
                 (f) => `- [${f.severity}] ${f.path}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`,
               )
               .join('\n'),
         );
       }
-      if (out.security.findings.length) {
+      if (securityFindings.length) {
         parts.push(
           '### Security\n' +
-            out.security.findings
+            securityFindings
               .map(
                 (f) => `- [${f.severity}] ${f.path}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`,
               )
@@ -511,10 +717,11 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         );
       }
       for (const lens of out.extraLenses) {
-        if (!lens.findings.length) continue;
+        const lensFindings = live(lens.findings);
+        if (!lensFindings.length) continue;
         parts.push(
           `### ${lens.title}\n` +
-            lens.findings
+            lensFindings
               .map(
                 (f) =>
                   `- [${f.severity}] ${f.path ?? ''}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`,
@@ -651,6 +858,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         extraLenses: [],
         blocking: false,
         reviewIncomplete: false,
+        refutedCount: 0,
         counts: { peer: 0, securityCriticalHigh: 0 },
       };
     }
@@ -756,7 +964,52 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // Block on what we REPORT, not on what parsed: peerOut/securityOut carry the
     // synthetic findings for an unparseable reviewer, so the blocking decision and
     // the gate-2 finding list can never disagree.
-    const blocking = computeBlocking(peerOut, securityOut, extraLenses);
+    let blocking = computeBlocking(peerOut, securityOut, extraLenses);
+
+    // Refutation, in two passes over the same apply(). The first throws to dispatch one
+    // refuter per blocking finding (apply cannot fan out itself — see MiningWaveError);
+    // the second reads their verdicts back and recomputes what still blocks.
+    //
+    // Only blocking findings are refuted, and collectRefutable enforces that: they are
+    // the only ones that cost a fix round. It follows that an empty list means there is
+    // no claim to disprove — either nothing blocks, or the block is a bare
+    // REQUEST_CHANGES/VULNERABLE verdict the reviewer never grounded in a finding.
+    const waveRan = results.some((r) => r.agentId.startsWith(REFUTER_PREFIX));
+    let refutedCount = 0;
+    if (waveRan) {
+      refutedCount = applyRefutations(results, peerOut, securityOut, extraLenses);
+      blocking = computeBlocking(
+        { verdict: peerOut.verdict, findings: live(peerOut.findings) },
+        { verdict: securityOut.verdict, findings: live(securityOut.findings) },
+        extraLenses.map((l) => ({ verdict: l.verdict, findings: live(l.findings) })),
+      );
+    } else if (args.miningWaveExhausted !== true) {
+      const refutable = collectRefutable(peerOut, securityOut, extraLenses);
+      if (
+        refutable.length > 0 &&
+        (await configService.getBoolean(CONFIG_KEYS.REVIEW_REFUTE_ENABLED, true))
+      ) {
+        // Worst first (severityRank: lower is more severe), so a capped wave spends its
+        // invocations on the findings that hurt most if they are wrong.
+        const wave = [...refutable]
+          .sort((a, b) => severityRank(a.severity) - severityRank(b.severity))
+          .slice(0, MAX_REFUTERS);
+        if (wave.length < refutable.length) {
+          ctx.logger.warn(
+            { total: refutable.length, refuting: wave.length },
+            'more blocking findings than refuters; the overflow stands unrefuted',
+          );
+        }
+        ctx.logger.info({ count: wave.length }, 'dispatching refuters for blocking findings');
+        throw new MiningWaveError(
+          wave.map((f) => ({
+            agentId: f.agentId,
+            agentTitle: `Refuter (${f.reviewerId})`,
+            prompt: buildRefutePrompt(args.detected, f),
+          })),
+        );
+      }
+    }
 
     await recordReviewFindings(ctx, '08c-code-review', [
       ...peerOut.findings.map((f) => ({
@@ -766,7 +1019,9 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         path: f.path,
         lines: f.lines,
         fix: f.fix,
-        blocking: isBlockingSeverity(f.severity),
+        blocking: isBlockingSeverity(f.severity) && !f.refuted,
+        disposition: f.refuted ? ('dismissed_refuted' as const) : ('open' as const),
+        dispositionSource: f.refuted ? 'refuter' : undefined,
         raw: f,
       })),
       ...securityOut.findings.map((f) => ({
@@ -776,7 +1031,9 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         path: f.path,
         lines: f.line,
         fix: f.fix,
-        blocking: isBlockingSeverity(f.severity),
+        blocking: isBlockingSeverity(f.severity) && !f.refuted,
+        disposition: f.refuted ? ('dismissed_refuted' as const) : ('open' as const),
+        dispositionSource: f.refuted ? 'refuter' : undefined,
         raw: f,
       })),
       ...extraLenses.flatMap((lens) =>
@@ -787,13 +1044,15 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
           path: f.path,
           lines: f.lines,
           fix: f.fix,
-          blocking: isBlockingSeverity(f.severity),
+          blocking: isBlockingSeverity(f.severity) && !f.refuted,
+          disposition: f.refuted ? ('dismissed_refuted' as const) : ('open' as const),
+          dispositionSource: f.refuted ? 'refuter' : undefined,
           raw: f,
         })),
       ),
     ]);
 
-    const securityCriticalHigh = securityOut.findings.filter((f) =>
+    const securityCriticalHigh = live(securityOut.findings).filter((f) =>
       isBlockingSeverity(f.severity),
     ).length;
 
@@ -805,6 +1064,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         securityCriticalHigh,
         lenses: extraLenses.map((l) => `${l.id}:${l.verdict}`),
         blocking,
+        refutedCount,
         reviewIncomplete,
         unreadable,
       },
@@ -818,6 +1078,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       extraLenses,
       blocking,
       reviewIncomplete,
+      refutedCount,
       counts: { peer: peerOut.findings.length, securityCriticalHigh },
     };
   },

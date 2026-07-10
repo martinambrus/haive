@@ -126,7 +126,14 @@ interface Phase8cOutput {
   reviewIncomplete?: boolean;
   peer?: {
     verdict?: string;
-    findings?: { severity?: string; path?: string; lines?: string; issue?: string; fix?: string }[];
+    findings?: {
+      severity?: string;
+      path?: string;
+      lines?: string;
+      issue?: string;
+      fix?: string;
+      refuted?: boolean;
+    }[];
     positives?: string[];
   };
   security?: {
@@ -138,14 +145,27 @@ interface Phase8cOutput {
       issue?: string;
       attack?: string;
       fix?: string;
+      refuted?: boolean;
     }[];
   };
   extraLenses?: {
     id?: string;
     title?: string;
     verdict?: string;
-    findings?: { severity?: string; path?: string; lines?: string; issue?: string; fix?: string }[];
+    findings?: {
+      severity?: string;
+      path?: string;
+      lines?: string;
+      issue?: string;
+      fix?: string;
+      refuted?: boolean;
+    }[];
   }[];
+}
+
+/** Prefix marking a finding a refuter disproved (08c's refutation pass). Advisory only. */
+function refutedTag(f: { refuted?: boolean }): string {
+  return f.refuted ? '[refuted] ' : '';
 }
 
 interface Phase5aOutput {
@@ -392,15 +412,18 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         securityVerdict: pc.security?.verdict ?? 'NEEDS_FIXES',
         blocking: pc.blocking === true,
         reviewIncomplete: pc.reviewIncomplete === true,
+        // A refuted finding is shown, not hidden: a refuter disproved it, and the human
+        // at this gate is the one entitled to disagree with that. It no longer blocks,
+        // and the implementer never saw it.
         peerFindings: (pc.peer?.findings ?? []).map((f) =>
-          `[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+          `${refutedTag(f)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
         securityFindings: (pc.security?.findings ?? []).map((f) =>
-          `[${f.severity ?? '?'}] ${f.path ?? ''}${f.line ? `:${f.line}` : ''} ${f.issue ?? ''}${f.attack ? ` (attack: ${f.attack})` : ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+          `${refutedTag(f)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.line ? `:${f.line}` : ''} ${f.issue ?? ''}${f.attack ? ` (attack: ${f.attack})` : ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
         lensFindings: (pc.extraLenses ?? []).flatMap((lens) =>
           (lens.findings ?? []).map((f) =>
-            `[${lens.title ?? lens.id ?? 'lens'}] [${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+            `${refutedTag(f)}[${lens.title ?? lens.id ?? 'lens'}] [${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
           ),
         ),
         positives: pc.peer?.positives ?? [],

@@ -2,8 +2,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
+import { hasFileLineEvidence } from './_review-findings.js';
 import {
-  hasFileLineEvidence,
   parseGlobalCandidates,
   parseInvestigation,
   parseKbSync,

@@ -57,6 +57,8 @@ export default function AdminPage() {
   const [savingTerseness, setSavingTerseness] = useState(false);
   const [reviewDistillEnabled, setReviewDistillEnabled] = useState<boolean | null>(null);
   const [savingReviewDistill, setSavingReviewDistill] = useState(false);
+  const [reviewRefuteEnabled, setReviewRefuteEnabled] = useState<boolean | null>(null);
+  const [savingReviewRefute, setSavingReviewRefute] = useState(false);
   const [maxPerTask, setMaxPerTask] = useState<number | null>(null);
   const [maxPerTaskInput, setMaxPerTaskInput] = useState('');
   const [savingPerTask, setSavingPerTask] = useState(false);
@@ -85,6 +87,7 @@ export default function AdminPage() {
         promptCaching1hData,
         tersenessData,
         reviewDistillData,
+        reviewRefuteData,
         usageWindowData,
       ] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
@@ -104,6 +107,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/prompt-caching-1h'),
         api.get<{ level: string }>('/admin/config/terseness'),
         api.get<{ enabled: boolean }>('/admin/config/review-fanout-distill'),
+        api.get<{ enabled: boolean }>('/admin/config/review-refute'),
         api.get<{ enabled: boolean }>('/admin/config/usage-window'),
       ]);
       setUsers(usersData.users);
@@ -123,6 +127,7 @@ export default function AdminPage() {
       setPromptCaching1hEnabled(promptCaching1hData.enabled);
       setTersenessLevel(tersenessData.level);
       setReviewDistillEnabled(reviewDistillData.enabled);
+      setReviewRefuteEnabled(reviewRefuteData.enabled);
       setUsageWindowEnabled(usageWindowData.enabled);
       setMaxPerTask(perTaskData.maxAgentsPerTask);
       setMaxPerTaskInput(String(perTaskData.maxAgentsPerTask));
@@ -335,6 +340,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update review distill');
     } finally {
       setSavingReviewDistill(false);
+    }
+  }
+
+  async function setReviewRefute(next: boolean) {
+    setSavingReviewRefute(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/review-refute', {
+        enabled: next,
+      });
+      setReviewRefuteEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update review refutation');
+    } finally {
+      setSavingReviewRefute(false);
     }
   }
 
@@ -807,6 +827,34 @@ export default function AdminPage() {
             />
             {reviewDistillEnabled ? 'Enabled' : 'Disabled'}
             {savingReviewDistill && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {reviewRefuteEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Refute blocking review findings</CardTitle>
+            <CardDescription>
+              Default ON. A blocking code-review finding sends the change back through
+              implementation and spends one of the capped fix rounds, so each one is first handed to
+              a refuter agent that tries to disprove it against the code. A finding is dismissed
+              only on positive evidence, cited at a file and line, that it is wrong; an uncertain,
+              unreadable or failed refuter leaves it blocking. Dismissed findings stay visible at
+              gate 2 as advisory. Costs one extra CLI invocation per blocking finding, and only in a
+              round that has one. Takes effect on the next review; persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={reviewRefuteEnabled}
+              disabled={savingReviewRefute}
+              onChange={(e) => void setReviewRefute(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {reviewRefuteEnabled ? 'Enabled' : 'Disabled'}
+            {savingReviewRefute && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

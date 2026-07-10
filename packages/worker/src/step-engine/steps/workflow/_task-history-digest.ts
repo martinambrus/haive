@@ -72,8 +72,11 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
       });
     }
   } else if (stepId === '08c-code-review') {
+    // `refuted` findings are skipped throughout: a refuter disproved them against the
+    // code, so they are not evidence of anything the next task should learn from.
     for (const it of asArray((o.peer as Record<string, unknown> | undefined)?.findings)) {
       const i = it as Record<string, unknown>;
+      if (i.refuted === true) continue;
       out.push({
         severity: coerceReviewSeverity(i.severity, 'low'),
         where: str(i.path),
@@ -84,6 +87,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
     }
     for (const it of asArray((o.security as Record<string, unknown> | undefined)?.findings)) {
       const i = it as Record<string, unknown>;
+      if (i.refuted === true) continue;
       const cwe = str(i.cwe);
       out.push({
         severity: coerceReviewSeverity(i.severity, 'low'),
@@ -97,6 +101,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
       const l = lens as Record<string, unknown>;
       for (const it of asArray(l.findings)) {
         const i = it as Record<string, unknown>;
+        if (i.refuted === true) continue;
         out.push({
           severity: coerceReviewSeverity(i.severity, 'low'),
           where: str(i.path),

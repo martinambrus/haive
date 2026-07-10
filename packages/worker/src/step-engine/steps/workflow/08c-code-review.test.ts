@@ -1,14 +1,16 @@
-import { describe, it, expect } from 'vitest';
-import { logger } from '@haive/shared';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { configService, logger } from '@haive/shared';
 import {
   parsePeerReview,
   parseSecurityReview,
   parseReviewLens,
   lensesForLevel,
   computeBlocking,
+  collectRefutable,
+  isRefuted,
   codeReviewStep,
 } from './08c-code-review.js';
-import { MiningRetryError } from '../../step-definition.js';
+import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 
 const fakeCtx = { logger: logger.child({ test: '08c-apply' }) } as unknown as StepContext;
@@ -22,10 +24,18 @@ function mining(agentId: string, rawOutput: string | null): AgentMiningResult {
     errorMessage: null,
   };
 }
-function runReview(results: AgentMiningResult[], isFinalMiningAttempt?: boolean) {
+/** Defaults `miningWaveExhausted: true` so a test that only cares about the review
+ *  itself never fans out refuters. The refutation tests below opt back in. */
+function runReview(
+  results: AgentMiningResult[],
+  isFinalMiningAttempt?: boolean,
+  miningWaveExhausted = true,
+) {
   return codeReviewStep.apply(fakeCtx, {
+    detected: { spec: 'the spec', implementationFiles: [], debtBlock: '', level: 'none' },
     agentMiningResults: results,
     isFinalMiningAttempt,
+    miningWaveExhausted,
   } as unknown as Parameters<typeof codeReviewStep.apply>[1]);
 }
 
@@ -414,5 +424,290 @@ describe('codeReviewStep.apply de-silence', () => {
     expect(op).toBeDefined();
     expect(op!.verdict).toBe('DISCUSS');
     expect(op!.findings.length).toBeGreaterThan(0);
+  });
+});
+
+describe('collectRefutable', () => {
+  const peer = {
+    findings: [
+      { severity: 'critical' as const, path: 'a.ts', lines: '4', issue: 'npe' },
+      { severity: 'medium' as const, path: 'b.ts', issue: 'naming' },
+    ],
+  };
+  const security = {
+    findings: [{ severity: 'high' as const, path: 'c.ts', line: 9, issue: 'sqli' }],
+  };
+
+  it('takes only the blocking-severity findings, one refuter each', () => {
+    const r = collectRefutable(peer, security, []);
+    expect(r.map((f) => f.issue)).toEqual(['npe', 'sqli']);
+    expect(r.every((f) => f.agentId.startsWith('refute-'))).toBe(true);
+    // distinct findings get distinct refuters
+    expect(new Set(r.map((f) => f.agentId)).size).toBe(2);
+  });
+
+  it('is deterministic, so the dispatching apply and the reading apply agree', () => {
+    expect(collectRefutable(peer, security, [])[0]!.agentId).toBe(
+      collectRefutable(peer, security, [])[0]!.agentId,
+    );
+  });
+
+  it('collapses a finding the same reviewer reported twice', () => {
+    const dup = {
+      findings: [
+        { severity: 'critical' as const, path: 'a.ts', lines: '4', issue: 'npe' },
+        { severity: 'critical' as const, path: 'a.ts', lines: '40', issue: 'npe' },
+      ],
+    };
+    expect(collectRefutable(dup, { findings: [] }, [])).toHaveLength(1);
+  });
+});
+
+describe('isRefuted', () => {
+  it('dismisses a finding only on a cited file:line', () => {
+    expect(isRefuted('```json\n{"refuted":true,"evidence":"src/a.ts:42"}\n```')).toBe(true);
+  });
+
+  it('keeps the finding when the refuter is uncertain, silent, or unreadable', () => {
+    // Fail CLOSED. A wrongly-dismissed critical defaults gate 2 to approve; a wrongly
+    // kept one costs a fix round.
+    expect(isRefuted('```json\n{"refuted":false,"evidence":"src/a.ts:42"}\n```')).toBe(false);
+    expect(isRefuted('```json\n{"refuted":true,"reason":"it looks fine to me"}\n```')).toBe(false);
+    expect(isRefuted('```json\n{"refuted":true,"evidence":"the code is fine"}\n```')).toBe(false);
+    expect(isRefuted('I could not find the file, so probably refuted')).toBe(false);
+    expect(isRefuted(null)).toBe(false);
+    expect(isRefuted('```json\n{}\n```')).toBe(false);
+  });
+
+  it('ignores a citation the refuter only echoed from the finding it was handed', () => {
+    // The prompt quotes the finding's own `path:line`; a refuter that restates it in
+    // prose has cited nothing it read. Only `evidence` counts.
+    expect(isRefuted('```json\n{"refuted":true,"reason":"src/a.ts:42 is unreachable"}\n```')).toBe(
+      false,
+    );
+  });
+});
+
+describe('codeReviewStep refutation pass', () => {
+  const CRITICAL_PEER =
+    '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"critical","path":"a.ts","lines":"4","issue":"npe","fix":"guard"}],"positives":[]}\n```';
+  const CLEAN_SECURITY = '```json\n{"verdict":"SECURE","findings":[]}\n```';
+
+  /** The agent id 08c will address this finding's refuter by. */
+  const refuterId = collectRefutable(
+    { findings: [{ severity: 'critical', path: 'a.ts', lines: '4', issue: 'npe', fix: 'guard' }] },
+    { findings: [] },
+    [],
+  )[0]!.agentId;
+
+  beforeEach(() => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** apply() with no wave dispatched yet — the first pass, which may throw. */
+  const firstPass = (results: AgentMiningResult[]) => runReview(results, true, false);
+
+  it('fans out one refuter per blocking finding', async () => {
+    const err = await firstPass([
+      mining('peer-reviewer', CRITICAL_PEER),
+      mining('security-code-reviewer', CLEAN_SECURITY),
+    ]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MiningWaveError);
+    const dispatches = (err as MiningWaveError).dispatches;
+    expect(dispatches).toHaveLength(1);
+    expect(dispatches[0]!.agentId).toBe(refuterId);
+    expect(dispatches[0]!.prompt).toContain('DISPROVE');
+    expect(dispatches[0]!.prompt).toContain('npe');
+  });
+
+  it('caps the fan-out and refutes the most severe findings first', async () => {
+    // One sandboxed CLI invocation per refuter. A round with 12 blocking findings is
+    // going back to the implementer whatever we disprove, so bound the spend — and
+    // spend it on the criticals.
+    const findings = [
+      ...Array.from({ length: 8 }, (_, i) => ({
+        severity: 'high',
+        path: `h${i}.ts`,
+        issue: `high ${i}`,
+      })),
+      ...Array.from({ length: 4 }, (_, i) => ({
+        severity: 'critical',
+        path: `c${i}.ts`,
+        issue: `critical ${i}`,
+      })),
+    ];
+    const err = await firstPass([
+      mining(
+        'peer-reviewer',
+        `\`\`\`json\n${JSON.stringify({ verdict: 'REQUEST_CHANGES', findings, positives: [] })}\n\`\`\``,
+      ),
+    ]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MiningWaveError);
+    const prompts = (err as MiningWaveError).dispatches.map((d) => d.prompt);
+    expect(prompts).toHaveLength(10);
+    // every critical got a refuter; two of the highs were dropped
+    for (let i = 0; i < 4; i += 1) {
+      expect(prompts.some((p) => p.includes(`critical ${i}`))).toBe(true);
+    }
+    expect(prompts.filter((p) => p.includes('severity high'))).toHaveLength(6);
+  });
+
+  it('never fans out when nothing blocks', async () => {
+    const out = await firstPass([
+      mining('peer-reviewer', '```json\n{"verdict":"APPROVE","findings":[],"positives":[]}\n```'),
+      mining('security-code-reviewer', CLEAN_SECURITY),
+    ]);
+    expect(out.blocking).toBe(false);
+    expect(out.refutedCount).toBe(0);
+  });
+
+  it('never fans out when the block is a bare verdict with no finding behind it', async () => {
+    // Nothing to disprove: the reviewer asserted, it did not cite.
+    const out = await firstPass([
+      mining(
+        'peer-reviewer',
+        '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"medium","issue":"m"}],"positives":[]}\n```',
+      ),
+    ]);
+    expect(out.blocking).toBe(true);
+    expect(out.refutedCount).toBe(0);
+  });
+
+  it('never fans out when the kill-switch is off', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const out = await firstPass([mining('peer-reviewer', CRITICAL_PEER)]);
+    expect(out.blocking).toBe(true);
+    expect(out.refutedCount).toBe(0);
+  });
+
+  it('never fans out twice: an exhausted wave runs the review as-is', async () => {
+    const out = await runReview([mining('peer-reviewer', CRITICAL_PEER)], true, true);
+    expect(out.blocking).toBe(true);
+    expect(out.refutedCount).toBe(0);
+  });
+
+  it('dismisses a refuted finding: no block, no fix round, still visible', async () => {
+    const out = await firstPass([
+      mining('peer-reviewer', CRITICAL_PEER),
+      mining('security-code-reviewer', CLEAN_SECURITY),
+      mining(
+        refuterId,
+        '```json\n{"refuted":true,"evidence":"a.ts:4 guards the value already"}\n```',
+      ),
+    ]);
+    expect(out.refutedCount).toBe(1);
+    expect(out.blocking).toBe(false);
+    // the verdict rested entirely on the refuted finding, so it is downgraded
+    expect(out.peer.verdict).toBe('DISCUSS');
+    // but the finding itself is still reported to the human at gate 2
+    expect(out.peer.findings).toHaveLength(1);
+    expect(out.peer.findings[0]!.refuted).toBe(true);
+    // and never reaches the implementer
+    expect(codeReviewStep.fixLoop!.evaluate(out)).toBeNull();
+  });
+
+  it('keeps a finding whose refuter cited nothing', async () => {
+    const out = await firstPass([
+      mining('peer-reviewer', CRITICAL_PEER),
+      mining(refuterId, '```json\n{"refuted":true,"reason":"seems fine"}\n```'),
+    ]);
+    expect(out.refutedCount).toBe(0);
+    expect(out.blocking).toBe(true);
+    expect(out.peer.verdict).toBe('REQUEST_CHANGES');
+  });
+
+  it('keeps a finding whose refuter never reported', async () => {
+    const failed: AgentMiningResult = {
+      agentId: refuterId,
+      agentTitle: 'Refuter',
+      status: 'failed',
+      output: null,
+      rawOutput: null,
+      errorMessage: 'timed out',
+    };
+    const out = await firstPass([mining('peer-reviewer', CRITICAL_PEER), failed]);
+    expect(out.refutedCount).toBe(0);
+    expect(out.blocking).toBe(true);
+  });
+
+  it('keeps the surviving findings blocking when only one of two is refuted', async () => {
+    const twoFindings =
+      '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"critical","path":"a.ts","lines":"4","issue":"npe","fix":"guard"},{"severity":"high","path":"b.ts","issue":"race","fix":"lock"}],"positives":[]}\n```';
+    const raceId = collectRefutable(
+      { findings: [{ severity: 'high', path: 'b.ts', issue: 'race', fix: 'lock' }] },
+      { findings: [] },
+      [],
+    )[0]!.agentId;
+    const out = await firstPass([
+      mining('peer-reviewer', twoFindings),
+      mining(refuterId, '```json\n{"refuted":true,"evidence":"a.ts:4"}\n```'),
+      mining(raceId, '```json\n{"refuted":false,"reason":"the race is real"}\n```'),
+    ]);
+    expect(out.refutedCount).toBe(1);
+    expect(out.blocking).toBe(true);
+    // verdict is NOT downgraded: a blocking finding survived
+    expect(out.peer.verdict).toBe('REQUEST_CHANGES');
+    const diagnosis = codeReviewStep.fixLoop!.evaluate(out)!.diagnosis;
+    expect(diagnosis).toContain('race');
+    expect(diagnosis).not.toContain('npe');
+  });
+
+  it('records the refuted finding as dismissed_refuted and non-blocking', async () => {
+    // The durable row is the whole point of the pass: a dismissed finding must be
+    // distinguishable later from one that never fired.
+    let recorded: Record<string, unknown>[] = [];
+    const ctx = {
+      logger: logger.child({ test: '08c-record' }),
+      taskId: 't1',
+      taskStepId: 's1',
+      round: 0,
+      db: {
+        insert: () => ({
+          values: (rows: Record<string, unknown>[]) => {
+            recorded = rows;
+            return { onConflictDoNothing: async () => undefined };
+          },
+        }),
+      },
+    } as unknown as StepContext;
+    await codeReviewStep.apply(ctx, {
+      detected: { spec: 's', implementationFiles: [], debtBlock: '', level: 'none' },
+      agentMiningResults: [
+        mining('peer-reviewer', CRITICAL_PEER),
+        mining(refuterId, '```json\n{"refuted":true,"evidence":"a.ts:4"}\n```'),
+      ],
+      isFinalMiningAttempt: true,
+      miningWaveExhausted: false,
+    } as unknown as Parameters<typeof codeReviewStep.apply>[1]);
+
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]!.disposition).toBe('dismissed_refuted');
+    expect(recorded[0]!.dispositionSource).toBe('refuter');
+    expect(recorded[0]!.dispositionAt).toBeInstanceOf(Date);
+    expect(recorded[0]!.blocking).toBe(false);
+  });
+
+  it('refutes a security finding and downgrades VULNERABLE to NEEDS_FIXES', async () => {
+    const vulnerable =
+      '```json\n{"verdict":"VULNERABLE","findings":[{"severity":"critical","path":"c.ts","line":9,"issue":"sqli","fix":"bind"}]}\n```';
+    const sqliId = collectRefutable(
+      { findings: [] },
+      { findings: [{ severity: 'critical', path: 'c.ts', line: 9, issue: 'sqli', fix: 'bind' }] },
+      [],
+    )[0]!.agentId;
+    const out = await firstPass([
+      mining('peer-reviewer', '```json\n{"verdict":"APPROVE","findings":[],"positives":[]}\n```'),
+      mining('security-code-reviewer', vulnerable),
+      mining(
+        sqliId,
+        '```json\n{"refuted":true,"evidence":"c.ts:9 uses a prepared statement"}\n```',
+      ),
+    ]);
+    expect(out.refutedCount).toBe(1);
+    expect(out.security.verdict).toBe('NEEDS_FIXES');
+    expect(out.blocking).toBe(false);
   });
 });

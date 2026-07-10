@@ -443,6 +443,24 @@ adminRoutes.put('/config/review-fanout-distill', async (c) => {
   return c.json({ enabled });
 });
 
+const reviewRefuteSchema = z.object({ enabled: z.boolean() });
+
+// Refutation pass over blocking code-review findings (default ON). A blocking finding
+// costs one of the capped fix rounds, so a refuter is asked to disprove it first; only
+// positive, cited evidence dismisses it. The worker reads this per 08c apply (~30s config
+// cache), so a flip applies to the next review, not a running one.
+adminRoutes.get('/config/review-refute', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.REVIEW_REFUTE_ENABLED, true);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/review-refute', async (c) => {
+  const { enabled } = reviewRefuteSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.REVIEW_REFUTE_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'global review-refute switch updated');
+  return c.json({ enabled });
+});
+
 const browserAccessSchema = z.object({ enabled: z.boolean() });
 
 // Global direct-browser-access kill-switch. The worker reads this at runner START

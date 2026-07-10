@@ -190,6 +190,15 @@ export const CONFIG_KEYS = {
   // can't dedup the fan-out (separate sessions), so this is the only lever — kept off by
   // default until token metrics justify it.
   REVIEW_FANOUT_DISTILL: 'config:output:reviewFanoutDistill',
+
+  // Refutation pass over 08c's BLOCKING review findings (default ON). Each such finding
+  // routes the change back through implementation and costs one of the capped fix
+  // rounds, so before that happens a refuter per finding is asked to disprove it against
+  // the code. A finding is dismissed only on positive, cited evidence that it is wrong;
+  // an uncertain, unparseable or failed refuter leaves it standing. Costs one extra CLI
+  // invocation per blocking finding, only in a round that has one. Set 'false' to block
+  // on the reviewers' word alone. Read per 08c apply (~30s config cache).
+  REVIEW_REFUTE_ENABLED: 'config:review:refuteEnabled',
 } as const;
 
 /** Allowed terseness levels for CONFIG_KEYS.TERSENESS_LEVEL (output prose only). */
@@ -240,6 +249,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS]: '2560',
   [CONFIG_KEYS.TERSENESS_LEVEL]: 'full',
   [CONFIG_KEYS.REVIEW_FANOUT_DISTILL]: 'false',
+  [CONFIG_KEYS.REVIEW_REFUTE_ENABLED]: 'true',
 };
 
 export class ConfigService {

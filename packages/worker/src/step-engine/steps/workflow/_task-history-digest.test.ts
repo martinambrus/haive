@@ -76,6 +76,38 @@ describe('renderTaskHistoryDigest', () => {
     expect(d.text).toContain('Connection refused');
   });
 
+  it('skips 08c findings a refuter disproved', () => {
+    // A refuted finding was shown to be wrong against the code. It is not a lesson the
+    // next task should carry, and it must not raise the digest tier.
+    const d = renderTaskHistoryDigest(
+      [
+        step('08c-code-review', 1, {
+          peer: {
+            findings: [
+              { severity: 'critical', path: 'a.ts', issue: 'npe', refuted: true },
+              { severity: 'high', path: 'b.ts', issue: 'race' },
+            ],
+          },
+          security: {
+            findings: [{ severity: 'critical', path: 'db.php', issue: 'sqli', refuted: true }],
+          },
+          extraLenses: [
+            {
+              id: 'operational-reviewer',
+              findings: [{ severity: 'high', path: 'c.ts', issue: 'no logs', refuted: true }],
+            },
+          ],
+        }),
+      ],
+      [],
+    );
+    expect(d.findingCount).toBe(1);
+    expect(d.text).toContain('race');
+    expect(d.text).not.toContain('npe');
+    expect(d.text).not.toContain('sqli');
+    expect(d.text).not.toContain('no logs');
+  });
+
   it('prioritizes critical/high and caps lower-severity findings with a tail', () => {
     const issues: Array<Record<string, unknown>> = [];
     for (let i = 0; i < 50; i += 1) {
