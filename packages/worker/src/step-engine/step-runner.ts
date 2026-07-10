@@ -1009,6 +1009,7 @@ async function dispatchMiningAgents(
       spec: plan.invocation.spec,
       timeoutMs: spec.timeoutMs,
       agentMiningId: miningId,
+      softTimeout: spec.softTimeout === true,
     });
     enqueued++;
   }

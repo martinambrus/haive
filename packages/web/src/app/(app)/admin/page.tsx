@@ -32,6 +32,9 @@ export default function AdminPage() {
   const [savingConcurrency, setSavingConcurrency] = useState(false);
   const [steeringEnabled, setSteeringEnabled] = useState<boolean | null>(null);
   const [savingSteering, setSavingSteering] = useState(false);
+  const [softTimeoutEnabled, setSoftTimeoutEnabled] = useState<boolean | null>(null);
+  const [softTimeoutPercentInput, setSoftTimeoutPercentInput] = useState('');
+  const [savingSoftTimeout, setSavingSoftTimeout] = useState(false);
   const [usageWindowEnabled, setUsageWindowEnabled] = useState<boolean | null>(null);
   const [savingUsageWindow, setSavingUsageWindow] = useState(false);
   const [ideEnabled, setIdeEnabled] = useState<boolean | null>(null);
@@ -69,6 +72,7 @@ export default function AdminPage() {
         healthData,
         concurrencyData,
         steeringData,
+        softTimeoutData,
         ideData,
         debugModeData,
         browserAccessData,
@@ -87,6 +91,7 @@ export default function AdminPage() {
         api.get<AdminHealthResponse>('/admin/health'),
         api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
         api.get<{ enabled: boolean }>('/admin/config/steering'),
+        api.get<{ enabled: boolean; percent: number }>('/admin/config/cli-soft-timeout'),
         api.get<{ enabled: boolean }>('/admin/config/ide'),
         api.get<{ enabled: boolean }>('/admin/config/debug-mode'),
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
@@ -106,6 +111,8 @@ export default function AdminPage() {
       setMaxParallel(concurrencyData.maxParallelAgents);
       setMaxParallelInput(String(concurrencyData.maxParallelAgents));
       setSteeringEnabled(steeringData.enabled);
+      setSoftTimeoutEnabled(softTimeoutData.enabled);
+      setSoftTimeoutPercentInput(String(softTimeoutData.percent));
       setIdeEnabled(ideData.enabled);
       setDebugModeEnabled(debugModeData.enabled);
       setBrowserAccessEnabled(browserAccessData.enabled);
@@ -244,6 +251,30 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update steering');
     } finally {
       setSavingSteering(false);
+    }
+  }
+
+  // Enabled and percent share one endpoint, so the toggle re-sends the current percent
+  // and the Save button re-sends the current enabled flag.
+  async function saveSoftTimeout(enabled: boolean, percentRaw: string) {
+    const percent = Number.parseInt(percentRaw, 10);
+    if (!Number.isFinite(percent) || percent < 1 || percent > 99) {
+      setError('Soft timeout percent must be between 1 and 99.');
+      return;
+    }
+    setSavingSoftTimeout(true);
+    try {
+      const result = await api.put<{ enabled: boolean; percent: number }>(
+        '/admin/config/cli-soft-timeout',
+        { enabled, percent },
+      );
+      setSoftTimeoutEnabled(result.enabled);
+      setSoftTimeoutPercentInput(String(result.percent));
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update soft timeout');
+    } finally {
+      setSavingSoftTimeout(false);
     }
   }
 
@@ -624,6 +655,54 @@ export default function AdminPage() {
             {steeringEnabled ? 'Enabled' : 'Disabled'}
             {savingSteering && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
+        </Card>
+      )}
+
+      {softTimeoutEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>CLI soft timeout</CardTitle>
+            <CardDescription>
+              A CLI that hits its timeout is SIGKILLed with no grace, so a reviewer that runs its
+              full budget loses everything it found. At the percentage below, the worker steers the
+              CLI to stop investigating and emit only the findings it has already verified.
+              Delivered as a steering message, so it reaches Claude-family CLIs only, and only while
+              mid-run steering is enabled above. Read at invocation start; a change applies to the
+              next invocation, not a running one.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={softTimeoutEnabled}
+              disabled={savingSoftTimeout}
+              onChange={(e) => void saveSoftTimeout(e.target.checked, softTimeoutPercentInput)}
+              className="h-4 w-4"
+            />
+            {softTimeoutEnabled ? 'Enabled' : 'Disabled'}
+            {savingSoftTimeout && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+          <div className="mt-3 flex items-end gap-2">
+            <label className="flex flex-col gap-1 text-xs text-neutral-400">
+              Wind-down at (% of budget)
+              <input
+                type="number"
+                min={1}
+                max={99}
+                value={softTimeoutPercentInput}
+                onChange={(e) => setSoftTimeoutPercentInput(e.target.value)}
+                className="w-24 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+              />
+            </label>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={savingSoftTimeout}
+              onClick={() => void saveSoftTimeout(softTimeoutEnabled, softTimeoutPercentInput)}
+            >
+              {savingSoftTimeout ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
         </Card>
       )}
 

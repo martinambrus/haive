@@ -244,6 +244,8 @@ describe('advanceStep agentMining retry', () => {
     expect(enqueued).toHaveLength(1);
     expect(enqueued[0]!.kind).toBe('agent_mining');
     expect(enqueued[0]!.agentMiningId).toBe('mining-peer-reviewer');
+    // the step declares no softTimeout, so the re-roll must not opt into one either
+    expect(enqueued[0]!.softTimeout).toBe(false);
 
     // the peer row goes back to pending with attempts bumped; the security row is untouched
     const miningUpdates = state.updates.filter((u) => u.table === 'task_step_agent_minings');

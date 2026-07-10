@@ -345,6 +345,32 @@ adminRoutes.put('/config/steering', async (c) => {
   return c.json({ enabled });
 });
 
+const softTimeoutSchema = z.object({
+  enabled: z.boolean(),
+  // 1..99: at 0 the wind-down lands before the CLI reads anything, at 100 after the
+  // SIGKILL. Integer because configService.getNumber parses with parseInt.
+  percent: z.number().int().min(1).max(99),
+});
+
+// Soft timeout before the hard SIGKILL, for steerable (Claude-family) invocations.
+// At `percent` of the invocation's timeout budget the worker steers the CLI to stop
+// investigating and emit its verified findings. Read once per invocation at spawn
+// (within the ~30s config cache), so a flip applies to the next invocation, not the
+// running one.
+adminRoutes.get('/config/cli-soft-timeout', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.CLI_SOFT_TIMEOUT_ENABLED, true);
+  const percent = await configService.getNumber(CONFIG_KEYS.CLI_SOFT_TIMEOUT_PERCENT, 80);
+  return c.json({ enabled, percent });
+});
+
+adminRoutes.put('/config/cli-soft-timeout', async (c) => {
+  const { enabled, percent } = softTimeoutSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.CLI_SOFT_TIMEOUT_ENABLED, enabled ? 'true' : 'false');
+  await configService.set(CONFIG_KEYS.CLI_SOFT_TIMEOUT_PERCENT, String(percent));
+  log.info({ enabled, percent }, 'cli soft timeout updated');
+  return c.json({ enabled, percent });
+});
+
 const usageWindowSchema = z.object({ enabled: z.boolean() });
 
 // Global kill-switch for the subscription usage-window display. When ON (default),

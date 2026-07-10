@@ -95,6 +95,24 @@ export const CONFIG_KEYS = {
   // toggle — there is no per-repo flag.
   STEERING_ENABLED: 'config:steering:enabled',
 
+  // Soft timeout for steerable CLI invocations (default ON). The hard timeout is a
+  // zero-grace SIGKILL, so a reviewer killed at its budget loses every finding it
+  // made. At CLI_SOFT_TIMEOUT_PERCENT of the budget the worker publishes a wind-down
+  // to the invocation's steer channel (CLI_SOFT_TIMEOUT_WIND_DOWN): stop investigating,
+  // emit the verified findings now. Set 'false' to go back to the bare hard kill.
+  //
+  // Steer-delivered, so it reaches ONLY invocations that are actually steerable —
+  // Claude-family adapters, and only while STEERING_ENABLED is on. Non-steerable
+  // adapters (codex, gemini, amp, antigravity) are unaffected either way.
+  CLI_SOFT_TIMEOUT_ENABLED: 'config:cli:softTimeoutEnabled',
+  // Percent of the invocation's timeout budget at which the wind-down fires (default
+  // 80). An integer, not a fraction, because configService.getNumber parses with
+  // parseInt — 0.8 would read as 0 and fire the wind-down instantly. Clamped to
+  // 1..99: at 0 or 100 the wind-down is either useless or unsendable, so both
+  // disable it. Steers apply at the next tool-call boundary, so the remaining
+  // percent must cover a boundary plus the JSON write (20% of 30min = 6 min).
+  CLI_SOFT_TIMEOUT_PERCENT: 'config:cli:softTimeoutPercent',
+
   // Global kill-switch for the subscription usage-window display (claude-hud-style
   // 5h/weekly meters in the task header). When 'true' (default), a gentle background
   // poller reads each logged-in provider's (undocumented) usage endpoint and the task
@@ -201,6 +219,8 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.SANDBOX_NETWORK]: 'haive-network',
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
   [CONFIG_KEYS.STEERING_ENABLED]: 'true',
+  [CONFIG_KEYS.CLI_SOFT_TIMEOUT_ENABLED]: 'true',
+  [CONFIG_KEYS.CLI_SOFT_TIMEOUT_PERCENT]: '80',
   [CONFIG_KEYS.USAGE_WINDOW_ENABLED]: 'true',
   [CONFIG_KEYS.IDE_ENABLED]: 'true',
   [CONFIG_KEYS.DEBUG_MODE_ENABLED]: 'true',

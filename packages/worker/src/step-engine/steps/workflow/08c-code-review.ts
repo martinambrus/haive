@@ -606,6 +606,9 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
   agentMining: {
     requiredCapabilities: ['tool_use'],
     timeoutMs: REVIEW_TIMEOUT_MS,
+    // A reviewer SIGKILLed at 30 minutes loses every finding it made. Steer it to bank
+    // the verified ones first. Safe here because a reviewer only reads and reports.
+    softTimeout: true,
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       // Mining has no bypass stub; under test bypass return [] so the smoke
       // doesn't enqueue real CLI jobs (mirrors 03-discovery's empty-persona path).

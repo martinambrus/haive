@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
+  CLI_SOFT_TIMEOUT_WIND_DOWN,
   CONFIG_KEYS,
   STEER_IN_CHANNEL_PREFIX,
   configService,
@@ -10,7 +11,7 @@ import {
   type CliProviderName,
   type CliTokenUsage,
 } from '@haive/shared';
-import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
+import { DEFAULT_RUN_TIMEOUT_MS, type DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliCommandSpec } from '../../cli-adapters/types.js';
@@ -210,6 +211,7 @@ export async function executeByKind(
         payload.invocationId ?? null,
         mcp.extraArgs,
         makeUsageSnapshotPersister(db, payload.invocationId),
+        payload.softTimeout === true,
       );
     }
     case 'subagent_sequential':
@@ -249,6 +251,7 @@ export async function executeCliSpec(
   invocationId: string | null = null,
   mcpExtraArgs: string[] = [],
   onUsageSnapshot?: (usage: CliTokenUsage | null) => void,
+  softTimeout = false,
 ): Promise<ExecutionOutcome> {
   const mergedSpec: CliCommandSpec = {
     ...spec,
@@ -346,6 +349,19 @@ export async function executeCliSpec(
     };
     await sub.subscribe(channel);
   }
+  // Soft timeout: the hard one is a zero-grace SIGKILL, so a reviewer that runs its full
+  // budget loses every finding it made. Well before that, ask it to bank the verified
+  // ones. Opt-in per invocation, because for a step that WRITES (code, files, skills) an
+  // early "emit now" turns a loud timeout into a silent partial success — strictly worse
+  // than the kill. Published to the SAME steer channel rather than written straight to
+  // the captured stdin: that reuses the forwarder's sawResult latch, its
+  // writable.writable guard and its EPIPE swallow. It also stays out of the api's steer
+  // route, which would write a `steering.nudge` task_event — _task-history-digest reads
+  // those as a human-friction signal, and an automated wind-down is not friction.
+  const softTimeoutTimer =
+    steerable && invocationId && softTimeout
+      ? await scheduleSoftTimeout(invocationId, timeoutMs)
+      : null;
 
   const collector = createStreamJsonCollector(
     statusCallback,
@@ -390,6 +406,7 @@ export async function executeCliSpec(
     });
   } finally {
     if (usageTimer) clearInterval(usageTimer);
+    if (softTimeoutTimer) clearTimeout(softTimeoutTimer);
     if (steer) steer.teardown();
   }
   const streamLog = streamBuf.join('');
@@ -682,6 +699,61 @@ function extractStdinPromptText(stdinInitial: string): string {
   } catch {
     return '';
   }
+}
+
+/** Delay before the wind-down fires, or null when it must not fire at all.
+ *
+ *  Null at percent <= 0 (the wind-down would land before the CLI has read anything)
+ *  and at percent >= 100 (it would land after the SIGKILL). A non-integer or NaN
+ *  percent cannot reach here: configService.getNumber parses with parseInt and falls
+ *  back to the default. A zero or negative budget has no room for a wind-down. */
+export function softTimeoutDelayMs(timeoutMs: number, percent: number): number | null {
+  if (percent <= 0 || percent >= 100 || timeoutMs <= 0) return null;
+  const delay = Math.floor((timeoutMs * percent) / 100);
+  return delay > 0 ? delay : null;
+}
+
+/** Arm the wind-down for a steerable invocation. Returns the timer so the caller can
+ *  clear it once the CLI exits, or null when the soft timeout is off / mistuned.
+ *  Best-effort: a config or publish failure must never fail the invocation. */
+async function scheduleSoftTimeout(
+  invocationId: string,
+  timeoutMs: number | undefined,
+): Promise<ReturnType<typeof setTimeout> | null> {
+  let enabled: boolean;
+  let percent: number;
+  try {
+    enabled = await configService.getBoolean(CONFIG_KEYS.CLI_SOFT_TIMEOUT_ENABLED, true);
+    percent = await configService.getNumber(CONFIG_KEYS.CLI_SOFT_TIMEOUT_PERCENT, 80);
+  } catch {
+    return null;
+  }
+  if (!enabled) return null;
+  // An invocation that named no timeout still gets one: the runner's default, which it
+  // will SIGKILL on. Wind down against that, not against a step's absent number.
+  const budgetMs = timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
+  const delayMs = softTimeoutDelayMs(budgetMs, percent);
+  if (delayMs === null) {
+    log.warn({ invocationId, percent, budgetMs }, 'soft timeout skipped: percent out of range');
+    return null;
+  }
+  return setTimeout(() => {
+    // Whole body guarded: getRedis() THROWS when redis is uninitialized, and it throws
+    // synchronously, before .publish() can attach a .catch(). An uncaught throw inside
+    // a timer callback takes down the worker process, and a missed wind-down is a lost
+    // review, not a lost worker.
+    try {
+      // id '' marks it as not a user steer. publishCliSteerConsumed drops an empty
+      // steerId, so the wind-down never ticks a row in the user's steer list.
+      const payload = JSON.stringify({ id: '', text: CLI_SOFT_TIMEOUT_WIND_DOWN });
+      void getRedis()
+        .publish(`${STEER_IN_CHANNEL_PREFIX}${invocationId}`, payload)
+        .then(() => log.info({ invocationId, delayMs, percent }, 'soft timeout: wind-down sent'))
+        .catch((err: unknown) => log.warn({ err, invocationId }, 'soft timeout publish failed'));
+    } catch (err) {
+      log.warn({ err, invocationId }, 'soft timeout publish failed');
+    }
+  }, delayMs);
 }
 
 export function createSandboxSpawner(

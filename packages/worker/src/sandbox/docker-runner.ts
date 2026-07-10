@@ -102,7 +102,10 @@ export interface DockerRunner {
 }
 
 const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60 * 1000;
-const DEFAULT_RUN_TIMEOUT_MS = 2 * 60 * 1000;
+/** Budget an invocation that names no timeout actually gets. Exported so the soft
+ *  timeout winds a CLI down against the budget this runner will SIGKILL it on, not
+ *  against a second copy of the number. */
+export const DEFAULT_RUN_TIMEOUT_MS = 2 * 60 * 1000;
 
 async function spawnAndCollect(
   command: string,

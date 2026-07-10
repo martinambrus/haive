@@ -120,6 +120,11 @@ export interface AgentMiningSpec {
   requiredCapabilities: StepCapability[];
   /** Sandbox timeout per agent invocation. Defaults to step-runner default. */
   timeoutMs?: number;
+  /** Opt in to the soft timeout: shortly before the hard SIGKILL, steer the agent to
+   *  stop investigating and emit only what it has verified. For reviewers, whose
+   *  partial findings beat losing the whole run. NOT for an agent that writes code or
+   *  files — ending one early would look like success. Steerable adapters only. */
+  softTimeout?: boolean;
   /** Re-roll INDIVIDUAL agents whose output apply() could not use — a reviewer that
    *  emitted prose instead of its JSON contract. apply() throws MiningRetryError
    *  naming those agents; the runner re-dispatches only those, leaving the other

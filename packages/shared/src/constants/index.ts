@@ -243,6 +243,12 @@ export interface CliExecJobPayload {
   timeoutMs?: number;
   /** For kind='agent_mining': the task_step_agent_minings.id row to update with results. */
   agentMiningId?: string;
+  /** Opt in to the soft timeout (CLI_SOFT_TIMEOUT_WIND_DOWN before the hard SIGKILL).
+   *  Set only by steps whose PARTIAL output is worth more than a clean failure — a
+   *  reviewer's verified findings. Never by a step that writes code or files: winding
+   *  one down early turns a loud timeout into a silent partial success, which is the
+   *  worse of the two. Honored only for a steerable invocation. */
+  softTimeout?: boolean;
   /** Marks a best-effort per-step summarizer invocation: its completion writes
    *  task_steps.summary (for summaryForStepId) and does NOT resume the step machine. */
   purpose?: 'step_summary';
@@ -380,6 +386,22 @@ export const TERMINAL_CTL_CHANNEL_PREFIX = 'terminal:ctl:';
  *  as an NDJSON user-message (applied at the next tool-call boundary). Body is
  *  the raw steer text. */
 export const STEER_IN_CHANNEL_PREFIX = 'steer:in:';
+/** Wind-down the worker publishes to a steerable invocation's steer channel once it has
+ *  burned CLI_SOFT_TIMEOUT_PERCENT of its timeout budget, for the invocations that opt
+ *  in via CliExecJobPayload.softTimeout. The hard timeout is a zero-grace SIGKILL, so a
+ *  reviewer that runs the full budget loses everything it found; this asks it to bank
+ *  the verified findings while it still can.
+ *
+ *  Deliberately worded as an instruction to stop investigating rather than to hurry: a
+ *  model told to hurry speculates, and a speculative blocking finding costs a fix round.
+ *  Reaches the CLI as an ordinary steer, so it applies at the next tool-call boundary —
+ *  the unspent remainder of the budget is the headroom for that boundary plus the write. */
+export const CLI_SOFT_TIMEOUT_WIND_DOWN =
+  'TIME BUDGET NEARLY SPENT. Stop investigating now and start no new tool calls. ' +
+  'Emit your final JSON output immediately, containing ONLY the findings you have ' +
+  'already verified against the code. Drop anything speculative or unconfirmed — an ' +
+  'unverified finding is worse than a missing one. Do not summarise, do not explain, ' +
+  'just emit the JSON.';
 /** Pub/sub channel the api publishes to when MAX_PARALLEL_AGENTS changes, so the
  *  worker live-retunes the cli-exec queue concurrency without a restart. Body is
  *  the new clamped integer as a string. */

@@ -275,6 +275,9 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
   agentMining: {
     requiredCapabilities: ['tool_use'],
     timeoutMs: QA_TIMEOUT_MS,
+    // Same bargain as 08c: an adversary's confirmed exploits are worth banking before
+    // the SIGKILL. Its proofs are non-destructive, so it writes nothing to lose.
+    softTimeout: true,
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       // No bypass stub for mining; return [] under test bypass (08c pattern).
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
