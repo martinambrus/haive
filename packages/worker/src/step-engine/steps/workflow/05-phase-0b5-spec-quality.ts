@@ -6,6 +6,8 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
+import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
+import type { ReviewSeverity } from '@haive/shared/review';
 
 interface SpecQualityDetect {
   specSummary: string;
@@ -38,7 +40,7 @@ function roleForIteration(iteration: number): string {
 
 interface QualityFinding {
   dimension: string;
-  severity: 'info' | 'warn' | 'error';
+  severity: ReviewSeverity;
   comment: string;
 }
 
@@ -83,9 +85,13 @@ const QUALITY_DIMENSIONS = [
   'documentation_updates',
 ];
 
-function coerceSeverity(value: unknown): QualityFinding['severity'] {
-  if (value === 'error' || value === 'warn' || value === 'info') return value;
-  return 'info';
+/** The spec reviewer emits only `high` (blocking gap) and `medium` (non-blocking);
+ *  anything else — including the pre-ladder `error`/`warn`/`info` a repo's
+ *  checked-in spec-quality-reviewer persona still specifies — is coerced. The
+ *  fallback is deliberately below the blocking tier: an unrecognised severity must
+ *  not keep the review/correct loop running. */
+function coerceSeverity(value: unknown): ReviewSeverity {
+  return coerceReviewSeverity(value, 'low');
 }
 
 export interface SpecQualityParseResult {
@@ -152,14 +158,14 @@ export function parseCorrectorOutput(raw: unknown): { amendedSpec: string | null
   return null;
 }
 
-function coerceVerdict(value: unknown, hasError: boolean): SpecVerdict {
+function coerceVerdict(value: unknown, hasBlockingFinding: boolean): SpecVerdict {
   if (value === 'APPROVED' || value === 'NEEDS_REVISION' || value === 'BLOCKING_AMBIGUITY') {
     return value;
   }
-  // Derive when the model omitted an explicit verdict: only ERROR findings (real
-  // gaps/bugs) force a revision. Warn/info are non-blocking polish, so the spec is
-  // clean enough to approve and the loop must not keep chasing them.
-  return hasError ? 'NEEDS_REVISION' : 'APPROVED';
+  // Derive when the model omitted an explicit verdict: only blocking-tier findings
+  // (real gaps/bugs) force a revision. Medium/low are non-blocking polish, so the
+  // spec is clean enough to approve and the loop must not keep chasing them.
+  return hasBlockingFinding ? 'NEEDS_REVISION' : 'APPROVED';
 }
 
 function normaliseResult(
@@ -181,9 +187,9 @@ function normaliseResult(
       comment,
     });
   }
-  const hasError = items.some((f) => f.severity === 'error');
+  const hasBlockingFinding = items.some((f) => isBlockingSeverity(f.severity));
   return {
-    verdict: coerceVerdict(rawVerdict, hasError),
+    verdict: coerceVerdict(rawVerdict, hasBlockingFinding),
     score: clamped,
     findings: items,
     amendedSpec,
@@ -279,7 +285,7 @@ export function resolveReviewResult(
   best: SpecQualityApply | null,
 ): SpecQualityApply {
   const hasHardSignal =
-    current.findings.some((f) => f.severity === 'error') ||
+    current.findings.some((f) => isBlockingSeverity(f.severity)) ||
     current.verdict === 'BLOCKING_AMBIGUITY';
   if (!hasHardSignal && best && iterationRank(best) > iterationRank(current)) {
     return { ...current, verdict: best.verdict, score: best.score };
@@ -321,14 +327,14 @@ const REVIEW_RULES = [
   '"could be clearer" polish — those burn the token budget on diminishing returns. When in',
   'doubt, leave it out.',
   '',
-  'Severity — by IMPACT, not by how much you could nitpick:',
-  '- error: a real gap or bug that would cause a wrong, incomplete, or blocked implementation.',
+  'Severity — by IMPACT, not by how much you could nitpick. Use ONLY these two:',
+  '- high: a real gap or bug that would cause a wrong, incomplete, or blocked implementation.',
   '  These are the ONLY findings the review/correct loop keeps iterating on.',
-  '- warn: a genuine but non-blocking gap worth a quick fix. Use sparingly; warns NEVER block',
-  '  approval. Omit it rather than stretch to invent one.',
-  '- Do NOT emit info / cosmetic / style findings at all.',
+  '- medium: a genuine but non-blocking gap worth a quick fix. Use sparingly; medium findings',
+  '  NEVER block approval. Omit one rather than stretch to invent it.',
+  '- Do NOT emit low / cosmetic / style findings at all, and do NOT use "critical" here.',
   '- Exception to the style bar: a missing or malformed final `## Comprehension Quiz` section',
-  '  IS a warn finding (the gate-1 reviewer relies on it).',
+  '  IS a medium finding (the gate-1 reviewer relies on it).',
   '',
   'Codebase cross-check — for every file, function, or "follow the pattern from X" claim in',
   'the spec, confirm it actually exists and does what the spec says, in this order:',
@@ -338,20 +344,20 @@ const REVIEW_RULES = [
   'OUTPUT FORMAT IS STRICT: reply with a SINGLE JSON object inside one ```json fence. Do',
   'NOT use YAML, do NOT add prose, and do NOT use any keys other than verdict/score/findings.',
   'The first non-whitespace character inside the fence MUST be "{". severity MUST be exactly',
-  '"warn" or "error".',
+  '"medium" or "high".',
   'Emit ONE JSON object inside a ```json fenced code block with the shape:',
   '{',
   '  "verdict": "APPROVED" | "NEEDS_REVISION" | "BLOCKING_AMBIGUITY",',
   '  "score": <integer 0-10>,',
-  '  "findings": [ { "dimension": "<dimension or \\"ambiguity\\">", "severity": "warn|error", "comment": "<text; cite the spec section or file:line>" } ]',
+  '  "findings": [ { "dimension": "<dimension or \\"ambiguity\\">", "severity": "medium|high", "comment": "<text; cite the spec section or file:line>" } ]',
   '}',
   'Do NOT include an amendedSpec — the corrector applies the fixes.',
   '',
   'Verdict rules — approve as soon as the spec is implementable; do not chase perfection:',
-  '- APPROVED: no error findings and no blocking ambiguity — the spec can be implemented',
-  '  without guessing wrong. Emit APPROVED even if minor warn notes remain; they must NOT',
+  '- APPROVED: no high findings and no blocking ambiguity — the spec can be implemented',
+  '  without guessing wrong. Emit APPROVED even if minor medium notes remain; they must NOT',
   '  keep the loop running.',
-  '- NEEDS_REVISION: at least one error-level gap exists that the corrector can fix.',
+  '- NEEDS_REVISION: at least one high-severity gap exists that the corrector can fix.',
   "- BLOCKING_AMBIGUITY: the spec's intent itself is unclear (references missing code, or",
   '  "which X?" with several candidates) so a human must clarify — put the blocking',
   '  questions in findings.',

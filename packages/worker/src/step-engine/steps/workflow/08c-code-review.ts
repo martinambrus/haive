@@ -16,6 +16,8 @@ import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { CONFIG_KEYS, configService } from '@haive/shared';
+import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
+import type { ReviewSeverity } from '@haive/shared/review';
 
 // Phase 6 — Code review (legacy phase6-code-review.md). After test management
 // and before gate 2, two reviewers run IN PARALLEL via agent mining: a
@@ -47,7 +49,7 @@ interface CodeReviewDetect {
 }
 
 interface PeerFinding {
-  severity: string;
+  severity: ReviewSeverity;
   path?: string;
   lines?: string;
   issue: string;
@@ -55,7 +57,7 @@ interface PeerFinding {
   fix?: string;
 }
 interface SecurityFinding {
-  severity: string;
+  severity: ReviewSeverity;
   in_scope?: string;
   path?: string;
   line?: string | number;
@@ -83,12 +85,18 @@ interface CodeReviewApply {
   counts: { peer: number; securityCriticalHigh: number };
 }
 
+// Severity is coerced, not enum-validated: a repo's checked-in reviewer persona may
+// still specify a pre-ladder vocabulary, and a strict enum would fail the whole
+// finding rather than the one field. Unknown values land on the fallback.
 const peerSchema = z.object({
   verdict: z.enum(['APPROVE', 'REQUEST_CHANGES', 'DISCUSS']).optional(),
   findings: z
     .array(
       z.object({
-        severity: z.string().default('suggestion'),
+        severity: z
+          .unknown()
+          .optional()
+          .transform((v) => coerceReviewSeverity(v, 'low')),
         path: z.string().optional(),
         lines: z.string().optional(),
         issue: z.string(),
@@ -105,7 +113,10 @@ const securitySchema = z.object({
   findings: z
     .array(
       z.object({
-        severity: z.string().default('low'),
+        severity: z
+          .unknown()
+          .optional()
+          .transform((v) => coerceReviewSeverity(v, 'low')),
         in_scope: z.string().optional(),
         path: z.string().optional(),
         line: z.union([z.string(), z.number()]).optional(),
@@ -126,7 +137,10 @@ const reviewLensSchema = z.object({
   findings: z
     .array(
       z.object({
-        severity: z.string().default('suggestion'),
+        severity: z
+          .unknown()
+          .optional()
+          .transform((v) => coerceReviewSeverity(v, 'low')),
         path: z.string().optional(),
         lines: z.string().optional(),
         issue: z.string(),
@@ -175,32 +189,46 @@ export function parseReviewLens(raw: unknown): { verdict: string; findings: Peer
   return { verdict: parsed.data.verdict ?? 'DISCUSS', findings: parsed.data.findings };
 }
 
-/** A review result is blocking when peer requests changes, security is
- *  vulnerable, any security finding is critical/high, or an extra review lens
- *  (operational/performance) requests changes. */
+/** A review result is blocking when peer requests changes, security is vulnerable,
+ *  or ANY reviewer raised a critical/high finding.
+ *
+ *  Blocking costs a fix round, so it keys on the severity ladder rather than on a
+ *  reviewer's summary verdict. Two consequences, both deliberate:
+ *  - a peer `critical` finding blocks on its own, even under an APPROVE/DISCUSS
+ *    verdict (it previously did not);
+ *  - an extra lens (operational/performance/simplicity) no longer blocks on its
+ *    verdict alone — a lens that requests changes over `medium`/`low` findings
+ *    surfaces as advisory at gate 2 instead of burning a fix round.
+ */
 export function computeBlocking(
-  peer: { verdict: string } | null,
-  security: { verdict: string; findings: SecurityFinding[] } | null,
-  lenses: { verdict: string }[] = [],
+  peer: { verdict: string; findings?: { severity: ReviewSeverity }[] } | null,
+  security: { verdict: string; findings: { severity: ReviewSeverity }[] } | null,
+  lenses: { verdict: string; findings?: { severity: ReviewSeverity }[] }[] = [],
 ): boolean {
   if (peer?.verdict === 'REQUEST_CHANGES') return true;
   if (security?.verdict === 'VULNERABLE') return true;
-  if (
-    security?.findings.some((f) => {
-      const s = (f.severity ?? '').toLowerCase();
-      return s === 'critical' || s === 'high';
-    })
-  ) {
-    return true;
-  }
-  if (lenses.some((l) => l.verdict === 'REQUEST_CHANGES')) return true;
-  return false;
+  const findings = [
+    ...(peer?.findings ?? []),
+    ...(security?.findings ?? []),
+    ...lenses.flatMap((l) => l.findings ?? []),
+  ];
+  return findings.some((f) => isBlockingSeverity(f.severity));
 }
 
 const SEARCH_LADDER = [
   'When you need conventions or context, search in this order:',
   ...retrievalGuidanceLines(),
 ] as const;
+
+// Reviewers pick the severity; severity picks whether the change goes back to the
+// implementer. Say so, so critical/high stay a judgement about impact rather than a
+// way to add emphasis.
+const SEVERITY_GUIDANCE = [
+  'Severity decides what happens next: a "critical" or "high" finding sends the change back to be',
+  'reimplemented, while "medium" and "low" surface to the developer as advisory. Reserve',
+  'critical/high for a defect that would break behaviour, lose data, or expose a vulnerability —',
+  'not for emphasis. When a finding is real but the code would still work, it is medium or low.',
+].join('\n');
 
 const PEER_PERSONA = [
   'You are the Peer Reviewer. Catch bugs and improve quality before merge while keeping feedback',
@@ -219,7 +247,7 @@ const PEER_PERSONA = [
   'happy path, ask these four questions of the diff and raise anything it fails as a finding:',
   QA_LENS_NUMBERED,
   'Every finding needs a file + line, the offending code snippet, and a concrete fix (with a code',
-  'example where it helps); mark critical issues critical (never soften to a suggestion). Report',
+  'example where it helps); mark critical issues critical (never soften to low). Report',
   'EVERY finding in full — never just counts. Do NOT edit code and do NOT run git (it is',
   'unavailable here — work from the changed-files list and read them directly).',
 ] as const;
@@ -380,7 +408,8 @@ function buildPeerPrompt(d: CodeReviewDetect): string {
     reviewAssignment(d),
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
-    '{ "verdict": "APPROVE|REQUEST_CHANGES|DISCUSS", "findings": [{ "severity": "critical|warning|suggestion", "path": "file", "lines": "start-end", "issue": "...", "snippet": "<offending code>", "fix": "..." }], "positives": ["..."] }',
+    '{ "verdict": "APPROVE|REQUEST_CHANGES|DISCUSS", "findings": [{ "severity": "critical|high|medium|low", "path": "file", "lines": "start-end", "issue": "...", "snippet": "<offending code>", "fix": "..." }], "positives": ["..."] }',
+    SEVERITY_GUIDANCE,
   ].join('\n');
 }
 
@@ -394,6 +423,7 @@ function buildSecurityPrompt(d: CodeReviewDetect): string {
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
     '{ "verdict": "SECURE|NEEDS_FIXES|VULNERABLE", "findings": [{ "severity": "critical|high|medium|low", "in_scope": "yes|no", "path": "file", "line": 0, "cwe": "id or n/a", "issue": "...", "snippet": "<vulnerable code>", "attack": "...", "fix": "..." }] }',
+    SEVERITY_GUIDANCE,
   ].join('\n');
 }
 
@@ -406,7 +436,8 @@ function buildLensPrompt(lens: ReviewLensDef, d: CodeReviewDetect): string {
     reviewAssignment(d),
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
-    '{ "verdict": "APPROVE|REQUEST_CHANGES|DISCUSS", "findings": [{ "severity": "critical|warning|suggestion", "path": "file", "lines": "start-end", "issue": "...", "snippet": "<offending code>", "fix": "..." }] }',
+    '{ "verdict": "APPROVE|REQUEST_CHANGES|DISCUSS", "findings": [{ "severity": "critical|high|medium|low", "path": "file", "lines": "start-end", "issue": "...", "snippet": "<offending code>", "fix": "..." }] }',
+    SEVERITY_GUIDANCE,
   ].join('\n');
 }
 
@@ -599,12 +630,16 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       );
     }
 
-    const peerOut = peer ?? {
+    // The synthetic "did not complete" findings stay below the blocking tier on
+    // purpose: a reviewer that failed to emit JSON is not evidence the CODE is
+    // wrong, so it must not route the change back to the implementer. It is
+    // non-approving, and the developer decides at gate 2.
+    const peerOut: { verdict: string; findings: PeerFinding[]; positives: string[] } = peer ?? {
       verdict: peerUnparsed ? 'DISCUSS' : 'APPROVE',
       findings: peerUnparsed
         ? [
             {
-              severity: 'warning',
+              severity: 'medium',
               issue:
                 'Peer review output was unparseable — review did not complete; re-run code review.',
             },
@@ -612,7 +647,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         : [],
       positives: [],
     };
-    const securityOut = security ?? {
+    const securityOut: { verdict: string; findings: SecurityFinding[] } = security ?? {
       verdict: securityUnparsed ? 'NEEDS_FIXES' : 'SECURE',
       findings: securityUnparsed
         ? [
@@ -644,7 +679,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
           verdict: 'DISCUSS',
           findings: [
             {
-              severity: 'warning',
+              severity: 'medium',
               issue: `${lens.title} output was unparseable — review did not complete; re-run code review.`,
             },
           ],
@@ -659,11 +694,13 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       });
     }
 
-    const blocking = computeBlocking(peer, security, extraLenses);
-    const securityCriticalHigh = securityOut.findings.filter((f) => {
-      const s = (f.severity ?? '').toLowerCase();
-      return s === 'critical' || s === 'high';
-    }).length;
+    // Block on what we REPORT, not on what parsed: peerOut/securityOut carry the
+    // synthetic findings for an unparseable reviewer, so the blocking decision and
+    // the gate-2 finding list can never disagree.
+    const blocking = computeBlocking(peerOut, securityOut, extraLenses);
+    const securityCriticalHigh = securityOut.findings.filter((f) =>
+      isBlockingSeverity(f.severity),
+    ).length;
 
     ctx.logger.info(
       {

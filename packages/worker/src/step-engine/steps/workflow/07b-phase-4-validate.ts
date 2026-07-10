@@ -9,6 +9,8 @@ import { parseJsonLoose } from '../_fenced-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadHonoredConstraints } from './_fix-loop.js';
+import { coerceReviewSeverity } from '@haive/shared/review';
+import type { ReviewSeverity } from '@haive/shared/review';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { ensureAppServing } from './_app-runtime.js';
 import { startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
@@ -55,7 +57,7 @@ interface ValidateDetect {
 export type ValidationVerdict = 'VALID' | 'ISSUES_FOUND' | 'UNPARSEABLE';
 
 interface ValidationIssue {
-  severity?: string;
+  severity: ReviewSeverity;
   file?: string;
   description: string;
   fix?: string;
@@ -95,7 +97,10 @@ const validatorOutputSchema = z.object({
   issues: z
     .array(
       z.object({
-        severity: z.string().optional(),
+        severity: z
+          .unknown()
+          .optional()
+          .transform((v) => coerceReviewSeverity(v, 'medium')),
         file: z.string().optional(),
         description: z.string(),
         fix: z.string().optional(),
@@ -223,9 +228,8 @@ function buildFindingsSummary(
   if (issues.length > 0) {
     lines.push('', `### Remaining issues (${issues.length})`);
     for (const i of issues) {
-      const sev = i.severity ? `[${i.severity}] ` : '';
       const loc = i.file ? `\`${i.file}\` — ` : '';
-      lines.push(`- ${sev}${loc}${i.description}`);
+      lines.push(`- [${i.severity}] ${loc}${i.description}`);
     }
   }
   if (fixesApplied.length === 0 && issues.length === 0) {
@@ -342,7 +346,7 @@ function outputContract(): string[] {
     'Then emit ONE JSON object inside a ```json fenced code block as the FINAL thing in your',
     'response, with EXACTLY this shape:',
     '{ "verdict": "VALID|ISSUES_FOUND", "summary": "<one paragraph>", "issues": [{ "severity":',
-    '"high|medium|low", "file": "path:line", "description": "...", "fix": "<required fix>" }],',
+    '"critical|high|medium|low", "file": "path:line", "description": "...", "fix": "<required fix>" }],',
     '"dimensions": [{ "name": "Security", "status": "PASS|FAIL|N/A", "note": "<one line>" }] }',
     'verdict VALID = no blocking issues (the dead code you removed and stale callers you fixed do',
     'not count as open issues). verdict ISSUES_FOUND = open issues remain that a fix agent must',
@@ -523,7 +527,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
             ? issues
                 .map(
                   (i, n) =>
-                    `${n + 1}. [${i.severity ?? 'unspecified'}] ${i.file ?? ''} ${i.description}${i.fix ? ` — required fix: ${i.fix}` : ''}`,
+                    `${n + 1}. [${i.severity}] ${i.file ?? ''} ${i.description}${i.fix ? ` — required fix: ${i.fix}` : ''}`,
                 )
                 .join('\n')
             : '(the validator reported issues but provided no list — re-read its report in the spec context and fix what is broken)',

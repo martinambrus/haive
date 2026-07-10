@@ -25,13 +25,13 @@ function pass(applyOutput: SpecQualityApply): StepLoopPassRecord {
 }
 
 describe('resolveReviewResult (regression guard)', () => {
-  it('keeps a lower-scored re-review that surfaces a NEW error finding (no spec rollback)', () => {
+  it('keeps a lower-scored re-review that surfaces a NEW blocking finding (no spec rollback)', () => {
     // Reproduces the live it6 bug: re-review of the corrected spec scored 6 with a new
-    // error finding, but the prior review scored 7. The guard must NOT revert to the
-    // prior (older, shorter) spec — the error finding must drive another correction.
+    // blocking finding, but the prior review scored 7. The guard must NOT revert to the
+    // prior (older, shorter) spec — the blocking finding must drive another correction.
     const current = review({
       score: 6,
-      findings: [{ dimension: 'acceptance_criteria', severity: 'error', comment: 'AC4 fails' }],
+      findings: [{ dimension: 'acceptance_criteria', severity: 'high', comment: 'AC4 fails' }],
       spec: 'CORRECTED SPEC (longer)',
     });
     const best = review({ score: 7, findings: [], spec: 'OLD SHORTER SPEC' });
@@ -39,14 +39,14 @@ describe('resolveReviewResult (regression guard)', () => {
     expect(result).toBe(current);
     expect(result.spec).toBe('CORRECTED SPEC (longer)');
     expect(result.score).toBe(6);
-    expect(result.findings[0]?.severity).toBe('error');
+    expect(result.findings[0]?.severity).toBe('high');
   });
 
-  it('borrows the prior verdict/score on a pure no-error wobble but keeps the corrected spec', () => {
+  it('borrows the prior verdict/score on a pure non-blocking wobble but keeps the corrected spec', () => {
     const current = review({
       verdict: 'NEEDS_REVISION',
       score: 5,
-      findings: [{ dimension: 'documentation_updates', severity: 'warn', comment: 'minor' }],
+      findings: [{ dimension: 'documentation_updates', severity: 'medium', comment: 'minor' }],
       spec: 'CORRECTED SPEC',
     });
     const best = review({ verdict: 'APPROVED', score: 8, findings: [], spec: 'OLD SPEC' });
@@ -55,7 +55,7 @@ describe('resolveReviewResult (regression guard)', () => {
     expect(result.score).toBe(8);
     // spec + findings stay the CURRENT ones — only verdict/score are borrowed.
     expect(result.spec).toBe('CORRECTED SPEC');
-    expect(result.findings[0]?.severity).toBe('warn');
+    expect(result.findings[0]?.severity).toBe('medium');
   });
 
   it('returns the current review unchanged when it already ranks at least as high', () => {

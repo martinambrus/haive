@@ -4,9 +4,9 @@ import type { StepContext } from '../../step-definition.js';
 
 const ctx = {} as unknown as StepContext;
 const base = {
-  findings: ['[WARN] documentation: minor'],
-  warnCount: 1,
-  errorCount: 0,
+  findings: ['[MEDIUM] documentation: minor'],
+  blockingCount: 0,
+  advisoryCount: 1,
   spec: 'SPEC',
   specFilePath: '/workspace/.haive/spec-review.md',
 };

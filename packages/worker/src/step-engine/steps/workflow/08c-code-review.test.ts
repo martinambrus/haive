@@ -49,6 +49,18 @@ describe('parsePeerReview', () => {
     expect(parsePeerReview('no json')).toBeNull();
     expect(parsePeerReview(null)).toBeNull();
   });
+
+  it('parses a finding that omits severity instead of failing the whole review', () => {
+    // The severity key must stay OPTIONAL. Under zod 4 a bare z.unknown() is
+    // non-optional, so one finding without a severity would fail the entire object
+    // and the review would be reported as unparseable.
+    const p = parsePeerReview(
+      '```json\n{"verdict":"DISCUSS","findings":[{"issue":"no sev"}]}\n```',
+    );
+    expect(p).not.toBeNull();
+    expect(p!.findings).toHaveLength(1);
+    expect(p!.findings[0]!.severity).toBe('low');
+  });
 });
 
 describe('parseSecurityReview', () => {
@@ -129,7 +141,16 @@ describe('computeBlocking', () => {
     expect(
       computeBlocking(
         { verdict: 'APPROVE' },
-        { verdict: 'NEEDS_FIXES', findings: [{ severity: 'High', issue: 'x' }] },
+        { verdict: 'NEEDS_FIXES', findings: [{ severity: 'high' }] },
+      ),
+    ).toBe(true);
+  });
+
+  it('blocks on a peer critical finding even under a non-REQUEST_CHANGES verdict', () => {
+    expect(
+      computeBlocking(
+        { verdict: 'DISCUSS', findings: [{ severity: 'critical' }] },
+        { verdict: 'SECURE', findings: [] },
       ),
     ).toBe(true);
   });
@@ -140,8 +161,8 @@ describe('computeBlocking', () => {
     );
     expect(
       computeBlocking(
-        { verdict: 'DISCUSS' },
-        { verdict: 'NEEDS_FIXES', findings: [{ severity: 'medium', issue: 'x' }] },
+        { verdict: 'DISCUSS', findings: [{ severity: 'low' }] },
+        { verdict: 'NEEDS_FIXES', findings: [{ severity: 'medium' }] },
       ),
     ).toBe(false);
   });
@@ -150,10 +171,18 @@ describe('computeBlocking', () => {
     expect(computeBlocking(null, null)).toBe(false);
   });
 
-  it('blocks on an extra lens REQUEST_CHANGES', () => {
+  it('does NOT block on an extra lens REQUEST_CHANGES carrying only advisory findings', () => {
     expect(
       computeBlocking({ verdict: 'APPROVE' }, { verdict: 'SECURE', findings: [] }, [
-        { verdict: 'REQUEST_CHANGES' },
+        { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'medium' }] },
+      ]),
+    ).toBe(false);
+  });
+
+  it('blocks on an extra lens critical/high finding', () => {
+    expect(
+      computeBlocking({ verdict: 'APPROVE' }, { verdict: 'SECURE', findings: [] }, [
+        { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'critical' }] },
       ]),
     ).toBe(true);
   });
@@ -199,13 +228,13 @@ describe('codeReviewStep.apply de-silence', () => {
     expect(out.blocking).toBe(true);
   });
 
-  it('parses an extra review lens into extraLenses and blocks on its REQUEST_CHANGES', async () => {
+  it('parses an extra review lens into extraLenses without blocking on its verdict alone', async () => {
     const out = await runReview([
       mining('peer-reviewer', '```json\n{"verdict":"APPROVE","findings":[],"positives":[]}\n```'),
       mining('security-code-reviewer', '```json\n{"verdict":"SECURE","findings":[]}\n```'),
       mining(
         'operational-reviewer',
-        '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"warning","path":"a.ts","lines":"1-2","issue":"no logging on new path","fix":"add logger"}]}\n```',
+        '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"medium","path":"a.ts","lines":"1-2","issue":"no logging on new path","fix":"add logger"}]}\n```',
       ),
     ]);
     expect(out.reviewed).toBe(true);
@@ -213,7 +242,34 @@ describe('codeReviewStep.apply de-silence', () => {
     expect(out.extraLenses[0]!.id).toBe('operational-reviewer');
     expect(out.extraLenses[0]!.verdict).toBe('REQUEST_CHANGES');
     expect(out.extraLenses[0]!.findings).toHaveLength(1);
-    // a lens REQUEST_CHANGES blocks even when peer + security are clean
+    // A lens verdict no longer blocks by itself: a medium finding is advisory and
+    // must not spend a fix round.
+    expect(out.blocking).toBe(false);
+  });
+
+  it('blocks when an extra lens raises a critical finding', async () => {
+    const out = await runReview([
+      mining('peer-reviewer', '```json\n{"verdict":"APPROVE","findings":[],"positives":[]}\n```'),
+      mining(
+        'operational-reviewer',
+        '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"critical","path":"a.ts","issue":"migration is irreversible"}]}\n```',
+      ),
+    ]);
+    expect(out.blocking).toBe(true);
+  });
+
+  it('coerces a pre-ladder severity vocabulary from a repo-checked-in persona', async () => {
+    // A repo onboarded before the ladder change still has .claude/agents/peer-reviewer.md
+    // on disk specifying critical|warning|suggestion, and the prompt tells the reviewer
+    // to follow it. Those findings must still parse.
+    const out = await runReview([
+      mining(
+        'peer-reviewer',
+        '```json\n{"verdict":"DISCUSS","findings":[{"severity":"warning","issue":"w"},{"severity":"suggestion","issue":"s"},{"severity":"blocker","issue":"b"}],"positives":[]}\n```',
+      ),
+    ]);
+    expect(out.peer.findings.map((f) => f.severity)).toEqual(['medium', 'low', 'critical']);
+    // the coerced blocker is critical, so it blocks
     expect(out.blocking).toBe(true);
   });
 

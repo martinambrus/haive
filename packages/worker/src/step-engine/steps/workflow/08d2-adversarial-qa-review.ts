@@ -1,6 +1,8 @@
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
+import type { ReviewSeverity } from '@haive/shared/review';
 
 // Gate 1.5 — adversarial-QA review (legacy gate1-5-adversarial-qa-review.md).
 // After 08d runs the adversarial agents, the HUMAN decides what to do with the
@@ -14,7 +16,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 interface QaFinding {
   /** Stable index-based key used as the multi-select option value. */
   key: string;
-  severity: string;
+  severity: ReviewSeverity;
   /** Short label for the multi-select option. */
   label: string;
   /** Full formatted line handed to the implementer when this finding is chosen. */
@@ -99,11 +101,14 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
     const findings: QaFinding[] = (out.findings ?? []).map((f, i) => {
       const cat = f.category ?? 'issue';
       const loc = f.location ? ` @ ${f.location}` : '';
+      // Coerce rather than read straight through: this reads 08d's persisted jsonb,
+      // which for a task started before the ladder change holds the old vocabulary.
+      const severity = coerceReviewSeverity(f.severity, 'low');
       return {
         key: String(i),
-        severity: (f.severity ?? 'low').toLowerCase(),
-        label: `[${f.severity ?? '?'}] ${cat}${loc}`,
-        line: `- [${f.severity ?? '?'}] ${cat}${loc}: ${f.impact ?? ''}${f.fix ? ` — fix: ${f.fix}` : ''}`,
+        severity,
+        label: `[${severity}] ${cat}${loc}`,
+        line: `- [${severity}] ${cat}${loc}: ${f.impact ?? ''}${f.fix ? ` — fix: ${f.fix}` : ''}`,
       };
     });
     return {
@@ -196,7 +201,7 @@ export const adversarialQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApp
     const scope = values.scope ?? 'all';
     let chosen = args.detected.findings;
     if (scope === 'critical_high') {
-      chosen = chosen.filter((f) => f.severity === 'critical' || f.severity === 'high');
+      chosen = chosen.filter((f) => isBlockingSeverity(f.severity));
     } else if (scope === 'selected') {
       const keys = new Set(values.findingKeys ?? []);
       chosen = chosen.filter((f) => keys.has(f.key));

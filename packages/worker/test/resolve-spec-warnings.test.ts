@@ -7,11 +7,12 @@ import { resolveSpecWarningsStep } from '../src/step-engine/steps/workflow/05a-r
 
 const baseCtx = { logger: logger.child({ test: 'resolve-warnings' }) };
 
-function detected(spec = 'SPEC BODY', findings = ['[WARN] goal_clarity: x']) {
+function detected(spec = 'SPEC BODY', findings = ['[MEDIUM] goal_clarity: x']) {
   return {
     findings,
-    warnCount: findings.filter((f) => f.startsWith('[WARN]')).length,
-    errorCount: findings.filter((f) => f.startsWith('[ERROR]')).length,
+    blockingCount: findings.filter((f) => f.startsWith('[HIGH]') || f.startsWith('[CRITICAL]'))
+      .length,
+    advisoryCount: findings.filter((f) => f.startsWith('[MEDIUM]') || f.startsWith('[LOW]')).length,
     spec,
     specFilePath: '/haive/workdir/.haive/spec-review.md',
   };
@@ -102,7 +103,7 @@ describe('resolveSpecWarningsStep form + llm gating', () => {
   it('offers continue/manual/agent and surfaces the spec file path', () => {
     const fs = resolveSpecWarningsStep.form!(
       {} as never,
-      detected('S', ['[WARN] d: c', '[ERROR] e: g']),
+      detected('S', ['[MEDIUM] d: c', '[HIGH] e: g']),
     );
     const action = fs.fields.find((f) => f.id === 'action') as
       | { type: string; options: { value: string }[] }

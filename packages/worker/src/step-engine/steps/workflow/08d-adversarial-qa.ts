@@ -13,6 +13,8 @@ import { parseJsonLoose } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput } from './_task-meta.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
+import { coerceReviewSeverity, isBlockingSeverity, severityRank } from '@haive/shared/review';
+import type { ReviewSeverity } from '@haive/shared/review';
 
 // Phase 7 — Adversarial QA (legacy phase7-adversarial-qa.md). Opt-in per task
 // (tasks.adversarial_qa_level: poc|standard|enterprise). After code review and
@@ -92,7 +94,7 @@ interface AdversarialDetect {
 }
 
 interface AdversarialFinding {
-  severity: string;
+  severity: ReviewSeverity;
   category?: string;
   location?: string;
   poc?: string;
@@ -113,7 +115,10 @@ const adversaryOutputSchema = z.object({
   findings: z
     .array(
       z.object({
-        severity: z.string().default('low'),
+        severity: z
+          .unknown()
+          .optional()
+          .transform((v) => coerceReviewSeverity(v, 'low')),
         category: z.string().optional(),
         location: z.string().optional(),
         poc: z.string().optional(),
@@ -285,7 +290,6 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     const detected = args.detected;
 
     // Aggregate findings across agents; dedupe by location keeping highest severity.
-    const rank: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 };
     const byLocation = new Map<string, AdversarialFinding>();
     const unlocated: AdversarialFinding[] = [];
     for (const r of results) {
@@ -312,24 +316,19 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
           continue;
         }
         const existing = byLocation.get(key);
-        if (
-          !existing ||
-          (rank[(f.severity ?? '').toLowerCase()] ?? 0) >
-            (rank[(existing.severity ?? '').toLowerCase()] ?? 0)
-        ) {
+        // severityRank is ascending in severity: critical=0, low=3.
+        if (!existing || severityRank(f.severity) < severityRank(existing.severity)) {
           byLocation.set(key, f);
         }
       }
     }
     // Consolidate: sort by severity (critical → low), like the legacy phase-7b consolidator.
     const findings = [...byLocation.values(), ...unlocated].sort(
-      (a, b) =>
-        (rank[(b.severity ?? '').toLowerCase()] ?? 0) -
-        (rank[(a.severity ?? '').toLowerCase()] ?? 0),
+      (a, b) => severityRank(a.severity) - severityRank(b.severity),
     );
-    const critical = findings.filter((f) => (f.severity ?? '').toLowerCase() === 'critical').length;
-    const high = findings.filter((f) => (f.severity ?? '').toLowerCase() === 'high').length;
-    const blocking = critical + high > 0;
+    const critical = findings.filter((f) => f.severity === 'critical').length;
+    const high = findings.filter((f) => f.severity === 'high').length;
+    const blocking = findings.some((f) => isBlockingSeverity(f.severity));
     const ran = results.some((r) => r.status === 'done');
 
     ctx.logger.info(

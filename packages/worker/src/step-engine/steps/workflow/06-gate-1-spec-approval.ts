@@ -2,6 +2,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { recordSpecDecision } from './_spec-feedback.js';
+import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
 
 interface SpecGateDetect {
   /** Full spec body (markdown). The renderer turns this into HTML inside
@@ -49,7 +50,9 @@ interface IterationEntry {
 
 function formatFinding(f: QualityFinding): string {
   const dim = f.dimension ?? 'general';
-  const sev = f.severity ?? 'info';
+  // Read back from 05's persisted jsonb, which for a task started before the
+  // severity ladder change still holds the old vocabulary.
+  const sev = coerceReviewSeverity(f.severity, 'low');
   const comment = f.comment ?? '';
   return `[${sev.toUpperCase()}] ${dim}: ${comment}`;
 }
@@ -59,14 +62,11 @@ function summariseIteration(entry: IterationEntry): string {
   const out = entry.applyOutput;
   const verdict = typeof out?.verdict === 'string' ? out.verdict : '?';
   const score = typeof out?.score === 'number' ? `${out.score}/10` : '?/10';
-  const fc = Array.isArray(out?.findings) ? out!.findings!.length : 0;
-  const errs = Array.isArray(out?.findings)
-    ? out!.findings!.filter((f) => f.severity === 'error').length
-    : 0;
-  const warns = Array.isArray(out?.findings)
-    ? out!.findings!.filter((f) => f.severity === 'warn').length
-    : 0;
-  return `Iteration ${idx}: ${verdict}, score ${score}, ${fc} finding(s) (${errs} error / ${warns} warn)`;
+  const findings = Array.isArray(out?.findings) ? out!.findings! : [];
+  const severities = findings.map((f) => coerceReviewSeverity(f.severity, 'low'));
+  const blocking = severities.filter(isBlockingSeverity).length;
+  const advisory = severities.length - blocking;
+  return `Iteration ${idx}: ${verdict}, score ${score}, ${findings.length} finding(s) (${blocking} blocking / ${advisory} advisory)`;
 }
 
 /** Pick the first chunk of meaningful prose from a markdown spec body so

@@ -6,6 +6,8 @@ import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
+import { coerceReviewSeverity } from '@haive/shared/review';
+import type { ReviewSeverity } from '@haive/shared/review';
 
 // 08c2 — broad code audit (report-only). A single one-shot auditor verifies the
 // written code against the spec as broadly as possible — beyond the narrow
@@ -25,7 +27,7 @@ interface CodeAuditDetect {
 }
 
 interface AuditFinding {
-  severity?: string;
+  severity: ReviewSeverity;
   path?: string;
   lines?: string;
   issue?: string;
@@ -60,7 +62,9 @@ const AUDIT_RULES = [
   '(improvements unrelated to this task) in the `## INSIGHTS` section instead — never in findings.',
   '',
   'Emit ONE JSON object inside a ```json fenced code block with the shape:',
-  '{ "findings": [ { "severity": "critical|warning|suggestion", "path": "<file>", "lines": "<start-end>", "issue": "<what is wrong vs the spec>", "fix": "<concrete fix>" } ] }',
+  '{ "findings": [ { "severity": "critical|high|medium|low", "path": "<file>", "lines": "<start-end>", "issue": "<what is wrong vs the spec>", "fix": "<concrete fix>" } ] }',
+  'Reserve critical/high for a defect that would break behaviour, lose data, or expose a',
+  'vulnerability. A finding that is real but leaves the code working is medium or low.',
   'If the code faithfully implements the spec, return an empty findings array.',
 ] as const;
 
@@ -80,7 +84,9 @@ export function parseCodeAuditFindings(raw: unknown): AuditFinding[] {
   return findings
     .filter((f): f is Record<string, unknown> => typeof f === 'object' && f !== null)
     .map((f) => ({
-      severity: typeof f.severity === 'string' ? f.severity : undefined,
+      // Advisory step: an unrecognised severity lands on medium, never on the
+      // blocking tier.
+      severity: coerceReviewSeverity(f.severity, 'medium'),
       path: typeof f.path === 'string' ? f.path : undefined,
       lines: typeof f.lines === 'string' ? f.lines : undefined,
       issue: typeof f.issue === 'string' ? f.issue : undefined,

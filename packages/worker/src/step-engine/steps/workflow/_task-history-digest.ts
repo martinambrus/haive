@@ -1,5 +1,7 @@
 import { asc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { coerceReviewSeverity, isBlockingSeverity, severityRank } from '@haive/shared/review';
+import type { ReviewSeverity } from '@haive/shared/review';
 
 /* ------------------------------------------------------------------ */
 /* Task-history digest — mines the PERSISTED run history (fix-loop     */
@@ -32,26 +34,11 @@ const SOFT_FINDING_CAP: Record<DigestTier, number> = { low: 4, medium: 12, high:
 const FINDING_STEP_IDS = new Set(['07b-phase-4-validate', '08c-code-review', '08d-adversarial-qa']);
 
 interface Finding {
-  severity: string;
+  severity: ReviewSeverity;
   where: string;
   desc: string;
   fix: string;
   source: string;
-}
-
-function sevRank(s: string): number {
-  switch (s.toLowerCase()) {
-    case 'critical':
-      return 0;
-    case 'high':
-      return 1;
-    case 'medium':
-      return 2;
-    case 'low':
-      return 3;
-    default:
-      return 4;
-  }
 }
 
 function clip(s: string, max: number): string {
@@ -77,7 +64,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
     for (const it of asArray(o.issues)) {
       const i = it as Record<string, unknown>;
       out.push({
-        severity: str(i.severity) || 'unspecified',
+        severity: coerceReviewSeverity(i.severity, 'low'),
         where: str(i.file),
         desc: str(i.description),
         fix: str(i.fix),
@@ -88,7 +75,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
     for (const it of asArray((o.peer as Record<string, unknown> | undefined)?.findings)) {
       const i = it as Record<string, unknown>;
       out.push({
-        severity: str(i.severity) || 'unspecified',
+        severity: coerceReviewSeverity(i.severity, 'low'),
         where: str(i.path),
         desc: str(i.issue),
         fix: str(i.fix),
@@ -99,7 +86,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
       const i = it as Record<string, unknown>;
       const cwe = str(i.cwe);
       out.push({
-        severity: str(i.severity) || 'unspecified',
+        severity: coerceReviewSeverity(i.severity, 'low'),
         where: str(i.path),
         desc: `${cwe ? `[${cwe}] ` : ''}${str(i.issue)}`,
         fix: str(i.fix),
@@ -111,7 +98,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
       for (const it of asArray(l.findings)) {
         const i = it as Record<string, unknown>;
         out.push({
-          severity: str(i.severity) || 'unspecified',
+          severity: coerceReviewSeverity(i.severity, 'low'),
           where: str(i.path),
           desc: str(i.issue),
           fix: str(i.fix),
@@ -123,7 +110,7 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
     for (const it of asArray(o.findings)) {
       const i = it as Record<string, unknown>;
       out.push({
-        severity: str(i.severity) || 'unspecified',
+        severity: coerceReviewSeverity(i.severity, 'low'),
         where: str(i.location),
         desc: str(i.impact) || str(i.category),
         fix: str(i.fix),
@@ -279,9 +266,11 @@ export function renderTaskHistoryDigest(
   }
 
   if (findings.length > 0) {
-    const sorted = [...findings].sort((a, b) => sevRank(a.severity) - sevRank(b.severity));
-    const critHigh = sorted.filter((f) => sevRank(f.severity) <= 1);
-    const lower = sorted.filter((f) => sevRank(f.severity) > 1);
+    const sorted = [...findings].sort(
+      (a, b) => severityRank(a.severity) - severityRank(b.severity),
+    );
+    const critHigh = sorted.filter((f) => isBlockingSeverity(f.severity));
+    const lower = sorted.filter((f) => !isBlockingSeverity(f.severity));
     const lowerShown = lower.slice(0, SOFT_FINDING_CAP[tier]);
     lines.push('', '## Findings (validation / review / QA)');
     for (const f of [...critHigh, ...lowerShown]) {

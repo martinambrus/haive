@@ -66,9 +66,10 @@ describe('parseSpecQualityOutput', () => {
     const result = parseSpecQualityOutput(raw);
     expect(result?.score).toBe(7);
     expect(result?.findings).toHaveLength(2);
+    // legacy 'warn' from a pre-ladder persona coerces onto the canonical ladder
     expect(result?.findings[0]).toMatchObject({
       dimension: 'goal_clarity',
-      severity: 'warn',
+      severity: 'medium',
       comment: 'be more specific',
     });
     expect(result?.amendedSpec).toBeNull();
@@ -134,13 +135,13 @@ describe('parseSpecQualityOutput', () => {
     expect(fractional?.score).toBe(6);
   });
 
-  it('coerces unknown severity to info and missing fields to defaults', () => {
+  it('coerces an unrecognised severity below the blocking tier and fills missing fields', () => {
     const raw = [
       '```json',
       JSON.stringify({
         score: 5,
         findings: [
-          { severity: 'critical', comment: 'unknown sev' },
+          { severity: 'showstopper', comment: 'unknown sev' },
           { dimension: 'test_strategy' },
           'not even an object',
         ],
@@ -149,14 +150,16 @@ describe('parseSpecQualityOutput', () => {
     ].join('\n');
     const result = parseSpecQualityOutput(raw);
     expect(result?.findings).toHaveLength(2);
+    // An unrecognised severity must NOT land on critical/high — a typo would
+    // otherwise force a spec revision.
     expect(result?.findings[0]).toMatchObject({
       dimension: 'general',
-      severity: 'info',
+      severity: 'low',
       comment: 'unknown sev',
     });
     expect(result?.findings[1]).toMatchObject({
       dimension: 'test_strategy',
-      severity: 'info',
+      severity: 'low',
       comment: '',
     });
   });
@@ -168,7 +171,8 @@ describe('parseSpecQualityOutput', () => {
       amendedSpec: 'fixed body',
     });
     expect(result?.score).toBe(3);
-    expect(result?.findings[0]?.severity).toBe('error');
+    // legacy 'error' maps to the blocking tier
+    expect(result?.findings[0]?.severity).toBe('high');
     expect(result?.amendedSpec).toBe('fixed body');
   });
 

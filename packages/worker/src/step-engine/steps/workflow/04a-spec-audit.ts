@@ -5,6 +5,8 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
+import { coerceReviewSeverity } from '@haive/shared/review';
+import type { ReviewSeverity } from '@haive/shared/review';
 
 // 04a — broad spec audit (report-only). A single one-shot reviewer reads the
 // drafted spec as broadly as possible — not just the fixed dimensions the gating
@@ -22,7 +24,7 @@ interface SpecAuditDetect {
 
 interface AuditFinding {
   dimension?: string;
-  severity?: string;
+  severity: ReviewSeverity;
   comment?: string;
 }
 
@@ -68,10 +70,10 @@ const AUDIT_RULES = [
   'in the `## INSIGHTS` section instead — never in findings.',
   '',
   'Emit ONE JSON object inside a ```json fenced code block with the shape:',
-  '{ "findings": [ { "dimension": "<short area or \\"ambiguity\\">", "severity": "warn"|"error", "comment": "<the problem; cite the spec section>" } ] }',
-  'Use "error" for a gap or mistake that would cause a wrong, incomplete, or blocked',
-  'implementation; "warn" for a genuine but non-blocking gap. If the spec is clean, return',
-  'an empty findings array.',
+  '{ "findings": [ { "dimension": "<short area or \\"ambiguity\\">", "severity": "medium"|"high", "comment": "<the problem; cite the spec section>" } ] }',
+  'Use "high" for a gap or mistake that would cause a wrong, incomplete, or blocked',
+  'implementation; "medium" for a genuine but non-blocking gap. Use no other severity. If the',
+  'spec is clean, return an empty findings array.',
 ] as const;
 
 /** Salvage a fenced-JSON object from the auditor output (object passes through). */
@@ -83,7 +85,7 @@ function fencedCandidate(raw: unknown): unknown {
 }
 
 /** Parse the auditor findings into the same shape 05 emits so 05a consumes them
- *  unchanged (dimension / severity warn|error / comment). */
+ *  unchanged (dimension / severity high|medium / comment). */
 export function parseSpecAuditFindings(raw: unknown): AuditFinding[] {
   const obj = fencedCandidate(raw);
   if (!obj || typeof obj !== 'object') return [];
@@ -93,7 +95,9 @@ export function parseSpecAuditFindings(raw: unknown): AuditFinding[] {
     .filter((f): f is Record<string, unknown> => typeof f === 'object' && f !== null)
     .map((f) => ({
       dimension: typeof f.dimension === 'string' ? f.dimension : undefined,
-      severity: f.severity === 'error' ? 'error' : 'warn',
+      // Report-only step: an unrecognised severity lands on medium, never on the
+      // blocking tier, so a typo cannot force a spec revision.
+      severity: coerceReviewSeverity(f.severity, 'medium'),
       comment: typeof f.comment === 'string' ? f.comment : '',
     }));
 }

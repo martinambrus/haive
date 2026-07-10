@@ -6,6 +6,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { parseCorrectorOutput } from './05-phase-0b5-spec-quality.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
+import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
 
 // The spec-quality (05) amended spec is written here so the user can hand-edit
 // it in the Terminal tab (the workspace mounts at ctx.sandboxWorkdir, RW for
@@ -30,8 +31,10 @@ type ResolveAction = 'continue' | 'manual' | 'agent';
 
 interface ResolveWarningsDetect {
   findings: string[];
-  warnCount: number;
-  errorCount: number;
+  /** Findings on the blocking tier (critical/high) — a real gap the corrector must close. */
+  blockingCount: number;
+  /** Findings below it (medium/low) — genuine but non-blocking. */
+  advisoryCount: number;
   /** The spec-quality amended spec (the working draft). */
   spec: string;
   /** In-terminal path of the editable spec file. */
@@ -52,7 +55,9 @@ interface ResolveWarningsApply {
 }
 
 function formatFinding(f: QualityFinding): string {
-  const sev = (f.severity ?? 'info').toUpperCase();
+  // 05/04a output is read back from jsonb, so a task started before the severity
+  // ladder change still carries the old vocabulary here.
+  const sev = coerceReviewSeverity(f.severity, 'low').toUpperCase();
   const dim = f.dimension ?? 'general';
   return `[${sev}] ${dim}: ${f.comment ?? ''}`;
 }
@@ -134,10 +139,11 @@ export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, Reso
         await mkdir(path.dirname(fsPath), { recursive: true });
         await writeFile(fsPath, spec, 'utf8');
       }
+      const severities = findings.map((f) => coerceReviewSeverity(f.severity, 'low'));
       return {
         findings: findings.map(formatFinding),
-        warnCount: findings.filter((f) => f.severity === 'warn').length,
-        errorCount: findings.filter((f) => f.severity === 'error').length,
+        blockingCount: severities.filter(isBlockingSeverity).length,
+        advisoryCount: severities.filter((s) => !isBlockingSeverity(s)).length,
         spec,
         specFilePath: `${ctx.sandboxWorkdir}/${SPEC_REVIEW_REL}`,
         revising: (await loadOutstandingSpecFeedback(ctx)).length > 0,
@@ -148,7 +154,7 @@ export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, Reso
     form(_ctx, detected): FormSchema {
       const infoSections: InfoSection[] = [
         {
-          title: `Remaining findings (${detected.errorCount} error / ${detected.warnCount} warn)`,
+          title: `Remaining findings (${detected.blockingCount} blocking / ${detected.advisoryCount} advisory)`,
           preview: `${detected.findings.length} finding(s)`,
           body:
             detected.findings.length > 0
