@@ -34,8 +34,9 @@ async function initRepo(): Promise<string> {
   return dir;
 }
 
-// apply() reaches resolveUserGitEnv -> db.query.users.findFirst; returning
-// undefined makes it fall back to the built-in identity, so no git config needed.
+// apply() reaches resolveGitEnv, which skips the repo lookup on a ctx with no taskId and
+// reads db.query.users.findFirst; returning undefined makes it fall back to the built-in
+// identity, so no git config needed.
 const stubCtx = {
   logger: { info: () => {} },
   userId: 'u1',

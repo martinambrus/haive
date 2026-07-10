@@ -10,6 +10,8 @@ interface CredentialRow {
   id: string;
   label: string;
   host: string;
+  gitName: string | null;
+  gitEmail: string | null;
   createdAt: string;
 }
 
@@ -79,6 +81,11 @@ export default function CredentialsPage() {
               <div className="flex flex-col gap-0.5">
                 <span className="text-sm font-medium text-neutral-100">{cred.label}</span>
                 <span className="text-xs text-neutral-400">{cred.host}</span>
+                <span className="text-xs text-neutral-500">
+                  {cred.gitName && cred.gitEmail
+                    ? `commits as ${cred.gitName} <${cred.gitEmail}>`
+                    : 'commits with your global git identity'}
+                </span>
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-xs text-neutral-500">
@@ -118,7 +125,15 @@ export default function CredentialsPage() {
           setCredentials(
             (prev) =>
               prev?.map((c) =>
-                c.id === cred.id ? { ...c, label: cred.label, host: cred.host } : c,
+                c.id === cred.id
+                  ? {
+                      ...c,
+                      label: cred.label,
+                      host: cred.host,
+                      gitName: cred.gitName,
+                      gitEmail: cred.gitEmail,
+                    }
+                  : c,
               ) ?? null,
           );
         }}

@@ -7,7 +7,7 @@ import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
-import { resolveUserGitEnv } from '../../../secrets/user-git-identity.js';
+import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import {
   WORKTREE_SUBDIR,
   sandboxWorktreePath,
@@ -114,7 +114,7 @@ async function initGitRepo(
   initBranch: string,
   commitMessage: string,
 ): Promise<void> {
-  const userEnv = await resolveUserGitEnv(ctx.db, ctx.userId);
+  const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
   const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
 
   const init = await gitRun(ctx.repoPath, ['init', '-b', initBranch]);

@@ -13,7 +13,7 @@ import {
 } from '@haive/shared';
 import type { StepCapability } from '@haive/shared';
 import { resolveDispatch } from '../orchestrator/dispatcher.js';
-import { resolveUserGitEnv } from '../secrets/user-git-identity.js';
+import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
 import { loadPreviousStepOutput, pathExists } from './steps/onboarding/_helpers.js';
@@ -1291,7 +1291,7 @@ export async function resolveDagPhase(
   }
 
   const integration = await loadIntegrationWorktree(db, ctx.taskId);
-  const gitEnv = await resolveUserGitEnv(db, ctx.userId).then((e) =>
+  const gitEnv = await resolveGitEnv(db, { userId: ctx.userId, taskId: ctx.taskId }).then((e) =>
     Object.keys(e).length > 0 ? e : FALLBACK_GIT_IDENTITY,
   );
 

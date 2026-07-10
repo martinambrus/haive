@@ -9,6 +9,8 @@ interface CredentialRow {
   id: string;
   label: string;
   host: string;
+  gitName: string | null;
+  gitEmail: string | null;
 }
 
 const HOST_PRESETS = ['github.com', 'gitlab.com', 'bitbucket.org'];
@@ -34,18 +36,22 @@ export function CredentialModal({
   const [host, setHost] = useState('');
   const [username, setUsername] = useState('');
   const [secret, setSecret] = useState('');
+  const [gitName, setGitName] = useState('');
+  const [gitEmail, setGitEmail] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
-  // Re-initialise each time the modal opens: pre-fill label/host when editing
-  // (username/secret stay blank — the encrypted values are never sent to the
-  // client, so blank means "keep current"); all blank when adding.
+  // Re-initialise each time the modal opens: pre-fill label/host and the commit
+  // identity when editing (username/secret stay blank — the encrypted values are
+  // never sent to the client, so blank means "keep current"); all blank when adding.
   useEffect(() => {
     if (!open) return;
     setLabel(credential?.label ?? '');
     setHost(credential?.host ?? '');
     setUsername('');
     setSecret('');
+    setGitName(credential?.gitName ?? '');
+    setGitEmail(credential?.gitEmail ?? '');
     setError(null);
     setPending(false);
   }, [open, credential]);
@@ -53,12 +59,26 @@ export function CredentialModal({
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+
+    // The API enforces this too; checking here saves a round-trip.
+    const identity = { gitName: gitName.trim(), gitEmail: gitEmail.trim() };
+    if (Boolean(identity.gitName) !== Boolean(identity.gitEmail)) {
+      setError('Set both the commit name and email, or leave both empty.');
+      return;
+    }
+
     setPending(true);
     try {
       if (isEdit && credential) {
         const res = await api.put<{ credential: CredentialRow }>(
           `/repo-credentials/${credential.id}`,
-          { label: label.trim(), host: host.trim(), username: username.trim(), secret },
+          {
+            label: label.trim(),
+            host: host.trim(),
+            username: username.trim(),
+            secret,
+            ...identity,
+          },
         );
         onUpdated?.(res.credential);
       } else {
@@ -67,6 +87,7 @@ export function CredentialModal({
           host: host.trim(),
           username: username.trim(),
           secret,
+          ...identity,
         });
         onCreated(res.credential);
       }
@@ -152,6 +173,29 @@ export function CredentialModal({
               placeholder={
                 isEdit ? 'leave blank to keep current secret' : 'personal access token or password'
               }
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5 border-t border-neutral-800 pt-4">
+            <Label htmlFor="cred-git-name">Commit identity (optional)</Label>
+            <p className="text-xs text-neutral-400">
+              Used to author commits in every repository bound to this credential. Leave both empty
+              to use your global git identity.
+            </p>
+            <Input
+              id="cred-git-name"
+              value={gitName}
+              onChange={(e) => setGitName(e.target.value)}
+              maxLength={100}
+              placeholder="Jane Doe"
+            />
+            <Input
+              id="cred-git-email"
+              type="email"
+              value={gitEmail}
+              onChange={(e) => setGitEmail(e.target.value)}
+              maxLength={255}
+              placeholder="jane@work.example.com"
             />
           </div>
 

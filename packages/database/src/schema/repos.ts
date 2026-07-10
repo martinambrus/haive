@@ -178,6 +178,14 @@ export const repoCredentials = pgTable(
     usernameEncrypted: text('username_encrypted').notNull(),
     secretEncrypted: text('secret_encrypted').notNull(),
     encryptedDek: text('encrypted_dek').notNull(),
+    /** Optional commit identity for every repository bound to this credential.
+     *  Overrides the user's global `users.git_name`/`users.git_email`. Set both or
+     *  neither — a half-filled pair is rejected at the API and ignored by
+     *  resolveGitEnv, so a commit can never be authored `Work Name <personal@email>`.
+     *  Plaintext like the user-level columns: these are stamped into every commit
+     *  object and pushed to the remote, so they are not secrets. */
+    gitName: text('git_name'),
+    gitEmail: text('git_email'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },

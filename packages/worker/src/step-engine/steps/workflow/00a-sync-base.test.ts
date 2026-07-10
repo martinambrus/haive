@@ -149,7 +149,13 @@ function makeMergeDb() {
     if ('mergeResolveState' in patch) mergeState = patch.mergeResolveState;
   };
   const db = {
-    query: { users: { findFirst: async () => undefined } },
+    // resolveGitEnv walks tasks -> repositories before users; an unlinked task means
+    // the merge commit uses merge-resolver's FALLBACK_GIT_IDENTITY, as before.
+    query: {
+      tasks: { findFirst: async () => ({ repositoryId: null }) },
+      repositories: { findFirst: async () => undefined },
+      users: { findFirst: async () => undefined },
+    },
     update: () => ({
       set: (patch: Record<string, unknown>) => ({
         where: () => ({

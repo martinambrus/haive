@@ -7,7 +7,7 @@ import {
   type FormSchema,
 } from '@haive/shared';
 import { resolveDispatch } from '../orchestrator/dispatcher.js';
-import { resolveUserGitEnv } from '../secrets/user-git-identity.js';
+import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
 import { completeMergeHostSide, mergeCommitted } from './git-merge.js';
 import { pathExists } from './steps/onboarding/_helpers.js';
@@ -474,7 +474,7 @@ export async function resolveMergePhase(
     return { resolved: true, current };
   }
 
-  const userEnv = await resolveUserGitEnv(db, ctx.userId);
+  const userEnv = await resolveGitEnv(db, { userId: ctx.userId, taskId: ctx.taskId });
   const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
 
   let state = current.mergeResolveState as MergeResolveState | null;

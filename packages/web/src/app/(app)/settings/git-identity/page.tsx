@@ -77,7 +77,8 @@ export default function GitIdentityPage() {
             <code className="font-mono text-neutral-300">GIT_AUTHOR_NAME</code> /{' '}
             <code className="font-mono text-neutral-300">GIT_AUTHOR_EMAIL</code> (plus matching
             <code className="font-mono text-neutral-300"> GIT_COMMITTER_*</code>) so commits
-            attribute to you. Leave both empty to fall back to the sandbox default.
+            attribute to you. Leave both empty to fall back to the sandbox default. A git credential
+            can carry its own identity, which overrides this one for every repository bound to it.
           </CardDescription>
         </CardHeader>
         <div className="flex flex-col gap-3">

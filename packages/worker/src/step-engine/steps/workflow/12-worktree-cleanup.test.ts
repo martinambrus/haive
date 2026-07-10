@@ -111,7 +111,7 @@ function det(wt: string, over: Partial<Det> = {}): Det {
 const logger = { info: () => {}, warn: () => {}, error: () => {} };
 
 // In-memory stub db backing task_steps.merge_resolve_state, shared by
-// resolveMergePhase (writes) and apply (reads). resolveUserGitEnv reads users
+// resolveMergePhase (writes) and apply (reads). resolveGitEnv reads users
 // (undefined -> fallback identity).
 function makeDb(
   opts: { invocation?: { id: string; endedAt: Date | null; rawOutput?: string } } = {},

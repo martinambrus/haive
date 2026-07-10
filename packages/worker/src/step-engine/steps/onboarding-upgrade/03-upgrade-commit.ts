@@ -7,6 +7,7 @@ import type { CliProviderName, FormSchema } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
 import type { Database } from '@haive/database';
 import type { StepDefinition } from '../../step-definition.js';
+import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { pathExists } from '../onboarding/_helpers.js';
 
 const execFileAsync = promisify(execFile);
@@ -44,7 +45,14 @@ async function resolveStagePaths(db: Database, userId: string): Promise<string[]
   return [...BASE_STAGE_PATHS, ...Array.from(extra)];
 }
 
-const GIT_IDENTITY = ['-c', 'user.email=haive@local', '-c', 'user.name=Haive Worker'];
+/** Used only when neither the repo's bound credential nor the user carries an identity,
+ *  preserving the bot attribution these commits have always had. */
+const FALLBACK_GIT_IDENTITY = {
+  GIT_AUTHOR_NAME: 'Haive Worker',
+  GIT_AUTHOR_EMAIL: 'haive@local',
+  GIT_COMMITTER_NAME: 'Haive Worker',
+  GIT_COMMITTER_EMAIL: 'haive@local',
+};
 
 interface UpgradeCommitOutput {
   commitPerformed: boolean;
@@ -138,7 +146,12 @@ export const upgradeCommitStep: StepDefinition<Record<string, never>, UpgradeCom
         typeof values.commitMessage === 'string' && values.commitMessage.trim().length > 0
           ? values.commitMessage
           : DEFAULT_COMMIT_MESSAGE;
-      await execFileAsync('git', [...GIT_IDENTITY, 'commit', '-m', message], { cwd: ctx.repoPath });
+      const resolved = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
+      const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
+      await execFileAsync('git', ['commit', '-m', message], {
+        cwd: ctx.repoPath,
+        env: { ...process.env, ...identity },
+      });
       const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
       commitSha = stdout.trim();
       commitPerformed = true;

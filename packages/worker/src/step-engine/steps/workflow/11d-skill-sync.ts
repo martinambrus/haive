@@ -6,7 +6,7 @@ import type { DetectResult, SkillEntry } from '@haive/shared';
 import { mapWithConcurrency } from '@haive/shared';
 import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
-import { resolveUserGitEnv } from '../../../secrets/user-git-identity.js';
+import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import type { KbFileSummary } from '../onboarding/09-qa.js';
 import {
   loadPreviousStepOutput,
@@ -483,7 +483,7 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
       if (present.length > 0) {
         const add = await gitRun(worktree, ['add', '--', ...present]);
         if (add.code !== 0) throw new Error(`git add failed: ${add.stderr || add.stdout}`);
-        const userEnv = await resolveUserGitEnv(ctx.db, ctx.userId);
+        const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
         const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
         const commit = await gitRun(
           worktree,

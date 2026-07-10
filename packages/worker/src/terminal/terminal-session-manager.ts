@@ -30,7 +30,7 @@ import type { McpServerSpec } from '../sandbox/mcp-config.js';
 import { buildDefaultMcpServers } from '../sandbox/mcp-config.js';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
 import { resolveProviderSecrets } from '../secrets/provider-secrets.js';
-import { resolveUserGitEnv } from '../secrets/user-git-identity.js';
+import { resolveGitEnv, type GitEnvScope } from '../secrets/user-git-identity.js';
 
 const log = logger.child({ module: 'terminal-session-manager' });
 
@@ -168,18 +168,22 @@ export class TerminalSessionManager {
   /** Resolve the env an interactive shell should see for this provider:
    *  decrypted secrets + provider.envVars + git identity, run through the
    *  adapter's `buildShellEnv` so per-CLI aliases (e.g. zai's
-   *  ANTHROPIC_AUTH_TOKEN) land. Empty object on missing provider. */
+   *  ANTHROPIC_AUTH_TOKEN) land. Empty object on missing provider.
+   *
+   *  `gitScope` carries whichever key this terminal's scope has — a repo terminal has
+   *  no task — so a repository bound to a credential with its own commit identity
+   *  gets that identity instead of the user's global one. */
   private async resolveProviderShellEnv(
-    userId: string,
+    gitScope: GitEnvScope,
     providerId: string,
   ): Promise<Record<string, string>> {
     const provider = await this.db.query.cliProviders.findFirst({
       where: eq(schema.cliProviders.id, providerId),
     });
-    if (!provider || provider.userId !== userId) return {};
+    if (!provider || provider.userId !== gitScope.userId) return {};
     const [secrets, gitEnv] = await Promise.all([
       resolveProviderSecrets(this.db, providerId),
-      resolveUserGitEnv(this.db, userId),
+      resolveGitEnv(this.db, gitScope),
     ]);
     const adapter = cliAdapterRegistry.has(provider.name)
       ? cliAdapterRegistry.get(provider.name)
@@ -246,7 +250,11 @@ export class TerminalSessionManager {
       scopeId = taskId;
     }
 
-    const providerEnv = await this.resolveProviderShellEnv(req.userId, providerId).catch((err) => {
+    const gitScope: GitEnvScope =
+      scope === 'repo'
+        ? { userId: req.userId, repositoryId: scopeId }
+        : { userId: req.userId, taskId: scopeId };
+    const providerEnv = await this.resolveProviderShellEnv(gitScope, providerId).catch((err) => {
       log.warn({ err, providerId }, 'resolveProviderShellEnv failed');
       return {};
     });

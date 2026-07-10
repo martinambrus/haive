@@ -27,6 +27,7 @@ import {
 } from '@haive/shared';
 import type { Database } from '@haive/database';
 import type { StepDefinition, StepContext } from '../../step-definition.js';
+import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { loadPreviousStepOutput, pathExists, resolveSkillTargetDirs } from './_helpers.js';
 import {
   expandCustomBundlesFor,
@@ -104,7 +105,14 @@ async function resolveStagePaths(
   return [...paths];
 }
 
-const GIT_IDENTITY = ['-c', 'user.email=haive@local', '-c', 'user.name=Haive Worker'];
+/** Used only when neither the repo's bound credential nor the user carries an identity,
+ *  preserving the bot attribution these commits have always had. */
+const FALLBACK_GIT_IDENTITY = {
+  GIT_AUTHOR_NAME: 'Haive Worker',
+  GIT_AUTHOR_EMAIL: 'haive@local',
+  GIT_COMMITTER_NAME: 'Haive Worker',
+  GIT_COMMITTER_EMAIL: 'haive@local',
+};
 
 interface PostOnboardingOutput {
   commitPerformed: boolean;
@@ -475,7 +483,12 @@ export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboa
         typeof values.commitMessage === 'string' && values.commitMessage.trim().length > 0
           ? values.commitMessage
           : DEFAULT_COMMIT_MESSAGE;
-      await exec('git', [...GIT_IDENTITY, 'commit', '-m', message], { cwd: ctx.repoPath });
+      const resolved = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
+      const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
+      await exec('git', ['commit', '-m', message], {
+        cwd: ctx.repoPath,
+        env: { ...process.env, ...identity },
+      });
       const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
       commitSha = stdout.trim();
       commitPerformed = true;

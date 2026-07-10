@@ -1,0 +1,21 @@
+-- Optional per-credential git commit identity, overriding the user's global one.
+--
+-- `users.git_name`/`users.git_email` were the only commit identity in the system, so a user
+-- who works on employer repos and personal repos committed to both under one name and email.
+-- Git credentials already model that split (one row per host + label, e.g. "github.com / Work
+-- PAT" vs "github.com / Personal PAT"), and a repository binds one via
+-- `repositories.credentials_secret_id` -- so the identity hangs off the credential.
+--
+-- Precedence at commit time (resolveGitEnv): credential identity -> user global identity ->
+-- the caller's `Haive <worker@haive.local>` fallback. Both columns must be set together; a
+-- half-filled pair is rejected by the API and ignored by the resolver, so no commit can be
+-- authored `Work Name <personal@email>`. Existing rows are NULL/NULL and keep using the
+-- global identity, so nothing changes until a user fills the pair in.
+--
+-- Plaintext, mirroring `users.git_name`/`users.git_email`: unlike this table's username and
+-- secret, an identity is stamped into every commit object and pushed to the remote, so it is
+-- not a secret and encrypting it would only add a DEK round-trip to the commit path.
+--
+-- Additive + idempotent: safe to re-run on every environment via `drizzle-kit push`.
+ALTER TABLE "repo_credentials" ADD COLUMN IF NOT EXISTS "git_name" text;
+ALTER TABLE "repo_credentials" ADD COLUMN IF NOT EXISTS "git_email" text;

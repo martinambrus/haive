@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { resolveUserGitEnv } from '../../../secrets/user-git-identity.js';
+import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { buildCommitDiffArtifact } from './_commit-diff.js';
 
@@ -170,7 +170,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const message =
       (values.commitMessage ?? 'feat: apply workflow changes').trim() ||
       'feat: apply workflow changes';
-    const userEnv = await resolveUserGitEnv(ctx.db, ctx.userId);
+    const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
     const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
     const commit = await gitRun(workspace, ['commit', '-m', message], commitEnv);
     if (commit.code !== 0) {

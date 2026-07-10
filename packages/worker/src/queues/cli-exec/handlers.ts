@@ -37,7 +37,7 @@ import { renderDockerfile, resolveImageTag } from '../../sandbox/image-cache.js'
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import { resolveProviderSecrets } from '../../secrets/provider-secrets.js';
 import { provisionOllamaProvider } from '../../sandbox/ollama-provision.js';
-import { resolveUserGitEnv } from '../../secrets/user-git-identity.js';
+import { resolveGitEnv } from '../../secrets/user-git-identity.js';
 import { createSandboxLoginContainer } from '../../sandbox/login-container.js';
 import { buildSetupTokenCommand } from '../../cli-adapters/setup-token-command.js';
 import { getDb } from '../../db.js';
@@ -114,7 +114,7 @@ export async function handleCliExecJob(
   const providerSecrets = payload.cliProviderId
     ? await resolveProviderSecrets(db, payload.cliProviderId)
     : {};
-  const gitEnv = await resolveUserGitEnv(db, payload.userId);
+  const gitEnv = await resolveGitEnv(db, { userId: payload.userId, taskId: payload.taskId });
   const secrets: Record<string, string> = { ...gitEnv, ...providerSecrets };
 
   const startedAt = Date.now();
