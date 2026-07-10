@@ -447,6 +447,29 @@ function miningResult(results: AgentMiningResult[], agentId: string): unknown {
   return r ? (r.output ?? r.rawOutput) : null;
 }
 
+// Preamble to the fix-loop diagnosis. Every other finding path in the workflow hands
+// the implementer a licence to reject a wrong finding — 05's CORRECT_RULES, 05a's
+// FIX_RULES, gate-2's formatRejectDiagnosis for the broad audit — and 08c was the
+// exception, so an unverified reviewer claim was acted on directly, at the cost of
+// one of five capped fix rounds.
+//
+// Note the deliberate asymmetry with gate-2: a DEVELOPER's findings there are
+// authoritative and must not be dismissed. These are a REVIEWER's, and a reviewer
+// can be wrong.
+const VALIDATE_THEN_ACT = [
+  'Automated code review requested changes. These are REVIEWER findings, not observations from a',
+  'developer using the running app.',
+  '',
+  'Do NOT blindly trust the reviewer. For EACH finding, FIRST validate it yourself against the',
+  'actual code: confirm the issue is real, correctly described, and in scope for this change.',
+  'Fix ONLY the findings you validated as real and in scope. Ignore any that are wrong, already',
+  'handled, or out of scope — and say which ones you ignored, and why, in your summary. A',
+  'speculative edit made to satisfy a bogus finding is worse than the finding.',
+  '',
+  'Findings marked [critical] or [high] are what blocked the review; [medium] and [low] are',
+  'advisory — fix them only if they are real and cheap.',
+].join('\n');
+
 export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> = {
   metadata: {
     id: '08c-code-review',
@@ -462,7 +485,9 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
   fixLoop: {
     evaluate: (out) => {
       if (!out.blocking) return null;
-      const parts: string[] = [];
+      // One element: `parts` is joined with a blank line, so the preamble must arrive
+      // as a single block rather than one paragraph per line.
+      const parts: string[] = [VALIDATE_THEN_ACT];
       if (out.peer.findings.length) {
         parts.push(
           '### Peer review\n' +

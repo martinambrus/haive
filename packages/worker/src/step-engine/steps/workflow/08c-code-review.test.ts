@@ -197,6 +197,36 @@ describe('computeBlocking', () => {
   });
 });
 
+describe('codeReviewStep.fixLoop diagnosis', () => {
+  const blockingOutput = {
+    blocking: true,
+    peer: {
+      verdict: 'REQUEST_CHANGES',
+      findings: [{ severity: 'critical', path: 'a.ts', issue: 'npe', fix: 'guard' }],
+      positives: [],
+    },
+    security: { verdict: 'SECURE', findings: [] },
+    extraLenses: [],
+  };
+
+  it('gives the implementer licence to reject a wrong reviewer finding', () => {
+    const v = codeReviewStep.fixLoop!.evaluate(blockingOutput as never);
+    expect(v).not.toBeNull();
+    // 08c was the only finding path in the workflow without a validate-then-act
+    // instruction, so an unverified reviewer claim cost a capped fix round.
+    expect(v!.diagnosis).toContain('validate it yourself');
+    expect(v!.diagnosis).toContain('Ignore any that are wrong');
+    // and it still carries the findings themselves
+    expect(v!.diagnosis).toContain('a.ts: npe');
+  });
+
+  it('does not fire when nothing blocks', () => {
+    expect(
+      codeReviewStep.fixLoop!.evaluate({ ...blockingOutput, blocking: false } as never),
+    ).toBeNull();
+  });
+});
+
 describe('codeReviewStep.apply de-silence', () => {
   it('does NOT silently APPROVE/SECURE when a reviewer ran but its output was unparseable', async () => {
     const out = await runReview([
