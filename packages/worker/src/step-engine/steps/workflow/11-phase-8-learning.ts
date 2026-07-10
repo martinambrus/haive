@@ -189,6 +189,22 @@ async function gitRun(
 /** Valid op values for a reported KB sync change. */
 const KB_SYNC_OPS = new Set(['insert', 'update', 'delete']);
 
+/**
+ * A concrete `path/to/file.ext:123` citation. The extension must start with a letter so
+ * a version string (`1.2:30`) or a timestamp cannot pose as evidence.
+ *
+ * This is the one admission rule the parser can enforce. The other two — "CI already
+ * catches it" and "the model knows it from general training" — are stated in the prompt
+ * and cannot be checked mechanically; a lesson with no citation is the shape they both
+ * take in practice, because neither has anything in THIS run to point at.
+ */
+const FILE_LINE_EVIDENCE_RE = /[\w./-]*\w\.[A-Za-z][A-Za-z0-9]{0,11}:\d+/;
+
+/** Does any of these texts cite a file and a line from this run? */
+export function hasFileLineEvidence(...texts: (string | undefined | null)[]): boolean {
+  return texts.some((t) => typeof t === 'string' && FILE_LINE_EVIDENCE_RE.test(t));
+}
+
 /** A bug-fix task is flagged at creation (tasks.metadata.category) or inferred
  *  from the title/description as a fallback. */
 async function detectBugFix(
@@ -307,7 +323,13 @@ export function parseSkillSync(raw: unknown, existingSkillIds: Set<string>): Ski
 /** Parse the optional `globalCandidates` array (portable house-standard articles)
  *  the learning agent may emit for cross-repo global-KB promotion. Defensive:
  *  entries missing title/body/tech are dropped; unknown categories fall back to
- *  tech_pattern; ids are deduped. */
+ *  tech_pattern; ids are deduped.
+ *
+ *  ADMISSION BAR: a candidate must cite a file and line from THIS run in a separate
+ *  `evidence` field. Unlike a learning it cannot cite them in the body — the body is a
+ *  portable article and must carry no repo-specific names or paths — so the citation is
+ *  read, checked, and dropped. A global article about a public tech that nothing in this
+ *  run demonstrates is exactly the generic advice that dilutes every repo's rag_search. */
 export function parseGlobalCandidates(raw: unknown): GlobalCandidate[] {
   let obj: Record<string, unknown> | null = null;
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
@@ -329,6 +351,8 @@ export function parseGlobalCandidates(raw: unknown): GlobalCandidate[] {
     const body = typeof c.body === 'string' ? c.body : '';
     const tech = typeof c.tech === 'string' ? c.tech.trim() : '';
     if (!title || !body.trim() || !tech) continue;
+    const evidence = typeof c.evidence === 'string' ? c.evidence : undefined;
+    if (!hasFileLineEvidence(evidence)) continue;
     const category =
       typeof c.category === 'string' && GLOBAL_CANDIDATE_CATEGORIES.has(c.category)
         ? (c.category as GlobalCandidate['category'])
@@ -430,6 +454,13 @@ function normaliseEntries(raw: unknown[]): LearningEntry[] {
       continue;
     }
     if (!title || !body) continue;
+    // ADMISSION BAR: a lesson that cannot point at a file and line in this run is either
+    // something CI already catches or something the model knew before the run started.
+    // Either way it dilutes every later rag_search, so it is never written. Checked
+    // against the BODY first, so the citation lives on in the artifact rather than in a
+    // field we would discard; a separate `evidence` field is accepted as well.
+    const evidence = typeof entry.evidence === 'string' ? entry.evidence : undefined;
+    if (!hasFileLineEvidence(body, evidence)) continue;
     const id = typeof entry.id === 'string' && entry.id.length > 0 ? entry.id : slugify(title);
     out.push({ id, title, body, op, targetId });
   }
@@ -779,9 +810,22 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         'You are the learning capture phase of an engineering workflow.',
         'Emit ONE JSON object inside a ```json fenced code block with the shape:',
         detected.isBugFix
-          ? '{ "entries": [ { "id": "<kebab-case>", "op": "insert|update|delete", "targetId": "<existing learning id; only for update/delete>", "title": "<short>", "body": "<markdown>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] }, "investigation": { "title": "<short>", "symptoms": "<observable symptoms + the EXACT error strings/messages, verbatim>", "root_cause": "<why/how the bug happened>", "lesson": "<durable lesson for future runs>", "scope": "local | global" }, "skillSync": { "ops": [ { "op": "new_feature|feature_update|feature_removal", "skillId": "<existing skill id; update/removal only>", "capability": "<capability name; new_feature only>", "rationale": "<one line>" } ] } }'
-          : '{ "entries": [ { "id": "<kebab-case>", "op": "insert|update|delete", "targetId": "<existing learning id; only for update/delete>", "title": "<short>", "body": "<markdown>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] }, "skillSync": { "ops": [ { "op": "new_feature|feature_update|feature_removal", "skillId": "<existing skill id; update/removal only>", "capability": "<capability name; new_feature only>", "rationale": "<one line>" } ] } }',
+          ? '{ "entries": [ { "id": "<kebab-case>", "op": "insert|update|delete", "targetId": "<existing learning id; only for update/delete>", "title": "<short>", "body": "<markdown; MUST cite a path/to/file.ext:LINE from this run>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] }, "investigation": { "title": "<short>", "symptoms": "<observable symptoms + the EXACT error strings/messages, verbatim>", "root_cause": "<why/how the bug happened>", "lesson": "<durable lesson for future runs>", "scope": "local | global" }, "skillSync": { "ops": [ { "op": "new_feature|feature_update|feature_removal", "skillId": "<existing skill id; update/removal only>", "capability": "<capability name; new_feature only>", "rationale": "<one line>" } ] } }'
+          : '{ "entries": [ { "id": "<kebab-case>", "op": "insert|update|delete", "targetId": "<existing learning id; only for update/delete>", "title": "<short>", "body": "<markdown; MUST cite a path/to/file.ext:LINE from this run>" } ], "kbSync": { "classification": "new_feature|feature_update|feature_removal|bug_fix|refactor", "changes": [ { "file": "<repo-relative .md path>", "op": "insert|update|delete", "summary": "<one line>" } ] }, "skillSync": { "ops": [ { "op": "new_feature|feature_update|feature_removal", "skillId": "<existing skill id; update/removal only>", "capability": "<capability name; new_feature only>", "rationale": "<one line>" } ] } }',
         'Each entry must be a reusable lesson grounded in the workflow run. Avoid generic advice.',
+        '',
+        'ADMISSION BAR — the knowledge base is read by every future run, so a weak entry costs',
+        'every one of them. Before you write ANY learning, investigation, or global candidate,',
+        'drop it if ANY of these is true:',
+        '1. A linter, type checker, test, or CI job would have caught it. Tooling already',
+        '   enforces it; a KB article about it is never read.',
+        '2. You knew it before this run, from general training. If the lesson would be true of',
+        '   a project you have never seen, it is not a lesson from THIS run.',
+        '3. You cannot cite a concrete `path/to/file.ext:LINE` from this run as the evidence',
+        '   for it. No citation means no evidence, and an uncited lesson is an opinion.',
+        'Cite that `file.ext:LINE` inside each learning `body`. Entries without one are DROPPED',
+        'before a human ever sees them — writing fewer, cited lessons is the goal, not more.',
+        'Emitting zero entries is a valid, correct answer when the run taught nothing durable.',
         '',
         'LEARNINGS RECONCILIATION — you are shown the EXISTING learnings below. For each lesson decide an `op`:',
         '- "insert" (default) for a NEW lesson no existing learning covers.',
@@ -803,10 +847,10 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         '- bug_fix / refactor → the capability set is unchanged; emit "ops": [].',
         'Use a `skillId` ONLY from the Existing skills list below (an unknown id is dropped). Emit one op per affected capability — usually zero or one. Keep this consistent with the KB sync classification above.',
         detected.isBugFix
-          ? 'This task was a BUG FIX: ALSO produce an `investigation`. In `symptoms`, lead with the observable symptoms and quote the EXACT error strings/messages verbatim — these are the lexical anchor future searches match on; name the affected feature/area. Give the root cause (why/how the bug existed, grounded in the implementation) and the durable lesson for future work. Set its `scope` to "global" ONLY when the lesson is a reusable house standard for any project of this stack (not specific to this repo); otherwise "local".'
+          ? 'This task was a BUG FIX: ALSO produce an `investigation`. In `symptoms`, lead with the observable symptoms and quote the EXACT error strings/messages verbatim — these are the lexical anchor future searches match on; name the affected feature/area. Give the root cause (why/how the bug existed, grounded in the implementation, citing the `path/to/file.ext:LINE` the bug lived on) and the durable lesson for future work. Set its `scope` to "global" ONLY when the lesson is a reusable house standard for any project of this stack (not specific to this repo) AND it clears the ADMISSION BAR above — a lesson CI would catch, or one you already knew, stays "local" at most; otherwise "local".'
           : '',
         '',
-        'GLOBAL KB CANDIDATES (optional, separate from the per-repo learnings above): if this run produced REUSABLE, PORTABLE house-standard knowledge about a PUBLIC tech (a framework/library/language/datastore — NOT this repo\'s own code, names, or paths), add a `globalCandidates` array to the JSON: [ { "title": "<short>", "category": "tech_pattern|best_practice|anti_pattern|quick_reference", "tech": "<public tech slug, e.g. drupal, php, mariadb>", "body": "<full portable markdown article, no repo-specific names/paths>" } ]. Omit it or use [] when nothing is genuinely portable. If a candidate covers the SAME topic as one of the existing global articles shown below, author `body` as the FULL UPDATED article: keep the existing wording VERBATIM where unchanged and only add or adjust what this task learned — the body is diffed against the existing article for human approval, so minimize churn.',
+        'GLOBAL KB CANDIDATES (optional, separate from the per-repo learnings above): if this run produced REUSABLE, PORTABLE house-standard knowledge about a PUBLIC tech (a framework/library/language/datastore — NOT this repo\'s own code, names, or paths), add a `globalCandidates` array to the JSON: [ { "title": "<short>", "category": "tech_pattern|best_practice|anti_pattern|quick_reference", "tech": "<public tech slug, e.g. drupal, php, mariadb>", "evidence": "<path/to/file.ext:LINE from THIS run that demonstrates it>", "body": "<full portable markdown article, no repo-specific names/paths>" } ]. Omit it or use [] when nothing is genuinely portable. The ADMISSION BAR above applies with full force here — a global article is read by every repo, so a candidate the model already knew, or that CI would catch, is worse than no candidate. `evidence` is checked and then discarded: it stays OUT of `body`, which must remain portable, and a candidate without it is dropped. If a candidate covers the SAME topic as one of the existing global articles shown below, author `body` as the FULL UPDATED article: keep the existing wording VERBATIM where unchanged and only add or adjust what this task learned — the body is diffed against the existing article for human approval, so minimize churn.',
         '',
         `Task title: ${detected.taskTitle || '(untitled)'}`,
         `Task description: ${detected.taskDescription || '(none)'}`,
@@ -838,7 +882,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         '=== What happened during this task (mine this — it is the real, persisted run history) ===',
         detected.historyDigest.text,
         '',
-        'Ground EVERY learning, the investigation, and the KB sync in the SPECIFIC diagnoses, findings, human reactions, and any user steering (mid-run course-corrections) above: quote the real errors/symptoms, name what was planned or implemented wrong and how it was resolved, and fold the human reviewer reactions and steering directives in. A mid-run steer marks a spot where the agent drifted — capture the durable lesson (or runbook step) that would have avoided the need to steer. Do NOT write generic advice. For a bug, the investigation symptoms + root cause must cite the actual diagnosis; the KB sync should reflect what the reviewers and the human actually flagged.',
+        'Ground EVERY learning, the investigation, and the KB sync in the SPECIFIC diagnoses, findings, human reactions, and any user steering (mid-run course-corrections) above: quote the real errors/symptoms, name what was planned or implemented wrong and how it was resolved, and fold the human reviewer reactions and steering directives in. A mid-run steer marks a spot where the agent drifted — capture the durable lesson (or runbook step) that would have avoided the need to steer. Do NOT write generic advice. For a bug, the investigation symptoms + root cause must cite the actual diagnosis; the KB sync should reflect what the reviewers and the human actually flagged. Grounding is what the ADMISSION BAR checks: every learning body and every global candidate must carry the `path/to/file.ext:LINE` it came from, and one that cannot is dropped rather than written.',
         detected.refineInstruction
           ? [
               '',
@@ -858,7 +902,11 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     },
     bypassStub: (args) => {
       const d = args.detected as LearningDetect;
-      const base = { entries: [{ id: 'bypass', title: 'Bypass stub', body: 'bypass' }] };
+      // The body carries a file:line because the admission bar drops an uncited entry,
+      // and the smoke run asserts the step writes one.
+      const base = {
+        entries: [{ id: 'bypass', title: 'Bypass stub', body: 'bypass — src/bypass.ts:1' }],
+      };
       return d.isBugFix
         ? {
             ...base,

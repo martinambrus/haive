@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
+  hasFileLineEvidence,
   parseGlobalCandidates,
   parseInvestigation,
   parseKbSync,
@@ -15,6 +16,110 @@ import {
   applyLearningOps,
   readExistingLearnings,
 } from './11-phase-8-learning.js';
+
+describe('KB admission bar', () => {
+  describe('hasFileLineEvidence', () => {
+    it('accepts a concrete path:line citation anywhere in the text', () => {
+      expect(hasFileLineEvidence('packages/worker/src/step-runner.ts:1392')).toBe(true);
+      expect(hasFileLineEvidence('see `src/a.ts:42` for the guard')).toBe(true);
+      expect(hasFileLineEvidence('composer.json:12')).toBe(true);
+      expect(hasFileLineEvidence('config/sync/system.site.yml:3')).toBe(true);
+    });
+
+    it('rejects text that only looks like a citation', () => {
+      // An extension must start with a letter, so a version or a clock time is not evidence.
+      expect(hasFileLineEvidence('upgrade to version 1.2:30')).toBe(false);
+      expect(hasFileLineEvidence('at 12:30 the build failed')).toBe(false);
+      expect(hasFileLineEvidence('see the file src/a.ts')).toBe(false); // no line
+      expect(hasFileLineEvidence('Always validate your inputs.')).toBe(false);
+    });
+
+    it('accepts a citation in any of the texts, and rejects absent ones', () => {
+      expect(hasFileLineEvidence('generic prose', 'src/a.ts:9')).toBe(true);
+      expect(hasFileLineEvidence(undefined, null)).toBe(false);
+    });
+  });
+
+  describe('learning entries', () => {
+    it('drops a lesson that cites no file and line', () => {
+      // The shape both unenforceable rules take: a lesson CI would catch, and one the
+      // model knew before the run, each have nothing in THIS run to point at.
+      const entries = parseLearningOutput({
+        entries: [
+          { id: 'generic', title: 'Validate inputs', body: 'Always validate user input.' },
+          { id: 'ci', title: 'Run the linter', body: 'Unused imports should be removed.' },
+        ],
+      });
+      expect(entries).toEqual([]);
+    });
+
+    it('keeps a lesson cited in its body, so the citation survives into the artifact', () => {
+      const entries = parseLearningOutput({
+        entries: [
+          {
+            id: 'real',
+            title: 'Zod 4 z.unknown() is non-optional',
+            body: 'A bare `z.unknown()` inside `z.object()` fails on a missing key — see packages/worker/src/step-engine/steps/workflow/08c-code-review.ts:102.',
+          },
+        ],
+      });
+      expect(entries).toHaveLength(1);
+      expect(entries![0]!.id).toBe('real');
+    });
+
+    it('accepts a separate evidence field when the body omits the citation', () => {
+      const entries = parseLearningOutput({
+        entries: [{ id: 'x', title: 'X', body: 'a lesson', evidence: 'src/a.ts:7' }],
+      });
+      expect(entries).toHaveLength(1);
+    });
+
+    it('never demands evidence of a delete — it cites only its targetId', () => {
+      const entries = parseLearningOutput({ entries: [{ op: 'delete', targetId: 'gone' }] });
+      expect(entries).toHaveLength(1);
+      expect(entries![0]!.op).toBe('delete');
+    });
+
+    it('re-rolls the draft when the bar leaves no entries', () => {
+      // shouldRetryPreForm sees zero usable entries and asks for a fresh, grounded draft
+      // rather than parking an empty one in front of the human.
+      const gate = phase8LearningStep.llm!.shouldRetryPreForm!;
+      expect(gate('```json\n{"entries":[{"id":"g","title":"G","body":"Be careful."}]}\n```')).toBe(
+        true,
+      );
+    });
+  });
+
+  describe('global candidates', () => {
+    it('drops a candidate with no evidence field', () => {
+      // Its body must stay portable, so a citation cannot live there — it needs its own.
+      expect(
+        parseGlobalCandidates({
+          globalCandidates: [{ title: 'T', tech: 'php', body: 'portable article' }],
+        }),
+      ).toEqual([]);
+    });
+
+    it('keeps a cited candidate and never leaks the citation into the portable body', () => {
+      const cands = parseGlobalCandidates({
+        globalCandidates: [
+          { title: 'T', tech: 'php', body: 'portable article', evidence: 'src/a.ts:3' },
+        ],
+      });
+      expect(cands).toHaveLength(1);
+      expect(cands[0]!.body).toBe('portable article');
+      expect(cands[0]).not.toHaveProperty('evidence');
+    });
+
+    it('rejects an evidence field that is not a real citation', () => {
+      expect(
+        parseGlobalCandidates({
+          globalCandidates: [{ title: 'T', tech: 'php', body: 'x', evidence: 'the docs say so' }],
+        }),
+      ).toEqual([]);
+    });
+  });
+});
 
 describe('parseSkillSync', () => {
   const existing = new Set(['fleet-search', 'boat-catalogue']);
@@ -282,14 +387,16 @@ describe('phase8LearningStep preForm retry gate', () => {
   });
 
   it('does not retry when entries parsed', () => {
-    const raw = '```json\n{"entries":[{"id":"x","title":"X","body":"b"}]}\n```';
+    const raw = '```json\n{"entries":[{"id":"x","title":"X","body":"b src/a.ts:1"}]}\n```';
     expect(gate(raw)).toBe(false);
   });
 });
 
 describe('parseLearningOutput op/targetId', () => {
   it('defaults op to insert when absent', () => {
-    const entries = parseLearningOutput({ entries: [{ id: 'a', title: 'A', body: 'b' }] });
+    const entries = parseLearningOutput({
+      entries: [{ id: 'a', title: 'A', body: 'b src/a.ts:1' }],
+    });
     expect(entries).toHaveLength(1);
     expect(entries![0]).toMatchObject({ id: 'a', op: 'insert' });
     expect(entries![0].targetId).toBeUndefined();
@@ -297,7 +404,7 @@ describe('parseLearningOutput op/targetId', () => {
 
   it('parses an update op + targetId', () => {
     const entries = parseLearningOutput({
-      entries: [{ op: 'update', targetId: 'old', title: 'A', body: 'b' }],
+      entries: [{ op: 'update', targetId: 'old', title: 'A', body: 'b src/a.ts:1' }],
     });
     expect(entries![0]).toMatchObject({ op: 'update', targetId: 'old' });
   });
@@ -309,9 +416,9 @@ describe('parseLearningOutput op/targetId', () => {
   });
 
   it('falls back to insert for an unknown op and drops a bodyless insert', () => {
-    expect(parseLearningOutput({ entries: [{ op: 'frob', title: 'A', body: 'b' }] })![0].op).toBe(
-      'insert',
-    );
+    expect(
+      parseLearningOutput({ entries: [{ op: 'frob', title: 'A', body: 'b src/a.ts:1' }] })![0].op,
+    ).toBe('insert');
     expect(parseLearningOutput({ entries: [{ op: 'insert', title: 'A' }] })).toHaveLength(0);
   });
 });
@@ -321,14 +428,14 @@ describe('planLearningReconciliation', () => {
 
   it('keeps an update whose targetId exists', () => {
     const entries = parseLearningOutput({
-      entries: [{ op: 'update', targetId: 'known', title: 'New', body: 'new' }],
+      entries: [{ op: 'update', targetId: 'known', title: 'New', body: 'new src/a.ts:1' }],
     })!;
     expect(planLearningReconciliation(entries, existing)).toEqual([
       {
         op: 'update',
         id: 'known',
         title: 'New',
-        newBody: '# New\n\nnew',
+        newBody: '# New\n\nnew src/a.ts:1',
         oldBody: '# Known\n\nold body',
       },
     ]);
@@ -336,7 +443,7 @@ describe('planLearningReconciliation', () => {
 
   it('downgrades an update with an unknown targetId to an insert', () => {
     const entries = parseLearningOutput({
-      entries: [{ op: 'update', targetId: 'missing', title: 'New', body: 'new' }],
+      entries: [{ op: 'update', targetId: 'missing', title: 'New', body: 'new src/a.ts:1' }],
     })!;
     const plan = planLearningReconciliation(entries, existing);
     expect(plan).toHaveLength(1);
@@ -359,7 +466,7 @@ describe('planLearningReconciliation', () => {
 
   it('guards an insert whose slug collides with an existing learning', () => {
     const entries = parseLearningOutput({
-      entries: [{ id: 'known', title: 'Known', body: 'fresh' }],
+      entries: [{ id: 'known', title: 'Known', body: 'fresh src/a.ts:1' }],
     })!;
     expect(planLearningReconciliation(entries, existing)[0]).toMatchObject({
       op: 'insert',
@@ -370,8 +477,8 @@ describe('planLearningReconciliation', () => {
   it('disambiguates two inserts that share a slug in one batch', () => {
     const entries = parseLearningOutput({
       entries: [
-        { title: 'Same', body: 'a' },
-        { title: 'Same', body: 'b' },
+        { title: 'Same', body: 'a src/a.ts:1' },
+        { title: 'Same', body: 'b src/b.ts:2' },
       ],
     })!;
     expect(planLearningReconciliation(entries, []).map((p) => p.id)).toEqual(['same', 'same-2']);
@@ -410,8 +517,8 @@ describe('applyLearningOps + readExistingLearnings', () => {
 
       const entries = parseLearningOutput({
         entries: [
-          { id: 'dup', title: 'Dup', body: 'NEW dup' },
-          { op: 'update', targetId: 'old', title: 'Old', body: 'updated body' },
+          { id: 'dup', title: 'Dup', body: 'NEW dup src/a.ts:1' },
+          { op: 'update', targetId: 'old', title: 'Old', body: 'updated body src/b.ts:2' },
           { op: 'delete', targetId: 'gone' },
         ],
       })!;
@@ -439,8 +546,20 @@ describe('parseGlobalCandidates', () => {
   it('parses candidates, validates category, dedups ids', () => {
     const cands = parseGlobalCandidates({
       globalCandidates: [
-        { title: 'Drupal hook pattern', category: 'best_practice', tech: 'drupal', body: 'a' },
-        { title: 'Drupal hook pattern', category: 'bogus', tech: 'drupal', body: 'b' },
+        {
+          title: 'Drupal hook pattern',
+          category: 'best_practice',
+          tech: 'drupal',
+          body: 'a',
+          evidence: 'src/a.ts:1',
+        },
+        {
+          title: 'Drupal hook pattern',
+          category: 'bogus',
+          tech: 'drupal',
+          body: 'b',
+          evidence: 'src/b.ts:2',
+        },
       ],
     });
     expect(cands).toHaveLength(2);
@@ -457,10 +576,10 @@ describe('parseGlobalCandidates', () => {
   it('drops entries missing title, body, or tech', () => {
     const cands = parseGlobalCandidates({
       globalCandidates: [
-        { title: '', tech: 'php', body: 'x' },
-        { title: 'No body', tech: 'php', body: '   ' },
-        { title: 'No tech', tech: '', body: 'x' },
-        { title: 'Keep', tech: 'php', body: 'real' },
+        { title: '', tech: 'php', body: 'x', evidence: 'src/a.ts:1' },
+        { title: 'No body', tech: 'php', body: '   ', evidence: 'src/a.ts:1' },
+        { title: 'No tech', tech: '', body: 'x', evidence: 'src/a.ts:1' },
+        { title: 'Keep', tech: 'php', body: 'real', evidence: 'src/a.ts:1' },
       ],
     });
     expect(cands).toHaveLength(1);
@@ -475,7 +594,7 @@ describe('parseGlobalCandidates', () => {
 
   it('parses from a fenced-json string', () => {
     const raw =
-      'noise\n```json\n{"globalCandidates":[{"title":"T","category":"tech_pattern","tech":"mariadb","body":"B"}]}\n```\ntail';
+      'noise\n```json\n{"globalCandidates":[{"title":"T","category":"tech_pattern","tech":"mariadb","body":"B","evidence":"src/a.ts:1"}]}\n```\ntail';
     const cands = parseGlobalCandidates(raw);
     expect(cands).toHaveLength(1);
     expect(cands[0]).toMatchObject({ title: 'T', tech: 'mariadb', category: 'tech_pattern' });

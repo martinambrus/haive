@@ -8,6 +8,8 @@ import { parseQaResolveOutput } from '../src/step-engine/steps/onboarding/09_2-q
 // threw. Each parser below now routes through the shared brace-matching helper.
 const fencedBody = [
   '## Example',
+  // The learning admission bar drops an entry whose body cites no file:line.
+  'Seen at src/example.ts:12.',
   '```ts',
   'const x = 1;',
   '```',
@@ -55,7 +57,7 @@ describe('nested-fence regression across HIGH parsers', () => {
     const result = parseLearningOutput(
       wrap([
         { id: 'a', title: 'A', body: fencedBody },
-        { id: 'b', title: 'B', body: 'plain' },
+        { id: 'b', title: 'B', body: 'plain — src/b.ts:2' },
       ]),
     );
     expect(result).toHaveLength(2);
