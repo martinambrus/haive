@@ -579,8 +579,8 @@ export default function NewTaskPage() {
                 onClick={() => setIgnoreSavedStepClis((v) => !v)}
                 className={`inline-flex h-10 w-10 items-center justify-center rounded-md border transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500 ${
                   ignoreSavedStepClis
-                    ? 'border-indigo-500 bg-indigo-950/40 text-indigo-300'
-                    : 'border-amber-600 bg-amber-950/30 text-amber-300 hover:border-amber-500 hover:bg-amber-950/50 hover:text-amber-200'
+                    ? 'border-amber-600 bg-amber-950/30 text-amber-300'
+                    : 'border-indigo-500 bg-indigo-950/40 text-indigo-300 hover:border-indigo-400 hover:bg-indigo-950/60 hover:text-indigo-200'
                 }`}
               >
                 {ignoreSavedStepClis ? (
