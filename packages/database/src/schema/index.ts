@@ -4,6 +4,7 @@ export * from './repos.js';
 export * from './db-dumps.js';
 export * from './tasks.js';
 export * from './task-dag.js';
+export * from './review.js';
 export * from './task-attachments.js';
 export * from './audit.js';
 export * from './containers.js';

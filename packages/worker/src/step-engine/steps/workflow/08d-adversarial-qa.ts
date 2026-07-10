@@ -15,6 +15,7 @@ import { loadAppBootOutput } from './_task-meta.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { coerceReviewSeverity, isBlockingSeverity, severityRank } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
+import { recordReviewFindings, splitLocation } from './_review-findings.js';
 
 // Phase 7 — Adversarial QA (legacy phase7-adversarial-qa.md). Opt-in per task
 // (tasks.adversarial_qa_level: poc|standard|enterprise). After code review and
@@ -330,6 +331,28 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     const high = findings.filter((f) => f.severity === 'high').length;
     const blocking = findings.some((f) => isBlockingSeverity(f.severity));
     const ran = results.some((r) => r.status === 'done');
+
+    // Recorded post-dedupe, so the reviewer is the step rather than the adversary
+    // that happened to win the keep-highest-severity merge for a location.
+    await recordReviewFindings(
+      ctx,
+      '08d-adversarial-qa',
+      findings
+        .filter((f) => (f.impact ?? f.category ?? '').trim().length > 0)
+        .map((f) => {
+          const { path, lines } = splitLocation(f.location);
+          return {
+            reviewerId: 'adversarial-qa',
+            severity: f.severity,
+            issue: f.impact || (f.category as string),
+            path,
+            lines,
+            fix: f.fix,
+            blocking: isBlockingSeverity(f.severity),
+            raw: f,
+          };
+        }),
+    );
 
     ctx.logger.info(
       { level: detected.level, agents: results.length, findings: findings.length, blocking },

@@ -11,6 +11,7 @@ import { collectImplementationFiles } from './_impl-changes.js';
 import { loadHonoredConstraints } from './_fix-loop.js';
 import { coerceReviewSeverity } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
+import { recordReviewFindings, splitLocation } from './_review-findings.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { ensureAppServing } from './_app-runtime.js';
 import { startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
@@ -636,6 +637,27 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           churnFiles: churnFiles.length,
         },
         'phase-4 validation pass complete',
+      );
+      // Every validator pass records; the dedupe index collapses an issue this step
+      // row already saw this round, so a loop that re-flags the same file once per
+      // pass leaves one row, not one per pass. blocking:false — 07b's fixLoop keys
+      // on the verdict, not on a per-issue severity.
+      await recordReviewFindings(
+        ctx,
+        '07b-phase-4-validate',
+        parsed.issues.map((i) => {
+          const { path, lines } = splitLocation(i.file);
+          return {
+            reviewerId: 'validator',
+            severity: i.severity,
+            issue: i.description,
+            path,
+            lines,
+            fix: i.fix,
+            blocking: false,
+            raw: i,
+          };
+        }),
       );
       return {
         verdict: parsed.verdict,

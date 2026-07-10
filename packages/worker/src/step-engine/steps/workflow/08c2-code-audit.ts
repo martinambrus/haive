@@ -8,6 +8,7 @@ import { collectImplementationFiles } from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { coerceReviewSeverity } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
+import { recordReviewFindings } from './_review-findings.js';
 
 // 08c2 — broad code audit (report-only). A single one-shot auditor verifies the
 // written code against the spec as broadly as possible — beyond the narrow
@@ -157,7 +158,25 @@ export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
     bypassStub: () => ({ findings: [] }),
   },
 
-  async apply(_ctx, args): Promise<CodeAuditApply> {
-    return { audited: true, findings: parseCodeAuditFindings(args.llmOutput ?? null) };
+  async apply(ctx, args): Promise<CodeAuditApply> {
+    const findings = parseCodeAuditFindings(args.llmOutput ?? null);
+    // Report-only step: nothing here blocks, so every finding records blocking:false.
+    await recordReviewFindings(
+      ctx,
+      '08c2-code-audit',
+      findings
+        .filter((f) => (f.issue ?? '').trim().length > 0)
+        .map((f) => ({
+          reviewerId: 'code-auditor',
+          severity: f.severity,
+          issue: f.issue as string,
+          path: f.path,
+          lines: f.lines,
+          fix: f.fix,
+          blocking: false,
+          raw: f,
+        })),
+    );
+    return { audited: true, findings };
   },
 };

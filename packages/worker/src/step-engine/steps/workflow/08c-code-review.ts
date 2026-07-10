@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { CONFIG_KEYS, configService } from '@haive/shared';
 import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
+import { recordReviewFindings } from './_review-findings.js';
 
 // Phase 6 — Code review (legacy phase6-code-review.md). After test management
 // and before gate 2, two reviewers run IN PARALLEL via agent mining: a
@@ -698,6 +699,42 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // synthetic findings for an unparseable reviewer, so the blocking decision and
     // the gate-2 finding list can never disagree.
     const blocking = computeBlocking(peerOut, securityOut, extraLenses);
+
+    await recordReviewFindings(ctx, '08c-code-review', [
+      ...peerOut.findings.map((f) => ({
+        reviewerId: 'peer-reviewer',
+        severity: f.severity,
+        issue: f.issue,
+        path: f.path,
+        lines: f.lines,
+        fix: f.fix,
+        blocking: isBlockingSeverity(f.severity),
+        raw: f,
+      })),
+      ...securityOut.findings.map((f) => ({
+        reviewerId: 'security-code-reviewer',
+        severity: f.severity,
+        issue: f.issue,
+        path: f.path,
+        lines: f.line,
+        fix: f.fix,
+        blocking: isBlockingSeverity(f.severity),
+        raw: f,
+      })),
+      ...extraLenses.flatMap((lens) =>
+        lens.findings.map((f) => ({
+          reviewerId: lens.id,
+          severity: f.severity,
+          issue: f.issue,
+          path: f.path,
+          lines: f.lines,
+          fix: f.fix,
+          blocking: isBlockingSeverity(f.severity),
+          raw: f,
+        })),
+      ),
+    ]);
+
     const securityCriticalHigh = securityOut.findings.filter((f) =>
       isBlockingSeverity(f.severity),
     ).length;
