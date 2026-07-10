@@ -10,8 +10,8 @@ import type {
 } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { parseJsonLoose } from '../_fenced-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
+import { parseReviewJson } from './_review-parse.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { promises as fs } from 'node:fs';
@@ -157,42 +157,39 @@ const reviewLensSchema = z.object({
     .default([]),
 });
 
-function fencedCandidate(raw: unknown): unknown {
-  if (!raw) return null;
-  if (typeof raw === 'object') return raw;
-  if (typeof raw !== 'string') return null;
-  // parseJsonLoose extracts the fenced/balanced JSON and runs a jsonrepair salvage
-  // pass, so a truncated/malformed reviewer turn is recovered instead of dropped.
-  return parseJsonLoose(raw);
-}
-
 /** Parse the peer-reviewer JSON; null when unparseable. */
 export function parsePeerReview(
   raw: unknown,
 ): { verdict: string; findings: PeerFinding[]; positives: string[] } | null {
-  const parsed = peerSchema.safeParse(fencedCandidate(raw));
-  if (!parsed.success) return null;
-  return {
-    verdict: parsed.data.verdict ?? 'DISCUSS',
-    findings: parsed.data.findings,
-    positives: parsed.data.positives,
-  };
+  return parseReviewJson(raw, (candidate) => {
+    const parsed = peerSchema.safeParse(candidate);
+    if (!parsed.success) return null;
+    return {
+      verdict: parsed.data.verdict ?? 'DISCUSS',
+      findings: parsed.data.findings,
+      positives: parsed.data.positives,
+    };
+  });
 }
 
 /** Parse the security-code-reviewer JSON; null when unparseable. */
 export function parseSecurityReview(
   raw: unknown,
 ): { verdict: string; findings: SecurityFinding[] } | null {
-  const parsed = securitySchema.safeParse(fencedCandidate(raw));
-  if (!parsed.success) return null;
-  return { verdict: parsed.data.verdict ?? 'NEEDS_FIXES', findings: parsed.data.findings };
+  return parseReviewJson(raw, (candidate) => {
+    const parsed = securitySchema.safeParse(candidate);
+    if (!parsed.success) return null;
+    return { verdict: parsed.data.verdict ?? 'NEEDS_FIXES', findings: parsed.data.findings };
+  });
 }
 
 /** Parse one extra review-lens (operational/performance) JSON; null when unparseable. */
 export function parseReviewLens(raw: unknown): { verdict: string; findings: PeerFinding[] } | null {
-  const parsed = reviewLensSchema.safeParse(fencedCandidate(raw));
-  if (!parsed.success) return null;
-  return { verdict: parsed.data.verdict ?? 'DISCUSS', findings: parsed.data.findings };
+  return parseReviewJson(raw, (candidate) => {
+    const parsed = reviewLensSchema.safeParse(candidate);
+    if (!parsed.success) return null;
+    return { verdict: parsed.data.verdict ?? 'DISCUSS', findings: parsed.data.findings };
+  });
 }
 
 /** A review result is blocking when peer requests changes, security is vulnerable,

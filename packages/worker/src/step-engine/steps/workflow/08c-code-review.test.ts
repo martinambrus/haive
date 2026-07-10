@@ -40,11 +40,57 @@ describe('parsePeerReview', () => {
     expect(p!.positives).toEqual(['clean naming']);
   });
 
-  it('defaults verdict to DISCUSS and arrays when omitted', () => {
-    const p = parsePeerReview('```json\n{}\n```');
+  it('defaults verdict to DISCUSS and arrays when partially omitted', () => {
+    const p = parsePeerReview('```json\n{"findings":[]}\n```');
     expect(p!.verdict).toBe('DISCUSS');
     expect(p!.findings).toEqual([]);
     expect(p!.positives).toEqual([]);
+    // and the mirror: a verdict with no findings key
+    expect(parsePeerReview('```json\n{"verdict":"APPROVE"}\n```')!.findings).toEqual([]);
+  });
+
+  it('rejects an object that names neither a verdict nor findings', () => {
+    // Every field is optional, so an unguarded parse turns ANY object into an empty,
+    // non-blocking review. `{}` communicates nothing — treat it as unparseable and
+    // re-roll, rather than reporting a silent clean review.
+    expect(parsePeerReview('```json\n{}\n```')).toBeNull();
+    expect(parsePeerReview('```json\n{"require":{"drupal/core":"^10"}}\n```')).toBeNull();
+  });
+
+  it('parses its own JSON, not a .json file it quoted as evidence', () => {
+    // Reviewing composer.json, the reviewer fences the offending file before its
+    // verdict. Anchoring on the FIRST fence parsed the evidence as the review: a
+    // critical REQUEST_CHANGES silently became DISCUSS with zero findings, which does
+    // not block and shows OK at gate 2.
+    const raw = [
+      'The change pins an outdated core:',
+      '```json',
+      '{"require": {"drupal/core": "^10.0.0"}}',
+      '```',
+      'That version has a known SA. My verdict:',
+      '```json',
+      '{"verdict":"REQUEST_CHANGES","findings":[{"severity":"critical","path":"composer.json","issue":"pins a vulnerable drupal/core","fix":"bump"}],"positives":[]}',
+      '```',
+    ].join('\n');
+    const p = parsePeerReview(raw);
+    expect(p).not.toBeNull();
+    expect(p!.verdict).toBe('REQUEST_CHANGES');
+    expect(p!.findings).toHaveLength(1);
+    expect(p!.findings[0]!.severity).toBe('critical');
+  });
+
+  it('finds JSON that follows a brace which is only prose', () => {
+    const p = parsePeerReview('Checked src/{a,b}.ts.\n\n{"verdict":"APPROVE","findings":[]}');
+    expect(p!.verdict).toBe('APPROVE');
+  });
+
+  it('does not let an inline APPROVE example outrank the fenced REQUEST_CHANGES', () => {
+    const p = parsePeerReview(
+      'I will not simply emit {"verdict": "APPROVE"} without checking.\n' +
+        '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"critical","issue":"npe"}]}\n```',
+    );
+    expect(p!.verdict).toBe('REQUEST_CHANGES');
+    expect(p!.findings).toHaveLength(1);
   });
 
   it('returns null on garbled output', () => {
@@ -80,8 +126,25 @@ describe('parseSecurityReview', () => {
     expect(p!.verdict).toBe('SECURE');
   });
 
+  it('parses its own JSON, not a config it quoted as evidence', () => {
+    const raw = [
+      'Offending config:',
+      '```json',
+      '{"debug": true}',
+      '```',
+      'Verdict:',
+      '```json',
+      '{"verdict":"VULNERABLE","findings":[{"severity":"critical","path":"q.php","issue":"sqli","fix":"param"}]}',
+      '```',
+    ].join('\n');
+    const p = parseSecurityReview(raw);
+    expect(p!.verdict).toBe('VULNERABLE');
+    expect(p!.findings).toHaveLength(1);
+  });
+
   it('returns null on garbled output', () => {
     expect(parseSecurityReview('nope')).toBeNull();
+    expect(parseSecurityReview('```json\n{"debug":true}\n```')).toBeNull();
   });
 });
 
@@ -96,9 +159,13 @@ describe('parseReviewLens', () => {
   });
 
   it('defaults verdict to DISCUSS when omitted', () => {
-    const p = parseReviewLens('```json\n{}\n```');
+    const p = parseReviewLens('```json\n{"findings":[]}\n```');
     expect(p!.verdict).toBe('DISCUSS');
     expect(p!.findings).toEqual([]);
+  });
+
+  it('rejects an object that names neither a verdict nor findings', () => {
+    expect(parseReviewLens('```json\n{}\n```')).toBeNull();
   });
 
   it('returns null on garbled output', () => {

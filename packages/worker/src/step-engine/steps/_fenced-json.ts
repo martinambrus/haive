@@ -175,6 +175,61 @@ export function escapeInnerQuotes(s: string): string {
  * repaired-but-wrong-shape result is still rejected downstream. Mirrors the salvage
  * chain in 06_5-agent-discovery and 08-knowledge-acquisition.
  */
+/** Strict parse of one candidate slice, then a jsonrepair salvage. Null when neither
+ *  yields JSON. A slice always starts at a bracket, so a JSON `null` cannot collide
+ *  with the failure value. */
+function parseCandidate(slice: string): unknown | null {
+  try {
+    return JSON.parse(slice);
+  } catch {
+    // fall through to the repair attempt
+  }
+  try {
+    return JSON.parse(jsonrepair(slice));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse the LAST JSON object in `text` that the CALLER accepts — not merely the first
+ * one that is syntactically JSON.
+ *
+ * parseJsonLoose anchors on the first ```json fence (or the first bracket) and never
+ * looks further. That is wrong whenever an agent emits JSON *before* its own answer: a
+ * reviewer quoting `composer.json` as evidence, an adversary fencing its JSON payload as
+ * proof. The decoy parses, the caller's schema is permissive enough to validate it, and
+ * the agent's real output is never seen. Scanning every balanced `{"..."` object and
+ * letting the caller's shape guard choose fixes that, and skips a brace that is merely
+ * prose (`src/{a,b}.ts`), which is not a candidate at all.
+ *
+ * LAST, not first, because the agent prompts all say "when finished emit ONE JSON
+ * object": the answer is what it finishes with, and anything JSON-shaped before it is
+ * working material. Taking the first accepted candidate instead would let an inline
+ * `{"verdict": "APPROVE"}` written in narration outrank the real REQUEST_CHANGES that
+ * followed it — the same silent approval, entered through a different door. Trailing
+ * content after the final object is prose, not JSON, so scanning to the end is safe.
+ *
+ * `accept` returns the parsed value on a match and null to reject. Falls back to
+ * parseJsonLoose's deeper salvage — truncated tails, single quotes, unescaped inner
+ * quotes — when no scanned candidate is accepted, so nothing it recovers is lost.
+ */
+export function parseJsonLooseValidated<T>(
+  text: string,
+  accept: (candidate: unknown) => T | null,
+): T | null {
+  let last: T | null = null;
+  for (const slice of extractFencedJsonObjects(text)) {
+    const value = parseCandidate(slice);
+    if (value === null) continue;
+    const accepted = accept(value);
+    if (accepted !== null) last = accepted;
+  }
+  if (last !== null) return last;
+  const loose = parseJsonLoose(text);
+  return loose === null ? null : accept(loose);
+}
+
 export function parseJsonLoose(text: string): unknown | null {
   const greedy = text.match(/```(?:json)?\s*([\s\S]*)```/i);
   const lazy = text.match(/```(?:json)?\s*([\s\S]*?)```/i);

@@ -49,9 +49,28 @@ describe('parseAdversaryOutput', () => {
     expect(parseAdversaryOutput({ verdict: 'PASS', findings: [] })).toEqual([]);
   });
 
+  it('parses its own report, not the payload it fenced as proof', () => {
+    // An adversary's PoC is often itself JSON. Anchoring on the first fence parsed the
+    // payload as the report, silently dropping a confirmed critical exploit.
+    const raw = [
+      'Payload used:',
+      '```json',
+      '{"input":"1 OR 1=1"}',
+      '```',
+      '```json',
+      '{"verdict":"FAIL","findings":[{"severity":"critical","category":"sqli","location":"q.php:5","poc":"1 OR 1=1"}]}',
+      '```',
+    ].join('\n');
+    const f = parseAdversaryOutput(raw);
+    expect(f).toHaveLength(1);
+    expect(f![0]!.severity).toBe('critical');
+  });
+
   it('returns null on garbled output', () => {
     expect(parseAdversaryOutput('no json')).toBeNull();
     expect(parseAdversaryOutput(null)).toBeNull();
+    // an object naming neither a verdict nor findings is not a report
+    expect(parseAdversaryOutput('```json\n{"input":"1 OR 1=1"}\n```')).toBeNull();
   });
 });
 

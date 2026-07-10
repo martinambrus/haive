@@ -10,7 +10,7 @@ import type {
 } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { parseJsonLoose } from '../_fenced-json.js';
+import { parseReviewJson } from './_review-parse.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput } from './_task-meta.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
@@ -131,20 +131,13 @@ const adversaryOutputSchema = z.object({
     .default([]),
 });
 
-function fencedCandidate(raw: unknown): unknown {
-  if (!raw) return null;
-  if (typeof raw === 'object') return raw;
-  if (typeof raw !== 'string') return null;
-  // parseJsonLoose extracts the fenced/balanced JSON and runs a jsonrepair salvage
-  // pass, so a truncated/malformed adversary turn is recovered instead of dropped.
-  return parseJsonLoose(raw);
-}
-
 /** Parse one adversarial agent's JSON; null when unparseable. */
 export function parseAdversaryOutput(raw: unknown): AdversarialFinding[] | null {
-  const parsed = adversaryOutputSchema.safeParse(fencedCandidate(raw));
-  if (!parsed.success) return null;
-  return parsed.data.findings;
+  return parseReviewJson(raw, (candidate) => {
+    const parsed = adversaryOutputSchema.safeParse(candidate);
+    if (!parsed.success) return null;
+    return parsed.data.findings;
+  });
 }
 
 /** Roster size per level — exported for the unit test. */
