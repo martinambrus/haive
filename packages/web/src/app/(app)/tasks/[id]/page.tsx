@@ -7,7 +7,7 @@ import type { FormSchema } from '@haive/shared';
 // Import the pure timing helper from its dedicated subpath, NOT the package
 // barrel — the barrel pulls server-only utils (ioredis -> dns) that break the
 // browser bundle. timing.ts has no imports, so this subpath is browser-safe.
-import { computeTaskTiming } from '@haive/shared/timing';
+import { computeStepContribution, computeTaskTiming } from '@haive/shared/timing';
 import {
   api,
   postUserActive,
@@ -1615,28 +1615,40 @@ function StepDuration({
     return () => clearInterval(t);
   }, [ticking]);
   if (!startedAt) return null;
-  const start = new Date(startedAt).getTime();
-  const end = stepEndedAt ? new Date(stepEndedAt).getTime() : now;
-  const openWaitMs =
-    !stepEndedAt && status === 'waiting_form' && waitingStartedAt
-      ? Math.max(0, now - new Date(waitingStartedAt).getTime())
-      : 0;
-  const workMs = Math.max(0, end - start - idleMs - openWaitMs) + carriedWorkMs;
-  const waiting = !stepEndedAt && status === 'waiting_form';
-  const color = stepEndedAt ? 'text-neutral-500' : waiting ? 'text-amber-300' : 'text-indigo-300';
+  // Reuse the shared effort math so this per-step timer freezes on the SAME waits
+  // the totals do: a waiting_form gate AND a waiting_cli park (queued for a CLI
+  // slot / rate-limited — waitingStartedAt set, no agent running). Inlining the
+  // formula here is what let it drift and tick through a queue park while the
+  // totals correctly paused. carriedWorkMs is added on top (prior runs of a retry).
+  const { workMs: liveWorkMs } = computeStepContribution(
+    { startedAt, endedAt: stepEndedAt, idleMs, userActiveMs: 0, waitingStartedAt, status },
+    now,
+  );
+  const workMs = liveWorkMs + carriedWorkMs;
+  const parkedForm = !stepEndedAt && status === 'waiting_form' && !!waitingStartedAt;
+  const parkedCli = !stepEndedAt && status === 'waiting_cli' && !!waitingStartedAt;
+  const color = stepEndedAt
+    ? 'text-neutral-500'
+    : parkedForm
+      ? 'text-amber-300'
+      : parkedCli
+        ? 'text-neutral-400'
+        : 'text-indigo-300';
   return (
     <span
       className={`font-mono text-xs ${color}`}
       title={
         stepEndedAt
           ? 'Active work time'
-          : waiting
+          : parkedForm
             ? 'Work time (paused — waiting for input)'
-            : 'Active work so far'
+            : parkedCli
+              ? 'Work time (paused — queued for a CLI slot)'
+              : 'Active work so far'
       }
     >
       {formatDuration(workMs)}
-      {waiting ? ' (waiting)' : ''}
+      {parkedForm ? ' (waiting)' : parkedCli ? ' (queued)' : ''}
     </span>
   );
 }
