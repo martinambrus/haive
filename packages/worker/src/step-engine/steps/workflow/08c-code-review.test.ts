@@ -6,6 +6,7 @@ import {
   parseReviewLens,
   lensesForLevel,
   computeBlocking,
+  hasNonApprovingVerdict,
   collectRefutable,
   isRefuted,
   codeReviewStep,
@@ -204,45 +205,40 @@ describe('lensesForLevel', () => {
 });
 
 describe('computeBlocking', () => {
-  it('blocks on peer REQUEST_CHANGES', () => {
-    expect(
-      computeBlocking({ verdict: 'REQUEST_CHANGES' }, { verdict: 'SECURE', findings: [] }),
-    ).toBe(true);
+  it('does NOT block on a bare REQUEST_CHANGES / VULNERABLE verdict', () => {
+    // Measured on 36 real historical reviews: 7 of 25 blocking rounds were a verdict with
+    // nothing worse than `medium` behind it. Each spent a fix round on an assertion no
+    // refuter can disprove, and SEVERITY_GUIDANCE already promises the reviewer that
+    // severity — not the verdict — is what sends a change back. hasNonApprovingVerdict
+    // keeps these off the gate-2 approve default instead.
+    expect(computeBlocking({ findings: [] }, { findings: [] })).toBe(false);
+    expect(computeBlocking({ findings: [{ severity: 'medium' }] }, { findings: [] })).toBe(false);
   });
 
-  it('blocks on security VULNERABLE', () => {
-    expect(computeBlocking({ verdict: 'APPROVE' }, { verdict: 'VULNERABLE', findings: [] })).toBe(
+  it('hasNonApprovingVerdict catches the verdicts that no longer block', () => {
+    expect(hasNonApprovingVerdict({ verdict: 'REQUEST_CHANGES' }, { verdict: 'SECURE' })).toBe(
       true,
     );
+    expect(hasNonApprovingVerdict({ verdict: 'APPROVE' }, { verdict: 'VULNERABLE' })).toBe(true);
+    expect(hasNonApprovingVerdict({ verdict: 'DISCUSS' }, { verdict: 'NEEDS_FIXES' })).toBe(false);
+    // NEEDS_FIXES is what parseSecurityReview substitutes for an ABSENT verdict, so it
+    // asserts nothing. Treating it as non-approving would hold nearly every gate.
+    expect(hasNonApprovingVerdict({ verdict: 'APPROVE' }, { verdict: 'NEEDS_FIXES' })).toBe(false);
+    expect(hasNonApprovingVerdict(null, null)).toBe(false);
   });
 
   it('blocks on any critical/high security finding', () => {
-    expect(
-      computeBlocking(
-        { verdict: 'APPROVE' },
-        { verdict: 'NEEDS_FIXES', findings: [{ severity: 'high' }] },
-      ),
-    ).toBe(true);
+    expect(computeBlocking({ findings: [] }, { findings: [{ severity: 'high' }] })).toBe(true);
   });
 
-  it('blocks on a peer critical finding even under a non-REQUEST_CHANGES verdict', () => {
-    expect(
-      computeBlocking(
-        { verdict: 'DISCUSS', findings: [{ severity: 'critical' }] },
-        { verdict: 'SECURE', findings: [] },
-      ),
-    ).toBe(true);
+  it('blocks on a peer critical finding', () => {
+    expect(computeBlocking({ findings: [{ severity: 'critical' }] }, { findings: [] })).toBe(true);
   });
 
   it('does not block on clean reviews or low/medium only', () => {
-    expect(computeBlocking({ verdict: 'APPROVE' }, { verdict: 'SECURE', findings: [] })).toBe(
-      false,
-    );
+    expect(computeBlocking({ findings: [] }, { findings: [] })).toBe(false);
     expect(
-      computeBlocking(
-        { verdict: 'DISCUSS', findings: [{ severity: 'low' }] },
-        { verdict: 'NEEDS_FIXES', findings: [{ severity: 'medium' }] },
-      ),
+      computeBlocking({ findings: [{ severity: 'low' }] }, { findings: [{ severity: 'medium' }] }),
     ).toBe(false);
   });
 
@@ -250,29 +246,22 @@ describe('computeBlocking', () => {
     expect(computeBlocking(null, null)).toBe(false);
   });
 
-  it('does NOT block on an extra lens REQUEST_CHANGES carrying only advisory findings', () => {
+  it('does NOT block on an extra lens carrying only advisory findings', () => {
     expect(
-      computeBlocking({ verdict: 'APPROVE' }, { verdict: 'SECURE', findings: [] }, [
-        { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'medium' }] },
-      ]),
+      computeBlocking({ findings: [] }, { findings: [] }, [{ findings: [{ severity: 'medium' }] }]),
     ).toBe(false);
   });
 
   it('blocks on an extra lens critical/high finding', () => {
     expect(
-      computeBlocking({ verdict: 'APPROVE' }, { verdict: 'SECURE', findings: [] }, [
-        { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'critical' }] },
+      computeBlocking({ findings: [] }, { findings: [] }, [
+        { findings: [{ severity: 'critical' }] },
       ]),
     ).toBe(true);
   });
 
-  it('does not block on extra lenses that approve or discuss', () => {
-    expect(
-      computeBlocking({ verdict: 'APPROVE' }, { verdict: 'SECURE', findings: [] }, [
-        { verdict: 'APPROVE' },
-        { verdict: 'DISCUSS' },
-      ]),
-    ).toBe(false);
+  it('does not block on extra lenses with no findings', () => {
+    expect(computeBlocking({ findings: [] }, { findings: [] }, [{}, {}])).toBe(false);
   });
 });
 
@@ -564,16 +553,31 @@ describe('codeReviewStep refutation pass', () => {
     expect(out.refutedCount).toBe(0);
   });
 
-  it('never fans out when the block is a bare verdict with no finding behind it', async () => {
-    // Nothing to disprove: the reviewer asserted, it did not cite.
+  it('a bare REQUEST_CHANGES neither blocks nor fans out, but holds the gate', async () => {
+    // Nothing to disprove: the reviewer asserted, it did not cite. It costs no fix round,
+    // and it must not read as a clean review either.
     const out = await firstPass([
       mining(
         'peer-reviewer',
         '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"medium","issue":"m"}],"positives":[]}\n```',
       ),
     ]);
-    expect(out.blocking).toBe(true);
+    expect(out.blocking).toBe(false);
+    expect(out.advisoryVerdict).toBe(true);
     expect(out.refutedCount).toBe(0);
+    expect(codeReviewStep.fixLoop!.evaluate(out)).toBeNull();
+  });
+
+  it('clears advisoryVerdict when refutation downgrades the verdict', async () => {
+    const out = await firstPass([
+      mining('peer-reviewer', CRITICAL_PEER),
+      mining(refuterId, '```json\n{"refuted":true,"evidence":"a.ts:4"}\n```'),
+    ]);
+    // REQUEST_CHANGES rested on the refuted critical, so it became DISCUSS: the gate is
+    // free to default to approve. A verdict that survived would have held it.
+    expect(out.peer.verdict).toBe('DISCUSS');
+    expect(out.blocking).toBe(false);
+    expect(out.advisoryVerdict).toBe(false);
   });
 
   it('never fans out when the kill-switch is off', async () => {
@@ -607,6 +611,18 @@ describe('codeReviewStep refutation pass', () => {
     expect(out.peer.findings[0]!.refuted).toBe(true);
     // and never reaches the implementer
     expect(codeReviewStep.fixLoop!.evaluate(out)).toBeNull();
+  });
+
+  it('does not flag advisoryVerdict when the review actually blocks', async () => {
+    // advisoryVerdict means "asked for changes, but nothing was sent back". Gate 2 renders
+    // that sentence verbatim, so a blocking review must never carry it.
+    const out = await firstPass([
+      mining('peer-reviewer', CRITICAL_PEER),
+      mining(refuterId, '```json\n{"refuted":false,"reason":"the npe is real"}\n```'),
+    ]);
+    expect(out.blocking).toBe(true);
+    expect(out.peer.verdict).toBe('REQUEST_CHANGES');
+    expect(out.advisoryVerdict).toBe(false);
   });
 
   it('keeps a finding whose refuter cited nothing', async () => {

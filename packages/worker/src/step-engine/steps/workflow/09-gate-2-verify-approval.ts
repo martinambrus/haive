@@ -60,6 +60,9 @@ interface VerifyGateDetect {
      *  went unreviewed. Not blocking (the reviewer failed, not the code), but the gate
      *  must not report OK and must not default to approve. */
     reviewIncomplete: boolean;
+    /** A reviewer requested changes with no critical/high finding behind it. Same
+     *  contract as reviewIncomplete: no fix round, but no silent approve either. */
+    advisoryVerdict: boolean;
     peerFindings: string[];
     securityFindings: string[];
     /** Findings from the level-gated extra review lenses (operational/performance). */
@@ -124,6 +127,10 @@ interface Phase8cOutput {
   /** Absent on rows written before 08c reported it; treated as false (a review that
    *  predates the flag either completed or already surfaced its own findings). */
   reviewIncomplete?: boolean;
+  /** A reviewer requested changes with no critical/high finding behind it. Absent on rows
+   *  written before 08c reported it — those blocked on the verdict instead, so the gate
+   *  already defaulted to reject. */
+  advisoryVerdict?: boolean;
   peer?: {
     verdict?: string;
     findings?: {
@@ -412,6 +419,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         securityVerdict: pc.security?.verdict ?? 'NEEDS_FIXES',
         blocking: pc.blocking === true,
         reviewIncomplete: pc.reviewIncomplete === true,
+        advisoryVerdict: pc.advisoryVerdict === true,
         // A refuted finding is shown, not hidden: a refuter disproved it, and the human
         // at this gate is the one entitled to disagree with that. It no longer blocks,
         // and the implementer never saw it.
@@ -592,7 +600,10 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // An incomplete review is not a passing review. It does not block (that would spend
     // a fix round because a reviewer failed), but it must not flip the gate to approve
     // by default either — the developer decides what to do about the unreviewed part.
-    const codeReviewOk = cr === null || (!cr.blocking && !cr.reviewIncomplete);
+    // A reviewer that requested changes without a critical/high finding behind it carries
+    // the same contract: no fix round to spend, but no silent approve either.
+    const codeReviewOk =
+      cr === null || (!cr.blocking && !cr.reviewIncomplete && !cr.advisoryVerdict);
     const cAudit = detected.codeAudit;
     const aq = detected.adversarial;
     const adversarialOk = aq === null || !aq.blocking;
@@ -741,16 +752,26 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         for (const p of cr.positives) lines.push(`- ${p}`);
       }
       // An unreadable reviewer used to render as pass/OK and collapse its own evidence,
-      // so a review that never completed looked like a clean one.
+      // so a review that never completed looked like a clean one. A reviewer that asked
+      // for changes over nothing worse than `medium` must not read as OK either.
+      const detail = cr.reviewIncomplete
+        ? `a reviewer's output could not be read after re-rolling — part of the change is unreviewed (peer ${cr.peerVerdict}, security ${cr.securityVerdict})`
+        : cr.advisoryVerdict
+          ? `a reviewer requested changes but raised no critical/high finding, so nothing was sent back — read the findings and decide (peer ${cr.peerVerdict}, security ${cr.securityVerdict})`
+          : `peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} ops/perf` : ''}`;
       rows.push({
         label: 'Code review',
-        status: cr.blocking ? 'fail' : cr.reviewIncomplete ? 'warn' : 'pass',
-        statusLabel: cr.blocking ? 'BLOCKING' : cr.reviewIncomplete ? 'INCOMPLETE' : 'OK',
-        detail: cr.reviewIncomplete
-          ? `a reviewer's output could not be read after re-rolling — part of the change is unreviewed (peer ${cr.peerVerdict}, security ${cr.securityVerdict})`
-          : `peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} ops/perf` : ''}`,
+        status: cr.blocking ? 'fail' : cr.reviewIncomplete || cr.advisoryVerdict ? 'warn' : 'pass',
+        statusLabel: cr.blocking
+          ? 'BLOCKING'
+          : cr.reviewIncomplete
+            ? 'INCOMPLETE'
+            : cr.advisoryVerdict
+              ? 'ADVISORY'
+              : 'OK',
+        detail,
         body: lines.join('\n'),
-        defaultOpen: cr.blocking || cr.reviewIncomplete,
+        defaultOpen: cr.blocking || cr.reviewIncomplete || cr.advisoryVerdict,
       });
     }
 

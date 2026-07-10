@@ -97,6 +97,9 @@ interface CodeReviewApply {
    *  part of the change went unreviewed. Distinct from `blocking`: the reviewer failed,
    *  not the code, so it must not spend a fix round — but gate 2 must not report OK. */
   reviewIncomplete: boolean;
+  /** A reviewer requested changes without a critical/high finding to point at. Does not
+   *  block (no fix round, nothing to refute), but holds gate 2 off its approve default. */
+  advisoryVerdict: boolean;
   /** Blocking findings a refuter disproved. 0 when the pass is off or nothing blocked. */
   refutedCount: number;
   counts: { peer: number; securityCriticalHigh: number };
@@ -203,30 +206,47 @@ export function parseReviewLens(raw: unknown): { verdict: string; findings: Peer
   });
 }
 
-/** A review result is blocking when peer requests changes, security is vulnerable,
- *  or ANY reviewer raised a critical/high finding.
+/** A review result is blocking when ANY reviewer raised a critical/high finding.
  *
- *  Blocking costs a fix round, so it keys on the severity ladder rather than on a
- *  reviewer's summary verdict. Two consequences, both deliberate:
- *  - a peer `critical` finding blocks on its own, even under an APPROVE/DISCUSS
- *    verdict (it previously did not);
- *  - an extra lens (operational/performance/simplicity) no longer blocks on its
- *    verdict alone — a lens that requests changes over `medium`/`low` findings
- *    surfaces as advisory at gate 2 instead of burning a fix round.
+ *  Blocking costs a fix round, so it keys on the severity ladder and on nothing else —
+ *  never on a reviewer's summary verdict. SEVERITY_GUIDANCE tells every reviewer exactly
+ *  that ("critical/high sends the change back; medium/low surface as advisory"), and the
+ *  code has to mean it. Three consequences, all deliberate:
+ *  - a peer `critical` finding blocks on its own, even under an APPROVE/DISCUSS verdict;
+ *  - an extra lens no longer blocks on its verdict alone;
+ *  - a bare `REQUEST_CHANGES`/`VULNERABLE` over nothing worse than `medium` no longer
+ *    blocks either. Measured on 36 real historical reviews, that was 7 of 25 blocking
+ *    rounds — fix rounds spent on an assertion the reviewer never grounded in a finding,
+ *    and which no refuter can disprove because there is no claim to read.
+ *
+ *  Those verdicts are not ignored: `hasNonApprovingVerdict` keeps them off the gate-2
+ *  approve default. The cost moves from an automatic reimplementation to a human glance.
  */
 export function computeBlocking(
-  peer: { verdict: string; findings?: { severity: ReviewSeverity }[] } | null,
-  security: { verdict: string; findings: { severity: ReviewSeverity }[] } | null,
-  lenses: { verdict: string; findings?: { severity: ReviewSeverity }[] }[] = [],
+  peer: { findings?: { severity: ReviewSeverity }[] } | null,
+  security: { findings: { severity: ReviewSeverity }[] } | null,
+  lenses: { findings?: { severity: ReviewSeverity }[] }[] = [],
 ): boolean {
-  if (peer?.verdict === 'REQUEST_CHANGES') return true;
-  if (security?.verdict === 'VULNERABLE') return true;
   const findings = [
     ...(peer?.findings ?? []),
     ...(security?.findings ?? []),
     ...lenses.flatMap((l) => l.findings ?? []),
   ];
   return findings.some((f) => isBlockingSeverity(f.severity));
+}
+
+/** A reviewer asked for changes without grounding it in a critical/high finding.
+ *
+ *  It must not spend a fix round (nothing to fix, nothing to refute), and it must not let
+ *  gate 2 default to approve either — a collapsed green "OK" next to `peer
+ *  REQUEST_CHANGES` is the same silent approval an unparseable review used to produce.
+ *  Only these two verdicts count: `NEEDS_FIXES` is what parseSecurityReview substitutes
+ *  for an ABSENT verdict, so it carries no assertion at all. */
+export function hasNonApprovingVerdict(
+  peer: { verdict: string } | null,
+  security: { verdict: string } | null,
+): boolean {
+  return peer?.verdict === 'REQUEST_CHANGES' || security?.verdict === 'VULNERABLE';
 }
 
 /* ------------------------------------------------------------------ */
@@ -368,8 +388,8 @@ function buildRefutePrompt(d: CodeReviewDetect, f: RefutableFinding): string {
 
 /** Downgrade a reviewer's verdict when every blocking finding behind it was refuted: the
  *  verdict was a summary of those findings, and nothing is left to summarise. A reviewer
- *  that raised no blocking finding keeps its verdict — there was nothing to refute, so
- *  a bare REQUEST_CHANGES/VULNERABLE still blocks. */
+ *  that raised no blocking finding keeps its verdict — there was nothing to refute, so a
+ *  bare REQUEST_CHANGES/VULNERABLE still holds gate 2 off its approve default. */
 function adjustVerdict<T extends { severity: ReviewSeverity; refuted?: boolean }>(
   verdict: string,
   findings: T[],
@@ -858,6 +878,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         extraLenses: [],
         blocking: false,
         reviewIncomplete: false,
+        advisoryVerdict: false,
         refutedCount: 0,
         counts: { peer: 0, securityCriticalHigh: 0 },
       };
@@ -971,17 +992,16 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // the second reads their verdicts back and recomputes what still blocks.
     //
     // Only blocking findings are refuted, and collectRefutable enforces that: they are
-    // the only ones that cost a fix round. It follows that an empty list means there is
-    // no claim to disprove — either nothing blocks, or the block is a bare
-    // REQUEST_CHANGES/VULNERABLE verdict the reviewer never grounded in a finding.
+    // the only ones that cost a fix round. An empty list therefore means nothing blocks
+    // and there is no claim to disprove.
     const waveRan = results.some((r) => r.agentId.startsWith(REFUTER_PREFIX));
     let refutedCount = 0;
     if (waveRan) {
       refutedCount = applyRefutations(results, peerOut, securityOut, extraLenses);
       blocking = computeBlocking(
-        { verdict: peerOut.verdict, findings: live(peerOut.findings) },
-        { verdict: securityOut.verdict, findings: live(securityOut.findings) },
-        extraLenses.map((l) => ({ verdict: l.verdict, findings: live(l.findings) })),
+        { findings: live(peerOut.findings) },
+        { findings: live(securityOut.findings) },
+        extraLenses.map((l) => ({ findings: live(l.findings) })),
       );
     } else if (args.miningWaveExhausted !== true) {
       const refutable = collectRefutable(peerOut, securityOut, extraLenses);
@@ -1055,6 +1075,9 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     const securityCriticalHigh = live(securityOut.findings).filter((f) =>
       isBlockingSeverity(f.severity),
     ).length;
+    // After applyRefutations, so a verdict its refuted findings no longer support has
+    // already been downgraded and does not hold the gate.
+    const advisoryVerdict = !blocking && hasNonApprovingVerdict(peerOut, securityOut);
 
     ctx.logger.info(
       {
@@ -1064,6 +1087,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         securityCriticalHigh,
         lenses: extraLenses.map((l) => `${l.id}:${l.verdict}`),
         blocking,
+        advisoryVerdict,
         refutedCount,
         reviewIncomplete,
         unreadable,
@@ -1078,6 +1102,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       extraLenses,
       blocking,
       reviewIncomplete,
+      advisoryVerdict,
       refutedCount,
       counts: { peer: peerOut.findings.length, securityCriticalHigh },
     };
