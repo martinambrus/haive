@@ -5,7 +5,7 @@ import { STEP_CLI_ROLES } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { parseJsonLoose } from '../_fenced-json.js';
+import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadHonoredConstraints } from './_fix-loop.js';
@@ -124,12 +124,12 @@ const fixerOutputSchema = z.object({
   notes: z.string().default(''),
 });
 
-function fencedCandidate(raw: unknown): unknown {
-  if (!raw) return null;
-  if (typeof raw === 'object') return raw;
-  if (typeof raw !== 'string') return null;
-  return parseJsonLoose(raw);
-}
+/** The fixer's own report names the fixes it made, or the notes it left; a config it
+ *  quoted names neither. `notes` is in the gate because a fixer that changed nothing
+ *  legitimately reports only notes. The validator needs no key gate — its schema
+ *  REQUIRES a verdict — but it still needs the candidate scan, or a JSON file it quoted
+ *  is the only thing it gets judged on. */
+const FIXER_KEYS = ['fixes_made', 'notes'] as const;
 
 /** Parse the validator's final fenced JSON; null when unparseable (the step then
  *  records UNPARSEABLE — no fix loop, surfaced as a warning at gate-2). */
@@ -139,16 +139,22 @@ export function parseValidatorOutput(raw: unknown): {
   issues: ValidationIssue[];
   dimensions: DimensionResult[];
 } | null {
-  const parsed = validatorOutputSchema.safeParse(fencedCandidate(raw));
-  if (!parsed.success) return null;
-  return parsed.data;
+  return parseAgentJson(raw, (candidate) => {
+    const parsed = validatorOutputSchema.safeParse(candidate);
+    return parsed.success ? parsed.data : null;
+  });
 }
 
 /** Parse the fixer's JSON; falls back to "no fixes recorded" on a parse miss. */
 export function parseFixerOutput(raw: unknown): { fixesMade: string[]; notes: string } {
-  const parsed = fixerOutputSchema.safeParse(fencedCandidate(raw));
-  if (!parsed.success) return { fixesMade: [], notes: '' };
-  return { fixesMade: parsed.data.fixes_made, notes: parsed.data.notes };
+  return (
+    parseAgentJson(raw, (candidate) => {
+      if (!hasAnyKey(candidate, FIXER_KEYS)) return null;
+      const parsed = fixerOutputSchema.safeParse(candidate);
+      if (!parsed.success) return null;
+      return { fixesMade: parsed.data.fixes_made, notes: parsed.data.notes };
+    }) ?? { fixesMade: [], notes: '' }
+  );
 }
 
 /** Latest validator (or stub) pass — its verdict/issues drive the fixer and are

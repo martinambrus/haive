@@ -5,7 +5,7 @@ import { STEP_CLI_ROLES } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { parseJsonLoose } from '../_fenced-json.js';
+import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 
 // Phase 3.5 — Code simplification (legacy phase3_5-code-simplification.md). A
@@ -51,33 +51,39 @@ const fixupOutputSchema = z.object({
   fixes_made: z.array(z.string()).default([]),
 });
 
-function fencedCandidate(raw: unknown): unknown {
-  if (!raw) return null;
-  if (typeof raw === 'object') return raw;
-  if (typeof raw !== 'string') return null;
-  return parseJsonLoose(raw);
-}
+/** Keys naming the agent's own report. Every schema field below defaults, so without
+ *  these gates any JSON the agent quoted validates as "nothing to simplify". */
+const SIMPLIFIER_KEYS = ['files_simplified', 'changes_made', 'no_changes_needed'] as const;
+const FIXUP_KEYS = ['fixes_needed', 'fixes_made'] as const;
 
 /** Parse the simplifier's JSON; null when unparseable (treated as no-changes —
  *  a parse miss must not trigger a pointless fixup pass). */
 export function parseSimplifierOutput(
   raw: unknown,
 ): { filesSimplified: string[]; changesMade: string[]; noChangesNeeded: boolean } | null {
-  const parsed = simplifierOutputSchema.safeParse(fencedCandidate(raw));
-  if (!parsed.success) return null;
-  const { files_simplified, changes_made, no_changes_needed } = parsed.data;
-  return {
-    filesSimplified: files_simplified,
-    changesMade: changes_made,
-    noChangesNeeded: no_changes_needed ?? files_simplified.length === 0,
-  };
+  return parseAgentJson(raw, (candidate) => {
+    if (!hasAnyKey(candidate, SIMPLIFIER_KEYS)) return null;
+    const parsed = simplifierOutputSchema.safeParse(candidate);
+    if (!parsed.success) return null;
+    const { files_simplified, changes_made, no_changes_needed } = parsed.data;
+    return {
+      filesSimplified: files_simplified,
+      changesMade: changes_made,
+      noChangesNeeded: no_changes_needed ?? files_simplified.length === 0,
+    };
+  });
 }
 
 /** Parse the fixup agent's JSON; falls back to "no fixes" on a parse miss. */
 export function parseFixupOutput(raw: unknown): { fixesNeeded: boolean; fixesMade: string[] } {
-  const parsed = fixupOutputSchema.safeParse(fencedCandidate(raw));
-  if (!parsed.success) return { fixesNeeded: false, fixesMade: [] };
-  return { fixesNeeded: parsed.data.fixes_needed, fixesMade: parsed.data.fixes_made };
+  return (
+    parseAgentJson(raw, (candidate) => {
+      if (!hasAnyKey(candidate, FIXUP_KEYS)) return null;
+      const parsed = fixupOutputSchema.safeParse(candidate);
+      if (!parsed.success) return null;
+      return { fixesNeeded: parsed.data.fixes_needed, fixesMade: parsed.data.fixes_made };
+    }) ?? { fixesNeeded: false, fixesMade: [] }
+  );
 }
 
 /** The pass-0 simplifier result carried into the fixup pass / final output. */

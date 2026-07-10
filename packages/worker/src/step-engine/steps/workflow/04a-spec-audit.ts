@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { parseJsonLoose } from '../_fenced-json.js';
+import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { coerceReviewSeverity } from '@haive/shared/review';
@@ -76,30 +76,32 @@ const AUDIT_RULES = [
   'spec is clean, return an empty findings array.',
 ] as const;
 
-/** Salvage a fenced-JSON object from the auditor output (object passes through). */
-function fencedCandidate(raw: unknown): unknown {
-  if (!raw) return null;
-  if (typeof raw === 'object') return raw;
-  if (typeof raw !== 'string') return null;
-  return parseJsonLoose(raw);
-}
+/** The auditor's own report names a findings list; a spec snippet it quoted does not. */
+const AUDIT_KEYS = ['findings'] as const;
 
 /** Parse the auditor findings into the same shape 05 emits so 05a consumes them
- *  unchanged (dimension / severity high|medium / comment). */
+ *  unchanged (dimension / severity high|medium / comment).
+ *
+ *  An empty array means "the spec is clean", so the auditor's own object has to be the
+ *  one that is read: anchoring on the first fenced JSON would let a spec snippet the
+ *  auditor quoted report a clean spec while its real findings went unseen. */
 export function parseSpecAuditFindings(raw: unknown): AuditFinding[] {
-  const obj = fencedCandidate(raw);
-  if (!obj || typeof obj !== 'object') return [];
-  const findings = (obj as { findings?: unknown }).findings;
-  if (!Array.isArray(findings)) return [];
-  return findings
-    .filter((f): f is Record<string, unknown> => typeof f === 'object' && f !== null)
-    .map((f) => ({
-      dimension: typeof f.dimension === 'string' ? f.dimension : undefined,
-      // Report-only step: an unrecognised severity lands on medium, never on the
-      // blocking tier, so a typo cannot force a spec revision.
-      severity: coerceReviewSeverity(f.severity, 'medium'),
-      comment: typeof f.comment === 'string' ? f.comment : '',
-    }));
+  return (
+    parseAgentJson(raw, (candidate) => {
+      if (!hasAnyKey(candidate, AUDIT_KEYS)) return null;
+      const findings = candidate.findings;
+      if (!Array.isArray(findings)) return null;
+      return findings
+        .filter((f): f is Record<string, unknown> => typeof f === 'object' && f !== null)
+        .map((f) => ({
+          dimension: typeof f.dimension === 'string' ? f.dimension : undefined,
+          // Report-only step: an unrecognised severity lands on medium, never on the
+          // blocking tier, so a typo cannot force a spec revision.
+          severity: coerceReviewSeverity(f.severity, 'medium'),
+          comment: typeof f.comment === 'string' ? f.comment : '',
+        }));
+    }) ?? []
+  );
 }
 
 export const specAuditStep: StepDefinition<SpecAuditDetect, SpecAuditApply> = {

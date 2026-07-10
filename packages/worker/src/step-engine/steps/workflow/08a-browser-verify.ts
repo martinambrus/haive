@@ -8,7 +8,7 @@ import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
-import { parseJsonLoose } from '../_fenced-json.js';
+import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput, resolveDdevWorkspace } from './_task-meta.js';
 import { resolveBrowserRuntime } from './_browser-runtime.js';
@@ -119,14 +119,12 @@ const checklistOutputSchema = z.object({
   checklist_markdown: z.string().default(''),
 });
 
-function fencedCandidate(raw: unknown): unknown {
-  if (!raw) return null;
-  if (typeof raw === 'object') return raw;
-  if (typeof raw !== 'string') return null;
-  // parseJsonLoose extracts the fenced/balanced JSON and runs a jsonrepair salvage
-  // pass, so a truncated/malformed agent turn is recovered instead of dropped.
-  return parseJsonLoose(raw);
-}
+/** Keys naming each agent's own report. The tester's schema already REQUIRES `passed`,
+ *  so it needs no key gate — only the candidate scan, so that a JSON payload it printed
+ *  while driving the browser cannot stand in for its verdict. `notes` is in the fixer's
+ *  gate because a fixer that changed nothing legitimately reports only notes. */
+const FIXER_KEYS = ['fixes_made', 'notes'] as const;
+const CHECKLIST_KEYS = ['checklist_markdown'] as const;
 
 /** Parse the MCP tester verdict; null when unparseable (caller treats a parse
  *  miss as a FAILED test so a broken tester never silently passes). */
@@ -137,27 +135,40 @@ export function parseBrowserTestOutput(raw: unknown): {
   fixScope: 'trivial' | 'implementation';
   notes: string;
 } | null {
-  const parsed = testerOutputSchema.safeParse(fencedCandidate(raw));
-  if (!parsed.success) return null;
-  return {
-    passed: parsed.data.passed,
-    failures: parsed.data.failures,
-    visualVerdict: parsed.data.visual_verdict ?? null,
-    fixScope: parsed.data.fix_scope,
-    notes: parsed.data.notes,
-  };
+  return parseAgentJson(raw, (candidate) => {
+    const parsed = testerOutputSchema.safeParse(candidate);
+    if (!parsed.success) return null;
+    return {
+      passed: parsed.data.passed,
+      failures: parsed.data.failures,
+      visualVerdict: parsed.data.visual_verdict ?? null,
+      fixScope: parsed.data.fix_scope,
+      notes: parsed.data.notes,
+    };
+  });
 }
 
 export function parseFixerOutput(raw: unknown): { fixesMade: string[]; notes: string } {
-  const parsed = fixerOutputSchema.safeParse(fencedCandidate(raw));
-  if (!parsed.success) return { fixesMade: [], notes: '' };
-  return { fixesMade: parsed.data.fixes_made, notes: parsed.data.notes };
+  return (
+    parseAgentJson(raw, (candidate) => {
+      if (!hasAnyKey(candidate, FIXER_KEYS)) return null;
+      const parsed = fixerOutputSchema.safeParse(candidate);
+      if (!parsed.success) return null;
+      return { fixesMade: parsed.data.fixes_made, notes: parsed.data.notes };
+    }) ?? { fixesMade: [], notes: '' }
+  );
 }
 
 export function parseChecklistOutput(raw: unknown): string {
-  const parsed = checklistOutputSchema.safeParse(fencedCandidate(raw));
-  if (parsed.success && parsed.data.checklist_markdown.trim())
+  // A blank checklist rejects the candidate rather than accepting an empty string, so a
+  // plain-markdown agent still reaches the raw-text fallback below.
+  const markdown = parseAgentJson(raw, (candidate) => {
+    if (!hasAnyKey(candidate, CHECKLIST_KEYS)) return null;
+    const parsed = checklistOutputSchema.safeParse(candidate);
+    if (!parsed.success || !parsed.data.checklist_markdown.trim()) return null;
     return parsed.data.checklist_markdown;
+  });
+  if (markdown !== null) return markdown;
   // Fall back to the raw text (the agent may have written plain markdown).
   return typeof raw === 'string' ? raw.slice(0, 16_000) : '';
 }

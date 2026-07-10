@@ -7,7 +7,7 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { extractFencedJson } from '../_fenced-json.js';
+import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
@@ -73,18 +73,9 @@ const testerOutputSchema = z.object({
   notes: z.string().default(''),
 });
 
-function fencedCandidate(raw: unknown): unknown {
-  if (!raw) return null;
-  if (typeof raw === 'object') return raw;
-  if (typeof raw !== 'string') return null;
-  const body = extractFencedJson(raw);
-  if (!body) return null;
-  try {
-    return JSON.parse(body);
-  } catch {
-    return null;
-  }
-}
+/** The tester's own report names the test files it touched. Every schema field defaults,
+ *  so without this gate any JSON it printed validates as "no tests written". */
+const TESTER_KEYS = ['tests_created', 'tests_updated', 'tests_deleted'] as const;
 
 /** Parse the tester agent's JSON; falls back to "no changes" on a parse miss. */
 export function parseTesterOutput(raw: unknown): {
@@ -93,14 +84,19 @@ export function parseTesterOutput(raw: unknown): {
   testsDeleted: string[];
   notes: string;
 } {
-  const parsed = testerOutputSchema.safeParse(fencedCandidate(raw));
-  if (!parsed.success) return { testsCreated: [], testsUpdated: [], testsDeleted: [], notes: '' };
-  return {
-    testsCreated: parsed.data.tests_created,
-    testsUpdated: parsed.data.tests_updated,
-    testsDeleted: parsed.data.tests_deleted,
-    notes: parsed.data.notes,
-  };
+  return (
+    parseAgentJson(raw, (candidate) => {
+      if (!hasAnyKey(candidate, TESTER_KEYS)) return null;
+      const parsed = testerOutputSchema.safeParse(candidate);
+      if (!parsed.success) return null;
+      return {
+        testsCreated: parsed.data.tests_created,
+        testsUpdated: parsed.data.tests_updated,
+        testsDeleted: parsed.data.tests_deleted,
+        notes: parsed.data.notes,
+      };
+    }) ?? { testsCreated: [], testsUpdated: [], testsDeleted: [], notes: '' }
+  );
 }
 
 const TEST_FILE_RE =

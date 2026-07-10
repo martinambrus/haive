@@ -3,7 +3,7 @@ import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
-import { parseJsonLoose } from '../_fenced-json.js';
+import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { coerceReviewSeverity } from '@haive/shared/review';
@@ -69,30 +69,30 @@ const AUDIT_RULES = [
   'If the code faithfully implements the spec, return an empty findings array.',
 ] as const;
 
-/** Salvage a fenced-JSON object from the auditor output (object passes through). */
-function fencedCandidate(raw: unknown): unknown {
-  if (!raw) return null;
-  if (typeof raw === 'object') return raw;
-  if (typeof raw !== 'string') return null;
-  return parseJsonLoose(raw);
-}
+/** The auditor's own report names a findings list; a code/config snippet it quoted as
+ *  evidence does not. Without the gate an empty findings array — "the code is clean" —
+ *  is what a quoted JSON file parses to. */
+const AUDIT_KEYS = ['findings'] as const;
 
 export function parseCodeAuditFindings(raw: unknown): AuditFinding[] {
-  const obj = fencedCandidate(raw);
-  if (!obj || typeof obj !== 'object') return [];
-  const findings = (obj as { findings?: unknown }).findings;
-  if (!Array.isArray(findings)) return [];
-  return findings
-    .filter((f): f is Record<string, unknown> => typeof f === 'object' && f !== null)
-    .map((f) => ({
-      // Advisory step: an unrecognised severity lands on medium, never on the
-      // blocking tier.
-      severity: coerceReviewSeverity(f.severity, 'medium'),
-      path: typeof f.path === 'string' ? f.path : undefined,
-      lines: typeof f.lines === 'string' ? f.lines : undefined,
-      issue: typeof f.issue === 'string' ? f.issue : undefined,
-      fix: typeof f.fix === 'string' ? f.fix : undefined,
-    }));
+  return (
+    parseAgentJson(raw, (candidate) => {
+      if (!hasAnyKey(candidate, AUDIT_KEYS)) return null;
+      const findings = candidate.findings;
+      if (!Array.isArray(findings)) return null;
+      return findings
+        .filter((f): f is Record<string, unknown> => typeof f === 'object' && f !== null)
+        .map((f) => ({
+          // Advisory step: an unrecognised severity lands on medium, never on the
+          // blocking tier.
+          severity: coerceReviewSeverity(f.severity, 'medium'),
+          path: typeof f.path === 'string' ? f.path : undefined,
+          lines: typeof f.lines === 'string' ? f.lines : undefined,
+          issue: typeof f.issue === 'string' ? f.issue : undefined,
+          fix: typeof f.fix === 'string' ? f.fix : undefined,
+        }));
+    }) ?? []
+  );
 }
 
 export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {

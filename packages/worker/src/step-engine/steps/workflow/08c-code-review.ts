@@ -11,7 +11,7 @@ import type {
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
-import { parseReviewJson } from './_review-parse.js';
+import { parseReviewJson } from './_agent-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { promises as fs } from 'node:fs';
