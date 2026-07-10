@@ -68,7 +68,9 @@ Step lifecycle: `pending` to `running(detect)` to `waiting_form` to `running(app
 
 ## CLI adapter system
 
-`packages/worker/src/cli-adapters/base-adapter.ts` defines `BaseCliAdapter`. Implemented adapters: `claude-code`, `codex`, `gemini`, `amp`, `zai`, `antigravity`, `ollama`. Each declares `supportsSubagents`, `supportsApi`, `supportsCliAuth`. The dispatcher resolves execution via a priority chain: subscription CLI to BYOK API to platform API to CLI fallback to skip.
+`packages/worker/src/cli-adapters/base-adapter.ts` defines `BaseCliAdapter`. Implemented adapters: `claude-code`, `codex`, `gemini`, `amp`, `zai`, `antigravity`, `ollama`. Each declares `supportsSubagents`, `supportsCliAuth`, `supportsMcp`, `supportsPlugins`, `defaultAuthMode` (`subscription` or `api_key`), and `apiKeyEnvName`. `supportsSteering` defaults to false; only the Claude-family adapters (`claude-code`, `zai`, `ollama`) override it to true.
+
+The dispatcher (`resolveDispatch`) filters to enabled providers, orders the resolved preferred provider first, and picks the first whose adapter is registered and has `supportsCliAuth` — plus `supportsSubagents` when the step declares the `subagents` capability. If none matches, the step is skipped. Every plan it emits is a CLI invocation; there is no API-mode branch. Auth mode selects which credentials the CLI is given, not whether the dispatcher bypasses the CLI.
 
 The sub-agent emulator splits a single sub-agent specification into either a native `Task()` call (Claude Code) or a sequential prompt script (everything else). A sequential script runs inside a single `cli-exec-queue` job — the runner is an in-memory for-loop over the sub-steps, with no per-sub-step DB writes. A crash mid-script therefore fails the whole invocation; restart re-runs from sub-step 0. (Mid-script resume would require persisting each sub-step's parsed output to `cli_invocations` before moving on — not implemented.)
 
