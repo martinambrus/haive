@@ -474,6 +474,11 @@ export const taskStepAgentMinings = pgTable(
     output: jsonb('output').$type<unknown>(),
     rawOutput: text('raw_output'),
     errorMessage: text('error_message'),
+    /** CLI invocations dispatched for this agent, including re-rolls. The llm-retry
+     *  path counts attempts by counting cli_invocations rows, which does not work
+     *  here: a mining row is UPDATEd in place on retry (the (task_step_id, agent_id)
+     *  unique index forbids a second row), so the count has to live on the row. */
+    attempts: integer('attempts').notNull().default(1),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),

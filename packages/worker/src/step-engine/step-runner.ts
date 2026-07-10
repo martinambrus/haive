@@ -25,6 +25,8 @@ import { isOutputTruncationMessage } from '../queues/cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
 import {
   TaskCancelledError,
+  MiningRetryError,
+  type AgentMiningDispatch,
   type AgentMiningResult,
   type StepContext,
   type StepDefinition,
@@ -824,13 +826,56 @@ async function resolveAgentMiningPhase(
     return { resolved: true, results: [], current };
   }
 
+  const dispatched = await dispatchMiningAgents(
+    db,
+    stepDef,
+    current,
+    ctx,
+    params,
+    dispatches,
+    null,
+  );
+
+  const updated = await updateRow(db, current.id, {
+    status: 'waiting_cli',
+    statusMessage: `Mining knowledge from ${dispatches.length} agent(s)...`,
+  });
+  ctx.logger.info(
+    { dispatched, agentIds: dispatches.map((d) => d.agentId) },
+    'agent mining fan-out enqueued',
+  );
+  return { resolved: false, result: { status: 'waiting_cli', row: updated } };
+}
+
+/** Existing mining row a retry re-dispatches onto, keyed by agentId. */
+type MiningRetryTargets = Map<
+  string,
+  { id: string; attempts: number; cliInvocationId: string | null }
+>;
+
+/** Enqueue one cli invocation per dispatch.
+ *
+ *  Shared by the initial fan-out (`existing` = null, one INSERT per agent) and the
+ *  per-agent retry (`existing` = the rows to re-roll, UPDATEd in place because the
+ *  (task_step_id, agent_id) unique index forbids a second row per agent). Returns the
+ *  number actually enqueued. */
+async function dispatchMiningAgents(
+  db: Database,
+  stepDef: StepDefinition,
+  current: TaskStepRow,
+  ctx: StepContext,
+  params: AdvanceStepParams,
+  dispatches: AgentMiningDispatch[],
+  existing: MiningRetryTargets | null,
+): Promise<number> {
+  const spec = stepDef.agentMining!;
   const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
     await resolvePreferredCli(
       db,
       params.userId,
       stepDef.metadata.id,
       params.cliProviderId ?? null,
-      params.providers,
+      params.providers!,
       'default',
       params.taskId,
       params.ignoreSavedStepClis ?? false,
@@ -838,9 +883,12 @@ async function resolveAgentMiningPhase(
   // Each mining agent is its own Claude-family invocation with its own terminal,
   // so each is independently steerable (gated globally + by adapter support).
   const steeringRequested = await resolveSteeringEnabled();
+  let enqueued = 0;
+
   for (const dispatch of dispatches) {
+    const prior = existing?.get(dispatch.agentId) ?? null;
     const plan = resolveDispatch({
-      providers: params.providers,
+      providers: params.providers!,
       preferredProviderId,
       steeringRequested,
       input: {
@@ -856,14 +904,24 @@ async function resolveAgentMiningPhase(
     });
 
     if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
-      await db.insert(schema.taskStepAgentMinings).values({
-        taskStepId: current.id,
-        agentId: dispatch.agentId,
-        agentTitle: dispatch.agentTitle,
-        status: 'failed',
+      const failure = {
+        status: 'failed' as const,
         errorMessage: `no cli provider available: ${plan.reason}`,
         endedAt: new Date(),
-      });
+      };
+      if (prior) {
+        await db
+          .update(schema.taskStepAgentMinings)
+          .set({ ...failure, updatedAt: new Date() })
+          .where(eq(schema.taskStepAgentMinings.id, prior.id));
+      } else {
+        await db.insert(schema.taskStepAgentMinings).values({
+          taskStepId: current.id,
+          agentId: dispatch.agentId,
+          agentTitle: dispatch.agentTitle,
+          ...failure,
+        });
+      }
       continue;
     }
 
@@ -881,38 +939,67 @@ async function resolveAgentMiningPhase(
     const invRow = inv[0];
     if (!invRow) throw new Error('failed to insert cli_invocations row for agent mining');
 
-    const mining = await db
-      .insert(schema.taskStepAgentMinings)
-      .values({
-        taskStepId: current.id,
-        agentId: dispatch.agentId,
-        agentTitle: dispatch.agentTitle,
-        cliProviderId: plan.providerId,
-        cliInvocationId: invRow.id,
-        status: 'pending',
-      })
-      // Idempotent fan-out: if a concurrent/duplicate execution already reserved this
-      // (taskStepId, agentId) slot, skip rather than crash on the unique index. The epoch
-      // guard prevents the cross-generation race; this covers a residual same-epoch
-      // double-delivery. Supersede the invocation we just opened so it is not left orphaned.
-      .onConflictDoNothing({
-        target: [schema.taskStepAgentMinings.taskStepId, schema.taskStepAgentMinings.agentId],
-      })
-      .returning();
-    const miningRow = mining[0];
-    if (!miningRow) {
+    let miningId: string;
+    if (prior) {
+      // Re-roll: supersede the invocation whose output apply() could not use, then
+      // reset the row to pending so the fan-out barrier re-parks the step on it.
+      if (prior.cliInvocationId) {
+        await db
+          .update(schema.cliInvocations)
+          .set({ supersededAt: new Date() })
+          .where(eq(schema.cliInvocations.id, prior.cliInvocationId));
+      }
       await db
-        .update(schema.cliInvocations)
-        .set({ supersededAt: new Date() })
-        .where(eq(schema.cliInvocations.id, invRow.id));
-      ctx.logger.warn(
-        { agentId: dispatch.agentId, taskStepId: current.id },
-        'agent mining row already exists (concurrent/duplicate run) — skipping duplicate dispatch',
-      );
-      continue;
+        .update(schema.taskStepAgentMinings)
+        .set({
+          status: 'pending',
+          cliProviderId: plan.providerId,
+          cliInvocationId: invRow.id,
+          output: null,
+          rawOutput: null,
+          errorMessage: null,
+          startedAt: null,
+          endedAt: null,
+          attempts: prior.attempts + 1,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.taskStepAgentMinings.id, prior.id));
+      miningId = prior.id;
+    } else {
+      const mining = await db
+        .insert(schema.taskStepAgentMinings)
+        .values({
+          taskStepId: current.id,
+          agentId: dispatch.agentId,
+          agentTitle: dispatch.agentTitle,
+          cliProviderId: plan.providerId,
+          cliInvocationId: invRow.id,
+          status: 'pending',
+        })
+        // Idempotent fan-out: if a concurrent/duplicate execution already reserved this
+        // (taskStepId, agentId) slot, skip rather than crash on the unique index. The epoch
+        // guard prevents the cross-generation race; this covers a residual same-epoch
+        // double-delivery. Supersede the invocation we just opened so it is not left orphaned.
+        .onConflictDoNothing({
+          target: [schema.taskStepAgentMinings.taskStepId, schema.taskStepAgentMinings.agentId],
+        })
+        .returning();
+      const miningRow = mining[0];
+      if (!miningRow) {
+        await db
+          .update(schema.cliInvocations)
+          .set({ supersededAt: new Date() })
+          .where(eq(schema.cliInvocations.id, invRow.id));
+        ctx.logger.warn(
+          { agentId: dispatch.agentId, taskStepId: current.id },
+          'agent mining row already exists (concurrent/duplicate run) — skipping duplicate dispatch',
+        );
+        continue;
+      }
+      miningId = miningRow.id;
     }
 
-    await params.deps.enqueueCliInvocation({
+    await params.deps!.enqueueCliInvocation({
       invocationId: invRow.id,
       taskId: params.taskId,
       taskStepId: current.id,
@@ -921,19 +1008,11 @@ async function resolveAgentMiningPhase(
       kind: 'agent_mining',
       spec: plan.invocation.spec,
       timeoutMs: spec.timeoutMs,
-      agentMiningId: miningRow.id,
+      agentMiningId: miningId,
     });
+    enqueued++;
   }
-
-  const updated = await updateRow(db, current.id, {
-    status: 'waiting_cli',
-    statusMessage: `Mining knowledge from ${dispatches.length} agent(s)...`,
-  });
-  ctx.logger.info(
-    { dispatched: dispatches.length, agentIds: dispatches.map((d) => d.agentId) },
-    'agent mining fan-out enqueued',
-  );
-  return { resolved: false, result: { status: 'waiting_cli', row: updated } };
+  return enqueued;
 }
 
 const CANCEL_POLL_INTERVAL_MS = 2_000;
@@ -1318,6 +1397,13 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       process.env.HAIVE_TEST_BYPASS_LLM === '1' || !llmRetry
         ? true
         : (await countLlmAttempts(db, current.id)) >= llmRetry.maxAttempts;
+    // Same contract for mining agents: final once NO agent has a re-roll left, so
+    // apply() degrades (surfaces the reviewer as non-approving) instead of throwing.
+    const miningRetry = stepDef.agentMining?.retry;
+    const isFinalMiningAttempt =
+      process.env.HAIVE_TEST_BYPASS_LLM === '1' || !miningRetry || stepDef.loop
+        ? true
+        : !(await miningAgentsWithBudget(db, current.id, miningRetry.maxAttempts));
     let output: unknown;
     try {
       output = await stepDef.apply(ctx, {
@@ -1328,44 +1414,89 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         iteration,
         previousIterations,
         isFinalLlmAttempt,
+        isFinalMiningAttempt,
       });
     } catch (applyErr) {
-      // llm.retry: a flaky model (e.g. a cloud Ollama model whose agentic tool-loop
-      // intermittently ends with no JSON, or emits unparseable/truncated JSON) often
-      // succeeds on a fresh roll. On a retryable apply throw, re-enqueue a NEW cli
-      // invocation (consume the bad one) up to maxAttempts TOTAL, parking the step in
-      // waiting_cli; once attempts are exhausted, rethrow so the outer catch fails the
-      // step. Skipped for loop steps (they own their own re-dispatch counting).
-      const retry = stepDef.llm?.retry;
-      if (retry && !stepDef.loop && (retry.retryOn?.(applyErr) ?? true)) {
-        const attempt = await countLlmAttempts(db, current.id);
-        if (attempt < retry.maxAttempts) {
-          ctx.logger.warn(
-            {
-              stepId: meta.id,
-              attempt,
-              maxAttempts: retry.maxAttempts,
-              err: applyErr instanceof Error ? applyErr.message : String(applyErr),
-            },
-            'llm apply failed; retrying with a fresh invocation',
-          );
-          await markLatestInvocationConsumed(db, current.id);
-          const retryLlm = await resolveLlmPhase(
-            db,
-            stepDef,
-            current,
-            ctx,
-            detected,
-            formValues,
-            params,
-          );
-          // A fresh enqueue always parks in waiting_cli (resolved:false); return it
-          // so the orchestrator re-enters when the retry invocation completes. If it
-          // somehow resolved synchronously, fall through and rethrow.
-          if (!retryLlm.resolved) return retryLlm.result;
+      // agentMining.retry: a reviewer that ran but emitted prose instead of its JSON
+      // contract is re-rolled on its own, leaving the other agents' completed rows
+      // alone. Re-running one agent is far cheaper than the alternatives: a fix round
+      // through implementation, or a developer reject at the gate.
+      if (applyErr instanceof MiningRetryError && miningRetry && !stepDef.loop) {
+        const requeued = await retryMiningAgents(
+          db,
+          stepDef,
+          current,
+          ctx,
+          detected,
+          formValues,
+          llmOutput,
+          params,
+          applyErr.agentIds,
+          miningRetry.maxAttempts,
+        );
+        if (requeued > 0) {
+          const parked = await updateRow(db, current.id, {
+            status: 'waiting_cli',
+            statusMessage: `Re-running ${requeued} agent(s) whose output could not be read...`,
+          });
+          return { status: 'waiting_cli', row: parked };
         }
+        // Every NAMED agent is spent, but isFinalMiningAttempt was false because some
+        // OTHER agent still had budget (peer exhausted on its re-roll, security fine on
+        // its first). apply() cannot see that, so it threw. Re-run it as final and let
+        // it degrade: failing the step here would discard a review that mostly worked.
+        ctx.logger.warn(
+          { stepId: meta.id, agentIds: applyErr.agentIds },
+          'no re-roll budget left for the named agents; degrading',
+        );
+        output = await stepDef.apply(ctx, {
+          detected,
+          formValues: formValues ?? {},
+          llmOutput,
+          agentMiningResults,
+          iteration,
+          previousIterations,
+          isFinalLlmAttempt,
+          isFinalMiningAttempt: true,
+        });
+      } else {
+        // llm.retry: a flaky model (e.g. a cloud Ollama model whose agentic tool-loop
+        // intermittently ends with no JSON, or emits unparseable/truncated JSON) often
+        // succeeds on a fresh roll. On a retryable apply throw, re-enqueue a NEW cli
+        // invocation (consume the bad one) up to maxAttempts TOTAL, parking the step in
+        // waiting_cli; once attempts are exhausted, rethrow so the outer catch fails the
+        // step. Skipped for loop steps (they own their own re-dispatch counting).
+        const retry = stepDef.llm?.retry;
+        if (retry && !stepDef.loop && (retry.retryOn?.(applyErr) ?? true)) {
+          const attempt = await countLlmAttempts(db, current.id);
+          if (attempt < retry.maxAttempts) {
+            ctx.logger.warn(
+              {
+                stepId: meta.id,
+                attempt,
+                maxAttempts: retry.maxAttempts,
+                err: applyErr instanceof Error ? applyErr.message : String(applyErr),
+              },
+              'llm apply failed; retrying with a fresh invocation',
+            );
+            await markLatestInvocationConsumed(db, current.id);
+            const retryLlm = await resolveLlmPhase(
+              db,
+              stepDef,
+              current,
+              ctx,
+              detected,
+              formValues,
+              params,
+            );
+            // A fresh enqueue always parks in waiting_cli (resolved:false); return it
+            // so the orchestrator re-enters when the retry invocation completes. If it
+            // somehow resolved synchronously, fall through and rethrow.
+            if (!retryLlm.resolved) return retryLlm.result;
+          }
+        }
+        throw applyErr;
       }
-      throw applyErr;
     }
 
     // Curated per-step recap for the "What the agent did" panel. LLM steps that
@@ -1888,6 +2019,91 @@ async function resolveLoopBudget(
   }
   if (rounds === null) rounds = stepDef.loop.maxIterations;
   return rounds * perRound;
+}
+
+/** True when at least one mining agent on this step still has a re-roll left.
+ *  Drives isFinalMiningAttempt, so apply() knows whether it may throw or must degrade. */
+async function miningAgentsWithBudget(
+  db: Database,
+  taskStepId: string,
+  maxAttempts: number,
+): Promise<boolean> {
+  const rows = await db
+    .select({ attempts: schema.taskStepAgentMinings.attempts })
+    .from(schema.taskStepAgentMinings)
+    .where(eq(schema.taskStepAgentMinings.taskStepId, taskStepId));
+  return rows.some((r) => r.attempts < maxAttempts);
+}
+
+/** Re-dispatch the named mining agents that still have budget. Returns how many were
+ *  re-enqueued; 0 means every named agent is spent and the caller must not park.
+ *
+ *  selectAgents is re-run to rebuild each prompt, then filtered to the named agents —
+ *  the other agents' `done` rows are never touched, and the fan-out barrier re-parks
+ *  the step because at least one row went back to `pending`. */
+async function retryMiningAgents(
+  db: Database,
+  stepDef: StepDefinition,
+  current: TaskStepRow,
+  ctx: StepContext,
+  detected: unknown,
+  formValues: FormValues | null,
+  llmOutput: unknown,
+  params: AdvanceStepParams,
+  agentIds: string[],
+  maxAttempts: number,
+): Promise<number> {
+  if (agentIds.length === 0 || !params.providers || !params.deps) return 0;
+
+  const rows = await db
+    .select()
+    .from(schema.taskStepAgentMinings)
+    .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
+
+  const wanted = new Set(agentIds);
+  const targets: MiningRetryTargets = new Map();
+  for (const r of rows) {
+    if (!wanted.has(r.agentId) || r.attempts >= maxAttempts) continue;
+    targets.set(r.agentId, {
+      id: r.id,
+      attempts: r.attempts,
+      cliInvocationId: r.cliInvocationId,
+    });
+  }
+  if (targets.size === 0) {
+    ctx.logger.warn(
+      { stepId: stepDef.metadata.id, agentIds, maxAttempts },
+      'mining retry requested but every named agent is out of budget',
+    );
+    return 0;
+  }
+
+  const dispatches = (
+    await stepDef.agentMining!.selectAgents({
+      ctx,
+      detected,
+      formValues: formValues ?? {},
+      llmOutput,
+    })
+  ).filter((d) => targets.has(d.agentId));
+
+  if (dispatches.length === 0) {
+    ctx.logger.warn(
+      { stepId: stepDef.metadata.id, agentIds },
+      'mining retry requested but selectAgents no longer offers those agents',
+    );
+    return 0;
+  }
+
+  ctx.logger.warn(
+    {
+      stepId: stepDef.metadata.id,
+      agentIds: dispatches.map((d) => d.agentId),
+      maxAttempts,
+    },
+    'agent output unusable; re-rolling those agents',
+  );
+  return dispatchMiningAgents(db, stepDef, current, ctx, params, dispatches, targets);
 }
 
 /** Mark the currently-active LLM invocation row as consumed so the next

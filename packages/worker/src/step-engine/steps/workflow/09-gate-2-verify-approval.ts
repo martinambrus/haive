@@ -56,6 +56,10 @@ interface VerifyGateDetect {
     peerVerdict: string;
     securityVerdict: string;
     blocking: boolean;
+    /** A reviewer's output stayed unreadable after its re-rolls: part of the change
+     *  went unreviewed. Not blocking (the reviewer failed, not the code), but the gate
+     *  must not report OK and must not default to approve. */
+    reviewIncomplete: boolean;
     peerFindings: string[];
     securityFindings: string[];
     /** Findings from the level-gated extra review lenses (operational/performance). */
@@ -117,6 +121,9 @@ interface Phase8dOutput {
 interface Phase8cOutput {
   reviewed?: boolean;
   blocking?: boolean;
+  /** Absent on rows written before 08c reported it; treated as false (a review that
+   *  predates the flag either completed or already surfaced its own findings). */
+  reviewIncomplete?: boolean;
   peer?: {
     verdict?: string;
     findings?: { severity?: string; path?: string; lines?: string; issue?: string; fix?: string }[];
@@ -384,6 +391,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         peerVerdict: pc.peer?.verdict ?? 'DISCUSS',
         securityVerdict: pc.security?.verdict ?? 'NEEDS_FIXES',
         blocking: pc.blocking === true,
+        reviewIncomplete: pc.reviewIncomplete === true,
         peerFindings: (pc.peer?.findings ?? []).map((f) =>
           `[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
@@ -558,7 +566,10 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const b = detected.browser;
     const browserOk = b === null || b.passed;
     const cr = detected.codeReview;
-    const codeReviewOk = cr === null || !cr.blocking;
+    // An incomplete review is not a passing review. It does not block (that would spend
+    // a fix round because a reviewer failed), but it must not flip the gate to approve
+    // by default either — the developer decides what to do about the unreviewed part.
+    const codeReviewOk = cr === null || (!cr.blocking && !cr.reviewIncomplete);
     const cAudit = detected.codeAudit;
     const aq = detected.adversarial;
     const adversarialOk = aq === null || !aq.blocking;
@@ -706,13 +717,17 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         lines.push('', '## Positives');
         for (const p of cr.positives) lines.push(`- ${p}`);
       }
+      // An unreadable reviewer used to render as pass/OK and collapse its own evidence,
+      // so a review that never completed looked like a clean one.
       rows.push({
         label: 'Code review',
-        status: cr.blocking ? 'fail' : 'pass',
-        statusLabel: cr.blocking ? 'BLOCKING' : 'OK',
-        detail: `peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} ops/perf` : ''}`,
+        status: cr.blocking ? 'fail' : cr.reviewIncomplete ? 'warn' : 'pass',
+        statusLabel: cr.blocking ? 'BLOCKING' : cr.reviewIncomplete ? 'INCOMPLETE' : 'OK',
+        detail: cr.reviewIncomplete
+          ? `a reviewer's output could not be read after re-rolling — part of the change is unreviewed (peer ${cr.peerVerdict}, security ${cr.securityVerdict})`
+          : `peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} ops/perf` : ''}`,
         body: lines.join('\n'),
-        defaultOpen: cr.blocking,
+        defaultOpen: cr.blocking || cr.reviewIncomplete,
       });
     }
 

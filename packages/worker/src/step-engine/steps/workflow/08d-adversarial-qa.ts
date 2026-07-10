@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { MiningRetryError } from '../../step-definition.js';
 import type {
   StepContext,
   StepDefinition,
@@ -284,6 +285,10 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
         prompt: buildAdversaryPrompt(a, d),
       }));
     },
+    // One re-roll per adversary. An adversary whose output cannot be read leaves a
+    // hole in the attack surface that only shows up as a qa-gap finding; re-rolling
+    // it is cheaper than the human deciding what to do about the gap.
+    retry: { maxAttempts: 2 },
   },
 
   async apply(ctx, args): Promise<AdversarialApply> {
@@ -293,15 +298,17 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     // Aggregate findings across agents; dedupe by location keeping highest severity.
     const byLocation = new Map<string, AdversarialFinding>();
     const unlocated: AdversarialFinding[] = [];
+    const unreadable: string[] = [];
     for (const r of results) {
       if (r.status !== 'done') continue;
       const raw = r.output ?? r.rawOutput;
       const parsed = parseAdversaryOutput(raw);
       if (parsed == null) {
         // Adversary ran but its output was unparseable (even after jsonrepair salvage).
-        // Do NOT treat that as "no vulnerabilities" — surface a visible QA-gap finding
-        // so it shows at gate 2 (the Tier-3 retry will re-roll the agent upstream).
+        // Do NOT treat that as "no vulnerabilities" — re-roll it while it has budget,
+        // and once spent surface a visible QA-gap finding so the hole shows at gate 2.
         if (raw != null) {
+          unreadable.push(r.agentId);
           unlocated.push({
             severity: 'medium',
             category: 'qa-gap',
@@ -323,6 +330,12 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
         }
       }
     }
+    // Re-roll the adversaries whose output could not be read, while they have budget.
+    // Only these are re-dispatched; the other adversaries' completed rows stand.
+    if (unreadable.length > 0 && args.isFinalMiningAttempt === false) {
+      throw new MiningRetryError(unreadable);
+    }
+
     // Consolidate: sort by severity (critical → low), like the legacy phase-7b consolidator.
     const findings = [...byLocation.values(), ...unlocated].sort(
       (a, b) => severityRank(a.severity) - severityRank(b.severity),

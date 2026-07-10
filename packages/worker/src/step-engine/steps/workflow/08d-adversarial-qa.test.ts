@@ -5,6 +5,7 @@ import {
   adversaryIdsForLevel,
   adversarialQaStep,
 } from './08d-adversarial-qa.js';
+import { MiningRetryError } from '../../step-definition.js';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 
 const fakeCtx = { logger: logger.child({ test: '08d-apply' }) } as unknown as StepContext;
@@ -54,16 +55,43 @@ describe('parseAdversaryOutput', () => {
   });
 });
 
+function runQa(results: AgentMiningResult[], isFinalMiningAttempt?: boolean) {
+  return adversarialQaStep.apply(fakeCtx, {
+    detected: { level: 'poc' },
+    agentMiningResults: results,
+    isFinalMiningAttempt,
+  } as unknown as Parameters<typeof adversarialQaStep.apply>[1]);
+}
+
 describe('adversarialQaStep.apply de-silence', () => {
-  it('surfaces a qa-gap finding (not silent 0-findings) when an adversary ran but was unparseable', async () => {
-    const out = await adversarialQaStep.apply(fakeCtx, {
-      detected: { level: 'poc' },
-      agentMiningResults: [
-        mining('edge-case-breaker', 'I tried hard to break it but did not emit any json'),
-      ],
-    } as unknown as Parameters<typeof adversarialQaStep.apply>[1]);
+  it('surfaces a qa-gap finding (not silent 0-findings) once the re-roll budget is spent', async () => {
+    const out = await runQa(
+      [mining('edge-case-breaker', 'I tried hard to break it but did not emit any json')],
+      true,
+    );
     expect(out.ran).toBe(true);
     expect(out.findings.length).toBeGreaterThan(0);
     expect(out.findings.some((f) => f.category === 'qa-gap')).toBe(true);
+  });
+
+  it('re-rolls only the unreadable adversary while it still has budget', async () => {
+    const err = await runQa(
+      [
+        mining('edge-case-breaker', 'prose, no json'),
+        mining('workflow-disruptor', '```json\n{"verdict":"PASS","findings":[]}\n```'),
+      ],
+      false,
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MiningRetryError);
+    expect((err as MiningRetryError).agentIds).toEqual(['edge-case-breaker']);
+  });
+
+  it('does not throw when every adversary is readable', async () => {
+    const out = await runQa(
+      [mining('edge-case-breaker', '```json\n{"verdict":"PASS"}\n```')],
+      false,
+    );
+    expect(out.ran).toBe(true);
+    expect(out.findings).toEqual([]);
   });
 });

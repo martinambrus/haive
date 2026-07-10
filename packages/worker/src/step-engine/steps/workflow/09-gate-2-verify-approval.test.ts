@@ -67,6 +67,51 @@ describe('gate-2 status summary', () => {
     skipped: false,
   };
 
+  const cleanReview = {
+    peerVerdict: 'APPROVE',
+    securityVerdict: 'SECURE',
+    blocking: false,
+    reviewIncomplete: false,
+    peerFindings: [],
+    securityFindings: [],
+    lensFindings: [],
+    positives: [],
+  };
+
+  it('does not report an incomplete review as OK, and does not default to approve', () => {
+    // Regression: an unreadable reviewer is non-blocking (the reviewer failed, not the
+    // code), which made codeReviewOk true -- so the row rendered pass/OK, collapsed its
+    // own "review did not complete" finding, and the gate defaulted to approve.
+    const d = baseDetect({
+      codeReview: {
+        ...cleanReview,
+        peerVerdict: 'DISCUSS',
+        reviewIncomplete: true,
+        peerFindings: ['[medium]  Peer review output was unparseable'],
+      },
+    });
+    const r = row(d, 'Code review');
+    expect(r?.status).toBe('warn');
+    expect(r?.statusLabel).toBe('INCOMPLETE');
+    expect(r?.defaultOpen).toBe(true);
+    expect(decisionDefault(d)).toBe('reject');
+  });
+
+  it('still reports a complete, clean review as OK and defaults to approve', () => {
+    const d = baseDetect({ codeReview: cleanReview });
+    expect(row(d, 'Code review')?.status).toBe('pass');
+    expect(row(d, 'Code review')?.statusLabel).toBe('OK');
+    expect(decisionDefault(d)).toBe('approve');
+  });
+
+  it('a blocking review still outranks incomplete', () => {
+    const d = baseDetect({
+      codeReview: { ...cleanReview, blocking: true, reviewIncomplete: true },
+    });
+    expect(row(d, 'Code review')?.statusLabel).toBe('BLOCKING');
+    expect(decisionDefault(d)).toBe('reject');
+  });
+
   it('hides skipped verify checks and shows ran ones with PASS/FAIL', () => {
     const d = baseDetect({
       verify: {

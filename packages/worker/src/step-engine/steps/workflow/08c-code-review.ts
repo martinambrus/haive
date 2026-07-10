@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { MiningRetryError } from '../../step-definition.js';
 import type {
   StepContext,
   StepDefinition,
@@ -83,6 +84,10 @@ interface CodeReviewApply {
   /** Level-gated extra review lenses (operational, performance). Empty for none/poc. */
   extraLenses: ReviewLensResult[];
   blocking: boolean;
+  /** A reviewer RAN but its output stayed unreadable after its re-rolls were spent, so
+   *  part of the change went unreviewed. Distinct from `blocking`: the reviewer failed,
+   *  not the code, so it must not spend a fix round — but gate 2 must not report OK. */
+  reviewIncomplete: boolean;
   counts: { peer: number; securityCriticalHigh: number };
 }
 
@@ -620,6 +625,12 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         })),
       ];
     },
+    // One re-roll per reviewer. parseJsonLoose already salvages a truncated or
+    // malformed turn via a balanced-brace scan and a jsonrepair pass, so a reviewer
+    // that still yields nothing usually emitted prose — a fresh roll fixes that far
+    // more cheaply than a fix round or a developer reject. Two, not three: the
+    // failure is rare, and the degrade path below is a safe floor.
+    retry: { maxAttempts: 2 },
   },
 
   async apply(ctx, args): Promise<CodeReviewApply> {
@@ -639,14 +650,16 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         security: { verdict: 'SECURE', findings: [] },
         extraLenses: [],
         blocking: false,
+        reviewIncomplete: false,
         counts: { peer: 0, securityCriticalHigh: 0 },
       };
     }
 
     // A reviewer that RAN but whose output could not be parsed (even after the
     // jsonrepair salvage) must NOT be reported as APPROVE/SECURE — that would
-    // advance unreviewed code. Surface a visible, non-approving finding at gate 2
-    // instead (the Tier-3 reviewer retry, when added, re-rolls upstream of this).
+    // advance unreviewed code. While the agent still has a re-roll left, throw so
+    // the runner re-dispatches just that reviewer; once its budget is spent, degrade
+    // to a visible, non-approving finding and flag the review as incomplete.
     const peerUnparsed = peerRaw != null && peer == null;
     const securityUnparsed = securityRaw != null && security == null;
     if (peerUnparsed || securityUnparsed) {
@@ -690,11 +703,13 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // level enabled them. Mirror the peer/security de-silence rule: a lens that
     // RAN but whose output is unparseable surfaces as non-approving, never silent.
     const extraLenses: ReviewLensResult[] = [];
+    const unparsedLensIds: string[] = [];
     for (const lens of REVIEW_LENSES) {
       const raw = miningResult(results, lens.id);
       if (raw == null) continue;
       const parsed = parseReviewLens(raw);
       if (parsed == null) {
+        unparsedLensIds.push(lens.id);
         ctx.logger.warn(
           { lens: lens.id },
           'review lens output unparseable — surfacing as non-approving, not silently approving',
@@ -719,6 +734,24 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         findings: parsed.findings,
       });
     }
+
+    // Re-roll the reviewers whose output could not be read, while any of them still
+    // has budget. The runner re-dispatches only these; the other agents' completed
+    // rows are untouched, and apply() runs again once they finish.
+    const unreadable = [
+      ...(peerUnparsed ? ['peer-reviewer'] : []),
+      ...(securityUnparsed ? ['security-code-reviewer'] : []),
+      ...unparsedLensIds,
+    ];
+    if (unreadable.length > 0 && args.isFinalMiningAttempt === false) {
+      throw new MiningRetryError(unreadable);
+    }
+
+    // Budget spent (or no retry configured): the review did not complete. This is NOT
+    // blocking — the reviewer failed, not the code, and routing the change back to the
+    // implementer for that would burn a fix round on nothing. It must still not read as
+    // OK at gate 2, which is what reviewIncomplete carries.
+    const reviewIncomplete = unreadable.length > 0;
 
     // Block on what we REPORT, not on what parsed: peerOut/securityOut carry the
     // synthetic findings for an unparseable reviewer, so the blocking decision and
@@ -772,8 +805,8 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         securityCriticalHigh,
         lenses: extraLenses.map((l) => `${l.id}:${l.verdict}`),
         blocking,
-        peerUnparsed,
-        securityUnparsed,
+        reviewIncomplete,
+        unreadable,
       },
       'code review complete',
     );
@@ -784,6 +817,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       security: securityOut,
       extraLenses,
       blocking,
+      reviewIncomplete,
       counts: { peer: peerOut.findings.length, securityCriticalHigh },
     };
   },

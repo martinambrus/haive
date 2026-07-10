@@ -8,6 +8,7 @@ import {
   computeBlocking,
   codeReviewStep,
 } from './08c-code-review.js';
+import { MiningRetryError } from '../../step-definition.js';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 
 const fakeCtx = { logger: logger.child({ test: '08c-apply' }) } as unknown as StepContext;
@@ -21,9 +22,10 @@ function mining(agentId: string, rawOutput: string | null): AgentMiningResult {
     errorMessage: null,
   };
 }
-function runReview(results: AgentMiningResult[]) {
+function runReview(results: AgentMiningResult[], isFinalMiningAttempt?: boolean) {
   return codeReviewStep.apply(fakeCtx, {
     agentMiningResults: results,
+    isFinalMiningAttempt,
   } as unknown as Parameters<typeof codeReviewStep.apply>[1]);
 }
 
@@ -301,6 +303,39 @@ describe('codeReviewStep.apply de-silence', () => {
     expect(out.peer.findings.map((f) => f.severity)).toEqual(['medium', 'low', 'critical']);
     // the coerced blocker is critical, so it blocks
     expect(out.blocking).toBe(true);
+  });
+
+  it('re-rolls only the unreadable reviewers while they still have budget', async () => {
+    const err = await runReview(
+      [
+        mining('peer-reviewer', 'prose, no json'),
+        mining('security-code-reviewer', '```json\n{"verdict":"SECURE","findings":[]}\n```'),
+        mining('operational-reviewer', 'also prose'),
+      ],
+      false,
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MiningRetryError);
+    // the security reviewer parsed fine and must not be re-dispatched
+    expect((err as MiningRetryError).agentIds).toEqual(['peer-reviewer', 'operational-reviewer']);
+  });
+
+  it('does not throw when every reviewer is readable', async () => {
+    const out = await runReview(
+      [
+        mining('peer-reviewer', '```json\n{"verdict":"APPROVE","findings":[],"positives":[]}\n```'),
+        mining('security-code-reviewer', '```json\n{"verdict":"SECURE","findings":[]}\n```'),
+      ],
+      false,
+    );
+    expect(out.reviewIncomplete).toBe(false);
+  });
+
+  it('degrades with reviewIncomplete once the re-roll budget is spent', async () => {
+    const out = await runReview([mining('peer-reviewer', 'still prose after the re-roll')], true);
+    expect(out.reviewIncomplete).toBe(true);
+    expect(out.peer.verdict).toBe('DISCUSS');
+    // the reviewer failed, not the code: this must NOT spend a fix round
+    expect(out.blocking).toBe(false);
   });
 
   it('surfaces an unparseable lens as non-approving, not silently approving', async () => {

@@ -120,6 +120,16 @@ export interface AgentMiningSpec {
   requiredCapabilities: StepCapability[];
   /** Sandbox timeout per agent invocation. Defaults to step-runner default. */
   timeoutMs?: number;
+  /** Re-roll INDIVIDUAL agents whose output apply() could not use — a reviewer that
+   *  emitted prose instead of its JSON contract. apply() throws MiningRetryError
+   *  naming those agents; the runner re-dispatches only those, leaving the other
+   *  agents' completed rows untouched, up to `maxAttempts` invocations PER AGENT.
+   *  Budget is tracked on task_step_agent_minings.attempts. Once no named agent has
+   *  budget left, apply() is called with isFinalMiningAttempt=true and must degrade
+   *  rather than throw. Ignored for steps that also declare loop?. */
+  retry?: {
+    maxAttempts: number;
+  };
 }
 
 /** Per-coder context the DAG executor passes to a step's coder-prompt builder. */
@@ -202,6 +212,10 @@ export interface StepApplyArgs<TDetect = unknown> {
    *  RetryableParseError. False on earlier attempts so a parse failure re-rolls.
    *  Undefined for callers that don't set it (treated as final). */
   isFinalLlmAttempt?: boolean;
+  /** True when no mining agent has re-roll budget left (or the step has no
+   *  agentMining.retry): apply() must DEGRADE rather than throw MiningRetryError.
+   *  Undefined for callers that don't set it (treated as final). */
+  isFinalMiningAttempt?: boolean;
 }
 
 /** Throw from apply() on an unrecoverable LLM parse failure to trigger llm.retry
@@ -211,6 +225,20 @@ export class RetryableParseError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'RetryableParseError';
+  }
+}
+
+/** Throw from apply() of an agentMining step when specific agents produced output it
+ *  could not use, to re-roll just those agents. Deliberately NOT a RetryableParseError:
+ *  the llm-retry arm defaults `retryOn` to "every error", so a step declaring both specs
+ *  would re-enqueue its llm invocation for a mining failure. Thrown only while
+ *  args.isFinalMiningAttempt is false; on the final attempt apply() degrades instead. */
+export class MiningRetryError extends Error {
+  readonly agentIds: string[];
+  constructor(agentIds: string[], message?: string) {
+    super(message ?? `agent output unusable, re-roll: ${agentIds.join(', ')}`);
+    this.name = 'MiningRetryError';
+    this.agentIds = agentIds;
   }
 }
 
