@@ -2082,7 +2082,7 @@ function TaskTotalTime({
               const metered = p.costBasis === 'metered';
               return (
                 <div
-                  key={p.provider}
+                  key={`${p.provider}-${p.costBasis}`}
                   className="flex items-center justify-between gap-3 text-xs"
                   title={`${p.invocations} invocation(s) — input ${p.inputTokens.toLocaleString()} / output ${p.outputTokens.toLocaleString()} / cache ${cache.toLocaleString()}`}
                 >

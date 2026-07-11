@@ -282,6 +282,21 @@ export function isCostMetered(name: CliProviderName): boolean {
   return CLI_PROVIDER_CATALOG[name].costBasis === 'metered';
 }
 
+/** The effective cost basis for an invocation given its provider's auth mode.
+ *  A metered backend bills real per-token money ONLY under api_key auth; under a
+ *  flat subscription plan the CLI still reports a notional (Anthropic-price)
+ *  costUsd, so classify it as 'subscription' — token-only, no real $. All other
+ *  bases are auth-mode-independent and pass through unchanged. Equivalent to the
+ *  SQL cost filters (`name in <metered> and auth_mode = 'api_key'`). */
+export function resolveCostBasis(
+  name: CliProviderName,
+  authMode: AuthMode,
+): CliProviderMetadata['costBasis'] {
+  const base = CLI_PROVIDER_CATALOG[name].costBasis;
+  if (base === 'metered' && authMode === 'subscription') return 'subscription';
+  return base;
+}
+
 export function getCliProviderMetadata(name: CliProviderName): CliProviderMetadata {
   return CLI_PROVIDER_CATALOG[name];
 }
