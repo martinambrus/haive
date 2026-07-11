@@ -888,13 +888,19 @@ async function dispatchMiningAgents(
 
   for (const dispatch of dispatches) {
     const prior = existing?.get(dispatch.agentId) ?? null;
+    // Close the mining terseness gap: the main dispatch gets the admin terseness level
+    // at resolveLlmPhase, but fan-out sub-prompts are built per step and bypass it.
+    // Apply the same directive so the level reaches mining output (skill-gen, discovery,
+    // review). Agent-backed mining also carries its agent-file RESPONSE_STYLE_BLOCK; the
+    // runtime directive is appended last and governs at prompt scope.
+    const prompt = await augmentPromptWithTerseness(dispatch.prompt);
     const plan = resolveDispatch({
       providers: params.providers!,
       preferredProviderId,
       steeringRequested,
       input: {
         kind: 'prompt',
-        prompt: dispatch.prompt,
+        prompt,
         capabilities: spec.requiredCapabilities,
       },
       invokeOpts: {
@@ -933,7 +939,7 @@ async function dispatchMiningAgents(
         taskStepId: current.id,
         cliProviderId: plan.providerId,
         mode: 'agent_mining',
-        prompt: dispatch.prompt,
+        prompt,
         steerable: plan.invocation.spec.steerable === true,
       })
       .returning();
