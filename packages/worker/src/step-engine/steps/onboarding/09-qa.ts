@@ -215,6 +215,8 @@ function buildPrompt(args: LlmBuildArgs): string {
     '}',
     '```',
     '',
+    'Valid JSON only: escape every literal double-quote inside a string value as \\" (and every backslash as \\\\). One unescaped " truncates the JSON and the whole output is rejected (e.g. write a value as `status = \\"archived\\"`, not `status = "archived"`).',
+    '',
     'Field rules:',
     '- id: kebab-case, unique within this output.',
     '- topic: a short label the user will see as a textarea heading.',

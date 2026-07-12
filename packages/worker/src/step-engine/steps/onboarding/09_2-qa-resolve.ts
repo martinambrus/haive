@@ -260,6 +260,8 @@ function buildPrompt(args: LlmBuildArgs): string {
     '}',
     '```',
     '',
+    'Valid JSON only: escape every literal double-quote inside a string value as \\" (and every backslash as \\\\). One unescaped " truncates the JSON and the whole output is rejected — code snippets in `content` are the usual offender (write `custom=\\"1\\"`, not `custom="1"`).',
+    '',
     'Field rules:',
     '- answers.source: `kb` if the answer was already in the KB (then OMIT proposedWrite); `code` if you',
     '  found it in the code; `user` for agent questions answered by the user.',

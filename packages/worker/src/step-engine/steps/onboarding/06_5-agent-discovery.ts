@@ -633,6 +633,7 @@ function buildAgentDiscoveryPrompt(args: LlmBuildArgs): string {
     '  ]',
     '}',
     '```',
+    'Valid JSON only: escape every literal double-quote inside a string value as \\" (and every backslash as \\\\). One unescaped " truncates the JSON and the whole output is rejected — code snippets are the usual offender (write `custom=\\"1\\"`, not `custom="1"`).',
     'Do not emit any prose outside the fenced block. The body field is REQUIRED for every custom agent.',
   ].join('\n');
 }
