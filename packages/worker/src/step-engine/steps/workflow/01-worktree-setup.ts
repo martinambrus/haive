@@ -8,6 +8,7 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
+import { SANDBOX_UID, SANDBOX_GID } from '../../../sandbox/sandbox-runner.js';
 import {
   WORKTREE_SUBDIR,
   sandboxWorktreePath,
@@ -302,6 +303,24 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       ctx.logger.info(
         { branchExists: branchExists.code === 0, branchName },
         'worktree branch resolved',
+      );
+    }
+
+    // `git worktree add` runs here in the worker (root), so the worktree tree lands
+    // root-owned. But the cli-exec sandbox runs the agent as node (SANDBOX_UID) and does
+    // NOT chown its own workdir (the terminal container does; this path does not). A
+    // root-owned worktree is therefore silently unwritable to the agent: its Edit fails
+    // EACCES and it falls back to editing the repo-root copy, so the review passes on an
+    // edited file while the committed branch stays unchanged. Match the worktree to the
+    // repo (which is already node-owned) so the sandbox can write it. Fail loud rather
+    // than reproduce that silent split-brain. Unconditional (also fixes a worktree a
+    // pre-fix run left root-owned) and idempotent.
+    try {
+      await exec('chown', ['-R', `${SANDBOX_UID}:${SANDBOX_GID}`, worktreePath]);
+    } catch (err) {
+      throw new Error(
+        `failed to chown worktree ${worktreePath} to ${SANDBOX_UID}:${SANDBOX_GID} — the ` +
+          `sandbox agent (node) would be unable to write it: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
 

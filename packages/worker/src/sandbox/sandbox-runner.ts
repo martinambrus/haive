@@ -24,8 +24,11 @@ export const SANDBOX_USER_HOME = '/home/node';
 const DEFAULT_WORKDIR = SANDBOX_WORKDIR;
 // uid:gid the sandbox runs as (SANDBOX_USER = node). A captured-log dir is chowned
 // to this so the CLI (running as node) can write its log into the writable mount.
-const SANDBOX_UID = 1000;
-const SANDBOX_GID = 1000;
+// Exported so worktree creation can chown the tree to the same owner: the sandbox
+// runs as node and never chowns its own workdir (unlike the terminal container), so a
+// root-owned worktree is silently unwritable to the agent.
+export const SANDBOX_UID = 1000;
+export const SANDBOX_GID = 1000;
 // Only the tail of a captured CLI log is needed for fatal-error classification (the
 // provider-fatal line is near the end); cap the readback so a verbose debug log
 // can't balloon memory.
