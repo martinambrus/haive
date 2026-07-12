@@ -89,14 +89,10 @@ export default function NewTaskPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryRepoId = searchParams.get('repositoryId');
-  const modeParam = searchParams.get('mode');
   // run_app: a deterministic "run this repository" task (no implementation pipeline).
   // Preset from the repo card's "Run app" button (?mode=run_app); also selectable
-  // here via the task-type toggle below. Starts false so the first client render
-  // matches the server HTML regardless of the URL — deriving the initial state
-  // from useSearchParams() mismatched on soft reload against a cached shell. The
-  // preset is applied post-hydration in the effect below.
-  const [isRunApp, setIsRunApp] = useState(false);
+  // here via the task-type toggle below.
+  const [isRunApp, setIsRunApp] = useState(searchParams.get('mode') === 'run_app');
   const presetAppliedRef = useRef(false);
   const [repos, setRepos] = useState<Repository[] | null>(null);
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
@@ -183,10 +179,6 @@ export default function NewTaskPage() {
       setRepositoryId(queryRepoId);
     }
   }, [queryRepoId, repos]);
-
-  useEffect(() => {
-    if (modeParam === 'run_app') setIsRunApp(true);
-  }, [modeParam]);
 
   useEffect(() => {
     void refreshStatus(repositoryId);
@@ -401,7 +393,10 @@ export default function NewTaskPage() {
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+      {/* autoComplete=off stops Firefox persisting the button's dynamic disabled
+          state across a soft reload (Firefox bug 654072), which stripped the
+          attribute before hydration and tripped a hydration mismatch. */}
+      <form onSubmit={handleSubmit} autoComplete="off" className="flex flex-col gap-5">
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="repositoryId">Repository</Label>
           <select
