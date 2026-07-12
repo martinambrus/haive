@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Haive Onboarding - LLM Comparison, 2026-07-10 (Redaction System)</title>
+<style>
+  :root{
+    --bg:#0b0f14; --bg2:#11171f; --card:#151c26; --card2:#1b2430;
+    --ink:#e7edf3; --mut:#8da0b3; --line:#243140;
+    --accent:#3ddc97; --accent2:#4aa8ff; --warn:#f5b14c; --bad:#f2607a;
+    --good:#3ddc97; --mid:#f5b14c; --weak:#f2607a;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;font-size:15px}
+  a{color:var(--accent2);text-decoration:none;overflow-wrap:anywhere}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1120px;margin:0 auto;padding:0 20px 80px}
+  header.hero{padding:54px 0 26px;border-bottom:1px solid var(--line)}
+  .kicker{font:600 12px/1 var(--mono);letter-spacing:0;text-transform:uppercase;color:var(--accent)}
+  h1{font-size:34px;line-height:1.12;margin:14px 0 8px;letter-spacing:0}
+  h2{font-size:22px;margin:46px 0 6px;letter-spacing:0}
+  h2 .num{font:600 13px/1 var(--mono);color:var(--accent);margin-right:10px;vertical-align:2px}
+  h3{font-size:16px;margin:22px 0 8px}
+  p.sub{color:var(--mut);max-width:78ch;margin:6px 0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:18px;font:500 13px/1.4 var(--mono);color:var(--mut)}
+  .meta b{color:var(--ink);font-weight:600}
+  .pill{display:inline-block;padding:3px 10px;border:1px solid var(--line);border-radius:999px;background:var(--bg2);font:600 12px/1.5 var(--mono)}
+  .src{margin-top:16px;padding:12px 16px;background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent2);border-radius:8px}
+  .src .t{font:600 12px/1 var(--mono);letter-spacing:0;text-transform:uppercase;color:var(--mut)}
+
+  /* verdict cards */
+  .verdicts{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:24px}
+  .vcard{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px 16px 14px;position:relative;overflow:hidden}
+  .vcard .lab{font:700 11px/1 var(--mono);letter-spacing:0;text-transform:uppercase;color:var(--mut)}
+  .vcard .who{font-size:19px;font-weight:700;margin:8px 0 4px}
+  .vcard .why{font-size:13px;color:var(--mut)}
+  .vcard.win{border-color:#2f6b52}
+  .vcard.win::after,.vcard.val::after{content:"";position:absolute;inset:0 auto 0 0;width:3px}
+  .vcard.win::after{background:var(--good)}
+  .vcard.val{border-color:#2c4d70}.vcard.val::after{background:var(--accent2)}
+  .vcard.avoid{border-color:#6b2f3e}.vcard.avoid::after{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--bad)}
+
+  /* controls + table */
+  .controls{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:16px 0 10px}
+  .controls .l{font:600 12px/1 var(--mono);color:var(--mut);margin-right:4px}
+  button.sb{font:600 12px/1 var(--mono);color:var(--ink);background:var(--bg2);border:1px solid var(--line);padding:7px 11px;border-radius:7px;cursor:pointer}
+  button.sb:hover{border-color:var(--accent)}
+  button.sb.on{background:var(--accent);color:#06120c;border-color:var(--accent)}
+  .tbl-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--card)}
+  table{border-collapse:collapse;width:100%;min-width:860px}
+  th,td{padding:10px 12px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+  th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+  thead th{position:sticky;top:0;background:var(--bg2);font:600 12px/1.2 var(--mono);color:var(--mut);cursor:pointer;user-select:none;letter-spacing:0}
+  thead th:hover{color:var(--ink)}
+  thead th.sorted{color:var(--accent)}
+  tbody tr:hover{background:#19222e}
+  tbody tr.tierA td:first-child{box-shadow:inset 3px 0 var(--good)}
+  tbody tr.tierB td:first-child{box-shadow:inset 3px 0 var(--mid)}
+  tbody tr.tierC td:first-child,tbody tr.tierD td:first-child{box-shadow:inset 3px 0 var(--bad)}
+  .llm{font-weight:600}
+  .prov{display:block;font:500 11px/1.3 var(--mono);color:var(--mut)}
+  .sc{font:600 13px/1 var(--mono);color:#06120c;border-radius:6px;padding:4px 7px;display:inline-block;min-width:34px;text-align:center}
+  td.num{font:500 13px/1 var(--mono);color:var(--ink)}
+  td.dim{color:var(--mut)}
+  .rank{font:700 13px/1 var(--mono);color:var(--mut)}
+
+  /* chart */
+  .chartwrap{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;margin-top:8px}
+  .chartwrap svg{width:100%;height:auto;display:block}
+  .axt{fill:var(--mut);font:500 11px/1 var(--mono)}
+  .axl{fill:var(--ink);font:600 12px/1 var(--sans)}
+  .dotlab{fill:var(--ink);font:600 11px/1 var(--mono)}
+  .grid{stroke:var(--line);stroke-width:1}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;font:600 12px/1 var(--mono);color:var(--mut)}
+  .legend i{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:6px;vertical-align:-1px}
+
+  /* per-llm cards */
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(330px,100%),1fr));gap:12px;margin-top:10px}
+  details.llmc{background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  details.llmc[open]{border-color:var(--accent2)}
+  details.llmc summary{list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center;gap:12px}
+  details.llmc summary::-webkit-details-marker{display:none}
+  .badge{font:700 14px/1 var(--mono);color:#06120c;border-radius:8px;padding:7px 9px;min-width:46px;text-align:center}
+  .csum{flex:1}
+  .csum .n{font-weight:700;font-size:15px}
+  .csum .p{font:500 11px/1.3 var(--mono);color:var(--mut)}
+  .chev{color:var(--mut);font:600 12px/1 var(--mono)}
+  .cbody{padding:0 16px 16px;border-top:1px solid var(--line)}
+  .statline{display:flex;flex-wrap:wrap;gap:6px 14px;margin:12px 0;font:500 12px/1.4 var(--mono);color:var(--mut)}
+  .statline b{color:var(--ink)}
+  .cbody ul{margin:6px 0;padding-left:18px}
+  .cbody li{margin:3px 0;font-size:13.5px}
+  .cbody .pro li{color:#bfe9d4}
+  .cbody .con li{color:#f3c3cd}
+  .lbl{font:700 11px/1 var(--mono);letter-spacing:0;text-transform:uppercase;color:var(--mut);margin-top:10px;display:block}
+
+  /* generic blocks */
+  .grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+  @media(max-width:720px){.grid2{grid-template-columns:1fr}}
+  .box{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px}
+  .box h3{margin-top:0}
+  table.mini{min-width:0}
+  table.mini th,table.mini td{padding:8px 10px;font-size:13px}
+  .flag{border-left:3px solid var(--bad);padding:8px 0 8px 14px;margin:10px 0;font-size:14px}
+  .flag b{color:#ffd2dc}
+  .note{border-left:3px solid var(--warn);padding:8px 0 8px 14px;margin:10px 0;font-size:14px;color:var(--mut)}
+  ol.recs{padding-left:20px}
+  ol.recs li{margin:8px 0}
+  ol.recs b{color:var(--ink)}
+  details.method summary{cursor:pointer;font:600 13px/1 var(--mono);color:var(--accent2);padding:6px 0}
+  footer{margin-top:50px;padding-top:18px;border-top:1px solid var(--line);color:var(--mut);font:500 12px/1.6 var(--mono)}
+  code{font-family:var(--mono);background:var(--bg2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12.5px;overflow-wrap:anywhere}
+  .delta-up{color:var(--good);font-weight:700}.delta-down{color:var(--bad);font-weight:700}.delta-flat{color:var(--mut);font-weight:700}
+  .tasklink{font:600 12px/1.4 var(--mono)}
+  @media(max-width:520px){h1{font-size:29px}.wrap{padding-left:14px;padding-right:14px}.cards{grid-template-columns:minmax(0,1fr)}.vcard,.box,details.llmc,.csum{min-width:0}.prov{white-space:normal;overflow-wrap:anywhere}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="kicker">Haive / Onboarding Benchmark / July 2026</div>
+  <h1>Legacy-code onboarding after the pipeline update</h1>
+  <p class="sub">Six fresh runs of the same Redaction System repository, completed on 10 July 2026. Five returning models and one new entrant were audited with the June benchmark&rsquo;s exact five-dimension methodology, with every substantive claim checked against source.</p>
+  <div class="meta">
+    <span><b>6</b> LLMs</span>
+    <span><b>5</b> correctness dims</span>
+    <span><b>25</b> steps / run</span>
+    <span>Audited <b>2026-07-10</b></span>
+    <span class="pill">all runs completed</span>
+  </div>
+  <div class="src">
+    <div class="t">Onboarded project</div>
+    <div style="margin-top:6px"><b>Redaction System</b> &mdash; a legacy PHP content-management / page-&ldquo;redaction&rdquo; CMS (circa 2008).
+    Source: <a href="https://sourceforge.net/projects/redactionsystem/" target="_blank" rel="noopener">sourceforge.net/projects/redactionsystem</a></div>
+    <div style="margin-top:6px;color:var(--mut);font:500 12.5px/1.5 var(--mono)">Stack (ground truth): PHP (121 files) / JS 218 / CSS 80 / HTML 41 / deprecated <code>mysql_*</code> extension / MySQL / FCKeditor 2.x / YUI / jQuery 1.2 / <b>no framework or automated test suite</b>.</div>
+  </div>
+</header>
+
+<section>
+  <div class="verdicts">
+    <div class="vcard win"><div class="lab">Best overall</div><div class="who" id="bestOverall">Audit pending</div><div class="why" id="bestOverallWhy">Calculated from the five weighted quality dimensions.</div></div>
+    <div class="vcard val"><div class="lab">Best value</div><div class="who" id="bestValue">Audit pending</div><div class="why" id="bestValueWhy">Highest correctness per active CLI minute.</div></div>
+    <div class="vcard win"><div class="lab">Most skill families</div><div class="who">MiniMax M3</div><div class="why">Nine families cover rare subsystems, but one invents a rank/CSRF API, Reports Wizard guidance reverses contracts, and the alias skill leaks sandbox paths.</div></div>
+    <div class="vcard avoid"><div class="lab">Cohort blind spot</div><div class="who">Global-KB routing</div><div class="why">Only Claude and Kimi promoted reusable knowledge. The other four left every portable PHP/MySQL article local.</div></div>
+  </div>
+</section>
+
+<h2><span class="num">01</span>The leaderboard</h2>
+<p class="sub">Composite = weighted blend (KB 25% / Skills 25% / Detection 20% / Agents 15% / Global-KB 15%). Click any metric header to sort. Cells are heat-mapped 3.5&nbsp;&rarr;&nbsp;10.</p>
+<div class="controls">
+  <span class="l">Quick sort:</span>
+  <button class="sb" data-k="composite">Composite</button>
+  <button class="sb" data-k="detect">Detection</button>
+  <button class="sb" data-k="kb">Knowledge base</button>
+  <button class="sb" data-k="skills">Skills</button>
+  <button class="sb" data-k="agents">Agents</button>
+  <button class="sb" data-k="global">Global KB</button>
+  <button class="sb" data-k="cliMin" data-asc="1">Speed (fastest)</button>
+  <button class="sb" data-k="value">Value</button>
+</div>
+<div class="tbl-scroll">
+  <table id="tbl">
+    <thead><tr id="head"></tr></thead>
+    <tbody id="body"></tbody>
+  </table>
+</div>
+<p class="sub" style="font-size:13px;margin-top:8px"><b>Value</b> = composite divided by active CLI minutes. Compute and output totals include superseded retry invocations, matching the June report. Output tokens remain only roughly comparable; provider input/cache accounting is not.</p>
+
+<h2><span class="num">02</span>Quality vs. speed</h2>
+<p class="sub">Up = more correct; left = faster. The shaded value zone is composite at least 8.0 within 45 active CLI minutes. Bubble area follows output tokens; hover a bubble for exact telemetry.</p>
+<div class="chartwrap">
+  <svg id="scatter" viewBox="0 0 880 540" role="img" aria-label="Scatter plot of correctness versus compute time"></svg>
+  <div class="legend">
+    <span><i style="background:var(--good)"></i>Excellent (≥8.0)</span>
+    <span><i style="background:var(--mid)"></i>Decent (6&ndash;8)</span>
+    <span><i style="background:var(--bad)"></i>Weak (&lt;6)</span>
+    <span style="color:var(--mut)">bubble size ∝ output tokens</span>
+  </div>
+</div>
+
+<h2><span class="num">03</span>June vs. July</h2>
+<p class="sub">Five models also ran in the 23 June benchmark. This is a pipeline comparison, not a controlled model-version experiment: the July workflow has 25 steps, new retry accounting, richer skill generation, and global-KB merge stages. Quality and compute deltas therefore describe the complete Haive+model system.</p>
+<div class="tbl-scroll">
+  <table class="mini">
+    <thead><tr><th style="text-align:left">Model</th><th>June score</th><th>July score</th><th>Score delta</th><th>June compute</th><th>July compute</th><th>Compute delta</th><th>June output</th><th>July output</th></tr></thead>
+    <tbody id="deltaBody"></tbody>
+  </table>
+</div>
+<p class="note"><b>Raw speed did not improve for this cohort.</b> The five returning models averaged 49.4 CLI minutes in June and 67.8 in July (+37%). The updated pipeline produced more and deeper artifacts, so interpret this as added work rather than a clean efficiency regression.</p>
+
+<h2><span class="num">04</span>Best LLM per step</h2>
+<div class="tbl-scroll">
+<table class="mini">
+  <thead><tr><th>Onboarding step</th><th style="text-align:left">Winner</th><th>Score</th><th style="text-align:left">Runner-up</th><th style="text-align:left">Why the winner</th></tr></thead>
+  <tbody>
+    <tr><td style="text-align:left">Stack detection (01/02/04)</td><td style="text-align:left"><b>Claude / Codex / MiniMax</b></td><td>9.0</td><td style="text-align:left">Kimi / GLM-5.2 (8.5)</td><td style="text-align:left">Correct PHP/MySQL/no-framework/no-tests judgment; Claude resolves Apache, Codex resolves PHP ceiling, MiniMax resolves docroot</td></tr>
+    <tr><td style="text-align:left">Agent discovery (06_5)</td><td style="text-align:left"><b>Codex</b></td><td>9.5</td><td style="text-align:left">Claude / GLM-5.2 (8.5)</td><td style="text-align:left">Four distinct grounded agents: MySQL, FCKeditor, legacy PHP, legacy JavaScript; no invented technology or API</td></tr>
+    <tr><td style="text-align:left">Knowledge base (08)</td><td style="text-align:left"><b>Claude</b></td><td>9.0</td><td style="text-align:left">Codex / Kimi / GLM-5.2 (8.5)</td><td style="text-align:left">Best balance of source depth, subsystem coverage, and low defect density</td></tr>
+    <tr><td style="text-align:left">Skill generation (09_5)</td><td style="text-align:left"><b>Claude / Codex / GLM-5.2</b></td><td>9.0</td><td style="text-align:left">Kimi / GLM-4.6 (8.5)</td><td style="text-align:left">Actionable, domain-specific guides with verified bug-level findings; each still has localized contract errors</td></tr>
+    <tr><td style="text-align:left">Global-KB promotion</td><td style="text-align:left"><b>Claude / Kimi</b></td><td>8.0</td><td style="text-align:left">others (6.0)</td><td style="text-align:left">Portable and project-clean routing, but PHP-version and MariaDB factual defects cap both runs</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="note">RAG population (step 10) is deterministic embedding and is not LLM-differentiating; all six runs indexed the same 313 code files.</p>
+
+<h2><span class="num">05</span>Every model, in detail</h2>
+<p class="sub">Click a card to expand strengths, weaknesses, and the per-dimension scores. Findings were verified to file:line against the real repository.</p>
+<div class="cards" id="cards"></div>
+
+<h2><span class="num">06</span>Notable defects</h2>
+<div class="grid2">
+  <div class="box">
+    <h3>Correctness failures</h3>
+    <div class="flag"><b>MiniMax M3</b> &mdash; fabricated a complete rank/CSRF contract: nonexistent <code>GetRank()</code>, <code>SetRank()</code>, <code>CheckSecHash()</code>, rank constants, <code>admins.rank</code>, and hidden form tokens. Its Reports Wizard skill also reverses DB-prefix behavior and uses PHP 7 <code>??</code> syntax.</div>
+    <div class="flag"><b>GLM-4.6</b> &mdash; repeatedly reverses the edit-lock timeout behavior even while citing the correct source lines. Its module agent invents a <code>Mods</code> class and file-backed settings; its KB also claims FCKeditor sanitizes HTML although the input helper merely skips sanitization.</div>
+    <div class="flag"><b>Codex</b> &mdash; otherwise precise KB quick references invent six function signatures, including incorrect <code>Insert</code>/<code>Update</code>/<code>Delete</code>/<code>lockTables</code> parameters, and its edit-lock article reverses the same timeout bug.</div>
+  </div>
+  <div class="box">
+    <h3>Routing, portability, and review</h3>
+    <div class="note"><b>Global PHP 5 articles</b> from Kimi and later Claude contain PHP 7/7.3-only APIs (<code>unserialize</code> options and array-form <code>session_set_cookie_params</code>) and an overbroad Argon2 recommendation. Portable does not automatically mean version-correct.</div>
+    <div class="note"><b>Sandbox-path leaks</b> remain: nine references in Kimi&rsquo;s rank skill and four in MiniMax&rsquo;s alias skill point to <code>/haive/workdir</code>.</div>
+    <div class="note"><b>Broken links</b>: MiniMax has 19 broken skill links; GLM-4.6 and Kimi each have four; Codex has three. The deterministic verification step passed them because it checks structure, not every link target.</div>
+    <div class="note"><b>Final review missed every issue above.</b> All six review steps reported completion from counts/expected paths. Source-level audit remains necessary; a green pipeline is not an accuracy verdict.</div>
+  </div>
+</div>
+
+<h2><span class="num">07</span>Recommendations</h2>
+<ol class="recs">
+  <li><b>Default / highest-stakes onboarding: Claude Code.</b> Best composite (8.78), no weak local dimension, and the best balance of depth and global routing. Budget 84.5 active CLI minutes and audit the promoted version-specific guidance.</li>
+  <li><b>High-throughput default: GLM-5.2.</b> It delivers 8.25 correctness in 31.8 minutes, about 2.5x Claude&rsquo;s correctness per compute minute. Add an explicit global-promotion pass and verify theme/form contracts.</li>
+  <li><b>Best alternative for agent coverage: Codex.</b> Second overall (8.50), best discovered agents, strong bug-level skills, and moderate compute. Fix the KB API-reference signatures before trusting it as a reference.</li>
+  <li><b>Use Kimi when global routing matters.</b> It made the broadest portable promotion set and stayed third overall. Its version-scoped global advice and sandbox paths require review.</li>
+  <li><b>Do not select on artifact volume.</b> MiniMax produced the most skills and GLM-4.6 produced very long skills, yet both fall into the lower tier because coherent-looking guides reverse or invent contracts.</li>
+</ol>
+
+<details class="method">
+  <summary>&#9656; Methodology &amp; caveats</summary>
+  <div class="box" style="margin-top:10px">
+    <ul>
+      <li><b>Ground truth.</b> All six models onboarded separate uploads of the same Redaction System source. Parallel audits checked model-authored claims against the real files and line-level behavior; artifact count alone earned no credit.</li>
+      <li><b>Detection (20%).</b> Audited LLM output from steps 01/02/04, persisted project metadata, and raw CLI text. Deterministic form values were separated from model judgment.</li>
+      <li><b>Harness metadata.</b> Every final <code>AGENTS.md</code> project block inherits confirmation-form values <code>mariadb 10.11</code> and <code>apache</code>. Raw LLM detection instead identified MySQL with no version; scores treat the form values as deterministic. GLM-5.2 was separately penalized for copying the DDEV/MariaDB harness claim into LLM-authored KB guidance.</li>
+      <li><b>Knowledge base (25%).</b> Read all core docs and every topical category; scored project specificity, coverage, citation quality, factual accuracy, and local/global routing.</li>
+      <li><b>Skills (25%) and agents (15%).</b> Read every <code>SKILL.md</code> and its subskills. Agent scoring includes only entries with <code>accepted.source = "llm"</code>; the 28 shared scan/template agents and mirrored <code>.agents/skills</code> copies are excluded.</li>
+      <li><b>Global KB (15%).</b> Queried the separate <code>haive_kb_global.global_kb_entries</code> table by <code>source_task_id</code>, across every status, and read complete bodies plus merge lineage. Later archival does not erase the originating run&rsquo;s decision. DB lineage is authoritative when a step summary disagrees, as Claude&rsquo;s 3-merged/1-skipped summary does with its four active attributed rows.</li>
+      <li><b>No-promotion baseline.</b> A run with zero global articles receives 6.0: the June methodology&rsquo;s neutral &ldquo;no contamination, but missed reusable knowledge&rdquo; floor. It is not a six-out-of-ten assessment of nonexistent content.</li>
+      <li><b>Cost.</b> CLI minutes = sum of <code>cli_invocations.duration_ms</code> across all rows, including superseded retries. Output tokens use the same all-invocation rule. Raw input/total tokens are excluded because providers account for caching differently.</li>
+      <li><b>Wall and idle.</b> Wall time includes unattended form gates and is contextual only. Idle uses current plus retry-carried idle. Speed/value rankings use active CLI minutes.</li>
+      <li><b>Completion is not quality.</b> Every run has 25 step rows and no degraded/failing step. Three or four deterministic/conditional steps were skipped. RAG indexed the same 313 code files in every run and is not scored.</li>
+      <li><b>Score precision.</b> Dimension scores are evidence-calibrated judgments in 0.5-point increments, not a laboratory measurement. Composite decimals come only from the published weights.</li>
+    </ul>
+  </div>
+</details>
+
+<details class="method">
+  <summary>&#9656; Run provenance</summary>
+  <div class="tbl-scroll" style="margin-top:10px">
+    <table class="mini">
+      <thead><tr><th style="text-align:left">Model</th><th style="text-align:left">Task</th><th>Steps done</th><th>Skipped</th><th>CLI runs</th><th>Wall min</th><th>Idle min</th></tr></thead>
+      <tbody id="provenanceBody"></tbody>
+    </table>
+  </div>
+</details>
+
+<footer>
+  Generated 2026-07-10 for the Haive onboarding step-engine benchmark / Redaction System / self-contained, no runtime dependencies. Historical baseline: <a href="onboarding-llm-comparison.html">23 June report</a>.
+</footer>
+
+</div>
+
+<script>
+const LEGACY_DATA = [
+ {id:"claude-code",name:"Claude Code",prov:"Anthropic · subscription",tier:"A",
+  composite:8.95,detect:9.0,kb:9.5,skills:9.5,agents:7.0,global:9.0,
+  cliMin:54.6,wallMin:125.4,idleMin:12.3,outTok:165795,kbLocal:15,kbGlobal:8,skillsN:7,agentsDisc:1,
+  pro:[`Rejected the injected Jest false-positive; committed to PHP/no-framework/2008-LAMP`,
+       `Cleanest knowledge routing: 15 project-local KB files + 8 portable articles promoted to global`,
+       `Best single mysql-specialist agent (spotted makeDBSafe uses only stripslashes; flagged sql_debug.txt exposure)`,
+       `Zero hallucinations; top-3 in every dimension`],
+  con:[`Only 1 discovered agent (deepseek/glm/minimax found 3-5)`,
+       `mariadb/ folder name is anachronistic (content accurate)`,
+       `Mid-pack compute (~55 min)`]},
+
+ {id:"amp",name:"Sourcegraph Amp",prov:"Sourcegraph Amp · subscription",tier:"A",
+  composite:8.68,detect:7.5,kb:10,skills:8.5,agents:7.5,global:9.5,
+  cliMin:69.6,wallMin:381.6,idleMin:145.1,outTok:244316,kbLocal:20,kbGlobal:6,skillsN:6,agentsDisc:1,
+  pro:[`Best knowledge base (10/10) - bug-level accuracy: caught the inverted Db::Update() return and the fckeditor-substring XSS bypass`,
+       `Best global-KB promotion: 6 portable articles, correctly merged/deduped`,
+       `Unique domain-glossary "decoder ring" skill`],
+  con:[`Slow: ~70 min compute, 54 min on skills alone`,
+       `Duplicate multilingual skills (one feature shipped twice)`,
+       `Invented Db methods queryCount/lastQuery; shallow stack detection`]},
+
+ {id:"deepseek-v4-pro",name:"deepseek-v4-pro",prov:"Ollama Cloud · deepseek-v4-pro:cloud",tier:"A",
+  composite:8.60,detect:9.5,kb:9.5,skills:8.0,agents:9.5,global:6.0,
+  cliMin:27.9,wallMin:729.2,idleMin:96.1,outTok:103549,kbLocal:22,kbGlobal:0,skillsN:4,agentsDisc:5,
+  pro:[`Best stack detection (9.5) - only model to explicitly debunk the Jest false-positive`,
+       `Best discovered agents (5 grounded: mysql, php-legacy, yui, theme, fckeditor)`,
+       `Five real redaction-* subsystem KB dirs with verbatim source quotes`,
+       `Fastest of the strong tier: 28 min compute`],
+  con:[`Promoted nothing to global KB (missed reusable PHP5/mysql knowledge)`,
+       `Only 3-4 skills`,
+       `Cited one non-existent path (installer/actions_step_2.php)`]},
+
+ {id:"glm-4.6",name:"glm-4.6 (z.ai)",prov:"Z.AI · glm-4.6",tier:"A",
+  composite:8.58,detect:8.5,kb:9.0,skills:9.5,agents:9.0,global:6.0,
+  cliMin:79.2,wallMin:157.4,idleMin:22.5,outTok:134395,kbLocal:30,kbGlobal:0,skillsN:5,agentsDisc:3,
+  pro:[`Densest, security-grade skills (flagged the math-captcha eval() guard; decoded encryptPW=md5(crypt()))`,
+       `Strong framework-specialist agent`,
+       `Deepest KB content (30 files, verified not padded)`],
+  con:[`Slowest compute by far: ~79 min (about 2x the median), slow even on trivial steps`,
+       `30 local KB files / 0 promoted - no local-vs-global routing`,
+       `Superseded by glm-5.2: same-or-better quality at ~1/3 the compute (29 vs 79 min)`]},
+
+ {id:"glm-5.2",name:"glm-5.2 (z.ai)",prov:"Ollama Cloud · glm-5.2:cloud",tier:"A",
+  composite:8.70,detect:8.5,kb:9.5,skills:9.5,agents:9.0,global:6.0,
+  cliMin:29.4,wallMin:29.7,idleMin:6.4,outTok:109819,kbLocal:35,kbGlobal:0,skillsN:5,agentsDisc:3,
+  pro:[`Matches or beats its sibling glm-4.6 across the board - at 2.7x the speed (29 vs 79 min compute)`,
+       `Deepest KB of the field (35 files, +26% words vs glm-4.6, ~15/15 claims verified) - not padded; covers jquery + recaptcha subsystems others skipped`,
+       `Top-tier skills (9.5): security-grade encryptPW=md5(crypt()) decode; forms-wizard newform table lifecycle`,
+       `Rejected the Jest false-positive; wrote a standalone TESTING_STANDARDS.md debunk`,
+       `Fast: 29 min compute, low idle, no degraded steps`],
+  con:[`Promoted nothing to global KB (35 local / 0 global) - no local-vs-global routing`,
+       `Left webserver/docroot null in detection (glm-4.6 resolved them)`,
+       `3 discovered agents (mysql, fckeditor, installer) - missed the YUI/theme layers deepseek caught`,
+       `Cosmetic "(calypso)" codename label in KB headers (unverified, not load-bearing)`]},
+
+ {id:"kimi-k2.7-code",name:"kimi-k2.7-code",prov:"Ollama Cloud · kimi-k2.7-code:cloud",tier:"A",
+  composite:8.30,detect:8.5,kb:9.0,skills:9.0,agents:8.0,global:6.0,
+  cliMin:40.0,wallMin:47.0,idleMin:5.6,outTok:163714,kbLocal:26,kbGlobal:0,skillsN:7,agentsDisc:2,
+  pro:[`Fast + strong: 40 min compute, lowest idle`,
+       `Broad architecture KB, every symbol verified to file:line`,
+       `Grounded url-aliases + rank-based-access skills; version-accurate (jquery-1-2)`],
+  con:[`Edit-locking only lightly covered`,
+       `Stray rs_ollama4. artifact atop INDEX.md`,
+       `0 global promotions`]},
+
+ {id:"minimax-m3",name:"minimax-m3",prov:"Ollama Cloud · minimax-m3:cloud",tier:"A",
+  composite:8.25,detect:6.0,kb:10,skills:9.5,agents:8.5,global:6.0,
+  cliMin:43.8,wallMin:110.2,idleMin:65.6,outTok:73579,kbLocal:25,kbGlobal:0,skillsN:8,agentsDisc:3,
+  pro:[`Best KB + skills depth (10 / 9.5)`,
+       `Precise family naming ("mysql-extension","php4-procedural"); 30+ claims verified line-exact`,
+       `Niche subsystems others missed (mailform flood-lock, visitor-counter, cross-language copy)`],
+  con:[`Weak detection (6.0) - propagated the Jest false-positive into AGENTS.md`,
+       `0 global promotions`]},
+
+ {id:"antigravity",name:"Google Antigravity",prov:"Google Antigravity · subscription",tier:"B",
+  composite:7.93,detect:8.0,kb:9.0,skills:8.5,agents:7.0,global:6.0,
+  cliMin:10.1,wallMin:56.8,idleMin:10.0,outTok:0,kbLocal:26,kbGlobal:0,skillsN:4,agentsDisc:1,
+  pro:[`Fastest compute (10 min)`,
+       `Every falsifiable claim verified exact`,
+       `Standout dynamic-modules skill`],
+  con:[`Broken token tracking (reports 0 tokens)`,
+       `Brief / shallow coverage depth`,
+       `Leaked /haive/workdir/ sandbox paths; invented a bogus localUrl`]},
+
+ {id:"gpt-oss",name:"gpt-oss:120b",prov:"Ollama Cloud · gpt-oss:120b-cloud",tier:"C",
+  composite:5.83,detect:5.0,kb:9.0,skills:4.0,agents:4.5,global:6.0,
+  cliMin:15.2,wallMin:122.8,idleMin:79.7,outTok:50742,kbLocal:22,kbGlobal:0,skillsN:4,agentsDisc:3,
+  pro:[`KB tech files mostly rs-anchored with line numbers (KB scored 9/10)`,
+       `Fast compute (15 min)`],
+  con:[`Hallucinated a jest-specialist agent (no npm/tests exist) + a fake settings table`,
+       `Refused to name PHP as the primary language`,
+       `Propagated the Jest false-positive; weakest skills/agents tier`]},
+
+ {id:"gemma4-31b",name:"gemma4:31b",prov:"Ollama Cloud · gemma4:31b-cloud",tier:"C",
+  composite:5.43,detect:5.0,kb:7.0,skills:5.0,agents:3.5,global:6.0,
+  cliMin:19.4,wallMin:29.4,idleMin:9.0,outTok:30456,kbLocal:13,kbGlobal:0,skillsN:4,agentsDisc:1,
+  pro:[`Lean but line-accurate where it speaks (cites real eval() at functions.php:1301)`,
+       `Fast (19 min) and well-organized`],
+  con:[`Shallow - omits half the app (edit-locking, aliases, form-wizard, installer, FCKeditor/YUI)`,
+       `Never flags the deprecated mysql_* extension`,
+       `Propagated the Jest false-positive; stray artifact in INDEX`]},
+
+ {id:"qwen3-coder",name:"qwen3-coder:480b",prov:"Ollama Cloud · qwen3-coder:480b-cloud",tier:"D",
+  composite:3.93,detect:3.5,kb:5.0,skills:4.0,agents:4.0,global:2.5,
+  cliMin:31.9,wallMin:78.8,idleMin:22.2,outTok:32717,kbLocal:14,kbGlobal:1,skillsN:4,agentsDisc:1,
+  pro:[`Accurate spine where present (real files/Db methods; "calypso" codename real)`],
+  con:[`Worst overall. Global-KB contamination: promoted "MySQL Best Practices for Redaction System" (project name leaked)`,
+       `Credulously accepted Jest into AGENTS.md`,
+       `Stub-shallow KB (~2 paragraphs/file), omits most subsystems`,
+       `Leaked sandbox paths; cited a non-repo path`]},
+];
+const DATA = [
+  {
+    id:"claude-code", name:"Claude Code", prov:"Anthropic / Claude Sonnet 4 / subscription", tier:"A",
+    detect:9.0, kb:9.0, skills:9.0, agents:8.5, global:8.0,
+    cliMin:84.5, wallMin:101.2, idleMin:53.2, outTok:362755, kbLocal:23, kbGlobal:4, skillsN:4, agentsDisc:3,
+    done:22, skipped:3, invocations:26, retries:0, taskId:"d7aa3b3b-c875-4553-9139-002548b1db1a", labelDx:-8, labelDy:-24,
+    pro:["Best overall and the only model at 9.0 across detection, KB, and skills", "Deep, repo-specific coverage of the 23-table MyISAM schema, forms, ACL cascade, sessions, aliases, modules, FCKeditor, and dead reCAPTCHA", "Caught real defects: undefined <code>mpart</code>, runtime schema mutation, OPTIMIZE-after-delete, multipart gap handling", "Four portable, project-clean global articles with valid supersession lineage"],
+    con:["Highest cost: 84.5 CLI min and 362.8K output tokens", "Repeats the wrong <code>[*link2:*]</code> marker order and several incorrect skill contracts", "Global PHP 5 quick reference uses a PHP 7.3 cookie API; MySQL advice has FK-index and MyISAM-backup errors", "One merge CLI stopped and the step summary says 3 merged / 1 skipped, although the authoritative global DB contains 4 active task-attributed rows"]
+  },
+  {
+    id:"codex", name:"OpenAI Codex (o3)", prov:"OpenAI Codex / subscription", tier:"A",
+    detect:9.0, kb:8.5, skills:9.0, agents:9.5, global:6.0,
+    cliMin:60.9, wallMin:98.7, idleMin:50.5, outTok:147097, kbLocal:24, kbGlobal:0, skillsN:3, agentsDisc:4,
+    done:21, skipped:4, invocations:21, retries:1, taskId:"c7fe3765-ff6a-408a-af57-32c35ac0fe94", labelDx:0, labelDy:-25,
+    pro:["Best discovered-agent set: MySQL, FCKeditor, legacy PHP, and legacy JavaScript, all grounded in real code", "Clean detection includes PHP <=5.6, docroot, no framework/build/tests, and explicitly rejects a Jest specialist", "All cited paths and line ranges resolve; skills catch the inverted <code>Db::Update()</code> result, alias clearing, and undefined <code>mpart</code>", "Second overall with much lower output than Claude"],
+    con:["Six invented API signatures across the KB quick references", "Misreads the edit-lock timeout bug; one skill SQL example also omits quotes around the language value", "Three related links are broken; no reusable PHP/MySQL knowledge was promoted globally"]
+  },
+  {
+    id:"kimi-k2.7-code", name:"Kimi K2.7 Code", prov:"Ollama Cloud / kimi-k2.7-code:cloud", tier:"A",
+    detect:8.5, kb:8.5, skills:8.5, agents:7.5, global:8.0,
+    cliMin:57.0, wallMin:119.4, idleMin:82.2, outTok:187108, kbLocal:16, kbGlobal:5, skillsN:6, agentsDisc:1,
+    done:22, skipped:3, invocations:29, retries:1, taskId:"77a7d868-62da-4efb-a6d2-ebb8ea6887d4", labelDx:0, labelDy:28,
+    pro:["Lean KB with 102 valid line anchors and strong legacy-architecture coverage", "Five project-clean global promotions; four correctly merged existing topics and one was novel", "Skills expose real bugs in tab moves, defaults, multipart deletion, activation, and <code>editAccess()</code>", "Excellent single MySQL agent respects the ext/mysql and manual-migration constraints"],
+    con:["Global PHP 5 advice includes PHP 7/7.3-only APIs and Argon2; MariaDB FK-index guidance is wrong", "Nine <code>/haive/workdir</code> paths leak into one skill, plus four broken links", "Local KB undercovers edit locks, history/SEO, multilingual behavior, and FCKeditor", "Localized contract errors misstate module state, captcha data, registration login, and upload/insert ordering"]
+  },
+  {
+    id:"glm-5.2", name:"glm-5.2", prov:"Ollama Cloud / glm-5.2:cloud", tier:"A",
+    detect:8.5, kb:8.5, skills:9.0, agents:8.5, global:6.0,
+    cliMin:31.8, wallMin:93.6, idleMin:66.5, outTok:144287, kbLocal:29, kbGlobal:0, skillsN:5, agentsDisc:4,
+    done:21, skipped:4, invocations:23, retries:0, taskId:"72ca3363-6f5c-4d37-92f0-ed50f0f90cd2", labelDx:0, labelDy:-24,
+    pro:["Best value by a wide margin: 8.25 composite in 31.8 active minutes", "Deep skills across hierarchy, forms, mail/logging, ranks, themes, and aliases", "Broad KB covers FCKeditor, ext/mysql, PHP4 OOP, MyISAM, dynamic form tables, and logging", "Four sensible discovered agents: MySQL, FCKeditor, legacy PHP, and themes"],
+    con:["No global promotions despite 29 local KB files", "Detection leaves webserver/docroot unresolved and leaks the harness's DDEV/MariaDB values into testing guidance", "Theme agent invents helpers/cached files; several KB and skill claims reverse real bootstrap, prefix, and form-save behavior"]
+  },
+  {
+    id:"glm-4.6", name:"glm-4.6", prov:"Z.AI / glm-4.6", tier:"B",
+    detect:8.0, kb:8.0, skills:8.5, agents:7.5, global:6.0,
+    cliMin:86.3, wallMin:114.0, idleMin:66.3, outTok:214493, kbLocal:21, kbGlobal:0, skillsN:6, agentsDisc:4,
+    done:21, skipped:4, invocations:23, retries:0, taskId:"75390f27-0fb0-4623-a44e-6d02a115bb83", labelDx:-8, labelDy:-22,
+    pro:["Very deep skills find dead <code>ConvertStats</code>, broken History wiring, undefined <code>mpart</code>, and keyword SQL risk", "Correct no-framework/no-tests result with no Jest contamination", "Strong exact detail on ext/mysql, FCKeditor/YUI, form tables, aliases, and content rendering"],
+    con:["Slowest run at 86.3 active minutes", "Edit-lock guidance reverses the actual timeout bug; alias and rank guidance also reverse persisted behavior", "Hallucinated <code>Mods</code> agent/settings storage; KB dangerously claims FCKeditor already sanitizes HTML despite no server-side whitelist", "Large citation-path debt, duplication, four broken links, and zero global promotions"]
+  },
+  {
+    id:"minimax-m3", name:"MiniMax M3", prov:"Ollama Cloud / minimax-m3:cloud", tier:"B",
+    detect:9.0, kb:8.0, skills:7.0, agents:6.5, global:6.0,
+    cliMin:79.6, wallMin:117.2, idleMin:73.8, outTok:196164, kbLocal:24, kbGlobal:0, skillsN:9, agentsDisc:2,
+    done:21, skipped:4, invocations:27, retries:0, taskId:"03bd74bd-3cb7-44ed-bfa2-1e276bd19d06", labelDx:0, labelDy:29,
+    pro:["Best raw detection completeness and exceptional subsystem breadth", "KB line anchors resolve and cover aliases, locks, forms, modules, history, multilingual behavior, and legacy security", "Seven of nine skill families are deep and useful; catches missing history date, password hashing, schema/runtime behavior"],
+    con:["Fabricates an entire rank/CSRF API family: nonexistent functions, constants, fields, and hidden tokens", "Reports Wizard guide gets <code>Select</code> and DB prefixes wrong and ships PHP 7 <code>??</code> examples for a PHP 5 project", "Mislabels the IP/UA session fingerprint as CSRF protection and falsely claims <code>Db::Insert()</code> sanitizes textarea content", "MySQL agent conflicts with the ext/mysql codebase; 19 broken links, four sandbox-path leaks, and no global promotion"]
+  }
+];
+
+const WEIGHTS = {kb:0.25, skills:0.25, detect:0.20, agents:0.15, global:0.15};
+DATA.forEach(d=>{
+  const weighted = Object.entries(WEIGHTS).reduce((sum,[k,w])=>sum+d[k]*w,0);
+  d.composite = Math.round((weighted+1e-9)*100)/100;
+  d.value = +(d.composite/d.cliMin).toFixed(3);
+});
+
+// ---------- helpers ----------
+const fmtTok = t => t===0 ? "n/a" : (t>=1000 ? (t/1000).toFixed(1)+"K" : ""+t);
+function scoreColor(v){ // 3.5 -> red, 6.5 -> amber, 10 -> green
+  const lo=3.5, mid=6.5, hi=10;
+  let r,g,b;
+  if(v<=mid){ const t=(v-lo)/(mid-lo); r=242; g=Math.round(96+t*(177-96)); b=Math.round(122+t*(76-122)); }
+  else { const t=(v-mid)/(hi-mid); r=Math.round(245-t*(245-61)); g=Math.round(177-t*(177-220)); b=Math.round(76+t*(151-76)); }
+  return `rgb(${r},${g},${b})`;
+}
+const tierClass = t => "tier"+t;
+
+// ---------- table ----------
+const COLS = [
+  {k:"rank",   t:"#",          kind:"rank"},
+  {k:"name",   t:"LLM",        kind:"llm"},
+  {k:"composite",t:"Composite",kind:"score"},
+  {k:"detect", t:"Detect",     kind:"score"},
+  {k:"kb",     t:"KB",         kind:"score"},
+  {k:"skills", t:"Skills",     kind:"score"},
+  {k:"agents", t:"Agents",     kind:"score"},
+  {k:"global", t:"Global KB",  kind:"score"},
+  {k:"cliMin", t:"Compute min",kind:"num"},
+  {k:"outTok", t:"Out tokens", kind:"tok"},
+  {k:"value",  t:"Value",      kind:"num"},
+];
+let sortKey="composite", sortAsc=false;
+
+function renderHead(){
+  document.getElementById("head").innerHTML = COLS.map(c=>{
+    const s = c.k===sortKey ? " sorted" : "";
+    const arrow = c.k===sortKey ? (sortAsc?" ▲":" ▼") : "";
+    return `<th class="col-${c.k}${s}" data-k="${c.k}">${c.t}${arrow}</th>`;
+  }).join("");
+  document.querySelectorAll("#head th").forEach(th=>{
+    if(th.dataset.k==="rank"||th.dataset.k==="name") return;
+    th.addEventListener("click",()=>setSort(th.dataset.k));
+  });
+}
+function sorted(){
+  const arr=[...DATA];
+  if(sortKey!=="rank") arr.sort((a,b)=> sortAsc ? a[sortKey]-b[sortKey] : b[sortKey]-a[sortKey]);
+  return arr;
+}
+function renderBody(){
+  const arr=sorted();
+  document.getElementById("body").innerHTML = arr.map((d,i)=>{
+    const cells = COLS.map(c=>{
+      if(c.kind==="rank") return `<td><span class="rank">${i+1}</span></td>`;
+      if(c.kind==="llm")  return `<td><span class="llm">${d.name}</span><span class="prov">${d.prov}</span></td>`;
+      if(c.kind==="score"){ const v=d[c.k]; const digits=c.k==="composite"?2:1; return `<td><span class="sc" style="background:${scoreColor(v)}">${v.toFixed(digits)}</span></td>`; }
+      if(c.kind==="num")  return `<td class="num">${d[c.k]}</td>`;
+      if(c.kind==="tok")  return `<td class="num dim">${fmtTok(d[c.k])}</td>`;
+      return `<td>${d[c.k]}</td>`;
+    }).join("");
+    return `<tr class="${tierClass(d.tier)}">${cells}</tr>`;
+  }).join("");
+}
+function setSort(k){
+  if(k===sortKey){ sortAsc=!sortAsc; } else { sortKey=k; sortAsc = (k==="cliMin"); } // speed defaults ascending
+  document.querySelectorAll("button.sb").forEach(b=>b.classList.toggle("on",b.dataset.k===k));
+  renderHead(); renderBody();
+}
+document.querySelectorAll("button.sb").forEach(b=>{
+  b.addEventListener("click",()=>{ sortKey=b.dataset.k; sortAsc = b.dataset.asc==="1";
+    document.querySelectorAll("button.sb").forEach(x=>x.classList.toggle("on",x===b));
+    renderHead(); renderBody(); });
+});
+
+// ---------- scatter ----------
+function renderScatter(){
+  const W=880,H=540, L=64,R=28,T=28,B=72;
+  const X0=L, X1=W-R, Y0=T, Y1=H-B;
+  const xmin=0,xmax=100, ymin=7,ymax=10;
+  const sx=v=>X0+(v-xmin)/(xmax-xmin)*(X1-X0);
+  const sy=v=>Y1-(v-ymin)/(ymax-ymin)*(Y1-Y0);
+  let s="";
+  // value zone (quality>=8, time<=45)
+  s+=`<rect x="${sx(0)}" y="${sy(10)}" width="${sx(45)-sx(0)}" height="${sy(8)-sy(10)}" fill="rgba(61,220,151,.08)" stroke="rgba(61,220,151,.25)" stroke-dasharray="4 4"/>`;
+  s+=`<text class="axt" x="${sx(2)}" y="${sy(9.85)}" style="fill:rgba(61,220,151,.8)">value zone</text>`;
+  // gridlines + x ticks
+  for(let g=0;g<=100;g+=20){ s+=`<line class="grid" x1="${sx(g)}" y1="${Y0}" x2="${sx(g)}" y2="${Y1}"/>`;
+    s+=`<text class="axt" x="${sx(g)}" y="${Y1+20}" text-anchor="middle">${g}</text>`; }
+  for(let g=7;g<=10;g+=1){ s+=`<line class="grid" x1="${X0}" y1="${sy(g)}" x2="${X1}" y2="${sy(g)}"/>`;
+    s+=`<text class="axt" x="${X0-10}" y="${sy(g)+4}" text-anchor="end">${g}</text>`; }
+  // axis labels
+  s+=`<text class="axl" x="${(X0+X1)/2}" y="${H-14}" text-anchor="middle">CLI compute time (minutes) &rarr; slower</text>`;
+  s+=`<text class="axl" transform="translate(16,${(Y0+Y1)/2}) rotate(-90)" text-anchor="middle">Correctness composite &rarr; better</text>`;
+  // dots
+  const col=t=> t==="A"?"var(--good)" : t==="B"?"var(--mid)" : "var(--bad)";
+  const maxTok=Math.max(...DATA.map(d=>d.outTok));
+  DATA.forEach(d=>{
+    const r = 6 + 12*Math.sqrt((d.outTok||1)/maxTok);
+    const x=sx(d.cliMin), y=sy(d.composite);
+    s+=`<circle cx="${x}" cy="${y}" r="${r}" fill="${col(d.tier)}" fill-opacity=".22" stroke="${col(d.tier)}" stroke-width="1.6"><title>${d.name} — composite ${d.composite}, ${d.cliMin} min, out ${fmtTok(d.outTok)}</title></circle>`;
+    const dy = d.labelDy ?? (-r-6);
+    const dx = d.labelDx ?? 0;
+    s+=`<text class="dotlab" x="${x+dx}" y="${y+dy}" text-anchor="middle">${d.name.replace(/ \(.*\)/,"").replace(":cloud","")}</text>`;
+  });
+  document.getElementById("scatter").innerHTML=s;
+}
+
+// ---------- per-llm cards ----------
+function renderCards(){
+  const arr=[...DATA].sort((a,b)=>b.composite-a.composite);
+  document.getElementById("cards").innerHTML = arr.map(d=>{
+    const proc = scoreColor(d.composite);
+    return `<details class="llmc">
+      <summary>
+        <span class="badge" style="background:${proc}">${d.composite.toFixed(2)}</span>
+        <span class="csum"><span class="n">${d.name}</span><span class="p">${d.prov}</span></span>
+        <span class="chev">▾</span>
+      </summary>
+      <div class="cbody">
+        <div class="statline">
+          <span>Detect <b>${d.detect}</b></span><span>KB <b>${d.kb}</b></span><span>Skills <b>${d.skills}</b></span>
+          <span>Agents <b>${d.agents}</b></span><span>Global <b>${d.global}</b></span>
+          <span>· compute <b>${d.cliMin}m</b></span><span>out <b>${fmtTok(d.outTok)}</b></span>
+          <span>KB <b>${d.kbLocal}</b> local / <b>${d.kbGlobal}</b> global</span>
+          <span>skills <b>${d.skillsN}</b></span><span>discovered agents <b>${d.agentsDisc}</b></span>
+        </div>
+        <span class="lbl">Strengths</span>
+        <ul class="pro">${d.pro.map(x=>`<li>${x}</li>`).join("")}</ul>
+        <span class="lbl">Weaknesses</span>
+        <ul class="con">${d.con.map(x=>`<li>${x}</li>`).join("")}</ul>
+      </div>
+    </details>`;
+  }).join("");
+}
+
+function deltaClass(v, lowerIsBetter=false){
+  if(Math.abs(v)<0.005) return "delta-flat";
+  const good = lowerIsBetter ? v<0 : v>0;
+  return good ? "delta-up" : "delta-down";
+}
+function signed(v, digits=2){
+  return (v>0?"+":"")+v.toFixed(digits);
+}
+function renderDelta(){
+  const legacyById = new Map(LEGACY_DATA.map(d=>[d.id,d]));
+  const returning = DATA.filter(d=>legacyById.has(d.id)).sort((a,b)=>b.composite-a.composite);
+  document.getElementById("deltaBody").innerHTML = returning.map(d=>{
+    const old=legacyById.get(d.id);
+    const scoreDelta=d.composite-old.composite;
+    const computePct=(d.cliMin/old.cliMin-1)*100;
+    return '<tr>'+
+      '<td style="text-align:left"><b>'+d.name+'</b></td>'+
+      '<td>'+old.composite.toFixed(2)+'</td><td>'+d.composite.toFixed(2)+'</td>'+
+      '<td class="'+deltaClass(scoreDelta)+'">'+signed(scoreDelta)+'</td>'+
+      '<td>'+old.cliMin.toFixed(1)+'m</td><td>'+d.cliMin.toFixed(1)+'m</td>'+
+      '<td class="'+deltaClass(computePct,true)+'">'+signed(computePct,0)+'%</td>'+
+      '<td>'+fmtTok(old.outTok)+'</td><td>'+fmtTok(d.outTok)+'</td>'+
+    '</tr>';
+  }).join("");
+}
+function renderProvenance(){
+  const arr=[...DATA].sort((a,b)=>b.composite-a.composite);
+  document.getElementById("provenanceBody").innerHTML = arr.map(d=>
+    '<tr><td style="text-align:left"><b>'+d.name+'</b></td>'+
+    '<td style="text-align:left"><a class="tasklink" target="_blank" rel="noopener" href="http://localhost:3000/tasks/'+d.taskId+'">'+d.taskId.slice(0,8)+'...</a></td>'+
+    '<td>'+d.done+'</td><td>'+d.skipped+'</td><td>'+d.invocations+(d.retries?' ('+d.retries+' retry)':'')+'</td>'+
+    '<td>'+d.wallMin.toFixed(1)+'</td><td>'+d.idleMin.toFixed(1)+'</td></tr>'
+  ).join("");
+}
+function renderVerdicts(){
+  const overall=[...DATA].sort((a,b)=>b.composite-a.composite)[0];
+  const bestValue=[...DATA].sort((a,b)=>b.value-a.value)[0];
+  document.getElementById("bestOverall").textContent=overall.name;
+  document.getElementById("bestOverallWhy").textContent=
+    overall.composite.toFixed(2)+" composite; strongest balance across local artifacts and global routing.";
+  document.getElementById("bestValue").textContent=bestValue.name;
+  document.getElementById("bestValueWhy").textContent=
+    bestValue.value.toFixed(3)+" composite per CLI minute; "+bestValue.cliMin.toFixed(1)+" minutes for "+bestValue.composite.toFixed(2)+" quality.";
+}
+
+// init
+renderHead(); renderBody(); renderScatter(); renderCards(); renderDelta(); renderProvenance(); renderVerdicts();
+document.querySelector('button.sb[data-k="composite"]').classList.add("on");
+</script>
+</body>
+</html>
