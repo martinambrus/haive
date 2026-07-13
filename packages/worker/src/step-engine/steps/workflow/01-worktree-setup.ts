@@ -313,15 +313,23 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     // EACCES and it falls back to editing the repo-root copy, so the review passes on an
     // edited file while the committed branch stays unchanged. Match the worktree to the
     // repo (which is already node-owned) so the sandbox can write it. Fail loud rather
-    // than reproduce that silent split-brain. Unconditional (also fixes a worktree a
-    // pre-fix run left root-owned) and idempotent.
-    try {
-      await exec('chown', ['-R', `${SANDBOX_UID}:${SANDBOX_GID}`, worktreePath]);
-    } catch (err) {
-      throw new Error(
-        `failed to chown worktree ${worktreePath} to ${SANDBOX_UID}:${SANDBOX_GID} — the ` +
-          `sandbox agent (node) would be unable to write it: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    // than reproduce that silent split-brain. Idempotent (also fixes a worktree a
+    // pre-fix run left root-owned).
+    //
+    // Root-only: the root-owned-worktree problem exists only when the worker runs as
+    // root (production). A non-root worker (dev, or the CI smokes running node directly
+    // on a non-root runner) created the worktree as itself — the same user the work then
+    // runs as — so the chown is unnecessary, and chowning to another uid needs a
+    // privilege it lacks (EPERM). Skip it there instead of hard-failing the step.
+    if (process.getuid?.() === 0) {
+      try {
+        await exec('chown', ['-R', `${SANDBOX_UID}:${SANDBOX_GID}`, worktreePath]);
+      } catch (err) {
+        throw new Error(
+          `failed to chown worktree ${worktreePath} to ${SANDBOX_UID}:${SANDBOX_GID} — the ` +
+            `sandbox agent (node) would be unable to write it: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
 
     const sandboxWorktree = sandboxWorktreePath(ctx.sandboxWorkdir, branchName);
