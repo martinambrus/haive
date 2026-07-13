@@ -22,7 +22,8 @@ import { killCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
 import type { DagCoderContext, StepContext, StepDefinition } from './step-definition.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
-import { worktreeDirName, worktreeDirPaths } from '../repo/worktree-paths.js';
+import { worktreeDirName, worktreeDirPaths, WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
+import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type {
   AdvanceStepParams,
   AdvanceStepResult,
@@ -195,8 +196,17 @@ function coderContext(issue: DagIssueRow): DagCoderContext {
     specSections: (issue.specSections ?? []) as string[],
     acceptanceCriteria: (issue.acceptanceCriteria ?? []) as string[],
     provides: issue.provides ?? '',
-    sandboxWorktreePath: issue.sandboxWorktreePath ?? '',
+    // The coder mounts ITS issue worktree alone at the workdir root (worktreeRel on the
+    // enqueue), so the workspace it sees is the mount root, not the old repo-root subdir.
+    sandboxWorktreePath: SANDBOX_WORKDIR,
   };
+}
+
+/** The issue worktree's path relative to the repo root, for the per-invocation sandbox
+ *  mount (CliExecJobPayload.worktreeRel) so a coder/reviewer/advisor is isolated to its
+ *  own issue worktree instead of the whole repo. */
+function issueWorktreeRel(issue: DagIssueRow): string | undefined {
+  return issue.branchName ? `${WORKTREE_SUBDIR}/${worktreeDirName(issue.branchName)}` : undefined;
 }
 
 function safeJsonParse(text: string): unknown {
@@ -656,6 +666,8 @@ async function spawnReviewAgent(
     taskId: ra.taskId,
     taskStepId: ra.current.id,
     userId: ra.params.userId,
+    // Isolate the reviewer / fix-coder / advisor to ITS issue worktree.
+    worktreeRel: issueWorktreeRel(issue),
     cliProviderId: plan.providerId,
     kind: 'cli',
     spec: plan.invocation.spec,
@@ -1440,6 +1452,8 @@ export async function resolveDagPhase(
           taskId: ctx.taskId,
           taskStepId: current.id,
           userId: params.userId,
+          // Isolate the coder to ITS issue worktree, not the whole repo.
+          worktreeRel: issueWorktreeRel(issue),
           cliProviderId: planDispatch.providerId,
           kind: 'cli',
           spec: planDispatch.invocation.spec,

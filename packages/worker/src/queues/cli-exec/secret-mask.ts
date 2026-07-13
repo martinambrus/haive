@@ -12,6 +12,7 @@ import {
   SECRET_MASK_LIMIT,
 } from '@haive/shared';
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
+import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import { WORKTREE_SUBDIR } from '../../repo/worktree-paths.js';
 import { HOST_REPO_ROOT, WORKER_REPO_STORAGE_ROOT } from './resolvers.js';
 import { log } from './_shared.js';
@@ -51,6 +52,7 @@ export class SecretMaskError extends Error {
 export async function resolveSecretMasks(
   db: Database,
   taskId: string,
+  repoMount?: DockerVolumeMount | null,
 ): Promise<SandboxExtraFile[]> {
   // Global kill-switch: lets ops disable masking everywhere without per-repo
   // edits or a redeploy. Default true.
@@ -89,21 +91,25 @@ export async function resolveSecretMasks(
   }
   if (!repo.secretMaskEnabled) return [];
 
-  // Worker-visible repo root (the same tree mounted at SANDBOX_WORKDIR), mirroring
-  // resolveTaskRepoMount: only a /host-fs path (local-path repo) is used verbatim.
-  // Every other repo — including one whose storage_path was never written — is mounted
-  // from the named-volume subpath under WORKER_REPO_STORAGE_ROOT, so the tree reaches
-  // the sandbox either way and must be scanned either way. Bailing on a null path here
-  // left that tree mounted and unmasked.
+  // Scan EXACTLY what is mounted, and mask at the mount target — so the masked set can
+  // never drift from the mount. A volume mount carries a subpath (the worktree this
+  // invocation is isolated to, or the repo root for a task with no worktree); a bind mount
+  // (read-only local-path repo) has no subpath and is the worker's /host-fs view of the
+  // repo root. With no mount supplied (unit tests / defensive) fall back to the repo-root
+  // tree the mount would bind. computeSecretMasks stats the root and fails closed if it is
+  // unreadable — the sandbox binds the real tree regardless of what the worker can see.
   const storagePath = repo.storagePath ?? repo.localPath;
-  const workerRoot = storagePath?.startsWith(HOST_REPO_ROOT + '/')
-    ? storagePath
-    : posix.join(WORKER_REPO_STORAGE_ROOT, `${task.userId}/${task.repositoryId}`);
+  const workerRoot = repoMount?.subpath
+    ? posix.join(WORKER_REPO_STORAGE_ROOT, repoMount.subpath)
+    : storagePath?.startsWith(HOST_REPO_ROOT + '/')
+      ? storagePath
+      : posix.join(WORKER_REPO_STORAGE_ROOT, `${task.userId}/${task.repositoryId}`);
 
-  return computeSecretMasks(workerRoot, {
-    allow: repo.secretMaskAllow,
-    denyExtend: repo.secretMaskDenyExtend,
-  });
+  return computeSecretMasks(
+    workerRoot,
+    { allow: repo.secretMaskAllow, denyExtend: repo.secretMaskDenyExtend },
+    repoMount?.target ?? SANDBOX_WORKDIR,
+  );
 }
 
 /**

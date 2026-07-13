@@ -240,6 +240,13 @@ export interface CliExecJobPayload {
   effortLevel?: string;
   kind: CliExecInvocationKind;
   spec: unknown;
+  /** The worktree this invocation is isolated to, as a path RELATIVE to the repo root
+   *  (e.g. `.haive/worktrees/<dirName>`), or `''` for the repo root itself (a merge that
+   *  runs at the parent checkout). The sandbox mounts ONLY this at the workdir root, so
+   *  the agent cannot reach the repo root or sibling worktrees. Unset = the task's feature
+   *  worktree (from tasks.worktreeBranch); set by DAG issue-coders (their issue worktree)
+   *  and the 12-cleanup merge fix-agent (a `--base` worktree, or `''` for the repo root). */
+  worktreeRel?: string;
   timeoutMs?: number;
   /** For kind='agent_mining': the task_step_agent_minings.id row to update with results. */
   agentMiningId?: string;

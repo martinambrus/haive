@@ -447,7 +447,8 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
 
     return {
       worktreePath: wt.worktreePath,
-      sandboxWorktreePath: wt.sandboxWorktreePath,
+      // Worktree is mounted alone at the workdir root — agent workspace is ctx.sandboxWorkdir.
+      sandboxWorktreePath: ctx.sandboxWorkdir,
       spec,
       implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
       debtBlock,

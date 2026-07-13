@@ -47,7 +47,11 @@ import {
 import { getDb } from '../../db.js';
 import { getTaskQueue } from '../task-queue.js';
 import { CliLoginRequiredError, log } from './_shared.js';
-import { sandboxWorktreePath } from '../../repo/worktree-paths.js';
+import {
+  sandboxWorktreePath,
+  worktreeDirName,
+  WORKTREE_SUBDIR,
+} from '../../repo/worktree-paths.js';
 import { resolveSandboxImageTag } from './images.js';
 
 export async function resolveProviderNameForPayload(
@@ -446,6 +450,78 @@ export async function resolveTaskRepoMount(
     source: REPO_VOLUME_NAME,
     target: REPO_MOUNT_TARGET,
     subpath: `${task.userId}/${task.repositoryId}`,
+  };
+}
+
+/** Repo mount for ONE cli-exec invocation, isolated to a single git worktree.
+ *
+ *  Unlike resolveTaskRepoMount (which mounts the whole repo root and is what the
+ *  human terminal uses), this mounts ONLY the invocation's target worktree at
+ *  REPO_MOUNT_TARGET, so the agent cannot see the repo-root checkout, sibling
+ *  worktrees, or the repo's real .git. `worktreeSubpath` names the worktree
+ *  (a DAG issue / merge integration / --base worktree); when unset it defaults to
+ *  the task's FEATURE worktree, computed directly from tasks.worktreeBranch — the
+ *  same value resolveTaskSandboxWorkdir already trusts, so it survives a Retry that
+ *  nulls the 01-worktree-setup step output (no dependency on that output).
+ *
+ *  Falls back to the repo root (hasWorktree=false) when the task has no worktree
+ *  (onboarding) and for read-only local-path repos (bound :ro end to end, so no
+ *  worktree work happens there). The caller sets `-w` to REPO_MOUNT_TARGET and drives
+ *  the gitfile mask off hasWorktree. */
+export async function resolveInvocationRepoMount(
+  db: Database,
+  taskId: string,
+  worktreeRel?: string,
+): Promise<{ repoMount: DockerVolumeMount | null; hasWorktree: boolean }> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { userId: true, repositoryId: true, worktreeBranch: true },
+  });
+  if (!task?.repositoryId) return { repoMount: null, hasWorktree: false };
+
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, task.repositoryId),
+    columns: { source: true, storagePath: true, localPath: true },
+  });
+  if (!repo) return { repoMount: null, hasWorktree: false };
+
+  const storagePath = repo.storagePath ?? repo.localPath;
+
+  // Local-path repos are bound read-only end to end (host fs is :ro in the worker),
+  // so no worktree work happens there — mount the repo root read-only, same as
+  // resolveTaskRepoMount. Nothing to isolate.
+  if (storagePath && storagePath.startsWith(HOST_REPO_ROOT + '/')) {
+    const relativePart = storagePath.slice(HOST_REPO_ROOT.length);
+    const hostPath = HOST_REPO_ROOT_REAL + relativePart;
+    return {
+      repoMount: { source: hostPath, target: REPO_MOUNT_TARGET, readOnly: true },
+      hasWorktree: false,
+    };
+  }
+
+  // Volume repo: mount ONLY the worktree subpath at the workdir root. Override wins
+  // (DAG sibling / merge integration); otherwise the feature worktree from the branch;
+  // otherwise the bare repo-root subpath (a task with no worktree — onboarding).
+  const base = `${task.userId}/${task.repositoryId}`;
+  // worktreeRel is repo-root-relative: '' means the repo root, a worktree rel means that
+  // worktree. Unset falls back to the feature worktree derived from the branch.
+  const subpath =
+    worktreeRel != null
+      ? worktreeRel
+        ? `${base}/${worktreeRel}`
+        : base
+      : task.worktreeBranch
+        ? `${base}/${WORKTREE_SUBDIR}/${worktreeDirName(task.worktreeBranch)}`
+        : base;
+  // A linked worktree lives under WORKTREE_SUBDIR and its `.git` is a gitfile (mask it);
+  // the repo root — onboarding, or a 12-cleanup merge that runs at the parent checkout —
+  // has a `.git` DIRECTORY and must NOT be masked. Key the signal on the mounted path so a
+  // repo-root override (worktreeSubpath = "<userId>/<repoId>") is correctly hasWorktree=false.
+  const hasWorktree = subpath.includes(`${WORKTREE_SUBDIR}/`);
+
+  return {
+    repoMount: { source: REPO_VOLUME_NAME, target: REPO_MOUNT_TARGET, subpath },
+    hasWorktree,
   };
 }
 

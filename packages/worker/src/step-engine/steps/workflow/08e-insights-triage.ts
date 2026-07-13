@@ -118,7 +118,8 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
       '';
     return {
       worktreePath: wt?.worktreePath ?? ctx.workspacePath,
-      sandboxWorktreePath: wt?.sandboxWorktreePath ?? ctx.workspacePath,
+      // Worktree is mounted alone at the workdir root — agent workspace is ctx.sandboxWorkdir.
+      sandboxWorktreePath: ctx.sandboxWorkdir,
       spec,
       insights: await collectInsights(ctx),
     };

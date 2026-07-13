@@ -1,3 +1,5 @@
+import { stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -41,9 +43,9 @@ import {
   loadProviderRuntimeConfig,
   resolveAuthMounts,
   resolveMcpExtraFiles,
-  resolveTaskRepoMount,
-  resolveTaskSandboxWorkdir,
+  resolveInvocationRepoMount,
   tryJsonParse,
+  WORKER_REPO_STORAGE_ROOT,
 } from './resolvers.js';
 import { executeSubAgentNative, executeSubAgentSequential } from './sub-agent.js';
 import { resolveSecretMasks } from './secret-mask.js';
@@ -178,23 +180,65 @@ async function resolveInvocationTimeoutMs(
   return Math.max(requested ?? 0, floor);
 }
 
+/** A read-only bind of the task's OWN uploads dir into the sandbox, at the path the
+ *  attachment prompt points to (`<SANDBOX_WORKDIR>/.haive/task-uploads/<taskId>`). Uploads
+ *  live at the repo root under `.haive/` (git-excluded), so the worktree-only mount hides
+ *  them — bind just this task's dir back in (never sibling tasks' uploads). Volume-mounted
+ *  repos only: a bind (local) repo keeps its repo-root mount so uploads are already visible,
+ *  and a repo-less task has none. Returns null when the task has no attachments (matching
+ *  augmentPromptWithAttachments' gate) or the dir isn't present (skip rather than fail the
+ *  docker mount). */
+async function resolveTaskUploadsMount(
+  db: Database,
+  taskId: string,
+  repoMount: DockerVolumeMount | null,
+): Promise<DockerVolumeMount | null> {
+  if (!repoMount?.subpath) return null;
+  const rows = await db.query.taskAttachments.findMany({
+    where: eq(schema.taskAttachments.taskId, taskId),
+    columns: { id: true },
+    limit: 1,
+  });
+  if (rows.length === 0) return null;
+  const repoBase = repoMount.subpath.split('/').slice(0, 2).join('/');
+  const uploadsSubpath = `${repoBase}/.haive/task-uploads/${taskId}`;
+  const present = await stat(join(WORKER_REPO_STORAGE_ROOT, uploadsSubpath))
+    .then((s) => s.isDirectory())
+    .catch(() => false);
+  if (!present) return null;
+  return {
+    source: repoMount.source,
+    target: `${SANDBOX_WORKDIR}/.haive/task-uploads/${taskId}`,
+    subpath: uploadsSubpath,
+    readOnly: true,
+  };
+}
+
 export async function executeByKind(
   db: Database,
   payload: CliExecJobPayload,
   deps: CliExecDeps,
   secrets: Record<string, string>,
 ): Promise<ExecutionOutcome> {
-  const repoMount = await resolveTaskRepoMount(db, payload.taskId);
+  // Isolate this invocation to ONE git worktree: mount it ALONE at the workdir root
+  // (payload.worktreeSubpath for a DAG/merge sibling, else the task's feature worktree)
+  // so the agent cannot reach the repo-root checkout or any sibling worktree. The
+  // worktree IS the mount root, so the container workdir is SANDBOX_WORKDIR.
+  const { repoMount, hasWorktree } = await resolveInvocationRepoMount(
+    db,
+    payload.taskId,
+    payload.worktreeRel,
+  );
   await ensureRepoMountWritable(repoMount);
-  const sandboxWorkdir = await resolveTaskSandboxWorkdir(db, payload.taskId);
+  const sandboxWorkdir = SANDBOX_WORKDIR;
   // Empty-file masks hiding deny-listed secret files from the agent (Tier 1,
   // untracked-only). Applied to every cli-exec kind; the app runtime mounts the
   // same repo volume WITHOUT these masks, so the running app still sees them.
   // The worktree gitfile mask rides the same mechanism but is an integrity control,
   // not a secrecy one — it is never gated by the secret-mask kill-switch.
   const maskFiles = [
-    ...(await resolveSecretMasks(db, payload.taskId)),
-    ...worktreeGitfileMask(sandboxWorkdir),
+    ...(await resolveSecretMasks(db, payload.taskId, repoMount)),
+    ...worktreeGitfileMask(hasWorktree),
   ];
   switch (payload.kind) {
     case 'cli':
@@ -210,6 +254,10 @@ export async function executeByKind(
       if (providerRow && cliAdapterRegistry.has(providerRow.name)) {
         authMounts = await resolveAuthMounts(db, providerRow, payload.taskId);
       }
+      // The task's own uploads dir (read-only) so the agent can read attachments the
+      // prompt references — the worktree-only mount hides the repo-root .haive/ otherwise.
+      const uploadsMount = await resolveTaskUploadsMount(db, payload.taskId, repoMount);
+      if (uploadsMount) authMounts.push(uploadsMount);
       const mcp = providerRow
         ? await resolveMcpExtraFiles(
             db,

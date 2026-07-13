@@ -200,7 +200,10 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
 
     return {
       worktreePath: wt.worktreePath,
-      sandboxWorktreePath: wt.sandboxWorktreePath,
+      // Per-invocation isolation mounts the worktree alone at the workdir root, so the
+      // agent's workspace is ctx.sandboxWorkdir. worktreePath (host) stays for host-side
+      // file listing below.
+      sandboxWorktreePath: ctx.sandboxWorkdir,
       spec,
       implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
     };

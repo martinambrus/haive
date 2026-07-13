@@ -62,6 +62,26 @@ describe('resolveSecretMasks', () => {
     expect(masks).toEqual([{ containerPath: '/haive/workdir/.env', content: '' }]);
   });
 
+  it('scans the worktree subpath (not the repo root) when the mount is a worktree', async () => {
+    // Per-invocation isolation mounts the worktree ALONE at the workdir root; the mask must
+    // scan THAT tree's own untracked secrets and target the mount root.
+    const wtDir = path.join(storageRoot, USER_ID, REPO_ID, '.haive', 'worktrees', 'feature-x');
+    await mkdir(wtDir, { recursive: true });
+    await writeFile(path.join(wtDir, '.env'), 'SECRET=1\n');
+
+    const masks = await resolveSecretMasks(
+      fakeDb({ userId: USER_ID, repositoryId: REPO_ID }, enabledRepo),
+      TASK_ID,
+      {
+        source: 'haive_repos',
+        target: '/haive/workdir',
+        subpath: `${USER_ID}/${REPO_ID}/.haive/worktrees/feature-x`,
+      },
+    );
+
+    expect(masks).toEqual([{ containerPath: '/haive/workdir/.env', content: '' }]);
+  });
+
   it('throws rather than reporting a clean scan when the repo tree is not where we look', async () => {
     // A wrong REPO_STORAGE_ROOT, an unmounted volume, or a repo whose files were never
     // written all look like "this repo has no secrets" to the scan, while the sandbox

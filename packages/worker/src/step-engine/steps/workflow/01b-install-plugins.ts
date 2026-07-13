@@ -6,13 +6,12 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { wantsLocalPhpLsp } from '../onboarding/07-generate-files.js';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { LspLanguage, PluginInstallCommand } from '../../../cli-adapters/types.js';
-import { runInSandbox } from '../../../sandbox/sandbox-runner.js';
+import { runInSandbox, SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import type { DockerVolumeMount } from '../../../sandbox/docker-runner.js';
 import {
   resolveAuthMounts,
   resolveSandboxImageTag,
-  resolveTaskRepoMount,
-  resolveTaskSandboxWorkdir,
+  resolveInvocationRepoMount,
 } from '../../../queues/cli-exec-queue.js';
 import { resolveSecretMasks } from '../../../queues/cli-exec/secret-mask.js';
 import { worktreeGitfileMask } from '../../../queues/cli-exec/gitfile-mask.js';
@@ -141,7 +140,7 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
       : [];
     const lspLanguages = rawLsp.map(toLspLanguage).filter((v): v is LspLanguage => v !== null);
 
-    const sandboxWorkdir = await resolveTaskSandboxWorkdir(ctx.db, ctx.taskId);
+    const sandboxWorkdir = SANDBOX_WORKDIR;
     const drupalRelBase = DRUPAL_LSP_BASE_BY_PROVIDER[provider.name] ?? null;
     const drupalLspPath =
       wantsLocalPhpLsp(lspLanguages) && drupalRelBase ? `${sandboxWorkdir}/${drupalRelBase}` : null;
@@ -208,8 +207,9 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
       throw new Error(`CLI provider ${ctx.cliProviderId} not found`);
     }
     const sandboxImage = await resolveSandboxImageTag(ctx.db, ctx.taskId, provider);
-    const sandboxWorkdir = await resolveTaskSandboxWorkdir(ctx.db, ctx.taskId);
-    const repoMount = await resolveTaskRepoMount(ctx.db, ctx.taskId);
+    // Per-invocation isolation: mount only the feature worktree at the workdir root.
+    const { repoMount, hasWorktree } = await resolveInvocationRepoMount(ctx.db, ctx.taskId);
+    const sandboxWorkdir = SANDBOX_WORKDIR;
     const authMounts = await resolveAuthMounts(ctx.db, provider, ctx.taskId);
     const mounts: DockerVolumeMount[] = [...authMounts];
     if (repoMount) mounts.push(repoMount);
@@ -219,8 +219,8 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
     // used to receive neither mask. Same set exec-core applies: deny-listed secret
     // files, plus the worktree gitfile the agent contract says must be unusable.
     const maskFiles = [
-      ...(await resolveSecretMasks(ctx.db, ctx.taskId)),
-      ...worktreeGitfileMask(sandboxWorkdir),
+      ...(await resolveSecretMasks(ctx.db, ctx.taskId, repoMount)),
+      ...worktreeGitfileMask(hasWorktree),
     ];
 
     const executed: InstallPluginsApply['executed'] = [];

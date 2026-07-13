@@ -234,8 +234,10 @@ async function resolveWorkspace(ctx: StepContext): Promise<{ workspace: string; 
   const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
   const out = prev?.output as { worktreePath?: string; sandboxWorktreePath?: string } | null;
   return {
+    // workspace = host path (host-side test scanning); sandbox = the agent's container
+    // workspace, now the workdir root since the worktree is mounted there alone.
     workspace: out?.worktreePath ?? ctx.workspacePath,
-    sandbox: out?.sandboxWorktreePath ?? ctx.workspacePath,
+    sandbox: ctx.sandboxWorkdir,
   };
 }
 

@@ -248,7 +248,10 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     return {
       specSummary,
       spec,
-      sandboxWorkspacePath: worktreeOutput.sandboxWorktreePath,
+      // The worktree is mounted alone at the sandbox workdir root (per-invocation
+      // isolation), so the agent's workspace IS ctx.sandboxWorkdir — not the old
+      // repo-root-mount subdir. The guard above still confirms 01 set the worktree up.
+      sandboxWorkspacePath: ctx.sandboxWorkdir,
       gateFeedback: gateOutput.feedback ?? '',
       fixContext: fix?.diagnosis ?? null,
       fixIsHuman: fix?.humanSourced ?? false,

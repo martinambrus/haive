@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { schema, type Database, type MergeResolveState } from '@haive/database';
@@ -15,6 +16,7 @@ import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from './steps/_fenced-json.js';
 import { resolvePreferredCli } from './step-runner.js';
 import { worktreeDirName, worktreeDirPaths } from '../repo/worktree-paths.js';
+import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type { MergeResolveSpec, StepContext, StepDefinition } from './step-definition.js';
 import type { AdvanceStepParams, AdvanceStepResult, TaskStepRow } from './step-runner.js';
 
@@ -440,6 +442,10 @@ async function dispatchFixAgent(
     taskId: params.taskId,
     taskStepId: current.id,
     userId: params.userId,
+    // Isolate the conflict fix-agent to the merge working tree: '' (repo root, same-branch)
+    // or the transient --base worktree (cross-branch), recovered from the stored container
+    // merge dir relative to the workdir root.
+    worktreeRel: path.relative(SANDBOX_WORKDIR, state.sandboxMergeDir),
     cliProviderId: plan.providerId,
     kind: 'cli',
     spec: plan.invocation.spec,
