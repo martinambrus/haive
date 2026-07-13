@@ -1,6 +1,7 @@
 import {
   clampPct,
   errMsg,
+  httpErrorOutcome,
   num,
   rec,
   type UsageFetcher,
@@ -54,7 +55,7 @@ export const fetchZaiUsage: UsageFetcher = async (token, ctx): Promise<UsageFetc
       headers: { Authorization: token, Accept: 'application/json' },
     });
     if (res.status === 429) return { ok: false, rateLimited: true, error: 'http 429' };
-    if (!res.ok) return { ok: false, rateLimited: false, error: `http ${res.status}` };
+    if (!res.ok) return httpErrorOutcome(res.status);
     const windows = parseZaiUsage(await res.json());
     if (!windows.fiveHour)
       return { ok: false, rateLimited: false, error: 'unexpected response shape' };

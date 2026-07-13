@@ -56,6 +56,26 @@ const DEFAULT_MIN_POLL_INTERVAL_MS = 60 * 1000 + POLL_LEEWAY_MS;
  *  poll is fine. */
 const lastPollAt = new Map<string, number>();
 
+/** Providers whose stored usage refresh token the token endpoint has rejected with
+ *  invalid_grant — revoked, or (common when one account is registered as several
+ *  providers sharing the OAuth client) superseded when a sibling refreshed. Keyed by
+ *  provider id -> the exact dead refresh token, so the gate self-clears the instant a
+ *  reconnect rotates the stored token. Without it every tick re-fires a doomed refresh
+ *  (400) then a fetch (401). In-process (singleton worker); cleared on restart, where
+ *  one re-discovery is fine. */
+const deadUsageRefreshToken = new Map<string, string>();
+
+/** Providers whose current usage token the vendor's usage endpoint itself rejected
+ *  (401/403) — a revoked API key, an expired non-refreshable token, or an
+ *  insufficient-scope grant. This is the no-refresh sibling of deadUsageRefreshToken:
+ *  it catches the providers that have no OAuth refresh step at all (codex/zai/gemini),
+ *  plus any token a refresh renewed that the usage endpoint still denies. Keyed by
+ *  provider id -> the exact denied token, so a reconnect/edit that rotates the token
+ *  (or a healthy refresh minting a new access token) lifts the gate on its own. Stops
+ *  the poller re-hitting a guaranteed deny every tick once needs_reconnect is recorded.
+ *  In-process; cleared on restart, where one re-probe is fine. */
+const deadUsageFetchToken = new Map<string, string>();
+
 let queueSingleton: Queue | null = null;
 function getUsagePollQueue(): Queue {
   if (!queueSingleton) {
@@ -120,14 +140,42 @@ async function resolveOauthRefreshToken(
     return null;
   }
   if (!stored.accessToken) return null;
+
+  // Known-dead refresh token: skip both the guaranteed-400 refresh and the doomed 401
+  // fetch a stale access token would draw. Returns null so pollProvider treats the
+  // provider as not pollable and moves on — zero vendor calls. A reconnect writes a new
+  // refresh token, which no longer matches this entry, so the gate lifts on its own.
+  if (stored.refreshToken && deadUsageRefreshToken.get(provider.id) === stored.refreshToken) {
+    return null;
+  }
+
   if (stored.refreshToken && claudeTokenNeedsRefresh(stored.expiresAt)) {
     try {
       const fresh = await refreshClaudeToken(stored.refreshToken);
       await writeProviderSecret(db, provider.id, secretName, JSON.stringify(fresh));
+      deadUsageRefreshToken.delete(provider.id); // recovered (or was never dead)
       return { token: fresh.accessToken };
     } catch (err) {
-      // Refresh failed (revoked / rotated elsewhere / host change). Try the stale token
-      // anyway; the fetch will 401 -> error row, surfacing "reconnect" rather than hiding.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('invalid_grant')) {
+        // Permanently rejected (revoked, or superseded by a sibling provider sharing
+        // the account). Retrying only re-fires the 400/401 pair each tick. Mark it dead
+        // to stop the churn, and record ONE needs_reconnect snapshot so the UI can
+        // prompt a re-auth instead of the chip silently vanishing.
+        log.warn(
+          { providerId: provider.id },
+          'usage OAuth refresh rejected (invalid_grant); marking needs_reconnect, polling paused until re-auth',
+        );
+        deadUsageRefreshToken.set(provider.id, stored.refreshToken);
+        await upsertSnapshot(db, provider, {
+          ok: false,
+          error: 'Usage tracking token expired — reconnect this provider to restore its meters.',
+          reconnect: true,
+        }).catch(() => {});
+        return null;
+      }
+      // Transient (network / 5xx): try the stale token anyway; the fetch surfaces the
+      // state without marking the token permanently dead.
       log.warn(
         { providerId: provider.id, err },
         'claude usage token refresh failed; using stale token',
@@ -174,7 +222,9 @@ async function resolveToken(
 async function upsertSnapshot(
   db: Database,
   provider: ProviderRow,
-  outcome: Extract<UsageFetchOutcome, { ok: true }> | { ok: false; error: string },
+  outcome:
+    | Extract<UsageFetchOutcome, { ok: true }>
+    | { ok: false; error: string; reconnect?: boolean },
 ): Promise<void> {
   const now = new Date();
   const iso = (s: string | null | undefined): Date | null => (s ? new Date(s) : null);
@@ -202,23 +252,26 @@ async function upsertSnapshot(
     return;
   }
   // Non-429 error: record status + message, but PRESERVE any prior window values
-  // (a transient failure shouldn't drop a good reading; the API treats
-  // status='error' as hidden until the next ok tick).
+  // (a transient failure shouldn't drop a good reading; the API treats status='error'
+  // as hidden until the next ok tick). 'needs_reconnect' is the actionable subclass —
+  // the token is dead and only a re-auth fixes it, so the chip prompts a reconnect
+  // rather than hiding.
   const msg = outcome.error.slice(0, 240);
+  const status = outcome.reconnect ? 'needs_reconnect' : 'error';
   await db
     .insert(schema.usageWindowSnapshots)
     .values({
       providerId: provider.id,
       userId: provider.userId,
       providerName: provider.name,
-      status: 'error',
+      status,
       errorMessage: msg,
       fetchedAt: now,
       updatedAt: now,
     })
     .onConflictDoUpdate({
       target: schema.usageWindowSnapshots.providerId,
-      set: { status: 'error', errorMessage: msg, fetchedAt: now, updatedAt: now },
+      set: { status, errorMessage: msg, fetchedAt: now, updatedAt: now },
     });
 }
 
@@ -236,6 +289,13 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
 
   const creds = await resolveToken(db, provider, cfg);
   if (!creds) return; // not logged in / no token -> skip silently (no error row)
+
+  // Already-denied token: the usage endpoint rejected this exact token (401/403) on a
+  // prior tick and it won't change until a re-auth. Skip the call entirely — the
+  // needs_reconnect status is already recorded. Keyed on the token, so a reconnect that
+  // rotates it lifts the gate on the next tick.
+  if (deadUsageFetchToken.get(provider.id) === creds.token) return;
+
   lastPollAt.set(provider.id, Date.now()); // record the actual vendor-call time
 
   const ctx: UsageFetchContext = {
@@ -256,7 +316,27 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
     );
     return;
   }
+
+  if (!outcome.ok && outcome.authExpired) {
+    // The token is rejected (401/403) and only a re-auth fixes it. Gate this token so
+    // we stop re-polling a guaranteed deny, clear any 429 backoff, and record the
+    // actionable needs_reconnect status once so the UI can prompt a reconnect.
+    deadUsageFetchToken.set(provider.id, creds.token);
+    backoff.delete(provider.id);
+    log.warn(
+      { providerId: provider.id, provider: provider.name, error: outcome.error },
+      'usage endpoint rejected the token (401/403); marking needs_reconnect, polling paused until re-auth',
+    );
+    await upsertSnapshot(db, provider, {
+      ok: false,
+      error: 'Usage tracking token expired — reconnect this provider to restore its meters.',
+      reconnect: true,
+    });
+    return;
+  }
+
   backoff.delete(provider.id); // any non-429 response clears the 429 backoff
+  if (outcome.ok) deadUsageFetchToken.delete(provider.id); // recovered / token rotated
   await upsertSnapshot(db, provider, outcome);
 }
 

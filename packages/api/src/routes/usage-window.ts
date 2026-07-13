@@ -30,7 +30,12 @@ function toSnapshot(row: SnapshotRow, now: number): UsageWindowSnapshot {
     daily: toWindow(row.dailyPct, row.dailyResetAt),
     fetchedAt: row.fetchedAt.toISOString(),
     stale: now - row.fetchedAt.getTime() > STALE_AFTER_MS,
-    status: row.status === 'error' ? 'error' : 'ok',
+    status:
+      row.status === 'error'
+        ? 'error'
+        : row.status === 'needs_reconnect'
+          ? 'needs_reconnect'
+          : 'ok',
   };
 }
 

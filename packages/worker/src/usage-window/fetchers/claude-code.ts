@@ -1,6 +1,7 @@
 import {
   clampPct,
   errMsg,
+  httpErrorOutcome,
   isoOrNull,
   num,
   rec,
@@ -49,7 +50,7 @@ export const fetchClaudeUsage: UsageFetcher = async (token, ctx): Promise<UsageF
       },
     });
     if (res.status === 429) return { ok: false, rateLimited: true, error: 'http 429' };
-    if (!res.ok) return { ok: false, rateLimited: false, error: `http ${res.status}` };
+    if (!res.ok) return httpErrorOutcome(res.status);
     const windows = parseClaudeUsage(await res.json());
     if (!windows.fiveHour && !windows.sevenDay) {
       return { ok: false, rateLimited: false, error: 'unexpected response shape' };

@@ -11,11 +11,27 @@ export interface UsageWindows {
   daily?: UsageWindow;
 }
 
-/** Discriminated fetch result so the poller can distinguish a 429 (back off)
- *  from a hard failure (mark error), and never throws into the poll loop. */
+/** Discriminated fetch result so the poller can distinguish a 429 (transient, back
+ *  off) from an auth denial (`authExpired`: the token is rejected and only a re-auth
+ *  fixes it, so stop re-polling) from other hard failures, and never throws into the
+ *  poll loop. */
 export type UsageFetchOutcome =
   | { ok: true; windows: UsageWindows }
-  | { ok: false; rateLimited: boolean; error: string };
+  | { ok: false; rateLimited: boolean; authExpired?: boolean; error: string };
+
+/** Error outcome for a non-ok HTTP status. 401/403 mean the credential is rejected —
+ *  a revoked/expired/insufficient-scope token that won't recover on its own — so flag
+ *  `authExpired` and let the poller stop hitting the same deny every tick. 429 is a
+ *  transient rate-limit and is handled by each fetcher BEFORE this, so it never lands
+ *  here. Shared by every fetcher so the auth-deny policy stays in one place. */
+export function httpErrorOutcome(status: number): Extract<UsageFetchOutcome, { ok: false }> {
+  return {
+    ok: false,
+    rateLimited: false,
+    authExpired: status === 401 || status === 403,
+    error: `http ${status}`,
+  };
+}
 
 export interface UsageFetchContext {
   providerName: CliProviderName;

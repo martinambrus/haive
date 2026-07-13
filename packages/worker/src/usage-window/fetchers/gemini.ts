@@ -1,6 +1,7 @@
 import {
   clampPct,
   errMsg,
+  httpErrorOutcome,
   isoOrNull,
   num,
   rec,
@@ -42,7 +43,7 @@ export const fetchGeminiUsage: UsageFetcher = async (token): Promise<UsageFetchO
       body: JSON.stringify({}),
     });
     if (res.status === 429) return { ok: false, rateLimited: true, error: 'http 429' };
-    if (!res.ok) return { ok: false, rateLimited: false, error: `http ${res.status}` };
+    if (!res.ok) return httpErrorOutcome(res.status);
     const windows = parseGeminiUsage(await res.json());
     if (!windows.daily)
       return { ok: false, rateLimited: false, error: 'unexpected response shape' };

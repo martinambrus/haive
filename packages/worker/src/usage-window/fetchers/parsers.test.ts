@@ -45,6 +45,28 @@ describe('parseCodexUsage', () => {
     expect(w.sevenDay?.usedPct).toBe(64);
   });
 
+  it('maps a lone window (Plus) to weekly when its reset is far out, not 5h', () => {
+    // Plus returns ONE window in the `primary` slot, but it is the WEEKLY limit
+    // (reset days out). Slot position would mislabel it "5h"; the horizon must win.
+    const now = Date.UTC(2026, 6, 13, 7, 0, 0);
+    const w = parseCodexUsage(
+      { primary: { used_percent: 5, resets_at: '2026-07-19T19:05:49Z' } },
+      now,
+    );
+    expect(w.sevenDay?.usedPct).toBe(5);
+    expect(w.fiveHour).toBeUndefined();
+  });
+
+  it('maps a lone window to 5h when it resets within a few hours', () => {
+    const now = Date.UTC(2026, 6, 13, 7, 0, 0);
+    const w = parseCodexUsage(
+      { primary: { used_percent: 20, resets_at: '2026-07-13T10:00:00Z' } },
+      now,
+    );
+    expect(w.fiveHour?.usedPct).toBe(20);
+    expect(w.sevenDay).toBeUndefined();
+  });
+
   it('returns empty on unknown shape', () => {
     expect(parseCodexUsage({ foo: 1 })).toEqual({});
   });
