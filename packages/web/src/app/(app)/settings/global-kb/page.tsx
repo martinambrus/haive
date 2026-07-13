@@ -489,19 +489,24 @@ export default function GlobalKbPage() {
   }
 
   async function remove(e: GlobalKbEntry) {
-    const msg = e.sourceTaskId
+    // Only a kb_author ENRICH entry (source='user' with its own task) should cascade
+    // a cancel — that task exists solely to produce this row, so deleting the row
+    // orphans it. A PROMOTED draft (source='promoted') is one incidental artifact of a
+    // full onboarding/workflow task; deleting it must NEVER cancel that task. Manual
+    // entries carry no sourceTaskId, so the second clause also excludes them.
+    const cancelsTask = e.source === 'user' && !!e.sourceTaskId;
+    const msg = cancelsTask
       ? `Delete "${e.title}" permanently and cancel its enrichment task? This cannot be undone.`
       : `Delete "${e.title}" permanently? This cannot be undone.`;
     if (!window.confirm(msg)) return;
     setBusy(true);
     try {
       await api.delete(`/global-kb/entries/${e.id}`);
-      // Deleting an enrich article would otherwise leave its kb_author task
-      // dangling (e.g. failed but never cancelled). Cancel it too — best-effort,
-      // since the article is already gone: a cancel hiccup must not block the
-      // list refresh. The action route no-ops for completed/cancelled tasks and
-      // flips a failed/running one to cancelled (with full teardown).
-      if (e.sourceTaskId) {
+      // Cancel the now-orphaned enrich task too — best-effort, since the article is
+      // already gone: a cancel hiccup must not block the list refresh. The action
+      // route no-ops for completed/cancelled tasks and flips a failed/running one to
+      // cancelled (with full teardown).
+      if (cancelsTask) {
         try {
           await api.post(`/tasks/${e.sourceTaskId}/action`, { action: 'cancel' });
         } catch {
