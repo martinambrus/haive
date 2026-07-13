@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useId, useState } from 'react';
+import { repairSequenceSemicolons } from './mermaid-repair';
 
 /** Module-level singleton so mermaid (a ~1.5MB chunk) loads once, lazily, and
  *  only on pages that actually render a diagram. The dynamic import keeps it
@@ -27,16 +28,33 @@ export function MermaidBlock({ source }: { source: string }) {
     let cancelled = false;
     setState({ kind: 'pending' });
     void (async () => {
+      let mermaid: Awaited<ReturnType<typeof loadMermaid>>;
       try {
-        const mermaid = await loadMermaid();
-        // Pre-validate so invalid syntax becomes our plain-code fallback
-        // instead of mermaid's error SVG injected into the document.
-        await mermaid.parse(source);
-        const { svg } = await mermaid.render(renderId, source);
-        if (!cancelled) setState({ kind: 'done', svg });
+        mermaid = await loadMermaid();
       } catch {
         if (!cancelled) setState({ kind: 'error' });
+        return;
       }
+      // Pre-validate with parse so invalid syntax becomes our plain-code
+      // fallback instead of mermaid's error SVG injected into the document.
+      const attempt = async (src: string, id: string): Promise<string | null> => {
+        try {
+          await mermaid.parse(src);
+          return (await mermaid.render(id, src)).svg;
+        } catch {
+          return null;
+        }
+      };
+      let svg = await attempt(source, renderId);
+      if (svg === null) {
+        // One targeted repair pass for the common LLM sequenceDiagram mistake
+        // (a bare `;` read as a statement separator). Retry-only, so a diagram
+        // that already renders is never altered. See mermaid-repair.
+        const repaired = repairSequenceSemicolons(source);
+        if (repaired !== null) svg = await attempt(repaired, `${renderId}-repaired`);
+      }
+      if (cancelled) return;
+      setState(svg !== null ? { kind: 'done', svg } : { kind: 'error' });
     })();
     return () => {
       cancelled = true;
