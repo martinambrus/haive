@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, ne } from 'drizzle-orm';
+import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   globalKbEntries,
@@ -9,7 +9,11 @@ import {
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { parseJsonLoose } from '../_fenced-json.js';
-import { confirmSupersedeByEmbedding } from '../_global-kb-similarity.js';
+import {
+  confirmSupersedeByEmbedding,
+  SUPERSEDE_CANDIDATE_LIMIT,
+} from '../_global-kb-similarity.js';
+import { globalKbTopicKey } from '../_global-kb-promote.js';
 import { syncGlobalKbEntry } from '../../../queues/global-kb-sync-queue.js';
 
 // Repo-anchored global-KB authoring (plan serialized-crunching-aurora). The task
@@ -307,64 +311,102 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
     // targetId we actually showed it (else treat it as a new entry).
     const existingIds = new Set(detected.existing.map((e) => e.id));
     const intent = resolveWriteTarget(parsed, skeletonId, existingIds);
+    const settings = await resolveGlobalKbSettings();
 
-    // Confirm a proposed update with real embeddings BEFORE letting it supersede:
-    // the model picks the target from titles/excerpts and can mis-match unrelated
-    // articles. A confirmed update lands as a DRAFT that supersedes the target (the
-    // user reviews the before/after diff and activates it, which archives the old
-    // one); an unconfirmed proposal — or ollama being unavailable — is downgraded to
-    // a brand-new entry, so a wrong match can never silently overwrite a good article.
-    let confirmedUpdate = false;
-    if (intent.isUpdate) {
-      const settings = await resolveGlobalKbSettings();
-      const target = await withGlobalKb(ctx.db, async ({ db }) =>
-        db.query.globalKbEntries.findFirst({
-          where: eq(globalKbEntries.id, intent.targetId),
-          columns: { title: true, body: true, status: true },
-        }),
+    // Decide supersede-vs-new under one transaction + a topic-scoped advisory lock
+    // (mirrors promoteToGlobalKbDraft) so concurrent enriches for the same topic
+    // serialize instead of each writing a blind duplicate. The dedup candidate set is
+    // the model's proposed update target PLUS any entry that APPEARED SINCE this task's
+    // detect snapshot (created by a concurrent enrich) — so the second of two racing
+    // tasks sees the first's committed entry. Real embeddings (not the coarse lock key)
+    // decide identity: a confirmed same-article match (>=0.72) becomes a review-gated
+    // DRAFT superseding it (target left untouched until the user activates); anything
+    // else — or ollama unavailable — is a brand-new active, so a wrong match can never
+    // silently overwrite a good article. topicKey is the lock key ONLY, never stored on
+    // the entry, so enrich stays isolated from the promote path's topicKey dedup.
+    const lockTopic = globalKbTopicKey(category, facets) ?? `kbauthor:${category}`;
+    const { confirmedUpdate, namespace } = await withGlobalKb(ctx.db, async ({ db }) =>
+      db.transaction(async (tx) => {
+        const lockKey = `${detected.namespace}:${lockTopic}`;
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext('gkb_enrich'), hashtext(${lockKey}))`,
+        );
+        // Live entries newer than this task's detect snapshot (not already shown to the
+        // model); capped for the embed batch. These catch a concurrent enrich's result.
+        const appeared = await tx
+          .select({
+            id: globalKbEntries.id,
+            status: globalKbEntries.status,
+            title: globalKbEntries.title,
+            body: globalKbEntries.body,
+          })
+          .from(globalKbEntries)
+          .where(
+            and(
+              eq(globalKbEntries.namespace, detected.namespace),
+              inArray(globalKbEntries.status, ['active', 'draft']),
+              ne(globalKbEntries.id, skeletonId),
+            ),
+          )
+          .orderBy(desc(globalKbEntries.updatedAt))
+          .limit(SUPERSEDE_CANDIDATE_LIMIT);
+        const candidates = appeared.filter((c) => !existingIds.has(c.id));
+        // Keep the model's proposed target in the running even if it's an older entry
+        // outside the recent-window query above.
+        if (intent.isUpdate && !candidates.some((c) => c.id === intent.targetId)) {
+          const [tgt] = await tx
+            .select({
+              id: globalKbEntries.id,
+              status: globalKbEntries.status,
+              title: globalKbEntries.title,
+              body: globalKbEntries.body,
+            })
+            .from(globalKbEntries)
+            .where(eq(globalKbEntries.id, intent.targetId))
+            .limit(1);
+          if (tgt) candidates.push(tgt);
+        }
+        // Confirm identity with real embeddings BEFORE letting anything supersede: the
+        // coarse lock key groups a whole tech, so it can't decide the SAME article.
+        const matchId =
+          candidates.length > 0
+            ? await confirmSupersedeByEmbedding(
+                { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
+                `${title}\n\n${body}`,
+                candidates.map((c) => ({
+                  id: c.id,
+                  status: c.status,
+                  text: `${c.title}\n\n${c.body}`,
+                })),
+              )
+            : null;
+        const isUpdate = matchId != null;
+        // The SKELETON row carries the article either way: a confirmed match becomes a
+        // draft superseding it; otherwise it goes live immediately as a new entry.
+        const [row] = await tx
+          .update(globalKbEntries)
+          .set({
+            title,
+            category,
+            facets,
+            body,
+            status: isUpdate ? 'draft' : 'active',
+            supersedesEntryId: matchId,
+            embedStatus: 'pending',
+            updatedAt: new Date(),
+          })
+          .where(eq(globalKbEntries.id, skeletonId))
+          .returning({ namespace: globalKbEntries.namespace });
+        return { confirmedUpdate: isUpdate, namespace: row?.namespace ?? detected.namespace };
+      }),
+    );
+
+    if (intent.isUpdate && !confirmedUpdate) {
+      ctx.logger.info(
+        { skeletonId, proposedTargetId: intent.targetId },
+        'kb enrich: update target not similarity-confirmed → writing as a new entry',
       );
-      if (target) {
-        const match = await confirmSupersedeByEmbedding(
-          { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
-          `${title}\n\n${body}`,
-          [
-            {
-              id: intent.targetId,
-              status: target.status,
-              text: `${target.title}\n\n${target.body}`,
-            },
-          ],
-        );
-        confirmedUpdate = match === intent.targetId;
-      }
-      if (!confirmedUpdate) {
-        ctx.logger.info(
-          { skeletonId, proposedTargetId: intent.targetId },
-          'kb enrich: update target not similarity-confirmed → writing as a new entry',
-        );
-      }
     }
-
-    // Either way the SKELETON row carries the article. A confirmed update becomes a
-    // draft superseding the target (target left active + untouched until the user
-    // activates the draft); otherwise it goes live immediately as a new entry.
-    const namespace = await withGlobalKb(ctx.db, async ({ db }) => {
-      const [row] = await db
-        .update(globalKbEntries)
-        .set({
-          title,
-          category,
-          facets,
-          body,
-          status: confirmedUpdate ? 'draft' : 'active',
-          supersedesEntryId: confirmedUpdate ? intent.targetId : null,
-          embedStatus: 'pending',
-          updatedAt: new Date(),
-        })
-        .where(eq(globalKbEntries.id, skeletonId))
-        .returning({ namespace: globalKbEntries.namespace });
-      return row?.namespace ?? detected.namespace;
-    });
 
     // Auto-activate ONLY the new path: embed now so it's retrievable immediately.
     // A confirmed update is a draft (drafts hold no vectors) until the user reviews

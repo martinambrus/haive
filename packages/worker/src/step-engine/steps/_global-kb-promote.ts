@@ -168,82 +168,93 @@ export async function promoteToGlobalKbDraft(
       // activation, supersede the existing one. The existing entry — possibly a
       // curated active — is never mutated here. The per-task draft cleanup runs
       // first, so this matches OTHER tasks' or already-activated entries.
-      let supersedesEntryId: string | null = null;
-      if (promotion.topicKey) {
-        const candidates = await gdb
-          .select({
-            id: globalKbEntries.id,
-            status: globalKbEntries.status,
-            title: globalKbEntries.title,
-            body: globalKbEntries.body,
+      //
+      // The SELECT..INSERT runs in one transaction under a topic-scoped advisory lock
+      // so concurrent promotions of the SAME topic serialize: the second waits, then
+      // sees the first's committed draft and dedups/links instead of inserting a blind
+      // duplicate. Distinct topics never contend; the xact lock auto-releases on end.
+      return await gdb.transaction(async (tx) => {
+        let supersedesEntryId: string | null = null;
+        if (promotion.topicKey) {
+          const lockKey = `${settings.namespace}:${promotion.topicKey}`;
+          await tx.execute(
+            sql`SELECT pg_advisory_xact_lock(hashtext('gkb_promote'), hashtext(${lockKey}))`,
+          );
+          const candidates = await tx
+            .select({
+              id: globalKbEntries.id,
+              status: globalKbEntries.status,
+              title: globalKbEntries.title,
+              body: globalKbEntries.body,
+            })
+            .from(globalKbEntries)
+            .where(
+              and(
+                eq(globalKbEntries.namespace, settings.namespace),
+                eq(globalKbEntries.topicKey, promotion.topicKey),
+                // Don't reconcile against a superseded (archived) entry — it's on its
+                // way out; match only live drafts/actives for this topic.
+                ne(globalKbEntries.status, 'archived'),
+              ),
+            )
+            // Prefer the canonical active entry; else the newest.
+            .orderBy(
+              sql`case when ${globalKbEntries.status} = 'active' then 0 else 1 end`,
+              desc(globalKbEntries.createdAt),
+            )
+            .limit(SUPERSEDE_CANDIDATE_LIMIT);
+          // Exact duplicate of any same-key entry: nothing new to add, skip the insert.
+          const identical = candidates.find((c) => c.body.trim() === clean.body.trim());
+          if (identical) {
+            log.info(
+              { topicKey: promotion.topicKey, existingId: identical.id },
+              'global KB promotion skipped (identical content already present)',
+            );
+            return { id: identical.id, deduped: true, supersedesEntryId: null };
+          }
+          // Supersede an existing entry ONLY when embeddings confirm it is the SAME
+          // article — the coarse topicKey (category:tech) groups unrelated articles on
+          // one tech, so it can't decide identity. No confirmed match (or ollama
+          // unavailable) -> insert an INDEPENDENT new draft; never clobber a different
+          // article that merely shares the key.
+          if (candidates.length > 0) {
+            supersedesEntryId = await confirmSupersedeByEmbedding(
+              { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
+              `${clean.title}\n\n${clean.body}`,
+              candidates.map((c) => ({
+                id: c.id,
+                status: c.status,
+                text: `${c.title}\n\n${c.body}`,
+              })),
+            );
+            log.info(
+              { topicKey: promotion.topicKey, candidates: candidates.length, supersedesEntryId },
+              supersedesEntryId
+                ? 'global KB promotion linked to existing topic (similarity-confirmed)'
+                : 'global KB promotion kept independent (no same-article match)',
+            );
+          }
+        }
+        const [row] = await tx
+          .insert(globalKbEntries)
+          .values({
+            namespace: settings.namespace,
+            userId: promotion.userId,
+            title: clean.title,
+            body: clean.body,
+            category: promotion.category,
+            facets: promotion.facets,
+            status: 'draft',
+            source: 'promoted',
+            sourceTaskId: promotion.taskId,
+            sourceRepoId: task?.repositoryId ?? null,
+            topicKey: promotion.topicKey ?? null,
+            supersedesEntryId,
+            embedStatus: 'pending',
           })
-          .from(globalKbEntries)
-          .where(
-            and(
-              eq(globalKbEntries.namespace, settings.namespace),
-              eq(globalKbEntries.topicKey, promotion.topicKey),
-              // Don't reconcile against a superseded (archived) entry — it's on its
-              // way out; match only live drafts/actives for this topic.
-              ne(globalKbEntries.status, 'archived'),
-            ),
-          )
-          // Prefer the canonical active entry; else the newest.
-          .orderBy(
-            sql`case when ${globalKbEntries.status} = 'active' then 0 else 1 end`,
-            desc(globalKbEntries.createdAt),
-          )
-          .limit(SUPERSEDE_CANDIDATE_LIMIT);
-        // Exact duplicate of any same-key entry: nothing new to add, skip the insert.
-        const identical = candidates.find((c) => c.body.trim() === clean.body.trim());
-        if (identical) {
-          log.info(
-            { topicKey: promotion.topicKey, existingId: identical.id },
-            'global KB promotion skipped (identical content already present)',
-          );
-          return { id: identical.id, deduped: true, supersedesEntryId: null };
-        }
-        // Supersede an existing entry ONLY when embeddings confirm it is the SAME
-        // article — the coarse topicKey (category:tech) groups unrelated articles on
-        // one tech, so it can't decide identity. No confirmed match (or ollama
-        // unavailable) -> insert an INDEPENDENT new draft; never clobber a different
-        // article that merely shares the key.
-        if (candidates.length > 0) {
-          supersedesEntryId = await confirmSupersedeByEmbedding(
-            { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
-            `${clean.title}\n\n${clean.body}`,
-            candidates.map((c) => ({
-              id: c.id,
-              status: c.status,
-              text: `${c.title}\n\n${c.body}`,
-            })),
-          );
-          log.info(
-            { topicKey: promotion.topicKey, candidates: candidates.length, supersedesEntryId },
-            supersedesEntryId
-              ? 'global KB promotion linked to existing topic (similarity-confirmed)'
-              : 'global KB promotion kept independent (no same-article match)',
-          );
-        }
-      }
-      const [row] = await gdb
-        .insert(globalKbEntries)
-        .values({
-          namespace: settings.namespace,
-          userId: promotion.userId,
-          title: clean.title,
-          body: clean.body,
-          category: promotion.category,
-          facets: promotion.facets,
-          status: 'draft',
-          source: 'promoted',
-          sourceTaskId: promotion.taskId,
-          sourceRepoId: task?.repositoryId ?? null,
-          topicKey: promotion.topicKey ?? null,
-          supersedesEntryId,
-          embedStatus: 'pending',
-        })
-        .returning({ id: globalKbEntries.id });
-      return row ? { id: row.id, deduped: false, supersedesEntryId } : null;
+          .returning({ id: globalKbEntries.id });
+        return row ? { id: row.id, deduped: false, supersedesEntryId } : null;
+      });
     });
   } catch (err) {
     log.warn({ err, title: promotion.title }, 'global KB promotion failed (skipped)');
