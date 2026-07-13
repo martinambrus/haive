@@ -39,7 +39,7 @@ import {
 import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
-import { getCliExecQueue, getCliExecQueueEvents } from '../queues.js';
+import { getCliExecQueue, getCliExecQueueEvents, getUsagePollQueue } from '../queues.js';
 
 async function loadOwnedProvider(db: Database, userId: string, providerId: string) {
   const provider = await db.query.cliProviders.findFirst({
@@ -791,6 +791,12 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
     CLAUDE_USAGE_OAUTH_SECRET,
     JSON.stringify(tokens),
   );
+  // Kick an immediate usage poll so the header meter refreshes within seconds instead of
+  // waiting for the ~5-min repeatable tick: the freshly rotated token clears the worker's
+  // dead-token gate and this poll overwrites the needs_reconnect snapshot with a live one.
+  await getUsagePollQueue()
+    .add('usage-poll-tick', {}, { removeOnComplete: true, removeOnFail: 10 })
+    .catch(() => {});
   return c.json({ connected: true, scopes: tokens.scopes, expiresAt: tokens.expiresAt });
 });
 
@@ -824,6 +830,11 @@ cliProviderRoutes.delete('/:providerId/usage-auth', async (c) => {
         eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
       ),
     );
+  // Drop the last usage snapshot too: with no token the poller will never touch this row
+  // again, so a stale meter / needs_reconnect chip would otherwise linger indefinitely.
+  await db
+    .delete(schema.usageWindowSnapshots)
+    .where(eq(schema.usageWindowSnapshots.providerId, providerId));
   return c.json({ connected: false });
 });
 

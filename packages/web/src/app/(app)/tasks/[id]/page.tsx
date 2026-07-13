@@ -1862,9 +1862,18 @@ function HeaderUsageChip({
         });
     void load();
     const t = setInterval(() => void load(), 60_000);
+    // Refetch when the tab regains focus so returning from a reconnect (done in another
+    // tab) updates the chip promptly instead of waiting up to 60s for the next tick.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
     return () => {
       cancelled = true;
       clearInterval(t);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
     };
   }, []);
 
@@ -1875,6 +1884,22 @@ function HeaderUsageChip({
 
   if (!providerId || !snapshots) return null;
   const snap = snapshots.find((s) => s.providerId === providerId);
+  // Dead usage token: don't vanish silently — prompt a reconnect and deep-link to the
+  // provider's page (where the Reconnect button lives) so the meter can be restored.
+  if (snap?.status === 'needs_reconnect') {
+    return (
+      <a
+        href={`/settings/cli-providers/${providerId}#usage-tracking`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="ml-auto flex shrink-0 items-center gap-1 px-2 font-mono text-xs font-semibold text-amber-400 hover:text-amber-300"
+        title={`${providerLabel ?? providerName ?? 'CLI'} usage token expired — open its Usage tracking in a new tab to reconnect`}
+      >
+        <span aria-hidden>⚠</span>
+        <span className="underline">reconnect</span>
+      </a>
+    );
+  }
   if (!snap || snap.status !== 'ok') return null;
 
   const windows: { label: string; w: UsageWindow }[] = [];

@@ -370,7 +370,9 @@ export interface UsageWindowSnapshot {
   daily?: UsageWindow;
   fetchedAt: string;
   stale: boolean;
-  status: 'ok' | 'error';
+  /** 'needs_reconnect' = the usage token was rejected and only a re-auth fixes it;
+   *  the header chip prompts a reconnect instead of hiding. */
+  status: 'ok' | 'error' | 'needs_reconnect';
 }
 
 export interface CliProviderSecret {

@@ -30,6 +30,7 @@ export function ClaudeUsageAuth({ providerId }: { providerId: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [needsReconnect, setNeedsReconnect] = useState(false);
 
   useEffect(() => {
     api
@@ -39,7 +40,29 @@ export function ClaudeUsageAuth({ providerId }: { providerId: string }) {
         setConnectedAt(s.connectedAt);
       })
       .catch(() => setConnected(false));
+    // A stored token can still be DEAD — the poller marks it needs_reconnect on an
+    // invalid_grant / 401 / 403. `connected` alone (token present) would show green for
+    // a dead token, so cross-check the usage snapshot and surface the expired state.
+    api
+      .get<{ snapshots: { providerId: string; status: string }[] }>('/usage-window')
+      .then((d) =>
+        setNeedsReconnect(
+          d.snapshots.some((s) => s.providerId === providerId && s.status === 'needs_reconnect'),
+        ),
+      )
+      .catch(() => {});
   }, [providerId]);
+
+  // This card mounts only after the parent page loads the provider, so the browser's
+  // on-load `#usage-tracking` scroll (from the header chip's deep-link) has already
+  // missed the anchor. Scroll it into view ourselves when the hash targets us.
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.location.hash === '#usage-tracking') {
+      document
+        .getElementById('usage-tracking')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, []);
 
   async function start() {
     setBusy(true);
@@ -69,6 +92,7 @@ export function ClaudeUsageAuth({ providerId }: { providerId: string }) {
       );
       setConnected(true);
       setConnectedAt(new Date().toISOString());
+      setNeedsReconnect(false);
       setAuthorizeUrl(null);
       setCode('');
       setNotice('Usage tracking connected.');
@@ -87,6 +111,7 @@ export function ClaudeUsageAuth({ providerId }: { providerId: string }) {
       await api.delete(`/cli-providers/${providerId}/usage-auth`);
       setConnected(false);
       setConnectedAt(null);
+      setNeedsReconnect(false);
       setAuthorizeUrl(null);
       setNotice('Usage tracking disconnected.');
     } catch (err) {
@@ -97,7 +122,7 @@ export function ClaudeUsageAuth({ providerId }: { providerId: string }) {
   }
 
   return (
-    <Card>
+    <Card id="usage-tracking" className="scroll-mt-6">
       <CardHeader>
         <CardTitle>Usage tracking</CardTitle>
         <CardDescription>
@@ -109,11 +134,18 @@ export function ClaudeUsageAuth({ providerId }: { providerId: string }) {
 
       {connected === null ? (
         <p className="text-sm text-neutral-500">Loading…</p>
-      ) : connected ? (
+      ) : connected && !authorizeUrl ? (
         <div className="flex flex-col gap-3">
-          <p className="text-sm text-emerald-400">
-            Connected{connectedAt ? ` · ${new Date(connectedAt).toLocaleString()}` : ''}
-          </p>
+          {needsReconnect ? (
+            <p className="text-sm text-amber-400">
+              ⚠ Token expired — reconnect to restore your usage meters. (If this is a duplicate of
+              an account you already track elsewhere, Disconnect it instead.)
+            </p>
+          ) : (
+            <p className="text-sm text-emerald-400">
+              Connected{connectedAt ? ` · ${new Date(connectedAt).toLocaleString()}` : ''}
+            </p>
+          )}
           <div className="flex gap-2">
             <Button variant="secondary" size="sm" onClick={() => void start()} disabled={busy}>
               Reconnect

@@ -69,6 +69,8 @@ export default function CliProvidersPage() {
   const [usageCodes, setUsageCodes] = useState<Record<string, string>>({});
   /** Per-claude-provider usage-tracking connection status (drives Connect vs Disconnect). */
   const [usageConnected, setUsageConnected] = useState<Record<string, boolean>>({});
+  /** Providers whose stored usage token the poller marked dead — a re-auth is needed. */
+  const [needsReconnect, setNeedsReconnect] = useState<Record<string, boolean>>({});
   const [cloningIds, setCloningIds] = useState<Record<string, boolean>>({});
   const [upgradingIds, setUpgradingIds] = useState<Record<string, boolean>>({});
   const { requireCliLogin } = useCliLogin();
@@ -110,6 +112,18 @@ export default function CliProvidersPage() {
         ),
       );
       setUsageConnected(Object.fromEntries(statuses));
+      // Which providers the poller flagged as needing re-auth (a usage token it found
+      // dead — invalid_grant on refresh, or 401/403 on the fetch).
+      const usage = await api
+        .get<{ snapshots: { providerId: string; status: string }[] }>('/usage-window')
+        .catch(() => ({ snapshots: [] as { providerId: string; status: string }[] }));
+      setNeedsReconnect(
+        Object.fromEntries(
+          usage.snapshots
+            .filter((s) => s.status === 'needs_reconnect')
+            .map((s) => [s.providerId, true]),
+        ),
+      );
     } catch (err) {
       setError((err as Error).message ?? 'Failed to load CLI providers');
     }
@@ -256,6 +270,7 @@ export default function CliProvidersPage() {
         },
       }));
       setUsageConnected((s) => ({ ...s, [p.id]: true }));
+      setNeedsReconnect((s) => ({ ...s, [p.id]: false }));
       setUsageCodes((s) => ({ ...s, [p.id]: '' }));
     } catch (err) {
       setUsageStates((s) => ({
@@ -285,6 +300,7 @@ export default function CliProvidersPage() {
     try {
       await api.delete(`/cli-providers/${p.id}/usage-auth`);
       setUsageConnected((s) => ({ ...s, [p.id]: false }));
+      setNeedsReconnect((s) => ({ ...s, [p.id]: false }));
       setUsageStates((s) => ({
         ...s,
         [p.id]: {
@@ -389,6 +405,14 @@ export default function CliProvidersPage() {
                                 upgrade: {p.cliVersion} → {upgradeLatest}
                               </Badge>
                             )}
+                            {needsReconnect[p.id] && (
+                              <Badge
+                                variant="warning"
+                                title="This provider's usage token expired — Reconnect to restore its subscription meters"
+                              >
+                                ⚠ usage token expired
+                              </Badge>
+                            )}
                           </div>
                           {meta && (
                             <p className="mt-1 text-xs text-neutral-500">{meta.description}</p>
@@ -419,7 +443,28 @@ export default function CliProvidersPage() {
                             </Button>
                           )}
                           {p.name === 'claude-code' &&
-                            (usageConnected[p.id] ? (
+                            (needsReconnect[p.id] ? (
+                              <>
+                                <Button
+                                  variant="secondary"
+                                  size="sm"
+                                  onClick={() => handleStartUsage(p)}
+                                  disabled={usageState?.busy === true}
+                                  title="Re-authorize the expired usage token to restore this provider's meters"
+                                >
+                                  {usageState?.busy ? 'Connecting...' : 'Reconnect'}
+                                </Button>
+                                <Button
+                                  variant="secondary"
+                                  size="sm"
+                                  onClick={() => handleDisconnectUsage(p)}
+                                  disabled={usageState?.busy === true}
+                                  title="Stop tracking usage and delete the stored token (use this to drop a duplicate of the same account)"
+                                >
+                                  {usageState?.busy ? 'Working...' : 'Disconnect usage'}
+                                </Button>
+                              </>
+                            ) : usageConnected[p.id] ? (
                               <Button
                                 variant="secondary"
                                 size="sm"

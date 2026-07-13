@@ -16,6 +16,7 @@ let ideEnsureQueue: Queue | null = null;
 let ideEnsureQueueEvents: QueueEvents | null = null;
 let ddevControlQueue: Queue | null = null;
 let ddevControlQueueEvents: QueueEvents | null = null;
+let usagePollQueue: Queue | null = null;
 
 export function getRepoQueue(): Queue {
   if (!repoQueue) {
@@ -115,6 +116,16 @@ export function getDdevControlQueueEvents(): QueueEvents {
   return ddevControlQueueEvents;
 }
 
+/** Fire-and-forget enqueue target: the api adds a one-off tick here (e.g. right after a
+ *  usage-tracking reconnect) so the worker re-polls promptly instead of waiting for its
+ *  ~5-min repeatable. The worker's poll worker runs a full tick on any job it receives. */
+export function getUsagePollQueue(): Queue {
+  if (!usagePollQueue) {
+    usagePollQueue = new Queue(QUEUE_NAMES.USAGE_POLL, { connection: getBullRedis() });
+  }
+  return usagePollQueue;
+}
+
 export async function closeQueues(): Promise<void> {
   await Promise.allSettled([
     repoQueue?.close(),
@@ -129,6 +140,7 @@ export async function closeQueues(): Promise<void> {
     ideEnsureQueueEvents?.close(),
     ddevControlQueue?.close(),
     ddevControlQueueEvents?.close(),
+    usagePollQueue?.close(),
   ]);
   repoQueue = null;
   taskQueue = null;
@@ -142,4 +154,5 @@ export async function closeQueues(): Promise<void> {
   ideEnsureQueueEvents = null;
   ddevControlQueue = null;
   ddevControlQueueEvents = null;
+  usagePollQueue = null;
 }
