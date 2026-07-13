@@ -28,6 +28,12 @@ export interface InvokeOpts {
    *  spawn its own Claude Code sub-agents (uncontrolled token fan-out). Non-claude
    *  adapters ignore it. */
   disallowedTools?: string[];
+  /** Claude-family only: when true, emit `--tools ""` to disable ALL built-in
+   *  tools so the model answers from the prompt alone (no repo crawl). Set for
+   *  enrichment/classification steps whose full input is already in the prompt
+   *  (e.g. 01-env-detect), where a high-effort model would otherwise burn the
+   *  timeout exploring the repo. codex/gemini adapters ignore it. */
+  disableTools?: boolean;
 }
 
 export interface EffortScale {

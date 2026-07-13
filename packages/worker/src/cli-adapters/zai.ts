@@ -76,7 +76,12 @@ export class ZaiAdapter extends BaseCliAdapter {
       command: this.resolveExecutable(provider),
       args: this.mergedArgs(
         provider,
-        claudeFamilyArgs({ steering, prompt, disallowedTools: opts.disallowedTools }),
+        claudeFamilyArgs({
+          steering,
+          prompt,
+          disallowedTools: opts.disallowedTools,
+          disableTools: opts.disableTools,
+        }),
       ),
       env,
       cwd: opts.cwd,

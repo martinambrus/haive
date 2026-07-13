@@ -112,6 +112,70 @@ describe('disallowedTools threads through every claude-family adapter', () => {
   });
 });
 
+describe('disableTools threads --tools "" through every claude-family adapter', () => {
+  // claude's documented "disable all built-in tools" is `--tools ""` (empty value).
+  const toolsValueAt = (args: string[]): string[] => {
+    const i = args.indexOf('--tools');
+    return i < 0 ? [] : [args[i + 1]!];
+  };
+
+  it('claude-code one-shot: --tools "" present (empty-string value)', () => {
+    const spec = new ClaudeCodeAdapter().buildCliInvocation(provider(), 'do x', {
+      disableTools: true,
+    });
+    expect(spec.args).toContain('--tools');
+    expect(toolsValueAt(spec.args)).toEqual(['']);
+  });
+
+  it('claude-code steering: --tools "" present', () => {
+    const spec = new ClaudeCodeAdapter().buildCliInvocation(provider(), 'do x', {
+      steeringMode: true,
+      disableTools: true,
+    });
+    expect(toolsValueAt(spec.args)).toEqual(['']);
+  });
+
+  it('zai: --tools "" present', () => {
+    const spec = new ZaiAdapter().buildCliInvocation(provider(), 'do x', {
+      disableTools: true,
+    });
+    expect(toolsValueAt(spec.args)).toEqual(['']);
+  });
+
+  it('ollama: --tools "" present, empty value ordered right before --model', () => {
+    const spec = new OllamaAdapter().buildCliInvocation(provider({ model: 'llama3' }), 'do x', {
+      disableTools: true,
+    });
+    const i = spec.args.indexOf('--tools');
+    expect(i).toBeGreaterThanOrEqual(0);
+    // the empty value must survive between --tools and --model, not be dropped —
+    // otherwise --tools would greedily swallow --model.
+    expect(spec.args[i + 1]).toBe('');
+    expect(spec.args[i + 2]).toBe('--model');
+  });
+
+  it('omitted → no --tools flag (unchanged default: all tools available)', () => {
+    for (const spec of [
+      new ClaudeCodeAdapter().buildCliInvocation(provider(), 'do x', {}),
+      new ZaiAdapter().buildCliInvocation(provider(), 'do x', {}),
+      new OllamaAdapter().buildCliInvocation(provider({ model: 'llama3' }), 'do x', {}),
+    ]) {
+      expect(spec.args).not.toContain('--tools');
+    }
+  });
+
+  it('empty-string value survives mergedArgs even with provider cliArgs present', () => {
+    const spec = new ClaudeCodeAdapter().buildCliInvocation(
+      provider({ cliArgs: ['--model', 'sonnet'] }),
+      'do x',
+      { disableTools: true },
+    );
+    const i = spec.args.indexOf('--tools');
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(spec.args[i + 1]).toBe('');
+  });
+});
+
 describe('ollama steering variant keeps --model', () => {
   it('steering args include --input-format and --model <model>', () => {
     const spec = new OllamaAdapter().buildCliInvocation(provider({ model: 'llama3' }), 'do x', {

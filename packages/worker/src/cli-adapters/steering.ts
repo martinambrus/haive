@@ -24,21 +24,31 @@ export function steeringUserMessageLine(text: string): string {
  *  `tail` carries adapter-specific trailing flags (e.g. ollama's `--model`).
  *  `disallowedTools` denies specific tools (e.g. `Agent` for onboarding mining,
  *  to stop a mining agent spawning its own sub-agents); honored even under
- *  `--dangerously-skip-permissions` (deny beats allow). Shared by every
- *  claude-binary adapter (claude-code / zai / ollama) so the deny is uniform. */
+ *  `--dangerously-skip-permissions` (deny beats allow). `disableTools` removes
+ *  ALL built-in tools (`--tools ""`) so the model answers from the prompt alone —
+ *  for enrichment steps (e.g. 01-env-detect) whose full input is already in the
+ *  prompt, stopping a high-effort model from burning the timeout crawling the repo.
+ *  Shared by every claude-binary adapter (claude-code / zai / ollama) so the
+ *  behavior is uniform. */
 export function claudeFamilyArgs(opts: {
   steering: boolean;
   prompt: string;
   tail?: string[];
   disallowedTools?: string[];
+  disableTools?: boolean;
 }): string[] {
   const tail = opts.tail ?? [];
   // Placed before `tail`: a trailing flag like ollama's `--model` terminates
-  // the tool list so `--disallowedTools Agent --model X` parses correctly.
+  // each variadic tool list so `--disallowedTools Agent --model X` and
+  // `--tools '' --model X` both parse correctly.
   const deny =
     opts.disallowedTools && opts.disallowedTools.length > 0
       ? ['--disallowedTools', ...opts.disallowedTools]
       : [];
+  // `--tools ''` (empty value) is claude's documented "disable all built-in
+  // tools". The empty-string argv element survives the whole pipeline —
+  // mergedArgs spreads it verbatim; exec-core/docker-runner never filter it.
+  const noTools = opts.disableTools ? ['--tools', ''] : [];
   if (opts.steering) {
     return [
       '--dangerously-skip-permissions',
@@ -49,6 +59,7 @@ export function claudeFamilyArgs(opts: {
       'stream-json',
       '--verbose',
       ...deny,
+      ...noTools,
       ...tail,
     ];
   }
@@ -60,6 +71,7 @@ export function claudeFamilyArgs(opts: {
     'stream-json',
     '--verbose',
     ...deny,
+    ...noTools,
     ...tail,
   ];
 }

@@ -61,6 +61,12 @@ export interface LlmInvocationSpec {
   /** Sandbox timeout for the CLI invocation in milliseconds.
    *  Defaults to 2 minutes; tool_use steps that browse the repo need more. */
   timeoutMs?: number;
+  /** Claude-family only: run this LLM phase with NO built-in tools (`--tools ""`)
+   *  so the model answers from the prompt alone instead of browsing the repo. For
+   *  enrichment/classification steps (e.g. 01-env-detect) whose full input is
+   *  already embedded in the prompt — a high-effort model otherwise crawls the
+   *  workspace and blows the timeout. codex/gemini ignore it. */
+  disableTools?: boolean;
   /** Test-only synthetic LLM output used when HAIVE_TEST_BYPASS_LLM=1.
    *  Steps whose apply() throws on null llmOutput must define this so smoke
    *  tests can exercise the full pipeline without a real CLI provider. */

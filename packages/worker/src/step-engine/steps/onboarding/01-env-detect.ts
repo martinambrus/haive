@@ -1034,6 +1034,11 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
 
   llm: {
     requiredCapabilities: [],
+    // Everything env-detect needs is already embedded in the prompt (deterministic
+    // detection, config file contents, tech inventory, file tree, source samples).
+    // Give the model no built-in tools so a high-effort run answers in one shot
+    // instead of crawling the repo until the sandbox timeout SIGKILLs it.
+    disableTools: true,
     buildPrompt: buildEnvDetectPrompt,
     parseOutput: (raw: string, _parsed: unknown) => parseEnrichment(raw),
     retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },

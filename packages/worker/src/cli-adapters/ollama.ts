@@ -114,6 +114,7 @@ export class OllamaAdapter extends BaseCliAdapter {
           prompt,
           tail: ['--model', model],
           disallowedTools: opts.disallowedTools,
+          disableTools: opts.disableTools,
         }),
       ),
       env,

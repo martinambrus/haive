@@ -56,6 +56,7 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
       steering,
       prompt,
       disallowedTools: opts.disallowedTools,
+      disableTools: opts.disableTools,
     });
     const spec: CliCommandSpec = {
       command: this.resolveExecutable(provider),

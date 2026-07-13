@@ -559,6 +559,7 @@ async function resolveLlmPhase(
       cwd: params.workspacePath,
       effortLevel: preferredEffort ?? undefined,
       disallowedTools: miningDisallowedTools(stepDef.metadata.id),
+      disableTools: llmSpec.disableTools,
     },
   });
 
