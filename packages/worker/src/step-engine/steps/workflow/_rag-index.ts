@@ -32,6 +32,7 @@ import {
   EMBED_BATCH_SIZE,
 } from '../onboarding/_rag-embed.js';
 import { detectEmbedDevice, embedDeviceWarning, type EmbedDevice } from '../_embed-device.js';
+import { indexTaskEmbedding, TASK_EMBED_SOURCE_TYPE } from './_task-embedding.js';
 
 /* ------------------------------------------------------------------ */
 /* Shared RAG indexing — used by 02-pre-rag-sync (run start, indexes  */
@@ -130,7 +131,7 @@ export interface RagSyncResolved {
 
 /** Map a persisted 04-tooling `tooling` object to RAG sync prefs. Shared by the
  *  repo-mirror read and the onboarding-task-output fallback. */
-function toRagPrefs(t: Record<string, unknown>): RagToolingPrefs {
+export function toRagPrefs(t: Record<string, unknown>): RagToolingPrefs {
   return {
     ragMode: ((t.ragMode as string) ?? 'none') as RagMode,
     ragConnectionString: (t.ragConnectionString as string) || null,
@@ -281,7 +282,7 @@ export async function runRagIndexSync(
     // silently filling the table.
     const taskRow = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { repositoryId: true },
+      columns: { repositoryId: true, title: true, description: true },
     });
     const repositoryId = taskRow?.repositoryId ?? null;
     if (!repositoryId) {
@@ -475,9 +476,12 @@ export async function runRagIndexSync(
 
     // Delete entries for files that no longer exist in the repo. Scoped by
     // repository_id so orphans from prior tasks on the same repo also get cleaned.
+    // EXCLUDE source_type='task' rows: those are the effort-estimator's task embeddings
+    // (source_path = a task id, not a repo file), so they are never "orphaned files" and
+    // must not be swept here (task-time estimation v2.2).
     const orphanRows = (await conn.pg.unsafe(
-      `SELECT DISTINCT source_path FROM ${RAG_TABLE} WHERE repository_id = $1`,
-      [repositoryId],
+      `SELECT DISTINCT source_path FROM ${RAG_TABLE} WHERE repository_id = $1 AND source_type <> $2`,
+      [repositoryId, TASK_EMBED_SOURCE_TYPE],
     )) as Array<{ source_path: string }>;
     for (const row of orphanRows) {
       if (!processedPaths.has(row.source_path)) {
@@ -486,6 +490,25 @@ export async function runRagIndexSync(
           [repositoryId, row.source_path],
         );
         deleted += result.count;
+      }
+    }
+
+    // Index THIS task's title+description as a source_type='task' embedding so future
+    // estimates can semantically retrieve it as a prior-effort anchor (task-time estimation
+    // v2.2). pgvector stores only (retrieval is vector-based); best-effort — a failure must
+    // not fail the file sync that already succeeded.
+    if (usedPgvector && useOllama && taskRow) {
+      try {
+        await indexTaskEmbedding(
+          conn,
+          prefs,
+          repositoryId,
+          ctx.taskId,
+          taskRow.title,
+          taskRow.description,
+        );
+      } catch (err) {
+        ctx.logger.warn({ err }, 'task embedding index failed (non-fatal)');
       }
     }
 

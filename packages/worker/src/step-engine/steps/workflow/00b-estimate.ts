@@ -4,15 +4,16 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { resolveRagSyncPrefs } from './_rag-index.js';
+import { retrieveSimilarTaskIds } from './_task-embedding.js';
 import {
   buildAnchors,
   clampHours,
   computeBiasFactor,
   estimateRange,
   heuristicEstimate,
+  MAX_ANCHORS,
   round2,
   type EstimateAnchor,
-  type SemanticRerankOpts,
 } from './_estimate.js';
 
 // 00b-estimate — the pre-flight effort estimate. Runs right after 00-triage (index 0.6,
@@ -153,22 +154,31 @@ function renderAnchor(a: EstimateAnchor): string {
   return line;
 }
 
-/** Build the semantic anchor-rerank opts from the repo's RAG tooling prefs, or undefined when
- *  RAG is not configured — in which case the estimator keeps its deterministic newest-first
- *  anchor selection. Prefs only: the actual ollama probe + embed happen inside buildAnchors and
- *  only when the candidate pool exceeds the anchor cap, so a small repo never pays for them. */
-async function resolveSemanticRerank(
+/** Ask the repo's RAG vector store for the prior tasks most semantically similar to this one
+ *  (most-similar first), for buildAnchors to prefer as effort anchors. Returns [] when RAG is
+ *  not configured or anything fails — buildAnchors then keeps its newest-first selection.
+ *  Requests MAX_ANCHORS ids so a well-populated store can fill the whole anchor set from
+ *  semantic matches, with newest-first top-up when the store is empty/partial. */
+async function resolvePreferredAnchorIds(
   ctx: StepContext,
+  repositoryId: string,
   queryText: string,
-): Promise<SemanticRerankOpts | undefined> {
-  if (!queryText) return undefined;
+): Promise<string[]> {
+  if (!queryText) return [];
   try {
     const resolved = await resolveRagSyncPrefs(ctx);
-    const p = resolved.ragToolingPrefs;
-    if (!resolved.ragConfigured || !p?.ollamaUrl || !p?.embeddingModel) return undefined;
-    return { ollamaUrl: p.ollamaUrl, model: p.embeddingModel, queryText };
-  } catch {
-    return undefined;
+    if (!resolved.ragConfigured || !resolved.ragToolingPrefs) return [];
+    return await retrieveSimilarTaskIds(
+      ctx,
+      resolved.ragToolingPrefs,
+      resolved.projectName,
+      repositoryId,
+      queryText,
+      MAX_ANCHORS,
+    );
+  } catch (err) {
+    ctx.logger.warn({ err }, 'preferred anchor retrieval failed (falling back to newest-first)');
+    return [];
   }
 }
 
@@ -204,11 +214,11 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
     const description = task?.description ?? '';
     const executionPath = task?.executionPath ?? null;
     const manualEstimateHours = task?.estimatedTimeHours ?? null;
-    const semantic = task?.repositoryId
-      ? await resolveSemanticRerank(ctx, `${title}\n${description}`.trim())
-      : undefined;
+    const preferredTaskIds = task?.repositoryId
+      ? await resolvePreferredAnchorIds(ctx, task.repositoryId, `${title}\n${description}`.trim())
+      : [];
     const anchors = task?.repositoryId
-      ? await buildAnchors(ctx.db, ctx.taskId, task.repositoryId, semantic)
+      ? await buildAnchors(ctx.db, ctx.taskId, task.repositoryId, preferredTaskIds)
       : [];
     const h = heuristicEstimate(anchors, executionPath);
     return {

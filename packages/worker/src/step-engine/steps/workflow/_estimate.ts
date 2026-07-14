@@ -1,7 +1,6 @@
 import { and, desc, eq, inArray, ne } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { computeTaskTiming, type TaskTimingStep } from '@haive/shared/timing';
-import { ollamaEmbed, probeOllama } from '@haive/shared/rag';
 
 // Shared building blocks for the task-effort estimator, used by BOTH the pre-flight
 // estimate step (00b-estimate) and the post-planning refinement folded into
@@ -184,99 +183,71 @@ async function hydrateAnchors(
   return anchors;
 }
 
-/** When a repo has MORE than MAX_ANCHORS completed tasks the anchor set must be SELECTED, not
- *  just "the newest 30". This is the candidate pool fetched for that selection: the newest N
- *  completed tasks are embedded and cosine-ranked against the new task, and the top
- *  MAX_ANCHORS are kept. Bounded so the one-shot embed at estimate time stays cheap. Below
- *  this many tasks selection is moot (every candidate fits), so no embedding ever happens. */
-export const SEMANTIC_CANDIDATE_POOL = 100;
-
-/** Opts enabling the semantic anchor-selection rerank. Absent => the estimator keeps the
- *  deterministic newest-first selection (the only behaviour below MAX_ANCHORS tasks, and the
- *  fallback whenever embeddings are unavailable). Resolved by 00b-estimate from the repo's
- *  RAG tooling prefs; kept as a minimal local shape to avoid importing the prefs type here. */
-export interface SemanticRerankOpts {
-  ollamaUrl: string;
-  model: string;
-  /** The new task's text (title + description) — the query candidates are ranked against. */
-  queryText: string;
-}
-
-/** Cosine similarity of two equal-length vectors; 0 when either is empty, all-zero, or a
- *  dimension mismatch makes them incomparable. */
-export function cosineSim(a: number[], b: number[]): number {
-  if (a.length === 0 || a.length !== b.length) return 0;
-  let dot = 0;
-  let na = 0;
-  let nb = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    const x = a[i]!;
-    const y = b[i]!;
-    dot += x * y;
-    na += x * x;
-    nb += y * y;
-  }
-  if (na === 0 || nb === 0) return 0;
-  return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
-
-/** Embed the candidate rows' title+description alongside the query and return them reordered
- *  most-similar-first. Best-effort: returns null (caller keeps newest-first) if embeddings are
- *  unavailable or the model returns an unexpected shape. The ollama probe/embed live here so
- *  they only ever run when there is actually an oversized pool to rank. */
-async function semanticRankRows(
-  rows: PriorTaskRow[],
-  opts: SemanticRerankOpts,
-): Promise<PriorTaskRow[] | null> {
-  try {
-    if (!(await probeOllama(opts.ollamaUrl))) return null;
-    const texts = rows.map((r) => `${r.title}\n${(r.description ?? '').slice(0, ANCHOR_DESC_CAP)}`);
-    const vectors = await ollamaEmbed(opts.ollamaUrl, opts.model, [opts.queryText, ...texts]);
-    if (!Array.isArray(vectors) || vectors.length !== texts.length + 1) return null;
-    const queryVec = vectors[0]!;
-    return rows
-      .map((r, i) => ({ r, sim: cosineSim(queryVec, vectors[i + 1]!) }))
-      .sort((x, y) => y.sim - x.sim)
-      .map((s) => s.r);
-  } catch {
-    return null;
-  }
-}
-
-/** Gather the anchor set: the repository's prior COMPLETED workflow tasks with their MEASURED
- *  effort (computeTaskTiming) and the files they changed. Same-type only — an onboarding's
- *  multi-hour run is not a workflow-effort anchor. Selection is newest-first, EXCEPT when the
- *  pool exceeds MAX_ANCHORS and `semantic` opts are given, where the newest SEMANTIC_CANDIDATE_POOL
- *  are cosine-ranked against the new task and the most-similar MAX_ANCHORS kept. When the repo
- *  has fewer than COLD_START_MIN_ANCHORS local anchors, it is supplemented with cross-repo
- *  cold-start anchors from the same user's other same-framework repos. */
-export async function buildAnchors(
+/** Fetch the given prior task rows (validated: same repo, completed workflow, not the current
+ *  task) and return them in the SAME order as `ids` — the semantic ranking order that
+ *  retrieveSimilarTaskIds produced. Ids that don't resolve to a valid anchor (a non-completed
+ *  or other-repo id lingering in the vector store, or a stale id) are dropped. */
+async function fetchPreferredTaskRows(
   db: Database,
   taskId: string,
   repositoryId: string,
-  semantic?: SemanticRerankOpts,
-): Promise<EstimateAnchor[]> {
-  // With semantic selection available, pull a larger candidate pool so there is something to
-  // choose from; otherwise the newest MAX_ANCHORS is the whole set.
-  const poolLimit = semantic ? SEMANTIC_CANDIDATE_POOL : MAX_ANCHORS;
-  const localPriors = await db.query.tasks.findMany({
+  ids: string[],
+): Promise<PriorTaskRow[]> {
+  if (ids.length === 0) return [];
+  const rows = await db.query.tasks.findMany({
     where: and(
+      inArray(schema.tasks.id, ids),
       eq(schema.tasks.repositoryId, repositoryId),
       eq(schema.tasks.type, 'workflow'),
       eq(schema.tasks.status, 'completed'),
       ne(schema.tasks.id, taskId),
     ),
-    orderBy: desc(schema.tasks.completedAt),
-    limit: poolLimit,
     columns: PRIOR_TASK_COLUMNS,
   });
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return ids.map((id) => byId.get(id)).filter((r): r is NonNullable<typeof r> => r !== undefined);
+}
 
-  // Selection only matters once the pool exceeds the cap — the sole place an embed call is
-  // made, so a small repo pays nothing. A null rerank (embeddings down) keeps newest-first.
-  let selected: PriorTaskRow[] = localPriors;
-  if (localPriors.length > MAX_ANCHORS) {
-    const ranked = semantic ? await semanticRankRows(localPriors, semantic) : null;
-    selected = (ranked ?? localPriors).slice(0, MAX_ANCHORS);
+/** Gather the anchor set: the repository's prior COMPLETED workflow tasks with their MEASURED
+ *  effort (computeTaskTiming) and the files they changed. Same-type only — an onboarding's
+ *  multi-hour run is not a workflow-effort anchor. `preferredTaskIds` (from 00b's stored
+ *  semantic retrieval, most-similar first) are taken first, then topped up with the newest
+ *  completed tasks not already chosen — so semantic selection degrades gracefully to
+ *  newest-first when the vector store is empty/partial/unavailable (preferredTaskIds = [], the
+ *  default and 06b's path). When the repo has fewer than COLD_START_MIN_ANCHORS local anchors,
+ *  it is supplemented with cross-repo cold-start anchors from the same user's other
+ *  same-framework repos. */
+export async function buildAnchors(
+  db: Database,
+  taskId: string,
+  repositoryId: string,
+  preferredTaskIds: string[] = [],
+): Promise<EstimateAnchor[]> {
+  const preferred = await fetchPreferredTaskRows(db, taskId, repositoryId, preferredTaskIds);
+
+  const selected: PriorTaskRow[] = preferred.slice(0, MAX_ANCHORS);
+  if (selected.length < MAX_ANCHORS) {
+    // Top up (or, with no semantic ids, wholly fill) from the newest completed tasks not
+    // already chosen — the deterministic baseline and the graceful fallback.
+    const have = new Set(selected.map((r) => r.id));
+    const newest = await db.query.tasks.findMany({
+      where: and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'workflow'),
+        eq(schema.tasks.status, 'completed'),
+        ne(schema.tasks.id, taskId),
+      ),
+      orderBy: desc(schema.tasks.completedAt),
+      limit: MAX_ANCHORS,
+      columns: PRIOR_TASK_COLUMNS,
+    });
+    for (const r of newest) {
+      if (selected.length >= MAX_ANCHORS) break;
+      if (!have.has(r.id)) {
+        selected.push(r);
+        have.add(r.id);
+      }
+    }
   }
 
   const local = await hydrateAnchors(db, selected, false);
