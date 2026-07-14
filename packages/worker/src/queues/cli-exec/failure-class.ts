@@ -84,7 +84,7 @@ const PROVIDER_TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137, 
 // Keep tight — bare 5xx is deliberately NOT matched (line numbers, "500ms",
 // "$500" are too false-positive); 5xx must carry HTTP context.
 const RATE_LIMIT_RE =
-  /\b429\b|too[_\s-]?many[_\s-]?requests|\brate[_\s-]?limit(?:ed|ing)?\b|\busage limit\b|quota[_\s-]?(?:exceeded|exhausted|reached|limit)|\boverage\b/i;
+  /\b429\b|too[_\s-]?many[_\s-]?requests|\brate[_\s-]?limit(?:ed|ing)?\b|\b(?:usage|session) limit\b|quota[_\s-]?(?:exceeded|exhausted|reached|limit)|\boverage\b/i;
 const AUTH_RE =
   /\b40[13]\b|authentication_error|invalid authentication credentials|\bunauthorized\b|\bunauthenticated\b|permission_error|please log.?in|not authenticated|token.*(?:expired|invalid)/i;
 const SERVER_ERROR_RE =

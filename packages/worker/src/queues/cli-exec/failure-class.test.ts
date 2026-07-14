@@ -35,6 +35,10 @@ describe('classifyProviderFatal', () => {
     'Error: 429 Too Many Requests',
     'quota exceeded for this billing period',
     'monthly usage limit reached',
+    // Claude subscription session-limit wording (original failing input) — no 429/quota
+    // in the CLI output, so it must match on the "session limit" prose or the allowance
+    // watch never arms and the user is not notified when the window resets.
+    "You've hit your session limit · resets 8:50am (UTC)",
   ])('classifies %s as rate_limit', (msg) => {
     expect(classifyProviderFatal(1, msg, null)).toBe('rate_limit');
   });
