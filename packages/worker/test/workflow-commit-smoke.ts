@@ -204,6 +204,7 @@ async function main(): Promise<void> {
       // 00-triage runs first now; pick the full pipeline so this smoke still
       // exercises every step (no execution-path trimming).
       '00-triage': { path: 'full_workflow' },
+      '00b-estimate': { estimatedHours: 1 },
       '01-declare-deps': {
         runtimes: ['node'],
         nodeVersion: '22',

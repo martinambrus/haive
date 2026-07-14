@@ -38,6 +38,7 @@ const SPINE: readonly string[] = [
   MODEL_HEALTH_STEP_ID,
   SYNC_BASE_STEP_ID,
   TRIAGE_STEP_ID,
+  '00b-estimate',
   '01-worktree-setup',
   '01-debug-mode',
   '01a-app-boot',

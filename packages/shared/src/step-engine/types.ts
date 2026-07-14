@@ -167,6 +167,7 @@ export const CLI_DISPATCH_STEP_IDS: readonly string[] = [
   '11-final-review',
   // workflow
   '00-triage',
+  '00b-estimate',
   '01a-app-boot',
   '03-phase-0a-discovery',
   '03b-business-requirements',

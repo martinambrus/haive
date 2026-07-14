@@ -244,6 +244,7 @@ async function main(): Promise<void> {
       // fix-loop steps (07b/08/08c -> 07) are all present and the walk does not
       // fall back to the heuristic default (which could trim the path).
       '00-triage': { path: 'full_workflow' },
+      '00b-estimate': { estimatedHours: 1 },
       '01-declare-deps': {
         runtimes: ['node'],
         nodeVersion: '22',
