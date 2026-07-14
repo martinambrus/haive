@@ -120,6 +120,16 @@ export const tasks = pgTable(
      *  an audit record. */
     worktreePath: text('worktree_path'),
     worktreeBranch: text('worktree_branch'),
+    /** Durable record of the final workflow commit and the repo-relative paths it
+     *  changed, written by 10-gate-3-commit apply. Both are computed today but only
+     *  survive in step output (nulled by _step-reset) or a worktree artifact (deleted on
+     *  cleanup); persisted on the task row so a completed task's touched-file set stays
+     *  queryable after teardown — the anchor 00b-estimate uses to rank prior tasks by
+     *  file overlap ("this feature touches files earlier tasks touched"). changed_paths
+     *  is capped (MAX_PERSISTED_CHANGED_PATHS). Both NULL until the commit step runs, on
+     *  legacy rows, and on a task that committed nothing. */
+    commitSha: text('commit_sha'),
+    changedPaths: jsonb('changed_paths').$type<string[]>(),
     memoryLimitMb: integer('memory_limit_mb'),
     cpuLimitMilli: integer('cpu_limit_milli'),
     metadata: jsonb('metadata').$type<Record<string, unknown>>(),
@@ -192,6 +202,13 @@ export const tasks = pgTable(
      *  header and a footer verdict card. NULL = no estimate; the comparison
      *  surfaces stay hidden. doublePrecision so it round-trips as a JS number. */
     estimatedTimeHours: doublePrecision('estimated_time_hours'),
+    /** The AI's learned effort estimate (decimal hours), written by 00b-estimate from
+     *  the repository's prior completed tasks and their MEASURED effort. Kept SEPARATE
+     *  from the human/confirmed estimatedTimeHours (the 00b form defaults to this value
+     *  and the user may accept or override it) so AI accuracy stays measurable against
+     *  actual effort over time — that (aiEstimate, actual) pair is the calibration
+     *  signal 00b feeds itself. NULL until 00b runs, and on legacy rows. */
+    aiEstimatedTimeHours: doublePrecision('ai_estimated_time_hours'),
     /** Execution path chosen by the 00-triage step: 'quick_bugfix' | 'plan_tasklist'
      *  | 'full_workflow'. NULL until triage records it (and on legacy rows); buildRunList
      *  runs the full workflow when unset, and trims the workflow step list to the chosen
