@@ -724,24 +724,37 @@ async function loadProviders(db: Database, userId: string): Promise<CliProviderR
   return rows;
 }
 
-/** Fair-scheduling priority: a user's in-flight (enqueued or running, not yet
- *  ended) CLI invocation count. Used as the BullMQ priority (lower = sooner) so a
- *  freed concurrency slot is handed to the most-starved user rather than the next
- *  FIFO job from one task's fan-out. cli_invocations has no user_id, so join
- *  through tasks; superseded/ended rows are excluded. */
-async function userCliBacklog(db: Database, userId: string): Promise<number> {
+/** Composite fair-scheduling priority bands (BullMQ priority: lower = sooner, max
+ *  ~2^21). priority = taskRank * FAIR_RANK_MULTIPLIER + userTiebreak, so a task's
+ *  Nth in-flight agent shares a band with every other task's Nth agent (round-robin
+ *  across tasks — one task's fan-out cannot front-load its later terminals ahead of
+ *  another task's first terminal), and within a band the least-loaded user sorts
+ *  first. Both terms are clamped so the product stays under the ceiling:
+ *  FAIR_TASK_RANK_MAX * FAIR_RANK_MULTIPLIER + FAIR_USER_TIEBREAK_MAX < 2^21. */
+const FAIR_RANK_MULTIPLIER = 1000;
+const FAIR_USER_TIEBREAK_MAX = FAIR_RANK_MULTIPLIER - 1; // never bleeds into the next band
+const FAIR_TASK_RANK_MAX = 2000;
+
+/** In-flight (enqueued or running, not yet ended/superseded) CLI invocation counts
+ *  for one enqueue, in a single scan of the small in-flight set: `task` = this
+ *  task's count (its rank, since the invocation row is inserted before enqueue) and
+ *  `user` = this user's count across all their tasks (the cross-user tiebreak).
+ *  cli_invocations has no user_id, so join through tasks; the FILTERs partition the
+ *  same in-flight set two ways. */
+async function cliBacklogCounts(
+  db: Database,
+  userId: string,
+  taskId: string,
+): Promise<{ task: number; user: number }> {
   const rows = await db
-    .select({ n: sql<number>`count(*)::int` })
+    .select({
+      task: sql<number>`count(*) filter (where ${schema.cliInvocations.taskId} = ${taskId})::int`,
+      user: sql<number>`count(*) filter (where ${schema.tasks.userId} = ${userId})::int`,
+    })
     .from(schema.cliInvocations)
     .innerJoin(schema.tasks, eq(schema.cliInvocations.taskId, schema.tasks.id))
-    .where(
-      and(
-        eq(schema.tasks.userId, userId),
-        isNull(schema.cliInvocations.endedAt),
-        isNull(schema.cliInvocations.supersededAt),
-      ),
-    );
-  return rows[0]?.n ?? 0;
+    .where(and(isNull(schema.cliInvocations.endedAt), isNull(schema.cliInvocations.supersededAt)));
+  return { task: rows[0]?.task ?? 0, user: rows[0]?.user ?? 0 };
 }
 
 const workerDeps: WorkerDeps = {
@@ -753,13 +766,17 @@ const workerDeps: WorkerDeps = {
       removeOnComplete: 100,
       removeOnFail: 100,
     };
-    // Fair scheduling (kill-switch'd): priority = this user's in-flight CLI
-    // backlog so a freed slot goes to the most-starved user, not the next job in
-    // one task's fan-out. Fail-soft — a stale count only mis-orders, never blocks.
+    // Fair scheduling (kill-switch'd): composite priority round-robins across tasks
+    // (primary = this task's in-flight rank) so one task's fan-out cannot front-load
+    // its later terminals ahead of another task's first terminal, then breaks ties
+    // by this user's in-flight backlog so the least-loaded user wins equal ranks
+    // (cross-user fairness). Fail-soft — a stale count only mis-orders, never blocks.
     try {
       if (await configService.getBoolean(CONFIG_KEYS.FAIR_SCHEDULING_ENABLED, true)) {
-        const backlog = await userCliBacklog(getDb(), payload.userId);
-        if (backlog > 0) opts.priority = Math.min(backlog, 1_000_000);
+        const counts = await cliBacklogCounts(getDb(), payload.userId, payload.taskId);
+        const rank = Math.min(Math.max(counts.task, 1), FAIR_TASK_RANK_MAX);
+        const tiebreak = Math.min(counts.user, FAIR_USER_TIEBREAK_MAX);
+        opts.priority = rank * FAIR_RANK_MULTIPLIER + tiebreak;
       }
     } catch (err) {
       logger.warn({ err, userId: payload.userId }, 'fair-scheduling priority compute failed; FIFO');
