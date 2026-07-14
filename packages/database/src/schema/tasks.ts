@@ -209,6 +209,12 @@ export const tasks = pgTable(
      *  actual effort over time — that (aiEstimate, actual) pair is the calibration
      *  signal 00b feeds itself. NULL until 00b runs, and on legacy rows. */
     aiEstimatedTimeHours: doublePrecision('ai_estimated_time_hours'),
+    /** Low/high effort band (decimal hours) around the AI estimate, from the spread of
+     *  the anchor tasks' actual effort (p20/p80). Both NULL until 00b-estimate runs with
+     *  enough anchors, and on legacy rows. Shown as a confidence range on the verdict
+     *  card; the point estimate stays ai_estimated_time_hours. */
+    aiEstimateLowHours: doublePrecision('ai_estimate_low_hours'),
+    aiEstimateHighHours: doublePrecision('ai_estimate_high_hours'),
     /** Execution path chosen by the 00-triage step: 'quick_bugfix' | 'plan_tasklist'
      *  | 'full_workflow'. NULL until triage records it (and on legacy rows); buildRunList
      *  runs the full workflow when unset, and trims the workflow step list to the chosen

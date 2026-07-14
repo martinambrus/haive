@@ -198,3 +198,46 @@ export function overlapRefinedEstimate(
   ).size;
   return { hours, overlapAnchors: scored.length, matchedFiles };
 }
+
+/** Minimum anchors carrying BOTH a prior AI estimate and a measured actual before a
+ *  bias factor is trusted. */
+export const MIN_BIAS_ANCHORS = 2;
+
+/** Per-repo estimation bias: the median ratio of ACTUAL effort to the AI's own prior
+ *  estimate across anchors that carry both. > 1 means the estimator historically ran
+ *  UNDER (tasks took longer than predicted); < 1 means it ran over. Clamped to
+ *  [0.25, 4] so a single outlier can't wildly skew a fresh estimate, and null until at
+ *  least MIN_BIAS_ANCHORS tasks have an (estimate, actual) pair. Fed to the estimator as
+ *  an explicit correction hint rather than post-multiplied, so the LLM (which also sees
+ *  the raw pairs) does not double-correct. */
+export function computeBiasFactor(anchors: EstimateAnchor[]): number | null {
+  const ratios = anchors
+    .filter((a) => a.aiEstimateHours != null && a.aiEstimateHours > 0 && a.effortHours > 0)
+    .map((a) => a.effortHours / (a.aiEstimateHours as number));
+  if (ratios.length < MIN_BIAS_ANCHORS) return null;
+  return Math.min(4, Math.max(0.25, round2(median(ratios))));
+}
+
+/** Minimum anchors before a confidence range is offered. */
+export const MIN_RANGE_ANCHORS = 3;
+
+/** A p20/p80 effort band from the anchor tasks' ACTUAL effort — "tasks like this ran
+ *  low..high". A confidence range around the point estimate, not a re-derivation of it.
+ *  null until at least MIN_RANGE_ANCHORS anchors exist or when the band would collapse. */
+export function estimateRange(anchors: EstimateAnchor[]): { low: number; high: number } | null {
+  const efforts = anchors
+    .map((a) => a.effortHours)
+    .filter((h) => h > 0)
+    .sort((a, b) => a - b);
+  if (efforts.length < MIN_RANGE_ANCHORS) return null;
+  const pct = (p: number): number => {
+    const idx = Math.min(
+      efforts.length - 1,
+      Math.max(0, Math.round((p / 100) * (efforts.length - 1))),
+    );
+    return efforts[idx]!;
+  };
+  const low = clampHours(round2(pct(20)));
+  const high = clampHours(round2(pct(80)));
+  return high > low ? { low, high } : null;
+}

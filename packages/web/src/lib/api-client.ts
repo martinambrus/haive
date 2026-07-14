@@ -484,6 +484,10 @@ export interface Task {
    *  separate from the confirmed estimatedTimeHours so AI accuracy stays visible against
    *  actual effort. null on tasks that never ran the estimate step. */
   aiEstimatedTimeHours?: number | null;
+  /** Low/high effort band (decimal hours) around the AI estimate, from the spread of the
+   *  anchor tasks' actual effort. Both null until 00b-estimate has enough anchors. */
+  aiEstimateLowHours?: number | null;
+  aiEstimateHighHours?: number | null;
   status: TaskStatus;
   /** Auto-continue: the runner auto-submits info-only forms and gate-1
    *  pre-answers so the workflow runs hands-free between gates. Toggleable

@@ -6,6 +6,8 @@ import { parseJsonLoose } from '../_fenced-json.js';
 import {
   buildAnchors,
   clampHours,
+  computeBiasFactor,
+  estimateRange,
   heuristicEstimate,
   round2,
   type EstimateAnchor,
@@ -40,6 +42,9 @@ interface EstimateDetect {
    *  defaults to this (respect an explicit human value) over the AI number. */
   manualEstimateHours: number | null;
   anchors: EstimateAnchor[];
+  /** Median actual/estimate ratio over prior tasks that carry both; null until enough
+   *  history. Fed to the estimator as an explicit calibration hint. */
+  biasFactor: number | null;
   /** Deterministic baseline used as the recommendation when the LLM can't run. */
   heuristicHours: number;
   heuristicReason: string;
@@ -184,6 +189,7 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
       executionPath,
       manualEstimateHours,
       anchors,
+      biasFactor: computeBiasFactor(anchors),
       heuristicHours: h.hours,
       heuristicReason: h.reason,
     };
@@ -212,6 +218,12 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
         '',
         '=== Prior completed tasks in this repository (measured effort) ===',
         anchorBlock,
+        ...(d.biasFactor != null && (d.biasFactor >= 1.15 || d.biasFactor <= 0.85)
+          ? [
+              '',
+              `Calibration: across prior tasks with an AI estimate, ACTUAL effort was about ${d.biasFactor}x the estimate — bias your number in that direction.`,
+            ]
+          : []),
         '',
         `A deterministic baseline suggests ${d.heuristicHours}h (${d.heuristicReason}). Use`,
         'your own judgment anchored on the tasks above.',
@@ -300,11 +312,14 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
       Number.isFinite(submitted) && submitted > 0
         ? clampHours(round2(submitted))
         : clampHours(detected.manualEstimateHours ?? aiHours);
+    const range = estimateRange(detected.anchors);
 
     await ctx.db
       .update(schema.tasks)
       .set({
         aiEstimatedTimeHours: aiHours,
+        aiEstimateLowHours: range?.low ?? null,
+        aiEstimateHighHours: range?.high ?? null,
         estimatedTimeHours: confirmedHours,
         updatedAt: new Date(),
       })

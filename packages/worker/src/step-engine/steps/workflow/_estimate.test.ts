@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
+  computeBiasFactor,
   effortHoursFromSteps,
+  estimateRange,
   heuristicEstimate,
   overlapRefinedEstimate,
   type EstimateAnchor,
@@ -103,5 +105,39 @@ describe('overlapRefinedEstimate', () => {
     const anchors = [anchor(0, { changedPaths: ['a'] }), anchor(6, { changedPaths: ['a'] })];
     // Only one anchor has effort>0 AND overlap -> below the min, so null.
     expect(overlapRefinedEstimate(anchors, ['a'])).toBeNull();
+  });
+});
+
+describe('computeBiasFactor', () => {
+  it('null with fewer than 2 anchors carrying both estimate and actual', () => {
+    expect(computeBiasFactor([anchor(4, { aiEstimateHours: 2 })])).toBeNull();
+    expect(computeBiasFactor([anchor(4), anchor(6)])).toBeNull(); // no aiEstimateHours
+  });
+
+  it('median ratio of actual to prior AI estimate', () => {
+    // ratios 4/2=2 and 6/2=3 -> median 2.5.
+    const anchors = [anchor(4, { aiEstimateHours: 2 }), anchor(6, { aiEstimateHours: 2 })];
+    expect(computeBiasFactor(anchors)).toBe(2.5);
+  });
+
+  it('clamps an extreme ratio into [0.25, 4]', () => {
+    const anchors = [anchor(100, { aiEstimateHours: 1 }), anchor(50, { aiEstimateHours: 1 })];
+    expect(computeBiasFactor(anchors)).toBe(4);
+  });
+});
+
+describe('estimateRange', () => {
+  it('null with fewer than 3 usable anchors', () => {
+    expect(estimateRange([anchor(2), anchor(4)])).toBeNull();
+  });
+
+  it('p20/p80 band from the anchor efforts', () => {
+    // sorted [1,2,3,4,5]: p20 -> index 1 (2h), p80 -> index 3 (4h).
+    const anchors = [anchor(1), anchor(2), anchor(3), anchor(4), anchor(5)];
+    expect(estimateRange(anchors)).toEqual({ low: 2, high: 4 });
+  });
+
+  it('null when the band would collapse (all equal)', () => {
+    expect(estimateRange([anchor(3), anchor(3), anchor(3)])).toBeNull();
   });
 });
