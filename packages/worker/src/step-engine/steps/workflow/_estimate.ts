@@ -45,6 +45,12 @@ export interface EstimateAnchor {
   confirmedEstimateHours: number | null;
   /** The files the task changed — the overlap signal ("touches the same feature"). */
   changedPaths: string[];
+  /** True when this anchor came from ANOTHER repository (same user, same detected
+   *  framework) as a cold-start fallback, not from this repo's own history. Cross-repo
+   *  anchors seed the heuristic / range when local history is thin, but are excluded from
+   *  the per-repo bias factor and file-overlap refinement (both of which are local-only
+   *  signals — a matching path or a prior estimate from a different repo is coincidental). */
+  crossRepo: boolean;
 }
 
 export function clampHours(n: number): number {
@@ -99,36 +105,41 @@ export function heuristicEstimate(
   };
 }
 
-/** Gather the anchor set: the repository's prior COMPLETED workflow tasks (newest first,
- *  capped) with their MEASURED effort (computeTaskTiming) and the files they changed.
- *  Same-type only — an onboarding's multi-hour run is not a workflow-effort anchor. */
-export async function buildAnchors(
-  db: Database,
-  taskId: string,
-  repositoryId: string,
-): Promise<EstimateAnchor[]> {
-  const priors = await db.query.tasks.findMany({
-    where: and(
-      eq(schema.tasks.repositoryId, repositoryId),
-      eq(schema.tasks.type, 'workflow'),
-      eq(schema.tasks.status, 'completed'),
-      ne(schema.tasks.id, taskId),
-    ),
-    orderBy: desc(schema.tasks.completedAt),
-    limit: MAX_ANCHORS,
-    columns: {
-      id: true,
-      title: true,
-      description: true,
-      executionPath: true,
-      currentRound: true,
-      changedPaths: true,
-      aiEstimatedTimeHours: true,
-      estimatedTimeHours: true,
-    },
-  });
-  if (priors.length === 0) return [];
+/** Below this many usable LOCAL anchors a repo is treated as cold-start, and buildAnchors
+ *  supplements from the same user's other same-framework repos (see buildColdStartAnchors). */
+export const COLD_START_MIN_ANCHORS = 3;
 
+/** The task columns an anchor is built from. Shared by the local + cross-repo queries. */
+const PRIOR_TASK_COLUMNS = {
+  id: true,
+  title: true,
+  description: true,
+  executionPath: true,
+  currentRound: true,
+  changedPaths: true,
+  aiEstimatedTimeHours: true,
+  estimatedTimeHours: true,
+} as const;
+
+interface PriorTaskRow {
+  id: string;
+  title: string;
+  description: string | null;
+  executionPath: string | null;
+  currentRound: number | null;
+  changedPaths: string[] | null;
+  aiEstimatedTimeHours: number | null;
+  estimatedTimeHours: number | null;
+}
+
+/** Turn prior task rows into anchors: join their step timing, compute MEASURED effort via
+ *  computeTaskTiming, and drop any with no measurable effort. `crossRepo` tags the origin. */
+async function hydrateAnchors(
+  db: Database,
+  priors: PriorTaskRow[],
+  crossRepo: boolean,
+): Promise<EstimateAnchor[]> {
+  if (priors.length === 0) return [];
   const priorIds = priors.map((p) => p.id);
   const stepRows = await db.query.taskSteps.findMany({
     where: inArray(schema.taskSteps.taskId, priorIds),
@@ -166,9 +177,75 @@ export async function buildAnchors(
       aiEstimateHours: p.aiEstimatedTimeHours ?? null,
       confirmedEstimateHours: p.estimatedTimeHours ?? null,
       changedPaths: p.changedPaths ?? [],
+      crossRepo,
     });
   }
   return anchors;
+}
+
+/** Gather the anchor set: the repository's prior COMPLETED workflow tasks (newest first,
+ *  capped) with their MEASURED effort (computeTaskTiming) and the files they changed.
+ *  Same-type only — an onboarding's multi-hour run is not a workflow-effort anchor. When
+ *  the repo has fewer than COLD_START_MIN_ANCHORS local anchors, it is supplemented with
+ *  cross-repo cold-start anchors from the same user's other same-framework repos. */
+export async function buildAnchors(
+  db: Database,
+  taskId: string,
+  repositoryId: string,
+): Promise<EstimateAnchor[]> {
+  const localPriors = await db.query.tasks.findMany({
+    where: and(
+      eq(schema.tasks.repositoryId, repositoryId),
+      eq(schema.tasks.type, 'workflow'),
+      eq(schema.tasks.status, 'completed'),
+      ne(schema.tasks.id, taskId),
+    ),
+    orderBy: desc(schema.tasks.completedAt),
+    limit: MAX_ANCHORS,
+    columns: PRIOR_TASK_COLUMNS,
+  });
+  const local = await hydrateAnchors(db, localPriors, false);
+  if (local.length >= COLD_START_MIN_ANCHORS) return local;
+  const cross = await buildColdStartAnchors(db, repositoryId, MAX_ANCHORS - local.length);
+  return [...local, ...cross];
+}
+
+/** Cold-start fallback: anchors from the SAME user's OTHER repositories that share this
+ *  repo's detected framework (a durable clone-time facet). Scoped to the same user so no
+ *  cross-tenant data leaks, and to the same framework so the anchors are stack-comparable.
+ *  Tagged crossRepo so downstream local-only signals (bias, overlap) exclude them. */
+async function buildColdStartAnchors(
+  db: Database,
+  repositoryId: string,
+  limit: number,
+): Promise<EstimateAnchor[]> {
+  if (limit <= 0) return [];
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, repositoryId),
+    columns: { userId: true, detectedFramework: true },
+  });
+  if (!repo?.detectedFramework) return []; // no framework -> nothing stack-comparable to match
+  const siblings = await db.query.repositories.findMany({
+    where: and(
+      eq(schema.repositories.userId, repo.userId),
+      eq(schema.repositories.detectedFramework, repo.detectedFramework),
+      ne(schema.repositories.id, repositoryId),
+    ),
+    columns: { id: true },
+  });
+  if (siblings.length === 0) return [];
+  const repoIds = siblings.map((r) => r.id);
+  const priors = await db.query.tasks.findMany({
+    where: and(
+      inArray(schema.tasks.repositoryId, repoIds),
+      eq(schema.tasks.type, 'workflow'),
+      eq(schema.tasks.status, 'completed'),
+    ),
+    orderBy: desc(schema.tasks.completedAt),
+    limit,
+    columns: PRIOR_TASK_COLUMNS,
+  });
+  return hydrateAnchors(db, priors, true);
 }
 
 /** Post-planning refinement: once the task's likely files are known (the sprint plan's
@@ -185,6 +262,9 @@ export function overlapRefinedEstimate(
   if (predictedFiles.length === 0) return null;
   const predicted = new Set(predictedFiles);
   const scored = anchors
+    // Local anchors only: a cross-repo anchor sharing a path string is coincidental, not
+    // the same feature, so it must not drive this repo's file-overlap refinement.
+    .filter((a) => !a.crossRepo)
     .map((a) => ({
       a,
       overlap: a.changedPaths.filter((p) => predicted.has(p)).length,
@@ -212,7 +292,12 @@ export const MIN_BIAS_ANCHORS = 2;
  *  the raw pairs) does not double-correct. */
 export function computeBiasFactor(anchors: EstimateAnchor[]): number | null {
   const ratios = anchors
-    .filter((a) => a.aiEstimateHours != null && a.aiEstimateHours > 0 && a.effortHours > 0)
+    // Local anchors only — bias is THIS repo's estimator calibration; another repo's
+    // (estimate, actual) pair is a different context and must not skew it.
+    .filter(
+      (a) =>
+        !a.crossRepo && a.aiEstimateHours != null && a.aiEstimateHours > 0 && a.effortHours > 0,
+    )
     .map((a) => a.effortHours / (a.aiEstimateHours as number));
   if (ratios.length < MIN_BIAS_ANCHORS) return null;
   return Math.min(4, Math.max(0.25, round2(median(ratios))));

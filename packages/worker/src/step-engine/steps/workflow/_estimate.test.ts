@@ -19,6 +19,7 @@ function anchor(effortHours: number, over: Partial<EstimateAnchor> = {}): Estima
     aiEstimateHours: null,
     confirmedEstimateHours: null,
     changedPaths: [],
+    crossRepo: false,
     ...over,
   };
 }
@@ -73,6 +74,12 @@ describe('heuristicEstimate', () => {
   it('ignores zero-effort anchors when computing the median', () => {
     expect(heuristicEstimate([anchor(0), anchor(4)], 'plan_tasklist').hours).toBe(4);
   });
+
+  it('counts cross-repo anchors in the median (cold-start seed)', () => {
+    // median([2,4]) = 3; cross-repo anchors DO feed the heuristic baseline.
+    const anchors = [anchor(2, { crossRepo: true }), anchor(4, { crossRepo: true })];
+    expect(heuristicEstimate(anchors, 'plan_tasklist').hours).toBe(3);
+  });
 });
 
 describe('overlapRefinedEstimate', () => {
@@ -106,6 +113,16 @@ describe('overlapRefinedEstimate', () => {
     // Only one anchor has effort>0 AND overlap -> below the min, so null.
     expect(overlapRefinedEstimate(anchors, ['a'])).toBeNull();
   });
+
+  it('excludes cross-repo anchors from file overlap (coincidental path match)', () => {
+    const anchors = [
+      anchor(2, { changedPaths: ['a'], crossRepo: true }),
+      anchor(4, { changedPaths: ['a'], crossRepo: true }),
+      anchor(6, { changedPaths: ['a'] }), // the only LOCAL overlap
+    ];
+    // The two cross-repo overlaps are ignored; one local overlap is below the min -> null.
+    expect(overlapRefinedEstimate(anchors, ['a'])).toBeNull();
+  });
 });
 
 describe('computeBiasFactor', () => {
@@ -123,6 +140,16 @@ describe('computeBiasFactor', () => {
   it('clamps an extreme ratio into [0.25, 4]', () => {
     const anchors = [anchor(100, { aiEstimateHours: 1 }), anchor(50, { aiEstimateHours: 1 })];
     expect(computeBiasFactor(anchors)).toBe(4);
+  });
+
+  it('excludes cross-repo anchors from the bias factor', () => {
+    const anchors = [
+      anchor(4, { aiEstimateHours: 2, crossRepo: true }),
+      anchor(6, { aiEstimateHours: 2, crossRepo: true }),
+      anchor(4, { aiEstimateHours: 2 }), // the only LOCAL (estimate, actual) pair
+    ];
+    // Two cross-repo pairs ignored; one local pair is below the min -> null.
+    expect(computeBiasFactor(anchors)).toBeNull();
   });
 });
 

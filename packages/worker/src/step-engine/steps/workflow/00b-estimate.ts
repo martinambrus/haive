@@ -73,6 +73,9 @@ const ESTIMATE_RULES = [
   '- If a prior task shows a previous AI estimate AND its actual effort, and the AI',
   '  consistently under- or over-estimated, correct your number in that direction.',
   '- With no relevant anchors, fall back to the task size implied by the triage path.',
+  '- Anchors marked "(other repo — same stack)" come from your other repositories on the',
+  '  same framework and appear only when this repository has little history of its own —',
+  '  treat them as a weak cold-start signal, below any same-repo anchor.',
   '',
   'Emit ONE JSON object inside a ```json fenced code block, and nothing else:',
   '{ "estimatedHours": <number>, "confidence": "low" | "medium" | "high",',
@@ -138,6 +141,7 @@ function renderAnchor(a: EstimateAnchor): string {
     a.executionPath ? `[${a.executionPath}]` : '',
     a.fixRounds > 0 ? `${a.fixRounds} fix round(s)` : '',
     a.aiEstimateHours != null ? `(AI predicted ${a.aiEstimateHours}h)` : '',
+    a.crossRepo ? '(other repo — same stack)' : '',
   ].filter(Boolean);
   let line = bits.join(' ');
   if (a.description) line += `\n    ${a.description}`;
