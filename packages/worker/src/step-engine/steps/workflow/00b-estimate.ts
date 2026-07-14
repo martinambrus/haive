@@ -1,66 +1,36 @@
-import { and, desc, eq, inArray, ne } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
-import { computeTaskTiming, type TaskTimingStep } from '@haive/shared/timing';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import {
+  buildAnchors,
+  clampHours,
+  heuristicEstimate,
+  round2,
+  type EstimateAnchor,
+} from './_estimate.js';
 
 // 00b-estimate — the pre-flight effort estimate. Runs right after 00-triage (index 0.6,
 // so it sorts ahead of the env-replicate prelude and 01-worktree-setup on every path)
 // and produces a LEARNED estimate of how long the task will take, anchored on THIS
-// repository's own prior completed tasks and their MEASURED effort. The target metric is
-// EFFORT (agent work + user-active time), matching the completion "verdict card" and
-// excluding idle / queue-park noise. A one-shot LLM reads the anchors, weights the prior
-// tasks whose changed files / description overlap the new task's area, corrects for its
-// own past bias, and emits an estimate; the user confirms or overrides it on the form.
-// The LLM is optional — with no usable CLI it degrades to a deterministic heuristic
-// (median anchor effort scaled by the triage path), so the step never blocks task start.
+// repository's own prior completed tasks and their MEASURED effort (see _estimate.ts).
+// The target metric is EFFORT (agent work + user-active time), matching the completion
+// "verdict card" and excluding idle / queue-park noise. A one-shot LLM reads the anchors,
+// weights the prior tasks whose changed files / description overlap the new task's area,
+// corrects for its own past bias, and emits an estimate; the user confirms or overrides
+// it on the form. The LLM is optional — with no usable CLI it degrades to a deterministic
+// heuristic, so estimation never blocks task start.
 //
 // The RAW AI number is stored on tasks.ai_estimated_time_hours (never user-edited) so AI
 // accuracy stays measurable against actual effort over time — that (aiEstimate, actual)
-// pair is the calibration signal fed back into future estimates. The CONFIRMED value goes
-// to tasks.estimated_time_hours, which the verdict card already compares against actual.
+// pair is the calibration signal. The CONFIRMED value goes to tasks.estimated_time_hours,
+// which the verdict card already compares against actual. The post-planning refinement
+// (06b-sprint-planning) later sharpens ai_estimated_time_hours once the task's files are
+// known.
 
-/** Ceiling on how many prior tasks to hand the model as anchors. */
-const MAX_ANCHORS = 30;
-/** Per-anchor description budget in the prompt / info panel. */
-const ANCHOR_DESC_CAP = 240;
 /** Per-anchor changed-path budget shown to the model (the overlap signal). */
 const ANCHOR_PATHS_SHOWN = 12;
-
-/** Multiplier applied to the median anchor effort per triage path in the heuristic
- *  fallback: a quick bugfix is lighter than the median task, the full workflow heavier. */
-const PATH_SCALE: Record<string, number> = {
-  quick_bugfix: 0.5,
-  plan_tasklist: 1.0,
-  full_workflow: 1.5,
-};
-/** Cold-start baseline (decimal hours) when the repo has NO usable prior-task anchors —
- *  a sane per-path default the model/heuristic starts from until real actuals accrue. */
-const FALLBACK_HOURS: Record<string, number> = {
-  quick_bugfix: 0.5,
-  plan_tasklist: 2,
-  full_workflow: 6,
-};
-/** Same [>0, 1000] envelope the shared task schema enforces on estimated_time_hours. */
-const MIN_HOURS = 0.05;
-const MAX_HOURS = 1000;
-
-export interface EstimateAnchor {
-  title: string;
-  description: string;
-  executionPath: string | null;
-  /** Fix-loop rounds the task needed (0 = clean first pass); a complexity proxy. */
-  fixRounds: number;
-  /** MEASURED effort = (work + user-active) ms / 3.6e6, rounded to 2 decimals. */
-  effortHours: number;
-  /** This task's own prior AI estimate + confirmed estimate, when present, so the model
-   *  can see where past estimates missed and correct its bias. Null before this feature. */
-  aiEstimateHours: number | null;
-  confirmedEstimateHours: number | null;
-  /** The files the task changed — the overlap signal ("touches the same feature"). */
-  changedPaths: string[];
-}
 
 interface EstimateDetect {
   title: string;
@@ -104,59 +74,6 @@ const ESTIMATE_RULES = [
   '  "rationale": "<one or two sentences naming the prior tasks you anchored on>",',
   '  "similarPriorTasks": ["<title>", ...], "predictedAreas": ["<path or area>", ...] }',
 ] as const;
-
-function clampHours(n: number): number {
-  return Math.min(MAX_HOURS, Math.max(MIN_HOURS, n));
-}
-
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
-}
-
-/** Effort in hours for one prior task from its step rows, via the SAME pure timing
- *  function the api/web use so the anchor matches the verdict card's actual. Completed
- *  tasks have no open steps, so nowMs only matters for the (excluded) live-wait branch. */
-export function effortHoursFromSteps(steps: TaskTimingStep[], nowMs: number): number {
-  const t = computeTaskTiming(steps, nowMs);
-  return round2((t.workMs + t.userActiveMs) / 3_600_000);
-}
-
-function median(nums: number[]): number {
-  if (nums.length === 0) return 0;
-  const sorted = [...nums].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  // Guarded non-empty above, so mid and mid-1 are valid indices; the assertions satisfy
-  // noUncheckedIndexedAccess without masking a real out-of-bounds.
-  const hi = sorted[mid]!;
-  return sorted.length % 2 === 0 ? (sorted[mid - 1]! + hi) / 2 : hi;
-}
-
-/** Deterministic baseline estimate: the median measured effort of the anchors scaled by
- *  the triage path, or a per-path cold-start constant when there are no anchors. Used as
- *  the LLM fallback and to seed the prompt. */
-export function heuristicEstimate(
-  anchors: EstimateAnchor[],
-  path: string | null,
-): { hours: number; reason: string } {
-  const scale = PATH_SCALE[path ?? ''] ?? 1.0;
-  const efforts = anchors.map((a) => a.effortHours).filter((h) => h > 0);
-  if (efforts.length === 0) {
-    const hours = FALLBACK_HOURS[path ?? ''] ?? 2;
-    return {
-      hours: clampHours(hours),
-      reason: `No prior completed tasks to learn from — using the ${
-        path ?? 'default'
-      } path baseline of ${hours}h.`,
-    };
-  }
-  const hours = clampHours(round2(median(efforts) * scale));
-  return {
-    hours,
-    reason: `Median effort of ${efforts.length} prior task(s) (${round2(
-      median(efforts),
-    )}h) scaled ${scale}x for the ${path ?? 'default'} path.`,
-  };
-}
 
 /** Parse the classifier output (raw string with a fenced JSON object, or an already
  *  parsed object) into a usable estimate, or null when unusable. */
@@ -257,72 +174,9 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
     const description = task?.description ?? '';
     const executionPath = task?.executionPath ?? null;
     const manualEstimateHours = task?.estimatedTimeHours ?? null;
-
-    const anchors: EstimateAnchor[] = [];
-    if (task?.repositoryId) {
-      // Prior COMPLETED workflow tasks in the same repo (newest first). Same-type only —
-      // an onboarding's multi-hour run is not a workflow-effort anchor.
-      const priors = await ctx.db.query.tasks.findMany({
-        where: and(
-          eq(schema.tasks.repositoryId, task.repositoryId),
-          eq(schema.tasks.type, 'workflow'),
-          eq(schema.tasks.status, 'completed'),
-          ne(schema.tasks.id, ctx.taskId),
-        ),
-        orderBy: desc(schema.tasks.completedAt),
-        limit: MAX_ANCHORS,
-        columns: {
-          id: true,
-          title: true,
-          description: true,
-          executionPath: true,
-          currentRound: true,
-          changedPaths: true,
-          aiEstimatedTimeHours: true,
-          estimatedTimeHours: true,
-        },
-      });
-      if (priors.length > 0) {
-        const priorIds = priors.map((p) => p.id);
-        const stepRows = await ctx.db.query.taskSteps.findMany({
-          where: inArray(schema.taskSteps.taskId, priorIds),
-          columns: {
-            taskId: true,
-            startedAt: true,
-            endedAt: true,
-            idleMs: true,
-            userActiveMs: true,
-            waitingStartedAt: true,
-            status: true,
-            carriedWorkMs: true,
-            carriedIdleMs: true,
-            carriedUserActiveMs: true,
-          },
-        });
-        const stepsByTask = new Map<string, TaskTimingStep[]>();
-        for (const s of stepRows) {
-          const list = stepsByTask.get(s.taskId) ?? [];
-          list.push(s as TaskTimingStep);
-          stepsByTask.set(s.taskId, list);
-        }
-        const nowMs = Date.now();
-        for (const p of priors) {
-          const effortHours = effortHoursFromSteps(stepsByTask.get(p.id) ?? [], nowMs);
-          if (effortHours <= 0) continue; // no measurable effort — not a useful anchor
-          anchors.push({
-            title: p.title,
-            description: (p.description ?? '').trim().slice(0, ANCHOR_DESC_CAP),
-            executionPath: p.executionPath ?? null,
-            fixRounds: p.currentRound ?? 0,
-            effortHours,
-            aiEstimateHours: p.aiEstimatedTimeHours ?? null,
-            confirmedEstimateHours: p.estimatedTimeHours ?? null,
-            changedPaths: p.changedPaths ?? [],
-          });
-        }
-      }
-    }
-
+    const anchors = task?.repositoryId
+      ? await buildAnchors(ctx.db, ctx.taskId, task.repositoryId)
+      : [];
     const h = heuristicEstimate(anchors, executionPath);
     return {
       title,
@@ -402,7 +256,7 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
         'Effort = active agent work + your time at review gates (idle / queue time excluded). ' +
         'Defaults to the AI estimate; adjust if you disagree.',
       default: round2(defaultHours),
-      min: MIN_HOURS,
+      min: 0.05,
       step: 0.25,
       required: true,
     });

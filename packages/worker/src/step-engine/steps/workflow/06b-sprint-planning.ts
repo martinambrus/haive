@@ -11,6 +11,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import { buildAnchors, overlapRefinedEstimate } from './_estimate.js';
 
 // Phase 2c — Sprint planning (the DAG decision). An agent reads the spec
 // approved at gate 1 and decides mode 'single' (one implementation agent, the
@@ -230,6 +231,54 @@ async function fanOutDag(
   return { issueCount: plan.issues.length, levelCount: levels.length };
 }
 
+/** Post-planning refinement of the pre-flight effort estimate (00b-estimate). Once the
+ *  planner names the files the task will touch (each issue's estimated_files), re-anchor
+ *  on the prior tasks that ACTUALLY changed those files — a hard file-overlap signal the
+ *  00b estimate could only predict. Overwrites the calibration estimate on the task row
+ *  (tasks.ai_estimated_time_hours) and records the delta; leaves the user's CONFIRMED
+ *  estimated_time_hours untouched. Best-effort and no-op unless the planner decomposed
+ *  (single mode emits no estimated_files) AND enough prior tasks overlap — a metadata
+ *  refinement must never fail the planning step. */
+async function refineEstimateFromPlan(ctx: StepContext, plan: SprintPlan): Promise<void> {
+  try {
+    const predictedFiles = Array.from(
+      new Set(plan.issues.flatMap((i) => i.estimated_files ?? []).filter((p) => p.length > 0)),
+    );
+    if (predictedFiles.length === 0) return;
+    const task = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { repositoryId: true, aiEstimatedTimeHours: true },
+    });
+    if (!task?.repositoryId) return;
+    const anchors = await buildAnchors(ctx.db, ctx.taskId, task.repositoryId);
+    const refined = overlapRefinedEstimate(anchors, predictedFiles);
+    if (!refined) return;
+    const previous = task.aiEstimatedTimeHours ?? null;
+    await ctx.db
+      .update(schema.tasks)
+      .set({ aiEstimatedTimeHours: refined.hours, updatedAt: new Date() })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    await ctx.db.insert(schema.taskEvents).values({
+      taskId: ctx.taskId,
+      taskStepId: ctx.taskStepId,
+      eventType: 'estimate.refined',
+      payload: {
+        previous,
+        refined: refined.hours,
+        overlapAnchors: refined.overlapAnchors,
+        matchedFiles: refined.matchedFiles,
+        predictedFileCount: predictedFiles.length,
+      },
+    });
+    ctx.logger.info(
+      { previous, refined: refined.hours, overlapAnchors: refined.overlapAnchors },
+      'post-planning estimate refined from file overlap',
+    );
+  } catch (err) {
+    ctx.logger.warn({ err }, 'post-planning estimate refinement failed (skipped)');
+  }
+}
+
 export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlanningApply> = {
   metadata: {
     id: '06b-sprint-planning',
@@ -396,6 +445,10 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
       ctx.logger.warn('sprint planner output unparseable — single-agent fallback (degraded)');
     }
     ctx.logger.info({ mode, planId, issueCount, levelCount, degraded }, 'sprint plan recorded');
+    // Sharpen the pre-flight effort estimate now that the plan names the files the task
+    // will touch: anchor on prior tasks that actually changed those files. Best-effort,
+    // dag-only in practice (single mode emits no estimated_files). Never fails the step.
+    await refineEstimateFromPlan(ctx, plan);
     return {
       mode,
       planId,
