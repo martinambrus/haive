@@ -1150,6 +1150,7 @@ export default function TaskDetailPage() {
           mergedAt={task.prMergedAt}
           finalizeMode={task.prFinalizeMode}
           pollError={task.prPollError}
+          reopenable={task.status === 'waiting_pr'}
         />
       )}
 

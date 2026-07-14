@@ -19,6 +19,11 @@ interface PrStatusPanelProps {
   mergedAt: string | null | undefined;
   finalizeMode: 'auto' | 'manual' | null | undefined;
   pollError: string | null | undefined;
+  /** Whether the environment can still be reopened — only while the task is parked in
+   *  waiting_pr (the worktree is kept). Once the task completes/cancels, the worktree +
+   *  runtime are reaped, so the reopen affordance is hidden (it would spin forever
+   *  trying to warm a runtime that no longer exists). */
+  reopenable: boolean;
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -52,6 +57,7 @@ export function PrStatusPanel({
   mergedAt,
   finalizeMode,
   pollError,
+  reopenable,
 }: PrStatusPanelProps) {
   const badge = stateBadge(state);
   const providerLabel = (provider && PROVIDER_LABELS[provider]) || provider || 'forge';
@@ -96,15 +102,18 @@ export function PrStatusPanel({
         </p>
       )}
 
-      {/* Reopen the environment to address review feedback. Expanding this re-warms the
-          torn-down runtime via the same /access-urls ensure handshake the browser panel
-          uses; the surviving worktree is what it rebuilds from. Editing itself is via the
-          Editor/Terminal tabs (both stay enabled in waiting_pr). */}
-      <BrowserDirectPanel
-        taskId={taskId}
-        title="Reopen the app environment to address review feedback"
-        persistId="pr-wait"
-      />
+      {/* Reopen the environment to address review feedback — only while the task is still
+          parked in waiting_pr (worktree kept). Expanding this re-warms the torn-down
+          runtime via the same /access-urls ensure handshake the browser panel uses.
+          Hidden once the task completes/cancels: the worktree is gone, so an ensure would
+          spin "starting…" forever against a runtime that can never come up. */}
+      {reopenable && (
+        <BrowserDirectPanel
+          taskId={taskId}
+          title="Reopen the app environment to address review feedback"
+          persistId="pr-wait"
+        />
+      )}
     </Card>
   );
 }
