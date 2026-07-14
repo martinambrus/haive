@@ -10,10 +10,12 @@ import type {
 // Mirrors shared/catalog's CODEX_EFFORT_SCALE. Duplicated here because the
 // adapter layer reads the scale directly off itself (effortScale is on every
 // adapter), and we don't want worker code importing shared/catalog just for
-// one constant. Keep the two in sync when adding/removing levels.
+// one constant. Keep the two in sync when adding/removing levels. `minimal` is
+// omitted (it disables web search); `max`/`ultra` are the newest, highest
+// levels and are model-dependent, so an unsupported model rejects the run.
 const CODEX_EFFORT_SCALE: EffortScale = {
-  values: ['minimal', 'low', 'medium', 'high', 'xhigh'],
-  max: 'xhigh',
+  values: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+  max: 'ultra',
 };
 
 export class CodexAdapter extends BaseCliAdapter {

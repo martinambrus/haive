@@ -72,6 +72,18 @@ export interface CliProviderMetadata {
   costBasis: 'metered' | 'subscription' | 'local' | 'estimate';
 }
 
+// Claude Code drives the real Anthropic `claude` binary, which accepts an
+// `xhigh` reasoning level between `high` and `max`. Kept separate from
+// CLAUDE_LIKE_EFFORT_SCALE so the zai wrapper — same binary, but a GLM backend
+// that does not honor xhigh — stays on the conservative shared scale.
+const CLAUDE_CODE_EFFORT_SCALE: EffortScaleMetadata = {
+  values: ['low', 'medium', 'high', 'xhigh', 'max'],
+  max: 'max',
+};
+
+// The claude-family effort scale for CLI wrappers that drive the claude binary
+// against a non-Anthropic backend (zai/GLM). No `xhigh` — that level is
+// Anthropic-model-specific.
 const CLAUDE_LIKE_EFFORT_SCALE: EffortScaleMetadata = {
   values: ['low', 'medium', 'high', 'max'],
   max: 'max',
@@ -79,13 +91,15 @@ const CLAUDE_LIKE_EFFORT_SCALE: EffortScaleMetadata = {
 
 // Codex's native reasoning effort levels exposed via `model_reasoning_effort`
 // in config.toml or per-run as `-c model_reasoning_effort="<level>"` on
-// `codex exec`. `xhigh` is model-dependent (GPT-5 family); picking it on an
-// older model will cause the CLI to reject the run, but that's the user's
-// call — we surface the CLI's actual vocabulary rather than remapping onto
-// claude-code's scale.
+// `codex exec`, ordered low-to-high per the CLI's own ReasoningEffort enum.
+// `minimal` is intentionally omitted: it disables web search, which Haive's
+// codex steps rely on. `xhigh`/`max`/`ultra` are model-dependent (newer GPT-5
+// family); picking one on a model that does not support it makes the CLI reject
+// the run, but that's the user's call — we surface the CLI's actual vocabulary
+// rather than remapping onto claude-code's scale.
 const CODEX_EFFORT_SCALE: EffortScaleMetadata = {
-  values: ['minimal', 'low', 'medium', 'high', 'xhigh'],
-  max: 'xhigh',
+  values: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+  max: 'ultra',
 };
 
 export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> = {
@@ -105,7 +119,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     defaultModel: 'claude-sonnet-4-20250514',
     authConfigPaths: ['~/.config/claude', '~/.claude'],
     docsUrl: 'https://docs.anthropic.com/en/docs/claude-code',
-    effortScale: CLAUDE_LIKE_EFFORT_SCALE,
+    effortScale: CLAUDE_CODE_EFFORT_SCALE,
     projectSkillsDir: '.claude/skills',
     userSkillsPaths: [],
     projectAgentsDir: '.claude/agents',

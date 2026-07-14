@@ -10,8 +10,10 @@ import type {
   PluginInstallOpts,
 } from './types.js';
 
+// Mirrors shared/catalog's CLAUDE_CODE_EFFORT_SCALE. `xhigh` sits between
+// `high` and `max`; keep the two in sync when levels change.
 const CLAUDE_EFFORT_SCALE: EffortScale = {
-  values: ['low', 'medium', 'high', 'max'],
+  values: ['low', 'medium', 'high', 'xhigh', 'max'],
   max: 'max',
 };
 

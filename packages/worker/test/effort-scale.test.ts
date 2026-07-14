@@ -25,10 +25,10 @@ function makeProvider(overrides: ProviderOverrides): CliProviderRecord {
 }
 
 describe('effortScale declarations', () => {
-  it('claude-code exposes the four-level scale with max=max', () => {
+  it('claude-code exposes the five-level scale with max=max', () => {
     const adapter = cliAdapterRegistry.get('claude-code');
     expect(adapter.effortScale).not.toBeNull();
-    expect(adapter.effortScale!.values).toEqual(['low', 'medium', 'high', 'max']);
+    expect(adapter.effortScale!.values).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
     expect(adapter.effortScale!.max).toBe('max');
   });
 
@@ -39,11 +39,11 @@ describe('effortScale declarations', () => {
     expect(adapter.effortScale!.max).toBe('max');
   });
 
-  it('codex exposes the five-level scale with max=xhigh', () => {
+  it('codex exposes the six-level scale with max=ultra (no minimal)', () => {
     const adapter = cliAdapterRegistry.get('codex');
     expect(adapter.effortScale).not.toBeNull();
-    expect(adapter.effortScale!.values).toEqual(['minimal', 'low', 'medium', 'high', 'xhigh']);
-    expect(adapter.effortScale!.max).toBe('xhigh');
+    expect(adapter.effortScale!.values).toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+    expect(adapter.effortScale!.max).toBe('ultra');
   });
 
   it.each<CliProviderName>(['gemini', 'amp'])(
@@ -148,18 +148,18 @@ describe('codex arg-based effort injection', () => {
     return next && next.startsWith('model_reasoning_effort=') ? next : null;
   }
 
-  it('injects -c model_reasoning_effort="xhigh" by default (scale.max)', () => {
+  it('injects -c model_reasoning_effort="ultra" by default (scale.max)', () => {
     const adapter = cliAdapterRegistry.get('codex');
     const provider = makeProvider({ id: 'p1', name: 'codex' });
     const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w' });
-    expect(findReasoningArg(spec.args)).toBe('model_reasoning_effort="xhigh"');
+    expect(findReasoningArg(spec.args)).toBe('model_reasoning_effort="ultra"');
   });
 
   it('uses provider.effortLevel when set', () => {
     const adapter = cliAdapterRegistry.get('codex');
-    const provider = makeProvider({ id: 'p1', name: 'codex', effortLevel: 'minimal' });
+    const provider = makeProvider({ id: 'p1', name: 'codex', effortLevel: 'low' });
     const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w' });
-    expect(findReasoningArg(spec.args)).toBe('model_reasoning_effort="minimal"');
+    expect(findReasoningArg(spec.args)).toBe('model_reasoning_effort="low"');
   });
 
   it('opts.effortLevel overrides provider.effortLevel', () => {
