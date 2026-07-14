@@ -168,6 +168,41 @@ export async function deleteTaskAttachment(taskId: string, attachmentId: string)
   await api.delete(`/tasks/${taskId}/attachments/${attachmentId}`);
 }
 
+/** One completed task's AI-estimate-vs-actual-effort accuracy (estimation dashboard). */
+export interface EstimationAccuracyRow {
+  taskId: string;
+  title: string;
+  completedAt: string | null;
+  /** RAW AI estimate (decimal hours). */
+  aiEstimatedHours: number;
+  /** Human-confirmed estimate (decimal hours), for reference. */
+  confirmedHours: number | null;
+  /** MEASURED actual effort (work + user-active, decimal hours). */
+  actualHours: number;
+  /** Signed % error of the AI estimate vs actual ((actual-ai)/actual*100); positive means
+   *  the AI under-estimated (task took longer than predicted). */
+  signedErrorPct: number;
+  absErrorPct: number;
+}
+
+export interface EstimationAccuracySummary {
+  taskCount: number;
+  /** Mean Absolute Percentage Error of the AI estimate vs actual effort. */
+  mapePct: number;
+  /** Median actual/ai ratio: > 1 => the estimator ran under across the repo. */
+  medianBiasFactor: number | null;
+  underestimateCount: number;
+  overestimateCount: number;
+}
+
+export async function getEstimationAccuracy(
+  repositoryId: string,
+): Promise<{ rows: EstimationAccuracyRow[]; summary: EstimationAccuracySummary }> {
+  return api.get<{ rows: EstimationAccuracyRow[]; summary: EstimationAccuracySummary }>(
+    `/tasks/estimation-accuracy?repositoryId=${encodeURIComponent(repositoryId)}`,
+  );
+}
+
 export interface User {
   id: string;
   email: string;

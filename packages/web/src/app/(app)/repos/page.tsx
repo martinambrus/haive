@@ -385,6 +385,13 @@ function RepoCard(props: RepoCardProps) {
             </Link>
           )}
           {repo.status === 'ready' && (
+            <Link href={`/repos/${repo.id}/estimates`}>
+              <Button variant="secondary" size="sm">
+                Estimates
+              </Button>
+            </Link>
+          )}
+          {repo.status === 'ready' && (
             <Button variant="secondary" size="sm" onClick={downloadArchive} disabled={downloading}>
               {downloading ? 'Zipping...' : 'Download'}
             </Button>

@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  buildEstimationAccuracy,
   computeStepContribution,
   computeTaskTiming,
   createTaskRequestSchema,
@@ -297,6 +298,75 @@ taskRoutes.get('/feature-suggestions', async (c) => {
     .orderBy(desc(sql`count(*)`), asc(featureExpr))
     .limit(10);
   return c.json({ suggestions: rows.map((r) => r.feature) });
+});
+
+// Per-repo estimation-accuracy dashboard (task-time estimation v2.4). Completed workflow
+// tasks that carry a RAW AI estimate are paired with their MEASURED actual effort
+// (computeTaskTiming), and the shared aggregator derives per-task error + the repo-level
+// MAPE / median bias / over-under split. Empty until tasks complete through 00b-estimate.
+// Static path — must stay ABOVE '/:id' so it is not captured as an id.
+taskRoutes.get('/estimation-accuracy', async (c) => {
+  const userId = c.get('userId');
+  const repositoryId = c.req.query('repositoryId')?.trim();
+  if (!repositoryId) throw new HttpError(400, 'repositoryId is required');
+  const db = getDb();
+
+  const rows = await db.query.tasks.findMany({
+    where: and(
+      eq(schema.tasks.userId, userId),
+      eq(schema.tasks.repositoryId, repositoryId),
+      eq(schema.tasks.type, 'workflow'),
+      eq(schema.tasks.status, 'completed'),
+      isNotNull(schema.tasks.aiEstimatedTimeHours),
+    ),
+    orderBy: [desc(schema.tasks.completedAt)],
+    columns: {
+      id: true,
+      title: true,
+      completedAt: true,
+      aiEstimatedTimeHours: true,
+      estimatedTimeHours: true,
+    },
+  });
+
+  const taskIds = rows.map((r) => r.id);
+  const stepRows = taskIds.length
+    ? await db
+        .select({
+          taskId: schema.taskSteps.taskId,
+          startedAt: schema.taskSteps.startedAt,
+          endedAt: schema.taskSteps.endedAt,
+          idleMs: schema.taskSteps.idleMs,
+          userActiveMs: schema.taskSteps.userActiveMs,
+          waitingStartedAt: schema.taskSteps.waitingStartedAt,
+          status: schema.taskSteps.status,
+          carriedWorkMs: schema.taskSteps.carriedWorkMs,
+          carriedIdleMs: schema.taskSteps.carriedIdleMs,
+          carriedUserActiveMs: schema.taskSteps.carriedUserActiveMs,
+        })
+        .from(schema.taskSteps)
+        .where(inArray(schema.taskSteps.taskId, taskIds))
+    : [];
+  const stepsByTask = new Map<string, (typeof stepRows)[number][]>();
+  for (const s of stepRows) {
+    const list = stepsByTask.get(s.taskId);
+    if (list) list.push(s);
+    else stepsByTask.set(s.taskId, [s]);
+  }
+
+  const now = Date.now();
+  const data = rows.map((t) => {
+    const { workMs, userActiveMs } = computeTaskTiming(stepsByTask.get(t.id) ?? [], now);
+    return {
+      taskId: t.id,
+      title: t.title,
+      completedAt: t.completedAt ? t.completedAt.toISOString() : null,
+      aiEstimatedHours: t.aiEstimatedTimeHours ?? 0,
+      confirmedHours: t.estimatedTimeHours ?? null,
+      actualHours: Math.round(((workMs + userActiveMs) / 3_600_000) * 100) / 100,
+    };
+  });
+  return c.json(buildEstimationAccuracy(data));
 });
 
 taskRoutes.get('/:id', async (c) => {
