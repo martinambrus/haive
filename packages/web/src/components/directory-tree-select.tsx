@@ -181,9 +181,9 @@ function TreeNodeRow({
           className="shrink-0"
         />
 
-        {/* Folder icon */}
+        {/* Folder / file icon */}
         <span className="shrink-0 text-neutral-500">
-          {hasChildren ? (isExpanded ? 'dir' : 'dir') : 'dir'}
+          {node.kind === 'root-files' ? 'file' : 'dir'}
         </span>
 
         {/* Label */}

@@ -16,7 +16,7 @@ import { jsonrepair } from 'jsonrepair';
 import type { KbFileSummary } from './09-qa.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
 import {
-  isDeniedPath,
+  isDeniedFile,
   loadMiningScopeExcludeGlobs,
   noSubagentInstructionLines,
   scopeInstructionLines,
@@ -297,7 +297,7 @@ export async function collectShortFileTree(
     (rel, isDir) => {
       const parts = rel.split('/');
       if (parts.some((p) => IGNORE_DIRS.has(p))) return false;
-      if (isDeniedPath(rel, exclude)) return false;
+      if (isDeniedFile(rel, isDir, exclude)) return false;
       if (isDir) return false;
       return true;
     },

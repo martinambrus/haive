@@ -9,7 +9,7 @@ import {
 import type { OnboardingEnvironmentMirror, OnboardingToolingMirror } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { isDeniedPath, loadScopeExcludeGlobs } from '../onboarding/_scope.js';
+import { isDeniedFile, loadScopeExcludeGlobs } from '../onboarding/_scope.js';
 import {
   resolveRagConnection,
   ensureRagSchema,
@@ -101,7 +101,7 @@ export async function collectCodeFiles(
       // Per-repo onboarding scope deny list (06_7): keep task-end re-index scoped
       // to this project's own code, same as onboarding. New folders not on the
       // list stay in scope. Empty list → no-op.
-      if (isDeniedPath(rel, exclude)) return false;
+      if (isDeniedFile(rel, isDir, exclude)) return false;
       if (isDir) return false;
       return codeExts.has(path.extname(rel).toLowerCase());
     },

@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import type { TreeNode } from '@haive/shared';
 import {
   collectDenyFrontier,
+  isDeniedFile,
   isDeniedPath,
   noSubagentInstructionLines,
   scopeInstructionLines,
 } from './_scope.js';
+import { REPO_ROOT_NODE_PATH, ROOT_FILES_SCOPE } from '@haive/shared/scope-tree';
 
 function node(path: string, children?: TreeNode[]): TreeNode {
   return { path, label: path.split('/').pop() ?? path, children } as TreeNode;
@@ -74,6 +76,83 @@ describe('collectDenyFrontier', () => {
   });
 });
 
+describe('collectDenyFrontier (repo-root master transparency)', () => {
+  // One transparent 'repo-root' container wrapping the root-files leaf + dirs.
+  const masterTree: TreeNode[] = [
+    {
+      path: REPO_ROOT_NODE_PATH,
+      label: 'Repository root',
+      kind: 'repo-root',
+      children: [
+        { path: ROOT_FILES_SCOPE, label: 'root-level files', kind: 'root-files', fileCount: 3 },
+        node('themes', [node('themes/custom'), node('themes/contrib')]),
+        node('vendor'),
+      ],
+    },
+  ];
+  const frontier = (selected: string[]): string[] => {
+    const out: string[] = [];
+    collectDenyFrontier(masterTree, new Set(selected), out);
+    return out.sort();
+  };
+  const ALL = [
+    REPO_ROOT_NODE_PATH,
+    ROOT_FILES_SCOPE,
+    'themes',
+    'themes/custom',
+    'themes/contrib',
+    'vendor',
+  ];
+
+  it('unticking only the root-files leaf denies exactly the root-files token', () => {
+    expect(frontier(ALL.filter((p) => p !== ROOT_FILES_SCOPE))).toEqual([ROOT_FILES_SCOPE]);
+  });
+
+  it('everything selected denies nothing', () => {
+    expect(frontier(ALL)).toEqual([]);
+  });
+
+  it('unticking root files + a sibling dir denies both, keeps the rest', () => {
+    expect(frontier([REPO_ROOT_NODE_PATH, 'themes', 'themes/custom', 'themes/contrib'])).toEqual([
+      ROOT_FILES_SCOPE,
+      'vendor',
+    ]);
+  });
+
+  it('nothing selected lists per-child entries, never the container path', () => {
+    const deny = frontier([]);
+    expect(deny).toEqual([ROOT_FILES_SCOPE, 'themes', 'vendor'].sort());
+    expect(deny).not.toContain(REPO_ROOT_NODE_PATH);
+  });
+});
+
+describe('isDeniedFile', () => {
+  it('denies a repo-root-level file when the root-files token is set', () => {
+    expect(isDeniedFile('index.php', false, [ROOT_FILES_SCOPE])).toBe(true);
+    expect(isDeniedFile('composer.json', false, [ROOT_FILES_SCOPE])).toBe(true);
+  });
+
+  it('keeps files inside sub-directories even with the root-files token', () => {
+    expect(isDeniedFile('src/index.ts', false, [ROOT_FILES_SCOPE])).toBe(false);
+    expect(isDeniedFile('web/modules/custom/foo.php', false, [ROOT_FILES_SCOPE])).toBe(false);
+  });
+
+  it('never denies a directory via the root-files token', () => {
+    // a root-level DIR is slash-less too, but isDir guards it out
+    expect(isDeniedFile('src', true, [ROOT_FILES_SCOPE])).toBe(false);
+  });
+
+  it('keeps root files when the token is absent', () => {
+    expect(isDeniedFile('index.php', false, [])).toBe(false);
+    expect(isDeniedFile('index.php', false, ['vendor'])).toBe(false);
+  });
+
+  it('still honours directory-prefix denies alongside the token', () => {
+    expect(isDeniedFile('vendor/autoload.php', false, ['vendor', ROOT_FILES_SCOPE])).toBe(true);
+    expect(isDeniedFile('index.php', false, ['vendor', ROOT_FILES_SCOPE])).toBe(true);
+  });
+});
+
 describe('isDeniedPath', () => {
   const exclude = ['vendor', 'web/core', 'web/modules/contrib'];
 
@@ -115,5 +194,20 @@ describe('scopeInstructionLines', () => {
     // Has a header and closing note around the bullets.
     expect(lines[0]).toMatch(/Mining scope/i);
     expect(lines[lines.length - 1]).toBe('');
+  });
+
+  it('emits the block for the root-files token alone (not [])', () => {
+    const lines = scopeInstructionLines([ROOT_FILES_SCOPE]);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.join('\n')).toMatch(/root-level files/i);
+    // the '.' token is never rendered as a directory bullet
+    expect(lines).not.toContain('- .');
+  });
+
+  it('adds the root-files sentence alongside directory bullets', () => {
+    const lines = scopeInstructionLines(['vendor', ROOT_FILES_SCOPE]);
+    expect(lines).toContain('- vendor');
+    expect(lines).not.toContain('- .');
+    expect(lines.join('\n')).toMatch(/root-level files/i);
   });
 });

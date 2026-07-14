@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { Database } from '@haive/database';
 import type { TreeNode } from '@haive/shared';
+import { ROOT_FILES_SCOPE } from '@haive/shared/scope-tree';
 import { loadPreviousStepOutput } from './_helpers.js';
 
 /** Load the per-repo onboarding scope deny list (`repositories.scope_exclude_globs`)
@@ -40,6 +41,18 @@ export function isDeniedPath(rel: string, exclude: readonly string[]): boolean {
   return false;
 }
 
+/** File-aware deny test used by the enumeration walkers. A path is denied when
+ *  it matches the directory-prefix deny list (isDeniedPath) OR it is a
+ *  repo-root-level FILE — no slash, not a directory — and the deny list carries
+ *  ROOT_FILES_SCOPE. The walkers pass `isDir` from their own readdir, so the
+ *  root-files token excludes only real root files; root-level directories are
+ *  untouched (they have their own deny entries when unticked). */
+export function isDeniedFile(rel: string, isDir: boolean, exclude: readonly string[]): boolean {
+  if (isDeniedPath(rel, exclude)) return true;
+  if (!isDir && !rel.includes('/') && exclude.includes(ROOT_FILES_SCOPE)) return true;
+  return false;
+}
+
 /** Hard-scope instruction lines for a mining prompt. Confines the agent to the
  *  project's own in-scope directories: it may read/grep/glob only inside them, and
  *  may step out ONLY to follow a single named reference from an in-scope file — never
@@ -48,19 +61,39 @@ export function isDeniedPath(rel: string, exclude: readonly string[]): boolean {
  *  dominant token cost of onboarding. Returns `[]` when there is no deny list
  *  (nothing to constrain), so callers can spread it unconditionally. */
 export function scopeInstructionLines(exclude: readonly string[]): string[] {
-  if (exclude.length === 0) return [];
-  return [
+  const denyRootFiles = exclude.includes(ROOT_FILES_SCOPE);
+  const dirs = exclude.filter((g) => g !== ROOT_FILES_SCOPE);
+  if (dirs.length === 0 && !denyRootFiles) return [];
+
+  const lines: string[] = [
     '## Mining scope — HARD CONSTRAINT',
     "Read, grep, glob, mine and index files ONLY inside this project's own in-scope",
     'directories (those shown in the file tree above). Treat the in-scope set as a sandbox:',
     'your exploration MUST stay inside it. Being thorough means being thorough WITHIN scope —',
     'never widening the search to the rest of the repository.',
     '',
-    'The directories below are third-party / framework / generated code and are OUT OF SCOPE.',
-    'Do NOT open, read, grep, list, sample or crawl them to discover or document anything, and',
-    'never treat their code as a subject to mine in its own right:',
-    ...exclude.map((g) => `- ${g}`),
-    '',
+  ];
+
+  if (dirs.length > 0) {
+    lines.push(
+      'The directories below are third-party / framework / generated code and are OUT OF SCOPE.',
+      'Do NOT open, read, grep, list, sample or crawl them to discover or document anything, and',
+      'never treat their code as a subject to mine in its own right:',
+      ...dirs.map((g) => `- ${g}`),
+      '',
+    );
+  }
+
+  if (denyRootFiles) {
+    lines.push(
+      "Also OUT OF SCOPE: the repository's root-level files — the files that live directly in the",
+      'repo root (for example index.php, composer.json, top-level config files). Do NOT mine, read',
+      'to document, or index them. Files inside the in-scope sub-directories are unaffected.',
+      '',
+    );
+  }
+
+  lines.push(
     'The ONE permitted exception is a targeted reference lookup: when a specific in-scope file',
     'references a symbol defined out of scope (a parent class it extends, a service it injects,',
     'a function it imports), you MAY open THAT ONE referenced file to understand the in-scope',
@@ -72,7 +105,9 @@ export function scopeInstructionLines(exclude: readonly string[]): string[] {
     'enormous; crawling them burns large amounts of tokens and documents code this project did',
     'not write. Stay in scope; step out only to the single file a specific in-scope line names.',
     '',
-  ];
+  );
+
+  return lines;
 }
 
 /** Unconditional "work as a single agent" block for a mining prompt. Tells the
@@ -189,7 +224,18 @@ export function collectDefaults(tree: TreeNode[], deny: readonly string[]): stri
  *  set for one of its descendants to survive — which is exactly how the web tree
  *  reports a partially-ticked parent (child paths present, parent path absent). */
 export function collectDenyFrontier(tree: TreeNode[], selected: Set<string>, out: string[]): void {
-  for (const node of tree) denyFrontierNode(node, selected, out);
+  for (const node of tree) {
+    // The synthetic repo-root container is transparent: descend straight into
+    // its children so the container's own path never becomes a deny entry, and
+    // an all-unticked tree collapses to per-child entries (incl. the
+    // ROOT_FILES_SCOPE leaf) rather than a single container entry that no walker
+    // would honour.
+    if (node.kind === 'repo-root') {
+      for (const child of node.children ?? []) denyFrontierNode(child, selected, out);
+    } else {
+      denyFrontierNode(node, selected, out);
+    }
+  }
 }
 
 /** Records `node`'s minimal deny frontier into `out`; returns true when the node or

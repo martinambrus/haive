@@ -4,7 +4,7 @@ import type { DetectResult } from '@haive/shared';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, pathExists } from './_helpers.js';
 import {
-  isDeniedPath,
+  isDeniedFile,
   loadMiningScopeExcludeGlobs,
   noSubagentInstructionLines,
   scopeInstructionLines,
@@ -129,7 +129,7 @@ async function collectShortFileTree(
     (rel, isDir) => {
       const parts = rel.split('/');
       if (parts.some((p) => IGNORE_DIRS.has(p))) return false;
-      if (isDeniedPath(rel, exclude)) return false;
+      if (isDeniedFile(rel, isDir, exclude)) return false;
       if (isDir) return false;
       return true;
     },

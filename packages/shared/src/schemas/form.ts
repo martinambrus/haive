@@ -149,6 +149,7 @@ export const treeNodeSchema: z.ZodType<TreeNode> = z.lazy(() =>
     fileCount: z.number().int().nonnegative().optional(),
     badge: z.string().optional(),
     badgeColor: z.enum(['default', 'amber', 'indigo', 'green']).optional(),
+    kind: z.enum(['repo-root', 'root-files']).optional(),
     children: z.array(treeNodeSchema).optional(),
   }),
 );
@@ -159,6 +160,10 @@ export interface TreeNode {
   fileCount?: number;
   badge?: string;
   badgeColor?: 'default' | 'amber' | 'indigo' | 'green';
+  /** Synthetic scope-tree nodes: 'repo-root' is the transparent container the
+   *  sub-dirs hang under; 'root-files' is the leaf for the repo's own top-level
+   *  files (deny token ROOT_FILES_SCOPE). Absent on real directory nodes. */
+  kind?: 'repo-root' | 'root-files';
   children?: TreeNode[];
 }
 

@@ -51,7 +51,17 @@ function includedFromDeny(tree: TreeNode[], deny: readonly string[]): string[] {
  *  is how DirectoryTreeSelect reports a partially-ticked parent (child paths present,
  *  parent path absent). Mirror of 06_7/09_7's collectDenyFrontier in _scope.ts. */
 function denyFromIncluded(tree: TreeNode[], included: Set<string>, out: string[]): void {
-  for (const node of tree) denyNodeFromIncluded(node, included, out);
+  for (const node of tree) {
+    // The synthetic 'repo-root' container is transparent (mirror of the worker's
+    // collectDenyFrontier): descend into its children so the container path never
+    // becomes a deny entry and an all-unticked tree collapses to per-child entries
+    // (incl. the '.' root-files leaf), not the container.
+    if (node.kind === 'repo-root') {
+      for (const child of node.children ?? []) denyNodeFromIncluded(child, included, out);
+    } else {
+      denyNodeFromIncluded(node, included, out);
+    }
+  }
 }
 
 /** Records `node`'s minimal deny frontier into `out`; returns true when the node or

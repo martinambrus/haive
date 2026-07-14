@@ -34,6 +34,19 @@ export const NO_RECURSE_DIRS: ReadonlySet<string> = new Set([
 
 const DEFAULT_MAX_DEPTH = 10;
 
+/** Deny token for the repository's own root-level files (files directly in the
+ *  repo root, e.g. `index.php`). Chosen as `.` because `readdir` never yields it
+ *  (collision-free with real paths), it is inert in the directory-prefix
+ *  `isDeniedPath` match, and it survives the api exclusions sanitizer unchanged.
+ *  Honoured by the file walkers via `isDeniedFile` and by `scopeInstructionLines`
+ *  in the worker's `_scope.ts`. */
+export const ROOT_FILES_SCOPE = '.';
+
+/** Path of the synthetic transparent "Repository root" container node that the
+ *  sub-directory nodes hang under. Never reaches the stored deny list — the
+ *  frontier builders descend through it (see `collectDenyFrontier`). */
+export const REPO_ROOT_NODE_PATH = '__repo_root__';
+
 export interface ScopeTreeOptions {
   /** Lowercase extensions WITH the leading dot (e.g. ".php"). When set, a node's
    *  `fileCount` only counts files whose extension is in the set; omit to count
@@ -56,7 +69,53 @@ export async function buildScopeTree(
 ): Promise<TreeNode[]> {
   const maxDepth = opts.maxDepth ?? DEFAULT_MAX_DEPTH;
   const extensions = opts.extensions ?? null;
-  return childDirNodes(root, '', 0, maxDepth, extensions);
+
+  const subdirs = await childDirNodes(root, '', 0, maxDepth, extensions);
+  const rootFileCount = await countDirectFiles(root, extensions);
+
+  // Root's own direct files get their OWN leaf (deny token ROOT_FILES_SCOPE) so
+  // they can be unticked — the previous tree had no node for them, so they were
+  // always mined/indexed. Listed first, above the sub-dirs. Omitted when the
+  // root has no code files (nothing to exclude).
+  const children: TreeNode[] = [];
+  if (rootFileCount > 0) {
+    children.push({
+      path: ROOT_FILES_SCOPE,
+      label: 'root-level files',
+      fileCount: rootFileCount,
+      kind: 'root-files',
+    });
+  }
+  children.push(...subdirs);
+
+  // Truly empty repo (no sub-dirs, no root code files): preserve the callers'
+  // `tree.length === 0` empty-guard.
+  if (children.length === 0) return [];
+
+  // Wrap everything under one transparent "Repository root" container so the
+  // whole scope can be toggled at once. It carries no fileCount of its own (its
+  // files live in the root-files leaf) and never enters the deny list.
+  return [{ path: REPO_ROOT_NODE_PATH, label: 'Repository root', kind: 'repo-root', children }];
+}
+
+/** Count the direct (non-recursive) code files of `absDir`, honouring the same
+ *  extension filter as the tree nodes. Used for the root-files leaf count. */
+async function countDirectFiles(
+  absDir: string,
+  extensions: ReadonlySet<string> | null,
+): Promise<number> {
+  let entries: Dirent[];
+  try {
+    entries = (await readdir(absDir, { withFileTypes: true })) as Dirent[];
+  } catch {
+    return 0;
+  }
+  let count = 0;
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    if (!extensions || extensions.has(path.extname(entry.name).toLowerCase())) count += 1;
+  }
+  return count;
 }
 
 /** TreeNodes for the sub-directories of `relDir` (relative to `absRoot`). Each

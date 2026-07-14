@@ -6,6 +6,7 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
 import { loadScopeExcludeGlobs } from './_scope.js';
+import { ROOT_FILES_SCOPE } from '@haive/shared/scope-tree';
 import {
   resolveRagConnection,
   ensureRagSchema,
@@ -151,6 +152,9 @@ async function collectCodeFiles(
       for (const ex of excludeSet) {
         if (rel.startsWith(ex + '/') || rel === ex) return false;
       }
+      // Skip the repo's own root-level files when the root-files token is set
+      // (root files have no directory prefix, so the loop above can't match them).
+      if (!isDir && !rel.includes('/') && excludeSet.has(ROOT_FILES_SCOPE)) return false;
       if (isDir) return false;
       // Filter to selected directories when available
       if (dirFilter) {
