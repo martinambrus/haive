@@ -3,6 +3,7 @@ import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import { resolveRagSyncPrefs } from './_rag-index.js';
 import {
   buildAnchors,
   clampHours,
@@ -11,6 +12,7 @@ import {
   heuristicEstimate,
   round2,
   type EstimateAnchor,
+  type SemanticRerankOpts,
 } from './_estimate.js';
 
 // 00b-estimate — the pre-flight effort estimate. Runs right after 00-triage (index 0.6,
@@ -151,6 +153,25 @@ function renderAnchor(a: EstimateAnchor): string {
   return line;
 }
 
+/** Build the semantic anchor-rerank opts from the repo's RAG tooling prefs, or undefined when
+ *  RAG is not configured — in which case the estimator keeps its deterministic newest-first
+ *  anchor selection. Prefs only: the actual ollama probe + embed happen inside buildAnchors and
+ *  only when the candidate pool exceeds the anchor cap, so a small repo never pays for them. */
+async function resolveSemanticRerank(
+  ctx: StepContext,
+  queryText: string,
+): Promise<SemanticRerankOpts | undefined> {
+  if (!queryText) return undefined;
+  try {
+    const resolved = await resolveRagSyncPrefs(ctx);
+    const p = resolved.ragToolingPrefs;
+    if (!resolved.ragConfigured || !p?.ollamaUrl || !p?.embeddingModel) return undefined;
+    return { ollamaUrl: p.ollamaUrl, model: p.embeddingModel, queryText };
+  } catch {
+    return undefined;
+  }
+}
+
 export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
   metadata: {
     id: '00b-estimate',
@@ -183,8 +204,11 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
     const description = task?.description ?? '';
     const executionPath = task?.executionPath ?? null;
     const manualEstimateHours = task?.estimatedTimeHours ?? null;
+    const semantic = task?.repositoryId
+      ? await resolveSemanticRerank(ctx, `${title}\n${description}`.trim())
+      : undefined;
     const anchors = task?.repositoryId
-      ? await buildAnchors(ctx.db, ctx.taskId, task.repositoryId)
+      ? await buildAnchors(ctx.db, ctx.taskId, task.repositoryId, semantic)
       : [];
     const h = heuristicEstimate(anchors, executionPath);
     return {

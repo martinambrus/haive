@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeBiasFactor,
+  cosineSim,
   effortHoursFromSteps,
   estimateRange,
   heuristicEstimate,
@@ -166,5 +167,24 @@ describe('estimateRange', () => {
 
   it('null when the band would collapse (all equal)', () => {
     expect(estimateRange([anchor(3), anchor(3), anchor(3)])).toBeNull();
+  });
+});
+
+describe('cosineSim', () => {
+  it('identical direction -> 1', () => {
+    expect(cosineSim([1, 2, 3], [2, 4, 6])).toBeCloseTo(1);
+  });
+
+  it('orthogonal -> 0', () => {
+    expect(cosineSim([1, 0], [0, 1])).toBe(0);
+  });
+
+  it('opposite direction -> -1', () => {
+    expect(cosineSim([1, 1], [-1, -1])).toBeCloseTo(-1);
+  });
+
+  it('length mismatch or a zero vector -> 0', () => {
+    expect(cosineSim([1, 2, 3], [1, 2])).toBe(0);
+    expect(cosineSim([0, 0], [1, 1])).toBe(0);
   });
 });
