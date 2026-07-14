@@ -547,7 +547,15 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       .where(eq(schema.taskSteps.id, step.id));
     await db
       .update(schema.tasks)
-      .set({ status: 'running', errorMessage: null, ...CLEAR_ALLOWANCE_WATCH, updatedAt: now })
+      // completedAt: null — a prior failure stamped it; leaving it set freezes the
+      // task-level (global) UI timers (they key on !completedAt). Mirrors `retry`.
+      .set({
+        status: 'running',
+        errorMessage: null,
+        completedAt: null,
+        ...CLEAR_ALLOWANCE_WATCH,
+        updatedAt: now,
+      })
       .where(and(eq(schema.tasks.id, id), inArray(schema.tasks.status, ['failed', 'queued'])));
     await appendTaskEvent(db, id, step.id, 'step.resume', {
       stepId,
@@ -616,7 +624,15 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       .where(eq(schema.taskSteps.id, step.id));
     await db
       .update(schema.tasks)
-      .set({ status: 'running', errorMessage: null, ...CLEAR_ALLOWANCE_WATCH, updatedAt: now })
+      // completedAt: null — a prior failure stamped it; leaving it set freezes the
+      // task-level (global) UI timers (they key on !completedAt). Mirrors `retry`.
+      .set({
+        status: 'running',
+        errorMessage: null,
+        completedAt: null,
+        ...CLEAR_ALLOWANCE_WATCH,
+        updatedAt: now,
+      })
       .where(and(eq(schema.tasks.id, id), inArray(schema.tasks.status, ['failed', 'queued'])));
     await appendTaskEvent(db, id, step.id, 'step.retry_ai', { stepId, note: body.note ?? null });
     await getTaskQueue().add(
@@ -666,7 +682,15 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       });
       await tx
         .update(schema.tasks)
-        .set({ status: 'running', errorMessage: null, ...CLEAR_ALLOWANCE_WATCH, updatedAt: now })
+        // completedAt: null — a prior failure stamped it; leaving it set freezes the
+        // task-level (global) UI timers (they key on !completedAt). Mirrors `retry`.
+        .set({
+          status: 'running',
+          errorMessage: null,
+          completedAt: null,
+          ...CLEAR_ALLOWANCE_WATCH,
+          updatedAt: now,
+        })
         .where(eq(schema.tasks.id, id));
     });
     // The api can't see unmaterialized future steps, so it can't compute the next
