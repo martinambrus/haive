@@ -16,6 +16,9 @@ import { detectOrigin, getOriginUrl, pushBranch } from '../../../repo/git-push.j
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
 import {
   ForgeError,
+  credentialForgeProvider,
+  hostFromRemote,
+  inferForgeProviderFromHost,
   isForgeProviderName,
   resolveForgeContext,
   resolveForgeProvider,
@@ -23,6 +26,24 @@ import {
 } from '../../../forge/index.js';
 
 const exec = promisify(execFile);
+
+/** Whether a stored credential can open a PR for this repo. The repo's forge is fixed by
+ *  its origin URL; a credential is usable when its forge (explicit provider, else inferred
+ *  from the credential's host) matches the repo's. For a self-hosted origin whose forge
+ *  can't be inferred from the host, require a host match plus an explicit provider (which
+ *  resolveForgeContext needs anyway). This keeps a GitHub credential out of a GitLab repo's
+ *  picker while letting an "auto-detect" credential on a well-known host through. */
+function credentialUsableForPr(
+  c: { provider: string | null; host: string },
+  originUrl: string | null,
+): boolean {
+  if (!originUrl) return false;
+  const originHost = hostFromRemote(originUrl);
+  const repoForge = inferForgeProviderFromHost(originHost);
+  const credForge = credentialForgeProvider(c.provider, c.host);
+  if (repoForge) return credForge === repoForge;
+  return c.host === originHost && isForgeProviderName(c.provider);
+}
 
 type CleanupAction = 'merge_remove' | 'remove_only' | 'keep' | 'create_pr';
 
@@ -215,7 +236,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         (repo?.prWorkflowEnabled ?? false) &&
         hasOrigin &&
         !!originUrl &&
-        credentials.some((c) => isForgeProviderName(c.provider));
+        credentials.some((c) => credentialUsableForPr(c, originUrl));
     }
     return {
       mode,
@@ -332,8 +353,11 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     // Create-PR fields — shown only when the PR workflow is available for this repo.
     if (detected.prWorkflowAvailable) {
       const prCredentialOptions = detected.credentials
-        .filter((c) => isForgeProviderName(c.provider))
-        .map((c) => ({ value: c.id, label: `${c.label} (${c.host} — ${c.provider})` }));
+        .filter((c) => credentialUsableForPr(c, detected.originUrl))
+        .map((c) => ({
+          value: c.id,
+          label: `${c.label} (${c.host} — ${credentialForgeProvider(c.provider, c.host)})`,
+        }));
       const boundIsForgeCapable =
         detected.boundCredentialId != null &&
         prCredentialOptions.some((o) => o.value === detected.boundCredentialId);
@@ -371,7 +395,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
           id: 'prCredentialId',
           label: 'Forge credential to open the PR with',
           description:
-            'Must be a credential with a forge provider set (GitHub, Gitea/Forgejo, GitLab, Bitbucket) and a token that can create pull requests.',
+            'Only credentials matching this forge are listed (by provider, or auto-detected from the host). The token must be able to push the branch and open pull/merge requests.',
           options: prCredentialOptions,
           default: defaultPrCredential,
           visibleWhen: { field: 'action', equals: 'create_pr' },

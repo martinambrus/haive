@@ -15,9 +15,14 @@ const KNOWN_HOST_PROVIDERS: Record<string, ForgeProviderName> = {
   'bitbucket.org': 'bitbucket_cloud',
 };
 
+/** The forge a well-known public host runs, or null for a self-hosted / unknown host. */
+export function inferForgeProviderFromHost(host: string): ForgeProviderName | null {
+  return KNOWN_HOST_PROVIDERS[host.trim().toLowerCase()] ?? null;
+}
+
 /** Host portion of a git remote (https, ssh:// or scp-style), provider-independent —
  *  used to infer the forge for a well-known public host before the provider is known. */
-function extractHost(remoteUrl: string): string {
+export function hostFromRemote(remoteUrl: string): string {
   const trimmed = remoteUrl.trim();
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
     try {
@@ -27,6 +32,17 @@ function extractHost(remoteUrl: string): string {
     }
   }
   return trimmed.match(/^(?:[^@]+@)?([^:/]+):/)?.[1] ?? '';
+}
+
+/** The forge a credential can open PRs against: its explicit provider when set, else the
+ *  forge inferred from `host` (pass the credential's own host, or a repo's origin host).
+ *  null when neither resolves — a self-hosted host with no explicit provider. */
+export function credentialForgeProvider(
+  provider: string | null | undefined,
+  host: string,
+): ForgeProviderName | null {
+  const explicit = forgeProviderSchema.safeParse(provider);
+  return explicit.success ? explicit.data : inferForgeProviderFromHost(host);
 }
 
 /** Parse a git remote URL (https, ssh:// or scp-style git@host:owner/repo) into
@@ -99,20 +115,13 @@ export async function resolveForgeContext(args: {
   });
   if (!row) throw new ForgeError('Credential not found for pull-request creation.');
 
-  // Explicit credential provider wins; for a well-known public host fall back to host
-  // inference so the "auto-detect" default works without a manual pick.
-  let provider: ForgeProviderName;
-  const explicit = forgeProviderSchema.safeParse(row.provider);
-  if (explicit.success) {
-    provider = explicit.data;
-  } else {
-    const inferred = KNOWN_HOST_PROVIDERS[extractHost(remoteUrl).toLowerCase()];
-    if (!inferred) {
-      throw new ForgeError(
-        'This credential has no forge provider set. Choose a provider (GitHub, Gitea/Forgejo, GitLab, Bitbucket) on the credential to open pull requests.',
-      );
-    }
-    provider = inferred;
+  // Explicit credential provider wins; for a well-known public host fall back to inferring
+  // from the remote host so the "auto-detect" default works without a manual pick.
+  const provider = credentialForgeProvider(row.provider, hostFromRemote(remoteUrl));
+  if (!provider) {
+    throw new ForgeError(
+      'This credential has no forge provider set, and the host is not a known public forge. Choose a provider (GitHub, Gitea/Forgejo, GitLab, Bitbucket) on the credential to open pull requests.',
+    );
   }
 
   const creds = await getDecryptedCredentials(db, credentialId, userId);
