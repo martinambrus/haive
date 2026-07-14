@@ -311,6 +311,11 @@ export async function runRagIndexSync(
     const processedPaths = new Set<string>();
 
     for (let fi = 0; fi < allFiles.length; fi += 1) {
+      // Honor a user Stop/Cancel promptly: it sets the task failed/cancelled, which the
+      // step-runner poll turns into an aborted ctx.signal. Without this check the CPU
+      // embed loop runs to completion and the finished 'done' clobbers the stopped
+      // state, resuming the task. Mirrors 10-rag-populate.
+      ctx.throwIfCancelled();
       const { relPath, sourceType } = allFiles[fi]!;
       processedPaths.add(relPath);
       await ctx.emitProgress(`Syncing (${fi + 1}/${allFiles.length}): ${relPath}`);
@@ -412,6 +417,7 @@ export async function runRagIndexSync(
 
       // Embed and insert new/updated chunks in batches
       for (let batchStart = 0; batchStart < toEmbed.length; batchStart += EMBED_BATCH_SIZE) {
+        ctx.throwIfCancelled();
         const batch = toEmbed.slice(batchStart, batchStart + EMBED_BATCH_SIZE);
         const texts = batch.map((e) => e.chunk.content);
         let embeddings: number[][];

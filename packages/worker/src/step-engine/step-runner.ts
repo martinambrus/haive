@@ -1724,6 +1724,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       }
     }
 
+    // A Stop/Cancel that landed during apply() (task set failed/cancelled -> poll
+    // aborted the signal) must win over this completion: honor it before the done
+    // write so a finished step cannot clobber the stopped state back to 'done' and
+    // advance. Long deterministic steps (RAG sync) also poll the signal internally;
+    // this closes the return-race generically for every step.
+    throwIfCancelled();
     const done = await updateRow(db, current.id, {
       status: 'done',
       output,
