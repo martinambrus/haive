@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type Task, type TaskListResponse, type TaskStatus } from '@/lib/api-client';
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { formatDuration } from '@/lib/format-duration';
@@ -158,6 +158,17 @@ export default function TasksPage() {
   const filterKey = `${repoFilter}|${statusFilter}|${q}`;
   const filtersActive = Boolean(repoFilter || statusFilter || q);
 
+  // On a bare, unfiltered visit that has a saved filter to restore, the mount
+  // effect below router.replace()s to it. Detect that at render time so the
+  // fetch effect can wait for the redirect instead of first flashing an
+  // unfiltered list that the redirect then filters back down. Guard matches the
+  // restore effect exactly (repositoryId/status only — q is not restored).
+  const willRestoreFilter = useMemo(() => {
+    if (searchParams.has('repositoryId') || searchParams.has('status')) return false;
+    const saved = readSavedFilter();
+    return Boolean(saved && (saved.repositoryId || saved.status));
+  }, [searchParams]);
+
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [total, setTotal] = useState(0);
   const [repoOptions, setRepoOptions] = useState<{ id: string; name: string }[]>([]);
@@ -188,6 +199,7 @@ export default function TasksPage() {
   // Initial load + reset whenever a filter changes, plus the 3s live poll that
   // refreshes the currently-loaded span in place (newest-first).
   useEffect(() => {
+    if (willRestoreFilter) return; // wait for the mount restore redirect to set the URL filter
     let cancelled = false;
     const fetchSpan = async (count: number) => {
       try {
@@ -213,7 +225,7 @@ export default function TasksPage() {
       clearInterval(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterKey]);
+  }, [filterKey, willRestoreFilter]);
 
   // Append the next page (older rows) on scroll. Dedups by id so an offset shift
   // from a task created at the top mid-scroll cannot duplicate a boundary row.
