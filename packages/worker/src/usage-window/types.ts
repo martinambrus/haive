@@ -33,6 +33,20 @@ export function httpErrorOutcome(status: number): Extract<UsageFetchOutcome, { o
   };
 }
 
+export type AuthStrikeAction = 'hold' | 'escalate';
+
+/** Increment an auth-denial strike count and decide whether to escalate. Pure so the
+ *  consecutive-denial threshold is unit-tested without a DB/fetch (mirrors httpErrorOutcome).
+ *  A single 401/403 is often transient (Cloudflare/Google WAF, or a just-expired cached
+ *  token the CLI will refresh itself) — only escalate once `threshold` land in a row. */
+export function nextAuthStrike(
+  prev: number,
+  threshold: number,
+): { strikes: number; action: AuthStrikeAction } {
+  const strikes = prev + 1;
+  return { strikes, action: strikes >= threshold ? 'escalate' : 'hold' };
+}
+
 export interface UsageFetchContext {
   providerName: CliProviderName;
   /** provider.cliVersion — feeds the claude `User-Agent: claude-code/<ver>`,

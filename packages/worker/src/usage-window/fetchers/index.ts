@@ -27,6 +27,12 @@ export type UsageTokenSource =
 export interface ProviderUsageConfig {
   fetch: UsageFetcher;
   token: UsageTokenSource;
+  /** false = this provider has no in-product path to fix a rejected usage token, so a
+   *  persistent auth denial records a hidden `error` rather than nagging `needs_reconnect`.
+   *  Used for the volumeJson CLIs (codex/gemini) whose cached access token expires benignly
+   *  when the CLI is idle and is refreshed by the CLI itself on its next run. Defaults to
+   *  reconnectable (claude usage-OAuth re-auth; zai token edit). */
+  reconnectable?: boolean;
 }
 
 /** Providers with a (vendor-confirmed but undocumented) usage-window endpoint.
@@ -45,6 +51,10 @@ export const USAGE_PROVIDERS: Partial<Record<CliProviderName, ProviderUsageConfi
   },
   codex: {
     fetch: fetchCodexUsage,
+    // No in-product reconnect: codex's cached access token expires when idle and the CLI
+    // refreshes it on its next run. The poller cannot safely refresh it (single-use OpenAI
+    // refresh tokens; per-task auth-copy divergence), so a denial hides the chip, never nags.
+    reconnectable: false,
     token: {
       kind: 'volumeJson',
       authPathIdx: 0, // ~/.codex
@@ -57,6 +67,10 @@ export const USAGE_PROVIDERS: Partial<Record<CliProviderName, ProviderUsageConfi
   },
   gemini: {
     fetch: fetchGeminiUsage,
+    // No wired gemini login in Haive (default auth mode is api_key); oauth_creds.json exists
+    // only if the user logged the CLI in outside Haive, and its access token expires when idle.
+    // A denial hides the chip rather than prompting a reconnect the user can't perform here.
+    reconnectable: false,
     token: {
       kind: 'volumeJson',
       authPathIdx: 1, // ~/.gemini (authConfigPaths = ['~/.config/gemini', '~/.gemini'])

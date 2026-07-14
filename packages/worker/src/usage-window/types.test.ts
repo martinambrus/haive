@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { httpErrorOutcome } from './types.js';
+import { httpErrorOutcome, nextAuthStrike } from './types.js';
 
 describe('httpErrorOutcome', () => {
   it('flags 401/403 as authExpired so the poller stops re-hitting a dead token', () => {
@@ -18,5 +18,17 @@ describe('httpErrorOutcome', () => {
     expect(httpErrorOutcome(500).authExpired).toBe(false);
     expect(httpErrorOutcome(404).authExpired).toBe(false);
     expect(httpErrorOutcome(502).authExpired).toBe(false);
+  });
+});
+
+describe('nextAuthStrike', () => {
+  it('holds below the threshold so a transient 401/403 does not nag on the first hit', () => {
+    expect(nextAuthStrike(0, 3)).toEqual({ strikes: 1, action: 'hold' });
+    expect(nextAuthStrike(1, 3)).toEqual({ strikes: 2, action: 'hold' });
+  });
+
+  it('escalates once the consecutive-denial threshold is reached', () => {
+    expect(nextAuthStrike(2, 3)).toEqual({ strikes: 3, action: 'escalate' });
+    expect(nextAuthStrike(3, 3)).toEqual({ strikes: 4, action: 'escalate' });
   });
 });

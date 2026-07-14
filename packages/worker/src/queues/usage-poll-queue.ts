@@ -23,6 +23,7 @@ import {
   readProviderSecretToken,
   writeProviderSecret,
 } from '../usage-window/token-source.js';
+import { nextAuthStrike } from '../usage-window/types.js';
 import type { UsageFetchContext, UsageFetchOutcome } from '../usage-window/types.js';
 import { getTaskQueue } from './task-queue.js';
 import { autoResumeFailedStep } from './_step-reset.js';
@@ -82,6 +83,14 @@ const deadUsageRefreshToken = new Map<string, string>();
  *  the poller re-hitting a guaranteed deny every tick once needs_reconnect is recorded.
  *  In-process; cleared on restart, where one re-probe is fine. */
 const deadUsageFetchToken = new Map<string, string>();
+
+/** Consecutive auth-denial (401/403) strikes per provider. Escalation to needs_reconnect /
+ *  hidden error waits for AUTH_STRIKE_THRESHOLD denials in a row, so a transient 403
+ *  (codex/Cloudflare, gemini/Google) or a just-expired volumeJson token no longer nags on the
+ *  first hit. Reset on any ok, 429, or other non-auth response. In-process (singleton worker);
+ *  cleared on restart, where recounting from 0 is fine. */
+const authStrikes = new Map<string, number>();
+const AUTH_STRIKE_THRESHOLD = 3;
 
 let queueSingleton: Queue | null = null;
 function getUsagePollQueue(): Queue {
@@ -314,6 +323,7 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
   const outcome = await cfg.fetch(creds.token, ctx);
 
   if (!outcome.ok && outcome.rateLimited) {
+    authStrikes.delete(provider.id); // 429 is a non-auth response → reset the auth-denial streak
     const strikes = (bo?.strikes ?? 0) + 1;
     const until = Date.now() + Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** (strikes - 1));
     backoff.set(provider.id, { until, strikes });
@@ -325,23 +335,45 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
   }
 
   if (!outcome.ok && outcome.authExpired) {
-    // The token is rejected (401/403) and only a re-auth fixes it. Gate this token so
-    // we stop re-polling a guaranteed deny, clear any 429 backoff, and record the
-    // actionable needs_reconnect status once so the UI can prompt a reconnect.
+    // A single 401/403 is often transient (Cloudflare/Google WAF) or a just-expired cached
+    // token the CLI refreshes itself, so hold the prior snapshot and only escalate once
+    // AUTH_STRIKE_THRESHOLD denials land in a row. Below the threshold we neither gate the
+    // token nor write an error row, so a good prior reading stays visible.
+    const { strikes, action } = nextAuthStrike(
+      authStrikes.get(provider.id) ?? 0,
+      AUTH_STRIKE_THRESHOLD,
+    );
+    authStrikes.set(provider.id, strikes);
+    if (action === 'hold') {
+      log.debug(
+        { providerId: provider.id, provider: provider.name, strikes },
+        'usage auth denial below strike threshold; holding prior snapshot',
+      );
+      return;
+    }
+    // Escalate: gate this token so we stop re-polling a guaranteed deny (the gate lifts on its
+    // own when a reconnect / CLI refresh rotates the token), clear any 429 backoff, reset the
+    // streak. Providers with no in-product fix path (codex/gemini) record a hidden `error`
+    // instead of the actionable needs_reconnect nag.
     deadUsageFetchToken.set(provider.id, creds.token);
     backoff.delete(provider.id);
+    authStrikes.delete(provider.id);
+    const reconnectable = cfg.reconnectable !== false;
     log.warn(
-      { providerId: provider.id, provider: provider.name, error: outcome.error },
-      'usage endpoint rejected the token (401/403); marking needs_reconnect, polling paused until re-auth',
+      { providerId: provider.id, provider: provider.name, error: outcome.error, reconnectable },
+      'usage endpoint rejected the token past the strike threshold; pausing polls until it rotates',
     );
     await upsertSnapshot(db, provider, {
       ok: false,
-      error: 'Usage tracking token expired — reconnect this provider to restore its meters.',
-      reconnect: true,
+      error: reconnectable
+        ? 'Usage tracking token expired — reconnect this provider to restore its meters.'
+        : 'Usage tracking temporarily unavailable.',
+      reconnect: reconnectable,
     });
     return;
   }
 
+  authStrikes.delete(provider.id); // any non-auth response resets the auth-denial streak
   backoff.delete(provider.id); // any non-429 response clears the 429 backoff
   if (outcome.ok) deadUsageFetchToken.delete(provider.id); // recovered / token rotated
   await upsertSnapshot(db, provider, outcome);
