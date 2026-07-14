@@ -28,8 +28,11 @@ const baseField = z.object({
   visibleWhen: z
     .object({
       field: z.string().min(1),
-      equals: z.string().optional(),
-      notEquals: z.string().optional(),
+      // string | boolean so a field can be gated on a boolean checkbox (e.g. a
+      // sub-option shown only when a parent checkbox is ticked). The evaluator
+      // compares with ===, which is correct for both.
+      equals: z.union([z.string(), z.boolean()]).optional(),
+      notEquals: z.union([z.string(), z.boolean()]).optional(),
     })
     .optional(),
 });

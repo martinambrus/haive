@@ -22,4 +22,11 @@ describe('isFieldVisible', () => {
     expect(isFieldVisible(f, { mode: 'mcp' })).toBe(true);
     expect(isFieldVisible(f, { mode: 'headless' })).toBe(false);
   });
+
+  it('equals: boolean gates a sub-field on a checkbox (e.g. push under commit)', () => {
+    const f = field({ field: 'commit', equals: true });
+    expect(isFieldVisible(f, { commit: true })).toBe(true);
+    expect(isFieldVisible(f, { commit: false })).toBe(false);
+    expect(isFieldVisible(f, {})).toBe(false); // undefined !== true → hidden until ticked
+  });
 });

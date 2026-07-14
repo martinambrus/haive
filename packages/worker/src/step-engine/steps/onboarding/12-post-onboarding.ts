@@ -2,10 +2,11 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type {
   CliProviderName,
+  FormField,
   FormSchema,
   OnboardingEnvironmentMirror,
   OnboardingExclusionsMirror,
@@ -28,6 +29,7 @@ import {
 import type { Database } from '@haive/database';
 import type { StepDefinition, StepContext } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
+import { detectOrigin, getOriginUrl, gitRun } from '../../../repo/git-push.js';
 import { loadPreviousStepOutput, pathExists, resolveSkillTargetDirs } from './_helpers.js';
 import {
   expandCustomBundlesFor,
@@ -114,6 +116,18 @@ const FALLBACK_GIT_IDENTITY = {
   GIT_COMMITTER_EMAIL: 'haive@local',
 };
 
+interface PostOnboardingDetect {
+  /** The branch the onboarding commit lands on (parent checkout's current branch). */
+  currentBranch: string | null;
+  /** Whether the repo has a pushable origin remote (gates the push fields). */
+  hasOrigin: boolean;
+  originUrl: string | null;
+  /** Credential bound to the repo — the default selection for the push. */
+  boundCredentialId: string | null;
+  /** The user's stored git credentials, for the push credential picker. */
+  credentials: { id: string; label: string; host: string }[];
+}
+
 interface PostOnboardingOutput {
   commitPerformed: boolean;
   commitSha: string | null;
@@ -121,6 +135,12 @@ interface PostOnboardingOutput {
   warnings: string[];
   artifactRowsWritten: number;
   installManifestWritten: boolean;
+  /** Push handoff to 13-onboarding-push: pushRequested is true only after a
+   *  successful commit in THIS run; the rest carry the user's push choices. */
+  pushRequested: boolean;
+  pushCredentialId: string | null;
+  pushSetUpstream: boolean;
+  branch: string | null;
 }
 
 /** Build the deterministic render context from step 07's detect output. Used
@@ -336,39 +356,120 @@ async function writeHaiveDataMirror(
   return { filesWritten, warnings };
 }
 
-export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboardingOutput> = {
+export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboardingOutput> = {
   metadata: {
     id: '12-post-onboarding',
     workflowType: 'onboarding',
     index: 16,
     title: 'Post-onboarding commit',
-    description: 'Optionally commits the generated workflow files.',
+    description: 'Optionally commits the generated workflow files and pushes them to origin.',
     requiresCli: false,
   },
 
-  async detect(): Promise<Record<string, never>> {
-    return {};
+  async detect(ctx): Promise<PostOnboardingDetect> {
+    const empty: PostOnboardingDetect = {
+      currentBranch: null,
+      hasOrigin: false,
+      originUrl: null,
+      boundCredentialId: null,
+      credentials: [],
+    };
+    const cur = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    const currentBranch = cur.code === 0 ? cur.stdout.trim() : null;
+    const hasOrigin = await detectOrigin(ctx.repoPath);
+    const originUrl = hasOrigin ? await getOriginUrl(ctx.repoPath) : null;
+
+    const taskRow = await ctx.db
+      .select({ repositoryId: schema.tasks.repositoryId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, ctx.taskId))
+      .limit(1);
+    const repositoryId = taskRow[0]?.repositoryId ?? null;
+    const repo = repositoryId
+      ? await ctx.db.query.repositories.findFirst({
+          where: eq(schema.repositories.id, repositoryId),
+          columns: { credentialsSecretId: true },
+        })
+      : null;
+    const rows = await ctx.db.query.repoCredentials.findMany({
+      where: eq(schema.repoCredentials.userId, ctx.userId),
+      columns: { id: true, label: true, host: true },
+      orderBy: [desc(schema.repoCredentials.createdAt)],
+    });
+    return {
+      ...empty,
+      currentBranch,
+      hasOrigin,
+      originUrl,
+      boundCredentialId: repo?.credentialsSecretId ?? null,
+      credentials: rows.map((r) => ({ id: r.id, label: r.label, host: r.host })),
+    };
   },
 
-  form(): FormSchema {
+  form(_ctx, detected): FormSchema {
+    const fields: FormField[] = [
+      {
+        type: 'checkbox',
+        id: 'commit',
+        label: 'Stage and commit generated workflow files',
+        default: false,
+      },
+      {
+        type: 'textarea',
+        id: 'commitMessage',
+        label: 'Commit message',
+        default: DEFAULT_COMMIT_MESSAGE,
+        rows: 6,
+      },
+    ];
+
+    // Push-to-origin sub-option — only when the repo has a pushable origin. The push
+    // fields are nested under the commit checkbox (visibleWhen commit=true); the
+    // credential/upstream fields nest one deeper under pushToOrigin. The actual push
+    // (fetch → merge origin → resolve conflicts → push) runs in 13-onboarding-push,
+    // which reads the choices recorded on this step's output.
+    if (detected.hasOrigin) {
+      const credentialOptions = [
+        ...detected.credentials.map((c) => ({ value: c.id, label: `${c.label} (${c.host})` })),
+        { value: '', label: 'Authenticate manually (no stored credential)' },
+      ];
+      const defaultCredential =
+        detected.boundCredentialId &&
+        detected.credentials.some((c) => c.id === detected.boundCredentialId)
+          ? detected.boundCredentialId
+          : '';
+      fields.push(
+        {
+          type: 'checkbox',
+          id: 'pushToOrigin',
+          label: `Push to origin (${detected.originUrl ?? 'origin'}) after committing`,
+          default: false,
+          visibleWhen: { field: 'commit', equals: true },
+        },
+        {
+          type: 'select',
+          id: 'credentialId',
+          label: 'Credential to push with',
+          description:
+            'Used only for this push; the token is never written to git config. Choose "manually" for SSH or public remotes.',
+          options: credentialOptions,
+          default: defaultCredential,
+          visibleWhen: { field: 'pushToOrigin', equals: true },
+        },
+        {
+          type: 'checkbox',
+          id: 'setUpstream',
+          label: 'Set upstream (-u) so future pushes default to origin',
+          default: true,
+          visibleWhen: { field: 'pushToOrigin', equals: true },
+        },
+      );
+    }
+
     return {
       title: 'Post-onboarding actions',
       description: 'You can commit the generated workflow files now or skip and commit later.',
-      fields: [
-        {
-          type: 'checkbox',
-          id: 'commit',
-          label: 'Stage and commit generated workflow files',
-          default: false,
-        },
-        {
-          type: 'textarea',
-          id: 'commitMessage',
-          label: 'Commit message',
-          default: DEFAULT_COMMIT_MESSAGE,
-          rows: 6,
-        },
-      ],
+      fields,
       submitLabel: 'Finish onboarding',
     };
   },
@@ -379,6 +480,10 @@ export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboa
     let commitPerformed = false;
     let commitSha: string | null = null;
     const stagedPaths: string[] = [];
+    const branch = args.detected.currentBranch;
+    let pushRequested = false;
+    let pushCredentialId: string | null = null;
+    let pushSetUpstream = true;
 
     // Always record artifacts + write install.json, independent of the commit
     // checkbox — versioning metadata must be in place whether or not the user
@@ -395,6 +500,19 @@ export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboa
       warnings.push(`onboarding-artifacts recording failed: ${message}`);
       ctx.logger.warn({ err }, 'onboarding-artifacts recording failed');
     }
+
+    const result = (): PostOnboardingOutput => ({
+      commitPerformed,
+      commitSha,
+      stagedPaths,
+      warnings,
+      artifactRowsWritten,
+      installManifestWritten,
+      pushRequested,
+      pushCredentialId,
+      pushSetUpstream,
+      branch,
+    });
 
     // Write the committed .haive-data/ mirror from the onboarding_* columns so a
     // fresh clone restores its onboarding-derived DB state. Always runs (like the
@@ -417,14 +535,7 @@ export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboa
     }
 
     if (values.commit !== true) {
-      return {
-        commitPerformed,
-        commitSha,
-        stagedPaths,
-        warnings,
-        artifactRowsWritten,
-        installManifestWritten,
-      };
+      return result();
     }
 
     const taskRow = await ctx.db
@@ -445,18 +556,15 @@ export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboa
     if (existingPaths.length === 0) {
       warnings.push('no generated files found to stage');
       ctx.logger.warn('post-onboarding: no existing paths to stage');
-      return {
-        commitPerformed,
-        commitSha,
-        stagedPaths,
-        warnings,
-        artifactRowsWritten,
-        installManifestWritten,
-      };
+      return result();
     }
 
     try {
-      await exec('git', ['add', '--', ...existingPaths], { cwd: ctx.repoPath });
+      // -f: .haive/install.json lives under .haive/, which 01-worktree-setup adds to
+      // .git/info/exclude on repos that ran a workflow task. A plain `git add` of an
+      // excluded path exits non-zero and aborts the WHOLE stage (the other paths stay
+      // staged but uncommitted). Every path here is a curated deliverable, so force it.
+      await exec('git', ['add', '-f', '--', ...existingPaths], { cwd: ctx.repoPath });
       const { stdout: stagedOut } = await exec('git', ['diff', '--cached', '--name-only'], {
         cwd: ctx.repoPath,
       });
@@ -469,14 +577,7 @@ export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboa
       if (staged.length === 0) {
         warnings.push('no changes to commit (files already committed or identical)');
         ctx.logger.info('post-onboarding: nothing staged after git add');
-        return {
-          commitPerformed,
-          commitSha,
-          stagedPaths,
-          warnings,
-          artifactRowsWritten,
-          installManifestWritten,
-        };
+        return result();
       }
 
       const message =
@@ -492,10 +593,23 @@ export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboa
       const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: ctx.repoPath });
       commitSha = stdout.trim();
       commitPerformed = true;
+      // Hand the push choices to 13-onboarding-push, only now that the commit landed.
+      // pushToOrigin is offered on the form only when detect saw a pushable origin.
+      if (values.pushToOrigin === true) {
+        pushRequested = true;
+        pushCredentialId =
+          typeof values.credentialId === 'string' && values.credentialId.length > 0
+            ? values.credentialId
+            : null;
+        pushSetUpstream = values.setUpstream !== false;
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      warnings.push(`commit failed: ${message}`);
       ctx.logger.warn({ err }, 'post-onboarding commit failed');
+      // The user explicitly asked to commit; a git failure must be loud, not a silent
+      // `done` with a buried warning. The artifacts, the .haive-data mirror, and the
+      // artifact rows are already written, so a Retry re-attempts safely.
+      throw new Error(`Staging or committing the generated files failed: ${message}`);
     }
 
     ctx.logger.info(
@@ -503,19 +617,13 @@ export const postOnboardingStep: StepDefinition<Record<string, never>, PostOnboa
         commitPerformed,
         commitSha,
         staged: stagedPaths.length,
+        pushRequested,
         warnings,
         artifactRowsWritten,
         installManifestWritten,
       },
       'post-onboarding apply complete',
     );
-    return {
-      commitPerformed,
-      commitSha,
-      stagedPaths,
-      warnings,
-      artifactRowsWritten,
-      installManifestWritten,
-    };
+    return result();
   },
 };

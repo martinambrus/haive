@@ -125,7 +125,10 @@ export const upgradeCommitStep: StepDefinition<Record<string, never>, UpgradeCom
     }
 
     try {
-      await execFileAsync('git', ['add', '--', ...existingPaths], { cwd: ctx.repoPath });
+      // -f: .haive/install.json is under .haive/, which 01-worktree-setup excludes via
+      // .git/info/exclude; a plain `git add` of an excluded path exits non-zero and
+      // aborts the whole stage. Same fix as 12-post-onboarding.
+      await execFileAsync('git', ['add', '-f', '--', ...existingPaths], { cwd: ctx.repoPath });
       const { stdout: stagedOut } = await execFileAsync(
         'git',
         ['diff', '--cached', '--name-only'],

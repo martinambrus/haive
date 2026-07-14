@@ -24,6 +24,7 @@ import { ragSourceSelectionStep } from './09_7-rag-source-selection.js';
 import { ragPopulateStep } from './10-rag-populate.js';
 import { finalReviewStep } from './11-final-review.js';
 import { postOnboardingStep } from './12-post-onboarding.js';
+import { onboardingPushStep } from './13-onboarding-push.js';
 
 export {
   envDetectStep,
@@ -50,6 +51,7 @@ export {
   ragPopulateStep,
   finalReviewStep,
   postOnboardingStep,
+  onboardingPushStep,
 };
 
 export function registerOnboardingSteps(registry: StepRegistry): void {
@@ -78,4 +80,5 @@ export function registerOnboardingSteps(registry: StepRegistry): void {
   registry.register(ragPopulateStep);
   registry.register(finalReviewStep);
   registry.register(postOnboardingStep);
+  registry.register(onboardingPushStep);
 }

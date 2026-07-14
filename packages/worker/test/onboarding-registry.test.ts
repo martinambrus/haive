@@ -39,10 +39,11 @@ describe('onboarding registry', () => {
       '10-rag-populate',
       '11-final-review',
       '12-post-onboarding',
+      '13-onboarding-push',
     ]);
     expect(steps.map((s) => s.metadata.index)).toEqual([
       0, 1, 2, 3, 4, 4.5, 5.5, 6, 6.5, 7, 8, 9, 10, 10.25, 10.5, 10.75, 11, 11.5, 12, 12.4, 12.5,
-      13, 14, 15, 16,
+      13, 14, 15, 16, 17,
     ]);
   });
 
