@@ -480,6 +480,10 @@ export interface Task {
   /** Developer's estimated completion time in decimal hours (set on the new-task
    *  form; null when not given). Compared against actual effort in the task UI. */
   estimatedTimeHours?: number | null;
+  /** The AI's learned effort estimate (decimal hours) from the 00b-estimate step, kept
+   *  separate from the confirmed estimatedTimeHours so AI accuracy stays visible against
+   *  actual effort. null on tasks that never ran the estimate step. */
+  aiEstimatedTimeHours?: number | null;
   status: TaskStatus;
   /** Auto-continue: the runner auto-submits info-only forms and gate-1
    *  pre-answers so the workflow runs hands-free between gates. Toggleable

@@ -2015,6 +2015,11 @@ function TaskTotalTime({
       : verdictPct <= 105
         ? 'Slightly over estimate'
         : 'Over estimate';
+  // The AI's own estimate (00b-estimate), shown alongside the confirmed one so its
+  // accuracy vs actual effort is visible even when the user overrode it on the form.
+  const aiEstimateHours = task.aiEstimatedTimeHours ?? null;
+  const aiEstimateMs = (aiEstimateHours ?? 0) * 3_600_000;
+  const aiVerdictPct = showVerdict && aiEstimateMs > 0 ? (effortMs / aiEstimateMs) * 100 : null;
   return (
     <>
       <Card className="flex items-center justify-between gap-3 py-3">
@@ -2139,6 +2144,17 @@ function TaskTotalTime({
               Estimated {formatHoursMinutes(verdictEstimateMs)} · actual effort{' '}
               {formatHoursMinutes(effortMs)}
             </span>
+            {aiEstimateHours != null && (
+              <span className="text-xs text-neutral-500">
+                AI predicted {formatHoursMinutes(aiEstimateMs)}
+                {aiVerdictPct != null && (
+                  <span className={paceColorClass(aiVerdictPct)}>
+                    {' '}
+                    · {Math.round(aiVerdictPct)}% of actual
+                  </span>
+                )}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-3">
             <span className={`font-mono text-lg font-semibold ${paceColorClass(verdictPct)}`}>
