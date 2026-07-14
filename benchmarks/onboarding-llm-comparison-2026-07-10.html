@@ -115,6 +115,11 @@
   footer{margin-top:50px;padding-top:18px;border-top:1px solid var(--line);color:var(--mut);font:500 12px/1.6 var(--mono)}
   code{font-family:var(--mono);background:var(--bg2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12.5px;overflow-wrap:anywhere}
   .delta-up{color:var(--good);font-weight:700}.delta-down{color:var(--bad);font-weight:700}.delta-flat{color:var(--mut);font-weight:700}
+  .dsub{display:block;font:500 10.5px/1.3 var(--mono);color:var(--mut);margin-top:3px;letter-spacing:0}
+  td.dnu{color:var(--ink);font-weight:600}
+  table.deltatbl td{font-variant-numeric:tabular-nums}
+  table.deltatbl td:nth-child(2),table.deltatbl th:nth-child(2){text-align:right}
+  .legendkey{display:inline-block;padding:1px 7px;border-radius:4px;font:600 11px/1.5 var(--mono)}
   .tasklink{font:600 12px/1.4 var(--mono)}
   @media(max-width:520px){h1{font-size:29px}.wrap{padding-left:14px;padding-right:14px}.cards{grid-template-columns:minmax(0,1fr)}.vcard,.box,details.llmc,.csum{min-width:0}.prov{white-space:normal;overflow-wrap:anywhere}}
 </style>
@@ -184,14 +189,52 @@
 </div>
 
 <h2><span class="num">03</span>June vs. July</h2>
-<p class="sub">Five models also ran in the 23 June benchmark. This is a pipeline comparison, not a controlled model-version experiment: the July workflow has 25 steps, new retry accounting, richer skill generation, and global-KB merge stages. Quality and compute deltas therefore describe the complete Haive+model system.</p>
+<p class="sub"><b>All five returning models scored slightly lower overall in July (composite &minus;0.02 to &minus;0.83), yet every one did more work &mdash; and beneath the flat composite three individual dimensions genuinely improved.</b> This is a pipeline comparison, not a controlled model-version experiment: the July workflow has 25 steps, new retry accounting, richer skill generation, and global-KB merge stages, so read each delta as a property of the whole Haive+model system. In the score table, <span class="legendkey delta-up">green</span> means July improved and <span class="legendkey delta-down">red</span> means it regressed; the artifact table is <span class="legendkey" style="color:var(--ink)">neutral</span> because more is not automatically better.</p>
+
+<h3>Quality, dimension by dimension</h3>
+<p class="sub" style="font-size:13px;margin-top:2px">The composite alone hides where a run gained or lost. Each cell is the July&minus;June change; the small figures below it are the June&rarr;July scores. Composite uses the published weights.</p>
 <div class="tbl-scroll">
-  <table class="mini">
-    <thead><tr><th style="text-align:left">Model</th><th>June score</th><th>July score</th><th>Score delta</th><th>June compute</th><th>July compute</th><th>Compute delta</th><th>June output</th><th>July output</th></tr></thead>
-    <tbody id="deltaBody"></tbody>
+  <table class="mini deltatbl" id="deltaScoreTbl">
+    <thead><tr>
+      <th style="text-align:left">Model</th>
+      <th>Composite</th><th>Detect</th><th>KB</th><th>Skills</th><th>Agents</th><th>Global&nbsp;KB</th>
+    </tr></thead>
+    <tbody id="deltaScoreBody"></tbody>
   </table>
 </div>
-<p class="note"><b>Raw speed did not improve for this cohort.</b> The five returning models averaged 49.4 CLI minutes in June and 67.8 in July (+37%). The updated pipeline produced more and deeper artifacts, so interpret this as added work rather than a clean efficiency regression.</p>
+
+<h3>Did deeper artifacts offset the dips?</h3>
+<p class="sub" style="font-size:13px;margin-top:2px">Volume and cost for the same runs. When these grow while the scores above stay red, the extra artifacts did not translate into correctness.</p>
+<div class="tbl-scroll">
+  <table class="mini deltatbl" id="deltaArtTbl">
+    <thead><tr>
+      <th style="text-align:left">Model</th>
+      <th>KB&nbsp;local</th><th>KB&nbsp;global</th><th>Skills</th><th>Agents&nbsp;disc.</th><th>Output&nbsp;tok</th><th>Compute</th>
+    </tr></thead>
+    <tbody id="deltaArtBody"></tbody>
+  </table>
+</div>
+
+<div class="grid2" style="margin-top:16px">
+  <div class="box">
+    <h3 style="margin-top:0">What genuinely improved</h3>
+    <ul style="margin:6px 0;padding-left:18px;font-size:13.5px;line-height:1.5">
+      <li><b>MiniMax detection +3.0</b> (6.0&rarr;9.0) &mdash; stopped propagating the injected Jest false-positive into <code>AGENTS.md</code>, June's single worst detection defect.</li>
+      <li><b>Kimi global routing +2.0</b> (6.0&rarr;8.0) &mdash; 0&rarr;5 portable promotions, four correctly merged. The new merge stages paid off here.</li>
+      <li><b>Claude discovered agents +1.5</b> (7.0&rarr;8.5) &mdash; 1&rarr;3 grounded agents, closing June's main gap.</li>
+    </ul>
+  </div>
+  <div class="box">
+    <h3 style="margin-top:0">Where volume did not buy quality</h3>
+    <ul style="margin:6px 0;padding-left:18px;font-size:13.5px;line-height:1.5">
+      <li><b>Claude KB:</b> +8 local files (15&rarr;23) but KB &minus;0.5 &mdash; deeper, not more correct; global promotions actually fell 8&rarr;4.</li>
+      <li><b>MiniMax skills:</b> +1 family (8&rarr;9) but skills &minus;2.5 &mdash; the extra guide fabricates a rank/CSRF API.</li>
+      <li><b>glm-4.6 &amp; glm-5.2:</b> more output tokens, yet no dimension improved and neither promoted anything global (composite &minus;0.83, &minus;0.45).</li>
+    </ul>
+  </div>
+</div>
+
+<p class="note"><b>Raw speed did not improve for this cohort.</b> The five returning models averaged 49.4 CLI minutes in June and 67.8 in July (+37%), and every one emitted more output. The updated pipeline produced more and more-strictly-audited artifacts, so both the compute rise and the score dips describe added work rather than a clean efficiency regression.</p>
 
 <h2><span class="num">04</span>Best LLM per step</h2>
 <div class="tbl-scroll">
@@ -578,24 +621,49 @@ function deltaClass(v, lowerIsBetter=false){
   const good = lowerIsBetter ? v<0 : v>0;
   return good ? "delta-up" : "delta-down";
 }
-function signed(v, digits=2){
-  return (v>0?"+":"")+v.toFixed(digits);
+function fmtDelta(v, digits){
+  const eps = digits>0 ? 0.005 : 0.5;
+  if(Math.abs(v)<eps) return "0";
+  return (v>0?"+":"−")+Math.abs(v).toFixed(digits);
+}
+function scoreDeltaCell(oldV,newV,digits=1){
+  const dv=newV-oldV;
+  return '<td class="'+deltaClass(dv)+'">'+fmtDelta(dv,digits)+
+    '<span class="dsub">'+oldV.toFixed(digits)+'→'+newV.toFixed(digits)+'</span></td>';
+}
+function countDeltaCell(oldV,newV){
+  return '<td class="dnu">'+fmtDelta(newV-oldV,0)+
+    '<span class="dsub">'+oldV+'→'+newV+'</span></td>';
+}
+function pctDeltaCell(oldV,newV,fmt){
+  const pct = oldV ? (newV/oldV-1)*100 : 0;
+  return '<td class="dnu">'+fmtDelta(pct,0)+'%'+
+    '<span class="dsub">'+fmt(oldV)+'→'+fmt(newV)+'</span></td>';
 }
 function renderDelta(){
   const legacyById = new Map(LEGACY_DATA.map(d=>[d.id,d]));
   const returning = DATA.filter(d=>legacyById.has(d.id)).sort((a,b)=>b.composite-a.composite);
-  document.getElementById("deltaBody").innerHTML = returning.map(d=>{
-    const old=legacyById.get(d.id);
-    const scoreDelta=d.composite-old.composite;
-    const computePct=(d.cliMin/old.cliMin-1)*100;
-    return '<tr>'+
-      '<td style="text-align:left"><b>'+d.name+'</b></td>'+
-      '<td>'+old.composite.toFixed(2)+'</td><td>'+d.composite.toFixed(2)+'</td>'+
-      '<td class="'+deltaClass(scoreDelta)+'">'+signed(scoreDelta)+'</td>'+
-      '<td>'+old.cliMin.toFixed(1)+'m</td><td>'+d.cliMin.toFixed(1)+'m</td>'+
-      '<td class="'+deltaClass(computePct,true)+'">'+signed(computePct,0)+'%</td>'+
-      '<td>'+fmtTok(old.outTok)+'</td><td>'+fmtTok(d.outTok)+'</td>'+
-    '</tr>';
+  const nameCell = d=>'<td style="text-align:left"><b>'+d.name+'</b></td>';
+  document.getElementById("deltaScoreBody").innerHTML = returning.map(d=>{
+    const o=legacyById.get(d.id);
+    return '<tr>'+nameCell(d)+
+      scoreDeltaCell(o.composite,d.composite,2)+
+      scoreDeltaCell(o.detect,d.detect)+
+      scoreDeltaCell(o.kb,d.kb)+
+      scoreDeltaCell(o.skills,d.skills)+
+      scoreDeltaCell(o.agents,d.agents)+
+      scoreDeltaCell(o.global,d.global)+'</tr>';
+  }).join("");
+  const mins = v=>v.toFixed(1)+"m";
+  document.getElementById("deltaArtBody").innerHTML = returning.map(d=>{
+    const o=legacyById.get(d.id);
+    return '<tr>'+nameCell(d)+
+      countDeltaCell(o.kbLocal,d.kbLocal)+
+      countDeltaCell(o.kbGlobal,d.kbGlobal)+
+      countDeltaCell(o.skillsN,d.skillsN)+
+      countDeltaCell(o.agentsDisc,d.agentsDisc)+
+      pctDeltaCell(o.outTok,d.outTok,fmtTok)+
+      pctDeltaCell(o.cliMin,d.cliMin,mins)+'</tr>';
   }).join("");
 }
 function renderProvenance(){
