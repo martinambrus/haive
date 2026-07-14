@@ -134,10 +134,12 @@ export const repositories = pgTable(
     secretMaskDenyExtend: jsonb('secret_mask_deny_extend').$type<string[]>().notNull().default([]),
     /** Per-repo enable for the pull-request close-out workflow: when true (and the
      *  global CONFIG_KEYS.PR_WORKFLOW_ENABLED is on), the 12-worktree-cleanup step
-     *  offers the create_pr action for this repo. Default false — a repo needs an
-     *  origin remote + a credential with a forge provider set to open PRs, so it is
-     *  opt-in per repo on the tooling settings page. */
-    prWorkflowEnabled: boolean('pr_workflow_enabled').notNull().default(false),
+     *  offers the create_pr action for this repo. Default TRUE — the global switch is
+     *  the real gate (staged rollout, default off), so per-repo is an opt-OUT: once an
+     *  admin enables the feature globally, every eligible repo (origin remote + a
+     *  credential with a forge provider) surfaces the option without the user having to
+     *  find the tooling-page toggle. Turn it off per repo to suppress the option there. */
+    prWorkflowEnabled: boolean('pr_workflow_enabled').notNull().default(true),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
