@@ -2,16 +2,29 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { FormField, FormSchema } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  configService,
+  prFinalizeModeSchema,
+  type FormField,
+  type FormSchema,
+} from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
-import { detectOrigin, getOriginUrl } from '../../../repo/git-push.js';
+import { detectOrigin, getOriginUrl, pushBranch } from '../../../repo/git-push.js';
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
+import {
+  ForgeError,
+  isForgeProviderName,
+  resolveForgeContext,
+  resolveForgeProvider,
+  type OpenPrResult,
+} from '../../../forge/index.js';
 
 const exec = promisify(execFile);
 
-type CleanupAction = 'merge_remove' | 'remove_only' | 'keep';
+type CleanupAction = 'merge_remove' | 'remove_only' | 'keep' | 'create_pr';
 
 interface WorktreeCleanupDetect {
   mode: 'no-git' | 'inplace' | 'worktree' | 'unknown';
@@ -28,8 +41,16 @@ interface WorktreeCleanupDetect {
   originUrl: string | null;
   /** Credential bound to the repo (default selection for the push). */
   boundCredentialId: string | null;
-  /** The user's stored git credentials, for the push credential picker. */
-  credentials: { id: string; label: string; host: string }[];
+  /** The user's stored git credentials, for the push credential picker. `provider`
+   *  names the forge (null when unset — such a credential can push but not open PRs). */
+  credentials: { id: string; label: string; host: string; provider: string | null }[];
+  /** Whether the create_pr action may be offered: the global + per-repo PR workflow
+   *  toggles are on, an origin remote exists, and at least one credential has a forge
+   *  provider set. */
+  prWorkflowAvailable: boolean;
+  /** Task title/description, used as the PR title/body defaults on the form. */
+  taskTitle: string;
+  taskDescription: string;
 }
 
 interface WorktreeCleanupApply {
@@ -39,6 +60,17 @@ interface WorktreeCleanupApply {
   branchDeleted: boolean;
   mode: WorktreeCleanupDetect['mode'];
   message: string;
+  /** Set on the create_pr path: the opened PR/MR URL, for the step card. */
+  prUrl?: string | null;
+}
+
+interface CreatePrFormValues {
+  action?: string;
+  prTitle?: string;
+  prBody?: string;
+  prBaseBranch?: string;
+  prCredentialId?: string;
+  finalizeMode?: string;
 }
 
 async function gitRun(
@@ -112,9 +144,11 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     } | null;
     const task = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
-      columns: { repositoryId: true },
+      columns: { repositoryId: true, title: true, description: true },
     });
     const repositoryId = task?.repositoryId ?? null;
+    const taskTitle = task?.title ?? '';
+    const taskDescription = task?.description ?? '';
 
     if (!output) {
       return {
@@ -128,6 +162,9 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         originUrl: null,
         boundCredentialId: null,
         credentials: [],
+        prWorkflowAvailable: false,
+        taskTitle,
+        taskDescription,
       };
     }
     const mode =
@@ -141,7 +178,8 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     let hasOrigin = false;
     let originUrl: string | null = null;
     let boundCredentialId: string | null = null;
-    let credentials: { id: string; label: string; host: string }[] = [];
+    let credentials: WorktreeCleanupDetect['credentials'] = [];
+    let prWorkflowAvailable = false;
     if (mode === 'worktree') {
       const res = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
       parentBranch = res.code === 0 ? res.stdout.trim() : null;
@@ -150,16 +188,34 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       const repo = repositoryId
         ? await ctx.db.query.repositories.findFirst({
             where: eq(schema.repositories.id, repositoryId),
-            columns: { credentialsSecretId: true },
+            columns: { credentialsSecretId: true, prWorkflowEnabled: true },
           })
         : null;
       boundCredentialId = repo?.credentialsSecretId ?? null;
       const rows = await ctx.db.query.repoCredentials.findMany({
         where: eq(schema.repoCredentials.userId, ctx.userId),
-        columns: { id: true, label: true, host: true },
+        columns: { id: true, label: true, host: true, provider: true },
         orderBy: [desc(schema.repoCredentials.createdAt)],
       });
-      credentials = rows.map((r) => ({ id: r.id, label: r.label, host: r.host }));
+      credentials = rows.map((r) => ({
+        id: r.id,
+        label: r.label,
+        host: r.host,
+        provider: r.provider,
+      }));
+      // Offer create_pr only when the whole chain is in place: the global kill-switch
+      // and the per-repo enable are on, a pushable origin exists, and at least one
+      // credential names a forge provider whose REST API can open the PR.
+      const prGlobalEnabled = await configService.getBoolean(
+        CONFIG_KEYS.PR_WORKFLOW_ENABLED,
+        false,
+      );
+      prWorkflowAvailable =
+        prGlobalEnabled &&
+        (repo?.prWorkflowEnabled ?? false) &&
+        hasOrigin &&
+        !!originUrl &&
+        credentials.some((c) => isForgeProviderName(c.provider));
     }
     return {
       mode,
@@ -172,6 +228,9 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       originUrl,
       boundCredentialId,
       credentials,
+      prWorkflowAvailable,
+      taskTitle,
+      taskDescription,
     };
   },
 
@@ -226,19 +285,28 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       );
     }
 
+    const actionOptions = [
+      {
+        value: 'merge_remove',
+        label: `Merge ${branch} into ${base}, then remove the worktree`,
+      },
+    ];
+    if (detected.prWorkflowAvailable) {
+      actionOptions.push({
+        value: 'create_pr',
+        label: `Open a pull request from ${branch} into ${base} (keep the worktree until it merges)`,
+      });
+    }
+    actionOptions.push(
+      { value: 'remove_only', label: 'Remove the worktree, keep the branch' },
+      { value: 'keep', label: 'Keep the worktree' },
+    );
     fields.push(
       {
         type: 'radio',
         id: 'action',
         label: 'What should happen to the worktree?',
-        options: [
-          {
-            value: 'merge_remove',
-            label: `Merge ${branch} into ${base}, then remove the worktree`,
-          },
-          { value: 'remove_only', label: 'Remove the worktree, keep the branch' },
-          { value: 'keep', label: 'Keep the worktree' },
-        ],
+        options: actionOptions,
         default: 'merge_remove',
         required: true,
       },
@@ -260,6 +328,67 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         visibleWhen: { field: 'action', equals: 'remove_only' },
       },
     );
+
+    // Create-PR fields — shown only when the PR workflow is available for this repo.
+    if (detected.prWorkflowAvailable) {
+      const prCredentialOptions = detected.credentials
+        .filter((c) => isForgeProviderName(c.provider))
+        .map((c) => ({ value: c.id, label: `${c.label} (${c.host} — ${c.provider})` }));
+      const boundIsForgeCapable =
+        detected.boundCredentialId != null &&
+        prCredentialOptions.some((o) => o.value === detected.boundCredentialId);
+      const defaultPrCredential = boundIsForgeCapable
+        ? (detected.boundCredentialId as string)
+        : (prCredentialOptions[0]?.value ?? '');
+      const prBaseDefault = detected.baseBranch ?? detected.parentBranch ?? 'main';
+      fields.push(
+        {
+          type: 'text',
+          id: 'prTitle',
+          label: 'Pull request title',
+          default: detected.taskTitle,
+          required: true,
+          visibleWhen: { field: 'action', equals: 'create_pr' },
+        },
+        {
+          type: 'textarea',
+          id: 'prBody',
+          label: 'Pull request description',
+          default: detected.taskDescription,
+          rows: 6,
+          visibleWhen: { field: 'action', equals: 'create_pr' },
+        },
+        {
+          type: 'text',
+          id: 'prBaseBranch',
+          label: 'Base branch (the PR merges into this)',
+          default: prBaseDefault,
+          required: true,
+          visibleWhen: { field: 'action', equals: 'create_pr' },
+        },
+        {
+          type: 'select',
+          id: 'prCredentialId',
+          label: 'Forge credential to open the PR with',
+          description:
+            'Must be a credential with a forge provider set (GitHub, Gitea/Forgejo, GitLab, Bitbucket) and a token that can create pull requests.',
+          options: prCredentialOptions,
+          default: defaultPrCredential,
+          visibleWhen: { field: 'action', equals: 'create_pr' },
+        },
+        {
+          type: 'radio',
+          id: 'finalizeMode',
+          label: 'When the PR merges',
+          options: [
+            { value: 'auto', label: 'Automatically finish this task (reap the worktree)' },
+            { value: 'manual', label: 'Wait for me to click Finalize' },
+          ],
+          default: 'auto',
+          visibleWhen: { field: 'action', equals: 'create_pr' },
+        },
+      );
+    }
 
     // Base-branch push — offered only when the repo has a pushable origin. Hidden
     // entirely for local-only repos (push is impossible there).
@@ -330,7 +459,8 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     const action: CleanupAction =
       values.action === 'merge_remove' ||
       values.action === 'remove_only' ||
-      values.action === 'keep'
+      values.action === 'keep' ||
+      values.action === 'create_pr'
         ? values.action
         : 'keep';
 
@@ -343,6 +473,10 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         mode: 'worktree',
         message: `worktree kept at ${d.worktreePath}`,
       };
+    }
+
+    if (action === 'create_pr') {
+      return openPullRequestForCleanup(ctx, d, args.formValues as CreatePrFormValues);
     }
 
     // The merge (action === 'merge_remove') runs in resolveMergePhase BEFORE apply.
@@ -420,3 +554,113 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     };
   },
 };
+
+/** create_pr apply: ensure the feature branch is on origin, open a PR/MR on the repo's
+ *  forge, and record it on the task row. Leaves the worktree in place — the trailing
+ *  13-pr-wait step parks the task in waiting_pr and finalizes on merge. */
+async function openPullRequestForCleanup(
+  ctx: StepContext,
+  d: WorktreeCleanupDetect,
+  values: CreatePrFormValues,
+): Promise<WorktreeCleanupApply> {
+  if (!d.branchName || !d.originUrl) {
+    throw new Error(
+      'Cannot open a pull request: the worktree branch or the origin remote is unavailable.',
+    );
+  }
+
+  // Idempotency: a Retry after the PR was already opened must not open a second one.
+  const existing = await ctx.db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { prUrl: true },
+  });
+  const priorPrUrl = existing?.prUrl;
+  if (priorPrUrl) {
+    return {
+      action: 'create_pr',
+      removed: false,
+      merged: false,
+      branchDeleted: false,
+      mode: 'worktree',
+      message: `pull request already open: ${priorPrUrl}`,
+      prUrl: priorPrUrl,
+    };
+  }
+
+  const credentialId = values.prCredentialId?.trim();
+  if (!credentialId) {
+    throw new Error('Choose a forge credential (with a provider set) to open the pull request.');
+  }
+  const baseBranch = values.prBaseBranch?.trim() || d.baseBranch || d.parentBranch;
+  if (!baseBranch) {
+    throw new Error('No base branch to open the pull request against.');
+  }
+  const title = values.prTitle?.trim() || d.taskTitle || d.branchName;
+  const body = values.prBody ?? d.taskDescription ?? '';
+  const finalizeMode = prFinalizeModeSchema.catch('auto').parse(values.finalizeMode);
+
+  // Make sure the feature branch is on origin. It was pushed at 11a-gate-4-push, but
+  // fix loops after that push can add commits. Host-side; git works here (the sandbox
+  // git ban is cli-exec only).
+  await pushBranch({
+    cwd: ctx.repoPath,
+    branch: d.branchName,
+    setUpstream: true,
+    credentialId,
+    db: ctx.db,
+    userId: ctx.userId,
+  });
+
+  let provider: string;
+  let result: OpenPrResult;
+  try {
+    const forgeCtx = await resolveForgeContext({
+      db: ctx.db,
+      userId: ctx.userId,
+      credentialId,
+      remoteUrl: d.originUrl,
+    });
+    provider = forgeCtx.provider;
+    result = await resolveForgeProvider(forgeCtx.provider).openPullRequest(forgeCtx, {
+      head: d.branchName,
+      base: baseBranch,
+      title,
+      body,
+    });
+  } catch (err) {
+    if (err instanceof ForgeError) {
+      // Loud + actionable: the branch is safely on origin, so a Retry after fixing the
+      // token/scope re-enters cleanly.
+      throw new Error(`Opening the pull request failed: ${err.message}`);
+    }
+    throw err;
+  }
+
+  await ctx.db
+    .update(schema.tasks)
+    .set({
+      prProvider: provider,
+      prUrl: result.url,
+      prNumber: result.number,
+      prState: 'open',
+      prFinalizeMode: finalizeMode,
+      prCredentialId: credentialId,
+      prPollError: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.tasks.id, ctx.taskId));
+
+  ctx.logger.info(
+    { prUrl: result.url, prNumber: result.number, provider },
+    'pull request opened; task will wait for it to merge',
+  );
+  return {
+    action: 'create_pr',
+    removed: false,
+    merged: false,
+    branchDeleted: false,
+    mode: 'worktree',
+    message: `opened pull request ${result.url} (${provider}); waiting for it to merge`,
+    prUrl: result.url,
+  };
+}

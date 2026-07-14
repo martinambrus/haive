@@ -482,6 +482,7 @@ export type TaskStatus =
   | 'queued'
   | 'running'
   | 'waiting_user'
+  | 'waiting_pr'
   | 'completed'
   | 'failed'
   | 'cancelled';
@@ -545,6 +546,16 @@ export interface Task {
   allowanceAutoResumedAt?: string | null;
   containerId: string | null;
   worktreePath: string | null;
+  /** PR close-out (workflow tasks that chose create_pr at step 12). All null until a PR
+   *  is opened; the poller keeps prState/prMergedAt/prPollError live while the task parks
+   *  in waiting_pr. Spread straight off the task row by GET /tasks/:id. */
+  prProvider?: string | null;
+  prUrl?: string | null;
+  prNumber?: string | null;
+  prState?: 'open' | 'merged' | 'closed' | null;
+  prMergedAt?: string | null;
+  prFinalizeMode?: 'auto' | 'manual' | null;
+  prPollError?: string | null;
   errorMessage: string | null;
   startedAt: string | null;
   completedAt: string | null;

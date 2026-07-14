@@ -245,6 +245,7 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
       secretMaskEnabled: true,
       secretMaskAllow: true,
       secretMaskDenyExtend: true,
+      prWorkflowEnabled: true,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -288,6 +289,7 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
     secretMaskEnabled: repo.secretMaskEnabled,
     secretMaskAllow: repo.secretMaskAllow ?? [],
     secretMaskDenyExtend: repo.secretMaskDenyExtend ?? [],
+    prWorkflowEnabled: repo.prWorkflowEnabled,
     lspOptions,
   });
 });
@@ -317,6 +319,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     secretMaskEnabled?: boolean;
     secretMaskAllow?: string[];
     secretMaskDenyExtend?: string[];
+    prWorkflowEnabled?: boolean;
   };
 
   const updates: Partial<typeof schema.repositories.$inferInsert> = { updatedAt: new Date() };
@@ -349,6 +352,9 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     updates.secretMaskDenyExtend = [
       ...new Set(body.secretMaskDenyExtend.map((s) => s.trim()).filter(Boolean)),
     ];
+  }
+  if (typeof body.prWorkflowEnabled === 'boolean') {
+    updates.prWorkflowEnabled = body.prWorkflowEnabled;
   }
 
   await db.update(schema.repositories).set(updates).where(eq(schema.repositories.id, repositoryId));

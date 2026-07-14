@@ -45,6 +45,7 @@ import { PostgresTestButton, OllamaTestButton } from '@/components/connection-te
 import { EditorTab } from '@/components/editor/editor-tab';
 import { AttachmentsPanel } from '@/components/attachments/attachments-panel';
 import { CommitDiffViewer } from '@/components/commit-diff-viewer';
+import { PrStatusPanel } from '@/components/PrStatusPanel';
 import { StepTerminal } from '@/components/terminal/StepTerminal';
 import { BrowserVncPanel } from '@/components/terminal/BrowserVncPanel';
 import { BrowserDirectPanel } from '@/components/terminal/BrowserDirectPanel';
@@ -177,6 +178,7 @@ function taskStatusVariant(status: TaskStatus): BadgeVariant {
     case 'cancelled':
       return 'error';
     case 'waiting_user':
+    case 'waiting_pr':
       return 'warning';
     default:
       return 'default';
@@ -1136,6 +1138,19 @@ export default function TaskDetailPage() {
         <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300">
           {actionError}
         </div>
+      )}
+
+      {task.prUrl && (
+        <PrStatusPanel
+          taskId={task.id}
+          provider={task.prProvider}
+          url={task.prUrl}
+          number={task.prNumber}
+          state={task.prState}
+          mergedAt={task.prMergedAt}
+          finalizeMode={task.prFinalizeMode}
+          pollError={task.prPollError}
+        />
       )}
 
       <div className="flex flex-wrap gap-2 border-b border-neutral-800">

@@ -27,6 +27,7 @@ export const QUEUE_NAMES = {
   IDE_ENSURE: 'haive-ide-ensure',
   DDEV_CONTROL: 'haive-ddev-control',
   USAGE_POLL: 'haive-usage-poll',
+  PR_POLL: 'haive-pr-poll',
 } as const;
 
 export const REPO_JOB_NAMES = {

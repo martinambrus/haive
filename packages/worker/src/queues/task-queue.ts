@@ -17,6 +17,7 @@ import {
   type RepoResourceCleanupPayload,
   type ExecutionPath,
   type TaskJobPayload,
+  type TaskStatus,
   type WorkflowType,
 } from '@haive/shared';
 import {
@@ -267,12 +268,13 @@ async function markTaskWaiting(
   stepId: string,
   stepIndex: number,
   round = 0,
+  status: TaskStatus = 'waiting_user',
 ): Promise<void> {
   const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
   await db
     .update(schema.tasks)
     .set({
-      status: 'waiting_user',
+      status,
       currentStepId: stepId,
       currentStepIndex,
       currentRound: round,
@@ -856,6 +858,7 @@ async function handleResult(
         stepId,
         computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
         result.row.round,
+        stepDef.parkTaskStatus,
       );
       // Stamp the start of the idle (waiting-for-input) period so the step's
       // active-work timer can exclude it. Folded into idle_ms on form submit.

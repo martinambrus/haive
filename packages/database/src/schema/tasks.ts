@@ -63,6 +63,7 @@ export const taskStatusEnum = pgEnum('task_status', [
   'running',
   'paused',
   'waiting_user',
+  'waiting_pr',
   'completed',
   'failed',
   'cancelled',
@@ -130,6 +131,31 @@ export const tasks = pgTable(
      *  legacy rows, and on a task that committed nothing. */
     commitSha: text('commit_sha'),
     changedPaths: jsonb('changed_paths').$type<string[]>(),
+    /** Pull-request close-out (workflow tasks, opt-in via the 12-worktree-cleanup
+     *  create_pr action; gated by CONFIG_KEYS.PR_WORKFLOW_ENABLED + the repo's
+     *  pr_workflow_enabled). Durable on the task row — step output is nulled by
+     *  _step-reset — so the 13-pr-wait park and the PR-status poller can read them.
+     *  All NULL when no PR was opened; 13-pr-wait is then a no-op and the task
+     *  completes normally. */
+    prProvider: varchar('pr_provider', { length: 32 }),
+    prUrl: text('pr_url'),
+    /** The forge's PR identifier (GitHub/Gitea number, GitLab iid, Bitbucket id);
+     *  text to cover every forge's id shape. */
+    prNumber: text('pr_number'),
+    /** 'open' | 'merged' | 'closed' (closed = declined without merging), tracked by
+     *  the PR-status poller. */
+    prState: text('pr_state'),
+    prMergedAt: timestamp('pr_merged_at'),
+    /** 'auto' | 'manual': auto-complete the task when the PR merges, or wait for a
+     *  manual Finalize click. Chosen at PR-open on the 12-worktree-cleanup form. */
+    prFinalizeMode: text('pr_finalize_mode'),
+    /** Last PR-poll error (e.g. token lacks PR scope, host unreachable), surfaced in
+     *  the 13-pr-wait UI; cleared on a successful poll. */
+    prPollError: text('pr_poll_error'),
+    /** The forge credential used to open the PR — the PR-status poller decrypts its
+     *  token to read the PR state. Plain uuid (no FK) to avoid a tasks<->repos schema
+     *  cycle; a deleted credential simply surfaces a poll error. */
+    prCredentialId: uuid('pr_credential_id'),
     memoryLimitMb: integer('memory_limit_mb'),
     cpuLimitMilli: integer('cpu_limit_milli'),
     metadata: jsonb('metadata').$type<Record<string, unknown>>(),

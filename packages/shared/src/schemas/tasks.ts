@@ -27,6 +27,7 @@ export const taskStatusSchema = z.enum([
   'queued',
   'running',
   'waiting_user',
+  'waiting_pr',
   'completed',
   'failed',
   'cancelled',
@@ -143,6 +144,17 @@ export const taskActionRequestSchema = z.object({
 
 export type TaskAction = z.infer<typeof taskActionSchema>;
 
+/** PR close-out: whether a task auto-completes when its pull request merges, or
+ *  waits for a manual Finalize click. Chosen per task at PR-open; stored on
+ *  tasks.pr_finalize_mode. The background poller tracks PR status either way. */
+export const prFinalizeModeSchema = z.enum(['auto', 'manual']);
+export type PrFinalizeMode = z.infer<typeof prFinalizeModeSchema>;
+
+/** Lifecycle of the opened pull/merge request as tracked by the poller. Stored on
+ *  tasks.pr_state. `closed` = closed without merging (declined/rejected). */
+export const prRecordStateSchema = z.enum(['open', 'merged', 'closed']);
+export type PrRecordState = z.infer<typeof prRecordStateSchema>;
+
 export const stepActionSchema = z.enum(['retry', 'retry_ai', 'skip', 'resume', 'abort']);
 
 export const stepActionRequestSchema = z.object({
@@ -205,6 +217,7 @@ export const OPEN_TASK_STATUSES = [
   'running',
   'paused',
   'waiting_user',
+  'waiting_pr',
 ] as const;
 
 export const ACTIVE_TASK_STATUSES = ['created', 'queued', 'running', 'paused'] as const;
@@ -215,6 +228,7 @@ const ALL_TASK_STATUSES = [
   'running',
   'paused',
   'waiting_user',
+  'waiting_pr',
   'completed',
   'failed',
   'cancelled',

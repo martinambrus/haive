@@ -27,6 +27,7 @@ interface ToolingConfig {
   secretMaskEnabled: boolean;
   secretMaskAllow: string[];
   secretMaskDenyExtend: string[];
+  prWorkflowEnabled: boolean;
   lspOptions: LspOption[];
 }
 
@@ -77,6 +78,7 @@ export default function RepoToolingPage() {
   const [secretMaskEnabled, setSecretMaskEnabled] = useState(true);
   const [secretMaskAllow, setSecretMaskAllow] = useState('');
   const [secretMaskDenyExtend, setSecretMaskDenyExtend] = useState('');
+  const [prWorkflowEnabled, setPrWorkflowEnabled] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -95,6 +97,7 @@ export default function RepoToolingPage() {
         setSecretMaskEnabled(cfg.secretMaskEnabled);
         setSecretMaskAllow((cfg.secretMaskAllow ?? []).join('\n'));
         setSecretMaskDenyExtend((cfg.secretMaskDenyExtend ?? []).join('\n'));
+        setPrWorkflowEnabled(cfg.prWorkflowEnabled);
       } catch (err) {
         if (!cancelled) setError((err as Error).message ?? 'Failed to load tooling config');
       }
@@ -135,6 +138,7 @@ export default function RepoToolingPage() {
           .split('\n')
           .map((l) => l.trim())
           .filter(Boolean),
+        prWorkflowEnabled,
       });
       setSaved(true);
     } catch (err) {
@@ -317,6 +321,31 @@ export default function RepoToolingPage() {
                 Extra globs to mask on top of the built-in deny list (e.g. SQL files if your repo
                 uses them as dumps rather than schema/migrations).
               </p>
+            </div>
+          </Card>
+
+          <Card>
+            <h2 className="text-lg font-semibold text-neutral-100">Pull-request close-out</h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              Adds a &quot;create a pull request&quot; option at task close, alongside the local
+              merge. The task opens a PR on this repo&apos;s forge and waits for it to merge instead
+              of merging locally. Requires the global PR-workflow switch (admin settings) and a
+              repository credential with its forge provider set. Applies to workflow tasks only.
+            </p>
+            <div className="mt-3 flex items-center gap-2">
+              <input
+                id="prWorkflowEnabled"
+                type="checkbox"
+                className="h-4 w-4 rounded border-neutral-700 bg-neutral-900 text-indigo-500"
+                checked={prWorkflowEnabled}
+                onChange={(e) => {
+                  setPrWorkflowEnabled(e.target.checked);
+                  markDirty();
+                }}
+              />
+              <Label htmlFor="prWorkflowEnabled">
+                Offer &quot;create a pull request&quot; at task close
+              </Label>
             </div>
           </Card>
 

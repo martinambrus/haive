@@ -5,6 +5,7 @@ export type TaskStatus =
   | 'queued'
   | 'running'
   | 'waiting_user'
+  | 'waiting_pr'
   | 'completed'
   | 'failed'
   | 'cancelled';

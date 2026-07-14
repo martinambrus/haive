@@ -32,6 +32,8 @@ export default function AdminPage() {
   const [savingConcurrency, setSavingConcurrency] = useState(false);
   const [steeringEnabled, setSteeringEnabled] = useState<boolean | null>(null);
   const [savingSteering, setSavingSteering] = useState(false);
+  const [prWorkflowEnabled, setPrWorkflowEnabled] = useState<boolean | null>(null);
+  const [savingPrWorkflow, setSavingPrWorkflow] = useState(false);
   const [softTimeoutEnabled, setSoftTimeoutEnabled] = useState<boolean | null>(null);
   const [softTimeoutPercentInput, setSoftTimeoutPercentInput] = useState('');
   const [savingSoftTimeout, setSavingSoftTimeout] = useState(false);
@@ -94,6 +96,7 @@ export default function AdminPage() {
         reviewDistillData,
         reviewRefuteData,
         usageWindowData,
+        prWorkflowData,
       ] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
@@ -115,12 +118,14 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/review-fanout-distill'),
         api.get<{ enabled: boolean }>('/admin/config/review-refute'),
         api.get<{ enabled: boolean }>('/admin/config/usage-window'),
+        api.get<{ enabled: boolean }>('/admin/config/pr-workflow'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
       setMaxParallel(concurrencyData.maxParallelAgents);
       setMaxParallelInput(String(concurrencyData.maxParallelAgents));
       setSteeringEnabled(steeringData.enabled);
+      setPrWorkflowEnabled(prWorkflowData.enabled);
       setSoftTimeoutEnabled(softTimeoutData.enabled);
       setSoftTimeoutPercentInput(String(softTimeoutData.percent));
       setIdeEnabled(ideData.enabled);
@@ -263,6 +268,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update steering');
     } finally {
       setSavingSteering(false);
+    }
+  }
+
+  async function setPrWorkflow(next: boolean) {
+    setSavingPrWorkflow(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/pr-workflow', {
+        enabled: next,
+      });
+      setPrWorkflowEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update PR workflow');
+    } finally {
+      setSavingPrWorkflow(false);
     }
   }
 
@@ -696,6 +716,32 @@ export default function AdminPage() {
             />
             {steeringEnabled ? 'Enabled' : 'Disabled'}
             {savingSteering && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {prWorkflowEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Pull-request close-out</CardTitle>
+            <CardDescription>
+              Master switch for the &quot;create a pull request&quot; close-out at task end. When
+              on, a workflow task on a connected forge (GitHub, Gitea/Forgejo, GitLab, Bitbucket)
+              can open a PR instead of merging locally, then wait for it to merge. The per-repo
+              toggle sits under this switch; each repo also needs a credential with its forge
+              provider set. Default off. Takes effect within ~30s; persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={prWorkflowEnabled}
+              disabled={savingPrWorkflow}
+              onChange={(e) => void setPrWorkflow(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {prWorkflowEnabled ? 'Enabled' : 'Disabled'}
+            {savingPrWorkflow && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

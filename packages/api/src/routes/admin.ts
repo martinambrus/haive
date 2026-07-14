@@ -345,6 +345,24 @@ adminRoutes.put('/config/steering', async (c) => {
   return c.json({ enabled });
 });
 
+const prWorkflowSchema = z.object({ enabled: z.boolean() });
+
+// Global master switch for the create-PR close-out workflow. Gates step 12's create_pr
+// option, the 13-pr-wait park, and the PR-status poller. Default off (staged rollout);
+// the per-repo pr_workflow_enabled toggle sits under this master switch. Read within the
+// ~30s config cache, so a flip applies to the next task/poll tick.
+adminRoutes.get('/config/pr-workflow', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.PR_WORKFLOW_ENABLED, false);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/pr-workflow', async (c) => {
+  const { enabled } = prWorkflowSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.PR_WORKFLOW_ENABLED, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'global PR-workflow switch updated');
+  return c.json({ enabled });
+});
+
 const softTimeoutSchema = z.object({
   enabled: z.boolean(),
   // 1..99: at 0 the wind-down lands before the CLI reads anything, at 100 after the

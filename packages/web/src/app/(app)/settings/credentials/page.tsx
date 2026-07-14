@@ -10,6 +10,8 @@ interface CredentialRow {
   id: string;
   label: string;
   host: string;
+  provider?: string | null;
+  apiBaseUrl?: string | null;
   gitName: string | null;
   gitEmail: string | null;
   createdAt: string;
@@ -130,6 +132,8 @@ export default function CredentialsPage() {
                       ...c,
                       label: cred.label,
                       host: cred.host,
+                      provider: cred.provider,
+                      apiBaseUrl: cred.apiBaseUrl,
                       gitName: cred.gitName,
                       gitEmail: cred.gitEmail,
                     }

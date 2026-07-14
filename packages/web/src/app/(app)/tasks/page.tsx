@@ -19,6 +19,7 @@ function statusVariant(status: TaskStatus): BadgeVariant {
     case 'cancelled':
       return 'error';
     case 'waiting_user':
+    case 'waiting_pr':
       return 'warning';
     default:
       return 'default';
@@ -347,6 +348,7 @@ export default function TasksPage() {
             <option value="unfinished">Unfinished</option>
             <option value="active">In progress</option>
             <option value="waiting_user">Waiting on you</option>
+            <option value="waiting_pr">Waiting on PR</option>
             <option value="open">Open</option>
             <option value="completed">Completed</option>
             <option value="failed">Failed</option>

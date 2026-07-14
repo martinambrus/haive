@@ -1,4 +1,10 @@
-import type { FormSchema, FormValues, StepCapability, StepMetadata } from '@haive/shared';
+import type {
+  FormSchema,
+  FormValues,
+  StepCapability,
+  StepMetadata,
+  TaskStatus,
+} from '@haive/shared';
 import { logger } from '@haive/shared';
 import type { Database } from '@haive/database';
 
@@ -335,6 +341,10 @@ export interface StepLoopSpec<TApply = unknown> {
 
 export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   readonly metadata: StepMetadata;
+  /** When this step parks on a form (waiting_form), set the TASK status to this instead
+   *  of the default 'waiting_user'. Used by 13-pr-wait to surface a task waiting for its
+   *  PR to merge as 'waiting_pr'. Only takes effect when the step actually parks. */
+  readonly parkTaskStatus?: TaskStatus;
   shouldRun?(ctx: StepContext): Promise<boolean> | boolean;
   detect?(ctx: StepContext): Promise<TDetect>;
   form?(ctx: StepContext, detected: TDetect, llmOutput?: unknown): FormSchema | null;

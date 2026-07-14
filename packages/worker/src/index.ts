@@ -8,6 +8,7 @@ import { startRuntimeEnsureWorker } from './queues/runtime-ensure-queue.js';
 import { startIdeEnsureWorker } from './queues/ide-ensure-queue.js';
 import { startDdevControlWorker } from './queues/ddev-control-queue.js';
 import { scheduleUsagePollTick, startUsagePollWorker } from './queues/usage-poll-queue.js';
+import { closePrPollQueue, schedulePrPollTick, startPrPollWorker } from './queues/pr-poll-queue.js';
 import {
   closeCliExecQueue,
   scheduleCliVersionRefresh,
@@ -79,6 +80,9 @@ async function main(): Promise<void> {
   // Gentle background poller: reads each logged-in provider's subscription
   // usage-window endpoint (~5 min) so the task header can show 5h/weekly meters.
   const usagePollWorker = startUsagePollWorker();
+  // Watches every waiting_pr task's forge PR (~3 min); on merge auto-finalizes the
+  // 13-pr-wait step (auto mode) or surfaces the state for a manual Finalize.
+  const prPollWorker = startPrPollWorker();
   // Recover steps a prior worker orphaned mid-step (their sandboxes were reaped
   // above): resume waiting_cli steps and re-drive running steps whose advance-step
   // job died mid-execution, so neither hangs after a restart/crash/power loss.
@@ -106,6 +110,9 @@ async function main(): Promise<void> {
   });
   await scheduleUsagePollTick().catch((err) => {
     logger.warn({ err }, 'failed to schedule usage-window poll tick');
+  });
+  await schedulePrPollTick().catch((err) => {
+    logger.warn({ err }, 'failed to schedule pull-request poll tick');
   });
   // Pre-pull declared local Ollama models so a fresh stack is usable without a
   // manual pull. Non-blocking: boot completes while large pulls run in the
@@ -166,8 +173,10 @@ async function main(): Promise<void> {
       ideEnsureWorker.close(true),
       ddevControlWorker.close(true),
       usagePollWorker.close(true),
+      prPollWorker.close(true),
       closeTaskQueue(),
       closeCliExecQueue(),
+      closePrPollQueue(),
     ]);
     await reapAllCliSandboxes(`worker ${signal}`).catch((err) => {
       logger.warn({ err }, 'cli sandbox reap on shutdown failed');

@@ -9,6 +9,22 @@ export const repoSourceSchema = z.enum([
   'upload',
 ]);
 
+/** Which forge (git host) a credential authenticates against, selecting the PR/MR
+ *  REST client used at task close. `gitea` covers Gitea, Forgejo, Codeberg, and
+ *  Gogs (shared /api/v1 API). Bitbucket Cloud and Server/DC are distinct APIs,
+ *  hence two values. Null/unset on a credential = git-over-HTTPS only, no PR
+ *  creation. A hostname cannot reveal the forge software for self-hosted installs,
+ *  so this is stored explicitly rather than inferred. */
+export const forgeProviderSchema = z.enum([
+  'github',
+  'gitea',
+  'gitlab',
+  'bitbucket_cloud',
+  'bitbucket_server',
+]);
+
+export type ForgeProviderName = z.infer<typeof forgeProviderSchema>;
+
 /** A `local_path` repo is read-only end to end (its host directory is bound
  *  `:ro` into the sandbox) UNLESS it was imported in writable mode, where its
  *  working tree was copied into the haive_repos volume. Centralizes the guard

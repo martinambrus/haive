@@ -8,6 +8,7 @@ import {
   encryptDek,
   decryptDek,
   emailSchema,
+  forgeProviderSchema,
   secretsService,
 } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -38,6 +39,12 @@ const createCredentialSchema = z
     host: z.string().min(1).max(255),
     username: z.string().min(1).max(255),
     secret: z.string().min(1).max(4096),
+    // Which forge to call for PR creation/polling. '' = auto-detect from host (only
+    // works for the four well-known public hosts); required for self-hosted forges.
+    provider: z.union([z.literal(''), forgeProviderSchema]).optional(),
+    // Self-hosted API base override (e.g. https://git.example.com/api/v1); blank =
+    // derive from the provider convention.
+    apiBaseUrl: z.string().max(500).optional(),
     gitName: gitNameField,
     gitEmail: gitEmailField,
   })
@@ -57,6 +64,8 @@ const updateCredentialSchema = z
     host: z.string().min(1).max(255),
     username: z.string().max(255).optional(),
     secret: z.string().max(4096).optional(),
+    provider: z.union([z.literal(''), forgeProviderSchema]).optional(),
+    apiBaseUrl: z.string().max(500).optional(),
     gitName: gitNameField,
     gitEmail: gitEmailField,
   })
@@ -79,6 +88,8 @@ repoCredentialsRoutes.get('/', async (c) => {
       id: true,
       label: true,
       host: true,
+      provider: true,
+      apiBaseUrl: true,
       gitName: true,
       gitEmail: true,
       createdAt: true,
@@ -108,6 +119,8 @@ repoCredentialsRoutes.post('/', async (c) => {
       userId,
       label: body.label,
       host: body.host,
+      provider: body.provider ? body.provider : null,
+      apiBaseUrl: body.apiBaseUrl?.trim() || null,
       usernameEncrypted,
       secretEncrypted,
       encryptedDek,
@@ -118,6 +131,8 @@ repoCredentialsRoutes.post('/', async (c) => {
       id: schema.repoCredentials.id,
       label: schema.repoCredentials.label,
       host: schema.repoCredentials.host,
+      provider: schema.repoCredentials.provider,
+      apiBaseUrl: schema.repoCredentials.apiBaseUrl,
       gitName: schema.repoCredentials.gitName,
       gitEmail: schema.repoCredentials.gitEmail,
       createdAt: schema.repoCredentials.createdAt,
@@ -152,8 +167,14 @@ repoCredentialsRoutes.put('/:id', async (c) => {
     secretEncrypted?: string;
     gitName?: string | null;
     gitEmail?: string | null;
+    provider?: string | null;
+    apiBaseUrl?: string | null;
     updatedAt: Date;
   } = { label: body.label, host: body.host, updatedAt: new Date() };
+  // Absent = keep; '' = auto-detect (null); a value = pin. Same keep-on-omit rule as
+  // the identity pair, so an older client that omits them never wipes a set provider.
+  if (body.provider !== undefined) update.provider = body.provider ? body.provider : null;
+  if (body.apiBaseUrl !== undefined) update.apiBaseUrl = body.apiBaseUrl.trim() || null;
 
   // Absent = keep. Present = replace, where an empty pair clears the identity. The
   // refines guarantee both keys arrive together and are both empty or both filled.
@@ -182,6 +203,8 @@ repoCredentialsRoutes.put('/:id', async (c) => {
       id: schema.repoCredentials.id,
       label: schema.repoCredentials.label,
       host: schema.repoCredentials.host,
+      provider: schema.repoCredentials.provider,
+      apiBaseUrl: schema.repoCredentials.apiBaseUrl,
       gitName: schema.repoCredentials.gitName,
       gitEmail: schema.repoCredentials.gitEmail,
       createdAt: schema.repoCredentials.createdAt,

@@ -55,6 +55,7 @@ const SPINE: readonly string[] = [
   '10-gate-3-commit',
   '11a-gate-4-push',
   '12-worktree-cleanup',
+  '13-pr-wait',
 ];
 
 /** plan_tasklist adds the spec + decomposition chain on top of the spine, plus a

@@ -206,6 +206,16 @@ export const CONFIG_KEYS = {
   // invocation per blocking finding, only in a round that has one. Set 'false' to block
   // on the reviewers' word alone. Read per 08c apply (~30s config cache).
   REVIEW_REFUTE_ENABLED: 'config:review:refuteEnabled',
+
+  // Global kill-switch for the pull-request close-out workflow. When 'true', a
+  // workflow task's final worktree-cleanup step offers a "Create a pull request"
+  // action (open a PR/MR on the repo's forge instead of a local merge), and the
+  // task parks in waiting_pr until a background poller sees the PR merge. Default
+  // 'false' (staged rollout): the create_pr option is hidden and no PR polling
+  // runs until an admin flips this on. Also gated per-repo by
+  // repositories.pr_workflow_enabled. Read per step form + per poll tick (~30s
+  // config cache); a flip needs no redeploy.
+  PR_WORKFLOW_ENABLED: 'config:pr:workflowEnabled',
 } as const;
 
 /** Allowed terseness levels for CONFIG_KEYS.TERSENESS_LEVEL (output prose only). */
@@ -258,6 +268,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.TERSENESS_LEVEL]: 'full',
   [CONFIG_KEYS.REVIEW_FANOUT_DISTILL]: 'false',
   [CONFIG_KEYS.REVIEW_REFUTE_ENABLED]: 'true',
+  [CONFIG_KEYS.PR_WORKFLOW_ENABLED]: 'false',
 };
 
 export class ConfigService {

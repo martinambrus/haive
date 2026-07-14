@@ -132,6 +132,12 @@ export const repositories = pgTable(
      *  conventions (e.g. `*.sql` when a repo treats SQL files as dumps rather
      *  than schema/migrations). */
     secretMaskDenyExtend: jsonb('secret_mask_deny_extend').$type<string[]>().notNull().default([]),
+    /** Per-repo enable for the pull-request close-out workflow: when true (and the
+     *  global CONFIG_KEYS.PR_WORKFLOW_ENABLED is on), the 12-worktree-cleanup step
+     *  offers the create_pr action for this repo. Default false — a repo needs an
+     *  origin remote + a credential with a forge provider set to open PRs, so it is
+     *  opt-in per repo on the tooling settings page. */
+    prWorkflowEnabled: boolean('pr_workflow_enabled').notNull().default(false),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
@@ -186,6 +192,16 @@ export const repoCredentials = pgTable(
      *  object and pushed to the remote, so they are not secrets. */
     gitName: text('git_name'),
     gitEmail: text('git_email'),
+    /** Which forge this credential authenticates against, selecting the PR/MR REST
+     *  client used at task close (github | gitea | gitlab | bitbucket_cloud |
+     *  bitbucket_server; see @haive/shared forgeProviderSchema). NULL = git-over-HTTPS
+     *  only, no PR creation. Stored explicitly because a hostname cannot reveal the
+     *  forge software for self-hosted installs. */
+    provider: varchar('provider', { length: 32 }),
+    /** Optional override for the forge REST API base URL, for self-hosted installs
+     *  where the per-provider convention (<host>/api/v1, /api/v4, ...) does not hold
+     *  (subpath / reverse-proxy deployments). NULL = derive from host + provider. */
+    apiBaseUrl: text('api_base_url'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
