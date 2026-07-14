@@ -118,3 +118,97 @@ export async function resetStepAndDownstream(
 
   return { downstreamReset: downstreamToReset.length, newEpoch };
 }
+
+/** Auto-resume a task that FAILED on a provider session/rate-limit, once the usage poller
+ *  decides its allowance is back (gated by CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE). RESUME
+ *  semantics — supersede only the failed pass's live invocation and flip the step back to
+ *  `running` WITHOUT clearing iterations/output, so a loop step (e.g. skill-generation)
+ *  re-dispatches the failed pass and keeps every completed pass. Mirrors the API `resume`
+ *  action (packages/api/src/routes/tasks/steps.ts) — keep them in sync — but runs worker-side
+ *  and, unlike the manual resume, INCREMENTS the anti-thrash counter and stamps
+ *  allowance_auto_resumed_at (the web notifier's distinct "auto-resumed" signal) instead of
+ *  resetting the counter.
+ *
+ *  The task flip is guarded on `status='failed'`, so a concurrent MANUAL resume (which flips
+ *  it to running first) wins and this no-ops → returns false and the caller skips the enqueue.
+ *  Clears the allowance watch inline (mirror of the api CLEAR_ALLOWANCE_WATCH — the worker
+ *  must not import @haive/api) plus the stale completedAt (else the UI wall clock stays frozen
+ *  at failure time). Does NOT enqueue the advance itself (that would import the task queue and
+ *  form a cycle) — the caller enqueues ADVANCE_STEP when this returns true. */
+export async function autoResumeFailedStep(
+  db: Database,
+  args: { taskId: string; stepId: string; round: number; providerId: string | null; via: string },
+): Promise<boolean> {
+  const { taskId, stepId, round, providerId, via } = args;
+  const stepRows = await db
+    .select({ id: schema.taskSteps.id })
+    .from(schema.taskSteps)
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, taskId),
+        eq(schema.taskSteps.stepId, stepId),
+        eq(schema.taskSteps.round, round),
+      ),
+    )
+    .limit(1);
+  const step = stepRows[0];
+  if (!step) return false;
+
+  let flipped = false;
+  await db.transaction(async (tx) => {
+    const now = new Date();
+    // Guarded flip: only a task still `failed` is auto-resumed, so a concurrent manual resume
+    // makes this a no-op. Clears the watch + stale completedAt, bumps the anti-thrash counter,
+    // and stamps the auto-resumed marker — all atomically. RETURNING gives the post-increment
+    // count for the event's `attempt`.
+    const bumped = await tx
+      .update(schema.tasks)
+      .set({
+        status: 'running',
+        errorMessage: null,
+        completedAt: null,
+        awaitingAllowanceProviderId: null,
+        allowanceResetAt: null,
+        allowanceReplenishedAt: null,
+        allowanceAutoResumeCount: sql`${schema.tasks.allowanceAutoResumeCount} + 1`,
+        allowanceAutoResumedAt: now,
+        updatedAt: now,
+      })
+      .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed')))
+      .returning({ count: schema.tasks.allowanceAutoResumeCount });
+    if (bumped.length === 0) return; // already resumed elsewhere / not failed → no-op
+    flipped = true;
+
+    // Supersede the failed pass's live invocation so resolveLlmPhase sees no live invocation
+    // and re-dispatches a fresh wave at upcomingIteration = completed passes.
+    await tx
+      .update(schema.cliInvocations)
+      .set({ supersededAt: now })
+      .where(
+        and(
+          eq(schema.cliInvocations.taskStepId, step.id),
+          isNull(schema.cliInvocations.supersededAt),
+          isNull(schema.cliInvocations.consumedAt),
+        ),
+      );
+    // Preserve iterations/output/detect/form so the loop resumes at the failed pass.
+    await tx
+      .update(schema.taskSteps)
+      .set({
+        status: 'running',
+        errorMessage: null,
+        errorHint: null,
+        endedAt: null,
+        statusMessage: null,
+        updatedAt: now,
+      })
+      .where(eq(schema.taskSteps.id, step.id));
+    await tx.insert(schema.taskEvents).values({
+      taskId,
+      taskStepId: step.id,
+      eventType: 'task.auto_resumed',
+      payload: { stepId, round, providerId, via, attempt: bumped[0]?.count ?? null },
+    });
+  });
+  return flipped;
+}

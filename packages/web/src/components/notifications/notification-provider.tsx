@@ -8,8 +8,10 @@ import { ToastStack, type AttentionToast } from './toast-stack';
 import {
   detectTransitions,
   detectAllowanceReplenished,
+  detectAutoResumed,
   snapshotIdentities,
   snapshotAllowance,
+  snapshotAutoResumed,
   type TaskTransitionEvent,
 } from './transitions';
 
@@ -113,6 +115,8 @@ function bodyFor(status: TaskTransitionEvent['status']): string {
       return 'Task completed';
     case 'allowance_replenished':
       return 'Allowance is back — ready to retry';
+    case 'auto_resumed':
+      return 'Auto-resumed — allowance is back';
   }
 }
 
@@ -136,6 +140,9 @@ export function NotificationProvider() {
   // Separate prev-map for the allowance-back channel (taskId -> replenished stamp), diffed
   // independently of the status channel so the two never clobber each other's baseline.
   const prevAllowanceRef = useRef<Map<string, string> | null>(null);
+  // Separate prev-map for the auto-resume channel (taskId -> auto-resumed stamp), diffed
+  // independently so it never clobbers the status/allowance baselines.
+  const prevAutoResumedRef = useRef<Map<string, string> | null>(null);
   const settingsRef = useRef<{ soundEnabled: boolean; hasCustomSound: boolean }>({
     soundEnabled: true,
     hasCustomSound: false,
@@ -394,6 +401,11 @@ export function NotificationProvider() {
         const allowanceEvents = detectAllowanceReplenished(prevAllowanceRef.current, data.tasks);
         prevAllowanceRef.current = snapshotAllowance(data.tasks);
         for (const event of allowanceEvents) handleEvent(event);
+        // Separate channel: fire once when the poller AUTO-resumes a task after its allowance
+        // returned (only when AUTO_RESUME_ON_ALLOWANCE is on). No baseline — see detectAutoResumed.
+        const autoResumedEvents = detectAutoResumed(prevAutoResumedRef.current, data.tasks);
+        prevAutoResumedRef.current = snapshotAutoResumed(data.tasks);
+        for (const event of autoResumedEvents) handleEvent(event);
       } catch {
         // offline or auth refresh in flight — try again next tick
       }

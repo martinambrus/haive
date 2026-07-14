@@ -3,6 +3,7 @@ import { and, eq, inArray, isNull, isNotNull } from 'drizzle-orm';
 import {
   CONFIG_KEYS,
   QUEUE_NAMES,
+  TASK_JOB_NAMES,
   configService,
   logger,
   type CliProviderName,
@@ -23,6 +24,12 @@ import {
   writeProviderSecret,
 } from '../usage-window/token-source.js';
 import type { UsageFetchContext, UsageFetchOutcome } from '../usage-window/types.js';
+import { getTaskQueue } from './task-queue.js';
+import { autoResumeFailedStep } from './_step-reset.js';
+
+/** Max consecutive auto-resumes the poller performs before falling back to notify-only
+ *  (anti-thrash). Reset to 0 on any manual action or the next successful step progress. */
+const ALLOWANCE_AUTO_RESUME_CAP = 3;
 
 const log = logger.child({ module: 'usage-poll' });
 
@@ -382,8 +389,12 @@ async function checkAllowanceReplenishment(db: Database): Promise<void> {
   const armed = await db
     .select({
       id: schema.tasks.id,
+      userId: schema.tasks.userId,
       providerId: schema.tasks.awaitingAllowanceProviderId,
       resetAt: schema.tasks.allowanceResetAt,
+      currentStepId: schema.tasks.currentStepId,
+      currentRound: schema.tasks.currentRound,
+      autoResumeCount: schema.tasks.allowanceAutoResumeCount,
     })
     .from(schema.tasks)
     .where(
@@ -439,6 +450,53 @@ async function checkAllowanceReplenishment(db: Database): Promise<void> {
       continue;
     }
 
+    // Allowance is back. If auto-resume is ON, under the anti-thrash cap, and the task still
+    // has a step to resume, re-run it (resume semantics — completed loop passes preserved)
+    // instead of only notifying. A concurrent manual resume makes autoResumeFailedStep a no-op.
+    const autoResumeOn = await configService.getBoolean(
+      CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE,
+      false,
+    );
+    if (autoResumeOn && task.currentStepId && task.autoResumeCount < ALLOWANCE_AUTO_RESUME_CAP) {
+      const resumed = await autoResumeFailedStep(db, {
+        taskId: task.id,
+        stepId: task.currentStepId,
+        round: task.currentRound ?? 0,
+        providerId: task.providerId,
+        via: verdict.via,
+      });
+      if (resumed) {
+        await getTaskQueue().add(
+          TASK_JOB_NAMES.ADVANCE_STEP,
+          {
+            taskId: task.id,
+            userId: task.userId,
+            stepId: task.currentStepId,
+            round: task.currentRound ?? 0,
+          },
+          {
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 5000 },
+            removeOnComplete: 100,
+            removeOnFail: 100,
+          },
+        );
+        log.info(
+          { taskId: task.id, providerId: task.providerId, attempt: task.autoResumeCount + 1 },
+          'allowance replenished; auto-resumed',
+        );
+        continue;
+      }
+      // no-op (already resumed elsewhere) → the task is no longer failed; nothing to notify.
+      continue;
+    }
+    if (autoResumeOn && task.autoResumeCount >= ALLOWANCE_AUTO_RESUME_CAP) {
+      log.info(
+        { taskId: task.id, cap: ALLOWANCE_AUTO_RESUME_CAP },
+        'allowance replenished; auto-resume cap reached — notifying instead',
+      );
+    }
+    // Notify-only (default, capped, or no step to resume): stamp the replenished signal.
     await db
       .update(schema.tasks)
       .set({

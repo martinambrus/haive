@@ -451,6 +451,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           status: 'running',
           errorMessage: null,
           completedAt: null,
+          allowanceAutoResumeCount: 0,
           currentStepId: stepId,
           // run_seq (run-monotonic order), not step_index — mirrors the worker's
           // resolveCurrentStepIndex so the "Step index" label reflects true run order.
@@ -553,6 +554,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         status: 'running',
         errorMessage: null,
         completedAt: null,
+        // reset the auto-resume thrash counter: a manual action gives a fresh budget
+        allowanceAutoResumeCount: 0,
         ...CLEAR_ALLOWANCE_WATCH,
         updatedAt: now,
       })
@@ -630,6 +633,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         status: 'running',
         errorMessage: null,
         completedAt: null,
+        // reset the auto-resume thrash counter: a manual action gives a fresh budget
+        allowanceAutoResumeCount: 0,
         ...CLEAR_ALLOWANCE_WATCH,
         updatedAt: now,
       })
@@ -688,6 +693,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           status: 'running',
           errorMessage: null,
           completedAt: null,
+          // reset the auto-resume thrash counter: a manual action gives a fresh budget
+          allowanceAutoResumeCount: 0,
           ...CLEAR_ALLOWANCE_WATCH,
           updatedAt: now,
         })

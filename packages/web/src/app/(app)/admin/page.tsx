@@ -47,6 +47,10 @@ export default function AdminPage() {
   const [savingDbAccess, setSavingDbAccess] = useState(false);
   const [ddevRegistryCacheEnabled, setDdevRegistryCacheEnabled] = useState<boolean | null>(null);
   const [savingDdevRegistryCache, setSavingDdevRegistryCache] = useState(false);
+  const [autoResumeOnAllowanceEnabled, setAutoResumeOnAllowanceEnabled] = useState<boolean | null>(
+    null,
+  );
+  const [savingAutoResumeOnAllowance, setSavingAutoResumeOnAllowance] = useState(false);
   const [ddevControlEnabled, setDdevControlEnabled] = useState<boolean | null>(null);
   const [savingDdevControl, setSavingDdevControl] = useState(false);
   const [fairEnabled, setFairEnabled] = useState<boolean | null>(null);
@@ -80,6 +84,7 @@ export default function AdminPage() {
         browserAccessData,
         dbAccessData,
         ddevRegistryCacheData,
+        autoResumeOnAllowanceData,
         ddevControlData,
         fairData,
         perTaskData,
@@ -100,6 +105,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
         api.get<{ enabled: boolean }>('/admin/config/db-access'),
         api.get<{ enabled: boolean }>('/admin/config/ddev-registry-cache'),
+        api.get<{ enabled: boolean }>('/admin/config/auto-resume-on-allowance'),
         api.get<{ enabled: boolean }>('/admin/config/ddev-control'),
         api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
         api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
@@ -122,6 +128,7 @@ export default function AdminPage() {
       setBrowserAccessEnabled(browserAccessData.enabled);
       setDbAccessEnabled(dbAccessData.enabled);
       setDdevRegistryCacheEnabled(ddevRegistryCacheData.enabled);
+      setAutoResumeOnAllowanceEnabled(autoResumeOnAllowanceData.enabled);
       setDdevControlEnabled(ddevControlData.enabled);
       setFairEnabled(fairData.enabled);
       setPromptCaching1hEnabled(promptCaching1hData.enabled);
@@ -430,6 +437,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update DDEV image cache');
     } finally {
       setSavingDdevRegistryCache(false);
+    }
+  }
+
+  async function setAutoResumeOnAllowance(next: boolean) {
+    setSavingAutoResumeOnAllowance(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/auto-resume-on-allowance', {
+        enabled: next,
+      });
+      setAutoResumeOnAllowanceEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update auto-resume');
+    } finally {
+      setSavingAutoResumeOnAllowance(false);
     }
   }
 
@@ -984,6 +1006,34 @@ export default function AdminPage() {
             />
             {ddevRegistryCacheEnabled ? 'Enabled' : 'Disabled'}
             {savingDdevRegistryCache && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {autoResumeOnAllowanceEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Auto-resume on allowance reset</CardTitle>
+            <CardDescription>
+              When a task fails because a provider hit its session / rate limit, automatically
+              resume it once that provider&apos;s allowance resets, preserving completed work (e.g.
+              skills already generated). OFF (default) only notifies you so you can resume manually.
+              Capped at a few consecutive auto-resumes per task to avoid thrashing; any manual
+              action or successful step resets the count.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={autoResumeOnAllowanceEnabled}
+              disabled={savingAutoResumeOnAllowance}
+              onChange={(e) => void setAutoResumeOnAllowance(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {autoResumeOnAllowanceEnabled ? 'Enabled' : 'Disabled'}
+            {savingAutoResumeOnAllowance && (
+              <span className="text-xs text-neutral-500">saving…</span>
+            )}
           </label>
         </Card>
       )}

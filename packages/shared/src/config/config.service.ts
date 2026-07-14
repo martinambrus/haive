@@ -152,6 +152,13 @@ export const CONFIG_KEYS = {
   // mid-task flip needs Stop/Retry). Persists across restarts.
   DDEV_REGISTRY_CACHE_ENABLED: 'config:ddev:registryCache',
 
+  // When 'true', the usage poller AUTO-resumes a task that FAILED on a provider
+  // session/rate-limit once that provider's allowance resets — resume semantics, so
+  // completed loop passes are preserved — capped at ALLOWANCE_AUTO_RESUME_CAP consecutive
+  // auto-resumes before falling back to notify-only. Default 'false' = notify-only (the
+  // user resumes manually, today's behavior). Read once per usage-poll tick.
+  AUTO_RESUME_ON_ALLOWANCE: 'config:tasks:autoResumeOnAllowance',
+
   // Per-file size cap (bytes) for user-uploaded task attachments. Enforced by the
   // attachment upload endpoint (streamed; aborts once the byte count exceeds it).
   // Admin-tunable; default DEFAULT_TASK_ATTACHMENT_MAX_BYTES (25 MiB).
@@ -235,6 +242,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.DEBUG_MODE_ENABLED]: 'true',
   [CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED]: 'true',
   [CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED]: 'true',
+  [CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE]: 'false',
   [CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES]: String(DEFAULT_TASK_ATTACHMENT_MAX_BYTES),
   [CONFIG_KEYS.APP_URL]: 'http://localhost:3000',
   [CONFIG_KEYS.MAINTENANCE_MODE]: 'false',

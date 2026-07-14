@@ -146,6 +146,9 @@ taskRoutes.get('/', async (c) => {
       allowanceReplenishedAt: t.allowanceReplenishedAt
         ? t.allowanceReplenishedAt.toISOString()
         : null,
+      allowanceAutoResumedAt: t.allowanceAutoResumedAt
+        ? t.allowanceAutoResumedAt.toISOString()
+        : null,
     };
   });
   return c.json({ tasks, total, page, pageSize, repositories });
@@ -511,6 +514,8 @@ taskRoutes.post('/:id/action', async (c) => {
         .set({
           status: 'queued',
           errorMessage: null,
+          // full task restart → fresh auto-resume budget
+          allowanceAutoResumeCount: 0,
           updatedAt: new Date(),
         })
         .where(eq(schema.tasks.id, id));

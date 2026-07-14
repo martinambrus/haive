@@ -177,6 +177,15 @@ export const tasks = pgTable(
      *  Null -> set flip is the signal the web notifier diffs to fire the "allowance is
      *  back" browser notification. Cleared on retry/resume/cancel so a re-failure re-arms. */
     allowanceReplenishedAt: timestamp('allowance_replenished_at'),
+    /** Consecutive auto-resumes the allowance poller has performed on this task (only when
+     *  CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE is on). Anti-thrash cap: at ALLOWANCE_AUTO_RESUME_CAP
+     *  the poller falls back to notify-only. Reset to 0 on any manual action and on the next
+     *  successful step progress, so only a run of back-to-back auto-resumes counts. */
+    allowanceAutoResumeCount: integer('allowance_auto_resume_count').notNull().default(0),
+    /** Stamped by the poller when it AUTO-resumes a task whose allowance came back (distinct
+     *  from allowanceReplenishedAt, which is the notify-only "ready to retry" signal). Null ->
+     *  set flip is what the web diffs to fire the "auto-resumed" notification. */
+    allowanceAutoResumedAt: timestamp('allowance_auto_resumed_at'),
     /** Developer's estimated time to complete the task, in decimal hours
      *  (e.g. 0.25, 0.5, 1, 1.5). Optional, set on the new-task form; compared
      *  against the actual effort (agent work + user-active time) in the task

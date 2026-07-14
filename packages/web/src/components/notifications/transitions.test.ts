@@ -4,6 +4,8 @@ import {
   snapshotIdentities,
   detectAllowanceReplenished,
   snapshotAllowance,
+  detectAutoResumed,
+  snapshotAutoResumed,
 } from './transitions';
 
 const task = (
@@ -220,6 +222,63 @@ describe('snapshotAllowance', () => {
     const snap = snapshotAllowance([
       rtask('a', 'failed', '2026-07-03T01:00:00Z'),
       rtask('b', 'failed', null),
+    ]);
+    expect(snap.get('a')).toBe('2026-07-03T01:00:00Z');
+    expect(snap.get('b')).toBe('');
+  });
+});
+
+// Auto-resume task: carries the auto-resumed stamp (or null). Unlike replenishment, the task
+// is RUNNING by the time the stamp is set (the poller flipped it back).
+const artask = (
+  id: string,
+  status: string,
+  allowanceAutoResumedAt: string | null,
+  title = `Task ${id}`,
+) => ({ id, title, status, currentStepId: null, allowanceAutoResumedAt });
+
+describe('detectAutoResumed', () => {
+  it('first poll emits NOTHING (no baseline) — an auto-resume while away needs no attention', () => {
+    expect(
+      detectAutoResumed(null, [
+        artask('a', 'running', '2026-07-03T00:00:00Z'),
+        artask('b', 'failed', '2026-07-03T00:00:00Z'),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('fires on the empty->set flip for a RUNNING task (not gated on failed)', () => {
+    const prev = snapshotAutoResumed([artask('a', 'running', null)]);
+    const events = detectAutoResumed(prev, [artask('a', 'running', '2026-07-03T01:00:00Z')]);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.status).toBe('auto_resumed');
+    expect(events[0]!.baseline).toBe(false);
+    expect(events[0]!.currentWaitStartedAt).toBe('2026-07-03T01:00:00Z');
+  });
+
+  it('does not re-fire while the auto-resume stamp is unchanged', () => {
+    const prev = snapshotAutoResumed([artask('a', 'running', '2026-07-03T01:00:00Z')]);
+    expect(detectAutoResumed(prev, [artask('a', 'running', '2026-07-03T01:00:00Z')])).toEqual([]);
+  });
+
+  it('re-fires when a later auto-resume stamps a fresh time (new episode)', () => {
+    const prev = snapshotAutoResumed([artask('a', 'running', '2026-07-03T01:00:00Z')]);
+    const events = detectAutoResumed(prev, [artask('a', 'running', '2026-07-03T09:00:00Z')]);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.currentWaitStartedAt).toBe('2026-07-03T09:00:00Z');
+  });
+
+  it('does not fire for a task that was never auto-resumed', () => {
+    const prev = snapshotAutoResumed([artask('a', 'running', null)]);
+    expect(detectAutoResumed(prev, [artask('a', 'running', null)])).toEqual([]);
+  });
+});
+
+describe('snapshotAutoResumed', () => {
+  it('maps each task to its auto-resume stamp, empty string when absent', () => {
+    const snap = snapshotAutoResumed([
+      artask('a', 'running', '2026-07-03T01:00:00Z'),
+      artask('b', 'running', null),
     ]);
     expect(snap.get('a')).toBe('2026-07-03T01:00:00Z');
     expect(snap.get('b')).toBe('');

@@ -550,6 +550,23 @@ adminRoutes.put('/config/ddev-registry-cache', async (c) => {
   return c.json({ enabled });
 });
 
+const autoResumeOnAllowanceSchema = z.object({ enabled: z.boolean() });
+
+// Global auto-resume-on-allowance switch. When ON, the usage poller re-runs a task that
+// failed on a provider session/rate-limit once its allowance resets (resume semantics,
+// capped). OFF (default) = notify-only, the user resumes manually. Read per poll tick.
+adminRoutes.get('/config/auto-resume-on-allowance', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE, false);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/auto-resume-on-allowance', async (c) => {
+  const { enabled } = autoResumeOnAllowanceSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'auto-resume-on-allowance switch updated');
+  return c.json({ enabled });
+});
+
 const ddevControlSchema = z.object({ enabled: z.boolean() });
 
 // Global ddev-control MCP kill-switch. When ON (default), a DDEV task's AI CLI gets the

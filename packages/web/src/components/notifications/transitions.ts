@@ -8,7 +8,7 @@ export type NotifiableStatus = (typeof NOTIFIABLE_STATUSES)[number];
  *  'allowance_replenished' episode (a failed task whose CLI allowance came back). Keyed by
  *  the notifier for copy/tint/dedupe; NOT a task status (detectTransitions never emits it,
  *  it is produced only by detectAllowanceReplenished). */
-export type AttentionKind = NotifiableStatus | 'allowance_replenished';
+export type AttentionKind = NotifiableStatus | 'allowance_replenished' | 'auto_resumed';
 
 export interface TaskSnapshot {
   id: string;
@@ -29,6 +29,11 @@ export interface TaskSnapshot {
    *  only). Null/absent unless a rate-limit-failed task's allowance has come back; its
    *  empty->set transition is a distinct notifiable episode from the failure itself. */
   allowanceReplenishedAt?: string | null;
+  /** ISO time the poller AUTO-resumed this task after its allowance came back (list endpoint
+   *  only; set only when CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE is on). Distinct from
+   *  allowanceReplenishedAt (the notify-only "ready to retry" signal). Its empty->set flip is
+   *  a live "it auto-resumed" episode. */
+  allowanceAutoResumedAt?: string | null;
 }
 
 export interface TaskTransitionEvent {
@@ -162,4 +167,46 @@ export function detectAllowanceReplenished(
  *  detectAllowanceReplenished. Seeds the baseline so a replenishment is diffed as a flip. */
 export function snapshotAllowance(next: readonly TaskSnapshot[]): Map<string, string> {
   return new Map(next.map((t) => [t.id, t.allowanceReplenishedAt ?? '']));
+}
+
+/**
+ * Diff two auto-resume snapshots into "task auto-resumed" events — the counterpart to
+ * detectAllowanceReplenished for when CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE is on. Fires on
+ * the empty->set (or changed) flip of allowanceAutoResumedAt, for a task in ANY status
+ * (auto-resume flips it back to `running`, so this channel — unlike the replenished one — is
+ * NOT gated on `failed`).
+ *
+ * NO baseline: on the first poll (prev === null) it only seeds the snapshot and emits nothing.
+ * An auto-resume that happened while the tab was closed needs no attention — the task already
+ * resumed itself and is running — whereas the notify-only path DOES baseline because that task
+ * is still failed and waiting on the user. The stamp is a historical column (not cleared by
+ * CLEAR_ALLOWANCE_WATCH), so baselining it would re-fire stale episodes on every page load.
+ */
+export function detectAutoResumed(
+  prev: ReadonlyMap<string, string> | null,
+  next: readonly TaskSnapshot[],
+): TaskTransitionEvent[] {
+  const events: TaskTransitionEvent[] = [];
+  if (prev === null) return events;
+  for (const task of next) {
+    const cur = task.allowanceAutoResumedAt ?? '';
+    if (!cur) continue;
+    if ((prev.get(task.id) ?? '') === cur) continue;
+    events.push({
+      taskId: task.id,
+      title: task.title,
+      status: 'auto_resumed',
+      currentStepId: task.currentStepId,
+      // Fold the auto-resume stamp into the seen-key slot so each auto-resume dedupes as one.
+      currentWaitStartedAt: cur,
+      baseline: false,
+    });
+  }
+  return events;
+}
+
+/** taskId -> allowanceAutoResumedAt ('' when absent), compared against the next poll by
+ *  detectAutoResumed. Seeds the baseline so an auto-resume is diffed as a flip. */
+export function snapshotAutoResumed(next: readonly TaskSnapshot[]): Map<string, string> {
+  return new Map(next.map((t) => [t.id, t.allowanceAutoResumedAt ?? '']));
 }

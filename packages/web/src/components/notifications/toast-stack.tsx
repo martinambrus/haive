@@ -20,6 +20,7 @@ const TOAST_TINT: Record<AttentionKind, { border: string; label: string }> = {
   failed: { border: 'border-red-800/60', label: 'text-red-300' },
   completed: { border: 'border-emerald-800/60', label: 'text-emerald-300' },
   allowance_replenished: { border: 'border-emerald-800/60', label: 'text-emerald-300' },
+  auto_resumed: { border: 'border-indigo-800/60', label: 'text-indigo-300' },
 };
 
 /** Persistent attention toasts (no auto-dismiss): clicking the body opens the

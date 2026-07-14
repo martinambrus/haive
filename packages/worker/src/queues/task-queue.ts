@@ -800,6 +800,12 @@ async function handleResult(
       await appendEvent(db, ctx.taskId, result.row.id, `step.${result.status}`, {
         stepId,
       });
+      // A step completed → real progress; clear the consecutive auto-resume counter so only
+      // back-to-back auto-resumes with no progress in between reach the anti-thrash cap.
+      await db
+        .update(schema.tasks)
+        .set({ allowanceAutoResumeCount: 0 })
+        .where(and(eq(schema.tasks.id, ctx.taskId), ne(schema.tasks.allowanceAutoResumeCount, 0)));
       const steps = await buildRunList(ctx, db);
       const idx = steps.findIndex((s) => s.metadata.id === stepId);
       const next = idx >= 0 ? steps[idx + 1] : undefined;

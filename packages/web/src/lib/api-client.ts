@@ -496,6 +496,10 @@ export interface Task {
    *  Null until a task that failed on a provider rate-limit has its allowance come back;
    *  the notifier diffs its null->set flip to fire the "allowance is back" notification. */
   allowanceReplenishedAt?: string | null;
+  /** ISO time the poller AUTO-resumed this task after its allowance returned (list endpoint
+   *  only; set only when AUTO_RESUME_ON_ALLOWANCE is on). The notifier diffs its null->set
+   *  flip to fire the "auto-resumed" notification. */
+  allowanceAutoResumedAt?: string | null;
   containerId: string | null;
   worktreePath: string | null;
   errorMessage: string | null;
