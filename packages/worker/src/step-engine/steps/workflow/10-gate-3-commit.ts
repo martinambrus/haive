@@ -6,8 +6,15 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { buildCommitDiffArtifact } from './_commit-diff.js';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
 
 const exec = promisify(execFile);
+
+/** Cap on how many changed paths we persist to tasks.changed_paths. The estimator's
+ *  file-overlap anchor (00b-estimate) needs the touched-file SET, not every path in a
+ *  pathological diff, and the row should stay small. */
+export const MAX_PERSISTED_CHANGED_PATHS = 200;
 
 const FALLBACK_GIT_IDENTITY = {
   GIT_AUTHOR_NAME: 'Haive',
@@ -51,6 +58,45 @@ async function gitRun(
       stderr: (e.stderr ?? '').toString(),
       code: typeof e.code === 'number' ? e.code : 1,
     };
+  }
+}
+
+/** Persist the durable commit outcome (sha + touched paths) onto the TASK ROW so a
+ *  completed task's changed-file set survives worktree teardown and step-output resets
+ *  (see the step-output-not-durable rule) — the anchor 00b-estimate ranks prior tasks by
+ *  file overlap. The files this commit touched are unioned with any already stored: a
+ *  fix loop re-runs the commit gate each round, so the union across rounds is the task's
+ *  full change set. Newest-first before the cap so the latest round's files win a
+ *  truncation. Best-effort — the commit already landed, so a metadata-write failure must
+ *  not fail the gate. */
+async function persistCommitOutcome(
+  ctx: StepContext,
+  workspace: string,
+  commitSha: string | null,
+): Promise<void> {
+  try {
+    const names = await gitRun(workspace, ['show', '--name-only', '--format=', 'HEAD']);
+    const thisCommit =
+      names.code === 0
+        ? names.stdout
+            .split('\n')
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0)
+        : [];
+    const row = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { changedPaths: true },
+    });
+    const merged = Array.from(new Set([...thisCommit, ...(row?.changedPaths ?? [])])).slice(
+      0,
+      MAX_PERSISTED_CHANGED_PATHS,
+    );
+    await ctx.db
+      .update(schema.tasks)
+      .set({ commitSha, changedPaths: merged, updatedAt: new Date() })
+      .where(eq(schema.tasks.id, ctx.taskId));
+  } catch (err) {
+    ctx.logger.warn({ err }, 'failed to persist commit outcome (sha / changed paths)');
   }
 }
 
@@ -187,6 +233,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const sha = await gitRun(workspace, ['rev-parse', 'HEAD']);
     const commitSha = sha.code === 0 ? sha.stdout.trim() : null;
     ctx.logger.info({ commitSha, message }, 'workflow commit finalised');
+    await persistCommitOutcome(ctx, workspace, commitSha);
     return { committed: true, commitSha, message };
   },
 };
