@@ -11,9 +11,6 @@ export const CONFIG_KEYS = {
   DATABASE_URL: 'config:database:url',
   API_PORT: 'config:server:apiPort',
 
-  JWT_ACCESS_TTL: 'config:jwt:accessTtl',
-  JWT_REFRESH_TTL: 'config:jwt:refreshTtl',
-
   RATE_LIMIT_API_RPM: 'config:rateLimit:api:requestsPerMinute',
   RATE_LIMIT_AUTH_RPM: 'config:rateLimit:auth:requestsPerMinute',
 
@@ -224,8 +221,6 @@ export type TersenessLevel = (typeof TERSENESS_LEVELS)[number];
 
 const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.API_PORT]: '3001',
-  [CONFIG_KEYS.JWT_ACCESS_TTL]: '15m',
-  [CONFIG_KEYS.JWT_REFRESH_TTL]: '7d',
   [CONFIG_KEYS.RATE_LIMIT_API_RPM]: '60',
   [CONFIG_KEYS.RATE_LIMIT_AUTH_RPM]: '10',
   [CONFIG_KEYS.SMTP_HOST]: 'mailpit',

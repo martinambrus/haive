@@ -29,6 +29,21 @@ async function tryRefresh(): Promise<boolean> {
   }
 }
 
+/**
+ * Rotate the access cookie via /auth/refresh, deduped so concurrent callers share
+ * ONE in-flight request. The server rotates (and revokes) the refresh token on
+ * each call, so two overlapping refreshes would invalidate each other; the shared
+ * promise guarantees the 401-retry path and the keepalive timer never collide.
+ */
+export function refreshSession(): Promise<boolean> {
+  if (!refreshing) {
+    refreshing = tryRefresh().finally(() => {
+      refreshing = null;
+    });
+  }
+  return refreshing;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const doFetch = () =>
     fetch(`${API_BASE}${path}`, {
@@ -44,9 +59,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   // On 401, attempt one silent refresh then retry the original request
   if (res.status === 401 && !path.startsWith('/auth/')) {
-    if (!refreshing) refreshing = tryRefresh();
-    const ok = await refreshing;
-    refreshing = null;
+    const ok = await refreshSession();
     if (ok) {
       res = await doFetch();
     }
