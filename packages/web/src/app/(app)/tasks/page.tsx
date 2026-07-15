@@ -7,6 +7,7 @@ import { api, type Task, type TaskListResponse, type TaskStatus } from '@/lib/ap
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { formatDuration } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
+import { mergeSpan } from '@/lib/merge-task-span';
 import { usePageTitle } from '@/lib/use-page-title';
 
 type BadgeVariant = 'default' | 'success' | 'warning' | 'error';
@@ -134,21 +135,6 @@ function writeSavedFilter(filter: SavedFilter): void {
   }
 }
 
-// Merge a freshly-polled newest-first span into the current list. `fresh` is the
-// authoritative window for the current filter — new tasks, status/timing changes,
-// and drop-outs are all reflected. The older tail beyond the polled window is
-// kept from `prev` so a deep scroll is not truncated. createdAt is immutable, so
-// the oldest fresh row's timestamp cleanly splits refreshed-window from the
-// static tail (and id membership prevents duplicating a boundary row).
-function mergeSpan(prev: Task[] | null, fresh: Task[]): Task[] {
-  const oldest = fresh[fresh.length - 1];
-  if (!prev || !oldest || prev.length <= fresh.length) return fresh;
-  const cutoff = new Date(oldest.createdAt).getTime();
-  const freshIds = new Set(fresh.map((t) => t.id));
-  const tail = prev.filter((t) => !freshIds.has(t.id) && new Date(t.createdAt).getTime() < cutoff);
-  return [...fresh, ...tail];
-}
-
 export default function TasksPage() {
   usePageTitle('Tasks');
   const router = useRouter();
@@ -206,7 +192,7 @@ export default function TasksPage() {
       try {
         const data = await api.get<TaskListResponse>(`/tasks?${qsFor(1, count)}`);
         if (cancelled) return;
-        setTasks((prev) => mergeSpan(prev, data.tasks));
+        setTasks((prev) => mergeSpan(prev, data.tasks, count));
         setTotal(data.total);
         setRepoOptions(data.repositories);
         setError(null);
