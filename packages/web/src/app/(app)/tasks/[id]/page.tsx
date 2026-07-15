@@ -1829,12 +1829,27 @@ function HeaderPaceChip({
   const effortMs = liveEffortMs(steps, userActive, endMs);
   const estimateMs = estHours * 3_600_000;
   const pct = estimateMs > 0 ? (effortMs / estimateMs) * 100 : 0;
+  // AI's learned estimate (decimal hours) as a muted middle segment between effort
+  // and your estimate. Null on legacy tasks and when 00b-estimate didn't run — then
+  // the chip falls back to the two-part effort / estimate form.
+  const aiEstHours = task.aiEstimatedTimeHours ?? 0;
+  const aiEstimateMs = aiEstHours > 0 ? aiEstHours * 3_600_000 : 0;
   return (
     <span
       className={`ml-auto shrink-0 font-mono text-sm font-semibold ${paceColorClass(pct)}`}
-      title={`Effort vs estimate — ${Math.round(pct)}% of the ${estHours}h estimate`}
+      title={
+        aiEstimateMs > 0
+          ? `Effort / AI estimate / your estimate — ${Math.round(pct)}% of the ${estHours}h estimate (AI predicted ${aiEstHours}h)`
+          : `Effort vs estimate — ${Math.round(pct)}% of the ${estHours}h estimate`
+      }
     >
-      {formatHoursMinutes(effortMs)} / {formatHoursMinutes(estimateMs)}
+      {formatHoursMinutes(effortMs)} /{' '}
+      {aiEstimateMs > 0 && (
+        <>
+          <span className="text-neutral-400">{formatHoursMinutes(aiEstimateMs)}</span> /{' '}
+        </>
+      )}
+      {formatHoursMinutes(estimateMs)}
     </span>
   );
 }
