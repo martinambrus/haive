@@ -187,6 +187,30 @@ export default function NewTaskPage() {
     void refreshStatus(repositoryId);
   }, [repositoryId, refreshStatus]);
 
+  // QOL: preselect the CLI dropdown from this repo's last-used CLI (the
+  // cli_provider_id of the most-recent task on this repo). Only sets when that
+  // provider still exists in the loaded list, so an empty/stale result never
+  // wipes a manual pick. Waits for `providers` so the membership check is valid.
+  useEffect(() => {
+    if (!repositoryId || !providers) return;
+    let cancelled = false;
+    void api
+      .get<{ cliProviderId: string | null }>(
+        `/tasks/last-cli?repositoryId=${encodeURIComponent(repositoryId)}`,
+      )
+      .then((res) => {
+        if (cancelled) return;
+        const id = res.cliProviderId;
+        if (id && providers.some((p) => p.id === id)) setCliProviderId(id);
+      })
+      .catch(() => {
+        /* non-fatal: leave the current selection */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repositoryId, providers]);
+
   // Feature/area autocomplete: once >=2 chars are typed and a repo is selected,
   // fetch prior feature names for that repo (substring match) so the user reuses
   // an existing name instead of inventing a near-duplicate. Debounced so each

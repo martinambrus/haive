@@ -332,6 +332,29 @@ taskRoutes.get('/feature-suggestions', async (c) => {
   return c.json({ suggestions: rows.map((r) => r.feature) });
 });
 
+// Preselect the New Task form's CLI dropdown from this repo's history: the
+// cli_provider_id of the most-recent task on THIS repo that picked one. That
+// column is effectively the step-0 CLI (resolvePreferredCli falls back to
+// tasks.cli_provider_id), i.e. "the CLI used on this repo last". User-scoped
+// like its siblings. Static path — must stay ABOVE '/:id' so it is not
+// captured as a task id.
+taskRoutes.get('/last-cli', async (c) => {
+  const userId = c.get('userId');
+  const repositoryId = c.req.query('repositoryId')?.trim();
+  if (!repositoryId) return c.json({ cliProviderId: null });
+  const db = getDb();
+  const row = await db.query.tasks.findFirst({
+    where: and(
+      eq(schema.tasks.userId, userId),
+      eq(schema.tasks.repositoryId, repositoryId),
+      isNotNull(schema.tasks.cliProviderId),
+    ),
+    orderBy: [desc(schema.tasks.createdAt)],
+    columns: { cliProviderId: true },
+  });
+  return c.json({ cliProviderId: row?.cliProviderId ?? null });
+});
+
 // Per-repo estimation-accuracy dashboard (task-time estimation v2.4). Completed workflow
 // tasks that carry a RAW AI estimate are paired with their MEASURED actual effort
 // (computeTaskTiming), and the shared aggregator derives per-task error + the repo-level
