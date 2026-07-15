@@ -6,6 +6,7 @@ import {
   logger,
   CONFIG_KEYS,
 } from '@haive/shared';
+import { waitForDatabaseReady } from '@haive/database';
 import { initDatabase } from './db.js';
 import { initRedis } from './redis.js';
 import { runDataMigrations } from './data-migrations.js';
@@ -28,6 +29,10 @@ export async function bootstrap(): Promise<BootstrapResult> {
   await configService.initialize(redisUrl);
 
   const db = initDatabase(databaseUrl);
+  await waitForDatabaseReady(db, {
+    onRetry: ({ attempt, waitedMs, reason }) =>
+      logger.warn({ attempt, waitedMs, reason }, 'database not ready, retrying'),
+  });
   await secretsService.initialize(db);
 
   const masterKek = await secretsService.getMasterKek();
