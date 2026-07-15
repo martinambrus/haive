@@ -324,11 +324,27 @@ function notProbed(url: string | null, reason: string): RuntimeSmoke {
 }
 
 /** Boot the app once (idempotent via ensureAppServing) and curl it from INSIDE its
- *  container, where loopback/DNS resolve. Never throws — a boot or probe failure
- *  degrades to ran:false so the verify step still records test/lint/typecheck. */
-async function runRuntimeSmoke(ctx: StepContext): Promise<RuntimeSmoke> {
+ *  container, where loopback/DNS resolve. A DDEV boot error is fatal: without a
+ *  running DDEV environment, following checks would verify the wrong thing (or
+ *  nothing at all), so the step must stop as retryable. Probe failures after a
+ *  successful boot remain recorded in the smoke result for gate-2 review. */
+export async function runRuntimeSmoke(
+  ctx: StepContext,
+  opts: { failOnDdevBootError?: boolean } = {},
+): Promise<RuntimeSmoke> {
+  let rt: Awaited<ReturnType<typeof ensureAppServing>>;
   try {
-    const rt = await ensureAppServing(ctx);
+    rt = await ensureAppServing(ctx);
+  } catch (err) {
+    if (opts.failOnDdevBootError) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`DDEV environment could not start for runtime verification: ${message}`);
+    }
+    ctx.logger.warn({ err }, 'runtime smoke could not start the app — recording as not probed');
+    return notProbed(null, `Runtime smoke could not run: ${(err as Error).message}`);
+  }
+
+  try {
     if (rt.mode === 'none') return notProbed(null, 'No servable runtime recorded for this task.');
     if (rt.mode === 'host') return notProbed(rt.url, 'Host runtime is not smoke-probed.');
     // `-w …%{http_code}` appends the tail-safe status marker AFTER the body (see
@@ -471,7 +487,12 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     // Always smoke the running app, regardless of the test/lint checkboxes — this
     // is the only step that catches a runtime failure (e.g. a DB-connection error
     // page) before gate-2. Kept out of `passed` so it never routes to implement.
-    const runtimeSmoke = await runRuntimeSmoke(ctx);
+    const runtimeSmoke = await runRuntimeSmoke(ctx, {
+      // A DDEV boot failure is an environment failure, not a failed test result. Do
+      // not let it be recorded as a benign "not probed" smoke result and allow the
+      // workflow to continue; fail this retryable step instead.
+      failOnDdevBootError: args.detected.ddevMode,
+    });
 
     ctx.logger.info(
       {

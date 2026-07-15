@@ -123,7 +123,7 @@ function fixLoopStep(blocking: boolean): StepDefinition {
   };
 }
 
-function throwingStep(): StepDefinition {
+function throwingStep(routeErrorToFixLoop = true): StepDefinition {
   return {
     metadata: meta('test-fixloop-err'),
     async detect() {
@@ -132,7 +132,7 @@ function throwingStep(): StepDefinition {
     form() {
       return null;
     },
-    fixLoopOnError: true,
+    ...(routeErrorToFixLoop ? { fixLoopOnError: true } : {}),
     async apply() {
       throw new Error('ddev restart failed: bad webserver');
     },
@@ -202,6 +202,14 @@ describe('fix-loop engine', () => {
       expect(result.sourceStepId).toBe('test-fixloop-err');
       expect(result.row.round).toBe(2);
     }
+  });
+
+  it('fails a thrown error when fixLoopOnError is absent', async () => {
+    const state: MockState = { taskStepRow: {}, inserts: [], updates: [] };
+    const result = await advanceStep(params(makeMockDb(state), throwingStep(false), 2));
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') expect(result.error).toContain('ddev restart failed');
+    expect(state.taskStepRow.status).toBe('failed');
   });
 
   it('does NOT loop_back once the user accepted remaining issues (suppressed)', async () => {

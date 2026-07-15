@@ -32,8 +32,7 @@ export const SYNC_BASE_STEP_ID = '00a-sync-base';
 /** Steps present in every non-full path. 00-triage MUST be in every set so that,
  *  after triage records the path, the next buildRunList still finds it (else
  *  findIndex -> -1 -> the task would complete prematurely). 07-phase-2-implement is
- *  spine because spine verify steps (08-phase-5-verify fixLoop, 07c-ddev-reconcile
- *  fixLoopOnError) loop back to it. */
+ *  spine because its validation / verify steps can loop back to it. */
 const SPINE: readonly string[] = [
   MODEL_HEALTH_STEP_ID,
   SYNC_BASE_STEP_ID,
@@ -100,7 +99,6 @@ export const PATH_STEP_SETS: Record<
 export const PATH_REQUIRED_TARGETS: Record<string, string> = {
   '07b-phase-4-validate': '07-phase-2-implement', // fixLoop
   '08-phase-5-verify': '07-phase-2-implement', // fixLoop
-  '07c-ddev-reconcile': '07-phase-2-implement', // fixLoopOnError
   '08c-code-review': '07-phase-2-implement', // fixLoop
   '08a-browser-verify': '07-phase-2-implement', // fixLoop + restartLoop
   '09-gate-2-verify-approval': '07-phase-2-implement', // restartLoop

@@ -1,5 +1,22 @@
-import { describe, it, expect } from 'vitest';
-import { buildVerifyCommand, parseRuntimeSmokeOutput } from './08-phase-5-verify.js';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+
+const { ensureAppServing } = vi.hoisted(() => ({ ensureAppServing: vi.fn() }));
+
+vi.mock('./_app-runtime.js', () => ({ ensureAppServing }));
+
+import {
+  buildVerifyCommand,
+  parseRuntimeSmokeOutput,
+  runRuntimeSmoke,
+} from './08-phase-5-verify.js';
+
+const smokeCtx = {
+  logger: { info: vi.fn(), warn: vi.fn() },
+} as never;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 describe('buildVerifyCommand', () => {
   it('builds host pm-script commands (JS, always host)', () => {
@@ -150,5 +167,28 @@ describe('parseRuntimeSmokeOutput', () => {
     const r = parseRuntimeSmokeOutput(raw);
     expect(r.httpStatus).toBe(200);
     expect(r.passed).toBe(true);
+  });
+});
+
+describe('runRuntimeSmoke', () => {
+  it('fails a DDEV boot error instead of recording it as a non-blocking smoke miss', async () => {
+    ensureAppServing.mockRejectedValueOnce(
+      new Error('ddev start failed: version constraint is incompatible'),
+    );
+
+    await expect(runRuntimeSmoke(smokeCtx, { failOnDdevBootError: true })).rejects.toThrow(
+      'DDEV environment could not start for runtime verification: ddev start failed',
+    );
+  });
+
+  it('keeps non-DDEV runtime boot errors as an advisory smoke result', async () => {
+    ensureAppServing.mockRejectedValueOnce(new Error('host runtime unavailable'));
+
+    await expect(runRuntimeSmoke(smokeCtx)).resolves.toMatchObject({
+      ran: false,
+      passed: false,
+      httpStatus: null,
+      errorExcerpt: 'Runtime smoke could not run: host runtime unavailable',
+    });
   });
 });

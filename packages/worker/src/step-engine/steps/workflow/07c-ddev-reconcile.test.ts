@@ -35,6 +35,12 @@ describe('07c-ddev-reconcile form', () => {
   it('unsupported renders no form (apply throws the reason)', () => {
     expect(ddevReconcileStep.form!(undefined as never, detect('unsupported'))).toBeNull();
   });
+
+  it('does not turn DDEV runtime errors into an implementation fix loop', () => {
+    // A thrown apply error must take step-runner's normal `failed` path, which exposes
+    // Retry / Retry with AI instead of marking 07c done and advancing another round.
+    expect(ddevReconcileStep.fixLoopOnError).toBeUndefined();
+  });
 });
 
 const HASH_A = 'hash-a';
