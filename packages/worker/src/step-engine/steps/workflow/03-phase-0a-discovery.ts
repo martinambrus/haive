@@ -7,7 +7,7 @@ import type {
   StepContext,
   StepDefinition,
 } from '../../step-definition.js';
-import { isFatalProviderFailure } from '../../queues/cli-exec/failure-class.js';
+import { isFatalProviderFailure } from '../../../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { pathExists } from '../onboarding/_helpers.js';
