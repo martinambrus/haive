@@ -7,6 +7,7 @@ import type {
   StepContext,
   StepDefinition,
 } from '../../step-definition.js';
+import { isFatalProviderFailure } from '../../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { pathExists } from '../onboarding/_helpers.js';
@@ -45,6 +46,30 @@ interface DiscoveryApply {
 }
 
 const MAX_SELECTED_AGENTS = 7;
+
+// A miner is read-only enrichment, so a dropped provider connection is worth a
+// bounded fresh run. Do not burn retries on known persistent provider failures,
+// an intentional stop/timeout, or an unavailable provider — those need a user
+// action rather than another identical terminal.
+const TRANSIENT_MINING_TERMINAL_ERROR_RE =
+  /\b(?:connection (?:closed|reset|aborted|dropped)|socket hang up|econn(?:reset|refused)|network (?:error|failure)|fetch failed|stream ended prematurely|unexpected end of (?:stream|response)|timed? out|timeout)\b/i;
+const NON_RETRYABLE_MINING_TERMINAL_ERROR_RE =
+  /\b(?:no cli provider available|cli process was stopped|task cancelled)\b/i;
+
+function shouldRetryMiningTerminalFailure(result: AgentMiningResult): boolean {
+  if (result.status !== 'failed') return false;
+  const diagnostic = [result.errorMessage, result.rawOutput]
+    .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+    .join('\n');
+  if (!diagnostic) return false;
+  if (
+    isFatalProviderFailure(diagnostic) ||
+    NON_RETRYABLE_MINING_TERMINAL_ERROR_RE.test(diagnostic)
+  ) {
+    return false;
+  }
+  return TRANSIENT_MINING_TERMINAL_ERROR_RE.test(diagnostic);
+}
 
 function firstHeading(text: string): string | null {
   const m = /^#\s+(.+)$/m.exec(text);
@@ -318,6 +343,14 @@ export const phase0aDiscoveryStep: StepDefinition<DiscoveryDetect, DiscoveryAppl
   agentMining: {
     requiredCapabilities: ['tool_use'],
     timeoutMs: 60 * 60 * 1000,
+    // Three total attempts (the initial terminal plus up to two fresh terminals)
+    // for a dropped/closed provider connection. Each re-roll is scoped to the
+    // failed persona; successful miners remain banked. Once this budget is spent,
+    // apply() keeps the useful results or falls back to the deterministic stub.
+    retry: {
+      maxAttempts: 3,
+      retryOnInvocationFailure: shouldRetryMiningTerminalFailure,
+    },
     async selectAgents({ detected, formValues, llmOutput, ctx }): Promise<AgentMiningDispatch[]> {
       const detect = detected as DiscoveryDetect;
       const values = formValues as { extraContext?: string };

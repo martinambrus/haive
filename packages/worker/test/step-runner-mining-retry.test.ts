@@ -117,7 +117,11 @@ function makeMockDb(state: MockState): Database {
   return db;
 }
 
-function miningRow(agentId: string, attempts: number): MiningRow {
+function miningRow(
+  agentId: string,
+  attempts: number,
+  overrides: Partial<MiningRow> = {},
+): MiningRow {
   return {
     id: `mining-${agentId}`,
     agentId,
@@ -128,6 +132,7 @@ function miningRow(agentId: string, attempts: number): MiningRow {
     errorMessage: null,
     cliInvocationId: `inv-${agentId}`,
     attempts,
+    ...overrides,
   };
 }
 
@@ -210,6 +215,45 @@ function miningStep(unreadable: string[], applyCalls: StepApplyArgs[]): StepDefi
   } as unknown as StepDefinition;
 }
 
+/** A mining step that retries only a known transient terminal failure before
+ *  apply() receives the completed batch. Mirrors discovery's opt-in policy. */
+function terminalFailureRetryStep(applyCalls: StepApplyArgs[]): StepDefinition {
+  return {
+    metadata: {
+      id: 'test-mining-step',
+      workflowType: 'workflow',
+      index: 0,
+      title: 'test',
+      description: 'test',
+      requiresCli: true,
+    },
+    async detect() {
+      return { foo: 'bar' };
+    },
+    form() {
+      return null;
+    },
+    agentMining: {
+      requiredCapabilities: [],
+      retry: {
+        maxAttempts: 3,
+        retryOnInvocationFailure: (result) =>
+          result.errorMessage?.includes('Connection closed mid-response') === true,
+      },
+      async selectAgents() {
+        return [
+          { agentId: 'peer-reviewer', agentTitle: 'peer-reviewer', prompt: 'review' },
+          { agentId: 'security-code-reviewer', agentTitle: 'security', prompt: 'audit' },
+        ];
+      },
+    },
+    async apply(_ctx, args) {
+      applyCalls.push(args);
+      return { settled: true };
+    },
+  } as unknown as StepDefinition;
+}
+
 /** A mining step whose apply() asks for a SECOND wave (one refuter per finding) the
  *  first time it runs, and settles once those agents' results are present — the exact
  *  contract 08c's refutation pass implements. */
@@ -272,6 +316,46 @@ function run(db: Database, stepDef: StepDefinition, enqueued: CliExecJobPayload[
 }
 
 describe('advanceStep agentMining retry', () => {
+  it('re-runs only a transiently failed terminal before apply, preserving its siblings', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'API Error: Connection closed mid-response. The response may be incomplete.',
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), terminalFailureRetryStep(applyCalls), enqueued);
+
+    expect(result.status).toBe('waiting_cli');
+    expect(applyCalls).toHaveLength(0);
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]!.agentMiningId).toBe('mining-peer-reviewer');
+
+    const miningUpdates = state.updates.filter((u) => u.table === 'task_step_agent_minings');
+    expect(miningUpdates).toHaveLength(1);
+    expect(miningUpdates[0]!.status).toBe('pending');
+    expect(miningUpdates[0]!.attempts).toBe(2);
+  });
+
+  it('stops re-running a transient terminal after its third total attempt', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 3, {
+        status: 'failed',
+        errorMessage: 'API Error: Connection closed mid-response. The response may be incomplete.',
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), terminalFailureRetryStep(applyCalls), enqueued);
+
+    expect(result.status).toBe('done');
+    expect(applyCalls).toHaveLength(1);
+    expect(enqueued).toHaveLength(0);
+  });
+
   it('re-rolls only the unreadable agent and parks, leaving the readable one alone', async () => {
     const state = freshState([
       miningRow('peer-reviewer', 1),

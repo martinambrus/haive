@@ -801,6 +801,57 @@ async function resolveAgentMiningPhase(
       rawOutput: r.rawOutput,
       errorMessage: r.errorMessage,
     }));
+
+    // A mining terminal can fail independently of its siblings (for example, a
+    // provider connection dropping mid-response). Let an opt-in step re-roll only
+    // the transient failures before apply() consumes the batch. This uses the same
+    // durable per-agent attempts budget as MiningRetryError, so a failure cannot
+    // loop forever and successful siblings are never re-run.
+    const miningRetry = spec.retry;
+    const retryOnInvocationFailure = miningRetry?.retryOnInvocationFailure;
+    if (
+      miningRetry &&
+      retryOnInvocationFailure &&
+      !stepDef.loop &&
+      params.providers &&
+      params.deps
+    ) {
+      const retryableAgentIds = existing.flatMap((row, index) => {
+        if (row.status !== 'failed' || row.attempts >= miningRetry.maxAttempts) return [];
+        const result = results[index];
+        return result && retryOnInvocationFailure(result) ? [row.agentId] : [];
+      });
+      if (retryableAgentIds.length > 0) {
+        const requeued = await retryMiningAgents(
+          db,
+          stepDef,
+          current,
+          ctx,
+          detected,
+          formValues,
+          llmOutput,
+          params,
+          retryableAgentIds,
+          miningRetry.maxAttempts,
+        );
+        if (requeued > 0) {
+          ctx.logger.warn(
+            {
+              stepId: stepDef.metadata.id,
+              agentIds: retryableAgentIds,
+              requeued,
+              maxAttempts: miningRetry.maxAttempts,
+            },
+            're-running mining agents after transient terminal failure',
+          );
+          const parked = await updateRow(db, current.id, {
+            status: 'waiting_cli',
+            statusMessage: `Re-running ${requeued} mining agent(s) after a transient terminal failure...`,
+          });
+          return { resolved: false, result: { status: 'waiting_cli', row: parked } };
+        }
+      }
+    }
     return { resolved: true, results, current };
   }
 
@@ -949,8 +1000,9 @@ async function dispatchMiningAgents(
 
     let miningId: string;
     if (prior) {
-      // Re-roll: supersede the invocation whose output apply() could not use, then
-      // reset the row to pending so the fan-out barrier re-parks the step on it.
+      // Re-roll: supersede the prior terminal invocation, then reset the row to
+      // pending so the fan-out barrier re-parks the step on it. The prior run may
+      // have failed in transport or produced output apply() could not use.
       if (prior.cliInvocationId) {
         await db
           .update(schema.cliInvocations)

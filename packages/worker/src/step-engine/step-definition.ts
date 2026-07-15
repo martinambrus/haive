@@ -137,15 +137,21 @@ export interface AgentMiningSpec {
    *  partial findings beat losing the whole run. NOT for an agent that writes code or
    *  files — ending one early would look like success. Steerable adapters only. */
   softTimeout?: boolean;
-  /** Re-roll INDIVIDUAL agents whose output apply() could not use — a reviewer that
-   *  emitted prose instead of its JSON contract. apply() throws MiningRetryError
-   *  naming those agents; the runner re-dispatches only those, leaving the other
-   *  agents' completed rows untouched, up to `maxAttempts` invocations PER AGENT.
-   *  Budget is tracked on task_step_agent_minings.attempts. Once no named agent has
-   *  budget left, apply() is called with isFinalMiningAttempt=true and must degrade
-   *  rather than throw. Ignored for steps that also declare loop?. */
+  /** Re-roll INDIVIDUAL agents, up to `maxAttempts` TOTAL invocations per agent.
+   *
+   *  `retryOnInvocationFailure` handles a terminal CLI failure before apply() runs;
+   *  use it for transient transport errors and return false for persistent provider
+   *  failures such as auth or quota. `MiningRetryError` handles output that apply()
+   *  could not use — for example, a reviewer that emitted prose instead of its JSON
+   *  contract. Both paths preserve the other agents' completed rows. Budget is
+   *  tracked on task_step_agent_minings.attempts. Once no named agent has budget
+   *  left, apply() is called with isFinalMiningAttempt=true and must degrade rather
+   *  than throw. Ignored for steps that also declare loop?. */
   retry?: {
     maxAttempts: number;
+    /** Return true to re-run this failed CLI invocation before apply() sees it.
+     *  Called only for terminal mining rows that still have retry budget. */
+    retryOnInvocationFailure?: (result: AgentMiningResult) => boolean;
   };
 }
 
