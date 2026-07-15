@@ -98,6 +98,7 @@ describe('onboarding registry', () => {
       containerType: 'ddev',
       databaseType: 'postgres',
       hasPhpExtendedExtensions: false,
+      cliSupportsLsp: true,
     });
     const lsp = schema!.fields.find((f) => f.id === 'lspLanguages');
     expect(lsp?.type).toBe('multi-select');
@@ -113,6 +114,7 @@ describe('onboarding registry', () => {
       containerType: 'ddev',
       databaseType: 'postgres',
       hasPhpExtendedExtensions: false,
+      cliSupportsLsp: true,
     });
     const lsp = schema!.fields.find((f) => f.id === 'lspLanguages');
     expect((lsp as { defaults: string[] }).defaults).toEqual(['php-extended']);
@@ -126,9 +128,40 @@ describe('onboarding registry', () => {
       containerType: 'none',
       databaseType: null,
       hasPhpExtendedExtensions: true,
+      cliSupportsLsp: true,
     });
     const lsp = schema!.fields.find((f) => f.id === 'lspLanguages');
     expect((lsp as { defaults: string[] }).defaults).toEqual(['php-extended']);
+  });
+
+  it('hides every LSP choice for a CLI without an LSP bridge', () => {
+    const ctx = {} as never;
+    const schema = toolingInfrastructureStep.form!(ctx, {
+      primaryLanguage: 'typescript',
+      framework: 'generic',
+      containerType: 'none',
+      databaseType: null,
+      hasPhpExtendedExtensions: false,
+      cliSupportsLsp: false,
+    });
+    expect(schema!.fields.some((field) => field.id === 'lspLanguages')).toBe(false);
+  });
+
+  it('keeps all supported language-server choices for an LSP-capable CLI', () => {
+    const ctx = {} as never;
+    const schema = toolingInfrastructureStep.form!(ctx, {
+      primaryLanguage: 'typescript',
+      framework: 'generic',
+      containerType: 'none',
+      databaseType: null,
+      hasPhpExtendedExtensions: false,
+      cliSupportsLsp: true,
+    });
+    const field = schema!.fields.find((candidate) => candidate.id === 'lspLanguages');
+    expect(field?.type).toBe('multi-select');
+    expect(
+      (field as { options: Array<{ value: string }> }).options.map((option) => option.value),
+    ).toEqual(['php-extended', 'typescript', 'python', 'go', 'rust', 'java']);
   });
 
   it('tooling infrastructure includes DDEV rag option only when DDEV detected', () => {

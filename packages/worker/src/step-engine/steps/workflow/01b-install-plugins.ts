@@ -2,10 +2,10 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { wantsLocalPhpLsp } from '../onboarding/07-generate-files.js';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { LspLanguage, PluginInstallCommand } from '../../../cli-adapters/types.js';
+import { loadConfiguredLspLanguages } from '../../../lsp/configured-lsp.js';
 import { runInSandbox, SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import type { DockerVolumeMount } from '../../../sandbox/docker-runner.js';
 import {
@@ -40,18 +40,7 @@ interface InstallPluginsApply {
   executed: { description: string; exitCode: number; stdoutTail: string; stderrTail: string }[];
 }
 
-function toLspLanguage(value: unknown): LspLanguage | null {
-  const allowed: LspLanguage[] = [
-    'typescript',
-    'python',
-    'go',
-    'rust',
-    'php',
-    'php-extended',
-    'java',
-  ];
-  return allowed.includes(value as LspLanguage) ? (value as LspLanguage) : null;
-}
+export { parseConfiguredLspLanguages } from '../../../lsp/configured-lsp.js';
 
 export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPluginsApply> = {
   metadata: {
@@ -74,7 +63,11 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
     if (!provider) return false;
     if (!cliAdapterRegistry.has(provider.name)) return false;
     const adapter = cliAdapterRegistry.get(provider.name);
-    return adapter.supportsPlugins && typeof adapter.buildPluginInstallCommands === 'function';
+    return (
+      adapter.supportsLsp &&
+      adapter.supportsPlugins &&
+      typeof adapter.buildPluginInstallCommands === 'function'
+    );
   },
 
   async detect(ctx: StepContext): Promise<InstallPluginsDetect> {
@@ -115,7 +108,7 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
       };
     }
     const adapter = cliAdapterRegistry.get(provider.name);
-    if (!adapter.supportsPlugins || !adapter.buildPluginInstallCommands) {
+    if (!adapter.supportsLsp || !adapter.supportsPlugins || !adapter.buildPluginInstallCommands) {
       return {
         providerName: provider.name,
         providerSupportsPlugins: false,
@@ -123,22 +116,11 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
         drupalLspPath: null,
         commands: [],
         skip: true,
-        skipReason: `${provider.name} does not support plugin install`,
+        skipReason: `${provider.name} does not expose Haive LSP plugin support`,
       };
     }
 
-    const toolingPrev = await loadPreviousStepOutput(
-      ctx.db,
-      ctx.taskId,
-      '04-tooling-infrastructure',
-    );
-    const toolingOutput = toolingPrev?.output as {
-      tooling?: { lspLanguages?: unknown };
-    } | null;
-    const rawLsp = Array.isArray(toolingOutput?.tooling?.lspLanguages)
-      ? (toolingOutput!.tooling!.lspLanguages as unknown[])
-      : [];
-    const lspLanguages = rawLsp.map(toLspLanguage).filter((v): v is LspLanguage => v !== null);
+    const lspLanguages = await loadConfiguredLspLanguages(ctx.db, ctx.taskId);
 
     const sandboxWorkdir = SANDBOX_WORKDIR;
     const drupalRelBase = DRUPAL_LSP_BASE_BY_PROVIDER[provider.name] ?? null;

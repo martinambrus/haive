@@ -7,7 +7,7 @@ import {
   MERGE_CLARIFICATION_ASKED_EVENT,
   type FormSchema,
 } from '@haive/shared';
-import { resolveDispatch } from '../orchestrator/dispatcher.js';
+import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
 import { completeMergeHostSide, mergeCommitted } from './git-merge.js';
@@ -418,7 +418,7 @@ async function dispatchFixAgent(
     params.taskId,
     params.ignoreSavedStepClis ?? false,
   );
-  const plan = resolveDispatch({
+  const plan = await resolveTaskDispatch(db, params.taskId, {
     providers: params.providers!,
     preferredProviderId: preferred,
     input: { kind: 'prompt', prompt, capabilities: spec.requiredCapabilities },
@@ -432,7 +432,7 @@ async function dispatchFixAgent(
       taskStepId: current.id,
       cliProviderId: plan.providerId,
       mode: 'cli',
-      prompt,
+      prompt: plan.effectivePrompt ?? prompt,
     })
     .returning({ id: schema.cliInvocations.id });
   const invId = inv[0]?.id;

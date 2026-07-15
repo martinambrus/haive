@@ -12,7 +12,7 @@ import {
   type ReplannerOutput,
 } from '@haive/shared';
 import type { StepCapability } from '@haive/shared';
-import { resolveDispatch } from '../orchestrator/dispatcher.js';
+import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
@@ -401,7 +401,7 @@ async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<
     params.taskId,
     params.ignoreSavedStepClis ?? false,
   );
-  const plan = resolveDispatch({
+  const plan = await resolveTaskDispatch(db, params.taskId, {
     providers,
     preferredProviderId: preferred,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
@@ -415,7 +415,7 @@ async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<
       taskStepId: current.id,
       cliProviderId: plan.providerId,
       mode: 'cli',
-      prompt,
+      prompt: plan.effectivePrompt ?? prompt,
     })
     .returning({ id: schema.cliInvocations.id });
   const invId = inv[0]?.id;
@@ -630,7 +630,7 @@ async function spawnReviewAgent(
     ra.params.taskId,
     ra.params.ignoreSavedStepClis ?? false,
   );
-  const plan = resolveDispatch({
+  const plan = await resolveTaskDispatch(ra.db, ra.taskId, {
     providers: ra.providers,
     preferredProviderId: preferred,
     input: { kind: 'prompt', prompt, capabilities },
@@ -647,7 +647,7 @@ async function spawnReviewAgent(
       taskStepId: ra.current.id,
       cliProviderId: plan.providerId,
       mode: 'cli',
-      prompt,
+      prompt: plan.effectivePrompt ?? prompt,
     })
     .returning({ id: schema.cliInvocations.id });
   const invId = inv[0]?.id;
@@ -1029,7 +1029,7 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
     ea.params.taskId,
     ea.params.ignoreSavedStepClis ?? false,
   );
-  const plan = resolveDispatch({
+  const plan = await resolveTaskDispatch(ea.db, ea.taskId, {
     providers: ea.providers,
     preferredProviderId: preferred,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use'] },
@@ -1043,7 +1043,7 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
       taskStepId: ea.current.id,
       cliProviderId: plan.providerId,
       mode: 'cli',
-      prompt,
+      prompt: plan.effectivePrompt ?? prompt,
     })
     .returning({ id: schema.cliInvocations.id });
   const invId = inv[0]?.id;
@@ -1389,7 +1389,7 @@ export async function resolveDagPhase(
       let dispatched = 0;
       for (const issue of undispatched) {
         const prompt = spec.buildCoderPrompt(coderContext(issue), upstreamDebt);
-        const planDispatch = resolveDispatch({
+        const planDispatch = await resolveTaskDispatch(db, params.taskId, {
           providers,
           preferredProviderId: preferred,
           input: { kind: 'prompt', prompt, capabilities: spec.requiredCapabilities },
@@ -1421,7 +1421,7 @@ export async function resolveDagPhase(
             taskStepId: current.id,
             cliProviderId: planDispatch.providerId,
             mode: 'cli',
-            prompt,
+            prompt: planDispatch.effectivePrompt ?? prompt,
           })
           .returning({ id: schema.cliInvocations.id });
         const invId = inv[0]?.id;

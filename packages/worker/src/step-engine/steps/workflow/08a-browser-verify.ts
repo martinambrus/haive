@@ -6,7 +6,7 @@ import { STEP_CLI_ROLES } from '@haive/shared';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
-import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
@@ -959,8 +959,13 @@ function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string): string {
     'You are the browser integration-tester. Test the implemented feature in a REAL browser using',
     'the chrome-devtools MCP tools (the browser is already running — connect to it).',
     `Application URL: ${appUrl}`,
-    'If a `.claude/agents/integration-tester.md` agent definition exists in the repo, follow it;',
-    'otherwise follow the protocol below.',
+    agentDefinitionGuidance(
+      'integration-tester',
+      [
+        'If a `.claude/agents/integration-tester.md` agent definition exists in the repo, follow it;',
+        'otherwise follow the protocol below.',
+      ].join('\n'),
+    ),
     d.implementationFiles.length > 0
       ? `Changed files (focus your testing here):\n- ${d.implementationFiles.join('\n- ')}`
       : '',

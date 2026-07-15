@@ -69,6 +69,17 @@ describe('classifyEntry', () => {
     ).toBe('unchanged');
   });
 
+  it('schema-version change refreshes an unmodified artifact even when its canonical hash matches', () => {
+    expect(
+      classifyEntry({
+        live: live({ templateSchemaVersion: 1, templateContentHash: 'h' }),
+        current: current({ templateSchemaVersion: 2, templateContentHash: 'h' }),
+        diskContent: 'BODY',
+        diskHash: 'wh-A',
+      }),
+    ).toBe('clean_update');
+  });
+
   it('matching content hash but custom templateId shifted → clean_update (auto-realigns dangling tracking)', () => {
     // Same content hash means the rendered output is byte-identical, but the
     // templateId points at a different bundle_item UUID — typically because

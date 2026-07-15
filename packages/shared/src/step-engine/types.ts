@@ -118,12 +118,14 @@ export const SKIPPABLE_STEP_IDS: readonly string[] = [
 
 export const PROVIDER_SENSITIVE_STEP_IDS: readonly string[] = [
   '04-tooling-infrastructure',
+  '07-generate-files',
   '07_5-verify-files',
   '09_5-skill-generation',
   '09_5b-skill-repair',
   '09_6-skill-verification',
   '11-final-review',
   '01b-install-plugins',
+  '01-declare-deps',
   '11d-skill-sync',
 ];
 

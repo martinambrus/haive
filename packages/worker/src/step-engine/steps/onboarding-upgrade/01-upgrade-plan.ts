@@ -11,6 +11,7 @@ import {
   CLI_RULES_TEMPLATE_ID,
   CLI_RULES_TEMPLATE_KIND,
   extractRegion,
+  getCliProviderMetadata,
   getHaiveVersion,
   normalizeContent,
   sha256Hex,
@@ -195,8 +196,19 @@ async function resolveRenderContext(
   // lazy-backfill path. The resulting context reflects best-effort recovery;
   // conflicts get surfaced to the user via the plan UI.
   const fallbackAgentTargets: TemplateRenderContext['agentTargets'] = [
-    { dir: '.claude/agents', format: 'markdown' },
+    { dir: '.claude/agents', format: 'markdown', supportsLsp: false },
   ];
+
+  const lspLanguages = detect.lspLanguages ?? [];
+  const hasCapableProvider = (detect.cliProviders ?? []).some(
+    (provider) => getCliProviderMetadata(provider.name).supportsLsp,
+  );
+  const agentTargets = (detect.agentTargets ?? fallbackAgentTargets).map((target) => ({
+    ...target,
+    supportsLsp:
+      target.supportsLsp ??
+      (target.dir === '.claude/agents' && hasCapableProvider && lspLanguages.length > 0),
+  }));
 
   return {
     projectInfo: detect.projectInfo ?? {
@@ -218,8 +230,8 @@ async function resolveRenderContext(
     framework: detect.framework ?? null,
     acceptedAgentIds: detect.acceptedAgentIds ?? [],
     customAgentSpecs: detect.customAgentSpecs ?? [],
-    agentTargets: detect.agentTargets ?? fallbackAgentTargets,
-    lspLanguages: detect.lspLanguages ?? [],
+    agentTargets,
+    lspLanguages,
     // Legacy detect outputs (pre-rtk) didn't snapshot these fields; default
     // to "rtk off, no providers" so backfilled renders don't accidentally
     // surface rtk artifacts the user never opted into. The live
@@ -260,7 +272,9 @@ export function classifyEntry(args: {
 
   if (diskContent === null) return 'user_deleted';
 
-  const templateUnchanged = live.templateContentHash === current.templateContentHash;
+  const templateUnchanged =
+    live.templateSchemaVersion === current.templateSchemaVersion &&
+    live.templateContentHash === current.templateContentHash;
   const diskMatchesBaseline = diskHash === live.writtenHash;
   // For custom items, a templateId mismatch means the live row references a
   // bundle item that has since been replaced (e.g. ZIP re-uploaded → old

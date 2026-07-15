@@ -160,6 +160,7 @@ function makeMockDb(state: MockState): Database {
       tasks: {
         findFirst: async () => state.taskRow ?? undefined,
       },
+      taskSteps: { findFirst: async () => undefined },
     },
   } as unknown as Database;
   return db;

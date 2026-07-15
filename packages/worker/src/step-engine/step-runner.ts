@@ -19,7 +19,7 @@ import type {
   StepStatus,
 } from '@haive/shared';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
-import { resolveDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
+import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { isOutputTruncationMessage } from '../queues/cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
@@ -546,7 +546,7 @@ async function resolveLlmPhase(
       params.ignoreSavedStepClis ?? false,
     );
   const steeringRequested = await resolveSteeringEnabled();
-  const plan = resolveDispatch({
+  const plan = await resolveTaskDispatch(db, params.taskId, {
     providers: params.providers,
     preferredProviderId,
     steeringRequested,
@@ -598,7 +598,7 @@ async function resolveLlmPhase(
       taskStepId: current.id,
       cliProviderId: plan.providerId,
       mode,
-      prompt,
+      prompt: plan.effectivePrompt ?? prompt,
       agentTitle: roleLabel,
       steerable: plan.invocation.kind === 'cli' && plan.invocation.spec.steerable === true,
     })
@@ -704,7 +704,7 @@ async function resolveAiFixPhase(
       params.taskId,
       params.ignoreSavedStepClis ?? false,
     );
-  const plan = resolveDispatch({
+  const plan = await resolveTaskDispatch(db, params.taskId, {
     providers: params.providers,
     preferredProviderId,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
@@ -740,7 +740,7 @@ async function resolveAiFixPhase(
       taskStepId: current.id,
       cliProviderId: plan.providerId,
       mode: fixMode,
-      prompt,
+      prompt: plan.effectivePrompt ?? prompt,
     })
     .returning();
   const invRow = inserted[0];
@@ -946,7 +946,7 @@ async function dispatchMiningAgents(
     // review). Agent-backed mining also carries its agent-file RESPONSE_STYLE_BLOCK; the
     // runtime directive is appended last and governs at prompt scope.
     const prompt = await augmentPromptWithTerseness(dispatch.prompt);
-    const plan = resolveDispatch({
+    const plan = await resolveTaskDispatch(db, params.taskId, {
       providers: params.providers!,
       preferredProviderId,
       steeringRequested,
@@ -991,7 +991,7 @@ async function dispatchMiningAgents(
         taskStepId: current.id,
         cliProviderId: plan.providerId,
         mode: 'agent_mining',
-        prompt,
+        prompt: plan.effectivePrompt ?? prompt,
         steerable: plan.invocation.spec.steerable === true,
       })
       .returning();
@@ -1989,7 +1989,7 @@ async function maybeEnqueueStepSummary(
         params.taskId,
         params.ignoreSavedStepClis ?? false,
       );
-    const plan = resolveDispatch({
+    const plan = await resolveTaskDispatch(db, params.taskId, {
       providers,
       preferredProviderId,
       input: { kind: 'prompt', prompt, capabilities: [] },
@@ -2005,7 +2005,7 @@ async function maybeEnqueueStepSummary(
         taskStepId: null,
         cliProviderId: plan.providerId,
         mode: 'cli',
-        prompt,
+        prompt: plan.effectivePrompt ?? prompt,
         agentTitle: 'Step summary',
       })
       .returning({ id: schema.cliInvocations.id });

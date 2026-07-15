@@ -304,13 +304,35 @@ describe('buildSmokeChecks', () => {
     expect(pg?.cmd).toEqual(['psql', '--version']);
   });
 
-  it('adds LSP server checks', () => {
+  it('adds non-invoking executable checks for every offered LSP server', () => {
     const checks = buildSmokeChecks({
-      lspServers: ['intelephense', 'pyright'],
+      lspServers: [
+        'intelephense-extended',
+        'vtsls',
+        'pyright',
+        'gopls',
+        'rust-analyzer',
+        'solargraph',
+        'jdtls',
+      ],
     });
-    const ids = checks.map((c) => c.id);
-    expect(ids).toContain('lsp-intelephense');
-    expect(ids).toContain('lsp-pyright');
+    const lspChecks = checks.filter((check) => check.id.startsWith('lsp-'));
+    expect(lspChecks.map((check) => check.id)).toEqual([
+      'lsp-intelephense',
+      'lsp-vtsls',
+      'lsp-pyright',
+      'lsp-gopls',
+      'lsp-rust-analyzer',
+      'lsp-solargraph',
+      'lsp-jdtls',
+    ]);
+    expect(lspChecks.every((check) => check.cmd[0] === 'sh' && check.cmd[1] === '-c')).toBe(true);
+    expect(lspChecks.find((check) => check.id === 'lsp-intelephense')?.cmd).toEqual([
+      'sh',
+      '-c',
+      'command -v intelephense',
+    ]);
+    expect(lspChecks.flatMap((check) => check.cmd)).not.toContain('--version');
   });
 
   it('returns only the shell probe when nothing is declared', () => {

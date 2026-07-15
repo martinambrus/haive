@@ -14,6 +14,7 @@ import type {
 } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import { deriveEnvTemplateName, getTaskEnvTemplate, linkTaskToEnvTemplate } from './_shared.js';
+import { loadCliProviderMetadata } from '../onboarding/_helpers.js';
 
 // Both PHP language keys map to the single surviving env key (intelephense-extended):
 // after the PHP-LSP consolidation plain php and php-extended are the same server
@@ -237,6 +238,8 @@ export interface DeclareDepsDetect {
   ddevProjectName: string | null;
   database: { kind: DatabaseKind; version: string | null };
   suggestedLsp: LspKey[];
+  /** Whether the selected CLI can use Haive's LSP integration. */
+  cliSupportsLsp: boolean;
   /** This task's repository id, for the bottom tooling-page link. */
   repositoryId?: string | null;
   /** Per-LSP-option version badge (env key → "version (latest)"); absent for the
@@ -311,13 +314,16 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     index: 1,
     title: 'Declare dependencies',
     description:
-      'Detects runtimes, container tools, database and language servers needed by the project.',
+      'Detects runtimes, container tools, database and provider-supported development tooling needed by the project.',
     requiresCli: false,
     reuseLastCompletedFormValues: true,
+    providerSensitive: true,
   },
 
   async detect(ctx) {
     const result = await scanRepoForDeps(ctx.repoPath);
+    const cliMeta = await loadCliProviderMetadata(ctx.db, ctx.cliProviderId);
+    const cliSupportsLsp = cliMeta?.supportsLsp ?? false;
     const taskRow = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
       columns: { repositoryId: true, title: true, description: true },
@@ -337,9 +343,15 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       if (intent) result.containerTool = intent;
     }
 
-    const onboardingLsp = await loadOnboardingLspKeys(ctx.db, repositoryId);
-    if (onboardingLsp.length > 0) {
-      result.suggestedLsp = Array.from(new Set([...result.suggestedLsp, ...onboardingLsp]));
+    if (cliSupportsLsp) {
+      const onboardingLsp = await loadOnboardingLspKeys(ctx.db, repositoryId);
+      if (onboardingLsp.length > 0) {
+        result.suggestedLsp = Array.from(new Set([...result.suggestedLsp, ...onboardingLsp]));
+      }
+    } else {
+      // Do not carry a repository/onboarding selection into an environment
+      // whose selected CLI cannot expose language-server tools.
+      result.suggestedLsp = [];
     }
     // Reuse the stack confirmed during onboarding to fill what the in-repo scan
     // missed: the database, and any runtimes (with versions) not found on disk —
@@ -400,6 +412,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     }
     const chromeNewest = newestByTool.get('chrome-devtools-mcp');
     result.repositoryId = repositoryId;
+    result.cliSupportsLsp = cliSupportsLsp;
     result.lspVersionByOption = lspVersionByOption;
     result.chromeVersionLabel = chromeNewest ? `${chromeNewest} (latest)` : 'latest';
 
@@ -477,13 +490,17 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         default: detected.database.version ?? '',
         placeholder: 'e.g. 15 or 10.11',
       },
-      {
-        type: 'multi-select',
-        id: 'lspServers',
-        label: 'Language servers to preinstall',
-        options: lspOptions,
-        defaults: detected.suggestedLsp,
-      },
+      ...(detected.cliSupportsLsp
+        ? [
+            {
+              type: 'multi-select' as const,
+              id: 'lspServers',
+              label: 'Language servers to preinstall',
+              options: lspOptions,
+              defaults: detected.suggestedLsp,
+            },
+          ]
+        : []),
       {
         type: 'checkbox',
         id: 'preinstallDeps',
@@ -512,7 +529,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
               type: 'note' as const,
               id: 'toolingLink',
               label: 'Tooling page',
-              body: `Pin LSP server and Chrome DevTools MCP versions for this repository on the [tooling page](/repos/${detected.repositoryId}/tooling) (opens in a new tab).`,
+              body: `${detected.cliSupportsLsp ? 'Pin LSP server and ' : 'Manage '}Chrome DevTools MCP versions for this repository on the [tooling page](/repos/${detected.repositoryId}/tooling) (opens in a new tab).`,
             },
           ]
         : []),
@@ -533,6 +550,8 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
 
   async apply(ctx, args) {
     const values = args.formValues as DeclareDepsFormValues;
+    const currentCliMeta = await loadCliProviderMetadata(ctx.db, ctx.cliProviderId);
+    const cliSupportsLsp = currentCliMeta?.supportsLsp ?? args.detected.cliSupportsLsp ?? false;
     const baseImage = computeBaseImage(values.containerTool);
 
     const templateName = deriveEnvTemplateName(ctx.taskId);
@@ -573,6 +592,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       }
     }
 
+    const lspServers = cliSupportsLsp ? (repoLspServers ?? values.lspServers ?? []) : [];
     const declaredDeps: Record<string, unknown> = {
       runtimes: values.runtimes,
       versions: {
@@ -594,8 +614,10 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       },
       // Repo-level LSP override (tooling management page) wins over the
       // form/onboarding-derived set so enable/disable survives the per-task rebuild.
-      lspServers: repoLspServers ?? values.lspServers ?? [],
-      ...(repoLspVersions ? { lspServerVersions: repoLspVersions } : {}),
+      // Unsupported CLIs deliberately receive an empty set even when a repo
+      // retains settings for a different CLI.
+      lspServers,
+      ...(cliSupportsLsp && repoLspVersions ? { lspServerVersions: repoLspVersions } : {}),
       browserTesting: values.browserTesting,
       ...(repoChromeMcpVersion ? { chromeDevtoolsMcpVersion: repoChromeMcpVersion } : {}),
       extraPackages: parseExtraPackages(values.extraPackages ?? ''),
@@ -715,7 +737,7 @@ export interface DeclareDepsFormValues extends FormValues {
   webserver?: WebserverType;
   databaseKind: DatabaseKind;
   databaseVersion: string;
-  lspServers: LspKey[];
+  lspServers?: LspKey[];
   preinstallDeps: boolean;
   browserTesting: boolean;
   extraPackages: string;
@@ -933,6 +955,9 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
     ddevProjectName: ddev.projectName,
     database,
     suggestedLsp: Array.from(suggestedLsp),
+    // scanRepoForDeps is also exported for callers without a task/CLI context;
+    // the step's detect() fills the authoritative value from the selected CLI.
+    cliSupportsLsp: false,
   };
 }
 

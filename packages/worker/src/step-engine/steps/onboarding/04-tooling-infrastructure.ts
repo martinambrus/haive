@@ -32,7 +32,7 @@ interface ToolingDetect {
   hasPhpExtendedExtensions: boolean;
   cliDisplayName: string | null;
   cliSupportsMcp: boolean;
-  cliSupportsPlugins: boolean;
+  cliSupportsLsp: boolean;
   /** Current value of `repositories.rtk_enabled` for this task's repo. Used
    *  as the form-field default so a re-run of step 04 reflects the most
    *  recently saved choice instead of the hard-coded migration default. */
@@ -109,7 +109,7 @@ export const toolingInfrastructureStep: StepDefinition<
     index: 4,
     title: 'Tooling and infrastructure preferences',
     description:
-      'Captures user preferences for RAG storage (Ollama + PostgreSQL), MCP browser testing and LSP language server installation.',
+      'Captures user preferences for RAG storage, MCP browser testing and provider-supported code-navigation tooling.',
     requiresCli: false,
     providerSensitive: true,
   },
@@ -199,7 +199,7 @@ export const toolingInfrastructureStep: StepDefinition<
       hasPhpExtendedExtensions,
       cliDisplayName: cliMeta?.displayName ?? null,
       cliSupportsMcp: cliMeta?.supportsMcp ?? false,
-      cliSupportsPlugins: cliMeta?.supportsPlugins ?? false,
+      cliSupportsLsp: cliMeta?.supportsLsp ?? false,
       rtkEnabled,
       repositoryId,
       rtkVersionLabel: fmtVersion(rtkVersionPin, 'rtk'),
@@ -233,7 +233,7 @@ export const toolingInfrastructureStep: StepDefinition<
     return {
       title: 'Tooling and infrastructure',
       description:
-        'Configure RAG storage, Ollama embeddings, MCP browser testing and LSP language server preferences for this project.',
+        'Configure RAG storage, Ollama embeddings, and MCP browser testing for this project.',
       fields: [
         {
           type: 'select',
@@ -295,18 +295,19 @@ export const toolingInfrastructureStep: StepDefinition<
           default: DEFAULT_MCP_SETTINGS_JSON,
           rows: 14,
         },
-        {
-          type: 'multi-select',
-          id: 'lspLanguages',
-          label: 'LSP language servers',
-          description:
-            (detected.cliSupportsPlugins
-              ? ''
-              : `WARNING: ${detected.cliDisplayName ?? 'the current CLI'} does not support plugin install in haive. LSP servers will still be baked into the project image, but LSP plugins will not be installed into the CLI until you switch to a CLI that supports them (e.g. Claude Code, Z.AI, Qwen). `) +
-            'Pick one or more language servers to install. Leave empty to skip LSP installation.',
-          options: lspOptions,
-          defaults: defaultLspForLanguage(detected.primaryLanguage),
-        },
+        ...(detected.cliSupportsLsp
+          ? [
+              {
+                type: 'multi-select' as const,
+                id: 'lspLanguages',
+                label: 'LSP language servers',
+                description:
+                  'Pick one or more language servers to install. Leave empty to skip LSP installation.',
+                options: lspOptions,
+                defaults: defaultLspForLanguage(detected.primaryLanguage),
+              },
+            ]
+          : []),
         {
           type: 'checkbox',
           id: 'rtkEnabled',
@@ -331,6 +332,12 @@ export const toolingInfrastructureStep: StepDefinition<
 
   async apply(ctx, args) {
     const tooling: Record<string, unknown> = { ...args.formValues };
+    const currentCliMeta = await loadCliProviderMetadata(ctx.db, ctx.cliProviderId);
+    const cliSupportsLsp = currentCliMeta?.supportsLsp ?? args.detected.cliSupportsLsp ?? false;
+    // A hidden field must not retain a stale selection from a prior CLI. The
+    // selected CLI has no LSP bridge, so baking servers into this environment
+    // would only invite the model to use tools it cannot access.
+    if (!cliSupportsLsp) tooling.lspLanguages = [];
     if (tooling.ollamaMode === 'internal') {
       tooling.ollamaUrl = 'http://ollama:11434';
     }

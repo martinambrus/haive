@@ -14,6 +14,8 @@ import {
 } from '@haive/shared';
 import {
   type AgentSpec,
+  type AgentRenderTarget,
+  AGENT_RENDERER_VERSION,
   BASELINE_AGENT_SPECS,
   buildAgentFileForTarget,
   FRAMEWORK_AGENT_SPECS,
@@ -45,7 +47,7 @@ export interface TemplateRenderContext {
   framework: string | null;
   acceptedAgentIds: string[];
   customAgentSpecs: AgentSpec[];
-  agentTargets: Array<{ dir: string; format: 'markdown' | 'toml' }>;
+  agentTargets: AgentRenderTarget[];
   lspLanguages: string[];
   /** Per-repo opt-in for the RTK token-saving proxy. Read from
    *  `repositories.rtk_enabled`. Drives whether the rtk-config items in
@@ -90,7 +92,7 @@ export const REFERENCE_CONTEXT: TemplateRenderContext = {
   framework: null,
   acceptedAgentIds: [],
   customAgentSpecs: [],
-  agentTargets: [{ dir: '.claude/agents', format: 'markdown' }],
+  agentTargets: [{ dir: '.claude/agents', format: 'markdown', supportsLsp: true }],
   lspLanguages: [],
   rtkEnabled: false,
   enabledCliProviders: [],
@@ -116,7 +118,7 @@ function buildAgentTemplateItem(spec: AgentSpec): TemplateItem<TemplateRenderCon
   return {
     id: agentTemplateId(spec),
     kind: 'agent',
-    schemaVersion: 1,
+    schemaVersion: AGENT_RENDERER_VERSION,
     render(ctx: TemplateRenderContext): TemplateRendering[] {
       if (ctx.agentTargets.length === 0) return [];
       const out: TemplateRendering[] = [];
@@ -393,6 +395,9 @@ export function expandCustomBundlesFor(
       const templateId = `custom.${bundle.id}.${item.id}`;
       if (item.kind === 'agent') {
         if (agentTargets.length === 0) continue;
+        const rendererAwareContentHash = sha256Hex(
+          `${item.contentHash}\nhaive-agent-renderer:${AGENT_RENDERER_VERSION}`,
+        );
         for (const target of agentTargets) {
           const ext = target.format === 'toml' ? 'toml' : 'md';
           const content = buildAgentFileForTarget(item.spec, target);
@@ -400,7 +405,7 @@ export function expandCustomBundlesFor(
             templateId,
             templateKind: 'custom-agent',
             templateSchemaVersion: item.schemaVersion,
-            templateContentHash: item.contentHash,
+            templateContentHash: rendererAwareContentHash,
             diskPath: `${target.dir}/${item.spec.id}.${ext}`,
             content,
             writtenHash: sha256Hex(normalizeContent(content)),

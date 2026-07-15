@@ -41,6 +41,7 @@ export class ZaiAdapter extends BaseCliAdapter {
   readonly supportsCliAuth = true;
   readonly supportsMcp = true;
   readonly supportsPlugins = true;
+  override readonly supportsLsp = true;
   readonly defaultAuthMode = 'api_key' as const;
   // Z.AI distributes auth as a bearer token; the claude binary accepts it via
   // ANTHROPIC_AUTH_TOKEN (preferred) or ANTHROPIC_API_KEY (fallback for older

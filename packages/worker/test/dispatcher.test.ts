@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { resolveDispatch } from '../src/orchestrator/dispatcher.js';
 import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
 import type { CliProviderRecord, SubAgentSpec } from '../src/cli-adapters/types.js';
+import {
+  agentDefinitionGuidance,
+  retrievalGuidanceLines,
+} from '../src/step-engine/steps/_retrieval-guidance.js';
 
 type ProviderOverrides = Partial<CliProviderRecord> & Pick<CliProviderRecord, 'id' | 'name'>;
 
@@ -152,5 +156,147 @@ describe('resolveDispatch', () => {
       expect(plan.invocation.spec.args).toContain('status?');
       expect(plan.invocation.spec.cwd).toBe('/repo');
     }
+  });
+
+  it('removes every Haive-owned LSP instruction for Codex and preserves unrelated prompt text', () => {
+    const provider = makeProvider({ id: 'prov-codex', name: 'codex' });
+    const guidance = retrievalGuidanceLines().join('\n');
+    const prompt = [
+      'PREFIX: keep this byte-for-byte.',
+      guidance,
+      'MIDDLE: the task itself may legitimately discuss LSP architecture.',
+      guidance,
+      'Then GROUND every lead with LSP + grep against the CURRENT files on disk (on hits too, not as a fallback): the index can be stale, so a rag_search snippet is a lead to confirm, never the source of truth.',
+      'Validate (rag_search, then ground with LSP + grep).',
+      'Sweep renamed calls (grep -rn / find-references).',
+      agentDefinitionGuidance(
+        'spec-quality-reviewer',
+        [
+          'If a `.claude/agents/spec-quality-reviewer.md` agent definition exists in the repo, follow it;',
+          'otherwise follow the protocol below.',
+        ].join('\n'),
+      ),
+      'SUFFIX: keep this too.',
+    ].join('\n');
+    const plan = resolveDispatch({
+      providers: [provider],
+      input: { kind: 'prompt', prompt, capabilities: [] },
+      invokeOpts: {},
+    });
+    const effective = plan.effectivePrompt!;
+    expect(effective.startsWith('PREFIX: keep this byte-for-byte.')).toBe(true);
+    expect(effective.endsWith('SUFFIX: keep this too.')).toBe(true);
+    expect(effective).toContain('the task itself may legitimately discuss LSP architecture');
+    expect(effective).not.toContain('LSP + grep');
+    expect(effective).not.toContain('find-references');
+    expect(effective).not.toContain('.claude/agents/spec-quality-reviewer.md');
+    expect(effective).not.toContain('HAIVE_AGENT_DEFINITION');
+    expect(effective.match(/grep \+ direct file reads/g)).toHaveLength(6);
+    expect(effective).toContain('Follow the embedded protocol below.');
+    if (plan.invocation?.kind === 'cli') {
+      expect(plan.invocation.spec.args.at(-1)).toBe(effective);
+    }
+  });
+
+  it('keeps LSP guidance and resolves the native agent path for a capable provider', () => {
+    const provider = makeProvider({ id: 'prov-claude', name: 'claude-code' });
+    const agentClause = [
+      'If a `.claude/agents/spec-quality-reviewer.md` agent definition exists in the repo, follow it;',
+      'otherwise follow the protocol below.',
+    ].join('\n');
+    const prompt = [
+      'before',
+      retrievalGuidanceLines().join('\n'),
+      agentDefinitionGuidance('spec-quality-reviewer', agentClause),
+      'after',
+    ].join('\n');
+    const plan = resolveDispatch({
+      providers: [provider],
+      lspConfigured: true,
+      input: { kind: 'prompt', prompt, capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(plan.effectivePrompt).toBe(
+      ['before', retrievalGuidanceLines().join('\n'), agentClause, 'after'].join('\n'),
+    );
+  });
+
+  it('adapts every emulated subagent and synthesis prompt for Codex', () => {
+    const provider = makeProvider({
+      id: 'prov-codex',
+      name: 'codex',
+      supportsSubagents: false,
+    });
+    const lspPrompt = retrievalGuidanceLines().join('\n');
+    const plan = resolveDispatch({
+      providers: [provider],
+      input: {
+        kind: 'subagent',
+        spec: {
+          subAgents: [{ name: 'reviewer', prompt: lspPrompt, outputKey: 'review' }],
+          synthesisPrompt: `Synthesize\n${lspPrompt}`,
+        },
+        capabilities: ['subagents'],
+      },
+      invokeOpts: {},
+    });
+    expect(plan.invocation?.kind).toBe('subagent');
+    if (plan.invocation?.kind === 'subagent') {
+      expect(plan.invocation.spec.steps[0]?.prompt).not.toContain('LSP + grep');
+      expect(plan.invocation.spec.synthesis.prompt).not.toContain('LSP + grep');
+      expect(plan.invocation.spec.steps[0]?.prompt).toContain('grep + direct file reads');
+    }
+  });
+
+  it('resolves marked agent guidance in capable-provider subagents too', () => {
+    const provider = makeProvider({ id: 'prov-claude', name: 'claude-code' });
+    const marked = agentDefinitionGuidance(
+      'spec-quality-reviewer',
+      [
+        'If a `.claude/agents/spec-quality-reviewer.md` agent definition exists in the repo, follow it;',
+        'otherwise follow the protocol below.',
+      ].join('\n'),
+    );
+    const plan = resolveDispatch({
+      providers: [provider],
+      lspConfigured: true,
+      input: {
+        kind: 'subagent',
+        spec: {
+          subAgents: [{ name: 'reviewer', prompt: marked, outputKey: 'review' }],
+          synthesisPrompt: marked,
+        },
+        capabilities: ['subagents'],
+      },
+      invokeOpts: {},
+    });
+    expect(plan.invocation?.kind).toBe('subagent');
+    if (plan.invocation?.kind === 'subagent') {
+      expect(plan.invocation.spec.steps[0]?.prompt).toContain(
+        '.claude/agents/spec-quality-reviewer.md',
+      );
+      expect(plan.invocation.spec.steps[0]?.prompt).not.toContain('HAIVE_AGENT_DEFINITION');
+      expect(plan.invocation.spec.synthesis.prompt).not.toContain('HAIVE_AGENT_DEFINITION');
+    }
+  });
+
+  it('removes LSP guidance for a capable provider when no usable server bridge is configured', () => {
+    const provider = makeProvider({ id: 'prov-claude', name: 'claude-code' });
+    const prompt = [
+      retrievalGuidanceLines().join('\n'),
+      agentDefinitionGuidance(
+        'spec-quality-reviewer',
+        'Follow `.claude/agents/spec-quality-reviewer.md`.',
+      ),
+    ].join('\n');
+    const plan = resolveDispatch({
+      providers: [provider],
+      lspConfigured: false,
+      input: { kind: 'prompt', prompt, capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(plan.effectivePrompt).toContain('grep + direct file reads');
+    expect(plan.effectivePrompt).not.toContain('LSP + grep');
+    expect(plan.effectivePrompt).not.toContain('.claude/agents/spec-quality-reviewer.md');
   });
 });

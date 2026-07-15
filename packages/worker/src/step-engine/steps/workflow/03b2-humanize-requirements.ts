@@ -4,6 +4,7 @@ import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseBizReqOutput } from './03b-business-requirements.js';
+import { agentDefinitionGuidance } from '../_retrieval-guidance.js';
 
 // Phase 1 humanization (legacy phase2-humanization). Between the business-
 // requirements draft (03b) and its review (03c), a markdown-humanizer agent
@@ -80,8 +81,13 @@ export const humanizeRequirementsStep: StepDefinition<HumanizeDetect, HumanizeAp
     buildPrompt: (args) => {
       const d = args.detected as HumanizeDetect;
       return [
-        'If a `.claude/agents/markdown-humanizer.md` agent definition exists in the repo, follow it;',
-        'otherwise follow the protocol below.',
+        agentDefinitionGuidance(
+          'markdown-humanizer',
+          [
+            'If a `.claude/agents/markdown-humanizer.md` agent definition exists in the repo, follow it;',
+            'otherwise follow the protocol below.',
+          ].join('\n'),
+        ),
         ...PERSONA,
         '',
         'Humanize the business-requirements document below. Fix ALL grammar, spelling, punctuation,',

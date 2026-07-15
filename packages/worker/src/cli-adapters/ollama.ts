@@ -54,6 +54,7 @@ export class OllamaAdapter extends BaseCliAdapter {
   // are backend-agnostic — they write into .claude/plugins without a model call,
   // so they work against the Ollama endpoint exactly as for claude-code/zai.
   readonly supportsPlugins = true;
+  override readonly supportsLsp = true;
   readonly defaultAuthMode = 'api_key' as const;
   // Secrets merge into env verbatim with no remap, so a cloud/remote key must be
   // stored under the env name the claude binary reads.

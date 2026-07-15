@@ -5,6 +5,7 @@ import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import { agentDefinitionGuidance } from '../_retrieval-guidance.js';
 import { loadOutstandingBizReqFeedback } from './_biz-req-feedback.js';
 
 // Phase 1 — Business requirements (legacy phase1-business-requirements). Between
@@ -98,8 +99,13 @@ export const businessRequirementsStep: StepDefinition<BizReqDetect, BizReqApply>
       const d = args.detected as BizReqDetect;
       const guidance = ((args.formValues as { guidance?: string }).guidance ?? '').trim();
       return [
-        'If a `.claude/agents/business-requirements-writer.md` agent definition exists in the repo,',
-        'follow it; otherwise follow the protocol below.',
+        agentDefinitionGuidance(
+          'business-requirements-writer',
+          [
+            'If a `.claude/agents/business-requirements-writer.md` agent definition exists in the repo,',
+            'follow it; otherwise follow the protocol below.',
+          ].join('\n'),
+        ),
         ...PERSONA,
         '',
         `Task title: ${d.taskTitle || '(untitled)'}`,

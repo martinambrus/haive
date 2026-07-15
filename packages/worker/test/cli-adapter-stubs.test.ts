@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { CLI_PROVIDER_LIST } from '@haive/shared';
 import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
 import type {
   CliProviderRecord,
@@ -29,6 +30,27 @@ function makeProvider(overrides: ProviderOverrides): CliProviderRecord {
 }
 
 const opts: InvokeOpts = { cwd: '/work/repo' };
+
+describe('LSP capability matrix', () => {
+  it('keeps shared UI metadata and runtime adapters in lockstep', () => {
+    for (const metadata of CLI_PROVIDER_LIST) {
+      expect(cliAdapterRegistry.get(metadata.name).supportsLsp, metadata.name).toBe(
+        metadata.supportsLsp,
+      );
+    }
+  });
+
+  it('supports the Claude plugin family and fails closed for every other CLI', () => {
+    expect(
+      CLI_PROVIDER_LIST.filter((provider) => provider.supportsLsp).map((provider) => provider.name),
+    ).toEqual(['claude-code', 'zai', 'ollama']);
+    expect(
+      CLI_PROVIDER_LIST.filter((provider) => !provider.supportsLsp).map(
+        (provider) => provider.name,
+      ),
+    ).toEqual(['codex', 'gemini', 'amp', 'antigravity']);
+  });
+});
 
 describe('zai adapter', () => {
   const adapter = cliAdapterRegistry.get('zai');
@@ -223,10 +245,18 @@ describe('claude-family LSP plugin install (php uses local intelephense, not mar
       });
     }
 
-    it(`${name}: typescript still installs the marketplace vtsls plugin`, () => {
-      const flat = flatArgs(['typescript'], false);
-      expect(flat).toContain('vtsls@claude-code-lsps');
-      expect(flat).not.toContain('phpactor');
-    });
+    for (const [language, plugin] of [
+      ['typescript', 'vtsls'],
+      ['python', 'pyright'],
+      ['go', 'gopls'],
+      ['rust', 'rust-analyzer'],
+      ['java', 'jdtls'],
+    ] as const) {
+      it(`${name}: ${language} installs the ${plugin} marketplace plugin`, () => {
+        const flat = flatArgs([language], false);
+        expect(flat).toContain(`${plugin}@claude-code-lsps`);
+        expect(flat).not.toContain('phpactor');
+      });
+    }
   }
 });

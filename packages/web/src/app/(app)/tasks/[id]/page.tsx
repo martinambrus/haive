@@ -3156,8 +3156,9 @@ function RagStatsPanel({ taskId, stepId }: { taskId: string; stepId: string }) {
       </p>
       <p className="text-[11px] leading-relaxed text-neutral-500">
         RAG is a discovery tool: these counts measure pointers surfaced, not work done. The agent
-        grounds every lead with LSP + grep against the real files — that step is intentionally not
-        measured here, so a low hit-rate is not a low-quality signal.
+        grounds every lead with the code-navigation tools available to its CLI plus exact file
+        searches and direct reads — that step is intentionally not measured here, so a low hit-rate
+        is not a low-quality signal.
       </p>
     </div>
   );

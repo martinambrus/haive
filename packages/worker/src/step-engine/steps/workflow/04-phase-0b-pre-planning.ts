@@ -10,6 +10,7 @@ import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 import { loadBusinessRequirements } from './_business-requirements.js';
 import { isBugBranch } from './01-worktree-setup.js';
+import { agentDefinitionGuidance } from '../_retrieval-guidance.js';
 
 interface KbReference {
   id: string;
@@ -268,8 +269,13 @@ export const phase0bPrePlanningStep: StepDefinition<PrePlanningDetect, PrePlanni
       const revising = detected.priorRejectionFeedback.length > 0;
       const scopeVal = (values.scope ?? '').trim();
       return [
-        'If a `.claude/agents/technical-spec-writer.md` agent definition exists in the repo, follow',
-        'it; otherwise follow the protocol below.',
+        agentDefinitionGuidance(
+          'technical-spec-writer',
+          [
+            'If a `.claude/agents/technical-spec-writer.md` agent definition exists in the repo, follow',
+            'it; otherwise follow the protocol below.',
+          ].join('\n'),
+        ),
         'You are the pre-planning phase of an engineering workflow.',
         'Produce a concise draft specification for the task below.',
         'Emit ONE JSON object inside a ```json fenced code block with the shape:',

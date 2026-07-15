@@ -12,6 +12,7 @@ import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_h
 import { readDiskSkillSummaries } from '../onboarding/09_5b-skill-repair.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import { agentDefinitionGuidance } from '../_retrieval-guidance.js';
 import {
   clearTaskPromotedDrafts,
   globalKbTopicKey,
@@ -796,8 +797,13 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     buildPrompt: (args) => {
       const detected = args.detected as LearningDetect;
       return [
-        'If a `.claude/agents/learning-recorder.md` agent definition exists in the repo, follow it;',
-        'otherwise follow the protocol below.',
+        agentDefinitionGuidance(
+          'learning-recorder',
+          [
+            'If a `.claude/agents/learning-recorder.md` agent definition exists in the repo, follow it;',
+            'otherwise follow the protocol below.',
+          ].join('\n'),
+        ),
         'You are the learning capture phase of an engineering workflow.',
         'Emit ONE JSON object inside a ```json fenced code block with the shape:',
         detected.isBugFix

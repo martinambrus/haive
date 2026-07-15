@@ -75,33 +75,51 @@ export function buildSmokeChecks(deps: DeclaredDepsShape): SmokeCheck[] {
     checks.push({ id: 'java', label: 'Java', cmd: ['java', '--version'] });
   }
 
-  const lsp = deps.lspServers ?? [];
-  if (lsp.includes('intelephense') || lsp.includes('intelephense-extended')) {
-    checks.push({
+  const lsp = new Set(deps.lspServers ?? []);
+  const lspChecks: Array<{
+    keys: string[];
+    id: string;
+    label: string;
+    executable: string;
+  }> = [
+    {
+      keys: ['intelephense', 'intelephense-extended'],
       id: 'lsp-intelephense',
       label: 'intelephense',
-      cmd: ['intelephense', '--version'],
-    });
-  }
-  if (lsp.includes('pyright')) {
-    checks.push({
+      executable: 'intelephense',
+    },
+    { keys: ['vtsls'], id: 'lsp-vtsls', label: 'vtsls', executable: 'vtsls' },
+    {
+      keys: ['pyright'],
       id: 'lsp-pyright',
-      label: 'pyright',
-      cmd: ['pyright', '--version'],
-    });
-  }
-  if (lsp.includes('gopls')) {
-    checks.push({ id: 'lsp-gopls', label: 'gopls', cmd: ['gopls', 'version'] });
-  }
-  if (lsp.includes('rust-analyzer')) {
-    checks.push({
+      label: 'pyright language server',
+      executable: 'pyright-langserver',
+    },
+    { keys: ['gopls'], id: 'lsp-gopls', label: 'gopls', executable: 'gopls' },
+    {
+      keys: ['rust-analyzer'],
       id: 'lsp-rust-analyzer',
       label: 'rust-analyzer',
-      cmd: ['rust-analyzer', '--version'],
+      executable: 'rust-analyzer',
+    },
+    {
+      keys: ['solargraph'],
+      id: 'lsp-solargraph',
+      label: 'solargraph',
+      executable: 'solargraph',
+    },
+    { keys: ['jdtls'], id: 'lsp-jdtls', label: 'jdtls', executable: 'jdtls' },
+  ];
+  for (const check of lspChecks) {
+    if (!check.keys.some((key) => lsp.has(key))) continue;
+    // LSP executables speak JSON-RPC on stdio; treating `--version` as a
+    // universal flag can start the server or dump its bundled source (notably
+    // Intelephense). Verify the actual launcher exists without invoking it.
+    checks.push({
+      id: check.id,
+      label: check.label,
+      cmd: ['sh', '-c', `command -v ${check.executable}`],
     });
-  }
-  if (lsp.includes('jdtls')) {
-    checks.push({ id: 'lsp-jdtls', label: 'jdtls', cmd: ['jdtls', '--version'] });
   }
 
   const dbKind = deps.containerTool === 'ddev' ? undefined : deps.database?.kind;

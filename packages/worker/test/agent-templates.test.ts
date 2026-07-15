@@ -133,6 +133,8 @@ describe('buildAgentFileMarkdownGemini frontmatter', () => {
     expect(md).toContain('## Mandatory Search Order');
     expect(md).toContain('## Core Mission');
     expect(md).toContain('Find issues.');
+    expect(md).not.toContain('LSP');
+    expect(md).toContain('1. RAG → 2. KB → 3. GREP (last resort)');
   });
 });
 
@@ -141,6 +143,7 @@ describe('buildAgentFileForTarget routing', () => {
     const md = buildAgentFileForTarget(baseSpec, { dir: '.gemini/agents', format: 'markdown' });
     expect(md).not.toContain('color:');
     expect(md).not.toContain('allowed-tools:');
+    expect(md).not.toContain('LSP');
   });
 
   it('routes .claude/agents to the claude renderer', () => {
@@ -153,6 +156,26 @@ describe('buildAgentFileForTarget routing', () => {
     const toml = buildAgentFileForTarget(baseSpec, { dir: '.codex/agents', format: 'toml' });
     expect(toml).toContain('name = "sample-agent"');
     expect(toml).toContain('description = ');
+    expect(toml).not.toContain('LSP');
+  });
+
+  it('fails closed for legacy Antigravity and unknown markdown targets', () => {
+    for (const dir of ['.agents/agents', '.future-cli/agents']) {
+      const rendered = buildAgentFileForTarget(baseSpec, { dir, format: 'markdown' });
+      expect(rendered).not.toContain('LSP');
+      expect(rendered).toContain('1. RAG → 2. KB → 3. GREP (last resort)');
+    }
+  });
+
+  it('honors an explicit LSP-capable target without changing the rest of the agent', () => {
+    const rendered = buildAgentFileForTarget(baseSpec, {
+      dir: '.future-cli/agents',
+      format: 'markdown',
+      supportsLsp: true,
+    });
+    expect(rendered).toContain('3. **LSP (for code navigation)**');
+    expect(rendered).toContain('## Core Mission');
+    expect(rendered).toContain('Find issues.');
   });
 });
 

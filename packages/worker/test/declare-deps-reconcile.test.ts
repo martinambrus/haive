@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  declareDepsStep,
   reconcileStaleDeps,
   type DeclareDepsFormValues,
 } from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
@@ -16,6 +17,7 @@ function ddevDetect(overrides: Partial<DeclareDepsDetect> = {}): DeclareDepsDete
     ddevProjectName: 'acme',
     database: { kind: 'mariadb', version: '10.11' },
     suggestedLsp: ['intelephense-extended'],
+    cliSupportsLsp: true,
     ...overrides,
   };
 }
@@ -109,5 +111,36 @@ describe('reconcileStaleDeps', () => {
     expect(out.preinstallDeps).toBe(false);
     expect(out.extraPackages).toBe('vim');
     expect(out.lspServers).toEqual(['pyright']);
+  });
+});
+
+describe('declareDepsStep.form LSP capability', () => {
+  it('hides the language-server field for an unsupported CLI', () => {
+    const form = declareDepsStep.form!({} as never, ddevDetect({ cliSupportsLsp: false }));
+    expect(form!.fields.some((field) => field.id === 'lspServers')).toBe(false);
+  });
+
+  it('preserves the complete multi-server selection for a capable CLI', () => {
+    const form = declareDepsStep.form!(
+      {} as never,
+      ddevDetect({
+        cliSupportsLsp: true,
+        suggestedLsp: ['vtsls', 'pyright', 'gopls'],
+      }),
+    );
+    const field = form!.fields.find((candidate) => candidate.id === 'lspServers');
+    expect(field?.type).toBe('multi-select');
+    expect((field as { defaults: string[] }).defaults).toEqual(['vtsls', 'pyright', 'gopls']);
+    expect(
+      (field as { options: Array<{ value: string }> }).options.map((option) => option.value),
+    ).toEqual([
+      'intelephense-extended',
+      'vtsls',
+      'pyright',
+      'gopls',
+      'rust-analyzer',
+      'solargraph',
+      'jdtls',
+    ]);
   });
 });

@@ -9,7 +9,7 @@ import type {
   AgentMiningResult,
 } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { parseReviewJson } from './_agent-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput } from './_task-meta.js';
@@ -158,8 +158,13 @@ const SAFETY = [
 
 function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
   return [
-    `If a \`.claude/agents/${a.id}.md\` agent definition exists in the repo, follow it;`,
-    'otherwise follow the persona below.',
+    agentDefinitionGuidance(
+      a.id,
+      [
+        `If a \`.claude/agents/${a.id}.md\` agent definition exists in the repo, follow it;`,
+        'otherwise follow the persona below.',
+      ].join('\n'),
+    ),
     `You are ${a.title}, an adversarial QA agent. Your job is to BREAK the implemented change.`,
     a.persona,
     '',

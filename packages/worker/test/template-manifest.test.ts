@@ -108,6 +108,10 @@ describe('template manifest', () => {
     // Fan-out across targets must not change the template-content hash.
     const hashes = new Set(multiAgent.map((r) => r.templateContentHash));
     expect(hashes.size).toBe(1);
+    const byPath = new Map(multiAgent.map((rendering) => [rendering.diskPath, rendering.content]));
+    expect(byPath.get('.claude/agents/code-reviewer.md')).toContain('LSP');
+    expect(byPath.get('.codex/agents/code-reviewer.toml')).not.toContain('LSP');
+    expect(byPath.get('.gemini/agents/code-reviewer.md')).not.toContain('LSP');
   });
 
   it('gates agents by acceptedAgentIds: never-accepted baseline/framework agents do not expand', () => {

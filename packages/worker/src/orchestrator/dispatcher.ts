@@ -1,4 +1,5 @@
-import type { StepCapability } from '@haive/shared';
+import type { Database } from '@haive/database';
+import { getCliProviderMetadata, type StepCapability } from '@haive/shared';
 import type { BaseCliAdapter } from '../cli-adapters/base-adapter.js';
 import { CliAdapterRegistry, cliAdapterRegistry } from '../cli-adapters/registry.js';
 import type {
@@ -9,6 +10,8 @@ import type {
   SubAgentSpec,
 } from '../cli-adapters/types.js';
 import { splitSubAgentForProvider } from '../sub-agent-emulator/splitter.js';
+import { adaptPromptForCliCapabilities } from '../step-engine/steps/_retrieval-guidance.js';
+import { hasReadyLspBridge } from '../lsp/configured-lsp.js';
 
 export type DispatchMode = 'cli' | 'subagent_emulated' | 'skip';
 
@@ -43,6 +46,9 @@ export interface DispatchPlan {
   adapter: BaseCliAdapter | null;
   provider: CliProviderRecord | null;
   invocation: DispatchInvocation | null;
+  /** The prompt after adapting shared capability-sensitive guidance to the
+   *  provider that was actually selected. Present for kind:'prompt' plans. */
+  effectivePrompt?: string;
   reason: string;
 }
 
@@ -57,7 +63,24 @@ export interface DispatchRequest {
    *  agent_mining / subagent dispatches. ANDed with adapter.supportsSteering and
    *  applied only to a kind:'prompt' invocation. */
   steeringRequested?: boolean;
+  /** Whether this task has at least one configured language server with a
+   *  bridge implemented by Haive. Fail-closed when omitted so a provider's
+   *  coarse capability alone never advertises tools that are not configured. */
+  lspConfigured?: boolean;
   registry?: CliAdapterRegistry;
+}
+
+/** Task-aware production entry point. Tests and pure selection callers may use
+ *  resolveDispatch directly with an explicit lspConfigured value. */
+export async function resolveTaskDispatch(
+  db: Database,
+  taskId: string,
+  req: DispatchRequest,
+): Promise<DispatchPlan> {
+  return resolveDispatch({
+    ...req,
+    lspConfigured: await hasReadyLspBridge(db, taskId),
+  });
 }
 
 export function resolveDispatch(req: DispatchRequest): DispatchPlan {
@@ -108,6 +131,14 @@ function buildCliSidePlan(
   req: DispatchRequest,
   needsSubagents: boolean,
 ): DispatchPlan | null {
+  const providerMetadata = getCliProviderMetadata(provider.name);
+  const adaptPrompt = (prompt: string): string =>
+    adaptPromptForCliCapabilities(prompt, {
+      supportsLsp: adapter.supportsLsp && req.lspConfigured === true,
+      projectAgentsDir: providerMetadata.projectAgentsDir,
+      agentFileFormat: providerMetadata.agentFileFormat,
+    });
+
   if (req.input.kind === 'prompt') {
     if (needsSubagents && !adapter.supportsSubagents) {
       return null;
@@ -116,7 +147,8 @@ function buildCliSidePlan(
     // only when the resolved adapter supports it. Subagent/agent_mining paths
     // never set steeringRequested.
     const steeringMode = (req.steeringRequested ?? false) && adapter.supportsSteering;
-    const spec = adapter.buildCliInvocation(provider, req.input.prompt, {
+    const effectivePrompt = adaptPrompt(req.input.prompt);
+    const spec = adapter.buildCliInvocation(provider, effectivePrompt, {
       ...req.invokeOpts,
       steeringMode,
     });
@@ -127,11 +159,20 @@ function buildCliSidePlan(
       adapter,
       provider,
       invocation: { kind: 'cli', spec },
+      effectivePrompt,
       reason: 'cli',
     };
   }
 
-  const split = splitSubAgentForProvider(adapter, provider, req.input.spec, req.invokeOpts);
+  const subAgentSpec = {
+    ...req.input.spec,
+    subAgents: req.input.spec.subAgents.map((subAgent) => ({
+      ...subAgent,
+      prompt: adaptPrompt(subAgent.prompt),
+    })),
+    synthesisPrompt: adaptPrompt(req.input.spec.synthesisPrompt),
+  };
+  const split = splitSubAgentForProvider(adapter, provider, subAgentSpec, req.invokeOpts);
   return {
     mode: split.mode === 'native' ? 'cli' : 'subagent_emulated',
     providerId: provider.id,

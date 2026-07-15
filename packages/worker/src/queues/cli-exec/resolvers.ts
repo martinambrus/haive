@@ -53,6 +53,7 @@ import {
   WORKTREE_SUBDIR,
 } from '../../repo/worktree-paths.js';
 import { resolveSandboxImageTag } from './images.js';
+import { hasReadyLspBridge } from '../../lsp/configured-lsp.js';
 
 export async function resolveProviderNameForPayload(
   db: Database,
@@ -350,6 +351,10 @@ export async function resolveMcpExtraFiles(
     process.env.DDEV_API_INTERNAL_URL || process.env.RAG_API_INTERNAL_URL || 'http://api:3001';
 
   const rag = await resolveRagMcpConfig(db, taskId);
+  const ragLspAvailable =
+    cliAdapterRegistry.has(providerName) &&
+    cliAdapterRegistry.get(providerName).supportsLsp &&
+    (await hasReadyLspBridge(db, taskId));
 
   // When chrome-devtools is on AND the task's runner has a live headed browser
   // (interactive/mcp testing), connect the agent to THAT visible browser instead
@@ -368,6 +373,7 @@ export async function resolveMcpExtraFiles(
     ragServerPath: RAG_MCP_SERVER_PATH,
     ragApiUrl: rag.apiUrl,
     ragToken: rag.token,
+    ragLspAvailable,
     includeDdevControl: ddevControlEnabled,
     ddevControlServerPath: DDEV_MCP_SERVER_PATH,
     ddevApiUrl,

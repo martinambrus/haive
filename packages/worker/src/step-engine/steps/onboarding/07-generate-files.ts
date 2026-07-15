@@ -16,13 +16,14 @@ import { mcpSettingsFileContent } from '../../../sandbox/mcp-config.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   type AgentSpec,
+  type AgentRenderTarget,
   BASELINE_AGENT_SPECS,
   buildAgentFileForTarget,
   FRAMEWORK_AGENT_SPECS,
   shouldEmitAgentsReadme,
   stubCustomAgent,
 } from './_agent-templates.js';
-import { loadPreviousStepOutput, pathExists } from './_helpers.js';
+import { loadCliProviderMetadata, loadPreviousStepOutput, pathExists } from './_helpers.js';
 import {
   buildClaudeSettingsJson,
   buildGeminiSettingsJson,
@@ -65,7 +66,7 @@ export interface GenerateFilesDetect {
    *  directory (only Amp enabled) — apply() falls back to a single
    *  markdown write under `.claude/agents` so the user still gets files,
    *  and logs a warning. */
-  agentTargets: { dir: string; format: 'markdown' | 'toml' }[];
+  agentTargets: AgentRenderTarget[];
   plannedAgents: string[];
   existingFiles: string[];
   /** Per-repo RTK opt-in. Read from `repositories.rtk_enabled` in detect();
@@ -394,8 +395,9 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     index: 7,
     title: 'Generate workflow files',
     description:
-      'Writes the subagent files under .claude/agents/ and .claude/workflow-config.json. All content is template-driven; no CLI invocation required.',
+      'Writes provider-native subagent files and .claude/workflow-config.json. All content is template-driven; no CLI invocation required.',
     requiresCli: false,
+    providerSensitive: true,
   },
 
   async detect(ctx: StepContext): Promise<GenerateFilesDetect> {
@@ -428,11 +430,13 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const toolingOutput = toolingPrev?.output as {
       tooling?: { lspLanguages?: unknown; mcpSettingsJson?: string };
     } | null;
-    const lspLanguages = Array.isArray(toolingOutput?.tooling?.lspLanguages)
-      ? (toolingOutput!.tooling!.lspLanguages as unknown[]).filter(
-          (v): v is string => typeof v === 'string',
-        )
-      : [];
+    const cliMeta = await loadCliProviderMetadata(ctx.db, ctx.cliProviderId);
+    const lspLanguages =
+      cliMeta?.supportsLsp && Array.isArray(toolingOutput?.tooling?.lspLanguages)
+        ? (toolingOutput!.tooling!.lspLanguages as unknown[]).filter(
+            (v): v is string => typeof v === 'string',
+          )
+        : [];
     const mcpSettingsJson =
       typeof toolingOutput?.tooling?.mcpSettingsJson === 'string'
         ? toolingOutput.tooling.mcpSettingsJson
@@ -519,15 +523,22 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     // (markdown); Codex uses `.codex/agents` (TOML — Codex's own schema);
     // Amp has no file-based custom agents so is omitted entirely.
     const enabledProviders = providerRows.filter((p) => p.enabled);
-    const agentTargetsByDir = new Map<string, { dir: string; format: 'markdown' | 'toml' }>();
+    const hasConfiguredLsp = lspLanguages.length > 0;
+    const agentTargetsByDir = new Map<string, AgentRenderTarget>();
     for (const p of enabledProviders) {
       const meta = getCliProviderMetadata(p.name);
       if (!meta.projectAgentsDir || !meta.agentFileFormat) continue;
-      if (!agentTargetsByDir.has(meta.projectAgentsDir)) {
+      const existingTarget = agentTargetsByDir.get(meta.projectAgentsDir);
+      if (!existingTarget) {
         agentTargetsByDir.set(meta.projectAgentsDir, {
           dir: meta.projectAgentsDir,
           format: meta.agentFileFormat,
+          supportsLsp: meta.supportsLsp && hasConfiguredLsp,
         });
+      } else if (meta.supportsLsp && hasConfiguredLsp) {
+        // Shared targets (currently Claude Code + Z.AI) can use LSP whenever
+        // at least one provider wired to that directory can expose it.
+        existingTarget.supportsLsp = true;
       }
     }
     const agentTargets = Array.from(agentTargetsByDir.values());
@@ -667,7 +678,9 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const targets =
       detected.agentTargets && detected.agentTargets.length > 0
         ? detected.agentTargets
-        : [{ dir: '.claude/agents', format: 'markdown' as const }];
+        : ([
+            { dir: '.claude/agents', format: 'markdown' as const, supportsLsp: false },
+          ] satisfies AgentRenderTarget[]);
     if (detected.agentTargets && detected.agentTargets.length === 0) {
       ctx.logger.warn(
         'no enabled CLI provider has a file-based agents directory; writing to .claude/agents as fallback',

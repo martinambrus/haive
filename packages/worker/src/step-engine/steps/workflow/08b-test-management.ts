@@ -6,7 +6,7 @@ import { z } from 'zod';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
-import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
@@ -396,8 +396,13 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
       return [
         "You are the test-management phase of an engineering workflow. Keep the project's",
         'automated tests in sync with the change that was just implemented and verified.',
-        'If a `.claude/agents/test-writer.md` agent definition exists in the repo, follow its',
-        'conventions for how to write/maintain tests; otherwise follow the protocol below.',
+        agentDefinitionGuidance(
+          'test-writer',
+          [
+            'If a `.claude/agents/test-writer.md` agent definition exists in the repo, follow its',
+            'conventions for how to write/maintain tests; otherwise follow the protocol below.',
+          ].join('\n'),
+        ),
         '',
         `Workspace: ${d.sandboxWorktreePath}`,
         'Your current working directory has the workspace mounted; work on the files there.',
@@ -447,8 +452,13 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
       const run = last?.testRun;
       return [
         'The related tests were run after your test changes and FAILED. Fix them.',
-        'If a `.claude/agents/test-writer.md` agent definition exists in the repo, follow its',
-        'conventions; otherwise follow the protocol below.',
+        agentDefinitionGuidance(
+          'test-writer',
+          [
+            'If a `.claude/agents/test-writer.md` agent definition exists in the repo, follow its',
+            'conventions; otherwise follow the protocol below.',
+          ].join('\n'),
+        ),
         '',
         `Workspace: ${d.sandboxWorktreePath}`,
         'Your current working directory has the workspace mounted; work on the files there.',

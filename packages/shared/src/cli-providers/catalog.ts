@@ -29,6 +29,10 @@ export interface CliProviderMetadata {
   supportsCliAuth: boolean;
   supportsMcp: boolean;
   supportsPlugins: boolean;
+  /** Whether Haive can expose language-server code-navigation tools to this
+   *  CLI. This is deliberately narrower than plugin support: a CLI may install
+   *  plugins without having a supported LSP integration. */
+  supportsLsp: boolean;
   defaultAuthMode: AuthMode;
   apiKeyEnvName: string | null;
   defaultModel: string | null;
@@ -114,6 +118,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsCliAuth: true,
     supportsMcp: true,
     supportsPlugins: true,
+    supportsLsp: true,
     defaultAuthMode: 'subscription',
     apiKeyEnvName: 'ANTHROPIC_API_KEY',
     defaultModel: 'claude-sonnet-4-20250514',
@@ -135,6 +140,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsCliAuth: true,
     supportsMcp: true,
     supportsPlugins: false,
+    supportsLsp: false,
     defaultAuthMode: 'subscription',
     apiKeyEnvName: 'OPENAI_API_KEY',
     defaultModel: 'o3',
@@ -164,6 +170,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsCliAuth: true,
     supportsMcp: true,
     supportsPlugins: false,
+    supportsLsp: false,
     defaultAuthMode: 'api_key',
     apiKeyEnvName: 'GEMINI_API_KEY',
     defaultModel: 'gemini-2.5-pro',
@@ -190,6 +197,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsCliAuth: true,
     supportsMcp: false,
     supportsPlugins: false,
+    supportsLsp: false,
     defaultAuthMode: 'subscription',
     apiKeyEnvName: null,
     defaultModel: null,
@@ -210,6 +218,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsCliAuth: true,
     supportsMcp: true,
     supportsPlugins: true,
+    supportsLsp: true,
     defaultAuthMode: 'api_key',
     apiKeyEnvName: 'ANTHROPIC_AUTH_TOKEN',
     defaultModel: 'glm-4.6',
@@ -233,6 +242,8 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsCliAuth: true,
     supportsMcp: true,
     supportsPlugins: true,
+    // agy has a plugin surface, but Haive does not yet have an LSP bridge for it.
+    supportsLsp: false,
     defaultAuthMode: 'subscription',
     // No simple API-key env; BYOK would be GCP ADC, out of scope for v1.
     apiKeyEnvName: null,
@@ -266,6 +277,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     // The claude binary's `plugin` subcommands install into .claude/plugins with
     // no model call, so they work against the Ollama endpoint like claude-code/zai.
     supportsPlugins: true,
+    supportsLsp: true,
     defaultAuthMode: 'api_key',
     // Local Ollama needs no real key (the binary accepts any non-empty token);
     // cloud/remote users store their key UNDER THIS env name (not

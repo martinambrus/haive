@@ -25,6 +25,10 @@ export abstract class BaseCliAdapter {
   abstract readonly supportsCliAuth: boolean;
   abstract readonly supportsMcp: boolean;
   abstract readonly supportsPlugins: boolean;
+  /** Whether this adapter exposes a usable language-server integration to the
+   *  model. Defaults to false so test/custom adapters cannot accidentally
+   *  advertise unavailable navigation tools. */
+  readonly supportsLsp: boolean = false;
   abstract readonly defaultAuthMode: CliAuthMode;
   abstract readonly apiKeyEnvName: string | null;
   abstract readonly defaultModel: string | null;

@@ -53,6 +53,10 @@ export interface BuildDefaultMcpServersOptions {
   ragApiUrl?: string;
   /** Task-scoped bearer token the rag proxy presents to the API. */
   ragToken?: string;
+  /** Whether the resolved CLI can use Haive's LSP integration. Passed to the
+   *  RAG tool so its model-visible grounding guidance never advertises an
+   *  unavailable navigation surface. */
+  ragLspAvailable?: boolean;
   /** Enable the ddev-control MCP server (ddev_status/ddev_logs/ddev_restart via the
    *  API). Requires ddevControlServerPath, ddevApiUrl, and ddevToken to also be set. */
   includeDdevControl?: boolean;
@@ -130,6 +134,7 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
       env: {
         RAG_API_URL: opts.ragApiUrl,
         RAG_TASK_TOKEN: opts.ragToken,
+        HAIVE_LSP_AVAILABLE: opts.ragLspAvailable ? '1' : '0',
       },
     });
   }

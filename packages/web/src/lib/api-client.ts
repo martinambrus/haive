@@ -327,6 +327,7 @@ export interface CliProviderMetadata {
   supportsCliAuth: boolean;
   supportsMcp: boolean;
   supportsPlugins: boolean;
+  supportsLsp: boolean;
   defaultAuthMode: CliAuthMode;
   apiKeyEnvName: string | null;
   defaultModel: string | null;

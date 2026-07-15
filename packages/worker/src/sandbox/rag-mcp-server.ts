@@ -14,7 +14,9 @@ import { createInterface } from 'node:readline';
 
 const API_URL = process.env.RAG_API_URL || '';
 const TOKEN = process.env.RAG_TASK_TOKEN || '';
+const LSP_AVAILABLE = process.env.HAIVE_LSP_AVAILABLE === '1';
 const PROTOCOL_VERSION = '2024-11-05';
+const GROUNDING_TOOLS = LSP_AVAILABLE ? 'LSP + grep' : 'grep + direct file reads';
 
 function send(msg) {
   process.stdout.write(JSON.stringify(msg) + '\n');
@@ -31,7 +33,7 @@ function error(id, code, message) {
 const TOOL = {
   name: 'rag_search',
   description:
-    'Semantic + lexical (hybrid) search over this project\'s indexed code and knowledge base PLUS the global cross-project KB (house standards / boilerplate, version-scoped to this stack). DISCOVERY tool: use it to find WHERE something is implemented, defined, or configured, or HOW we conventionally set things up. Then GROUND every lead with LSP + grep against the actual files (the index may be stale) — a snippet is a pointer, never the source of truth. Returns ranked snippets tagged [local] (this repo) or [global] (house standard) with source paths.',
+    'Semantic + lexical (hybrid) search over this project\'s indexed code and knowledge base PLUS the global cross-project KB (house standards / boilerplate, version-scoped to this stack). DISCOVERY tool: use it to find WHERE something is implemented, defined, or configured, or HOW we conventionally set things up. Then GROUND every lead with ' + GROUNDING_TOOLS + ' against the actual files (the index may be stale) — a snippet is a pointer, never the source of truth. Returns ranked snippets tagged [local] (this repo) or [global] (house standard) with source paths.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -68,7 +70,7 @@ async function ragSearch(args) {
   const data = await resp.json().catch(() => ({}));
   const hits = Array.isArray(data?.hits) ? data.hits : [];
   if (hits.length === 0) {
-    return { isError: false, text: 'No RAG hits — ground directly with LSP + grep.' };
+    return { isError: false, text: 'No RAG hits — ground directly with ' + GROUNDING_TOOLS + '.' };
   }
   const lines = hits.map((h, i) => {
     const scope = h.scope === 'global' ? '[global] ' : h.scope === 'local' ? '[local] ' : '';

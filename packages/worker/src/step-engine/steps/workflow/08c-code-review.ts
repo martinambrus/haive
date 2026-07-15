@@ -9,7 +9,7 @@ import type {
   AgentMiningResult,
 } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
@@ -625,8 +625,13 @@ function reviewAssignment(d: CodeReviewDetect): string {
 
 function buildPeerPrompt(d: CodeReviewDetect): string {
   return [
-    'If a `.claude/agents/peer-reviewer.md` agent definition exists in the repo, follow it;',
-    'otherwise follow the protocol below.',
+    agentDefinitionGuidance(
+      'peer-reviewer',
+      [
+        'If a `.claude/agents/peer-reviewer.md` agent definition exists in the repo, follow it;',
+        'otherwise follow the protocol below.',
+      ].join('\n'),
+    ),
     ...PEER_PERSONA,
     '',
     reviewAssignment(d),
@@ -639,8 +644,13 @@ function buildPeerPrompt(d: CodeReviewDetect): string {
 
 function buildSecurityPrompt(d: CodeReviewDetect): string {
   return [
-    'If a `.claude/agents/security-code-reviewer.md` agent definition exists in the repo, follow',
-    'it; otherwise follow the protocol below.',
+    agentDefinitionGuidance(
+      'security-code-reviewer',
+      [
+        'If a `.claude/agents/security-code-reviewer.md` agent definition exists in the repo, follow',
+        'it; otherwise follow the protocol below.',
+      ].join('\n'),
+    ),
     ...SECURITY_PERSONA,
     '',
     reviewAssignment(d),
@@ -653,8 +663,13 @@ function buildSecurityPrompt(d: CodeReviewDetect): string {
 
 function buildLensPrompt(lens: ReviewLensDef, d: CodeReviewDetect): string {
   return [
-    `If a \`.claude/agents/${lens.id}.md\` agent definition exists in the repo, follow it;`,
-    'otherwise follow the protocol below.',
+    agentDefinitionGuidance(
+      lens.id,
+      [
+        `If a \`.claude/agents/${lens.id}.md\` agent definition exists in the repo, follow it;`,
+        'otherwise follow the protocol below.',
+      ].join('\n'),
+    ),
     ...lens.persona,
     '',
     reviewAssignment(d),

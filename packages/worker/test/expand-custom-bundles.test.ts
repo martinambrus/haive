@@ -69,8 +69,11 @@ describe('expandCustomBundlesFor', () => {
     expect(toml?.diskPath).toBe('.codex/agents/reviewer.toml');
     expect(md?.templateId).toBe('custom.b1.item-a');
     expect(md?.templateKind).toBe('custom-agent');
-    expect(md?.templateContentHash).toBe('agent-hash');
-    expect(toml?.templateContentHash).toBe('agent-hash');
+    // The bundle IR hash is salted with the Haive agent-renderer version so a
+    // provider-specific rendering fix can refresh existing artifacts even when
+    // the uploaded AgentSpec itself did not change.
+    expect(md?.templateContentHash).toBe(toml?.templateContentHash);
+    expect(md?.templateContentHash).not.toBe('agent-hash');
     expect(md?.writtenHash).not.toBe(toml?.writtenHash);
   });
 

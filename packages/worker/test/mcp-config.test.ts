@@ -80,6 +80,24 @@ describe('buildDefaultMcpServers', () => {
       }).find((s) => s.name === 'ddev-control'),
     ).toBeUndefined();
   });
+
+  it('marks RAG grounding as LSP-capable only for a capable resolved CLI', () => {
+    const base = {
+      repoPath: '/r',
+      includeRagSearch: true,
+      ragServerPath: '/haive/rag.mjs',
+      ragApiUrl: 'http://api:3001',
+      ragToken: 'task-token',
+    };
+    const capable = buildDefaultMcpServers({ ...base, ragLspAvailable: true }).find(
+      (server) => server.name === 'haive-rag',
+    );
+    const unsupported = buildDefaultMcpServers({ ...base, ragLspAvailable: false }).find(
+      (server) => server.name === 'haive-rag',
+    );
+    expect(capable?.env?.HAIVE_LSP_AVAILABLE).toBe('1');
+    expect(unsupported?.env?.HAIVE_LSP_AVAILABLE).toBe('0');
+  });
 });
 
 describe('additive merge of user MCP servers', () => {
