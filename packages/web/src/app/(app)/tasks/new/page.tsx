@@ -800,26 +800,37 @@ export default function NewTaskPage() {
                 </p>
               </div>
             )}
-            {isBugFix && parentOptions && parentOptions.length > 0 && (
+            {isBugFix && (
               <div className="mt-2 flex flex-col gap-1.5">
                 <Label htmlFor="parentTask">Parent task (optional)</Label>
-                <select
-                  id="parentTask"
-                  value={parentTaskId}
-                  onChange={(e) => setParentTaskId(e.target.value)}
-                  className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-                >
-                  <option value="">None (no parent)</option>
-                  {parentOptions.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.title}
-                    </option>
-                  ))}
-                </select>
-                <p className="text-xs text-neutral-500">
-                  The completed task this bug fix belongs to. Pick another bug fix and it links to
-                  that bug fix&apos;s parent instead, so a feature keeps a single level of fixes.
-                </p>
+                {parentOptions && parentOptions.length > 0 ? (
+                  <>
+                    <select
+                      id="parentTask"
+                      value={parentTaskId}
+                      onChange={(e) => setParentTaskId(e.target.value)}
+                      className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                    >
+                      <option value="">None (no parent)</option>
+                      {parentOptions.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.title}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-neutral-500">
+                      The completed task this bug fix belongs to. Pick another bug fix and it links
+                      to that bug fix&apos;s parent instead, so a feature keeps a single level of
+                      fixes.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-neutral-500">
+                    {parentOptions === null
+                      ? 'Loading previous tasks…'
+                      : 'No completed tasks in this repository yet — nothing to link this bug fix to.'}
+                  </p>
+                )}
               </div>
             )}
           </div>
