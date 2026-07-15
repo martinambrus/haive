@@ -218,6 +218,37 @@ taskRoutes.post('/', async (c) => {
     }
   }
 
+  // Parent-task link (bug fixes only, one level). The chosen parent must be a
+  // completed workflow task the user owns in the SAME repo. Flatten: if the pick
+  // is itself a linked bug fix, link to ITS parent so the tree never exceeds one
+  // level (see the tasks.parent_task_id schema note).
+  let parentTaskId: string | null = null;
+  if (body.parentTaskId) {
+    if (body.type !== 'workflow' || !body.isBugFix) {
+      throw new HttpError(400, 'parentTaskId is only allowed on bug-fix tasks');
+    }
+    if (!body.repositoryId) {
+      throw new HttpError(400, 'parentTaskId requires a repositoryId');
+    }
+    const parent = await db.query.tasks.findFirst({
+      where: and(
+        eq(schema.tasks.id, body.parentTaskId),
+        eq(schema.tasks.userId, userId),
+        eq(schema.tasks.repositoryId, body.repositoryId),
+        eq(schema.tasks.type, 'workflow'),
+        eq(schema.tasks.status, 'completed'),
+      ),
+      columns: { id: true, parentTaskId: true },
+    });
+    if (!parent) {
+      throw new HttpError(
+        404,
+        'Parent task not found (must be a completed task in this repository)',
+      );
+    }
+    parentTaskId = parent.parentTaskId ?? parent.id;
+  }
+
   const metadata: Record<string, unknown> = {};
   if (body.isBugFix) metadata.category = 'bugfix';
   if (body.feature) metadata.feature = body.feature;
@@ -231,6 +262,7 @@ taskRoutes.post('/', async (c) => {
       title: body.title,
       description: body.description ?? null,
       repositoryId: body.repositoryId ?? null,
+      parentTaskId,
       cliProviderId: body.cliProviderId ?? null,
       dbUploadId: body.dbUploadId ?? null,
       simplifyCode: body.simplifyCode ?? false,
@@ -409,12 +441,25 @@ taskRoutes.get('/:id', async (c) => {
   const steps = enrichStepsWithCliUsage(withActiveRole);
   const active = await findActiveCliInvocation(db, id);
   const providerBreakdown = await sumTaskProviderBreakdown(db, id);
+  // Parent + linked bug fixes (one level; see tasks.parent_task_id). Both scoped
+  // to the owner. parentTask is null unless this task is itself a linked bug fix.
+  const parentTask = task.parentTaskId
+    ? ((await db.query.tasks.findFirst({
+        where: and(eq(schema.tasks.id, task.parentTaskId), eq(schema.tasks.userId, userId)),
+        columns: { id: true, title: true, status: true },
+      })) ?? null)
+    : null;
+  const childTasks = await db.query.tasks.findMany({
+    where: and(eq(schema.tasks.parentTaskId, id), eq(schema.tasks.userId, userId)),
+    columns: { id: true, title: true, status: true, createdAt: true },
+    orderBy: [desc(schema.tasks.createdAt)],
+  });
   const taskWithActive = {
     ...task,
     activeCliInvocationId: active?.id ?? null,
     activeCliStepId: active?.taskStepId ?? null,
   };
-  return c.json({ task: taskWithActive, steps, providerBreakdown });
+  return c.json({ task: taskWithActive, steps, providerBreakdown, parentTask, childTasks });
 });
 
 taskRoutes.patch('/:id', async (c) => {

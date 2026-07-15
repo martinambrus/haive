@@ -14,6 +14,7 @@ import {
   type OnboardingStatus,
   type Repository,
   type Task,
+  type TaskListResponse,
   type WorkflowType,
 } from '@/lib/api-client';
 import {
@@ -110,6 +111,8 @@ export default function NewTaskPage() {
   const [featureSuggestions, setFeatureSuggestions] = useState<string[]>([]);
   const [showFeatureSuggestions, setShowFeatureSuggestions] = useState(false);
   const [affectedClients, setAffectedClients] = useState('');
+  const [parentTaskId, setParentTaskId] = useState('');
+  const [parentOptions, setParentOptions] = useState<Task[] | null>(null);
 
   const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
@@ -238,6 +241,30 @@ export default function NewTaskPage() {
     }
   }
 
+  // Parent-task picker options: completed workflow tasks in the selected repo,
+  // fetched only when this is a bug fix and a repo is chosen (cleared otherwise).
+  // Filtered to type==='workflow' to keep the dropdown to real features; the API
+  // re-checks the same constraints on submit, so this is a UX filter only.
+  useEffect(() => {
+    if (!isBugFix || !repositoryId) {
+      setParentOptions(null);
+      setParentTaskId('');
+      return;
+    }
+    let cancelled = false;
+    api
+      .get<TaskListResponse>(`/tasks?repositoryId=${repositoryId}&status=completed&pageSize=100`)
+      .then((r) => {
+        if (!cancelled) setParentOptions(r.tasks.filter((t) => t.type === 'workflow'));
+      })
+      .catch(() => {
+        if (!cancelled) setParentOptions(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isBugFix, repositoryId]);
+
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!repositoryId) {
@@ -288,6 +315,7 @@ export default function NewTaskPage() {
           .map((c) => c.trim())
           .filter(Boolean);
         if (clients.length > 0) body.affectedClients = clients;
+        if (isBugFix && parentTaskId) body.parentTaskId = parentTaskId;
       }
 
       if ((type === 'workflow' || type === 'run_app') && dumpFile) {
@@ -745,6 +773,28 @@ export default function NewTaskPage() {
                 <p className="text-xs text-neutral-500">
                   Comma-separated. Recorded in the task and the local investigation only — never
                   sent to the cross-repo knowledge base.
+                </p>
+              </div>
+            )}
+            {isBugFix && parentOptions && parentOptions.length > 0 && (
+              <div className="mt-2 flex flex-col gap-1.5">
+                <Label htmlFor="parentTask">Parent task (optional)</Label>
+                <select
+                  id="parentTask"
+                  value={parentTaskId}
+                  onChange={(e) => setParentTaskId(e.target.value)}
+                  className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                >
+                  <option value="">None (no parent)</option>
+                  {parentOptions.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.title}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-neutral-500">
+                  The completed task this bug fix belongs to. Pick another bug fix and it links to
+                  that bug fix&apos;s parent instead, so a feature keeps a single level of fixes.
                 </p>
               </div>
             )}

@@ -506,6 +506,10 @@ export interface Task {
   id: string;
   userId: string;
   repositoryId: string | null;
+  /** The completed task this bug fix belongs to (one level; null otherwise). Set
+   *  by the create form for workflow bug fixes; the API flattens so it never
+   *  points at another linked bug fix. */
+  parentTaskId?: string | null;
   cliProviderId: string | null;
   type: WorkflowType;
   /** Execution path chosen at the 00-triage step (workflow tasks only). null until

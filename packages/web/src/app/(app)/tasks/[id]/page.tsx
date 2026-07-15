@@ -271,10 +271,21 @@ interface TaskProviderUsage {
   costUsd: number;
 }
 
+interface LinkedTask {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  createdAt?: string;
+}
+
 interface TaskDetailResponse {
   task: Task;
   steps: TaskStep[];
   providerBreakdown: TaskProviderUsage[];
+  /** The completed task this one belongs to (bug fixes only; null otherwise). */
+  parentTask?: LinkedTask | null;
+  /** Tasks that link to this one as their parent (its linked bug fixes). */
+  childTasks?: LinkedTask[];
 }
 
 export default function TaskDetailPage() {
@@ -283,6 +294,8 @@ export default function TaskDetailPage() {
 
   const [task, setTask] = useState<Task | null>(null);
   const [providerBreakdown, setProviderBreakdown] = useState<TaskProviderUsage[]>([]);
+  const [parentTask, setParentTask] = useState<LinkedTask | null>(null);
+  const [childTasks, setChildTasks] = useState<LinkedTask[]>([]);
   const [promotedDraftCount, setPromotedDraftCount] = useState(0);
   usePageTitle(task ? task.title : 'Task');
   const [steps, setSteps] = useState<TaskStep[]>([]);
@@ -360,6 +373,8 @@ export default function TaskDetailPage() {
       setTask(data.task);
       setSteps(data.steps);
       setProviderBreakdown(data.providerBreakdown ?? []);
+      setParentTask(data.parentTask ?? null);
+      setChildTasks(data.childTasks ?? []);
     } catch (err) {
       setError((err as Error).message ?? 'Failed to load task');
     }
@@ -1091,6 +1106,29 @@ export default function TaskDetailPage() {
           {task.description && <p className="text-sm text-neutral-400">{task.description}</p>}
           {task.status === 'failed' && task.errorMessage && (
             <p className="text-sm text-red-400">Error: {task.errorMessage}</p>
+          )}
+          {parentTask && (
+            <p className="mt-1 text-sm text-neutral-400">
+              Parent task:{' '}
+              <Link href={`/tasks/${parentTask.id}`} className="text-indigo-400 underline">
+                {parentTask.title}
+              </Link>
+            </p>
+          )}
+          {childTasks.length > 0 && (
+            <div className="mt-1 text-sm text-neutral-400">
+              Linked bug fixes ({childTasks.length}):
+              <ul className="mt-0.5 flex flex-col gap-1">
+                {childTasks.map((ct) => (
+                  <li key={ct.id} className="flex items-center gap-2">
+                    <Link href={`/tasks/${ct.id}`} className="text-indigo-400 underline">
+                      {ct.title}
+                    </Link>
+                    <Badge variant={taskStatusVariant(ct.status)}>{ct.status}</Badge>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </div>
         <div className="flex flex-wrap gap-2">

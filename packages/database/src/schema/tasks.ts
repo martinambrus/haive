@@ -11,6 +11,7 @@ import {
   uniqueIndex,
   index,
   pgEnum,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
 import { users } from './auth.js';
@@ -104,6 +105,13 @@ export const tasks = pgTable(
       onDelete: 'set null',
     }),
     dbUploadId: uuid('db_upload_id').references(() => dbUploads.id, {
+      onDelete: 'set null',
+    }),
+    /** Parent task this bug fix belongs to (one level only; the create handler
+     *  flattens so this never points at another linked bug fix). Self-FK; set
+     *  null on parent delete so deleting a feature un-links its bug fixes rather
+     *  than cascading. Written only by the create path for workflow bug fixes. */
+    parentTaskId: uuid('parent_task_id').references((): AnyPgColumn => tasks.id, {
       onDelete: 'set null',
     }),
     type: workflowTypeEnum('type').notNull(),
@@ -290,6 +298,7 @@ export const tasks = pgTable(
     index('tasks_status_idx').on(table.status),
     index('tasks_repository_id_idx').on(table.repositoryId),
     index('tasks_env_template_id_idx').on(table.envTemplateId),
+    index('tasks_parent_task_id_idx').on(table.parentTaskId),
   ],
 );
 

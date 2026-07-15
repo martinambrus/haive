@@ -98,6 +98,12 @@ export const createTaskRequestSchema = z
      *  tasks.metadata.affectedClients and recorded only in the local investigation
      *  frontmatter — never promoted to the cross-repo KB. Workflow tasks only. */
     affectedClients: z.array(z.string().trim().max(120)).max(50).optional(),
+    /** Optional parent task this bug fix belongs to (one level only). Must be a
+     *  completed workflow task in the same repository; if the chosen parent is
+     *  itself a linked bug fix, the create handler re-points to ITS parent so the
+     *  link never chains past one level. Stored on tasks.parent_task_id.
+     *  Workflow bug-fix tasks only. */
+    parentTaskId: z.string().uuid().optional(),
     /** Auto-continue: auto-submit info-only forms and gate-1 pre-answers so the
      *  workflow runs hands-free between gates. Defaults to true. */
     autoContinue: z.boolean().optional(),
