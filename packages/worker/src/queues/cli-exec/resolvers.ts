@@ -581,8 +581,8 @@ export async function resolveRepoMount(
 
 export const WORKER_REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
 
-/** chown the repo-volume subpath for a task to 1000:1000 (the `node` user
- *  the sandbox CLI runs as). Named volumes default to root-owned content,
+/** Make the repo-volume subpath writable by 1000:1000 (the `node` user the
+ *  sandbox CLI runs as). Named volumes default to root-owned content,
  *  and the sandbox runs CLIs as `node` (sandbox-runner.ts), so any LLM that
  *  tries to write into `.claude/`, `.gemini/`, `.codex/`, etc. inside the
  *  workdir fails with EACCES and may pivot to writing under `/tmp/` instead,
@@ -602,8 +602,12 @@ export async function ensureRepoMountWritable(repoMount: DockerVolumeMount | nul
     const before = await stat(workerVolumePath);
     await ensureSandboxWritableTree(workerVolumePath);
     const after = await stat(workerVolumePath);
-    if (before.uid !== after.uid || before.gid !== after.gid) {
-      log.info({ workerVolumePath }, 'chowned repo volume to node user (1000:1000)');
+    if (
+      before.uid !== after.uid ||
+      before.gid !== after.gid ||
+      (before.mode & 0o777) !== (after.mode & 0o777)
+    ) {
+      log.info({ workerVolumePath }, 'repaired repo volume access for node user (1000:1000)');
     }
   } catch (err) {
     log.error({ err, workerVolumePath }, 'repo volume is not writable by sandbox user');
