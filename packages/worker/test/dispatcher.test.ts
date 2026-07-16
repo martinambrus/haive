@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { resolveDispatch } from '../src/orchestrator/dispatcher.js';
+import type { Database } from '@haive/database';
+import { resolveDispatch, resolveTaskDispatch } from '../src/orchestrator/dispatcher.js';
 import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
 import type { CliProviderRecord, SubAgentSpec } from '../src/cli-adapters/types.js';
 import {
   agentDefinitionGuidance,
   retrievalGuidanceLines,
 } from '../src/step-engine/steps/_retrieval-guidance.js';
+import { WORKTREE_GIT_BOUNDARY_MARKER } from '../src/repo/worktree-git-boundary.js';
 
 type ProviderOverrides = Partial<CliProviderRecord> & Pick<CliProviderRecord, 'id' | 'name'>;
 
@@ -298,5 +300,84 @@ describe('resolveDispatch', () => {
     expect(plan.effectivePrompt).toContain('grep + direct file reads');
     expect(plan.effectivePrompt).not.toContain('LSP + grep');
     expect(plan.effectivePrompt).not.toContain('.claude/agents/spec-quality-reviewer.md');
+  });
+
+  it('explains the zero-byte gitfile before serializing a masked-worktree prompt', () => {
+    const provider = makeProvider({ id: 'prov-codex', name: 'codex' });
+    const plan = resolveDispatch({
+      providers: [provider],
+      worktreeGitBoundary: true,
+      input: { kind: 'prompt', prompt: 'Implement the issue.', capabilities: ['file_write'] },
+      invokeOpts: {},
+    });
+    expect(plan.effectivePrompt).toContain(WORKTREE_GIT_BOUNDARY_MARKER);
+    expect(plan.effectivePrompt).toContain('zero-byte, read-only file');
+    expect(plan.effectivePrompt).toContain('not repository corruption');
+    if (plan.invocation?.kind === 'cli') {
+      expect(plan.invocation.spec.args.at(-1)).toBe(plan.effectivePrompt);
+    }
+  });
+
+  it('does not add the worktree boundary to a repo-root prompt', () => {
+    const provider = makeProvider({ id: 'prov-codex', name: 'codex' });
+    const plan = resolveDispatch({
+      providers: [provider],
+      worktreeGitBoundary: false,
+      input: { kind: 'prompt', prompt: 'Inspect the repository.', capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(plan.effectivePrompt).toBe('Inspect the repository.');
+  });
+
+  it('adds the boundary to every worktree-bound subagent and synthesis prompt', () => {
+    const provider = makeProvider({
+      id: 'prov-codex',
+      name: 'codex',
+      supportsSubagents: false,
+    });
+    const plan = resolveDispatch({
+      providers: [provider],
+      worktreeGitBoundary: true,
+      input: { kind: 'subagent', spec: sampleSubAgentSpec, capabilities: ['subagents'] },
+      invokeOpts: {},
+    });
+    expect(plan.invocation?.kind).toBe('subagent');
+    if (plan.invocation?.kind === 'subagent') {
+      for (const step of plan.invocation.spec.steps) {
+        expect(step.prompt).toContain(WORKTREE_GIT_BOUNDARY_MARKER);
+      }
+      expect(plan.invocation.spec.synthesis.prompt).toContain(WORKTREE_GIT_BOUNDARY_MARKER);
+    }
+  });
+
+  it('derives the production boundary from the same task target as the mount', async () => {
+    const task = {
+      envTemplateId: null,
+      repositoryId: 'repo-1',
+      worktreeBranch: 'feature/x',
+    };
+    const db = {
+      query: {
+        tasks: { findFirst: async () => task },
+        repositories: {
+          findFirst: async () => ({ storagePath: null, localPath: null }),
+        },
+      },
+    } as unknown as Database;
+    const provider = makeProvider({ id: 'prov-codex', name: 'codex' });
+    const worktreePlan = await resolveTaskDispatch(db, 'task-1', {
+      providers: [provider],
+      input: { kind: 'prompt', prompt: 'Worktree task.', capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(worktreePlan.effectivePrompt).toContain(WORKTREE_GIT_BOUNDARY_MARKER);
+
+    const repoRootPlan = await resolveTaskDispatch(db, 'task-1', {
+      providers: [provider],
+      worktreeRel: '',
+      input: { kind: 'prompt', prompt: 'Repo-root task.', capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(repoRootPlan.effectivePrompt).toBe('Repo-root task.');
   });
 });

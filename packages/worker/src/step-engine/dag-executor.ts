@@ -693,6 +693,7 @@ async function spawnReviewAgent(
   prompt: string,
   capabilities: StepCapability[],
 ): Promise<boolean> {
+  const worktreeRel = issueWorktreeRel(issue);
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
     ra.db,
     ra.params.userId,
@@ -706,6 +707,7 @@ async function spawnReviewAgent(
   const plan = await resolveTaskDispatch(ra.db, ra.taskId, {
     providers: ra.providers,
     preferredProviderId: preferred,
+    worktreeRel,
     input: { kind: 'prompt', prompt, capabilities },
     invokeOpts: {
       cwd: issue.sandboxWorktreePath ?? undefined,
@@ -740,7 +742,7 @@ async function spawnReviewAgent(
     taskStepId: ra.current.id,
     userId: ra.params.userId,
     // Isolate the reviewer / fix-coder / advisor to ITS issue worktree.
-    worktreeRel: issueWorktreeRel(issue),
+    worktreeRel,
     cliProviderId: plan.providerId,
     kind: 'cli',
     spec: plan.invocation.spec,
@@ -1515,9 +1517,11 @@ export async function resolveDagPhase(
       let dispatched = 0;
       for (const issue of undispatched) {
         const prompt = spec.buildCoderPrompt(coderContext(issue), upstreamDebt);
+        const worktreeRel = issueWorktreeRel(issue);
         const planDispatch = await resolveTaskDispatch(db, params.taskId, {
           providers,
           preferredProviderId: preferred,
+          worktreeRel,
           input: { kind: 'prompt', prompt, capabilities: spec.requiredCapabilities },
           invokeOpts: {
             cwd: issue.sandboxWorktreePath ?? undefined,
@@ -1579,7 +1583,7 @@ export async function resolveDagPhase(
           taskStepId: current.id,
           userId: params.userId,
           // Isolate the coder to ITS issue worktree, not the whole repo.
-          worktreeRel: issueWorktreeRel(issue),
+          worktreeRel,
           cliProviderId: planDispatch.providerId,
           kind: 'cli',
           spec: planDispatch.invocation.spec,

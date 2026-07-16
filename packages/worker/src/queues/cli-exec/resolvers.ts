@@ -51,6 +51,12 @@ import {
 import { resolveSandboxImageTag } from './images.js';
 import { hasReadyLspBridge } from '../../lsp/configured-lsp.js';
 import { ensureSandboxWritableTree } from '../../repo/worktree-permissions.js';
+import {
+  HOST_REPO_ROOT,
+  invocationUsesWorktreeGitBoundary,
+} from '../../repo/worktree-git-boundary.js';
+
+export { HOST_REPO_ROOT } from '../../repo/worktree-git-boundary.js';
 
 export async function resolveProviderNameForPayload(
   db: Database,
@@ -415,7 +421,6 @@ export async function resolveMcpExtraFiles(
 
 const REPO_VOLUME_NAME = 'haive_repos';
 const REPO_MOUNT_TARGET = SANDBOX_WORKDIR;
-export const HOST_REPO_ROOT = process.env.HOST_REPO_ROOT ?? '/host-fs';
 const HOST_REPO_ROOT_REAL = process.env.HOST_REPO_ROOT_REAL ?? process.env.HOME ?? '/';
 
 export async function resolveTaskRepoMount(
@@ -520,7 +525,12 @@ export async function resolveInvocationRepoMount(
   // the repo root — onboarding, or a 12-cleanup merge that runs at the parent checkout —
   // has a `.git` DIRECTORY and must NOT be masked. Key the signal on the mounted path so a
   // repo-root override (worktreeSubpath = "<userId>/<repoId>") is correctly hasWorktree=false.
-  const hasWorktree = subpath.includes(`${WORKTREE_SUBDIR}/`);
+  const hasWorktree = invocationUsesWorktreeGitBoundary({
+    storagePath: repo.storagePath,
+    localPath: repo.localPath,
+    worktreeBranch: task.worktreeBranch,
+    worktreeRel,
+  });
 
   return {
     repoMount: { source: REPO_VOLUME_NAME, target: REPO_MOUNT_TARGET, subpath },

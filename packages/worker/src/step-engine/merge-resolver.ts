@@ -405,6 +405,10 @@ async function dispatchFixAgent(
   state: MergeResolveState,
   guidance: string,
 ): Promise<string | null> {
+  // Keep this exact value paired between prompt planning and queue payload: an
+  // empty override is the repo root (real `.git` directory), while a transient
+  // --base worktree receives the zero-byte gitfile boundary.
+  const worktreeRel = path.relative(SANDBOX_WORKDIR, state.sandboxMergeDir);
   const prompt = spec.buildFixPrompt({
     baseBranch: state.baseBranch,
     featureBranch: state.featureBranch,
@@ -424,6 +428,7 @@ async function dispatchFixAgent(
   const plan = await resolveTaskDispatch(db, params.taskId, {
     providers: params.providers!,
     preferredProviderId: preferred,
+    worktreeRel,
     input: { kind: 'prompt', prompt, capabilities: spec.requiredCapabilities },
     invokeOpts: { cwd: state.sandboxMergeDir, effortLevel: preferredEffort ?? undefined },
   });
@@ -448,7 +453,7 @@ async function dispatchFixAgent(
     // Isolate the conflict fix-agent to the merge working tree: '' (repo root, same-branch)
     // or the transient --base worktree (cross-branch), recovered from the stored container
     // merge dir relative to the workdir root.
-    worktreeRel: path.relative(SANDBOX_WORKDIR, state.sandboxMergeDir),
+    worktreeRel,
     cliProviderId: plan.providerId,
     kind: 'cli',
     spec: plan.invocation.spec,

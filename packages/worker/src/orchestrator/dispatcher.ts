@@ -12,6 +12,10 @@ import type {
 import { splitSubAgentForProvider } from '../sub-agent-emulator/splitter.js';
 import { adaptPromptForCliCapabilities } from '../step-engine/steps/_retrieval-guidance.js';
 import { hasReadyLspBridge } from '../lsp/configured-lsp.js';
+import {
+  resolveInvocationUsesWorktreeGitBoundary,
+  withWorktreeGitBoundary,
+} from '../repo/worktree-git-boundary.js';
 
 export type DispatchMode = 'cli' | 'subagent_emulated' | 'skip';
 
@@ -67,6 +71,12 @@ export interface DispatchRequest {
    *  bridge implemented by Haive. Fail-closed when omitted so a provider's
    *  coarse capability alone never advertises tools that are not configured. */
   lspConfigured?: boolean;
+  /** Invocation-specific worktree override. Must match the worktreeRel later
+   *  placed on CliExecJobPayload so prompt and mount use the same boundary. */
+  worktreeRel?: string;
+  /** Computed by resolveTaskDispatch from the actual invocation target. Exposed
+   *  on the pure resolver only for deterministic unit tests. */
+  worktreeGitBoundary?: boolean;
   registry?: CliAdapterRegistry;
 }
 
@@ -77,9 +87,16 @@ export async function resolveTaskDispatch(
   taskId: string,
   req: DispatchRequest,
 ): Promise<DispatchPlan> {
+  const [lspConfigured, worktreeGitBoundary] = await Promise.all([
+    hasReadyLspBridge(db, taskId),
+    resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
+  ]);
   return resolveDispatch({
     ...req,
-    lspConfigured: await hasReadyLspBridge(db, taskId),
+    lspConfigured,
+    // Production callers cannot accidentally claim a boundary the mount will
+    // not apply (or omit one it will): the DB-backed target wins any input.
+    worktreeGitBoundary,
   });
 }
 
@@ -132,12 +149,14 @@ function buildCliSidePlan(
   needsSubagents: boolean,
 ): DispatchPlan | null {
   const providerMetadata = getCliProviderMetadata(provider.name);
-  const adaptPrompt = (prompt: string): string =>
-    adaptPromptForCliCapabilities(prompt, {
+  const adaptPrompt = (prompt: string): string => {
+    const capabilityAdapted = adaptPromptForCliCapabilities(prompt, {
       supportsLsp: adapter.supportsLsp && req.lspConfigured === true,
       projectAgentsDir: providerMetadata.projectAgentsDir,
       agentFileFormat: providerMetadata.agentFileFormat,
     });
+    return withWorktreeGitBoundary(capabilityAdapted, req.worktreeGitBoundary === true);
+  };
 
   if (req.input.kind === 'prompt') {
     if (needsSubagents && !adapter.supportsSubagents) {

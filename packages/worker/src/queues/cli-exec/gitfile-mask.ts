@@ -5,10 +5,14 @@ import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-ru
  * Read-only empty-file mask over a linked worktree's `.git` gitfile inside the
  * cli-exec sandbox.
  *
- * Every agent prompt asserts that git is unavailable in the sandbox and that the
- * host stages and commits (10-gate-3-commit, completeMergeHostSide). That was only
- * true by accident: the gitfile holds a host-absolute gitdir that does not resolve
- * inside the container, so git merely errored. An agent repointed it at the
+ * The task-aware dispatcher pairs this mask with the shared worktree git-boundary
+ * prompt: it explains that the zero-byte `.git` entry is an intentional containment
+ * sentinel, forbids repairing it, and says the host stages and commits. Both use the
+ * same invocation-target predicate, so a prompt cannot claim this boundary for the
+ * repo root and a masked worktree cannot omit it.
+ *
+ * Before the mask existed, the gitfile held a host-absolute gitdir that did not
+ * resolve inside the container, so git merely errored. An agent repointed it at the
  * container path — `printf 'gitdir: /haive/workdir/.git/worktrees/<name>' > .git` —
  * which handed itself a working git behind the commit gate AND left host-side git
  * fatally broken for every later step of the task (task 82949225).
