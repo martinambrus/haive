@@ -33,6 +33,11 @@ interface Waiter {
   done: boolean;
   timer: ReturnType<typeof setTimeout> | null;
   admit: (reason: 'slot' | 'timeout' | 'disabled') => void;
+  /** Called while this waiter is still queued behind a full gate, with the current
+   *  busy count (live runners + in-flight boots) and the active max. Lets a caller
+   *  surface "waiting for a runtime slot" instead of a misleading boot-progress line.
+   *  Fires on the initial pump and each 15s repump, so the count stays fresh. */
+  onWait?: (busy: number, max: number) => void;
 }
 
 let inFlightBoots = 0;
@@ -100,6 +105,11 @@ async function pump(): Promise<void> {
         if (live + inFlightBoots < max) {
           waiters[0]?.admit('slot');
         } else {
+          // Gate full: tell every still-queued waiter WHY it's blocked (a resource
+          // queue, not a slow boot) so its caller's progress line can say so. Fires on
+          // the initial pump and each repump, refreshing the count as runners come/go.
+          const busy = live + inFlightBoots;
+          for (const w of waiters) w.onWait?.(busy, max);
           break;
         }
       }
@@ -112,11 +122,15 @@ async function pump(): Promise<void> {
 /** Acquire a slot before booting a runtime runner. Resolves with a release function the
  *  caller MUST invoke (in a finally) once the runner is up or the boot failed. When the
  *  governor is disabled, resolves immediately with a no-op release. */
-export async function acquireRuntimeSlot(taskId: string, kind: 'ddev' | 'app'): Promise<ReleaseFn> {
+export async function acquireRuntimeSlot(
+  taskId: string,
+  kind: 'ddev' | 'app',
+  onWait?: (busy: number, max: number) => void,
+): Promise<ReleaseFn> {
   if (!(await resourceLimitsEnabled())) return NOOP_RELEASE;
 
   return new Promise<ReleaseFn>((resolve) => {
-    const w: Waiter = { done: false, timer: null, admit: () => {} };
+    const w: Waiter = { done: false, timer: null, admit: () => {}, onWait };
     w.admit = (reason) => {
       if (w.done) return;
       w.done = true;

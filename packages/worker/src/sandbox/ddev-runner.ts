@@ -1119,7 +1119,9 @@ async function ensureDdevStartedInner(
   // re-pulls base images into a fresh nested /var/lib/docker. Hold an admission slot
   // across the whole heavy boot (runner create + nested image pulls + ddev start), so
   // at most maxConcurrentRuntimes tasks cold-boot at once; release once up or failed.
-  const releaseSlot = await acquireRuntimeSlot(taskId, 'ddev');
+  const releaseSlot = await acquireRuntimeSlot(taskId, 'ddev', (busy, max) =>
+    opts.onProgress?.(`waiting for a free runtime slot — ${busy} in use, limit ${max}`),
+  );
   try {
     const handle = await startDdevRunner({ taskId, repoSubpath });
     let start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
