@@ -15,14 +15,17 @@ import {
   ensureAppServing,
   resolveDdevDbAccess,
   type AppRuntimeCtx,
+  type ServingRuntime,
 } from '../step-engine/steps/workflow/_app-runtime.js';
 import {
   startBrowserDesktop as startDdevBrowserDesktop,
   ddevAccessUrls,
+  runnerExec,
 } from '../sandbox/ddev-runner.js';
 import {
   startBrowserDesktop as startAppBrowserDesktop,
   appRunnerAccessUrls,
+  appRunnerExec,
 } from '../sandbox/app-runner.js';
 
 // The worker side of the VNC "ensure runtime" handshake. The api enqueues a job
@@ -32,6 +35,34 @@ import {
 // connects to a live desktop instead of silently tearing down a dead one.
 
 const log = logger.child({ module: 'runtime-ensure' });
+
+/** Point the freshly-recovered headed-browser desktop at the app URL — the same
+ *  navigate every desktop-start site runs (08a, Gate-2 detect, 99-run-app). The step's
+ *  own detect did this once, but a parked step does NOT re-detect (step-runner only
+ *  detects when detectOutput is null), so after a worker/host restart this ensure path
+ *  is the only thing that brings the desktop back — and without the navigate the VNC
+ *  panel bridges to a blank Chrome, leaving the user with no app to test. Best-effort:
+ *  runnerExec/appRunnerExec never throw and a non-zero/failed navigate must not fail the
+ *  ensure job (it also feeds /access-urls + /db-access); the panel still bridges. */
+async function navigateDesktopToApp(runtime: ServingRuntime, taskId: string): Promise<void> {
+  if (runtime.mode !== 'ddev' && runtime.mode !== 'app-runner') return;
+  try {
+    const r =
+      runtime.mode === 'ddev'
+        ? await runnerExec(runtime.handle, `node /opt/browser-probe-connect.js '${runtime.url}'`, {
+            timeoutMs: 30_000,
+          })
+        : await appRunnerExec(
+            runtime.handle,
+            `node /opt/browser/browser-probe-connect.js '${runtime.url}'`,
+            { timeoutMs: 30_000 },
+          );
+    if (r.exitCode !== 0)
+      log.warn({ taskId, url: runtime.url }, 'runtime-ensure browser navigate returned non-zero');
+  } catch (err) {
+    log.warn({ taskId, err }, 'runtime-ensure browser navigate failed (panel unaffected)');
+  }
+}
 
 /** Ensure the task's app is serving and its headed-browser desktop is up. Reads
  *  the task's repo path the same way the task worker builds a step context, then
@@ -58,6 +89,7 @@ export async function ensureRuntimeForTask(taskId: string): Promise<RuntimeEnsur
   let accessUrls: TaskAccessEndpoint[] = [];
   if (runtime.mode === 'ddev') {
     await startDdevBrowserDesktop(runtime.handle);
+    await navigateDesktopToApp(runtime, taskId);
     accessUrls = await ddevAccessUrls(runtime.handle, taskId);
     // Append the database endpoint when the task opted into db access (gated inside
     // resolveDdevDbAccess on the global DB switch + the per-task flag). Independent of the
@@ -65,6 +97,7 @@ export async function ensureRuntimeForTask(taskId: string): Promise<RuntimeEnsur
     accessUrls = accessUrls.concat(await resolveDdevDbAccess(db, taskId, runtime.handle));
   } else if (runtime.mode === 'app-runner') {
     await startAppBrowserDesktop(runtime.handle);
+    await navigateDesktopToApp(runtime, taskId);
     accessUrls = await appRunnerAccessUrls(taskId, runtime.port);
   }
   return { ok: runtime.mode !== 'none', url: runtime.url, mode: runtime.mode, accessUrls };

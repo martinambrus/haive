@@ -64,7 +64,7 @@ function liveBrowserPanel(
   opts: { autoCollapse: boolean; title?: string },
 ) {
   const det = step.detectOutput as {
-    liveBrowser?: { available?: boolean };
+    liveBrowser?: { available?: boolean; appUrl?: string | null };
     directAccess?: boolean;
     dbAccess?: boolean;
   } | null;
@@ -83,6 +83,7 @@ function liveBrowserPanel(
       title={opts.title}
       autoCollapse={opts.autoCollapse}
       persistId={step.id}
+      appUrl={det.liveBrowser.appUrl}
     />
   ) : null;
   const dbPanel = det?.dbAccess ? (
@@ -113,7 +114,7 @@ function RunAppReadyPanels({
 }) {
   const det = step.detectOutput as {
     mode?: string;
-    liveBrowser?: { available?: boolean };
+    liveBrowser?: { available?: boolean; appUrl?: string | null };
     directAccess?: boolean;
     dbAccess?: boolean;
     diffArtifactPath?: string | null;
@@ -143,6 +144,7 @@ function RunAppReadyPanels({
           title="In-app browser (VNC)"
           autoCollapse={autoCollapse}
           persistId={`${step.id}-vnc`}
+          appUrl={det?.liveBrowser?.appUrl}
         />
       )}
       {showDirect && (

@@ -23,6 +23,12 @@ interface BrowserVncPanelProps {
   /** Stable id (e.g. the owning step id) used to persist this panel's collapsed/
    *  expanded state per task across reloads. Omit to keep it in-memory only. */
   persistId?: string;
+  /** The in-environment URL the embedded browser is pointed at, shown as a read-only
+   *  caption so the user knows what they're testing (and can reproduce it after a
+   *  restart brings a fresh desktop up). NOT a link: in VNC (non-direct) mode the app
+   *  port is not published to the host, so this URL only resolves inside the environment
+   *  streamed below — direct mode is the one that hands out host-openable URLs. */
+  appUrl?: string | null;
 }
 
 /**
@@ -33,7 +39,13 @@ interface BrowserVncPanelProps {
  * click things agents can't reach (native Chrome popups). noVNC is imported
  * lazily in the browser only — it touches window at module load.
  */
-export function BrowserVncPanel({ taskId, title, autoCollapse, persistId }: BrowserVncPanelProps) {
+export function BrowserVncPanel({
+  taskId,
+  title,
+  autoCollapse,
+  persistId,
+  appUrl,
+}: BrowserVncPanelProps) {
   // Persisted per task (when a persistId is given) so a reload restores whether this
   // panel was open. autoCollapse below is edge-guarded so it never clobbers a restore.
   const [expanded, setExpanded, setExpandedAuto] = usePersistedToggle(
@@ -295,6 +307,12 @@ export function BrowserVncPanel({ taskId, title, autoCollapse, persistId }: Brow
           </button>
         </div>
       </div>
+      {appUrl && (
+        <p className="px-0.5 text-[11px] text-neutral-500">
+          Testing <span className="font-mono text-neutral-400">{appUrl}</span> in the environment
+          below
+        </p>
+      )}
       {expanded && (
         <div className={maximized ? 'relative min-h-0 w-full flex-1' : 'relative h-[480px] w-full'}>
           {/* noVNC manages its own canvas here; stays mounted across maximize
