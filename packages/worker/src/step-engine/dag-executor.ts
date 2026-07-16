@@ -23,6 +23,7 @@ import type { DagCoderContext, StepContext, StepDefinition } from './step-defini
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
 import { worktreeDirName, worktreeDirPaths, WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
+import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type {
   AdvanceStepParams,
@@ -145,24 +146,28 @@ async function createIssueWorktree(
   const list = await gitRun(ctx.repoPath, ['worktree', 'list', '--porcelain']);
   const registered =
     list.code === 0 && list.stdout.split('\n').some((l) => l === `worktree ${worktreePath}`);
-  if (registered) return;
-  if (await pathExists(worktreePath)) {
-    await gitRun(ctx.repoPath, ['worktree', 'remove', '--force', worktreePath]);
+  if (!registered) {
+    if (await pathExists(worktreePath)) {
+      await gitRun(ctx.repoPath, ['worktree', 'remove', '--force', worktreePath]);
+    }
+    const branchExists = await gitRun(ctx.repoPath, [
+      'show-ref',
+      '--verify',
+      '--quiet',
+      `refs/heads/${branchName}`,
+    ]);
+    const addArgs =
+      branchExists.code === 0
+        ? ['worktree', 'add', worktreePath, branchName]
+        : ['worktree', 'add', '-b', branchName, worktreePath, integration.branch];
+    const res = await gitRun(ctx.repoPath, addArgs);
+    if (res.code !== 0) {
+      throw new Error(`git worktree add failed for ${branchName}: ${res.stderr || res.stdout}`);
+    }
   }
-  const branchExists = await gitRun(ctx.repoPath, [
-    'show-ref',
-    '--verify',
-    '--quiet',
-    `refs/heads/${branchName}`,
-  ]);
-  const addArgs =
-    branchExists.code === 0
-      ? ['worktree', 'add', worktreePath, branchName]
-      : ['worktree', 'add', '-b', branchName, worktreePath, integration.branch];
-  const res = await gitRun(ctx.repoPath, addArgs);
-  if (res.code !== 0) {
-    throw new Error(`git worktree add failed for ${branchName}: ${res.stderr || res.stdout}`);
-  }
+  // Always check reused worktrees too: retry/recovery can encounter one created
+  // by an older worker and left root-owned.
+  await ensureSandboxWritableTree(worktreePath);
 }
 
 /** Pre-formatted notes from completed lower-level issues that carried debt, so
@@ -217,8 +222,9 @@ function safeJsonParse(text: string): unknown {
   }
 }
 
-/** Parse a coder's ISSUE_RESULT_JSON; fall back to completed (exit 0) or
- *  failed_unrecoverable (non-zero exit) when no JSON is parseable. */
+/** Parse a coder's ISSUE_RESULT_JSON. Structured output is the completion
+ *  contract: an exit-0 prose response is not evidence that implementation
+ *  happened, so malformed/missing JSON fails closed. */
 export function parseCoderResult(inv: typeof schema.cliInvocations.$inferSelect): {
   outcome: DagIssueRow['outcome'];
   filesModified: string[];
@@ -240,15 +246,53 @@ export function parseCoderResult(inv: typeof schema.cliInvocations.$inferSelect)
       concerns: parsed.data.concerns,
     };
   }
-  const failed = inv.exitCode !== null && inv.exitCode !== 0;
+  const exit = inv.exitCode ?? 'unknown';
   return {
-    outcome: failed ? 'failed_unrecoverable' : 'completed',
+    outcome: 'failed_unrecoverable',
     filesModified: [],
     debtItems: [],
-    concerns: failed
-      ? `coder exited ${inv.exitCode}; no ISSUE_RESULT_JSON parsed`
-      : 'no ISSUE_RESULT_JSON parsed',
+    concerns: `coder exited ${exit} without a valid ISSUE_RESULT_JSON; refusing to infer success`,
   };
+}
+
+const DAG_INFRASTRUCTURE_FAILURE =
+  /(?:\bEACCES\b|\bEPERM\b|permission denied|read-only file system|operation not permitted|root:root|root-owned|workspace[^\n]{0,80}unwritable|worktree[^\n]{0,80}unwritable|unable to write|cannot write|without a valid ISSUE_RESULT_JSON|no ISSUE_RESULT_JSON parsed|no valid reviewer verdict|no cli provider available)/i;
+
+/** A failed issue caused by the execution environment/protocol rather than the
+ *  implementation approach. These must stop the DAG, not enter the advisor's
+ *  accept-with-debt path. */
+export function dagInfrastructureFailureReason(issue: {
+  concerns?: string | null;
+  errorMessage?: string | null;
+}): string | null {
+  const detail = [issue.errorMessage, issue.concerns].filter(Boolean).join('; ').trim();
+  return detail && DAG_INFRASTRUCTURE_FAILURE.test(detail) ? detail : null;
+}
+
+async function haltForDagInfrastructureFailures(
+  db: Database,
+  current: TaskStepRow,
+  level: number,
+  issues: DagIssueRow[],
+): Promise<{ row: TaskStepRow; error: string } | null> {
+  const failures = issues
+    .map((issue) => ({ issue, reason: dagInfrastructureFailureReason(issue) }))
+    .filter((entry): entry is { issue: DagIssueRow; reason: string } => entry.reason !== null);
+  if (failures.length === 0) return null;
+
+  const detail = failures
+    .map(({ issue, reason }) => `${issue.issueKey}: ${reason}`)
+    .join(' | ')
+    .slice(0, 2000);
+  const error =
+    `DAG infrastructure failure at level ${level}; refusing to accept it as implementation debt. ` +
+    detail;
+  const row = await setStepStatus(db, current.id, {
+    status: 'failed',
+    errorMessage: error,
+    endedAt: new Date(),
+  });
+  return { row, error };
 }
 
 /** First fatal-provider errorMessage among ended invocations, or null. Scans ALL
@@ -281,6 +325,34 @@ async function commitIssueWork(
       'issue commit failed',
     );
   }
+}
+
+/** True only when host-side commitIssueWork produced a non-empty issue commit.
+ *  Inspect the issue branch itself so a retry remains valid after that branch
+ *  was already merged into the integration branch but not checkpointed. */
+async function issueBranchHasChanges(ctx: StepContext, issue: DagIssueRow): Promise<boolean> {
+  if (!issue.branchName) return false;
+
+  const subject = await gitRun(ctx.repoPath, ['show', '-s', '--format=%s', issue.branchName]);
+  if (subject.code !== 0) {
+    throw new Error(
+      `failed to inspect DAG branch ${issue.branchName}: ${subject.stderr || subject.stdout}`,
+    );
+  }
+  if (!subject.stdout.trim().startsWith(`${issue.issueKey}:`)) return false;
+
+  const diff = await gitRun(ctx.repoPath, [
+    'diff-tree',
+    '--quiet',
+    `${issue.branchName}^`,
+    issue.branchName,
+    '--',
+  ]);
+  if (diff.code === 0) return false;
+  if (diff.code === 1) return true;
+  throw new Error(
+    `failed to inspect changes on DAG branch ${issue.branchName}: ${diff.stderr || diff.stdout}`,
+  );
 }
 
 const MERGE_FIX_TIMEOUT_MS = 30 * 60 * 1000;
@@ -584,7 +656,9 @@ function fixCoderPrompt(issue: DagIssueRow, reviewIssues: unknown[]): string {
   ].join('\n');
 }
 
-function parseReviewerOutput(inv: typeof schema.cliInvocations.$inferSelect): ReviewerOutput {
+export function parseReviewerOutput(
+  inv: typeof schema.cliInvocations.$inferSelect,
+): ReviewerOutput | null {
   let candidate: unknown =
     inv.parsedOutput && typeof inv.parsedOutput === 'object' ? inv.parsedOutput : null;
   if (!candidate && typeof inv.rawOutput === 'string') {
@@ -592,8 +666,7 @@ function parseReviewerOutput(inv: typeof schema.cliInvocations.$inferSelect): Re
     candidate = body ? safeJsonParse(body) : null;
   }
   const parsed = reviewerOutputSchema.safeParse(candidate);
-  // Unparseable reviewer output → approve (don't block the pipeline on a parse miss).
-  return parsed.success ? parsed.data : { verdict: 'approve', criteria_results: [], issues: [] };
+  return parsed.success ? parsed.data : null;
 }
 
 /** A fix_required verdict whose own structured signals say the work is done:
@@ -680,10 +753,17 @@ async function setResolution(
   db: Database,
   issue: DagIssueRow,
   resolution: 'approved' | 'failed_unrecoverable',
+  errorMessage?: string,
 ): Promise<void> {
   await db
     .update(schema.taskDagIssues)
-    .set({ resolution, reviewStatus: resolution, endedAt: new Date(), updatedAt: new Date() })
+    .set({
+      resolution,
+      reviewStatus: resolution,
+      errorMessage: errorMessage ?? issue.errorMessage,
+      endedAt: new Date(),
+      updatedAt: new Date(),
+    })
     .where(eq(schema.taskDagIssues.id, issue.id));
 }
 
@@ -726,6 +806,14 @@ async function ingestReviewRun(
 
   if (run.role === 'reviewer') {
     const verdict = parseReviewerOutput(inv);
+    if (!verdict) {
+      return setResolution(
+        ra.db,
+        issue,
+        'failed_unrecoverable',
+        `reviewer returned no valid reviewer verdict${inv.errorMessage ? `: ${inv.errorMessage}` : ''}`,
+      );
+    }
     if (verdict.verdict === 'approve') return setResolution(ra.db, issue, 'approved');
     if (verdict.verdict === 'block') return setResolution(ra.db, issue, 'failed_unrecoverable');
     // fix_required whose criteria all pass and whose only issues are cosmetic →
@@ -866,7 +954,7 @@ function replannerPrompt(plan: DagPlanRow, failed: DagIssueRow[]): string {
   ].join('\n');
 }
 
-function parseAdvisor(inv: typeof schema.cliInvocations.$inferSelect): AdvisorOutput {
+export function parseAdvisor(inv: typeof schema.cliInvocations.$inferSelect): AdvisorOutput {
   let c: unknown =
     inv.parsedOutput && typeof inv.parsedOutput === 'object' ? inv.parsedOutput : null;
   if (!c && typeof inv.rawOutput === 'string') {
@@ -877,14 +965,14 @@ function parseAdvisor(inv: typeof schema.cliInvocations.$inferSelect): AdvisorOu
   return p.success
     ? p.data
     : {
-        action: 'ACCEPT_WITH_DEBT',
-        reasoning: 'advisor output unparseable',
+        action: 'ESCALATE_TO_REPLAN',
+        reasoning: 'advisor returned no valid structured decision',
         drop_criteria: [],
         sub_issues: [],
       };
 }
 
-function parseReplanner(inv: typeof schema.cliInvocations.$inferSelect): ReplannerOutput {
+export function parseReplanner(inv: typeof schema.cliInvocations.$inferSelect): ReplannerOutput {
   let c: unknown =
     inv.parsedOutput && typeof inv.parsedOutput === 'object' ? inv.parsedOutput : null;
   if (!c && typeof inv.rawOutput === 'string') {
@@ -895,11 +983,26 @@ function parseReplanner(inv: typeof schema.cliInvocations.$inferSelect): Replann
   return p.success
     ? p.data
     : {
-        action: 'CONTINUE',
-        reasoning: 'replanner output unparseable',
+        action: 'ABORT',
+        reasoning: 'replanner returned no valid structured decision',
         skip_downstream: [],
         new_levels: [],
       };
+}
+
+async function escalateIssueToReplan(
+  db: Database,
+  issue: DagIssueRow,
+  reason: string,
+): Promise<void> {
+  await db
+    .update(schema.taskDagIssues)
+    .set({
+      lastAdvisorAction: 'ESCALATE_TO_REPLAN',
+      errorMessage: issue.errorMessage ?? reason,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.taskDagIssues.id, issue.id));
 }
 
 async function pushDebt(db: Database, issue: DagIssueRow, items: unknown[]): Promise<void> {
@@ -951,6 +1054,14 @@ async function ingestAdvisor(
     .where(eq(schema.taskDagIssues.id, issue.id));
 
   if (out.action === 'ACCEPT_WITH_DEBT') {
+    if (((issue.filesModified ?? []) as string[]).length === 0) {
+      await escalateIssueToReplan(
+        ea.db,
+        issue,
+        'advisor attempted ACCEPT_WITH_DEBT without any reported implementation changes',
+      );
+      return 'escalate';
+    }
     await acceptWithDebt(ea.db, issue, [{ type: 'advisor_accept', reasoning: out.reasoning }]);
     return 'accept';
   }
@@ -1175,9 +1286,9 @@ async function resolveEscalationPhase(
         ['tool_use'],
       );
       if (ok) inFlight = true;
-      else await acceptWithDebt(ea.db, issue, [{ type: 'no_advisor_provider' }]);
+      else await escalateIssueToReplan(ea.db, issue, 'no advisor provider available');
     } else {
-      await acceptWithDebt(ea.db, issue, [{ type: 'advisor_exhausted' }]);
+      await escalateIssueToReplan(ea.db, issue, 'advisor retry budget exhausted');
     }
   }
   if (inFlight) {
@@ -1197,15 +1308,30 @@ async function resolveEscalationPhase(
   const ratioTrigger = stillFailed.length / Math.max(1, fresh.length) >= REPLAN_FAIL_RATIO;
   const trigger = escalated || stillFailed.length >= 2 || ratioTrigger;
   if (!trigger || ea.plan.replannerInvocations >= MAX_REPLANNER_INVOCATIONS) {
-    for (const issue of stillFailed)
-      await acceptWithDebt(ea.db, issue, [{ type: 'unresolved_after_escalation' }]);
-    return { status: 'reloop', row: ea.current };
+    const reason = !trigger
+      ? 'failed issue could not be resolved safely'
+      : `replanner retry budget exhausted after ${MAX_REPLANNER_INVOCATIONS} attempts`;
+    const msg = `DAG escalation aborted at level ${ea.level.level}: ${reason} (${stillFailed
+      .map((i) => i.issueKey)
+      .join(', ')})`;
+    const row = await setStepStatus(ea.db, ea.current.id, {
+      status: 'failed',
+      errorMessage: msg,
+      endedAt: new Date(),
+    });
+    return { status: 'aborted', row, error: msg };
   }
   const ok = await spawnReplanner(ea, stillFailed);
   if (!ok) {
-    for (const issue of stillFailed)
-      await acceptWithDebt(ea.db, issue, [{ type: 'no_replanner_provider' }]);
-    return { status: 'reloop', row: ea.current };
+    const msg = `DAG escalation aborted at level ${ea.level.level}: no replanner provider available (${stillFailed
+      .map((i) => i.issueKey)
+      .join(', ')})`;
+    const row = await setStepStatus(ea.db, ea.current.id, {
+      status: 'failed',
+      errorMessage: msg,
+      endedAt: new Date(),
+    });
+    return { status: 'aborted', row, error: msg };
   }
   const row = await setStepStatus(ea.db, ea.current.id, {
     status: 'waiting_cli',
@@ -1520,6 +1646,22 @@ export async function resolveDagPhase(
     // (D) Coder failures. With the escalation path (review on) mark them so the
     // issue-advisor can act; otherwise fail the step (recovery via retry/retry_ai).
     const coderFailed = issues.filter((i) => i.outcome === 'failed_unrecoverable');
+    const coderInfrastructureFailure = await haltForDagInfrastructureFailures(
+      db,
+      current,
+      curLevel.level,
+      coderFailed,
+    );
+    if (coderInfrastructureFailure) {
+      return {
+        resolved: false,
+        result: {
+          status: 'failed',
+          row: coderInfrastructureFailure.row,
+          error: coderInfrastructureFailure.error,
+        },
+      };
+    }
     if (coderFailed.length > 0 && !plan.reviewEnabled) {
       const msg = `DAG level ${curLevel.level} failed: ${coderFailed.map((f) => f.issueKey).join(', ')}`;
       const updated = await setStepStatus(db, current.id, {
@@ -1570,6 +1712,23 @@ export async function resolveDagPhase(
       current = review.row;
       issues = await reReadLevel();
 
+      const reviewInfrastructureFailure = await haltForDagInfrastructureFailures(
+        db,
+        current,
+        curLevel.level,
+        issues.filter((i) => i.resolution === 'failed_unrecoverable'),
+      );
+      if (reviewInfrastructureFailure) {
+        return {
+          resolved: false,
+          result: {
+            status: 'failed',
+            row: reviewInfrastructureFailure.row,
+            error: reviewInfrastructureFailure.error,
+          },
+        };
+      }
+
       const escalation = await resolveEscalationPhase({
         db,
         issues,
@@ -1599,9 +1758,28 @@ export async function resolveDagPhase(
     // (E) Commit each issue's work, then merge — git-first, conflicts held for
     // "Retry with LLM" (the step halts until every branch merges).
     await ctx.emitProgress(`Merging level ${curLevel.level}…`);
-    for (const issue of issues) {
-      if (issue.worktreePath && issue.mergeStatus === null) {
-        await commitIssueWork(ctx, issue.worktreePath, issue, gitEnv);
+    const acceptedForMerge = issues.filter((issue) =>
+      plan.reviewEnabled
+        ? issue.resolution === 'approved' || issue.resolution === 'completed_with_debt'
+        : issue.outcome === 'completed' || issue.outcome === 'completed_with_debt',
+    );
+    for (const issue of acceptedForMerge) {
+      if (!issue.worktreePath || issue.mergeStatus !== null) continue;
+      await commitIssueWork(ctx, issue.worktreePath, issue, gitEnv);
+      if (!(await issueBranchHasChanges(ctx, issue))) {
+        const error =
+          `DAG issue ${issue.issueKey} produced no branch changes; ` +
+          'refusing to record an empty implementation as a clean merge.';
+        await db
+          .update(schema.taskDagIssues)
+          .set({ errorMessage: error, updatedAt: new Date() })
+          .where(eq(schema.taskDagIssues.id, issue.id));
+        const row = await setStepStatus(db, current.id, {
+          status: 'failed',
+          errorMessage: error,
+          endedAt: new Date(),
+        });
+        return { resolved: false, result: { status: 'failed', row, error } };
       }
     }
     const merge = await runLevelMerge({

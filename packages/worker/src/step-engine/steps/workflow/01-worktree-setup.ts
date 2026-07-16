@@ -8,7 +8,7 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
-import { SANDBOX_UID, SANDBOX_GID } from '../../../sandbox/sandbox-runner.js';
+import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
 import {
   WORKTREE_SUBDIR,
   sandboxWorktreePath,
@@ -122,6 +122,10 @@ async function initGitRepo(
   if (init.code !== 0) {
     throw new Error(`git init failed (exit ${init.code}): ${init.stderr || init.stdout}`);
   }
+  // CLI preflight may previously have written internal `.haive/` data. Exclude
+  // it BEFORE the initial `git add -A`; doing this after the commit allowed the
+  // old ownership marker to become tracked and appear in every linked worktree.
+  await ensureExcludeEntry(ctx.repoPath);
   const add = await gitRun(ctx.repoPath, ['add', '-A']);
   if (add.code !== 0) {
     throw new Error(`git add -A failed (exit ${add.code}): ${add.stderr || add.stdout}`);
@@ -306,31 +310,10 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       );
     }
 
-    // `git worktree add` runs here in the worker (root), so the worktree tree lands
-    // root-owned. But the cli-exec sandbox runs the agent as node (SANDBOX_UID) and does
-    // NOT chown its own workdir (the terminal container does; this path does not). A
-    // root-owned worktree is therefore silently unwritable to the agent: its Edit fails
-    // EACCES and it falls back to editing the repo-root copy, so the review passes on an
-    // edited file while the committed branch stays unchanged. Match the worktree to the
-    // repo (which is already node-owned) so the sandbox can write it. Fail loud rather
-    // than reproduce that silent split-brain. Idempotent (also fixes a worktree a
-    // pre-fix run left root-owned).
-    //
-    // Root-only: the root-owned-worktree problem exists only when the worker runs as
-    // root (production). A non-root worker (dev, or the CI smokes running node directly
-    // on a non-root runner) created the worktree as itself — the same user the work then
-    // runs as — so the chown is unnecessary, and chowning to another uid needs a
-    // privilege it lacks (EPERM). Skip it there instead of hard-failing the step.
-    if (process.getuid?.() === 0) {
-      try {
-        await exec('chown', ['-R', `${SANDBOX_UID}:${SANDBOX_GID}`, worktreePath]);
-      } catch (err) {
-        throw new Error(
-          `failed to chown worktree ${worktreePath} to ${SANDBOX_UID}:${SANDBOX_GID} — the ` +
-            `sandbox agent (node) would be unable to write it: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
+    // `git worktree add` runs as the worker (root in compose), while cli-exec
+    // runs as uid 1000. Repair both new and reused worktrees and fail before a
+    // model call if the ownership cannot be made writable.
+    await ensureSandboxWritableTree(worktreePath);
 
     const sandboxWorktree = sandboxWorktreePath(ctx.sandboxWorkdir, branchName);
     // Durable record for the cancel reaper (removeTaskWorktree). This step's `output`

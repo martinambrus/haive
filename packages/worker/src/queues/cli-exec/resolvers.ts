@@ -1,9 +1,5 @@
-import { execFile } from 'node:child_process';
-import { access, mkdir, writeFile } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -54,6 +50,7 @@ import {
 } from '../../repo/worktree-paths.js';
 import { resolveSandboxImageTag } from './images.js';
 import { hasReadyLspBridge } from '../../lsp/configured-lsp.js';
+import { ensureSandboxWritableTree } from '../../repo/worktree-permissions.js';
 
 export async function resolveProviderNameForPayload(
   db: Database,
@@ -573,43 +570,34 @@ export async function resolveRepoMount(
 }
 
 export const WORKER_REPO_STORAGE_ROOT = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
-const CHOWN_MARKER_REL = '.haive/.chowned-1000';
 
 /** chown the repo-volume subpath for a task to 1000:1000 (the `node` user
  *  the sandbox CLI runs as). Named volumes default to root-owned content,
  *  and the sandbox runs CLIs as `node` (sandbox-runner.ts), so any LLM that
  *  tries to write into `.claude/`, `.gemini/`, `.codex/`, etc. inside the
  *  workdir fails with EACCES and may pivot to writing under `/tmp/` instead,
- *  losing the artifacts. Idempotent: writes a marker file at
- *  `.haive/.chowned-1000` and skips on subsequent invocations. Bind-mounted
- *  local-path repos are skipped — they're mounted read-only and chowning
- *  would mutate the user's host filesystem. */
+ *  losing the artifacts. Idempotence is determined from the actual tree-root
+ *  ownership, never an in-repository marker: that marker can be committed and
+ *  then copied into a fresh root-owned worktree. Bind-mounted local-path repos
+ *  are skipped — they're mounted read-only and chowning would mutate the
+ *  user's host filesystem. Failure is fatal so an unwritable agent run cannot
+ *  be misreported later as completed implementation debt. */
 export async function ensureRepoMountWritable(repoMount: DockerVolumeMount | null): Promise<void> {
   if (!repoMount) return;
   if (repoMount.source !== REPO_VOLUME_NAME) return;
   if (!repoMount.subpath) return;
 
   const workerVolumePath = join(WORKER_REPO_STORAGE_ROOT, repoMount.subpath);
-  const markerPath = join(workerVolumePath, CHOWN_MARKER_REL);
-
   try {
-    await access(markerPath);
-    return;
-  } catch {
-    // not yet chowned — fall through
-  }
-
-  try {
-    await execFileAsync('chown', ['-R', '1000:1000', workerVolumePath]);
-    await mkdir(join(workerVolumePath, '.haive'), { recursive: true });
-    await writeFile(markerPath, '', 'utf8');
-    await execFileAsync('chown', ['1000:1000', join(workerVolumePath, '.haive'), markerPath]);
-    log.info({ workerVolumePath }, 'chowned repo volume to node user (1000:1000)');
+    const before = await stat(workerVolumePath);
+    await ensureSandboxWritableTree(workerVolumePath);
+    const after = await stat(workerVolumePath);
+    if (before.uid !== after.uid || before.gid !== after.gid) {
+      log.info({ workerVolumePath }, 'chowned repo volume to node user (1000:1000)');
+    }
   } catch (err) {
-    log.warn(
-      { err, workerVolumePath },
-      'failed to chown repo volume to node user — CLI writes to .claude/.gemini/ may fail',
-    );
+    log.error({ err, workerVolumePath }, 'repo volume is not writable by sandbox user');
+    throw err;
   }
 }
 

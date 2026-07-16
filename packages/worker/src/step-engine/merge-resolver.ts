@@ -16,6 +16,7 @@ import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from './steps/_fenced-json.js';
 import { resolvePreferredCli } from './step-runner.js';
 import { worktreeDirName, worktreeDirPaths } from '../repo/worktree-paths.js';
+import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type { MergeResolveSpec, StepContext, StepDefinition } from './step-definition.js';
 import type { AdvanceStepParams, AdvanceStepResult, TaskStepRow } from './step-runner.js';
@@ -200,14 +201,16 @@ async function ensureBaseWorktree(
   const list = await gitRun(ctx.repoPath, ['worktree', 'list', '--porcelain']);
   const registered =
     list.code === 0 && list.stdout.split('\n').some((l) => l === `worktree ${worktreePath}`);
-  if (registered) return;
-  if (await pathExists(worktreePath)) {
-    await gitRun(ctx.repoPath, ['worktree', 'remove', '--force', worktreePath]);
+  if (!registered) {
+    if (await pathExists(worktreePath)) {
+      await gitRun(ctx.repoPath, ['worktree', 'remove', '--force', worktreePath]);
+    }
+    const res = await gitRun(ctx.repoPath, ['worktree', 'add', worktreePath, base]);
+    if (res.code !== 0) {
+      throw new Error(`git worktree add (base) failed: ${res.stderr || res.stdout}`);
+    }
   }
-  const res = await gitRun(ctx.repoPath, ['worktree', 'add', worktreePath, base]);
-  if (res.code !== 0) {
-    throw new Error(`git worktree add (base) failed: ${res.stderr || res.stdout}`);
-  }
+  await ensureSandboxWritableTree(worktreePath);
 }
 
 async function removeBaseWorktree(repoPath: string, worktreePath: string): Promise<void> {

@@ -10,6 +10,9 @@ import {
 } from './docker-runner.js';
 import { createEgressGateway, type EgressGateway } from './egress-gateway.js';
 import { OLLAMA_THINKING_PROXY_HOST } from '../cli-adapters/ollama-thinking-proxy.js';
+import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
+
+export { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 
 const log = logger.child({ module: 'sandbox-runner' });
 
@@ -27,8 +30,6 @@ const DEFAULT_WORKDIR = SANDBOX_WORKDIR;
 // Exported so worktree creation can chown the tree to the same owner: the sandbox
 // runs as node and never chowns its own workdir (unlike the terminal container), so a
 // root-owned worktree is silently unwritable to the agent.
-export const SANDBOX_UID = 1000;
-export const SANDBOX_GID = 1000;
 // Only the tail of a captured CLI log is needed for fatal-error classification (the
 // provider-fatal line is near the end); cap the readback so a verbose debug log
 // can't balloon memory.

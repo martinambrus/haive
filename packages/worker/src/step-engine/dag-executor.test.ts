@@ -4,6 +4,10 @@ import {
   issuePaths,
   pickFatalProviderError,
   fixRequiredIsCosmetic,
+  dagInfrastructureFailureReason,
+  parseReviewerOutput,
+  parseAdvisor,
+  parseReplanner,
 } from './dag-executor.js';
 import { PROVIDER_FATAL_HEADLINES } from '../queues/cli-exec/failure-class.js';
 import type { StepContext } from './step-definition.js';
@@ -40,15 +44,59 @@ describe('parseCoderResult', () => {
     expect(r.debtItems).toHaveLength(1);
   });
 
-  it('falls back to completed on unparseable output with exit 0', () => {
+  it('fails closed on unparseable output even when the CLI exits 0', () => {
     const r = parseCoderResult(inv({ rawOutput: 'no json here', exitCode: 0 }));
-    expect(r.outcome).toBe('completed');
+    expect(r.outcome).toBe('failed_unrecoverable');
     expect(r.filesModified).toEqual([]);
+    expect(r.concerns).toContain('without a valid ISSUE_RESULT_JSON');
   });
 
   it('falls back to failed_unrecoverable on a non-zero exit with no json', () => {
     const r = parseCoderResult(inv({ rawOutput: 'crashed', exitCode: 1 }));
     expect(r.outcome).toBe('failed_unrecoverable');
+  });
+});
+
+describe('dagInfrastructureFailureReason', () => {
+  it('classifies the root-owned EACCES failure from DAG issue worktrees', () => {
+    expect(
+      dagInfrastructureFailureReason({
+        concerns: 'Worktree is root:root mode 0755 and every write returned EACCES.',
+      }),
+    ).toContain('root:root');
+  });
+
+  it('classifies missing structured coder output as a protocol failure', () => {
+    expect(
+      dagInfrastructureFailureReason({
+        concerns: 'coder exited 0 without a valid ISSUE_RESULT_JSON; refusing to infer success',
+      }),
+    ).not.toBeNull();
+    expect(
+      dagInfrastructureFailureReason({ concerns: 'coder exited -1; no ISSUE_RESULT_JSON parsed' }),
+    ).not.toBeNull();
+  });
+
+  it('does not classify an ordinary implementation failure', () => {
+    expect(
+      dagInfrastructureFailureReason({
+        concerns: 'The proposed parser cannot satisfy the backwards-compatibility requirement.',
+      }),
+    ).toBeNull();
+  });
+});
+
+describe('DAG structured-decision parsing', () => {
+  it('does not approve an unparseable reviewer response', () => {
+    expect(parseReviewerOutput(inv({ rawOutput: 'looks fine', exitCode: 0 }))).toBeNull();
+  });
+
+  it('escalates an unparseable advisor response instead of accepting debt', () => {
+    expect(parseAdvisor(inv({ rawOutput: '', exitCode: 0 })).action).toBe('ESCALATE_TO_REPLAN');
+  });
+
+  it('aborts on an unparseable replanner response instead of continuing', () => {
+    expect(parseReplanner(inv({ rawOutput: '', exitCode: 0 })).action).toBe('ABORT');
   });
 });
 
