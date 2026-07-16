@@ -16,6 +16,8 @@ import {
 } from '@haive/shared';
 import { browserCdpUrlForRunner } from './runner-browser-cdp.js';
 import { resolveTaskDirectAccess } from './_browser-access.js';
+import { buildResourceLimitArgs, resolveRunnerCaps } from './runtime-caps.js';
+import { acquireRuntimeSlot } from './runtime-admission.js';
 
 // Per-task DDEV environment via nested Docker (DinD). DDEV can't run against the
 // shared host daemon here (repos live in the haive_repos NAMED VOLUME, which the
@@ -199,6 +201,9 @@ export async function startDdevRunner(params: {
     ? ['-e', `DDEV_REGISTRY_DAEMON_JSON=${buildRegistryDaemonJson(ddevRegistryMirrorUrl())}`]
     : [];
   const caMount = ddevCaMountArgs();
+  // Per-container resource caps (machine-aware; null when the governor is disabled).
+  const runnerCaps = await resolveRunnerCaps(params.taskId);
+  const limitArgs = runnerCaps ? buildResourceLimitArgs(runnerCaps) : [];
   const buildRunArgs = (attempt: number): { args: string[]; ports: DdevPublishedPorts | null } => {
     const publish: string[] = [];
     let ports: DdevPublishedPorts | null = null;
@@ -236,6 +241,7 @@ export async function startDdevRunner(params: {
         `haive.task.id=${params.taskId}`,
         '--label',
         'haive.ddev=1',
+        ...limitArgs,
         ...publish,
         ...caMount,
         ...registryEnv,
@@ -1110,26 +1116,33 @@ async function ensureDdevStartedInner(
   }
 
   // Cold boot: the runner is gone (or warm-start failed), so rebuild it. This
-  // re-pulls base images into a fresh nested /var/lib/docker.
-  const handle = await startDdevRunner({ taskId, repoSubpath });
-  let start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
-  if (start.exitCode !== 0) {
-    // A cold first boot builds the project's custom web image, so container
-    // readiness can land right at DDEV's default 120s timeout and fail
-    // transiently. The images are built now, so one retry usually clears it.
-    log.warn({ taskId, output: start.output.slice(-800) }, 'ddev start failed; retrying once');
-    start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
+  // re-pulls base images into a fresh nested /var/lib/docker. Hold an admission slot
+  // across the whole heavy boot (runner create + nested image pulls + ddev start), so
+  // at most maxConcurrentRuntimes tasks cold-boot at once; release once up or failed.
+  const releaseSlot = await acquireRuntimeSlot(taskId, 'ddev');
+  try {
+    const handle = await startDdevRunner({ taskId, repoSubpath });
+    let start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
+    if (start.exitCode !== 0) {
+      // A cold first boot builds the project's custom web image, so container
+      // readiness can land right at DDEV's default 120s timeout and fail
+      // transiently. The images are built now, so one retry usually clears it.
+      log.warn({ taskId, output: start.output.slice(-800) }, 'ddev start failed; retrying once');
+      start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
+    }
+    if (start.exitCode !== 0) {
+      throw new Error(`ddev start failed: ${start.output.slice(-1500)}`);
+    }
+    // The prior runner (and its nested DB) is gone — destroyed by the worker-boot
+    // reaper, a daemon/host restart, or task time elapsed — so the freshly-started
+    // DB is empty. A durability snapshot may survive on the repo volume; restore it
+    // so downstream verify/browser testing runs against a populated DB. No-op (and
+    // not an error) when none exists.
+    await restoreLatestSnapshot(handle, taskId);
+    return handle;
+  } finally {
+    releaseSlot();
   }
-  if (start.exitCode !== 0) {
-    throw new Error(`ddev start failed: ${start.output.slice(-1500)}`);
-  }
-  // The prior runner (and its nested DB) is gone — destroyed by the worker-boot
-  // reaper, a daemon/host restart, or task time elapsed — so the freshly-started
-  // DB is empty. A durability snapshot may survive on the repo volume; restore it
-  // so downstream verify/browser testing runs against a populated DB. No-op (and
-  // not an error) when none exists.
-  await restoreLatestSnapshot(handle, taskId);
-  return handle;
 }
 
 /** Restore the most recent Haive durability snapshot after a cold boot: a

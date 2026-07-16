@@ -11,6 +11,7 @@ import {
 import { createEgressGateway, type EgressGateway } from './egress-gateway.js';
 import { OLLAMA_THINKING_PROXY_HOST } from '../cli-adapters/ollama-thinking-proxy.js';
 import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
+import { resolveRunnerCaps } from './runtime-caps.js';
 
 export { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 
@@ -217,6 +218,11 @@ export async function runInSandbox(
     const network = resolveDockerNetwork(policy, gateway);
     const env = mergeProxyEnv(spec.env, gateway, modelsHost);
 
+    // Per-container caps for the CLI-exec sandbox (same governor as the runtime runners;
+    // null when disabled). The per-task tasks.memoryLimitMb/cpuLimitMilli override — which
+    // POST /tasks resourceLimits was built for — applies here.
+    const sandboxCaps = options.taskId ? await resolveRunnerCaps(options.taskId) : null;
+
     const result = await runner.run({
       image,
       cmd: [resolvedCommand, ...spec.args],
@@ -227,6 +233,13 @@ export async function runInSandbox(
       connectNetworks: resolveApiConnectNetworks(policy, gateway, modelsHost !== null),
       user: 'node',
       labels: options.taskId ? { 'haive.task.id': options.taskId } : undefined,
+      ...(sandboxCaps
+        ? {
+            memoryLimitMb: sandboxCaps.memoryMb,
+            cpuLimitMilli: Math.round(sandboxCaps.cpus * 1000),
+            pidsLimit: sandboxCaps.pidsLimit,
+          }
+        : {}),
       timeoutMs: spec.timeoutMs,
       onStdoutChunk: spec.onStdoutChunk,
       onStderrChunk: spec.onStderrChunk,

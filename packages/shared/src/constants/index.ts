@@ -414,6 +414,12 @@ export const CLI_SOFT_TIMEOUT_WIND_DOWN =
  *  worker live-retunes the cli-exec queue concurrency without a restart. Body is
  *  the new clamped integer as a string. */
 export const CONFIG_CONCURRENCY_CHANNEL = 'config:concurrency:changed';
+/** Pub/sub channel the api publishes to when the runtime resource-limit settings
+ *  (RESOURCE_LIMITS_ENABLED / RUNTIME_MEMORY_MB / RUNTIME_CPUS / MAX_CONCURRENT_RUNTIMES /
+ *  RUNTIME_IDLE_REAP_MINUTES) change, so the worker live-retunes the admission gate and
+ *  per-container cap resolution without a restart. Body is the new maxConcurrentRuntimes
+ *  as a string; subscribers treat any message as "re-read the runtime-limit config". */
+export const CONFIG_RUNTIME_LIMITS_CHANNEL = 'config:runtimeLimits:changed';
 /** Name of a task's per-task DDEV runner container (the nested-Docker DDEV
  *  environment the worker launches). Shared because the api dials the runner by
  *  this DNS name on the internal sandbox network (browser-VNC bridge) while the

@@ -72,6 +72,20 @@ export default function AdminPage() {
   const [attachmentMaxBytes, setAttachmentMaxBytes] = useState<number | null>(null);
   const [attachmentMaxMbInput, setAttachmentMaxMbInput] = useState('');
   const [savingAttachmentMax, setSavingAttachmentMax] = useState(false);
+  const [runtimeLimits, setRuntimeLimits] = useState<{
+    enabled: boolean;
+    memoryMb: number;
+    cpus: number;
+    maxConcurrent: number;
+    idleReapMinutes: number;
+  } | null>(null);
+  const [runtimeLimitsForm, setRuntimeLimitsForm] = useState({
+    memoryMb: '0',
+    cpus: '0',
+    maxConcurrent: '0',
+    idleReapMinutes: '180',
+  });
+  const [savingRuntimeLimits, setSavingRuntimeLimits] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -97,6 +111,7 @@ export default function AdminPage() {
         reviewRefuteData,
         usageWindowData,
         prWorkflowData,
+        runtimeLimitsData,
       ] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
@@ -119,6 +134,13 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/review-refute'),
         api.get<{ enabled: boolean }>('/admin/config/usage-window'),
         api.get<{ enabled: boolean }>('/admin/config/pr-workflow'),
+        api.get<{
+          enabled: boolean;
+          memoryMb: number;
+          cpus: number;
+          maxConcurrent: number;
+          idleReapMinutes: number;
+        }>('/admin/config/runtime-limits'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
@@ -147,6 +169,13 @@ export default function AdminPage() {
       setAttachmentMaxMbInput(
         String(Math.round((attachmentData.maxBytes / 1024 / 1024) * 100) / 100),
       );
+      setRuntimeLimits(runtimeLimitsData);
+      setRuntimeLimitsForm({
+        memoryMb: String(runtimeLimitsData.memoryMb),
+        cpus: String(runtimeLimitsData.cpus),
+        maxConcurrent: String(runtimeLimitsData.maxConcurrent),
+        idleReapMinutes: String(runtimeLimitsData.idleReapMinutes),
+      });
       setError(null);
     } catch (err) {
       const e = err as { status?: number; message?: string };
@@ -254,6 +283,52 @@ export default function AdminPage() {
     } finally {
       setSavingAttachmentMax(false);
     }
+  }
+
+  async function saveRuntimeLimits(next: {
+    enabled: boolean;
+    memoryMb: number;
+    cpus: number;
+    maxConcurrent: number;
+    idleReapMinutes: number;
+  }) {
+    setSavingRuntimeLimits(true);
+    try {
+      const result = await api.put<typeof next>('/admin/config/runtime-limits', next);
+      setRuntimeLimits(result);
+      setRuntimeLimitsForm({
+        memoryMb: String(result.memoryMb),
+        cpus: String(result.cpus),
+        maxConcurrent: String(result.maxConcurrent),
+        idleReapMinutes: String(result.idleReapMinutes),
+      });
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update runtime limits');
+    } finally {
+      setSavingRuntimeLimits(false);
+    }
+  }
+
+  function saveRuntimeNumbers() {
+    if (!runtimeLimits) return;
+    const memoryMb = Number.parseInt(runtimeLimitsForm.memoryMb, 10);
+    const cpus = Number.parseInt(runtimeLimitsForm.cpus, 10);
+    const maxConcurrent = Number.parseInt(runtimeLimitsForm.maxConcurrent, 10);
+    const idleReapMinutes = Number.parseInt(runtimeLimitsForm.idleReapMinutes, 10);
+    if (
+      [memoryMb, cpus, maxConcurrent, idleReapMinutes].some((n) => !Number.isInteger(n) || n < 0)
+    ) {
+      setError('Runtime limit values must be integers of 0 or more (0 = auto).');
+      return;
+    }
+    void saveRuntimeLimits({
+      enabled: runtimeLimits.enabled,
+      memoryMb,
+      cpus,
+      maxConcurrent,
+      idleReapMinutes,
+    });
   }
 
   async function setSteering(next: boolean) {
@@ -658,6 +733,89 @@ export default function AdminPage() {
               onClick={() => void savePerTask()}
             >
               {savingPerTask ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {runtimeLimits !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Runtime resource limits</CardTitle>
+            <CardDescription>
+              Machine-aware caps on per-task DDEV/app runtimes so concurrent environments can&apos;t
+              exhaust the host (thin WSL2 boxes especially). The master switch caps each
+              runner&apos;s memory (swap disabled) and CPU and gates how many boot at once. Each
+              number is 0 = auto-derive from this host&apos;s RAM/CPU; set a positive value to
+              override. Caps apply at the next runner start; the concurrency cap retunes the gate
+              live. Persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={runtimeLimits.enabled}
+              disabled={savingRuntimeLimits}
+              onChange={(e) =>
+                void saveRuntimeLimits({ ...runtimeLimits, enabled: e.target.checked })
+              }
+              className="h-4 w-4"
+            />
+            {runtimeLimits.enabled ? 'Enabled' : 'Disabled'}
+            {savingRuntimeLimits && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            <label className="flex flex-col gap-1 text-xs text-neutral-400">
+              Memory per runner (MB, 0=auto)
+              <input
+                type="number"
+                min={0}
+                value={runtimeLimitsForm.memoryMb}
+                onChange={(e) => setRuntimeLimitsForm((f) => ({ ...f, memoryMb: e.target.value }))}
+                className="w-36 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-neutral-400">
+              CPUs per runner (0=auto)
+              <input
+                type="number"
+                min={0}
+                value={runtimeLimitsForm.cpus}
+                onChange={(e) => setRuntimeLimitsForm((f) => ({ ...f, cpus: e.target.value }))}
+                className="w-28 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-neutral-400">
+              Max concurrent runtimes (0=auto)
+              <input
+                type="number"
+                min={0}
+                value={runtimeLimitsForm.maxConcurrent}
+                onChange={(e) =>
+                  setRuntimeLimitsForm((f) => ({ ...f, maxConcurrent: e.target.value }))
+                }
+                className="w-40 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-neutral-400">
+              Failed-runner reap (min, 0=off)
+              <input
+                type="number"
+                min={0}
+                value={runtimeLimitsForm.idleReapMinutes}
+                onChange={(e) =>
+                  setRuntimeLimitsForm((f) => ({ ...f, idleReapMinutes: e.target.value }))
+                }
+                className="w-36 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+              />
+            </label>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={savingRuntimeLimits}
+              onClick={() => saveRuntimeNumbers()}
+            >
+              {savingRuntimeLimits ? 'Saving...' : 'Save'}
             </Button>
           </div>
         </Card>

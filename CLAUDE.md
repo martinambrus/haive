@@ -123,7 +123,7 @@ Phase 0 scaffold is complete when `pnpm install` and `pnpm docker:dev` boot all 
 ## Constraints
 
 - WSL2 plus Docker is the only supported developer environment. No Windows-native installs.
-- Never run more than 7 concurrent worker tasks; WSL crashes under heavier parallelism.
+- Concurrent per-task runtimes (DDEV/app runners) are bounded by a machine-aware resource governor, not a fixed count: each runner gets Docker memory/CPU/pid caps (swap disabled) and an admission gate limits how many run at once, both auto-derived from host RAM/CPU and admin-tunable (RESOURCE_LIMITS_ENABLED / RUNTIME_MEMORY_MB / RUNTIME_CPUS / MAX_CONCURRENT_RUNTIMES / RUNTIME_IDLE_REAP_MINUTES). A reaper reclaims leaked runners. See packages/worker/src/sandbox/{runtime-caps,runtime-admission,runtime-runner-reaper}.ts.
 - The Docker socket mount in the worker container is effectively root on the host. Document this in the README and offer rootless Docker instructions in Phase 9 hardening.
 - All step content lives in TypeScript modules. Do not pipe legacy markdown into a CLI prompt.
 

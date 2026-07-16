@@ -8,6 +8,8 @@ import { schema } from '@haive/database';
 import { getDb } from '../db.js';
 import { browserCdpUrlForRunner } from './runner-browser-cdp.js';
 import { resolveTaskDirectAccess } from './_browser-access.js';
+import { buildResourceLimitArgs, resolveRunnerCaps } from './runtime-caps.js';
+import { acquireRuntimeSlot } from './runtime-admission.js';
 
 // Per-task app-runner: a plain (non-DinD) container built from the repo's
 // env-replicate image. It runs a single-process non-DDEV app AND hosts the
@@ -137,6 +139,10 @@ export async function startAppRunner(params: {
   // `node` boots; npm/yarn wrappers grab 9229 first and may need a manual tweak.
   const debugEnvArgs = params.debugMode ? ['-e', 'NODE_OPTIONS=--inspect=0.0.0.0:9229'] : [];
 
+  // Per-container resource caps (machine-aware; null when the governor is disabled).
+  const runnerCaps = await resolveRunnerCaps(params.taskId);
+  const limitArgs = runnerCaps ? buildResourceLimitArgs(runnerCaps) : [];
+
   await exec(
     'docker',
     [
@@ -148,6 +154,7 @@ export async function startAppRunner(params: {
       `haive.task.id=${params.taskId}`,
       '--label',
       `${APP_RUNNER_LABEL}=1`,
+      ...limitArgs,
       '-v',
       `${REPO_VOLUME}:/repos`,
       ...publishArgs,
@@ -224,7 +231,14 @@ async function ensureAppRunnerStartedInner(
   // every ensureAppRunnerStarted caller. Best-effort: a lookup failure just means
   // no inspector (app still runs).
   const debugMode = await isTaskDebugMode(taskId);
-  return startAppRunner({ taskId, repoSubpath, imageTag, appPort, debugMode });
+  // Cold boot only (the reuse path above already returned): hold an admission slot so
+  // at most maxConcurrentRuntimes runtime runners boot at once. Released once up/failed.
+  const releaseSlot = await acquireRuntimeSlot(taskId, 'app');
+  try {
+    return await startAppRunner({ taskId, repoSubpath, imageTag, appPort, debugMode });
+  } finally {
+    releaseSlot();
+  }
 }
 
 /** Whether the task opted into step-debugging (tasks.debug_mode). Swallows lookup

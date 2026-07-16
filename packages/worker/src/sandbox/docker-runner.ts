@@ -49,6 +49,13 @@ export interface DockerRunOpts {
   user?: string;
   /** Docker labels to attach. Used so cancel can find and kill containers by task id. */
   labels?: Record<string, string>;
+  /** cgroup memory cap (MB): emits --memory + --memory-swap (equal, so swap is disabled
+   *  and the sandbox OOM-kills instead of driving the host into swap). */
+  memoryLimitMb?: number;
+  /** cgroup CPU cap (millicores): emits --cpus. */
+  cpuLimitMilli?: number;
+  /** pid cap: emits --pids-limit. */
+  pidsLimit?: number;
   timeoutMs?: number;
   onStdoutChunk?: (chunk: string) => void;
   onStderrChunk?: (chunk: string) => void;
@@ -335,6 +342,23 @@ export const defaultDockerRunner: DockerRunner = {
           flagArgs.push('-v', `${m.source}:${m.target}${suffix}`);
         }
       }
+    }
+
+    // Per-container resource caps (machine-aware governor). --memory-swap == --memory
+    // disables swap so the sandbox OOM-kills rather than driving the host into swap.
+    if (opts.memoryLimitMb !== undefined) {
+      flagArgs.push(
+        '--memory',
+        `${opts.memoryLimitMb}m`,
+        '--memory-swap',
+        `${opts.memoryLimitMb}m`,
+      );
+    }
+    if (opts.cpuLimitMilli !== undefined) {
+      flagArgs.push('--cpus', (opts.cpuLimitMilli / 1000).toFixed(3));
+    }
+    if (opts.pidsLimit !== undefined) {
+      flagArgs.push('--pids-limit', String(opts.pidsLimit));
     }
 
     // SIGKILL/SIGTERM on the docker CLI client doesn't propagate to the

@@ -185,6 +185,27 @@ fallback when the editor is unavailable).
   auth disabled, bound only to the internal sandbox network (never host-published);
   the API proxy (cookie-JWT + task ownership) is the sole auth boundary.
 
+## Resource limits and WSL2 tuning
+
+Haive runs each task's DDEV/app environment as its own set of Docker containers (a privileged Docker-in-Docker runner plus DDEV's own web/db/router, and a headed Chromium for VNC testing). Several at once can exhaust a small VM, so a machine-aware resource governor bounds them:
+
+- Every runtime runner and CLI-exec sandbox is spawned with Docker memory and CPU caps, with memory-swap disabled so a runaway container is OOM-killed rather than driving the host into swap thrash, plus a pid cap.
+- An admission gate limits how many runtimes are live at once, so concurrent DDEV/VNC tasks queue instead of overcommitting RAM.
+- A reaper reclaims leaked runners (a failed task keeps its runner for retry; if never retried it is reclaimed after a grace).
+
+Defaults auto-derive from the host's RAM and CPU count, sized conservatively for thin machines (8-16 GB). Override any value in the admin console ("Runtime resource limits" card) or via the config keys `RESOURCE_LIMITS_ENABLED`, `RUNTIME_MEMORY_MB`, `RUNTIME_CPUS`, `MAX_CONCURRENT_RUNTIMES`, `RUNTIME_IDLE_REAP_MINUTES` (0 on a number means auto-derive). Set `RESOURCE_LIMITS_ENABLED=false` to disable the caps and gate entirely.
+
+WSL2 sizes its VM at roughly 50% of host RAM, with 25% of that as swap, unless you tune it. On a memory-constrained host, set limits in `%UserProfile%\.wslconfig` and restart WSL (`wsl --shutdown`):
+
+```ini
+[wsl2]
+memory=24GB
+swap=8GB
+processors=12
+```
+
+The container caps above still apply inside whatever size the VM is; `.wslconfig` sets the ceiling the governor budgets against.
+
 ## Hardening
 
 ### Multi-user isolation

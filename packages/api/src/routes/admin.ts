@@ -6,6 +6,7 @@ import { schema } from '@haive/database';
 import {
   CONFIG_CONCURRENCY_CHANNEL,
   CONFIG_KEYS,
+  CONFIG_RUNTIME_LIMITS_CHANNEL,
   configService,
   decryptEmail,
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
@@ -327,6 +328,48 @@ adminRoutes.put('/config/concurrency', async (c) => {
   await configService.getRedis().publish(CONFIG_CONCURRENCY_CHANNEL, String(maxParallelAgents));
   log.info({ maxParallelAgents }, 'max parallel agents updated');
   return c.json({ maxParallelAgents });
+});
+
+const runtimeLimitsSchema = z.object({
+  enabled: z.boolean(),
+  // 0 = auto-derive from host RAM/CPU; a positive value overrides (deriveRuntimeCaps
+  // re-clamps to a safe floor regardless).
+  memoryMb: z.number().int().min(0),
+  cpus: z.number().int().min(0),
+  maxConcurrent: z.number().int().min(0),
+  idleReapMinutes: z.number().int().min(0),
+});
+
+// Machine-aware runtime resource governor: master kill-switch, per-runner memory/CPU
+// caps, the aggregate concurrent-runtime cap, and the leaked-runner reap grace. Any
+// number at 0 auto-derives from host size. Caps are read at each runner START (~30s
+// config cache); the concurrency cap + master switch are also published so the worker's
+// admission gate retunes live.
+adminRoutes.get('/config/runtime-limits', async (c) => {
+  const [enabled, memoryMb, cpus, maxConcurrent, idleReapMinutes] = await Promise.all([
+    configService.getBoolean(CONFIG_KEYS.RESOURCE_LIMITS_ENABLED, true),
+    configService.getNumber(CONFIG_KEYS.RUNTIME_MEMORY_MB, 0),
+    configService.getNumber(CONFIG_KEYS.RUNTIME_CPUS, 0),
+    configService.getNumber(CONFIG_KEYS.MAX_CONCURRENT_RUNTIMES, 0),
+    configService.getNumber(CONFIG_KEYS.RUNTIME_IDLE_REAP_MINUTES, 180),
+  ]);
+  return c.json({ enabled, memoryMb, cpus, maxConcurrent, idleReapMinutes });
+});
+
+adminRoutes.put('/config/runtime-limits', async (c) => {
+  const body = runtimeLimitsSchema.parse(await c.req.json());
+  await Promise.all([
+    configService.set(CONFIG_KEYS.RESOURCE_LIMITS_ENABLED, body.enabled ? 'true' : 'false'),
+    configService.set(CONFIG_KEYS.RUNTIME_MEMORY_MB, String(body.memoryMb)),
+    configService.set(CONFIG_KEYS.RUNTIME_CPUS, String(body.cpus)),
+    configService.set(CONFIG_KEYS.MAX_CONCURRENT_RUNTIMES, String(body.maxConcurrent)),
+    configService.set(CONFIG_KEYS.RUNTIME_IDLE_REAP_MINUTES, String(body.idleReapMinutes)),
+  ]);
+  // Retune the admission gate live (new max / master switch); per-container caps re-read
+  // at the next runner start within the config cache.
+  await configService.getRedis().publish(CONFIG_RUNTIME_LIMITS_CHANNEL, String(body.maxConcurrent));
+  log.info({ ...body }, 'runtime resource limits updated');
+  return c.json({ ...body });
 });
 
 const steeringSchema = z.object({ enabled: z.boolean() });

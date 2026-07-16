@@ -213,6 +213,31 @@ export const CONFIG_KEYS = {
   // repositories.pr_workflow_enabled. Read per step form + per poll tick (~30s
   // config cache); a flip needs no redeploy.
   PR_WORKFLOW_ENABLED: 'config:pr:workflowEnabled',
+
+  // Master kill-switch for the machine-aware runtime resource governor (default ON).
+  // When 'true', every per-task DDEV/app runner and CLI-exec sandbox is spawned with
+  // Docker resource caps (--memory + swap-off + --cpus + --pids-limit), and an
+  // admission gate bounds how many runtime runners boot concurrently. Set 'false' to
+  // spawn with no caps and never gate (byte-for-byte the pre-feature argv) — the
+  // rollback. Read at each runner START, so a mid-task flip needs a runner restart.
+  RESOURCE_LIMITS_ENABLED: 'config:sandbox:resourceLimitsEnabled',
+  // Per-runtime-runner memory cap (MB) for DDEV/app runners, applied as --memory AND
+  // --memory-swap (swap disabled inside the container, so it OOM-kills rather than
+  // driving the host into swap thrash). 0 = auto-derive from host RAM (deriveRuntimeCaps).
+  // A per-task tasks.memoryLimitMb overrides this for that task.
+  RUNTIME_MEMORY_MB: 'config:sandbox:runtimeMemoryMb',
+  // Per-runtime-runner CPU cap for DDEV/app runners, applied as --cpus. 0 = auto-derive
+  // from host CPU count. A per-task tasks.cpuLimitMilli overrides this for that task.
+  RUNTIME_CPUS: 'config:sandbox:runtimeCpus',
+  // Max concurrent LIVE runtime runners (DDEV + app) the admission gate admits before
+  // a new cold-boot waits. 0 = auto-derive from the host RAM budget / per-runner cap.
+  // The single aggregate cap the independent queue budgets never provided.
+  MAX_CONCURRENT_RUNTIMES: 'config:sandbox:maxConcurrentRuntimes',
+  // Grace (minutes) before the runtime reaper reclaims a FAILED task's leaked runner
+  // (failed runners are kept for retry/recovery, so they need a grace). Runners whose
+  // task is completed/cancelled/missing, or whose container has exited, are reaped
+  // immediately regardless. 0 disables the failed-grace reap (the rest still runs).
+  RUNTIME_IDLE_REAP_MINUTES: 'config:sandbox:runtimeIdleReapMinutes',
 } as const;
 
 /** Allowed terseness levels for CONFIG_KEYS.TERSENESS_LEVEL (output prose only). */
@@ -264,6 +289,13 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.REVIEW_FANOUT_DISTILL]: 'false',
   [CONFIG_KEYS.REVIEW_REFUTE_ENABLED]: 'true',
   [CONFIG_KEYS.PR_WORKFLOW_ENABLED]: 'false',
+  // Runtime resource governor: ON by default; the numeric caps default to 0 (auto-derive
+  // from host RAM/CPU via deriveRuntimeCaps) so a fresh install self-tunes to its machine.
+  [CONFIG_KEYS.RESOURCE_LIMITS_ENABLED]: 'true',
+  [CONFIG_KEYS.RUNTIME_MEMORY_MB]: '0',
+  [CONFIG_KEYS.RUNTIME_CPUS]: '0',
+  [CONFIG_KEYS.MAX_CONCURRENT_RUNTIMES]: '0',
+  [CONFIG_KEYS.RUNTIME_IDLE_REAP_MINUTES]: '180',
 };
 
 export class ConfigService {

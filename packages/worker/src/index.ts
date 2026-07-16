@@ -31,6 +31,8 @@ import { ensureOllamaModels } from './sandbox/ollama-provision.js';
 import { ensureDdevCa, ensureDdevRegistryCache } from './sandbox/ddev-runner.js';
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
 import { IdeSessionReaper } from './sandbox/ide-session-reaper.js';
+import { RuntimeRunnerReaper } from './sandbox/runtime-runner-reaper.js';
+import { startRuntimeLimitsWatch } from './sandbox/runtime-admission.js';
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 
 async function main(): Promise<void> {
@@ -149,6 +151,13 @@ async function main(): Promise<void> {
   // editor tab closes (refcount==0 + lastSeenAt stale). No-op until an open arrives.
   const ideReaper = new IdeSessionReaper({ redis: getRedis() });
   ideReaper.start();
+  // Reclaim leaked DDEV/app runtime runners: a failed task keeps its runner for retry
+  // and the boot reaper preserves runners, so an abandoned/crashed one otherwise lives
+  // forever. Keys on task status + container age; never touches a live task's runner.
+  const runtimeRunnerReaper = new RuntimeRunnerReaper({ db: getDb() });
+  runtimeRunnerReaper.start();
+  // Live-retune the runtime admission gate when the resource-limit config changes.
+  const stopRuntimeLimitsWatch = startRuntimeLimitsWatch();
 
   logger.info('haive-worker ready');
 
@@ -160,6 +169,8 @@ async function main(): Promise<void> {
     // worker pid reaps orphan containers on boot.
     terminalReaper.stop();
     ideReaper.stop();
+    runtimeRunnerReaper.stop();
+    stopRuntimeLimitsWatch();
     await terminalManager.stop().catch((err) => {
       logger.warn({ err }, 'terminal manager stop failed');
     });
