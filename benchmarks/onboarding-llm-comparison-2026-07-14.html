@@ -221,7 +221,7 @@
     <ul style="margin:6px 0;padding-left:18px;font-size:13.5px;line-height:1.5">
       <li><b>The Codex line kept climbing</b>: o3 &rarr; gpt-5.5 fixed the invented <code>Db</code> signatures and the edit-lock misread; gpt-5.6-sol now catches the <code>Db::Update</code> inverted return <b>at every effort level</b>, raised the family floor to 8.20, and produced the benchmark's first winning top-effort run (max, 8.55) and first Codex global promotions (6 at high).</li>
       <li><b>Global routing spread from 2 families to 5</b>: July-13 had only Opus (every effort) and Sonnet-5 high; July-14 adds first-ever promotions from Sonnet-4.6 (xhigh, clean), Fable (high, 3 articles) and Codex-5.6 (high, 6 articles) &mdash; the two single-entry promotions are both portable, project-free and version-correct.</li>
-      <li><b>GLM via z.ai jumped a full tier</b> (7.75 &rarr; up to 8.43) as z.ai moved GLM-4.6&rarr;GLM-5.2 between rounds; <b>Sonnet 5 high</b> (8.80) still edges the all-time July-10 best (8.78) on four version-correct promotions with zero PHP7 leakage.</li>
+      <li><b>GLM via z.ai jumped a full tier</b> (7.75 &rarr; up to 8.43) on the <b>same glm-5.2[1m]</b> model both rounds &mdash; a pipeline/effort gain, not a model-version upgrade; <b>Sonnet 5 high</b> (8.80) still edges the all-time July-10 best (8.78) on four version-correct promotions with zero PHP7 leakage.</li>
     </ul>
   </div>
   <div class="box">
@@ -477,8 +477,8 @@ const JULY10 = [
   {name:"Claude Code",prov:"Anthropic / Sonnet 4",composite:8.78,cliMin:84.5,kbGlobal:4},
   {name:"OpenAI Codex",prov:"OpenAI Codex / o3 (default model)",composite:8.50,cliMin:60.9,kbGlobal:0},
   {name:"Kimi K2.7 Code",prov:"Ollama Cloud",composite:8.28,cliMin:57.0,kbGlobal:5},
-  {name:"glm-5.2",prov:"Ollama Cloud",composite:8.25,cliMin:31.8,kbGlobal:0},
-  {name:"glm-4.6",prov:"z.ai",composite:7.75,cliMin:86.3,kbGlobal:0},
+  {name:"glm-5.2 (Ollama)",prov:"Ollama Cloud",composite:8.25,cliMin:31.8,kbGlobal:0},
+  {name:"glm-5.2 (z.ai)",prov:"z.ai / glm-5.2[1m]",composite:7.75,cliMin:86.3,kbGlobal:0},
   {name:"MiniMax M3",prov:"Ollama Cloud",composite:7.43,cliMin:79.6,kbGlobal:0},
 ];
 
@@ -629,7 +629,7 @@ function renderPeriod(){
   const rows=[
     {line:"Codex (OpenAI)", earlier:"8.50", earlierNote:"Jul-10, o3 default model", now:"8.55", nowNote:"Jul-14 gpt-5.6-sol max", moved:"o3 → gpt-5.5 (fixed the invented Db signatures) → gpt-5.6-sol: catches the Update landmine at EVERY effort, posts the first Codex global promotions (6 at high), and its max is the benchmark's first winning top-effort run"},
     {line:"Sonnet 4.x (Anthropic)", earlier:"8.78", earlierNote:"Jul-10 base, Sonnet 4", now:"8.35", nowNote:"Jul-13 Sonnet 4.6 high", moved:"Same detect/KB/skills band, but global routing collapsed: 0 promotions across the Jul-13 sweep; xhigh adds the family's first (1 clean entry) yet lands at 8.08"},
-    {line:"GLM via z.ai", earlier:"7.75", earlierNote:"Jul-10, GLM-4.6", now:"8.43", nowNote:"Jul-13 GLM-5.2 high", moved:"z.ai upgraded 4.6→5.2; dropped the FCKeditor-sanitize claim, the Mods hallucination and the edit-lock reversal"},
+    {line:"GLM via z.ai", earlier:"7.75", earlierNote:"Jul-10, glm-5.2[1m]", now:"8.43", nowNote:"Jul-13 glm-5.2[1m] high", moved:"Same glm-5.2[1m] model both rounds — the gain is the pipeline/effort change, not a version upgrade: it dropped the FCKeditor-sanitize claim, the Mods hallucination and the edit-lock reversal"},
     {line:"Fable 5 (Anthropic)", earlier:"—", earlierNote:"did not run before", now:"8.48", nowNote:"Jul-14 medium (peak)", moved:"New entrant; second medium-peaked family (with Opus) and the only one where effort past medium is a net regression — high misses landmines its own medium caught, xhigh ships 4 sandbox leaks, max recovers to 8.30"},
     {line:"Opus 4.8 (Anthropic)", earlier:"—", earlierNote:"did not run before", now:"8.55", nowNote:"Jul-13 medium (peak)", moved:"New entrant; the only family that promotes portable knowledge at every effort level (xhigh included), but the post-medium slide reaches 8.05 at xhigh"},
     {line:"Haiku 4.5 (Anthropic)", earlier:"—", earlierNote:"did not run before", now:"6.75", nowNote:"Jul-13 high", moved:"New entrant; first sub-7 family since June's weak tier — reverses contracts and fabricates; xhigh (6.18) undershoots even max and ships no Jest debunk at all"},

@@ -1,0 +1,725 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Haive — README Quality &amp; Per-Step LLM Benchmark, 2026-07-16 (Redaction System)</title>
+<style>
+:root{--bg:#0b0f14;--bg2:#11171f;--card:#151c26;--card2:#1b2430;--ink:#e7edf3;--mut:#8da0b3;--line:#243140;
+--accent:#3ddc97;--accent2:#4aa8ff;--warn:#f5b14c;--bad:#f2607a;
+--claude:#3ddc97;--codex:#4aa8ff;--zai:#c69cff;--ollama:#f5b14c;
+--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;font-size:15px}
+a{color:var(--accent2);text-decoration:none}a:hover{text-decoration:underline}
+code{font-family:var(--mono);font-size:.86em;color:var(--mut)}
+.wrap{max-width:1120px;margin:0 auto;padding:0 20px 90px}
+header.hero{padding:52px 0 24px;border-bottom:1px solid var(--line)}
+.kicker{font:600 12px/1 var(--mono);letter-spacing:.5px;text-transform:uppercase;color:var(--accent)}
+h1{font-size:33px;line-height:1.12;margin:14px 0 8px}
+h2{font-size:22px;margin:50px 0 6px}
+h2 .num{font:600 13px/1 var(--mono);color:var(--accent);margin-right:10px;vertical-align:2px}
+h3{font-size:16px;margin:0}
+p.sub{color:var(--mut);max-width:82ch;margin:6px 0}
+.meta{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:18px;font:500 13px/1.4 var(--mono);color:var(--mut)}
+.meta b{color:var(--ink);font-weight:600}
+.src{margin-top:16px;padding:12px 16px;background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent2);border-radius:8px;font-size:13.5px;color:var(--mut)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:1px}
+.f-claude{background:var(--claude)}.f-codex{background:var(--codex)}.f-zai{background:var(--zai)}.f-ollama{background:var(--ollama)}
+.f-claudes{stroke:var(--claude)}.f-codexs{stroke:var(--codex)}.f-claudet{color:var(--claude)}.f-codext{color:var(--codex)}
+circle.pt.f-claude{fill:var(--claude)}circle.pt.f-codex{fill:var(--codex)}circle.pt.f-zai{fill:var(--zai)}circle.pt.f-ollama{fill:var(--ollama)}
+/* verdicts */
+.verdicts{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin-top:24px}
+.vcard{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:15px 16px;position:relative;overflow:hidden}
+.vcard .lab{font:700 11px/1 var(--mono);text-transform:uppercase;color:var(--mut)}
+.vcard .who{font-size:18px;font-weight:700;margin:8px 0 5px}
+.vcard .why{font-size:13px;color:var(--mut)}
+.vcard::after{content:"";position:absolute;inset:0 auto 0 0;width:3px}
+.vcard.win{border-color:#2f6b52}.vcard.win::after{background:var(--accent)}
+.vcard.val{border-color:#2c4d70}.vcard.val::after{background:var(--accent2)}
+.vcard.avoid{border-color:#6b2f3e}.vcard.avoid::after{background:var(--bad)}
+/* pin strip */
+.pins{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+.pin{flex:1 1 160px;background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:11px 13px}
+.pin .s{font:600 11px/1 var(--mono);text-transform:uppercase;color:var(--mut)}
+.pin .m{font-size:15px;font-weight:700;margin-top:6px}
+/* tables */
+.tbl-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--card);margin-top:12px}
+table{border-collapse:collapse;width:100%;min-width:720px}
+th,td{padding:9px 11px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th.l,td.l,td.ml,td.ef,td.tid{text-align:left}
+thead th{position:sticky;top:0;background:var(--bg2);font:600 12px/1.2 var(--mono);color:var(--mut);cursor:pointer;user-select:none}
+thead th:hover{color:var(--ink)}thead th.sorted{color:var(--accent)}
+tbody tr:hover{background:#19222e}
+td.sc{font-weight:700;color:#08110b;background:var(--c);border-radius:0}
+td.rk{color:var(--mut);font-family:var(--mono);text-align:right}
+td.ml{font-weight:600}
+.hz{color:var(--accent)}.h1{color:var(--warn)}.h2{color:var(--bad);font-weight:700}
+.ok{color:var(--accent)}.warn{color:var(--warn);font-weight:700}
+td.sub{color:var(--mut)}
+button.xb{font:700 13px/1 var(--mono);color:var(--ink);background:var(--bg2);border:1px solid var(--line);width:24px;height:24px;border-radius:6px;cursor:pointer}
+button.xb:hover{border-color:var(--accent)}
+tr.eviden td{background:var(--card2);padding:14px 18px;white-space:normal;text-align:left}
+tr.eviden ul{margin:0 0 8px;padding-left:18px}
+tr.eviden li{margin:3px 0;font-size:13.5px}
+li.pro::marker{content:"▲ "}li.pro{color:#bfe9d5}
+li.con::marker{content:"▼ "}li.con{color:#f2c7d1}
+li.hal{color:var(--bad)}
+.vd{font-size:13.5px;color:var(--mut);margin:6px 0 0;font-style:italic}
+tr.hi{background:#132b22}tr.hi:hover{background:#173327}
+/* bars */
+.bars{margin-top:14px;display:flex;flex-direction:column;gap:7px}
+.brow{display:grid;grid-template-columns:210px 1fr 92px;gap:12px;align-items:center}
+.bl{font-size:13.5px;font-weight:600}.bn{color:var(--mut);font:500 11px/1 var(--mono);margin-left:7px}
+.btrack{position:relative;background:var(--bg2);border:1px solid var(--line);border-radius:6px;height:22px}
+.bfill{height:100%;border-radius:5px 0 0 5px}
+.bv{position:absolute;right:8px;top:0;line-height:22px;font:700 12px/22px var(--mono);color:var(--ink)}
+.brng{font:500 11px/1 var(--mono);color:var(--mut);text-align:right}
+/* charts */
+.chart{width:100%;height:auto;background:var(--card);border:1px solid var(--line);border-radius:8px;margin-top:12px}
+.grid{stroke:var(--line);stroke-width:1}
+.axl,.axs{fill:var(--mut);font:500 11px/1 var(--mono)}.axs{font-size:9px}
+.axttl{fill:var(--mut);font:600 11px/1 var(--mono)}
+.pt{stroke:#0b0f14;stroke-width:1}
+.ln{fill:none;stroke-width:2}
+.swgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin-top:12px}
+.swcard{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px}
+.swcard h3{font-size:14px;margin-bottom:4px}.sw .chart{background:transparent;border:0;margin:0}
+.swleg{font:600 11px/1.6 var(--mono);margin-top:4px}.lg{margin-right:4px}
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:10px;font:600 12px/1 var(--mono);color:var(--mut)}
+.legend span{display:inline-flex;align-items:center}
+/* step cards */
+.stepcard{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-top:16px}
+.sthead{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.pinbadge{font:600 13px/1 var(--mono);color:var(--mut);background:var(--bg2);border:1px solid var(--line);padding:7px 11px;border-radius:999px}
+.pinbadge b{color:var(--accent)}
+.note{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:8px;padding:12px 16px;margin-top:14px;font-size:13.5px;color:var(--mut)}
+.note b{color:var(--ink)}
+ul.meth{color:var(--mut);font-size:13.5px;max-width:88ch;padding-left:18px}
+ul.meth li{margin:6px 0}ul.meth b{color:var(--ink)}
+footer{margin-top:60px;padding-top:20px;border-top:1px solid var(--line);color:var(--mut);font:500 12px/1.6 var(--mono)}
+</style></head>
+<body><div class="wrap">
+<header class="hero">
+  <div class="kicker">Haive · deterministic multi-CLI orchestration</div>
+  <h1>README Quality &amp; Per-Step LLM Benchmark</h1>
+  <p class="sub">One "Add README" quick-fix task run against the same legacy repo across <b>11 models</b> and every reasoning-effort level — 44 runs total. Each run's <b>headline model authored the README and drove every LLM step</b>, so this measures both the finished artifact and which model to pin per step.</p>
+  <div class="meta"><span><b>44</b> runs</span><span><b>11</b> models</span>
+    <span>Repo: <b>Redaction System</b> (PHP 4/5 · <code>mysql_*</code> · 2008)</span><span>Date: <b>2026-07-16</b></span>
+    <span>All runs <b>VALID</b> (provider-id verified)</span></div>
+  <div class="src"><b>What "VALID" means.</b> One &#x27;Add README&#x27; quick-fix task per (model, effort). Every LLM step ran the task&#x27;s headline model (ignore_saved_step_clis). README validity = newest implement invocation provider == task provider (all 44 VALID). Durations/tokens summed across retries incl. superseded. Input is ~98% cache on Claude-family, so output tokens + active duration are the cross-model metrics.</div>
+  
+<div class="verdicts">
+  <div class="vcard win"><div class="lab">Best README overall</div>
+    <div class="who">Opus 4.8 · xhigh</div>
+    <div class="why">Composite <b>98</b>/100 — accuracy 10, completeness 10, clarity 9. Task <code>f731ff5b</code>.</div></div>
+  <div class="vcard val"><div class="lab">Best model on average</div>
+    <div class="who">GLM-5.2 · z.ai (1M)</div>
+    <div class="why">Mean composite <b>91.5</b> across 4 effort levels (best 93).</div></div>
+  <div class="vcard val"><div class="lab">Most consistent</div>
+    <div class="who">Codex · gpt-5.6-sol</div>
+    <div class="why">Range only 8 pts across 6 efforts (85–93); mean 89.8.</div></div>
+  <div class="vcard avoid"><div class="lab">Weakest</div>
+    <div class="who">Haiku 4.5</div>
+    <div class="why">Mean composite <b>63.4</b>; effort did not fix recurring hallucinations (Jest test stack, sandbox-path leak, invented features).</div></div>
+</div>
+  <div class="pins"><div class="pin"><div class="s">Triage</div><div class="m">Sonnet 4.6</div></div><div class="pin"><div class="s">Estimate</div><div class="m">Sonnet 4.6</div></div><div class="pin"><div class="s">App-boot</div><div class="m">MiniMax-M3 · Ollama</div></div><div class="pin"><div class="s">Implement</div><div class="m">GLM-5.2 · z.ai (1M)</div></div><div class="pin"><div class="s">Validate</div><div class="m">MiniMax-M3 · Ollama</div></div></div>
+</header>
+
+<h2><span class="num">01</span>Artifact-quality leaderboard</h2>
+<p class="sub">All 44 READMEs, ranked by composite = accuracy×5 + completeness×3 + clarity×2 (max 100). Colour = score heat. Click a column to sort; click <b>+</b> for the source-verified evidence.</p>
+<div class="legend"><span><span class="dot f-claude"></span>Anthropic</span><span><span class="dot f-codex"></span>OpenAI Codex</span><span><span class="dot f-zai"></span>z.ai / GLM</span><span><span class="dot f-ollama"></span>Ollama Cloud</span></div>
+<div class="tbl-scroll"><table id="lead"><thead><tr>
+  <th data-k="rk">#</th><th data-k="m" class="l">Model</th><th data-k="ef" class="l">Effort</th>
+  <th data-k="c" class="sorted">Composite</th><th data-k="a">Acc</th><th data-k="cm">Compl</th><th data-k="cl">Clar</th>
+  <th data-k="h">Halluc</th><th data-k="tid" class="l">Task</th><th></th></tr></thead>
+  <tbody><tr class="lead" data-c="98" data-a="10" data-cm="10" data-cl="9" data-h="0" data-m="claude">
+      <td class="rk">1</td>
+      <td class="ml"><span class="dot f-claude"></span>Opus 4.8</td>
+      <td class="ef">xhigh</td>
+      <td class="sc" style="--c:rgb(76,217,145)">98</td>
+      <td class="sc" style="--c:rgb(61,220,151)">10</td><td class="sc" style="--c:rgb(61,220,151)">10</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>f731ff5b</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Deepest and most honest: explicitly states FCKeditor content is NOT HTML-sanitized and that eval/preg_replace-/e are used, plus weak md5+crypt and no migration runner</li><li class='pro'>Precisely grounded (mysql_pconnect, PHP_SELF abort, DB_PREFIX/SUFFIX, Db::Update() return-value quirk)</li><li class='pro'>Comprehensive: stack table, runtime-constraint callout, request flow, full security model, directory layout, credits</li><li class='con'>Labels the SECHASH user-agent+IP fingerprint as &#x27;CSRF/hijack protection&#x27; (not true CSRF defense)</li><li class='con'>&#x27;Runs only on PHP 5&#x27; slightly understates PHP 4 compatibility</li></ul><p class='vd'>The exemplar: fully accurate, deeply grounded, and honest about every legacy/security caveat with no fabricated features.</p></td></tr><tr class="lead" data-c="93" data-a="9" data-cm="10" data-cl="9" data-h="0" data-m="claude">
+      <td class="rk">2</td>
+      <td class="ml"><span class="dot f-claude"></span>Fable 5</td>
+      <td class="ef">max</td>
+      <td class="sc" style="--c:rgb(113,208,130)">93</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(61,220,151)">10</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>8d2987c9</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Exceptional grounding: mysql_* extension, /e-modifier regex, ereg_replace, magic-quotes, PHP4 var props</li><li class='pro'>Honest about no framework/Composer/tests and eval()/regex danger zones</li><li class='pro'>Comprehensive request-flow, conventions, and directory sections</li><li class='con'>Very long and dense for a README</li><li class='con'>Labels the real sechash fingerprint a hijacking/CSRF guard (ground truth: no CSRF layer)</li></ul><p class='vd'>An exceptionally accurate, deeply grounded developer README that nails the PHP4/5 + mysql_* reality and is honest about security caveats; only slightly verbose.</p></td></tr><tr class="lead" data-c="93" data-a="9" data-cm="10" data-cl="9" data-h="0" data-m="zai">
+      <td class="rk">3</td>
+      <td class="ml"><span class="dot f-zai"></span>GLM-5.2 · z.ai (1M)</td>
+      <td class="ef">max</td>
+      <td class="sc" style="--c:rgb(113,208,130)">93</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(61,220,151)">10</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>91551de1</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Exceptionally accurate: nails the PHP 4/5 era, var props, mysql_* custom Db class, GPL v2+, author and build date</li><li class='pro'>Comprehensive component, table, and real-file coverage (FCKeditor, YUI, themes, mods, aliases, mailer, mysqldump, reCAPTCHA, installer)</li><li class='pro'>Honest legacy caveats without inventing features</li><li class='con'>Very dense — reads more like a full dev reference than a lean README</li><li class='con'>A few unverifiable specifics (exact Db method list, MySQL &gt;= 4.1.01)</li></ul><p class='vd'>A near-perfect, deeply grounded README that correctly identifies the PHP 4/5 mysql_* stack, custom Db class, and every major component with honest caveats.</p></td></tr><tr class="lead" data-c="93" data-a="9" data-cm="10" data-cl="9" data-h="0" data-m="zai">
+      <td class="rk">4</td>
+      <td class="ml"><span class="dot f-zai"></span>GLM-5.2 · z.ai (1M)</td>
+      <td class="ef">high</td>
+      <td class="sc" style="--c:rgb(113,208,130)">93</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(61,220,151)">10</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>9e66a642</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Correctly states PHP 4/5 + mysql_*, no router/DI/autoloader, no prepared statements, weak md5+crypt</li><li class='pro'>Outstanding honest &#x27;Known modernization targets&#x27; section (mysql_*, eval, preg-/e, fckeditor stored-XSS) with careful SECHASH framing</li><li class='pro'>Comprehensive: requirements, 7-step install, PRG lifecycle, extension axes, content model, directory table</li><li class='con'>A few unverified specific attributions (e.g. &#x27;actions/ 30 files&#x27;, eval in ConvertStats)</li><li class='con'>Very dense in places</li></ul><p class='vd'>A near-peer to the top entry: exceptionally accurate and honest about the legacy/security posture, just a hair less deep and slightly denser.</p></td></tr><tr class="lead" data-c="93" data-a="9" data-cm="10" data-cl="9" data-h="0" data-m="codex">
+      <td class="rk">5</td>
+      <td class="ml"><span class="dot f-codex"></span>Codex · gpt-5.6-sol</td>
+      <td class="ef">max</td>
+      <td class="sc" style="--c:rgb(113,208,130)">93</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(61,220,151)">10</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>553ecfd0</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Explicit framework-free / no-committed-tests / no-Composer honesty</li><li class='pro'>Deep, grounded operational detail (removal cascades, edit-lock lifecycle, backup scope)</li><li class='pro'>Correct GPL v2 license and legacy mysql_* stack</li><li class='con'>Pins runtime to &#x27;PHP 5.6&#x27; as hard fact, omitting the PHP 4 heritage (ships fckeditor_php4.php)</li><li class='con'>The removed preg_replace /e-modifier claim is unverified</li><li class='con'>Dense in the persistent-data cascade section</li></ul><p class='vd'>The most thorough and operationally precise README, honest about legacy constraints and license, with only a slightly over-specified PHP 5.6 target.</p></td></tr><tr class="lead" data-c="93" data-a="9" data-cm="10" data-cl="9" data-h="0" data-m="codex">
+      <td class="rk">6</td>
+      <td class="ml"><span class="dot f-codex"></span>Codex · gpt-5.6-sol</td>
+      <td class="ef">ultra</td>
+      <td class="sc" style="--c:rgb(113,208,130)">93</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(61,220,151)">10</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>8500e207</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Exceptionally safety-conscious install section: least-privilege GRANT matrix, destructive-install warning, HTTPS/localhost installer caution</li><li class='pro'>Honest about the removed mysql_* extension, no framework/DI, and no Composer/npm/migration/test suite</li><li class='pro'>Correctly declines to pin a PHP version (&#x27;not pinned by this checkout&#x27;) and correctly notes no local container config</li><li class='con'>MyISAM and specific library versions (YUI 2.3.1, FCKeditor 2.5 Beta) asserted as fact</li><li class='con'>Omits codename/build-date metadata; lighter on code-level security weaknesses than the opus entries</li></ul><p class='vd'>The most operationally careful README in the set — honest about the legacy stack and license with an outstanding least-privilege install guide, just short of naming the historical metadata.</p></td></tr><tr class="lead" data-c="93" data-a="9" data-cm="10" data-cl="9" data-h="0" data-m="claude">
+      <td class="rk">7</td>
+      <td class="ml"><span class="dot f-claude"></span>Opus 4.8</td>
+      <td class="ef">max</td>
+      <td class="sc" style="--c:rgb(113,208,130)">93</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(61,220,151)">10</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>9789e2c5</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Deeply accurate and honest: PHP 4/5 dual-compat, ext/mysql will fatal on PHP 7+, no package manager/build/CI, no automated tests</li><li class='pro'>Correctly describes the actual .ddev config it ships (nginx-fpm + PHP 5.6 + MariaDB 10.11) — the only clone that has one</li><li class='pro'>Full security model (string-concat SQL, preg_replace /e, eval sites, weak md5(crypt)) and correct &#x27;no .htaccess rewrite&#x27; alias framing</li><li class='con'>Asserts a few unverified specifics as fact (actions/ = 30 handlers, RS_VERSION = beta2)</li><li class='con'>Describes the SECHASH mismatch as &#x27;treated as CSRF&#x27;, though it attributes that to the code&#x27;s own naming</li></ul><p class='vd'>A near-exemplar README: deeply grounded, honest about every legacy/security caveat, and uniquely correct about its own DDEV config — capped only by a couple of unverified specifics stated as fact.</p></td></tr><tr class="lead" data-c="91" data-a="9" data-cm="10" data-cl="8" data-h="0" data-m="codex">
+      <td class="rk">8</td>
+      <td class="ml"><span class="dot f-codex"></span>Codex · gpt-5.6-sol</td>
+      <td class="ef">xhigh</td>
+      <td class="sc" style="--c:rgb(127,205,124)">91</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(61,220,151)">10</td><td class="sc" style="--c:rgb(208,186,91)">8</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>1bf42b56</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>The most operationally precise entry: deletion-cascade compaction, the dormant History writer (omits history.date), and a link-rewrite regex that can decrement unrelated pages</li><li class='pro'>Correctly names the legacy mysql_* wrapper, no Composer/npm/tests, and no transactions/foreign keys</li><li class='pro'>Correctly states this checkout has no DDEV config and gives grounded manual provisioning steps</li><li class='con'>Pins PHP 5.6, understating the PHP 4 heritage; MyISAM asserted as fact</li><li class='con'>Reads more like a code audit than a README — the invariants section is dense</li></ul><p class='vd'>An exceptionally deep, honest, and technically precise README that surfaces real deletion/history/link-rewrite defects; docked only for the PHP 5.6 pin and audit-like density.</p></td></tr><tr class="lead" data-c="90" data-a="9" data-cm="9" data-cl="9" data-h="0" data-m="claude">
+      <td class="rk">9</td>
+      <td class="ml"><span class="dot f-claude"></span>Fable 5</td>
+      <td class="ef">medium</td>
+      <td class="sc" style="--c:rgb(135,203,121)">90</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>5f88947d</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Exceptionally grounded: cites real AJAX endpoints (admin_extend_editlock, admin_load_cpages), encryptPW(), and fckeditor_php4/php5.php as PHP4/5 proof</li><li class='pro'>Correct alias mechanism (aliases.ser resolved through 404.php, not mod_rewrite) and honest no-framework/no-Composer framing</li><li class='pro'>Complete subsystem table plus honest 2008-era caveats (magic_quotes, raw SQL interpolation)</li><li class='con'>License given only as a &#x27;see LICENCE&#x27; pointer, not stated as GPL v2</li><li class='con'>No dedicated security-weakness enumeration; MariaDB 10.11 attributed to the dev environment</li></ul><p class='vd'>A deeply grounded, honest developer README that nails the legacy mysql_* stack, the 404.php alias engine, and the real file/endpoint names, remarkably strong for medium effort.</p></td></tr><tr class="lead" data-c="90" data-a="9" data-cm="9" data-cl="9" data-h="0" data-m="claude">
+      <td class="rk">10</td>
+      <td class="ml"><span class="dot f-claude"></span>Fable 5</td>
+      <td class="ef">xhigh</td>
+      <td class="sc" style="--c:rgb(135,203,121)">90</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>f8cdf22e</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Correctly names the legacy ext/mysql API and Db class, and is explicit about no framework/Composer/ORM/migration</li><li class='pro'>Correct alias mechanism described precisely (404.php includes index.php with RS_ALIAS_REDIRECT, &#x27;a poor man&#x27;s rewrite engine&#x27;)</li><li class='pro'>Deeply grounded (RS_WORKING_DIR, [*link2*] tokens, logforms-bound registrations, ~25-table schema) with complete license/credits</li><li class='con'>States &#x27;local development uses DDEV (Apache, MariaDB 10.11)&#x27; though this checkout has no .ddev and the real webserver is nginx-fpm</li><li class='con'>No dedicated security-weakness enumeration</li></ul><p class='vd'>A superb, honest developer README that nails the ext/mysql stack, the 404.php alias engine, and the forms/registration model with no fabricated features — only a hedged DDEV/webserver claim keeps it from the top.</p></td></tr><tr class="lead" data-c="90" data-a="9" data-cm="9" data-cl="9" data-h="0" data-m="claude">
+      <td class="rk">11</td>
+      <td class="ml"><span class="dot f-claude"></span>Fable 5</td>
+      <td class="ef">high</td>
+      <td class="sc" style="--c:rgb(135,203,121)">90</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>5107db73</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Correctly nails PHP 4/5 dual-compat, the mysql_* Db wrapper, and an honest &#x27;no framework/autoloading/migration/tests&#x27; note</li><li class='pro'>Accurate request lifecycle + grounded components (ModManager, ThemeManager, aliases.ser, rs_dynamic_modules)</li><li class='pro'>Clean directory table and install-via-installer section</li><li class='con'>Omits build date / rs1_final version specifics</li><li class='con'>A couple of unverified specifics (Reports Wizard, DDEV) though plausibly real repo augmentation</li></ul><p class='vd'>Accurate, honest, well-grounded developer README that correctly identifies the legacy mysql_* stack with no fabricated features, just slightly less exhaustive than the top entries.</p></td></tr><tr class="lead" data-c="90" data-a="9" data-cm="9" data-cl="9" data-h="0" data-m="zai">
+      <td class="rk">12</td>
+      <td class="ml"><span class="dot f-zai"></span>GLM-5.2 · z.ai (1M)</td>
+      <td class="ef">low</td>
+      <td class="sc" style="--c:rgb(135,203,121)">90</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>82fa2c57</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Correctly nails PHP 4/5 + mysql_* (predates mysqli/PDO) + GPL v2</li><li class='pro'>Comprehensive schema/module/forms tables with real identifiers and ###PREFIX###/###SUFFIX### placeholders</li><li class='pro'>Honest legacy framing, impressive for low effort</li><li class='con'>Characterizes the `fixed` table as a 4th theme-layout hierarchy level (it is cross-tab menu placement)</li><li class='con'>No step-by-step request-lifecycle walkthrough</li></ul><p class='vd'>Remarkably complete and accurate for low effort, correctly identifying the legacy stack, license, and schema.</p></td></tr><tr class="lead" data-c="90" data-a="9" data-cm="9" data-cl="9" data-h="0" data-m="zai">
+      <td class="rk">13</td>
+      <td class="ml"><span class="dot f-zai"></span>GLM-5.2 · z.ai (1M)</td>
+      <td class="ef">medium</td>
+      <td class="sc" style="--c:rgb(135,203,121)">90</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>3e5abf16</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Fully accurate and honest: PHP 4/5 explicit, no framework/autoloader/package manager/test suite</li><li class='pro'>Exceptionally grounded (complete rs2_ DB table list, installer ###PREFIX###/###SUFFIX### placeholders, mailer trio, reCAPTCHA)</li><li class='pro'>Complete with dir map, DB table list, getting-started steps, license, and calypso/rs1_final/2008 metadata</li><li class='con'>Doesn&#x27;t literally name the legacy mysql_* API (says thin DB class)</li><li class='con'>Lighter on security caveats than opus/fable</li></ul><p class='vd'>A comprehensive, fully accurate and honest README that nails the PHP4/5 legacy stack, components, schema, and setup; it only misses explicitly naming mysql_* and deeper security notes.</p></td></tr><tr class="lead" data-c="90" data-a="9" data-cm="9" data-cl="9" data-h="0" data-m="codex">
+      <td class="rk">14</td>
+      <td class="ml"><span class="dot f-codex"></span>Codex · gpt-5.6-sol</td>
+      <td class="ef">medium</td>
+      <td class="sc" style="--c:rgb(135,203,121)">90</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>209cc9d6</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Correctly frames the removed ext/mysql runtime and won&#x27;t run on PHP 7+</li><li class='pro'>Honest about no package manager/build step and no tests/CI, with GPLv2 stated</li><li class='pro'>Unusually strong installation section (writable paths, protect init.php credentials)</li><li class='con'>Says normally PHP 5.x without noting the PHP4 files</li><li class='con'>Omits reCAPTCHA and the explicit mailer trio (smtp/libmail/mailer)</li></ul><p class='vd'>A clean, honest, well-structured README that correctly frames the removed ext/mysql legacy runtime and the no-tests/no-framework reality, with an unusually strong install section.</p></td></tr><tr class="lead" data-c="90" data-a="9" data-cm="9" data-cl="9" data-h="0" data-m="claude">
+      <td class="rk">15</td>
+      <td class="ml"><span class="dot f-claude"></span>Sonnet 5</td>
+      <td class="ef">max</td>
+      <td class="sc" style="--c:rgb(135,203,121)">90</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>9592c121</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Explicitly denies the common traps: not PDO/mysqli, no REST/JSON API, no PHPUnit/Jest, no Docker/DDEV (correct for this checkout)</li><li class='pro'>Names the /e preg_replace modifier and the mysql_* extension as PHP-7-incompatible, with honest security caveats (unquoted SQL, eval sites, fixed-salt passwords)</li><li class='pro'>Correct metadata and grounded YUI2 usage detail (6 of ~30 modules actually used)</li><li class='con'>Labels the SECHASH md5(UA+IP) fingerprint a &#x27;CSRF / session guard&#x27; though it explains the real mechanism</li><li class='con'>Lighter on the full DB schema than the table-enumerating entries</li></ul><p class='vd'>A deeply grounded, honest developer README that correctly denies PDO/mysqli/JSON-API/Jest/DDEV and names the /e modifier — one of the cleanest in the set, docked only for the CSRF framing.</p></td></tr><tr class="lead" data-c="88" data-a="8" data-cm="10" data-cl="9" data-h="2" data-m="ollama">
+      <td class="rk">16</td>
+      <td class="ml"><span class="dot f-ollama"></span>GLM-5.2 · Ollama</td>
+      <td class="ef">—</td>
+      <td class="sc" style="--c:rgb(149,199,115)">88</td>
+      <td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(61,220,151)">10</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="h2">2</td>
+      <td class="tid"><code>82cd3319</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Exhaustive, grounded coverage with real tables/functions and an honest security-weakness section (uploaded-SQL restore, WHERE-clause injection, hand-rolled escaping)</li><li class='pro'>Correctly identifies mysql_*, globals-not-DI, GPL v2, en/sk, and all components</li><li class='pro'>Clear repo table plus CMS domain model</li><li class='con'>Asserts unverified MyISAM/rs2_ specifics as fact</li><li class='con'>SECHASH-as-CSRF characterization</li><li class='hal'>hallucination: &#x27;MyISAM tables, rs2_ prefixed&#x27; asserted as fact (unverified)</li><li class='hal'>hallucination: Frames a SECHASH mismatch as &#x27;hijack/CSRF&#x27; though no real CSRF layer exists</li></ul><p class='vd'>One of the most complete and security-honest READMEs, docked only for stating a couple of unverified specifics as fact.</p></td></tr><tr class="lead" data-c="87" data-a="9" data-cm="8" data-cl="9" data-h="0" data-m="codex">
+      <td class="rk">17</td>
+      <td class="ml"><span class="dot f-codex"></span>Codex · gpt-5.5</td>
+      <td class="ef">high</td>
+      <td class="sc" style="--c:rgb(157,198,112)">87</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>7e1939a7</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Correctly identifies the deprecated mysql_* extension + PHP 4/5, no framework</li><li class='pro'>Deeply grounded content model with real DB constants (DB_PAGETYPE_*) and functions</li><li class='pro'>Accurate installer + manual init.php setup, correctly names init.php</li><li class='con'>License noted only as &#x27;GPL&#x27;, not v2 / LICENCE file</li><li class='con'>Mailer components (smtp.php/libmail.php) not detailed</li><li class='con'>No explicit &#x27;no tests&#x27; note</li></ul><p class='vd'>Highly accurate, well-grounded overview with excellent content-model and forms detail; license under-specified.</p></td></tr><tr class="lead" data-c="87" data-a="9" data-cm="8" data-cl="9" data-h="0" data-m="codex">
+      <td class="rk">18</td>
+      <td class="ml"><span class="dot f-codex"></span>Codex · gpt-5.5</td>
+      <td class="ef">medium</td>
+      <td class="sc" style="--c:rgb(157,198,112)">87</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>780877fa</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Accurate and honest: names the legacy mysql_* extension, MyISAM schema, and no Composer/DI/build</li><li class='pro'>Deeply grounded schema and installer detail (rs2_nocomments.php, uploadfiles, formphotos, kword2element)</li><li class='pro'>Strong developer conventions with a Form Wizard change checklist</li><li class='con'>Omits the GPL license entirely</li><li class='con'>No security-weakness section and no alias-routing (404.php) mechanism</li></ul><p class='vd'>An accurate, honest, and deeply grounded codebase map that correctly frames the legacy mysql_* stack and installer internals, let down only by the missing license.</p></td></tr><tr class="lead" data-c="87" data-a="9" data-cm="8" data-cl="9" data-h="0" data-m="codex">
+      <td class="rk">19</td>
+      <td class="ml"><span class="dot f-codex"></span>Codex · gpt-5.6-sol</td>
+      <td class="ef">low</td>
+      <td class="sc" style="--c:rgb(157,198,112)">87</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>8a16245a</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Cleanly honest for low effort: ext/mysql removed in PHP 7, no framework/package manager, no tests/CI, plaintext init.php secrets</li><li class='pro'>Grounded (installer/rs2.php schema, jQuery 1.2.x, rank2page, DB_PREFIX/SUFFIX)</li><li class='pro'>Clear prose, paths table, and setup steps</li><li class='con'>Omits codename calypso / rs1_final / build date</li><li class='con'>No reCAPTCHA and lighter component breadth</li></ul><p class='vd'>Accurate, honest, and well-structured despite low effort; loses ground only on version/codename coverage and breadth.</p></td></tr><tr class="lead" data-c="87" data-a="9" data-cm="8" data-cl="9" data-h="0" data-m="ollama">
+      <td class="rk">20</td>
+      <td class="ml"><span class="dot f-ollama"></span>MiniMax-M3 · Ollama</td>
+      <td class="ef">—</td>
+      <td class="sc" style="--c:rgb(157,198,112)">87</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>5f2e62e8</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Exceptionally grounded: names specific files calling raw mysql_query, exact bootstrap order, and the checkSecure guard</li><li class='pro'>Honest no-framework / no-CI / no-Composer / hand-rolled sanitization</li><li class='pro'>Correct ext/mysql API + PHP4-style constructors</li><li class='con'>Omits the license (GPL v2)</li><li class='con'>No build-date/version metadata</li><li class='con'>Schema tables not enumerated</li></ul><p class='vd'>Deeply grounded, architecturally precise, and honest about the legacy stack, let down only by the missing license.</p></td></tr><tr class="lead" data-c="87" data-a="9" data-cm="8" data-cl="9" data-h="0" data-m="claude">
+      <td class="rk">21</td>
+      <td class="ml"><span class="dot f-claude"></span>Opus 4.8</td>
+      <td class="ef">high</td>
+      <td class="sc" style="--c:rgb(157,198,112)">87</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>df933a6e</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Explicitly denies REST routes and documents the atn action dispatcher</li><li class='pro'>Deeply honest security section: string-interpolated SQL, weak md5(crypt) passwords, DEBUG_FLAG log leakage</li><li class='pro'>Richly grounded (page-type constants, Forms Wizard field types, service-locator globals table)</li><li class='con'>Omits the license (GPLv2) and the alias system (aliases.ser)</li><li class='con'>Frames era as PHP 5 and doesn&#x27;t literally name mysql_*</li><li class='con'>Labels sechash a CSRF/hijack guard (ground truth: no CSRF layer)</li></ul><p class='vd'>A deeply grounded, security-honest, developer-grade README that even denies the common REST hallucination; docked for omitting the license and alias system and understating the PHP4 era.</p></td></tr><tr class="lead" data-c="87" data-a="9" data-cm="8" data-cl="9" data-h="0" data-m="claude">
+      <td class="rk">22</td>
+      <td class="ml"><span class="dot f-claude"></span>Opus 4.8</td>
+      <td class="ef">low</td>
+      <td class="sc" style="--c:rgb(157,198,112)">87</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>3f58e5c0</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Accurate and correct metadata (calypso, rs1_final, 19 March 2008, GPL v2+) even at low effort</li><li class='pro'>Correctly names the deprecated mysql_* API in the single Db class and the PHP 4/5 era</li><li class='pro'>Comprehensive core-concept coverage (taxonomy, ranks, forms, modules, aliases, backup) with grounded skill references</li><li class='con'>No security-weakness section (md5/XSS/preg-/e/SQL) and no explicit no-tests note</li><li class='con'>No DB table enumeration; does not spell out &#x27;won&#x27;t run on PHP 7+&#x27;</li></ul><p class='vd'>A clean, accurate, well-grounded orientation with correct metadata and a proper mysql_* identification — impressively complete for low effort, missing only the security caveats and no-tests honesty.</p></td></tr><tr class="lead" data-c="87" data-a="9" data-cm="8" data-cl="9" data-h="1" data-m="claude">
+      <td class="rk">23</td>
+      <td class="ml"><span class="dot f-claude"></span>Opus 4.8</td>
+      <td class="ef">medium</td>
+      <td class="sc" style="--c:rgb(157,198,112)">87</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="h1">1</td>
+      <td class="tid"><code>eff2ce8f</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Precise and grounded: PHP 4/5, mysql_pconnect/mysql_query, custom Db class, no DI/framework</li><li class='pro'>Honest security caveats (weak encryptPW md5(crypt), no parameterized queries, FCKeditor skips escaping, DEBUG_FLAG)</li><li class='pro'>Valuable &#x27;read before editing&#x27; conventions grounded in real behavior (Db::Update returns false on success)</li><li class='con'>Omits YUI, reCAPTCHA, the mailer stack, and mysqldump from the component list</li><li class='con'>Loosely calls SECHASH a CSRF check</li><li class='con'>No dedicated license/build-date/author section</li><li class='hal'>hallucination: Labels SECHASH (md5 of user_agent+remote_addr) a &#x27;CSRF check&#x27; — no real CSRF layer exists</li></ul><p class='vd'>A precise, deeply grounded developer orientation that nails the PHP 4/5 mysql_* stack and security caveats, though it drops several bundled components and mislabels SECHASH as CSRF.</p></td></tr><tr class="lead" data-c="87" data-a="9" data-cm="8" data-cl="9" data-h="0" data-m="claude">
+      <td class="rk">24</td>
+      <td class="ml"><span class="dot f-claude"></span>Sonnet 5</td>
+      <td class="ef">xhigh</td>
+      <td class="sc" style="--c:rgb(157,198,112)">87</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>84e2e919</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Highly accurate and honest: no REST API/framework/build step/tests, mysql_*, GPL v2, weak-password and no-prepared-statement caveats</li><li class='pro'>Correct version/codename/date (rs1_final, calypso, 19 Mar 2008) and real file names (YUI2, mailer stack, mysqldump, reCAPTCHA)</li><li class='pro'>Concise, well-structured &#x27;Known limitations&#x27; grounded in real code</li><li class='con'>Omits the alias/friendly-URL subsystem (aliases.ser, 404.php) entirely</li><li class='con'>Doesn&#x27;t explicitly pin the PHP 4/5 era (only &#x27;legacy mysql_*&#x27;)</li><li class='con'>A few unverified specifics (MyISAM, rs2.php schema file, &#x27;30&#x27; action files)</li></ul><p class='vd'>A crisp, honest, and highly accurate README that nails the legacy stack and security caveats but omits the alias subsystem and doesn&#x27;t pin the PHP 4/5 era.</p></td></tr><tr class="lead" data-c="85" data-a="9" data-cm="8" data-cl="8" data-h="0" data-m="codex">
+      <td class="rk">25</td>
+      <td class="ml"><span class="dot f-codex"></span>Codex · gpt-5.5</td>
+      <td class="ef">xhigh</td>
+      <td class="sc" style="--c:rgb(171,194,106)">85</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(208,186,91)">8</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>5ffd0e3c</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Accurate and honest: names the legacy mysql_* extension, MyISAM schema, no Composer/npm/build, and no PHPUnit test suite</li><li class='pro'>Comprehensive, grounded data model and operations (sessiondata, admin_dump_download.php, $classnames registry)</li><li class='pro'>Useful developer conventions with real helper names (GetPHPVariables, checkInt, getHREF, UploadFile)</li><li class='con'>Omits the GPL license and all codename/version/date metadata</li><li class='con'>Pins &#x27;PHP 5.6-era&#x27; over the PHP 4 heritage; very list/bullet-heavy prose</li></ul><p class='vd'>An accurate, honest, well-grounded codebase map that correctly frames the legacy mysql_* stack and no-tests reality, undercut by the omitted license and metadata.</p></td></tr><tr class="lead" data-c="85" data-a="8" data-cm="9" data-cl="9" data-h="1" data-m="claude">
+      <td class="rk">26</td>
+      <td class="ml"><span class="dot f-claude"></span>Sonnet 4.6</td>
+      <td class="ef">high</td>
+      <td class="sc" style="--c:rgb(171,194,106)">85</td>
+      <td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="h1">1</td>
+      <td class="tid"><code>b3ddf598</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Comprehensive schema, actions, and module coverage</li><li class='pro'>Correctly identifies the legacy mysql_* API via the Db class</li><li class='pro'>Accurate PHP 4/5 dual-compat stack</li><li class='con'>Says the installer writes config.php (actually init.php)</li><li class='con'>No explicit &#x27;no framework / no tests&#x27; honesty note</li><li class='con'>Unverified MariaDB 10.11 version detail stated as fact</li><li class='hal'>hallucination: Installer &#x27;Writes config.php&#x27; — the generated config file is init.php, not config.php</li></ul><p class='vd'>Exceptionally thorough and largely accurate legacy-CMS overview, docked mainly for the config.php slip and the absent no-framework/no-tests caveat.</p></td></tr><tr class="lead" data-c="85" data-a="8" data-cm="9" data-cl="9" data-h="1" data-m="codex">
+      <td class="rk">27</td>
+      <td class="ml"><span class="dot f-codex"></span>Codex · gpt-5.6-sol</td>
+      <td class="ef">high</td>
+      <td class="sc" style="--c:rgb(171,194,106)">85</td>
+      <td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="h1">1</td>
+      <td class="tid"><code>1007832f</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Honest and correct: no framework, no tests, no Composer/npm, legacy mysql_*/ext/mysql, GPL v2+</li><li class='pro'>Outstanding safety-conscious install section (backup, DROP TABLE warning, privileges, credential handling)</li><li class='pro'>Clear repository map and content-visibility invariants</li><li class='con'>&#x27;PHP 5.6-era&#x27; misses the PHP 4 heritage</li><li class='con'>Unverified &#x27;MyISAM&#x27; claim; omits codename/build date and the Db class name</li><li class='hal'>hallucination: &#x27;PHP 5.6-era&#x27; overstates the version — the code is PHP 4/5, ~2008</li></ul><p class='vd'>Accurate, honest, and exceptionally safety-conscious with a superb install section, marginally undercut by the &#x27;PHP 5.6-era&#x27; over-specification.</p></td></tr><tr class="lead" data-c="85" data-a="8" data-cm="9" data-cl="9" data-h="1" data-m="claude">
+      <td class="rk">28</td>
+      <td class="ml"><span class="dot f-claude"></span>Sonnet 5</td>
+      <td class="ef">high</td>
+      <td class="sc" style="--c:rgb(171,194,106)">85</td>
+      <td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="h1">1</td>
+      <td class="tid"><code>b786ca9c</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Correct GPL v2 with LICENCE/README/TODO grounding</li><li class='pro'>Comprehensive, accurate project-layout tree</li><li class='pro'>Correctly frames it as procedural, no framework</li><li class='con'>Introduces an unverified &#x27;Reports Wizard&#x27; feature</li><li class='con'>Does not explicitly name the legacy mysql_* API or PHP 4/5 era</li><li class='con'>DB layer described only as a &#x27;thin MySQL wrapper&#x27;</li><li class='hal'>hallucination: &#x27;Reports Wizard&#x27; to query Forms Wizard submissions — not present in the tree or any other source (unverified/likely invented)</li></ul><p class='vd'>Comprehensive and correctly licensed overview, slightly undercut by an unverified &#x27;Reports Wizard&#x27; and a vague DB-layer description.</p></td></tr><tr class="lead" data-c="84" data-a="9" data-cm="7" data-cl="9" data-h="0" data-m="claude">
+      <td class="rk">29</td>
+      <td class="ml"><span class="dot f-claude"></span>Fable 5</td>
+      <td class="ef">low</td>
+      <td class="sc" style="--c:rgb(179,192,103)">84</td>
+      <td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(244,161,85)">7</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>47f360dd</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Honest about legacy: no namespaces/autoloading, PHP4-style constructors</li><li class='pro'>Excellent &#x27;how a request is served&#x27; orientation</li><li class='pro'>Grounded in real files and the DDEV/AGENTS.md context</li><li class='con'>Omits the license (GPL v2)</li><li class='con'>Does not name the three bundled themes</li><li class='con'>Concise, light on component/schema detail</li></ul><p class='vd'>Concise, highly accurate developer orientation that nails the legacy stack but omits the license.</p></td></tr><tr class="lead" data-c="82" data-a="8" data-cm="8" data-cl="9" data-h="2" data-m="claude">
+      <td class="rk">30</td>
+      <td class="ml"><span class="dot f-claude"></span>Sonnet 4.6</td>
+      <td class="ef">max</td>
+      <td class="sc" style="--c:rgb(193,189,97)">82</td>
+      <td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="h2">2</td>
+      <td class="tid"><code>522693f2</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Best-in-set metadata: codename calypso, rs1_final, 19 March 2008, GPL v2+</li><li class='pro'>Correctly identifies the deprecated mysql_* extension via the Db class and PHP 4/5 era</li><li class='pro'>Comprehensive, well-organised module and rs2_ table catalogues</li><li class='con'>Claims actions return JSON (they redirect/emit HTML)</li><li class='con'>No explicit no-framework/no-tests honesty note or security-weakness section</li><li class='con'>MariaDB 10.11 and a few module labels stated without qualification</li><li class='hal'>hallucination: Says admin actions &#x27;return JSON or a redirect&#x27; — actions redirect or emit HTML/plain text/JS object literals, not JSON</li><li class='hal'>hallucination: Labels admin_class_wcc a &#x27;word and character counter&#x27; (other sources read it as a website content/label editor)</li></ul><p class='vd'>Thorough, cleanly structured legacy-CMS map with excellent metadata and a correct mysql_* identification; docked for the JSON-response slip, a mislabelled module, and the absent honesty/security notes.</p></td></tr><tr class="lead" data-c="82" data-a="8" data-cm="8" data-cl="9" data-h="1" data-m="ollama">
+      <td class="rk">31</td>
+      <td class="ml"><span class="dot f-ollama"></span>MiniMax-M3 · Ollama</td>
+      <td class="ef">—</td>
+      <td class="sc" style="--c:rgb(193,189,97)">82</td>
+      <td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="h1">1</td>
+      <td class="tid"><code>08eb262c</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Reads like a genuine, polished README (Requirements, Install, Usage, Troubleshooting, Credits)</li><li class='pro'>Accurate copyright/GPL v2+, component and credits list, and references to the real README/TODO/LICENCE</li><li class='pro'>Honest operational notes (session.auto_start, last-admin, no password recovery)</li><li class='con'>Never identifies the legacy PHP 4/5 / mysql_* stack or its SQL-safety caveats</li><li class='con'>Omits codename calypso and build date</li><li class='con'>&#x27;Reports Wizard&#x27; appears fabricated</li><li class='hal'>hallucination: &#x27;Reports Wizard — display submitted form data with custom styling&#x27; — not attested in the codebase (only Forms Wizard)</li></ul><p class='vd'>A polished, genuinely README-shaped document with accurate components, credits, and setup, let down by never flagging the legacy mysql_* stack and one fabricated feature.</p></td></tr><tr class="lead" data-c="79" data-a="8" data-cm="7" data-cl="9" data-h="0" data-m="ollama">
+      <td class="rk">32</td>
+      <td class="ml"><span class="dot f-ollama"></span>MiniMax-M3 · Ollama</td>
+      <td class="ef">—</td>
+      <td class="sc" style="--c:rgb(216,184,88)">79</td>
+      <td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(244,161,85)">7</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>2d5a97e2</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Clean, conventional OSS README (Features/Requirements/Install/Credits/License)</li><li class='pro'>Correct on calypso/rs1_final/build date, GPL v2, components, and grounded third-party credits</li><li class='pro'>Accurate 7-step installer description and project tree</li><li class='con'>Shallow on tech: never mentions the mysql_* API / Db class or &#x27;no framework&#x27;</li><li class='con'>No architecture, DB-layer, or security caveats</li></ul><p class='vd'>A tidy, error-free classic README that correctly identifies the project but stays surface-level on the legacy stack and internals.</p></td></tr><tr class="lead" data-c="78" data-a="7" data-cm="9" data-cl="8" data-h="2" data-m="claude">
+      <td class="rk">33</td>
+      <td class="ml"><span class="dot f-claude"></span>Haiku 4.5</td>
+      <td class="ef">low</td>
+      <td class="sc" style="--c:rgb(223,182,85)">78</td>
+      <td class="sc" style="--c:rgb(244,161,85)">7</td><td class="sc" style="--c:rgb(135,203,121)">9</td><td class="sc" style="--c:rgb(208,186,91)">8</td>
+      <td class="h2">2</td>
+      <td class="tid"><code>6a3b981f</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Broad and useful structure: project tree, module breakdown, common tasks, troubleshooting</li><li class='pro'>Correctly notes mysql_pconnect/legacy, calypso/rs1_final/build date, reCAPTCHA, and real themes/modules</li><li class='con'>False phpMailer dependency</li><li class='con'>Misleading &#x27;Latest&#x27; version labels and some generic padding</li><li class='hal'>hallucination: Lists &#x27;phpMailer&#x27; as a bundled dependency (the mailer is custom libmail.php/smtp.php/mailer.php)</li><li class='hal'>hallucination: Labels FCKEditor and JS libraries as version &#x27;Latest&#x27; (they are old ~2.x)</li></ul><p class='vd'>Feature-rich and well-organized, but a false phpMailer dependency and vague &#x27;Latest&#x27; versions dent its accuracy.</p></td></tr><tr class="lead" data-c="77" data-a="8" data-cm="7" data-cl="8" data-h="0" data-m="codex">
+      <td class="rk">34</td>
+      <td class="ml"><span class="dot f-codex"></span>Codex · gpt-5.5</td>
+      <td class="ef">low</td>
+      <td class="sc" style="--c:rgb(230,180,82)">77</td>
+      <td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(244,161,85)">7</td><td class="sc" style="--c:rgb(208,186,91)">8</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>2e04f736</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Correctly identifies PHP 4/5-era code and the legacy mysql_* extension</li><li class='pro'>Well-grounded file/table names (mainparts, menus.parent, contents.multipart, kword2element)</li><li class='pro'>Honest about legacy idioms, global state, and direct SQL string construction</li><li class='con'>Omits the license (GPLv2) and the codename/2008 version metadata</li><li class='con'>Leaks an AI-sandbox note (.git metadata may not be usable in this sandbox)</li><li class='con'>No consolidated structure tree or step-by-step setup</li></ul><p class='vd'>An accurate, programmer-focused codebase map that correctly frames the legacy mysql_* PHP4/5 stack but omits license/version metadata and leaks an AI-agent sandbox note.</p></td></tr><tr class="lead" data-c="77" data-a="7" data-cm="8" data-cl="9" data-h="0" data-m="claude">
+      <td class="rk">35</td>
+      <td class="ml"><span class="dot f-claude"></span>Sonnet 4.6</td>
+      <td class="ef">low</td>
+      <td class="sc" style="--c:rgb(230,180,82)">77</td>
+      <td class="sc" style="--c:rgb(244,161,85)">7</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>0d4e5233</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Correctly names the legacy mysql_* API in the Db wrapper</li><li class='pro'>Excellent structure: stack table, dir layout, entry-point table, DB table list, setup steps</li><li class='pro'>Rich, grounded CMS detail (mainparts, part/subsect/mpart, elocks, rank2page, Forms Wizard)</li><li class='con'>Understates era as PHP 5 (repo is PHP 4/5, ships fckeditor_php4.php)</li><li class='con'>Never states the honest no-framework/no-tests caveat</li><li class='con'>MariaDB 10.11 reads as the app DB target; lang/ typo for langs/</li></ul><p class='vd'>Accurate, richly detailed and well-organized README that correctly identifies the legacy mysql_* layer, docked for understating the PHP4 era and omitting the no-framework/no-tests honesty.</p></td></tr><tr class="lead" data-c="77" data-a="7" data-cm="8" data-cl="9" data-h="3" data-m="claude">
+      <td class="rk">36</td>
+      <td class="ml"><span class="dot f-claude"></span>Sonnet 4.6</td>
+      <td class="ef">xhigh</td>
+      <td class="sc" style="--c:rgb(230,180,82)">77</td>
+      <td class="sc" style="--c:rgb(244,161,85)">7</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="h2">3</td>
+      <td class="tid"><code>790ea41d</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Correctly identifies a frameworkless legacy PHP + mysql_* app not compatible with PHP 7+</li><li class='pro'>Very detailed, mostly grounded module/edit-lock/ranks/forms internals with clear tables</li><li class='pro'>Strong, scannable structure</li><li class='con'>Never states the GPL v2 license at all</li><li class='con'>Invents physical alias-directory routing and a CSRF hash check</li><li class='con'>Says PHP 5 only, omitting PHP 4</li><li class='hal'>hallucination: aliases &#x27;implemented as physical subdirectories, each containing a stub index.php&#x27; — they resolve via aliases.ser/404.php, not physical dirs</li><li class='hal'>hallucination: bootstrap &#x27;checks CSRF hash&#x27; — no CSRF layer exists</li><li class='hal'>hallucination: &#x27;PHP 5.x only&#x27; drops the PHP 4 heritage (repo ships fckeditor_php4.php)</li></ul><p class='vd'>Detailed and well-structured with a correct frameworkless mysql_* core, but it omits the license and fabricates physical alias directories plus a CSRF check.</p></td></tr><tr class="lead" data-c="76" data-a="8" data-cm="6" data-cl="9" data-h="0" data-m="claude">
+      <td class="rk">37</td>
+      <td class="ml"><span class="dot f-claude"></span>Sonnet 5</td>
+      <td class="ef">medium</td>
+      <td class="sc" style="--c:rgb(238,179,79)">76</td>
+      <td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(243,128,104)">6</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>68cd5251</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Accurate and concise: legacy mysql_* wrapped by a custom Db class, no migration framework, no CI/CD/Docker (correct for this checkout)</li><li class='pro'>Grounded request flow and the real internal_module_RWizard/FWizard dispatch-bypass detail</li><li class='pro'>Honest per-language session model and correct aliases.ser framing</li><li class='con'>Omits the GPL license entirely and all version metadata beyond the codename</li><li class='con'>Does not pin the PHP 4/5 era or the PHP 7 incompatibility; lightest coverage of the sonnet efforts (no schema, security, or reCAPTCHA)</li></ul><p class='vd'>A clean, accurate, concise orientation that correctly frames the legacy Db/mysql_* stack and the Forms/Reports Wizard, but omits the license and stays the most surface-level of the sonnet runs.</p></td></tr><tr class="lead" data-c="74" data-a="8" data-cm="6" data-cl="8" data-h="0" data-m="claude">
+      <td class="rk">38</td>
+      <td class="ml"><span class="dot f-claude"></span>Sonnet 5</td>
+      <td class="ef">low</td>
+      <td class="sc" style="--c:rgb(245,174,78)">74</td>
+      <td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(243,128,104)">6</td><td class="sc" style="--c:rgb(208,186,91)">8</td>
+      <td class="hz">0</td>
+      <td class="tid"><code>2d99e044</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Accurate and honest (no CI/CD, no build, sole custom Db access layer)</li><li class='pro'>Well-grounded editor detail (FCKeditor plugins forms_wizard/rs_dynamic_modules/placeholder)</li><li class='pro'>Concise and readable as a quick architectural orientation</li><li class='con'>Omits several bundled components: alias system, mailer/SMTP, reCAPTCHA, jQuery/OverLib/CoolMenu</li><li class='con'>No setup steps, structure tree, or DB table list</li><li class='con'>Slightly over-frames authenticates against ranks</li></ul><p class='vd'>A concise, accurate architectural overview that correctly frames the legacy Db-wrapper stack and honestly notes no CI/build, but it omits several bundled components and any real setup instructions.</p></td></tr><tr class="lead" data-c="72" data-a="7" data-cm="7" data-cl="8" data-h="1" data-m="ollama">
+      <td class="rk">39</td>
+      <td class="ml"><span class="dot f-ollama"></span>Kimi-K2.7 · Ollama</td>
+      <td class="ef">—</td>
+      <td class="sc" style="--c:rgb(245,167,82)">72</td>
+      <td class="sc" style="--c:rgb(244,161,85)">7</td><td class="sc" style="--c:rgb(244,161,85)">7</td><td class="sc" style="--c:rgb(208,186,91)">8</td>
+      <td class="h1">1</td>
+      <td class="tid"><code>015bdc48</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Correct license (GPL v2) and honest developer note naming mysql_* and the magic_quotes/session era</li><li class='pro'>Grounded real file names (admin_move_menu, admin_load_cpages, js_step_*, fckeditor_php4/php5)</li><li class='pro'>Correct alias description (aliases.ser, no mod_rewrite fabrication) and clean conventional structure</li><li class='con'>Leaks the /haive/workdir sandbox path as the repo root</li><li class='con'>&#x27;PHP 5 compatible&#x27; understates PHP 4; no security-weakness or no-framework/no-tests notes</li><li class='con'>No DB schema enumeration or deeper metadata</li><li class='hal'>hallucination: Directory layout shows /haive/workdir as the project root — the sandbox path, not the real repo root</li></ul><p class='vd'>A competent, readable conventional README that correctly names mysql_*, the license, and the alias engine, but leaks the sandbox path and stays surface-level on the legacy caveats.</p></td></tr><tr class="lead" data-c="72" data-a="6" data-cm="8" data-cl="9" data-h="2" data-m="claude">
+      <td class="rk">40</td>
+      <td class="ml"><span class="dot f-claude"></span>Sonnet 4.6</td>
+      <td class="ef">medium</td>
+      <td class="sc" style="--c:rgb(245,167,82)">72</td>
+      <td class="sc" style="--c:rgb(243,128,104)">6</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(135,203,121)">9</td>
+      <td class="h2">2</td>
+      <td class="tid"><code>3f439824</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Most grounded on CMS internals: DB_PAGETYPE constants, m_main/parent/fixed, Form Wizard field types, per-language session keys</li><li class='pro'>Excellent scannable structure with class, module, and table tables</li><li class='pro'>Accurate rank2page ACL and checkSecure guard detail with real code</li><li class='con'>Fabricates an Apache mod_rewrite routing layer (real mechanism is 404.php)</li><li class='con'>Never names the legacy mysql_* extension and omits the GPL license</li><li class='con'>No security-weakness section; &#x27;PHP 5&#x27; understates the PHP 4 heritage</li><li class='hal'>hallucination: &#x27;Apache with mod_rewrite&#x27; routes unknown paths to index.php — verified false: no .htaccess and no RewriteRule exist; aliases resolve via 404.php/RS_ALIAS_REDIRECT</li><li class='hal'>hallucination: Never identifies the deprecated mysql_* API — the Db layer is described only as a &#x27;MySQL wrapper&#x27;</li></ul><p class='vd'>Richly detailed and well-structured on the CMS domain model, but it invents an Apache mod_rewrite router, never identifies the deprecated mysql_* layer, and drops the license.</p></td></tr><tr class="lead" data-c="70" data-a="6" data-cm="8" data-cl="8" data-h="5" data-m="claude">
+      <td class="rk">41</td>
+      <td class="ml"><span class="dot f-claude"></span>Haiku 4.5</td>
+      <td class="ef">high</td>
+      <td class="sc" style="--c:rgb(244,161,85)">70</td>
+      <td class="sc" style="--c:rgb(243,128,104)">6</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(208,186,91)">8</td>
+      <td class="h2">5</td>
+      <td class="tid"><code>1a99485a</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Honest caveats: &#x27;Testing: None&#x27;, SQL string-concatenation/injection note, PHP4/PHP5</li><li class='pro'>Comprehensive, scannable structure with setup, common tasks, and limitations</li><li class='con'>Fabricated Database Schema section (rs2_items/rs2_users, version history)</li><li class='con'>False mod_rewrite requirement for aliases</li><li class='con'>DB layer never identified as the mysql_*/custom Db class</li><li class='hal'>hallucination: &#x27;Apache with mod_rewrite (for alias functionality)&#x27; — aliases use aliases.ser/404.php, not mod_rewrite</li><li class='hal'>hallucination: DB tables &#x27;rs2_items&#x27; and &#x27;rs2_users&#x27; — no such tables</li><li class='hal'>hallucination: &#x27;Content Pages ... with version history&#x27; — no content versioning exists</li><li class='hal'>hallucination: &#x27;administrator and contributor roles&#x27; — &#x27;contributor&#x27; is invented</li><li class='hal'>hallucination: &#x27;Alternative Image Management&#x27; — invented/confused feature</li></ul><p class='vd'>Comprehensive and honest about tests and SQL risk, but undermined by a fabricated schema section, a false mod_rewrite requirement, and invented features.</p></td></tr><tr class="lead" data-c="62" data-a="5" data-cm="7" data-cl="8" data-h="3" data-m="claude">
+      <td class="rk">42</td>
+      <td class="ml"><span class="dot f-claude"></span>Haiku 4.5</td>
+      <td class="ef">medium</td>
+      <td class="sc" style="--c:rgb(243,135,100)">62</td>
+      <td class="sc" style="--c:rgb(242,96,122)">5</td><td class="sc" style="--c:rgb(244,161,85)">7</td><td class="sc" style="--c:rgb(208,186,91)">8</td>
+      <td class="h2">3</td>
+      <td class="tid"><code>2614d65b</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Correctly notes PHP 4.x/5.x era (many others say PHP 5 only)</li><li class='pro'>Broad component/credits coverage with a clean conventional README layout</li><li class='pro'>Lists the mailer trio, mysqldump, reCAPTCHA and per-module files</li><li class='con'>Never identifies the legacy mysql_* API (calls database.php a generic MySQL abstraction class)</li><li class='con'>Fabricates DB migrations, a content crawler module, and query caching</li><li class='con'>Omits codename/rs1_final and any setup steps</li><li class='hal'>hallucination: Built-in MySQL backup/restore with database migration support — no migration framework exists</li><li class='hal'>hallucination: admin_class_wcc.php described as Website content crawler — it is web-counter configuration</li><li class='hal'>hallucination: database.php with query caching — no such feature</li></ul><p class='vd'>A readable, well-formatted README with good breadth, but it never names the legacy mysql_* API and invents several features (DB migrations, a content crawler, query caching), lowering its accuracy.</p></td></tr><tr class="lead" data-c="55" data-a="3" data-cm="8" data-cl="8" data-h="4" data-m="claude">
+      <td class="rk">43</td>
+      <td class="ml"><span class="dot f-claude"></span>Haiku 4.5</td>
+      <td class="ef">xhigh</td>
+      <td class="sc" style="--c:rgb(243,112,113)">55</td>
+      <td class="sc" style="--c:rgb(242,96,122)">3</td><td class="sc" style="--c:rgb(208,186,91)">8</td><td class="sc" style="--c:rgb(208,186,91)">8</td>
+      <td class="h2">4</td>
+      <td class="tid"><code>71d8d848</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Good metadata (codename calypso, GPL v2+, author) and correct aliases.ser/loadAliases() detail</li><li class='pro'>Very broad, conventional structure: features, schema, install, troubleshooting, requirements, credits</li><li class='pro'>Readable and well formatted</li><li class='con'>Fabricates a Jest test stack and leaks the sandbox path as the repo root</li><li class='con'>Invents versioning, draft/publish, conditional fields, and a hook system</li><li class='con'>Never identifies the legacy mysql_* data layer</li><li class='hal'>hallucination: &#x27;Testing: Jest&#x27; in the stack — no test suite exists and Jest is JavaScript, not PHP</li><li class='hal'>hallucination: Project root shown as /haive/workdir/ — the sandbox path, not the real repo root</li><li class='hal'>hallucination: &#x27;Page versioning&#x27; and &#x27;draft/publish states&#x27; — no content versioning or draft workflow exists</li><li class='hal'>hallucination: &#x27;Conditional field display based on previous answers&#x27; and a &#x27;Hook-based system&#x27; — invented Form Wizard/module features</li></ul><p class='vd'>Broad, polished, and complete-looking, but a fabricated Jest test stack, a leaked sandbox path, and several invented features gut its accuracy — extra effort bought breadth, not correctness.</p></td></tr><tr class="lead" data-c="52" data-a="3" data-cm="7" data-cl="8" data-h="2" data-m="claude">
+      <td class="rk">44</td>
+      <td class="ml"><span class="dot f-claude"></span>Haiku 4.5</td>
+      <td class="ef">max</td>
+      <td class="sc" style="--c:rgb(242,102,118)">52</td>
+      <td class="sc" style="--c:rgb(242,96,122)">3</td><td class="sc" style="--c:rgb(244,161,85)">7</td><td class="sc" style="--c:rgb(208,186,91)">8</td>
+      <td class="h2">2</td>
+      <td class="tid"><code>2f8fb54e</code></td>
+      <td class="exp"><button class="xb" aria-label="expand">+</button></td></tr>
+    <tr class="eviden" hidden><td colspan="10"><ul><li class='pro'>Correctly identifies PHP 4/5 and GPL v2</li><li class='pro'>Complete history/metadata (calypso, project URL, creator)</li><li class='pro'>Good component and structure breadth</li><li class='con'>Fabricates a Jest test stack where none exists (flagged hallucination)</li><li class='con'>Leaks sandbox path /haive/workdir/ as the repo root</li><li class='con'>Never identifies the legacy mysql_* DB layer</li><li class='hal'>hallucination: &#x27;Testing: Jest&#x27; in the stack — no test suite exists (and Jest is JS, not PHP)</li><li class='hal'>hallucination: Project root shown as /haive/workdir/ — a sandbox path, not the real repo layout</li></ul><p class='vd'>Broad and mostly correct, but the fabricated &#x27;Jest&#x27; test stack is a clear hallucination that guts its accuracy.</p></td></tr></tbody></table></div>
+
+<h2><span class="num">02</span>Which model writes the best README</h2>
+<p class="sub">Mean composite per model across its effort sweep (bar), with the min–max range. The three Ollama-cloud models (GLM-5.2, Kimi-K2.7, MiniMax-M3) are single runs, shown but not effort-swept.</p>
+<div class="bars"><div class="brow">
+      <div class="bl"><span class="dot f-zai"></span>GLM-5.2 · z.ai (1M)<span class="bn">n=4</span></div>
+      <div class="btrack"><div class="bfill" style="width:91.5%;background:rgb(124,205,126)"></div>
+        <span class="bv">91.5</span></div>
+      <div class="brng">90–93</div></div><div class="brow">
+      <div class="bl"><span class="dot f-claude"></span>Opus 4.8<span class="bn">n=5</span></div>
+      <div class="btrack"><div class="bfill" style="width:90.4%;background:rgb(132,203,122)"></div>
+        <span class="bv">90.4</span></div>
+      <div class="brng">87–98</div></div><div class="brow">
+      <div class="bl"><span class="dot f-codex"></span>Codex · gpt-5.6-sol<span class="bn">n=6</span></div>
+      <div class="btrack"><div class="bfill" style="width:89.8%;background:rgb(136,202,120)"></div>
+        <span class="bv">89.8</span></div>
+      <div class="brng">85–93</div></div><div class="brow">
+      <div class="bl"><span class="dot f-claude"></span>Fable 5<span class="bn">n=5</span></div>
+      <div class="btrack"><div class="bfill" style="width:89.4%;background:rgb(139,202,119)"></div>
+        <span class="bv">89.4</span></div>
+      <div class="brng">84–93</div></div><div class="brow">
+      <div class="bl"><span class="dot f-ollama"></span>GLM-5.2 · Ollama<span class="bn">n=1</span></div>
+      <div class="btrack"><div class="bfill" style="width:88.0%;background:rgb(149,199,115)"></div>
+        <span class="bv">88</span></div>
+      <div class="brng">single run</div></div><div class="brow">
+      <div class="bl"><span class="dot f-codex"></span>Codex · gpt-5.5<span class="bn">n=4</span></div>
+      <div class="btrack"><div class="bfill" style="width:84.0%;background:rgb(179,192,103)"></div>
+        <span class="bv">84</span></div>
+      <div class="brng">77–87</div></div><div class="brow">
+      <div class="bl"><span class="dot f-ollama"></span>MiniMax-M3 · Ollama<span class="bn">n=3</span></div>
+      <div class="btrack"><div class="bfill" style="width:82.7%;background:rgb(188,190,99)"></div>
+        <span class="bv">82.7</span></div>
+      <div class="brng">79–87</div></div><div class="brow">
+      <div class="bl"><span class="dot f-claude"></span>Sonnet 5<span class="bn">n=5</span></div>
+      <div class="btrack"><div class="bfill" style="width:82.4%;background:rgb(191,190,98)"></div>
+        <span class="bv">82.4</span></div>
+      <div class="brng">74–90</div></div><div class="brow">
+      <div class="bl"><span class="dot f-claude"></span>Sonnet 4.6<span class="bn">n=5</span></div>
+      <div class="btrack"><div class="bfill" style="width:78.6%;background:rgb(219,183,87)"></div>
+        <span class="bv">78.6</span></div>
+      <div class="brng">72–85</div></div><div class="brow">
+      <div class="bl"><span class="dot f-ollama"></span>Kimi-K2.7 · Ollama<span class="bn">n=1</span></div>
+      <div class="btrack"><div class="bfill" style="width:72.0%;background:rgb(245,167,82)"></div>
+        <span class="bv">72</span></div>
+      <div class="brng">single run</div></div><div class="brow">
+      <div class="bl"><span class="dot f-claude"></span>Haiku 4.5<span class="bn">n=5</span></div>
+      <div class="btrack"><div class="bfill" style="width:63.4%;background:rgb(244,139,97)"></div>
+        <span class="bv">63.4</span></div>
+      <div class="brng">52–78</div></div></div>
+
+<h2><span class="num">03</span>Quality vs. cost</h2>
+<p class="sub">Each dot is one README: x = tokens the implement step emitted (verbosity / spend), y = composite quality. Up-and-left is the sweet spot — high quality without runaway output. Hover for the model and effort.</p>
+<svg viewBox="0 0 760 420" class="chart" role="img" aria-label="README quality vs implement output tokens">
+  <line x1="52" y1="20" x2="52" y2="376" class="grid"/><text x="52" y="392" class="axl" text-anchor="middle">0k</text><line x1="257" y1="20" x2="257" y2="376" class="grid"/><text x="257" y="392" class="axl" text-anchor="middle">10k</text><line x1="463" y1="20" x2="463" y2="376" class="grid"/><text x="463" y="392" class="axl" text-anchor="middle">20k</text><line x1="668" y1="20" x2="668" y2="376" class="grid"/><text x="668" y="392" class="axl" text-anchor="middle">30k</text><line x1="52" y1="344" x2="744" y2="344" class="grid"/><text x="44" y="348" class="axl" text-anchor="end">50</text><line x1="52" y1="279" x2="744" y2="279" class="grid"/><text x="44" y="283" class="axl" text-anchor="end">60</text><line x1="52" y1="214" x2="744" y2="214" class="grid"/><text x="44" y="218" class="axl" text-anchor="end">70</text><line x1="52" y1="149" x2="744" y2="149" class="grid"/><text x="44" y="153" class="axl" text-anchor="end">80</text><line x1="52" y1="85" x2="744" y2="85" class="grid"/><text x="44" y="89" class="axl" text-anchor="end">90</text><line x1="52" y1="20" x2="744" y2="20" class="grid"/><text x="44" y="24" class="axl" text-anchor="end">100</text>
+  <text x="398" y="414" class="axttl" text-anchor="middle">Implement step output tokens (verbosity / cost)</text>
+  <text x="14" y="198" class="axttl" text-anchor="middle" transform="rotate(-90 14 198)">README composite</text>
+  <circle cx="199.9" cy="168.9" r="5" class="pt f-claude"><title>Sonnet 4.6 · low — composite 77, 7200 out-tok</title></circle><circle cx="227.5" cy="201.2" r="5" class="pt f-claude"><title>Sonnet 4.6 · medium — composite 72, 8546 out-tok</title></circle><circle cx="262.6" cy="117.1" r="5" class="pt f-claude"><title>Sonnet 4.6 · high — composite 85, 10258 out-tok</title></circle><circle cx="226.5" cy="168.9" r="5" class="pt f-claude"><title>Sonnet 4.6 · xhigh — composite 77, 8499 out-tok</title></circle><circle cx="240.3" cy="136.5" r="5" class="pt f-claude"><title>Sonnet 4.6 · max — composite 82, 9168 out-tok</title></circle><circle cx="217.7" cy="123.6" r="5" class="pt f-claude"><title>Fable 5 · low — composite 84, 8070 out-tok</title></circle><circle cx="327.7" cy="84.7" r="5" class="pt f-claude"><title>Fable 5 · medium — composite 90, 13425 out-tok</title></circle><circle cx="310.8" cy="84.7" r="5" class="pt f-claude"><title>Fable 5 · high — composite 90, 12603 out-tok</title></circle><circle cx="333.5" cy="84.7" r="5" class="pt f-claude"><title>Fable 5 · xhigh — composite 90, 13706 out-tok</title></circle><circle cx="614.9" cy="65.3" r="5" class="pt f-claude"><title>Fable 5 · max — composite 93, 27410 out-tok</title></circle><circle cx="227.9" cy="168.9" r="5" class="pt f-codex"><title>Codex · gpt-5.5 · low — composite 77, 8565 out-tok</title></circle><circle cx="234.0" cy="104.1" r="5" class="pt f-codex"><title>Codex · gpt-5.5 · medium — composite 87, 8863 out-tok</title></circle><circle cx="243.3" cy="104.1" r="5" class="pt f-codex"><title>Codex · gpt-5.5 · high — composite 87, 9316 out-tok</title></circle><circle cx="399.5" cy="117.1" r="5" class="pt f-codex"><title>Codex · gpt-5.5 · xhigh — composite 85, 16921 out-tok</title></circle><circle cx="234.1" cy="104.1" r="5" class="pt f-codex"><title>Codex · gpt-5.6-sol · low — composite 87, 8870 out-tok</title></circle><circle cx="219.4" cy="84.7" r="5" class="pt f-codex"><title>Codex · gpt-5.6-sol · medium — composite 90, 8154 out-tok</title></circle><circle cx="365.1" cy="117.1" r="5" class="pt f-codex"><title>Codex · gpt-5.6-sol · high — composite 85, 15245 out-tok</title></circle><circle cx="557.0" cy="78.3" r="5" class="pt f-codex"><title>Codex · gpt-5.6-sol · xhigh — composite 91, 24594 out-tok</title></circle><circle cx="651.2" cy="65.3" r="5" class="pt f-codex"><title>Codex · gpt-5.6-sol · max — composite 93, 29182 out-tok</title></circle><circle cx="711.0" cy="65.3" r="5" class="pt f-codex"><title>Codex · gpt-5.6-sol · ultra — composite 93, 32094 out-tok</title></circle><circle cx="366.4" cy="162.4" r="5" class="pt f-claude"><title>Haiku 4.5 · low — composite 78, 15310 out-tok</title></circle><circle cx="222.1" cy="266.0" r="5" class="pt f-claude"><title>Haiku 4.5 · medium — composite 62, 8282 out-tok</title></circle><circle cx="211.7" cy="214.2" r="5" class="pt f-claude"><title>Haiku 4.5 · high — composite 70, 7779 out-tok</title></circle><circle cx="258.4" cy="311.3" r="5" class="pt f-claude"><title>Haiku 4.5 · xhigh — composite 55, 10049 out-tok</title></circle><circle cx="297.5" cy="330.7" r="5" class="pt f-claude"><title>Haiku 4.5 · max — composite 52, 11954 out-tok</title></circle><circle cx="208.2" cy="104.1" r="5" class="pt f-ollama"><title>MiniMax-M3 · Ollama · — — composite 87, 7607 out-tok</title></circle><circle cx="110.6" cy="136.5" r="5" class="pt f-ollama"><title>MiniMax-M3 · Ollama · — — composite 82, 2852 out-tok</title></circle><circle cx="86.4" cy="155.9" r="5" class="pt f-ollama"><title>MiniMax-M3 · Ollama · — — composite 79, 1677 out-tok</title></circle><circle cx="195.8" cy="188.3" r="5" class="pt f-claude"><title>Sonnet 5 · low — composite 74, 7005 out-tok</title></circle><circle cx="221.7" cy="175.3" r="5" class="pt f-claude"><title>Sonnet 5 · medium — composite 76, 8262 out-tok</title></circle><circle cx="285.2" cy="117.1" r="5" class="pt f-claude"><title>Sonnet 5 · high — composite 85, 11355 out-tok</title></circle><circle cx="266.7" cy="104.1" r="5" class="pt f-claude"><title>Sonnet 5 · xhigh — composite 87, 10454 out-tok</title></circle><circle cx="663.8" cy="84.7" r="5" class="pt f-claude"><title>Sonnet 5 · max — composite 90, 29793 out-tok</title></circle><circle cx="188.4" cy="84.7" r="5" class="pt f-zai"><title>GLM-5.2 · z.ai (1M) · low — composite 90, 6643 out-tok</title></circle><circle cx="221.6" cy="84.7" r="5" class="pt f-zai"><title>GLM-5.2 · z.ai (1M) · medium — composite 90, 8260 out-tok</title></circle><circle cx="297.9" cy="65.3" r="5" class="pt f-zai"><title>GLM-5.2 · z.ai (1M) · high — composite 93, 11974 out-tok</title></circle><circle cx="361.6" cy="65.3" r="5" class="pt f-zai"><title>GLM-5.2 · z.ai (1M) · max — composite 93, 15078 out-tok</title></circle><circle cx="265.7" cy="104.1" r="5" class="pt f-claude"><title>Opus 4.8 · low — composite 87, 10405 out-tok</title></circle><circle cx="280.1" cy="104.1" r="5" class="pt f-claude"><title>Opus 4.8 · medium — composite 87, 11109 out-tok</title></circle><circle cx="285.3" cy="104.1" r="5" class="pt f-claude"><title>Opus 4.8 · high — composite 87, 11363 out-tok</title></circle><circle cx="386.6" cy="32.9" r="5" class="pt f-claude"><title>Opus 4.8 · xhigh — composite 98, 16295 out-tok</title></circle><circle cx="484.5" cy="65.3" r="5" class="pt f-claude"><title>Opus 4.8 · max — composite 93, 21060 out-tok</title></circle><circle cx="194.2" cy="201.2" r="5" class="pt f-ollama"><title>Kimi-K2.7 · Ollama · — — composite 72, 6924 out-tok</title></circle><circle cx="235.8" cy="97.7" r="5" class="pt f-ollama"><title>GLM-5.2 · Ollama · — — composite 88, 8951 out-tok</title></circle></svg>
+<div class="legend"><span><span class="dot f-claude"></span>Anthropic</span><span><span class="dot f-codex"></span>OpenAI Codex</span><span><span class="dot f-zai"></span>z.ai / GLM</span><span><span class="dot f-ollama"></span>Ollama Cloud</span></div>
+
+<h2><span class="num">04</span>Does more effort buy better READMEs?</h2>
+<p class="sub">Composite vs reasoning effort, per model, for the two families swept across all levels. Mostly flat — effort barely moves README quality; model choice dominates.</p>
+<div class="swgrid"><div class="swcard"><h3>Anthropic — claude-code CLI</h3><div class="sw"><svg viewBox="0 0 340 150" class="chart"><line x1="30" y1="124" x2="330" y2="124" class="grid"/><text x="25" y="127" class="axs" text-anchor="end">50</text><line x1="30" y1="69" x2="330" y2="69" class="grid"/><text x="25" y="72" class="axs" text-anchor="end">75</text><line x1="30" y1="14" x2="330" y2="14" class="grid"/><text x="25" y="17" class="axs" text-anchor="end">100</text><text x="30" y="142" class="axs" text-anchor="middle">low</text><text x="90" y="142" class="axs" text-anchor="middle">med</text><text x="150" y="142" class="axs" text-anchor="middle">hig</text><text x="210" y="142" class="axs" text-anchor="middle">xhi</text><text x="270" y="142" class="axs" text-anchor="middle">max</text><text x="330" y="142" class="axs" text-anchor="middle">ult</text><path d="M30.0,42.6 L90.0,42.6 L150.0,42.6 L210.0,18.4 L270.0,29.4" class="ln f-claudes"/><circle cx="30.0" cy="42.6" r="3" class="pt f-claude"><title>Opus 4.8 low: 87</title></circle><circle cx="90.0" cy="42.6" r="3" class="pt f-claude"><title>Opus 4.8 medium: 87</title></circle><circle cx="150.0" cy="42.6" r="3" class="pt f-claude"><title>Opus 4.8 high: 87</title></circle><circle cx="210.0" cy="18.4" r="3" class="pt f-claude"><title>Opus 4.8 xhigh: 98</title></circle><circle cx="270.0" cy="29.4" r="3" class="pt f-claude"><title>Opus 4.8 max: 93</title></circle><path d="M30.0,71.2 L90.0,66.8 L150.0,47.0 L210.0,42.6 L270.0,36.0" class="ln f-claudes"/><circle cx="30.0" cy="71.2" r="3" class="pt f-claude"><title>Sonnet 5 low: 74</title></circle><circle cx="90.0" cy="66.8" r="3" class="pt f-claude"><title>Sonnet 5 medium: 76</title></circle><circle cx="150.0" cy="47.0" r="3" class="pt f-claude"><title>Sonnet 5 high: 85</title></circle><circle cx="210.0" cy="42.6" r="3" class="pt f-claude"><title>Sonnet 5 xhigh: 87</title></circle><circle cx="270.0" cy="36.0" r="3" class="pt f-claude"><title>Sonnet 5 max: 90</title></circle><path d="M30.0,64.6 L90.0,75.6 L150.0,47.0 L210.0,64.6 L270.0,53.6" class="ln f-claudes"/><circle cx="30.0" cy="64.6" r="3" class="pt f-claude"><title>Sonnet 4.6 low: 77</title></circle><circle cx="90.0" cy="75.6" r="3" class="pt f-claude"><title>Sonnet 4.6 medium: 72</title></circle><circle cx="150.0" cy="47.0" r="3" class="pt f-claude"><title>Sonnet 4.6 high: 85</title></circle><circle cx="210.0" cy="64.6" r="3" class="pt f-claude"><title>Sonnet 4.6 xhigh: 77</title></circle><circle cx="270.0" cy="53.6" r="3" class="pt f-claude"><title>Sonnet 4.6 max: 82</title></circle><path d="M30.0,62.4 L90.0,97.6 L150.0,80.0 L210.0,113.0 L270.0,119.6" class="ln f-claudes"/><circle cx="30.0" cy="62.4" r="3" class="pt f-claude"><title>Haiku 4.5 low: 78</title></circle><circle cx="90.0" cy="97.6" r="3" class="pt f-claude"><title>Haiku 4.5 medium: 62</title></circle><circle cx="150.0" cy="80.0" r="3" class="pt f-claude"><title>Haiku 4.5 high: 70</title></circle><circle cx="210.0" cy="113.0" r="3" class="pt f-claude"><title>Haiku 4.5 xhigh: 55</title></circle><circle cx="270.0" cy="119.6" r="3" class="pt f-claude"><title>Haiku 4.5 max: 52</title></circle><path d="M30.0,49.2 L90.0,36.0 L150.0,36.0 L210.0,36.0 L270.0,29.4" class="ln f-claudes"/><circle cx="30.0" cy="49.2" r="3" class="pt f-claude"><title>Fable 5 low: 84</title></circle><circle cx="90.0" cy="36.0" r="3" class="pt f-claude"><title>Fable 5 medium: 90</title></circle><circle cx="150.0" cy="36.0" r="3" class="pt f-claude"><title>Fable 5 high: 90</title></circle><circle cx="210.0" cy="36.0" r="3" class="pt f-claude"><title>Fable 5 xhigh: 90</title></circle><circle cx="270.0" cy="29.4" r="3" class="pt f-claude"><title>Fable 5 max: 93</title></circle></svg><div class="swleg"><span class="lg f-claudet">Opus 4.8</span> · <span class="lg f-claudet">Sonnet 5</span> · <span class="lg f-claudet">Sonnet 4.6</span> · <span class="lg f-claudet">Haiku 4.5</span> · <span class="lg f-claudet">Fable 5</span></div></div></div><div class="swcard"><h3>OpenAI — codex CLI</h3><div class="sw"><svg viewBox="0 0 340 150" class="chart"><line x1="30" y1="124" x2="330" y2="124" class="grid"/><text x="25" y="127" class="axs" text-anchor="end">50</text><line x1="30" y1="69" x2="330" y2="69" class="grid"/><text x="25" y="72" class="axs" text-anchor="end">75</text><line x1="30" y1="14" x2="330" y2="14" class="grid"/><text x="25" y="17" class="axs" text-anchor="end">100</text><text x="30" y="142" class="axs" text-anchor="middle">low</text><text x="90" y="142" class="axs" text-anchor="middle">med</text><text x="150" y="142" class="axs" text-anchor="middle">hig</text><text x="210" y="142" class="axs" text-anchor="middle">xhi</text><text x="270" y="142" class="axs" text-anchor="middle">max</text><text x="330" y="142" class="axs" text-anchor="middle">ult</text><path d="M30.0,64.6 L90.0,42.6 L150.0,42.6 L210.0,47.0" class="ln f-codexs"/><circle cx="30.0" cy="64.6" r="3" class="pt f-codex"><title>Codex · gpt-5.5 low: 77</title></circle><circle cx="90.0" cy="42.6" r="3" class="pt f-codex"><title>Codex · gpt-5.5 medium: 87</title></circle><circle cx="150.0" cy="42.6" r="3" class="pt f-codex"><title>Codex · gpt-5.5 high: 87</title></circle><circle cx="210.0" cy="47.0" r="3" class="pt f-codex"><title>Codex · gpt-5.5 xhigh: 85</title></circle><path d="M30.0,42.6 L90.0,36.0 L150.0,47.0 L210.0,33.8 L270.0,29.4 L330.0,29.4" class="ln f-codexs"/><circle cx="30.0" cy="42.6" r="3" class="pt f-codex"><title>Codex · gpt-5.6-sol low: 87</title></circle><circle cx="90.0" cy="36.0" r="3" class="pt f-codex"><title>Codex · gpt-5.6-sol medium: 90</title></circle><circle cx="150.0" cy="47.0" r="3" class="pt f-codex"><title>Codex · gpt-5.6-sol high: 85</title></circle><circle cx="210.0" cy="33.8" r="3" class="pt f-codex"><title>Codex · gpt-5.6-sol xhigh: 91</title></circle><circle cx="270.0" cy="29.4" r="3" class="pt f-codex"><title>Codex · gpt-5.6-sol max: 93</title></circle><circle cx="330.0" cy="29.4" r="3" class="pt f-codex"><title>Codex · gpt-5.6-sol ultra: 93</title></circle></svg><div class="swleg"><span class="lg f-codext">Codex · gpt-5.5</span> · <span class="lg f-codext">Codex · gpt-5.6-sol</span></div></div></div><div class="swcard"><h3>z.ai — GLM-5.2 (1M)</h3><div class="sw"><svg viewBox="0 0 340 150" class="chart"><line x1="30" y1="124" x2="330" y2="124" class="grid"/><text x="25" y="127" class="axs" text-anchor="end">50</text><line x1="30" y1="69" x2="330" y2="69" class="grid"/><text x="25" y="72" class="axs" text-anchor="end">75</text><line x1="30" y1="14" x2="330" y2="14" class="grid"/><text x="25" y="17" class="axs" text-anchor="end">100</text><text x="30" y="142" class="axs" text-anchor="middle">low</text><text x="90" y="142" class="axs" text-anchor="middle">med</text><text x="150" y="142" class="axs" text-anchor="middle">hig</text><text x="210" y="142" class="axs" text-anchor="middle">xhi</text><text x="270" y="142" class="axs" text-anchor="middle">max</text><text x="330" y="142" class="axs" text-anchor="middle">ult</text><path d="M30.0,36.0 L90.0,36.0 L150.0,29.4 L270.0,29.4" class="ln f-zais"/><circle cx="30.0" cy="36.0" r="3" class="pt f-zai"><title>GLM-5.2 · z.ai (1M) low: 90</title></circle><circle cx="90.0" cy="36.0" r="3" class="pt f-zai"><title>GLM-5.2 · z.ai (1M) medium: 90</title></circle><circle cx="150.0" cy="29.4" r="3" class="pt f-zai"><title>GLM-5.2 · z.ai (1M) high: 93</title></circle><circle cx="270.0" cy="29.4" r="3" class="pt f-zai"><title>GLM-5.2 · z.ai (1M) max: 93</title></circle></svg><div class="swleg"><span class="lg f-zait">GLM-5.2 · z.ai (1M)</span></div></div></div></div>
+
+<h2><span class="num">05</span>Best model per step</h2>
+<p class="sub">The pin recommendation for each LLM-involved step. ★ marks the recommended model (robustness guard: ≥2 runs). Implement is ranked by README quality; the other steps are functional, so they're ranked by fastest reliable (100%-success) median time.</p>
+<div class="stepcard">
+      <div class="sthead"><h3>Triage</h3>
+        <div class="pinbadge">pin → <b>Sonnet 4.6</b></div></div>
+      <p class="sub">Fast, cheap classification. The Anthropic models finish in ~12s; z.ai/GLM are 15–18× slower here and report no output tokens. Pin a cheap Claude model.</p>
+      <div class="tbl-scroll"><table class="pstep"><thead><tr><th class='l'>Model</th><th>Runs</th><th>Success</th><th>Median time</th><th>Median out-tok</th></tr></thead><tbody><tr class="hi"><td class="l"><span class="dot f-claude"></span>Sonnet 4.6 ★</td>
+          <td>5</td><td class="ok">100%</td><td>12s</td><td>70</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Sonnet 5</td>
+          <td>5</td><td class="ok">100%</td><td>12s</td><td>94</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Opus 4.8</td>
+          <td>5</td><td class="ok">100%</td><td>13s</td><td>276</td></tr><tr class=""><td class="l"><span class="dot f-ollama"></span>MiniMax-M3 · Ollama</td>
+          <td>3</td><td class="ok">100%</td><td>15s</td><td>227</td></tr><tr class=""><td class="l"><span class="dot f-ollama"></span>Kimi-K2.7 · Ollama</td>
+          <td>1</td><td class="ok">100%</td><td>21s</td><td>314</td></tr><tr class=""><td class="l"><span class="dot f-ollama"></span>GLM-5.2 · Ollama</td>
+          <td>1</td><td class="ok">100%</td><td>22s</td><td>354</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Haiku 4.5</td>
+          <td>5</td><td class="ok">100%</td><td>22s</td><td>1,075</td></tr><tr class=""><td class="l"><span class="dot f-codex"></span>Codex · gpt-5.6-sol</td>
+          <td>6</td><td class="ok">100%</td><td>25s</td><td>63</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Fable 5</td>
+          <td>5</td><td class="ok">100%</td><td>25s</td><td>533</td></tr><tr class=""><td class="l"><span class="dot f-codex"></span>Codex · gpt-5.5</td>
+          <td>4</td><td class="ok">100%</td><td>28s</td><td>189</td></tr><tr class=""><td class="l"><span class="dot f-zai"></span>GLM-5.2 · z.ai (1M)</td>
+          <td>4</td><td class="ok">100%</td><td>3.6m</td><td>0</td></tr></tbody></table></div></div><div class="stepcard">
+      <div class="sthead"><h3>Estimate</h3>
+        <div class="pinbadge">pin → <b>Sonnet 4.6</b></div></div>
+      <p class="sub">Same shape as triage — Sonnet 4.6 is fastest at ~16s. z.ai/GLM again far slower. Any Claude model is a safe pin.</p>
+      <div class="tbl-scroll"><table class="pstep"><thead><tr><th class='l'>Model</th><th>Runs</th><th>Success</th><th>Median time</th><th>Median out-tok</th></tr></thead><tbody><tr class="hi"><td class="l"><span class="dot f-claude"></span>Sonnet 4.6 ★</td>
+          <td>5</td><td class="ok">100%</td><td>16s</td><td>111</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Opus 4.8</td>
+          <td>5</td><td class="ok">100%</td><td>21s</td><td>333</td></tr><tr class=""><td class="l"><span class="dot f-codex"></span>Codex · gpt-5.6-sol</td>
+          <td>6</td><td class="ok">100%</td><td>24s</td><td>200</td></tr><tr class=""><td class="l"><span class="dot f-ollama"></span>Kimi-K2.7 · Ollama</td>
+          <td>1</td><td class="ok">100%</td><td>25s</td><td>418</td></tr><tr class=""><td class="l"><span class="dot f-ollama"></span>GLM-5.2 · Ollama</td>
+          <td>1</td><td class="ok">100%</td><td>26s</td><td>340</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Sonnet 5</td>
+          <td>5</td><td class="ok">100%</td><td>28s</td><td>995</td></tr><tr class=""><td class="l"><span class="dot f-codex"></span>Codex · gpt-5.5</td>
+          <td>4</td><td class="ok">100%</td><td>35s</td><td>641</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Fable 5</td>
+          <td>5</td><td class="ok">100%</td><td>35s</td><td>673</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Haiku 4.5</td>
+          <td>5</td><td class="ok">100%</td><td>36s</td><td>1,584</td></tr><tr class=""><td class="l"><span class="dot f-ollama"></span>MiniMax-M3 · Ollama</td>
+          <td>3</td><td class="ok">100%</td><td>1.1m</td><td>300</td></tr><tr class=""><td class="l"><span class="dot f-zai"></span>GLM-5.2 · z.ai (1M)</td>
+          <td>4</td><td class="ok">100%</td><td>3.5m</td><td>0</td></tr></tbody></table></div></div><div class="stepcard">
+      <div class="sthead"><h3>App-boot</h3>
+        <div class="pinbadge">pin → <b>MiniMax-M3 · Ollama</b></div></div>
+      <p class="sub">Getting the app running. MiniMax is fastest (~40s) but writes little; Sonnet 4.6 (~45s) is the fastest heavyweight and 100% reliable. fable and haiku each failed one app-boot here.</p>
+      <div class="tbl-scroll"><table class="pstep"><thead><tr><th class='l'>Model</th><th>Runs</th><th>Success</th><th>Median time</th><th>Median out-tok</th></tr></thead><tbody><tr class="hi"><td class="l"><span class="dot f-ollama"></span>MiniMax-M3 · Ollama ★</td>
+          <td>3</td><td class="ok">100%</td><td>40s</td><td>394</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Sonnet 4.6</td>
+          <td>5</td><td class="ok">100%</td><td>45s</td><td>756</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Sonnet 5</td>
+          <td>5</td><td class="ok">100%</td><td>55s</td><td>1,765</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Opus 4.8</td>
+          <td>4</td><td class="ok">100%</td><td>56s</td><td>1,478</td></tr><tr class=""><td class="l"><span class="dot f-ollama"></span>GLM-5.2 · Ollama</td>
+          <td>1</td><td class="ok">100%</td><td>1.6m</td><td>2,964</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Fable 5</td>
+          <td>5</td><td class="warn">80%</td><td>1.7m</td><td>2,142</td></tr><tr class=""><td class="l"><span class="dot f-ollama"></span>Kimi-K2.7 · Ollama</td>
+          <td>1</td><td class="ok">100%</td><td>1.7m</td><td>4,147</td></tr><tr class=""><td class="l"><span class="dot f-codex"></span>Codex · gpt-5.5</td>
+          <td>4</td><td class="ok">100%</td><td>1.9m</td><td>3,080</td></tr><tr class=""><td class="l"><span class="dot f-codex"></span>Codex · gpt-5.6-sol</td>
+          <td>6</td><td class="ok">100%</td><td>2.1m</td><td>3,186</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Haiku 4.5</td>
+          <td>5</td><td class="warn">80%</td><td>3.0m</td><td>8,542</td></tr><tr class=""><td class="l"><span class="dot f-zai"></span>GLM-5.2 · z.ai (1M)</td>
+          <td>4</td><td class="ok">100%</td><td>4.2m</td><td>2,174</td></tr></tbody></table></div></div><div class="stepcard">
+      <div class="sthead"><h3>Implement (writes README)</h3>
+        <div class="pinbadge">pin → <b>GLM-5.2 · z.ai (1M)</b></div></div>
+      <p class="sub">The README-writing step — pin by artifact quality, not speed. GLM-5.2 via z.ai leads on average (mean 91.5 across low→max, tightest spread 90–93); Opus is the robust Anthropic choice (n=5, mean 90.4, and the single best README at 98). MiniMax is very fast but its READMEs are short and shallow (82.7); Haiku is fastest-to-fail on quality (63.4).</p>
+      <div class="tbl-scroll"><table class="pstep"><thead><tr><th class='l'>Model</th><th>Runs</th><th>Success</th><th>Median time</th><th>Median out-tok</th><th>Avg README</th><th>Best</th></tr></thead><tbody><tr class="hi"><td class="l"><span class="dot f-zai"></span>GLM-5.2 · z.ai (1M) ★</td>
+          <td>4</td><td class="ok">100%</td><td>5.6m</td><td>10,117</td><td class="sc" style="--c:rgb(124,205,126)">91.5</td><td class="sub">93</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Opus 4.8</td>
+          <td>5</td><td class="ok">100%</td><td>3.5m</td><td>11,363</td><td class="sc" style="--c:rgb(132,203,122)">90.4</td><td class="sub">98</td></tr><tr class=""><td class="l"><span class="dot f-codex"></span>Codex · gpt-5.6-sol</td>
+          <td>6</td><td class="ok">100%</td><td>9.4m</td><td>19,920</td><td class="sc" style="--c:rgb(136,202,120)">89.8</td><td class="sub">93</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Fable 5</td>
+          <td>5</td><td class="warn">80%</td><td>6.1m</td><td>13,425</td><td class="sc" style="--c:rgb(139,202,119)">89.4</td><td class="sub">93</td></tr><tr class=""><td class="l"><span class="dot f-ollama"></span>GLM-5.2 · Ollama</td>
+          <td>1</td><td class="ok">100%</td><td>4.1m</td><td>8,951</td><td class="sc" style="--c:rgb(149,199,115)">88</td><td class="sub">88</td></tr><tr class=""><td class="l"><span class="dot f-codex"></span>Codex · gpt-5.5</td>
+          <td>4</td><td class="ok">100%</td><td>3.7m</td><td>9,090</td><td class="sc" style="--c:rgb(179,192,103)">84</td><td class="sub">87</td></tr><tr class=""><td class="l"><span class="dot f-ollama"></span>MiniMax-M3 · Ollama</td>
+          <td>3</td><td class="ok">100%</td><td>1.1m</td><td>2,852</td><td class="sc" style="--c:rgb(188,190,99)">82.7</td><td class="sub">87</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Sonnet 5</td>
+          <td>5</td><td class="ok">100%</td><td>3.2m</td><td>10,454</td><td class="sc" style="--c:rgb(191,190,98)">82.4</td><td class="sub">90</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Sonnet 4.6</td>
+          <td>5</td><td class="ok">100%</td><td>3.6m</td><td>8,546</td><td class="sc" style="--c:rgb(219,183,87)">78.6</td><td class="sub">85</td></tr><tr class=""><td class="l"><span class="dot f-ollama"></span>Kimi-K2.7 · Ollama</td>
+          <td>1</td><td class="ok">100%</td><td>2.5m</td><td>6,924</td><td class="sc" style="--c:rgb(245,167,82)">72</td><td class="sub">72</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Haiku 4.5</td>
+          <td>5</td><td class="warn">80%</td><td>4.0m</td><td>10,049</td><td class="sc" style="--c:rgb(244,139,97)">63.4</td><td class="sub">78</td></tr></tbody></table></div></div><div class="stepcard">
+      <div class="sthead"><h3>Validate</h3>
+        <div class="pinbadge">pin → <b>MiniMax-M3 · Ollama</b></div></div>
+      <p class="sub">Runtime smoke + fix loop. MiniMax is fastest reliable (~77s). Avoid gpt-5.6-sol here: median ~29 min and it timed out at ultra effort. Sonnet 4.6 (~4 min) is the fastest reliable heavyweight.</p>
+      <div class="tbl-scroll"><table class="pstep"><thead><tr><th class='l'>Model</th><th>Runs</th><th>Success</th><th>Median time</th><th>Median out-tok</th></tr></thead><tbody><tr class="hi"><td class="l"><span class="dot f-ollama"></span>MiniMax-M3 · Ollama ★</td>
+          <td>3</td><td class="ok">100%</td><td>1.3m</td><td>3,226</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Sonnet 4.6</td>
+          <td>5</td><td class="ok">100%</td><td>3.9m</td><td>12,552</td></tr><tr class=""><td class="l"><span class="dot f-codex"></span>Codex · gpt-5.5</td>
+          <td>4</td><td class="ok">100%</td><td>4.1m</td><td>11,299</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Haiku 4.5</td>
+          <td>5</td><td class="warn">80%</td><td>5.2m</td><td>18,570</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Opus 4.8</td>
+          <td>5</td><td class="ok">100%</td><td>5.2m</td><td>15,802</td></tr><tr class=""><td class="l"><span class="dot f-ollama"></span>Kimi-K2.7 · Ollama</td>
+          <td>1</td><td class="ok">100%</td><td>5.2m</td><td>17,703</td></tr><tr class=""><td class="l"><span class="dot f-zai"></span>GLM-5.2 · z.ai (1M)</td>
+          <td>4</td><td class="ok">100%</td><td>5.6m</td><td>12,224</td></tr><tr class=""><td class="l"><span class="dot f-ollama"></span>GLM-5.2 · Ollama</td>
+          <td>1</td><td class="ok">100%</td><td>6.0m</td><td>11,398</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Sonnet 5</td>
+          <td>5</td><td class="ok">100%</td><td>6.2m</td><td>20,725</td></tr><tr class=""><td class="l"><span class="dot f-claude"></span>Fable 5</td>
+          <td>5</td><td class="warn">80%</td><td>7.3m</td><td>22,987</td></tr><tr class=""><td class="l"><span class="dot f-codex"></span>Codex · gpt-5.6-sol</td>
+          <td>6</td><td class="warn">83%</td><td>29.5m</td><td>57,904</td></tr></tbody></table></div></div>
+<div class="note"><b>Reliability findings (captured, not resumed).</b> Three runs failed downstream of a completed, valid README: <b>haiku/high</b> and <b>fable/max</b> failed at <b>app-boot</b> (README harvested from the worktree), and <b>gpt-5.6-sol/ultra</b> timed out at <b>validate</b> (7 invocations, ~93 min). gpt-5.6-sol's validate step is a systematic cost sink (median ~29 min, 0.83 success). haiku/high and fable/max wrote their READMEs <b>without a booted app</b>, a small context disadvantage inherent to their result.</div>
+
+<h2><span class="num">06</span>Methodology &amp; provenance</h2>
+<ul class="meth">
+<li><b>Task set.</b> Every task titled "Add README" created after 2026-07-14 — 44 runs, one per (model, effort). Newer non-README tasks are excluded.</li>
+<li><b>Validity.</b> A README counts only if the newest <code>07-phase-2-implement</code> invocation's provider equals the task's headline provider (superseded-inclusive). This is provider-id based, so env-model providers (z.ai, Ollama) that set the model without a <code>--model</code> flag attribute correctly. All 44 are VALID.</li>
+<li><b>Quality scores</b> are source-verified 0–10 judgments (accuracy, completeness, clarity) against a fixed Redaction System ground-truth dossier, not measurements. Composite = accuracy×5 + completeness×3 + clarity×2. Accuracy anchors: ≤3 = major hallucination (invented framework/tests/PDO-mysqli/features); 7–8 = accurate + legacy <code>mysql_*</code> identified; 9–10 = fully accurate + honest caveats.</li>
+<li><b>Ground truth</b> verified against the actual source this session: no <code>.htaccess</code>/<code>RewriteRule</code> exists (aliases resolve via <code>404.php</code>+<code>RS_ALIAS_REDIRECT</code>, so "mod_rewrite routing" is a fabrication); the <code>History</code> class genuinely writes the <code>history</code> table (calling it an audit log is accurate); 13 of 14 re-run clones ship no <code>.ddev</code>, so "no DDEV" claims are correct and only Opus/max's clone legitimately documents DDEV.</li>
+<li><b>Cost metrics.</b> Duration and tokens are summed across every invocation of a step including superseded retries, so a rerun pays for failed attempts. Input is ~98% cache-read on the Claude family, so <b>output tokens + active duration</b> are the portable cross-model metrics; raw input/total counts are not comparable across providers.</li>
+<li><b>Per-step attribution.</b> Under <code>ignore_saved_step_clis</code> every step ran the task's headline model, so per-step metrics reflect that model. The <code>00-model-health-workflow</code> canary (fixed minimax-m3) is excluded.</li>
+<li><b>z.ai model label corrected.</b> The z.ai runs are labelled <b>GLM-5.2 · z.ai (1M)</b>, verified from every run's <code>stream_log</code> (<code>glm-5.2[1m]</code>) and the provider <code>ANTHROPIC_DEFAULT_SONNET_MODEL/OPUS_MODEL = glm-5.2[1m]</code> env. The z.ai CLI sets its model through those env vars; the stale <code>cli_providers.model = "glm-4.6"</code> text field does not drive the model and is <b>not</b> what ran. Earlier onboarding reports that labelled z.ai "GLM-4.6" are wrong (June runs were <code>glm-5.1[1m]</code>, July runs <code>glm-5.2[1m]</code>).</li>
+<li><b>Two GLM-5.2 deployments, kept distinct.</b> <b>GLM-5.2 · z.ai (1M)</b> (hosted 1M-context endpoint, swept low→max) and <b>GLM-5.2 · Ollama</b> (<code>glm-5.2:cloud</code>, single run) are the same base model served two ways; they are listed separately because that is the axis you pin on.</li>
+<li><b>Provenance.</b> Metrics from the Haive Postgres DB (<code>tasks</code>, <code>task_steps</code>, <code>cli_invocations</code>); README bodies from each task's <code>feature/readme-bench-*</code> git branch in the <code>haive_repos</code> volume; provider/effort resolved from <code>cli_providers</code> (<code>cli_args --model</code> / <code>effort_level</code>).</li>
+</ul>
+
+<footer>Haive README benchmark · generated 2026-07-16 · 44 runs · 11 models · self-contained, no external dependencies.</footer>
+</div>
+<script>
+// column sort
+(function(){
+ var t=document.getElementById('lead');if(!t)return;
+ var tb=t.tBodies[0];
+ // group lead+eviden rows
+ function pairs(){var r=[...tb.querySelectorAll('tr.lead')];return r.map(function(x){return [x,x.nextElementSibling];});}
+ var dir={};
+ t.querySelectorAll('th[data-k]').forEach(function(th){
+   th.addEventListener('click',function(){
+     var k=th.dataset.k;if(k==='rk')return;
+     t.querySelectorAll('th').forEach(function(o){o.classList.remove('sorted');});th.classList.add('sorted');
+     var num=(k!=='m'&&k!=='ef'&&k!=='tid');
+     dir[k]=!dir[k];var s=dir[k]?1:-1;
+     var pr=pairs();
+     pr.sort(function(a,b){
+       var av,bv;
+       if(k==='m'){av=a[0].querySelector('.ml').textContent;bv=b[0].querySelector('.ml').textContent;}
+       else if(k==='ef'){av=a[0].querySelector('.ef').textContent;bv=b[0].querySelector('.ef').textContent;}
+       else if(k==='tid'){av=a[0].querySelector('.tid').textContent;bv=b[0].querySelector('.tid').textContent;}
+       else{av=+a[0].dataset[{c:'c',a:'a',cm:'cm',cl:'cl',h:'h'}[k]];bv=+b[0].dataset[{c:'c',a:'a',cm:'cm',cl:'cl',h:'h'}[k]];}
+       if(num)return (av-bv)*s; return av<bv?-1*s:av>bv?1*s:0;
+     });
+     pr.forEach(function(p){tb.appendChild(p[0]);tb.appendChild(p[1]);});
+     // renumber
+     tb.querySelectorAll('tr.lead .rk').forEach(function(c,i){c.textContent=i+1;});
+   });
+ });
+ // expand evidence
+ tb.addEventListener('click',function(e){
+   var b=e.target.closest('.xb');if(!b)return;
+   var ev=b.closest('tr.lead').nextElementSibling;
+   var open=!ev.hasAttribute('hidden');
+   if(open){ev.setAttribute('hidden','');b.textContent='+';}else{ev.removeAttribute('hidden');b.textContent='–';}
+ });
+})();
+</script>
+</body></html>

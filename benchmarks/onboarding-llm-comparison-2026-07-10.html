@@ -229,7 +229,7 @@
     <ul style="margin:6px 0;padding-left:18px;font-size:13.5px;line-height:1.5">
       <li><b>Claude KB:</b> +8 local files (15&rarr;23) but KB &minus;0.5 &mdash; deeper, not more correct; global promotions actually fell 8&rarr;4.</li>
       <li><b>MiniMax skills:</b> +1 family (8&rarr;9) but skills &minus;2.5 &mdash; the extra guide fabricates a rank/CSRF API.</li>
-      <li><b>glm-4.6 &amp; glm-5.2:</b> more output tokens, yet no dimension improved and neither promoted anything global (composite &minus;0.83, &minus;0.45).</li>
+      <li><b>glm-5.2 (z.ai) &amp; glm-5.2 (Ollama):</b> more output tokens, yet no dimension improved and neither promoted anything global (composite &minus;0.83, &minus;0.45) &mdash; the z.ai drop spans a glm-5.1&rarr;glm-5.2 version change, while the Ollama run is the same glm-5.2:cloud model in both periods.</li>
     </ul>
   </div>
 </div>
@@ -241,10 +241,10 @@
 <table class="mini">
   <thead><tr><th>Onboarding step</th><th style="text-align:left">Winner</th><th>Score</th><th style="text-align:left">Runner-up</th><th style="text-align:left">Why the winner</th></tr></thead>
   <tbody>
-    <tr><td style="text-align:left">Stack detection (01/02/04)</td><td style="text-align:left"><b>Claude / Codex / MiniMax</b></td><td>9.0</td><td style="text-align:left">Kimi / GLM-5.2 (8.5)</td><td style="text-align:left">Correct PHP/MySQL/no-framework/no-tests judgment; Claude resolves Apache, Codex resolves PHP ceiling, MiniMax resolves docroot</td></tr>
-    <tr><td style="text-align:left">Agent discovery (06_5)</td><td style="text-align:left"><b>Codex</b></td><td>9.5</td><td style="text-align:left">Claude / GLM-5.2 (8.5)</td><td style="text-align:left">Four distinct grounded agents: MySQL, FCKeditor, legacy PHP, legacy JavaScript; no invented technology or API</td></tr>
-    <tr><td style="text-align:left">Knowledge base (08)</td><td style="text-align:left"><b>Claude</b></td><td>9.0</td><td style="text-align:left">Codex / Kimi / GLM-5.2 (8.5)</td><td style="text-align:left">Best balance of source depth, subsystem coverage, and low defect density</td></tr>
-    <tr><td style="text-align:left">Skill generation (09_5)</td><td style="text-align:left"><b>Claude / Codex / GLM-5.2</b></td><td>9.0</td><td style="text-align:left">Kimi / GLM-4.6 (8.5)</td><td style="text-align:left">Actionable, domain-specific guides with verified bug-level findings; each still has localized contract errors</td></tr>
+    <tr><td style="text-align:left">Stack detection (01/02/04)</td><td style="text-align:left"><b>Claude / Codex / MiniMax</b></td><td>9.0</td><td style="text-align:left">Kimi / GLM-5.2·Ollama (8.5)</td><td style="text-align:left">Correct PHP/MySQL/no-framework/no-tests judgment; Claude resolves Apache, Codex resolves PHP ceiling, MiniMax resolves docroot</td></tr>
+    <tr><td style="text-align:left">Agent discovery (06_5)</td><td style="text-align:left"><b>Codex</b></td><td>9.5</td><td style="text-align:left">Claude / GLM-5.2·Ollama (8.5)</td><td style="text-align:left">Four distinct grounded agents: MySQL, FCKeditor, legacy PHP, legacy JavaScript; no invented technology or API</td></tr>
+    <tr><td style="text-align:left">Knowledge base (08)</td><td style="text-align:left"><b>Claude</b></td><td>9.0</td><td style="text-align:left">Codex / Kimi / GLM-5.2·Ollama (8.5)</td><td style="text-align:left">Best balance of source depth, subsystem coverage, and low defect density</td></tr>
+    <tr><td style="text-align:left">Skill generation (09_5)</td><td style="text-align:left"><b>Claude / Codex / GLM-5.2·Ollama</b></td><td>9.0</td><td style="text-align:left">Kimi / GLM-5.2·z.ai (8.5)</td><td style="text-align:left">Actionable, domain-specific guides with verified bug-level findings; each still has localized contract errors</td></tr>
     <tr><td style="text-align:left">Global-KB promotion</td><td style="text-align:left"><b>Claude / Kimi</b></td><td>8.0</td><td style="text-align:left">others (6.0)</td><td style="text-align:left">Portable and project-clean routing, but PHP-version and MariaDB factual defects cap both runs</td></tr>
   </tbody>
 </table>
@@ -260,14 +260,14 @@
   <div class="box">
     <h3>Correctness failures</h3>
     <div class="flag"><b>MiniMax M3</b> &mdash; fabricated a complete rank/CSRF contract: nonexistent <code>GetRank()</code>, <code>SetRank()</code>, <code>CheckSecHash()</code>, rank constants, <code>admins.rank</code>, and hidden form tokens. Its Reports Wizard skill also reverses DB-prefix behavior and uses PHP 7 <code>??</code> syntax.</div>
-    <div class="flag"><b>GLM-4.6</b> &mdash; repeatedly reverses the edit-lock timeout behavior even while citing the correct source lines. Its module agent invents a <code>Mods</code> class and file-backed settings; its KB also claims FCKeditor sanitizes HTML although the input helper merely skips sanitization.</div>
+    <div class="flag"><b>GLM-5.2·z.ai</b> &mdash; repeatedly reverses the edit-lock timeout behavior even while citing the correct source lines. Its module agent invents a <code>Mods</code> class and file-backed settings; its KB also claims FCKeditor sanitizes HTML although the input helper merely skips sanitization.</div>
     <div class="flag"><b>Codex</b> &mdash; otherwise precise KB quick references invent six function signatures, including incorrect <code>Insert</code>/<code>Update</code>/<code>Delete</code>/<code>lockTables</code> parameters, and its edit-lock article reverses the same timeout bug.</div>
   </div>
   <div class="box">
     <h3>Routing, portability, and review</h3>
     <div class="note"><b>Global PHP 5 articles</b> from Kimi and later Claude contain PHP 7/7.3-only APIs (<code>unserialize</code> options and array-form <code>session_set_cookie_params</code>) and an overbroad Argon2 recommendation. Portable does not automatically mean version-correct.</div>
     <div class="note"><b>Sandbox-path leaks</b> remain: nine references in Kimi&rsquo;s rank skill and four in MiniMax&rsquo;s alias skill point to <code>/haive/workdir</code>.</div>
-    <div class="note"><b>Broken links</b>: MiniMax has 19 broken skill links; GLM-4.6 and Kimi each have four; Codex has three. The deterministic verification step passed them because it checks structure, not every link target.</div>
+    <div class="note"><b>Broken links</b>: MiniMax has 19 broken skill links; GLM-5.2·z.ai and Kimi each have four; Codex has three. The deterministic verification step passed them because it checks structure, not every link target.</div>
     <div class="note"><b>Final review missed every issue above.</b> All six review steps reported completion from counts/expected paths. Source-level audit remains necessary; a green pipeline is not an accuracy verdict.</div>
   </div>
 </div>
@@ -275,10 +275,10 @@
 <h2><span class="num">07</span>Recommendations</h2>
 <ol class="recs">
   <li><b>Default / highest-stakes onboarding: Claude Code.</b> Best composite (8.78), no weak local dimension, and the best balance of depth and global routing. Budget 84.5 active CLI minutes and audit the promoted version-specific guidance.</li>
-  <li><b>High-throughput default: GLM-5.2.</b> It delivers 8.25 correctness in 31.8 minutes, about 2.5x Claude&rsquo;s correctness per compute minute. Add an explicit global-promotion pass and verify theme/form contracts.</li>
+  <li><b>High-throughput default: GLM-5.2 (Ollama).</b> It delivers 8.25 correctness in 31.8 minutes, about 2.5x Claude&rsquo;s correctness per compute minute. Add an explicit global-promotion pass and verify theme/form contracts.</li>
   <li><b>Best alternative for agent coverage: Codex.</b> Second overall (8.50), best discovered agents, strong bug-level skills, and moderate compute. Fix the KB API-reference signatures before trusting it as a reference.</li>
   <li><b>Use Kimi when global routing matters.</b> It made the broadest portable promotion set and stayed third overall. Its version-scoped global advice and sandbox paths require review.</li>
-  <li><b>Do not select on artifact volume.</b> MiniMax produced the most skills and GLM-4.6 produced very long skills, yet both fall into the lower tier because coherent-looking guides reverse or invent contracts.</li>
+  <li><b>Do not select on artifact volume.</b> MiniMax produced the most skills and GLM-5.2·z.ai produced very long skills, yet both fall into the lower tier because coherent-looking guides reverse or invent contracts.</li>
 </ol>
 
 <details class="method">
@@ -350,7 +350,7 @@ const LEGACY_DATA = [
        `Only 3-4 skills`,
        `Cited one non-existent path (installer/actions_step_2.php)`]},
 
- {id:"glm-4.6",name:"glm-4.6 (z.ai)",prov:"Z.AI · glm-4.6",tier:"A",
+ {id:"glm-zai",name:"glm-5.1 (z.ai)",prov:"Z.AI · glm-5.1[1m]",tier:"A",
   composite:8.58,detect:8.5,kb:9.0,skills:9.5,agents:9.0,global:6.0,
   cliMin:79.2,wallMin:157.4,idleMin:22.5,outTok:134395,kbLocal:30,kbGlobal:0,skillsN:5,agentsDisc:3,
   pro:[`Densest, security-grade skills (flagged the math-captcha eval() guard; decoded encryptPW=md5(crypt()))`,
@@ -358,18 +358,18 @@ const LEGACY_DATA = [
        `Deepest KB content (30 files, verified not padded)`],
   con:[`Slowest compute by far: ~79 min (about 2x the median), slow even on trivial steps`,
        `30 local KB files / 0 promoted - no local-vs-global routing`,
-       `Superseded by glm-5.2: same-or-better quality at ~1/3 the compute (29 vs 79 min)`]},
+       `Beaten by Ollama's glm-5.2:cloud: same-or-better quality at ~1/3 the compute (29 vs 79 min) - different provider, not a newer sibling`]},
 
- {id:"glm-5.2",name:"glm-5.2 (z.ai)",prov:"Ollama Cloud · glm-5.2:cloud",tier:"A",
+ {id:"glm-5.2",name:"glm-5.2 (Ollama)",prov:"Ollama Cloud · glm-5.2:cloud",tier:"A",
   composite:8.70,detect:8.5,kb:9.5,skills:9.5,agents:9.0,global:6.0,
   cliMin:29.4,wallMin:29.7,idleMin:6.4,outTok:109819,kbLocal:35,kbGlobal:0,skillsN:5,agentsDisc:3,
-  pro:[`Matches or beats its sibling glm-4.6 across the board - at 2.7x the speed (29 vs 79 min compute)`,
-       `Deepest KB of the field (35 files, +26% words vs glm-4.6, ~15/15 claims verified) - not padded; covers jquery + recaptcha subsystems others skipped`,
+  pro:[`Matches or beats z.ai's glm-5.1[1m] across the board - at 2.7x the speed (29 vs 79 min compute)`,
+       `Deepest KB of the field (35 files, +26% words vs z.ai's glm-5.1, ~15/15 claims verified) - not padded; covers jquery + recaptcha subsystems others skipped`,
        `Top-tier skills (9.5): security-grade encryptPW=md5(crypt()) decode; forms-wizard newform table lifecycle`,
        `Rejected the Jest false-positive; wrote a standalone TESTING_STANDARDS.md debunk`,
        `Fast: 29 min compute, low idle, no degraded steps`],
   con:[`Promoted nothing to global KB (35 local / 0 global) - no local-vs-global routing`,
-       `Left webserver/docroot null in detection (glm-4.6 resolved them)`,
+       `Left webserver/docroot null in detection (z.ai's glm-5.1 resolved them)`,
        `3 discovered agents (mysql, fckeditor, installer) - missed the YUI/theme layers deepseek caught`,
        `Cosmetic "(calypso)" codename label in KB headers (unverified, not load-bearing)`]},
 
@@ -455,7 +455,7 @@ const DATA = [
     con:["Global PHP 5 advice includes PHP 7/7.3-only APIs and Argon2; MariaDB FK-index guidance is wrong", "Nine <code>/haive/workdir</code> paths leak into one skill, plus four broken links", "Local KB undercovers edit locks, history/SEO, multilingual behavior, and FCKeditor", "Localized contract errors misstate module state, captcha data, registration login, and upload/insert ordering"]
   },
   {
-    id:"glm-5.2", name:"glm-5.2", prov:"Ollama Cloud / glm-5.2:cloud", tier:"A",
+    id:"glm-5.2", name:"glm-5.2 (Ollama)", prov:"Ollama Cloud / glm-5.2:cloud", tier:"A",
     detect:8.5, kb:8.5, skills:9.0, agents:8.5, global:6.0,
     cliMin:31.8, wallMin:93.6, idleMin:66.5, outTok:144287, kbLocal:29, kbGlobal:0, skillsN:5, agentsDisc:4,
     done:21, skipped:4, invocations:23, retries:0, taskId:"72ca3363-6f5c-4d37-92f0-ed50f0f90cd2", labelDx:0, labelDy:-24,
@@ -463,7 +463,7 @@ const DATA = [
     con:["No global promotions despite 29 local KB files", "Detection leaves webserver/docroot unresolved and leaks the harness's DDEV/MariaDB values into testing guidance", "Theme agent invents helpers/cached files; several KB and skill claims reverse real bootstrap, prefix, and form-save behavior"]
   },
   {
-    id:"glm-4.6", name:"glm-4.6", prov:"Z.AI / glm-4.6", tier:"B",
+    id:"glm-zai", name:"glm-5.2 (z.ai, 1M)", prov:"Z.AI / glm-5.2[1m]", tier:"B",
     detect:8.0, kb:8.0, skills:8.5, agents:7.5, global:6.0,
     cliMin:86.3, wallMin:114.0, idleMin:66.3, outTok:214493, kbLocal:21, kbGlobal:0, skillsN:6, agentsDisc:4,
     done:21, skipped:4, invocations:23, retries:0, taskId:"75390f27-0fb0-4623-a44e-6d02a115bb83", labelDx:-8, labelDy:-22,
