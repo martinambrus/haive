@@ -18,6 +18,11 @@ import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
 import { loadPreviousStepOutput, pathExists } from './steps/onboarding/_helpers.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
+import {
+  classifyDagIssueFailure,
+  dagEnvironmentHaltReason,
+  DAG_INFRA_EXHAUSTED_MARKER,
+} from './dag-failure-class.js';
 import { killCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
 import type { DagCoderContext, StepContext, StepDefinition } from './step-definition.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
@@ -222,6 +227,11 @@ function safeJsonParse(text: string): unknown {
   }
 }
 
+/** Max TRANSIENT (killed / orphaned / timed-out) re-dispatches of an issue's coder
+ *  before its failure is treated as an ENVIRONMENT halt. Bounds auto-recovery so an
+ *  issue that keeps killing its runner (e.g. a persistent OOM) can't loop forever. */
+const DAG_MAX_INFRA_RETRIES = 2;
+
 /** Parse a coder's ISSUE_RESULT_JSON. Structured output is the completion
  *  contract: an exit-0 prose response is not evidence that implementation
  *  happened, so malformed/missing JSON fails closed. */
@@ -255,28 +265,18 @@ export function parseCoderResult(inv: typeof schema.cliInvocations.$inferSelect)
   };
 }
 
-const DAG_INFRASTRUCTURE_FAILURE =
-  /(?:\bEACCES\b|\bEPERM\b|permission denied|read-only file system|operation not permitted|root:root|root-owned|workspace[^\n]{0,80}unwritable|worktree[^\n]{0,80}unwritable|unable to write|cannot write|without a valid ISSUE_RESULT_JSON|no ISSUE_RESULT_JSON parsed|no valid reviewer verdict|no cli provider available)/i;
+// Failure classification (transient / environment / genuine) lives in
+// ./dag-failure-class.ts. Only an ENVIRONMENT failure halts here; a killed agent is
+// re-dispatched (step C / ingestReviewRun) and a clean contract violation escalates.
 
-/** A failed issue caused by the execution environment/protocol rather than the
- *  implementation approach. These must stop the DAG, not enter the advisor's
- *  accept-with-debt path. */
-export function dagInfrastructureFailureReason(issue: {
-  concerns?: string | null;
-  errorMessage?: string | null;
-}): string | null {
-  const detail = [issue.errorMessage, issue.concerns].filter(Boolean).join('; ').trim();
-  return detail && DAG_INFRASTRUCTURE_FAILURE.test(detail) ? detail : null;
-}
-
-async function haltForDagInfrastructureFailures(
+async function haltForDagEnvironmentFailures(
   db: Database,
   current: TaskStepRow,
   level: number,
   issues: DagIssueRow[],
 ): Promise<{ row: TaskStepRow; error: string } | null> {
   const failures = issues
-    .map((issue) => ({ issue, reason: dagInfrastructureFailureReason(issue) }))
+    .map((issue) => ({ issue, reason: dagEnvironmentHaltReason(issue) }))
     .filter((entry): entry is { issue: DagIssueRow; reason: string } => entry.reason !== null);
   if (failures.length === 0) return null;
 
@@ -284,9 +284,13 @@ async function haltForDagInfrastructureFailures(
     .map(({ issue, reason }) => `${issue.issueKey}: ${reason}`)
     .join(' | ')
     .slice(0, 2000);
+  // Actionable, not just "infrastructure failure": these are environment problems the
+  // user (or an admin) fixes, then a plain Retry resumes — root-owned worktrees need a
+  // permission repair; a repeatedly-killed coder (DAG_INFRA_EXHAUSTED) usually means the
+  // runner OOM-killed it, so raise RUNTIME_MEMORY_MB or reduce the issue's scope.
   const error =
-    `DAG infrastructure failure at level ${level}; refusing to accept it as implementation debt. ` +
-    detail;
+    `DAG halted at level ${level}: the execution environment blocked the work (not an ` +
+    `implementation problem). Fix the cause below, then Retry. ${detail}`;
   const row = await setStepStatus(db, current.id, {
     status: 'failed',
     errorMessage: error,
@@ -809,6 +813,35 @@ async function ingestReviewRun(
   if (run.role === 'reviewer') {
     const verdict = parseReviewerOutput(inv);
     if (!verdict) {
+      // A killed/orphaned reviewer never produced a verdict — re-run it (bounded by the
+      // shared infra_retries budget), the same crash-resume the coder path gets, rather
+      // than failing the issue on a transient event.
+      const cls = classifyDagIssueFailure({
+        exitCode: inv.exitCode,
+        errorMessage: inv.errorMessage,
+      });
+      if (cls === 'transient' && issue.infraRetries < DAG_MAX_INFRA_RETRIES) {
+        await ra.db
+          .update(schema.taskDagIssues)
+          .set({ infraRetries: issue.infraRetries + 1, updatedAt: new Date() })
+          .where(eq(schema.taskDagIssues.id, issue.id));
+        const ok = await spawnReviewAgent(
+          ra,
+          issue,
+          'reviewer',
+          issue.innerIteration,
+          reviewerPrompt(issue),
+          ['tool_use'],
+        );
+        if (!ok)
+          await setResolution(
+            ra.db,
+            issue,
+            'failed_unrecoverable',
+            'no cli provider available for reviewer re-dispatch',
+          );
+        return;
+      }
       return setResolution(
         ra.db,
         issue,
@@ -1624,6 +1657,49 @@ export async function resolveDagPhase(
           continue;
         }
         const result = parseCoderResult(inv);
+        // A coder that produced no usable result: was it KILLED (re-dispatch) or a real
+        // failure (persist, then halt/escalate)? A killed/orphaned/timed-out coder never
+        // finished, so re-running it — bounded by infra_retries — honours the DAG's
+        // crash-resume contract instead of freezing the level on a transient event.
+        if (result.outcome === 'failed_unrecoverable') {
+          const cls = classifyDagIssueFailure({
+            exitCode: inv.exitCode,
+            errorMessage: inv.errorMessage,
+          });
+          if (cls === 'transient' && issue.infraRetries < DAG_MAX_INFRA_RETRIES) {
+            await db
+              .update(schema.taskDagIssues)
+              .set({
+                outcome: 'pending',
+                cliInvocationId: null,
+                infraRetries: issue.infraRetries + 1,
+                concerns: null,
+                errorMessage: null,
+                rawOutput: null,
+                startedAt: null,
+                endedAt: null,
+                updatedAt: new Date(),
+              })
+              .where(eq(schema.taskDagIssues.id, issue.id));
+            await db
+              .update(schema.cliInvocations)
+              .set({ consumedAt: new Date() })
+              .where(eq(schema.cliInvocations.id, inv.id));
+            ctx.logger.info(
+              { issueKey: issue.issueKey, attempt: issue.infraRetries + 1 },
+              'dag coder killed/orphaned — re-dispatching',
+            );
+            continue; // re-dispatched by step (B) on the next loop pass
+          }
+          if (cls === 'transient') {
+            // Re-dispatch budget spent: a persistently-killed coder is an environment
+            // problem (usually a runner OOM). Stamp the marker the ENVIRONMENT halt reads.
+            result.concerns =
+              `${DAG_INFRA_EXHAUSTED_MARKER}: ${issue.issueKey} coder was killed/orphaned ` +
+              `${issue.infraRetries + 1} times without completing (worker restart or runner ` +
+              `OOM). Not retrying — raise RUNTIME_MEMORY_MB or reduce the issue's scope.`;
+          }
+        }
         await db
           .update(schema.taskDagIssues)
           .set({
@@ -1650,19 +1726,19 @@ export async function resolveDagPhase(
     // (D) Coder failures. With the escalation path (review on) mark them so the
     // issue-advisor can act; otherwise fail the step (recovery via retry/retry_ai).
     const coderFailed = issues.filter((i) => i.outcome === 'failed_unrecoverable');
-    const coderInfrastructureFailure = await haltForDagInfrastructureFailures(
+    const coderEnvHalt = await haltForDagEnvironmentFailures(
       db,
       current,
       curLevel.level,
       coderFailed,
     );
-    if (coderInfrastructureFailure) {
+    if (coderEnvHalt) {
       return {
         resolved: false,
         result: {
           status: 'failed',
-          row: coderInfrastructureFailure.row,
-          error: coderInfrastructureFailure.error,
+          row: coderEnvHalt.row,
+          error: coderEnvHalt.error,
         },
       };
     }
@@ -1716,19 +1792,19 @@ export async function resolveDagPhase(
       current = review.row;
       issues = await reReadLevel();
 
-      const reviewInfrastructureFailure = await haltForDagInfrastructureFailures(
+      const reviewEnvHalt = await haltForDagEnvironmentFailures(
         db,
         current,
         curLevel.level,
         issues.filter((i) => i.resolution === 'failed_unrecoverable'),
       );
-      if (reviewInfrastructureFailure) {
+      if (reviewEnvHalt) {
         return {
           resolved: false,
           result: {
             status: 'failed',
-            row: reviewInfrastructureFailure.row,
-            error: reviewInfrastructureFailure.error,
+            row: reviewEnvHalt.row,
+            error: reviewEnvHalt.error,
           },
         };
       }

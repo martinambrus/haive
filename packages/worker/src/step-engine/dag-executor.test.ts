@@ -4,11 +4,11 @@ import {
   issuePaths,
   pickFatalProviderError,
   fixRequiredIsCosmetic,
-  dagInfrastructureFailureReason,
   parseReviewerOutput,
   parseAdvisor,
   parseReplanner,
 } from './dag-executor.js';
+import { dagEnvironmentHaltReason } from './dag-failure-class.js';
 import { PROVIDER_FATAL_HEADLINES } from '../queues/cli-exec/failure-class.js';
 import type { StepContext } from './step-definition.js';
 import type { ReviewerOutput } from '@haive/shared';
@@ -57,29 +57,42 @@ describe('parseCoderResult', () => {
   });
 });
 
-describe('dagInfrastructureFailureReason', () => {
-  it('classifies the root-owned EACCES failure from DAG issue worktrees', () => {
+describe('dagEnvironmentHaltReason', () => {
+  it('halts on the root-owned EACCES failure from DAG issue worktrees', () => {
     expect(
-      dagInfrastructureFailureReason({
+      dagEnvironmentHaltReason({
         concerns: 'Worktree is root:root mode 0755 and every write returned EACCES.',
       }),
     ).toContain('root:root');
   });
 
-  it('classifies missing structured coder output as a protocol failure', () => {
+  it('halts on a transient re-dispatch exhausted (repeatedly-killed) coder', () => {
     expect(
-      dagInfrastructureFailureReason({
-        concerns: 'coder exited 0 without a valid ISSUE_RESULT_JSON; refusing to infer success',
+      dagEnvironmentHaltReason({
+        concerns: 'DAG_INFRA_EXHAUSTED: ISSUE-004 coder was killed/orphaned 3 times',
       }),
-    ).not.toBeNull();
-    expect(
-      dagInfrastructureFailureReason({ concerns: 'coder exited -1; no ISSUE_RESULT_JSON parsed' }),
     ).not.toBeNull();
   });
 
-  it('does not classify an ordinary implementation failure', () => {
+  it('does NOT halt on a clean contract violation (missing result JSON) — that escalates', () => {
     expect(
-      dagInfrastructureFailureReason({
+      dagEnvironmentHaltReason({
+        concerns: 'coder exited 0 without a valid ISSUE_RESULT_JSON; refusing to infer success',
+      }),
+    ).toBeNull();
+  });
+
+  it('does NOT halt on a killed/orphaned coder — that is re-dispatched', () => {
+    expect(
+      dagEnvironmentHaltReason({
+        errorMessage: 'CLI invocation orphaned by a worker restart (worker exited mid-run)',
+      }),
+    ).toBeNull();
+  });
+
+  it('does not halt on an ordinary implementation failure', () => {
+    expect(
+      dagEnvironmentHaltReason({
         concerns: 'The proposed parser cannot satisfy the backwards-compatibility requirement.',
       }),
     ).toBeNull();
