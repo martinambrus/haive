@@ -1137,7 +1137,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     signal: controller.signal,
     throwIfCancelled,
     async emitProgress(message: string) {
-      await updateRow(db, row.id, { statusMessage: message });
+      // Cosmetic status-line write. Best-effort: emitters fire this and discard the
+      // promise (`void ctx.emitProgress(...)` on a setInterval heartbeat, per-file RAG
+      // sync, etc.), so a transient DB/DNS blip here (e.g. `EAI_AGAIN postgres`) would
+      // reject unhandled and kill the whole worker — freezing every task. Swallow + log.
+      try {
+        await updateRow(db, row.id, { statusMessage: message });
+      } catch (err) {
+        log.warn({ err, taskId, taskStepId: row.id }, 'progress update failed (non-fatal)');
+      }
     },
   };
 

@@ -200,6 +200,15 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
 }
 
+// A stray fire-and-forget rejection (e.g. a void'd cosmetic progress heartbeat losing
+// its postgres lookup on a transient DNS blip) must NOT kill the worker: in dev it runs
+// under `tsx watch`, which does not restart on a crash, so one unhandled rejection
+// freezes every task until a source edit. Log it and keep the queues running; real bugs
+// still surface loudly.
+process.on('unhandledRejection', (reason) => {
+  logger.error({ err: reason }, 'unhandled promise rejection (worker kept alive)');
+});
+
 main().catch((err) => {
   logger.error({ err }, 'worker bootstrap failed');
   process.exit(1);
