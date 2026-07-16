@@ -644,6 +644,16 @@ export const cliInvocations = pgTable(
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),
     index('cli_invocations_task_step_id_idx').on(table.taskStepId),
+    // At most one LIVE non-mining invocation per step. Closes the TOCTOU race in
+    // resolveLlmPhase's dispatch guard (see migration 0096): a second concurrent
+    // live insert fails with 23505 and the dispatch path re-parks the loser.
+    // 'agent_mining' is excluded because the review fan-out runs N concurrent
+    // invocations per step by design.
+    uniqueIndex('cli_invocations_one_live_per_step_idx')
+      .on(table.taskStepId)
+      .where(
+        sql`${table.endedAt} is null and ${table.supersededAt} is null and ${table.mode} <> 'agent_mining'`,
+      ),
   ],
 );
 

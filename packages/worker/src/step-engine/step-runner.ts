@@ -367,6 +367,51 @@ async function resolveSteeringEnabled(): Promise<boolean> {
   }
 }
 
+/** True when a live (not ended, not superseded) non-mining invocation already
+ *  exists for this step — the invariant the partial unique index
+ *  `cli_invocations_one_live_per_step_idx` enforces. Mirrors resolveLlmPhase's
+ *  own guard predicate; used to re-park a losing concurrent dispatch before it
+ *  inserts a duplicate. 'agent_mining' is excluded: the review fan-out runs N
+ *  concurrent invocations per step by design. `ended_at is null` subsumes
+ *  `consumed_at is null` (consume only happens after completion). */
+async function hasLiveInvocation(db: Database, taskStepId: string): Promise<boolean> {
+  const rows = await db
+    .select({ id: schema.cliInvocations.id })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+        ne(schema.cliInvocations.mode, 'agent_mining'),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
+}
+
+/** Postgres unique_violation (SQLSTATE 23505), surfaced by postgres.js on `.code`. */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === '23505'
+  );
+}
+
+/** Insert a cli_invocations row, returning null instead of throwing when the
+ *  live-per-step unique index rejects it (a concurrent dispatch won the race).
+ *  The caller re-parks the step; the winner's invocation drives the loop. */
+async function insertInvocationOrNull<T>(insert: () => Promise<T>): Promise<T | null> {
+  try {
+    return await insert();
+  } catch (err) {
+    if (isUniqueViolation(err)) return null;
+    throw err;
+  }
+}
+
 async function resolveLlmPhase(
   db: Database,
   stepDef: StepDefinition,
@@ -591,18 +636,37 @@ async function resolveLlmPhase(
         ? 'subagent_sequential'
         : 'subagent_native'
       : 'cli';
-  const inserted = await db
-    .insert(schema.cliInvocations)
-    .values({
-      taskId: params.taskId,
-      taskStepId: current.id,
-      cliProviderId: plan.providerId,
-      mode,
-      prompt: plan.effectivePrompt ?? prompt,
-      agentTitle: roleLabel,
-      steerable: plan.invocation.kind === 'cli' && plan.invocation.spec.steerable === true,
-    })
-    .returning();
+  // Dispatch-race guard: a concurrent advance-step job may have already parked this
+  // step on a live invocation. Re-check right before insert (cheap; catches the common
+  // near-simultaneous case) and let the unique index backstop true simultaneity via
+  // 23505. Either way re-park and let the winner's invocation drive the loop.
+  if (await hasLiveInvocation(db, current.id)) {
+    return { resolved: false, result: { status: 'waiting_cli', row: current } };
+  }
+  // Compute in the narrowed scope: `plan.invocation` is non-null here, but inside
+  // the insertInvocationOrNull closure TS widens it back (a closure may run later).
+  const steerable = plan.invocation.kind === 'cli' && plan.invocation.spec.steerable === true;
+  const inserted = await insertInvocationOrNull(() =>
+    db
+      .insert(schema.cliInvocations)
+      .values({
+        taskId: params.taskId,
+        taskStepId: current.id,
+        cliProviderId: plan.providerId,
+        mode,
+        prompt: plan.effectivePrompt ?? prompt,
+        agentTitle: roleLabel,
+        steerable,
+      })
+      .returning(),
+  );
+  if (!inserted) {
+    ctx.logger.info(
+      { taskStepId: current.id },
+      'concurrent live invocation won the dispatch race; re-parking',
+    );
+    return { resolved: false, result: { status: 'waiting_cli', row: current } };
+  }
   const invRow = inserted[0];
   if (!invRow) throw new Error('failed to insert cli_invocations row');
   await params.deps.enqueueCliInvocation({
@@ -733,16 +797,29 @@ async function resolveAiFixPhase(
         ? 'subagent_sequential'
         : 'subagent_native'
       : 'cli';
-  const inserted = await db
-    .insert(schema.cliInvocations)
-    .values({
-      taskId: params.taskId,
-      taskStepId: current.id,
-      cliProviderId: plan.providerId,
-      mode: fixMode,
-      prompt: plan.effectivePrompt ?? prompt,
-    })
-    .returning();
+  // Dispatch-race guard (see resolveLlmPhase): re-check + unique-index backstop.
+  if (await hasLiveInvocation(db, current.id)) {
+    return { resolved: false, result: { status: 'waiting_cli', row: current } };
+  }
+  const inserted = await insertInvocationOrNull(() =>
+    db
+      .insert(schema.cliInvocations)
+      .values({
+        taskId: params.taskId,
+        taskStepId: current.id,
+        cliProviderId: plan.providerId,
+        mode: fixMode,
+        prompt: plan.effectivePrompt ?? prompt,
+      })
+      .returning(),
+  );
+  if (!inserted) {
+    ctx.logger.info(
+      { taskStepId: current.id },
+      'concurrent live invocation won the dispatch race; re-parking (ai-fix)',
+    );
+    return { resolved: false, result: { status: 'waiting_cli', row: current } };
+  }
   const invRow = inserted[0];
   if (!invRow) throw new Error('failed to insert ai-fix cli_invocations row');
   await params.deps.enqueueCliInvocation({
