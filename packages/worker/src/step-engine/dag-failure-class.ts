@@ -4,7 +4,8 @@
 //
 //   TRANSIENT   the process was KILLED before it finished (worker restart, SIGKILL/
 //               OOM, cancel, timeout) — it never had a chance to emit its result.
-//               Recover by RE-DISPATCHING (bounded by task_dag_issues.infra_retries).
+//               Recover by RE-DISPATCHING, bounded per-agent by task_dag_issues:
+//               .infra_retries for coders, .review_infra_retries for reviewers.
 //   ENVIRONMENT a real execution-environment problem (unwritable/root-owned worktree,
 //               no CLI provider, or transient re-dispatch exhausted). Re-running will
 //               not help until it is fixed → HALT with an actionable message.

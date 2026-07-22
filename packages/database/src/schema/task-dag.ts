@@ -176,13 +176,19 @@ export const taskDagIssues = pgTable(
     // --- Execution tracking (the barrier row) ---
     outcome: dagIssueOutcomeEnum('outcome').notNull().default('pending'),
     cliInvocationId: uuid('cli_invocation_id'),
-    /** Count of TRANSIENT (killed / orphaned / timed-out) agent re-dispatches for this
-     *  issue — a coder or reviewer that never finished (worker restart, SIGKILL/OOM,
-     *  timeout) is re-run rather than failed. Bounds the auto-recovery so an issue that
-     *  keeps killing its runner (e.g. a persistent OOM) eventually halts with an
-     *  actionable error instead of looping. Distinct from innerIteration (review fix
-     *  rounds) and advisorInvocations (escalation attempts). */
+    /** Count of TRANSIENT (killed / orphaned / timed-out) CODER re-dispatches for this
+     *  issue — a coder that never finished (worker restart, SIGKILL/OOM, timeout) is
+     *  re-run rather than failed. Bounds the auto-recovery so an issue that keeps killing
+     *  its runner (e.g. a persistent OOM) eventually halts with an actionable error
+     *  instead of looping. Distinct from innerIteration (review fix rounds) and
+     *  advisorInvocations (escalation attempts). */
     infraRetries: integer('infra_retries').notNull().default(0),
+    /** The same transient budget for the REVIEWER, deliberately SEPARATE from the coder's.
+     *  Both shared one counter originally, so a coder that spent it (e.g. re-dispatched
+     *  twice through worker restarts) left its reviewer with nothing: a later, unrelated
+     *  transient kill of the reviewer could not re-spawn and the issue was escalated as
+     *  failed instead of simply re-reviewed. Each side now gets its own budget. */
+    reviewInfraRetries: integer('review_infra_retries').notNull().default(0),
     filesModified: jsonb('files_modified')
       .$type<string[]>()
       .notNull()

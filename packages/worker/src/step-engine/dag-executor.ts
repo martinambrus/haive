@@ -861,16 +861,16 @@ async function ingestReviewRun(
     const verdict = parseReviewerOutput(inv);
     if (!verdict) {
       // A killed/orphaned reviewer never produced a verdict — re-run it (bounded by the
-      // shared infra_retries budget), the same crash-resume the coder path gets, rather
-      // than failing the issue on a transient event.
+      // reviewer's OWN transient budget, separate from the coder's), the same crash-resume
+      // the coder path gets, rather than failing the issue on a transient event.
       const cls = classifyDagIssueFailure({
         exitCode: inv.exitCode,
         errorMessage: inv.errorMessage,
       });
-      if (cls === 'transient' && issue.infraRetries < DAG_MAX_INFRA_RETRIES) {
+      if (cls === 'transient' && issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES) {
         await ra.db
           .update(schema.taskDagIssues)
-          .set({ infraRetries: issue.infraRetries + 1, updatedAt: new Date() })
+          .set({ reviewInfraRetries: issue.reviewInfraRetries + 1, updatedAt: new Date() })
           .where(eq(schema.taskDagIssues.id, issue.id));
         const ok = await spawnReviewAgent(
           ra,
@@ -976,13 +976,13 @@ async function resolveReviewPhase(
       // STILL unresolved — the review stalled, e.g. resolveDagPhase threw mid-ingest and
       // the resolution write never landed. Skipping here would park the step forever
       // (this issue keeps `needReview` non-empty and nothing ever re-spawns), so make the
-      // phase crash-resumable: re-spawn a fresh reviewer, bounded by the same transient
-      // budget; once it is spent, resolve failed_unrecoverable so the escalation path
-      // (advisor) decides instead of the level wedging.
-      if (issue.infraRetries < DAG_MAX_INFRA_RETRIES) {
+      // phase crash-resumable: re-spawn a fresh reviewer, bounded by the reviewer's OWN
+      // transient budget; once it is spent, resolve failed_unrecoverable so the escalation
+      // path (advisor) decides instead of the level wedging.
+      if (issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES) {
         await ra.db
           .update(schema.taskDagIssues)
-          .set({ infraRetries: issue.infraRetries + 1, updatedAt: new Date() })
+          .set({ reviewInfraRetries: issue.reviewInfraRetries + 1, updatedAt: new Date() })
           .where(eq(schema.taskDagIssues.id, issue.id));
         const ok = await spawnReviewAgent(
           ra,
@@ -1757,8 +1757,8 @@ export async function resolveDagPhase(
         const result = parseCoderResult(inv);
         // A coder that produced no usable result: was it KILLED (re-dispatch) or a real
         // failure (persist, then halt/escalate)? A killed/orphaned/timed-out coder never
-        // finished, so re-running it — bounded by infra_retries — honours the DAG's
-        // crash-resume contract instead of freezing the level on a transient event.
+        // finished, so re-running it — bounded by the coder's own infra_retries — honours
+        // the DAG's crash-resume contract instead of freezing the level on a transient event.
         if (result.outcome === 'failed_unrecoverable') {
           const cls = classifyDagIssueFailure({
             exitCode: inv.exitCode,

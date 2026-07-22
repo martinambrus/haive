@@ -37,7 +37,8 @@ const isStuckFailed = or(
  *    resolution, i.e. review/escalation gave up) with no deliberate terminal resolution —
  *    a `split` parent, an accepted-with-debt issue, a skipped issue and a merged issue are
  *    all left as-is;
- *  - the reset clears the transient re-dispatch budget (`infraRetries`) and every review /
+ *  - the reset clears BOTH transient re-dispatch budgets (coder `infraRetries` and
+ *    `reviewInfraRetries`) and every review /
  *    escalation / merge field so the re-attempt starts fresh, but KEEPS the worktree
  *    (path/branch) to reuse it, mirroring the in-executor transient re-dispatch;
  *  - it DELETES the reset issues' `dag_agent_runs`: a stale CONSUMED reviewer run makes
@@ -98,6 +99,7 @@ export async function resetDagCurrentLevelForRetry(tx: DbHandle, taskId: string)
       outcome: 'pending',
       cliInvocationId: null,
       infraRetries: 0,
+      reviewInfraRetries: 0,
       resolution: null,
       reviewStatus: null,
       innerIteration: 0,
