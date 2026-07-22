@@ -438,6 +438,19 @@ async function haltConflicts(
 /** Recreate the live conflict for `target` and dispatch one merge-fix agent into
  *  the integration worktree. Returns 'waiting' (agent in flight) or 'halt' (no
  *  provider). Shared by manual retry_ai and auto-resolve. */
+/** Postgres unique_violation (SQLSTATE 23505). The one-live-per-step index rejected a
+ *  duplicate SINGLETON dispatch because a concurrent/duplicate advance already spawned
+ *  one. Not a failure — the winner's invocation drives the phase, so the loser parks
+ *  (mirrors step-runner's insertInvocationOrNull). */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === '23505'
+  );
+}
+
 async function startConflictFix(
   m: MergeArgs,
   state: LevelMergeState,
@@ -446,14 +459,26 @@ async function startConflictFix(
   { status: 'waiting'; row: TaskStepRow } | { status: 'halt'; row: TaskStepRow; error: string }
 > {
   await gitRun(m.integration.path, ['merge', '--no-ff', '--no-edit', target.branchName!], m.gitEnv);
-  const invId = await dispatchMergeFixAgent(m, target);
-  if (!invId) {
+  const dispatched = await dispatchMergeFixAgent(m, target);
+  if (dispatched.kind === 'already_live') {
+    // A concurrent advance already dispatched the fix agent for this step (the
+    // one-live-per-step index rejected ours). The winner owns the in-progress merge and
+    // has saved its own fixInvocationId, so PARK on it. Falling into the no_provider
+    // branch below would `git merge --abort` the winner's half-finished resolution, and
+    // writing our stale mergeState would strand the winner's invocation.
+    const parked = await setStepStatus(m.db, m.current.id, {
+      status: 'waiting_cli',
+      statusMessage: `Resolving merge conflict on ${target.issueKey} with AI…`,
+    });
+    return { status: 'waiting', row: parked };
+  }
+  if (dispatched.kind === 'no_provider') {
     await gitRun(m.integration.path, ['merge', '--abort']);
     await clearAiFix(m.db, m.current.id);
     return haltConflicts(m, [target], 'no CLI provider for merge resolution');
   }
   state.activeConflict = target.issueKey;
-  state.fixInvocationId = invId;
+  state.fixInvocationId = dispatched.invId;
   state.conflictRetries[target.issueKey] = (state.conflictRetries[target.issueKey] ?? 0) + 1;
   await saveMergeState(m.db, m.level.id, state);
   await clearAiFix(m.db, m.current.id);
@@ -464,7 +489,15 @@ async function startConflictFix(
   return { status: 'waiting', row: waiting };
 }
 
-async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<string | null> {
+/** Outcome of dispatching the merge-fix agent. `already_live` means the one-live-per-step
+ *  index rejected the insert because a concurrent advance already dispatched one; the
+ *  caller must PARK on the winner, never abort the in-progress merge. */
+type MergeFixDispatch =
+  | { kind: 'ok'; invId: string }
+  | { kind: 'no_provider' }
+  | { kind: 'already_live' };
+
+async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<MergeFixDispatch> {
   const { db, params, stepDef, current, integration, providers, deps } = m;
   const prompt = buildMergeFixPrompt(issue.branchName ?? '', issue.title ?? undefined);
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
@@ -483,19 +516,30 @@ async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<
     input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
     invokeOpts: { cwd: integration.sandboxPath, effortLevel: preferredEffort ?? undefined },
   });
-  if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return null;
-  const inv = await db
-    .insert(schema.cliInvocations)
-    .values({
-      taskId: params.taskId,
-      taskStepId: current.id,
-      cliProviderId: plan.providerId,
-      mode: 'cli',
-      prompt: plan.effectivePrompt ?? prompt,
-    })
-    .returning({ id: schema.cliInvocations.id });
+  if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
+    return { kind: 'no_provider' };
+  }
+  // The merge-fix agent is a per-step SINGLETON, so the one-live-per-step index rejects a
+  // second concurrent dispatch. Surface that distinctly instead of throwing (which would
+  // fail the step) or reporting no_provider (which would abort the winner's merge).
+  let inv: { id: string }[];
+  try {
+    inv = await db
+      .insert(schema.cliInvocations)
+      .values({
+        taskId: params.taskId,
+        taskStepId: current.id,
+        cliProviderId: plan.providerId,
+        mode: 'cli',
+        prompt: plan.effectivePrompt ?? prompt,
+      })
+      .returning({ id: schema.cliInvocations.id });
+  } catch (err) {
+    if (isUniqueViolation(err)) return { kind: 'already_live' };
+    throw err;
+  }
   const invId = inv[0]?.id;
-  if (!invId) return null;
+  if (!invId) return { kind: 'no_provider' };
   await deps.enqueueCliInvocation({
     invocationId: invId,
     taskId: params.taskId,
@@ -506,7 +550,7 @@ async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<
     spec: plan.invocation.spec,
     timeoutMs: MERGE_FIX_TIMEOUT_MS,
   });
-  return invId;
+  return { kind: 'ok', invId };
 }
 
 /** Merge a level's issue branches into the integration branch, git-first. Clean
@@ -1201,19 +1245,6 @@ async function ingestAdvisor(
   );
   if (!ok) await setResolution(ea.db, issue, 'failed_unrecoverable');
   return 'retry';
-}
-
-/** Postgres unique_violation (SQLSTATE 23505). The one-live-per-step index rejected a
- *  duplicate SINGLETON dispatch because a concurrent/duplicate advance already spawned
- *  one. Not a failure — the winner's invocation drives the phase, so the loser parks
- *  (mirrors step-runner's insertInvocationOrNull). */
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'code' in err &&
-    (err as { code?: unknown }).code === '23505'
-  );
 }
 
 async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promise<boolean> {
