@@ -14,7 +14,6 @@
     "test:e2e": "playwright test --pass-with-no-tests",
     "smoke": "pnpm --filter @haive/worker smoke:all",
     "typecheck": "turbo run typecheck",
-    "lint": "turbo run lint",
     "clean": "turbo run clean && rm -rf node_modules .turbo",
     "db:generate": "pnpm --filter @haive/database generate",
     "db:push": "pnpm --filter @haive/database push",
