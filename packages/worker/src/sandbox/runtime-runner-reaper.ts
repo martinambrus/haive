@@ -15,7 +15,38 @@ const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
  *  is handled separately (kept for retry until the grace elapses). */
 const TERMINAL_STATUSES = new Set(['completed', 'cancelled']);
 
-type ReapReason = 'exited' | 'orphan' | 'terminal' | 'failed-grace';
+export type ReapReason = 'exited' | 'orphan' | 'terminal' | 'failed-grace';
+
+/** Pure reap decision, split out from the DB lookup so the rules are directly testable.
+ *  Returns why this runner should be reaped, or null to keep it. */
+export function reapDecision(
+  c: { running: boolean; taskId: string | null; startedAtMs: number | null },
+  task: { status: string; completedAt: Date | null } | undefined,
+  failedGraceMs: number,
+  nowMs: number = Date.now(),
+): ReapReason | null {
+  // An exited/created (non-running) runner serves nothing — reclaim it and its anon
+  // volume regardless of task status (a retry cold-boots a fresh one).
+  if (!c.running) return 'exited';
+  // A running runner with no task label can't belong to a live task's runtime.
+  if (!c.taskId) return 'orphan';
+  if (!task) return 'orphan'; // task row gone — the runner is a leftover
+  if (TERMINAL_STATUSES.has(task.status)) return 'terminal';
+  if (task.status === 'failed') {
+    if (failedGraceMs <= 0) return null; // grace disabled — keep for manual retry
+    // Anchor the grace to WHEN THE TASK FAILED, not to the container's start time. A
+    // runner (re)booted for an already-failed task — a UI visit, a stray runtime-ensure —
+    // would otherwise re-arm a FULL grace on every boot and let a long-dead task squat a
+    // scarce runtime slot indefinitely (observed: a task failed at 14:56 held a slot to
+    // 21:07 because its runner was rebooted at 18:07). Fall back to the container start
+    // only when the failure time is unknown.
+    const failedAtMs = task.completedAt?.getTime() ?? c.startedAtMs;
+    if (failedAtMs != null && nowMs - failedAtMs >= failedGraceMs) return 'failed-grace';
+    return null;
+  }
+  // running / paused / waiting_* / created / queued — in use, keep.
+  return null;
+}
 
 interface RunnerContainer {
   id: string;
@@ -103,32 +134,19 @@ export class RuntimeRunnerReaper {
   /** Why this runner should be reaped, or null to keep it. Fail-safe: a DB error keeps
    *  the runner (null) rather than risk reaping a live task's runtime. */
   private async reapReason(c: RunnerContainer, failedGraceMs: number): Promise<ReapReason | null> {
-    // An exited/created (non-running) runner serves nothing — reclaim it and its anon
-    // volume regardless of task status (a retry cold-boots a fresh one).
-    if (!c.running) return 'exited';
-    // A running runner with no task label can't belong to a live task's runtime.
-    if (!c.taskId) return 'orphan';
-    let task: { status: string } | undefined;
+    // Short-circuit before the DB round-trip for the container-only verdicts.
+    if (!c.running || !c.taskId) return reapDecision(c, undefined, failedGraceMs);
+    let task: { status: string; completedAt: Date | null } | undefined;
     try {
       task = await this.db.query.tasks.findFirst({
         where: eq(schema.tasks.id, c.taskId),
-        columns: { status: true },
+        columns: { status: true, completedAt: true },
       });
     } catch (err) {
       log.warn({ err, taskId: c.taskId }, 'runtime reaper task lookup failed; keeping runner');
-      return null;
+      return null; // fail-safe: never reap a live task's runtime on a DB hiccup
     }
-    if (!task) return 'orphan'; // task row gone — the runner is a leftover
-    if (TERMINAL_STATUSES.has(task.status)) return 'terminal';
-    if (task.status === 'failed') {
-      if (failedGraceMs <= 0) return null; // grace disabled — keep for manual retry
-      if (c.startedAtMs != null && Date.now() - c.startedAtMs >= failedGraceMs) {
-        return 'failed-grace';
-      }
-      return null;
-    }
-    // running / paused / waiting_* / created / queued — in use, keep.
-    return null;
+    return reapDecision(c, task, failedGraceMs);
   }
 
   private async listRunnerContainers(): Promise<RunnerContainer[]> {

@@ -1,7 +1,10 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { Worker, type Job } from 'bullmq';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  APP_RUNNER_LABEL,
   QUEUE_NAMES,
   RUNTIME_ENSURE_JOB_NAMES,
   logger,
@@ -64,6 +67,29 @@ async function navigateDesktopToApp(runtime: ServingRuntime, taskId: string): Pr
   }
 }
 
+const exec = promisify(execFile);
+
+/** Task statuses where nothing is actively waiting on the runtime, so a fresh runner must
+ *  not be cold-booted at the expense of a live task's slot. `failed` is included: its app
+ *  stays browsable only while the existing runner survives the reaper's grace. */
+const DORMANT_TASK_STATUSES = new Set(['completed', 'cancelled', 'failed']);
+
+/** True when a runtime runner container for this task already exists (running or not), so
+ *  ensureAppServing can take its reuse / warm-start path instead of a fresh cold boot.
+ *  Fail-OPEN on a docker error: assume it exists rather than wrongly block a legitimate
+ *  reuse — a genuinely absent runner will simply fail to start further down. */
+async function hasRunnerContainer(taskId: string): Promise<boolean> {
+  const byLabel = (label: string): Promise<boolean> =>
+    exec(
+      'docker',
+      ['ps', '-aq', '--filter', `label=${label}`, '--filter', `label=haive.task.id=${taskId}`],
+      { timeout: 10_000 },
+    )
+      .then(({ stdout }) => stdout.trim().length > 0)
+      .catch(() => true);
+  return (await byLabel('haive.ddev')) || (await byLabel(APP_RUNNER_LABEL));
+}
+
 /** Ensure the task's app is serving and its headed-browser desktop is up. Reads
  *  the task's repo path the same way the task worker builds a step context, then
  *  delegates to the shared ensureAppServing primitive. Idempotent. */
@@ -71,9 +97,22 @@ export async function ensureRuntimeForTask(taskId: string): Promise<RuntimeEnsur
   const db = getDb();
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
-    columns: { repositoryId: true },
+    columns: { repositoryId: true, status: true },
   });
   if (!task?.repositoryId) return { ok: false, url: null, mode: 'none' };
+  // A dormant task may REUSE a runner that is still up (that is what keeps a failed
+  // task's app browsable during the reaper's grace) but must never COLD-BOOT a new one:
+  // runtime slots are scarce, and acquireRuntimeSlot deliberately PROCEEDS on timeout, so
+  // a cold boot for work nobody is waiting on overcommits past the cap and starves the
+  // live tasks queued behind it (observed: a task failed at 14:56 cold-booted at 18:07
+  // after an 8-minute wait, taking a third slot with the limit at two).
+  if (DORMANT_TASK_STATUSES.has(task.status) && !(await hasRunnerContainer(taskId))) {
+    log.info(
+      { taskId, status: task.status },
+      'skipping runtime cold boot for a dormant task (no existing runner to reuse)',
+    );
+    return { ok: false, url: null, mode: 'none' };
+  }
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, task.repositoryId),
     columns: { storagePath: true, localPath: true },
