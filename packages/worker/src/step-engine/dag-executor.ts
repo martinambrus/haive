@@ -725,7 +725,10 @@ async function spawnReviewAgent(
       taskId: ra.taskId,
       taskStepId: ra.current.id,
       cliProviderId: plan.providerId,
-      mode: 'cli',
+      // 'dag_parallel', not 'cli': the reviewer/fix-coder/advisor fan-out runs N
+      // concurrent invocations on the ONE 06c step, so it must be exempt from the
+      // one-live-per-step index (its concurrency is bounded by dag_agent_runs).
+      mode: 'dag_parallel',
       prompt: plan.effectivePrompt ?? prompt,
     })
     .returning({ id: schema.cliInvocations.id });
@@ -1583,7 +1586,10 @@ export async function resolveDagPhase(
             taskId: ctx.taskId,
             taskStepId: current.id,
             cliProviderId: planDispatch.providerId,
-            mode: 'cli',
+            // 'dag_parallel', not 'cli': N coders dispatch concurrently on the ONE
+            // 06c step, so they must be exempt from the one-live-per-step index (the
+            // per-issue barrier is task_dag_issues, not the singleton index).
+            mode: 'dag_parallel',
             prompt: planDispatch.effectivePrompt ?? prompt,
           })
           .returning({ id: schema.cliInvocations.id });

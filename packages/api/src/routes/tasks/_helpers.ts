@@ -235,9 +235,10 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
     .select({
       taskStepId: schema.cliInvocations.taskStepId,
       count: sql<number>`count(*)::int`,
-      // LLM run attempts: exclude agent_mining (parallel sub-agents inflate the
-      // count and aren't retries). >1 on a non-loop step => an auto-retry happened.
-      attemptCount: sql<number>`count(*) filter (where ${schema.cliInvocations.mode} <> 'agent_mining')::int`,
+      // LLM run attempts: exclude the per-step fan-outs (agent_mining review agents
+      // and dag_parallel DAG coders/reviewers) -- they run N concurrent per step by
+      // design and aren't retries. >1 on a non-loop step => an auto-retry happened.
+      attemptCount: sql<number>`count(*) filter (where ${schema.cliInvocations.mode} not in ('agent_mining', 'dag_parallel'))::int`,
       inputTokens: sql<number>`coalesce(sum((${tu} ->> 'inputTokens')::numeric), 0)::int`,
       outputTokens: sql<number>`coalesce(sum((${tu} ->> 'outputTokens')::numeric), 0)::int`,
       totalTokens: sql<number>`coalesce(sum((${tu} ->> 'totalTokens')::numeric), 0)::int`,

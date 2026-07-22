@@ -815,7 +815,12 @@ export interface GlobalKbEntry {
   supersededAt: string | null;
 }
 
-export type CliInvocationMode = 'cli' | 'agent_mining' | 'subagent_native' | 'subagent_sequential';
+export type CliInvocationMode =
+  | 'cli'
+  | 'agent_mining'
+  | 'dag_parallel'
+  | 'subagent_native'
+  | 'subagent_sequential';
 
 export interface CliInvocationSummary {
   id: string;

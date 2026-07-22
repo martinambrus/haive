@@ -40,6 +40,7 @@ export const cliInvocationModeEnum = pgEnum('cli_invocation_mode', [
   'cli',
   'subagent_emulated',
   'agent_mining',
+  'dag_parallel',
 ]);
 
 // 'env_replicate' kept in pgEnum for backward compat with existing DB rows.
@@ -644,15 +645,17 @@ export const cliInvocations = pgTable(
   (table) => [
     index('cli_invocations_task_id_idx').on(table.taskId),
     index('cli_invocations_task_step_id_idx').on(table.taskStepId),
-    // At most one LIVE non-mining invocation per step. Closes the TOCTOU race in
+    // At most one LIVE singleton invocation per step. Closes the TOCTOU race in
     // resolveLlmPhase's dispatch guard (see migration 0096): a second concurrent
     // live insert fails with 23505 and the dispatch path re-parks the loser.
-    // 'agent_mining' is excluded because the review fan-out runs N concurrent
-    // invocations per step by design.
+    // 'agent_mining' (review fan-out) and 'dag_parallel' (DAG coder/reviewer
+    // fan-out) are excluded because both run N concurrent invocations per step by
+    // design — their concurrency is bounded by task_step_agent_minings /
+    // task_dag_issues barrier rows, not by this singleton index.
     uniqueIndex('cli_invocations_one_live_per_step_idx')
       .on(table.taskStepId)
       .where(
-        sql`${table.endedAt} is null and ${table.supersededAt} is null and ${table.mode} <> 'agent_mining'`,
+        sql`${table.endedAt} is null and ${table.supersededAt} is null and ${table.mode} <> 'agent_mining' and ${table.mode} <> 'dag_parallel'`,
       ),
   ],
 );

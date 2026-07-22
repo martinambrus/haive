@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNotNull, isNull, ne } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull, ne, notInArray } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema, type StepIterationEntry } from '@haive/database';
 import {
@@ -383,7 +383,10 @@ async function hasLiveInvocation(db: Database, taskStepId: string): Promise<bool
         eq(schema.cliInvocations.taskStepId, taskStepId),
         isNull(schema.cliInvocations.endedAt),
         isNull(schema.cliInvocations.supersededAt),
-        ne(schema.cliInvocations.mode, 'agent_mining'),
+        // Kept byte-identical to the cli_invocations_one_live_per_step_idx predicate:
+        // 'agent_mining' and 'dag_parallel' are per-step fan-outs, exempt from the
+        // singleton one-live invariant this guard enforces for LLM/AI-fix dispatch.
+        notInArray(schema.cliInvocations.mode, ['agent_mining', 'dag_parallel']),
       ),
     )
     .limit(1);
