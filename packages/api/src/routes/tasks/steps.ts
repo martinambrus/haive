@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, resetDagCurrentLevelForRetry } from '@haive/database';
 import { computeStepContribution } from '@haive/shared/timing';
 import {
   CLI_PROVIDER_CATALOG,
@@ -387,6 +387,12 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       await tx
         .delete(schema.taskStepAgentMinings)
         .where(inArray(schema.taskStepAgentMinings.taskStepId, allStepIds));
+      // Retrying 06c-dag-execute (or any step whose cascade includes it) must also clear
+      // the wedged DAG level: resetting task_steps alone leaves task_dag_issues
+      // failed_unrecoverable, so resolveDagPhase re-derives the same failure and the step
+      // re-halts with the identical error. No-op when the task has no DAG / no stuck issue.
+      // Keep in sync with resetStepAndDownstream in the worker.
+      await resetDagCurrentLevelForRetry(tx, id);
       // Clearing formSchema is essential: step-runner only re-renders the form
       // when persistedSchema is null (step-runner.ts ~L287). Without this, a
       // retry would re-run the LLM but reuse the stale form schema.

@@ -1,5 +1,5 @@
 import { and, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, resetDagCurrentLevelForRetry, type Database } from '@haive/database';
 import { computeStepContribution } from '@haive/shared/timing';
 
 // Reset a step + its downstream back to `pending` so the worker re-runs the step from
@@ -70,6 +70,11 @@ export async function resetStepAndDownstream(
     await tx
       .delete(schema.taskStepAgentMinings)
       .where(inArray(schema.taskStepAgentMinings.taskStepId, allStepIds));
+    // When this reset cascades through 06c-dag-execute, task_steps alone leaves the DAG's
+    // task_dag_issues rows failed_unrecoverable, so resolveDagPhase re-derives the wedge and
+    // the step re-halts with the identical error. Reset the current level's stuck issues too.
+    // No-op when the task has no DAG / no stuck issue. Keep in sync with the API retry site.
+    await resetDagCurrentLevelForRetry(tx, taskId);
     // Clearing formSchema is essential: the runner only re-renders the form when the
     // persisted schema is null. formValues is cleared so the regenerated form re-decides.
     // Zero the live timing per row, but first fold the finishing run's work/idle/user
