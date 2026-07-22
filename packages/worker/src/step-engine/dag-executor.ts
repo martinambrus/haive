@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { and, asc, desc, eq, isNotNull, isNull } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, isUniqueViolation, type Database } from '@haive/database';
 import {
   dagIssueResultSchema,
   reviewerOutputSchema,
@@ -438,19 +438,6 @@ async function haltConflicts(
 /** Recreate the live conflict for `target` and dispatch one merge-fix agent into
  *  the integration worktree. Returns 'waiting' (agent in flight) or 'halt' (no
  *  provider). Shared by manual retry_ai and auto-resolve. */
-/** Postgres unique_violation (SQLSTATE 23505). The one-live-per-step index rejected a
- *  duplicate SINGLETON dispatch because a concurrent/duplicate advance already spawned
- *  one. Not a failure — the winner's invocation drives the phase, so the loser parks
- *  (mirrors step-runner's insertInvocationOrNull). */
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'code' in err &&
-    (err as { code?: unknown }).code === '23505'
-  );
-}
-
 async function startConflictFix(
   m: MergeArgs,
   state: LevelMergeState,

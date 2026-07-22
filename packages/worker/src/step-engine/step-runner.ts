@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, isNotNull, isNull, ne, notInArray } from 'drizzle-orm';
 import type { Database } from '@haive/database';
-import { schema, type StepIterationEntry } from '@haive/database';
+import { schema, isUniqueViolation, type StepIterationEntry } from '@haive/database';
 import {
   CONFIG_KEYS,
   configService,
@@ -394,16 +394,6 @@ async function hasLiveInvocation(db: Database, taskStepId: string): Promise<bool
     )
     .limit(1);
   return rows.length > 0;
-}
-
-/** Postgres unique_violation (SQLSTATE 23505), surfaced by postgres.js on `.code`. */
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'code' in err &&
-    (err as { code?: unknown }).code === '23505'
-  );
 }
 
 /** Insert a cli_invocations row, returning null instead of throwing when the
