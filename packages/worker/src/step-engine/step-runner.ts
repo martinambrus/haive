@@ -21,7 +21,10 @@ import type {
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
-import { isOutputTruncationMessage } from '../queues/cli-exec/failure-class.js';
+import {
+  isOutputTruncationMessage,
+  isTransientCliFailure,
+} from '../queues/cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
 import {
   TaskCancelledError,
@@ -475,6 +478,35 @@ async function resolveLlmPhase(
       const rawTail = invocation.rawOutput?.trim().slice(-1000) ?? '';
       const message =
         errTrimmed || rawTail || `cli exited with code ${invocation.exitCode ?? 'unknown'}`;
+      // Worker-restart orphan / kill / timeout: the invocation never finished under its
+      // own power, so this is an infrastructure event, not a model failure — re-dispatch a
+      // fresh invocation instead of failing the step (mirrors the DAG's transient recovery).
+      // Bounded by the consecutive-transient count so a crash-looping worker converges to a
+      // failed step rather than an infinite re-drive. Supersede the orphan (not consume) so
+      // it stays OUT of countLlmAttempts and does not burn the genuine llm.retry budget.
+      if (isTransientCliFailure({ exitCode: invocation.exitCode, errorMessage: errTrimmed })) {
+        if ((await countTrailingOrphans(db, current.id)) < MAX_ORPHAN_REDISPATCH) {
+          ctx.logger.warn(
+            { stepId: stepDef.metadata.id, message },
+            'cli invocation orphaned/killed; re-dispatching a fresh invocation',
+          );
+          await db
+            .update(schema.cliInvocations)
+            .set({ supersededAt: new Date() })
+            .where(eq(schema.cliInvocations.id, invocation.id));
+          const retryLlm = await resolveLlmPhase(
+            db,
+            stepDef,
+            current,
+            ctx,
+            detected,
+            formValues,
+            params,
+          );
+          if (!retryLlm.resolved) return retryLlm;
+        }
+        // Transient budget spent — fall through and fail with the orphan reason.
+      }
       // Output-truncation retry: a response that hit the model's output-token cap
       // produces no result, so it never reaches apply()'s retry — handle it here by
       // consuming the bad row and re-dispatching a fresh invocation.
@@ -863,12 +895,36 @@ async function resolveAgentMiningPhase(
 ): Promise<AgentMiningResolved> {
   const spec = stepDef.agentMining!;
 
-  const existing = await db
+  let existing = await db
     .select()
     .from(schema.taskStepAgentMinings)
     .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
 
   if (existing.length > 0) {
+    // Recover agents orphaned by a worker restart BEFORE the barrier check: a
+    // pending/running row whose backing invocation already ENDED (its completion handler
+    // never ran) is not really in-flight. Without this the barrier below counts it live
+    // forever and the step wedges waiting_cli. Transient orphans re-dispatch (bounded);
+    // genuinely-dead ones are marked failed so the step can proceed.
+    if (
+      await reconcileOrphanedMiningAgents(
+        db,
+        stepDef,
+        current,
+        ctx,
+        detected,
+        formValues,
+        llmOutput,
+        params,
+        existing,
+      )
+    ) {
+      existing = await db
+        .select()
+        .from(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
+    }
+
     const pending = existing.filter((r) => r.status === 'pending' || r.status === 'running');
     if (pending.length > 0) {
       return { resolved: false, result: { status: 'waiting_cli', row: current } };
@@ -2312,6 +2368,93 @@ async function retryMiningAgents(
   return dispatchMiningAgents(db, stepDef, current, ctx, params, dispatches, targets);
 }
 
+/** Max total attempts (initial + orphan re-dispatches) for a mining agent killed by a
+ *  worker restart. The `attempts` column starts at 1, so 3 allows 2 re-dispatches —
+ *  aligned with the LLM (MAX_ORPHAN_REDISPATCH) and DAG (DAG_MAX_INFRA_RETRIES) caps. */
+const MAX_MINING_ORPHAN_REDISPATCH = 3;
+
+/** Recover mining agents orphaned by a worker restart. A pending/running mining row whose
+ *  backing invocation has already ENDED means the cli-exec completion handler never ran
+ *  (the worker died mid-run), so the row is frozen and resolveAgentMiningPhase's barrier
+ *  would count it in-flight forever. Marks every such orphan `failed` (so the barrier can
+ *  never wedge on it), then re-dispatches the recoverable TRANSIENT ones (bounded by
+ *  `attempts`) via the existing re-roll path; a genuine failure or an exhausted transient
+ *  stays failed and the step proceeds. Returns true if any row changed (caller re-reads).
+ *  A row whose invocation is still live (ended_at NULL) is left as genuinely in-flight. */
+async function reconcileOrphanedMiningAgents(
+  db: Database,
+  stepDef: StepDefinition,
+  current: TaskStepRow,
+  ctx: StepContext,
+  detected: unknown,
+  formValues: FormValues | null,
+  llmOutput: unknown,
+  params: AdvanceStepParams,
+  existing: (typeof schema.taskStepAgentMinings.$inferSelect)[],
+): Promise<boolean> {
+  const stuck = existing.filter(
+    (r) => (r.status === 'pending' || r.status === 'running') && r.cliInvocationId,
+  );
+  if (stuck.length === 0) return false;
+
+  const transientAgentIds: string[] = [];
+  let changed = false;
+  for (const row of stuck) {
+    const [inv] = await db
+      .select({
+        exitCode: schema.cliInvocations.exitCode,
+        errorMessage: schema.cliInvocations.errorMessage,
+        endedAt: schema.cliInvocations.endedAt,
+      })
+      .from(schema.cliInvocations)
+      .where(eq(schema.cliInvocations.id, row.cliInvocationId!))
+      .limit(1);
+    if (!inv || inv.endedAt === null) continue; // genuinely still in-flight
+    // Invocation ended but the mining row never folded -> orphaned. Fail it so the barrier
+    // can clear, and remember recoverable transients to re-dispatch below.
+    await db
+      .update(schema.taskStepAgentMinings)
+      .set({
+        status: 'failed',
+        errorMessage:
+          inv.errorMessage ??
+          `agent invocation ended without a result (exit ${inv.exitCode ?? 'unknown'})`,
+        endedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.taskStepAgentMinings.id, row.id));
+    changed = true;
+    if (
+      isTransientCliFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) &&
+      row.attempts < MAX_MINING_ORPHAN_REDISPATCH
+    ) {
+      transientAgentIds.push(row.agentId);
+    }
+  }
+
+  if (transientAgentIds.length > 0 && params.providers && params.deps) {
+    const requeued = await retryMiningAgents(
+      db,
+      stepDef,
+      current,
+      ctx,
+      detected,
+      formValues,
+      llmOutput,
+      params,
+      transientAgentIds,
+      MAX_MINING_ORPHAN_REDISPATCH,
+    );
+    if (requeued > 0) {
+      ctx.logger.warn(
+        { stepId: stepDef.metadata.id, agentIds: transientAgentIds, requeued },
+        'mining agents orphaned by a worker restart — re-dispatching',
+      );
+    }
+  }
+  return changed;
+}
+
 /** Mark the currently-active LLM invocation row as consumed so the next
  *  resolveLlmPhase pass enqueues a fresh one. No-op when the step has no
  *  unconsumed invocation (already-consumed paths or steps without llm). */
@@ -2382,6 +2525,39 @@ async function countTrailingTruncations(db: Database, taskStepId: string): Promi
   let n = 0;
   for (const r of rows) {
     if (isOutputTruncationMessage(r.errorMessage)) n++;
+    else break;
+  }
+  return n;
+}
+
+/** Max consecutive worker-restart/kill/timeout orphans to auto-re-dispatch on a step
+ *  before giving up and failing it — bounds a crash-looping worker. Slightly above the
+ *  DAG's 2 since a single deploy can cluster a few restarts. */
+const MAX_ORPHAN_REDISPATCH = 3;
+
+/** Count the most-recent CONSECUTIVE invocations for a step whose failure is TRANSIENT
+ *  (worker-restart orphan / SIGKILL / timeout). Resets at the first non-transient row.
+ *  Unlike countLlmAttempts it does NOT filter supersededAt: a re-dispatched orphan is
+ *  superseded (to keep it out of the genuine llm.retry budget) yet must still count
+ *  toward this thrash cap. Keyed on the shared isTransientCliFailure classifier. */
+async function countTrailingOrphans(db: Database, taskStepId: string): Promise<number> {
+  const rows = await db
+    .select({
+      exitCode: schema.cliInvocations.exitCode,
+      errorMessage: schema.cliInvocations.errorMessage,
+    })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        ne(schema.cliInvocations.mode, 'agent_mining'),
+      ),
+    )
+    .orderBy(desc(schema.cliInvocations.createdAt))
+    .limit(10);
+  let n = 0;
+  for (const r of rows) {
+    if (isTransientCliFailure({ exitCode: r.exitCode, errorMessage: r.errorMessage })) n++;
     else break;
   }
   return n;
