@@ -4,6 +4,7 @@ import {
   classifyProviderFatal,
   fatalClassFromMessage,
   isFatalProviderFailure,
+  isTransientCliFailure,
   PROVIDER_FATAL_HEADLINES,
   type ProviderFatalClass,
 } from './failure-class.js';
@@ -203,5 +204,43 @@ describe('fatalClassFromMessage', () => {
     expect(
       fatalClassFromMessage(`cli invocation failed: ${PROVIDER_FATAL_HEADLINES.rate_limit}`),
     ).toBe(null);
+  });
+});
+
+describe('isTransientCliFailure', () => {
+  it.each([null, 130, 137, 143])('transient for a killed/terminated exit code: %s', (exitCode) => {
+    expect(isTransientCliFailure({ exitCode, errorMessage: null })).toBe(true);
+  });
+
+  it.each([
+    'CLI invocation orphaned by a worker restart (worker exited mid-run)',
+    'CLI process was stopped before it finished (cancelled or timed out).',
+    STREAM_PREMATURE_END,
+  ])('transient for an orphan/stop/premature marker even with a 0 exit: %s', (errorMessage) => {
+    expect(isTransientCliFailure({ exitCode: 0, errorMessage })).toBe(true);
+  });
+
+  it('transient from the marker alone when no exit signal is available (undefined exit)', () => {
+    expect(isTransientCliFailure({ errorMessage: 'the run was cancelled or timed out' })).toBe(
+      true,
+    );
+  });
+
+  it('NOT transient for a clean success (exit 0, no error)', () => {
+    expect(isTransientCliFailure({ exitCode: 0, errorMessage: null })).toBe(false);
+  });
+
+  it('NOT transient for a genuine code failure (exit 1 + real error)', () => {
+    expect(
+      isTransientCliFailure({
+        exitCode: 1,
+        errorMessage: 'TypeError: x is not a function at build.ts:42',
+      }),
+    ).toBe(false);
+  });
+
+  it('NOT transient for a non-termination failure with no kill marker', () => {
+    expect(isTransientCliFailure({ exitCode: 1, errorMessage: null })).toBe(false);
+    expect(isTransientCliFailure({ errorMessage: 'plain failure, no kill marker' })).toBe(false);
   });
 });

@@ -44,6 +44,40 @@ export function isOutputTruncationMessage(message: string | null | undefined): b
 }
 
 /* ------------------------------------------------------------------ */
+/* Transient (recoverable) failures — killed / orphaned / timed out    */
+/* ------------------------------------------------------------------ */
+
+/** Exit codes that mean the process was TERMINATED before finishing (SIGINT 130,
+ *  SIGKILL 137, SIGTERM 143) — mirrors exec-core's TERMINATION_EXIT_CODES. A null
+ *  exit code is the same case (a worker restart orphaned the run, or the spawn
+ *  killed the client on timeout/abort, before an exit was recorded). */
+export const CLI_TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137, 143]);
+
+/** Invariant marker phrases proving an invocation was KILLED / ORPHANED / cut off
+ *  mid-run rather than finishing — the recoverable transient case. Sourced from the
+ *  EXACT strings the runtime writes: task-queue.ts (worker-restart orphan),
+ *  exec-core.ts (stop/cancel/timeout), stream.ts (premature stream end). Stable
+ *  internal contracts we own end-to-end, never ephemeral upstream wording. */
+export const TRANSIENT_CLI_FAILURE_RE =
+  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out/i;
+
+/** True when an ended invocation did not finish under its own power — it was killed,
+ *  orphaned by a worker restart, cancelled, or timed out — so its "failure" is an
+ *  infrastructure event, not the model's fault. The correct recovery is to RE-DISPATCH
+ *  the never-completed work (bounded by a per-site attempt cap), NOT to fail the step.
+ *  Keyed on the STABLE exit signal + invariant markers. Pass `exitCode: undefined` to
+ *  classify from text alone (no exit signal available). */
+export function isTransientCliFailure(sig: {
+  exitCode?: number | null;
+  errorMessage?: string | null;
+}): boolean {
+  const killedByExit =
+    sig.exitCode === null ||
+    (typeof sig.exitCode === 'number' && CLI_TERMINATION_EXIT_CODES.has(sig.exitCode));
+  return killedByExit || (!!sig.errorMessage && TRANSIENT_CLI_FAILURE_RE.test(sig.errorMessage));
+}
+
+/* ------------------------------------------------------------------ */
 /* Fatal (non-retryable) provider failures                             */
 /* ------------------------------------------------------------------ */
 
@@ -68,10 +102,6 @@ export const PROVIDER_FATAL_HEADLINES: Record<ProviderFatalClass, string> = {
   auth: 'CLI authentication failed',
   server_error: 'Provider server error (service unavailable)',
 };
-
-// Termination/cancellation exit codes — see exec-core's TERMINATION_EXIT_CODES.
-// A stopped process is never a provider-fatal failure.
-const PROVIDER_TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137, 143]);
 
 // --- Volatile upstream text -------------------------------------------------
 // These patterns match text emitted by third-party CLIs / provider APIs. The
@@ -103,7 +133,7 @@ export function classifyProviderFatal(
   errorMessage: string | null,
   rawOutput: string | null,
 ): ProviderFatalClass | null {
-  if (exitCode === null || exitCode === 0 || PROVIDER_TERMINATION_EXIT_CODES.has(exitCode)) {
+  if (exitCode === null || exitCode === 0 || CLI_TERMINATION_EXIT_CODES.has(exitCode)) {
     return null;
   }
   const tail = typeof rawOutput === 'string' ? rawOutput.slice(-2000) : '';

@@ -12,22 +12,12 @@
 //               plain non-termination error. The implementation approach is the
 //               problem → the escalation path (advisor → replanner) decides.
 //
-// Keyed on the STABLE exit signal + invariant error phrases (see cli-exec/exec-core.ts
-// TERMINATION_EXIT_CODES and the orphan/timeout markers), never on ephemeral wording.
+// Keyed on the STABLE exit signal + invariant error phrases, delegated to the shared
+// isTransientCliFailure classifier (cli-exec/failure-class.ts), never on ephemeral wording.
+
+import { isTransientCliFailure } from '../queues/cli-exec/failure-class.js';
 
 export type DagFailureClass = 'transient' | 'environment' | 'genuine';
-
-/** Exit codes that mean the process was TERMINATED before finishing (SIGINT 130,
- *  SIGKILL 137, SIGTERM 143) — mirrors TERMINATION_EXIT_CODES in cli-exec/exec-core.ts.
- *  A null exit code is the same case (the spawn killed the client on timeout/abort). */
-const TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137, 143]);
-
-/** Error phrases proving the invocation was killed / orphaned / cut off mid-run rather
- *  than finishing — the recoverable transient case. Sourced from the exact strings the
- *  runtime writes: task-queue.ts (worker-restart orphan), cli-exec/exec-core.ts (stop/
- *  cancel/timeout), cli-exec/stream.ts (premature stream end). */
-const TRANSIENT_FAILURE_RE =
-  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out/i;
 
 /** Stable marker stamped on the issue's `concerns` when transient re-dispatch is
  *  exhausted, so the downstream ENVIRONMENT halt recognises a persistently-killed agent
@@ -67,12 +57,11 @@ export function classifyDagIssueFailure(signal: {
   concerns?: string | null;
 }): DagFailureClass {
   const text = [signal.errorMessage, signal.concerns].filter(Boolean).join(' ; ');
-  const killedByExit =
-    signal.exitCode === null ||
-    (typeof signal.exitCode === 'number' && TERMINATION_EXIT_CODES.has(signal.exitCode));
   // A transient MARKER-exhausted concern reads as ENVIRONMENT, so check that first.
   if (ENVIRONMENT_FAILURE_RE.test(text)) return 'environment';
-  if (killedByExit || TRANSIENT_FAILURE_RE.test(text)) return 'transient';
+  // Delegate the transient (killed/orphaned/timed-out) test to the shared classifier,
+  // passing the combined error+concerns text so a concern-only marker still matches.
+  if (isTransientCliFailure({ exitCode: signal.exitCode, errorMessage: text })) return 'transient';
   return 'genuine';
 }
 

@@ -1460,6 +1460,7 @@ async function handleAdvanceStep(
 export async function reconcileOrphanedSteps(db: Database): Promise<void> {
   const stuckCli = await db
     .select({
+      taskStepId: schema.taskSteps.id,
       taskId: schema.taskSteps.taskId,
       stepId: schema.taskSteps.stepId,
       round: schema.taskSteps.round,
@@ -1476,30 +1477,25 @@ export async function reconcileOrphanedSteps(db: Database): Promise<void> {
     );
   for (const s of stuckCli) {
     try {
-      const [inv] = await db
-        .select({ id: schema.cliInvocations.id })
-        .from(schema.cliInvocations)
-        .innerJoin(schema.taskSteps, eq(schema.taskSteps.id, schema.cliInvocations.taskStepId))
+      // Mark EVERY live invocation for this step orphaned, not just the latest — a
+      // fan-out step (agent-mining review / DAG) has N in-flight invocations after a
+      // crash, and leaving the siblings ended_at NULL makes the mining barrier count
+      // them as still-in-flight forever. Safe: sandbox containers are reaped before the
+      // workers start (index.ts), so none is genuinely running at reconcile time. The
+      // per-phase resolvers then classify each orphan and re-dispatch it (bounded).
+      await db
+        .update(schema.cliInvocations)
+        .set({
+          endedAt: new Date(),
+          errorMessage: 'CLI invocation orphaned by a worker restart (worker exited mid-run)',
+        })
         .where(
           and(
-            eq(schema.taskSteps.taskId, s.taskId),
-            eq(schema.taskSteps.stepId, s.stepId),
-            eq(schema.taskSteps.round, s.round),
+            eq(schema.cliInvocations.taskStepId, s.taskStepId),
             isNull(schema.cliInvocations.endedAt),
             isNull(schema.cliInvocations.supersededAt),
           ),
-        )
-        .orderBy(desc(schema.cliInvocations.startedAt))
-        .limit(1);
-      if (inv) {
-        await db
-          .update(schema.cliInvocations)
-          .set({
-            endedAt: new Date(),
-            errorMessage: 'CLI invocation orphaned by a worker restart (worker exited mid-run)',
-          })
-          .where(eq(schema.cliInvocations.id, inv.id));
-      }
+        );
       await enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, s.epoch);
       logger.info({ taskId: s.taskId, stepId: s.stepId }, 'reconciled orphaned waiting_cli step');
     } catch (err) {
