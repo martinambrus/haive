@@ -64,19 +64,25 @@ function makeMockDb(state: MockState): Database {
     },
     update: (table: unknown) => {
       const tableName = tableNameOf(table);
+      // Apply the side-effect eagerly in set() so an update that does NOT call
+      // .returning() (e.g. superseding an orphaned invocation) still takes effect,
+      // matching Drizzle's awaitable builder. .returning() then reflects the result.
+      const apply = (v: Record<string, unknown>): Record<string, unknown>[] => {
+        state.updates.push({ table: tableName, ...v });
+        if (tableName === 'task_steps') {
+          state.taskStepRow = { ...state.taskStepRow, ...v };
+          return [state.taskStepRow];
+        }
+        // A cli_invocations supersede drops the row from the live/unconsumed set, so a
+        // re-dispatch on re-entry sees no ended invocation and dispatches a fresh one.
+        if (tableName === 'cli_invocations' && v.supersededAt) state.cliInvocationRow = null;
+        return [];
+      };
       return {
-        set: (v: Record<string, unknown>) => ({
-          where: (_: unknown) => ({
-            returning: async () => {
-              state.updates.push({ table: tableName, ...v });
-              if (tableName === 'task_steps') {
-                state.taskStepRow = { ...state.taskStepRow, ...v };
-                return [state.taskStepRow];
-              }
-              return [];
-            },
-          }),
-        }),
+        set: (v: Record<string, unknown>) => {
+          const rows = apply(v);
+          return { where: (_: unknown) => ({ returning: async () => rows }) };
+        },
       };
     },
     // db.query.<table>.findFirst is the relation-aware Drizzle API used
@@ -368,7 +374,11 @@ describe('advanceStep LLM phase', () => {
     }
   });
 
-  it('fails the step when exitCode is null (abnormal termination)', async () => {
+  it('re-dispatches a fresh invocation when the prior one was killed (null exit, transient)', async () => {
+    // A null exit code means the process was terminated before it finished (worker
+    // restart, timeout, SIGKILL) — an infrastructure event, not a model failure. The
+    // step now supersedes the orphan and dispatches a fresh invocation (bounded by
+    // countTrailingOrphans) instead of failing, so a restart mid-run self-heals.
     const state = freshState();
     state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
     state.cliInvocationRow = {
@@ -381,6 +391,7 @@ describe('advanceStep LLM phase', () => {
       createdAt: new Date(),
     };
     const db = makeMockDb(state);
+    let enqueued = 0;
     const result = await advanceStep({
       db,
       taskId: 'task-1',
@@ -392,14 +403,13 @@ describe('advanceStep LLM phase', () => {
       providers: [makeProvider()],
       deps: {
         async enqueueCliInvocation() {
-          throw new Error('should not enqueue');
+          enqueued += 1;
         },
       },
     });
-    expect(result.status).toBe('failed');
-    if (result.status === 'failed') {
-      expect(result.error).toMatch(/cli exited with code unknown/);
-    }
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toBe(1);
+    expect(state.updates.some((u) => u.table === 'cli_invocations' && u.supersededAt)).toBe(true);
   });
 
   it('blocks a local Ollama model on an unsafeForLocalModels step', async () => {
