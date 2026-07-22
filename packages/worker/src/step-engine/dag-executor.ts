@@ -927,7 +927,44 @@ async function resolveReviewPhase(
       if (!ok) await setResolution(ra.db, issue, 'failed_unrecoverable');
       continue;
     }
-    if (latest.consumedAt || !latest.cliInvocationId) continue;
+    if (latest.consumedAt || !latest.cliInvocationId) {
+      // The latest run is already folded (or never got an invocation) yet the issue is
+      // STILL unresolved — the review stalled, e.g. resolveDagPhase threw mid-ingest and
+      // the resolution write never landed. Skipping here would park the step forever
+      // (this issue keeps `needReview` non-empty and nothing ever re-spawns), so make the
+      // phase crash-resumable: re-spawn a fresh reviewer, bounded by the same transient
+      // budget; once it is spent, resolve failed_unrecoverable so the escalation path
+      // (advisor) decides instead of the level wedging.
+      if (issue.infraRetries < DAG_MAX_INFRA_RETRIES) {
+        await ra.db
+          .update(schema.taskDagIssues)
+          .set({ infraRetries: issue.infraRetries + 1, updatedAt: new Date() })
+          .where(eq(schema.taskDagIssues.id, issue.id));
+        const ok = await spawnReviewAgent(
+          ra,
+          issue,
+          'reviewer',
+          issue.innerIteration,
+          reviewerPrompt(issue),
+          ['tool_use'],
+        );
+        if (!ok)
+          await setResolution(
+            ra.db,
+            issue,
+            'failed_unrecoverable',
+            'no cli provider available for reviewer re-dispatch',
+          );
+      } else {
+        await setResolution(
+          ra.db,
+          issue,
+          'failed_unrecoverable',
+          'review stalled: the reviewer run was consumed without recording a verdict and the re-dispatch budget is spent',
+        );
+      }
+      continue;
+    }
     const inv = await ra.db.query.cliInvocations.findFirst({
       where: eq(schema.cliInvocations.id, latest.cliInvocationId),
     });
@@ -1166,6 +1203,19 @@ async function ingestAdvisor(
   return 'retry';
 }
 
+/** Postgres unique_violation (SQLSTATE 23505). The one-live-per-step index rejected a
+ *  duplicate SINGLETON dispatch because a concurrent/duplicate advance already spawned
+ *  one. Not a failure — the winner's invocation drives the phase, so the loser parks
+ *  (mirrors step-runner's insertInvocationOrNull). */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === '23505'
+  );
+}
+
 async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promise<boolean> {
   const prompt = replannerPrompt(ea.plan, failed);
   const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
@@ -1185,16 +1235,27 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
     invokeOpts: { cwd: ea.params.workspacePath, effortLevel: preferredEffort ?? undefined },
   });
   if (plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') return false;
-  const inv = await ea.db
-    .insert(schema.cliInvocations)
-    .values({
-      taskId: ea.taskId,
-      taskStepId: ea.current.id,
-      cliProviderId: plan.providerId,
-      mode: 'cli',
-      prompt: plan.effectivePrompt ?? prompt,
-    })
-    .returning({ id: schema.cliInvocations.id });
+  // The replanner is a per-step SINGLETON, so the one-live-per-step index rejects a second
+  // concurrent dispatch (two advance jobs racing into the escalation phase). That rejection
+  // is not an error: the winner already inserted its invocation AND stamped
+  // plan.replannerInvocationId, so report success and let the caller park on it. Throwing
+  // here instead would fail the whole step on a duplicate advance.
+  let inv: { id: string }[];
+  try {
+    inv = await ea.db
+      .insert(schema.cliInvocations)
+      .values({
+        taskId: ea.taskId,
+        taskStepId: ea.current.id,
+        cliProviderId: plan.providerId,
+        mode: 'cli',
+        prompt: plan.effectivePrompt ?? prompt,
+      })
+      .returning({ id: schema.cliInvocations.id });
+  } catch (err) {
+    if (isUniqueViolation(err)) return true; // a replanner is already in flight
+    throw err;
+  }
   const invId = inv[0]?.id;
   if (!invId) return false;
   await ea.db
