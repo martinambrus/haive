@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   api,
   type CliAuthStatus,
@@ -21,6 +21,8 @@ import {
   FormError,
   Input,
 } from '@/components/ui';
+import { CliUpgradeAll } from '@/components/cli-upgrade-all';
+import { cliUpgradeLatest, groupUpgradable } from '@/components/cli-upgrade-selection';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { usePageTitle } from '@/lib/use-page-title';
 
@@ -73,7 +75,16 @@ export default function CliProvidersPage() {
   const [needsReconnect, setNeedsReconnect] = useState<Record<string, boolean>>({});
   const [cloningIds, setCloningIds] = useState<Record<string, boolean>>({});
   const [upgradingIds, setUpgradingIds] = useState<Record<string, boolean>>({});
+  /** Bulk ("Upgrade All") run state — separate from upgradingIds, which drives
+   *  the per-row buttons for both the single and the bulk path. */
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<string | null>(null);
   const { requireCliLogin } = useCliLogin();
+
+  const upgradeGroups = useMemo(
+    () => (providers && catalog ? groupUpgradable(providers, catalog) : []),
+    [providers, catalog],
+  );
 
   function handleLogin(p: CliProvider) {
     requireCliLogin({
@@ -176,6 +187,64 @@ export default function CliProvidersPage() {
         delete next[p.id];
         return next;
       });
+    }
+  }
+
+  /** Bulk path for the Upgrade All control. Sequential rather than Promise.all so
+   *  the progress count is real; each provider is upgraded through the same PATCH
+   *  the per-row button uses. One provider failing must not strand the rest, so
+   *  every iteration catches on its own and failures are reported in aggregate. */
+  async function handleUpgradeMany(ids: string[]) {
+    if (ids.length === 0 || bulkBusy) return;
+    const byId = new Map((providers ?? []).map((p) => [p.id, p]));
+    const targets: { p: CliProvider; latest: string }[] = [];
+    for (const id of ids) {
+      const p = byId.get(id);
+      if (!p) continue;
+      const latest = cliUpgradeLatest(
+        p,
+        catalog?.find((m) => m.name === p.name),
+      );
+      if (latest) targets.push({ p, latest });
+    }
+    if (targets.length === 0) return;
+
+    setBulkBusy(true);
+    setError(null);
+    setUpgradingIds((s) => {
+      const next = { ...s };
+      for (const t of targets) next[t.p.id] = true;
+      return next;
+    });
+
+    const failed: { label: string; message: string }[] = [];
+    let upgraded = 0;
+    for (const [i, { p, latest }] of targets.entries()) {
+      setBulkProgress(`Upgrading ${i + 1} of ${targets.length}...`);
+      try {
+        await api.patch(`/cli-providers/${p.id}`, { cliVersion: latest });
+        upgraded++;
+      } catch (err) {
+        failed.push({ label: p.label, message: (err as Error).message ?? 'Upgrade failed' });
+      }
+    }
+
+    // Refetch before reporting: load() writes its own error on failure and would
+    // otherwise clobber the summary below.
+    await load();
+    setUpgradingIds((s) => {
+      const next = { ...s };
+      for (const t of targets) delete next[t.p.id];
+      return next;
+    });
+    setBulkProgress(null);
+    setBulkBusy(false);
+    if (failed.length > 0) {
+      setError(
+        `Upgraded ${upgraded} of ${targets.length}. Failed: ${failed
+          .map((f) => `${f.label} (${f.message})`)
+          .join('; ')}`,
+      );
     }
   }
 
@@ -365,6 +434,12 @@ export default function CliProvidersPage() {
         <>
           <section className="flex flex-col gap-4">
             <h2 className="text-lg font-semibold text-neutral-100">Configured</h2>
+            <CliUpgradeAll
+              groups={upgradeGroups}
+              onUpgrade={(ids) => void handleUpgradeMany(ids)}
+              busy={bulkBusy}
+              progress={bulkProgress}
+            />
             {providers.length === 0 ? (
               <p className="text-sm text-neutral-500">None yet. Pick a CLI below to get started.</p>
             ) : (
@@ -649,23 +724,6 @@ function authBadgeVariant(status: CliAuthStatus): 'success' | 'warning' | 'error
   if (status === 'rate_limited' || status === 'network_error') return 'warning';
   if (status === 'unknown') return 'default';
   return 'error';
-}
-
-/** Returns the newest available version to upgrade to, or null when none.
- *  Target is versions[0] (newest published), NOT the dist-tag latestVersion,
- *  which can lag behind the newest publish. Offered only when the pin is a
- *  KNOWN, older entry (idx > 0): idx 0 = already newest; idx -1 = pinned to
- *  something not in the cache (e.g. ahead of the registry list) → no offer, so
- *  we never prompt a downgrade. Unpinnable providers never report an upgrade. */
-function cliUpgradeLatest(
-  p: CliProvider,
-  meta: CliProviderCatalogEntry | undefined,
-): string | null {
-  if (!meta?.versionPinnable) return null;
-  const versions = meta.versionCache?.versions ?? [];
-  const installed = p.cliVersion;
-  if (!installed || versions.length === 0) return null;
-  return versions.indexOf(installed) > 0 ? versions[0]! : null;
 }
 
 function TestPathLine({
