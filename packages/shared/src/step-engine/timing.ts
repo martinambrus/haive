@@ -78,6 +78,25 @@ export function computeStepContribution(
   };
 }
 
+/** Work / idle / user-active one step contributes when it is being RESET and FOLDED into
+ *  carried_* (not displayed live). Identical to the read path for a step whose run has ENDED
+ *  (or is a waiting park), so a normal reset is unchanged. The one difference is a run still
+ *  OPEN at fold time — endedAt null with a started_at, e.g. a step left `running` after a
+ *  worker restart orphaned it. computeStepContribution bills such a step's whole start->now
+ *  gap as work; for an orphaned step that gap is hours or days of DEAD time, not work, and
+ *  folding it inflates carried_work permanently (observed: a task reported 157h of "work",
+ *  149h of which was one never-completed step's orphan gap). So an open run's billed work is
+ *  reclassified as idle here. A genuinely-running step being revised loses at most its brief
+ *  current run to idle and re-runs anyway; the live read path is untouched and keeps ticking
+ *  work for a running step. Used by every carried_* fold (reset/revise/retry) so the rule
+ *  lives in ONE place instead of being duplicated across the worker + api reset sites. */
+export function computeFoldContribution(step: TaskTimingStep, nowMs: number): TaskTiming {
+  const c = computeStepContribution(step, nowMs, step.status === 'failed');
+  const open = toMs(step.startedAt) !== null && toMs(step.endedAt) === null;
+  if (!open) return c;
+  return { workMs: 0, idleMs: c.idleMs + c.workMs, userActiveMs: c.userActiveMs };
+}
+
 /** Active-work / idle / user-active breakdown for a task, summed across its steps.
  *  Each step's CURRENT run (via `computeStepContribution`) plus any timing carried
  *  over from prior runs (`carried_*`, folded in by a retry/reset), so the totals

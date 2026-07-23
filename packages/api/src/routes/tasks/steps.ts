@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { schema, resetDagCurrentLevelForRetry } from '@haive/database';
-import { computeStepContribution } from '@haive/shared/timing';
+import { computeFoldContribution } from '@haive/shared/timing';
 import {
   CLI_PROVIDER_CATALOG,
   clarifyStepRequestSchema,
@@ -400,12 +400,13 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       // (possibly different) regenerated schema.
       // Zero the live timing per row, but first fold the finishing run's work/idle/
       // user into carried_* so the step's timing survives the retry (a plain reset
-      // discards the prior run, undercounting effort). foldSit counts a failed step's
-      // fail->retry wait as idle so wall reconciles. Per-row because each contributes
-      // differently. Mirrors resetStepAndDownstream in the worker.
+      // discards the prior run, undercounting effort). computeFoldContribution counts a
+      // failed step's fail->retry wait as idle so wall reconciles, and reclassifies an
+      // orphaned still-open run's span as idle instead of inflating carried work. Per-row
+      // because each contributes differently. Mirrors resetStepAndDownstream in the worker.
       const resetRows = [step, ...downstream.filter((r) => r.status !== 'pending')];
       for (const r of resetRows) {
-        const contrib = computeStepContribution(r, now.getTime(), r.status === 'failed');
+        const contrib = computeFoldContribution(r, now.getTime());
         await tx
           .update(schema.taskSteps)
           .set({
@@ -1018,8 +1019,9 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       .where(eq(schema.taskStepAgentMinings.taskStepId, step.id));
     // Fold the finishing run's timing into carried_* before zeroing, so switching the
     // CLI and re-running the step keeps its accrued work/idle/effort (same as retry).
+    // computeFoldContribution avoids carrying an orphaned open run's span as work.
     const now = new Date();
-    const contrib = computeStepContribution(step, now.getTime(), step.status === 'failed');
+    const contrib = computeFoldContribution(step, now.getTime());
     await db
       .update(schema.taskSteps)
       .set({

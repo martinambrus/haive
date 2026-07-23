@@ -1,6 +1,6 @@
 import { and, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { schema, resetDagCurrentLevelForRetry, type Database } from '@haive/database';
-import { computeStepContribution } from '@haive/shared/timing';
+import { computeFoldContribution } from '@haive/shared/timing';
 
 // Reset a step + its downstream back to `pending` so the worker re-runs the step from
 // detect. Used by the `revise` route (handleResult): a review step asks to re-run an
@@ -79,12 +79,13 @@ export async function resetStepAndDownstream(
     // persisted schema is null. formValues is cleared so the regenerated form re-decides.
     // Zero the live timing per row, but first fold the finishing run's work/idle/user
     // into carried_* so the step's timing survives the restart (a plain reset would
-    // discard the prior run, making the effort timer undercount). foldSit counts a
-    // failed step's fail->retry dead-wait as idle so wall reconciles. Per-row (not a
-    // blanket update) because each row's contribution differs.
+    // discard the prior run, making the effort timer undercount). computeFoldContribution
+    // counts a failed step's fail->retry dead-wait as idle so wall reconciles, and
+    // reclassifies an orphaned still-open run's span as idle rather than inflating carried
+    // work with it. Per-row (not a blanket update) because each row's contribution differs.
     const resetRows = [target, ...downstream.filter((r) => r.status !== 'pending')];
     for (const r of resetRows) {
-      const c = computeStepContribution(r, now.getTime(), r.status === 'failed');
+      const c = computeFoldContribution(r, now.getTime());
       await tx
         .update(schema.taskSteps)
         .set({
