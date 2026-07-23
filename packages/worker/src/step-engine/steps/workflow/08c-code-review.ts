@@ -295,6 +295,21 @@ function refuterAgentId(fingerprint: string): string {
   return `${REFUTER_PREFIX}${fingerprint.slice(0, 16)}`;
 }
 
+/** Human terminal label for a refuter. Every refuter used to render as the identical
+ *  "Refuter (<reviewer>)", so a fan-out of N distinct findings looked like N duplicate
+ *  terminals. Include the position (i/total), the severity, and the finding's location +
+ *  issue so each terminal names the specific finding it is trying to disprove. */
+export function refuterTitle(
+  f: Pick<RefutableFinding, 'severity' | 'path' | 'lines' | 'issue'>,
+  index: number,
+  total: number,
+): string {
+  const loc = [f.path, f.lines].filter(Boolean).join(':');
+  const issue = f.issue.replace(/\s+/g, ' ').trim();
+  const head = `Refuter ${index + 1}/${total} — ${f.severity}${loc ? ` ${loc}` : ''}`;
+  return issue ? `${head} · ${issue.slice(0, 80)}` : head;
+}
+
 /** Every critical/high finding across all reviewers — exactly the ones that cost a fix
  *  round. Medium/low are advisory already and are never refuted: the invocation would
  *  buy nothing. */
@@ -1037,9 +1052,9 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         }
         ctx.logger.info({ count: wave.length }, 'dispatching refuters for blocking findings');
         throw new MiningWaveError(
-          wave.map((f) => ({
+          wave.map((f, i) => ({
             agentId: f.agentId,
-            agentTitle: `Refuter (${f.reviewerId})`,
+            agentTitle: refuterTitle(f, i, wave.length),
             prompt: buildRefutePrompt(args.detected, f),
           })),
         );

@@ -27,6 +27,8 @@ import {
   waitForPortInRunner,
   type AppRunnerHandle,
 } from '../../../sandbox/app-runner.js';
+import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
+import { TaskCancelledError } from '../../step-definition.js';
 
 // The single "is the app actually serving, and at what URL" primitive. Browser
 // testing (08a), the live VNC view, and any later runtime consumer all need the
@@ -48,6 +50,14 @@ export interface AppRuntimeCtx {
   repoPath: string;
   logger: Pick<typeof logger, 'info' | 'warn' | 'error' | 'debug'>;
   emitProgress?(message: string): Promise<void>;
+  /** Throws TaskCancelledError when the task was stopped/cancelled. A StepContext supplies
+   *  it directly; a non-step caller (runtime-ensure job) omits it. Threaded so a bring-up
+   *  that blocked in the admission gate does not resume and clobber a Stopped step's state
+   *  once a slot frees. */
+  throwIfCancelled?(): void;
+  /** Aborts when the task is stopped/cancelled, so the admission gate can drop the wait
+   *  immediately instead of holding a scarce slot until its 8-minute timeout. */
+  signal?: AbortSignal;
 }
 
 export type RuntimeMode = 'ddev' | 'app-runner' | 'host' | 'none';
@@ -141,10 +151,28 @@ export async function classifyRuntime(ctx: AppRuntimeCtx): Promise<RuntimeSpec> 
  *  relaunches the dev server when a cold restart killed it (the container alone
  *  does not restart the process). host: best-effort URL only (no relaunch). */
 export async function ensureAppServing(ctx: AppRuntimeCtx): Promise<ServingRuntime> {
+  try {
+    return await ensureAppServingInner(ctx);
+  } catch (err) {
+    // A slot wait aborted because the task was stopped — normalise to TaskCancelledError so
+    // the step runner's cancel path handles it (leave the step Stopped, don't re-fail or
+    // route it into the fix-loop).
+    if (err instanceof RuntimeSlotAbortedError) throw new TaskCancelledError();
+    throw err;
+  }
+}
+
+async function ensureAppServingInner(ctx: AppRuntimeCtx): Promise<ServingRuntime> {
+  // Bail before doing any bring-up work if the task was already stopped.
+  ctx.throwIfCancelled?.();
   const spec = await classifyRuntime(ctx);
 
   if (spec.mode === 'ddev' && spec.repoSubpath) {
     const handle = await ensureDdevWithProgress(ctx, spec.repoSubpath);
+    // A bring-up that blocked in the admission gate may return long after the user hit
+    // Stop; check BEFORE the caller writes waiting_cli so it can't resurrect a Stopped
+    // step (the throw unwinds through the step runner's cancel handling instead).
+    ctx.throwIfCancelled?.();
     const url = (await ddevPrimaryUrl(handle)) ?? spec.knownUrl ?? 'http://localhost';
     return { mode: 'ddev', url, handle };
   }
@@ -169,6 +197,7 @@ export async function ensureAppServing(ctx: AppRuntimeCtx): Promise<ServingRunti
           ctx.logger.warn({ taskId: ctx.taskId, logTail }, 'app did not respond after relaunch');
       }
     }
+    ctx.throwIfCancelled?.(); // see the ddev branch: don't resurrect a Stopped step
     const url = spec.knownUrl ?? (spec.port ? `http://localhost:${spec.port}` : 'http://localhost');
     return { mode: 'app-runner', url, handle, port: spec.port };
   }
@@ -219,13 +248,14 @@ export async function withDdevProgress<T>(
  *  ~2-minute cold boot never looks frozen. Shared by 01c-ddev-env, 07c-ddev-
  *  reconcile, and ensureAppServing. Throws whatever ensureDdevStarted throws. */
 export async function ensureDdevWithProgress(
-  ctx: Pick<AppRuntimeCtx, 'taskId' | 'emitProgress' | 'db'>,
+  ctx: Pick<AppRuntimeCtx, 'taskId' | 'emitProgress' | 'db' | 'signal'>,
   repoSubpath: string,
 ): Promise<DdevRunnerHandle> {
   const handle = await withDdevProgress(
     ctx,
     'Ensuring the DDEV environment is up…',
-    (onLine) => ensureDdevStarted(ctx.taskId, repoSubpath, { onProgress: onLine }),
+    (onLine) =>
+      ensureDdevStarted(ctx.taskId, repoSubpath, { onProgress: onLine, signal: ctx.signal }),
     { initialLine: 'starting containers…' },
   );
   // On-demand step-debugging: when the task opted into debug mode, (re)wire Xdebug

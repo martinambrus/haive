@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   decideDdevRecovery,
   isHostPortCollision,
+  isDdevVersionConstraintFailure,
   parseProcNetRouteGateway,
   parseDdevPrimaryUrl,
   renderXdebugIni,
@@ -51,6 +52,23 @@ describe('decideDdevRecovery', () => {
     expect(decideDdevRecovery({ describeOk: false, hasPrimaryUrl: true, dockerdUp: true })).toBe(
       'warm-start',
     );
+  });
+});
+
+describe('isDdevVersionConstraintFailure', () => {
+  it('matches the real runner failure (task 38f02dee, exact-pin vs shipped patch)', () => {
+    const out =
+      "Failed to start project(s): unable to start the 'rs-codex-5-6-ultra' project: your DDEV " +
+      "version 'v1.25.3' doesn't meet the constraint '= v1.25.2'. Please update to a DDEV version " +
+      'that meets this constraint or update the `ddev_version_constraint` in your .ddev/config.yaml';
+    expect(isDdevVersionConstraintFailure(out)).toBe(true);
+  });
+
+  it('is false for an ordinary transient boot failure (rebuild/retry should still run)', () => {
+    expect(isDdevVersionConstraintFailure('Failed to start: container timed out after 120s')).toBe(
+      false,
+    );
+    expect(isDdevVersionConstraintFailure('web container failed: exit 1')).toBe(false);
   });
 });
 

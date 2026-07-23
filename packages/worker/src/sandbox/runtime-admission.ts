@@ -29,10 +29,19 @@ const REPUMP_INTERVAL_MS = 15_000;
 type ReleaseFn = () => void;
 const NOOP_RELEASE: ReleaseFn = () => {};
 
+/** Thrown from acquireRuntimeSlot when the task was stopped/cancelled while it waited for a
+ *  runtime slot, so the caller unwinds the bring-up instead of proceeding. */
+export class RuntimeSlotAbortedError extends Error {
+  constructor(taskId: string) {
+    super(`runtime slot wait aborted: task ${taskId} was stopped`);
+    this.name = 'RuntimeSlotAbortedError';
+  }
+}
+
 interface Waiter {
   done: boolean;
   timer: ReturnType<typeof setTimeout> | null;
-  admit: (reason: 'slot' | 'timeout' | 'disabled') => void;
+  admit: (reason: 'slot' | 'timeout' | 'disabled' | 'aborted') => void;
   /** Called while this waiter is still queued behind a full gate, with the current
    *  busy count (live runners + in-flight boots) and the active max. Lets a caller
    *  surface "waiting for a runtime slot" instead of a misleading boot-progress line.
@@ -126,17 +135,30 @@ export async function acquireRuntimeSlot(
   taskId: string,
   kind: 'ddev' | 'app',
   onWait?: (busy: number, max: number) => void,
+  signal?: AbortSignal,
 ): Promise<ReleaseFn> {
   if (!(await resourceLimitsEnabled())) return NOOP_RELEASE;
+  // Already stopped before we even queued — don't take a slot at all.
+  if (signal?.aborted) throw new RuntimeSlotAbortedError(taskId);
 
-  return new Promise<ReleaseFn>((resolve) => {
+  return new Promise<ReleaseFn>((resolve, reject) => {
     const w: Waiter = { done: false, timer: null, admit: () => {}, onWait };
+    let onAbort: (() => void) | null = null;
     w.admit = (reason) => {
       if (w.done) return;
       w.done = true;
       if (w.timer) clearTimeout(w.timer);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
       const idx = waiters.indexOf(w);
       if (idx >= 0) waiters.splice(idx, 1);
+      // The task was stopped/cancelled while queued — reject so the bring-up unwinds
+      // instead of resuming and clobbering the Stopped step, and DON'T count an
+      // inFlightBoot (we never boot). The slot goes to the next real waiter.
+      if (reason === 'aborted') {
+        log.info({ taskId, kind }, 'runtime admission aborted (task stopped while waiting)');
+        reject(new RuntimeSlotAbortedError(taskId));
+        return;
+      }
       // 'disabled' means the governor was turned off while waiting — don't count it
       // against the budget; hand back a no-op release.
       if (reason === 'disabled') {
@@ -158,6 +180,10 @@ export async function acquireRuntimeSlot(
         void pump();
       });
     };
+    if (signal) {
+      onAbort = () => w.admit('aborted');
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
     w.timer = setTimeout(() => w.admit('timeout'), ADMISSION_TIMEOUT_MS);
     waiters.push(w);
     ensureRepumpTimer();

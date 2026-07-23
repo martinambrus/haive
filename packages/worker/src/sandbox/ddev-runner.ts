@@ -380,6 +380,26 @@ export function isHostPortCollision(msg: string): boolean {
   );
 }
 
+/** True when `ddev start` failed because the project pins a DDEV version the runner image
+ *  does not satisfy (`ddev_version_constraint`). This is a config problem in the repo, not
+ *  a transient boot hiccup, so rebuilding the runner or retrying the start can NEVER fix
+ *  it — both just burn a runtime slot. VOLATILE upstream wording isolated here; a miss
+ *  only costs today's futile retry, never correctness, so it degrades gracefully. */
+export function isDdevVersionConstraintFailure(output: string): boolean {
+  return /doesn't meet the constraint|ddev_version_constraint/i.test(output);
+}
+
+/** Actionable failure for an unsatisfiable version pin — names the fix (relax the pin to a
+ *  range) instead of dumping the raw ddev output, and short-circuits the rebuild/retry. */
+function ddevVersionConstraintError(output: string): Error {
+  const detail =
+    /(your DDEV version[^\n]*constraint[^\n]*)/i.exec(output)?.[1] ?? output.slice(-300);
+  return new Error(
+    `ddev start blocked by an incompatible ddev_version_constraint in .ddev/config.yaml. ` +
+      `Relax it to a range (e.g. ">= v1.25.2 < v1.26.0") rather than an exact patch pin. ${detail}`,
+  );
+}
+
 /** Shared mkcert CA volume (generated once on worker boot) mounted RO into every
  *  runner so all per-task DDEV certs share ONE CA the user trusts once, instead of
  *  a per-runner throwaway. The api also mounts it (read-only) to serve rootCA.pem. */
@@ -1053,7 +1073,7 @@ const inFlightDdevBoots = new Map<string, Promise<DdevRunnerHandle>>();
 export async function ensureDdevStarted(
   taskId: string,
   repoSubpath: string,
-  opts: { onProgress?: (line: string) => void } = {},
+  opts: { onProgress?: (line: string) => void; signal?: AbortSignal } = {},
 ): Promise<DdevRunnerHandle> {
   // Coalesce concurrent boots of the SAME task into one. An interactive 08a apply
   // and the VNC runtime-ensure job can both call this at once; two startDdevRunner
@@ -1073,7 +1093,7 @@ export async function ensureDdevStarted(
 async function ensureDdevStartedInner(
   taskId: string,
   repoSubpath: string,
-  opts: { onProgress?: (line: string) => void },
+  opts: { onProgress?: (line: string) => void; signal?: AbortSignal },
 ): Promise<DdevRunnerHandle> {
   const existing = runnerHandleForTask(taskId, repoSubpath);
   const describe = await ddevExec(existing, 'describe -j', { timeoutMs: 15_000 });
@@ -1105,6 +1125,10 @@ async function ensureDdevStartedInner(
         // live DB. Skip it even when a snapshot exists.
         return existing;
       }
+      // A version-constraint rejection is not a wedged runner — a cold rebuild cannot
+      // satisfy the pin, so fail fast with an actionable error instead of looping.
+      if (isDdevVersionConstraintFailure(warm.output))
+        throw ddevVersionConstraintError(warm.output);
       log.warn(
         { taskId, output: warm.output.slice(-800) },
         'ddev warm-start failed; rebuilding the runner (cold boot)',
@@ -1119,13 +1143,22 @@ async function ensureDdevStartedInner(
   // re-pulls base images into a fresh nested /var/lib/docker. Hold an admission slot
   // across the whole heavy boot (runner create + nested image pulls + ddev start), so
   // at most maxConcurrentRuntimes tasks cold-boot at once; release once up or failed.
-  const releaseSlot = await acquireRuntimeSlot(taskId, 'ddev', (busy, max) =>
-    opts.onProgress?.(`waiting for a free runtime slot — ${busy} in use, limit ${max}`),
+  const releaseSlot = await acquireRuntimeSlot(
+    taskId,
+    'ddev',
+    (busy, max) =>
+      opts.onProgress?.(`waiting for a free runtime slot — ${busy} in use, limit ${max}`),
+    opts.signal,
   );
   try {
     const handle = await startDdevRunner({ taskId, repoSubpath });
     let start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
     if (start.exitCode !== 0) {
+      // An unsatisfiable ddev_version_constraint cannot be fixed by a second identical
+      // start — surface it now rather than burning another 900s attempt.
+      if (isDdevVersionConstraintFailure(start.output)) {
+        throw ddevVersionConstraintError(start.output);
+      }
       // A cold first boot builds the project's custom web image, so container
       // readiness can land right at DDEV's default 120s timeout and fail
       // transiently. The images are built now, so one retry usually clears it.

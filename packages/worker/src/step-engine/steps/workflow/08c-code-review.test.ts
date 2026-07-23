@@ -9,6 +9,7 @@ import {
   hasNonApprovingVerdict,
   collectRefutable,
   isRefuted,
+  refuterTitle,
   codeReviewStep,
 } from './08c-code-review.js';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
@@ -39,6 +40,35 @@ function runReview(
     miningWaveExhausted,
   } as unknown as Parameters<typeof codeReviewStep.apply>[1]);
 }
+
+describe('refuterTitle', () => {
+  const f = {
+    severity: 'high' as const,
+    path: 'src/auth.ts',
+    lines: '42',
+    issue: 'Missing CSRF token validation on the login form',
+  };
+
+  it('names the specific finding with position, severity, and location — not a generic label', () => {
+    expect(refuterTitle(f, 0, 8)).toBe(
+      'Refuter 1/8 — high src/auth.ts:42 · Missing CSRF token validation on the login form',
+    );
+  });
+
+  it('gives each finding in a wave a DISTINCT title (the whole point)', () => {
+    const a = refuterTitle(f, 0, 3);
+    const b = refuterTitle({ ...f, path: 'src/db.ts', lines: '9', issue: 'SQL injection' }, 1, 3);
+    expect(a).not.toBe(b);
+    expect(b).toContain('Refuter 2/3');
+    expect(b).toContain('src/db.ts:9');
+  });
+
+  it('degrades gracefully when location/issue are missing', () => {
+    expect(refuterTitle({ severity: 'critical', path: '', lines: '', issue: '' }, 2, 4)).toBe(
+      'Refuter 3/4 — critical',
+    );
+  });
+});
 
 describe('parsePeerReview', () => {
   it('parses a fenced peer review', () => {
