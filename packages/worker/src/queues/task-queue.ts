@@ -1439,10 +1439,15 @@ async function handleAdvanceStep(
     const admission = await runtimeAdmission(ctx.taskId);
     if (admission.decision === 'park') {
       const row = await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined);
+      // Frame the wait as a QUEUE POSITION, not the raw "N in use, limit M" ratio: `busy` can
+      // exceed the limit (STOP-kept envs linger and count), so "7 in use, limit 2" read like an
+      // error. `ahead` = runners that must free before this task is admitted = busy - (max - 1).
+      // The poll re-runs this every RUNTIME_PARK_POLL_MS, so the number counts down as slots free.
+      const ahead = Math.max(1, admission.busy - admission.max + 1);
       await db
         .update(schema.taskSteps)
         .set({
-          statusMessage: `Waiting for a free runtime slot — ${admission.busy} in use, limit ${admission.max}`,
+          statusMessage: `Waiting for a free runtime slot (limit ${admission.max}; ${ahead} ahead in the queue)`,
           updatedAt: new Date(),
         })
         .where(eq(schema.taskSteps.id, row.id));
