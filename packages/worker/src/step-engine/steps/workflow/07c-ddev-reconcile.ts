@@ -133,6 +133,7 @@ async function loadReconcileState(ctx: StepContext): Promise<{
 }
 
 export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> = {
+  needsRuntime: true,
   metadata: {
     id: '07c-ddev-reconcile',
     workflowType: 'workflow',

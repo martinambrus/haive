@@ -35,9 +35,11 @@ import {
   computeGlobalStepIndex,
   stepRegistry,
   registerAllSteps,
+  upsertRow,
   type AdvanceStepResult,
   type WorkerDeps,
 } from '../step-engine/index.js';
+import { runtimeAdmission } from '../sandbox/runtime-admission.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { orderWorkflowRunList } from '../orchestrator/execution-paths.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
@@ -698,12 +700,17 @@ async function defaultContainerCleanup(db: Database, taskId: string): Promise<nu
   return destroyed;
 }
 
+/** Poll interval for a step parked on the runtime-admission pre-check (no free runtime slot).
+ *  The delayed advance re-checks admission; matches the in-process gate's repump cadence. */
+const RUNTIME_PARK_POLL_MS = 15_000;
+
 async function enqueueAdvance(
   taskId: string,
   userId: string,
   stepId: string,
   round = 0,
   epoch?: number,
+  opts?: { delayMs?: number },
 ): Promise<void> {
   const queue = getTaskQueue();
   await queue.add(
@@ -714,6 +721,7 @@ async function enqueueAdvance(
       backoff: { type: 'exponential', delay: 5000 },
       removeOnComplete: 100,
       removeOnFail: 100,
+      ...(opts?.delayMs ? { delay: opts.delayMs } : {}),
     },
   );
 }
@@ -1419,6 +1427,35 @@ async function handleAdvanceStep(
   // Stamp the step's position in the run list as run_seq (the run-order display key).
   const runList = await buildRunList(ctx, db);
   const runIdx = runList.findIndex((s) => s.metadata.id === payload.stepId);
+
+  // Runtime-pool admission (task level): a step that brings up the per-task runtime must not
+  // overcommit the machine-aware runtime limit. When the pool is full and this task holds no
+  // runner yet, PARK — surface the wait on the step row, release this worker, and re-drive the
+  // advance after a short delay (the delayed job persists across restarts). A task already
+  // holding its runner, or a free slot, is admitted immediately, so only the FIRST bring-up (or
+  // a re-boot after the runner was reaped) can park. The in-process acquireRuntimeSlot gate
+  // remains the last-resort backstop for the rare pre-check -> cold-boot race.
+  if (stepDef.needsRuntime) {
+    const admission = await runtimeAdmission(ctx.taskId);
+    if (admission.decision === 'park') {
+      const row = await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined);
+      await db
+        .update(schema.taskSteps)
+        .set({
+          statusMessage: `Waiting for a free runtime slot — ${admission.busy} in use, limit ${admission.max}`,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.taskSteps.id, row.id));
+      await enqueueAdvance(ctx.taskId, ctx.userId, payload.stepId, round, ctx.orchestrationEpoch, {
+        delayMs: RUNTIME_PARK_POLL_MS,
+      });
+      logger.info(
+        { taskId: ctx.taskId, stepId: payload.stepId, busy: admission.busy, max: admission.max },
+        'runtime admission: parked step (pool full, no free slot)',
+      );
+      return;
+    }
+  }
 
   const providers = await loadProviders(db, ctx.userId);
   const result = await advanceStep({

@@ -152,6 +152,7 @@ async function buildProposedConfig(
 }
 
 export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
+  needsRuntime: true,
   metadata: {
     id: '01c-ddev-env',
     workflowType: 'workflow',

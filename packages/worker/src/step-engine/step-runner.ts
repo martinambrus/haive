@@ -1994,7 +1994,7 @@ export function computeGlobalStepIndex(workflowType: string, index: number): num
   return offset + index;
 }
 
-async function upsertRow(
+export async function upsertRow(
   db: Database,
   taskId: string,
   stepDef: StepDefinition,

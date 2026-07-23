@@ -91,6 +91,56 @@ async function maxConcurrentOrInfinity(): Promise<number> {
   }
 }
 
+/** True when the task already owns a LIVE (running) runtime runner — it reuses/warm-starts
+ *  that one and needs NO new admission slot. Running-only (`docker ps -q`): a created/exited
+ *  container is not a usable runtime. Mirrors the label ddev-runner uses for its own sweeps. */
+async function taskHasLiveRunner(taskId: string): Promise<boolean> {
+  const ids = await exec('docker', ['ps', '-q', '--filter', `label=haive.task.id=${taskId}`], {
+    timeout: 10_000,
+  })
+    .then(({ stdout }) => stdout.split(/\s+/).filter((s) => s.length > 0))
+    .catch(() => []);
+  return ids.length > 0;
+}
+
+/** Pure admission decision, split from the docker/config I/O so the rule is directly testable
+ *  (mirrors reapDecision / pickPreemptibleRunner). `proceed` when the governor is off
+ *  (max=Infinity), the task already holds a runner (reuse/warm — no new slot), or a slot is
+ *  free; else `park`. */
+export function runtimeAdmissionDecision(
+  max: number,
+  hasLiveRunner: boolean,
+  busy: number,
+): 'proceed' | 'park' {
+  if (max === Number.POSITIVE_INFINITY) return 'proceed';
+  if (hasLiveRunner) return 'proceed';
+  return busy < max ? 'proceed' : 'park';
+}
+
+/** Non-blocking, TASK-level runtime admission — the pre-step gate the orchestrator consults
+ *  BEFORE running a step that would bring up a runtime, so it can PARK the task (release the
+ *  worker, re-drive later) instead of blocking in `acquireRuntimeSlot` and overcommitting the
+ *  pool past the limit. Counts `inFlightBoots` so a task mid-cold-boot also occupies a slot
+ *  here, closing most of the pre-check -> cold-boot race. The docker count is skipped when the
+ *  task already holds a runner (short-circuit to proceed). */
+export async function runtimeAdmission(
+  taskId: string,
+): Promise<{ decision: 'proceed' | 'park'; busy: number; max: number }> {
+  const max = await maxConcurrentOrInfinity();
+  if (max === Number.POSITIVE_INFINITY) return { decision: 'proceed', busy: 0, max };
+  if (await taskHasLiveRunner(taskId)) return { decision: 'proceed', busy: 0, max };
+  let busy = (await liveRuntimeRunnerCount()) + inFlightBoots;
+  // Pool full: before parking, try to preempt a runner from a task that is no longer running
+  // (a failed/terminal task's grace-runner) — a live task's demand outranks a dead task's
+  // retry-cache, and parking must NOT make the waiter sit out the full failed-grace. Uses the
+  // same reclaimer the in-process gate calls (the pre-check bypasses that gate, so without this
+  // preemption would never fire for a parked task). If it frees one, re-count and maybe admit.
+  if (busy >= max && reclaimer && (await reclaimer().catch(() => false))) {
+    busy = (await liveRuntimeRunnerCount()) + inFlightBoots;
+  }
+  return { decision: runtimeAdmissionDecision(max, false, busy), busy, max };
+}
+
 function ensureRepumpTimer(): void {
   if (repumpTimer || waiters.length === 0) return;
   repumpTimer = setInterval(() => {

@@ -350,6 +350,7 @@ function formatInteractiveReject(out: BrowserVerifyApply): string {
 }
 
 export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerifyApply> = {
+  needsRuntime: true,
   metadata: {
     id: '08a-browser-verify',
     workflowType: 'workflow',

@@ -351,6 +351,12 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
    *  of the default 'waiting_user'. Used by 13-pr-wait to surface a task waiting for its
    *  PR to merge as 'waiting_pr'. Only takes effect when the step actually parks. */
   readonly parkTaskStatus?: TaskStatus;
+  /** This step brings up the task's per-task runtime (DDEV / app-runner) — it calls
+   *  ensureAppServing / ensureDdevStarted. The orchestrator gates it on the machine-aware
+   *  runtime pool BEFORE running it: when the pool is full and the task holds no runner yet,
+   *  the step is parked (re-driven when a slot frees) instead of overcommitting a new runner.
+   *  Over-declaring is safe — a task already holding its runner is admitted immediately. */
+  readonly needsRuntime?: boolean;
   shouldRun?(ctx: StepContext): Promise<boolean> | boolean;
   detect?(ctx: StepContext): Promise<TDetect>;
   form?(ctx: StepContext, detected: TDetect, llmOutput?: unknown): FormSchema | null;

@@ -321,6 +321,7 @@ function formatRejectDiagnosis(
 }
 
 export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGateApply> = {
+  needsRuntime: true,
   metadata: {
     id: '09-gate-2-verify-approval',
     workflowType: 'workflow',

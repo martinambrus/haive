@@ -234,6 +234,7 @@ function parseRunRecipe(raw: unknown): RunRecipe | null {
 }
 
 export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
+  needsRuntime: true,
   metadata: {
     id: '01a-app-boot',
     workflowType: 'workflow',
