@@ -80,6 +80,11 @@ export function BrowserVncPanel({
   // 1006 "Failed when connecting" console error on every completion. Cleared on an
   // explicit user reconnect (Retry / Show).
   const liveDropRef = useRef(false);
+  // Mirror the autoCollapse prop into a ref so the disconnect handler (a stable closure created
+  // in connect()) can read the CURRENT value: while the step is still active (autoCollapse false)
+  // a live drop reconnects to re-stream the unchanged desktop; once the step finishes
+  // (autoCollapse true) a drop is terminal (the runtime is being torn down).
+  const autoCollapseRef = useRef(autoCollapse);
 
   const disconnect = useCallback(() => {
     if (retryTimerRef.current) {
@@ -128,10 +133,18 @@ export function BrowserVncPanel({
         // cap is hit.)
         if (connectedRef.current) {
           connectedRef.current = false;
-          liveDropRef.current = true;
-          setMessage('Browser session ended.');
-          setState('error');
-          return;
+          // Terminal ONLY if the step already finished (autoCollapse → the runtime is being
+          // torn down; reconnecting would race a gone bridge and cold-boot a completed task's
+          // runtime). While the step is still active, fall through to the reconnect path below
+          // to re-stream the (unchanged) desktop — a bridge drop mid-review must self-heal, not
+          // give up. A successful reconnect resets retriesRef, so a session that drops every so
+          // often keeps re-streaming; only genuinely-failing reconnects hit the budget below.
+          if (autoCollapseRef.current) {
+            liveDropRef.current = true;
+            setMessage('Browser session ended.');
+            setState('error');
+            return;
+          }
         }
         if (retriesRef.current < MAX_CONNECT_RETRIES) {
           retriesRef.current += 1;
@@ -212,6 +225,7 @@ export function BrowserVncPanel({
   // later steps. Fires once on the false→true edge; re-opening stays manual.
   const prevAutoCollapse = useRef(autoCollapse);
   useEffect(() => {
+    autoCollapseRef.current = autoCollapse;
     // Fire only on the false→true edge (step finishing), NOT on mount — otherwise a
     // reload of an already-finished step would clobber a persisted "expanded".
     // setExpandedAuto is the ephemeral setter: the programmatic collapse stays
