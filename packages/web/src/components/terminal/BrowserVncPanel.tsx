@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiWebSocketUrl } from '@/lib/api-client';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
+import { suppressNovncCloseLog } from '@/lib/suppress-novnc-log';
 
 type VncState = 'idle' | 'connecting' | 'connected' | 'error';
 
@@ -98,6 +99,9 @@ export function BrowserVncPanel({
 
   const connect = useCallback(async () => {
     if (!containerRef.current || rfbRef.current) return;
+    // Install before the RFB below can log a benign 1006 close (idempotent) so the reconnect
+    // churn doesn't pop the Next.js dev overlay as a page-level Console Error.
+    suppressNovncCloseLog();
     setState('connecting');
     setMessage(null);
     try {
