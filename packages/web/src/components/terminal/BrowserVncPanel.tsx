@@ -6,10 +6,14 @@ import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 
 type VncState = 'idle' | 'connecting' | 'connected' | 'error';
 
-// While the runtime cold-boots, the api gates (and may reject) the VNC bridge
-// until it is up, so retry quietly up to this many times — showing a "starting…"
-// state — before surfacing an error.
-const MAX_CONNECT_RETRIES = 8;
+// While the runtime cold-boots, the api gates (and may reject) the VNC bridge until it is up,
+// so retry quietly up to this many times — showing a "starting…" state — before surfacing an
+// error. Must cover a cold DDEV boot PLUS a first-run install (composer / site-install), which
+// routinely runs past a couple of minutes: the old 24s (8×3s) gave up mid-install and forced a
+// manual Retry even though the runtime came up moments later. ~3 min at 3s (the api holds each
+// attempt up to its own VNC_ENSURE_TIMEOUT_MS, so a slow-but-progressing boot bridges in one
+// shot without exhausting these). A genuinely stuck runtime still surfaces the Retry button.
+const MAX_CONNECT_RETRIES = 60;
 const RETRY_DELAY_MS = 3000;
 
 interface BrowserVncPanelProps {
