@@ -239,8 +239,7 @@ async function upsertSnapshot(
   db: Database,
   provider: ProviderRow,
   outcome:
-    | Extract<UsageFetchOutcome, { ok: true }>
-    | { ok: false; error: string; reconnect?: boolean },
+    Extract<UsageFetchOutcome, { ok: true }> | { ok: false; error: string; reconnect?: boolean },
 ): Promise<void> {
   const now = new Date();
   const iso = (s: string | null | undefined): Date | null => (s ? new Date(s) : null);

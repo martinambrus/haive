@@ -106,10 +106,13 @@ describe('ported baseline agents', () => {
 
   it('working agents get the Response Style directive; document agents are exempt', () => {
     const render = (id: string) =>
-      buildAgentFileForTarget(BASELINE_AGENT_SPECS.find((s) => s.id === id)!, {
-        dir: '.claude/agents',
-        format: 'markdown',
-      });
+      buildAgentFileForTarget(
+        BASELINE_AGENT_SPECS.find((s) => s.id === id)!,
+        {
+          dir: '.claude/agents',
+          format: 'markdown',
+        },
+      );
 
     // Working agent → terseness directive present.
     expect(render('code-reviewer')).toContain('## Response Style');

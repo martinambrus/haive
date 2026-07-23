@@ -405,8 +405,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const envApplyData = (envPrev?.output as { enrichedData?: EnvDetectShape } | null)
       ?.enrichedData;
     const envDetectData = (envPrev?.detect as DetectResult | null)?.data as
-      | EnvDetectShape
-      | undefined;
+      EnvDetectShape | undefined;
     const envData: EnvDetectShape | null = envApplyData ?? envDetectData ?? null;
 
     const confirmPrev = await loadPreviousStepOutput(

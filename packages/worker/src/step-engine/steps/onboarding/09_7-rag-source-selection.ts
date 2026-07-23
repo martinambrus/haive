@@ -64,8 +64,7 @@ export const ragSourceSelectionStep: StepDefinition<
     await ctx.emitProgress('Loading project metadata...');
     const envPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
     const envData = (envPrev?.detect as DetectResult | null)?.data as
-      | { project?: { framework?: string } }
-      | undefined;
+      { project?: { framework?: string } } | undefined;
     const framework = envData?.project?.framework ?? null;
 
     await ctx.emitProgress('Loading extension data...');

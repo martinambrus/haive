@@ -3,8 +3,7 @@ import { diffLines } from 'diff';
 /** One half-row of a side-by-side diff: a real line (with its line number) or an
  *  empty padding cell that keeps the two columns aligned across a modification. */
 export type DiffCell =
-  | { kind: 'equal' | 'remove' | 'add'; num: number; text: string }
-  | { kind: 'empty' };
+  { kind: 'equal' | 'remove' | 'add'; num: number; text: string } | { kind: 'empty' };
 
 export interface DiffRow {
   left: DiffCell;

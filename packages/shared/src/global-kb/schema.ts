@@ -30,11 +30,7 @@ export interface GlobalKbFacets {
 }
 
 export type GlobalKbCategory =
-  | 'general'
-  | 'tech_pattern'
-  | 'anti_pattern'
-  | 'best_practice'
-  | 'quick_reference';
+  'general' | 'tech_pattern' | 'anti_pattern' | 'best_practice' | 'quick_reference';
 
 export type GlobalKbStatus = 'skeleton' | 'enriching' | 'draft' | 'active' | 'archived' | 'failed';
 

@@ -120,9 +120,4 @@ export type TerminalFrame =
 export type TerminalClientFrame = InputFrame | ResizeFrame | PingFrame | SetControlPassthroughFrame;
 
 export type TerminalServerFrame =
-  | OutputFrame
-  | ConnectedFrame
-  | ExitFrame
-  | ErrorFrame
-  | PongFrame
-  | OAuthPromptFrame;
+  OutputFrame | ConnectedFrame | ExitFrame | ErrorFrame | PongFrame | OAuthPromptFrame;

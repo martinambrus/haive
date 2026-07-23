@@ -99,8 +99,7 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
   if (models && typeof models === 'object') {
     for (const entry of Object.values(models)) {
       const tokens = (entry as Record<string, unknown> | null)?.tokens as
-        | Record<string, unknown>
-        | undefined;
+        Record<string, unknown> | undefined;
       if (!tokens || typeof tokens !== 'object') continue;
       const prompt = num(tokens.prompt) ?? 0;
       const candidates = num(tokens.candidates) ?? 0;

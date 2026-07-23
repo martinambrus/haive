@@ -35,12 +35,7 @@ import type { GenerateFilesDetect } from '../onboarding/07-generate-files.js';
 import { computeLineDelta } from './_diff.js';
 
 export type UpgradePlanBucket =
-  | 'unchanged'
-  | 'clean_update'
-  | 'conflict'
-  | 'new_artifact'
-  | 'user_deleted'
-  | 'obsolete';
+  'unchanged' | 'clean_update' | 'conflict' | 'new_artifact' | 'user_deleted' | 'obsolete';
 
 export interface UpgradePlanEntry {
   /** Stable per-row identifier used by step 02's form to refer to this entry. */

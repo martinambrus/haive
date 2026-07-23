@@ -341,8 +341,7 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
     // returns the latest round, so 01-env-detect (round 0) resolves on this forked round.
     const envPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
     const envData = (envPrev?.detect as DetectResult | null)?.data as
-      | { project?: { framework?: string; primaryLanguage?: string } }
-      | undefined;
+      { project?: { framework?: string; primaryLanguage?: string } } | undefined;
     const framework = envData?.project?.framework ?? null;
     const language = envData?.project?.primaryLanguage ?? null;
     const kbFiles = await listKbFiles(ctx.repoPath);

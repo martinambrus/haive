@@ -11,22 +11,10 @@ export type TaskStatus =
   | 'cancelled';
 
 export type StepStatus =
-  | 'pending'
-  | 'running'
-  | 'waiting_form'
-  | 'waiting_cli'
-  | 'done'
-  | 'failed'
-  | 'skipped';
+  'pending' | 'running' | 'waiting_form' | 'waiting_cli' | 'done' | 'failed' | 'skipped';
 
 export type CliProviderName =
-  | 'claude-code'
-  | 'codex'
-  | 'gemini'
-  | 'amp'
-  | 'zai'
-  | 'antigravity'
-  | 'ollama';
+  'claude-code' | 'codex' | 'gemini' | 'amp' | 'zai' | 'antigravity' | 'ollama';
 
 export type AuthMode = 'subscription' | 'api_key';
 
@@ -82,12 +70,7 @@ export interface CliTokenUsage {
 }
 
 export type RepoSource =
-  | 'local_path'
-  | 'git_https'
-  | 'github_https'
-  | 'github_oauth'
-  | 'gitlab_https'
-  | 'upload';
+  'local_path' | 'git_https' | 'github_https' | 'github_oauth' | 'gitlab_https' | 'upload';
 
 export type ArchiveFormat = 'zip' | 'tar' | 'tar.gz';
 

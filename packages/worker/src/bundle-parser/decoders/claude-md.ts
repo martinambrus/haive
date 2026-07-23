@@ -23,8 +23,7 @@ export function decodeClaudeAgent(content: string, sourcePath: string): AgentSpe
   const tools = frontmatter['allowed-tools'] ? parseInlineArray(frontmatter['allowed-tools']) : [];
   const model = parseEnum(frontmatter.model, agentModelSchema.options) as AgentModel | undefined;
   const expertise = parseEnum(frontmatter.expertise, agentExpertiseSchema.options) as
-    | AgentExpertise
-    | undefined;
+    AgentExpertise | undefined;
   const color = (parseEnum(frontmatter.color, agentColorSchema.options) as AgentColor) ?? 'blue';
   const field = (frontmatter.field ?? '').trim() || 'general';
 

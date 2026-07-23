@@ -259,9 +259,7 @@ async function main(): Promise<void> {
 
     const envDetectStep = allSteps.find((s) => s.stepId === '01-env-detect');
     const envDetect = envDetectStep?.detectOutput as
-      | { data?: { project?: { framework?: string; primaryLanguage?: string } } }
-      | null
-      | undefined;
+      { data?: { project?: { framework?: string; primaryLanguage?: string } } } | null | undefined;
     const detectedFramework = envDetect?.data?.project?.framework;
     const detectedLanguage = envDetect?.data?.project?.primaryLanguage;
     if (detectedFramework !== 'drupal7') {

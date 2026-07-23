@@ -224,10 +224,7 @@ export interface RefreshCliVersionsJobResult {
 }
 
 export type CliExecInvocationKind =
-  | 'cli'
-  | 'subagent_native'
-  | 'subagent_sequential'
-  | 'agent_mining';
+  'cli' | 'subagent_native' | 'subagent_sequential' | 'agent_mining';
 
 export interface CliExecJobPayload {
   invocationId: string;

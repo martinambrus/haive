@@ -2590,17 +2590,16 @@ function overlayLeafDefault(field: LeafFormField, pre: Record<string, unknown>):
 function overlayPreAnswerDefaults(schema: FormSchema, pre: Record<string, unknown>): FormSchema {
   return {
     ...schema,
-    fields: schema.fields.map(
-      (field): FormField =>
-        field.type === 'accordion'
-          ? {
-              ...field,
-              items: field.items.map((item) => ({
-                ...item,
-                fields: item.fields.map((leaf) => overlayLeafDefault(leaf, pre)),
-              })),
-            }
-          : overlayLeafDefault(field, pre),
+    fields: schema.fields.map((field): FormField =>
+      field.type === 'accordion'
+        ? {
+            ...field,
+            items: field.items.map((item) => ({
+              ...item,
+              fields: item.fields.map((leaf) => overlayLeafDefault(leaf, pre)),
+            })),
+          }
+        : overlayLeafDefault(field, pre),
     ),
   };
 }

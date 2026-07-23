@@ -106,8 +106,7 @@ describe('resolveSpecWarningsStep form + llm gating', () => {
       detected('S', ['[MEDIUM] d: c', '[HIGH] e: g']),
     );
     const action = fs.fields.find((f) => f.id === 'action') as
-      | { type: string; options: { value: string }[] }
-      | undefined;
+      { type: string; options: { value: string }[] } | undefined;
     expect(action?.type).toBe('radio');
     expect(action?.options.map((o) => o.value)).toEqual(['continue', 'manual', 'agent']);
     expect(fs.description).toContain('/haive/workdir/.haive/spec-review.md');

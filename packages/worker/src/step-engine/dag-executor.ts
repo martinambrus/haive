@@ -49,8 +49,7 @@ import type {
 const exec = promisify(execFile);
 
 export type DagResolved =
-  | { resolved: true; current: TaskStepRow }
-  | { resolved: false; result: AdvanceStepResult };
+  { resolved: true; current: TaskStepRow } | { resolved: false; result: AdvanceStepResult };
 
 type DagIssueRow = typeof schema.taskDagIssues.$inferSelect;
 type DagLevelRow = typeof schema.taskDagLevels.$inferSelect;
@@ -480,9 +479,7 @@ async function startConflictFix(
  *  index rejected the insert because a concurrent advance already dispatched one; the
  *  caller must PARK on the winner, never abort the in-progress merge. */
 type MergeFixDispatch =
-  | { kind: 'ok'; invId: string }
-  | { kind: 'no_provider' }
-  | { kind: 'already_live' };
+  { kind: 'ok'; invId: string } | { kind: 'no_provider' } | { kind: 'already_live' };
 
 async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<MergeFixDispatch> {
   const { db, params, stepDef, current, integration, providers, deps } = m;

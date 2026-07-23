@@ -226,8 +226,7 @@ export const ripgrepConfigStep: StepDefinition<
   async detect(ctx: StepContext): Promise<RipgrepDetect> {
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
     const detected = (prev?.detect as DetectResult | null)?.data as
-      | EnvDetectShape['data']
-      | undefined;
+      EnvDetectShape['data'] | undefined;
     const framework = (detected?.project?.framework ?? 'general') as FrameworkName;
 
     const extensions = await scanExtensions(ctx.repoPath, framework);

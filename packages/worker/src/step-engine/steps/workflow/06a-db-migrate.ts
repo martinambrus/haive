@@ -20,14 +20,7 @@ import { withDdevProgress } from './_app-runtime.js';
 // without DDEV skip it. allowSkip is set so the user may Skip this one step.
 
 type Framework =
-  | 'drupal'
-  | 'laravel'
-  | 'symfony'
-  | 'django'
-  | 'rails'
-  | 'wordpress'
-  | 'prisma'
-  | 'unknown';
+  'drupal' | 'laravel' | 'symfony' | 'django' | 'rails' | 'wordpress' | 'prisma' | 'unknown';
 
 interface MigrateDetect {
   framework: Framework;

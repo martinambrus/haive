@@ -362,8 +362,7 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     // Generation grounding context (same sources as 09_5b.detect).
     const envPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
     const envData = (envPrev?.detect as DetectResult | null)?.data as
-      | { project?: { framework?: string; primaryLanguage?: string } }
-      | undefined;
+      { project?: { framework?: string; primaryLanguage?: string } } | undefined;
     const framework = envData?.project?.framework ?? null;
     const language = envData?.project?.primaryLanguage ?? null;
     const kbFiles = await listKbFiles(worktreePath);

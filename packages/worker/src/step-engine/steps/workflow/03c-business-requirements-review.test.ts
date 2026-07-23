@@ -40,8 +40,7 @@ describe('03c review form', () => {
     expect(schema).not.toBeNull();
     expect(schema!.infoSections?.[0]?.body ?? '').toContain('Users need to log out.');
     const decision = schema!.fields.find((f) => f.id === 'decision') as
-      | { type?: string; required?: boolean }
-      | undefined;
+      { type?: string; required?: boolean } | undefined;
     expect(decision?.type).toBe('radio');
     expect(decision?.required).toBe(true);
   });

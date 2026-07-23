@@ -41,8 +41,7 @@ const MAX_MERGE_CONFLICT_RETRIES = 4;
 const MERGE_FIX_TIMEOUT_MS = 30 * 60 * 1000;
 
 export type MergeResolved =
-  | { resolved: true; current: TaskStepRow }
-  | { resolved: false; result: AdvanceStepResult };
+  { resolved: true; current: TaskStepRow } | { resolved: false; result: AdvanceStepResult };
 
 // Structured signal the fix agent emits: either it resolved everything, or it is
 // unsure and wants the user to decide. Parsed leniently (fenced JSON + jsonrepair).

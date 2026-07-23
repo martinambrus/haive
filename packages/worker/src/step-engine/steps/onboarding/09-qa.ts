@@ -341,8 +341,7 @@ export const knowledgeQaPrepStep: StepDefinition<KnowledgeQaPrepDetect, Knowledg
     await ctx.emitProgress('Loading project metadata...');
     const envPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-env-detect');
     const envData = (envPrev?.detect as DetectResult | null)?.data as
-      | { project?: { framework?: string; primaryLanguage?: string } }
-      | undefined;
+      { project?: { framework?: string; primaryLanguage?: string } } | undefined;
     const framework = envData?.project?.framework ?? null;
     const language = envData?.project?.primaryLanguage ?? null;
 

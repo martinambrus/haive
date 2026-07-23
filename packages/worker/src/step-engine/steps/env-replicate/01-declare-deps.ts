@@ -802,8 +802,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
   const packageJson = await readJsonIfExists(path.join(repoPath, 'package.json'));
   if (packageJson) {
     const engines = (packageJson as Record<string, unknown>).engines as
-      | Record<string, string>
-      | undefined;
+      Record<string, string> | undefined;
     const nodeVersion = engines?.node ?? null;
     runtimes.push({
       language: 'node',
@@ -818,8 +817,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
   let isCmsPhpProject = false;
   if (composerJson) {
     const requireField = (composerJson as Record<string, unknown>).require as
-      | Record<string, string>
-      | undefined;
+      Record<string, string> | undefined;
     const phpSpec = requireField?.['php'];
     runtimes.push({
       language: 'php',

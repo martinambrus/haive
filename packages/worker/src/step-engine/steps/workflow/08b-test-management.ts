@@ -447,8 +447,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
     buildIterationPrompt: ({ detected, previousIterations }) => {
       const d = detected as TestManagementDetect;
       const last = previousIterations[previousIterations.length - 1]?.applyOutput as
-        | TestManagementApply
-        | undefined;
+        TestManagementApply | undefined;
       const run = last?.testRun;
       return [
         'The related tests were run after your test changes and FAILED. Fix them.',

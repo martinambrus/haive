@@ -124,8 +124,7 @@ export const toolingInfrastructureStep: StepDefinition<
       data = enriched;
     } else {
       data = ((prev?.detect as DetectResult | null)?.data as unknown as
-        | EnvDetectData
-        | undefined) ?? {
+        EnvDetectData | undefined) ?? {
         project: { primaryLanguage: 'unknown' },
         container: { type: 'none', databaseType: null },
       };
