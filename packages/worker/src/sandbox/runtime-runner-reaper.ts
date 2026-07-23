@@ -15,6 +15,14 @@ const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
  *  is handled separately (kept for retry until the grace elapses). */
 const TERMINAL_STATUSES = new Set(['completed', 'cancelled']);
 
+/** Task statuses whose runtime runner a WAITING live task may PREEMPT when the admission gate
+ *  is full: the task is no longer actively using its runtime. Unlike the periodic sweep this
+ *  includes `failed` WITHOUT waiting out the grace — preemption is demand-driven (a live task
+ *  needs the slot now); the grace only governs the unattended background reap. Whitelist: any
+ *  status not listed (running, paused, waiting_x, queued, pending, unknown) is never
+ *  preempted. */
+const PREEMPTIBLE_TASK_STATUSES = new Set(['failed', 'completed', 'cancelled']);
+
 export type ReapReason = 'exited' | 'orphan' | 'terminal' | 'failed-grace';
 
 /** Pure reap decision, split out from the DB lookup so the rules are directly testable.
@@ -48,11 +56,36 @@ export function reapDecision(
   return null;
 }
 
-interface RunnerContainer {
+export interface RunnerContainer {
   id: string;
   taskId: string | null;
   running: boolean;
   startedAtMs: number | null;
+}
+
+/** Pure pick of ONE runtime runner a waiting live task may preempt, or null. Split from the
+ *  DB/docker I/O so the rules are directly testable (mirrors `reapDecision`). Only RUNNING
+ *  containers are considered: the admission gate counts running runners (`docker ps -q`), so
+ *  an exited/`created` one holds no slot — and requiring `running` also avoids reaping a
+ *  runner another waiter is mid-cold-boot into (it appears briefly as `created`). A running
+ *  runner is preemptible when it serves nothing active: no task label / task row gone
+ *  (orphan), or the task is failed/completed/cancelled. Among candidates the longest-dead
+ *  goes first (oldest `completedAt`; orphan/unknown sorts oldest). */
+export function pickPreemptibleRunner(
+  runners: RunnerContainer[],
+  taskById: Map<string, { status: string; completedAt: Date | null }>,
+): RunnerContainer | null {
+  const candidates = runners.filter((c) => {
+    if (!c.running) return false; // holds no gate slot; boot-race guard
+    if (!c.taskId) return true; // orphan runner — nobody owns it
+    const task = taskById.get(c.taskId);
+    if (!task) return true; // task row gone — leftover
+    return PREEMPTIBLE_TASK_STATUSES.has(task.status);
+  });
+  if (candidates.length === 0) return null;
+  const deadAtMs = (c: RunnerContainer): number =>
+    (c.taskId ? taskById.get(c.taskId) : undefined)?.completedAt?.getTime() ?? 0;
+  return candidates.reduce((best, c) => (deadAtMs(c) < deadAtMs(best) ? c : best));
 }
 
 export interface RuntimeRunnerReaperOptions {
@@ -119,6 +152,57 @@ export class RuntimeRunnerReaper {
       reaped += 1;
     }
     return { scanned: containers.length, reaped };
+  }
+
+  /** Reclaim ONE runtime runner for a WAITING live task by preempting a task no longer using
+   *  its runtime (failed/completed/cancelled/orphan). Wired into the admission gate: called
+   *  when the gate is full, it frees a slot so a live task isn't starved behind a dead task's
+   *  grace-runner. Preempts a `failed` runner WITHOUT the sweep's grace — a live task's demand
+   *  outranks a dead task's retry-cache. Returns true iff it reaped a runner. */
+  async reclaimOnePreemptible(): Promise<boolean> {
+    const containers = await this.listRunnerContainers();
+    const taskById = new Map<string, { status: string; completedAt: Date | null }>();
+    for (const c of containers) {
+      if (!c.running || !c.taskId || taskById.has(c.taskId)) continue;
+      try {
+        const t = await this.db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, c.taskId),
+          columns: { status: true, completedAt: true },
+        });
+        if (t) taskById.set(c.taskId, t);
+      } catch (err) {
+        // A DB hiccup on one lookup just leaves that runner out of the candidate set
+        // (fail-safe: an un-looked-up runner is never preempted).
+        log.warn({ err, taskId: c.taskId }, 'preemption task lookup failed; skipping runner');
+      }
+    }
+    const pick = pickPreemptibleRunner(containers, taskById);
+    if (!pick) return false;
+    // Re-verify immediately before reaping: a `failed` task may have been retried in the gap
+    // since we listed (list->reap TOCTOU). Only reap if the task is still preemptible. An
+    // orphan (task row gone) stays reapable — findFirst returns undefined, we fall through.
+    if (pick.taskId) {
+      try {
+        const t = await this.db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, pick.taskId),
+          columns: { status: true },
+        });
+        if (t && !PREEMPTIBLE_TASK_STATUSES.has(t.status)) return false;
+      } catch (err) {
+        log.warn({ err, taskId: pick.taskId }, 'preemption re-check failed; not reaping');
+        return false;
+      }
+    }
+    await this.reap(pick.id);
+    // Confirm the reap actually removed the container. `reap` swallows a failed `docker rm`,
+    // so without this a persistent rm failure would report success — and the gate's pump
+    // re-picks the same runner on its `continue`, spinning forever. If it's still there, park.
+    if (await this.inspect(pick.id)) {
+      log.warn({ id: pick.id }, 'preemption reap did not remove the runner; not retrying it');
+      return false;
+    }
+    log.info({ id: pick.id, taskId: pick.taskId }, 'preempted runtime runner for a waiting task');
+    return true;
   }
 
   /** Grace (ms) before a `failed` task's runner is reclaimed; 0 disables that path. */

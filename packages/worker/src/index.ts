@@ -32,7 +32,7 @@ import { ensureDdevCa, ensureDdevRegistryCache } from './sandbox/ddev-runner.js'
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
 import { IdeSessionReaper } from './sandbox/ide-session-reaper.js';
 import { RuntimeRunnerReaper } from './sandbox/runtime-runner-reaper.js';
-import { startRuntimeLimitsWatch } from './sandbox/runtime-admission.js';
+import { startRuntimeLimitsWatch, setRuntimeReclaimer } from './sandbox/runtime-admission.js';
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 
 async function main(): Promise<void> {
@@ -156,6 +156,9 @@ async function main(): Promise<void> {
   // forever. Keys on task status + container age; never touches a live task's runner.
   const runtimeRunnerReaper = new RuntimeRunnerReaper({ db: getDb() });
   runtimeRunnerReaper.start();
+  // Let the admission gate preempt a dead task's grace-runner for a waiting live task instead
+  // of starving it behind the retry-cache (reuses the reaper's list/reap).
+  setRuntimeReclaimer(() => runtimeRunnerReaper.reclaimOnePreemptible());
   // Live-retune the runtime admission gate when the resource-limit config changes.
   const stopRuntimeLimitsWatch = startRuntimeLimitsWatch();
 

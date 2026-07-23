@@ -55,6 +55,15 @@ let pumping = false;
 let pumpAgain = false;
 let repumpTimer: ReturnType<typeof setInterval> | null = null;
 
+/** Optional hook to reclaim one runtime slot when the gate is full, by preempting a runner
+ *  whose task is no longer running (a failed/terminal task's grace-runner). Wired at boot to
+ *  the runner reaper; left unset it is exactly today's park-and-wait behavior. Returns true
+ *  iff it freed a slot. */
+let reclaimer: (() => Promise<boolean>) | null = null;
+export function setRuntimeReclaimer(fn: (() => Promise<boolean>) | null): void {
+  reclaimer = fn;
+}
+
 function listRunningIdsByLabel(label: string): Promise<string[]> {
   return exec('docker', ['ps', '-q', '--filter', `label=${label}`], { timeout: 10_000 })
     .then(({ stdout }) => stdout.split(/\s+/).filter((s) => s.length > 0))
@@ -114,9 +123,14 @@ async function pump(): Promise<void> {
         if (live + inFlightBoots < max) {
           waiters[0]?.admit('slot');
         } else {
-          // Gate full: tell every still-queued waiter WHY it's blocked (a resource
-          // queue, not a slow boot) so its caller's progress line can say so. Fires on
-          // the initial pump and each repump, refreshing the count as runners come/go.
+          // Gate full. Before parking the waiters, try to reclaim a slot by preempting a
+          // runner whose task is no longer running (a dead task's grace-runner) — a live
+          // waiter's demand outranks a retry-cache. A reclaim frees a running runner, so loop
+          // again to re-count `live` and admit. Best-effort: never let it fail the pump.
+          if (reclaimer && (await reclaimer().catch(() => false))) continue;
+          // Nothing to preempt: tell every still-queued waiter WHY it's blocked (a resource
+          // queue, not a slow boot) so its caller's progress line can say so. Fires on the
+          // initial pump and each repump, refreshing the count as runners come/go.
           const busy = live + inFlightBoots;
           for (const w of waiters) w.onWait?.(busy, max);
           break;
