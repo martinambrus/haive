@@ -99,9 +99,25 @@ function runVncBridge(ws: WebSocket, host: string, port: number, taskId: string)
   const tcp = net.connect({ host, port });
   let closed = false;
 
+  // Keepalive: a VNC session parked on a STATIC screen (a Gate-2 review, an idle desktop) sends
+  // no framebuffer data, so the socket goes idle and is dropped abnormally (close 1006, no
+  // handshake) after ~20s — the panel then sees a drop and reconnect-loops (observed on
+  // ec9371b3: "ws closed" every ~21-24s). A periodic WS ping keeps the socket active (the
+  // browser auto-pongs), so an idle-but-alive session stays connected. Cleared on teardown.
+  const keepAlive = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.ping();
+      } catch {
+        /* ignore */
+      }
+    }
+  }, 15_000);
+
   const teardown = (reason: string): void => {
     if (closed) return;
     closed = true;
+    clearInterval(keepAlive);
     log.info({ taskId, host, reason }, 'vnc bridge closed');
     try {
       tcp.destroy();
