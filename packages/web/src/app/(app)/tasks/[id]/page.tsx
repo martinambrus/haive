@@ -2742,12 +2742,18 @@ function StepCardImpl({
         </div>
       </div>
 
-      {step.statusMessage && (step.status === 'running' || step.status === 'waiting_cli') && (
-        <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">
-          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
-          {step.statusMessage}
-        </div>
-      )}
+      {step.statusMessage &&
+        (step.status === 'running' ||
+          step.status === 'waiting_cli' ||
+          // A parked step is 'pending' with a set message (e.g. "waiting for a free runtime
+          // slot") — surface it so an admission-queued step doesn't look like a stuck blank.
+          // Non-parked pending steps carry no message (reset clears it, fresh rows default null).
+          step.status === 'pending') && (
+          <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
+            {step.statusMessage}
+          </div>
+        )}
 
       {step.warningMessage && (
         <div className="whitespace-pre-wrap rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
