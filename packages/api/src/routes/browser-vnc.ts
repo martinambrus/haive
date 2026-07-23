@@ -69,19 +69,26 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
-        // Bring the task's runtime + browser desktop up before bridging. A
-        // worker-boot reap / restart can leave them down, and the api can't start
-        // them itself (spawning task containers is worker-only). Enqueue a worker
-        // ensure job and await it; on timeout/failure reject so the panel's Retry
-        // can reconnect once a slow DDEV cold start finishes in the background.
-        const ready = await ensureRuntimeUp(taskId, auth.userId);
-        if (!ready) {
-          rejectUpgrade(socket, 503, 'Runtime starting');
-          return;
+        // Fast path: if the desktop VNC is ALREADY reachable, bridge straight to it. Do NOT run
+        // the ensure job on a reconnect — it re-navigates Chrome to the app root (page.goto),
+        // which resets an in-progress session (e.g. an install wizard) each time the bridge
+        // re-establishes. The VNC bridge only needs the desktop reachable, not re-navigated.
+        let desktopHost = await reachableDesktopHost(taskId, vncPort);
+        if (!desktopHost) {
+          // Desktop is down (a worker-boot reap / restart / first open). The api can't start it
+          // (spawning task containers is worker-only), so enqueue a worker ensure job and await
+          // it; it cold-boots the runtime AND navigates Chrome to the app on this first load. On
+          // timeout/failure reject so the panel's retry reconnects once the boot finishes.
+          const ready = await ensureRuntimeUp(taskId, auth.userId);
+          if (!ready) {
+            rejectUpgrade(socket, 503, 'Runtime starting');
+            return;
+          }
+          desktopHost = await resolveDesktopContainer(taskId, vncPort);
         }
-        const desktopHost = await resolveDesktopContainer(taskId, vncPort);
+        const host = desktopHost;
         wss.handleUpgrade(req, socket, head, (ws) => {
-          runVncBridge(ws, desktopHost, vncPort, taskId);
+          runVncBridge(ws, host, vncPort, taskId);
         });
       } catch (err) {
         log.error({ err, url: rawUrl }, 'vnc upgrade handler failed');
@@ -183,6 +190,19 @@ async function resolveDesktopContainer(taskId: string, port: number): Promise<st
   const ddev = ddevRunnerName(taskId);
   if (await probeTcp(ddev, port)) return ddev;
   return appRunnerName(taskId);
+}
+
+/** The desktop container whose VNC port is ALREADY reachable, or null if neither is. Lets a VNC
+ *  upgrade bridge straight to a live desktop and SKIP the ensure job — which re-navigates Chrome
+ *  to the app root (page.goto) and would reset an in-progress session (e.g. an install wizard) on
+ *  every reconnect. Only a genuinely-down desktop pays for the ensure (which navigates on first
+ *  load). Probes both runtime kinds; the ddev runner wins when both answer (mirrors resolve). */
+async function reachableDesktopHost(taskId: string, port: number): Promise<string | null> {
+  const ddev = ddevRunnerName(taskId);
+  if (await probeTcp(ddev, port)) return ddev;
+  const app = appRunnerName(taskId);
+  if (await probeTcp(app, port)) return app;
+  return null;
 }
 
 /** Ask the worker to ensure the task's app + browser desktop are up, awaiting the
