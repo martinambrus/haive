@@ -46,8 +46,11 @@ FROM deps AS builder
 COPY packages/shared ./packages/shared
 COPY packages/database ./packages/database
 COPY packages/worker ./packages/worker
-RUN pnpm --filter @haive/shared build \
- && pnpm --filter @haive/database build \
+# @haive/shared imports @haive/database, so database's dist must exist before
+# shared (and worker) build; build it first (deps before dependents). See the
+# matching .dockerignore **/node_modules fix and packages/web/Dockerfile.
+RUN pnpm --filter @haive/database build \
+ && pnpm --filter @haive/shared build \
  && pnpm --filter @haive/worker build
 
 FROM base AS production
