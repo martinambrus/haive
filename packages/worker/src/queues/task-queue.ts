@@ -40,6 +40,7 @@ import {
   type WorkerDeps,
 } from '../step-engine/index.js';
 import { runtimeAdmission } from '../sandbox/runtime-admission.js';
+import { computeFoldContribution } from '@haive/shared/timing';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { orderWorkflowRunList } from '../orchestrator/execution-paths.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
@@ -1444,9 +1445,28 @@ async function handleAdvanceStep(
       // error. `ahead` = runners that must free before this task is admitted = busy - (max - 1).
       // The poll re-runs this every RUNTIME_PARK_POLL_MS, so the number counts down as slots free.
       const ahead = Math.max(1, admission.busy - admission.max + 1);
+      // Re-queue the step to a clean PENDING state, not just a message. A step re-parked after
+      // an interrupted run is still `running` with an open started_at, which bills the whole
+      // park as phantom work AND renders as running (expanded terminals, buried banner). Fold
+      // the open run's timing into carried_* (computeFoldContribution reclassifies an OPEN span
+      // to idle, so the phantom "work" becomes carried_idle and work+idle still reconciles with
+      // wall), then reset the live timing. iterations/output/detect are PRESERVED so it RESUMES
+      // when a slot frees — a park is a transient resource wait, not a reset (the pending->running
+      // re-run stamps a fresh started_at, step-runner.ts). Idempotent: a later poll re-park finds
+      // started_at=null so the fold adds 0.
+      const fold = computeFoldContribution(row, Date.now());
       await db
         .update(schema.taskSteps)
         .set({
+          status: 'pending',
+          startedAt: null,
+          endedAt: null,
+          idleMs: 0,
+          waitingStartedAt: null,
+          userActiveMs: 0,
+          carriedWorkMs: row.carriedWorkMs + fold.workMs,
+          carriedIdleMs: row.carriedIdleMs + fold.idleMs,
+          carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
           statusMessage: `Waiting for a free runtime slot (limit ${admission.max}; ${ahead} ahead in the queue)`,
           updatedAt: new Date(),
         })

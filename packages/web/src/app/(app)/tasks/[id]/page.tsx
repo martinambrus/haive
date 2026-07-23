@@ -2993,25 +2993,23 @@ function StepCardImpl({
       )}
       {ranAgent && showRagStats && <RagStatsPanel taskId={taskId} stepId={step.stepId} />}
 
-      {step.cliInvocationCount > 0 ? (
+      {step.cliInvocationCount > 0 && (
         <StepTerminal
           taskId={taskId}
           stepRowId={step.id}
           autoExpand={step.status === 'running' || step.status === 'waiting_cli'}
           statusMessage={step.statusMessage}
         />
-      ) : (
-        step.status === 'pending' &&
-        step.statusMessage && (
-          // Runtime-parked: the step is queued for a runtime slot BEFORE any CLI invocation
-          // exists, so no StepTerminal spawns. Render a prominent amber "queued" panel where the
-          // terminal would appear (mirrors StepTerminal's own queue-mode strip) so the task reads
-          // as waiting-in-line, not stuck.
-          <div className="flex items-center gap-2 rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
-            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-            {step.statusMessage}
-          </div>
-        )
+      )}
+      {step.status === 'pending' && step.statusMessage && (
+        // Runtime-parked: the step is queued for a runtime slot. It may have prior invocations
+        // from an interrupted run — their terminals render collapsed above (a pending step does
+        // not auto-expand), so this prominent amber "queued" panel is the current signal and the
+        // task reads as waiting-in-line, not a stuck blank you have to scroll up to explain.
+        <div className="flex items-center gap-2 rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
+          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
+          {step.statusMessage}
+        </div>
       )}
 
       {!runtimeTornDown &&

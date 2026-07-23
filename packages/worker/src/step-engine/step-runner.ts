@@ -1292,6 +1292,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       current = await updateRow(db, current.id, {
         status: 'running',
         startedAt: new Date(),
+        // Clear any queued/parked message (e.g. "waiting for a free runtime slot") so it does
+        // not linger once the step actually runs; the run's own emitProgress takes over.
+        statusMessage: null,
       });
     }
 
