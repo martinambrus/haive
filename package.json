@@ -51,13 +51,15 @@
   "pnpm": {
     "overrides": {
       "drizzle-orm": "0.45.2",
-      "protobufjs": "^7.6.3",
+      "protobufjs": "^7.6.5",
       "@grpc/grpc-js": "^1.14.4",
-      "dompurify": "^3.4.11",
+      "dompurify": "^3.4.12",
       "uuid": "^11.1.1",
       "ws": "^8.21.0",
       "postcss": "^8.5.16",
-      "esbuild": "^0.28.1"
+      "esbuild": "^0.28.1",
+      "sharp": "^0.35.0",
+      "brace-expansion": "^5.0.7"
     }
   }
 }
