@@ -1291,6 +1291,32 @@ export async function startBrowserDesktop(handle: DdevRunnerHandle): Promise<voi
   }
 }
 
+/** pkill patterns reversing start-browser-desktop.sh's pgrep guards; the trailing
+ *  `true` keeps the exec exit 0 when nothing matches (pkill returns 1 on no match). */
+const BROWSER_DESKTOP_STOP_CMD =
+  "pkill -f 'remote-debugging-port=9222'; pkill chromium; pkill -f 'socat.*9223'; pkill x11vnc; pkill Xvfb; true";
+
+/** Stop (best-effort) the headed-browser desktop inside the runner — the inverse of
+ *  startBrowserDesktop. Keyed on taskId (no handle, boots nothing): a no-op when the
+ *  runner isn't running. Called after Gate 2 approval, once the browser is no longer
+ *  needed, to free the runner's RAM/CPU. Idempotent + safe to re-run; a later
+ *  startBrowserDesktop brings it back up. */
+export async function stopBrowserDesktop(taskId: string): Promise<void> {
+  const container = ddevRunnerName(taskId);
+  if (!(await containerRunning(container))) return;
+  try {
+    await exec(
+      'docker',
+      ['exec', '-u', 'ddev', container, 'bash', '-lc', BROWSER_DESKTOP_STOP_CMD],
+      {
+        timeout: 20_000,
+      },
+    );
+  } catch (err) {
+    logger.debug({ err, taskId }, 'stopBrowserDesktop (ddev) best-effort failed');
+  }
+}
+
 /** If the runner's headed-browser desktop is up, return the http://<ip>:9223 URL
  *  sandboxed CLIs use to connect chrome-devtools to that SAME visible browser; else
  *  null (caller self-launches an isolated one). The runner's network IP, not its DNS

@@ -3026,14 +3026,6 @@ function StepCardImpl({
         </div>
       )}
 
-      {!runtimeTornDown &&
-        step.stepId === '09-gate-2-verify-approval' &&
-        step.status !== 'waiting_form' &&
-        liveBrowserPanel(step, taskId, {
-          autoCollapse: step.status === 'done' || taskEnded,
-          title: 'Browser — test the app here',
-        })}
-
       {step.stepId === '10-gate-3-commit' &&
         (step.detectOutput as { diffArtifactPath?: string | null } | null)?.diffArtifactPath && (
           <CommitDiffViewer

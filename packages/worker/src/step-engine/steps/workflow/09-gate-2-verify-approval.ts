@@ -8,11 +8,17 @@ import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
-import { startBrowserDesktop, runnerExec, ddevPrimaryUrl } from '../../../sandbox/ddev-runner.js';
+import {
+  startBrowserDesktop,
+  stopBrowserDesktop as stopDdevBrowserDesktop,
+  runnerExec,
+  ddevPrimaryUrl,
+} from '../../../sandbox/ddev-runner.js';
 import {
   ensureAppRunnerStarted,
   appRunnerExec,
   startBrowserDesktop as startAppBrowserDesktop,
+  stopBrowserDesktop as stopAppBrowserDesktop,
 } from '../../../sandbox/app-runner.js';
 import { ensureDdevWithProgress } from './_app-runtime.js';
 import { resolveTaskDirectAccess } from '../../../sandbox/_browser-access.js';
@@ -886,6 +892,17 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const values = args.formValues as { decision?: string; feedback?: string };
     const decision: 'approve' | 'reject' = values.decision === 'reject' ? 'reject' : 'approve';
     ctx.logger.info({ decision }, 'verify gate decision recorded');
+    // On approve the browser is no longer needed (no later step uses it), so stop the
+    // in-runner headed-browser desktop to free the runner's RAM/CPU. Best-effort and
+    // keyed on taskId — the inactive runtime's guard makes one of the two a no-op.
+    // Reject keeps it up: the restartLoop re-verifies, and startBrowserDesktop is
+    // idempotent regardless.
+    if (decision === 'approve') {
+      await Promise.allSettled([
+        stopDdevBrowserDesktop(ctx.taskId),
+        stopAppBrowserDesktop(ctx.taskId),
+      ]);
+    }
     // Reject does NOT fail the task: the restartLoop hook above turns a reject into an
     // uncapped restart from implementation, handing the developer's findings to the
     // implementer. Approve finalizes and the forward walk proceeds to the commit gate.
