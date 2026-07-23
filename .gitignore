@@ -62,5 +62,6 @@ orchestration.zip
 # Local dev credentials (browser-verification by Claude Code)
 testcreds.txt
 
-# One-off maintenance script backups (data, not source)
-packages/worker/scripts/*-backup.json
+# One-off maintenance script backups (data, not source), including dated copies kept
+# when a later run would otherwise overwrite an earlier run's rollback file.
+packages/worker/scripts/*-backup*.json
