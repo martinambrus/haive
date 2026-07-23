@@ -10,7 +10,15 @@ const STREAM_PREFIX = 'cli-stream:';
 const STREAM_MAXLEN = 5000;
 /** Keep the stream around for 10 min after the invocation ends so a user
  *  who opens the Terminal tab after-the-fact still sees the final output. */
-const STREAM_TTL_SECONDS = 600;
+export const STREAM_TTL_SECONDS = 600;
+/** Live TTL, refreshed on EVERY frame written to a stream. publishCliExit sets a TTL only on
+ *  a clean/handled exit; an invocation that is superseded, or whose worker is SIGKILLed by a
+ *  tsx reload, never reaches it — so without a write-time refresh the key lives forever
+ *  (ttl=-1) and leaks Redis to OOM (256MB maxmemory, noeviction). This bounds every stream's
+ *  lifetime to its last write + this TTL. MUST exceed the max invocation timeout — the 2h
+ *  OLLAMA_CLI_TIMEOUT_MS floor (exec-core.ts) — so a live but output-silent run never has its
+ *  stream expire mid-run; bump this if that config is raised past ~2h. */
+export const CLI_STREAM_LIVE_TTL_SECONDS = 3 * 60 * 60; // 3h
 
 export type StreamFrameKind = 'stdout' | 'stderr' | 'text' | 'exit' | 'steer_consumed';
 
@@ -25,17 +33,23 @@ export async function publishCliChunk(
 ): Promise<void> {
   if (!invocationId || !data) return;
   try {
-    await getRedis().xadd(
-      streamKey(invocationId),
-      'MAXLEN',
-      '~',
-      STREAM_MAXLEN,
-      '*',
-      'stream',
-      stream,
-      'data',
-      data,
-    );
+    // Pipeline the append with a TTL refresh (one round-trip) so a stream that stops being
+    // written — orphaned by a worker SIGKILL, superseded — still expires instead of leaking.
+    await getRedis()
+      .multi()
+      .xadd(
+        streamKey(invocationId),
+        'MAXLEN',
+        '~',
+        STREAM_MAXLEN,
+        '*',
+        'stream',
+        stream,
+        'data',
+        data,
+      )
+      .expire(streamKey(invocationId), CLI_STREAM_LIVE_TTL_SECONDS)
+      .exec();
   } catch (err) {
     log.warn({ err, invocationId }, 'publishCliChunk failed');
   }
@@ -51,17 +65,22 @@ export async function publishCliSteerConsumed(
 ): Promise<void> {
   if (!invocationId || !steerId) return;
   try {
-    await getRedis().xadd(
-      streamKey(invocationId),
-      'MAXLEN',
-      '~',
-      STREAM_MAXLEN,
-      '*',
-      'stream',
-      'steer_consumed',
-      'id',
-      steerId,
-    );
+    // Same TTL refresh as publishCliChunk: any write keeps the live stream from leaking.
+    await getRedis()
+      .multi()
+      .xadd(
+        streamKey(invocationId),
+        'MAXLEN',
+        '~',
+        STREAM_MAXLEN,
+        '*',
+        'stream',
+        'steer_consumed',
+        'id',
+        steerId,
+      )
+      .expire(streamKey(invocationId), CLI_STREAM_LIVE_TTL_SECONDS)
+      .exec();
   } catch (err) {
     log.warn({ err, invocationId }, 'publishCliSteerConsumed failed');
   }
