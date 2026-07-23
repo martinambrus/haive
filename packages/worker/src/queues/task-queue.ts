@@ -69,7 +69,7 @@ import {
 } from '../step-engine/steps/workflow/_fix-loop.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 import { resetStepAndDownstream } from './_step-reset.js';
-import { markCliParkBegin } from './cli-park-timing.js';
+import { foldOrphanedCliParkOnBoot, markCliParkBegin } from './cli-park-timing.js';
 import { unloadTaskOllamaCliModels } from '../sandbox/ollama-provision.js';
 
 let registered = false;
@@ -1558,6 +1558,12 @@ export async function reconcileOrphanedSteps(db: Database): Promise<void> {
             isNull(schema.cliInvocations.supersededAt),
           ),
         );
+      // The step is now parked with NO invocation running — the state markCliParkBegin exists
+      // for — but the park did not start now, it started when the worker died. Fold that dead
+      // gap into idle_ms so the downtime bills as idle instead of work. Order matters: AFTER
+      // the update above (its NOT EXISTS guard is what proves no CLI is live) and BEFORE
+      // enqueueAdvance (so the re-driven step cannot start an invocation into an unmarked park).
+      await foldOrphanedCliParkOnBoot(db, s.taskStepId);
       await enqueueAdvance(s.taskId, s.userId, s.stepId, s.round, s.epoch);
       logger.info({ taskId: s.taskId, stepId: s.stepId }, 'reconciled orphaned waiting_cli step');
     } catch (err) {
@@ -1658,7 +1664,20 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   // non-terminal rows are touched, so re-running this is a no-op.
   await db
     .update(schema.taskSteps)
-    .set({ status: 'failed', errorMessage: 'Task cancelled', endedAt: now, updatedAt: now })
+    .set({
+      status: 'failed',
+      errorMessage: 'Task cancelled',
+      endedAt: now,
+      // Mirror of the fold in cancelTaskRow (api/lib/cancel-task.ts): stamping ended_at over a
+      // live waiting_started_at would turn the whole recorded park back into work, because
+      // computeStepContribution only counts an open wait while ended_at is null. Clearing the
+      // marker in the same statement keeps this idempotent — the api path usually folded it
+      // already, and a second pass adds 0 because GREATEST ignores the NULL marker.
+      idleMs: sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
+        greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`,
+      waitingStartedAt: null,
+      updatedAt: now,
+    })
     .where(
       and(
         eq(schema.taskSteps.taskId, payload.taskId),

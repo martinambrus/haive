@@ -98,6 +98,14 @@ export function computeFoldContribution(step: TaskTimingStep, nowMs: number): Ta
 }
 
 /** Active-work / idle / user-active breakdown for a task, summed across its steps.
+ *
+ *  `nowMs` is the task's EFFECTIVE now — `completedAt ?? Date.now()` — never a bare wall
+ *  clock. A step whose `ended_at` was never stamped (a cancel or crash left it open) bills
+ *  `start -> nowMs` as work, so evaluating a terminal task at the live clock makes its "work"
+ *  grow on every poll: one such row read 670h against a 1.78h wall before this was fixed.
+ *  Callers hold the task row, so they cap; this function cannot, as it only sees steps.
+ *
+
  *  Each step's CURRENT run (via `computeStepContribution`) plus any timing carried
  *  over from prior runs (`carried_*`, folded in by a retry/reset), so the totals
  *  report the full step across all restarts, not just the latest attempt. Pure, so

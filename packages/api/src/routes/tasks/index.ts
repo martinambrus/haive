@@ -3,7 +3,7 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm
 import { schema } from '@haive/database';
 import {
   buildEstimationAccuracy,
-  computeStepContribution,
+  computeFoldContribution,
   computeTaskTiming,
   createTaskRequestSchema,
   expandTaskStatusFilter,
@@ -130,9 +130,14 @@ taskRoutes.get('/', async (c) => {
   const tokensByTask = await sumTaskTokens(db, taskIds);
   const tasks = rows.map((t) => {
     const steps = stepsByTask.get(t.id) ?? [];
-    const { workMs, idleMs, userActiveMs } = computeTaskTiming(steps, now);
     const startMs = t.startedAt ? t.startedAt.getTime() : null;
+    // The task's EFFECTIVE now, not the wall clock: a step left open when the task reached a
+    // terminal state (legacy rows predating c8542c0) otherwise bills start->now as work
+    // forever and grows every time the list is polled — one such row read 670h against a 1.78h
+    // wall. The web detail page already caps this way (tasks/[id]/page.tsx endMs, and
+    // StepDuration's `endedAt ?? taskCompletedAt`); this endpoint was the divergence.
     const endMs = t.completedAt ? t.completedAt.getTime() : now;
+    const { workMs, idleMs, userActiveMs } = computeTaskTiming(steps, endMs);
     const wallMs = startMs === null ? 0 : Math.max(0, endMs - startMs);
     // At most one step is in waiting_form at a time, so the single non-null
     // waitingStartedAt tags THIS wait occurrence — a fresh value each time the
@@ -411,7 +416,11 @@ taskRoutes.get('/estimation-accuracy', async (c) => {
 
   const now = Date.now();
   const data = rows.map((t) => {
-    const { workMs, userActiveMs } = computeTaskTiming(stepsByTask.get(t.id) ?? [], now);
+    // Cap at the task's completion instant — same reason as the listing above. This feeds the
+    // estimation-accuracy report, so an uncapped open step inflates "actual" hours and biases
+    // the effort learner against its own past estimates.
+    const endMs = t.completedAt ? t.completedAt.getTime() : now;
+    const { workMs, userActiveMs } = computeTaskTiming(stepsByTask.get(t.id) ?? [], endMs);
     return {
       taskId: t.id,
       title: t.title,
@@ -590,6 +599,16 @@ async function stopActiveCliInvocations(
       errorMessage: 'Stopped by user',
       endedAt: now,
       statusMessage: null,
+      // Fold an outstanding park into idle_ms before closing the row — see the same fold in
+      // cancelTaskRow (api/lib/cancel-task.ts) for why stamping ended_at alone silently turns
+      // a recorded park back into work, and why the int4 clamp is load-bearing.
+      // Caveat accepted: a step re-entered from waiting_cli keeps that status through its
+      // apply phase (step-runner.ts only flips pending -> running), so stopping mid-apply
+      // books that sliver as idle. Apply windows are sub-minute here (777 such rows total
+      // 0.04h) against multi-hour parks, so the trade is strongly net-correct.
+      idleMs: sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
+        greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`,
+      waitingStartedAt: null,
       updatedAt: now,
     })
     .where(
@@ -872,7 +891,13 @@ taskRoutes.patch('/:id/cli-provider', async (c) => {
     );
   const invalidateNow = new Date();
   for (const r of invalidated) {
-    const contrib = computeStepContribution(r, invalidateNow.getTime(), r.status === 'failed');
+    // computeFoldContribution, not computeStepContribution: the filter above includes `running`,
+    // so a step orphaned by a worker restart (started_at set, ended_at null) would otherwise
+    // carry its whole dead start->now span into carried_work_ms. It applies foldSit for a
+    // failed step internally, so behaviour is unchanged for every closed row. This is the same
+    // fix 79d5bac made at the other three fold sites (_step-reset.ts, steps.ts retry and
+    // per-step switch-cli); this task-level provider switch was missed.
+    const contrib = computeFoldContribution(r, invalidateNow.getTime());
     await db
       .update(schema.taskSteps)
       .set({

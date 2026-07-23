@@ -53,3 +53,67 @@ export async function foldCliParkOnResume(db: Database, stepId: string): Promise
       and(eq(schema.taskSteps.id, stepId), sql`${schema.taskSteps.waitingStartedAt} IS NOT NULL`),
     );
 }
+
+/** Boot reconcile only. A worker that died mid-park leaves a waiting_cli step in one of two
+ *  broken states, and BOTH bill the whole downtime as WORK:
+ *    (a) no marker — it died while an invocation was running, so the invariant above was never
+ *        re-established; computeStepContribution sees ended=null + waitStart=null and counts
+ *        start->now as work (observed: 150h of "work" for a 6-day outage with 0.16h of real
+ *        CLI runtime).
+ *    (b) a live marker — correct in the live view, but openWait only counts while ended_at is
+ *        null, so whatever ends the step after the restart silently reclassifies the whole
+ *        park back to work.
+ *
+ *  Fix both by making the gap DURABLE: fold it into idle_ms (permanent — unlike an open marker
+ *  it survives any later ended_at stamp) and restamp the marker at now() so the forward wait
+ *  keeps accruing and foldCliParkOnResume closes it normally. For case (b) this is
+ *  arithmetically neutral at the instant it runs (idle_ms gains exactly what openWait loses);
+ *  it only makes the number stick. Note a backdated marker is NOT sufficient: reconcile's very
+ *  next act is enqueueAdvance, which drives the step to done/failed and stamps ended_at, at
+ *  which point openWait stops counting and the whole gap reverts to work.
+ *
+ *  Gap start = the marker when set, else the newest invocation START — which is exactly where
+ *  foldCliParkOnResume last folded, so idle_ms and this fold abut with no gap and no overlap —
+ *  else the step's own started_at (nothing ever ran). Deliberately NOT max(ended_at): the
+ *  reconcile stamps ended_at=now() on the orphans it just closed, so that would read as "now"
+ *  and silently no-op; and anchoring at an earlier ended_at would double-count the
+ *  [last end, next start] span idle_ms already holds. The [start, crash] sliver of real work is
+ *  booked as idle, which under-reports work rather than inventing it.
+ *
+ *  least() clamps to int4 headroom because idle_ms is an integer column: an outage past ~24.8
+ *  days would otherwise raise "integer out of range", the caller's per-step try/catch would
+ *  swallow it, enqueueAdvance would never run, and the task would wedge forever.
+ *
+ *  Call AFTER the step's orphaned invocations are marked ended (the NOT EXISTS guard is what
+ *  proves no CLI is live) and BEFORE enqueueAdvance (so the re-driven step cannot start an
+ *  invocation into an unmarked park). Unlike markCliParkBegin this does NOT require the marker
+ *  to be null — case (b) is precisely the already-marked one — so the guard set is otherwise
+ *  identical and the statement leaves the marker non-null, preserving the invariant on exit. */
+export async function foldOrphanedCliParkOnBoot(db: Database, stepId: string): Promise<void> {
+  const gapStart = sql`coalesce(
+    ${schema.taskSteps.waitingStartedAt},
+    greatest(${schema.taskSteps.startedAt},
+      (SELECT max(${schema.cliInvocations.startedAt}) FROM ${schema.cliInvocations}
+        WHERE ${schema.cliInvocations.taskStepId} = ${stepId}
+          AND ${schema.cliInvocations.supersededAt} IS NULL)),
+    now())`;
+  await db
+    .update(schema.taskSteps)
+    .set({
+      idleMs: sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
+        greatest(0, floor(extract(epoch from (now() - ${gapStart})) * 1000)))::int`,
+      waitingStartedAt: sql`now()`,
+      updatedAt: sql`now()`,
+    })
+    .where(
+      and(
+        eq(schema.taskSteps.id, stepId),
+        eq(schema.taskSteps.status, 'waiting_cli'),
+        sql`NOT EXISTS (SELECT 1 FROM ${schema.cliInvocations}
+              WHERE ${schema.cliInvocations.taskStepId} = ${stepId}
+                AND ${schema.cliInvocations.startedAt} IS NOT NULL
+                AND ${schema.cliInvocations.endedAt} IS NULL
+                AND ${schema.cliInvocations.supersededAt} IS NULL)`,
+      ),
+    );
+}

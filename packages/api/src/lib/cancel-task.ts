@@ -1,4 +1,4 @@
-import { and, eq, inArray, notInArray } from 'drizzle-orm';
+import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   TASK_JOB_NAMES,
@@ -49,7 +49,24 @@ export async function cancelTaskRow(
   // consistent immediately instead of after the CANCEL job runs.
   await tx
     .update(schema.taskSteps)
-    .set({ status: 'failed', errorMessage: 'Task cancelled', endedAt: now, updatedAt: now })
+    .set({
+      status: 'failed',
+      errorMessage: 'Task cancelled',
+      endedAt: now,
+      // A parked step holds its live wait in waiting_started_at, which computeStepContribution
+      // only counts as idle while ended_at is null. Stamping ended_at without folding therefore
+      // reclassifies the WHOLE recorded park from idle back into WORK (measured: 111h across 20
+      // cancelled steps). Fold it into idle_ms and clear the marker in the SAME statement, so
+      // the row is never terminal with an unfolded park. Expression mirrors foldCliParkOnResume
+      // (worker cli-park-timing.ts); GREATEST ignores NULLs in Postgres, so an unparked
+      // pending/running row adds 0 rather than NULL. The least() clamp is required, not
+      // defensive: idle_ms is int4, so a step parked longer than ~24.8 days (this DB has
+      // waiting_form rows parked 40+) would raise "integer out of range" and abort the cancel.
+      idleMs: sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
+        greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`,
+      waitingStartedAt: null,
+      updatedAt: now,
+    })
     .where(
       and(
         eq(schema.taskSteps.taskId, taskId),

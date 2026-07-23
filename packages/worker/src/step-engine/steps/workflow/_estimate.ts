@@ -62,8 +62,13 @@ export function round2(n: number): number {
 }
 
 /** Effort in hours for one prior task from its step rows, via the SAME pure timing
- *  function the api/web use so the anchor matches the verdict card's actual. Completed
- *  tasks have no open steps, so nowMs only matters for the (excluded) live-wait branch. */
+ *  function the api/web use so the anchor matches the verdict card's actual.
+ *
+ *  `nowMs` must be the task's EFFECTIVE now — its completedAt when terminal, the wall clock
+ *  only while it is still live. Do NOT assume a terminal task has no open steps: rows left
+ *  open by a cancel/crash exist (20 of them in this database), and each one bills
+ *  start->nowMs as work, so passing a bare Date.now() inflates an anchor's effort without
+ *  bound and biases every later estimate off it. */
 export function effortHoursFromSteps(steps: TaskTimingStep[], nowMs: number): number {
   const t = computeTaskTiming(steps, nowMs);
   return round2((t.workMs + t.userActiveMs) / 3_600_000);
@@ -119,6 +124,8 @@ const PRIOR_TASK_COLUMNS = {
   changedPaths: true,
   aiEstimatedTimeHours: true,
   estimatedTimeHours: true,
+  // Needed to cap each anchor's timing at ITS completion instant — see effortHoursFromSteps.
+  completedAt: true,
 } as const;
 
 interface PriorTaskRow {
@@ -130,6 +137,7 @@ interface PriorTaskRow {
   changedPaths: string[] | null;
   aiEstimatedTimeHours: number | null;
   estimatedTimeHours: number | null;
+  completedAt: Date | null;
 }
 
 /** Turn prior task rows into anchors: join their step timing, compute MEASURED effort via
@@ -166,7 +174,11 @@ async function hydrateAnchors(
   const nowMs = Date.now();
   const anchors: EstimateAnchor[] = [];
   for (const p of priors) {
-    const effortHours = effortHoursFromSteps(stepsByTask.get(p.id) ?? [], nowMs);
+    // Cap at THIS anchor's completion instant, not the shared wall clock.
+    const effortHours = effortHoursFromSteps(
+      stepsByTask.get(p.id) ?? [],
+      p.completedAt ? p.completedAt.getTime() : nowMs,
+    );
     if (effortHours <= 0) continue; // no measurable effort — not a useful anchor
     anchors.push({
       title: p.title,
