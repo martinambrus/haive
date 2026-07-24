@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { runtimeAdmissionDecision } from './runtime-admission.js';
+import { runtimeAdmissionDecision, parseRunnerTaskIds } from './runtime-admission.js';
 
 describe('runtimeAdmissionDecision', () => {
   it('proceeds when the governor is disabled (max=Infinity), whatever the load', () => {
@@ -46,5 +46,23 @@ describe('runtimeAdmissionDecision', () => {
 
   it('ignores queue position when the task already holds a runner', () => {
     expect(runtimeAdmissionDecision(2, true, 2, 9)).toBe('proceed');
+  });
+});
+
+describe('parseRunnerTaskIds', () => {
+  it('reads the task id off each runner line', () => {
+    expect(parseRunnerTaskIds('task-a|c001\ntask-b|c002\n')).toEqual(['task-a', 'task-b']);
+  });
+
+  it('falls back to the container id when a runner carries no task label', () => {
+    // Occupancy is a set keyed by task; an unlabeled runner still consumes a machine slot, so
+    // it must contribute its own distinct key rather than collapsing with every other unlabeled
+    // runner under the empty string.
+    expect(parseRunnerTaskIds('|c001\n|c002\n')).toEqual(['container:c001', 'container:c002']);
+  });
+
+  it('ignores blank lines and empty output', () => {
+    expect(parseRunnerTaskIds('')).toEqual([]);
+    expect(parseRunnerTaskIds('\n  \ntask-a|c001\n')).toEqual(['task-a']);
   });
 });

@@ -40,7 +40,7 @@ import {
   type AdvanceStepResult,
   type WorkerDeps,
 } from '../step-engine/index.js';
-import { runtimeAdmission } from '../sandbox/runtime-admission.js';
+import { runtimeAdmission, releaseRuntimeReservation } from '../sandbox/runtime-admission.js';
 import { computeFoldContribution } from '@haive/shared/timing';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { orderWorkflowRunList } from '../orchestrator/execution-paths.js';
@@ -1539,22 +1539,30 @@ async function handleAdvanceStep(
   }
 
   const providers = await loadProviders(db, ctx.userId);
-  const result = await advanceStep({
-    db,
-    taskId: ctx.taskId,
-    userId: ctx.userId,
-    repoPath: ctx.repoPath,
-    workspacePath: ctx.workspacePath,
-    cliProviderId: ctx.cliProviderId,
-    ignoreSavedStepClis: ctx.ignoreSavedStepClis,
-    stepDef,
-    round,
-    runSeq: runIdx >= 0 ? runIdx : undefined,
-    formValues,
-    providers,
-    deps: workerDeps,
-  });
-  await handleResult(db, ctx, payload.stepId, result);
+  try {
+    const result = await advanceStep({
+      db,
+      taskId: ctx.taskId,
+      userId: ctx.userId,
+      repoPath: ctx.repoPath,
+      workspacePath: ctx.workspacePath,
+      cliProviderId: ctx.cliProviderId,
+      ignoreSavedStepClis: ctx.ignoreSavedStepClis,
+      stepDef,
+      round,
+      runSeq: runIdx >= 0 ? runIdx : undefined,
+      formValues,
+      providers,
+      deps: workerDeps,
+    });
+    await handleResult(db, ctx, payload.stepId, result);
+  } finally {
+    // Drop the slot reservation this step's admission took. The boot path already releases it
+    // as soon as its runner is up or the boot failed; this covers the admitted step that never
+    // booted one at all (warm reuse, an early throw, a form gate), which would otherwise hold a
+    // slot out of the pool until the 45-min expiry. Idempotent — a second release is a no-op.
+    if (stepDef.needsRuntime) await releaseRuntimeReservation(ctx.taskId);
+  }
 }
 
 /** Recover steps orphaned by a prior worker that died mid-step (graceful restart,

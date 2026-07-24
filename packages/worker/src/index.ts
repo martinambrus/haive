@@ -32,7 +32,11 @@ import { ensureDdevCa, ensureDdevRegistryCache } from './sandbox/ddev-runner.js'
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
 import { IdeSessionReaper } from './sandbox/ide-session-reaper.js';
 import { RuntimeRunnerReaper } from './sandbox/runtime-runner-reaper.js';
-import { startRuntimeLimitsWatch, setRuntimeReclaimer } from './sandbox/runtime-admission.js';
+import {
+  startRuntimeLimitsWatch,
+  setRuntimeReclaimer,
+  clearRuntimeReservations,
+} from './sandbox/runtime-admission.js';
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 
 async function main(): Promise<void> {
@@ -64,6 +68,10 @@ async function main(): Promise<void> {
   await reapStaleComposedImages().catch((err) => {
     logger.warn({ err }, 'stale composed-image reap on boot failed');
   });
+  // Drop runtime slot reservations left by the previous process. The reap above removed every
+  // runtime runner, so a reservation from before this boot can only describe a boot that no
+  // longer exists — leaving it would hold a slot out of the pool until its 45-min expiry.
+  await clearRuntimeReservations();
 
   const repoWorker = startRepoWorker(repoStoragePath);
   const bundleWorker = startBundleWorker(bundleStoragePath);
