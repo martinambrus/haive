@@ -702,6 +702,26 @@ taskRoutes.post('/:id/action', async (c) => {
         .update(schema.taskSteps)
         .set({ status: 'pending', waitingStartedAt: null, updatedAt: new Date() })
         .where(and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.status, 'waiting_form')));
+      // Wipe the transient wait notes ("Waiting for a free runtime slot…", "Queued — machine at
+      // capacity…") off every pending row. A retry replays from step 0 and the fix loop restarts
+      // at round 1, so rows materialized by a previous, longer run (rounds 2+) are orphaned at
+      // `pending` and never run again — yet they keep the message they were parked with. The step
+      // list sorts by round, so that frozen line lands at the BOTTOM of the task page and reads as
+      // the task's current state while the real work runs mid-page. Rows that DO run re-derive
+      // their own message (the park poll rewrites it; step-runner clears it on pending->running).
+      await db
+        .update(schema.taskSteps)
+        .set({ statusMessage: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, id),
+            // pending = queued or parked; skipped = never ran. Neither can be "waiting" for
+            // anything, so any message on them is stale. done/failed rows keep theirs — there
+            // it is a run artifact ("Waiting for AI analysis…" on a killed step) worth reading.
+            inArray(schema.taskSteps.status, ['pending', 'skipped']),
+            isNotNull(schema.taskSteps.statusMessage),
+          ),
+        );
       // Bump the orchestration epoch so advance-step jobs enqueued before this retry are
       // dropped by the worker's epoch guard instead of running against the restarted task.
       await db

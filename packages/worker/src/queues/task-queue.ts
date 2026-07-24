@@ -1487,11 +1487,11 @@ async function handleAdvanceStep(
     const admission = await runtimeAdmission(ctx.taskId);
     if (admission.decision === 'park') {
       const row = await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined);
-      // Frame the wait as a QUEUE POSITION, not the raw "N in use, limit M" ratio: `busy` can
-      // exceed the limit (STOP-kept envs linger and count), so "7 in use, limit 2" read like an
-      // error. `ahead` = runners that must free before this task is admitted = busy - (max - 1).
-      // The poll re-runs this every RUNTIME_PARK_POLL_MS, so the number counts down as slots free.
-      const ahead = Math.max(1, admission.busy - admission.max + 1);
+      // Report the REAL queue: position among the parked tasks and how many are parked. The
+      // previous line printed `busy - max + 1` as "N ahead in the queue", which is the number of
+      // runners that must free — always 1 at an exactly-full pool, whether one task waits or ten
+      // — and read as "one slot away". Both numbers come from the FIFO park queue and the poll
+      // re-runs every RUNTIME_PARK_POLL_MS, so the position counts down as slots free.
       // Re-queue the step to a clean PENDING state, not just a message. A step re-parked after
       // an interrupted run is still `running` with an open started_at, which bills the whole
       // park as phantom work AND renders as running (expanded terminals, buried banner). Fold
@@ -1514,7 +1514,9 @@ async function handleAdvanceStep(
           carriedWorkMs: row.carriedWorkMs + fold.workMs,
           carriedIdleMs: row.carriedIdleMs + fold.idleMs,
           carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
-          statusMessage: `Waiting for a free runtime slot (limit ${admission.max}; ${ahead} ahead in the queue)`,
+          statusMessage:
+            `Waiting for a free runtime slot — #${admission.position} of ${admission.waiting} ` +
+            `waiting (${admission.busy} runtime${admission.busy === 1 ? '' : 's'} in use, limit ${admission.max})`,
           updatedAt: new Date(),
         })
         .where(eq(schema.taskSteps.id, row.id));
@@ -1522,7 +1524,14 @@ async function handleAdvanceStep(
         delayMs: RUNTIME_PARK_POLL_MS,
       });
       logger.info(
-        { taskId: ctx.taskId, stepId: payload.stepId, busy: admission.busy, max: admission.max },
+        {
+          taskId: ctx.taskId,
+          stepId: payload.stepId,
+          busy: admission.busy,
+          max: admission.max,
+          position: admission.position,
+          waiting: admission.waiting,
+        },
         'runtime admission: parked step (pool full, no free slot)',
       );
       return;

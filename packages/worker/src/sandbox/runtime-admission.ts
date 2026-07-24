@@ -7,6 +7,7 @@ import {
   createRedisConnection,
   logger,
 } from '@haive/shared';
+import { getRedis } from '../redis.js';
 import { resolveRuntimeCaps, resourceLimitsEnabled } from './runtime-caps.js';
 
 // In-process admission gate bounding how many LIVE runtime runners (DDEV DinD + app
@@ -103,18 +104,79 @@ async function taskHasLiveRunner(taskId: string): Promise<boolean> {
   return ids.length > 0;
 }
 
+// --- FIFO park queue -------------------------------------------------------------------
+// Fairness for tasks parked at the TASK-level gate. Without it the pool is a lottery: every
+// parked step re-polls on its own timer and a freed slot goes to whichever task polls first,
+// not to the one that has waited longest. ZSET member = taskId, score = ms of that task's
+// FIRST park. Each poll refreshes a short-lived liveness key; a member without one has stopped
+// polling (admitted, cancelled, worker died) and is pruned on read, so a dead ticket can never
+// head-of-line block the queue. Redis-only soft state — losing it costs fairness for one
+// round, never correctness.
+const PARK_QUEUE_KEY = 'haive:runtime-park';
+const PARK_ALIVE_PREFIX = 'haive:runtime-park-alive:';
+/** Liveness TTL. Must outlast several park polls so a slow poll is not pruned as dead. */
+const PARK_ALIVE_TTL_S = 60;
+
+export interface ParkQueuePosition {
+  /** 1-based position among live parked tasks; 1 = next in line. */
+  position: number;
+  /** Tasks parked on a runtime slot right now, this one included. */
+  waiting: number;
+}
+
+/** Join the park queue (idempotent — the first park's score is kept) and read this task's live
+ *  position. Best-effort: any Redis failure degrades to "I am next", i.e. the first-poll-wins
+ *  behavior this queue replaces. */
+async function joinParkQueue(taskId: string): Promise<ParkQueuePosition> {
+  try {
+    const redis = getRedis();
+    await redis
+      .multi()
+      .zadd(PARK_QUEUE_KEY, 'NX', Date.now(), taskId)
+      .set(`${PARK_ALIVE_PREFIX}${taskId}`, '1', 'EX', PARK_ALIVE_TTL_S)
+      .exec();
+    const members = await redis.zrange(PARK_QUEUE_KEY, 0, -1);
+    if (members.length === 0) return { position: 1, waiting: 1 };
+    const alive = await redis.mget(...members.map((m) => `${PARK_ALIVE_PREFIX}${m}`));
+    const live: string[] = [];
+    const dead: string[] = [];
+    members.forEach((m, i) => (alive[i] === null ? dead : live).push(m));
+    if (dead.length > 0) await redis.zrem(PARK_QUEUE_KEY, ...dead);
+    const idx = live.indexOf(taskId);
+    return { position: idx >= 0 ? idx + 1 : 1, waiting: Math.max(live.length, 1) };
+  } catch (err) {
+    log.warn({ err, taskId }, 'park-queue read failed; admitting first-come');
+    return { position: 1, waiting: 1 };
+  }
+}
+
+/** Leave the park queue — called the moment a task is admitted (or never parked at all), so
+ *  its ticket cannot hold back the tasks queued behind it. */
+async function leaveParkQueue(taskId: string): Promise<void> {
+  try {
+    const redis = getRedis();
+    await redis.multi().zrem(PARK_QUEUE_KEY, taskId).del(`${PARK_ALIVE_PREFIX}${taskId}`).exec();
+  } catch {
+    // Soft state: the liveness key expires on its own, so a failed release self-heals.
+  }
+}
+
 /** Pure admission decision, split from the docker/config I/O so the rule is directly testable
  *  (mirrors reapDecision / pickPreemptibleRunner). `proceed` when the governor is off
- *  (max=Infinity), the task already holds a runner (reuse/warm — no new slot), or a slot is
- *  free; else `park`. */
+ *  (max=Infinity), the task already holds a runner (reuse/warm — no new slot), or a free slot
+ *  is this task's to take by queue position; else `park`. `position` is 1-based (1 = next in
+ *  line), so with `free = max - busy` slots open only positions 1..free may claim one — a task
+ *  that just arrived can no longer jump a task that has waited an hour. Default 1 keeps the
+ *  pre-queue behavior when no position is known. */
 export function runtimeAdmissionDecision(
   max: number,
   hasLiveRunner: boolean,
   busy: number,
+  position = 1,
 ): 'proceed' | 'park' {
   if (max === Number.POSITIVE_INFINITY) return 'proceed';
   if (hasLiveRunner) return 'proceed';
-  return busy < max ? 'proceed' : 'park';
+  return position <= max - busy ? 'proceed' : 'park';
 }
 
 /** Non-blocking, TASK-level runtime admission — the pre-step gate the orchestrator consults
@@ -123,12 +185,22 @@ export function runtimeAdmissionDecision(
  *  pool past the limit. Counts `inFlightBoots` so a task mid-cold-boot also occupies a slot
  *  here, closing most of the pre-check -> cold-boot race. The docker count is skipped when the
  *  task already holds a runner (short-circuit to proceed). */
-export async function runtimeAdmission(
-  taskId: string,
-): Promise<{ decision: 'proceed' | 'park'; busy: number; max: number }> {
+export async function runtimeAdmission(taskId: string): Promise<{
+  decision: 'proceed' | 'park';
+  busy: number;
+  max: number;
+  position: number;
+  waiting: number;
+}> {
   const max = await maxConcurrentOrInfinity();
-  if (max === Number.POSITIVE_INFINITY) return { decision: 'proceed', busy: 0, max };
-  if (await taskHasLiveRunner(taskId)) return { decision: 'proceed', busy: 0, max };
+  if (max === Number.POSITIVE_INFINITY) {
+    await leaveParkQueue(taskId);
+    return { decision: 'proceed', busy: 0, max, position: 1, waiting: 0 };
+  }
+  if (await taskHasLiveRunner(taskId)) {
+    await leaveParkQueue(taskId);
+    return { decision: 'proceed', busy: 0, max, position: 1, waiting: 0 };
+  }
   let busy = (await liveRuntimeRunnerCount()) + inFlightBoots;
   // Pool full: before parking, try to preempt a runner from a task that is no longer running
   // (a failed/terminal task's grace-runner) — a live task's demand outranks a dead task's
@@ -138,7 +210,13 @@ export async function runtimeAdmission(
   if (busy >= max && reclaimer && (await reclaimer().catch(() => false))) {
     busy = (await liveRuntimeRunnerCount()) + inFlightBoots;
   }
-  return { decision: runtimeAdmissionDecision(max, false, busy), busy, max };
+  // Take (or keep) the FIFO ticket BEFORE deciding — the decision needs this task's position,
+  // and an admitted task drops its ticket again right below. Cost of the extra Redis round trip
+  // on an uncontended admission is one ZADD/SET/ZRANGE; the gate runs once per step advance.
+  const queue = await joinParkQueue(taskId);
+  const decision = runtimeAdmissionDecision(max, false, busy, queue.position);
+  if (decision === 'proceed') await leaveParkQueue(taskId);
+  return { decision, busy, max, position: queue.position, waiting: queue.waiting };
 }
 
 function ensureRepumpTimer(): void {
