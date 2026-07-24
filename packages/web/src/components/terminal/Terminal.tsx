@@ -89,6 +89,9 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
       },
       convertEol: true,
       scrollback: 5000,
+      // Silences xterm's own "Parsing error" console.error on arbitrary container bytes
+      // — see CliStreamViewer for why no sanitizer can cover it. App errors unaffected.
+      logLevel: 'off',
     });
 
     const fitAddon = new FitAddon();

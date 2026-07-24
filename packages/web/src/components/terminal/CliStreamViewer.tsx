@@ -197,6 +197,16 @@ export function CliStreamViewer({
       },
       convertEol: true,
       scrollback: 10000,
+      // Arbitrary CLI output (binary dumps, truncated escape sequences) drives xterm's
+      // VT500 parser into its ERROR action, which it logs through its own logger as
+      // "xterm.js: Parsing error:" — the Next dev overlay then surfaces that
+      // console.error as a page error. The parser recovers on its own, so the log is
+      // the whole symptom, and no input sanitizer can pre-empt it: the table leaves the
+      // non-ASCII-printable slot undefined in every non-GROUND state, so any binary
+      // byte that opens a CSI/DCS/APC sequence followed by a byte >= 0xa0 (U+FFFD very
+      // much included) trips it. Silencing xterm's logger is the only fix that covers
+      // the whole class; application errors are logged by React/Next, not by xterm.
+      logLevel: 'off',
     });
 
     const fitAddon = new FitAddon();

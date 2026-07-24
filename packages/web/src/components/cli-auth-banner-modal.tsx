@@ -232,6 +232,9 @@ export function CliAuthBannerModal({
       theme: { background: '#0a0a0a', foreground: '#e5e5e5', cursor: '#e5e5e5' },
       convertEol: true,
       scrollback: 5000,
+      // Silences xterm's own "Parsing error" console.error on arbitrary TUI bytes —
+      // see CliStreamViewer for why no sanitizer can cover it. App errors unaffected.
+      logLevel: 'off',
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);

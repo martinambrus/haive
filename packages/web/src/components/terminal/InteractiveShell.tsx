@@ -66,6 +66,9 @@ export function InteractiveShell(props: InteractiveShellProps) {
       },
       convertEol: true,
       scrollback: 5000,
+      // Silences xterm's own "Parsing error" console.error on arbitrary shell bytes —
+      // see CliStreamViewer for why no sanitizer can cover it. App errors are unaffected.
+      logLevel: 'off',
     });
 
     const fitAddon = new FitAddon();
