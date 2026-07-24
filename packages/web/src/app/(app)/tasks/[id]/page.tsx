@@ -42,6 +42,7 @@ import {
 } from '@/components/form-renderer';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { PersistedDetails } from '@/components/persisted-details';
+import { SlotWaitBadge } from '@/components/slot-wait-badge';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { EditorTab } from '@/components/editor/editor-tab';
 import { AttachmentsPanel } from '@/components/attachments/attachments-panel';
@@ -1091,7 +1092,13 @@ export default function TaskDetailPage() {
             ) : (
               <>
                 <h1 className="text-2xl font-bold text-neutral-50">{task.title}</h1>
-                <Badge variant={taskStatusVariant(task.status)}>{task.status}</Badge>
+                {/* Queued behind a capacity cap: the task row still says `running`, so show
+                    which slot it is waiting for instead (same badge as the tasks listing). */}
+                {task.slotWait ? (
+                  <SlotWaitBadge slotWait={task.slotWait} />
+                ) : (
+                  <Badge variant={taskStatusVariant(task.status)}>{task.status}</Badge>
+                )}
                 <Badge>{task.type}</Badge>
                 {task.executionPath && (
                   <Badge variant={executionPathVariant(task.executionPath)}>

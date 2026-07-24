@@ -215,6 +215,54 @@ export async function findActiveCliInvocation(
   return rows[0] ?? null;
 }
 
+/** `task_steps.id` of every step in `taskIds` holding an invocation that is ENQUEUED but not
+ *  started (`started_at IS NULL`, not ended, not superseded) — a job sitting in the cli-exec
+ *  queue because MAX_PARALLEL_AGENTS is saturated or the per-task cap deferred it. Feeds
+ *  deriveSlotWait's agent-slot branch. One query for a whole page of tasks; empty set when
+ *  called with no ids. */
+export async function findQueuedInvocationStepIds(
+  db: ReturnType<typeof getDb>,
+  taskIds: string[],
+): Promise<Set<string>> {
+  if (taskIds.length === 0) return new Set();
+  const rows = await db
+    .selectDistinct({ taskStepId: schema.cliInvocations.taskStepId })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        inArray(schema.cliInvocations.taskId, taskIds),
+        isNull(schema.cliInvocations.startedAt),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
+  return new Set(rows.map((r) => r.taskStepId).filter((id): id is string => id !== null));
+}
+
+/** SQL predicate for the `waiting_slot` listing filter: the task's CURRENT step is parked
+ *  waiting for capacity. Mirrors deriveSlotWait rule-for-rule (runtime park = pending + a live
+ *  wait marker; agent park = waiting_cli + an unstarted invocation), scoped to
+ *  current_step_id/current_round for the same reason the helper is — a stale marker on an
+ *  older round must not make a working task look queued. Caller adds the
+ *  `tasks.status = 'running'` term, so this stays a pure "is the current step parked" test and
+ *  the count query and the page query can share it. */
+export function currentStepParkedSql() {
+  return sql`EXISTS (
+    SELECT 1 FROM ${schema.taskSteps} ts
+    WHERE ts.task_id = ${schema.tasks.id}
+      AND ts.step_id = ${schema.tasks.currentStepId}
+      AND ts.round = ${schema.tasks.currentRound}
+      AND (
+        (ts.status = 'pending' AND ts.waiting_started_at IS NOT NULL)
+        OR (ts.status = 'waiting_cli' AND EXISTS (
+          SELECT 1 FROM ${schema.cliInvocations} ci
+          WHERE ci.task_step_id = ts.id
+            AND ci.started_at IS NULL
+            AND ci.ended_at IS NULL
+            AND ci.superseded_at IS NULL))
+      ))`;
+}
+
 /** Annotate each step with the count of non-superseded CLI invocations attached
  *  to it AND the summed token usage across those invocations. The count drives
  *  the inline-terminal toggle (hidden on steps that never spawned a CLI); the

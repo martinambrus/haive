@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type Task, type TaskListResponse, type TaskStatus } from '@/lib/api-client';
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
+import { SlotWaitBadge } from '@/components/slot-wait-badge';
 import { formatDuration } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
 import { mergeSpan } from '@/lib/merge-task-span';
@@ -46,7 +47,13 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <h2 className="text-lg font-semibold text-neutral-50">{task.title}</h2>
-            <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
+            {/* A task queued behind a capacity cap stays `running` in the DB, which made
+                "working" and "waiting in line" look identical here — show the wait instead. */}
+            {task.slotWait ? (
+              <SlotWaitBadge slotWait={task.slotWait} />
+            ) : (
+              <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
+            )}
             <Badge>{TYPE_LABELS[task.type]}</Badge>
             {task.repository && <Badge variant="info">repo: {task.repository.name}</Badge>}
           </div>
@@ -333,6 +340,7 @@ export default function TasksPage() {
             <option value="">All statuses</option>
             <option value="unfinished">Unfinished</option>
             <option value="active">In progress</option>
+            <option value="waiting_slot">Waiting for slot</option>
             <option value="waiting_user">Waiting on you</option>
             <option value="waiting_pr">Waiting on PR</option>
             <option value="open">Open</option>

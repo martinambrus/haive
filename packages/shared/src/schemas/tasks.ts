@@ -228,6 +228,12 @@ export const OPEN_TASK_STATUSES = [
 
 export const ACTIVE_TASK_STATUSES = ['created', 'queued', 'running', 'paused'] as const;
 
+/** Filter token for "running but queued behind a capacity cap" — a DERIVED state, not a
+ *  task status (see deriveSlotWait), so it cannot be expanded into a status IN (...) list.
+ *  expandTaskStatusFilter returns null for it and the api branches on this constant to add
+ *  its EXISTS predicate instead. Shared so the web dropdown and the query agree. */
+export const WAITING_SLOT_FILTER_TOKEN = 'waiting_slot';
+
 const ALL_TASK_STATUSES = [
   'created',
   'queued',
@@ -244,7 +250,9 @@ const ALL_TASK_STATUSES = [
  *  or null for "no status filter" (all). Mirrors the web matchesStatus grouping
  *  exactly. An empty or unrecognized token yields null — the dropdown only emits
  *  known tokens, so a hand-typed garbage value falls back to the unfiltered (but
- *  still user-scoped) list rather than an empty-IN edge case. */
+ *  still user-scoped) list rather than an empty-IN edge case. WAITING_SLOT_FILTER_TOKEN
+ *  also yields null by design: it is derived, so its caller must handle it BEFORE
+ *  calling this. */
 export function expandTaskStatusFilter(token: string | undefined | null): string[] | null {
   if (!token) return null;
   if (token === 'open') return [...OPEN_TASK_STATUSES];

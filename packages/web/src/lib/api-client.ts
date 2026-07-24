@@ -498,6 +498,23 @@ export type TaskStatus =
 export type StepStatus =
   'pending' | 'running' | 'waiting_form' | 'waiting_cli' | 'done' | 'failed' | 'skipped';
 
+/** Which capacity cap a running-but-queued task is parked behind: 'runtime' = the runtime
+ *  admission gate (no free DDEV/app runner slot), 'agent' = its CLI job is enqueued but no
+ *  parallel-agent slot has picked it up. Local mirror of @haive/shared's SlotWait — the web
+ *  package intentionally keeps its own copies of API types. */
+export type SlotWaitKind = 'runtime' | 'agent';
+
+export interface SlotWait {
+  kind: SlotWaitKind;
+  /** ISO time the wait began. */
+  since: string | null;
+  stepId: string;
+  /** The worker's own queue copy (position, pool size). Display only. */
+  message: string | null;
+  /** The park's heartbeat went cold — the task is wedged, not queued. */
+  stale: boolean;
+}
+
 export interface NotificationSettings {
   soundEnabled: boolean;
   /** Per-user opt-out for subscription usage-depletion alerts. The global enable and
@@ -545,6 +562,10 @@ export interface Task {
    *  wait occurrence so the notifier re-fires when a task re-enters the same gate
    *  after a restart. List endpoint only. */
   currentWaitStartedAt?: string | null;
+  /** Set while the task's status is `running` but its current step is parked waiting for
+   *  capacity — the badge distinguishes "actually working" from "queued in line". Derived
+   *  server-side on every request (both the listing and the detail endpoint), never stored. */
+  slotWait?: SlotWait | null;
   /** ISO time the provider-outage watch was marked recovered (list endpoint only). Null
    *  until a task that failed on a provider rate-limit or 5xx has that provider come back;
    *  the notifier diffs its null->set flip to fire the "provider is back" notification. */

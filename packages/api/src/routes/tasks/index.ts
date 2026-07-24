@@ -6,6 +6,7 @@ import {
   computeFoldContribution,
   computeTaskTiming,
   createTaskRequestSchema,
+  deriveSlotWait,
   expandTaskStatusFilter,
   logger,
   PROVIDER_SENSITIVE_STEP_IDS,
@@ -14,6 +15,7 @@ import {
   STEER_IN_CHANNEL_PREFIX,
   taskActionRequestSchema,
   TASK_JOB_NAMES,
+  WAITING_SLOT_FILTER_TOKEN,
   type TaskJobPayload,
 } from '@haive/shared';
 import { getDb } from '../../db.js';
@@ -25,12 +27,14 @@ import { cancelTaskRow, enqueueCancelJob } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   appendTaskEvent,
+  currentStepParkedSql,
   enrichStepsWithActiveRole,
   enrichStepsWithCliStats,
   enrichStepsWithCliPreferences,
   enrichStepsWithCliUsage,
   enrichStepsWithSkipFlag,
   findActiveCliInvocation,
+  findQueuedInvocationStepIds,
   sumTaskTokens,
   sumTaskProviderBreakdown,
 } from './_helpers.js';
@@ -61,11 +65,18 @@ taskRoutes.get('/', async (c) => {
 
   const conds = [eq(schema.tasks.userId, userId)];
   if (repositoryId) conds.push(eq(schema.tasks.repositoryId, repositoryId));
-  const statuses = expandTaskStatusFilter(statusToken);
-  if (statuses) {
-    conds.push(
-      inArray(schema.tasks.status, statuses as (typeof schema.tasks.$inferSelect)['status'][]),
-    );
+  if (statusToken === WAITING_SLOT_FILTER_TOKEN) {
+    // Derived state, not a task status: a task queued behind a capacity cap stays `running`
+    // (see deriveSlotWait), so this token cannot be expanded into a status IN (...) list —
+    // expandTaskStatusFilter returns null for it by design.
+    conds.push(eq(schema.tasks.status, 'running'), currentStepParkedSql());
+  } else {
+    const statuses = expandTaskStatusFilter(statusToken);
+    if (statuses) {
+      conds.push(
+        inArray(schema.tasks.status, statuses as (typeof schema.tasks.$inferSelect)['status'][]),
+      );
+    }
   }
   if (q) conds.push(sql`${schema.tasks.title} ilike ${`%${q}%`}`);
   const where = and(...conds);
@@ -114,10 +125,19 @@ taskRoutes.get('/', async (c) => {
           carriedWorkMs: schema.taskSteps.carriedWorkMs,
           carriedIdleMs: schema.taskSteps.carriedIdleMs,
           carriedUserActiveMs: schema.taskSteps.carriedUserActiveMs,
+          // Slot-wait derivation (below) rides the same rows: identity of the current step
+          // plus the park's own copy and its heartbeat.
+          id: schema.taskSteps.id,
+          stepId: schema.taskSteps.stepId,
+          round: schema.taskSteps.round,
+          statusMessage: schema.taskSteps.statusMessage,
+          updatedAt: schema.taskSteps.updatedAt,
         })
         .from(schema.taskSteps)
         .where(inArray(schema.taskSteps.taskId, taskIds))
     : [];
+  // Steps whose CLI job is enqueued but not yet picked up — the agent-slot half of the wait.
+  const queuedInvocationStepIds = await findQueuedInvocationStepIds(db, taskIds);
   const stepsByTask = new Map<string, (typeof stepRows)[number][]>();
   for (const s of stepRows) {
     const list = stepsByTask.get(s.taskId);
@@ -156,16 +176,30 @@ taskRoutes.get('/', async (c) => {
     const endMs = t.completedAt ? t.completedAt.getTime() : now;
     const { workMs, idleMs, userActiveMs } = computeTaskTiming(steps, endMs);
     const wallMs = startMs === null ? 0 : Math.max(0, endMs - startMs);
-    // At most one step is in waiting_form at a time, so the single non-null
-    // waitingStartedAt tags THIS wait occurrence — a fresh value each time the
-    // task (re)enters a gate. Lets the notifier re-fire on a restart that returns
-    // to the same step, without re-firing on unrelated task edits.
-    const waitStart = steps.find((s) => s.waitingStartedAt)?.waitingStartedAt ?? null;
+    // At most one step is in waiting_form at a time, so its waitingStartedAt tags THIS wait
+    // occurrence — a fresh value each time the task (re)enters a gate. Lets the notifier
+    // re-fire on a restart that returns to the same step, without re-firing on unrelated task
+    // edits. Scoped to waiting_form on purpose: the same marker column also records the
+    // agent-slot and runtime-slot parks, so an unscoped find could tag a gate wait with an
+    // unrelated park's timestamp.
+    const waitStart =
+      steps.find((s) => s.status === 'waiting_form' && s.waitingStartedAt)?.waitingStartedAt ??
+      null;
     return {
       ...t,
       timing: { wallMs, workMs, idleMs, userActiveMs },
       tokenUsage: tokensByTask.get(t.id) ?? null,
       currentWaitStartedAt: waitStart ? waitStart.toISOString() : null,
+      // Running-but-queued: which capacity cap this task is parked behind, or null when it is
+      // genuinely working. Derived per poll rather than stored, so it cannot go stale.
+      slotWait: deriveSlotWait({
+        taskStatus: t.status,
+        currentStepId: t.currentStepId,
+        currentRound: t.currentRound,
+        steps,
+        queuedInvocationStepRowIds: queuedInvocationStepIds,
+        nowMs: now,
+      }),
       allowanceReplenishedAt: t.allowanceReplenishedAt
         ? t.allowanceReplenishedAt.toISOString()
         : null,
@@ -511,6 +545,16 @@ taskRoutes.get('/:id', async (c) => {
     ...task,
     activeCliInvocationId: active?.id ?? null,
     activeCliStepId: active?.taskStepId ?? null,
+    // Same derivation as the listing, over the rows already fetched above, so the header badge
+    // and the list badge can never disagree.
+    slotWait: deriveSlotWait({
+      taskStatus: task.status,
+      currentStepId: task.currentStepId,
+      currentRound: task.currentRound,
+      steps: stepRows,
+      queuedInvocationStepRowIds: await findQueuedInvocationStepIds(db, [id]),
+      nowMs: Date.now(),
+    }),
   };
   return c.json({ task: taskWithActive, steps, providerBreakdown, parentTask, childTasks });
 });
