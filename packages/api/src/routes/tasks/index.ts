@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, not, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   buildEstimationAccuracy,
@@ -76,6 +76,14 @@ taskRoutes.get('/', async (c) => {
       conds.push(
         inArray(schema.tasks.status, statuses as (typeof schema.tasks.$inferSelect)['status'][]),
       );
+    }
+    if (statusToken === 'running') {
+      // A task queued behind a capacity cap ALSO stays `running` (same reason as above), so a
+      // plain status match hands back the whole waiting queue next to the tasks that are
+      // genuinely working. The dropdown's "Running" means working, so subtract the parked half
+      // — exactly the set the WAITING_SLOT_FILTER_TOKEN branch selects. The compound tokens
+      // ('open'/'active'/'unfinished') deliberately keep both: they answer "still in flight".
+      conds.push(not(currentStepParkedSql()));
     }
   }
   if (q) conds.push(sql`${schema.tasks.title} ilike ${`%${q}%`}`);

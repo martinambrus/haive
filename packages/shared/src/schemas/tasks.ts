@@ -252,7 +252,9 @@ const ALL_TASK_STATUSES = [
  *  known tokens, so a hand-typed garbage value falls back to the unfiltered (but
  *  still user-scoped) list rather than an empty-IN edge case. WAITING_SLOT_FILTER_TOKEN
  *  also yields null by design: it is derived, so its caller must handle it BEFORE
- *  calling this. */
+ *  calling this. The 'running' token expands to the raw status here, but the api NARROWS it
+ *  further (running minus the slot-parked half, which is also stored as `running`) so the
+ *  dropdown's "Running" and "Waiting for slot" name disjoint sets. */
 export function expandTaskStatusFilter(token: string | undefined | null): string[] | null {
   if (!token) return null;
   if (token === 'open') return [...OPEN_TASK_STATUSES];

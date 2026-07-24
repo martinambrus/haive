@@ -340,6 +340,7 @@ export default function TasksPage() {
             <option value="">All statuses</option>
             <option value="unfinished">Unfinished</option>
             <option value="active">In progress</option>
+            <option value="running">Running</option>
             <option value="waiting_slot">Waiting for slot</option>
             <option value="waiting_user">Waiting on you</option>
             <option value="waiting_pr">Waiting on PR</option>
