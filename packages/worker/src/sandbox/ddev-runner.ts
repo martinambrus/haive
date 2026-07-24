@@ -14,6 +14,7 @@ import {
   taskHostPort,
   type TaskAccessEndpoint,
 } from '@haive/shared';
+import { relaxExactDdevVersionConstraint } from './ddev-version-constraint.js';
 import { browserCdpUrlForRunner } from './runner-browser-cdp.js';
 import { resolveTaskDirectAccess } from './_browser-access.js';
 import { buildResourceLimitArgs, resolveRunnerCaps } from './runtime-caps.js';
@@ -387,6 +388,39 @@ export function isHostPortCollision(msg: string): boolean {
  *  only costs today's futile retry, never correctness, so it degrades gracefully. */
 export function isDdevVersionConstraintFailure(output: string): boolean {
   return /doesn't meet the constraint|ddev_version_constraint/i.test(output);
+}
+
+/** Relax an EXACT `ddev_version_constraint` pin in the project's config to a range, in place.
+ *  Called only after ddev has already rejected the pin, so the rewrite costs nothing on the
+ *  normal path and ddev's own verdict — not our reading of the version — is what triggers it.
+ *  Returns true when the file was rewritten and a retry is worth one attempt; false leaves the
+ *  caller to raise the actionable error (no constraint line, or a range someone chose on
+ *  purpose, which is not ours to widen). Best-effort: an unreadable/unwritable config is not a
+ *  new failure mode, it just falls back to the error the caller was about to throw. */
+async function repairVersionConstraint(
+  taskId: string,
+  repoSubpath: string,
+  onProgress?: (line: string) => void,
+): Promise<boolean> {
+  const configPath = path.join(XDEBUG_REPO_STORAGE_ROOT, repoSubpath, '.ddev', 'config.yaml');
+  try {
+    const before = await readFile(configPath, 'utf8');
+    const relaxed = relaxExactDdevVersionConstraint(before);
+    if (!relaxed) return false;
+    await writeFile(configPath, relaxed.text, 'utf8');
+    log.warn(
+      { taskId, configPath, from: relaxed.from, to: relaxed.to },
+      'relaxed an exact ddev_version_constraint pin the runner could not satisfy',
+    );
+    onProgress?.(
+      `.ddev/config.yaml pinned ddev_version_constraint to ${relaxed.from}, which this DDEV ` +
+        `does not satisfy — relaxed it to "${relaxed.to}" and retrying`,
+    );
+    return true;
+  } catch (err) {
+    log.warn({ taskId, configPath, err }, 'could not relax the ddev_version_constraint pin');
+    return false;
+  }
 }
 
 /** Actionable failure for an unsatisfiable version pin — names the fix (relax the pin to a
@@ -1126,9 +1160,22 @@ async function ensureDdevStartedInner(
         return existing;
       }
       // A version-constraint rejection is not a wedged runner — a cold rebuild cannot
-      // satisfy the pin, so fail fast with an actionable error instead of looping.
-      if (isDdevVersionConstraintFailure(warm.output))
-        throw ddevVersionConstraintError(warm.output);
+      // satisfy the pin, so fail fast with an actionable error instead of looping. An
+      // EXACT pin is the one case we can fix ourselves: relax it and retry this warm
+      // start once (a cold rebuild would pay 900s to reach the same config).
+      if (isDdevVersionConstraintFailure(warm.output)) {
+        if (!(await repairVersionConstraint(taskId, repoSubpath, opts.onProgress))) {
+          throw ddevVersionConstraintError(warm.output);
+        }
+        const retry = await ddevExec(existing, 'start', {
+          onLine: opts.onProgress,
+          timeoutMs: 300_000,
+        });
+        if (retry.exitCode === 0) return existing;
+        if (isDdevVersionConstraintFailure(retry.output)) {
+          throw ddevVersionConstraintError(retry.output);
+        }
+      }
       log.warn(
         { taskId, output: warm.output.slice(-800) },
         'ddev warm-start failed; rebuilding the runner (cold boot)',
@@ -1153,12 +1200,18 @@ async function ensureDdevStartedInner(
   try {
     const handle = await startDdevRunner({ taskId, repoSubpath });
     let start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
-    if (start.exitCode !== 0) {
-      // An unsatisfiable ddev_version_constraint cannot be fixed by a second identical
-      // start — surface it now rather than burning another 900s attempt.
-      if (isDdevVersionConstraintFailure(start.output)) {
+    // An unsatisfiable ddev_version_constraint cannot be fixed by a second IDENTICAL start,
+    // so only retry once the config itself has changed — i.e. after relaxing an exact pin.
+    if (start.exitCode !== 0 && isDdevVersionConstraintFailure(start.output)) {
+      if (!(await repairVersionConstraint(taskId, repoSubpath, opts.onProgress))) {
         throw ddevVersionConstraintError(start.output);
       }
+      start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
+      if (start.exitCode !== 0 && isDdevVersionConstraintFailure(start.output)) {
+        throw ddevVersionConstraintError(start.output);
+      }
+    }
+    if (start.exitCode !== 0) {
       // A cold first boot builds the project's custom web image, so container
       // readiness can land right at DDEV's default 120s timeout and fail
       // transiently. The images are built now, so one retry usually clears it.

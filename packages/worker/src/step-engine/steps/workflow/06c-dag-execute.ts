@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DagCoderContext, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { ddevConfigGuidanceLines, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 
 // Phase 3 — DAG execution. Runs only when 2c sprint planning chose 'dag'. The
 // heavy lifting (per-level worktrees, parallel coders, barrier, merge,
@@ -43,6 +43,9 @@ function buildCoderPrompt(issue: DagCoderContext, upstreamDebt: string): string 
       ? `Acceptance criteria (for this issue only):\n- ${issue.acceptanceCriteria.join('\n- ')}`
       : '',
     upstreamDebt ? `\n${upstreamDebt}` : '',
+    ...ddevConfigGuidanceLines(
+      [issue.title, issue.description, issue.provides, ...issue.specSections].join(' '),
+    ),
     '',
     'Do NOT run git — it is unavailable in this environment; the orchestrator commits your work after you finish.',
     'When finished, emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',

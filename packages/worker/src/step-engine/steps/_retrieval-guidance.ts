@@ -132,3 +132,25 @@ export function adaptPromptForCliCapabilities(
     );
   });
 }
+
+/** One rule for implementation agents that may author `.ddev/config.yaml`.
+ *
+ *  Agents add `ddev_version_constraint` unprompted — pinning is ordinary DDEV practice — and
+ *  some write an EXACT version, which is dead the moment the runner's DDEV differs by a patch.
+ *  Observed across six add-ddev tasks: four wrote ranges, two wrote exact pins and both tasks
+ *  died at `ddev start`. The runner repairs an exact pin at boot (ddev-version-constraint.ts),
+ *  so this is the cheap nudge that stops it being written, not the thing that saves the task.
+ *
+ *  Gated on the work actually mentioning DDEV so a repo that has nothing to do with it never
+ *  pays for the lines. The match is a heuristic, not a contract: a miss costs the nudge, never
+ *  correctness — the runtime repair still catches it. */
+export function ddevConfigGuidanceLines(context: string): string[] {
+  if (!/\bddev\b/i.test(context)) return [];
+  return [
+    '',
+    'If you create or edit .ddev/config.yaml: do NOT pin `ddev_version_constraint` to an exact',
+    'version (e.g. `v1.25.2`). The DDEV that runs this project is not necessarily the one you',
+    'see documented, and an exact pin fails the moment it differs by a patch. Use a range such',
+    'as ">= v1.24.0 < v2.0.0", or leave the key out entirely.',
+  ];
+}

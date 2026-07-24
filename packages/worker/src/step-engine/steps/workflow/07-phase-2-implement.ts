@@ -3,7 +3,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
-import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { ddevConfigGuidanceLines, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { loadFixLoopDiagnosis, loadPriorFixContext } from './_fix-loop.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
@@ -325,6 +325,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         `Your current working directory is already set to the workspace path above.`,
         `Gate 1 feedback: ${detected.gateFeedback || '(none)'}`,
         `Extra instructions: ${values.instructions ?? '(none)'}`,
+        ...ddevConfigGuidanceLines(detected.spec),
       ];
 
       // When the repo does browser testing, a chrome-devtools MCP is wired to the

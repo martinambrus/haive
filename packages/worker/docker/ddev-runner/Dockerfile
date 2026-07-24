@@ -27,9 +27,18 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 
 # DDEV + mkcert from DDEV's apt repo.
+#
+# DDEV_VERSION is PINNED on purpose. Unpinned, every image rebuild silently adopted whatever
+# the apt repo served that day, so the CLI drifted underneath projects whose .ddev/config.yaml
+# carries a `ddev_version_constraint` — a repo that booted last week started failing with
+# "your DDEV version 'X' doesn't meet the constraint" for no change of its own. It also let the
+# CLI diverge from the ddev/* images already cached on the host. Bump this deliberately (and
+# rebuild with `pnpm docker rebuild`); `apt-cache policy ddev` inside the image lists what the
+# repo currently offers.
+ARG DDEV_VERSION=1.25.3
 RUN curl -fsSL https://apt.fury.io/drud/gpg.key | gpg --dearmor -o /etc/apt/keyrings/ddev.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/ddev.gpg] https://apt.fury.io/drud/ * *" > /etc/apt/sources.list.d/ddev.list \
-    && apt-get update && apt-get install -y --no-install-recommends ddev mkcert \
+    && apt-get update && apt-get install -y --no-install-recommends "ddev=${DDEV_VERSION}" mkcert \
     && rm -rf /var/lib/apt/lists/*
 
 # Browser testing inside the runner (08a-browser-verify): node + chromium +
