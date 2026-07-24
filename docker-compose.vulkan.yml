@@ -1,0 +1,20 @@
+# Vulkan GPU override for Ollama. Included automatically by scripts/dev.sh
+# (pnpm docker:dev) when no NVIDIA GPU is available but /dev/dri render nodes
+# exist — i.e. Intel iGPU (Iris Xe, Arc) or AMD iGPU/dGPU with Vulkan support.
+# Ollama's built-in Vulkan backend (enabled by default since v0.12.6) handles
+# GPU detection; the only extra requirement is passing the DRI device into the
+# container and setting OLLAMA_IGPU_ENABLE=1 so Ollama doesn't skip integrated
+# GPUs.
+#
+# On a machine with BOTH an NVIDIA dGPU and an Intel iGPU, scripts/dev.sh
+# prefers NVIDIA (docker-compose.gpu.yml) — Vulkan is the second-tier fallback.
+# CPU-only machines load neither file.
+services:
+  ollama:
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      OLLAMA_IGPU_ENABLE: "1"
+  worker:
+    environment:
+      HAIVE_GPU_EXPECTED: "1"

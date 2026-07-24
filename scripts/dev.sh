@@ -7,26 +7,33 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # --- compose wrapper ---------------------------------------------------------
-# Always layer base + dev override. Add the GPU override only when an NVIDIA GPU
-# is actually usable by Docker — a failed nvidia device reservation hard-errors
-# the service, so compose cannot gate this on its own.
+# Always layer base + dev override. Add a GPU override when hardware is usable:
+#   1. NVIDIA dGPU  — requires nvidia-smi + nvidia container runtime
+#   2. Vulkan iGPU  — Intel Iris Xe / Arc or AMD with /dev/dri render nodes
+#   3. CPU fallback — no extra file, Ollama runs on CPU
+# A failed nvidia device reservation hard-errors the service, so compose cannot
+# gate NVIDIA on its own. Vulkan is safe to layer unconditionally when render
+# nodes exist — Ollama simply falls back to CPU if Vulkan init fails at runtime.
 FILES=(-f docker-compose.yml -f docker-compose.dev.yml)
 GPU_MODE="CPU"
 if command -v nvidia-smi >/dev/null 2>&1 \
   && nvidia-smi -L >/dev/null 2>&1 \
   && docker info 2>/dev/null | grep -qiE 'runtimes:.*nvidia'; then
   FILES+=(-f docker-compose.gpu.yml)
-  GPU_MODE="GPU"
+  GPU_MODE="NVIDIA"
+elif [ -e /dev/dri/renderD128 ]; then
+  FILES+=(-f docker-compose.vulkan.yml)
+  GPU_MODE="Vulkan"
 fi
 dc() { docker compose "${FILES[@]}" "$@"; }
 
 say() { echo "[dev] $*"; }
 gpu_note() {
-  if [ "$GPU_MODE" = "GPU" ]; then
-    say "NVIDIA GPU detected -> Ollama on GPU (fast embeddings)."
-  else
-    say "No NVIDIA GPU available to Docker -> Ollama on CPU (embeddings slower)."
-  fi
+  case "$GPU_MODE" in
+    NVIDIA) say "NVIDIA GPU detected -> Ollama on GPU (fast embeddings)." ;;
+    Vulkan) say "Vulkan GPU detected (Intel/AMD) -> Ollama on iGPU via Vulkan (moderate speed)." ;;
+    *)      say "No GPU available to Docker -> Ollama on CPU (embeddings slower)." ;;
+  esac
 }
 
 # Build/cache volumes ONLY. The compose key is `haive_node_modules_*` and the
