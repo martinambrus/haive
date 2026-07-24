@@ -117,6 +117,13 @@ interface ResolvedTaskContext {
   /** Current orchestration generation; advance-step jobs from an older epoch are
    *  skipped as stale (see handleAdvanceStep). */
   orchestrationEpoch: number;
+  /** The step the orchestrator considers current. Every legitimate advance targets it:
+   *  the forward walk and every loop-back/revise path call markTaskRunningWithStep before
+   *  enqueueing, and the api step actions repoint it (and bump the epoch) in the same
+   *  transaction. An advance for a different step at the SAME epoch is therefore a second
+   *  orchestration loop for one task. Null on a task that has not advanced yet. */
+  currentStepId: string | null;
+  currentRound: number;
 }
 
 async function buildRunList(ctx: ResolvedTaskContext, db: Database): Promise<StepDefinition[]> {
@@ -219,6 +226,8 @@ async function resolveTaskContext(
     executionPath: (task.executionPath as ExecutionPath | null) ?? null,
     metadata: task.metadata ?? null,
     orchestrationEpoch: task.orchestrationEpoch ?? 0,
+    currentStepId: task.currentStepId ?? null,
+    currentRound: task.currentRound ?? 0,
   };
 }
 
@@ -1509,6 +1518,31 @@ async function handleAdvanceStep(
   if (stepDef.needsRuntime) {
     const admission = await runtimeAdmission(ctx.taskId);
     if (admission.decision === 'park') {
+      // Only the task's CURRENT step may hold a park loop. A park re-drives itself on a delayed
+      // job, so an advance for a step the task has moved past would re-park forever in parallel
+      // with the real loop — two loops re-parking one task every 15s, both ticking a wait
+      // (observed: 06a-db-migrate round 0 alongside 07b-phase-4-validate round 1). The epoch
+      // guard cannot catch it: reconcile re-drives an abandoned step at the task's CURRENT
+      // epoch, so both jobs look live. End the loop here instead and close its park; the row
+      // stays pending and runs if the forward walk reaches it. Null current step = a task that
+      // has not advanced yet, where no competing loop can be identified.
+      if (
+        ctx.currentStepId !== null &&
+        (payload.stepId !== ctx.currentStepId || round !== ctx.currentRound)
+      ) {
+        await foldAbandonedPark(db, ctx.taskId, payload.stepId, round);
+        logger.info(
+          {
+            taskId: ctx.taskId,
+            stepId: payload.stepId,
+            round,
+            currentStepId: ctx.currentStepId,
+            currentRound: ctx.currentRound,
+          },
+          'runtime admission: dropped a park loop for a step the task has moved past',
+        );
+        return;
+      }
       const row = await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined);
       // Report the REAL queue: position among the parked tasks and how many are parked. The
       // previous line printed `busy - max + 1` as "N ahead in the queue", which is the number of
@@ -1624,7 +1658,67 @@ async function handleAdvanceStep(
  *     the zombie is skipped by the epoch guard when BullMQ eventually redelivers it. No
  *     BullMQ/redis surgery, so it is safe regardless of worker count.
  *
- *  `waiting_form` user gates are durable (no in-flight job) and left untouched. */
+ *  `waiting_form` user gates are durable (no in-flight job) and left untouched.
+ *
+ *  Both passes re-drive ONLY the task's current step. A task can carry orphans from a chain it
+ *  has since abandoned — a task-level retry kills its in-flight chain by bumping the epoch, and
+ *  a fix loop leaves earlier rounds behind — and re-driving one of those hands the task a SECOND
+ *  orchestration loop: pass 1 enqueues at the task's current epoch, so the epoch guard sees both
+ *  as live, and pass 2's resetStepAndDownstream on an abandoned upstream row would reset the
+ *  live chain and invalidate the real loop's queued job. An abandoned orphan still has to leave
+ *  the blocking statuses (the other-step-active guard refuses every advance while any sibling
+ *  sits in running/waiting_cli/waiting_form, which would wedge the task), so it gets the same
+ *  fold-and-requeue the runtime park uses: timing folded into carried_*, row back to `pending`,
+ *  no downstream cascade, no epoch bump, no re-drive. */
+/** Is this row the step the task is actually working on? The single rule behind both duplicate-
+ *  loop defences (boot reconcile, and the park branch's refusal to re-park a step the task has
+ *  moved past), split out so it is directly testable. A null current step means the task never
+ *  advanced, so no competing loop can be identified — treat it as current and keep the
+ *  historical recover-everything behaviour rather than risk wedging it. */
+export function isCurrentStep(row: {
+  stepId: string;
+  round: number;
+  currentStepId: string | null;
+  currentRound: number;
+}): boolean {
+  if (row.currentStepId === null) return true;
+  return row.stepId === row.currentStepId && row.round === row.currentRound;
+}
+
+/** Requeue an orphan the task has moved past: fold its dead run into carried_* and put the row
+ *  back to a clean `pending`. It must not stay in running/waiting_cli, because the
+ *  other-step-active guard refuses every advance while a sibling sits there — the task would
+ *  wedge. Deliberately narrower than resetStepAndDownstream: one row, no downstream cascade, no
+ *  epoch bump, so the live chain and its queued advance are untouched. computeFoldContribution
+ *  reclassifies the open (never-closed) run as idle, so the crash downtime does not land in
+ *  carried_work. iterations/output/detect are preserved, as in the runtime park. */
+async function requeueAbandonedOrphan(db: Database, taskStepId: string): Promise<void> {
+  const rows = await db
+    .select()
+    .from(schema.taskSteps)
+    .where(eq(schema.taskSteps.id, taskStepId))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return;
+  const fold = computeFoldContribution(row, Date.now());
+  await db
+    .update(schema.taskSteps)
+    .set({
+      status: 'pending',
+      startedAt: null,
+      endedAt: null,
+      idleMs: 0,
+      waitingStartedAt: null,
+      userActiveMs: 0,
+      carriedWorkMs: row.carriedWorkMs + fold.workMs,
+      carriedIdleMs: row.carriedIdleMs + fold.idleMs,
+      carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
+      statusMessage: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.taskSteps.id, taskStepId));
+}
+
 export async function reconcileOrphanedSteps(db: Database): Promise<void> {
   const stuckCli = await db
     .select({
@@ -1634,6 +1728,8 @@ export async function reconcileOrphanedSteps(db: Database): Promise<void> {
       round: schema.taskSteps.round,
       userId: schema.tasks.userId,
       epoch: schema.tasks.orchestrationEpoch,
+      currentStepId: schema.tasks.currentStepId,
+      currentRound: schema.tasks.currentRound,
     })
     .from(schema.taskSteps)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
@@ -1664,6 +1760,22 @@ export async function reconcileOrphanedSteps(db: Database): Promise<void> {
             isNull(schema.cliInvocations.supersededAt),
           ),
         );
+      // Abandoned chain: this row is not what the task is working on, so re-driving it would
+      // add a second orchestration loop (see the pass note above). Requeue it instead.
+      if (!isCurrentStep(s)) {
+        await requeueAbandonedOrphan(db, s.taskStepId);
+        logger.info(
+          {
+            taskId: s.taskId,
+            stepId: s.stepId,
+            round: s.round,
+            currentStepId: s.currentStepId,
+            currentRound: s.currentRound,
+          },
+          'requeued an abandoned waiting_cli orphan (task has moved on; not re-driven)',
+        );
+        continue;
+      }
       // The step is now parked with NO invocation running — the state markCliParkBegin exists
       // for — but the park did not start now, it started when the worker died. Fold that dead
       // gap into idle_ms so the downtime bills as idle instead of work. Order matters: AFTER
@@ -1680,10 +1792,13 @@ export async function reconcileOrphanedSteps(db: Database): Promise<void> {
   // Pass 2: steps left `running` because the advance-step job died mid-execution.
   const stuckRunning = await db
     .select({
+      taskStepId: schema.taskSteps.id,
       taskId: schema.taskSteps.taskId,
       stepId: schema.taskSteps.stepId,
       round: schema.taskSteps.round,
       userId: schema.tasks.userId,
+      currentStepId: schema.tasks.currentStepId,
+      currentRound: schema.tasks.currentRound,
     })
     .from(schema.taskSteps)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
@@ -1695,6 +1810,24 @@ export async function reconcileOrphanedSteps(db: Database): Promise<void> {
     );
   for (const s of stuckRunning) {
     try {
+      // Abandoned chain: requeue the row so it stops blocking the other-step-active guard, but
+      // do NOT reset its downstream or bump the epoch — this row is upstream of whatever the
+      // task is really working on, so the cascade would wipe the live chain and the bump would
+      // invalidate the real loop's queued advance.
+      if (!isCurrentStep(s)) {
+        await requeueAbandonedOrphan(db, s.taskStepId);
+        logger.info(
+          {
+            taskId: s.taskId,
+            stepId: s.stepId,
+            round: s.round,
+            currentStepId: s.currentStepId,
+            currentRound: s.currentRound,
+          },
+          'requeued an abandoned running orphan (task has moved on; not re-driven)',
+        );
+        continue;
+      }
       // resetStepAndDownstream supersedes the step's open invocations, resets it to
       // pending, and bumps the task epoch so the orphaned zombie advance job no longer
       // matches the same-step duplicate guard; re-drive at that new epoch.
