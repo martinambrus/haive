@@ -7,6 +7,7 @@ import { CliStreamViewer } from './CliStreamViewer';
 import { useAutoScrollTerminals } from '@/lib/terminal-autoscroll';
 import { formatDuration } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
+import { invocationBanner } from '@/lib/step-banners';
 
 interface StepTerminalProps {
   taskId: string;
@@ -223,6 +224,8 @@ function InvocationPanel({
 }: InvocationPanelProps) {
   const [replay, setReplay] = useState<CliInvocationOutput | null>(null);
   const [replayError, setReplayError] = useState<string | null>(null);
+  // Which state this invocation's copy belongs to — decided on startedAt, not on the words.
+  const banner = invocationBanner(invocation);
 
   // Active invocation → live WebSocket via CliStreamViewer (no fetch needed).
   // Ended invocation → fetch persisted rawOutput once and render statically.
@@ -336,22 +339,23 @@ function InvocationPanel({
       ) : (
         !replayError && <div className="text-xs text-neutral-500">Loading output…</div>
       )}
-      {invocation.isActive && invocation.startedAt === null && invocation.statusMessage ? (
-        // Queued: enqueued but no concurrency slot yet. Amber so the user sees the
-        // machine is busy rather than a silent "connected" terminal. Gated on
-        // startedAt===null so it disappears the instant the run begins.
+      {invocation.isActive && banner?.kind === 'queued' ? (
+        // Queued: enqueued but no concurrency slot yet. Amber so the user sees the machine is busy
+        // rather than a silent "connected" terminal. invocationBanner (lib/step-banners) splits
+        // queued from running on startedAt, so a started invocation can never present itself as
+        // waiting for a slot even when its copy still says "machine at capacity".
         <div className="flex items-center gap-2 rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-          {invocation.statusMessage}
+          {banner.text}
         </div>
       ) : (
         total > 1 &&
         invocation.isActive &&
-        invocation.startedAt !== null &&
-        (invocation.statusMessage ?? (idx > 0 ? statusMessage : null)) && (
+        (banner?.kind === 'running' || idx > 0) &&
+        (banner?.text ?? (idx > 0 ? statusMessage : null)) && (
           <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">
             <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
-            {invocation.statusMessage ?? statusMessage}
+            {banner?.text ?? statusMessage}
           </div>
         )
       )}

@@ -1,0 +1,105 @@
+import { describe, it, expect } from 'vitest';
+import {
+  failureBanner,
+  invocationBanner,
+  parkBanner,
+  type StepBannerRow,
+  type InvocationBannerRow,
+} from './step-banners';
+
+const step = (over: Partial<StepBannerRow> = {}): StepBannerRow => ({
+  status: 'pending',
+  statusMessage: null,
+  errorMessage: null,
+  waitingStartedAt: null,
+  ...over,
+});
+
+const PARK_COPY = 'Waiting for a free runtime slot — #1 of 2 waiting (8192 MB of 10941 MB in use)';
+const QUEUED_COPY = 'Queued — machine at capacity (2 parallel slots).';
+
+describe('parkBanner', () => {
+  it('shows while the step is parked', () => {
+    const parked = step({ statusMessage: PARK_COPY, waitingStartedAt: '2026-07-24T13:00:00Z' });
+    expect(parkBanner(parked, { taskEnded: false })).toEqual({ text: PARK_COPY });
+  });
+
+  it('hides once the park is over, even though the copy survives', () => {
+    // The bug: a park loop whose chain ended cannot clear its own line, so this row kept
+    // advertising a live wait beside the task's real one — two amber banners on one task.
+    const leftover = step({ statusMessage: PARK_COPY, waitingStartedAt: null });
+    expect(parkBanner(leftover, { taskEnded: false })).toBeNull();
+  });
+
+  it('hides on a terminal task that still holds a marker', () => {
+    const parked = step({ statusMessage: PARK_COPY, waitingStartedAt: '2026-07-24T13:00:00Z' });
+    expect(parkBanner(parked, { taskEnded: true })).toBeNull();
+  });
+
+  it('hides for any status other than pending', () => {
+    for (const status of ['running', 'waiting_cli', 'waiting_form', 'done', 'failed']) {
+      const row = step({
+        status,
+        statusMessage: PARK_COPY,
+        waitingStartedAt: '2026-07-24T13:00:00Z',
+      });
+      expect(parkBanner(row, { taskEnded: false })).toBeNull();
+    }
+  });
+});
+
+describe('failureBanner', () => {
+  it('shows on a failed step', () => {
+    const failed = step({ status: 'failed', errorMessage: 'Stopped by user' });
+    expect(failureBanner(failed)).toEqual({ text: 'Stopped by user' });
+  });
+
+  it('hides on a row that ended well, where the text is stale or a diagnosis', () => {
+    // Two reasons, one rule. Stale: a step that failed on one attempt and succeeded later kept
+    // its error text and rendered a red "cli invocation failed" panel with a Retry button, reading
+    // as a failure beside the task's real work. Deliberate: fixLoopOnError writes done TOGETHER
+    // with errorMessage to route a diagnosis back to implementation.
+    for (const status of ['done', 'skipped']) {
+      const ended = step({ status, errorMessage: 'cli invocation failed: orphaned by a restart' });
+      expect(failureBanner(ended)).toBeNull();
+    }
+  });
+
+  it('still shows while the step is live', () => {
+    for (const status of ['running', 'waiting_cli', 'pending']) {
+      expect(failureBanner(step({ status, errorMessage: 'boom' }))).toEqual({ text: 'boom' });
+    }
+  });
+
+  it('is null with no copy to show', () => {
+    expect(failureBanner(step({ status: 'failed' }))).toBeNull();
+  });
+});
+
+describe('invocationBanner', () => {
+  const inv = (over: Partial<InvocationBannerRow> = {}): InvocationBannerRow => ({
+    startedAt: null,
+    statusMessage: null,
+    ...over,
+  });
+
+  it('calls an unstarted invocation queued', () => {
+    expect(invocationBanner(inv({ statusMessage: QUEUED_COPY }))).toEqual({
+      kind: 'queued',
+      text: QUEUED_COPY,
+    });
+  });
+
+  it('calls a started invocation running, whatever its copy says', () => {
+    // The bug: the queued mark is written after queue.add, so a job picked up immediately had its
+    // live "Waiting for AI analysis..." clobbered — a running CLI advertising "machine at
+    // capacity" while the task read `running` in the listing.
+    expect(
+      invocationBanner(inv({ startedAt: '2026-07-24T15:44:12Z', statusMessage: QUEUED_COPY })),
+    ).toEqual({ kind: 'running', text: QUEUED_COPY });
+  });
+
+  it('is null with no copy', () => {
+    expect(invocationBanner(inv({ startedAt: '2026-07-24T15:44:12Z' }))).toBeNull();
+  });
+});

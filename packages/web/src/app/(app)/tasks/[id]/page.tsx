@@ -33,6 +33,7 @@ import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
 import { isAfterFrontier, type StepOrderKey } from '@/lib/step-order';
+import { failureBanner, parkBanner } from '@/lib/step-banners';
 import { formatTokens } from '@/lib/format-tokens';
 import { CLI_USAGE_LABEL, resetShort, resetSuffix } from '@/lib/usage-format';
 import {
@@ -2292,6 +2293,10 @@ function StepCardImpl({
   // so they stop reconnecting against a torn-down runtime and spamming the console
   // with WebSocket 1006 errors.
   const taskEnded = taskCancelled || taskStatus === 'completed' || taskStatus === 'failed';
+  // Banner visibility comes from the structural columns, never from the presence of the copy —
+  // lib/step-banners is the single tested source of that rule.
+  const park = parkBanner(step, { taskEnded });
+  const failure = failureBanner(step);
   // The live browser/VNC needs a running task runtime; once the task is completed or
   // cancelled that runtime is torn down (cleanup/teardown), so hide the browser
   // panels entirely instead of letting them reconnect to nothing (WebSocket 1006
@@ -2753,15 +2758,12 @@ function StepCardImpl({
         </div>
       )}
 
-      {step.errorMessage && step.status !== 'done' && step.status !== 'skipped' && (
-        // Only while the row has NOT ended successfully. error_message is copy that can outlive
-        // the failure it describes — a step that failed on one attempt and succeeded on a later
-        // one kept the text, so a `done` row rendered a red "cli invocation failed…" banner and
-        // read as a failed step sitting beside whatever the task was really doing (observed on
-        // 38f02dee: 07b-phase-4-validate round 0 done-with-error next to its live round-1 park).
+      {failure && (
+        // Only while the row has NOT ended successfully — see failureBanner (lib/step-banners) for
+        // why a `done` row's error_message is either stale or a deliberate fix-loop diagnosis.
         // Steps that ended well but with caveats use degradedNote / warningMessage instead.
         <div className="whitespace-pre-wrap rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
-          {step.errorMessage}
+          {failure.text}
         </div>
       )}
 
@@ -3005,20 +3007,16 @@ function StepCardImpl({
           statusMessage={step.statusMessage}
         />
       )}
-      {step.status === 'pending' && step.waitingStartedAt && step.statusMessage && !taskEnded && (
+      {park && (
         // Runtime-parked: the step is queued for a runtime slot. It may have prior invocations
         // from an interrupted run — their terminals render collapsed above (a pending step does
         // not auto-expand), so this prominent amber "queued" panel is the current signal and the
         // task reads as waiting-in-line, not a stuck blank you have to scroll up to explain.
-        //
-        // Gated on the wait MARKER, not on the message: status_message is display copy that
-        // outlives the park (a loop whose chain ended leaves its last line behind), so keying on
-        // it alone showed a second live-looking "waiting for a slot" banner on a step nothing was
-        // driving — two amber banners on one task. The marker is the structural signal, and a
-        // terminal task can hold one too, hence !taskEnded.
+        // Visibility comes from parkBanner (lib/step-banners) — gated on the wait marker, never on
+        // the presence of the copy.
         <div className="flex items-center gap-2 rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-          {step.statusMessage}
+          {park.text}
         </div>
       )}
 
