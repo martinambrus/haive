@@ -215,33 +215,52 @@ export async function findActiveCliInvocation(
   return rows[0] ?? null;
 }
 
-/** `task_steps.id` of every step in `taskIds` holding an invocation that is ENQUEUED but not
- *  started (`started_at IS NULL`, not ended, not superseded) — a job sitting in the cli-exec
- *  queue because MAX_PARALLEL_AGENTS is saturated or the per-task cap deferred it. Feeds
- *  deriveSlotWait's agent-slot branch. One query for a whole page of tasks; empty set when
- *  called with no ids. */
+/** `task_steps.id` of every step in `taskIds` that is WHOLLY parked on the agent gate: it holds
+ *  an invocation enqueued but not started (`started_at IS NULL`, not ended, not superseded) and
+ *  none of its invocations is actually running — a job sitting in the cli-exec queue because
+ *  MAX_PARALLEL_AGENTS is saturated or the per-task cap deferred it. Feeds deriveSlotWait's
+ *  agent-slot branch.
+ *
+ *  The "none running" half is what makes a FAN-OUT step honest. A mining/DAG step dispatches N
+ *  invocations at once and cli-exec runs `concurrency` of them, so N > concurrency leaves
+ *  siblings enqueued for the whole step — on the queued-row test alone every such step reads as
+ *  parked while its agents stream output, which drops the task out of the "Running" listing and
+ *  badges it "waiting: agent slot". A step with one live agent is working, not queued.
+ *
+ *  Two queries per page rather than a correlated NOT EXISTS: same round-trip cost in practice
+ *  and the set arithmetic stays readable. Empty set when called with no ids. */
 export async function findQueuedInvocationStepIds(
   db: ReturnType<typeof getDb>,
   taskIds: string[],
 ): Promise<Set<string>> {
   if (taskIds.length === 0) return new Set();
-  const rows = await db
-    .selectDistinct({ taskStepId: schema.cliInvocations.taskStepId })
-    .from(schema.cliInvocations)
-    .where(
-      and(
-        inArray(schema.cliInvocations.taskId, taskIds),
-        isNull(schema.cliInvocations.startedAt),
-        isNull(schema.cliInvocations.endedAt),
-        isNull(schema.cliInvocations.supersededAt),
-      ),
-    );
-  return new Set(rows.map((r) => r.taskStepId).filter((id): id is string => id !== null));
+  const stepIdsWhere = (startedAt: ReturnType<typeof isNull>) =>
+    db
+      .selectDistinct({ taskStepId: schema.cliInvocations.taskStepId })
+      .from(schema.cliInvocations)
+      .where(
+        and(
+          inArray(schema.cliInvocations.taskId, taskIds),
+          startedAt,
+          isNull(schema.cliInvocations.endedAt),
+          isNull(schema.cliInvocations.supersededAt),
+        ),
+      );
+  const [queued, running] = await Promise.all([
+    stepIdsWhere(isNull(schema.cliInvocations.startedAt)),
+    stepIdsWhere(isNotNull(schema.cliInvocations.startedAt)),
+  ]);
+  const busy = new Set(running.map((r) => r.taskStepId));
+  return new Set(
+    queued.map((r) => r.taskStepId).filter((id): id is string => id !== null && !busy.has(id)),
+  );
 }
 
 /** SQL predicate for the `waiting_slot` listing filter: the task's CURRENT step is parked
- *  waiting for capacity. Mirrors deriveSlotWait rule-for-rule (runtime park = pending + a live
- *  wait marker; agent park = waiting_cli + an unstarted invocation), scoped to
+ *  waiting for capacity. Mirrors deriveSlotWait rule-for-rule as fed by
+ *  findQueuedInvocationStepIds (runtime park = pending + a live wait marker; agent park =
+ *  waiting_cli + an unstarted invocation and NOTHING running — see that helper for why a
+ *  fan-out step needs the second half), scoped to
  *  current_step_id/current_round for the same reason the helper is — a stale marker on an
  *  older round must not make a working task look queued. Caller adds the
  *  `tasks.status = 'running'` term, so this stays a pure "is the current step parked" test and
@@ -258,6 +277,12 @@ export function currentStepParkedSql() {
           SELECT 1 FROM ${schema.cliInvocations} ci
           WHERE ci.task_step_id = ts.id
             AND ci.started_at IS NULL
+            AND ci.ended_at IS NULL
+            AND ci.superseded_at IS NULL)
+          AND NOT EXISTS (
+          SELECT 1 FROM ${schema.cliInvocations} ci
+          WHERE ci.task_step_id = ts.id
+            AND ci.started_at IS NOT NULL
             AND ci.ended_at IS NULL
             AND ci.superseded_at IS NULL))
       ))`;
