@@ -17,6 +17,16 @@ describe('relaxExactDdevVersionConstraint', () => {
     expect(r?.to).toBe('>= v1.25.2 < v2.0.0');
   });
 
+  it.each(['= v1.25.2', '=v1.25.2', '== v1.25.2', '==1.25.2'])(
+    'relaxes an exact pin whose equality is spelled out: %s',
+    (v) => {
+      const r = relaxExactDdevVersionConstraint(config(`ddev_version_constraint: '${v}'`));
+      expect(r?.from).toBe(v);
+      expect(r?.to).toBe('>= v1.25.2 < v2.0.0');
+      expect(r?.text).toContain('ddev_version_constraint: ">= v1.25.2 < v2.0.0"');
+    },
+  );
+
   it('accepts double quotes and preserves indentation', () => {
     const r = relaxExactDdevVersionConstraint(`  ddev_version_constraint: "v1.25.2"\n`);
     expect(r?.text).toBe(`  ddev_version_constraint: ">= v1.25.2 < v2.0.0"\n`);
@@ -35,6 +45,8 @@ describe('relaxExactDdevVersionConstraint', () => {
     '>= v1.25.2, < v1.26.0',
     '>=1.25.2 <1.26.0',
     '>= v1.25.2',
+    '<= v1.25.2',
+    '!= v1.25.2',
     '~> v1.25',
   ])('leaves a value that already carries a comparator alone: %s', (v) => {
     expect(relaxExactDdevVersionConstraint(config(`ddev_version_constraint: "${v}"`))).toBeNull();

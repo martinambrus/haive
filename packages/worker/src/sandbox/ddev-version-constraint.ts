@@ -13,10 +13,13 @@
  *  the YAML key, which is the stable contract here — not on ddev's error wording. */
 const CONSTRAINT_LINE_RE = /^([ \t]*ddev_version_constraint:[ \t]*)(\S.*?)[ \t]*$/m;
 
-/** A bare version with no comparator: `v1.25.2`, `1.25.2`. This is the only shape we rewrite —
- *  a value carrying any operator is a range the agent thought about, and second-guessing it
- *  (widening someone's deliberate upper bound) is not our call. */
-const EXACT_PIN_RE = /^v?(\d+)\.(\d+)\.(\d+)$/;
+/** A single version pinned to itself, whether or not the equality is spelled out: `v1.25.2`,
+ *  `1.25.2`, `= v1.25.2`, `==1.25.2`. All of these mean "this version and nothing else" and
+ *  all fail identically against a runner on any other patch — an agent writing the `=` form
+ *  is the case that reached production. A value carrying any OTHER operator (`>=`, `<=`, `>`,
+ *  `<`, `~`, `^`, `!=`) is a range the agent thought about, and second-guessing it (widening
+ *  someone's deliberate upper bound) is not our call. */
+const EXACT_PIN_RE = /^(?:={1,2}[ \t]*)?v?(\d+)\.(\d+)\.(\d+)$/;
 
 export interface RelaxedConstraint {
   /** The rewritten file contents. */
@@ -36,8 +39,8 @@ export interface RelaxedConstraint {
  * compatibility boundary and the one the agent plausibly meant to guard. The floor is kept
  * verbatim so the agent's intent ("at least this version") survives.
  *
- * Returns null when there is no constraint line, or when the value already carries a
- * comparator; the caller then keeps today's actionable error.
+ * Returns null when there is no constraint line, or when the value carries a comparator that
+ * makes it a real range; the caller then keeps today's actionable error.
  */
 export function relaxExactDdevVersionConstraint(configText: string): RelaxedConstraint | null {
   const match = CONSTRAINT_LINE_RE.exec(configText);
