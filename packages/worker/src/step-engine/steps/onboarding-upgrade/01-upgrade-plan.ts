@@ -220,6 +220,7 @@ async function resolveRenderContext(
       testFrameworks: [],
       testPaths: [],
       buildTool: null,
+      commands: [],
       containerType: null,
     },
     framework: detect.framework ?? null,

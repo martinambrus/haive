@@ -149,6 +149,10 @@ interface EnvDetectData {
   localUrl: string | null;
   testFrameworks: string[];
   buildTool: string | null;
+  /** Runnable commands parsed straight out of the repo's manifests (npm/composer
+   *  scripts, Makefile targets). Deterministic — never LLM-enriched, so the list
+   *  only ever contains commands that genuinely exist. */
+  commands: string[];
   source: 'llm' | 'deterministic';
 }
 
@@ -760,6 +764,104 @@ function mergeEnrichment(base: EnvDetectData, enrichment: LlmEnrichment): EnvDet
   return merged;
 }
 
+/* ------------------------------------------------------------------ */
+/* Runnable project commands                                           */
+/* ------------------------------------------------------------------ */
+
+/** Script/target names worth writing into AGENTS.md. A repo can declare dozens
+ *  of scripts; these are the ones an agent needs to build, test and check its
+ *  own work, and keeping the list short is the point — the file is read on every
+ *  invocation. Matched case-insensitively against the exact name and against the
+ *  common namespaced form (`test:unit`, `lint:fix`). */
+const COMMAND_NAMES = [
+  'build',
+  'test',
+  'lint',
+  'format',
+  'typecheck',
+  'check',
+  'dev',
+  'start',
+  'e2e',
+] as const;
+
+function isInterestingCommandName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return COMMAND_NAMES.some((known) => lower === known || lower.startsWith(`${known}:`));
+}
+
+/** Package manager a developer would actually use, from the committed lockfile.
+ *  Falls back to npm — the script still runs, it is just not the repo's habit. */
+async function detectNodeRunner(repoPath: string): Promise<string> {
+  const byLockfile: [string, string][] = [
+    ['pnpm-lock.yaml', 'pnpm'],
+    ['yarn.lock', 'yarn'],
+    ['bun.lockb', 'bun'],
+  ];
+  for (const [lockfile, runner] of byLockfile) {
+    if (await pathExists(path.join(repoPath, lockfile))) return runner;
+  }
+  return 'npm';
+}
+
+/** Makefile target names — a line starting at column 0 with `name:` that is not a
+ *  variable assignment (`name := ...`) or a special target (`.PHONY`). Pattern
+ *  targets (`%.o:`) are skipped: they are rules, not things a developer runs. */
+function parseMakefileTargets(text: string): string[] {
+  const out: string[] = [];
+  for (const line of text.split('\n')) {
+    const m = /^([A-Za-z0-9][A-Za-z0-9_.\-:]*)\s*:(?!=)/.exec(line);
+    if (m?.[1] && !m[1].includes(':')) out.push(m[1]);
+  }
+  return out;
+}
+
+/** Deterministic scan for the commands a developer runs in this repo. Reads only
+ *  declarative manifests already present — no LLM inference, because a guessed
+ *  command that does not exist is worse than no command at all. */
+async function detectCommands(repoPath: string): Promise<string[]> {
+  const commands: string[] = [];
+
+  const pkgText = await readTextSafe(path.join(repoPath, 'package.json'));
+  if (pkgText) {
+    try {
+      const scripts = (JSON.parse(pkgText) as { scripts?: Record<string, string> }).scripts ?? {};
+      const runner = await detectNodeRunner(repoPath);
+      for (const name of Object.keys(scripts).filter(isInterestingCommandName)) {
+        commands.push(`${runner} run ${name}`);
+      }
+    } catch {
+      /* unparseable manifest — no commands from it */
+    }
+  }
+
+  const composerText = await readTextSafe(path.join(repoPath, 'composer.json'));
+  if (composerText) {
+    try {
+      const scripts =
+        (JSON.parse(composerText) as { scripts?: Record<string, unknown> }).scripts ?? {};
+      for (const name of Object.keys(scripts).filter(isInterestingCommandName)) {
+        commands.push(`composer ${name}`);
+      }
+    } catch {
+      /* unparseable manifest */
+    }
+  }
+
+  const makefileText = await readTextSafe(path.join(repoPath, 'Makefile'));
+  if (makefileText) {
+    for (const target of parseMakefileTargets(makefileText).filter(isInterestingCommandName)) {
+      commands.push(`make ${target}`);
+    }
+  }
+
+  return [...new Set(commands)];
+}
+
+/** Test seam for detectCommands, which is otherwise reachable only through a
+ *  full detect() run against a real repository. */
+export const detectCommandsForTest = detectCommands;
+
 async function collectConfigFileContents(repoPath: string): Promise<string> {
   const candidates = [
     'package.json',
@@ -1009,6 +1111,7 @@ export const envDetectStep: StepDefinition<DetectResult, EnvDetectApply> = {
       localUrl: null,
       testFrameworks: [],
       buildTool: null,
+      commands: await detectCommands(ctx.repoPath),
       source: 'deterministic',
     };
 

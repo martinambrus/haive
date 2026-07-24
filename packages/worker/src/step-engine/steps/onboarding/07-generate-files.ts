@@ -46,6 +46,8 @@ export interface ProjectInfo {
   testFrameworks: string[];
   testPaths: string[];
   buildTool: string | null;
+  /** Commands parsed from the repo's own manifests during detection. */
+  commands: string[];
   containerType: string | null;
 }
 
@@ -105,6 +107,7 @@ type EnvDetectShape = {
   localUrl?: string | null;
   testFrameworks?: string[];
   buildTool?: string | null;
+  commands?: string[];
 };
 
 function pickString(v: unknown): string | null {
@@ -152,6 +155,7 @@ function extractProjectInfo(
     testFrameworks,
     testPaths: Array.isArray(base.paths?.testPaths) ? base.paths!.testPaths! : [],
     buildTool: pickString(c.buildTool) ?? base.buildTool ?? null,
+    commands: Array.isArray(base.commands) ? base.commands : [],
     containerType: base.container?.type ?? null,
   };
 }
@@ -194,6 +198,16 @@ export function projectInfoMarkdown(info: ProjectInfo): string {
   }
   if (info.testPaths.length > 0) {
     lines.push(`- **Test paths**: ${info.testPaths.join(', ')}`);
+  }
+  // The rest of this block is metadata; these are the only lines an agent can act
+  // on directly, so they get their own heading rather than another bullet.
+  if (info.commands.length > 0) {
+    lines.push('');
+    lines.push('## Commands');
+    lines.push('');
+    lines.push('Parsed from the manifests in this repository. Use these to verify your work.');
+    lines.push('');
+    for (const command of info.commands) lines.push(`- \`${command}\``);
   }
   lines.push('');
   lines.push(PROJECT_INFO_END);

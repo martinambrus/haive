@@ -78,6 +78,7 @@ const REFERENCE_PROJECT_INFO: ProjectInfo = {
   testFrameworks: [],
   testPaths: [],
   buildTool: null,
+  commands: [],
   containerType: null,
 };
 
