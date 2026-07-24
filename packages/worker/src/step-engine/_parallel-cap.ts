@@ -1,17 +1,20 @@
-import { CONFIG_KEYS, configService } from '@haive/shared';
+import { resolveAgentConcurrency } from '../sandbox/runtime-admission.js';
+
+/** Concurrency when config is unavailable (e.g. focused unit tests) or the governor is off. */
+const STATIC_PARALLEL_CAP = 3;
 
 /**
- * The admin-configured max parallel agents/CLI invocations (floored at 1; no
- * upper limit — set per host capacity), defaulting to 3 when config isn't
- * initialized (e.g. focused unit tests). Pairs with `mapWithConcurrency` from
- * @haive/shared to bound in-process fan-outs by the same knob that caps the
- * cli-exec queue.
+ * The max parallel agents/CLI invocations (floored at 1; no upper limit — set per
+ * host capacity). Resolved through the same path as the cli-exec queue's own
+ * concurrency, so a pinned MAX_PARALLEL_AGENTS binds both and an auto-sized one
+ * shrinks in-process fan-outs while the runtime pool is full — otherwise the fan-out
+ * limiter would happily start 3 agents the queue has no budget for. Pairs with
+ * `mapWithConcurrency` from @haive/shared.
  */
 export async function resolveParallelCap(): Promise<number> {
   try {
-    const n = await configService.getNumber(CONFIG_KEYS.MAX_PARALLEL_AGENTS, 3);
-    return Math.max(1, Math.floor(n));
+    return Math.max(1, Math.floor(await resolveAgentConcurrency(STATIC_PARALLEL_CAP)));
   } catch {
-    return 3;
+    return STATIC_PARALLEL_CAP;
   }
 }

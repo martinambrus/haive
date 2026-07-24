@@ -82,7 +82,7 @@ function commandFor(framework: Framework): string {
 }
 
 export const dbMigrateStep: StepDefinition<MigrateDetect, MigrateApply> = {
-  needsRuntime: true,
+  needsRuntime: 'ddev',
   metadata: {
     id: '06a-db-migrate',
     workflowType: 'workflow',

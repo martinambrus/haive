@@ -8,7 +8,12 @@ import { schema } from '@haive/database';
 import { getDb } from '../db.js';
 import { browserCdpUrlForRunner } from './runner-browser-cdp.js';
 import { resolveTaskDirectAccess } from './_browser-access.js';
-import { buildResourceLimitArgs, resolveRunnerCaps } from './runtime-caps.js';
+import {
+  RUNTIME_WEIGHT_LABEL,
+  buildResourceLimitArgs,
+  resolveRunnerCaps,
+  resolveRuntimeWeightMb,
+} from './runtime-caps.js';
 import { acquireRuntimeSlot } from './runtime-admission.js';
 
 // Per-task app-runner: a plain (non-DinD) container built from the repo's
@@ -142,6 +147,11 @@ export async function startAppRunner(params: {
   // Per-container resource caps (machine-aware; null when the governor is disabled).
   const runnerCaps = await resolveRunnerCaps(params.taskId);
   const limitArgs = runnerCaps ? buildResourceLimitArgs(runnerCaps) : [];
+  // Planning weight this runner is budgeted at, stamped so the admission gate reads occupancy
+  // off `docker ps` — NOT the same number as the --memory ceiling above.
+  const weightArgs = runnerCaps
+    ? ['--label', `${RUNTIME_WEIGHT_LABEL}=${await resolveRuntimeWeightMb(params.taskId, 'app')}`]
+    : [];
 
   await exec(
     'docker',
@@ -155,6 +165,7 @@ export async function startAppRunner(params: {
       '--label',
       `${APP_RUNNER_LABEL}=1`,
       ...limitArgs,
+      ...weightArgs,
       '-v',
       `${REPO_VOLUME}:/repos`,
       ...publishArgs,

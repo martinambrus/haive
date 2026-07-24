@@ -373,7 +373,7 @@ export async function runRuntimeSmoke(
 }
 
 export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
-  needsRuntime: true,
+  needsRuntime: 'if-serving',
   metadata: {
     id: '08-phase-5-verify',
     workflowType: 'workflow',

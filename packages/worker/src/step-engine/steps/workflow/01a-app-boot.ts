@@ -234,7 +234,9 @@ function parseRunRecipe(raw: unknown): RunRecipe | null {
 }
 
 export const appBootStep: StepDefinition<AppBootDetect, AppBootApply> = {
-  needsRuntime: true,
+  // Not 'if-serving': this step WRITES the boot row classifyRuntime reads, so it
+  // classifies as 'none' right up until it has already booted the runner.
+  needsRuntime: 'app',
   metadata: {
     id: '01a-app-boot',
     workflowType: 'workflow',

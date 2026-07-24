@@ -362,7 +362,7 @@ function outputContract(): string[] {
 }
 
 export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> = {
-  needsRuntime: true,
+  needsRuntime: 'if-serving',
   metadata: {
     id: '07b-phase-4-validate',
     workflowType: 'workflow',

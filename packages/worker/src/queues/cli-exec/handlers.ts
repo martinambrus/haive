@@ -10,6 +10,7 @@ import {
   CLI_EXEC_JOB_NAMES,
   CONFIG_CONCURRENCY_CHANNEL,
   CONFIG_KEYS,
+  CONFIG_RUNTIME_LIMITS_CHANNEL,
   QUEUE_NAMES,
   cliAuthProviderVolumeName,
   cliAuthVolumeName,
@@ -31,6 +32,7 @@ import {
   type OllamaProvisionJobPayload,
   type OllamaProvisionResult,
 } from '@haive/shared';
+import { resolveAgentConcurrency } from '../../sandbox/runtime-admission.js';
 import { refreshAllCliVersions, refreshAllToolVersions } from '../../cli-versions/index.js';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
 import { renderDockerfile, resolveImageTag } from '../../sandbox/image-cache.js';
@@ -603,10 +605,19 @@ export async function scheduleCliVersionRefresh(): Promise<void> {
   );
 }
 
+/** Concurrency used when config is unavailable, or when the resource governor is off and there
+ *  is no budget to size against. The pre-feature fixed value. */
+const STATIC_PARALLEL_AGENTS = 3;
+
+/** How often auto-sized concurrency re-reads the runtime pool. Runners come and go outside any
+ *  config change (a boot, a teardown, the reaper), and none of those publish on the concurrency
+ *  channel — without this poll the agent pool would only retune when an admin touched a setting. */
+const AGENT_CONCURRENCY_POLL_MS = 30_000;
+
 /** Floor the parallel-agent cap at 1 (BullMQ requires concurrency >= 1). No upper
  *  limit — the host operator sets it to whatever their machine can handle. */
 function clampParallelCap(n: number): number {
-  if (!Number.isFinite(n)) return 3;
+  if (!Number.isFinite(n)) return STATIC_PARALLEL_AGENTS;
   return Math.max(1, Math.floor(n));
 }
 
@@ -702,13 +713,12 @@ export async function startCliExecWorker(
     | void
   >
 > {
-  // Max parallel agent/CLI invocations — admin-tunable (clamped 1..7). Falls back
-  // to 3 when config isn't initialized (e.g. focused smoke tests).
-  let concurrency = 3;
+  // Max parallel agent/CLI invocations. A positive MAX_PARALLEL_AGENTS pins it; at 0 it is
+  // sized from the host budget the runtime pool is NOT holding. Falls back to the fixed
+  // default when config isn't initialized (e.g. focused smoke tests).
+  let concurrency = STATIC_PARALLEL_AGENTS;
   try {
-    concurrency = clampParallelCap(
-      await configService.getNumber(CONFIG_KEYS.MAX_PARALLEL_AGENTS, 3),
-    );
+    concurrency = clampParallelCap(await resolveAgentConcurrency(STATIC_PARALLEL_AGENTS));
   } catch {
     /* config not initialized — keep the default */
   }
@@ -777,23 +787,46 @@ export async function startCliExecWorker(
     log.warn({ jobId: job?.id, name: job?.name, err }, 'cli-exec job failed');
   });
 
-  // Live-retune concurrency when the admin changes MAX_PARALLEL_AGENTS, so a
-  // bigger host can raise parallelism without a worker restart (BullMQ v5 honors
-  // the runtime setter; lowering lets in-flight jobs drain). The boot read above
-  // is the always-correct fallback on restart.
+  // Live-retune concurrency (BullMQ v5 honors the runtime setter; lowering lets in-flight jobs
+  // drain). The boot read above is the always-correct fallback on restart.
+  const applyConcurrency = async (): Promise<void> => {
+    let next: number;
+    try {
+      next = clampParallelCap(await resolveAgentConcurrency(STATIC_PARALLEL_AGENTS));
+    } catch (err) {
+      log.warn({ err }, 'cli-exec concurrency resolve failed; keeping the current value');
+      return;
+    }
+    if (next === (worker as { concurrency: number }).concurrency) return;
+    try {
+      (worker as { concurrency: number }).concurrency = next;
+      log.info({ concurrency: next }, 'cli-exec concurrency retuned');
+    } catch (err) {
+      log.warn({ err, next }, 'cli-exec concurrency retune failed (restart to apply)');
+    }
+  };
+
+  // Poll: when auto-sized, the number moves with runtime occupancy, and a runner booting or
+  // being reaped publishes nothing. Cheap (one docker ps + cached config) and a no-op while
+  // MAX_PARALLEL_AGENTS is pinned.
+  const poll = setInterval(() => void applyConcurrency(), AGENT_CONCURRENCY_POLL_MS);
+  if (poll.unref) poll.unref();
+  worker.on('closing', () => clearInterval(poll));
+
+  // Push: an admin changing MAX_PARALLEL_AGENTS (either channel also carries weight/budget
+  // changes) retunes immediately instead of waiting out the poll. The published value is
+  // ignored — resolveAgentConcurrency re-reads it, because 0 means "size it yourself".
   const redisUrl = process.env.REDIS_URL;
   if (redisUrl) {
     const sub = createRedisConnection(redisUrl);
-    sub.on('message', (_channel, message) => {
-      const next = clampParallelCap(Number.parseInt(message, 10));
-      try {
-        (worker as { concurrency: number }).concurrency = next;
-        log.info({ concurrency: next }, 'cli-exec concurrency retuned');
-      } catch (err) {
-        log.warn({ err, next }, 'cli-exec concurrency retune failed (restart to apply)');
-      }
+    sub.on('message', () => {
+      configService.clearCache();
+      void applyConcurrency();
     });
-    sub.subscribe(CONFIG_CONCURRENCY_CHANNEL).catch((err) => {
+    Promise.all([
+      sub.subscribe(CONFIG_CONCURRENCY_CHANNEL),
+      sub.subscribe(CONFIG_RUNTIME_LIMITS_CHANNEL),
+    ]).catch((err) => {
       log.warn({ err }, 'cli-exec concurrency subscribe failed');
     });
     worker.on('closing', () => {

@@ -6,8 +6,10 @@
  *
  *  Two waits exist, both bounded by an admin cap:
  *    - runtime: the task-level runtime admission gate (MAX_CONCURRENT_RUNTIMES) parked the
- *      step before it could boot its DDEV/app runner. The worker resets the row to `pending`
- *      and stamps `waiting_started_at`, then re-drives it on a delayed poll.
+ *      step before it could boot its DDEV/app runner. Only a step that will actually spawn one
+ *      is gated — a task whose runtime classifies as 'none' never queues — so this wait always
+ *      means real contention. The worker resets the row to `pending` and stamps
+ *      `waiting_started_at`, then re-drives it on a delayed poll.
  *    - agent:  the step's CLI invocation is enqueued but no worker slot has picked it up
  *      (MAX_PARALLEL_AGENTS) or it was deferred by the per-task cap
  *      (MAX_PARALLEL_AGENTS_PER_TASK).

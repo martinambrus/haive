@@ -59,7 +59,7 @@ interface RunAppReadyApply {
  *  to the worktree branch (and pushes), then the step finishes — and because this
  *  is the LAST step, markTaskCompleted tears the whole runtime down. */
 export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply> = {
-  needsRuntime: true,
+  needsRuntime: 'if-serving',
   metadata: {
     id: '99-run-app-ready',
     workflowType: 'run_app',

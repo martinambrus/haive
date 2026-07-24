@@ -40,7 +40,15 @@ import {
   type AdvanceStepResult,
   type WorkerDeps,
 } from '../step-engine/index.js';
-import { runtimeAdmission, releaseRuntimeReservation } from '../sandbox/runtime-admission.js';
+import {
+  releaseRuntimeReservation,
+  resolveAgentConcurrency,
+  runtimeAdmission,
+} from '../sandbox/runtime-admission.js';
+import {
+  admissionKindFromRuntimeMode,
+  classifyRuntime,
+} from '../step-engine/steps/workflow/_app-runtime.js';
 import { computeFoldContribution } from '@haive/shared/timing';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { orderWorkflowRunList } from '../orchestrator/execution-paths.js';
@@ -827,7 +835,10 @@ const workerDeps: WorkerDeps = {
     // The handler overwrites this at run-start (handlers.ts started_at write), so
     // the queued text never leaks into the running (blue) status banner.
     try {
-      const concurrency = await configService.getNumber(CONFIG_KEYS.MAX_PARALLEL_AGENTS, 3);
+      // The effective number, not the raw setting: at 0 (auto) the cli-exec worker sizes
+      // itself from the free host budget, so reading the setting would compare against 0 and
+      // brand every single invocation "machine at capacity".
+      const concurrency = await resolveAgentConcurrency(3);
       if ((await queue.getActiveCount()) >= concurrency) {
         await getDb()
           .update(schema.cliInvocations)
@@ -1349,6 +1360,41 @@ async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<v
   await handleResult(db, ctx, first.metadata.id, result);
 }
 
+/** The runtime this step's admission must budget for, or null when it will spawn none.
+ *
+ *  A declared kind ('ddev'/'app') is taken as-is — the step boots that runner itself. An
+ *  'if-serving' step defers to classifyRuntime, the SAME predicate ensureAppServing uses to
+ *  decide whether it boots anything: 'none' (no .ddev/config.yaml, no 01a-app-boot row) and
+ *  'host' (legacy on-worker boot, no container) both mean no runner will exist, so the step must
+ *  not queue for a slot it will never use. Gating on the static flag instead parked plain
+ *  code-only tasks — 07/07b/08 are in every execution path's SPINE — behind a pool they cost
+ *  nothing in.
+ *
+ *  Fails SAFE: a classification error keeps the gate (as 'ddev', the heavier weight) rather than
+ *  waving a possibly-real runner past the pool. */
+async function resolveAdmissionRuntimeKind(
+  db: Database,
+  ctx: ResolvedTaskContext,
+  declared: NonNullable<StepDefinition['needsRuntime']>,
+): Promise<'ddev' | 'app' | null> {
+  if (declared !== 'if-serving') return declared;
+  try {
+    const spec = await classifyRuntime({
+      db,
+      taskId: ctx.taskId,
+      repoPath: ctx.repoPath,
+      logger,
+    });
+    return admissionKindFromRuntimeMode(spec.mode);
+  } catch (err) {
+    logger.warn(
+      { err, taskId: ctx.taskId },
+      'runtime classification failed; gating this step as a ddev runtime',
+    );
+    return 'ddev';
+  }
+}
+
 async function handleAdvanceStep(
   db: Database,
   payload: TaskJobPayload,
@@ -1514,9 +1560,14 @@ async function handleAdvanceStep(
   // advance after a short delay (the delayed job persists across restarts). A task already
   // holding its runner, or a free slot, is admitted immediately, so only the FIRST bring-up (or
   // a re-boot after the runner was reaped) can park. The in-process acquireRuntimeSlot gate
-  // remains the last-resort backstop for the rare pre-check -> cold-boot race.
-  if (stepDef.needsRuntime) {
-    const admission = await runtimeAdmission(ctx.taskId);
+  // remains the last-resort backstop for the rare pre-check -> cold-boot race. A null kind means
+  // this step will spawn no runner at all, so it takes no gate, no queue ticket and no
+  // reservation — see resolveAdmissionRuntimeKind.
+  const runtimeKind = stepDef.needsRuntime
+    ? await resolveAdmissionRuntimeKind(db, ctx, stepDef.needsRuntime)
+    : null;
+  if (runtimeKind) {
+    const admission = await runtimeAdmission(ctx.taskId, runtimeKind);
     if (admission.decision === 'park') {
       // Only the task's CURRENT step may hold a park loop. A park re-drives itself on a delayed
       // job, so an advance for a step the task has moved past would re-park forever in parallel
@@ -1548,10 +1599,13 @@ async function handleAdvanceStep(
       // previous line printed `busy - max + 1` as "N ahead in the queue", which is the number of
       // runners that must free — always 1 at an exactly-full pool, whether one task waits or ten
       // — and read as "one slot away". Both numbers come from the FIFO park queue and the poll
-      // re-runs every RUNTIME_PARK_POLL_MS, so the position counts down as slots free.
+      // re-runs every RUNTIME_PARK_POLL_MS, so the position counts down as capacity frees. The
+      // MB figures say WHY it waits: a light runner queued behind a DDEV reads very differently
+      // from one that cannot fit at all.
       const parkMessage =
         `Waiting for a free runtime slot — #${admission.position} of ${admission.waiting} ` +
-        `waiting (${admission.busy} runtime${admission.busy === 1 ? '' : 's'} in use, limit ${admission.max})`;
+        `waiting (${admission.busyMb} MB of ${admission.budgetMb} MB in use, ` +
+        `this one needs ${admission.myWeightMb} MB)`;
       // `pending` + a live waiting_started_at is this park's structural signature: every other
       // pending writer nulls the marker, so deriveSlotWait (@haive/shared) reads exactly this
       // row as "queued for a runtime slot" and computeStepContribution bills the open wait as
@@ -1603,12 +1657,14 @@ async function handleAdvanceStep(
         {
           taskId: ctx.taskId,
           stepId: payload.stepId,
-          busy: admission.busy,
-          max: admission.max,
+          runtimeKind,
+          busyMb: admission.busyMb,
+          budgetMb: admission.budgetMb,
+          myWeightMb: admission.myWeightMb,
           position: admission.position,
           waiting: admission.waiting,
         },
-        'runtime admission: parked step (pool full, no free slot)',
+        'runtime admission: parked step (pool full, no free capacity)',
       );
       return;
     }
@@ -1637,7 +1693,7 @@ async function handleAdvanceStep(
     // as soon as its runner is up or the boot failed; this covers the admitted step that never
     // booted one at all (warm reuse, an early throw, a form gate), which would otherwise hold a
     // slot out of the pool until the 45-min expiry. Idempotent — a second release is a no-op.
-    if (stepDef.needsRuntime) await releaseRuntimeReservation(ctx.taskId);
+    if (runtimeKind) await releaseRuntimeReservation(ctx.taskId);
   }
 }
 

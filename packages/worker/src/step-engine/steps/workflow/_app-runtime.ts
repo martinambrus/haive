@@ -144,6 +144,23 @@ export async function classifyRuntime(ctx: AppRuntimeCtx): Promise<RuntimeSpec> 
   };
 }
 
+/** Which pooled runner (if any) a step that goes through ensureAppServing will actually spawn
+ *  for this classification. `host` is the legacy on-worker boot and `none` is no runtime at all
+ *  — neither occupies a runtime-pool slot, so a step resolving to null must not queue for one.
+ *  Exhaustive switch on purpose: a new RuntimeMode has to declare its weight class here rather
+ *  than defaulting to "ungated". */
+export function admissionKindFromRuntimeMode(mode: RuntimeMode): 'ddev' | 'app' | null {
+  switch (mode) {
+    case 'ddev':
+      return 'ddev';
+    case 'app-runner':
+      return 'app';
+    case 'host':
+    case 'none':
+      return null;
+  }
+}
+
 /** Ensure the task's app is up and serving, returning the authoritative URL plus
  *  the runtime handle. Idempotent; safe to call from any step's apply/prepare or a
  *  worker job. DDEV: boots the runner (ensureDdevStarted throws on failure) and

@@ -11,8 +11,11 @@ import {
   configService,
   decryptEmail,
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
+  deriveAgentConcurrency,
+  deriveRuntimeCaps,
   logger,
   parseAllowanceWatchMode,
+  readHostResources,
   TERSENESS_LEVELS,
 } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -315,12 +318,13 @@ adminRoutes.get('/health', async (c) => {
 });
 
 const concurrencySchema = z.object({
-  // Floor of 1 (BullMQ needs concurrency >= 1); no upper limit — set per host.
-  maxParallelAgents: z.number().int().min(1),
+  // 0 = auto (sized from the host budget the runtime pool leaves free); a positive value pins
+  // it, with no upper limit — set per host.
+  maxParallelAgents: z.number().int().min(0),
 });
 
 adminRoutes.get('/config/concurrency', async (c) => {
-  const maxParallelAgents = await configService.getNumber(CONFIG_KEYS.MAX_PARALLEL_AGENTS, 3);
+  const maxParallelAgents = await configService.getNumber(CONFIG_KEYS.MAX_PARALLEL_AGENTS, 0);
   return c.json({ maxParallelAgents });
 });
 
@@ -341,22 +345,105 @@ const runtimeLimitsSchema = z.object({
   cpus: z.number().int().min(0),
   maxConcurrent: z.number().int().min(0),
   idleReapMinutes: z.number().int().min(0),
+  // Planning weights, NOT container caps: what the admission gate assumes each consumer
+  // occupies out of the host budget. Lowering them is what buys concurrency.
+  ddevWeightMb: z.number().int().min(0),
+  appWeightMb: z.number().int().min(0),
+  agentWeightMb: z.number().int().min(0),
+  browserWeightMb: z.number().int().min(0),
+  agentFloor: z.number().int().min(0),
 });
 
-// Machine-aware runtime resource governor: master kill-switch, per-runner memory/CPU
-// caps, the aggregate concurrent-runtime cap, and the leaked-runner reap grace. Any
-// number at 0 auto-derives from host size. Caps are read at each runner START (~30s
-// config cache); the concurrency cap + master switch are also published so the worker's
-// admission gate retunes live.
+/** Capacity the current settings actually produce, so the admin card can state it instead of
+ *  making the operator divide budget by weight in their head. Derived from the API host's own
+ *  RAM/CPU — the api and worker containers run on the same machine with no memory limits, so
+ *  they read the same figures the gate will. */
+function deriveCapacityPreview(overrides: {
+  memoryMb: number;
+  cpus: number;
+  maxConcurrent: number;
+  ddevWeightMb: number;
+  appWeightMb: number;
+  agentWeightMb: number;
+  browserWeightMb: number;
+  agentFloor: number;
+}): {
+  budgetMb: number;
+  ddevWeightMb: number;
+  appWeightMb: number;
+  agentWeightMb: number;
+  browserWeightMb: number;
+  concurrentDdev: number;
+  concurrentDdevWithBrowser: number;
+  concurrentApp: number;
+  agentsIdle: number;
+} {
+  const host = readHostResources();
+  const caps = deriveRuntimeCaps({
+    totalMemMb: host.totalMemMb,
+    cpuCount: host.cpuCount,
+    overrides,
+  });
+  const fits = (weightMb: number): number => Math.floor(caps.runtimeBudgetMb / weightMb);
+  return {
+    budgetMb: caps.runtimeBudgetMb,
+    ddevWeightMb: caps.ddevWeightMb,
+    appWeightMb: caps.appWeightMb,
+    agentWeightMb: caps.agentWeightMb,
+    browserWeightMb: caps.browserWeightMb,
+    concurrentDdev: fits(caps.ddevWeightMb),
+    concurrentDdevWithBrowser: fits(caps.ddevWeightMb + caps.browserWeightMb),
+    concurrentApp: fits(caps.appWeightMb),
+    agentsIdle: deriveAgentConcurrency({
+      caps,
+      liveRuntimeWeightMb: 0,
+      cpuCount: host.cpuCount,
+    }),
+  };
+}
+
+// Machine-aware runtime resource governor: master kill-switch, per-runner memory/CPU caps
+// (ceilings), the planning weights the byte budget is spent in, an optional hard count cap,
+// and the leaked-runner reap grace. Any number at 0 auto-derives from host size. Caps are read
+// at each runner START (~30s config cache); weights + master switch are also published so the
+// worker's admission gate and agent-pool sizing retune live.
 adminRoutes.get('/config/runtime-limits', async (c) => {
-  const [enabled, memoryMb, cpus, maxConcurrent, idleReapMinutes] = await Promise.all([
+  const [
+    enabled,
+    memoryMb,
+    cpus,
+    maxConcurrent,
+    idleReapMinutes,
+    ddevWeightMb,
+    appWeightMb,
+    agentWeightMb,
+    browserWeightMb,
+    agentFloor,
+  ] = await Promise.all([
     configService.getBoolean(CONFIG_KEYS.RESOURCE_LIMITS_ENABLED, true),
     configService.getNumber(CONFIG_KEYS.RUNTIME_MEMORY_MB, 0),
     configService.getNumber(CONFIG_KEYS.RUNTIME_CPUS, 0),
     configService.getNumber(CONFIG_KEYS.MAX_CONCURRENT_RUNTIMES, 0),
     configService.getNumber(CONFIG_KEYS.RUNTIME_IDLE_REAP_MINUTES, 180),
+    configService.getNumber(CONFIG_KEYS.RUNTIME_DDEV_WEIGHT_MB, 0),
+    configService.getNumber(CONFIG_KEYS.RUNTIME_APP_WEIGHT_MB, 0),
+    configService.getNumber(CONFIG_KEYS.AGENT_WEIGHT_MB, 0),
+    configService.getNumber(CONFIG_KEYS.RUNTIME_BROWSER_WEIGHT_MB, 0),
+    configService.getNumber(CONFIG_KEYS.AGENT_FLOOR, 0),
   ]);
-  return c.json({ enabled, memoryMb, cpus, maxConcurrent, idleReapMinutes });
+  const settings = {
+    enabled,
+    memoryMb,
+    cpus,
+    maxConcurrent,
+    idleReapMinutes,
+    ddevWeightMb,
+    appWeightMb,
+    agentWeightMb,
+    browserWeightMb,
+    agentFloor,
+  };
+  return c.json({ ...settings, capacity: deriveCapacityPreview(settings) });
 });
 
 adminRoutes.put('/config/runtime-limits', async (c) => {
@@ -367,12 +454,17 @@ adminRoutes.put('/config/runtime-limits', async (c) => {
     configService.set(CONFIG_KEYS.RUNTIME_CPUS, String(body.cpus)),
     configService.set(CONFIG_KEYS.MAX_CONCURRENT_RUNTIMES, String(body.maxConcurrent)),
     configService.set(CONFIG_KEYS.RUNTIME_IDLE_REAP_MINUTES, String(body.idleReapMinutes)),
+    configService.set(CONFIG_KEYS.RUNTIME_DDEV_WEIGHT_MB, String(body.ddevWeightMb)),
+    configService.set(CONFIG_KEYS.RUNTIME_APP_WEIGHT_MB, String(body.appWeightMb)),
+    configService.set(CONFIG_KEYS.AGENT_WEIGHT_MB, String(body.agentWeightMb)),
+    configService.set(CONFIG_KEYS.RUNTIME_BROWSER_WEIGHT_MB, String(body.browserWeightMb)),
+    configService.set(CONFIG_KEYS.AGENT_FLOOR, String(body.agentFloor)),
   ]);
-  // Retune the admission gate live (new max / master switch); per-container caps re-read
-  // at the next runner start within the config cache.
+  // Retune the admission gate AND the agent pool live (both subscribe to this channel); the
+  // per-container caps re-read at the next runner start within the config cache.
   await configService.getRedis().publish(CONFIG_RUNTIME_LIMITS_CHANNEL, String(body.maxConcurrent));
   log.info({ ...body }, 'runtime resource limits updated');
-  return c.json({ ...body });
+  return c.json({ ...body, capacity: deriveCapacityPreview(body) });
 });
 
 const steeringSchema = z.object({ enabled: z.boolean() });

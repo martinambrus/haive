@@ -20,6 +20,54 @@ import {
   FormError,
 } from '@/components/ui';
 
+/** Runtime governor settings. Every number is 0 = auto-derive from this host. */
+type RuntimeLimitsSettings = {
+  enabled: boolean;
+  memoryMb: number;
+  cpus: number;
+  maxConcurrent: number;
+  idleReapMinutes: number;
+  ddevWeightMb: number;
+  appWeightMb: number;
+  agentWeightMb: number;
+  browserWeightMb: number;
+  agentFloor: number;
+};
+
+/** What those settings actually produce on this host, resolved server-side so the card can
+ *  state the capacity instead of making the operator divide budget by weight. */
+type RuntimeCapacity = {
+  budgetMb: number;
+  ddevWeightMb: number;
+  appWeightMb: number;
+  agentWeightMb: number;
+  browserWeightMb: number;
+  concurrentDdev: number;
+  concurrentDdevWithBrowser: number;
+  concurrentApp: number;
+  agentsIdle: number;
+};
+
+type RuntimeLimitsResponse = RuntimeLimitsSettings & { capacity: RuntimeCapacity };
+
+/** The runtime-limits card's inputs, as raw text (so a half-typed value isn't clamped). */
+type RuntimeLimitsForm = { [K in keyof Omit<RuntimeLimitsSettings, 'enabled'>]: string };
+
+/** Settings -> text inputs. One place, so a new knob can't be loaded but not saved. */
+function runtimeLimitsFormOf(s: RuntimeLimitsSettings): RuntimeLimitsForm {
+  return {
+    memoryMb: String(s.memoryMb),
+    cpus: String(s.cpus),
+    maxConcurrent: String(s.maxConcurrent),
+    idleReapMinutes: String(s.idleReapMinutes),
+    ddevWeightMb: String(s.ddevWeightMb),
+    appWeightMb: String(s.appWeightMb),
+    agentWeightMb: String(s.agentWeightMb),
+    browserWeightMb: String(s.browserWeightMb),
+    agentFloor: String(s.agentFloor),
+  };
+}
+
 export default function AdminPage() {
   usePageTitle('Admin console');
   const [users, setUsers] = useState<AdminUser[] | null>(null);
@@ -73,18 +121,17 @@ export default function AdminPage() {
   const [attachmentMaxBytes, setAttachmentMaxBytes] = useState<number | null>(null);
   const [attachmentMaxMbInput, setAttachmentMaxMbInput] = useState('');
   const [savingAttachmentMax, setSavingAttachmentMax] = useState(false);
-  const [runtimeLimits, setRuntimeLimits] = useState<{
-    enabled: boolean;
-    memoryMb: number;
-    cpus: number;
-    maxConcurrent: number;
-    idleReapMinutes: number;
-  } | null>(null);
-  const [runtimeLimitsForm, setRuntimeLimitsForm] = useState({
+  const [runtimeLimits, setRuntimeLimits] = useState<RuntimeLimitsResponse | null>(null);
+  const [runtimeLimitsForm, setRuntimeLimitsForm] = useState<RuntimeLimitsForm>({
     memoryMb: '0',
     cpus: '0',
     maxConcurrent: '0',
     idleReapMinutes: '180',
+    ddevWeightMb: '0',
+    appWeightMb: '0',
+    agentWeightMb: '0',
+    browserWeightMb: '0',
+    agentFloor: '0',
   });
   const [savingRuntimeLimits, setSavingRuntimeLimits] = useState(false);
 
@@ -137,13 +184,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/usage-window'),
         api.get<{ enabled: boolean; thresholdPct: number }>('/admin/config/usage-alert'),
         api.get<{ enabled: boolean }>('/admin/config/pr-workflow'),
-        api.get<{
-          enabled: boolean;
-          memoryMb: number;
-          cpus: number;
-          maxConcurrent: number;
-          idleReapMinutes: number;
-        }>('/admin/config/runtime-limits'),
+        api.get<RuntimeLimitsResponse>('/admin/config/runtime-limits'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
@@ -175,12 +216,7 @@ export default function AdminPage() {
         String(Math.round((attachmentData.maxBytes / 1024 / 1024) * 100) / 100),
       );
       setRuntimeLimits(runtimeLimitsData);
-      setRuntimeLimitsForm({
-        memoryMb: String(runtimeLimitsData.memoryMb),
-        cpus: String(runtimeLimitsData.cpus),
-        maxConcurrent: String(runtimeLimitsData.maxConcurrent),
-        idleReapMinutes: String(runtimeLimitsData.idleReapMinutes),
-      });
+      setRuntimeLimitsForm(runtimeLimitsFormOf(runtimeLimitsData));
       setError(null);
     } catch (err) {
       const e = err as { status?: number; message?: string };
@@ -227,8 +263,8 @@ export default function AdminPage() {
 
   async function saveConcurrency() {
     const value = Number.parseInt(maxParallelInput, 10);
-    if (!Number.isInteger(value) || value < 1) {
-      setError('Max parallel agents must be an integer of at least 1.');
+    if (!Number.isInteger(value) || value < 0) {
+      setError('Max parallel agents must be an integer of 0 (auto) or more.');
       return;
     }
     setSavingConcurrency(true);
@@ -290,23 +326,12 @@ export default function AdminPage() {
     }
   }
 
-  async function saveRuntimeLimits(next: {
-    enabled: boolean;
-    memoryMb: number;
-    cpus: number;
-    maxConcurrent: number;
-    idleReapMinutes: number;
-  }) {
+  async function saveRuntimeLimits(next: RuntimeLimitsSettings) {
     setSavingRuntimeLimits(true);
     try {
-      const result = await api.put<typeof next>('/admin/config/runtime-limits', next);
+      const result = await api.put<RuntimeLimitsResponse>('/admin/config/runtime-limits', next);
       setRuntimeLimits(result);
-      setRuntimeLimitsForm({
-        memoryMb: String(result.memoryMb),
-        cpus: String(result.cpus),
-        maxConcurrent: String(result.maxConcurrent),
-        idleReapMinutes: String(result.idleReapMinutes),
-      });
+      setRuntimeLimitsForm(runtimeLimitsFormOf(result));
       setError(null);
     } catch (err) {
       setError((err as Error).message ?? 'Failed to update runtime limits');
@@ -317,23 +342,22 @@ export default function AdminPage() {
 
   function saveRuntimeNumbers() {
     if (!runtimeLimits) return;
-    const memoryMb = Number.parseInt(runtimeLimitsForm.memoryMb, 10);
-    const cpus = Number.parseInt(runtimeLimitsForm.cpus, 10);
-    const maxConcurrent = Number.parseInt(runtimeLimitsForm.maxConcurrent, 10);
-    const idleReapMinutes = Number.parseInt(runtimeLimitsForm.idleReapMinutes, 10);
-    if (
-      [memoryMb, cpus, maxConcurrent, idleReapMinutes].some((n) => !Number.isInteger(n) || n < 0)
-    ) {
+    const numbers = {
+      memoryMb: Number.parseInt(runtimeLimitsForm.memoryMb, 10),
+      cpus: Number.parseInt(runtimeLimitsForm.cpus, 10),
+      maxConcurrent: Number.parseInt(runtimeLimitsForm.maxConcurrent, 10),
+      idleReapMinutes: Number.parseInt(runtimeLimitsForm.idleReapMinutes, 10),
+      ddevWeightMb: Number.parseInt(runtimeLimitsForm.ddevWeightMb, 10),
+      appWeightMb: Number.parseInt(runtimeLimitsForm.appWeightMb, 10),
+      agentWeightMb: Number.parseInt(runtimeLimitsForm.agentWeightMb, 10),
+      browserWeightMb: Number.parseInt(runtimeLimitsForm.browserWeightMb, 10),
+      agentFloor: Number.parseInt(runtimeLimitsForm.agentFloor, 10),
+    };
+    if (Object.values(numbers).some((n) => !Number.isInteger(n) || n < 0)) {
       setError('Runtime limit values must be integers of 0 or more (0 = auto).');
       return;
     }
-    void saveRuntimeLimits({
-      enabled: runtimeLimits.enabled,
-      memoryMb,
-      cpus,
-      maxConcurrent,
-      idleReapMinutes,
-    });
+    void saveRuntimeLimits({ enabled: runtimeLimits.enabled, ...numbers });
   }
 
   async function setSteering(next: boolean) {
@@ -706,16 +730,19 @@ export default function AdminPage() {
             <CardTitle>Performance</CardTitle>
             <CardDescription>
               Max parallel agents — caps concurrent CLI/agent invocations (cli-exec queue + DAG
-              coders). Set to what your machine can handle; higher means more parallelism and load.
-              Applies immediately; persists across restarts.
+              coders). <strong>0 = auto</strong>: sized from the host RAM budget the per-task
+              runtimes are not holding, so agents use the headroom when no DDEV environment is up
+              and fall back to the agent floor when the pool is full (see runtime resource limits).
+              A positive value pins it to what your machine can handle. Applies immediately;
+              persists across restarts.
             </CardDescription>
           </CardHeader>
           <div className="flex items-end gap-2">
             <label className="flex flex-col gap-1 text-xs text-neutral-400">
-              Max parallel agents
+              Max parallel agents (0=auto)
               <input
                 type="number"
-                min={1}
+                min={0}
                 value={maxParallelInput}
                 onChange={(e) => setMaxParallelInput(e.target.value)}
                 className="w-24 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
@@ -772,12 +799,18 @@ export default function AdminPage() {
           <CardHeader>
             <CardTitle>Runtime resource limits</CardTitle>
             <CardDescription>
-              Machine-aware caps on per-task DDEV/app runtimes so concurrent environments can&apos;t
-              exhaust the host (thin WSL2 boxes especially). The master switch caps each
-              runner&apos;s memory (swap disabled) and CPU and gates how many boot at once. Each
-              number is 0 = auto-derive from this host&apos;s RAM/CPU; set a positive value to
-              override. Caps apply at the next runner start; the concurrency cap retunes the gate
-              live. Persists across restarts.
+              Machine-aware limits on per-task DDEV/app runtimes so concurrent environments
+              can&apos;t exhaust the host (thin WSL2 boxes especially). The master switch caps each
+              runner&apos;s memory (swap disabled) and CPU, and admits new runtimes against a host
+              RAM budget. <strong>Caps are ceilings; weights are what admission budgets.</strong> A
+              weight is what a runner of that kind is assumed to occupy — lowering one is what buys
+              concurrency, so calibrate from <code>docker stats</code> rather than guessing. The
+              browser weight is charged only to tasks that run browser testing, because the VNC
+              desktop (Xvfb + Chromium) runs inside that task&apos;s runner. Agents share the same
+              budget: they use what the runtimes are not holding, never dropping below the agent
+              floor. Each number is 0 = auto-derive from this host&apos;s RAM/CPU. Caps apply at the
+              next runner start; weights retune the gate and the agent pool live. Persists across
+              restarts.
             </CardDescription>
           </CardHeader>
           <label className="flex items-center gap-2 text-sm text-neutral-200">
@@ -838,6 +871,28 @@ export default function AdminPage() {
                 className="w-36 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
               />
             </label>
+          </div>
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            {(
+              [
+                ['ddevWeightMb', 'DDEV weight (MB, 0=auto)'],
+                ['appWeightMb', 'App-runner weight (MB, 0=auto)'],
+                ['browserWeightMb', 'Browser desktop weight (MB, 0=auto)'],
+                ['agentWeightMb', 'Agent weight (MB, 0=auto)'],
+                ['agentFloor', 'Agent floor (0=auto)'],
+              ] as const
+            ).map(([field, label]) => (
+              <label key={field} className="flex flex-col gap-1 text-xs text-neutral-400">
+                {label}
+                <input
+                  type="number"
+                  min={0}
+                  value={runtimeLimitsForm[field]}
+                  onChange={(e) => setRuntimeLimitsForm((f) => ({ ...f, [field]: e.target.value }))}
+                  className="w-44 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+                />
+              </label>
+            ))}
             <Button
               size="sm"
               variant="secondary"
@@ -847,6 +902,21 @@ export default function AdminPage() {
               {savingRuntimeLimits ? 'Saving...' : 'Save'}
             </Button>
           </div>
+          <p className="mt-3 text-xs text-neutral-400">
+            At these settings: budget{' '}
+            <span className="text-neutral-200">{runtimeLimits.capacity.budgetMb} MB</span> —{' '}
+            <span className="text-neutral-200">{runtimeLimits.capacity.concurrentDdev}</span>{' '}
+            concurrent DDEV ({runtimeLimits.capacity.ddevWeightMb} MB each), or{' '}
+            <span className="text-neutral-200">
+              {runtimeLimits.capacity.concurrentDdevWithBrowser}
+            </span>{' '}
+            with browser testing (+{runtimeLimits.capacity.browserWeightMb} MB), or{' '}
+            <span className="text-neutral-200">{runtimeLimits.capacity.concurrentApp}</span>{' '}
+            app-runners ({runtimeLimits.capacity.appWeightMb} MB each). Agents on an idle host:{' '}
+            <span className="text-neutral-200">{runtimeLimits.capacity.agentsIdle}</span> (
+            {runtimeLimits.capacity.agentWeightMb} MB each), shrinking toward the floor as runtimes
+            come up.
+          </p>
         </Card>
       )}
 

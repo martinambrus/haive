@@ -17,7 +17,12 @@ import {
 import { relaxExactDdevVersionConstraint } from './ddev-version-constraint.js';
 import { browserCdpUrlForRunner } from './runner-browser-cdp.js';
 import { resolveTaskDirectAccess } from './_browser-access.js';
-import { buildResourceLimitArgs, resolveRunnerCaps } from './runtime-caps.js';
+import {
+  RUNTIME_WEIGHT_LABEL,
+  buildResourceLimitArgs,
+  resolveRunnerCaps,
+  resolveRuntimeWeightMb,
+} from './runtime-caps.js';
 import { acquireRuntimeSlot } from './runtime-admission.js';
 
 // Per-task DDEV environment via nested Docker (DinD). DDEV can't run against the
@@ -205,6 +210,11 @@ export async function startDdevRunner(params: {
   // Per-container resource caps (machine-aware; null when the governor is disabled).
   const runnerCaps = await resolveRunnerCaps(params.taskId);
   const limitArgs = runnerCaps ? buildResourceLimitArgs(runnerCaps) : [];
+  // Planning weight this runner is budgeted at, stamped so the admission gate reads occupancy
+  // off `docker ps` — NOT the same number as the --memory ceiling above.
+  const weightArgs = runnerCaps
+    ? ['--label', `${RUNTIME_WEIGHT_LABEL}=${await resolveRuntimeWeightMb(params.taskId, 'ddev')}`]
+    : [];
   const buildRunArgs = (attempt: number): { args: string[]; ports: DdevPublishedPorts | null } => {
     const publish: string[] = [];
     let ports: DdevPublishedPorts | null = null;
@@ -243,6 +253,7 @@ export async function startDdevRunner(params: {
         '--label',
         'haive.ddev=1',
         ...limitArgs,
+        ...weightArgs,
         ...publish,
         ...caMount,
         ...registryEnv,
@@ -1187,14 +1198,14 @@ async function ensureDdevStartedInner(
   }
 
   // Cold boot: the runner is gone (or warm-start failed), so rebuild it. This
-  // re-pulls base images into a fresh nested /var/lib/docker. Hold an admission slot
+  // re-pulls base images into a fresh nested /var/lib/docker. Hold admission
   // across the whole heavy boot (runner create + nested image pulls + ddev start), so
-  // at most maxConcurrentRuntimes tasks cold-boot at once; release once up or failed.
+  // cold boots cannot together exceed the runtime budget; release once up or failed.
   const releaseSlot = await acquireRuntimeSlot(
     taskId,
     'ddev',
-    (busy, max) =>
-      opts.onProgress?.(`waiting for a free runtime slot — ${busy} in use, limit ${max}`),
+    (busyMb, budgetMb) =>
+      opts.onProgress?.(`waiting for a free runtime slot — ${busyMb} MB of ${budgetMb} MB in use`),
     opts.signal,
   );
   try {

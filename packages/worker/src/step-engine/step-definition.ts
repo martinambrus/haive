@@ -364,12 +364,22 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
    *  of the default 'waiting_user'. Used by 13-pr-wait to surface a task waiting for its
    *  PR to merge as 'waiting_pr'. Only takes effect when the step actually parks. */
   readonly parkTaskStatus?: TaskStatus;
-  /** This step brings up the task's per-task runtime (DDEV / app-runner) — it calls
-   *  ensureAppServing / ensureDdevStarted. The orchestrator gates it on the machine-aware
-   *  runtime pool BEFORE running it: when the pool is full and the task holds no runner yet,
-   *  the step is parked (re-driven when a slot frees) instead of overcommitting a new runner.
-   *  Over-declaring is safe — a task already holding its runner is admitted immediately. */
-  readonly needsRuntime?: boolean;
+  /** This step brings up the task's per-task runtime (DDEV / app-runner). The orchestrator
+   *  gates it on the machine-aware runtime pool BEFORE running it: when the pool is full and
+   *  the task holds no runner yet, the step is parked (re-driven when a slot frees) instead of
+   *  overcommitting a new runner.
+   *
+   *  `'ddev'` / `'app'`: the step boots that runtime itself (ensureDdevStarted /
+   *  ensureAppRunnerStarted), so it is gated unconditionally.
+   *
+   *  `'if-serving'`: the runtime comes from ensureAppServing, which boots NOTHING when
+   *  classifyRuntime reports `'none'` (no .ddev/config.yaml, no 01a-app-boot row). The gate
+   *  resolves that same classification and skips admission for a task that will never spawn a
+   *  runner — over-declaring is only safe for a task that HAS a runner; a task that will never
+   *  have one would otherwise park behind a pool it does not use. A step that creates the
+   *  runtime for the FIRST time cannot use this: 01a-app-boot classifies as `'none'` right up
+   *  until it writes its own boot row. */
+  readonly needsRuntime?: 'ddev' | 'app' | 'if-serving';
   shouldRun?(ctx: StepContext): Promise<boolean> | boolean;
   detect?(ctx: StepContext): Promise<TDetect>;
   form?(ctx: StepContext, detected: TDetect, llmOutput?: unknown): FormSchema | null;

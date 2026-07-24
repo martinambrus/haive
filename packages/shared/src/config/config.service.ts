@@ -22,8 +22,10 @@ export const CONFIG_KEYS = {
 
   // Max CLI/agent invocations that run in parallel GLOBALLY: bounds the cli-exec
   // queue concurrency AND the in-process fan-out limiter (e.g. DAG coders,
-  // onboarding fan-outs). User-tunable per host capacity (>= 1; no upper limit —
-  // some machines handle 10+).
+  // onboarding fan-outs). A positive value pins it (no upper limit — some machines
+  // handle 10+). 0 = auto: sized from the host RAM budget the runtime pool is not
+  // holding, so agents use the headroom when no DDEV runner is up and fall back to
+  // the agent floor when the pool is full (deriveAgentConcurrency).
   MAX_PARALLEL_AGENTS: 'config:worker:maxParallelAgents',
   // Per-task cap: max CLI/agent invocations a SINGLE task may run at once. Bounds
   // one task's share of the global pool (above) so a task's fan-out can't seize
@@ -249,10 +251,28 @@ export const CONFIG_KEYS = {
   // Per-runtime-runner CPU cap for DDEV/app runners, applied as --cpus. 0 = auto-derive
   // from host CPU count. A per-task tasks.cpuLimitMilli overrides this for that task.
   RUNTIME_CPUS: 'config:sandbox:runtimeCpus',
-  // Max concurrent LIVE runtime runners (DDEV + app) the admission gate admits before
-  // a new cold-boot waits. 0 = auto-derive from the host RAM budget / per-runner cap.
-  // The single aggregate cap the independent queue budgets never provided.
+  // Hard cap on the NUMBER of live runtime runners (DDEV + app), enforced alongside the
+  // byte budget. 0 = no count cap, the budget alone governs. A count cap treats every
+  // runtime as equally expensive, which is what made a light app-runner consume the same
+  // slot as a DDEV DinD; set it only to pin the old behavior.
   MAX_CONCURRENT_RUNTIMES: 'config:sandbox:maxConcurrentRuntimes',
+  // Planning weights (MB) the admission gate budgets each consumer at. NOT container caps:
+  // RUNTIME_MEMORY_MB is the ceiling a runner may grow into, these are what the pool assumes
+  // it actually occupies. 0 = auto-derive (ddev = the per-runner ceiling; app and agent =
+  // half of it). The auto values are PROVISIONAL — calibrate from `docker stats` and lower
+  // them, since lower weights are what buy extra concurrency.
+  RUNTIME_DDEV_WEIGHT_MB: 'config:sandbox:runtimeDdevWeightMb',
+  RUNTIME_APP_WEIGHT_MB: 'config:sandbox:runtimeAppWeightMb',
+  AGENT_WEIGHT_MB: 'config:sandbox:agentWeightMb',
+  // Surcharge (MB) added to a runtime's weight when its task runs browser testing. The headed
+  // desktop (Xvfb + x11vnc + Chromium) runs INSIDE the runner container, so it is not its own
+  // pool entry — it makes that runner heavier. 0 = auto (a quarter of the per-runner ceiling,
+  // carved out of the ddev/app weights so a browser task weighs what it always did and a
+  // browser-less one stops paying for a Chromium it never starts).
+  RUNTIME_BROWSER_WEIGHT_MB: 'config:sandbox:runtimeBrowserWeightMb',
+  // Agents that stay runnable however full the runtime pool is. A task holding a runtime
+  // needs an agent to finish, so a zero-agent state deadlocks. 0 = auto (2).
+  AGENT_FLOOR: 'config:sandbox:agentFloor',
   // Grace (minutes) before the runtime reaper reclaims a FAILED task's leaked runner
   // (failed runners are kept for retry/recovery, so they need a grace). Runners whose
   // task is completed/cancelled/missing, or whose container has exited, are reaped
@@ -289,7 +309,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.SMTP_PORT]: '1025',
   [CONFIG_KEYS.SMTP_FROM]: 'no-reply@haive.local',
   [CONFIG_KEYS.SMTP_FROM_NAME]: 'Haive',
-  [CONFIG_KEYS.MAX_PARALLEL_AGENTS]: '3',
+  [CONFIG_KEYS.MAX_PARALLEL_AGENTS]: '0',
   [CONFIG_KEYS.MAX_PARALLEL_AGENTS_PER_TASK]: '5',
   [CONFIG_KEYS.OLLAMA_CLI_TIMEOUT_MS]: '7200000',
   [CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS]: 'false',
@@ -334,6 +354,11 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.RUNTIME_MEMORY_MB]: '0',
   [CONFIG_KEYS.RUNTIME_CPUS]: '0',
   [CONFIG_KEYS.MAX_CONCURRENT_RUNTIMES]: '0',
+  [CONFIG_KEYS.RUNTIME_DDEV_WEIGHT_MB]: '0',
+  [CONFIG_KEYS.RUNTIME_APP_WEIGHT_MB]: '0',
+  [CONFIG_KEYS.AGENT_WEIGHT_MB]: '0',
+  [CONFIG_KEYS.RUNTIME_BROWSER_WEIGHT_MB]: '0',
+  [CONFIG_KEYS.AGENT_FLOOR]: '0',
   [CONFIG_KEYS.RUNTIME_IDLE_REAP_MINUTES]: '180',
 };
 
