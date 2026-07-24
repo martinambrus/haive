@@ -55,6 +55,28 @@ describe('deriveRuntimeCaps', () => {
     expect(caps.perRunnerCpus).toBe(4);
   });
 
+  it('grows the per-runner CEILING with the host, leaving the weights alone', () => {
+    // What a runner may grow into is a property of the HOST (a bigger box is asked to run
+    // bigger projects); what it typically occupies is a property of the project. So the cap
+    // scales and the weights do not — a flat cap made a 128 GB box OOM-kill a 6 GB project
+    // exactly as a 16 GB box would.
+    const caps = [4, 8, 16, 32, 64, 128].map((gb) =>
+      deriveRuntimeCaps({ totalMemMb: gb * 1024, cpuCount: 16 }),
+    );
+    expect(caps.map((c) => c.perRunnerMemoryMb)).toEqual([2048, 4096, 4096, 6656, 14848, 16384]);
+    // Hosts at or below 16 GB are untouched by the change, and no weight moved with the cap.
+    expect(caps.every((c) => c.ddevWeightMb === 1536)).toBe(true);
+    expect(caps.every((c) => c.agentWeightMb === 2048 || c.perRunnerMemoryMb < 2048)).toBe(true);
+  });
+
+  it('never lets one runner’s ceiling exceed the pool it is drawn from', () => {
+    for (const gb of [1, 2, 4, 8, 16, 64]) {
+      const caps = deriveRuntimeCaps({ totalMemMb: gb * 1024, cpuCount: 4 });
+      expect(caps.perRunnerMemoryMb).toBeLessThanOrEqual(caps.runtimeBudgetMb);
+      expect(caps.perRunnerMemoryMb).toBeLessThanOrEqual(16384);
+    }
+  });
+
   it('never charges a weight the container cap could not hold', () => {
     // Thin host: the cap itself clamps to the runner floor, so every weight clamps with it
     // and the browser surcharge collapses to zero rather than pushing past the cap.

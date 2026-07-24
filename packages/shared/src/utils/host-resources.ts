@@ -84,12 +84,30 @@ const RESERVE_FRACTION = 0.3;
 const RESERVE_FLOOR_MB = 2048;
 const RESERVE_CEIL_MB = 6144;
 
-/** Desired per-runner memory. Sized for the heaviest runner: a DDEV DinD (nested
- *  dockerd + web + db + router) that ALSO hosts a headed Chromium for VNC testing.
- *  Clamped down to the budget on small machines, never below the floor a real
+/** Baseline per-runner memory CEILING — the OOM-kill boundary, not a claim. Sized for the
+ *  heaviest runner we measured: a DDEV DinD (nested dockerd + web + db + router) that ALSO
+ *  hosts a headed Chromium, which peaked at 2505 MB. Never below the floor a real
  *  DDEV+Chromium boot needs (a tighter cap OOM-kills mid-boot). */
 const DESIRED_RUNNER_MB = 4096;
 const RUNNER_FLOOR_MB = 1536;
+
+/** The ceiling SCALES with the host, because the biggest project one machine is asked to run
+ *  grows with the machine. A flat 4096 meant a 128 GB box OOM-killed a project needing 6 GB
+ *  exactly as a 16 GB box would — the one number that genuinely should track host size, since
+ *  what a runner is ALLOWED to grow into is a property of the host, while what it typically
+ *  occupies (its planning weight) is a property of the project.
+ *
+ *  One runner may be allowed up to this share of the pool: enough headroom for a fat project,
+ *  still small enough that a single runaway container cannot eat the machine — which is what
+ *  the cap exists to prevent. Bounded absolutely, because past ~16 GB in ONE runner the
+ *  problem is the project, not the limit, and an admin override is the honest answer.
+ *
+ *  Note this widens the gap between planned (weight) and worst-case (cap) occupancy on big
+ *  hosts. That gap is inherent to caps-vs-weights and already exists at 4096; a task that
+ *  really needs the headroom should carry a per-task memoryLimitMb, which admission charges
+ *  verbatim (resolveRuntimeWeightMb) instead of the class weight. */
+const RUNNER_BUDGET_SHARE = 0.25;
+const RUNNER_CEIL_MB = 16384;
 
 /** Generous PID cap: a DinD daemon plus DDEV's containers plus Chromium fork heavily,
  *  so this guards against a runaway fork bomb without breaking normal operation. */
@@ -200,10 +218,17 @@ export function deriveRuntimeCaps(input: {
   );
   const budgetMb = Math.max(RUNNER_FLOOR_MB, totalMemMb - reserveMb);
 
+  // Never below the baseline (a smaller ceiling OOM-kills a normal runner), never above a
+  // quarter of the pool or the absolute ceiling, and never above the whole budget on a host
+  // too thin to honour either.
   const perRunnerMemoryMb =
     ov.memoryMb && ov.memoryMb > 0
       ? Math.floor(ov.memoryMb)
-      : clamp(DESIRED_RUNNER_MB, RUNNER_FLOOR_MB, budgetMb);
+      : clamp(
+          Math.max(DESIRED_RUNNER_MB, Math.round(budgetMb * RUNNER_BUDGET_SHARE)),
+          RUNNER_FLOOR_MB,
+          Math.min(budgetMb, RUNNER_CEIL_MB),
+        );
 
   const perRunnerCpus =
     ov.cpus && ov.cpus > 0 ? ov.cpus : clamp(Math.floor(cpuCount / 2), 1, RUNNER_CPU_CEIL);
