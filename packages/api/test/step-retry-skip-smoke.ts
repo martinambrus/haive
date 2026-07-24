@@ -4,7 +4,7 @@ import { schema } from '@haive/database';
 import { configService, secretsService, userSecretsService, logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
 import { initRedis, closeRedis } from '../src/redis.js';
-import { closeQueues } from '../src/queues.js';
+import { closeQueues, getTaskQueue } from '../src/queues.js';
 import { createApiApp } from '../src/index.js';
 import { signAccessToken } from '../src/auth/jwt.js';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
@@ -23,6 +23,7 @@ interface State {
   userId?: string;
   taskId?: string;
   stepIds?: string[];
+  paused?: boolean;
 }
 
 function assertStatus(label: string, actual: number, expected: number): void {
@@ -42,6 +43,14 @@ async function main(): Promise<void> {
     await secretsService.initialize(db);
     const masterKek = await secretsService.getMasterKek();
     await userSecretsService.initialize(db, masterKek);
+
+    // Every action below enqueues a real advance-step job. Against a live stack a running
+    // worker picks it up within milliseconds, fails the throwaway task (no repo, no real
+    // step) and the assertions below race it. Pause the queue for the duration; the jobs
+    // are dropped and the queue resumed in the finally block.
+    await getTaskQueue().pause();
+    state.paused = true;
+    log.info('task queue paused for the smoke');
 
     const app = createApiApp('http://localhost:3000');
 
@@ -81,7 +90,10 @@ async function main(): Promise<void> {
       .values([
         {
           taskId: task.id,
-          stepId: 'failing-step',
+          // A REAL id from SKIPPABLE_STEP_IDS: part 2 below exercises the Skip action, and
+          // the api refuses it on any step whose StepDefinition does not set allowSkip. The
+          // fake id this used to carry made that half 409 from the day the allow-list landed.
+          stepId: '03b-business-requirements',
           stepIndex: 0,
           title: 'Failing step',
           status: 'failed',
@@ -132,7 +144,7 @@ async function main(): Promise<void> {
     state.stepIds = [failedStep.id, middleStep.id, lastStep.id];
 
     // 1. Retry the failed step
-    const retryRes = await app.request(`/tasks/${task.id}/steps/failing-step/action`, {
+    const retryRes = await app.request(`/tasks/${task.id}/steps/03b-business-requirements/action`, {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'retry', note: 'manual retry' }),
@@ -156,8 +168,10 @@ async function main(): Promise<void> {
     if (taskAfterRetry?.status !== 'running') {
       throw new Error(`expected task running after retry, got ${taskAfterRetry?.status}`);
     }
-    if (taskAfterRetry.currentStepId !== 'failing-step') {
-      throw new Error(`expected currentStepId=failing-step, got ${taskAfterRetry.currentStepId}`);
+    if (taskAfterRetry.currentStepId !== '03b-business-requirements') {
+      throw new Error(
+        `expected currentStepId=03b-business-requirements, got ${taskAfterRetry.currentStepId}`,
+      );
     }
 
     // Retrying an upstream step must reset downstream loop state, not carry it
@@ -178,13 +192,13 @@ async function main(): Promise<void> {
       );
     }
 
-    // 2. Mark failing-step failed again, then skip it
+    // 2. Mark 03b-business-requirements failed again, then skip it
     await db
       .update(schema.taskSteps)
       .set({ status: 'failed', errorMessage: 'kaboom again' })
       .where(eq(schema.taskSteps.id, failedStep.id));
 
-    const skipRes = await app.request(`/tasks/${task.id}/steps/failing-step/action`, {
+    const skipRes = await app.request(`/tasks/${task.id}/steps/03b-business-requirements/action`, {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'skip', note: 'skip during smoke' }),
@@ -192,8 +206,11 @@ async function main(): Promise<void> {
     assertStatus('POST /skip', skipRes.status, 200);
     const skipBody = (await skipRes.json()) as { status: string; nextStepId: string | null };
     if (skipBody.status !== 'skipped') throw new Error(`expected skipped, got ${skipBody.status}`);
-    if (skipBody.nextStepId !== 'middle-step') {
-      throw new Error(`expected next=middle-step, got ${skipBody.nextStepId}`);
+    // nextStepId is always null now: the api cannot see unmaterialized future steps, so it
+    // enqueues an advance for the SKIPPED step and lets the worker pick the next one off the
+    // registry run list. This used to expect the api to compute it.
+    if (skipBody.nextStepId !== null) {
+      throw new Error(`expected next=null (worker computes it), got ${skipBody.nextStepId}`);
     }
 
     const afterSkip = await db.query.taskSteps.findFirst({
@@ -206,8 +223,13 @@ async function main(): Promise<void> {
     const taskAfterSkip = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, task.id),
     });
-    if (taskAfterSkip?.currentStepId !== 'middle-step') {
-      throw new Error(`expected currentStepId=middle-step, got ${taskAfterSkip?.currentStepId}`);
+    // Skip hands the task back to the worker, so the api only puts it back in `running` and
+    // clears the failure — advancing currentStepId is the worker's job (no worker here).
+    if (taskAfterSkip?.status !== 'running') {
+      throw new Error(`expected task running after skip, got ${taskAfterSkip?.status}`);
+    }
+    if (taskAfterSkip.errorMessage !== null) {
+      throw new Error('skip should clear the task errorMessage');
     }
 
     // 3. Retry is allowed on any status by design (see steps.ts: "Any status is
@@ -263,6 +285,16 @@ async function main(): Promise<void> {
     try {
       const db = getDb();
       if (state.taskId) {
+        for (const job of await getTaskQueue().getJobs([
+          'wait',
+          'delayed',
+          'paused',
+          'prioritized',
+        ])) {
+          if ((job.data as { taskId?: string })?.taskId === state.taskId) {
+            await job.remove().catch(() => {});
+          }
+        }
         await db.delete(schema.taskEvents).where(eq(schema.taskEvents.taskId, state.taskId));
         await db.delete(schema.taskSteps).where(eq(schema.taskSteps.taskId, state.taskId));
         await db.delete(schema.tasks).where(eq(schema.tasks.id, state.taskId));
@@ -272,6 +304,11 @@ async function main(): Promise<void> {
       }
     } catch (cleanupErr) {
       log.warn({ err: cleanupErr }, 'cleanup failed');
+    }
+    if (state.paused) {
+      await getTaskQueue()
+        .resume()
+        .catch((err) => log.error({ err }, 'FAILED TO RESUME THE TASK QUEUE — resume it manually'));
     }
     await closeQueues().catch(() => {});
     await closeRedis().catch(() => {});

@@ -108,7 +108,14 @@ jobs:
       - name: Push database schema
         run: pnpm --filter @haive/database push --force
 
-      - name: Run smokes
+      # api smokes first: they are seconds each, so a broken route surfaces before the
+      # worker suite spends most of the job's 30-minute budget. smoke:terminal is
+      # excluded from smoke:ci — it needs a docker daemon and pulls an image, the same
+      # reason the worker job leaves smoke:sub-agent out of its own smoke:ci.
+      - name: Run api smokes
+        run: pnpm --filter @haive/api smoke:ci
+
+      - name: Run worker smokes
         run: pnpm --filter @haive/worker smoke:ci
 
   compose-boot:

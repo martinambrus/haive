@@ -13,6 +13,12 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "smoke:step-retry-skip": "tsx test/step-retry-skip-smoke.ts",
+    "smoke:task-retry-parked": "tsx test/task-retry-parked-smoke.ts",
+    "smoke:multi-user-isolation": "tsx test/multi-user-isolation-smoke.ts",
+    "smoke:terminal": "tsx test/terminal-smoke.ts",
+    "smoke:all": "pnpm smoke:step-retry-skip && pnpm smoke:task-retry-parked && pnpm smoke:multi-user-isolation && pnpm smoke:terminal",
+    "smoke:ci": "pnpm smoke:step-retry-skip && pnpm smoke:task-retry-parked && pnpm smoke:multi-user-isolation",
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
