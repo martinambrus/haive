@@ -85,14 +85,21 @@ describe('buildAgentFileMarkdown frontmatter', () => {
 });
 
 describe('buildAgentFileMarkdown body', () => {
-  it('emits the 4-step RAG → KB → LSP → GREP search order block', () => {
+  it('emits the canonical discover-then-ground retrieval block', () => {
     const md = buildAgentFileMarkdown(baseSpec);
-    expect(md).toContain('## Mandatory Search Order');
-    expect(md).toContain('1. RAG → 2. KB → 3. LSP → 4. GREP (last resort)');
-    expect(md).toMatch(/1\. \*\*RAG \(first\)\*\*/);
-    expect(md).toMatch(/2\. \*\*KB\*\*/);
-    expect(md).toMatch(/3\. \*\*LSP \(for code navigation\)\*\*/);
-    expect(md).toMatch(/4\. \*\*GREP \(last resort\)\*\*/);
+    expect(md).toContain('## Retrieval Protocol');
+    expect(md).toContain('1. DISCOVER with `rag_search`');
+    expect(md).toContain('2. GROUND every lead with LSP + grep TOGETHER');
+  });
+
+  it('never tells an agent to stop at a rag or KB hit', () => {
+    // The old fallback chain ("use them and STOP", "do not proceed to LSP/GREP")
+    // contradicted the shared guidance the surrounding prompt carries, which
+    // grounds every lead on hits as well as misses.
+    const md = buildAgentFileMarkdown(baseSpec);
+    expect(md).not.toContain('STOP');
+    expect(md).not.toContain('last resort');
+    expect(md).toContain('NOT as a fallback');
   });
 
   it('directs agents to the rag_search MCP tool first', () => {
@@ -128,13 +135,13 @@ describe('buildAgentFileMarkdownGemini frontmatter', () => {
     expect(md).not.toContain('kb-references:');
   });
 
-  it('still emits the shared agent body (search order, mission, etc.)', () => {
+  it('still emits the shared agent body (retrieval protocol, mission, etc.)', () => {
     const md = buildAgentFileMarkdownGemini(baseSpec);
-    expect(md).toContain('## Mandatory Search Order');
+    expect(md).toContain('## Retrieval Protocol');
     expect(md).toContain('## Core Mission');
     expect(md).toContain('Find issues.');
     expect(md).not.toContain('LSP');
-    expect(md).toContain('1. RAG → 2. KB → 3. GREP (last resort)');
+    expect(md).toContain('2. GROUND every lead with grep + direct file reads TOGETHER');
   });
 });
 
@@ -163,7 +170,7 @@ describe('buildAgentFileForTarget routing', () => {
     for (const dir of ['.agents/agents', '.future-cli/agents']) {
       const rendered = buildAgentFileForTarget(baseSpec, { dir, format: 'markdown' });
       expect(rendered).not.toContain('LSP');
-      expect(rendered).toContain('1. RAG → 2. KB → 3. GREP (last resort)');
+      expect(rendered).toContain('2. GROUND every lead with grep + direct file reads TOGETHER');
     }
   });
 
@@ -173,7 +180,7 @@ describe('buildAgentFileForTarget routing', () => {
       format: 'markdown',
       supportsLsp: true,
     });
-    expect(rendered).toContain('3. **LSP (for code navigation)**');
+    expect(rendered).toContain('2. GROUND every lead with LSP + grep TOGETHER');
     expect(rendered).toContain('## Core Mission');
     expect(rendered).toContain('Find issues.');
   });

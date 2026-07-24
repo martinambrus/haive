@@ -89,7 +89,16 @@ export function agentDefinitionGuidance(agentId: string, guidance: string): stri
 /** The canonical LSP-capable guidance used by prompt builders. Dispatch adapts
  * it only after choosing the actual CLI provider for an invocation. */
 export function retrievalGuidanceLines(): string[] {
-  return [...RETRIEVAL_GUIDANCE_WITH_LSP];
+  return retrievalGuidanceLinesFor(true);
+}
+
+/** Variant chosen at RENDER time, for callers that already know the target's LSP
+ * capability because they write a file rather than dispatch a prompt (the agent
+ * file writers). Prompt builders keep using retrievalGuidanceLines() plus the
+ * dispatch-time swap, which cannot know the provider yet. Both paths read the
+ * same two constants so the protocol cannot drift between prompts and agents. */
+export function retrievalGuidanceLinesFor(supportsLsp: boolean): string[] {
+  return [...(supportsLsp ? RETRIEVAL_GUIDANCE_WITH_LSP : RETRIEVAL_GUIDANCE_WITHOUT_LSP)];
 }
 
 /** Replace only capability-sensitive grounding text when the resolved CLI

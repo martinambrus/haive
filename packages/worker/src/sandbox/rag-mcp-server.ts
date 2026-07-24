@@ -33,7 +33,7 @@ function error(id, code, message) {
 const TOOL = {
   name: 'rag_search',
   description:
-    'Semantic + lexical (hybrid) search over this project\'s indexed code and knowledge base PLUS the global cross-project KB (house standards / boilerplate, version-scoped to this stack). DISCOVERY tool: use it to find WHERE something is implemented, defined, or configured, or HOW we conventionally set things up. Then GROUND every lead with ' + GROUNDING_TOOLS + ' against the actual files (the index may be stale) — a snippet is a pointer, never the source of truth. Returns ranked snippets tagged [local] (this repo) or [global] (house standard) with source paths.',
+    'Hybrid semantic + lexical search over this repo\'s indexed code and knowledge base plus the global cross-project KB. Discovery only: the index can be stale, so confirm every hit against the current files with ' + GROUNDING_TOOLS + '. Returns ranked snippets tagged [local] or [global], each with its source path.',
   inputSchema: {
     type: 'object',
     properties: {

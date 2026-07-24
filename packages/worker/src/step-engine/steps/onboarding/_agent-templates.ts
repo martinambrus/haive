@@ -1,5 +1,6 @@
 import type { AgentColor, AgentExpertise, AgentKbRefs, AgentModel, AgentSpec } from '@haive/shared';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
+import { retrievalGuidanceLinesFor } from '../_retrieval-guidance.js';
 
 // Re-export the canonical types so existing worker imports keep working without
 // touching every call site. Source of truth lives in @haive/shared.
@@ -19,57 +20,26 @@ export interface AgentRenderTarget {
   supportsLsp?: boolean;
 }
 
-const SEARCH_ORDER_BLOCK_WITH_LSP = [
-  '## Mandatory Search Order',
-  '',
-  'Before searching code or answering questions about the codebase, follow this order. Skipping steps is prohibited.',
-  '',
-  '```',
-  '1. RAG → 2. KB → 3. LSP → 4. GREP (last resort)',
-  '```',
-  '',
-  '1. **RAG (first)**',
-  '   - Call the `rag_search` MCP tool with a natural-language or code-keyword query',
-  '   - It returns ranked code/KB snippets with their source paths; open the cited files to confirm',
-  '   - If `rag_search` returns relevant hits, use them and STOP — only fall through when it returns nothing relevant',
-  '',
-  '2. **KB**',
-  '   - Read the KB files linked from the `kb-references` frontmatter on this agent',
-  '   - Start at `.claude/knowledge_base/INDEX.md` and follow topic links',
-  '   - If the KB answers the question, STOP — do not proceed to LSP/GREP',
-  '',
-  '3. **LSP (for code navigation)**',
-  '   - Use for `goToDefinition`, `findReferences`, `incomingCalls`, `outgoingCalls`',
-  '   - Only after RAG and KB are exhausted, and only when the task involves code navigation',
-  '',
-  '4. **GREP (last resort)**',
-  '   - Most token-expensive — use only if RAG and KB are insufficient and LSP not applicable',
-].join('\n');
+// The retrieval protocol is owned by _retrieval-guidance.ts, the same source the
+// ~6 workflow prompt builders read. These files used to carry their own
+// "RAG → KB → LSP → GREP, STOP at the first hit" fallback chain, which the shared
+// block was written to REPLACE — leaving an agent told to stop at a rag hit while
+// the surrounding prompt told it to ground every lead. Render the canonical block
+// instead; the only thing added here is the pointer to this agent's own
+// kb-references frontmatter, which the shared block cannot know about.
+function searchOrderBlock(supportsLsp: boolean): string {
+  return [
+    '## Retrieval Protocol',
+    '',
+    'Before searching code or answering questions about the codebase:',
+    '',
+    ...retrievalGuidanceLinesFor(supportsLsp),
+    '',
+    'The `kb-references` frontmatter on this agent lists the knowledge-base files closest to its work — read them directly when rag_search is unavailable or returns nothing.',
+  ].join('\n');
+}
 
-const SEARCH_ORDER_BLOCK_WITHOUT_LSP = [
-  '## Mandatory Search Order',
-  '',
-  'Before searching code or answering questions about the codebase, follow this order. Skipping steps is prohibited.',
-  '',
-  '```',
-  '1. RAG → 2. KB → 3. GREP (last resort)',
-  '```',
-  '',
-  '1. **RAG (first)**',
-  '   - Call the `rag_search` MCP tool with a natural-language or code-keyword query',
-  '   - It returns ranked code/KB snippets with their source paths; open the cited files to confirm',
-  '   - If `rag_search` returns relevant hits, use them and STOP — only fall through when it returns nothing relevant',
-  '',
-  '2. **KB**',
-  '   - Read the KB files linked from the `kb-references` frontmatter on this agent',
-  '   - Start at `.claude/knowledge_base/INDEX.md` and follow topic links',
-  '   - If the KB answers the question, STOP — do not proceed to GREP',
-  '',
-  '3. **GREP (last resort)**',
-  '   - Most token-expensive — use only if RAG and KB are insufficient',
-].join('\n');
-
-// Complements SEARCH_ORDER_BLOCK (which trims READ tokens): a WRITE-side
+// Complements searchOrderBlock (which trims READ tokens): a WRITE-side
 // directive that keeps agent output concise to save subscription token
 // allowance. Injected into every working agent except the document-producing
 // ones in RESPONSE_STYLE_EXEMPT_IDS, whose deliverables must stay thorough.
@@ -133,7 +103,7 @@ function buildAgentBody(spec: AgentSpec, supportsLsp = true): string {
     '',
     '## Execution Protocol',
     '',
-    supportsLsp ? SEARCH_ORDER_BLOCK_WITH_LSP : SEARCH_ORDER_BLOCK_WITHOUT_LSP,
+    searchOrderBlock(supportsLsp),
     '',
     ...spec.executionSteps.flatMap((s, i) => [`### Step ${i + 1}: ${s.title}`, '', s.body, '']),
     '## Output Format',
@@ -166,7 +136,7 @@ export function buildAgentFileMarkdown(
     `field: ${spec.field}`,
     `expertise: ${spec.expertise ?? 'expert'}`,
     `allowed-tools: [${spec.tools.join(', ')}]`,
-    // Every agent gets `rag_search` so the Mandatory Search Order (RAG first)
+    // Every agent gets `rag_search` so the Retrieval Protocol's discovery step
     // is callable; any agent-specific MCP tools (e.g. chrome-devtools) merge in.
     `mcp-tools: [${Array.from(new Set(['rag_search', ...(spec.mcpTools ?? [])])).join(', ')}]`,
     'auto-invoke: false',
