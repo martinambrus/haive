@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   buildEstimationAccuracy,
@@ -657,6 +657,13 @@ async function stopActiveCliInvocations(
   // with no live invocation — otherwise un-stoppable because there is nothing
   // in cli_invocations to cancel. Steps run one-at-a-time per task, so this only
   // ever hits the single active step.
+  //
+  // A step parked on the runtime-admission gate is `pending`, not running/waiting_cli, and it
+  // owns no invocation — so before this it matched nothing, `stopped` came back empty, the
+  // failTask branch below never fired, and Stop was a silent no-op while the 15s park poll
+  // kept re-parking the step forever. The park marker is what identifies that row precisely
+  // (an ordinary not-yet-run downstream step has status pending with a NULL marker, and must
+  // not be failed).
   const stopped = await db
     .update(schema.taskSteps)
     .set({
@@ -679,7 +686,10 @@ async function stopActiveCliInvocations(
     .where(
       and(
         eq(schema.taskSteps.taskId, taskId),
-        inArray(schema.taskSteps.status, ['running', 'waiting_cli']),
+        or(
+          inArray(schema.taskSteps.status, ['running', 'waiting_cli']),
+          and(eq(schema.taskSteps.status, 'pending'), isNotNull(schema.taskSteps.waitingStartedAt)),
+        ),
       ),
     )
     .returning({ id: schema.taskSteps.id });
