@@ -82,6 +82,7 @@ import { resetStepAndDownstream } from './_step-reset.js';
 import {
   foldAbandonedPark,
   foldOrphanedCliParkOnBoot,
+  foldOtherTaskParks,
   markCliParkBegin,
 } from './cli-park-timing.js';
 import { unloadTaskOllamaCliModels } from '../sandbox/ollama-provision.js';
@@ -1569,17 +1570,24 @@ async function handleAdvanceStep(
   if (runtimeKind) {
     const admission = await runtimeAdmission(ctx.taskId, runtimeKind);
     if (admission.decision === 'park') {
-      // Only the task's CURRENT step may hold a park loop. A park re-drives itself on a delayed
-      // job, so an advance for a step the task has moved past would re-park forever in parallel
-      // with the real loop — two loops re-parking one task every 15s, both ticking a wait
-      // (observed: 06a-db-migrate round 0 alongside 07b-phase-4-validate round 1). The epoch
-      // guard cannot catch it: reconcile re-drives an abandoned step at the task's CURRENT
-      // epoch, so both jobs look live. End the loop here instead and close its park; the row
-      // stays pending and runs if the forward walk reaches it. Null current step = a task that
-      // has not advanced yet, where no competing loop can be identified.
+      // One park loop per task. A park re-drives itself on a delayed job, so a second advance
+      // for the same task would re-park forever alongside the real loop — two loops re-parking
+      // one task every 15s, both ticking a wait (observed: 06a-db-migrate round 0 alongside
+      // 07b-phase-4-validate round 1). The epoch guard cannot catch that: reconcile re-drives an
+      // abandoned step at the task's CURRENT epoch, so both jobs look live.
+      //
+      // Dropping requires EVIDENCE that another loop owns the task, never just a current_step_id
+      // mismatch. That pointer is stamped only by a step that actually RUNS, so a step which
+      // parks before running leaves it addressing an earlier step — and a mismatch-only rule
+      // killed the ONLY loop of such a task, wedging it with no queued advance at all
+      // (bf88b9a5: pointer at 07-phase-2-implement while its live park sat on 06a-db-migrate).
+      // So drop only when the pointed-at step is ITSELF live or parked; the park below then
+      // stamps the pointer, which makes the loops converge — the first to park owns the task and
+      // the other drops itself on its next tick.
       if (
         ctx.currentStepId !== null &&
-        (payload.stepId !== ctx.currentStepId || round !== ctx.currentRound)
+        (payload.stepId !== ctx.currentStepId || round !== ctx.currentRound) &&
+        (await isStepLive(db, ctx.taskId, ctx.currentStepId, ctx.currentRound))
       ) {
         await foldAbandonedPark(db, ctx.taskId, payload.stepId, round);
         logger.info(
@@ -1590,7 +1598,7 @@ async function handleAdvanceStep(
             currentStepId: ctx.currentStepId,
             currentRound: ctx.currentRound,
           },
-          'runtime admission: dropped a park loop for a step the task has moved past',
+          'runtime admission: dropped a duplicate park loop (another live step owns this task)',
         );
         return;
       }
@@ -1649,7 +1657,27 @@ async function handleAdvanceStep(
             updatedAt: new Date(),
           })
           .where(eq(schema.taskSteps.id, row.id));
+        // A parked step IS what the task is working on, so point current_step_id/current_round at
+        // it. Only a step that RUNS stamped them before, which left the pointer addressing an
+        // earlier step for the whole park — that stale pointer is what the drop rule above and
+        // deriveSlotWait (@haive/shared) both read, so a parked step showed no queued badge and
+        // could have its own loop mistaken for a duplicate. First park only: a re-park must not
+        // rewrite the task row every 15s, and by then the pointer is already correct.
+        await markTaskRunningWithStep(
+          db,
+          ctx.taskId,
+          payload.stepId,
+          computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
+          round,
+        );
       }
+      // Exactly one open park marker per task: close any left by a loop that vanished without
+      // folding (a park chain ends whenever its advance is skipped or dropped, and a dead loop
+      // cannot close its own marker), so no wait keeps ticking for a step nothing drives. On EVERY
+      // tick, not just the first park — a leftover can appear after this step first parked (that
+      // is exactly how it happens: the rival loop dies later), and the statement matches no rows
+      // in the normal case.
+      await foldOtherTaskParks(db, ctx.taskId, row.id);
       await enqueueAdvance(ctx.taskId, ctx.userId, payload.stepId, round, ctx.orchestrationEpoch, {
         delayMs: RUNTIME_PARK_POLL_MS,
       });
@@ -1739,6 +1767,39 @@ export function isCurrentStep(row: {
 }): boolean {
   if (row.currentStepId === null) return true;
   return row.stepId === row.currentStepId && row.round === row.currentRound;
+}
+
+/** Does this (step, round) row currently own the task's orchestration — actively working
+ *  (running / waiting_cli / waiting_form) or holding a runtime-slot park (pending + marker)?
+ *  A missing row answers false. Used as the EVIDENCE half of the duplicate-park rule: a
+ *  current_step_id mismatch alone must never drop a loop, because that pointer is stale for
+ *  the whole time a step parks before it first runs. */
+async function isStepLive(
+  db: Database,
+  taskId: string,
+  stepId: string,
+  round: number,
+): Promise<boolean> {
+  const rows = await db
+    .select({
+      status: schema.taskSteps.status,
+      waitingStartedAt: schema.taskSteps.waitingStartedAt,
+    })
+    .from(schema.taskSteps)
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, taskId),
+        eq(schema.taskSteps.stepId, stepId),
+        eq(schema.taskSteps.round, round),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row) return false;
+  if (row.status === 'running' || row.status === 'waiting_cli' || row.status === 'waiting_form') {
+    return true;
+  }
+  return row.status === 'pending' && row.waitingStartedAt !== null;
 }
 
 /** Requeue an orphan the task has moved past: fold its dead run into carried_* and put the row

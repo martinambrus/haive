@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
+import { and, eq, isNull, ne, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 
 // waiting_cli park accounting. A step in `waiting_cli` is normally the CLI actively running
@@ -72,6 +72,27 @@ export async function foldAbandonedPark(
       eq(schema.taskSteps.taskId, taskId),
       eq(schema.taskSteps.stepId, stepId),
       eq(schema.taskSteps.round, round),
+    )!,
+  );
+}
+
+/** One open park marker per task. Called when a step parks: closes any OTHER row of the task
+ *  still holding one. Those are loops that vanished without folding — a park's poll chain ends
+ *  whenever its advance is skipped or dropped, and a dead loop cannot close its own marker — and
+ *  an orphan marker keeps ticking a wait for a step nothing is driving. Safe against the
+ *  ping-pong this would have caused before the duplicate-park guard existed: only one loop parks
+ *  now, the rival drops itself, so this clears leftovers exactly once. */
+export async function foldOtherTaskParks(
+  db: Database,
+  taskId: string,
+  keepStepRowId: string,
+): Promise<void> {
+  await foldPark(
+    db,
+    and(
+      eq(schema.taskSteps.taskId, taskId),
+      ne(schema.taskSteps.id, keepStepRowId),
+      eq(schema.taskSteps.status, 'pending'),
     )!,
   );
 }

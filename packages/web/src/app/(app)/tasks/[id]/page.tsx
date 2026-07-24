@@ -478,7 +478,14 @@ export default function TaskDetailPage() {
     const active =
       steps.find(
         (s) => s.status === 'running' || s.status === 'waiting_form' || s.status === 'waiting_cli',
-      ) ?? steps.find((s) => s.status === 'failed');
+      ) ??
+      // A step queued for a runtime slot is the frontier too. The park deliberately re-queues
+      // the row to `pending` (+ a wait marker), which matched none of the statuses above — so a
+      // parked task had NO frontier, and every leftover row from a longer earlier run (rounds
+      // that a later retry never replayed) rendered its own Retry/Stop/Skip at the bottom of the
+      // page, reading as steps waiting for action after the current one.
+      steps.find((s) => s.status === 'pending' && s.waitingStartedAt) ??
+      steps.find((s) => s.status === 'failed');
     return active?.runSeq ?? null;
   }, [steps]);
 
@@ -489,9 +496,13 @@ export default function TaskDetailPage() {
   // form / status stays visible.
   useEffect(() => {
     const container = stepsContainerRef.current;
-    const activeStep = steps.find(
-      (s) => s.status === 'waiting_form' || s.status === 'running' || s.status === 'waiting_cli',
-    );
+    const activeStep =
+      steps.find(
+        (s) => s.status === 'waiting_form' || s.status === 'running' || s.status === 'waiting_cli',
+      ) ??
+      // Queued for a runtime slot: the park re-queues the row to `pending`, so without this the
+      // page scrolled nowhere and left the user looking at leftover rows further down.
+      steps.find((s) => s.status === 'pending' && s.waitingStartedAt);
     const activeId = activeStep?.id ?? null;
     // Loop re-entry: a gate revise / fix loop_back re-enters an EARLIER step, so the active
     // step's run_seq drops below the previously-active one (forward flow only increases it).
