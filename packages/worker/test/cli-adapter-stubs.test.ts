@@ -21,6 +21,7 @@ function makeProvider(overrides: ProviderOverrides): CliProviderRecord {
     wrapperPath: overrides.wrapperPath ?? null,
     envVars: overrides.envVars ?? null,
     cliArgs: overrides.cliArgs ?? null,
+    model: overrides.model ?? null,
     supportsSubagents: overrides.supportsSubagents ?? false,
     authMode: overrides.authMode ?? 'subscription',
     enabled: overrides.enabled ?? true,
@@ -34,9 +35,13 @@ const opts: InvokeOpts = { cwd: '/work/repo' };
 describe('LSP capability matrix', () => {
   it('keeps shared UI metadata and runtime adapters in lockstep', () => {
     for (const metadata of CLI_PROVIDER_LIST) {
-      expect(cliAdapterRegistry.get(metadata.name).supportsLsp, metadata.name).toBe(
-        metadata.supportsLsp,
-      );
+      const adapter = cliAdapterRegistry.get(metadata.name);
+      expect(adapter.supportsLsp, metadata.name).toBe(metadata.supportsLsp);
+      // The dispatcher reads the adapter; the settings badge reads the catalog.
+      // codex, gemini and amp each drifted here — the catalog advertised native
+      // sub-agents that the adapter refuses, so the emulator emitted a
+      // sequential script while the UI promised parallel agents.
+      expect(adapter.supportsSubagents, metadata.name).toBe(metadata.supportsSubagents);
     }
   });
 
@@ -208,6 +213,27 @@ describe('adapter outputFormat declarations', () => {
     const i = spec.args.indexOf('--disable');
     expect(i).toBeGreaterThanOrEqual(0);
     expect(spec.args[i + 1]).toBe('multi_agent_v2');
+  });
+
+  it('codex passes a configured model through -m, and omits it when unset', () => {
+    const adapter = cliAdapterRegistry.get('codex');
+    const withModel = adapter.buildCliInvocation(
+      makeProvider({ id: 'p-codex', name: 'codex', model: 'gpt-5.6-sol' }),
+      'hello',
+      opts,
+    );
+    const i = withModel.args.indexOf('-m');
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(withModel.args[i + 1]).toBe('gpt-5.6-sol');
+
+    // Unset must emit nothing so the CLI keeps its own configured model —
+    // the same contract as the effort override.
+    const withoutModel = adapter.buildCliInvocation(
+      makeProvider({ id: 'p-codex', name: 'codex' }),
+      'hello',
+      opts,
+    );
+    expect(withoutModel.args).not.toContain('-m');
   });
 
   it('gemini requests JSON output mode', () => {

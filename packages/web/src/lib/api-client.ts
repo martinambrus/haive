@@ -338,6 +338,9 @@ export interface CliProviderMetadata {
   defaultAuthMode: CliAuthMode;
   apiKeyEnvName: string | null;
   defaultModel: string | null;
+  /** Whether the adapter actually reads `model` and passes it to the CLI. When
+   *  false the form must not offer the field — the value could never take effect. */
+  supportsModelSelection: boolean;
   authConfigPaths: string[];
   docsUrl?: string;
   effortScale: EffortScaleMetadata | null;

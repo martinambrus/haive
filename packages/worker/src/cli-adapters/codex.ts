@@ -27,7 +27,7 @@ export class CodexAdapter extends BaseCliAdapter {
   readonly supportsPlugins = false;
   readonly defaultAuthMode = 'subscription' as const;
   readonly apiKeyEnvName = 'OPENAI_API_KEY';
-  readonly defaultModel = 'o3';
+  readonly defaultModel = 'gpt-5.6-sol';
   readonly rulesFile = 'AGENTS.md';
   readonly rulesFileMode = 'native' as const;
   override readonly effortScale = CODEX_EFFORT_SCALE;
@@ -45,6 +45,11 @@ export class CodexAdapter extends BaseCliAdapter {
     // configured default.
     const level = this.resolveEffortLevel(provider, opts);
     const reasoningArgs = level ? ['-c', `model_reasoning_effort="${level}"`] : [];
+    // Same contract as the effort override: emit nothing when the provider has
+    // no model set, so the CLI keeps whatever its own config selects. Until this
+    // existed the stored model could not reach the run at all, which made the
+    // field look configurable while doing nothing.
+    const modelArgs = provider.model ? ['-m', provider.model] : [];
     return {
       command: this.resolveExecutable(provider),
       // Haive runs every CLI inside an isolated per-task Docker container, so
@@ -70,6 +75,7 @@ export class CodexAdapter extends BaseCliAdapter {
         '--disable',
         'multi_agent_v2',
         ...reasoningArgs,
+        ...modelArgs,
         '--skip-git-repo-check',
         prompt,
       ]),

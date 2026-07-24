@@ -36,6 +36,12 @@ export interface CliProviderMetadata {
   defaultAuthMode: AuthMode;
   apiKeyEnvName: string | null;
   defaultModel: string | null;
+  /** Whether this provider's ADAPTER actually reads `provider.model` and passes
+   *  it to the CLI. False means the stored value can never affect a run, so the
+   *  UI must not offer the field — it would silently do nothing. Keep in sync
+   *  with the adapter: today ollama (`--model` on the wrapper) and codex (`-m`).
+   *  zai selects its model through Z_AI_MODEL, not this column, so it is false. */
+  supportsModelSelection: boolean;
   authConfigPaths: string[];
   docsUrl?: string;
   /** When non-null the provider exposes a reasoning/effort knob and the UI
@@ -122,6 +128,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     defaultAuthMode: 'subscription',
     apiKeyEnvName: 'ANTHROPIC_API_KEY',
     defaultModel: 'claude-sonnet-4-20250514',
+    supportsModelSelection: false,
     authConfigPaths: ['~/.config/claude', '~/.claude'],
     docsUrl: 'https://docs.anthropic.com/en/docs/claude-code',
     effortScale: CLAUDE_CODE_EFFORT_SCALE,
@@ -134,16 +141,22 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     name: 'codex',
     costBasis: 'metered',
     displayName: 'OpenAI Codex',
-    description: "OpenAI's Codex CLI. Native sub-agent orchestration.",
+    description: "OpenAI's Codex CLI. Sub-agents are emulated as a sequential script.",
     defaultExecutable: 'codex',
-    supportsSubagents: true,
+    // Codex HAS a native multi-agent mode, but the adapter disables it
+    // (`--disable multi_agent_v2`) because Haive owns fan-out, retries and
+    // synthesis — a run spawning its own agents duplicates that work. This must
+    // stay false: the dispatcher reads the adapter, the UI reads this catalog,
+    // and advertising a capability we turn off is how they drift.
+    supportsSubagents: false,
     supportsCliAuth: true,
     supportsMcp: true,
     supportsPlugins: false,
     supportsLsp: false,
     defaultAuthMode: 'subscription',
     apiKeyEnvName: 'OPENAI_API_KEY',
-    defaultModel: 'o3',
+    defaultModel: 'gpt-5.6-sol',
+    supportsModelSelection: true,
     authConfigPaths: ['~/.codex'],
     effortScale: CODEX_EFFORT_SCALE,
     projectSkillsDir: '.agents/skills',
@@ -161,9 +174,12 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     name: 'gemini',
     costBasis: 'metered',
     displayName: 'Google Gemini',
-    description: 'Google Gemini CLI. Native sub-agents via markdown agent definitions.',
+    description: 'Google Gemini CLI. Sub-agents are emulated as a sequential script.',
     defaultExecutable: 'gemini',
-    supportsSubagents: true,
+    // GeminiAdapter declares false, so the dispatcher never routes a subagents
+    // step here and the emulator emits a sequential script instead. Advertising
+    // true only misled the settings badge.
+    supportsSubagents: false,
     // BYOK/API-key only (no subscription CLI login). Kept true like zai so the
     // dispatcher's CLI path stays available; defaultAuthMode='api_key' is what
     // removes the subscription option from the UI/API.
@@ -174,6 +190,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     defaultAuthMode: 'api_key',
     apiKeyEnvName: 'GEMINI_API_KEY',
     defaultModel: 'gemini-2.5-pro',
+    supportsModelSelection: false,
     authConfigPaths: ['~/.config/gemini', '~/.gemini'],
     effortScale: null,
     projectSkillsDir: '.gemini/skills',
@@ -191,9 +208,10 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     name: 'amp',
     costBasis: 'subscription',
     displayName: 'Sourcegraph Amp',
-    description: 'Sourcegraph Amp CLI. Native sub-agents spawn parallel mini-Amp threads.',
+    description: 'Sourcegraph Amp CLI. Sub-agents are emulated as a sequential script.',
     defaultExecutable: 'amp',
-    supportsSubagents: true,
+    // AmpAdapter declares false; see the gemini entry for why this must match.
+    supportsSubagents: false,
     supportsCliAuth: true,
     supportsMcp: false,
     supportsPlugins: false,
@@ -201,6 +219,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     defaultAuthMode: 'subscription',
     apiKeyEnvName: null,
     defaultModel: null,
+    supportsModelSelection: false,
     authConfigPaths: ['~/.local/share/amp', '~/.config/amp'],
     effortScale: null,
     projectSkillsDir: '.claude/skills',
@@ -222,6 +241,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     defaultAuthMode: 'api_key',
     apiKeyEnvName: 'ANTHROPIC_AUTH_TOKEN',
     defaultModel: 'glm-4.6',
+    supportsModelSelection: false,
     authConfigPaths: ['~/.config/claude', '~/.claude'],
     effortScale: CLAUDE_LIKE_EFFORT_SCALE,
     projectSkillsDir: '.claude/skills',
@@ -248,6 +268,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     // No simple API-key env; BYOK would be GCP ADC, out of scope for v1.
     apiKeyEnvName: null,
     defaultModel: null,
+    supportsModelSelection: false,
     // OAuth token persists as a file under this dir
     // (antigravity-oauth-token); captured by the auth volume.
     authConfigPaths: ['~/.gemini/antigravity-cli'],
@@ -285,6 +306,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     apiKeyEnvName: 'ANTHROPIC_AUTH_TOKEN',
     // No universal default; the per-provider `model` field must be set.
     defaultModel: null,
+    supportsModelSelection: true,
     authConfigPaths: ['~/.config/claude', '~/.claude'],
     docsUrl: 'https://docs.ollama.com',
     effortScale: null,

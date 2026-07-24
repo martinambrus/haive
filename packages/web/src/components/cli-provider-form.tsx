@@ -427,7 +427,7 @@ export function CliProviderForm({
       authMode: snapshot.authMode,
       cliVersion: snapshot.cliVersion || null,
       effortLevel: metadata.effortScale ? snapshot.effortLevel || null : null,
-      model: metadata.name === 'ollama' ? snapshot.model.trim() || null : null,
+      model: metadata.supportsModelSelection ? snapshot.model.trim() || null : null,
       modelfile: snapshot.modelfile.trim() || null,
       sandboxDockerfileExtra: snapshot.sandboxDockerfileExtra,
       enabled: snapshot.enabled,
@@ -528,7 +528,7 @@ export function CliProviderForm({
           authMode: state.authMode,
           cliVersion: state.cliVersion || null,
           effortLevel: metadata.effortScale ? state.effortLevel || null : null,
-          model: metadata.name === 'ollama' ? state.model.trim() || null : null,
+          model: metadata.supportsModelSelection ? state.model.trim() || null : null,
           modelfile: state.modelfile.trim() || null,
           sandboxDockerfileExtra: state.sandboxDockerfileExtra,
           enabled: state.enabled,
@@ -746,21 +746,28 @@ export function CliProviderForm({
         )}
       </div>
 
-      {metadata.name === 'ollama' && (
+      {metadata.supportsModelSelection && (
         <div>
           <Label htmlFor="model">Model</Label>
           <Input
             id="model"
             value={state.model}
             onChange={(e) => update('model', e.target.value)}
-            placeholder="qwen3-coder:480b-cloud"
+            placeholder={metadata.defaultModel ?? 'qwen3-coder:480b-cloud'}
           />
-          <p className="mt-1 text-xs text-neutral-500">
-            The Ollama model this provider runs (required). Use a local/pulled name (
-            <code className="font-mono">qwen3-coder:30b</code>), a cloud model (
-            <code className="font-mono">qwen3-coder:480b-cloud</code>), or a custom model (
-            <code className="font-mono">mannix/gemma4-98e:CD-Q6_K</code>).
-          </p>
+          {metadata.name === 'ollama' ? (
+            <p className="mt-1 text-xs text-neutral-500">
+              The Ollama model this provider runs (required). Use a local/pulled name (
+              <code className="font-mono">qwen3-coder:30b</code>), a cloud model (
+              <code className="font-mono">qwen3-coder:480b-cloud</code>), or a custom model (
+              <code className="font-mono">mannix/gemma4-98e:CD-Q6_K</code>).
+            </p>
+          ) : (
+            <p className="mt-1 text-xs text-neutral-500">
+              The model this CLI runs. Leave empty to use whatever the CLI&apos;s own config
+              selects.
+            </p>
+          )}
           {ollamaInStackUrl && state.model.trim() && (
             <OllamaModelDownload model={state.model.trim()} ollamaUrl={ollamaInStackUrl} />
           )}
