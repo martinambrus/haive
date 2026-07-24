@@ -6,7 +6,7 @@ When a test fails, a system errors, or the user reports a bug, behave as follows
 
 ### Order of operations — NO SKIPPING
 
-1. **Enumerate own blast radius FIRST.** Run \`git diff --stat HEAD\` and \`git status\`. State out loud what has been changed this session, by file, in one line each. This is the first move on every failure, every time.
+1. **Enumerate own blast radius FIRST.** State what has been changed this session, by file, in one line each, using whatever change-inspection tooling this environment actually provides — and your own record of the edits you made when it provides none. This is the first move on every failure, every time.
 
 2. **Read ALL failure artefacts — not a sample.**
    - Test failures: every file the test runner produced for the failing case (stdout/stderr capture, result files, recorded fixtures, screenshots, traces). Not a sample — every file.
@@ -51,7 +51,7 @@ If any answer is "no", go back and do the check. Do not send a speculative diagn
 Every failure investigation reply must follow this structure:
 
 \`\`\`
-WHAT I CHANGED THIS SESSION (from git diff):
+WHAT I CHANGED THIS SESSION:
   - <file>: <one line on what>
 
 WHAT THE ARTEFACTS SHOW:
@@ -150,5 +150,6 @@ export const KNOWN_DEFAULT_RULES_HASHES: ReadonlySet<string> = new Set([
   '0cf013f7aa212445b94d38dde2f5efcb343b5a4d72e847cd47f75db6d1d73c47', // + match-the-invariant (0e3ae82)
   'c8962d1ee239a4550a6310fb94ed5c709f2235a356b74be93cff3d350bd44484', // + ddev-not-on-PATH rule
   '3a052a7ef7d4d74918fefca987471e71ce340482925f5c974d37aec0a2b58e6f', // + ddev change-in-code + auto-restart workflow
-  'a2afb02998cfbe4fd9b19eabcbc8958c136402d7fb65e5e1237f6921c7c0c9bd', // current: + reuse-before-writing rung
+  'a2afb02998cfbe4fd9b19eabcbc8958c136402d7fb65e5e1237f6921c7c0c9bd', // + reuse-before-writing rung
+  '341e83c8af394739148260e3ccb2f51847f40e8e39374222337fed2fafe03aa1', // current: VCS-agnostic blast-radius step
 ]);
