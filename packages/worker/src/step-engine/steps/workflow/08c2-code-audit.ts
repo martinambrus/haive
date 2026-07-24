@@ -138,6 +138,8 @@ export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
 
   llm: {
     requiredCapabilities: ['tool_use'],
+    // Report-only audit: reads code, writes findings. See 04a-spec-audit.
+    toolProfile: 'rag_only',
     timeoutMs: AUDIT_TIMEOUT_MS,
     buildPrompt: (args) => {
       const d = args.detected as CodeAuditDetect;

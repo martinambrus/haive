@@ -133,6 +133,9 @@ export const specAuditStep: StepDefinition<SpecAuditDetect, SpecAuditApply> = {
 
   llm: {
     requiredCapabilities: ['tool_use'],
+    // Report-only audit: it reads the spec and the repo and writes findings. No
+    // browser, no container, nothing a user MCP server would contribute.
+    toolProfile: 'rag_only',
     timeoutMs: 30 * 60 * 1000,
     buildPrompt: (args) => {
       const detected = args.detected as SpecAuditDetect;

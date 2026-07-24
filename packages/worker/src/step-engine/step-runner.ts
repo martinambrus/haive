@@ -703,6 +703,7 @@ async function resolveLlmPhase(
     cliProviderId: plan.providerId,
     effortLevel: preferredEffort ?? undefined,
     kind: payloadKind,
+    toolProfile: llmSpec.toolProfile,
     spec: plan.invocation.spec,
     timeoutMs: llmSpec.timeoutMs,
   });

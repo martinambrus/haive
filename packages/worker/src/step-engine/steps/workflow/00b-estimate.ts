@@ -235,6 +235,9 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
 
   llm: {
     requiredCapabilities: ['tool_use'],
+    // Estimation reads prior tasks and the repo; a browser or a DDEV container
+    // cannot inform it.
+    toolProfile: 'rag_only',
     preForm: true,
     // Best-effort: a missing/unusable CLI degrades to the heuristic baseline rather than
     // failing the step, so estimation never blocks task start.

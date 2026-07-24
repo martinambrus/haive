@@ -73,6 +73,19 @@ export interface LlmInvocationSpec {
    *  already embedded in the prompt — a high-effort model otherwise crawls the
    *  workspace and blows the timeout. codex/gemini ignore it. */
   disableTools?: boolean;
+  /** Narrow the MCP surface this invocation is given. Unset = the full surface
+   *  (rag, plus chrome-devtools when the repo does browser testing, ddev-control
+   *  on a DDEV task, and the user's own servers from `.claude/mcp_settings.json`).
+   *
+   *  `'rag_only'` cuts it to rag_search alone — the same surface knowledge-mining
+   *  already gets. For a report-only step that cannot act on a browser or a
+   *  container, those servers are tool definitions the model pays for and can
+   *  never usefully call. Note this drops the USER's servers too, so do not set it
+   *  on a step where a user-provided tool could plausibly help.
+   *
+   *  Unlike `disableTools` (which removes the CLI's own built-in file tools) this
+   *  only touches MCP; the step can still read the repo. */
+  toolProfile?: 'rag_only';
   /** Test-only synthetic LLM output used when HAIVE_TEST_BYPASS_LLM=1.
    *  Steps whose apply() throws on null llmOutput must define this so smoke
    *  tests can exercise the full pipeline without a real CLI provider. */

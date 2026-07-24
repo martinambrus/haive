@@ -237,6 +237,10 @@ export interface CliExecJobPayload {
    *  rebuild the spec worker-side and read this to honor the step's effort. */
   effortLevel?: string;
   kind: CliExecInvocationKind;
+  /** Step-declared MCP narrowing (LlmInvocationSpec.toolProfile). `'rag_only'`
+   *  gives this invocation the same rag-search-only surface knowledge-mining
+   *  gets. Unset = the full surface. kind='agent_mining' is rag-only regardless. */
+  toolProfile?: 'rag_only';
   spec: unknown;
   /** The worktree this invocation is isolated to, as a path RELATIVE to the repo root
    *  (e.g. `.haive/worktrees/<dirName>`), or `''` for the repo root itself (a merge that

@@ -224,9 +224,36 @@ describe('advanceStep LLM phase', () => {
     expect(enqueued).toHaveLength(1);
     expect(enqueued[0]!.cliProviderId).toBe('prov-1');
     expect(enqueued[0]!.kind).toBe('cli');
+    // Unset means the full MCP surface; exec-core must not narrow by accident.
+    expect(enqueued[0]!.toolProfile).toBeUndefined();
     const invInsert = state.inserts.find((i) => i.table === 'cli_invocations');
     expect(invInsert).toBeDefined();
     expect(invInsert!.row.prompt).toContain('prompt with detected=');
+  });
+
+  it("threads a step's toolProfile onto the cli-exec payload", async () => {
+    const state = freshState();
+    const db = makeMockDb(state);
+    const enqueued: CliExecJobPayload[] = [];
+    const stepDef = baseStep();
+    stepDef.llm!.toolProfile = 'rag_only';
+    await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef,
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation(payload) {
+          enqueued.push(payload);
+        },
+      },
+    });
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]!.toolProfile).toBe('rag_only');
   });
 
   it('routes api_key zai providers through the claude CLI binary', async () => {

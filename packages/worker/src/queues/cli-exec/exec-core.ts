@@ -264,8 +264,10 @@ export async function executeByKind(
             payload.taskId,
             providerRow.name as CliProviderName,
             sandboxWorkdir,
-            // Knowledge-mining invocations get a rag-only MCP surface.
-            payload.kind === 'agent_mining',
+            // Knowledge-mining invocations get a rag-only MCP surface, as does any
+            // step that declared toolProfile='rag_only' (report-only steps that
+            // cannot act on a browser or a container).
+            payload.kind === 'agent_mining' || payload.toolProfile === 'rag_only',
           )
         : { files: [], extraArgs: [] };
       const statusUpdater = payload.taskStepId

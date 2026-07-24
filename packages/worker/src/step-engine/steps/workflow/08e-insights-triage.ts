@@ -153,6 +153,9 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
 
   llm: {
     requiredCapabilities: ['tool_use', 'file_write'],
+    // Triage sorts existing findings into buckets. It writes files, but nothing
+    // it writes needs a browser or a container to determine.
+    toolProfile: 'rag_only',
     timeoutMs: 30 * 60 * 1000,
     skipIf: ({ formValues }) => {
       const sel = (formValues as { selectedInsights?: string[] }).selectedInsights;
