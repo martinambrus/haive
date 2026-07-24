@@ -75,8 +75,8 @@ If "WHAT I HAVE NOT VERIFIED" is empty and certainty is claimed, say so explicit
 These are always fine and should be used in place of speculation:
 
 - "I don't know yet — reading the logs now."
-- "My change at \`<file>:<line>\` could plausibly have caused this; ruling out by checking ."
-- "I was wrong earlier — the evidence says ." (Replaces the earlier wrong claim, does not sit beside it.)
+- "My change at \`<file>:<line>\` could plausibly have caused this; ruling it out by checking \`<artefact>\` now."
+- "I was wrong earlier — the evidence at \`<artefact>\` says \`<finding>\`." (Replaces the earlier wrong claim, does not sit beside it.)
 
 ### Hard-stop trigger
 
@@ -92,9 +92,7 @@ The post-2.1.110 harness regression causes jump-to-conclusion behaviour: hypothe
 
 - Only make changes that are directly requested. Keep solutions simple and focused.
 
-- ALWAYS read and understand relevant files before proposing code edits. Do not speculate about code you have not inspected. If the user references a specific file/path, you MUST open and inspect it before explaining or proposing fixes. Be rigorous and persistent in searching code for key facts. Thoroughly review the style, conventions, and abstractions of the codebase before implementing new features or abstractions.
-
-- Never speculate about code you have not opened. If the user references a specific file, you MUST read the file before answering. Make sure to investigate and read relevant files BEFORE answering questions about the codebase. Never make any claims about code before investigating unless you are certain of the correct answer - give grounded and hallucination-free answers.
+- ALWAYS read and understand the relevant files before proposing a code edit or answering a question about the codebase. Never speculate about code you have not opened: when a specific file or path is referenced, you MUST open and inspect it before explaining or proposing a fix. Be rigorous and persistent in searching code for the key facts, and review the surrounding style, conventions, and abstractions before implementing a new feature or abstraction. Make no claim about code you have not investigated unless you are certain of the answer — give grounded, hallucination-free answers.
 
 - If you intend to call multiple tools and there are no dependencies between the tool calls, make all of the independent tool calls in parallel. Prioritize calling tools simultaneously whenever the actions can be done in parallel rather than sequentially. For example, when reading 3 files, run 3 tool calls in parallel to read all 3 files into context at the same time. Maximize use of parallel tool calls where possible to increase speed and efficiency. However, if some tool calls depend on previous calls to inform dependent values like the parameters, do NOT call these tools in parallel and instead call them sequentially. Never use placeholders or guess missing parameters in tool calls
 
@@ -102,9 +100,7 @@ The post-2.1.110 harness regression causes jump-to-conclusion behaviour: hypothe
 
 - When creating or updating any agent-specific documentation/MD files (subagents, skills, AGENTS.md etc.), refrain from using any ASCII art or smileys and make the text clearly readable by the agent, keeping it concise but also keeping the exact meaning of the text intact. This is to save tokens when an agent later reads these files and to prevent context bloating.
 
-- If a larger refactor/feature coding is needed, make sure to always use plan mode to plan this in detail.
-
-- Always use tasks to break down a planned feature or refactor into steps. This should prevent loosing track of the plan during conversation compaction.
+- For a larger refactor or feature, use plan mode to plan it in detail first, then break that plan into tasks. A task list survives conversation compaction; a plan held only in context does not.
 
 - If you're adjusting small part of code, such as an invalid/wrong regex or something similarly small, which can be tested on a previously failed input, always try to safely test the fix on the original input to verify the fix is working.
 
@@ -124,7 +120,7 @@ The post-2.1.110 harness regression causes jump-to-conclusion behaviour: hypothe
 
 - Surgical changes: touch only what you must. Do not improve adjacent code, comments, or formatting; do not refactor what is not broken; match the existing style even if you would do it differently. Remove only the imports, variables, and functions your own changes made unused; do not delete pre-existing dead code unless asked, mention it instead. Keep each change the smallest unit still worth reviewing, prefer several small focused commits over one large batch, and never bundle a refactor, a bug fix, and a feature into one change.
 
-- Goal-driven execution: turn each task into a verifiable goal before starting. "Add validation" becomes "write tests for invalid inputs, then make them pass"; "fix the bug" becomes "write a test that reproduces it, then make it pass"; "refactor X" becomes "ensure tests pass before and after". For multi-step tasks, state a brief plan with a verification check for each step.
+- Goal-driven execution: turn each task into a verifiable goal before starting. "Add validation" becomes "write tests for invalid inputs, then make them pass"; "fix the bug" becomes "write a test that reproduces it, then make it pass"; "refactor X" becomes "ensure tests pass before and after". Give every step of a multi-step plan its own verification check.
 
 - Match the invariant, not the ephemeral value (forward compatibility). Before keying any logic on a value, classify it. Stable values are contracts that change only with notice: documented APIs, exit codes, schema fields, error types/classes, structural delimiters (newlines, separators, stream boundaries). Ephemeral values are cosmetic or version-bound and change silently: banners, decorative headers, log/branding prefixes (e.g. a ddev/Docker banner), version strings, timestamps, ANSI codes, the exact wording of human-facing messages. Never match, parse, slice, or branch on an ephemeral value — a fix that string-matches today's banner breaks the instant upstream rewords it, and it breaks silently (truncated/empty output) so it surfaces in production, not review. Instead: key on the stable invariant (split a banner from a message by the structural boundary — delimiter, blank line, stream, exit code, message object — not the banner's literal text); prefer "capture everything, exclude the known-stable part" over "capture the known-ephemeral part" (take the whole stderr stream rather than only the text after a known banner); and if you genuinely must depend on an ephemeral value, isolate it in one named constant marked volatile and fail loud rather than silent when it stops matching. Test before committing: if this tool reworded its banner, bumped its version, or changed its formatting tomorrow, would this code still be correct? If no, you matched the wrong thing — find the invariant.
 `;
@@ -151,5 +147,6 @@ export const KNOWN_DEFAULT_RULES_HASHES: ReadonlySet<string> = new Set([
   'c8962d1ee239a4550a6310fb94ed5c709f2235a356b74be93cff3d350bd44484', // + ddev-not-on-PATH rule
   '3a052a7ef7d4d74918fefca987471e71ce340482925f5c974d37aec0a2b58e6f', // + ddev change-in-code + auto-restart workflow
   'a2afb02998cfbe4fd9b19eabcbc8958c136402d7fb65e5e1237f6921c7c0c9bd', // + reuse-before-writing rung
-  '341e83c8af394739148260e3ccb2f51847f40e8e39374222337fed2fafe03aa1', // current: VCS-agnostic blast-radius step
+  '341e83c8af394739148260e3ccb2f51847f40e8e39374222337fed2fafe03aa1', // VCS-agnostic blast-radius step
+  '6b120eb904ccade5842b6d24ee315dfed988931df976648f7ad3e7c3293f1ac2', // current: merged duplicate rules, restored stripped placeholders
 ]);
