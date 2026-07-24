@@ -57,6 +57,7 @@ import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
+import { blockedByActiveStepMessage, findLiveSibling } from './_advance-guards.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
 import {
   recordFixLoopRequest,
@@ -1369,7 +1370,11 @@ async function handleAdvanceStep(
   // hand-off never sees another active step here. Skipping returns normally, so
   // the stale job completes (leaves the queue) and is never re-delivered.
   const otherActive = await db
-    .select({ stepId: schema.taskSteps.stepId, status: schema.taskSteps.status })
+    .select({
+      id: schema.taskSteps.id,
+      stepId: schema.taskSteps.stepId,
+      status: schema.taskSteps.status,
+    })
     .from(schema.taskSteps)
     .where(
       and(
@@ -1389,6 +1394,18 @@ async function handleAdvanceStep(
       },
       'advance-step skipped: another step is already active (stale/duplicate job)',
     );
+    // Say so on the BLOCKER's row. Skipping used to be silent in the DB, so a task whose
+    // active step had died kept showing that step's last message ("Waiting for AI analysis…")
+    // while nothing ran — no signal anywhere that an advance was being refused. Best-effort:
+    // a failed write must not turn a skip into a job failure.
+    await db
+      .update(schema.taskSteps)
+      .set({
+        statusMessage: blockedByActiveStepMessage(payload.stepId),
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.taskSteps.id, otherActive[0].id))
+      .catch((err) => logger.warn({ err, taskId: ctx.taskId }, 'block-reason write failed'));
     return;
   }
 
@@ -1410,26 +1427,24 @@ async function handleAdvanceStep(
   // second advance-step job for the same step+round+epoch start a parallel
   // apply() — observed as two RAG-populate embed loops (double CPU) after a
   // worker reload. If the step is already 'running', another delivery set it so;
-  // yield to the live sibling in BullMQ's active set (tiebreak on job id, lower
-  // wins, so two can't both yield). Gating on 'running' is what keeps this from
-  // skipping a legit waiting_form submit / pending first run — with no apply in
-  // flight there is nothing to duplicate, and a stale "active" zombie job (a dead
-  // worker's, whose 30-min lock has not expired) must NOT block the step from
-  // advancing. A genuinely orphaned 'running' step recovers via its own job's
-  // same-id stalled re-delivery (excluded below by `j.id === jobId`).
+  // yield to the live sibling (tiebreak on job id, lower wins, so two can't both
+  // yield). Gating on 'running' is what keeps this from skipping a legit
+  // waiting_form submit / pending first run — with no apply in flight there is
+  // nothing to duplicate. "Live" means a job THIS process is executing
+  // (inFlightJobIds): BullMQ's active set also holds the jobs of a worker that
+  // died, whose 30-min lock has not expired, and yielding to one of those froze
+  // the step for that whole window. See findLiveSibling for the full reasoning.
+  // A genuinely orphaned 'running' step recovers via its own job's same-id
+  // stalled re-delivery (excluded by the self check in findLiveSibling).
   if (existing?.status === 'running' && jobId != null) {
-    const activeJobs = await getTaskQueue().getActive();
-    const sibling = activeJobs.find((j) => {
-      if (j.id == null || j.id === jobId || j.name !== TASK_JOB_NAMES.ADVANCE_STEP) return false;
-      const d = j.data as TaskJobPayload;
-      return (
-        d.taskId === ctx.taskId &&
-        d.stepId === payload.stepId &&
-        (d.round ?? 0) === round &&
-        (d.epoch ?? null) === (payload.epoch ?? null)
-      );
+    const sibling = findLiveSibling(await getTaskQueue().getActive(), inFlightJobIds, {
+      jobId,
+      taskId: ctx.taskId,
+      stepId: payload.stepId,
+      round,
+      epoch: payload.epoch ?? null,
     });
-    if (sibling && Number(jobId) > Number(sibling.id)) {
+    if (sibling) {
       logger.warn(
         { taskId: ctx.taskId, stepId: payload.stepId, round, jobId, siblingJobId: sibling.id },
         'advance-step skipped: same step already running in another job (duplicate)',
@@ -1812,12 +1827,20 @@ async function handleCleanupRepoResources(
 
 type TaskWorkerPayload = TaskJobPayload | RepoRagCleanupPayload | RepoResourceCleanupPayload;
 
+/** Job ids this process is executing right now, maintained by the worker's processor below.
+ *  The duplicate guard needs it because BullMQ's `active` set is not proof of life: with a
+ *  30-minute lockDuration, a worker killed mid-job leaves its jobs there for up to half an
+ *  hour, and yielding to one of those corpses froze the step for that whole window. Dies with
+ *  the process, which is exactly right — a restarted worker is running none of them. */
+const inFlightJobIds = new Set<string>();
+
 export function startTaskWorker(): Worker<TaskWorkerPayload> {
   ensureRegistered();
   const worker = new Worker<TaskWorkerPayload>(
     QUEUE_NAMES.TASK,
     async (job: Job<TaskWorkerPayload>) => {
       const db = getDb();
+      if (job.id) inFlightJobIds.add(job.id);
       try {
         if (job.name === TASK_JOB_NAMES.CLEANUP_REPO_RAG) {
           await handleCleanupRepoRag(db, job.data as RepoRagCleanupPayload);
@@ -1852,6 +1875,8 @@ export function startTaskWorker(): Worker<TaskWorkerPayload> {
           });
         }
         throw err;
+      } finally {
+        if (job.id) inFlightJobIds.delete(job.id);
       }
     },
     {
