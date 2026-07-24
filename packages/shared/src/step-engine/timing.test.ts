@@ -87,6 +87,71 @@ describe('computeFoldContribution', () => {
     expect(computeStepContribution(closedFolded, NOW).idleMs).toBe(180 * 60_000);
   });
 
+  it('bills a PRE-RUN park (pending, no started_at, marker set) as idle', () => {
+    // The runtime-slot admission park resets the row to `pending` and stamps
+    // waiting_started_at; started_at is null because the run never began. Without this the
+    // queue wait counted as neither work nor idle and wall silently stopped reconciling.
+    const parked = {
+      ...base,
+      startedAt: null,
+      endedAt: null,
+      waitingStartedAt: minAgo(45),
+      status: 'pending',
+    };
+    expect(computeStepContribution(parked, NOW)).toEqual({
+      workMs: 0,
+      idleMs: 45 * 60_000,
+      userActiveMs: 0,
+    });
+    // Carried across a reset/revise too, rather than being dropped.
+    expect(computeFoldContribution(parked, NOW).idleMs).toBe(45 * 60_000);
+    // Already-folded park (idle_ms credited, marker cleared) does not double count.
+    const folded = { ...parked, idleMs: 45 * 60_000, waitingStartedAt: null };
+    expect(computeStepContribution(folded, NOW).idleMs).toBe(45 * 60_000);
+  });
+
+  it('counts only the NEWEST open pre-run park in the task total', () => {
+    // Two rows parked at once is normal, not a crash artifact: each park enqueues its own
+    // delayed re-drive, so a step parked before the task moved on keeps its marker and its own
+    // poll loop. Summing both billed 2x idle per second of wall.
+    const older = {
+      ...base,
+      startedAt: null,
+      endedAt: null,
+      waitingStartedAt: minAgo(30),
+      status: 'pending',
+    };
+    const newer = { ...older, waitingStartedAt: minAgo(10) };
+    expect(computeTaskTiming([older, newer], NOW).idleMs).toBe(10 * 60_000);
+    // Order must not matter.
+    expect(computeTaskTiming([newer, older], NOW).idleMs).toBe(10 * 60_000);
+    // Per-step display is unchanged — each card still shows its own wait.
+    expect(computeStepContribution(older, NOW).idleMs).toBe(30 * 60_000);
+    // A gate wait (waiting_form, which HAS a started_at) is not a pre-run park and still adds
+    // on top of the live park.
+    const gate = {
+      ...base,
+      startedAt: minAgo(50),
+      endedAt: null,
+      waitingStartedAt: minAgo(20),
+      status: 'waiting_form',
+    };
+    expect(computeTaskTiming([older, newer, gate], NOW).idleMs).toBe(30 * 60_000);
+  });
+
+  it('stops billing a pre-run park once the row is closed', () => {
+    // A stale marker on a terminal row (cancel/stop close the row and fold, but a legacy
+    // row may not have) must not tick forever.
+    const closed = {
+      ...base,
+      startedAt: null,
+      endedAt: minAgo(10),
+      waitingStartedAt: minAgo(45),
+      status: 'skipped',
+    };
+    expect(computeStepContribution(closed, NOW).idleMs).toBe(0);
+  });
+
   it('keeps foldSit semantics for a failed step (ended set) — its span still bills as work', () => {
     const step = { ...base, startedAt: minAgo(60), endedAt: minAgo(40), status: 'failed' };
     const fold = computeFoldContribution(step, NOW);

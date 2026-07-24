@@ -1492,34 +1492,53 @@ async function handleAdvanceStep(
       // runners that must free — always 1 at an exactly-full pool, whether one task waits or ten
       // — and read as "one slot away". Both numbers come from the FIFO park queue and the poll
       // re-runs every RUNTIME_PARK_POLL_MS, so the position counts down as slots free.
-      // Re-queue the step to a clean PENDING state, not just a message. A step re-parked after
-      // an interrupted run is still `running` with an open started_at, which bills the whole
-      // park as phantom work AND renders as running (expanded terminals, buried banner). Fold
-      // the open run's timing into carried_* (computeFoldContribution reclassifies an OPEN span
-      // to idle, so the phantom "work" becomes carried_idle and work+idle still reconciles with
-      // wall), then reset the live timing. iterations/output/detect are PRESERVED so it RESUMES
-      // when a slot frees — a park is a transient resource wait, not a reset (the pending->running
-      // re-run stamps a fresh started_at, step-runner.ts). Idempotent: a later poll re-park finds
-      // started_at=null so the fold adds 0.
-      const fold = computeFoldContribution(row, Date.now());
-      await db
-        .update(schema.taskSteps)
-        .set({
-          status: 'pending',
-          startedAt: null,
-          endedAt: null,
-          idleMs: 0,
-          waitingStartedAt: null,
-          userActiveMs: 0,
-          carriedWorkMs: row.carriedWorkMs + fold.workMs,
-          carriedIdleMs: row.carriedIdleMs + fold.idleMs,
-          carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
-          statusMessage:
-            `Waiting for a free runtime slot — #${admission.position} of ${admission.waiting} ` +
-            `waiting (${admission.busy} runtime${admission.busy === 1 ? '' : 's'} in use, limit ${admission.max})`,
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.taskSteps.id, row.id));
+      const parkMessage =
+        `Waiting for a free runtime slot — #${admission.position} of ${admission.waiting} ` +
+        `waiting (${admission.busy} runtime${admission.busy === 1 ? '' : 's'} in use, limit ${admission.max})`;
+      // `pending` + a live waiting_started_at is this park's structural signature: every other
+      // pending writer nulls the marker, so deriveSlotWait (@haive/shared) reads exactly this
+      // row as "queued for a runtime slot" and computeStepContribution bills the open wait as
+      // idle. The re-park below must therefore keep the SAME marker instead of re-stamping it.
+      const alreadyParked = row.status === 'pending' && row.waitingStartedAt !== null;
+      if (alreadyParked) {
+        // Re-park (once per RUNTIME_PARK_POLL_MS): refresh the queue-position copy and the
+        // updated_at heartbeat only — that heartbeat is what distinguishes "still queued" from
+        // "the poll loop died and the task is wedged" (deriveSlotWait's `stale`). Deliberately
+        // NOT the fold+reset below: re-running it would fold the open park into carried_idle
+        // while the marker kept ticking (double count), and re-stamping the marker would
+        // restart the wait clock every poll so the reported wait never grew past 15s.
+        await db
+          .update(schema.taskSteps)
+          .set({ statusMessage: parkMessage, updatedAt: new Date() })
+          .where(eq(schema.taskSteps.id, row.id));
+      } else {
+        // First park: re-queue the step to a clean PENDING state, not just a message. A step
+        // parked after an interrupted run is still `running` with an open started_at, which
+        // bills the whole park as phantom work AND renders as running (expanded terminals,
+        // buried banner). Fold the open run's timing into carried_* (computeFoldContribution
+        // reclassifies an OPEN span to idle, so the phantom "work" becomes carried_idle and
+        // work+idle still reconciles with wall), then reset the live timing and OPEN the park
+        // marker. iterations/output/detect are PRESERVED so it RESUMES when a slot frees — a
+        // park is a transient resource wait, not a reset (the pending->running re-run folds the
+        // park into idle_ms and stamps a fresh started_at, step-runner.ts).
+        const fold = computeFoldContribution(row, Date.now());
+        await db
+          .update(schema.taskSteps)
+          .set({
+            status: 'pending',
+            startedAt: null,
+            endedAt: null,
+            idleMs: 0,
+            waitingStartedAt: new Date(),
+            userActiveMs: 0,
+            carriedWorkMs: row.carriedWorkMs + fold.workMs,
+            carriedIdleMs: row.carriedIdleMs + fold.idleMs,
+            carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
+            statusMessage: parkMessage,
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.taskSteps.id, row.id));
+      }
       await enqueueAdvance(ctx.taskId, ctx.userId, payload.stepId, round, ctx.orchestrationEpoch, {
         delayMs: RUNTIME_PARK_POLL_MS,
       });

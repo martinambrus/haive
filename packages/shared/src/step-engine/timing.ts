@@ -35,8 +35,9 @@ function toMs(v: Date | string | null): number | null {
  *  rule the task page shows: work is the step's span (start -> ended, or `nowMs` if
  *  still open) minus its idle and minus the live open wait; idle is stored idle plus
  *  that open wait; user-active is the stored focused subset. A step with no
- *  `startedAt` contributes no work but still surfaces any stored idle/user (matches
- *  the historical sum). Pure — shared by `computeTaskTiming` (read path) and the
+ *  `startedAt` contributes no work but still surfaces any stored idle/user, plus a live
+ *  pre-run park wait when its marker is set (the runtime-slot park — see below).
+ *  Pure — shared by `computeTaskTiming` (read path) and the
  *  reset fold (which snapshots a finishing run before its timing is zeroed).
  *
  *  `foldSit` (reset fold only): also count a FAILED step's ended -> now dead-wait as
@@ -51,13 +52,22 @@ export function computeStepContribution(
   const stepIdle = step.idleMs ?? 0;
   const userActiveMs = step.userActiveMs ?? 0;
   const start = toMs(step.startedAt);
-  if (start === null) return { workMs: 0, idleMs: stepIdle, userActiveMs };
   const ended = toMs(step.endedAt);
-  const end = ended ?? nowMs;
   const waitStart = toMs(step.waitingStartedAt);
+  if (start === null) {
+    // No started_at yet, but a live wait marker: the step is PARKED before its run ever began
+    // — the runtime-slot admission park (task-queue.ts), which resets the row to `pending` and
+    // stamps waiting_started_at. Count that wait as idle so a task queued behind a full runtime
+    // pool reconciles (wall ~ work + idle) instead of the wait vanishing from both. Bounded by
+    // ended_at like every other open wait, and the worker folds it into idle_ms + clears the
+    // marker when the step finally runs (foldCliParkOnResume), so there is no double count.
+    const openPark = ended === null && waitStart !== null ? Math.max(0, nowMs - waitStart) : 0;
+    return { workMs: 0, idleMs: stepIdle + openPark, userActiveMs };
+  }
+  const end = ended ?? nowMs;
   // A step accruing non-work wait right now: either sitting in waiting_form (waiting on
-  // the user) or parked in waiting_cli with NO invocation currently running (waiting on a
-  // CLI slot / a rate-limit reset). Count the ongoing wait so idle ticks live and is
+  // the user) or parked in waiting_cli with NO invocation currently running (waiting on an
+  // agent slot / a rate-limit reset). Count the ongoing wait so idle ticks live and is
   // excluded from work below. waitingStartedAt is the invariant: for waiting_cli the worker
   // sets it only while no invocation runs and clears+folds it into idle_ms when one starts,
   // so an actively-running CLI step has waitStart === null and its span still bills as work.
@@ -111,16 +121,44 @@ export function computeFoldContribution(step: TaskTimingStep, nowMs: number): Ta
  *  report the full step across all restarts, not just the latest attempt. Pure, so
  *  the api list endpoint and the web detail page compute identical numbers. Wall
  *  clock (start -> end of the whole task) is the caller's job — it comes from the
- *  task row, not the steps. */
+ *  task row, not the steps.
+ *
+ *  One task-level rule the per-step function cannot enforce: a task waits for ONE slot at a
+ *  time, but several rows can hold an open pre-run park marker at once. Each runtime-slot park
+ *  enqueues its own delayed re-drive, so a step parked before the task moved on keeps both its
+ *  marker and its own poll loop alive (observed: 07b-phase-4-validate round 1 and 06a-db-migrate
+ *  round 0 parked together, billing 12s of idle per 6s of wall). Only the NEWEST such park —
+ *  the live one — contributes here; the others are summed as if unmarked. Their own step cards
+ *  still show their wait, and nothing is lost: whatever a park accrued before the task moved on
+ *  was already folded into idle_ms. */
 export function computeTaskTiming(steps: TaskTimingStep[], nowMs: number): TaskTiming {
+  let liveParkIdx = -1;
+  let liveParkAt = -Infinity;
+  for (let i = 0; i < steps.length; i++) {
+    const at = openPreRunParkAt(steps[i]!);
+    if (at !== null && at > liveParkAt) {
+      liveParkAt = at;
+      liveParkIdx = i;
+    }
+  }
   let workMs = 0;
   let idleMs = 0;
   let userActiveMs = 0;
-  for (const s of steps) {
-    const c = computeStepContribution(s, nowMs);
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i]!;
+    const superseded = i !== liveParkIdx && openPreRunParkAt(s) !== null;
+    const c = computeStepContribution(superseded ? { ...s, waitingStartedAt: null } : s, nowMs);
     workMs += c.workMs + (s.carriedWorkMs ?? 0);
     idleMs += c.idleMs + (s.carriedIdleMs ?? 0);
     userActiveMs += c.userActiveMs + (s.carriedUserActiveMs ?? 0);
   }
   return { workMs, idleMs, userActiveMs };
+}
+
+/** Marker time of a step parked BEFORE its run began (the runtime-slot park: no started_at, no
+ *  ended_at, marker set), else null. Only these overlap task-wide; a waiting_form/waiting_cli
+ *  wait always has a started_at and is bounded by the one-active-step rule. */
+function openPreRunParkAt(step: TaskTimingStep): number | null {
+  if (toMs(step.startedAt) !== null || toMs(step.endedAt) !== null) return null;
+  return toMs(step.waitingStartedAt);
 }

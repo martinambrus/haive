@@ -9,6 +9,12 @@ import { schema, type Database } from '@haive/database';
 // `idle_ms` when work resumes. computeTaskTiming (@haive/shared) then excludes it (it counts
 // a live open wait as idle for waiting_cli exactly when waiting_started_at is set).
 //
+// The runtime-slot admission park (task-queue.ts) uses the same marker on a `pending` row —
+// it stamps waiting_started_at in its own park UPDATE and foldCliParkOnResume below closes
+// it when the step finally runs. `pending` + a non-null marker is therefore the structural
+// signature of that park (every other pending writer nulls the marker), which is what
+// deriveSlotWait keys the "queued for a runtime slot" badge on.
+//
 // Invariant: for a waiting_cli step, `waiting_started_at` is non-null iff no invocation is
 // currently running. Both writes below are single atomic UPDATEs whose WHERE clause enforces
 // the invariant, so concurrent invocation start/end and the transition write can interleave
@@ -39,8 +45,10 @@ export async function markCliParkBegin(db: Database, stepId: string): Promise<vo
 
 /** Park ends: fold `now() - waiting_started_at` into `idle_ms` and clear the marker. Guarded
  *  on the marker being set, so the first invocation to start running folds the wait and any
- *  parallel starters no-op. greatest(0, …) guards against clock skew. Call when an invocation
- *  begins running. */
+ *  parallel starters no-op. greatest(0, …) guards against clock skew. Call when work resumes:
+ *  when an invocation begins running (agent park) and at the pending -> running flip
+ *  (runtime-slot park, step-runner.ts). Status-agnostic by design — the marker alone says a
+ *  park is open, so both parks close through this one statement. */
 export async function foldCliParkOnResume(db: Database, stepId: string): Promise<void> {
   await db
     .update(schema.taskSteps)

@@ -26,6 +26,7 @@ import {
   isTransientCliFailure,
 } from '../queues/cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
+import { foldCliParkOnResume } from '../queues/cli-park-timing.js';
 import {
   TaskCancelledError,
   MiningRetryError,
@@ -1289,6 +1290,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     let current = row;
     if (current.status === 'pending') {
+      // Work resumes: close any open runtime-slot park FIRST (fold `now - waiting_started_at`
+      // into idle_ms and clear the marker) so the queue wait stays booked as idle. Without the
+      // fold the marker would be dropped by the run and the recorded wait would vanish from
+      // the totals the moment the step started; without clearing it, `pending` + marker (the
+      // park's signature) would keep reading as queued. No-op when nothing was parked.
+      await foldCliParkOnResume(db, current.id);
       current = await updateRow(db, current.id, {
         status: 'running',
         startedAt: new Date(),
