@@ -127,8 +127,25 @@ describe('computeFoldContribution', () => {
     expect(computeTaskTiming([newer, older], NOW).idleMs).toBe(10 * 60_000);
     // Per-step display is unchanged — each card still shows its own wait.
     expect(computeStepContribution(older, NOW).idleMs).toBe(30 * 60_000);
-    // A gate wait (waiting_form, which HAS a started_at) is not a pre-run park and still adds
-    // on top of the live park.
+  });
+
+  it('ignores pre-run parks entirely while another step is live', () => {
+    // A park's poll chain ends the moment another step becomes active (the advance is skipped
+    // and never re-enqueued), so its marker stays open with nothing left to fold it. Counting it
+    // would tick idle alongside the working step and bill the same wall clock twice.
+    const parked = {
+      ...base,
+      startedAt: null,
+      endedAt: null,
+      waitingStartedAt: minAgo(30),
+      status: 'pending',
+    };
+    const working = { ...base, startedAt: minAgo(10), endedAt: null, status: 'running' };
+    const t = computeTaskTiming([parked, working], NOW);
+    expect(t.idleMs).toBe(0);
+    expect(t.workMs).toBe(10 * 60_000);
+
+    // Same for a gate: the user wait is the task's real state, the stale park is not.
     const gate = {
       ...base,
       startedAt: minAgo(50),
@@ -136,7 +153,7 @@ describe('computeFoldContribution', () => {
       waitingStartedAt: minAgo(20),
       status: 'waiting_form',
     };
-    expect(computeTaskTiming([older, newer, gate], NOW).idleMs).toBe(30 * 60_000);
+    expect(computeTaskTiming([parked, gate], NOW).idleMs).toBe(20 * 60_000);
   });
 
   it('stops billing a pre-run park once the row is closed', () => {

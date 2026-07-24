@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 
 // waiting_cli park accounting. A step in `waiting_cli` is normally the CLI actively running
@@ -50,6 +50,35 @@ export async function markCliParkBegin(db: Database, stepId: string): Promise<vo
  *  (runtime-slot park, step-runner.ts). Status-agnostic by design — the marker alone says a
  *  park is open, so both parks close through this one statement. */
 export async function foldCliParkOnResume(db: Database, stepId: string): Promise<void> {
+  await foldPark(db, eq(schema.taskSteps.id, stepId));
+}
+
+/** Park ABANDONED: same fold, keyed on (task, step, round) instead of a row id. A runtime-slot
+ *  park lives on a delayed advance job; when that advance is skipped because another step of the
+ *  task became active, the poll chain ENDS (handleAdvanceStep returns without re-enqueueing) and
+ *  the step is no longer waiting for a slot — it is blocked behind the active step. Closing the
+ *  marker there is what stops it ticking idle in parallel with the step that is really working
+ *  (a dead loop cannot fold its own park), and stops deriveSlotWait reading a task that has
+ *  moved on as still queued. */
+export async function foldAbandonedPark(
+  db: Database,
+  taskId: string,
+  stepId: string,
+  round: number,
+): Promise<void> {
+  await foldPark(
+    db,
+    and(
+      eq(schema.taskSteps.taskId, taskId),
+      eq(schema.taskSteps.stepId, stepId),
+      eq(schema.taskSteps.round, round),
+    )!,
+  );
+}
+
+/** The one fold statement both callers share: credit the elapsed park to idle_ms, clear the
+ *  marker, and no-op when no marker is set. */
+async function foldPark(db: Database, target: SQL | SQLWrapper): Promise<void> {
   await db
     .update(schema.taskSteps)
     .set({
@@ -57,9 +86,7 @@ export async function foldCliParkOnResume(db: Database, stepId: string): Promise
       waitingStartedAt: null,
       updatedAt: sql`now()`,
     })
-    .where(
-      and(eq(schema.taskSteps.id, stepId), sql`${schema.taskSteps.waitingStartedAt} IS NOT NULL`),
-    );
+    .where(and(target, sql`${schema.taskSteps.waitingStartedAt} IS NOT NULL`));
 }
 
 /** Boot reconcile only. A worker that died mid-park leaves a waiting_cli step in one of two

@@ -71,7 +71,11 @@ import {
 } from '../step-engine/steps/workflow/_fix-loop.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
 import { resetStepAndDownstream } from './_step-reset.js';
-import { foldOrphanedCliParkOnBoot, markCliParkBegin } from './cli-park-timing.js';
+import {
+  foldAbandonedPark,
+  foldOrphanedCliParkOnBoot,
+  markCliParkBegin,
+} from './cli-park-timing.js';
 import { unloadTaskOllamaCliModels } from '../sandbox/ollama-provision.js';
 
 let registered = false;
@@ -1394,6 +1398,11 @@ async function handleAdvanceStep(
       },
       'advance-step skipped: another step is already active (stale/duplicate job)',
     );
+    // This advance was the parked step's poll tick, and skipping ends the chain (no re-enqueue
+    // below). Close its park: it is blocked behind the active step now, not queued for a slot,
+    // and an open marker with no loop to fold it would tick idle for as long as the other step
+    // works — billing the same wall clock twice.
+    await foldAbandonedPark(db, ctx.taskId, payload.stepId, round);
     // Say so on the BLOCKER's row. Skipping used to be silent in the DB, so a task whose
     // active step had died kept showing that step's last message ("Waiting for AI analysis…")
     // while nothing ran — no signal anywhere that an advance was being refused. Best-effort:

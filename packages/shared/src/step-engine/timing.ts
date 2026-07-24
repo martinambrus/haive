@@ -132,9 +132,17 @@ export function computeFoldContribution(step: TaskTimingStep, nowMs: number): Ta
  *  still show their wait, and nothing is lost: whatever a park accrued before the task moved on
  *  was already folded into idle_ms. */
 export function computeTaskTiming(steps: TaskTimingStep[], nowMs: number): TaskTiming {
+  // A task with a live step is not queued for a slot, so NO pre-run park counts: whatever the
+  // orchestrator is doing now is the task's real state. This matters because a park's poll chain
+  // can end while its marker is still open — the advance is skipped once another step becomes
+  // active, and a dead loop cannot fold its own park — and that stale marker would otherwise
+  // tick idle for as long as the other step works, billing the same wall clock twice.
+  const taskIsElsewhere = steps.some(
+    (s) => s.status === 'running' || s.status === 'waiting_cli' || s.status === 'waiting_form',
+  );
   let liveParkIdx = -1;
   let liveParkAt = -Infinity;
-  for (let i = 0; i < steps.length; i++) {
+  for (let i = 0; i < steps.length && !taskIsElsewhere; i++) {
     const at = openPreRunParkAt(steps[i]!);
     if (at !== null && at > liveParkAt) {
       liveParkAt = at;
