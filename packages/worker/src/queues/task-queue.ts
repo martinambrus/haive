@@ -240,7 +240,21 @@ async function appendEvent(
 async function markTaskRunning(db: Database, taskId: string): Promise<void> {
   await db
     .update(schema.tasks)
-    .set({ status: 'running', startedAt: new Date(), updatedAt: new Date() })
+    .set({
+      status: 'running',
+      // Stamp the FIRST start and never overwrite it, so wall clock accumulates the way work
+      // and idle do (the step rows' carried_* survive every reset). handleStartTask runs again
+      // on a task-level retry, and re-stamping here restarted the wall clock while work/idle
+      // kept every prior run — a task read `wall 44m` against `idle 193h`, and the two could
+      // never reconcile.
+      startedAt: sql`coalesce(${schema.tasks.startedAt}, now())`,
+      // A retry starts from a failed task, whose completedAt markTaskFailed stamped. Preserving
+      // started_at makes that stale value load-bearing: wall would freeze at
+      // completedAt - startedAt (the api and the task page both end the span at
+      // `completedAt ?? now`) instead of ticking. Same clear markTaskRunningWithStep documents.
+      completedAt: null,
+      updatedAt: new Date(),
+    })
     .where(eq(schema.tasks.id, taskId));
 }
 
