@@ -32,6 +32,7 @@ import { CircleDot, Route, FolderGit2 } from 'lucide-react';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
+import { isAfterFrontier, type StepOrderKey } from '@/lib/step-order';
 import { formatTokens } from '@/lib/format-tokens';
 import { CLI_USAGE_LABEL, resetShort, resetSuffix } from '@/lib/usage-format';
 import {
@@ -466,17 +467,30 @@ export default function TaskDetailPage() {
     return { byStepId, byRound };
   }, [steps]);
 
-  // run_seq of the "frontier" step — the one the run is currently parked on / working
-  // (running / waiting_form / waiting_cli), or a failed task's failed step. Every step
-  // AFTER it in run order is pending and gets reset + re-run whenever an at-or-before
-  // step is retried, so those downstream steps must not offer their own Retry/Stop/Skip
-  // actions (the orchestrator's concurrency guard would just skip acting on them, which
-  // reads as "nothing happened"). Upstream (done) steps keep their Retry. Uses run_seq,
-  // NOT step_index (a static per-workflow-type offset, not run-monotonic when step
-  // families interleave — e.g. an env-replicate prelude spliced into a workflow).
-  const frontierRunSeq = useMemo(() => {
+  // The "frontier" step — the one the run is parked on / working (running / waiting_form /
+  // waiting_cli), the one queued for a runtime slot, or a failed task's failure. Every step BELOW
+  // it is pending and gets reset + re-run whenever an at-or-before step is retried, so those must
+  // not offer their own Retry/Stop/Skip actions (the orchestrator's concurrency guard would just
+  // skip acting on them, which reads as "nothing happened"). Steps ABOVE it keep their Retry —
+  // that is how you re-run finished work.
+  //
+  // Ordered by (round, run_seq), never run_seq alone — see isAfterFrontier. Uses run_seq rather
+  // than step_index (a static per-workflow-type offset, not run-monotonic when step families
+  // interleave, e.g. an env-replicate prelude spliced into a workflow).
+  //
+  // LAST match per category, not first: a task can carry a failure in round 0 and another in
+  // round 3, and picking the earlier one would push the real, furthest-along failure below the
+  // frontier and strip the very Retry needed to recover it.
+  const frontierKey = useMemo<StepOrderKey | null>(() => {
+    const lastMatching = (pred: (s: TaskStep) => boolean): TaskStep | undefined => {
+      for (let i = steps.length - 1; i >= 0; i--) {
+        const s = steps[i];
+        if (s && pred(s)) return s;
+      }
+      return undefined;
+    };
     const active =
-      steps.find(
+      lastMatching(
         (s) => s.status === 'running' || s.status === 'waiting_form' || s.status === 'waiting_cli',
       ) ??
       // A step queued for a runtime slot is the frontier too: the park re-queues its row to
@@ -484,9 +498,9 @@ export default function TaskDetailPage() {
       // task IS on it. Without this a parked task had no frontier at all, and the steps after it
       // kept offering their own Retry/Stop/Skip — the same buttons a running task already
       // suppresses on the steps it has not reached yet.
-      steps.find((s) => s.status === 'pending' && s.waitingStartedAt) ??
-      steps.find((s) => s.status === 'failed');
-    return active?.runSeq ?? null;
+      lastMatching((s) => s.status === 'pending' && !!s.waitingStartedAt) ??
+      lastMatching((s) => s.status === 'failed');
+    return active ? { round: active.round, runSeq: active.runSeq } : null;
   }, [steps]);
 
   // Auto-scroll to the active step when it changes. For a step that shows a
@@ -1251,10 +1265,9 @@ export default function TaskDetailPage() {
             // original pass). Mark the start of each round > 0 group with a kind-aware
             // header (spec revision vs fix loop) computed in roundLabels.byStepId.
             const loopHeader = roundLabels.byStepId.get(step.id) ?? null;
-            // Steps after the frontier get reset + re-run on any at-or-before retry, so
-            // they hide their own action buttons (see frontierRunSeq).
-            const isDownstreamOfActive =
-              frontierRunSeq != null && step.runSeq != null && step.runSeq > frontierRunSeq;
+            // Steps below the frontier get reset + re-run on any at-or-before retry, so
+            // they hide their own action buttons (see frontierKey).
+            const isDownstreamOfActive = frontierKey != null && isAfterFrontier(step, frontierKey);
             return (
               <div key={step.id} data-step-id={step.id}>
                 {loopHeader && (
