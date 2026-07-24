@@ -683,10 +683,27 @@ taskRoutes.post('/:id/action', async (c) => {
       await cancelTaskRow(db, id, { by: userId });
       await enqueueCancelJob(id, userId);
       return c.json({ ok: true, status: 'cancelled' });
-    case 'retry':
+    case 'retry': {
       if (task.status !== 'failed') {
         throw new HttpError(409, `Cannot retry task in status ${task.status}`);
       }
+      // Clear in-flight work FIRST. A retry restarts the task from step 0, and the
+      // orchestrator refuses to advance any step while another one is still
+      // running/waiting_cli (the other-step guard in task-queue.ts). A task that failed
+      // with a step left parked — a worker killed mid-run leaves exactly that — would
+      // otherwise restart into a permanent deadlock: every advance skipped, current_step_id
+      // drifting backwards, and Retry the only enabled button. Same helper Stop/cancel use;
+      // it supersedes live invocations, ends the parked step, and kills the haive-cli-*
+      // sandboxes while leaving the DDEV/app runtime up.
+      await stopActiveCliInvocations(db, id, { failTask: false });
+      // stopActiveCliInvocations deliberately covers running/waiting_cli only. A step parked
+      // at a FORM should be re-offered by the restart, not failed, so reset it to pending.
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'pending', waitingStartedAt: null, updatedAt: new Date() })
+        .where(and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.status, 'waiting_form')));
+      // Bump the orchestration epoch so advance-step jobs enqueued before this retry are
+      // dropped by the worker's epoch guard instead of running against the restarted task.
       await db
         .update(schema.tasks)
         .set({
@@ -694,6 +711,7 @@ taskRoutes.post('/:id/action', async (c) => {
           errorMessage: null,
           // full task restart → fresh auto-resume budget
           allowanceAutoResumeCount: 0,
+          orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
           updatedAt: new Date(),
         })
         .where(eq(schema.tasks.id, id));
@@ -703,6 +721,7 @@ taskRoutes.post('/:id/action', async (c) => {
         backoff: { type: 'exponential', delay: 5000 },
       });
       return c.json({ ok: true, status: 'queued' });
+    }
     default:
       throw new HttpError(400, 'Unknown action');
   }

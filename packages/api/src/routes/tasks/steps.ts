@@ -572,9 +572,21 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       fromIteration: step.iterationCount,
       note: body.note ?? null,
     });
+    // Stamp the epoch (here and on the other recovery actions below) so a task-level retry
+    // that bumps it invalidates this job instead of letting it run against the restarted
+    // task. An UNSTAMPED job is exempt from the worker's epoch guard, which is how a stale
+    // advance survived a retry and re-dispatched a step the restart had moved past. The
+    // form submit / clarify endpoints stay unstamped on purpose: their job carries the
+    // user's just-entered values, and silently dropping that reads as "nothing happened".
     await getTaskQueue().add(
       TASK_JOB_NAMES.ADVANCE_STEP,
-      { taskId: id, userId, stepId, round: step.round } as TaskJobPayload,
+      {
+        taskId: id,
+        userId,
+        stepId,
+        round: step.round,
+        epoch: task.orchestrationEpoch,
+      } as TaskJobPayload,
       {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
@@ -649,7 +661,13 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     await appendTaskEvent(db, id, step.id, 'step.retry_ai', { stepId, note: body.note ?? null });
     await getTaskQueue().add(
       TASK_JOB_NAMES.ADVANCE_STEP,
-      { taskId: id, userId, stepId, round: step.round } as TaskJobPayload,
+      {
+        taskId: id,
+        userId,
+        stepId,
+        round: step.round,
+        epoch: task.orchestrationEpoch,
+      } as TaskJobPayload,
       {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
@@ -713,7 +731,13 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // path a step's own `skipped`/`done` result takes (handleResult → buildRunList).
     await getTaskQueue().add(
       TASK_JOB_NAMES.ADVANCE_STEP,
-      { taskId: id, userId, stepId, round: step.round } as TaskJobPayload,
+      {
+        taskId: id,
+        userId,
+        stepId,
+        round: step.round,
+        epoch: task.orchestrationEpoch,
+      } as TaskJobPayload,
       {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
@@ -809,7 +833,13 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
 
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    columns: { id: true, status: true, ignoreSavedStepClis: true },
+    columns: {
+      id: true,
+      status: true,
+      ignoreSavedStepClis: true,
+      // stamped on the re-advance below so a later task retry can invalidate it
+      orchestrationEpoch: true,
+    },
   });
   if (!task) throw new HttpError(404, 'Task not found');
   if (task.status === 'completed' || task.status === 'cancelled') {
@@ -1064,7 +1094,13 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   if (invalidated) {
     await getTaskQueue().add(
       TASK_JOB_NAMES.ADVANCE_STEP,
-      { taskId: id, userId, stepId, round: step.round } as TaskJobPayload,
+      {
+        taskId: id,
+        userId,
+        stepId,
+        round: step.round,
+        epoch: task.orchestrationEpoch,
+      } as TaskJobPayload,
       {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
