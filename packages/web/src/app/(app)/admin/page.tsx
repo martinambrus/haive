@@ -1090,8 +1090,9 @@ export default function AdminPage() {
             <CardDescription>
               Global style directive appended to every CLI step&apos;s main prompt, controlling how
               terse the model&apos;s PROSE output is. Structured output (JSON, code, diffs, specs)
-              and the reasoning channel are always left exact and untouched. lite = lightest, full =
-              default, ultra = most aggressive. Takes effect within ~30s; persists across restarts.
+              and the reasoning channel are always left exact and untouched. off = inject nothing
+              (for models already terse by default), lite = lightest, full = default, ultra = most
+              aggressive. Takes effect within ~30s; persists across restarts.
             </CardDescription>
           </CardHeader>
           <label className="flex items-center gap-2 text-sm text-neutral-200">
@@ -1101,6 +1102,7 @@ export default function AdminPage() {
               onChange={(e) => void setTerseness(e.target.value)}
               className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm"
             >
+              <option value="off">off</option>
               <option value="lite">lite</option>
               <option value="full">full</option>
               <option value="ultra">ultra</option>

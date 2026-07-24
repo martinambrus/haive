@@ -13,6 +13,7 @@ import {
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   logger,
   parseAllowanceWatchMode,
+  TERSENESS_LEVELS,
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { hashPassword } from '../auth/password.js';
@@ -497,9 +498,9 @@ adminRoutes.put('/config/prompt-caching-1h', async (c) => {
   return c.json({ enabled });
 });
 
-const tersenessSchema = z.object({ level: z.enum(['lite', 'full', 'ultra']) });
+const tersenessSchema = z.object({ level: z.enum(TERSENESS_LEVELS) });
 
-// Global output terseness level (lite | full | ultra; default full). Appended as a
+// Global output terseness level (off | lite | full | ultra; default full). Appended as a
 // prose-only style directive to each CLI step's main prompt — structured output, code,
 // and specs are carved out, and reasoning is untouched. The worker reads it per cli
 // dispatch (~30s config cache); a change needs no redeploy.

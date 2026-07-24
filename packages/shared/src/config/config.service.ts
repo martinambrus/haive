@@ -260,8 +260,10 @@ export const CONFIG_KEYS = {
   RUNTIME_IDLE_REAP_MINUTES: 'config:sandbox:runtimeIdleReapMinutes',
 } as const;
 
-/** Allowed terseness levels for CONFIG_KEYS.TERSENESS_LEVEL (output prose only). */
-export const TERSENESS_LEVELS = ['lite', 'full', 'ultra'] as const;
+/** Allowed terseness levels for CONFIG_KEYS.TERSENESS_LEVEL (output prose only).
+ *  'off' injects no directive at all — for models that are already concise by
+ *  default, where the extra instruction is bulk rather than signal. */
+export const TERSENESS_LEVELS = ['off', 'lite', 'full', 'ultra'] as const;
 export type TersenessLevel = (typeof TERSENESS_LEVELS)[number];
 
 /** Allowed levels for CONFIG_KEYS.ALLOWANCE_WATCH_MODE — how Haive reacts to a task that
