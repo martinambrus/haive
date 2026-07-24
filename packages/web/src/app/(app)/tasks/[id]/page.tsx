@@ -474,8 +474,8 @@ export default function TaskDetailPage() {
   // reads as "nothing happened"). Upstream (done) steps keep their Retry. Uses run_seq,
   // NOT step_index (a static per-workflow-type offset, not run-monotonic when step
   // families interleave — e.g. an env-replicate prelude spliced into a workflow).
-  const frontierRunSeq = useMemo(() => {
-    const active =
+  const frontierStep = useMemo(
+    () =>
       steps.find(
         (s) => s.status === 'running' || s.status === 'waiting_form' || s.status === 'waiting_cli',
       ) ??
@@ -485,20 +485,28 @@ export default function TaskDetailPage() {
       // that a later retry never replayed) rendered its own Retry/Stop/Skip at the bottom of the
       // page, reading as steps waiting for action after the current one.
       steps.find((s) => s.status === 'pending' && s.waitingStartedAt) ??
-      steps.find((s) => s.status === 'failed');
-    return active?.runSeq ?? null;
-  }, [steps]);
+      steps.find((s) => s.status === 'failed') ??
+      null,
+    [steps],
+  );
+  const frontierRunSeq = frontierStep?.runSeq ?? null;
 
-  // First row rendered BELOW the frontier. Everything from there down belongs to an earlier,
-  // longer pass (finished rows plus rows an abandoned round materialized but never ran) and only
-  // re-runs if the workflow walks back to it. Worth marking, because those rows sort after the
-  // active step: a task parked early in the run order (e.g. re-entered at 01c-ddev-env) buried
-  // its live step mid-page under a wall of finished work, which read as "the last step is
-  // inactive but still has buttons".
+  // Where the current pass ends on screen: the card right after the frontier's. Everything below
+  // belongs to an earlier, longer pass (finished rows plus rows an abandoned round materialized
+  // but never ran) and only re-runs if the workflow walks back to it — yet it sorts after the
+  // active step, so a task re-entered early in the run order buried its live step mid-page under
+  // a wall of finished cards.
+  //
+  // Placed by DISPLAY POSITION, not by run_seq: the list sorts by (round, run_seq), so run_seq is
+  // not monotonic down the page and "first row with a higher run_seq" could land ABOVE the active
+  // step — which put the live parked card inside the earlier-pass block on a fix-loop task. Button
+  // suppression still keys on run_seq (below), because a leftover has to lose its buttons wherever
+  // it sorts.
   const firstEarlierPassStepId = useMemo(() => {
-    if (frontierRunSeq == null) return null;
-    return steps.find((s) => s.runSeq != null && s.runSeq > frontierRunSeq)?.id ?? null;
-  }, [steps, frontierRunSeq]);
+    if (!frontierStep) return null;
+    const at = steps.indexOf(frontierStep);
+    return at >= 0 ? (steps[at + 1]?.id ?? null) : null;
+  }, [steps, frontierStep]);
 
   // Auto-scroll to the active step when it changes. For a step that shows a
   // terminal (running / waiting_cli with at least one CLI run) scroll to the
