@@ -856,8 +856,14 @@ const workerDeps: WorkerDeps = {
     await queue.add(CLI_EXEC_JOB_NAMES.INVOKE, payload, opts);
     // Queued-status visibility: if every slot is busy at enqueue, the job will
     // wait — mark the invocation so the UI shows an amber "machine busy" banner.
-    // The handler overwrites this at run-start (handlers.ts started_at write), so
-    // the queued text never leaks into the running (blue) status banner.
+    //
+    // Guarded on started_at IS NULL, because this mark RACES the run itself: it is written after
+    // queue.add, so a job the worker picks up straight away has already stamped its live
+    // "Waiting for AI analysis..." (handlers.ts run-start) and this write would clobber it — a
+    // CLI that was genuinely running then advertised "Queued — machine at capacity", i.e. a task
+    // reading `running` in the listing while its own terminal claimed it was still waiting for a
+    // slot. Only an invocation that has NOT started can be queued, so let the DB decide rather
+    // than assuming the handler wins the race. (Migration 0106 repaired the rows already written.)
     try {
       // The effective number, not the raw setting: at 0 (auto) the cli-exec worker sizes
       // itself from the free host budget, so reading the setting would compare against 0 and
@@ -871,7 +877,12 @@ const workerDeps: WorkerDeps = {
               concurrency === 1 ? '' : 's'
             }). Your run starts automatically when a slot frees.`,
           })
-          .where(eq(schema.cliInvocations.id, payload.invocationId));
+          .where(
+            and(
+              eq(schema.cliInvocations.id, payload.invocationId),
+              isNull(schema.cliInvocations.startedAt),
+            ),
+          );
       }
     } catch (err) {
       logger.warn({ err, invocationId: payload.invocationId }, 'queued-status mark failed');
