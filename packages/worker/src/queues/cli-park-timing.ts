@@ -73,15 +73,20 @@ export async function foldAbandonedPark(
       eq(schema.taskSteps.stepId, stepId),
       eq(schema.taskSteps.round, round),
     )!,
+    { clearMessage: true },
   );
 }
 
-/** One open park marker per task. Called when a step parks: closes any OTHER row of the task
- *  still holding one. Those are loops that vanished without folding — a park's poll chain ends
- *  whenever its advance is skipped or dropped, and a dead loop cannot close its own marker — and
- *  an orphan marker keeps ticking a wait for a step nothing is driving. Safe against the
- *  ping-pong this would have caused before the duplicate-park guard existed: only one loop parks
- *  now, the rival drops itself, so this clears leftovers exactly once. */
+/** One live park per task, marker AND banner. Called on every park tick: closes any OTHER
+ *  pending row of the task still holding a marker or still carrying park copy. Those are loops
+ *  that vanished without folding — a park's poll chain ends whenever its advance is skipped or
+ *  dropped, and a dead loop cannot close its own marker — leaving a wait that ticks for a step
+ *  nothing drives and a "waiting for a free runtime slot" line that renders as a second live
+ *  queue banner. Safe against the ping-pong this would have caused before the duplicate-park
+ *  guard existed: only one loop parks now, the rival drops itself, so leftovers clear once.
+ *
+ *  Scoped to `pending` rows, which hold no durable status_message — a park/queue note is the only
+ *  thing they ever carry (see migration 0102), so clearing it discards nothing. */
 export async function foldOtherTaskParks(
   db: Database,
   taskId: string,
@@ -94,20 +99,41 @@ export async function foldOtherTaskParks(
       ne(schema.taskSteps.id, keepStepRowId),
       eq(schema.taskSteps.status, 'pending'),
     )!,
+    { clearMessage: true, requireMarker: false },
   );
 }
 
-/** The one fold statement both callers share: credit the elapsed park to idle_ms, clear the
- *  marker, and no-op when no marker is set. */
-async function foldPark(db: Database, target: SQL | SQLWrapper): Promise<void> {
+/** The one fold statement every caller shares: credit the elapsed park to idle_ms and clear the
+ *  marker.
+ *
+ *  `requireMarker` (default true) keeps it a no-op unless a park is actually open. Dropping it
+ *  widens the statement to rows that only carry leftover copy; the idle arithmetic stays correct
+ *  for them because Postgres `greatest(0, NULL)` is 0, so a marker-less row is credited nothing.
+ *  The predicate still demands SOMETHING to clear, so a park tick does not rewrite updated_at
+ *  across the task's untouched pending rows every 15s.
+ *
+ *  `clearMessage` also drops the park's display copy. Only for a park that is ENDING with nothing
+ *  about to run the row: the resume path leaves it alone, because there the step is starting and
+ *  its own progress line takes over (step-runner clears it in the same breath), and an
+ *  invocation-start fold must not wipe a live progress line. */
+async function foldPark(
+  db: Database,
+  target: SQL | SQLWrapper,
+  opts?: { clearMessage?: boolean; requireMarker?: boolean },
+): Promise<void> {
+  const hasSomethingToClear =
+    opts?.requireMarker === false
+      ? sql`(${schema.taskSteps.waitingStartedAt} IS NOT NULL OR ${schema.taskSteps.statusMessage} IS NOT NULL)`
+      : sql`${schema.taskSteps.waitingStartedAt} IS NOT NULL`;
   await db
     .update(schema.taskSteps)
     .set({
       idleMs: sql`${schema.taskSteps.idleMs} + greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000))::int`,
       waitingStartedAt: null,
+      ...(opts?.clearMessage ? { statusMessage: null } : {}),
       updatedAt: sql`now()`,
     })
-    .where(and(target, sql`${schema.taskSteps.waitingStartedAt} IS NOT NULL`));
+    .where(and(target, hasSomethingToClear));
 }
 
 /** Boot reconcile only. A worker that died mid-park leaves a waiting_cli step in one of two

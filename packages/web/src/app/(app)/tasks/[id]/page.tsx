@@ -489,6 +489,17 @@ export default function TaskDetailPage() {
     return active?.runSeq ?? null;
   }, [steps]);
 
+  // First row rendered BELOW the frontier. Everything from there down belongs to an earlier,
+  // longer pass (finished rows plus rows an abandoned round materialized but never ran) and only
+  // re-runs if the workflow walks back to it. Worth marking, because those rows sort after the
+  // active step: a task parked early in the run order (e.g. re-entered at 01c-ddev-env) buried
+  // its live step mid-page under a wall of finished work, which read as "the last step is
+  // inactive but still has buttons".
+  const firstEarlierPassStepId = useMemo(() => {
+    if (frontierRunSeq == null) return null;
+    return steps.find((s) => s.runSeq != null && s.runSeq > frontierRunSeq)?.id ?? null;
+  }, [steps, frontierRunSeq]);
+
   // Auto-scroll to the active step when it changes. For a step that shows a
   // terminal (running / waiting_cli with at least one CLI run) scroll to the
   // END of the last terminal so its output is fully in view, rather than the
@@ -1257,6 +1268,13 @@ export default function TaskDetailPage() {
               frontierRunSeq != null && step.runSeq != null && step.runSeq > frontierRunSeq;
             return (
               <div key={step.id} data-step-id={step.id}>
+                {step.id === firstEarlierPassStepId && (
+                  <div className="mb-2 mt-5 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-neutral-500">
+                    <span className="h-px flex-1 bg-neutral-700/60" />
+                    from an earlier pass — re-runs when the workflow reaches it
+                    <span className="h-px flex-1 bg-neutral-700/60" />
+                  </div>
+                )}
                 {loopHeader && (
                   <div className="mb-2 mt-5 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-amber-400/80">
                     <span className="h-px flex-1 bg-amber-400/20" />
@@ -2986,11 +3004,17 @@ function StepCardImpl({
           statusMessage={step.statusMessage}
         />
       )}
-      {step.status === 'pending' && step.statusMessage && (
+      {step.status === 'pending' && step.waitingStartedAt && step.statusMessage && !taskEnded && (
         // Runtime-parked: the step is queued for a runtime slot. It may have prior invocations
         // from an interrupted run — their terminals render collapsed above (a pending step does
         // not auto-expand), so this prominent amber "queued" panel is the current signal and the
         // task reads as waiting-in-line, not a stuck blank you have to scroll up to explain.
+        //
+        // Gated on the wait MARKER, not on the message: status_message is display copy that
+        // outlives the park (a loop whose chain ended leaves its last line behind), so keying on
+        // it alone showed a second live-looking "waiting for a slot" banner on a step nothing was
+        // driving — two amber banners on one task. The marker is the structural signal, and a
+        // terminal task can hold one too, hence !taskEnded.
         <div className="flex items-center gap-2 rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
           {step.statusMessage}

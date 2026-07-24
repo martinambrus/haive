@@ -1630,6 +1630,19 @@ async function handleAdvanceStep(
           .update(schema.taskSteps)
           .set({ statusMessage: parkMessage, updatedAt: new Date() })
           .where(eq(schema.taskSteps.id, row.id));
+        // Re-assert the pointer if it drifted while this step stayed parked. The stamp below runs
+        // on the FIRST park only, so a pointer left addressing some other step (a `done` row, say
+        // — nothing re-points it back) would keep deriveSlotWait from finding this park at all and
+        // the queued badge would silently vanish. Guarded, so a matching pointer writes nothing.
+        if (payload.stepId !== ctx.currentStepId || round !== ctx.currentRound) {
+          await markTaskRunningWithStep(
+            db,
+            ctx.taskId,
+            payload.stepId,
+            computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
+            round,
+          );
+        }
       } else {
         // First park: re-queue the step to a clean PENDING state, not just a message. A step
         // parked after an interrupted run is still `running` with an open started_at, which
