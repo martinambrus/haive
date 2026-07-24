@@ -18,7 +18,12 @@ if ! pgrep -x Xvfb >/dev/null 2>&1; then
 fi
 
 if ! pgrep -x x11vnc >/dev/null 2>&1; then
-  x11vnc -display "$DISPLAY_NUM" -rfbport "$VNC_PORT" -forever -shared -nopw \
+  # -nomodtweak: keep the client-held modifier state instead of synthesizing it
+  # per keysym. Default -modtweak releases a held Shift to produce the unshifted
+  # XK_Tab, so Shift+Tab reaches Chromium as plain Tab (focus jumps forward, not
+  # back). -nomodtweak presses the keycode under the live Shift, so Shift+Tab,
+  # capitals and shifted symbols all arrive correctly. (-xkb does NOT fix this.)
+  x11vnc -display "$DISPLAY_NUM" -rfbport "$VNC_PORT" -forever -shared -nopw -nomodtweak \
     -quiet -bg -o /tmp/x11vnc.log >/dev/null 2>&1
 fi
 
