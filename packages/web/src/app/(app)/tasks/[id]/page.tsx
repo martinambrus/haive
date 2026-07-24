@@ -474,39 +474,20 @@ export default function TaskDetailPage() {
   // reads as "nothing happened"). Upstream (done) steps keep their Retry. Uses run_seq,
   // NOT step_index (a static per-workflow-type offset, not run-monotonic when step
   // families interleave — e.g. an env-replicate prelude spliced into a workflow).
-  const frontierStep = useMemo(
-    () =>
+  const frontierRunSeq = useMemo(() => {
+    const active =
       steps.find(
         (s) => s.status === 'running' || s.status === 'waiting_form' || s.status === 'waiting_cli',
       ) ??
-      // A step queued for a runtime slot is the frontier too. The park deliberately re-queues
-      // the row to `pending` (+ a wait marker), which matched none of the statuses above — so a
-      // parked task had NO frontier, and every leftover row from a longer earlier run (rounds
-      // that a later retry never replayed) rendered its own Retry/Stop/Skip at the bottom of the
-      // page, reading as steps waiting for action after the current one.
+      // A step queued for a runtime slot is the frontier too: the park re-queues its row to
+      // `pending` (+ a wait marker), so it matches none of the live statuses above even though the
+      // task IS on it. Without this a parked task had no frontier at all, and the steps after it
+      // kept offering their own Retry/Stop/Skip — the same buttons a running task already
+      // suppresses on the steps it has not reached yet.
       steps.find((s) => s.status === 'pending' && s.waitingStartedAt) ??
-      steps.find((s) => s.status === 'failed') ??
-      null,
-    [steps],
-  );
-  const frontierRunSeq = frontierStep?.runSeq ?? null;
-
-  // Where the current pass ends on screen: the card right after the frontier's. Everything below
-  // belongs to an earlier, longer pass (finished rows plus rows an abandoned round materialized
-  // but never ran) and only re-runs if the workflow walks back to it — yet it sorts after the
-  // active step, so a task re-entered early in the run order buried its live step mid-page under
-  // a wall of finished cards.
-  //
-  // Placed by DISPLAY POSITION, not by run_seq: the list sorts by (round, run_seq), so run_seq is
-  // not monotonic down the page and "first row with a higher run_seq" could land ABOVE the active
-  // step — which put the live parked card inside the earlier-pass block on a fix-loop task. Button
-  // suppression still keys on run_seq (below), because a leftover has to lose its buttons wherever
-  // it sorts.
-  const firstEarlierPassStepId = useMemo(() => {
-    if (!frontierStep) return null;
-    const at = steps.indexOf(frontierStep);
-    return at >= 0 ? (steps[at + 1]?.id ?? null) : null;
-  }, [steps, frontierStep]);
+      steps.find((s) => s.status === 'failed');
+    return active?.runSeq ?? null;
+  }, [steps]);
 
   // Auto-scroll to the active step when it changes. For a step that shows a
   // terminal (running / waiting_cli with at least one CLI run) scroll to the
@@ -1276,13 +1257,6 @@ export default function TaskDetailPage() {
               frontierRunSeq != null && step.runSeq != null && step.runSeq > frontierRunSeq;
             return (
               <div key={step.id} data-step-id={step.id}>
-                {step.id === firstEarlierPassStepId && (
-                  <div className="mb-2 mt-5 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-neutral-500">
-                    <span className="h-px flex-1 bg-neutral-700/60" />
-                    from an earlier pass — re-runs when the workflow reaches it
-                    <span className="h-px flex-1 bg-neutral-700/60" />
-                  </div>
-                )}
                 {loopHeader && (
                   <div className="mb-2 mt-5 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-amber-400/80">
                     <span className="h-px flex-1 bg-amber-400/20" />
