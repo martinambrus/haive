@@ -78,6 +78,22 @@ export default function NotificationsPage() {
     }
   }
 
+  async function toggleUsageAlert(enabled: boolean) {
+    if (!settings) return;
+    setError(null);
+    setSettings({ ...settings, usageAlertEnabled: enabled });
+    try {
+      await api.put('/user-settings/notifications', {
+        soundEnabled: settings.soundEnabled,
+        usageAlertEnabled: enabled,
+      });
+      notifySettingsChanged();
+    } catch (err) {
+      setSettings({ ...settings, usageAlertEnabled: !enabled });
+      setError((err as ApiError).message ?? 'Failed to save');
+    }
+  }
+
   async function handleUpload(file: File) {
     setBusy(true);
     setError(null);
@@ -248,6 +264,28 @@ export default function NotificationsPage() {
                 unfocused.
               </p>
             </div>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Subscription usage alerts</CardTitle>
+              <CardDescription>
+                A heads-up when a CLI subscription window (5-hour, weekly or daily) is nearly used
+                up, so a long task does not stop on a rate limit unannounced. Silent and
+                informational: a toast while you are here, a browser notification while you are not.
+                Fires once per provider per window until that window resets. Your administrator sets
+                the percentage.
+              </CardDescription>
+            </CardHeader>
+            <label className="flex items-center gap-2 text-sm text-neutral-100">
+              <input
+                type="checkbox"
+                checked={settings.usageAlertEnabled}
+                onChange={(e) => void toggleUsageAlert(e.target.checked)}
+                className="h-4 w-4 rounded border-neutral-700 bg-neutral-950"
+              />
+              Warn me when a CLI subscription is nearly used up
+            </label>
           </Card>
         </>
       )}

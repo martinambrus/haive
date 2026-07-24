@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { UsageWindowSnapshot } from '@haive/shared';
+import { CONFIG_KEYS, configService, type UsageWindowSnapshot } from '@haive/shared';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import type { AppEnv } from '../context.js';
@@ -43,11 +43,33 @@ function toSnapshot(row: SnapshotRow, now: number): UsageWindowSnapshot {
 // chip picks the row matching the active step's provider; rows are written by the
 // worker's gentle poller. Returns all rows (incl. status='error'/stale) and lets
 // the chip decide what to show.
+//
+// `alert` rides along so the notifier (NotificationProvider's usage channel) resolves
+// the depletion-alert config in the same fetch it already makes for the numbers. The
+// three switches are AND-ed server-side: the admin global, the usage-window global
+// (without the poller every snapshot goes stale and alerting off a frozen number is
+// worse than staying quiet), and this user's own opt-out.
 usageWindowRoutes.get('/', async (c) => {
   const userId = c.get('userId');
-  const rows = await getDb().query.usageWindowSnapshots.findMany({
+  const db = getDb();
+  const rows = await db.query.usageWindowSnapshots.findMany({
     where: eq(schema.usageWindowSnapshots.userId, userId),
   });
+  const [alertEnabled, windowEnabled, thresholdPct, prefs] = await Promise.all([
+    configService.getBoolean(CONFIG_KEYS.USAGE_ALERT_ENABLED, true),
+    configService.getBoolean(CONFIG_KEYS.USAGE_WINDOW_ENABLED, true),
+    configService.getNumber(CONFIG_KEYS.USAGE_ALERT_THRESHOLD_PCT, 10),
+    db.query.userNotificationSettings.findFirst({
+      where: eq(schema.userNotificationSettings.userId, userId),
+      columns: { usageAlertEnabled: true },
+    }),
+  ]);
   const now = Date.now();
-  return c.json({ snapshots: rows.map((r) => toSnapshot(r, now)) });
+  return c.json({
+    snapshots: rows.map((r) => toSnapshot(r, now)),
+    alert: {
+      enabled: alertEnabled && windowEnabled && (prefs?.usageAlertEnabled ?? true),
+      thresholdPct,
+    },
+  });
 });

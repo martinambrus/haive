@@ -39,6 +39,9 @@ export default function AdminPage() {
   const [savingSoftTimeout, setSavingSoftTimeout] = useState(false);
   const [usageWindowEnabled, setUsageWindowEnabled] = useState<boolean | null>(null);
   const [savingUsageWindow, setSavingUsageWindow] = useState(false);
+  const [usageAlertEnabled, setUsageAlertEnabled] = useState<boolean | null>(null);
+  const [usageAlertThresholdInput, setUsageAlertThresholdInput] = useState('');
+  const [savingUsageAlert, setSavingUsageAlert] = useState(false);
   const [ideEnabled, setIdeEnabled] = useState<boolean | null>(null);
   const [savingIde, setSavingIde] = useState(false);
   const [debugModeEnabled, setDebugModeEnabled] = useState<boolean | null>(null);
@@ -110,6 +113,7 @@ export default function AdminPage() {
         reviewDistillData,
         reviewRefuteData,
         usageWindowData,
+        usageAlertData,
         prWorkflowData,
         runtimeLimitsData,
       ] = await Promise.all([
@@ -133,6 +137,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/review-fanout-distill'),
         api.get<{ enabled: boolean }>('/admin/config/review-refute'),
         api.get<{ enabled: boolean }>('/admin/config/usage-window'),
+        api.get<{ enabled: boolean; thresholdPct: number }>('/admin/config/usage-alert'),
         api.get<{ enabled: boolean }>('/admin/config/pr-workflow'),
         api.get<{
           enabled: boolean;
@@ -163,6 +168,8 @@ export default function AdminPage() {
       setReviewDistillEnabled(reviewDistillData.enabled);
       setReviewRefuteEnabled(reviewRefuteData.enabled);
       setUsageWindowEnabled(usageWindowData.enabled);
+      setUsageAlertEnabled(usageAlertData.enabled);
+      setUsageAlertThresholdInput(String(usageAlertData.thresholdPct));
       setMaxPerTask(perTaskData.maxAgentsPerTask);
       setMaxPerTaskInput(String(perTaskData.maxAgentsPerTask));
       setAttachmentMaxBytes(attachmentData.maxBytes);
@@ -382,6 +389,30 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update soft timeout');
     } finally {
       setSavingSoftTimeout(false);
+    }
+  }
+
+  // Enabled and threshold share one endpoint, so the toggle re-sends the current
+  // threshold and the Save button re-sends the current enabled flag.
+  async function saveUsageAlert(enabled: boolean, thresholdRaw: string) {
+    const thresholdPct = Number.parseInt(thresholdRaw, 10);
+    if (!Number.isFinite(thresholdPct) || thresholdPct < 1 || thresholdPct > 50) {
+      setError('Usage alert threshold must be between 1 and 50 percent.');
+      return;
+    }
+    setSavingUsageAlert(true);
+    try {
+      const result = await api.put<{ enabled: boolean; thresholdPct: number }>(
+        '/admin/config/usage-alert',
+        { enabled, thresholdPct },
+      );
+      setUsageAlertEnabled(result.enabled);
+      setUsageAlertThresholdInput(String(result.thresholdPct));
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update usage alerts');
+    } finally {
+      setSavingUsageAlert(false);
     }
   }
 
@@ -974,6 +1005,57 @@ export default function AdminPage() {
             {usageWindowEnabled ? 'Enabled' : 'Disabled'}
             {savingUsageWindow && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
+        </Card>
+      )}
+
+      {usageAlertEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Subscription usage alerts</CardTitle>
+            <CardDescription>
+              Warns each user (toast in-app, browser notification when the tab is unfocused) once
+              per provider per usage window as soon as that window&apos;s remaining allowance falls
+              to or below the threshold, so a long task does not stop on a rate limit unannounced.
+              Silent and informational &mdash; the notification is not clickable. Needs the usage
+              display above to stay on: the alerts read the same poller-written snapshots, and a
+              stale reading never fires. Users can opt out individually under Settings &rarr;
+              Notifications. Takes effect within ~30s and persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <div className="flex flex-col gap-3">
+            <label className="flex items-center gap-2 text-sm text-neutral-200">
+              <input
+                type="checkbox"
+                checked={usageAlertEnabled}
+                disabled={savingUsageAlert}
+                onChange={(e) => void saveUsageAlert(e.target.checked, usageAlertThresholdInput)}
+                className="h-4 w-4"
+              />
+              {usageAlertEnabled ? 'Enabled' : 'Disabled'}
+              {savingUsageAlert && <span className="text-xs text-neutral-500">saving…</span>}
+            </label>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-2 text-sm text-neutral-300">
+                Alert when remaining drops to or below (%)
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={usageAlertThresholdInput}
+                  onChange={(e) => setUsageAlertThresholdInput(e.target.value)}
+                  className="w-24 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+                />
+              </label>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={savingUsageAlert}
+                onClick={() => void saveUsageAlert(usageAlertEnabled, usageAlertThresholdInput)}
+              >
+                {savingUsageAlert ? 'Saving...' : 'Save'}
+              </Button>
+            </div>
+          </div>
         </Card>
       )}
 

@@ -285,7 +285,13 @@ export interface FilesystemListing {
 }
 
 export type CliProviderName =
-  'claude-code' | 'codex' | 'gemini' | 'amp' | 'zai' | 'antigravity' | 'ollama';
+  | 'claude-code'
+  | 'codex'
+  | 'gemini'
+  | 'amp'
+  | 'zai'
+  | 'antigravity'
+  | 'ollama';
 
 export type CliAuthMode = 'subscription' | 'api_key';
 export type CliSandboxBuildStatus = 'idle' | 'building' | 'ready' | 'failed';
@@ -496,10 +502,19 @@ export type TaskStatus =
   | 'cancelled';
 
 export type StepStatus =
-  'pending' | 'running' | 'waiting_form' | 'waiting_cli' | 'done' | 'failed' | 'skipped';
+  | 'pending'
+  | 'running'
+  | 'waiting_form'
+  | 'waiting_cli'
+  | 'done'
+  | 'failed'
+  | 'skipped';
 
 export interface NotificationSettings {
   soundEnabled: boolean;
+  /** Per-user opt-out for subscription usage-depletion alerts. The global enable and
+   *  the remaining-% threshold are admin config; this only removes the user from them. */
+  usageAlertEnabled: boolean;
   hasCustomSound: boolean;
   soundFilename: string | null;
 }
@@ -804,7 +819,11 @@ export interface GlobalKbEntry {
 }
 
 export type CliInvocationMode =
-  'cli' | 'agent_mining' | 'dag_parallel' | 'subagent_native' | 'subagent_sequential';
+  | 'cli'
+  | 'agent_mining'
+  | 'dag_parallel'
+  | 'subagent_native'
+  | 'subagent_sequential';
 
 export interface CliInvocationSummary {
   id: string;

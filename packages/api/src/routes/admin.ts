@@ -450,6 +450,32 @@ adminRoutes.put('/config/usage-window', async (c) => {
   return c.json({ enabled });
 });
 
+const usageAlertSchema = z.object({
+  enabled: z.boolean(),
+  // REMAINING percent, not consumed. 1..50: at 0 the alert could never fire, and past
+  // half a window it stops being a warning. Integer because configService.getNumber
+  // parses with parseInt.
+  thresholdPct: z.number().int().min(1).max(50),
+});
+
+// Subscription usage-depletion alerts: the global enable plus the remaining-% threshold
+// at which the web notifier warns (once per provider per window per reset). The per-user
+// opt-out lives on user_notification_settings; GET /usage-window folds all three together
+// so the notifier needs a single fetch. Read within the ~30s config cache; no redeploy.
+adminRoutes.get('/config/usage-alert', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.USAGE_ALERT_ENABLED, true);
+  const thresholdPct = await configService.getNumber(CONFIG_KEYS.USAGE_ALERT_THRESHOLD_PCT, 10);
+  return c.json({ enabled, thresholdPct });
+});
+
+adminRoutes.put('/config/usage-alert', async (c) => {
+  const { enabled, thresholdPct } = usageAlertSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.USAGE_ALERT_ENABLED, enabled ? 'true' : 'false');
+  await configService.set(CONFIG_KEYS.USAGE_ALERT_THRESHOLD_PCT, String(thresholdPct));
+  log.info({ enabled, thresholdPct }, 'usage alert config updated');
+  return c.json({ enabled, thresholdPct });
+});
+
 const promptCaching1hSchema = z.object({ enabled: z.boolean() });
 
 // Global 1-hour prompt-cache TTL opt-in (default OFF). When ON, claude-family cli-exec

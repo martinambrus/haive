@@ -118,6 +118,21 @@ export const CONFIG_KEYS = {
   // (~30s config cache).
   USAGE_WINDOW_ENABLED: 'config:usage:windowEnabled',
 
+  // Global kill-switch for subscription usage-depletion alerts. When 'true' (default),
+  // the web notifier warns (toast + OS notification) once per provider per window per
+  // reset as soon as that window's REMAINING allowance falls to or below
+  // USAGE_ALERT_THRESHOLD_PCT. Independent of USAGE_WINDOW_ENABLED, but useless
+  // without it: the alerts read the same poller-written snapshots the chip does, so a
+  // stopped poller means stale rows and no alerts either way.
+  USAGE_ALERT_ENABLED: 'config:usage:alertEnabled',
+  // Remaining-percent threshold at which a usage window alerts (default 10, matching
+  // the header chip's red band). REMAINING, not consumed — 10 means "warn when 10% is
+  // left", not "warn after 10% is spent". An integer, not a fraction, because
+  // configService.getNumber parses with parseInt (0.1 would read as 0). Clamped to
+  // 1..50 by the admin endpoint: 0 could never fire and anything past half the window
+  // stops being a warning.
+  USAGE_ALERT_THRESHOLD_PCT: 'config:usage:alertThresholdPct',
+
   // Global kill-switch for the in-task browser IDE (code-server Editor tab).
   // When 'true' (default), the web exposes the Editor tab and the api/worker
   // lazily launch a per-task code-server container. Set 'false' to hide the
@@ -268,6 +283,8 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.CLI_SOFT_TIMEOUT_ENABLED]: 'true',
   [CONFIG_KEYS.CLI_SOFT_TIMEOUT_PERCENT]: '80',
   [CONFIG_KEYS.USAGE_WINDOW_ENABLED]: 'true',
+  [CONFIG_KEYS.USAGE_ALERT_ENABLED]: 'true',
+  [CONFIG_KEYS.USAGE_ALERT_THRESHOLD_PCT]: '10',
   [CONFIG_KEYS.IDE_ENABLED]: 'true',
   [CONFIG_KEYS.DEBUG_MODE_ENABLED]: 'true',
   [CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED]: 'true',

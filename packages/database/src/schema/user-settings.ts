@@ -12,6 +12,9 @@ export const userNotificationSettings = pgTable('user_notification_settings', {
     .primaryKey()
     .references(() => users.id, { onDelete: 'cascade' }),
   soundEnabled: boolean('sound_enabled').notNull().default(true),
+  /** Per-user opt-out for subscription usage-depletion alerts (the global
+   *  enable + threshold live in config as USAGE_ALERT_*). Default on. */
+  usageAlertEnabled: boolean('usage_alert_enabled').notNull().default(true),
   soundPath: text('sound_path'),
   soundMime: varchar('sound_mime', { length: 64 }),
   soundFilename: varchar('sound_filename', { length: 255 }),

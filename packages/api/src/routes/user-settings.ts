@@ -228,6 +228,7 @@ userSettingsRoutes.get('/notifications', async (c) => {
   });
   return c.json({
     soundEnabled: row?.soundEnabled ?? true,
+    usageAlertEnabled: row?.usageAlertEnabled ?? true,
     hasCustomSound: Boolean(row?.soundPath),
     soundFilename: row?.soundFilename ?? null,
   });
@@ -237,12 +238,16 @@ userSettingsRoutes.put('/notifications', async (c) => {
   const userId = c.get('userId');
   const body = notificationSettingsUpdateSchema.parse(await c.req.json());
   const db = getDb();
+  // usageAlertEnabled is optional in the schema: a PUT that omits it must leave the
+  // stored preference alone rather than resetting it to the column default.
+  const usageAlert =
+    body.usageAlertEnabled === undefined ? {} : { usageAlertEnabled: body.usageAlertEnabled };
   await db
     .insert(schema.userNotificationSettings)
-    .values({ userId, soundEnabled: body.soundEnabled })
+    .values({ userId, soundEnabled: body.soundEnabled, ...usageAlert })
     .onConflictDoUpdate({
       target: schema.userNotificationSettings.userId,
-      set: { soundEnabled: body.soundEnabled, updatedAt: new Date() },
+      set: { soundEnabled: body.soundEnabled, ...usageAlert, updatedAt: new Date() },
     });
   return c.json({ ok: true });
 });
@@ -299,10 +304,15 @@ userSettingsRoutes.post('/notifications/sound', async (c) => {
 
   const row = await db.query.userNotificationSettings.findFirst({
     where: eq(schema.userNotificationSettings.userId, userId),
-    columns: { soundEnabled: true },
+    columns: { soundEnabled: true, usageAlertEnabled: true },
   });
   return c.json(
-    { soundEnabled: row?.soundEnabled ?? true, hasCustomSound: true, soundFilename },
+    {
+      soundEnabled: row?.soundEnabled ?? true,
+      usageAlertEnabled: row?.usageAlertEnabled ?? true,
+      hasCustomSound: true,
+      soundFilename,
+    },
     201,
   );
 });

@@ -2,7 +2,15 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import { api, API_BASE_URL, type NotificationSettings, type Task } from '@/lib/api-client';
+import {
+  api,
+  API_BASE_URL,
+  type CliProviderName,
+  type NotificationSettings,
+  type Task,
+  type UsageWindowSnapshot,
+} from '@/lib/api-client';
+import { CLI_USAGE_LABEL, resetSuffix } from '@/lib/usage-format';
 import { playChime } from './chime';
 import { ToastStack, type AttentionToast } from './toast-stack';
 import {
@@ -14,8 +22,13 @@ import {
   snapshotAutoResumed,
   type TaskTransitionEvent,
 } from './transitions';
+import { WINDOW_LABEL, detectUsageAlerts, usageEpisodeKey, type UsageAlert } from './usage-alerts';
 
 const POLL_MS = 5_000;
+/** The usage channel runs on its own, much slower cadence: the worker's poller only
+ *  refreshes a snapshot every ~5 min, so polling it at the 5s task rate would be 60
+ *  wasted requests per reading. */
+const USAGE_POLL_MS = 60_000;
 const SETTINGS_CHANGED_EVENT = 'haive:notification-settings-changed';
 
 const SEEN_PREFIX = 'haive:notif-seen:';
@@ -45,19 +58,26 @@ function seenKey(e: TaskTransitionEvent): string {
   return `${SEEN_PREFIX}${e.taskId}:${e.status}:${e.currentStepId ?? ''}:${e.currentWaitStartedAt ?? ''}`;
 }
 
-function hasSeen(e: TaskTransitionEvent): boolean {
+/** Persistent seen-store key for one usage-depletion episode. Shares SEEN_PREFIX so
+ *  pruneSeen()'s TTL sweep covers it with no change to the prune loop. */
+function usageSeenKey(alert: UsageAlert): string {
+  return `${SEEN_PREFIX}${usageEpisodeKey(alert)}`;
+}
+
+/** Both channels key their own episodes, so these take the finished key string. */
+function hasSeen(key: string): boolean {
   if (typeof window === 'undefined') return false;
   try {
-    return window.localStorage.getItem(seenKey(e)) !== null;
+    return window.localStorage.getItem(key) !== null;
   } catch {
     return false;
   }
 }
 
-function markSeen(e: TaskTransitionEvent): void {
+function markSeen(key: string): void {
   if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(seenKey(e), String(Date.now()));
+    window.localStorage.setItem(key, String(Date.now()));
   } catch {
     // storage disabled — dedupe degrades to per-poll (fires on each transition)
   }
@@ -298,7 +318,9 @@ export function NotificationProvider() {
     const timer = setInterval(() => {
       setToasts((prev) => {
         if (prev.length === 0) return prev;
-        const next = prev.filter((t) => !isViewedElsewhere(t.taskId));
+        // Toasts with no task (usage_low) have nothing to "open", so no amount of
+        // viewing makes them redundant — they survive until dismissed.
+        const next = prev.filter((t) => !t.taskId || !isViewedElsewhere(t.taskId));
         return next.length === prev.length ? prev : next;
       });
     }, VIEWING_HEARTBEAT_MS);
@@ -316,7 +338,8 @@ export function NotificationProvider() {
   const handleEvent = useCallback(
     (e: TaskTransitionEvent) => {
       // Already surfaced/handled (in any tab or a prior session) — never repeat.
-      if (hasSeen(e)) return;
+      const key = seenKey(e);
+      if (hasSeen(key)) return;
 
       // '/tasks/new' yields 'new', which never equals a task uuid — safe.
       const m = /^\/tasks\/([^/]+)$/.exec(pathRef.current ?? '');
@@ -334,7 +357,7 @@ export function NotificationProvider() {
       // so the two stay consistent.
       const viewing = isCurrent && document.visibilityState === 'visible' && document.hasFocus();
       if (viewing) {
-        markSeen(e); // looking at it now → don't nag for this episode anywhere
+        markSeen(key); // looking at it now → don't nag for this episode anywhere
         return;
       }
 
@@ -344,7 +367,7 @@ export function NotificationProvider() {
       // on the wrong route alerts for a task the user is already reading in another
       // tab, just because it processed the event before the viewing tab did.
       if (isViewedElsewhere(e.taskId)) {
-        markSeen(e); // read in another tab → suppress everywhere for this episode
+        markSeen(key); // read in another tab → suppress everywhere for this episode
         return;
       }
 
@@ -382,7 +405,7 @@ export function NotificationProvider() {
           })
           .catch(() => {});
       }
-      markSeen(e); // surfaced once — other tabs/sessions skip it from here on
+      markSeen(key); // surfaced once — other tabs/sessions skip it from here on
     },
     [playSound],
   );
@@ -418,10 +441,84 @@ export function NotificationProvider() {
     };
   }, [handleEvent]);
 
+  /** Surface one subscription-depletion episode: an informational toast plus, when the
+   *  window is unfocused, an OS notification. Deliberately silent (this is a heads-up,
+   *  not something waiting on the user) and deliberately inert — no `data.url`, so
+   *  sw.js's notificationclick early-returns and a click just dismisses it. */
+  const handleUsageAlert = useCallback((alert: UsageAlert) => {
+    const key = usageSeenKey(alert);
+    if (hasSeen(key)) return;
+
+    const label = CLI_USAGE_LABEL[alert.providerName as CliProviderName] ?? alert.providerName;
+    const headline = `${label} usage low`;
+    const detail = `${alert.remainingPct}% left on the ${WINDOW_LABEL[alert.windowKey]} window${resetSuffix(
+      alert.resetsAt,
+      Date.now(),
+    )}`;
+
+    setToasts((prev) => [
+      ...prev.filter((t) => t.key !== key),
+      { key, title: detail, status: 'usage_low', message: headline },
+    ]);
+
+    if (
+      typeof Notification !== 'undefined' &&
+      Notification.permission === 'granted' &&
+      !document.hasFocus() &&
+      swRegRef.current
+    ) {
+      // The tag collapses the duplicate a sibling tab may fire in the same tick — both
+      // tabs can read the seen-store before either writes it.
+      void swRegRef.current
+        .showNotification(`Haive — ${headline}`, {
+          body: detail,
+          tag: `usage:${alert.providerId}:${alert.windowKey}`,
+        })
+        .catch(() => {});
+    }
+    markSeen(key);
+  }, []);
+
+  // Usage-depletion channel. Independent of the task poll: its own (slower) cadence,
+  // its own endpoint, its own episode keys. The server AND-s the admin global, the
+  // usage-window global and this user's opt-out into `alert.enabled`, so one fetch
+  // answers both "should I warn?" and "at what threshold?".
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const data = await api.get<{
+          snapshots: UsageWindowSnapshot[];
+          alert?: { enabled: boolean; thresholdPct: number };
+        }>('/usage-window');
+        if (cancelled || !data.alert?.enabled) return;
+        const alerts = detectUsageAlerts(data.snapshots, {
+          thresholdPct: data.alert.thresholdPct,
+          now: Date.now(),
+        });
+        for (const alert of alerts) handleUsageAlert(alert);
+      } catch {
+        // offline or auth refresh in flight — try again next tick
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), USAGE_POLL_MS);
+    // Re-poll when the user flips their opt-out on the settings page, so re-enabling
+    // takes effect at once instead of up to a minute later.
+    const onChanged = () => void poll();
+    window.addEventListener(SETTINGS_CHANGED_EVENT, onChanged);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      window.removeEventListener(SETTINGS_CHANGED_EVENT, onChanged);
+    };
+  }, [handleUsageAlert]);
+
   return (
     <ToastStack
       toasts={toasts}
       onOpen={(toast) => {
+        if (!toast.taskId) return; // usage toasts are informational — nowhere to go
         setToasts((prev) => prev.filter((t) => t.key !== toast.key));
         router.push(`/tasks/${toast.taskId}`);
       }}

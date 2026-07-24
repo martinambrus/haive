@@ -46,10 +46,14 @@ export type GitIdentityResponse = z.infer<typeof gitIdentityResponseSchema>;
 
 export const notificationSettingsUpdateSchema = z.object({
   soundEnabled: z.boolean(),
+  // Optional so a caller can PUT { soundEnabled } alone; the route writes this column
+  // only when the field is present, leaving the other preference untouched.
+  usageAlertEnabled: z.boolean().optional(),
 });
 
 export const notificationSettingsResponseSchema = z.object({
   soundEnabled: z.boolean(),
+  usageAlertEnabled: z.boolean(),
   hasCustomSound: z.boolean(),
   soundFilename: z.string().nullable(),
 });
