@@ -12,6 +12,7 @@ import {
   TASK_JOB_NAMES,
   ideSessionKey,
   logger,
+  parseAllowanceWatchMode,
   type CliExecJobPayload,
   type RepoRagCleanupPayload,
   type RepoResourceCleanupPayload,
@@ -55,7 +56,7 @@ import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-co
 import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
-import { constrainingResetAt } from '../usage-window/allowance-watch.js';
+import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
 import {
   recordFixLoopRequest,
@@ -1139,18 +1140,25 @@ async function handleResult(
           })
           .where(eq(schema.taskSteps.id, result.row.id));
 
-        // Allowance-back watch (notify-only): if the fatal reason is a provider rate-limit/
-        // quota AND we can read that provider's usage window, arm a SILENT watch on the task
-        // so the usage poller can notify the user once the allowance replenishes. Capture the
-        // window the task is blocked until (latest reset over the exhausted windows) so the
-        // poller can fire on the authoritative vendor reset, not just a %-drop. No event/
-        // notification here — the task-failed notification already told the user it stopped.
+        // Provider-outage watch: arm a SILENT watch on the task so the usage poller can act
+        // once the provider recovers. No event/notification here — the task-failed
+        // notification already told the user it stopped. Gated by the global watch mode:
+        // 'off' means the admin wants no monitoring at all, so nothing is armed and the
+        // poller has nothing to find (the errorHint banner above still writes either way).
+        const watchMode = parseAllowanceWatchMode(
+          await configService.get(CONFIG_KEYS.ALLOWANCE_WATCH_MODE),
+        );
+        const armedAt = new Date();
         if (
+          watchMode !== 'off' &&
           outage.reason === 'rate_limit' &&
           outage.cliProviderId &&
           providerName &&
           providerName in USAGE_PROVIDERS
         ) {
+          // Rate limit: capture the window the task is blocked until (latest reset over the
+          // exhausted windows) so the poller can fire on the authoritative vendor reset,
+          // not just a %-drop.
           const [snap] = await db
             .select({
               fiveHourPct: schema.usageWindowSnapshots.fiveHourPct,
@@ -1168,9 +1176,11 @@ async function handleResult(
             .update(schema.tasks)
             .set({
               awaitingAllowanceProviderId: outage.cliProviderId,
+              awaitingProviderReason: 'rate_limit',
+              awaitingProviderSince: armedAt,
               allowanceResetAt: resetAt,
               allowanceReplenishedAt: null,
-              updatedAt: new Date(),
+              updatedAt: armedAt,
             })
             .where(eq(schema.tasks.id, ctx.taskId));
           // Refresh the snapshot now, and wake the poller AT the reset so detection isn't up
@@ -1179,6 +1189,28 @@ async function handleResult(
           if (resetAt && resetAt.getTime() > Date.now()) {
             await enqueueUsagePollTick({ delayMs: resetAt.getTime() - Date.now() });
           }
+        } else if (
+          watchMode !== 'off' &&
+          outage.reason === 'server_error' &&
+          outage.cliProviderId
+        ) {
+          // Server error: no quota meter to read, so recovery is judged by serverErrorVerdict
+          // (cool-off, plus a post-failure OK usage snapshot where one is readable). That works
+          // for every CLI, so unlike the rate-limit arm this is NOT gated on USAGE_PROVIDERS.
+          const cooloffEnd = new Date(armedAt.getTime() + SERVER_ERROR_COOLOFF_MS);
+          await db
+            .update(schema.tasks)
+            .set({
+              awaitingAllowanceProviderId: outage.cliProviderId,
+              awaitingProviderReason: 'server_error',
+              awaitingProviderSince: armedAt,
+              allowanceResetAt: cooloffEnd,
+              allowanceReplenishedAt: null,
+              updatedAt: armedAt,
+            })
+            .where(eq(schema.tasks.id, ctx.taskId));
+          // Wake the poller when the cool-off ends rather than waiting out the repeatable tick.
+          await enqueueUsagePollTick({ delayMs: SERVER_ERROR_COOLOFF_MS });
         }
       }
       await appendEvent(db, ctx.taskId, result.row.id, 'step.failed', {

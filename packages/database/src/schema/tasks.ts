@@ -205,25 +205,39 @@ export const tasks = pgTable(
      *  their own host. Re-read at every runner start (survives warm-recover). Gated
      *  behind the global CONFIG_KEYS.BROWSER_DIRECT_ACCESS kill-switch. */
     directAccess: boolean('direct_access').notNull().default(false),
-    /** Allowance-back watch: set when a task FAILS on a provider rate-limit/quota
-     *  (ProviderFatalClass.rate_limit) for a usage-readable CLI. Points at the depleted
-     *  cli_provider so the usage poller knows which snapshot to watch. NULL = no watch.
-     *  Cleared on replenishment (below) and on retry/resume/cancel. */
+    /** Provider-outage watch: set when a task FAILS on a provider rate-limit/quota
+     *  (ProviderFatalClass.rate_limit, usage-readable CLIs only) or on a provider 5xx
+     *  (ProviderFatalClass.server_error, any CLI). Points at the affected cli_provider so
+     *  the usage poller knows which snapshot to watch, and so the "provider is back"
+     *  notification can name it. NULL = no watch. Kept set through replenishment (the
+     *  allowance_replenished_at stamp is what excludes the row from the armed query);
+     *  cleared on retry/resume/cancel and on auto-resume. */
     awaitingAllowanceProviderId: uuid('awaiting_allowance_provider_id').references(
       () => cliProviders.id,
       { onDelete: 'set null' },
     ),
-    /** The "blocked until" moment captured at arm time: the LATEST *_reset_at among the
-     *  provider's windows that were >= EXHAUSTED_PCT in its usage snapshot. NULL when
+    /** Which fatal class armed the watch: 'rate_limit' (recovery = the allowance window
+     *  reset or the consumed % fell back) or 'server_error' (recovery = a cool-off plus,
+     *  for usage-readable CLIs, a fresh OK usage snapshot proving the vendor answers again).
+     *  NULL on rows armed before this column existed — read as 'rate_limit'. */
+    awaitingProviderReason: varchar('awaiting_provider_reason', { length: 16 }),
+    /** When the watch was armed. The server-error path needs it to require a usage snapshot
+     *  fetched AFTER the failure (a stale OK snapshot proves nothing), to hold a minimum
+     *  cool-off before declaring recovery, and to give up on a provider that never returns. */
+    awaitingProviderSince: timestamp('awaiting_provider_since'),
+    /** The "blocked until" moment captured at arm time: for a rate-limit watch the LATEST
+     *  *_reset_at among the provider's windows that were >= EXHAUSTED_PCT in its usage
+     *  snapshot; for a server-error watch the end of the recovery cool-off. NULL when
      *  unknown (no snapshot yet, or a provider that exposes no reset, e.g. zai). */
     allowanceResetAt: timestamp('allowance_reset_at'),
-    /** Stamped by the usage poller when the depleted allowance has replenished (the
-     *  captured reset passed, or the snapshot's max consumed % fell below RECOVERED_PCT).
-     *  Null -> set flip is the signal the web notifier diffs to fire the "allowance is
-     *  back" browser notification. Cleared on retry/resume/cancel so a re-failure re-arms. */
+    /** Stamped by the usage poller when the provider is back (rate limit: the captured reset
+     *  passed or the snapshot's max consumed % fell below RECOVERED_PCT; server error: the
+     *  cool-off elapsed and, where readable, a fresh OK usage snapshot). Null -> set flip is
+     *  the signal the web notifier diffs to fire the "provider is back" browser notification.
+     *  Cleared on retry/resume/cancel so a re-failure re-arms. */
     allowanceReplenishedAt: timestamp('allowance_replenished_at'),
-    /** Consecutive auto-resumes the allowance poller has performed on this task (only when
-     *  CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE is on). Anti-thrash cap: at ALLOWANCE_AUTO_RESUME_CAP
+    /** Consecutive auto-resumes the allowance poller has performed on this task (only in
+     *  CONFIG_KEYS.ALLOWANCE_WATCH_MODE 'auto'). Anti-thrash cap: at ALLOWANCE_AUTO_RESUME_CAP
      *  the poller falls back to notify-only. Reset to 0 on any manual action and on the next
      *  successful step progress, so only a run of back-to-back auto-resumes counts. */
     allowanceAutoResumeCount: integer('allowance_auto_resume_count').notNull().default(0),

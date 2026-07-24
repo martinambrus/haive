@@ -164,12 +164,17 @@ export const CONFIG_KEYS = {
   // mid-task flip needs Stop/Retry). Persists across restarts.
   DDEV_REGISTRY_CACHE_ENABLED: 'config:ddev:registryCache',
 
-  // When 'true', the usage poller AUTO-resumes a task that FAILED on a provider
-  // session/rate-limit once that provider's allowance resets — resume semantics, so
-  // completed loop passes are preserved — capped at ALLOWANCE_AUTO_RESUME_CAP consecutive
-  // auto-resumes before falling back to notify-only. Default 'false' = notify-only (the
-  // user resumes manually, today's behavior). Read once per usage-poll tick.
-  AUTO_RESUME_ON_ALLOWANCE: 'config:tasks:autoResumeOnAllowance',
+  // How Haive reacts when a task FAILS on a provider outage (session/rate-limit, or a
+  // provider 5xx) and that provider later recovers. One of ALLOWANCE_WATCH_MODES:
+  //   'off'    — do not watch at all. Nothing is armed, nothing notifies, nothing resumes.
+  //   'notify' — watch and fire a browser notification when the provider is back (default).
+  //   'auto'   — also AUTO-resume the task (resume semantics, so completed loop passes are
+  //              preserved), capped at ALLOWANCE_AUTO_RESUME_CAP consecutive auto-resumes
+  //              before falling back to notify-only.
+  // The key string keeps its legacy 'autoResumeOnAllowance' name so an existing install's
+  // stored value survives the boolean->enum change; parseAllowanceWatchMode maps the legacy
+  // 'true'/'false' values onto 'auto'/'notify'. Read once per usage-poll tick and at arm time.
+  ALLOWANCE_WATCH_MODE: 'config:tasks:autoResumeOnAllowance',
 
   // Per-file size cap (bytes) for user-uploaded task attachments. Enforced by the
   // attachment upload endpoint (streamed; aborts once the byte count exceeds it).
@@ -259,6 +264,21 @@ export const CONFIG_KEYS = {
 export const TERSENESS_LEVELS = ['lite', 'full', 'ultra'] as const;
 export type TersenessLevel = (typeof TERSENESS_LEVELS)[number];
 
+/** Allowed levels for CONFIG_KEYS.ALLOWANCE_WATCH_MODE — how Haive reacts to a task that
+ *  failed on a provider outage once that provider recovers. */
+export const ALLOWANCE_WATCH_MODES = ['off', 'notify', 'auto'] as const;
+export type AllowanceWatchMode = (typeof ALLOWANCE_WATCH_MODES)[number];
+
+/** Read a stored ALLOWANCE_WATCH_MODE value, accepting the legacy boolean the key held
+ *  before it became an enum ('true' was auto-resume-on, 'false' was notify-only). Anything
+ *  unrecognised — including an absent key — reads as 'notify', the default level. */
+export function parseAllowanceWatchMode(raw: string | null | undefined): AllowanceWatchMode {
+  if (raw === 'true') return 'auto';
+  return (ALLOWANCE_WATCH_MODES as readonly string[]).includes(raw ?? '')
+    ? (raw as AllowanceWatchMode)
+    : 'notify';
+}
+
 const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.API_PORT]: '3001',
   [CONFIG_KEYS.RATE_LIMIT_API_RPM]: '60',
@@ -289,7 +309,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.DEBUG_MODE_ENABLED]: 'true',
   [CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED]: 'true',
   [CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED]: 'true',
-  [CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE]: 'false',
+  [CONFIG_KEYS.ALLOWANCE_WATCH_MODE]: 'notify',
   [CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES]: String(DEFAULT_TASK_ATTACHMENT_MAX_BYTES),
   [CONFIG_KEYS.APP_URL]: 'http://localhost:3000',
   [CONFIG_KEYS.MAINTENANCE_MODE]: 'false',

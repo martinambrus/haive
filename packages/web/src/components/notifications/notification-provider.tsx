@@ -125,18 +125,31 @@ function isViewedElsewhere(taskId: string): boolean {
   }
 }
 
-function bodyFor(status: TaskTransitionEvent['status']): string {
-  switch (status) {
+function bodyFor(e: Pick<TaskTransitionEvent, 'status' | 'providerName' | 'watchReason'>): string {
+  switch (e.status) {
     case 'waiting_user':
       return 'Waiting for your input';
     case 'failed':
       return 'Task failed';
     case 'completed':
       return 'Task completed';
-    case 'allowance_replenished':
-      return 'Allowance is back — ready to retry';
+    case 'allowance_replenished': {
+      // Name the CLI when the list endpoint could resolve it; a server outage and an
+      // exhausted allowance are different waits, so they read differently.
+      const serverError = e.watchReason === 'server_error';
+      if (e.providerName) {
+        return serverError
+          ? `${e.providerName} is back online — ready to resume`
+          : `${e.providerName} allowance is back — ready to resume`;
+      }
+      return serverError
+        ? 'Provider is back online — ready to retry'
+        : 'Allowance is back — ready to retry';
+    }
     case 'auto_resumed':
-      return 'Auto-resumed — allowance is back';
+      // The auto-resume path clears the watch (the task is running again), so the provider
+      // name isn't available on this channel.
+      return 'Auto-resumed — provider is back';
   }
 }
 
@@ -377,7 +390,7 @@ export function NotificationProvider() {
           taskId: e.taskId,
           title: e.title,
           status: e.status,
-          message: bodyFor(e.status),
+          message: bodyFor(e),
         };
         setToasts((prev) => [...prev.filter((t) => t.key !== toast.key), toast]);
       }
@@ -399,7 +412,7 @@ export function NotificationProvider() {
         // arbitrary tab that built it. Fire-and-forget; failures are non-fatal.
         void swRegRef.current
           .showNotification(`Haive — ${e.title}`, {
-            body: bodyFor(e.status),
+            body: bodyFor(e),
             tag: e.taskId,
             data: { url: `/tasks/${e.taskId}` },
           })
@@ -425,7 +438,7 @@ export function NotificationProvider() {
         prevAllowanceRef.current = snapshotAllowance(data.tasks);
         for (const event of allowanceEvents) handleEvent(event);
         // Separate channel: fire once when the poller AUTO-resumes a task after its allowance
-        // returned (only when AUTO_RESUME_ON_ALLOWANCE is on). No baseline — see detectAutoResumed.
+        // returned (only in ALLOWANCE_WATCH_MODE 'auto'). No baseline — see detectAutoResumed.
         const autoResumedEvents = detectAutoResumed(prevAutoResumedRef.current, data.tasks);
         prevAutoResumedRef.current = snapshotAutoResumed(data.tasks);
         for (const event of autoResumedEvents) handleEvent(event);

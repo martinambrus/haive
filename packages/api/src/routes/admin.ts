@@ -4,6 +4,7 @@ import { Hono } from 'hono';
 import { and, desc, eq, gte, lte, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  ALLOWANCE_WATCH_MODES,
   CONFIG_CONCURRENCY_CHANNEL,
   CONFIG_KEYS,
   CONFIG_RUNTIME_LIMITS_CHANNEL,
@@ -11,6 +12,7 @@ import {
   decryptEmail,
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   logger,
+  parseAllowanceWatchMode,
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { hashPassword } from '../auth/password.js';
@@ -637,21 +639,23 @@ adminRoutes.put('/config/ddev-registry-cache', async (c) => {
   return c.json({ enabled });
 });
 
-const autoResumeOnAllowanceSchema = z.object({ enabled: z.boolean() });
+const allowanceWatchSchema = z.object({ mode: z.enum(ALLOWANCE_WATCH_MODES) });
 
-// Global auto-resume-on-allowance switch. When ON, the usage poller re-runs a task that
-// failed on a provider session/rate-limit once its allowance resets (resume semantics,
-// capped). OFF (default) = notify-only, the user resumes manually. Read per poll tick.
-adminRoutes.get('/config/auto-resume-on-allowance', async (c) => {
-  const enabled = await configService.getBoolean(CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE, false);
-  return c.json({ enabled });
+// Global provider-outage watch level. 'off' stops monitoring entirely (nothing is armed when
+// a task fails on a provider rate-limit or 5xx); 'notify' (default) watches and fires a
+// browser notification once the provider is back; 'auto' additionally re-runs the failed step
+// (resume semantics, capped). Read per poll tick and at arm time, within the ~30s config
+// cache. The stored key keeps its legacy boolean name — see CONFIG_KEYS.ALLOWANCE_WATCH_MODE.
+adminRoutes.get('/config/allowance-watch', async (c) => {
+  const mode = parseAllowanceWatchMode(await configService.get(CONFIG_KEYS.ALLOWANCE_WATCH_MODE));
+  return c.json({ mode });
 });
 
-adminRoutes.put('/config/auto-resume-on-allowance', async (c) => {
-  const { enabled } = autoResumeOnAllowanceSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE, enabled ? 'true' : 'false');
-  log.info({ enabled }, 'auto-resume-on-allowance switch updated');
-  return c.json({ enabled });
+adminRoutes.put('/config/allowance-watch', async (c) => {
+  const { mode } = allowanceWatchSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.ALLOWANCE_WATCH_MODE, mode);
+  log.info({ mode }, 'provider-outage watch mode updated');
+  return c.json({ mode });
 });
 
 const ddevControlSchema = z.object({ enabled: z.boolean() });

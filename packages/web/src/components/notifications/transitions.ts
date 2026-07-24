@@ -25,15 +25,19 @@ export interface TaskSnapshot {
    *  gets a fresh value (→ a fresh notification) whereas an unrelated task edit
    *  leaves it untouched (→ no spurious re-fire). Null/absent when not at a gate. */
   currentWaitStartedAt?: string | null;
-  /** ISO time the task's depleted-allowance watch flipped to replenished (list endpoint
-   *  only). Null/absent unless a rate-limit-failed task's allowance has come back; its
-   *  empty->set transition is a distinct notifiable episode from the failure itself. */
+  /** ISO time the task's provider-outage watch flipped to recovered (list endpoint only).
+   *  Null/absent unless an outage-failed task's provider has come back; its empty->set
+   *  transition is a distinct notifiable episode from the failure itself. */
   allowanceReplenishedAt?: string | null;
-  /** ISO time the poller AUTO-resumed this task after its allowance came back (list endpoint
-   *  only; set only when CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE is on). Distinct from
+  /** ISO time the poller AUTO-resumed this task after its provider came back (list endpoint
+   *  only; set only in CONFIG_KEYS.ALLOWANCE_WATCH_MODE 'auto'). Distinct from
    *  allowanceReplenishedAt (the notify-only "ready to retry" signal). Its empty->set flip is
    *  a live "it auto-resumed" episode. */
   allowanceAutoResumedAt?: string | null;
+  /** Name of the CLI provider the watch is on, for the notification copy. */
+  allowanceProviderName?: string | null;
+  /** Why the watch armed ('rate_limit' | 'server_error'), for the notification copy. */
+  allowanceWatchReason?: string | null;
 }
 
 export interface TaskTransitionEvent {
@@ -52,6 +56,10 @@ export interface TaskTransitionEvent {
    *  these via the persistent seen-store so each browser session surfaces them
    *  at most once. */
   baseline: boolean;
+  /** Copy inputs for the provider-outage channel: which CLI recovered and why it had
+   *  stopped. Absent on every other channel. */
+  providerName?: string | null;
+  watchReason?: string | null;
 }
 
 function isNotifiable(status: string): status is NotifiableStatus {
@@ -158,6 +166,8 @@ export function detectAllowanceReplenished(
       // dedupes as one, while a later re-recovery (fresh stamp) re-notifies.
       currentWaitStartedAt: cur,
       baseline: prev === null,
+      providerName: task.allowanceProviderName ?? null,
+      watchReason: task.allowanceWatchReason ?? null,
     });
   }
   return events;
@@ -171,7 +181,7 @@ export function snapshotAllowance(next: readonly TaskSnapshot[]): Map<string, st
 
 /**
  * Diff two auto-resume snapshots into "task auto-resumed" events — the counterpart to
- * detectAllowanceReplenished for when CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE is on. Fires on
+ * detectAllowanceReplenished for CONFIG_KEYS.ALLOWANCE_WATCH_MODE 'auto'. Fires on
  * the empty->set (or changed) flip of allowanceAutoResumedAt, for a task in ANY status
  * (auto-resume flips it back to `running`, so this channel — unlike the replenished one — is
  * NOT gated on `failed`).

@@ -3,7 +3,10 @@ import {
   maxConsumedPct,
   constrainingResetAt,
   allowanceVerdict,
+  serverErrorVerdict,
   RECOVERED_PCT,
+  SERVER_ERROR_COOLOFF_MS,
+  SERVER_ERROR_WATCH_MAX_MS,
   type UsageWindows,
 } from './allowance-watch.js';
 
@@ -101,5 +104,82 @@ describe('allowanceVerdict', () => {
     expect(allowanceVerdict({ resetAt: null, windows: null, snapshotOk: true, now })).toEqual({
       back: false,
     });
+  });
+});
+
+describe('serverErrorVerdict', () => {
+  const now = Date.parse('2026-07-03T12:00:00Z');
+  const armedAgo = (ms: number) => new Date(now - ms);
+  const snap = (status: string, fetchedAt: Date) => ({ status, fetchedAt });
+
+  it('holds the cool-off even with a fresh ok snapshot', () => {
+    // The usage endpoint answering is not proof the inference endpoint recovered — the
+    // cool-off is what stops a same-minute, wrong "back online".
+    const v = serverErrorVerdict({
+      since: armedAgo(SERVER_ERROR_COOLOFF_MS - 1000),
+      now,
+      snapshot: snap('ok', new Date(now - 500)),
+      hasUsageWindow: true,
+    });
+    expect(v).toEqual({ back: false, giveUp: false });
+  });
+
+  it('reports back via probe once the cool-off passed and a fresh ok snapshot exists', () => {
+    const since = armedAgo(SERVER_ERROR_COOLOFF_MS + 60_000);
+    const v = serverErrorVerdict({
+      since,
+      now,
+      snapshot: snap('ok', new Date(since.getTime() + 1000)),
+      hasUsageWindow: true,
+    });
+    expect(v).toEqual({ back: true, via: 'probe', giveUp: false });
+  });
+
+  it('rejects an ok snapshot fetched BEFORE the failure (stale evidence)', () => {
+    const since = armedAgo(SERVER_ERROR_COOLOFF_MS + 60_000);
+    const v = serverErrorVerdict({
+      since,
+      now,
+      snapshot: snap('ok', new Date(since.getTime() - 1000)),
+      hasUsageWindow: true,
+    });
+    expect(v).toEqual({ back: false, giveUp: false });
+  });
+
+  it('rejects a fresh snapshot that errored', () => {
+    const since = armedAgo(SERVER_ERROR_COOLOFF_MS + 60_000);
+    const v = serverErrorVerdict({
+      since,
+      now,
+      snapshot: snap('error', new Date(since.getTime() + 1000)),
+      hasUsageWindow: true,
+    });
+    expect(v).toEqual({ back: false, giveUp: false });
+  });
+
+  it('falls back to the cool-off alone for a CLI with no usage window', () => {
+    // amp / ollama / antigravity expose no window, so no probe can ever exist.
+    const v = serverErrorVerdict({
+      since: armedAgo(SERVER_ERROR_COOLOFF_MS + 1),
+      now,
+      snapshot: null,
+      hasUsageWindow: false,
+    });
+    expect(v).toEqual({ back: true, via: 'cooloff', giveUp: false });
+  });
+
+  it('gives up on a probe-backed watch the provider never answers', () => {
+    const v = serverErrorVerdict({
+      since: armedAgo(SERVER_ERROR_WATCH_MAX_MS + 1000),
+      now,
+      snapshot: null,
+      hasUsageWindow: true,
+    });
+    expect(v).toEqual({ back: false, giveUp: true });
+  });
+
+  it('gives up when the arm moment is unknown (row predates the column)', () => {
+    const v = serverErrorVerdict({ since: null, now, snapshot: null, hasUsageWindow: true });
+    expect(v).toEqual({ back: false, giveUp: true });
   });
 });

@@ -215,6 +215,27 @@ describe('detectAllowanceReplenished', () => {
     const prev = snapshotAllowance([rtask('a', 'failed', null)]);
     expect(detectAllowanceReplenished(prev, [rtask('a', 'failed', null)])).toEqual([]);
   });
+
+  it('carries the provider name and watch reason through for the notification copy', () => {
+    const prev = snapshotAllowance([rtask('a', 'failed', null)]);
+    const events = detectAllowanceReplenished(prev, [
+      {
+        ...rtask('a', 'failed', '2026-07-03T01:00:00Z'),
+        allowanceProviderName: 'codex',
+        allowanceWatchReason: 'server_error',
+      },
+    ]);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.providerName).toBe('codex');
+    expect(events[0]!.watchReason).toBe('server_error');
+  });
+
+  it('nulls the copy fields when the endpoint could not resolve them', () => {
+    const prev = snapshotAllowance([rtask('a', 'failed', null)]);
+    const events = detectAllowanceReplenished(prev, [rtask('a', 'failed', '2026-07-03T01:00:00Z')]);
+    expect(events[0]!.providerName).toBeNull();
+    expect(events[0]!.watchReason).toBeNull();
+  });
 });
 
 describe('snapshotAllowance', () => {

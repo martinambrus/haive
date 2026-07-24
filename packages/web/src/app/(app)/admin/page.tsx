@@ -52,10 +52,8 @@ export default function AdminPage() {
   const [savingDbAccess, setSavingDbAccess] = useState(false);
   const [ddevRegistryCacheEnabled, setDdevRegistryCacheEnabled] = useState<boolean | null>(null);
   const [savingDdevRegistryCache, setSavingDdevRegistryCache] = useState(false);
-  const [autoResumeOnAllowanceEnabled, setAutoResumeOnAllowanceEnabled] = useState<boolean | null>(
-    null,
-  );
-  const [savingAutoResumeOnAllowance, setSavingAutoResumeOnAllowance] = useState(false);
+  const [allowanceWatchMode, setAllowanceWatchModeState] = useState<string | null>(null);
+  const [savingAllowanceWatch, setSavingAllowanceWatch] = useState(false);
   const [ddevControlEnabled, setDdevControlEnabled] = useState<boolean | null>(null);
   const [savingDdevControl, setSavingDdevControl] = useState(false);
   const [fairEnabled, setFairEnabled] = useState<boolean | null>(null);
@@ -103,7 +101,7 @@ export default function AdminPage() {
         browserAccessData,
         dbAccessData,
         ddevRegistryCacheData,
-        autoResumeOnAllowanceData,
+        allowanceWatchData,
         ddevControlData,
         fairData,
         perTaskData,
@@ -127,7 +125,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
         api.get<{ enabled: boolean }>('/admin/config/db-access'),
         api.get<{ enabled: boolean }>('/admin/config/ddev-registry-cache'),
-        api.get<{ enabled: boolean }>('/admin/config/auto-resume-on-allowance'),
+        api.get<{ mode: string }>('/admin/config/allowance-watch'),
         api.get<{ enabled: boolean }>('/admin/config/ddev-control'),
         api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
         api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
@@ -160,7 +158,7 @@ export default function AdminPage() {
       setBrowserAccessEnabled(browserAccessData.enabled);
       setDbAccessEnabled(dbAccessData.enabled);
       setDdevRegistryCacheEnabled(ddevRegistryCacheData.enabled);
-      setAutoResumeOnAllowanceEnabled(autoResumeOnAllowanceData.enabled);
+      setAllowanceWatchModeState(allowanceWatchData.mode);
       setDdevControlEnabled(ddevControlData.enabled);
       setFairEnabled(fairData.enabled);
       setPromptCaching1hEnabled(promptCaching1hData.enabled);
@@ -566,18 +564,18 @@ export default function AdminPage() {
     }
   }
 
-  async function setAutoResumeOnAllowance(next: boolean) {
-    setSavingAutoResumeOnAllowance(true);
+  async function setAllowanceWatchMode(next: string) {
+    setSavingAllowanceWatch(true);
     try {
-      const result = await api.put<{ enabled: boolean }>('/admin/config/auto-resume-on-allowance', {
-        enabled: next,
+      const result = await api.put<{ mode: string }>('/admin/config/allowance-watch', {
+        mode: next,
       });
-      setAutoResumeOnAllowanceEnabled(result.enabled);
+      setAllowanceWatchModeState(result.mode);
       setError(null);
     } catch (err) {
-      setError((err as Error).message ?? 'Failed to update auto-resume');
+      setError((err as Error).message ?? 'Failed to update provider-outage watch');
     } finally {
-      setSavingAutoResumeOnAllowance(false);
+      setSavingAllowanceWatch(false);
     }
   }
 
@@ -1296,30 +1294,36 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {autoResumeOnAllowanceEnabled !== null && (
+      {allowanceWatchMode !== null && (
         <Card>
           <CardHeader>
-            <CardTitle>Auto-resume on allowance reset</CardTitle>
+            <CardTitle>Provider-outage recovery</CardTitle>
             <CardDescription>
-              When a task fails because a provider hit its session / rate limit, automatically
-              resume it once that provider&apos;s allowance resets, preserving completed work (e.g.
-              skills already generated). OFF (default) only notifies you so you can resume manually.
-              Capped at a few consecutive auto-resumes per task to avoid thrashing; any manual
-              action or successful step resets the count.
+              What happens when a task fails because its CLI provider hit a session / rate limit or
+              returned a server error, and that provider later recovers. <strong>off</strong> — do
+              not monitor at all; nothing watches the provider and nothing notifies.{' '}
+              <strong>notify</strong> (default) — watch, and send a browser notification naming the
+              CLI once it is back, so you decide when to resume. <strong>auto</strong> — also resume
+              the task automatically, preserving completed work (e.g. skills already generated).
+              Auto is capped at a few consecutive auto-resumes per task to avoid thrashing, then
+              falls back to notifying; any manual action or successful step resets the count. Rate
+              limits resolve off the provider&apos;s usage window; server errors resolve off a
+              cool-off plus, where readable, a fresh successful call to the provider. Takes effect
+              within ~30s; persists across restarts.
             </CardDescription>
           </CardHeader>
           <label className="flex items-center gap-2 text-sm text-neutral-200">
-            <input
-              type="checkbox"
-              checked={autoResumeOnAllowanceEnabled}
-              disabled={savingAutoResumeOnAllowance}
-              onChange={(e) => void setAutoResumeOnAllowance(e.target.checked)}
-              className="h-4 w-4"
-            />
-            {autoResumeOnAllowanceEnabled ? 'Enabled' : 'Disabled'}
-            {savingAutoResumeOnAllowance && (
-              <span className="text-xs text-neutral-500">saving…</span>
-            )}
+            <select
+              value={allowanceWatchMode}
+              disabled={savingAllowanceWatch}
+              onChange={(e) => void setAllowanceWatchMode(e.target.value)}
+              className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm"
+            >
+              <option value="off">off</option>
+              <option value="notify">notify</option>
+              <option value="auto">auto</option>
+            </select>
+            {savingAllowanceWatch && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

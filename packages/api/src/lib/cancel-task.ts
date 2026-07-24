@@ -17,13 +17,14 @@ type Db = ReturnType<typeof getDb>;
  *  the transaction callback's argument type. */
 type DbOrTx = Db | Parameters<Parameters<Db['transaction']>[0]>[0];
 
-/** Clears the allowance-back watch columns (notify-only). Spread into any `tasks`
- *  update that moves a task OUT of the failed-armed state (retry/resume/retry_ai/skip/
- *  cancel), so a later usage-poll tick can't stamp a stale "allowance is back" signal and
- *  a re-failure re-arms cleanly. Kept here (the shared cancel helper) so all clear sites
- *  reference one definition. */
+/** Clears the provider-outage watch columns. Spread into any `tasks` update that moves a
+ *  task OUT of the failed-armed state (retry/resume/retry_ai/skip/cancel), so a later
+ *  usage-poll tick can't stamp a stale "provider is back" signal and a re-failure re-arms
+ *  cleanly. Kept here (the shared cancel helper) so all clear sites reference one definition. */
 export const CLEAR_ALLOWANCE_WATCH = {
   awaitingAllowanceProviderId: null,
+  awaitingProviderReason: null,
+  awaitingProviderSince: null,
   allowanceResetAt: null,
   allowanceReplenishedAt: null,
 };

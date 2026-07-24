@@ -125,8 +125,8 @@ export async function resetStepAndDownstream(
   return { downstreamReset: downstreamToReset.length, newEpoch };
 }
 
-/** Auto-resume a task that FAILED on a provider session/rate-limit, once the usage poller
- *  decides its allowance is back (gated by CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE). RESUME
+/** Auto-resume a task that FAILED on a provider outage (session/rate-limit or 5xx), once the
+ *  usage poller decides the provider is back (CONFIG_KEYS.ALLOWANCE_WATCH_MODE 'auto'). RESUME
  *  semantics — supersede only the failed pass's live invocation and flip the step back to
  *  `running` WITHOUT clearing iterations/output, so a loop step (e.g. skill-generation)
  *  re-dispatches the failed pass and keeps every completed pass. Mirrors the API `resume`
@@ -174,6 +174,8 @@ export async function autoResumeFailedStep(
         errorMessage: null,
         completedAt: null,
         awaitingAllowanceProviderId: null,
+        awaitingProviderReason: null,
+        awaitingProviderSince: null,
         allowanceResetAt: null,
         allowanceReplenishedAt: null,
         allowanceAutoResumeCount: sql`${schema.tasks.allowanceAutoResumeCount} + 1`,

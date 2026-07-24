@@ -128,6 +128,23 @@ taskRoutes.get('/', async (c) => {
   // one query. Like timing, it's a snapshot at `now`; the listing's 3s poll keeps
   // running tasks current as the worker flushes live usage snapshots.
   const tokensByTask = await sumTaskTokens(db, taskIds);
+  // Names of the providers this page's tasks are waiting on, so the "provider is back"
+  // notification can say WHICH CLI recovered instead of a generic line. A side-query rather
+  // than a drizzle relation: `tasks` already relates to `cli_providers` via cliProviderId, and
+  // a second relation between the same pair needs relationName on both sides.
+  const watchedProviderIds = [
+    ...new Set(rows.map((t) => t.awaitingAllowanceProviderId).filter((id): id is string => !!id)),
+  ];
+  const providerNameById = new Map(
+    watchedProviderIds.length
+      ? (
+          await db
+            .select({ id: schema.cliProviders.id, name: schema.cliProviders.name })
+            .from(schema.cliProviders)
+            .where(inArray(schema.cliProviders.id, watchedProviderIds))
+        ).map((p) => [p.id, p.name])
+      : [],
+  );
   const tasks = rows.map((t) => {
     const steps = stepsByTask.get(t.id) ?? [];
     const startMs = t.startedAt ? t.startedAt.getTime() : null;
@@ -155,6 +172,10 @@ taskRoutes.get('/', async (c) => {
       allowanceAutoResumedAt: t.allowanceAutoResumedAt
         ? t.allowanceAutoResumedAt.toISOString()
         : null,
+      allowanceProviderName: t.awaitingAllowanceProviderId
+        ? (providerNameById.get(t.awaitingAllowanceProviderId) ?? null)
+        : null,
+      allowanceWatchReason: t.awaitingProviderReason ?? null,
     };
   });
   return c.json({ tasks, total, page, pageSize, repositories });

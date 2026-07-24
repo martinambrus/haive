@@ -62,3 +62,48 @@ export function allowanceVerdict(args: {
   if (maxPct != null && maxPct < RECOVERED_PCT) return { back: true, via: 'usage_dropped' };
   return { back: false };
 }
+
+/** Minimum wait before a provider that returned 5xx is considered back. A rate limit states
+ *  its own reset; a server error states nothing, and the usage endpoint that backs the probe
+ *  below is a DIFFERENT surface from the inference endpoint that failed — it can answer fine
+ *  while inference is still down. The cool-off is what stops that mismatch from declaring an
+ *  instant, wrong recovery. */
+export const SERVER_ERROR_COOLOFF_MS = 5 * 60_000;
+
+/** How long a server-error watch keeps waiting before it is abandoned. A provider that has
+ *  not answered in this long is an outage the user will have noticed; firing a "back online"
+ *  notification (or worse, auto-resuming) a day later is noise, not help. */
+export const SERVER_ERROR_WATCH_MAX_MS = 6 * 60 * 60_000;
+
+export type ServerErrorVerdict =
+  { back: false; giveUp: boolean } | { back: true; via: 'probe' | 'cooloff'; giveUp: false };
+
+/** Decide whether a provider that failed with a 5xx is answering again.
+ *
+ *  There is no quota meter to read here, so recovery is judged two ways. For a CLI with a
+ *  readable usage window the poller's own per-tick fetch IS a liveness probe: a snapshot with
+ *  status 'ok' whose fetchedAt is LATER than the arm moment proves the vendor answered us
+ *  after the failure. `fetchedAt > since` is the load-bearing half — a snapshot left over from
+ *  before the outage is stale evidence and must not count. For a CLI with no usage window
+ *  (amp, ollama, antigravity) no probe exists, so the cool-off elapsing is the whole verdict.
+ *
+ *  Either way the cool-off is a floor, and a watch older than SERVER_ERROR_WATCH_MAX_MS is
+ *  abandoned rather than left to fire arbitrarily late. */
+export function serverErrorVerdict(args: {
+  since: Date | null;
+  now: number;
+  snapshot: { status: string; fetchedAt: Date } | null;
+  hasUsageWindow: boolean;
+}): ServerErrorVerdict {
+  const { since, now, snapshot, hasUsageWindow } = args;
+  // No arm time (a row written before the column existed) — nothing can be judged against it,
+  // so abandon rather than guess a recovery.
+  if (since == null) return { back: false, giveUp: true };
+  const age = now - since.getTime();
+  if (age < SERVER_ERROR_COOLOFF_MS) return { back: false, giveUp: false };
+  if (!hasUsageWindow) return { back: true, via: 'cooloff', giveUp: false };
+  if (snapshot?.status === 'ok' && snapshot.fetchedAt.getTime() > since.getTime()) {
+    return { back: true, via: 'probe', giveUp: false };
+  }
+  return { back: false, giveUp: age > SERVER_ERROR_WATCH_MAX_MS };
+}

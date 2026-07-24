@@ -6,6 +6,7 @@ import {
   TASK_JOB_NAMES,
   configService,
   logger,
+  parseAllowanceWatchMode,
   type CliProviderName,
 } from '@haive/shared';
 import { schema, type Database } from '@haive/database';
@@ -17,7 +18,11 @@ import {
   type ClaudeOauthTokens,
 } from '@haive/shared/claude-oauth';
 import { USAGE_PROVIDERS, type ProviderUsageConfig } from '../usage-window/fetchers/index.js';
-import { constrainingResetAt, allowanceVerdict } from '../usage-window/allowance-watch.js';
+import {
+  constrainingResetAt,
+  allowanceVerdict,
+  serverErrorVerdict,
+} from '../usage-window/allowance-watch.js';
 import {
   readAuthVolumeFile,
   readProviderSecretToken,
@@ -403,31 +408,51 @@ async function runUsagePollTick(db: Database): Promise<void> {
     log.debug({ count: targets.length }, 'usage poll tick complete');
   }
 
-  // Allowance-back watch: after refreshing snapshots, notify any task that failed on a
-  // provider rate-limit whose allowance has since replenished. Runs even when no provider
-  // is currently pollable, so a task can still resolve off an existing snapshot / passed reset.
-  await checkAllowanceReplenishment(db);
+  // Provider-outage watch: after refreshing snapshots, resolve any task that failed on a
+  // provider outage whose provider has since recovered. Runs even when no provider is
+  // currently pollable, so a task can still resolve off an existing snapshot / passed reset.
+  await checkProviderRecovery(db);
 }
 
-/** Notify-only detect half of the allowance-back watch. For every task the arm path parked
- *  (status='failed', awaiting_allowance_provider_id set, not yet replenished), decide whether
- *  the depleted provider's allowance is back and, if so, stamp allowance_replenished_at (the
- *  signal the web notifier diffs) + clear the watch + append a task_events row. "Back" =
- *  the captured vendor reset has passed (authoritative) OR the snapshot's max consumed %
- *  fell below RECOVERED_PCT (covers providers with no readable reset, e.g. zai, and early
- *  recovery). Reads only stored snapshots, so it ignores the per-provider 429 backoff. */
-async function checkAllowanceReplenishment(db: Database): Promise<void> {
+/** Detect half of the provider-outage watch. For every task the arm path parked
+ *  (status='failed', awaiting_allowance_provider_id set, not yet resolved), decide whether the
+ *  provider is back and, if so, either AUTO-resume the task or stamp allowance_replenished_at
+ *  (the signal the web notifier diffs) + append a task_events row.
+ *
+ *  What "back" means depends on why the watch armed. rate_limit: the captured vendor reset has
+ *  passed (authoritative) OR the snapshot's max consumed % fell below RECOVERED_PCT (covers
+ *  providers with no readable reset, e.g. zai, and early recovery). server_error: the cool-off
+ *  elapsed and, for a usage-readable CLI, a post-failure OK snapshot proves the vendor answers
+ *  again — see serverErrorVerdict.
+ *
+ *  Reads only stored snapshots, so it ignores the per-provider 429 backoff. Skipped entirely in
+ *  watch mode 'off': armed rows simply stop resolving, and resume resolving if the mode is
+ *  turned back on. */
+async function checkProviderRecovery(db: Database): Promise<void> {
+  const watchMode = parseAllowanceWatchMode(
+    await configService.get(CONFIG_KEYS.ALLOWANCE_WATCH_MODE),
+  );
+  if (watchMode === 'off') return;
+
   const armed = await db
     .select({
       id: schema.tasks.id,
       userId: schema.tasks.userId,
       providerId: schema.tasks.awaitingAllowanceProviderId,
+      // NULL on rows armed before the reason column existed — those are all rate limits.
+      reason: schema.tasks.awaitingProviderReason,
+      since: schema.tasks.awaitingProviderSince,
       resetAt: schema.tasks.allowanceResetAt,
       currentStepId: schema.tasks.currentStepId,
       currentRound: schema.tasks.currentRound,
       autoResumeCount: schema.tasks.allowanceAutoResumeCount,
+      providerName: schema.cliProviders.name,
     })
     .from(schema.tasks)
+    .leftJoin(
+      schema.cliProviders,
+      eq(schema.tasks.awaitingAllowanceProviderId, schema.cliProviders.id),
+    )
     .where(
       and(
         isNotNull(schema.tasks.awaitingAllowanceProviderId),
@@ -443,6 +468,7 @@ async function checkAllowanceReplenishment(db: Database): Promise<void> {
     .select({
       providerId: schema.usageWindowSnapshots.providerId,
       status: schema.usageWindowSnapshots.status,
+      fetchedAt: schema.usageWindowSnapshots.fetchedAt,
       fiveHourPct: schema.usageWindowSnapshots.fiveHourPct,
       fiveHourResetAt: schema.usageWindowSnapshots.fiveHourResetAt,
       sevenDayPct: schema.usageWindowSnapshots.sevenDayPct,
@@ -458,43 +484,77 @@ async function checkAllowanceReplenishment(db: Database): Promise<void> {
   for (const task of armed) {
     if (!task.providerId) continue;
     const snap = snapById.get(task.providerId);
-    // Backfill the reset if the arm path couldn't capture it (no snapshot yet) but the
-    // window is now visible — so a later tick can fire on the authoritative reset.
-    let resetAt = task.resetAt;
-    if (!resetAt && snap) resetAt = constrainingResetAt(snap) ?? null;
+    let via: string;
 
-    const verdict = allowanceVerdict({
-      resetAt,
-      windows: snap ?? null,
-      snapshotOk: snap?.status === 'ok',
-      now,
-    });
-
-    if (!verdict.back) {
-      // Not back yet. Persist a freshly-backfilled reset so the next tick can fire on it.
-      if (resetAt && resetAt !== task.resetAt) {
-        await db
-          .update(schema.tasks)
-          .set({ allowanceResetAt: resetAt, updatedAt: new Date() })
-          .where(eq(schema.tasks.id, task.id));
+    if (task.reason === 'server_error') {
+      const verdict = serverErrorVerdict({
+        since: task.since,
+        now,
+        snapshot: snap ? { status: snap.status, fetchedAt: snap.fetchedAt } : null,
+        hasUsageWindow: !!task.providerName && task.providerName in USAGE_PROVIDERS,
+      });
+      if (!verdict.back) {
+        if (verdict.giveUp) {
+          // The provider never came back within the watch window. Drop the watch instead of
+          // notifying arbitrarily late; the task keeps its failed state and outage errorHint.
+          await db
+            .update(schema.tasks)
+            .set({
+              awaitingAllowanceProviderId: null,
+              awaitingProviderReason: null,
+              awaitingProviderSince: null,
+              allowanceResetAt: null,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.tasks.id, task.id));
+          log.info(
+            { taskId: task.id, providerId: task.providerId },
+            'provider server error never cleared; abandoning watch',
+          );
+        }
+        continue;
       }
-      continue;
+      via = verdict.via;
+    } else {
+      // Backfill the reset if the arm path couldn't capture it (no snapshot yet) but the
+      // window is now visible — so a later tick can fire on the authoritative reset.
+      let resetAt = task.resetAt;
+      if (!resetAt && snap) resetAt = constrainingResetAt(snap) ?? null;
+
+      const verdict = allowanceVerdict({
+        resetAt,
+        windows: snap ?? null,
+        snapshotOk: snap?.status === 'ok',
+        now,
+      });
+
+      if (!verdict.back) {
+        // Not back yet. Persist a freshly-backfilled reset so the next tick can fire on it.
+        if (resetAt && resetAt !== task.resetAt) {
+          await db
+            .update(schema.tasks)
+            .set({ allowanceResetAt: resetAt, updatedAt: new Date() })
+            .where(eq(schema.tasks.id, task.id));
+        }
+        continue;
+      }
+      via = verdict.via;
     }
 
-    // Allowance is back. If auto-resume is ON, under the anti-thrash cap, and the task still
-    // has a step to resume, re-run it (resume semantics — completed loop passes preserved)
-    // instead of only notifying. A concurrent manual resume makes autoResumeFailedStep a no-op.
-    const autoResumeOn = await configService.getBoolean(
-      CONFIG_KEYS.AUTO_RESUME_ON_ALLOWANCE,
-      false,
-    );
-    if (autoResumeOn && task.currentStepId && task.autoResumeCount < ALLOWANCE_AUTO_RESUME_CAP) {
+    // Provider is back. In 'auto' mode, under the anti-thrash cap, and with a step still to
+    // resume, re-run it (resume semantics — completed loop passes preserved) instead of only
+    // notifying. A concurrent manual resume makes autoResumeFailedStep a no-op.
+    if (
+      watchMode === 'auto' &&
+      task.currentStepId &&
+      task.autoResumeCount < ALLOWANCE_AUTO_RESUME_CAP
+    ) {
       const resumed = await autoResumeFailedStep(db, {
         taskId: task.id,
         stepId: task.currentStepId,
         round: task.currentRound ?? 0,
         providerId: task.providerId,
-        via: verdict.via,
+        via,
       });
       if (resumed) {
         await getTaskQueue().add(
@@ -514,25 +574,26 @@ async function checkAllowanceReplenishment(db: Database): Promise<void> {
         );
         log.info(
           { taskId: task.id, providerId: task.providerId, attempt: task.autoResumeCount + 1 },
-          'allowance replenished; auto-resumed',
+          'provider recovered; auto-resumed',
         );
         continue;
       }
       // no-op (already resumed elsewhere) → the task is no longer failed; nothing to notify.
       continue;
     }
-    if (autoResumeOn && task.autoResumeCount >= ALLOWANCE_AUTO_RESUME_CAP) {
+    if (watchMode === 'auto' && task.autoResumeCount >= ALLOWANCE_AUTO_RESUME_CAP) {
       log.info(
         { taskId: task.id, cap: ALLOWANCE_AUTO_RESUME_CAP },
-        'allowance replenished; auto-resume cap reached — notifying instead',
+        'provider recovered; auto-resume cap reached — notifying instead',
       );
     }
-    // Notify-only (default, capped, or no step to resume): stamp the replenished signal.
+    // Notify (mode 'notify', capped, or no step to resume): stamp the recovery signal. The
+    // provider id STAYS set so the notification can name the CLI — the row is already excluded
+    // from the armed query above by allowance_replenished_at being non-null.
     await db
       .update(schema.tasks)
       .set({
         allowanceReplenishedAt: new Date(),
-        awaitingAllowanceProviderId: null,
         updatedAt: new Date(),
       })
       .where(eq(schema.tasks.id, task.id));
@@ -540,9 +601,12 @@ async function checkAllowanceReplenishment(db: Database): Promise<void> {
       taskId: task.id,
       taskStepId: null,
       eventType: 'task.allowance_replenished',
-      payload: { providerId: task.providerId, via: verdict.via },
+      payload: { providerId: task.providerId, reason: task.reason ?? 'rate_limit', via },
     });
-    log.info({ taskId: task.id, providerId: task.providerId }, 'allowance replenished; notifying');
+    log.info(
+      { taskId: task.id, providerId: task.providerId, reason: task.reason ?? 'rate_limit' },
+      'provider recovered; notifying',
+    );
   }
 }
 
