@@ -258,17 +258,18 @@ export const CONFIG_KEYS = {
   MAX_CONCURRENT_RUNTIMES: 'config:sandbox:maxConcurrentRuntimes',
   // Planning weights (MB) the admission gate budgets each consumer at. NOT container caps:
   // RUNTIME_MEMORY_MB is the ceiling a runner may grow into, these are what the pool assumes
-  // it actually occupies. 0 = auto-derive (ddev = the per-runner ceiling; app and agent =
-  // half of it). The auto values are PROVISIONAL — calibrate from `docker stats` and lower
-  // them, since lower weights are what buy extra concurrency.
+  // it actually occupies. 0 = auto, which uses the CALIBRATED defaults in deriveRuntimeCaps
+  // (ddev 1536, app 1024, agent 2048), measured from 1731 `docker stats` samples rather than
+  // guessed. Absolute, not host-relative: a project's runner uses the same RAM on a 16 GB box
+  // as on a 64 GB one. Override only if your projects differ materially from that profile.
   RUNTIME_DDEV_WEIGHT_MB: 'config:sandbox:runtimeDdevWeightMb',
   RUNTIME_APP_WEIGHT_MB: 'config:sandbox:runtimeAppWeightMb',
   AGENT_WEIGHT_MB: 'config:sandbox:agentWeightMb',
   // Surcharge (MB) added to a runtime's weight when its task runs browser testing. The headed
   // desktop (Xvfb + x11vnc + Chromium) runs INSIDE the runner container, so it is not its own
-  // pool entry — it makes that runner heavier. 0 = auto (a quarter of the per-runner ceiling,
-  // carved out of the ddev/app weights so a browser task weighs what it always did and a
-  // browser-less one stops paying for a Chromium it never starts).
+  // pool entry — it makes that runner heavier. 0 = auto (1536, so a browser-phase DDEV is
+  // budgeted 3072 against a measured 2505 peak). The flag is really a proxy for "this task is
+  // in a verify/fix phase", which is when the agent works the app hardest.
   RUNTIME_BROWSER_WEIGHT_MB: 'config:sandbox:runtimeBrowserWeightMb',
   // Agents that stay runnable however full the runtime pool is. A task holding a runtime
   // needs an agent to finish, so a zero-agent state deadlocks. 0 = auto (2).

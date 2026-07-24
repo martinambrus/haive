@@ -13,7 +13,7 @@ function admits(caps: RuntimeCaps, weightMb: number): number {
 }
 
 describe('deriveRuntimeCaps', () => {
-  it('sizes a 16 GB / 16-CPU host conservatively', () => {
+  it('sizes a 16 GB / 16-CPU host from the calibrated weights', () => {
     const caps = deriveRuntimeCaps({ totalMemMb: 16384, cpuCount: 16 });
     expect(caps).toEqual({
       perRunnerMemoryMb: 4096,
@@ -21,46 +21,55 @@ describe('deriveRuntimeCaps', () => {
       perRunnerPidsLimit: 8192,
       maxConcurrentRuntimes: null,
       runtimeBudgetMb: 11469,
-      ddevWeightMb: 3072,
-      appWeightMb: 2048,
+      ddevWeightMb: 1536,
+      appWeightMb: 1024,
       agentWeightMb: 2048,
-      browserWeightMb: 1024,
+      browserWeightMb: 1536,
       agentFloor: 2,
     });
-    // Same two DDEV runners as the previous count-based governor when they run the browser
-    // desktop — the ceiling that governor divided by was sized for exactly that.
-    expect(admits(caps, caps.ddevWeightMb + caps.browserWeightMb)).toBe(2);
-    // A DDEV that never starts Chromium stops paying for it...
-    expect(admits(caps, caps.ddevWeightMb)).toBe(3);
-    // ...and a light runner no longer costs a DDEV-sized slot at all.
-    expect(admits(caps, caps.appWeightMb)).toBe(5);
+    // Measured: a DDEV in a browser-verification phase peaked at 2505 MB, so 3072 covers it
+    // with ~1.2x margin and three fit where the old count-based governor allowed two.
+    expect(admits(caps, caps.ddevWeightMb + caps.browserWeightMb)).toBe(3);
+    // A DDEV that never starts the desktop peaked at 1036 MB including a full cold boot.
+    expect(admits(caps, caps.ddevWeightMb)).toBe(7);
+    expect(admits(caps, caps.appWeightMb)).toBe(11);
   });
 
-  it('carves the browser surcharge out of the ddev weight, never adds to the ceiling', () => {
+  it('keeps base + browser within the container cap, since the desktop runs inside it', () => {
     const caps = deriveRuntimeCaps({ totalMemMb: 16384, cpuCount: 16 });
-    expect(caps.ddevWeightMb + caps.browserWeightMb).toBe(caps.perRunnerMemoryMb);
+    expect(caps.ddevWeightMb + caps.browserWeightMb).toBeLessThanOrEqual(caps.perRunnerMemoryMb);
   });
 
-  it('allows one DDEV runner on an 8 GB host', () => {
+  it('allows one browser-phase DDEV runner on an 8 GB host', () => {
     const caps = deriveRuntimeCaps({ totalMemMb: 8192, cpuCount: 4 });
     expect(caps.perRunnerMemoryMb).toBe(4096);
     expect(caps.perRunnerCpus).toBe(2);
     expect(admits(caps, caps.ddevWeightMb + caps.browserWeightMb)).toBe(1);
-    expect(admits(caps, caps.appWeightMb)).toBe(2);
+    expect(admits(caps, caps.ddevWeightMb)).toBe(3);
   });
 
   it('scales up on a 32 GB host', () => {
     const caps = deriveRuntimeCaps({ totalMemMb: 32768, cpuCount: 16 });
-    expect(admits(caps, caps.ddevWeightMb + caps.browserWeightMb)).toBe(6);
-    expect(admits(caps, caps.ddevWeightMb)).toBe(8);
+    expect(admits(caps, caps.ddevWeightMb + caps.browserWeightMb)).toBe(8);
+    expect(admits(caps, caps.ddevWeightMb)).toBe(17);
     expect(caps.perRunnerCpus).toBe(4);
+  });
+
+  it('never charges a weight the container cap could not hold', () => {
+    // Thin host: the cap itself clamps to the runner floor, so every weight clamps with it
+    // and the browser surcharge collapses to zero rather than pushing past the cap.
+    const caps = deriveRuntimeCaps({ totalMemMb: 2048, cpuCount: 2 });
+    expect(caps.perRunnerMemoryMb).toBe(1536);
+    expect(caps.ddevWeightMb).toBe(1536);
+    expect(caps.browserWeightMb).toBe(0);
+    expect(caps.agentWeightMb).toBeLessThanOrEqual(caps.perRunnerMemoryMb);
+    expect(admits(caps, caps.ddevWeightMb + caps.browserWeightMb)).toBe(1);
   });
 
   it('floors per-runner memory (never below what DDEV needs) on a tiny host', () => {
     const caps = deriveRuntimeCaps({ totalMemMb: 2048, cpuCount: 2 });
     expect(caps.perRunnerMemoryMb).toBe(1536);
     expect(caps.perRunnerCpus).toBe(1);
-    expect(admits(caps, caps.ddevWeightMb + caps.browserWeightMb)).toBe(1);
   });
 
   it('always leaves room for one runtime, one CPU and a weight floor', () => {
@@ -72,7 +81,10 @@ describe('deriveRuntimeCaps', () => {
     expect(caps.agentWeightMb).toBeGreaterThanOrEqual(512);
   });
 
-  it('derives the ddev weight from the ceiling, so a memory override moves both', () => {
+  it('leaves the calibrated weights alone until the cap drops below them', () => {
+    // Weights are absolute (a DDEV project uses the same RAM on any host), so lowering the
+    // per-container cap only matters where it would charge more than the container can hold:
+    // here the browser surcharge is squeezed to what is left under a 2048 cap.
     const caps = deriveRuntimeCaps({
       totalMemMb: 16384,
       cpuCount: 16,
@@ -82,7 +94,7 @@ describe('deriveRuntimeCaps', () => {
     expect(caps.ddevWeightMb).toBe(1536);
     expect(caps.browserWeightMb).toBe(512);
     expect(caps.appWeightMb).toBe(1024);
-    // budget (11469) / 2048 => 5 browser-testing runners when per-runner is halved.
+    expect(caps.agentWeightMb).toBe(2048);
     expect(admits(caps, caps.ddevWeightMb + caps.browserWeightMb)).toBe(5);
   });
 

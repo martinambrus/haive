@@ -99,22 +99,39 @@ const RUNNER_PIDS_LIMIT = 8192;
  *  for the host keeps it responsive). */
 const RUNNER_CPU_CEIL = 4;
 
-/** PROVISIONAL planning weight for the light consumers (app-runner, cli-exec agent
- *  sandbox) as a fraction of the per-runner ceiling. Neither runs a nested dockerd, so
- *  neither peaks anywhere near a DDEV DinD — but the exact figure is a placeholder until
- *  calibrated from `docker stats`. Chosen conservatively: half the ceiling keeps DDEV
- *  concurrency identical to the previous count-based governor. */
-const LIGHT_WEIGHT_FRACTION = 0.5;
+/* CALIBRATED planning weights (MB), from 1731 `docker stats` samples over 4 DDEV runners
+ * and 52 cli-exec sandboxes on a 16 GB WSL2 host, covering cold boots, idle gates, agent
+ * fix rounds and browser verification:
+ *
+ *   kind            mean    p90   peak     weight   margin over peak
+ *   ddev (no browser) 666    972   1036       1536   1.5x   (peak includes a full cold boot)
+ *   ddev + browser   1052   1612   2505       3072   1.2x   (base + surcharge)
+ *   agent             831   1416   1736       2048   1.2x
+ *
+ * These are ABSOLUTE, not a fraction of the container cap, because a DDEV runner's real
+ * footprint does not grow with host size — the same Drupal project uses ~1 GB on a 16 GB
+ * box and on a 64 GB one. They are clamped to the cap below, since a container can never
+ * occupy more than it is allowed.
+ *
+ * Two findings worth carrying: a cold `ddev start` peaks near 1 GB (image pulls are
+ * disk-bound, not RAM-bound), and the browser flag is a PROXY rather than a cause — the
+ * 2505 peak came from agent work during a fix round, not from Chromium being resident. The
+ * surcharge holds because the desktop is up precisely during verify/fix phases.
+ *
+ * Re-calibrate by sampling `docker stats` per container kind and setting the admin
+ * overrides; these defaults only apply when those are 0. */
+const DDEV_WEIGHT_MB = 1536;
+const BROWSER_WEIGHT_MB = 1536;
+const AGENT_WEIGHT_MB = 2048;
+
+/** App-runner: the ONE unmeasured weight — no app-runner was ever admitted during
+ *  calibration. Set below the DDEV base deliberately: it runs the app image and its dev
+ *  server with no nested dockerd, db or router, so it is strictly less machinery than the
+ *  1036 MB a DDEV base peaked at. Treat as provisional. */
+const APP_WEIGHT_MB = 1024;
 
 /** Never plan a consumer at less than this, however small the ceiling gets. */
 const WEIGHT_FLOOR_MB = 512;
-
-/** PROVISIONAL share of the per-runner ceiling attributed to the headed browser desktop
- *  (Xvfb + x11vnc + Chromium) when a task runs browser testing. The ceiling was sized for a
- *  DDEV DinD that ALSO hosts Chromium, so this is carved OUT of the ddev/app base weights:
- *  a browser-testing runner still totals the old full-ceiling weight, while one that never
- *  starts the desktop stops paying for it. */
-const BROWSER_WEIGHT_FRACTION = 0.25;
 
 /** Agents kept runnable regardless of runtime occupancy (deadlock floor). */
 const DEFAULT_AGENT_FLOOR = 2;
@@ -194,15 +211,20 @@ export function deriveRuntimeCaps(input: {
   const maxConcurrentRuntimes =
     ov.maxConcurrent && ov.maxConcurrent > 0 ? Math.floor(ov.maxConcurrent) : null;
 
-  const lightWeightMb = Math.max(
-    WEIGHT_FLOOR_MB,
-    Math.round(perRunnerMemoryMb * LIGHT_WEIGHT_FRACTION),
-  );
   const positive = (v: number | undefined, fallback: number): number =>
     v && v > 0 ? Math.floor(v) : fallback;
+  // A container cannot occupy more than its own --memory cap, so no weight may exceed it.
+  // This only binds on a thin host where the cap itself was clamped down to the budget.
+  const withinCap = (mb: number): number =>
+    clamp(mb, Math.min(WEIGHT_FLOOR_MB, perRunnerMemoryMb), perRunnerMemoryMb);
+
+  const ddevWeightMb = positive(ov.ddevWeightMb, withinCap(DDEV_WEIGHT_MB));
+  // The desktop runs INSIDE the runner and shares its cap, so base + surcharge is bounded by
+  // that cap too — charging more than a container can hold would park tasks against capacity
+  // that could never be used.
   const browserWeightMb = positive(
     ov.browserWeightMb,
-    Math.round(perRunnerMemoryMb * BROWSER_WEIGHT_FRACTION),
+    Math.max(0, Math.min(BROWSER_WEIGHT_MB, perRunnerMemoryMb - ddevWeightMb)),
   );
 
   return {
@@ -212,12 +234,9 @@ export function deriveRuntimeCaps(input: {
     maxConcurrentRuntimes,
     runtimeBudgetMb: budgetMb,
     browserWeightMb,
-    ddevWeightMb: positive(
-      ov.ddevWeightMb,
-      Math.max(WEIGHT_FLOOR_MB, perRunnerMemoryMb - browserWeightMb),
-    ),
-    appWeightMb: positive(ov.appWeightMb, lightWeightMb),
-    agentWeightMb: positive(ov.agentWeightMb, lightWeightMb),
+    ddevWeightMb,
+    appWeightMb: positive(ov.appWeightMb, withinCap(APP_WEIGHT_MB)),
+    agentWeightMb: positive(ov.agentWeightMb, withinCap(AGENT_WEIGHT_MB)),
     agentFloor: positive(ov.agentFloor, DEFAULT_AGENT_FLOOR),
   };
 }
