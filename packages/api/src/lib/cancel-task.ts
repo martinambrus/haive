@@ -41,7 +41,18 @@ export async function cancelTaskRow(
   const now = new Date();
   await tx
     .update(schema.tasks)
-    .set({ status: 'cancelled', completedAt: now, ...CLEAR_ALLOWANCE_WATCH, updatedAt: now })
+    .set({
+      status: 'cancelled',
+      completedAt: now,
+      // Invalidate every advance-step job still queued or delayed for this task. Cancel does not
+      // purge the BullMQ queue, so a runtime-slot park kept re-driving itself on a cancelled task
+      // — and the park's pointer stamp flipped the task back to `running` one poll later, each
+      // round re-destroying its worktree and auth volumes. The worker's epoch guard drops an
+      // advance carrying an older epoch, so bumping here ends those loops at the source.
+      orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
+      ...CLEAR_ALLOWANCE_WATCH,
+      updatedAt: now,
+    })
     .where(eq(schema.tasks.id, taskId));
   // Transition any non-terminal step rows so a cancelled task never shows a live
   // step (e.g. a run_app hold step parked at waiting_form). step_status has no

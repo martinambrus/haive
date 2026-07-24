@@ -2,7 +2,7 @@ import { rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Queue, Worker, type Job, type JobsOptions } from 'bullmq';
 import Docker from 'dockerode';
-import { and, desc, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, ne, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
@@ -133,6 +133,9 @@ interface ResolvedTaskContext {
    *  orchestration loop for one task. Null on a task that has not advanced yet. */
   currentStepId: string | null;
   currentRound: number;
+  /** Task status as of job pickup. A `cancelled`/`completed` task must never be advanced —
+   *  cancel leaves its already-queued advance jobs in place, so this is what stops them. */
+  status: string;
 }
 
 async function buildRunList(ctx: ResolvedTaskContext, db: Database): Promise<StepDefinition[]> {
@@ -237,6 +240,7 @@ async function resolveTaskContext(
     orchestrationEpoch: task.orchestrationEpoch ?? 0,
     currentStepId: task.currentStepId ?? null,
     currentRound: task.currentRound ?? 0,
+    status: task.status,
   };
 }
 
@@ -303,6 +307,11 @@ async function resolveCurrentStepIndex(
   return rows[0]?.runSeq ?? fallbackIndex;
 }
 
+/** Statuses a task never comes back from. Cancel is the user's final word and completion is
+ *  done; only `failed` is revivable (retry / allowance auto-resume). Every write that could flip
+ *  a task back to running/waiting excludes these, so a stale job cannot raise the dead. */
+const TERMINAL_TASK_STATUSES = ['cancelled', 'completed'] as const;
+
 async function markTaskWaiting(
   db: Database,
   taskId: string,
@@ -321,7 +330,12 @@ async function markTaskWaiting(
       currentRound: round,
       updatedAt: new Date(),
     })
-    .where(eq(schema.tasks.id, taskId));
+    .where(
+      and(
+        eq(schema.tasks.id, taskId),
+        notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
+      ),
+    );
 }
 
 async function markTaskRunningWithStep(
@@ -349,7 +363,16 @@ async function markTaskRunningWithStep(
       errorMessage: null,
       updatedAt: new Date(),
     })
-    .where(eq(schema.tasks.id, taskId));
+    // …but never on a CANCELLED or COMPLETED task. Clearing completedAt is what makes this write
+    // able to resurrect the dead: a park tick on a cancelled task called this and flipped it back
+    // to `running` one poll after the user cancelled, over and over. `failed` stays writable —
+    // the allowance auto-resume legitimately revives a failed task through here.
+    .where(
+      and(
+        eq(schema.tasks.id, taskId),
+        notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
+      ),
+    );
 }
 
 async function markTaskCompleted(db: Database, taskId: string): Promise<void> {
@@ -1406,6 +1429,19 @@ async function handleAdvanceStep(
     logger.warn({ taskId: payload.taskId }, 'advance-step: task not found');
     return;
   }
+  // Terminal task: nothing may advance it, ever. Cancel does not purge the task's queued or
+  // delayed advance jobs, so a park loop kept ticking on a cancelled task and the park's own
+  // pointer stamp (markTaskRunningWithStep, which clears completedAt by design for auto-resume)
+  // flipped it back to `running` one poll after the user cancelled it — repeatedly, re-destroying
+  // its worktree and auth volumes each round. Cancel now also bumps the epoch so these jobs are
+  // dropped as stale; this guard is what protects the ones already in flight.
+  if (ctx.status === 'cancelled' || ctx.status === 'completed') {
+    logger.info(
+      { taskId: ctx.taskId, stepId: payload.stepId, taskStatus: ctx.status },
+      'advance-step skipped: task is terminal',
+    );
+    return;
+  }
   if (!payload.stepId) {
     throw new Error('advance-step requires stepId');
   }
@@ -2024,7 +2060,15 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   const now = new Date();
   await db
     .update(schema.tasks)
-    .set({ status: 'cancelled', completedAt: now, updatedAt: now })
+    .set({
+      status: 'cancelled',
+      completedAt: now,
+      // Same epoch bump the api's cancelTaskRow makes, for a cancel that starts worker-side
+      // (abort): it invalidates every advance-step job still queued for this task, so no park
+      // loop can keep re-driving — and resurrecting — a cancelled task.
+      orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
+      updatedAt: now,
+    })
     .where(eq(schema.tasks.id, payload.taskId));
   // The task is terminal now, but its active/parked step rows are still in a
   // non-terminal state (e.g. a run_app hold step left at waiting_form) — that
