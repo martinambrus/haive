@@ -1849,6 +1849,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           output,
           summary: curatedSummary,
           statusMessage: null,
+          // Ends successfully => carries no error; see the main done write below.
+          errorMessage: null,
           endedAt: new Date(),
         });
         ctx.logger.info(
@@ -1877,6 +1879,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           output,
           summary: curatedSummary,
           statusMessage: null,
+          // Ends successfully => carries no error; see the main done write below.
+          errorMessage: null,
           endedAt: new Date(),
         });
         ctx.logger.info(
@@ -1906,6 +1910,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           output,
           summary: curatedSummary,
           statusMessage: null,
+          // Ends successfully => carries no error; see the main done write below.
+          errorMessage: null,
           endedAt: new Date(),
         });
         ctx.logger.info(
@@ -1933,6 +1939,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       summary: curatedSummary,
       degradedNote,
       statusMessage: null,
+      // A row that ends successfully carries no error. The step may have failed on an earlier
+      // attempt (an orphaned CLI, a transient dispatch failure) and error_message survived the
+      // retry, so a DONE row kept rendering a red "cli invocation failed…" banner — reading as a
+      // failed step, in parallel with whatever the task was really doing. degradedNote /
+      // warningMessage are the channels for "succeeded, with caveats".
+      errorMessage: null,
       endedAt: new Date(),
     });
 

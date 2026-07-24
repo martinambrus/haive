@@ -2766,7 +2766,13 @@ function StepCardImpl({
         </div>
       )}
 
-      {step.errorMessage && (
+      {step.errorMessage && step.status !== 'done' && step.status !== 'skipped' && (
+        // Only while the row has NOT ended successfully. error_message is copy that can outlive
+        // the failure it describes — a step that failed on one attempt and succeeded on a later
+        // one kept the text, so a `done` row rendered a red "cli invocation failed…" banner and
+        // read as a failed step sitting beside whatever the task was really doing (observed on
+        // 38f02dee: 07b-phase-4-validate round 0 done-with-error next to its live round-1 park).
+        // Steps that ended well but with caveats use degradedNote / warningMessage instead.
         <div className="whitespace-pre-wrap rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
           {step.errorMessage}
         </div>
