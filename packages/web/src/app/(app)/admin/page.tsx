@@ -85,6 +85,10 @@ export default function AdminPage() {
   const [softTimeoutEnabled, setSoftTimeoutEnabled] = useState<boolean | null>(null);
   const [softTimeoutPercentInput, setSoftTimeoutPercentInput] = useState('');
   const [savingSoftTimeout, setSavingSoftTimeout] = useState(false);
+  const [timeoutBaseInput, setTimeoutBaseInput] = useState('');
+  const [timeoutLadderInput, setTimeoutLadderInput] = useState('');
+  const [timeoutRungs, setTimeoutRungs] = useState<number[] | null>(null);
+  const [savingTimeoutLadder, setSavingTimeoutLadder] = useState(false);
   const [usageWindowEnabled, setUsageWindowEnabled] = useState<boolean | null>(null);
   const [savingUsageWindow, setSavingUsageWindow] = useState(false);
   const [usageAlertEnabled, setUsageAlertEnabled] = useState<boolean | null>(null);
@@ -146,6 +150,7 @@ export default function AdminPage() {
         concurrencyData,
         steeringData,
         softTimeoutData,
+        timeoutLadderData,
         ideData,
         debugModeData,
         browserAccessData,
@@ -171,6 +176,9 @@ export default function AdminPage() {
         api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
         api.get<{ enabled: boolean }>('/admin/config/steering'),
         api.get<{ enabled: boolean; percent: number }>('/admin/config/cli-soft-timeout'),
+        api.get<{ baseMinutes: number; ladder: string; rungs: number[] }>(
+          '/admin/config/cli-timeout-ladder',
+        ),
         api.get<{ enabled: boolean }>('/admin/config/ide'),
         api.get<{ enabled: boolean }>('/admin/config/debug-mode'),
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
@@ -199,6 +207,9 @@ export default function AdminPage() {
       setPrWorkflowEnabled(prWorkflowData.enabled);
       setSoftTimeoutEnabled(softTimeoutData.enabled);
       setSoftTimeoutPercentInput(String(softTimeoutData.percent));
+      setTimeoutBaseInput(String(timeoutLadderData.baseMinutes));
+      setTimeoutLadderInput(timeoutLadderData.ladder);
+      setTimeoutRungs(timeoutLadderData.rungs);
       setIdeEnabled(ideData.enabled);
       setDebugModeEnabled(debugModeData.enabled);
       setBrowserAccessEnabled(browserAccessData.enabled);
@@ -440,6 +451,29 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update soft timeout');
     } finally {
       setSavingSoftTimeout(false);
+    }
+  }
+
+  async function saveTimeoutLadder(baseRaw: string, ladderRaw: string) {
+    const baseMinutes = Number.parseInt(baseRaw, 10);
+    if (!Number.isFinite(baseMinutes) || baseMinutes < 5 || baseMinutes > 480) {
+      setError('Timeout base must be between 5 and 480 minutes.');
+      return;
+    }
+    setSavingTimeoutLadder(true);
+    try {
+      const result = await api.put<{ baseMinutes: number; ladder: string; rungs: number[] }>(
+        '/admin/config/cli-timeout-ladder',
+        { baseMinutes, ladder: ladderRaw },
+      );
+      setTimeoutBaseInput(String(result.baseMinutes));
+      setTimeoutLadderInput(result.ladder);
+      setTimeoutRungs(result.rungs);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update the timeout ladder');
+    } finally {
+      setSavingTimeoutLadder(false);
     }
   }
 
@@ -1115,6 +1149,59 @@ export default function AdminPage() {
               {savingSoftTimeout ? 'Saving...' : 'Save'}
             </Button>
           </div>
+        </Card>
+      )}
+
+      {timeoutRungs !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>CLI timeout ladder</CardTitle>
+            <CardDescription>
+              How long a CLI invocation may run before it is SIGKILLed. The base is a floor over
+              each step&apos;s own declared timeout, never a replacement — a step that asks for more
+              keeps its number. Each consecutive timeout on the same step re-dispatches one rung
+              higher, so a pass that genuinely needs longer gets it instead of burning three
+              identical attempts. Only timeouts advance the ladder; a worker-restart orphan retries
+              at the same rung. Read at dispatch, so a change applies to the next invocation.
+            </CardDescription>
+          </CardHeader>
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="flex flex-col gap-1 text-xs text-neutral-400">
+              Base (minutes)
+              <input
+                type="number"
+                min={5}
+                max={480}
+                value={timeoutBaseInput}
+                onChange={(e) => setTimeoutBaseInput(e.target.value)}
+                className="w-24 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-neutral-400">
+              Rungs (multipliers)
+              <input
+                type="text"
+                value={timeoutLadderInput}
+                onChange={(e) => setTimeoutLadderInput(e.target.value)}
+                className="w-40 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 font-mono text-sm text-neutral-100"
+              />
+            </label>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={savingTimeoutLadder}
+              onClick={() => void saveTimeoutLadder(timeoutBaseInput, timeoutLadderInput)}
+            >
+              {savingTimeoutLadder ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
+          <p className="mt-2 text-xs text-neutral-500">
+            A 30-minute step would run for{' '}
+            {timeoutRungs
+              .map((r) => Math.max(1, Math.round((Number(timeoutBaseInput) || 0) * r)))
+              .join(' → ')}{' '}
+            minutes across its attempts, then fail.
+          </p>
         </Card>
       )}
 

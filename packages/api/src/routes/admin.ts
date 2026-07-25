@@ -11,11 +11,14 @@ import {
   configService,
   decryptEmail,
   DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS,
+  DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
+  DEFAULT_CLI_TIMEOUT_LADDER,
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   deriveAgentConcurrency,
   deriveRuntimeCaps,
   logger,
   parseAllowanceWatchMode,
+  parseTimeoutLadder,
   readHostResources,
   TERSENESS_LEVELS,
 } from '@haive/shared';
@@ -526,6 +529,49 @@ adminRoutes.put('/config/cli-soft-timeout', async (c) => {
   await configService.set(CONFIG_KEYS.CLI_SOFT_TIMEOUT_PERCENT, String(percent));
   log.info({ enabled, percent }, 'cli soft timeout updated');
   return c.json({ enabled, percent });
+});
+
+const timeoutLadderSchema = z.object({
+  // 5..480: below 5 no CLI finishes anything, and a single pass that needs more than
+  // eight hours is wedged rather than slow.
+  baseMinutes: z.number().int().min(5).max(480),
+  // Free text so fractional rungs are expressible ("1,1.33,2"); rejected below if it
+  // parses to nothing usable, rather than silently falling back to the built-in ladder
+  // and leaving the admin believing their string took effect.
+  ladder: z.string().min(1).max(120),
+});
+
+// Escalating hard-timeout ladder for CLI invocations. A run SIGKILLed at its budget is
+// re-dispatched one rung higher instead of at the same budget; the base is a FLOOR over
+// each step's declared timeout, never a replacement. Read per dispatch (within the ~30s
+// config cache), so a change applies to the next invocation, not the running one.
+adminRoutes.get('/config/cli-timeout-ladder', async (c) => {
+  const baseMinutes = await configService.getNumber(
+    CONFIG_KEYS.CLI_TIMEOUT_BASE_MINUTES,
+    DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
+  );
+  const ladder =
+    (await configService.get(CONFIG_KEYS.CLI_TIMEOUT_LADDER)) ??
+    DEFAULT_CLI_TIMEOUT_LADDER.join(',');
+  return c.json({ baseMinutes, ladder, rungs: parseTimeoutLadder(ladder) });
+});
+
+adminRoutes.put('/config/cli-timeout-ladder', async (c) => {
+  const { baseMinutes, ladder } = timeoutLadderSchema.parse(await c.req.json());
+  // parseTimeoutLadder falls back to the built-in ladder for unusable input, so compare
+  // against a raw parse to tell "the admin typed the defaults" from "the admin typed
+  // junk" — only the latter is an error.
+  const usable = ladder
+    .split(',')
+    .map((part) => Number(part.trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  if (usable.length === 0) {
+    throw new HttpError(400, 'ladder must be comma-separated positive numbers, e.g. "1,1.33,2"');
+  }
+  await configService.set(CONFIG_KEYS.CLI_TIMEOUT_BASE_MINUTES, String(baseMinutes));
+  await configService.set(CONFIG_KEYS.CLI_TIMEOUT_LADDER, usable.join(','));
+  log.info({ baseMinutes, ladder: usable }, 'cli timeout ladder updated');
+  return c.json({ baseMinutes, ladder: usable.join(','), rungs: usable });
 });
 
 const usageWindowSchema = z.object({ enabled: z.boolean() });
