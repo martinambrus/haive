@@ -445,11 +445,16 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       // auto-submit. "Override and run" is an explicit run-it-now, so it does NOT
       // pause (hence `!== true`). One-shot — step-runner clears it on park. Scoped
       // to step.id like the override; the downstream cascade keeps auto-continuing.
+      // cliTimeoutOverrideMs: "Retry with longer timeout" pins this step's CLI budget
+      // to the minutes the user picked; every other retry path writes null, so the
+      // escalating ladder applies again and no stale override outlives the run that
+      // needed it. Same scoping as the two above.
       await tx
         .update(schema.taskSteps)
         .set({
           localModelOverride: body.overrideLocalModel === true,
           pauseFormOnRetry: body.overrideLocalModel !== true,
+          cliTimeoutOverrideMs: body.timeoutMinutes ? body.timeoutMinutes * 60_000 : null,
         })
         .where(eq(schema.taskSteps.id, step.id));
       const bumped = await tx
@@ -482,6 +487,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           priorStatus: step.status,
           cascadedSteps: downstreamToReset.length,
           overrideLocalModel: body.overrideLocalModel === true,
+          timeoutMinutes: body.timeoutMinutes ?? null,
         },
       });
     });

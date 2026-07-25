@@ -175,6 +175,15 @@ export const stepActionRequestSchema = z.object({
    *  unsafe-for-local-models guard is bypassed on re-run (the "Override and run"
    *  button). Omitted/false → a normal retry that re-arms the guard. */
   overrideLocalModel: z.boolean().optional(),
+  /** Only meaningful with action 'retry'. Sets task_steps.cli_timeout_override_ms on the
+   *  clicked step so its next CLI invocations get exactly this budget instead of the
+   *  escalating ladder (the "Retry with longer timeout" button). Omitted → the retry
+   *  clears any previous override and the ladder applies again.
+   *
+   *  15 minutes is below every step's declared timeout, so it is only ever a deliberate
+   *  shortening; 480 is the ceiling because a single CLI pass that cannot finish in eight
+   *  hours is a wedged run, not a slow one. */
+  timeoutMinutes: z.number().int().min(15).max(480).optional(),
 });
 
 export type StepAction = z.infer<typeof stepActionSchema>;

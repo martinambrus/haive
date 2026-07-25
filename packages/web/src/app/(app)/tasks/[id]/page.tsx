@@ -34,6 +34,12 @@ import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
 import { isAfterFrontier, type StepOrderKey } from '@/lib/step-order';
 import { failureBanner, parkBanner } from '@/lib/step-banners';
+import {
+  defaultRetryTimeoutMinutes,
+  parseRetryTimeoutMinutes,
+  RETRY_TIMEOUT_MAX_MINUTES,
+  RETRY_TIMEOUT_MIN_MINUTES,
+} from '@/lib/retry-timeout';
 import { formatTokens } from '@/lib/format-tokens';
 import { CLI_USAGE_LABEL, resetShort, resetSuffix } from '@/lib/usage-format';
 import {
@@ -807,7 +813,7 @@ export default function TaskDetailPage() {
   async function runStepAction(
     step: TaskStep,
     action: StepAction,
-    opts?: { overrideLocalModel?: boolean },
+    opts?: { overrideLocalModel?: boolean; timeoutMinutes?: number },
   ) {
     // Downstream by TRUE run order (run_seq): retrying re-runs the WHOLE tail after
     // this step — pending steps run too, non-pending ones are also reset first — so
@@ -821,21 +827,23 @@ export default function TaskDetailPage() {
     ).length;
     const label = opts?.overrideLocalModel
       ? 'Run this step on the current local model anyway?\n\nLocal models are unreliable at rewriting long-lived project files (skills, agents, config) and may produce low-quality or damaging output. Proceed only if you understand the risk.'
-      : action === 'retry_ai'
-        ? 'Spawn an AI agent to diagnose and fix this failure, then re-run the step?'
-        : action === 'abort'
-          ? 'Abort this step and cancel the task? The environment will be torn down.'
-          : action === 'skip'
-            ? step.stepId === '01-worktree-setup'
-              ? 'Work from the project root (the repo’s current branch) instead of an isolated branch/worktree? You can still commit your edits at the end.'
-              : 'Skip this step and continue to the next step?'
-            : action === 'resume'
-              ? step.iterationCount > 0
-                ? `Resume this step from the last completed pass (${step.iterationCount} kept) with the currently-selected CLI?`
-                : `Resume this step's first pass with the currently-selected CLI?`
-              : downstreamCount
-                ? `Retry this step? ${downstreamCount} downstream step(s) will also be reset and re-run.`
-                : 'Retry this step?';
+      : opts?.timeoutMinutes
+        ? `Retry this step with a ${opts.timeoutMinutes}-minute CLI timeout?${downstreamCount ? ` ${downstreamCount} downstream step(s) will also be reset and re-run.` : ''}`
+        : action === 'retry_ai'
+          ? 'Spawn an AI agent to diagnose and fix this failure, then re-run the step?'
+          : action === 'abort'
+            ? 'Abort this step and cancel the task? The environment will be torn down.'
+            : action === 'skip'
+              ? step.stepId === '01-worktree-setup'
+                ? 'Work from the project root (the repo’s current branch) instead of an isolated branch/worktree? You can still commit your edits at the end.'
+                : 'Skip this step and continue to the next step?'
+              : action === 'resume'
+                ? step.iterationCount > 0
+                  ? `Resume this step from the last completed pass (${step.iterationCount} kept) with the currently-selected CLI?`
+                  : `Resume this step's first pass with the currently-selected CLI?`
+                : downstreamCount
+                  ? `Retry this step? ${downstreamCount} downstream step(s) will also be reset and re-run.`
+                  : 'Retry this step?';
     if (!confirm(label)) return;
     setStepActionBusy(step.stepId);
     setStepActionError(null);
@@ -844,6 +852,7 @@ export default function TaskDetailPage() {
         action,
         round: step.round,
         overrideLocalModel: opts?.overrideLocalModel,
+        timeoutMinutes: opts?.timeoutMinutes,
       });
       await reload();
     } catch (err) {
@@ -1529,7 +1538,10 @@ interface StepCardProps {
   onSubmit: (values: FormValues) => Promise<void>;
   actionBusy: boolean;
   actionError: string | null;
-  onAction: (action: StepAction, opts?: { overrideLocalModel?: boolean }) => Promise<void>;
+  onAction: (
+    action: StepAction,
+    opts?: { overrideLocalModel?: boolean; timeoutMinutes?: number },
+  ) => Promise<void>;
   onCliLogin: () => void;
   providers: CliProvider[];
   /** Task-level fallback when this step has no per-step preference set. */
@@ -2696,6 +2708,30 @@ function StepCardImpl({
                   title="Run this step on the current local model despite the reliability warning. Bypasses the block for this step only — other steps keep the guard."
                 >
                   {actionBusy ? 'Overriding…' : 'Override and run'}
+                </Button>
+              )}
+              {step.errorHint?.type === 'cli_timeout' && step.status === 'failed' && (
+                <Button
+                  size="sm"
+                  disabled={actionBusy}
+                  onClick={() => {
+                    // errorHint is the structural proof the CLI hit its budget on every
+                    // rung — never the step's message copy, which outlives the state it
+                    // describes. Narrowed inside the handler so the union stays exhaustive.
+                    const hint = step.errorHint;
+                    if (hint?.type !== 'cli_timeout') return;
+                    const minutes = parseRetryTimeoutMinutes(
+                      prompt(
+                        `The CLI was stopped at its ${hint.lastBudgetMinutes}-minute budget on ${hint.attempts} attempt(s).\n\nMinutes to give it this time (${RETRY_TIMEOUT_MIN_MINUTES}–${RETRY_TIMEOUT_MAX_MINUTES}):`,
+                        String(defaultRetryTimeoutMinutes(hint.lastBudgetMinutes)),
+                      ),
+                    );
+                    if (minutes === null) return;
+                    void onAction('retry', { timeoutMinutes: minutes });
+                  }}
+                  title="Re-run this step with a CLI timeout you choose, instead of the automatic budget ladder. Use when the pass is genuinely long rather than stuck."
+                >
+                  {actionBusy ? 'Retrying…' : 'Retry with longer timeout'}
                 </Button>
               )}
               {step.status === 'failed' &&
