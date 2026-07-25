@@ -16,6 +16,7 @@ import {
   resolveInvocationUsesWorktreeGitBoundary,
   withWorktreeGitBoundary,
 } from '../repo/worktree-git-boundary.js';
+import { withDdevGeneratedBoundary } from '../repo/ddev-generated-boundary.js';
 
 export type DispatchMode = 'cli' | 'subagent_emulated' | 'skip';
 
@@ -155,7 +156,11 @@ function buildCliSidePlan(
       projectAgentsDir: providerMetadata.projectAgentsDir,
       agentFileFormat: providerMetadata.agentFileFormat,
     });
-    return withWorktreeGitBoundary(capabilityAdapted, req.worktreeGitBoundary === true);
+    // Both boundaries ride the same predicate: an invocation isolated to a worktree is
+    // exactly the one that gets the read-only `.git` and `#ddev-generated` masks, so a
+    // prompt can never claim a boundary the mount does not enforce (or omit one it does).
+    const gitBounded = withWorktreeGitBoundary(capabilityAdapted, req.worktreeGitBoundary === true);
+    return withDdevGeneratedBoundary(gitBounded, req.worktreeGitBoundary === true);
   };
 
   if (req.input.kind === 'prompt') {

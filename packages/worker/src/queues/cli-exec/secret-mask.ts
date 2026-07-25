@@ -14,7 +14,7 @@ import {
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import { WORKTREE_SUBDIR } from '../../repo/worktree-paths.js';
-import { HOST_REPO_ROOT, WORKER_REPO_STORAGE_ROOT } from './resolvers.js';
+import { resolveInvocationWorkerRoot } from './resolvers.js';
 import { log } from './_shared.js';
 
 const execFileAsync = promisify(execFile);
@@ -92,18 +92,16 @@ export async function resolveSecretMasks(
   if (!repo.secretMaskEnabled) return [];
 
   // Scan EXACTLY what is mounted, and mask at the mount target — so the masked set can
-  // never drift from the mount. A volume mount carries a subpath (the worktree this
-  // invocation is isolated to, or the repo root for a task with no worktree); a bind mount
-  // (read-only local-path repo) has no subpath and is the worker's /host-fs view of the
-  // repo root. With no mount supplied (unit tests / defensive) fall back to the repo-root
-  // tree the mount would bind. computeSecretMasks stats the root and fails closed if it is
-  // unreadable — the sandbox binds the real tree regardless of what the worker can see.
-  const storagePath = repo.storagePath ?? repo.localPath;
-  const workerRoot = repoMount?.subpath
-    ? posix.join(WORKER_REPO_STORAGE_ROOT, repoMount.subpath)
-    : storagePath?.startsWith(HOST_REPO_ROOT + '/')
-      ? storagePath
-      : posix.join(WORKER_REPO_STORAGE_ROOT, `${task.userId}/${task.repositoryId}`);
+  // never drift from the mount. resolveInvocationWorkerRoot is the one definition of that
+  // path, shared with the other sandbox masks. computeSecretMasks stats the root and fails
+  // closed if it is unreadable — the sandbox binds the real tree regardless of what the
+  // worker can see.
+  const workerRoot = resolveInvocationWorkerRoot({
+    repoMountSubpath: repoMount?.subpath,
+    storagePath: repo.storagePath ?? repo.localPath,
+    userId: task.userId,
+    repositoryId: task.repositoryId,
+  });
 
   return computeSecretMasks(
     workerRoot,

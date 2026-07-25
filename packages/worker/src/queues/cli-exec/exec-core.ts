@@ -51,6 +51,7 @@ import {
 import { executeSubAgentNative, executeSubAgentSequential } from './sub-agent.js';
 import { resolveSecretMasks } from './secret-mask.js';
 import { worktreeGitfileMask } from './gitfile-mask.js';
+import { resolveDdevGeneratedMasks } from './ddev-generated-mask.js';
 import { makeUsageSnapshotPersister } from './running-usage.js';
 import {
   classifyAntigravityDiagnostic,
@@ -242,10 +243,14 @@ export async function executeByKind(
   // untracked-only). Applied to every cli-exec kind; the app runtime mounts the
   // same repo volume WITHOUT these masks, so the running app still sees them.
   // The worktree gitfile mask rides the same mechanism but is an integrity control,
-  // not a secrecy one — it is never gated by the secret-mask kill-switch.
+  // not a secrecy one — it is never gated by the secret-mask kill-switch. The
+  // `#ddev-generated` masks are the same kind of control: they keep an agent from taking
+  // over a file DDEV owns (and thereby freezing it against regeneration), which is how a
+  // dropped `/phpstatus` alias made every later `ddev start` time out.
   const maskFiles = [
     ...(await resolveSecretMasks(db, payload.taskId, repoMount)),
     ...worktreeGitfileMask(hasWorktree),
+    ...(await resolveDdevGeneratedMasks(db, payload.taskId, repoMount)),
   ];
   switch (payload.kind) {
     case 'cli':
