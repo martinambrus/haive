@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type Task, type TaskListResponse, type TaskStatus } from '@/lib/api-client';
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
+import { CircleDot, FolderGit2 } from 'lucide-react';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
 import { formatDuration } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
@@ -55,18 +56,29 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
               <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
             )}
             <Badge>{TYPE_LABELS[task.type]}</Badge>
-            {task.repository && <Badge variant="info">repo: {task.repository.name}</Badge>}
+            {task.repository && (
+              <Badge variant="info" className="gap-1">
+                <FolderGit2 className="h-3 w-3" />
+                {task.repository.name}
+              </Badge>
+            )}
+            {/* Current step as a badge, matching the fixed-header strip on the task page.
+                The listing only carries the step id (no steps array), so it shows the id
+                rather than the friendly title. Hidden on done/cancelled tasks — there is
+                no "current" step then, and an amber badge would read as an alert. */}
+            {task.currentStepId && task.status !== 'completed' && task.status !== 'cancelled' && (
+              <Badge variant="warning" className="gap-1" title={task.currentStepId}>
+                <CircleDot className="h-3 w-3" />
+                {task.currentStepId}
+              </Badge>
+            )}
           </div>
           <span className="text-xs text-neutral-500">
             {new Date(task.createdAt).toLocaleString()}
           </span>
         </div>
         {task.description && <p className="text-xs text-neutral-400">{task.description}</p>}
-        <div className="flex items-center gap-3 text-xs text-neutral-500">
-          <span>Step index: {task.currentStepIndex}</span>
-          {task.currentStepId && <span>Current: {task.currentStepId}</span>}
-          {task.errorMessage && <span className="text-red-400">{task.errorMessage}</span>}
-        </div>
+        {task.errorMessage && <p className="text-xs text-red-400">{task.errorMessage}</p>}
         {task.timing && task.startedAt && (
           <div className="flex flex-wrap items-center gap-3 font-mono text-xs">
             <span className="text-neutral-300" title="Wall clock since the task started">
@@ -86,6 +98,15 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
               title="Your active time at gates (focused while it waited)"
             >
               user {formatDuration(task.timing.userActiveMs)}
+            </span>
+            {/* Same basis as the detail page's effort figure and the estimation-accuracy
+                math: work + user-active. Both operands come from the one computeTaskTiming
+                the listing endpoint already runs, so no server change is needed. */}
+            <span
+              className="text-rose-400"
+              title="Agent work + your active time = real task effort"
+            >
+              effort {formatDuration(task.timing.workMs + task.timing.userActiveMs)}
             </span>
             {task.tokenUsage && task.tokenUsage.totalTokens > 0 && (
               <span
