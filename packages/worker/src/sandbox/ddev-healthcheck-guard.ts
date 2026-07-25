@@ -26,10 +26,30 @@ const GENERATED_SITE_CONF: Record<string, { dir: string; file: string }> = {
 };
 
 const DDEV_GENERATED_MARKER = '#ddev-generated';
-/** The endpoint /healthcheck.sh polls. Not the directive syntax — apache and nginx spell
- *  the routing differently, and `Alias` / `AliasMatch` / a `location` variant are all
- *  legitimate ways to serve it. The path itself is the invariant. */
+/** The endpoint /healthcheck.sh polls. Not the directive syntax — `Alias` / `AliasMatch` /
+ *  a `location` variant are all legitimate ways to serve it. The path is the invariant. */
 const HEALTHCHECK_PATH = '/phpstatus';
+/** The two webserver families route /phpstatus by DIFFERENT mechanisms, verified against
+ *  `ddev/ddev-webserver:v1.25.3`:
+ *   - apache serves it ONLY from `/etc/apache2/sites-enabled/apache-site.conf`, the file
+ *     DDEV copies out of `.ddev/apache/` — so the literal path must appear there.
+ *   - nginx serves it from the image's own `/etc/nginx/monitoring.conf`, which
+ *     `nginx.conf` does NOT include; the site conf pulls it in with
+ *     `include /etc/nginx/monitoring.conf`. A stock `nginx-site.conf` therefore contains
+ *     NO `/phpstatus` at all, and demanding one falsely condemns every nginx project
+ *     (which is exactly what it did to rs_codex_5.6_high before this).
+ *  Matching the include on the FILE NAME rather than the absolute path so a DDEV
+ *  directory reshuffle degrades to "we stop recognising it", never to a false alarm. */
+const NGINX_MONITORING_INCLUDE = 'monitoring.conf';
+
+/** Tokens that prove a conf routes the healthcheck endpoint, per family. Either one is
+ *  enough — this is deliberately lenient, because a false "broken" verdict blocks a
+ *  working environment while a false "fine" only costs the readiness timeout we already
+ *  had. */
+function servesHealthcheck(family: string, text: string): boolean {
+  if (text.includes(HEALTHCHECK_PATH)) return true;
+  return family === 'nginx' && text.includes(NGINX_MONITORING_INCLUDE);
+}
 
 /** Strip full-line comments so a conf that merely mentions the endpoint in prose does not
  *  read as serving it. Deliberately does NOT try to parse directives: a false "broken"
@@ -84,7 +104,7 @@ export function findDdevHealthcheckBreakage(input: {
   // Absent, or still DDEV's to rewrite: the next start restores the alias itself.
   if (!site || site.content.includes(DDEV_GENERATED_MARKER)) return null;
 
-  if (active.some((c) => withoutComments(c.content).includes(HEALTHCHECK_PATH))) return null;
+  if (active.some((c) => servesHealthcheck(family, withoutComments(c.content)))) return null;
 
   return (
     `.ddev/${generated.dir}/${generated.file} was taken over (its \`${DDEV_GENERATED_MARKER}\` marker ` +

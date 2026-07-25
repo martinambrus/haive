@@ -177,4 +177,54 @@ describe('findDdevHealthcheckBreakage', () => {
       }),
     ).toBeNull();
   });
+
+  it('accepts an nginx conf that only INCLUDES the monitoring config', () => {
+    // Regression: nginx never serves /phpstatus from the site conf — the image's
+    // /etc/nginx/monitoring.conf does, and nginx.conf does not include it, so the site
+    // conf must. DDEV's own stock nginx-site.conf therefore contains no /phpstatus at
+    // all. Demanding the literal path condemned rs_codex_5.6_high, whose taken-over conf
+    // was working: it kept the include on line 13.
+    expect(
+      findDdevHealthcheckBreakage({
+        webserverType: 'nginx-fpm',
+        confs: [
+          {
+            name: 'nginx-site.conf',
+            content:
+              'server {\n  root /var/www/html;\n\n  include /etc/nginx/monitoring.conf;\n\n  location / {\n    try_files $uri @rewrite;\n  }\n}\n',
+          },
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it('still flags an nginx conf that dropped the monitoring include', () => {
+    expect(
+      findDdevHealthcheckBreakage({
+        webserverType: 'nginx-fpm',
+        confs: [
+          {
+            name: 'nginx-site.conf',
+            content: 'server {\n  root /var/www/html;\n  include fastcgi_params;\n}\n',
+          },
+        ],
+      }),
+    ).not.toBeNull();
+  });
+
+  it('does not let the nginx include excuse an apache project', () => {
+    // apache has no monitoring.conf mechanism — its /phpstatus comes only from the site
+    // conf DDEV copies, so the include token must not satisfy the apache branch.
+    expect(
+      findDdevHealthcheckBreakage({
+        webserverType: 'apache-fpm',
+        confs: [
+          {
+            name: 'apache-site.conf',
+            content: '<VirtualHost *:80>\n  Include /etc/nginx/monitoring.conf\n</VirtualHost>\n',
+          },
+        ],
+      }),
+    ).not.toBeNull();
+  });
 });
