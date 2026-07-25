@@ -36,6 +36,7 @@ import {
   computeGlobalStepIndex,
   stepRegistry,
   registerAllSteps,
+  trailingTimeoutInfo,
   upsertRow,
   type AdvanceStepResult,
   type WorkerDeps,
@@ -1285,6 +1286,31 @@ async function handleResult(
             .where(eq(schema.tasks.id, ctx.taskId));
           // Wake the poller when the cool-off ends rather than waiting out the repeatable tick.
           await enqueueUsagePollTick({ delayMs: SERVER_ERROR_COOLOFF_MS });
+        }
+      } else {
+        // Budget-timeout hint: the step's CLI was SIGKILLed at its budget on every rung of
+        // the escalating ladder, so the failure is "this pass needs more time", not a code
+        // defect or an outage. Surfacing it structurally lets the UI offer a retry with a
+        // user-chosen budget instead of the same doomed ladder.
+        //
+        // NOT read from endedInvs above: that query excludes superseded rows, and every
+        // re-dispatched timeout IS superseded — it would always report one attempt. The
+        // step runner's own counter is the single source of truth for how many rungs
+        // burned, so the hint and the dispatch that produced it cannot disagree.
+        const timeouts = await trailingTimeoutInfo(db, result.row.id);
+        if (timeouts.attempts > 0) {
+          await db
+            .update(schema.taskSteps)
+            .set({
+              errorHint: {
+                type: 'cli_timeout',
+                stepId,
+                lastBudgetMinutes: timeouts.lastBudgetMinutes ?? 0,
+                attempts: timeouts.attempts,
+              },
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.taskSteps.id, result.row.id));
         }
       }
       await appendEvent(db, ctx.taskId, result.row.id, 'step.failed', {

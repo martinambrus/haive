@@ -4,9 +4,12 @@ import { schema, isUniqueViolation, type StepIterationEntry } from '@haive/datab
 import {
   CONFIG_KEYS,
   configService,
+  DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
+  escalatedTimeoutMs,
   extractFormDefaults,
   isOllamaCloudModel,
   logger,
+  parseTimeoutLadder,
   validateFormValues,
 } from '@haive/shared';
 import type {
@@ -22,6 +25,8 @@ import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import {
+  cliTimeoutBudgetMinutes,
+  isCliTimeoutFailure,
   isOutputTruncationMessage,
   isTransientCliFailure,
 } from '../queues/cli-exec/failure-class.js';
@@ -695,6 +700,10 @@ async function resolveLlmPhase(
   }
   const invRow = inserted[0];
   if (!invRow) throw new Error('failed to insert cli_invocations row');
+  // Budget: the user's explicit override, else one rung up the ladder per consecutive
+  // timeout this step has already burned. Resolved here rather than in the step
+  // definition so a re-dispatch after a kill can differ from the first attempt.
+  const budget = await resolveDispatchTimeoutMs(db, current, llmSpec.timeoutMs);
   await params.deps.enqueueCliInvocation({
     invocationId: invRow.id,
     taskId: params.taskId,
@@ -705,14 +714,22 @@ async function resolveLlmPhase(
     kind: payloadKind,
     toolProfile: llmSpec.toolProfile,
     spec: plan.invocation.spec,
-    timeoutMs: llmSpec.timeoutMs,
+    timeoutMs: budget.timeoutMs,
   });
   const updated = await updateRow(db, current.id, {
     status: 'waiting_cli',
     statusMessage: 'Waiting for AI analysis...',
   });
   ctx.logger.info(
-    { invocationId: invRow.id, providerId: plan.providerId, mode: plan.mode },
+    {
+      invocationId: invRow.id,
+      providerId: plan.providerId,
+      mode: plan.mode,
+      declaredTimeoutMs: llmSpec.timeoutMs ?? null,
+      timeoutMs: budget.timeoutMs,
+      timeoutAttempt: budget.timeoutAttempt,
+      timeoutSource: budget.timeoutSource,
+    },
     'cli invocation enqueued',
   );
   return { resolved: false, result: { status: 'waiting_cli', row: updated } };
@@ -849,6 +866,9 @@ async function resolveAiFixPhase(
   }
   const invRow = inserted[0];
   if (!invRow) throw new Error('failed to insert ai-fix cli_invocations row');
+  // Same ladder as a normal dispatch: the fix agent declares nothing of its own, so it
+  // runs at the configured base and escalates if it too gets killed at its budget.
+  const fixBudget = await resolveDispatchTimeoutMs(db, current, undefined);
   await params.deps.enqueueCliInvocation({
     invocationId: invRow.id,
     taskId: params.taskId,
@@ -858,7 +878,7 @@ async function resolveAiFixPhase(
     effortLevel: preferredEffort ?? undefined,
     kind: payloadKind,
     spec: plan.invocation.spec,
-    timeoutMs: 30 * 60 * 1000,
+    timeoutMs: fixBudget.timeoutMs,
   });
   const updated = await updateRow(db, current.id, {
     status: 'waiting_cli',
@@ -2574,6 +2594,89 @@ async function countTrailingOrphans(db: Database, taskStepId: string): Promise<n
     else break;
   }
   return n;
+}
+
+/** The most-recent CONSECUTIVE invocations for a step that were killed by their own
+ *  TIMEOUT: how many, and the budget the newest of them was allowed.
+ *
+ *  A strict subset of countTrailingOrphans: same rows, same "reset at the first row that
+ *  doesn't match" rule, same reason for NOT filtering supersededAt — a re-dispatched
+ *  timeout is superseded to keep it out of the llm.retry budget, yet it is precisely the
+ *  history this must see. The distinction that matters is which transient kind ran out of
+ *  TIME: a worker-restart orphan or a cancel never spent its budget, so it must not push
+ *  the next run onto a bigger one.
+ *
+ *  Shared by the dispatch resolver (which needs the count, to pick a rung) and the
+ *  failed-step hint (which needs both, to tell the user what already failed) so the two
+ *  can never disagree about how many attempts were burned. */
+export async function trailingTimeoutInfo(
+  db: Database,
+  taskStepId: string,
+): Promise<{ attempts: number; lastBudgetMinutes: number | null }> {
+  const rows = await db
+    .select({ errorMessage: schema.cliInvocations.errorMessage })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        ne(schema.cliInvocations.mode, 'agent_mining'),
+      ),
+    )
+    .orderBy(desc(schema.cliInvocations.createdAt))
+    .limit(10);
+  let attempts = 0;
+  let lastBudgetMinutes: number | null = null;
+  for (const r of rows) {
+    if (!isCliTimeoutFailure({ errorMessage: r.errorMessage })) break;
+    if (attempts === 0) lastBudgetMinutes = cliTimeoutBudgetMinutes(r.errorMessage);
+    attempts++;
+  }
+  return { attempts, lastBudgetMinutes };
+}
+
+/** The hard-timeout budget this step's next invocation should be dispatched with.
+ *
+ *  Two sources, in order:
+ *   - the user's explicit "Retry with longer timeout" choice, which wins outright — they
+ *     named a number, so escalating on top of it would ignore what they asked for;
+ *   - otherwise the escalating ladder, indexed by how many consecutive timeouts this step
+ *     has already burned.
+ *
+ *  Returns the reasoning alongside the number so the dispatch log says WHY a run got the
+ *  budget it did — the previous behaviour (same budget forever) was invisible in logs. */
+async function resolveDispatchTimeoutMs(
+  db: Database,
+  step: { id: string; cliTimeoutOverrideMs: number | null },
+  declaredMs: number | undefined,
+): Promise<{ timeoutMs: number; timeoutAttempt: number; timeoutSource: 'override' | 'ladder' }> {
+  if (step.cliTimeoutOverrideMs && step.cliTimeoutOverrideMs > 0) {
+    return {
+      timeoutMs: step.cliTimeoutOverrideMs,
+      timeoutAttempt: 0,
+      timeoutSource: 'override',
+    };
+  }
+  const { attempts: timeoutAttempt } = await trailingTimeoutInfo(db, step.id);
+  // Both knobs have built-in defaults, so an unreadable config has one obviously correct
+  // answer: use them. Failing the dispatch instead would turn a config blip into a failed
+  // step — the same tolerate-and-continue stance the other augmenters on this path take
+  // (augmentPromptWithTerseness / augmentPromptWithAttachments).
+  let baseMinutes = DEFAULT_CLI_TIMEOUT_BASE_MINUTES;
+  let ladder = parseTimeoutLadder(null);
+  try {
+    baseMinutes = await configService.getNumber(
+      CONFIG_KEYS.CLI_TIMEOUT_BASE_MINUTES,
+      DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
+    );
+    ladder = parseTimeoutLadder(await configService.get(CONFIG_KEYS.CLI_TIMEOUT_LADDER));
+  } catch (err) {
+    logger.warn({ err }, 'cli timeout ladder config unreadable; using built-in defaults');
+  }
+  return {
+    timeoutMs: escalatedTimeoutMs(declaredMs, timeoutAttempt, { baseMinutes, ladder }),
+    timeoutAttempt,
+    timeoutSource: 'ladder',
+  };
 }
 
 /** Writes a gate-1 pre-answer value into a leaf field's default so a form
