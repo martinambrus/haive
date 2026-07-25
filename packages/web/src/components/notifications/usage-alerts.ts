@@ -47,21 +47,33 @@ export function usageEpisodeKey(alert: UsageAlert): string {
 }
 
 /**
- * Every window at or below the remaining-% threshold, across every provider.
+ * Every window at or below the remaining-% threshold, across every provider the caller
+ * currently has live work on.
  *
  * Skips snapshots that are not `ok` (an errored or reconnect-needing provider has no
  * trustworthy number) and snapshots that are `stale` — a reading the poller stopped
  * refreshing is frozen, and warning off a frozen number is worse than staying quiet.
+ *
+ * Also skips any provider absent from `activeProviderIds` (the server's set of CLIs with a
+ * running task or an in-flight invocation). A depletion warning is only actionable while
+ * something is spending that allowance: once every task on the CLI has failed on the
+ * exhausted window, re-warning each time a new 5-hour window rolls over is pure noise, and
+ * the recovery side is covered by the separate allowance-replenished channel, which is
+ * armed per failed task. An empty set therefore silences the channel — the same way a
+ * missing `alert` object already does in the caller.
+ *
  * Emitting an alert is not the same as showing it: the caller still has to check the
  * episode against the seen-store.
  */
 export function detectUsageAlerts(
   snapshots: readonly UsageWindowSnapshot[],
-  opts: { thresholdPct: number; now: number },
+  opts: { thresholdPct: number; now: number; activeProviderIds: readonly string[] },
 ): UsageAlert[] {
+  const active = new Set(opts.activeProviderIds);
   const alerts: UsageAlert[] = [];
   for (const snap of snapshots) {
     if (snap.status !== 'ok' || snap.stale) continue;
+    if (!active.has(snap.providerId)) continue;
     for (const windowKey of WINDOW_KEYS) {
       const window = snap[windowKey];
       if (!window) continue;

@@ -494,20 +494,24 @@ export function NotificationProvider() {
 
   // Usage-depletion channel. Independent of the task poll: its own (slower) cadence,
   // its own endpoint, its own episode keys. The server AND-s the admin global, the
-  // usage-window global and this user's opt-out into `alert.enabled`, so one fetch
-  // answers both "should I warn?" and "at what threshold?".
+  // usage-window global and this user's opt-out into `alert.enabled`, and reports which
+  // CLIs have live work in `alert.activeProviderIds`, so one fetch answers "should I
+  // warn?", "at what threshold?" and "is anything actually spending this allowance?".
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
       try {
         const data = await api.get<{
           snapshots: UsageWindowSnapshot[];
-          alert?: { enabled: boolean; thresholdPct: number };
+          alert?: { enabled: boolean; thresholdPct: number; activeProviderIds?: string[] };
         }>('/usage-window');
         if (cancelled || !data.alert?.enabled) return;
         const alerts = detectUsageAlerts(data.snapshots, {
           thresholdPct: data.alert.thresholdPct,
           now: Date.now(),
+          // Absent (older api) reads as "nothing is running", which silences the channel
+          // rather than warning off an activity set we cannot see.
+          activeProviderIds: data.alert.activeProviderIds ?? [],
         });
         for (const alert of alerts) handleUsageAlert(alert);
       } catch {
