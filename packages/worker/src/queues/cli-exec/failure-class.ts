@@ -59,7 +59,19 @@ export const CLI_TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137
  *  exec-core.ts (stop/cancel/timeout), stream.ts (premature stream end). Stable
  *  internal contracts we own end-to-end, never ephemeral upstream wording. */
 export const TRANSIENT_CLI_FAILURE_RE =
-  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out/i;
+  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out|exceeded its time budget/i;
+
+/** Stable headline for the ONE transient case that must not be re-run identically: the
+ *  CLI burned its whole budget and was SIGKILLed. Every other transient failure (worker
+ *  restart, cancel, premature stream end) never got its time, so re-dispatching at the
+ *  same budget is correct for them and wrong for this one — a pass that needs 40 minutes
+ *  fails at 30 exactly as many times as we retry it (07b burned 3 x 31 min and produced
+ *  nothing). Built by interpretCliFailure, detected by isCliTimeoutFailure, and used by
+ *  step-runner to pick the next rung of the escalating timeout ladder.
+ *
+ *  Same "internal contract we own end-to-end" convention as OUTPUT_TRUNCATION_HEADLINE
+ *  and PROVIDER_FATAL_HEADLINES — never matched against third-party CLI wording. */
+export const CLI_TIMEOUT_HEADLINE = 'CLI process exceeded its time budget';
 
 /** True when an ended invocation did not finish under its own power — it was killed,
  *  orphaned by a worker restart, cancelled, or timed out — so its "failure" is an
@@ -75,6 +87,26 @@ export function isTransientCliFailure(sig: {
     sig.exitCode === null ||
     (typeof sig.exitCode === 'number' && CLI_TERMINATION_EXIT_CODES.has(sig.exitCode));
   return killedByExit || (!!sig.errorMessage && TRANSIENT_CLI_FAILURE_RE.test(sig.errorMessage));
+}
+
+/** True when an invocation was killed specifically by its own TIMEOUT — the transient
+ *  subset that earns a bigger budget on re-dispatch rather than an identical one.
+ *
+ *  Text-only by design: the exit signal cannot tell a timeout SIGKILL from a cancel or a
+ *  worker-restart orphan (all land on a termination code or null), so the headline
+ *  interpretCliFailure wrote is the only signal that separates them. */
+export function isCliTimeoutFailure(sig: { errorMessage?: string | null }): boolean {
+  return !!sig.errorMessage && sig.errorMessage.startsWith(CLI_TIMEOUT_HEADLINE);
+}
+
+/** Minutes an invocation was allowed before the timeout killed it, recovered from the
+ *  headline interpretCliFailure wrote. Null when the message is not a timeout headline
+ *  or carries no budget — callers fall back to their own knowledge of the budget rather
+ *  than inventing one. */
+export function cliTimeoutBudgetMinutes(errorMessage: string | null | undefined): number | null {
+  if (!isCliTimeoutFailure({ errorMessage })) return null;
+  const m = /\((\d+)m\)/.exec(errorMessage!);
+  return m ? Number(m[1]) : null;
 }
 
 /* ------------------------------------------------------------------ */

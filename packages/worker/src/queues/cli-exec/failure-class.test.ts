@@ -2,12 +2,18 @@ import { describe, it, expect } from 'vitest';
 import {
   classifyAntigravityDiagnostic,
   classifyProviderFatal,
+  CLI_TIMEOUT_HEADLINE,
+  cliTimeoutBudgetMinutes,
   fatalClassFromMessage,
+  isCliTimeoutFailure,
   isFatalProviderFailure,
   isTransientCliFailure,
   PROVIDER_FATAL_HEADLINES,
   type ProviderFatalClass,
 } from './failure-class.js';
+
+// The EXACT message createSandboxSpawner stamps on a budget SIGKILL.
+const TIMEOUT_45M = `${CLI_TIMEOUT_HEADLINE} (45m).`;
 
 // The EXACT errorMessage captured from the production incident (task 2cac9e07,
 // Ollama cloud over its weekly limit). Verifies the fix against the original
@@ -242,5 +248,56 @@ describe('isTransientCliFailure', () => {
   it('NOT transient for a non-termination failure with no kill marker', () => {
     expect(isTransientCliFailure({ exitCode: 1, errorMessage: null })).toBe(false);
     expect(isTransientCliFailure({ errorMessage: 'plain failure, no kill marker' })).toBe(false);
+  });
+
+  it('still transient for a budget timeout — the re-dispatch path must stay open', () => {
+    // The ladder raises the BUDGET on re-dispatch; it does not change the fact that a
+    // timeout is recoverable infrastructure, not a model failure.
+    expect(isTransientCliFailure({ exitCode: null, errorMessage: TIMEOUT_45M })).toBe(true);
+    expect(isTransientCliFailure({ exitCode: 0, errorMessage: TIMEOUT_45M })).toBe(true);
+  });
+});
+
+describe('isCliTimeoutFailure', () => {
+  it('matches only the budget-timeout headline', () => {
+    expect(isCliTimeoutFailure({ errorMessage: TIMEOUT_45M })).toBe(true);
+  });
+
+  it('does NOT match the other transient kinds', () => {
+    // These never spent their budget, so escalating for them would hand a bigger
+    // timeout to a run that was merely interrupted.
+    for (const msg of [
+      'CLI invocation orphaned by a worker restart (worker exited mid-run)',
+      'CLI process was stopped before it finished (cancelled or timed out).',
+      STREAM_PREMATURE_END,
+      null,
+      undefined,
+    ]) {
+      expect(isCliTimeoutFailure({ errorMessage: msg })).toBe(false);
+    }
+  });
+
+  it('does NOT match the headline buried mid-message', () => {
+    // Prefix-anchored: a model that happens to discuss time budgets in its output
+    // must never be read as having timed out.
+    expect(
+      isCliTimeoutFailure({ errorMessage: `the agent said ${CLI_TIMEOUT_HEADLINE} (45m).` }),
+    ).toBe(false);
+  });
+});
+
+describe('cliTimeoutBudgetMinutes', () => {
+  it('recovers the budget the run was killed at', () => {
+    expect(cliTimeoutBudgetMinutes(TIMEOUT_45M)).toBe(45);
+    expect(cliTimeoutBudgetMinutes(`${CLI_TIMEOUT_HEADLINE} (120m).`)).toBe(120);
+  });
+
+  it('returns null for anything that is not a timeout headline', () => {
+    expect(cliTimeoutBudgetMinutes('CLI process was stopped before it finished')).toBeNull();
+    expect(cliTimeoutBudgetMinutes(null)).toBeNull();
+  });
+
+  it('returns null for a timeout headline with no parseable budget', () => {
+    expect(cliTimeoutBudgetMinutes(CLI_TIMEOUT_HEADLINE)).toBeNull();
   });
 });

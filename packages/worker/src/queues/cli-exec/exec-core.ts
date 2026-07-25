@@ -55,6 +55,7 @@ import { makeUsageSnapshotPersister } from './running-usage.js';
 import {
   classifyAntigravityDiagnostic,
   classifyProviderFatal,
+  CLI_TIMEOUT_HEADLINE,
   PROVIDER_FATAL_HEADLINES,
   type ProviderFatalClass,
 } from './failure-class.js';
@@ -115,6 +116,11 @@ export function interpretCliFailure(
   }
   if (result.exitCode === 0) return existing;
   if (result.exitCode === null || TERMINATION_EXIT_CODES.has(result.exitCode)) {
+    // A budget kill already identified itself (createSandboxSpawner stamps the headline
+    // and the minutes). Keep that: it is the same transient class, but the ONLY one the
+    // step runner re-dispatches at a LARGER budget, so collapsing it back into the
+    // generic sentence would silently disable the escalating ladder.
+    if (existing?.startsWith(CLI_TIMEOUT_HEADLINE)) return existing;
     return 'CLI process was stopped before it finished (cancelled or timed out).';
   }
 
@@ -893,7 +899,18 @@ export function createSandboxSpawner(
       stderr: result.stderr,
       durationMs: result.durationMs,
       timedOut: result.timedOut,
-      error: result.error,
+      // A budget SIGKILL leaves exitCode null / 137 and NO spawn error, which reads
+      // downstream exactly like a cancel or a worker-restart orphan — yet only this case
+      // must come back with a bigger budget. Stamp the headline here, the one place where
+      // "we killed it because time ran out" is authoritative and the budget is in scope;
+      // formatCliErrorMessage prefers a spawn error, so it reaches every return site of
+      // executeCliSpec without touching any of them. A real spawn error still wins: it
+      // says why the process never ran, which outranks how long we waited.
+      error:
+        result.error ??
+        (result.timedOut
+          ? `${CLI_TIMEOUT_HEADLINE} (${Math.round((opts.timeoutMs ?? 0) / 60_000)}m).`
+          : undefined),
       capturedLog: result.capturedLog,
     };
   };
