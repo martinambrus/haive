@@ -17,6 +17,7 @@ import {
   ddevSafeRename,
 } from '../../../sandbox/ddev-runner.js';
 import { ensureDdevWithProgress, withDdevProgress } from './_app-runtime.js';
+import { isDdevBuildInputFailure } from '../../../sandbox/ddev-build-guard.js';
 
 // Reconciles the per-task DDEV runtime with the post-implementation `.ddev/` inputs.
 // 01c-ddev-env booted DDEV ONCE early on the pre-change config; if the implementation
@@ -145,11 +146,20 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
     allowSkip: true,
   },
 
-  // Reconciliation is a runtime operation, not an implementation review. A DDEV boot,
-  // restart, migration, or rename failure must use the normal failed-step path so the
-  // workflow stops and exposes Retry / Retry with AI. In particular, host-level errors
-  // such as an incompatible `ddev_version_constraint` cannot be fixed by silently
-  // looping the implementation step.
+  // Reconciliation is a runtime operation, not an implementation review, so a boot,
+  // restart, migration, or rename failure uses the normal failed-step path: the workflow
+  // stops and exposes Retry / Retry with AI. Host-level errors such as an incompatible
+  // `ddev_version_constraint` or a reaped runner cannot be fixed by looping the
+  // implementation step, and looping them would burn a round to reach the same failure.
+  //
+  // An image-BUILD failure is the exception, and the reason this predicate exists. The
+  // only mutable inputs to that build are the project's own `web-build`/`db-build`
+  // Dockerfiles and the `*image_extra_packages` lists — all authored by the implementation
+  // agent, none of them reachable by a retry, because the file is still there on the next
+  // attempt (task 4fad0c4f died on `RUN docker-php-ext-install mysql`, a command the DDEV
+  // web image has never had). That is a code defect found late, which is exactly what the
+  // fix loop is for: hand the build log back to the implementer, capped by max_fix_rounds.
+  fixLoopOnError: isDdevBuildInputFailure,
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
     const row = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01c-ddev-env');

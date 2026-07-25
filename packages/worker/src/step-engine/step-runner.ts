@@ -1997,8 +1997,14 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     }
     // Deterministic fix-loop steps (e.g. 07c) route a fixable thrown failure back to
     // implementation as a diagnosis instead of failing the task. handleResult enforces
-    // the round cap; at the cap the task fails with this diagnosis.
-    if (!cancelled && stepDef.fixLoopOnError) {
+    // the round cap; at the cap the task fails with this diagnosis. A predicate form
+    // decides per error, so a step can loop back on the failures its implementer authored
+    // and still hard-fail on the ones no amount of re-implementing would clear.
+    const routeErrorToFixLoop =
+      typeof stepDef.fixLoopOnError === 'function'
+        ? stepDef.fixLoopOnError(errorMessage)
+        : stepDef.fixLoopOnError === true;
+    if (!cancelled && routeErrorToFixLoop) {
       const finished = await updateRow(db, row.id, {
         status: 'done',
         statusMessage: null,

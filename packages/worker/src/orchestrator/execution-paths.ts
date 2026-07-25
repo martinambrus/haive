@@ -98,6 +98,7 @@ export const PATH_STEP_SETS: Record<
  *  hooks in steps/workflow/*. */
 export const PATH_REQUIRED_TARGETS: Record<string, string> = {
   '07b-phase-4-validate': '07-phase-2-implement', // fixLoop
+  '07c-ddev-reconcile': '07-phase-2-implement', // fixLoopOnError (image-build failures only)
   '08-phase-5-verify': '07-phase-2-implement', // fixLoop
   '08c-code-review': '07-phase-2-implement', // fixLoop
   '08a-browser-verify': '07-phase-2-implement', // fixLoop + restartLoop

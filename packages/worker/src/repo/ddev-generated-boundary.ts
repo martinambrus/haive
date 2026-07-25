@@ -20,6 +20,14 @@ export const DDEV_GENERATED_BOUNDARY_PROMPT = [
   'apply without touching the generated one.',
   'Files without the marker (`.ddev/config.yaml`, `.ddev/web-build/Dockerfile`, your own `*.conf`)',
   'are yours to edit normally.',
+  'When you edit `.ddev/web-build/Dockerfile` or `.ddev/db-build/Dockerfile`, remember what DDEV',
+  'builds them on top of: `ddev/ddev-webserver`, which is Debian with ondrej PHP packages — NOT an',
+  'official `php:*` image. `docker-php-ext-install`, `docker-php-ext-enable`, `docker-php-source`,',
+  '`pecl` and Alpine `apk` are not installed there, so a RUN line calling one fails the image build',
+  'with "command not found" on every later start. Check first whether you need the extension at all:',
+  'mysql, mysqli, pdo_mysql, gd, curl and intl are already compiled in. To add a package, prefer',
+  '`webimage_extra_packages: ["php${DDEV_PHP_VERSION}-<ext>"]` in `.ddev/config.yaml`; from a build',
+  'Dockerfile use `apt-get update && apt-get install -y php${DDEV_PHP_VERSION}-<ext>`.',
   '</haive_ddev_generated_boundary>',
 ].join('\n');
 

@@ -429,8 +429,16 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   };
   /** Deterministic steps (e.g. 07c-ddev-reconcile) that THROW on a fixable failure set
    *  this so the runner routes the thrown error into the fix loop (diagnosis = error
-   *  message) instead of failing the task outright. */
-  fixLoopOnError?: boolean;
+   *  message) instead of failing the task outright.
+   *
+   *  A predicate narrows that to the failures the implementation agent can actually fix.
+   *  07c needs it: a broken `.ddev/web-build/Dockerfile` is the agent's own work and should
+   *  loop back, while a host-level failure (an unsatisfiable `ddev_version_constraint`, a
+   *  reaped runner) must keep the hard-fail path — looping the implementer on those burns
+   *  a round and changes nothing. A step whose every failure is fixable can still pass
+   *  `true`. Note for path filtering: ANY value here (including a predicate) makes the step
+   *  a loop emitter, so it needs a PATH_REQUIRED_TARGETS entry or boot fails. */
+  fixLoopOnError?: boolean | ((errorMessage: string) => boolean);
   /** Review-gate revise loop: when this step's apply output asks to revise an EARLIER
    *  step, the runner returns `revise` (reset the target + its downstream and re-enter
    *  the target in the SAME round) instead of `done`. Unlike fixLoop this is

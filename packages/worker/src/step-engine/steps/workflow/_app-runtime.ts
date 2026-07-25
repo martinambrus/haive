@@ -29,6 +29,7 @@ import {
 } from '../../../sandbox/app-runner.js';
 import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
 import { checkDdevHealthcheckConfig } from '../../../sandbox/ddev-healthcheck-guard.js';
+import { checkDdevBuildInputs } from '../../../sandbox/ddev-build-guard.js';
 import { TaskCancelledError } from '../../step-definition.js';
 
 // The single "is the app actually serving, and at what URL" primitive. Browser
@@ -275,8 +276,17 @@ export async function ensureDdevWithProgress(
   // nothing in the error naming the cause. Two file reads turn that into an instant,
   // actionable failure. Every DDEV bring-up routes through here, so this is the one place
   // it needs to live.
-  const breakage = await checkDdevHealthcheckConfig(path.join(REPO_STORAGE_ROOT, repoSubpath));
+  const workspace = path.join(REPO_STORAGE_ROOT, repoSubpath);
+  const breakage = await checkDdevHealthcheckConfig(workspace);
   if (breakage) throw new Error(`DDEV cannot start: ${breakage}`);
+  // Same trade for the image-build inputs: `.ddev/web-build/Dockerfile` is spliced verbatim
+  // into the Dockerfile DDEV generates, so one line reaching for a command the image does
+  // not have (`docker-php-ext-install`, from the official php images) kills the build on
+  // EVERY start, minutes in and with the cause buried under a BuildKit dump. Reading the
+  // two build dirs first turns it into an instant failure that names the DDEV-native
+  // mechanism — which is also the text the "Retry with AI" fix agent gets to work from.
+  const buildBreakage = await checkDdevBuildInputs(workspace);
+  if (buildBreakage) throw new Error(`DDEV cannot start: ${buildBreakage}`);
 
   const handle = await withDdevProgress(
     ctx,

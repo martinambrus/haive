@@ -36,10 +36,34 @@ describe('07c-ddev-reconcile form', () => {
     expect(ddevReconcileStep.form!(undefined as never, detect('unsupported'))).toBeNull();
   });
 
-  it('does not turn DDEV runtime errors into an implementation fix loop', () => {
-    // A thrown apply error must take step-runner's normal `failed` path, which exposes
-    // Retry / Retry with AI instead of marking 07c done and advancing another round.
-    expect(ddevReconcileStep.fixLoopOnError).toBeUndefined();
+  it('does not turn DDEV RUNTIME errors into an implementation fix loop', () => {
+    // A host-level failure must take step-runner's normal `failed` path, which exposes
+    // Retry / Retry with AI instead of marking 07c done and burning another round on a
+    // re-implementation that cannot reach the cause.
+    const route = ddevReconcileStep.fixLoopOnError;
+    expect(typeof route).toBe('function');
+    const routes = (msg: string) => (route as (m: string) => boolean)(msg);
+    expect(
+      routes(
+        'ddev start blocked by an incompatible ddev_version_constraint in .ddev/config.yaml. ' +
+          "your DDEV version 'v1.25.3' doesn't meet the constraint '= v1.24.8'",
+      ),
+    ).toBe(false);
+    expect(routes('ddev restart failed: Error response from daemon: No such container')).toBe(
+      false,
+    );
+  });
+
+  it('routes an image-BUILD failure back to implementation', () => {
+    // `.ddev/web-build/Dockerfile` is the implementation agent's own file and a retry
+    // re-runs the same build against it, so this one is a code defect, not a runtime fault.
+    const route = ddevReconcileStep.fixLoopOnError as (m: string) => boolean;
+    expect(
+      route(
+        'ddev restart failed: #27 ERROR: process "/bin/bash -c docker-php-ext-install mysql" ' +
+          'did not complete successfully: exit code: 127',
+      ),
+    ).toBe(true);
   });
 });
 
