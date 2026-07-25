@@ -76,6 +76,40 @@ async function activeProviderIds(db: ReturnType<typeof getDb>, userId: string): 
   ];
 }
 
+/** Stable identity of the ALLOWANCE a snapshot's numbers describe — the credential set the
+ *  CLI actually spends, not the provider row that happens to report it.
+ *
+ *  `isolate_auth` is exactly what resolveCliAuthMounts branches on (worker
+ *  sandbox/cli-auth-volume.ts): an isolated row mounts its own per-provider auth volume and
+ *  therefore has its own login and its own quota, while every NON-isolated row of the same
+ *  CLI name mounts one shared volume — one login, one subscription, one allowance. Four
+ *  `claude-code` rows (Fable Low / Max / xHigh, Sonnet xHigh) are a single Claude
+ *  subscription, which is why they report the same reset instant and the same weekly
+ *  percentage; alerting per row fired four identical "usage low" notifications for one
+ *  depleting allowance. Per-user by construction — the route is already scoped to the
+ *  caller, so a shared key never spans two people. */
+function providerAllowanceKey(row: { id: string; name: string; isolateAuth: boolean }): string {
+  return row.isolateAuth ? `provider:${row.id}` : `shared:${row.name}`;
+}
+
+/** providerId -> allowance key, for every CLI provider the caller owns. The notifier keys
+ *  its depletion episodes on this instead of the provider id, so rows sharing a
+ *  subscription collapse into one alert. */
+async function allowanceKeys(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+): Promise<Record<string, string>> {
+  const rows = await db
+    .select({
+      id: schema.cliProviders.id,
+      name: schema.cliProviders.name,
+      isolateAuth: schema.cliProviders.isolateAuth,
+    })
+    .from(schema.cliProviders)
+    .where(eq(schema.cliProviders.userId, userId));
+  return Object.fromEntries(rows.map((r) => [r.id, providerAllowanceKey(r)]));
+}
+
 // Latest usage-window snapshot for each of the caller's CLI providers. The header
 // chip picks the row matching the active step's provider; rows are written by the
 // worker's gentle poller. Returns all rows (incl. status='error'/stale) and lets
@@ -92,16 +126,18 @@ usageWindowRoutes.get('/', async (c) => {
   const rows = await db.query.usageWindowSnapshots.findMany({
     where: eq(schema.usageWindowSnapshots.userId, userId),
   });
-  const [alertEnabled, windowEnabled, thresholdPct, prefs, activeIds] = await Promise.all([
-    configService.getBoolean(CONFIG_KEYS.USAGE_ALERT_ENABLED, true),
-    configService.getBoolean(CONFIG_KEYS.USAGE_WINDOW_ENABLED, true),
-    configService.getNumber(CONFIG_KEYS.USAGE_ALERT_THRESHOLD_PCT, 10),
-    db.query.userNotificationSettings.findFirst({
-      where: eq(schema.userNotificationSettings.userId, userId),
-      columns: { usageAlertEnabled: true },
-    }),
-    activeProviderIds(db, userId),
-  ]);
+  const [alertEnabled, windowEnabled, thresholdPct, prefs, activeIds, allowance] =
+    await Promise.all([
+      configService.getBoolean(CONFIG_KEYS.USAGE_ALERT_ENABLED, true),
+      configService.getBoolean(CONFIG_KEYS.USAGE_WINDOW_ENABLED, true),
+      configService.getNumber(CONFIG_KEYS.USAGE_ALERT_THRESHOLD_PCT, 10),
+      db.query.userNotificationSettings.findFirst({
+        where: eq(schema.userNotificationSettings.userId, userId),
+        columns: { usageAlertEnabled: true },
+      }),
+      activeProviderIds(db, userId),
+      allowanceKeys(db, userId),
+    ]);
   const now = Date.now();
   return c.json({
     snapshots: rows.map((r) => toSnapshot(r, now)),
@@ -109,6 +145,7 @@ usageWindowRoutes.get('/', async (c) => {
       enabled: alertEnabled && windowEnabled && (prefs?.usageAlertEnabled ?? true),
       thresholdPct,
       activeProviderIds: activeIds,
+      allowanceKeys: allowance,
     },
   });
 });

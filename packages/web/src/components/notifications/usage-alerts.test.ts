@@ -106,7 +106,60 @@ describe('detectUsageAlerts', () => {
     expect(usageEpisodeKey(first[0]!)).not.toBe(usageEpisodeKey(nextBucket[0]!));
   });
 
-  it('scopes the episode to the provider so two CLIs never share a key', () => {
+  it('scopes the episode to the allowance so two subscriptions never share a key', () => {
+    const alerts = detectUsageAlerts(
+      [
+        snap({ providerId: 'p1', fiveHour: { usedPct: 95, resetsAt: null } }),
+        snap({ providerId: 'p2', fiveHour: { usedPct: 95, resetsAt: null } }),
+      ],
+      {
+        thresholdPct: 10,
+        now: NOW,
+        activeProviderIds: ACTIVE,
+        allowanceKeys: { p1: 'provider:p1', p2: 'provider:p2' },
+      },
+    );
+    expect(new Set(alerts.map(usageEpisodeKey)).size).toBe(2);
+  });
+
+  it('collapses the provider rows that share one subscription into a single alert', () => {
+    // The reported case: four claude-code rows (Fable Low/Max/xHigh, Sonnet xHigh) all
+    // mount the shared auth volume, so they are one Claude allowance reported four times.
+    const rows = ['fable-low', 'fable-max', 'fable-xhigh', 'sonnet-xhigh'].map((id, i) =>
+      snap({
+        providerId: id,
+        providerName: 'claude-code',
+        // Each row stamps its own reset instant milliseconds apart, and their percentages
+        // disagree by a point because they poll seconds apart.
+        fiveHour: { usedPct: 89 + (i % 2), resetsAt: `2026-07-25T19:29:59.${320 + i}Z` },
+      }),
+    );
+    const alerts = detectUsageAlerts(rows, {
+      thresholdPct: 12,
+      now: NOW,
+      activeProviderIds: rows.map((r) => r.providerId),
+      allowanceKeys: Object.fromEntries(rows.map((r) => [r.providerId, 'shared:claude-code'])),
+    });
+    expect(alerts).toHaveLength(1);
+    // The most depleted reading wins, so collapsing never flatters the situation.
+    expect(alerts[0]!.remainingPct).toBe(10);
+  });
+
+  it('keeps one alert when rows sharing a subscription straddle a minute boundary', () => {
+    const rows = [
+      snap({ providerId: 'a', fiveHour: { usedPct: 95, resetsAt: '2026-07-25T19:29:59.900Z' } }),
+      snap({ providerId: 'b', fiveHour: { usedPct: 95, resetsAt: '2026-07-25T19:30:00.100Z' } }),
+    ];
+    const alerts = detectUsageAlerts(rows, {
+      thresholdPct: 10,
+      now: NOW,
+      activeProviderIds: ['a', 'b'],
+      allowanceKeys: { a: 'shared:codex', b: 'shared:codex' },
+    });
+    expect(alerts).toHaveLength(1);
+  });
+
+  it('falls back to per-provider keys when the api omits allowanceKeys', () => {
     const alerts = detectUsageAlerts(
       [
         snap({ providerId: 'p1', fiveHour: { usedPct: 95, resetsAt: null } }),
@@ -114,6 +167,19 @@ describe('detectUsageAlerts', () => {
       ],
       { thresholdPct: 10, now: NOW, activeProviderIds: ACTIVE },
     );
-    expect(new Set(alerts.map(usageEpisodeKey)).size).toBe(2);
+    expect(alerts).toHaveLength(2);
+  });
+
+  it('re-keys the episode across a real window boundary despite minute flooring', () => {
+    const at = (resetsAt: string) =>
+      detectUsageAlerts([snap({ fiveHour: { usedPct: 95, resetsAt } })], {
+        thresholdPct: 10,
+        now: NOW,
+        activeProviderIds: ACTIVE,
+        allowanceKeys: { p1: 'shared:codex' },
+      })[0]!;
+    expect(usageEpisodeKey(at('2026-07-25T19:29:59.320Z'))).not.toBe(
+      usageEpisodeKey(at('2026-07-26T00:29:59.320Z')),
+    );
   });
 });

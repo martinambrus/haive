@@ -481,11 +481,13 @@ export function NotificationProvider() {
       swRegRef.current
     ) {
       // The tag collapses the duplicate a sibling tab may fire in the same tick — both
-      // tabs can read the seen-store before either writes it.
+      // tabs can read the seen-store before either writes it. Keyed on the ALLOWANCE, so
+      // it also collapses the provider rows that share one subscription (four claude-code
+      // rows are one Claude login) rather than stacking four identical notifications.
       void swRegRef.current
         .showNotification(`Haive — ${headline}`, {
           body: detail,
-          tag: `usage:${alert.providerId}:${alert.windowKey}`,
+          tag: `usage:${alert.allowanceKey}:${alert.windowKey}`,
         })
         .catch(() => {});
     }
@@ -503,7 +505,12 @@ export function NotificationProvider() {
       try {
         const data = await api.get<{
           snapshots: UsageWindowSnapshot[];
-          alert?: { enabled: boolean; thresholdPct: number; activeProviderIds?: string[] };
+          alert?: {
+            enabled: boolean;
+            thresholdPct: number;
+            activeProviderIds?: string[];
+            allowanceKeys?: Record<string, string>;
+          };
         }>('/usage-window');
         if (cancelled || !data.alert?.enabled) return;
         const alerts = detectUsageAlerts(data.snapshots, {
@@ -512,6 +519,9 @@ export function NotificationProvider() {
           // Absent (older api) reads as "nothing is running", which silences the channel
           // rather than warning off an activity set we cannot see.
           activeProviderIds: data.alert.activeProviderIds ?? [],
+          // providerId -> the credential set it spends, so rows fronting one subscription
+          // collapse into a single alert. Absent (older api) degrades to per-row alerts.
+          allowanceKeys: data.alert.allowanceKeys,
         });
         for (const alert of alerts) handleUsageAlert(alert);
       } catch {
