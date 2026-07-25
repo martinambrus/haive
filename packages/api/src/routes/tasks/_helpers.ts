@@ -259,8 +259,12 @@ export async function findQueuedInvocationStepIds(
 /** SQL predicate for the `waiting_slot` listing filter: the task's CURRENT step is parked
  *  waiting for capacity. Mirrors deriveSlotWait rule-for-rule as fed by
  *  findQueuedInvocationStepIds (runtime park = pending + a live wait marker; agent park =
- *  waiting_cli + an unstarted invocation and NOTHING running — see that helper for why a
- *  fan-out step needs the second half), scoped to
+ *  waiting_cli OR running, plus an unstarted invocation and NOTHING running — see that helper
+ *  for why a fan-out step needs the second half). `running` belongs here because the mining /
+ *  DAG fan-out barrier reports `waiting_cli` upward without writing it to the step row, so a
+ *  step blocked on N queued agents keeps `running` and a status-only test listed it as
+ *  working. Kept in lockstep with AGENT_PARK_STATUSES in @haive/shared's deriveSlotWait —
+ *  when these two disagree the badge and the filter contradict each other. Scoped to
  *  current_step_id/current_round for the same reason the helper is — a stale marker on an
  *  older round must not make a working task look queued. Caller adds the
  *  `tasks.status = 'running'` term, so this stays a pure "is the current step parked" test and
@@ -273,7 +277,7 @@ export function currentStepParkedSql() {
       AND ts.round = ${schema.tasks.currentRound}
       AND (
         (ts.status = 'pending' AND ts.waiting_started_at IS NOT NULL)
-        OR (ts.status = 'waiting_cli' AND EXISTS (
+        OR (ts.status IN ('waiting_cli', 'running') AND EXISTS (
           SELECT 1 FROM ${schema.cliInvocations} ci
           WHERE ci.task_step_id = ts.id
             AND ci.started_at IS NULL

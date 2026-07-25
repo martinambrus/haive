@@ -94,6 +94,29 @@ describe('deriveSlotWait', () => {
     expect(derive({ queuedInvocationStepRowIds: new Set(['row-other']) }, [row])).toBeNull();
   });
 
+  it('reports an agent-slot wait for a RUNNING step whose fan-out is entirely queued', () => {
+    // The mining / DAG fan-out barrier reports waiting_cli upward but leaves the step row
+    // on `running`, so a step blocked on N queued agents used to read as working.
+    const row = step({ id: 'row-fanout', stepId: '03-phase-0a-discovery', status: 'running' });
+    const got = derive(
+      {
+        currentStepId: '03-phase-0a-discovery',
+        queuedInvocationStepRowIds: new Set(['row-fanout']),
+      },
+      [row],
+    );
+    expect(got?.kind).toBe('agent');
+    expect(got?.stepId).toBe('03-phase-0a-discovery');
+  });
+
+  it('is null for a running step once one of its fan-out agents starts', () => {
+    // findQueuedInvocationStepIds drops a step the moment any invocation starts, so the
+    // step leaves the set and the task reads as working again — that half of the test, not
+    // the status, is what keeps `running` from over-matching real work.
+    const row = step({ id: 'row-fanout', status: 'running' });
+    expect(derive({ queuedInvocationStepRowIds: new Set(['row-other']) }, [row])).toBeNull();
+  });
+
   it('is null when the task has no current step', () => {
     expect(derive({ currentStepId: null })).toBeNull();
   });

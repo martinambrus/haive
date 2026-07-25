@@ -56,6 +56,19 @@ export interface SlotWait {
  *  within two minutes. */
 export const STALE_PARK_MS = 120_000;
 
+/** Step statuses an AGENT park can be sitting in.
+ *
+ *  `waiting_cli` is the obvious one — resolveLlmPhase writes it to the row before parking.
+ *  `running` is the mining/DAG fan-out: its barrier reports `waiting_cli` upward but returns
+ *  the step row untouched, so a step blocked on N queued mining agents keeps the `running` it
+ *  had while apply() dispatched them. Testing the status alone therefore missed every
+ *  fan-out park — nine tasks at once on a saturated host — and listed them as working.
+ *
+ *  The status is only half the test and the weaker half; the other half (a live invocation
+ *  with NONE started, via queuedInvocationStepRowIds) is what actually proves the wait, and
+ *  it is what keeps `running` from over-matching a step that is genuinely computing. */
+const AGENT_PARK_STATUSES: ReadonlySet<string> = new Set(['waiting_cli', 'running']);
+
 function toMs(v: Date | string | null): number | null {
   if (v == null) return null;
   const t = new Date(v).getTime();
@@ -104,7 +117,7 @@ export function deriveSlotWait(args: {
       stale: updated !== null && args.nowMs - updated > STALE_PARK_MS,
     };
   }
-  if (row.status === 'waiting_cli' && args.queuedInvocationStepRowIds.has(row.id)) {
+  if (AGENT_PARK_STATUSES.has(row.status) && args.queuedInvocationStepRowIds.has(row.id)) {
     // No staleness check: the agent wait is held by BullMQ, not by a polling loop that
     // touches the row, so `updated_at` says nothing about whether the queue is alive.
     return { kind: 'agent', since, stepId: row.stepId, message: row.statusMessage, stale: false };
