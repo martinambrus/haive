@@ -782,6 +782,15 @@ export type StepErrorHint =
       type: 'provider_unavailable';
       reason: 'rate_limit' | 'auth' | 'server_error';
       providerName?: string;
+    }
+  | {
+      /** Mirrors StepErrorHint in @haive/shared — the step's CLI was SIGKILLed at its
+       *  budget on every rung of the escalating timeout ladder. Drives the "Retry with
+       *  longer timeout" button. */
+      type: 'cli_timeout';
+      stepId: string;
+      lastBudgetMinutes: number;
+      attempts: number;
     };
 
 /** One rag_search call's telemetry, surfaced in the discovery step's RAG stats

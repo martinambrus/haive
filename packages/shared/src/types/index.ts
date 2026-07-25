@@ -47,6 +47,23 @@ export type StepErrorHint =
       type: 'provider_unavailable';
       reason: 'rate_limit' | 'auth' | 'server_error';
       providerName?: CliProviderName;
+    }
+  | {
+      /** Every rung of the escalating timeout ladder was spent: the step's CLI was
+       *  SIGKILLed at its budget on each consecutive attempt without ever finishing.
+       *  The UI renders a "Retry with longer timeout" button that re-runs the step with
+       *  a user-chosen budget (task_steps.cli_timeout_override_ms).
+       *
+       *  Written from the failing INVOCATION's CLI_TIMEOUT_HEADLINE, never from the
+       *  step's message copy — the hint is the structural proof of the state, the
+       *  message is only the words in the banner. */
+      type: 'cli_timeout';
+      stepId: string;
+      /** Budget of the last attempt, in whole minutes — the number the retry prompt
+       *  should beat. */
+      lastBudgetMinutes: number;
+      /** How many consecutive timeouts were burned before giving up. */
+      attempts: number;
     };
 
 /** Per-invocation token usage captured from a CLI's structured output.

@@ -2,6 +2,10 @@ import { Redis } from 'ioredis';
 import { randomBytes } from 'node:crypto';
 import { createRedisConnection } from '../utils/redis-factory.js';
 import { logger } from '../logger/index.js';
+import {
+  DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
+  DEFAULT_CLI_TIMEOUT_LADDER,
+} from '../constants/index.js';
 
 /** Default per-file cap for task attachments (25 MiB). Admin-tunable via
  *  CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES. */
@@ -116,6 +120,21 @@ export const CONFIG_KEYS = {
   // disable it. Steers apply at the next tool-call boundary, so the remaining
   // percent must cover a boundary plus the JSON write (20% of 30min = 6 min).
   CLI_SOFT_TIMEOUT_PERCENT: 'config:cli:softTimeoutPercent',
+
+  // Escalating hard-timeout ladder for CLI invocations. The hard timeout is a
+  // zero-grace SIGKILL, and a re-dispatch after one used to hand the SAME budget to a
+  // run we already know needs more (07b's fixer burned 3 x 31 min and produced
+  // nothing). The budget an invocation gets is
+  //   max(step's declared timeoutMs, CLI_TIMEOUT_BASE_MINUTES) * CLI_TIMEOUT_LADDER[n]
+  // where n counts the CONSECUTIVE prior timeouts on that step. Defaults give a 30-min
+  // step 45/60/90 and a 60-min step 60/80/120. Only timeouts advance the ladder — a
+  // worker-restart orphan never got its time, so it retries at the same rung.
+  CLI_TIMEOUT_BASE_MINUTES: 'config:cli:timeoutBaseMinutes',
+  // Comma-separated multipliers applied to the base, one per attempt; the last entry
+  // repeats if attempts somehow exceed it. Fractional on purpose (unlike
+  // CLI_SOFT_TIMEOUT_PERCENT these are parsed as floats), and a string that parses to
+  // nothing usable falls back to the built-in ladder rather than yielding a zero budget.
+  CLI_TIMEOUT_LADDER: 'config:cli:timeoutLadder',
 
   // Global kill-switch for the subscription usage-window display (claude-hud-style
   // 5h/weekly meters in the task header). When 'true' (default), a gentle background
@@ -339,6 +358,8 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.STEERING_ENABLED]: 'true',
   [CONFIG_KEYS.CLI_SOFT_TIMEOUT_ENABLED]: 'true',
   [CONFIG_KEYS.CLI_SOFT_TIMEOUT_PERCENT]: '80',
+  [CONFIG_KEYS.CLI_TIMEOUT_BASE_MINUTES]: String(DEFAULT_CLI_TIMEOUT_BASE_MINUTES),
+  [CONFIG_KEYS.CLI_TIMEOUT_LADDER]: DEFAULT_CLI_TIMEOUT_LADDER.join(','),
   [CONFIG_KEYS.USAGE_WINDOW_ENABLED]: 'true',
   [CONFIG_KEYS.USAGE_ALERT_ENABLED]: 'true',
   [CONFIG_KEYS.USAGE_ALERT_THRESHOLD_PCT]: '10',

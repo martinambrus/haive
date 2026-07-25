@@ -411,6 +411,55 @@ export const CLI_SOFT_TIMEOUT_WIND_DOWN =
   'already verified against the code. Drop anything speculative or unconfirmed — an ' +
   'unverified finding is worse than a missing one. Do not summarise, do not explain, ' +
   'just emit the JSON.';
+/** Floor for the hard timeout an invocation is dispatched with, in minutes. A step
+ *  declaring less than this gets this instead; a step declaring more keeps its own
+ *  number. Admin-tunable via CONFIG_KEYS.CLI_TIMEOUT_BASE_MINUTES. */
+export const DEFAULT_CLI_TIMEOUT_BASE_MINUTES = 45;
+/** Multipliers on the base budget, one per attempt. Attempt 0 runs at the base; each
+ *  consecutive TIMEOUT moves one rung up. Three rungs because the step runner
+ *  re-dispatches a transient failure at most MAX_ORPHAN_REDISPATCH (3) times, so a
+ *  fourth entry could never be reached. Admin-tunable via CONFIG_KEYS.CLI_TIMEOUT_LADDER. */
+export const DEFAULT_CLI_TIMEOUT_LADDER: readonly number[] = [1, 1.33, 2];
+
+/** Parse the admin-supplied ladder ("1,1.33,2") into multipliers.
+ *
+ *  Floats, not ints — the whole point of the middle rung is a fractional step, so this
+ *  cannot use the parseInt-based configService.getNumber. Entries that are not finite
+ *  positive numbers are dropped, and a string that leaves nothing usable falls back to
+ *  the built-in ladder: a typo in an admin field must never produce a zero-length ladder
+ *  (and through it a zero-length budget that SIGKILLs every CLI at spawn). */
+export function parseTimeoutLadder(csv: string | null | undefined): number[] {
+  const parsed = (csv ?? '')
+    .split(',')
+    .map((part) => Number(part.trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  return parsed.length > 0 ? parsed : [...DEFAULT_CLI_TIMEOUT_LADDER];
+}
+
+/** The hard-timeout budget an invocation should be dispatched with.
+ *
+ *  `attempt` is the number of CONSECUTIVE prior timeouts on this step — not retries in
+ *  general. A worker-restart orphan never spent its budget, so it must not consume a
+ *  rung; only a run we watched burn its whole allowance earns a bigger one. Attempts
+ *  past the end of the ladder clamp to the last rung rather than wrapping or throwing.
+ *
+ *  The base is a FLOOR, not a replacement: a step that asked for 90 minutes knows
+ *  something this default does not, so it keeps its number and escalates from there.
+ *
+ *  Rounded to whole MINUTES, not milliseconds: 1.33 is an approximation of 4/3, so a
+ *  millisecond-exact product gives 59.85 min where everyone involved means 60 — and the
+ *  number surfaces in logs and in the retry prompt, both of which are minute-denominated. */
+export function escalatedTimeoutMs(
+  declaredMs: number | undefined,
+  attempt: number,
+  opts: { baseMinutes: number; ladder: number[] },
+): number {
+  const ladder = opts.ladder.length > 0 ? opts.ladder : [...DEFAULT_CLI_TIMEOUT_LADDER];
+  const base = Math.max(declaredMs ?? 0, opts.baseMinutes * 60_000);
+  const rung = ladder[Math.min(Math.max(attempt, 0), ladder.length - 1)]!;
+  return Math.max(1, Math.round((base * rung) / 60_000)) * 60_000;
+}
+
 /** Pub/sub channel the api publishes to when MAX_PARALLEL_AGENTS changes, so the
  *  worker live-retunes the cli-exec queue concurrency without a restart. Body is
  *  the new clamped integer as a string. */

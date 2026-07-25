@@ -34,7 +34,8 @@ type TaskStepErrorHint =
       type: 'provider_unavailable';
       reason: 'rate_limit' | 'auth' | 'server_error';
       providerName?: string;
-    };
+    }
+  | { type: 'cli_timeout'; stepId: string; lastBudgetMinutes: number; attempts: number };
 
 export const cliInvocationModeEnum = pgEnum('cli_invocation_mode', [
   'cli',
@@ -400,6 +401,13 @@ export const taskSteps = pgTable(
      *  leaks into an automatic re-run (fix-loop / revise / gate loop-back). Scoped to
      *  the clicked step only; the downstream cascade keeps auto-continuing. */
     pauseFormOnRetry: boolean('pause_form_on_retry').notNull().default(false),
+    /** Hard-timeout budget (ms) the user picked via "Retry with longer timeout", for a
+     *  step whose CLI burned every rung of the escalating ladder without finishing.
+     *  When set it REPLACES the ladder outright for this step's invocations — the user
+     *  named a number, so the worker does not second-guess it by escalating on top.
+     *  Per-step and set by the same retry endpoint update as localModelOverride, so a
+     *  plain Retry clears it back to null (no worker-side lifecycle). */
+    cliTimeoutOverrideMs: integer('cli_timeout_override_ms'),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
     /** Accumulated time (ms) the step spent idle waiting for user input
