@@ -14,7 +14,10 @@ import {
   taskHostPort,
   type TaskAccessEndpoint,
 } from '@haive/shared';
-import { relaxExactDdevVersionConstraint } from './ddev-version-constraint.js';
+import {
+  relaxCappedDdevConstraintForRunner,
+  relaxExactDdevVersionConstraint,
+} from './ddev-version-constraint.js';
 import { browserCdpUrlForRunner } from './runner-browser-cdp.js';
 import { resolveTaskDirectAccess } from './_browser-access.js';
 import {
@@ -401,35 +404,54 @@ export function isDdevVersionConstraintFailure(output: string): boolean {
   return /doesn't meet the constraint|ddev_version_constraint/i.test(output);
 }
 
-/** Relax an EXACT `ddev_version_constraint` pin in the project's config to a range, in place.
- *  Called only after ddev has already rejected the pin, so the rewrite costs nothing on the
- *  normal path and ddev's own verdict — not our reading of the version — is what triggers it.
+/** Pull the runner's DDEV version out of DDEV's own rejection ("your DDEV version 'v1.25.3'
+ *  doesn't meet the constraint ..."). VOLATILE: this is DDEV's message wording, not a stable
+ *  contract, so a miss returns null and the caller degrades to the actionable error — the same
+ *  graceful fallback isDdevVersionConstraintFailure and ddevVersionConstraintError already lean
+ *  on. Isolated here so the one fragile string match lives in one named place. */
+function parseRunnerVersionFromConstraintError(output: string): string | null {
+  return /your DDEV version '([^']+)'/i.exec(output)?.[1] ?? null;
+}
+
+/** Relax an unsatisfiable `ddev_version_constraint` in the project's config, in place. Called
+ *  only after ddev has already rejected the value, so the rewrite costs nothing on the normal
+ *  path and ddev's own verdict — not our reading of the version — is what triggers it. Two
+ *  fixable shapes, tried in order:
+ *   - an EXACT pin (`v1.25.2`, `= v1.25.2`) — relaxed to a major-bounded range, runner-independent;
+ *   - a RANGE whose ceiling sits below the runner (`>= v1.24.10 < v1.25.0` on a v1.25.x runner) —
+ *     the floor is fine, only the too-low upper bound kills it, so widen the ceiling using the
+ *     version DDEV reported. A range whose FLOOR the runner cannot meet is left to the actionable
+ *     error: that is a genuine "the runner is too old", not an accidental pin.
  *  Returns true when the file was rewritten and a retry is worth one attempt; false leaves the
- *  caller to raise the actionable error (no constraint line, or a range someone chose on
- *  purpose, which is not ours to widen). Best-effort: an unreadable/unwritable config is not a
+ *  caller to raise the actionable error. Best-effort: an unreadable/unwritable config is not a
  *  new failure mode, it just falls back to the error the caller was about to throw. */
 async function repairVersionConstraint(
   taskId: string,
   repoSubpath: string,
+  ddevOutput: string,
   onProgress?: (line: string) => void,
 ): Promise<boolean> {
   const configPath = path.join(XDEBUG_REPO_STORAGE_ROOT, repoSubpath, '.ddev', 'config.yaml');
   try {
     const before = await readFile(configPath, 'utf8');
-    const relaxed = relaxExactDdevVersionConstraint(before);
+    let relaxed = relaxExactDdevVersionConstraint(before);
+    if (!relaxed) {
+      const runnerVersion = parseRunnerVersionFromConstraintError(ddevOutput);
+      if (runnerVersion) relaxed = relaxCappedDdevConstraintForRunner(before, runnerVersion);
+    }
     if (!relaxed) return false;
     await writeFile(configPath, relaxed.text, 'utf8');
     log.warn(
       { taskId, configPath, from: relaxed.from, to: relaxed.to },
-      'relaxed an exact ddev_version_constraint pin the runner could not satisfy',
+      'relaxed an unsatisfiable ddev_version_constraint the runner could not meet',
     );
     onProgress?.(
-      `.ddev/config.yaml pinned ddev_version_constraint to ${relaxed.from}, which this DDEV ` +
+      `.ddev/config.yaml set ddev_version_constraint to ${relaxed.from}, which this DDEV ` +
         `does not satisfy — relaxed it to "${relaxed.to}" and retrying`,
     );
     return true;
   } catch (err) {
-    log.warn({ taskId, configPath, err }, 'could not relax the ddev_version_constraint pin');
+    log.warn({ taskId, configPath, err }, 'could not relax the ddev_version_constraint');
     return false;
   }
 }
@@ -1172,10 +1194,10 @@ async function ensureDdevStartedInner(
       }
       // A version-constraint rejection is not a wedged runner — a cold rebuild cannot
       // satisfy the pin, so fail fast with an actionable error instead of looping. An
-      // EXACT pin is the one case we can fix ourselves: relax it and retry this warm
-      // start once (a cold rebuild would pay 900s to reach the same config).
+      // exact pin or a too-low ceiling is the case we can fix ourselves: relax it and
+      // retry this warm start once (a cold rebuild would pay 900s to reach the same config).
       if (isDdevVersionConstraintFailure(warm.output)) {
-        if (!(await repairVersionConstraint(taskId, repoSubpath, opts.onProgress))) {
+        if (!(await repairVersionConstraint(taskId, repoSubpath, warm.output, opts.onProgress))) {
           throw ddevVersionConstraintError(warm.output);
         }
         const retry = await ddevExec(existing, 'start', {
@@ -1212,9 +1234,9 @@ async function ensureDdevStartedInner(
     const handle = await startDdevRunner({ taskId, repoSubpath });
     let start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
     // An unsatisfiable ddev_version_constraint cannot be fixed by a second IDENTICAL start,
-    // so only retry once the config itself has changed — i.e. after relaxing an exact pin.
+    // so only retry once the config itself has changed — i.e. after relaxing the pin/ceiling.
     if (start.exitCode !== 0 && isDdevVersionConstraintFailure(start.output)) {
-      if (!(await repairVersionConstraint(taskId, repoSubpath, opts.onProgress))) {
+      if (!(await repairVersionConstraint(taskId, repoSubpath, start.output, opts.onProgress))) {
         throw ddevVersionConstraintError(start.output);
       }
       start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { relaxExactDdevVersionConstraint } from './ddev-version-constraint.js';
+import {
+  relaxCappedDdevConstraintForRunner,
+  relaxExactDdevVersionConstraint,
+} from './ddev-version-constraint.js';
 
 const config = (constraintLine: string): string =>
   ['name: probe', 'type: php', 'php_version: "8.3"', constraintLine, 'docroot: web'].join('\n');
@@ -64,5 +67,81 @@ describe('relaxExactDdevVersionConstraint', () => {
     const once = relaxExactDdevVersionConstraint(config(`ddev_version_constraint: 'v1.25.2'`));
     expect(once).not.toBeNull();
     expect(relaxExactDdevVersionConstraint(once!.text)).toBeNull();
+  });
+});
+
+describe('relaxCappedDdevConstraintForRunner', () => {
+  it('widens a ceiling pinned below the runner, keeping the floor and bounding the major', () => {
+    // The real production failure: agent capped `< v1.25.0`, runner is v1.25.3.
+    const r = relaxCappedDdevConstraintForRunner(
+      config(`ddev_version_constraint: ">= v1.24.10 < v1.25.0"`),
+      'v1.25.3',
+    );
+    expect(r?.from).toBe('>= v1.24.10 < v1.25.0');
+    expect(r?.to).toBe('>= v1.24.10 < v2.0.0');
+    expect(r?.text).toContain('ddev_version_constraint: ">= v1.24.10 < v2.0.0"');
+  });
+
+  it.each([
+    ['>= v1.24.10, < v1.25.0', 'comma variant'],
+    ['>=1.24.10 <1.25.0', 'no v prefix'],
+    ['> v1.24.10 < v1.25.0', 'strict floor'],
+  ])('repairs the ceiling regardless of range spelling: %s', (v) => {
+    const r = relaxCappedDdevConstraintForRunner(
+      config(`ddev_version_constraint: "${v}"`),
+      'v1.25.3',
+    );
+    expect(r?.to).toBe('>= v1.24.10 < v2.0.0');
+  });
+
+  it('preserves indentation and rewrites only the value', () => {
+    const r = relaxCappedDdevConstraintForRunner(
+      `  ddev_version_constraint: ">= v1.24.10 < v1.25.0"\n`,
+      'v1.25.3',
+    );
+    expect(r?.text).toBe(`  ddev_version_constraint: ">= v1.24.10 < v2.0.0"\n`);
+  });
+
+  it('refuses when the runner is below the floor (wants a newer DDEV than exists)', () => {
+    expect(
+      relaxCappedDdevConstraintForRunner(
+        config(`ddev_version_constraint: ">= v1.30.0 < v1.31.0"`),
+        'v1.25.3',
+      ),
+    ).toBeNull();
+  });
+
+  it('refuses a ceiling-only value — no floor intent to preserve', () => {
+    expect(
+      relaxCappedDdevConstraintForRunner(config(`ddev_version_constraint: "< v1.25.0"`), 'v1.25.3'),
+    ).toBeNull();
+  });
+
+  it('refuses an exact pin — that is relaxExactDdevVersionConstraint’s job', () => {
+    expect(
+      relaxCappedDdevConstraintForRunner(config(`ddev_version_constraint: "v1.25.2"`), 'v1.25.3'),
+    ).toBeNull();
+  });
+
+  it('is idempotent — its own output already admits the runner', () => {
+    const once = relaxCappedDdevConstraintForRunner(
+      config(`ddev_version_constraint: ">= v1.24.10 < v1.25.0"`),
+      'v1.25.3',
+    );
+    expect(once).not.toBeNull();
+    expect(relaxCappedDdevConstraintForRunner(once!.text, 'v1.25.3')).toBeNull();
+  });
+
+  it('returns null when the runner version is unparseable', () => {
+    expect(
+      relaxCappedDdevConstraintForRunner(
+        config(`ddev_version_constraint: ">= v1.24.10 < v1.25.0"`),
+        'not-a-version',
+      ),
+    ).toBeNull();
+  });
+
+  it('returns null when the key is absent', () => {
+    expect(relaxCappedDdevConstraintForRunner('name: probe\ntype: php\n', 'v1.25.3')).toBeNull();
   });
 });
