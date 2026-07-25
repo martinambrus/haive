@@ -54,6 +54,22 @@ export function usageEpisodeKey(alert: UsageAlert): string {
 }
 
 /**
+ * The allowance a provider row spends, from the server's `alert.allowanceKeys` map.
+ *
+ * Single source of the rule for every consumer — the depletion alerts here and the
+ * task-list usage strip both group by it, and if they derived it separately they would
+ * eventually disagree about which rows are the same subscription. A providerId the server
+ * did not map (older api) falls back to its own id: per-row behaviour, which is merely the
+ * old duplication, rather than a guessed grouping that could merge two real subscriptions.
+ */
+export function allowanceKeyOf(
+  providerId: string,
+  allowanceKeys?: Readonly<Record<string, string>>,
+): string {
+  return allowanceKeys?.[providerId] ?? `provider:${providerId}`;
+}
+
+/**
  * Episode tag for one window.
  *
  * A parseable reset instant is floored to the MINUTE. Rows sharing a subscription are
@@ -119,7 +135,7 @@ export function detectUsageAlerts(
   for (const snap of snapshots) {
     if (snap.status !== 'ok' || snap.stale) continue;
     if (!active.has(snap.providerId)) continue;
-    const allowanceKey = opts.allowanceKeys?.[snap.providerId] ?? `provider:${snap.providerId}`;
+    const allowanceKey = allowanceKeyOf(snap.providerId, opts.allowanceKeys);
     for (const windowKey of WINDOW_KEYS) {
       const window = snap[windowKey];
       if (!window) continue;

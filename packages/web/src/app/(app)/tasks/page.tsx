@@ -7,6 +7,7 @@ import { api, type Task, type TaskListResponse, type TaskStatus } from '@/lib/ap
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { CircleDot, FolderGit2 } from 'lucide-react';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
+import { UsageStrip } from '@/components/usage-strip';
 import { formatDuration } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
 import { mergeSpan } from '@/lib/merge-task-span';
@@ -375,6 +376,10 @@ export default function TasksPage() {
           </Link>
         </div>
       </div>
+
+      {/* Allowance left on each CLI the rows BELOW use — scoped to the current filter, so
+          narrowing to one repo or one CLI narrows the meters with it. */}
+      <UsageStrip tasks={tasks} />
 
       {error && (
         <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300">
