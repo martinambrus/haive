@@ -10,6 +10,7 @@ import {
   CONFIG_RUNTIME_LIMITS_CHANNEL,
   configService,
   decryptEmail,
+  DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS,
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   deriveAgentConcurrency,
   deriveRuntimeCaps,
@@ -825,4 +826,25 @@ adminRoutes.put('/config/attachment-max-bytes', async (c) => {
   await configService.set(CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES, String(maxBytes));
   log.info({ maxBytes }, 'task attachment max bytes updated');
   return c.json({ maxBytes });
+});
+
+const cliStreamLogRetentionSchema = z.object({
+  // 0 disables the sweep (transcripts kept forever). Upper bound mirrors the global-KB
+  // retention setting; the sweep reads this within the ~30s config cache.
+  retentionDays: z.number().int().min(0).max(3650),
+});
+
+adminRoutes.get('/config/cli-stream-log-retention', async (c) => {
+  const retentionDays = await configService.getNumber(
+    CONFIG_KEYS.CLI_STREAM_LOG_RETENTION_DAYS,
+    DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS,
+  );
+  return c.json({ retentionDays });
+});
+
+adminRoutes.put('/config/cli-stream-log-retention', async (c) => {
+  const { retentionDays } = cliStreamLogRetentionSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.CLI_STREAM_LOG_RETENTION_DAYS, String(retentionDays));
+  log.info({ retentionDays }, 'cli stream-log retention updated');
+  return c.json({ retentionDays });
 });

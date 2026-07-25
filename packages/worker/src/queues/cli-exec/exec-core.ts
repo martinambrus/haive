@@ -33,6 +33,7 @@ import {
 import { log, type CliExecDeps, type ExecutionOutcome } from './_shared.js';
 import { createStreamJsonCollector } from './stream.js';
 import { looksLikeJson, proseForClean } from './clean-output.js';
+import { createStreamLogBuffer } from './stream-log-buffer.js';
 import { createSteerForwarder, type SteerForwarder } from './steer-forwarder.js';
 import { createSteerTracker } from './steer-tracker.js';
 import { getRedis } from '../../redis.js';
@@ -379,7 +380,10 @@ export async function executeCliSpec(
   // stream_log for historical replay. The spawner's wrapStreamCallback
   // publishes to Redis AND invokes our tees here, so the buffer matches
   // the bytes the user saw.
-  const streamBuf: string[] = [];
+  // Bounded: a single codex `exec --json` run can inline tens of MB of MCP tool
+  // results here. The collectors and the live Redis publish are fed separately, so
+  // the bound only trims the persisted replay. See stream-log-buffer.ts.
+  const streamBuf = createStreamLogBuffer();
   const headerText = formatCliHeader(mergedSpec, sandboxWorkdir);
   if (invocationId) {
     await publishCliChunk(invocationId, 'stdout', headerText);
@@ -490,7 +494,7 @@ export async function executeCliSpec(
     if (softTimeoutTimer) clearTimeout(softTimeoutTimer);
     if (steer) steer.teardown();
   }
-  const streamLog = streamBuf.join('');
+  const streamLog = streamBuf.toString();
   // Raw CLI stdout+stderr tail for provider-fatal classification. rawOutput is
   // now sanitized for the Clean tab (prose or empty), so it can no longer carry
   // an API error the classifier needs. Excludes the header/prompt (which

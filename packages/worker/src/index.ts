@@ -32,6 +32,7 @@ import { ensureDdevCa, ensureDdevRegistryCache } from './sandbox/ddev-runner.js'
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
 import { IdeSessionReaper } from './sandbox/ide-session-reaper.js';
 import { RuntimeRunnerReaper } from './sandbox/runtime-runner-reaper.js';
+import { CliStreamLogReaper } from './queues/cli-exec/stream-log-retention.js';
 import {
   startRuntimeLimitsWatch,
   setRuntimeReclaimer,
@@ -169,6 +170,10 @@ async function main(): Promise<void> {
   setRuntimeReclaimer(() => runtimeRunnerReaper.reclaimOnePreemptible());
   // Live-retune the runtime admission gate when the resource-limit config changes.
   const stopRuntimeLimitsWatch = startRuntimeLimitsWatch();
+  // Age out persisted CLI transcripts. Nothing else deletes cli_invocations.stream_log,
+  // so it only accrues; off unless an admin sets a retention window.
+  const cliStreamLogReaper = new CliStreamLogReaper({ db: getDb() });
+  cliStreamLogReaper.start();
 
   logger.info('haive-worker ready');
 
@@ -181,6 +186,7 @@ async function main(): Promise<void> {
     terminalReaper.stop();
     ideReaper.stop();
     runtimeRunnerReaper.stop();
+    cliStreamLogReaper.stop();
     stopRuntimeLimitsWatch();
     await terminalManager.stop().catch((err) => {
       logger.warn({ err }, 'terminal manager stop failed');

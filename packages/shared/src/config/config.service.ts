@@ -7,6 +7,11 @@ import { logger } from '../logger/index.js';
  *  CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES. */
 export const DEFAULT_TASK_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 
+/** Default retention window for CLI transcripts: 0 = keep forever. Off by default
+ *  because the sweep nulls the column and that cannot be undone. Admin-tunable via
+ *  CONFIG_KEYS.CLI_STREAM_LOG_RETENTION_DAYS. */
+export const DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS = 0;
+
 export const CONFIG_KEYS = {
   DATABASE_URL: 'config:database:url',
   API_PORT: 'config:server:apiPort',
@@ -183,6 +188,15 @@ export const CONFIG_KEYS = {
   // Admin-tunable; default DEFAULT_TASK_ATTACHMENT_MAX_BYTES (25 MiB).
   TASK_ATTACHMENT_MAX_BYTES: 'config:tasks:attachmentMaxBytes',
 
+  // Retention window (days) for cli_invocations.stream_log — the full CLI transcript
+  // behind the terminal's Raw tab. Nothing else ever deletes it (there is no task-delete
+  // route), and a codex `exec --json` run inlines every MCP tool result into its event
+  // stream, so one read_multiple_files call persists whole file contents. The sweep nulls
+  // the column on ended invocations older than the window; the row keeps its parsed
+  // output, token usage and timings, and the replay endpoint falls back to rawOutput.
+  // 0 keeps transcripts forever (the default) — nulling is irreversible, so it is opt-in.
+  CLI_STREAM_LOG_RETENTION_DAYS: 'config:tasks:cliStreamLogRetentionDays',
+
   APP_URL: 'config:app:url',
 
   ENCRYPTION_KEY: 'bootstrap:encryptionKey',
@@ -334,6 +348,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED]: 'true',
   [CONFIG_KEYS.ALLOWANCE_WATCH_MODE]: 'notify',
   [CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES]: String(DEFAULT_TASK_ATTACHMENT_MAX_BYTES),
+  [CONFIG_KEYS.CLI_STREAM_LOG_RETENTION_DAYS]: String(DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS),
   [CONFIG_KEYS.APP_URL]: 'http://localhost:3000',
   [CONFIG_KEYS.MAINTENANCE_MODE]: 'false',
   [CONFIG_KEYS.MAINTENANCE_MESSAGE]: 'Maintenance in progress. Please check back shortly.',

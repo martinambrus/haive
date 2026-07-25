@@ -121,6 +121,9 @@ export default function AdminPage() {
   const [attachmentMaxBytes, setAttachmentMaxBytes] = useState<number | null>(null);
   const [attachmentMaxMbInput, setAttachmentMaxMbInput] = useState('');
   const [savingAttachmentMax, setSavingAttachmentMax] = useState(false);
+  const [streamLogRetentionDays, setStreamLogRetentionDays] = useState<number | null>(null);
+  const [streamLogRetentionInput, setStreamLogRetentionInput] = useState('');
+  const [savingStreamLogRetention, setSavingStreamLogRetention] = useState(false);
   const [runtimeLimits, setRuntimeLimits] = useState<RuntimeLimitsResponse | null>(null);
   const [runtimeLimitsForm, setRuntimeLimitsForm] = useState<RuntimeLimitsForm>({
     memoryMb: '0',
@@ -161,6 +164,7 @@ export default function AdminPage() {
         usageAlertData,
         prWorkflowData,
         runtimeLimitsData,
+        streamLogRetentionData,
       ] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
@@ -185,6 +189,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean; thresholdPct: number }>('/admin/config/usage-alert'),
         api.get<{ enabled: boolean }>('/admin/config/pr-workflow'),
         api.get<RuntimeLimitsResponse>('/admin/config/runtime-limits'),
+        api.get<{ retentionDays: number }>('/admin/config/cli-stream-log-retention'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
@@ -217,6 +222,8 @@ export default function AdminPage() {
       );
       setRuntimeLimits(runtimeLimitsData);
       setRuntimeLimitsForm(runtimeLimitsFormOf(runtimeLimitsData));
+      setStreamLogRetentionDays(streamLogRetentionData.retentionDays);
+      setStreamLogRetentionInput(String(streamLogRetentionData.retentionDays));
       setError(null);
     } catch (err) {
       const e = err as { status?: number; message?: string };
@@ -323,6 +330,28 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update attachment size limit');
     } finally {
       setSavingAttachmentMax(false);
+    }
+  }
+
+  async function saveStreamLogRetention() {
+    const days = Number.parseInt(streamLogRetentionInput, 10);
+    if (!Number.isFinite(days) || days < 0 || days > 3650) {
+      setError('CLI transcript retention must be between 0 and 3650 days.');
+      return;
+    }
+    setSavingStreamLogRetention(true);
+    try {
+      const result = await api.put<{ retentionDays: number }>(
+        '/admin/config/cli-stream-log-retention',
+        { retentionDays: days },
+      );
+      setStreamLogRetentionDays(result.retentionDays);
+      setStreamLogRetentionInput(String(result.retentionDays));
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update CLI transcript retention');
+    } finally {
+      setSavingStreamLogRetention(false);
     }
   }
 
@@ -948,6 +977,44 @@ export default function AdminPage() {
               onClick={() => void saveAttachmentMax()}
             >
               {savingAttachmentMax ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {streamLogRetentionDays !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>CLI transcript retention</CardTitle>
+            <CardDescription>
+              Age out the full CLI transcript behind each step&apos;s Raw terminal tab. Nothing else
+              ever deletes it, so it only accrues. Only the transcript is dropped — the invocation
+              row keeps its result, token usage and timings, and the Raw tab falls back to the
+              parsed result.{' '}
+              <span className="text-amber-400">Dropping a transcript cannot be undone.</span> 0
+              keeps every transcript forever (default). Applies within ~30s; persists across
+              restarts.
+            </CardDescription>
+          </CardHeader>
+          <div className="flex items-end gap-2">
+            <label className="flex flex-col gap-1 text-xs text-neutral-400">
+              Retention (days, 0 = keep forever)
+              <input
+                type="number"
+                min={0}
+                max={3650}
+                value={streamLogRetentionInput}
+                onChange={(e) => setStreamLogRetentionInput(e.target.value)}
+                className="w-24 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+              />
+            </label>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={savingStreamLogRetention}
+              onClick={() => void saveStreamLogRetention()}
+            >
+              {savingStreamLogRetention ? 'Saving...' : 'Save'}
             </Button>
           </div>
         </Card>
