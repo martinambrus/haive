@@ -28,6 +28,7 @@ import {
   type AppRunnerHandle,
 } from '../../../sandbox/app-runner.js';
 import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
+import { checkDdevHealthcheckConfig } from '../../../sandbox/ddev-healthcheck-guard.js';
 import { TaskCancelledError } from '../../step-definition.js';
 
 // The single "is the app actually serving, and at what URL" primitive. Browser
@@ -268,6 +269,15 @@ export async function ensureDdevWithProgress(
   ctx: Pick<AppRuntimeCtx, 'taskId' | 'emitProgress' | 'db' | 'signal'>,
   repoSubpath: string,
 ): Promise<DdevRunnerHandle> {
+  // Pre-flight: a webserver config that can no longer answer DDEV's own /phpstatus health
+  // check makes the web container hang in `starting` until `ddev start` gives up at its
+  // readiness timeout — six opaque minutes, twice (the cold-boot path retries once), with
+  // nothing in the error naming the cause. Two file reads turn that into an instant,
+  // actionable failure. Every DDEV bring-up routes through here, so this is the one place
+  // it needs to live.
+  const breakage = await checkDdevHealthcheckConfig(path.join(REPO_STORAGE_ROOT, repoSubpath));
+  if (breakage) throw new Error(`DDEV cannot start: ${breakage}`);
+
   const handle = await withDdevProgress(
     ctx,
     'Ensuring the DDEV environment is up…',
