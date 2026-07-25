@@ -62,6 +62,31 @@ export interface SandboxExtraFile {
   content: string;
 }
 
+/**
+ * Collapse extra files that claim the same container path, keeping the FIRST.
+ *
+ * A duplicate target is not a soft warning to docker — it refuses to start the container
+ * at all ("Duplicate mount point: <path>"), so a single collision between two independent
+ * mask sources fails every CLI invocation on the affected repo. Deduping here rather than
+ * at each composition site means the invariant holds for callers that have not been
+ * written yet.
+ *
+ * Exported for unit testing.
+ */
+export function dedupeExtraFilesByPath(files: SandboxExtraFile[]): SandboxExtraFile[] {
+  const seen = new Set<string>();
+  const out: SandboxExtraFile[] = [];
+  for (const f of files) {
+    if (seen.has(f.containerPath)) {
+      log.debug({ containerPath: f.containerPath }, 'dropped a duplicate sandbox mask mount');
+      continue;
+    }
+    seen.add(f.containerPath);
+    out.push(f);
+  }
+  return out;
+}
+
 export interface SandboxRunSpec {
   command: string;
   args: string[];
@@ -178,8 +203,17 @@ export async function runInSandbox(
     }
 
     if (spec.extraFiles && spec.extraFiles.length > 0) {
-      for (let i = 0; i < spec.extraFiles.length; i++) {
-        const ef = spec.extraFiles[i]!;
+      // Docker rejects the WHOLE `docker run` with "Duplicate mount point" if two mounts
+      // share a target, so one container path may be claimed only once. Independent mask
+      // sources can legitimately pick the same file — `.ddev/traefik/certs/<project>.key`
+      // is both a `#ddev-generated` file and a `**/*.key` secret — and neither knows what
+      // the other selected. First entry wins, which makes the composition ORDER at the
+      // call site the precedence rule: exec-core lists secret masks first, so an empty
+      // secrecy mask always beats a real-bytes integrity mask on a collision (hiding the
+      // contents also prevents writing them, so nothing is lost either way).
+      const deduped = dedupeExtraFilesByPath(spec.extraFiles);
+      for (let i = 0; i < deduped.length; i++) {
+        const ef = deduped[i]!;
         const efId = randomUUID();
         const efDir = join(wrapperWorkerRoot, efId);
         const efHostPath = join(efDir, `extra-${i}`);

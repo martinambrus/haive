@@ -247,6 +247,12 @@ export async function executeByKind(
   // `#ddev-generated` masks are the same kind of control: they keep an agent from taking
   // over a file DDEV owns (and thereby freezing it against regeneration), which is how a
   // dropped `/phpstatus` alias made every later `ddev start` time out.
+  //
+  // ORDER IS PRECEDENCE. Two sources can select the same file — `.ddev/traefik/certs/
+  // <project>.key` is both `#ddev-generated` and a `**/*.key` secret — and docker refuses
+  // to start a container with two mounts on one target, so sandbox-runner keeps the FIRST
+  // entry per path. Secret masks go first deliberately: their empty content hides the
+  // bytes AND blocks writes, so it strictly dominates the ddev mask on a collision.
   const maskFiles = [
     ...(await resolveSecretMasks(db, payload.taskId, repoMount)),
     ...worktreeGitfileMask(hasWorktree),
