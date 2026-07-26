@@ -18,6 +18,7 @@ import {
   WAITING_SLOT_FILTER_TOKEN,
   type TaskJobPayload,
 } from '@haive/shared';
+import { currentStepLabel } from './_step-label.js';
 import { getDb } from '../../db.js';
 import { getRedis } from '../../redis.js';
 import { requireAuth } from '../../middleware/auth.js';
@@ -150,9 +151,24 @@ taskRoutes.get('/', async (c) => {
           round: schema.taskSteps.round,
           statusMessage: schema.taskSteps.statusMessage,
           updatedAt: schema.taskSteps.updatedAt,
+          // currentStepLabel (below) rides the same rows: the human title plus the
+          // in-place pass count, and run_seq/step_index to order the round scan.
+          title: schema.taskSteps.title,
+          iterationCount: schema.taskSteps.iterationCount,
+          runSeq: schema.taskSteps.runSeq,
+          stepIndex: schema.taskSteps.stepIndex,
+          createdAt: schema.taskSteps.createdAt,
         })
         .from(schema.taskSteps)
         .where(inArray(schema.taskSteps.taskId, taskIds))
+        // Run-list order, matching the detail endpoint exactly — deriveRoundSuffixes names a
+        // round group by the step that OPENS it, so a different order renames the groups.
+        .orderBy(
+          asc(schema.taskSteps.round),
+          asc(schema.taskSteps.runSeq),
+          asc(schema.taskSteps.createdAt),
+          asc(schema.taskSteps.stepIndex),
+        )
     : [];
   // Steps whose CLI job is enqueued but not yet picked up — the agent-slot half of the wait.
   const queuedInvocationStepIds = await findQueuedInvocationStepIds(db, taskIds);
@@ -208,6 +224,10 @@ taskRoutes.get('/', async (c) => {
       timing: { wallMs, workMs, idleMs, userActiveMs },
       tokenUsage: tokensByTask.get(t.id) ?? null,
       currentWaitStartedAt: waitStart ? waitStart.toISOString() : null,
+      // Human name of the step the task sits on, so the list badge reads the same as the
+      // task header instead of printing the raw step slug. Same helper, same rows, on both
+      // endpoints — the two cannot drift.
+      currentStepLabel: currentStepLabel(steps, t.currentStepId, t.currentRound),
       // Running-but-queued: which capacity cap this task is parked behind, or null when it is
       // genuinely working. Derived per poll rather than stored, so it cannot go stale.
       slotWait: deriveSlotWait({
@@ -573,6 +593,9 @@ taskRoutes.get('/:id', async (c) => {
       queuedInvocationStepRowIds: await findQueuedInvocationStepIds(db, [id]),
       nowMs: Date.now(),
     }),
+    // Same helper the listing uses, over the already-ordered rows above, so the header
+    // badge and the list badge render one identical string.
+    currentStepLabel: currentStepLabel(stepRows, task.currentStepId, task.currentRound),
   };
   return c.json({ task: taskWithActive, steps, providerBreakdown, parentTask, childTasks });
 });

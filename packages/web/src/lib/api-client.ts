@@ -530,6 +530,12 @@ export interface NotificationSettings {
 export interface Task {
   id: string;
   userId: string;
+  /** Human name of the step the task sits on ("Phase 4: Implementation validation
+   *  (fix loop 7)"), derived server-side from `currentStepId` + `currentRound` and served
+   *  by BOTH the listing and the detail endpoint. Rendered verbatim on both surfaces so the
+   *  list badge and the task header can never name the same step differently. Absent on an
+   *  older api; callers fall back to the step id. */
+  currentStepLabel?: string | null;
   repositoryId: string | null;
   /** The completed task this bug fix belongs to (one level; null otherwise). Set
    *  by the create form for workflow bug fixes; the API flattens so it never

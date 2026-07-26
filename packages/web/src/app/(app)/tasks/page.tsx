@@ -64,13 +64,15 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
               </Badge>
             )}
             {/* Current step as a badge, matching the fixed-header strip on the task page.
-                The listing only carries the step id (no steps array), so it shows the id
-                rather than the friendly title. Hidden on done/cancelled tasks — there is
-                no "current" step then, and an amber badge would read as an alert. */}
+                The server sends the same derived label to both surfaces, so this reads
+                "Phase 4: Implementation validation (fix loop 7)" exactly as the task header
+                does; the raw step id stays as the hover title, and is the fallback when an
+                older api omits the label. Hidden on done/cancelled tasks — there is no
+                "current" step then, and an amber badge would read as an alert. */}
             {task.currentStepId && task.status !== 'completed' && task.status !== 'cancelled' && (
               <Badge variant="warning" className="gap-1" title={task.currentStepId}>
                 <CircleDot className="h-3 w-3" />
-                {task.currentStepId}
+                {task.currentStepLabel ?? task.currentStepId}
               </Badge>
             )}
           </div>

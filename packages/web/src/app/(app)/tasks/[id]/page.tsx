@@ -1038,21 +1038,12 @@ export default function TaskDetailPage() {
       s.status === 'failed',
   );
 
-  // Fixed-header badge suffix: which rejection round / in-place loop pass the parked step
-  // is on. Round context (spec rev / fix loop) wins; otherwise an in-place loop counter.
-  // Null on the original pass (round 0, no iterations) so no empty "()" is ever shown.
-  const currentStepIterSuffix = !currentStep
-    ? null
-    : currentStep.round > 0
-      ? (roundLabels.byRound.get(currentStep.round) ?? null)
-      : currentStep.iterationCount > 0
-        ? iterationBadgeLabel(currentStep)
-        : null;
-  const currentStepBadgeText = !currentStep
-    ? ''
-    : currentStepIterSuffix
-      ? `${currentStep.title} (${currentStepIterSuffix})`
-      : currentStep.title;
+  // Fixed-header badge text. Served by the API (derived from the task's own current-step
+  // pointer, with the rejection-round / in-place-pass suffix already applied) and rendered
+  // verbatim, because the LISTING shows the same string — computing it a second time here
+  // is how the two surfaces came to name the same step differently. Falls back to the local
+  // rows when an older api omits it.
+  const currentStepBadgeText = task.currentStepLabel ?? (currentStep ? currentStep.title : '');
 
   // The subscription-usage chip follows the CLI of the step the run is parked on (or the
   // task default): a Codex step shows Codex's windows, a Claude step shows Claude's.
