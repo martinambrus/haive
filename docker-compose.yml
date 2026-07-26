@@ -118,6 +118,13 @@ services:
       dockerfile: packages/worker/Dockerfile
     container_name: haive-worker
     restart: unless-stopped
+    # Run tini as PID 1 so orphaned children get reaped. Without it PID 1 is the package
+    # manager, which never calls wait(), so every child re-parented to it becomes a
+    # permanent zombie: an overnight run left 1744 of the container's 1748 processes
+    # defunct (1608 git, 76 docker, 60 esbuild). The worker shells out constantly — git
+    # for worktrees and the tracked-file filter, docker for every sandbox and runner — so
+    # this is the one service where the leak actually compounds.
+    init: true
     depends_on:
       postgres:
         condition: service_healthy
