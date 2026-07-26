@@ -57,6 +57,14 @@ taskRoutes.get('/', async (c) => {
   const repositoryId = c.req.query('repositoryId')?.trim() || undefined;
   const statusToken = c.req.query('status')?.trim();
   const q = c.req.query('q')?.trim();
+  // `sort=updated` orders by last change instead of creation. The human listing wants
+  // creation order (a stable shelf you can scroll), but a CHANGE DETECTOR must page by
+  // change: the notifier polls one page and diffs it, so ordering by createdAt made every
+  // task outside the newest page permanently unnotifiable — a gate reached on the 22nd-
+  // newest task of 291 never reached the poll, and the silence looked like a broken
+  // notifier rather than a paging artifact. A transition always bumps updated_at, so this
+  // ordering keeps whatever just changed at the top regardless of task count.
+  const sortByUpdated = c.req.query('sort')?.trim() === 'updated';
   const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1')) || 1);
   const pageSize = Math.min(
     100,
@@ -97,7 +105,9 @@ taskRoutes.get('/', async (c) => {
 
   const rows = await db.query.tasks.findMany({
     where,
-    orderBy: [desc(schema.tasks.createdAt)],
+    orderBy: sortByUpdated
+      ? [desc(schema.tasks.updatedAt), desc(schema.tasks.createdAt)]
+      : [desc(schema.tasks.createdAt)],
     with: { repository: { columns: { id: true, name: true } } },
     limit: pageSize,
     offset: (page - 1) * pageSize,

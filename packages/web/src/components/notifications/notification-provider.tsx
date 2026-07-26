@@ -31,6 +31,22 @@ const POLL_MS = 5_000;
 const USAGE_POLL_MS = 60_000;
 const SETTINGS_CHANGED_EVENT = 'haive:notification-settings-changed';
 
+/** The task poll is a CHANGE DETECTOR, so it pages by change, not by creation.
+ *
+ *  `GET /tasks` defaults to the newest 20 BY CREATION, which quietly capped this channel at
+ *  the 20 most recently created tasks: on a 291-task install a gate reached on the 22nd-
+ *  newest task never entered the poll at all, and 271 tasks were unnotifiable. It read as
+ *  "notifications stopped working" because the fetch keeps succeeding — it just returns a
+ *  set that no longer contains the task that changed.
+ *
+ *  `sort=updated` puts whatever just transitioned at the top regardless of task count. The
+ *  page size only has to cover how many tasks can change between two polls (5s), so 50 is
+ *  ~10x headroom on a busy host; a task that later drops out of the window has already
+ *  fired, and the persistent seen-store keeps it from re-firing if it drifts back in.
+ *  detectTransitions handles the arrival: a task first seen mid-session in a notifiable
+ *  status has no prior identity, which differs from any identity, so it fires. */
+const NOTIFY_FEED_URL = '/tasks?sort=updated&pageSize=50';
+
 const SEEN_PREFIX = 'haive:notif-seen:';
 const SEEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -428,7 +444,7 @@ export function NotificationProvider() {
     let cancelled = false;
     const poll = async () => {
       try {
-        const data = await api.get<{ tasks: Task[] }>('/tasks');
+        const data = await api.get<{ tasks: Task[] }>(NOTIFY_FEED_URL);
         if (cancelled) return;
         const events = detectTransitions(prevRef.current, data.tasks);
         prevRef.current = snapshotIdentities(data.tasks);
