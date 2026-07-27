@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   reapDecision,
   pickPreemptibleRunner,
+  type ReaperTask,
   type RunnerContainer,
 } from './runtime-runner-reaper.js';
 
@@ -62,6 +63,29 @@ describe('reapDecision', () => {
     ).toBe('orphan');
     expect(reapDecision(freshRunner, undefined, GRACE, NOW)).toBe('orphan');
   });
+
+  it('reaps a long-paused settled task on the same grace, anchored to paused_at', () => {
+    // Anchored to the TASK's pause time, never the container start — the same anchoring bug
+    // the failed path already had, where a stray reboot re-armed a full grace.
+    const long = pausedTask({ pausedAt: ago(3.5 * 60 * 60_000) });
+    expect(reapDecision(freshRunner, long, GRACE, NOW)).toBe('paused-grace');
+    const oldContainer = { running: true, taskId: 't1', startedAtMs: NOW - 5 * 60 * 60_000 };
+    expect(reapDecision(oldContainer, pausedTask({ pausedAt: ago(10 * 60_000) }), GRACE, NOW)).toBe(
+      null,
+    );
+  });
+
+  it('never reaps a paused task whose final CLI run is still going', () => {
+    // That run may be driving this very DDEV container; pause promised to let it finish.
+    const busy = pausedTask({ pausedAt: ago(99 * 60 * 60_000), settled: false });
+    expect(reapDecision(freshRunner, busy, GRACE, NOW)).toBe(null);
+  });
+
+  it('keeps a paused task’s runner when the grace is disabled (0)', () => {
+    expect(reapDecision(freshRunner, pausedTask({ pausedAt: ago(99 * 60 * 60_000) }), 0, NOW)).toBe(
+      null,
+    );
+  });
 });
 
 const runner = (over: Partial<RunnerContainer> = {}): RunnerContainer => ({
@@ -71,8 +95,17 @@ const runner = (over: Partial<RunnerContainer> = {}): RunnerContainer => ({
   startedAtMs: NOW,
   ...over,
 });
-const tasks = (entries: Array<[string, { status: string; completedAt: Date | null }]>) =>
-  new Map(entries);
+const tasks = (entries: Array<[string, ReaperTask]>) => new Map(entries);
+
+/** A task the user paused. Its STATUS stays `running` — that is the whole point of storing the
+ *  hold in its own column — so these cases are precisely the ones a status-only rule misses. */
+const pausedTask = (over: Partial<ReaperTask> = {}): ReaperTask => ({
+  status: 'running',
+  completedAt: null,
+  pausedAt: ago(60 * 60_000),
+  settled: true,
+  ...over,
+});
 
 describe('pickPreemptibleRunner', () => {
   it.each(['failed', 'completed', 'cancelled'])(
@@ -138,5 +171,40 @@ describe('pickPreemptibleRunner', () => {
       pickPreemptibleRunner([runner()], tasks([['t1', { status: 'running', completedAt: null }]])),
     ).toBeNull();
     expect(pickPreemptibleRunner([], new Map())).toBeNull();
+  });
+
+  it('preempts a settled paused task’s runner when nothing dead is available', () => {
+    // The deadlock this exists for: every slot held by tasks the user paused, so a live task
+    // can never boot. Its status is `running`, so only the pausedAt rule can free it.
+    expect(pickPreemptibleRunner([runner()], tasks([['t1', pausedTask()]]))?.id).toBe('c1');
+  });
+
+  it('prefers a DEAD runner over a paused one (reclaiming a dead one costs nothing)', () => {
+    const pick = pickPreemptibleRunner(
+      [runner({ id: 'held', taskId: 'tp' }), runner({ id: 'dead', taskId: 'td' })],
+      tasks([
+        // Paused far longer than the dead task has been dead — tier still wins over age.
+        ['tp', pausedTask({ pausedAt: ago(10 * 60 * 60_000) })],
+        ['td', { status: 'failed', completedAt: ago(60_000) }],
+      ]),
+    );
+    expect(pick?.id).toBe('dead');
+  });
+
+  it('never preempts a paused task that still has a CLI run finishing', () => {
+    expect(
+      pickPreemptibleRunner([runner()], tasks([['t1', pausedTask({ settled: false })]])),
+    ).toBeNull();
+  });
+
+  it('prefers the longest-paused runner among held tasks', () => {
+    const pick = pickPreemptibleRunner(
+      [runner({ id: 'recent', taskId: 'tr' }), runner({ id: 'old', taskId: 'to' })],
+      tasks([
+        ['tr', pausedTask({ pausedAt: ago(10 * 60_000) })],
+        ['to', pausedTask({ pausedAt: ago(5 * 60 * 60_000) })],
+      ]),
+    );
+    expect(pick?.id).toBe('old');
   });
 });
