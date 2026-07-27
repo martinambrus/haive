@@ -53,6 +53,7 @@ import {
 import { computeFoldContribution } from '@haive/shared/timing';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { orderWorkflowRunList } from '../orchestrator/execution-paths.js';
+import { pauseParkMessage, resolvePause } from '../orchestrator/pause.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import { cleanupTaskAuthVolumes } from '../sandbox/task-auth-volume.js';
@@ -767,6 +768,12 @@ async function defaultContainerCleanup(db: Database, taskId: string): Promise<nu
  *  The delayed advance re-checks admission; matches the in-process gate's repump cadence. */
 const RUNTIME_PARK_POLL_MS = 15_000;
 
+/** Poll interval for a step held by a task or global PAUSE. Longer than the runtime park: that
+ *  one is racing for a slot that can free at any moment, this one waits on a human clicking
+ *  Resume. It is also the upper bound on how long a resume takes to visibly restart the task,
+ *  which is why it is not longer still. */
+const PAUSE_POLL_MS = 30_000;
+
 async function enqueueAdvance(
   taskId: string,
   userId: string,
@@ -1403,6 +1410,14 @@ async function handleStartTask(db: Database, payload: TaskJobPayload): Promise<v
     await markTaskFailed(db, ctx.taskId, `no steps registered for workflow ${ctx.workflowType}`);
     return;
   }
+  // This handler calls advanceStep DIRECTLY, so it bypasses handleAdvanceStep's pause gate
+  // entirely — without this a task created (or retried) while paused would run its whole first
+  // step. Hand the first step to the normal advance path instead and let that gate park it,
+  // which also gives the task the poll loop it needs to resume itself.
+  if (await resolvePause(db, ctx.taskId)) {
+    await enqueueAdvance(ctx.taskId, ctx.userId, first.metadata.id, 0, ctx.orchestrationEpoch);
+    return;
+  }
   const providers = await loadProviders(db, ctx.userId);
   const result = await advanceStep({
     db,
@@ -1627,6 +1642,106 @@ async function handleAdvanceStep(
   // Stamp the step's position in the run list as run_seq (the run-order display key).
   const runList = await buildRunList(ctx, db);
   const runIdx = runList.findIndex((s) => s.metadata.id === payload.stepId);
+
+  // Pause gate (per-task Pause button, or the admin global switch). Held at the STEP BOUNDARY:
+  // it fires only for an advance that would START new work — no row yet, or a row still
+  // `pending`. Every other status is a CONTINUATION of work already paid for and runs through:
+  // resumeStepIfLinked re-drives a `waiting_cli` step so its apply() can consume the invocation
+  // that just ended, and a form submit re-drives `waiting_form`. That is what makes "pause after
+  // the current CLI execution finishes" literally true — the run in flight completes, its step
+  // reaches `done`, and the NEXT step is the one held. Holding the continuation instead would
+  // strand the task at `waiting_cli` with an ended invocation, which is exactly the shape the
+  // boot reconciler re-dispatches, so it would eventually burn a fresh CLI call anyway.
+  //
+  // Placed BEFORE the runtime-admission block so the two parks can never both own the loop: this
+  // one returns, so a held task never reaches the admission gate. Deliberately AFTER the
+  // terminal/epoch/other-active/duplicate guards — a stale or duplicate advance must still be
+  // dropped rather than converted into a second park loop.
+  const pause =
+    existing == null || existing.status === 'pending' ? await resolvePause(db, ctx.taskId) : null;
+  if (pause) {
+    // Same duplicate-park-loop rule the runtime park uses, and for the same reason: a park
+    // re-drives itself on a delayed job, so two advances for one task would each spawn a loop
+    // and both tick a wait. Drop only on EVIDENCE that another loop owns the task (the
+    // pointed-at step is itself live or parked) — a bare current_step_id mismatch is normal for
+    // a step that parks before it ever runs, and acting on that alone wedges the task.
+    if (
+      ctx.currentStepId !== null &&
+      (payload.stepId !== ctx.currentStepId || round !== ctx.currentRound) &&
+      (await isStepLive(db, ctx.taskId, ctx.currentStepId, ctx.currentRound))
+    ) {
+      await foldAbandonedPark(db, ctx.taskId, payload.stepId, round);
+      logger.info(
+        { taskId: ctx.taskId, stepId: payload.stepId, round, scope: pause },
+        'pause: dropped a duplicate park loop (another live step owns this task)',
+      );
+      return;
+    }
+    const row = await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined);
+    const message = pauseParkMessage(pause);
+    // `pending` + a live waiting_started_at is the park signature computeStepContribution bills
+    // as IDLE, so a hold costs the task no phantom work. deriveSlotWait reads the same shape as
+    // a runtime-slot wait, which is why it takes an explicit `paused` flag and returns null.
+    const alreadyParked = row.status === 'pending' && row.waitingStartedAt !== null;
+    if (alreadyParked) {
+      // Re-park tick: refresh the copy + the updated_at heartbeat only. Re-stamping the marker
+      // would restart the wait clock every poll, and re-folding would double-count the open park.
+      await db
+        .update(schema.taskSteps)
+        .set({ statusMessage: message, updatedAt: new Date() })
+        .where(eq(schema.taskSteps.id, row.id));
+      if (payload.stepId !== ctx.currentStepId || round !== ctx.currentRound) {
+        await markTaskRunningWithStep(
+          db,
+          ctx.taskId,
+          payload.stepId,
+          computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
+          round,
+        );
+      }
+    } else {
+      // First park: fold whatever the row carried into carried_* (an OPEN span reclassifies to
+      // idle, so a step interrupted mid-run cannot bill the hold as work), reset the live timing
+      // and open the marker. iterations/output/detect are PRESERVED — a pause is a hold, not a
+      // reset, so the step resumes rather than re-running from scratch.
+      const fold = computeFoldContribution(row, Date.now());
+      await db
+        .update(schema.taskSteps)
+        .set({
+          status: 'pending',
+          startedAt: null,
+          endedAt: null,
+          idleMs: 0,
+          waitingStartedAt: new Date(),
+          userActiveMs: 0,
+          carriedWorkMs: row.carriedWorkMs + fold.workMs,
+          carriedIdleMs: row.carriedIdleMs + fold.idleMs,
+          carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
+          statusMessage: message,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.taskSteps.id, row.id));
+      await markTaskRunningWithStep(
+        db,
+        ctx.taskId,
+        payload.stepId,
+        computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
+        round,
+      );
+    }
+    await foldOtherTaskParks(db, ctx.taskId, row.id);
+    // The poll loop IS the resume mechanism: clearing paused_at (or flipping the admin switch
+    // off) needs no sweep and no re-drive, because the next tick simply falls through. Delayed
+    // BullMQ jobs survive a worker restart, so a hold outlives a redeploy.
+    await enqueueAdvance(ctx.taskId, ctx.userId, payload.stepId, round, ctx.orchestrationEpoch, {
+      delayMs: PAUSE_POLL_MS,
+    });
+    logger.info(
+      { taskId: ctx.taskId, stepId: payload.stepId, round, scope: pause },
+      'pause: parked step (task is held)',
+    );
+    return;
+  }
 
   // Runtime-pool admission (task level): a step that brings up the per-task runtime must not
   // overcommit the machine-aware runtime limit. When the pool is full and this task holds no

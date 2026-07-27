@@ -142,7 +142,12 @@ export type ClarifyStepRequest = z.infer<typeof clarifyStepRequestSchema>;
 export const MERGE_CLARIFICATION_ASKED_EVENT = 'merge_resolution.clarification_asked';
 export const MERGE_CLARIFICATION_ANSWERED_EVENT = 'merge_resolution.clarification_answered';
 
-export const taskActionSchema = z.enum(['cancel', 'retry']);
+/** `pause` holds a task so its CLI subscription budget goes to the other tasks: the run
+ *  in flight finishes, then the orchestrator stops handing it work. `resume` clears it.
+ *  Neither is terminal and neither touches the environment — unlike `cancel`, and unlike
+ *  Stop (`/cancel-active-cli`), which fails the current step to get the task out of
+ *  `running`. */
+export const taskActionSchema = z.enum(['cancel', 'retry', 'pause', 'resume']);
 
 export const taskActionRequestSchema = z.object({
   action: taskActionSchema,
@@ -223,19 +228,21 @@ export type RenameTaskRequest = z.infer<typeof renameTaskRequestSchema>;
 // non-terminal; 'active' = open minus waiting_user; 'unfinished' = open plus
 // failed (everything still needing attention). These sets are the single source
 // of truth shared by the web dropdown and the server-side query, so the listing
-// can paginate/filter in SQL instead of folding a full in-memory list. 'paused'
-// is a live DB status even though the shared TaskStatus union omits it, so these
-// are plain string literals rather than TaskStatus[].
+// can paginate/filter in SQL instead of folding a full in-memory list.
+//
+// They deliberately do NOT list 'paused'. The task_status enum has that member but
+// nothing writes it: a paused task keeps its real status (running / waiting_user / …)
+// and carries `tasks.paused_at`, so it already belongs to open/active/unfinished on
+// its own merit. See PAUSED_FILTER_TOKEN.
 export const OPEN_TASK_STATUSES = [
   'created',
   'queued',
   'running',
-  'paused',
   'waiting_user',
   'waiting_pr',
 ] as const;
 
-export const ACTIVE_TASK_STATUSES = ['created', 'queued', 'running', 'paused'] as const;
+export const ACTIVE_TASK_STATUSES = ['created', 'queued', 'running'] as const;
 
 /** Filter token for "running but queued behind a capacity cap" — a DERIVED state, not a
  *  task status (see deriveSlotWait), so it cannot be expanded into a status IN (...) list.
@@ -243,11 +250,17 @@ export const ACTIVE_TASK_STATUSES = ['created', 'queued', 'running', 'paused'] a
  *  its EXISTS predicate instead. Shared so the web dropdown and the query agree. */
 export const WAITING_SLOT_FILTER_TOKEN = 'waiting_slot';
 
+/** Filter token for "the user paused this task" — like WAITING_SLOT_FILTER_TOKEN a DERIVED
+ *  state rather than a task status: the row keeps whatever status it had and carries
+ *  `tasks.paused_at`. expandTaskStatusFilter returns null for it and the api branches on
+ *  this constant to add its own predicate (paused_at IS NOT NULL, minus terminal tasks).
+ *  Shared so the web dropdown and the query agree. */
+export const PAUSED_FILTER_TOKEN = 'paused';
+
 const ALL_TASK_STATUSES = [
   'created',
   'queued',
   'running',
-  'paused',
   'waiting_user',
   'waiting_pr',
   'completed',
@@ -259,11 +272,12 @@ const ALL_TASK_STATUSES = [
  *  or null for "no status filter" (all). Mirrors the web matchesStatus grouping
  *  exactly. An empty or unrecognized token yields null — the dropdown only emits
  *  known tokens, so a hand-typed garbage value falls back to the unfiltered (but
- *  still user-scoped) list rather than an empty-IN edge case. WAITING_SLOT_FILTER_TOKEN
- *  also yields null by design: it is derived, so its caller must handle it BEFORE
- *  calling this. The 'running' token expands to the raw status here, but the api NARROWS it
- *  further (running minus the slot-parked half, which is also stored as `running`) so the
- *  dropdown's "Running" and "Waiting for slot" name disjoint sets. */
+ *  still user-scoped) list rather than an empty-IN edge case. WAITING_SLOT_FILTER_TOKEN and
+ *  PAUSED_FILTER_TOKEN also yield null by design: both are derived, so their caller must
+ *  handle them BEFORE calling this. The 'running' token expands to the raw status here, but
+ *  the api NARROWS it further (running minus the slot-parked and paused halves, both of which
+ *  are also stored as `running`) so the dropdown's "Running", "Waiting for slot" and "Paused"
+ *  name disjoint sets. */
 export function expandTaskStatusFilter(token: string | undefined | null): string[] | null {
   if (!token) return null;
   if (token === 'open') return [...OPEN_TASK_STATUSES];

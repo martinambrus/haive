@@ -575,6 +575,11 @@ export interface Task {
    *  capacity — the badge distinguishes "actually working" from "queued in line". Derived
    *  server-side on every request (both the listing and the detail endpoint), never stored. */
   slotWait?: SlotWait | null;
+  /** ISO time the user paused this task, or null. NOT a status: the row keeps `running` /
+   *  `waiting_user` / … so every server-side guard and reaper still sees it, and "paused" is
+   *  derived here for the badge and the ?status=paused filter — same shape as slotWait, which
+   *  is suppressed while this is set. */
+  pausedAt?: string | null;
   /** ISO time the provider-outage watch was marked recovered (list endpoint only). Null
    *  until a task that failed on a provider rate-limit or 5xx has that provider come back;
    *  the notifier diffs its null->set flip to fire the "provider is back" notification. */
@@ -649,6 +654,15 @@ export interface TaskListResponse {
   page: number;
   pageSize: number;
   repositories: { id: string; name: string }[];
+  /** The admin global pause switch is on: no task is being advanced and no queued CLI
+   *  invocation is being picked up anywhere. Optional so an older api response still parses. */
+  globalPause?: boolean;
+}
+
+/** GET /system/pause — the global switch, readable by any signed-in user (the admin config
+ *  route is admin-gated, and the app-wide banner has to render for everyone). */
+export interface SystemPauseResponse {
+  globalPause: boolean;
 }
 
 export interface TaskStep {
@@ -908,7 +922,10 @@ export interface TaskEvent {
   createdAt: string;
 }
 
-export type TaskAction = 'cancel' | 'retry';
+/** `pause` holds a task so its CLI subscription budget goes to the other tasks — the run in
+ *  flight finishes, then the orchestrator stops handing it work. `resume` clears it. Neither
+ *  is terminal and neither touches the environment. */
+export type TaskAction = 'cancel' | 'retry' | 'pause' | 'resume';
 
 export type StepAction = 'retry' | 'retry_ai' | 'resume' | 'skip' | 'abort';
 

@@ -1057,6 +1057,13 @@ export default function TaskDetailPage() {
       {titleStripVisible && (
         <div className="fixed left-64 right-0 top-0 z-30 flex items-center gap-3 border-b border-neutral-800 bg-neutral-950/90 px-8 py-2 backdrop-blur">
           <p className="min-w-0 truncate text-sm font-semibold text-indigo-300">{task.title}</p>
+          {/* The strip carries no status badge, so a held task would otherwise look like it
+              is working once the page is scrolled past the header. */}
+          {task.pausedAt && (
+            <Badge variant="warning" className="shrink-0">
+              paused
+            </Badge>
+          )}
           {task.repository && (
             <Badge
               variant="default"
@@ -1123,9 +1130,13 @@ export default function TaskDetailPage() {
             ) : (
               <>
                 <h1 className="text-2xl font-bold text-neutral-50">{task.title}</h1>
-                {/* Queued behind a capacity cap: the task row still says `running`, so show
-                    which slot it is waiting for instead (same badge as the tasks listing). */}
-                {task.slotWait ? (
+                {/* Paused, or queued behind a capacity cap: the task row still says `running`
+                    in both cases, so show the real state instead (same precedence as the
+                    tasks listing — paused wins, and the server suppresses slotWait while it
+                    is set, so the two can never both be true). */}
+                {task.pausedAt ? (
+                  <Badge variant="warning">paused</Badge>
+                ) : task.slotWait ? (
                   <SlotWaitBadge slotWait={task.slotWait} />
                 ) : (
                   <Badge variant={taskStatusVariant(task.status)}>{task.status}</Badge>
@@ -1181,6 +1192,27 @@ export default function TaskDetailPage() {
               Retry
             </Button>
           )}
+          {/* Pause/Resume: hold this task so the CLI concurrency goes to the others. No
+              confirm() — nothing is killed and nothing is lost, so it is cheap to undo. */}
+          {canCancel &&
+            (task.pausedAt ? (
+              <Button
+                size="sm"
+                onClick={() => void runAction('resume')}
+                title="Continue this task from where it stopped. It picks up within ~30 seconds."
+              >
+                Resume
+              </Button>
+            ) : (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void runAction('pause')}
+                title="Let the CLI run in flight finish, then hold the task so its subscription budget goes to your other tasks. Nothing is killed and the task stays open. The environment stays up, but another task may reclaim its runtime slot while this one is held."
+              >
+                Pause
+              </Button>
+            ))}
           {stepRunning && (
             <Button
               variant="secondary"
@@ -1216,6 +1248,18 @@ export default function TaskDetailPage() {
       {actionError && (
         <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300">
           {actionError}
+        </div>
+      )}
+
+      {/* Task-scoped hold. The GLOBAL pause has its own app-wide banner, so it is not
+          repeated here — this one only ever means "you paused this task". */}
+      {task.pausedAt && (
+        <div className="rounded-md border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+          <span className="font-semibold">Paused</span> since{' '}
+          {new Date(task.pausedAt).toLocaleString()}. Any CLI run that was already in flight
+          finishes, and nothing new starts — the concurrency goes to your other tasks. The
+          environment stays up, though another task may reclaim its runtime slot while this one is
+          held. Press Resume to continue where it stopped.
         </div>
       )}
 

@@ -2,6 +2,7 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { SidebarNav } from '@/components/sidebar-nav';
+import { GlobalPauseBanner } from '@/components/global-pause-banner';
 import { CliLoginProvider } from '@/components/cli-login-provider';
 import { NotificationProvider } from '@/components/notifications/notification-provider';
 import { SessionKeepAlive } from '@/components/session-keepalive';
@@ -69,7 +70,13 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
     <CliLoginProvider>
       <div className="flex min-h-screen">
         <SidebarNav email={data.user.email} role={data.user.role} />
-        <main className="flex-1 overflow-y-auto p-8">{children}</main>
+        <main className="flex-1 overflow-y-auto p-8">
+          {/* Renders nothing unless the admin global pause switch is on. Role comes from the
+              /auth/me call this layout already makes, so the banner costs no extra request
+              to decide whether to offer the admin link. */}
+          <GlobalPauseBanner role={data.user.role} />
+          {children}
+        </main>
       </div>
       <NotificationProvider />
       <SessionKeepAlive />

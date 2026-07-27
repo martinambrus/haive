@@ -33,6 +33,7 @@ import {
   type OllamaProvisionResult,
 } from '@haive/shared';
 import { resolveAgentConcurrency } from '../../sandbox/runtime-admission.js';
+import { resolvePause } from '../../orchestrator/pause.js';
 import { refreshAllCliVersions, refreshAllToolVersions } from '../../cli-versions/index.js';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
 import { renderDockerfile, resolveImageTag } from '../../sandbox/image-cache.js';
@@ -644,6 +645,56 @@ async function handleProvisionOllamaModelJob(
 /** How long to defer a job that hit its task's agent cap before BullMQ retries it. */
 const TASK_AGENT_CAP_DEFER_MS = 4000;
 
+/** How long to defer a job whose task is PAUSED. Far longer than the agent-cap defer: that one
+ *  waits on a sibling agent finishing seconds from now, this one waits on a human clicking
+ *  Resume, so re-checking every 4s would be pure churn for the whole hold. */
+const PAUSE_DEFER_MS = 30_000;
+
+/** Pause gate, enforced at job pickup. A paused task's queued invocations must not start —
+ *  that is what "we will not round robin into it with the next CLI call" means: the slot they
+ *  would have taken goes to an unpaused task instead, which is the entire point of pausing.
+ *
+ *  Deferring (rather than failing) is what makes it reversible: the job goes back to delayed
+ *  and BullMQ redelivers it, so a Resume needs no re-drive of any kind. Invocations already
+ *  RUNNING are untouched — handleCliExecJob has already stamped started_at by then and this
+ *  never sees them again.
+ *
+ *  This is also the backstop that makes the advance gate's "let continuations through" rule
+ *  safe: a step left `running` by a dead worker is re-driven by the boot reconciler, passes
+ *  that gate as a continuation, and can dispatch a fresh invocation — which lands here and is
+ *  held before it ever spawns a sandbox.
+ *
+ *  Unlike enforceTaskAgentCap this does NOT exempt `step_summary`. That exemption is right for
+ *  the cap — it defers for seconds, so skipping it just avoids delaying a summary — but wrong
+ *  here: a hold lasts until a human ends it, a summary is still a real CLI call against the
+ *  subscription this feature exists to protect, and "paused" that keeps spending is not paused.
+ *  Deferring one costs nothing, because the job redelivers on resume and nothing awaits it (the
+ *  enqueue is best-effort with a null taskStepId, and handleCliExecJob's step_summary branch
+ *  never resumes a step). Observed as a defect first: two summaries ran under a global pause.
+ *
+ *  Fail-open on every error. The `!token` skip has to stay — moveToDelayed cannot be called
+ *  without a worker token, so there is no way to hold the job at all. */
+async function enforcePauseGate(
+  db: Database,
+  payload: CliExecJobPayload,
+  job: Job<CliExecQueuePayload>,
+  token: string | undefined,
+): Promise<void> {
+  if (!token) return;
+  if (!(await resolvePause(db, payload.taskId))) return;
+  try {
+    await job.moveToDelayed(Date.now() + PAUSE_DEFER_MS, token);
+  } catch (err) {
+    log.warn({ err, taskId: payload.taskId }, 'pause defer failed; allowing job');
+    return;
+  }
+  log.info(
+    { taskId: payload.taskId, invocationId: payload.invocationId },
+    'task is paused; deferring invocation',
+  );
+  throw new DelayedError();
+}
+
 /** Per-task agent cap, enforced at job pickup. Counts the task's currently-running
  *  CLI invocations (started, not ended/superseded) from the DB; if at/over the
  *  admin MAX_PARALLEL_AGENTS_PER_TASK cap, move this job back to delayed so its
@@ -737,6 +788,9 @@ export async function startCliExecWorker(
       const db = getDb();
       if (job.name === CLI_EXEC_JOB_NAMES.INVOKE) {
         const payload = job.data as CliExecJobPayload;
+        // Paused task (or global switch): defer before anything else, so a held task never
+        // spends a slot. Throws DelayedError on defer; no-op when the task is live.
+        await enforcePauseGate(db, payload, job, token);
         // Per-task cap: if this task already runs its max parallel agents, defer
         // the job (freeing the slot for others) and let BullMQ redeliver it.
         // Throws DelayedError on defer; no-op when under the cap.

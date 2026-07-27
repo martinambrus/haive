@@ -304,6 +304,16 @@ export const tasks = pgTable(
      *  the same-step concurrency race a retry-while-active otherwise triggers. */
     orchestrationEpoch: integer('orchestration_epoch').notNull().default(0),
     errorMessage: text('error_message'),
+    /** User paused this task: the CLI run in flight finishes, then the orchestrator
+     *  stops handing it work (no next step, no new CLI invocation) until it is cleared.
+     *
+     *  A COLUMN, not the `paused` value of task_status — that enum member exists but
+     *  nothing has ever written it. Every reaper, orchestration guard, boot backstop and
+     *  blocker query keys on the concrete status (running / queued / waiting_*), so a
+     *  ninth status would silently drop a paused task out of all of them. The task keeps
+     *  its real status and "paused" is derived for display and filtering, the same way
+     *  the runtime-slot wait is (see deriveSlotWait in @haive/shared). */
+    pausedAt: timestamp('paused_at'),
     startedAt: timestamp('started_at'),
     completedAt: timestamp('completed_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),

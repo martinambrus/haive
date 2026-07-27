@@ -94,11 +94,19 @@ export function deriveSlotWait(args: {
   /** `task_steps.id` of every step holding an invocation that is enqueued but not started
    *  (started_at null, not ended, not superseded). */
   queuedInvocationStepRowIds: ReadonlySet<string>;
+  /** The task is held by a per-task pause (`tasks.paused_at`) or the global pause switch. */
+  paused: boolean;
   nowMs: number;
 }): SlotWait | null {
   // Only a live task can be queued. A Stopped/cancelled/failed task can leave a parked row
   // behind (its step is not always reset), and that must never read as "waiting for a slot".
   if (args.taskStatus !== 'running') return null;
+  // A paused task is held on purpose, not starved of capacity — and it wears BOTH park
+  // signatures: the pause park writes the same `pending` + waiting_started_at row the runtime
+  // park does, and a CLI job deferred at pickup leaves the same unstarted invocation an agent
+  // wait does. Without this it would report a slot wait it is not in, and the listing's
+  // "Running"/"Waiting for slot"/"Paused" filters would stop naming disjoint sets.
+  if (args.paused) return null;
   if (!args.currentStepId) return null;
   const row = args.steps.find(
     (s) => s.stepId === args.currentStepId && s.round === args.currentRound,

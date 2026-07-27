@@ -816,6 +816,26 @@ adminRoutes.put('/config/ddev-control', async (c) => {
   return c.json({ enabled });
 });
 
+const globalPauseSchema = z.object({ paused: z.boolean() });
+
+// Global pause switch. ON stops the orchestrator handing out work everywhere: no step
+// advances and no queued CLI invocation is picked up. A CLI already RUNNING finishes —
+// nothing is killed, nothing is superseded, no environment is torn down. Terminals, the
+// browser IDE, VNC and the DDEV/app runners keep working so a frozen system stays
+// debuggable. The worker reads it per advance and per cli-exec pickup (~30s config cache),
+// so both directions take effect without a redeploy. Persists across restarts.
+adminRoutes.get('/config/global-pause', async (c) => {
+  const paused = await configService.getBoolean(CONFIG_KEYS.GLOBAL_PAUSE, false);
+  return c.json({ paused });
+});
+
+adminRoutes.put('/config/global-pause', async (c) => {
+  const { paused } = globalPauseSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.GLOBAL_PAUSE, paused ? 'true' : 'false');
+  log.info({ paused }, 'global pause switch updated');
+  return c.json({ paused });
+});
+
 const fairSchedulingSchema = z.object({ enabled: z.boolean() });
 
 // Global fair cli-exec scheduling kill-switch. The worker reads this at each

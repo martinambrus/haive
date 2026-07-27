@@ -25,6 +25,7 @@ const derive = (
     currentRound: 0,
     steps,
     queuedInvocationStepRowIds: new Set<string>(),
+    paused: false,
     nowMs: NOW,
     ...over,
   });
@@ -119,5 +120,23 @@ describe('deriveSlotWait', () => {
 
   it('is null when the task has no current step', () => {
     expect(derive({ currentStepId: null })).toBeNull();
+  });
+
+  it('is null for a paused task parked the way a runtime park looks', () => {
+    // The pause park writes the SAME `pending` + waiting_started_at row the runtime park
+    // does, so without the paused guard a held task would advertise a capacity wait it is
+    // not in — and would land in the ?status=waiting_slot filter alongside genuinely
+    // starved tasks.
+    expect(derive()?.kind).toBe('runtime');
+    expect(derive({ paused: true })).toBeNull();
+  });
+
+  it('is null for a paused task whose CLI job was deferred at pickup', () => {
+    // Gate B leaves the invocation enqueued-but-unstarted, which is byte-identical to an
+    // agent-slot wait. Same reasoning as above.
+    const row = step({ id: 'row-cli', status: 'waiting_cli', statusMessage: null });
+    const queued = { queuedInvocationStepRowIds: new Set(['row-cli']) };
+    expect(derive(queued, [row])?.kind).toBe('agent');
+    expect(derive({ ...queued, paused: true }, [row])).toBeNull();
   });
 });

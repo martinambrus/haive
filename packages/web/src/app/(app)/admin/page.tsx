@@ -110,6 +110,8 @@ export default function AdminPage() {
   const [savingDdevControl, setSavingDdevControl] = useState(false);
   const [fairEnabled, setFairEnabled] = useState<boolean | null>(null);
   const [savingFair, setSavingFair] = useState(false);
+  const [globalPause, setGlobalPause] = useState<boolean | null>(null);
+  const [savingGlobalPause, setSavingGlobalPause] = useState(false);
   const [promptCaching1hEnabled, setPromptCaching1hEnabled] = useState<boolean | null>(null);
   const [savingPromptCaching1h, setSavingPromptCaching1h] = useState(false);
   const [tersenessLevel, setTersenessLevel] = useState<string | null>(null);
@@ -170,6 +172,7 @@ export default function AdminPage() {
         prWorkflowData,
         runtimeLimitsData,
         streamLogRetentionData,
+        globalPauseData,
       ] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
         api.get<AdminHealthResponse>('/admin/health'),
@@ -198,6 +201,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/pr-workflow'),
         api.get<RuntimeLimitsResponse>('/admin/config/runtime-limits'),
         api.get<{ retentionDays: number }>('/admin/config/cli-stream-log-retention'),
+        api.get<{ paused: boolean }>('/admin/config/global-pause'),
       ]);
       setUsers(usersData.users);
       setHealth(healthData);
@@ -235,6 +239,7 @@ export default function AdminPage() {
       setRuntimeLimitsForm(runtimeLimitsFormOf(runtimeLimitsData));
       setStreamLogRetentionDays(streamLogRetentionData.retentionDays);
       setStreamLogRetentionInput(String(streamLogRetentionData.retentionDays));
+      setGlobalPause(globalPauseData.paused);
       setError(null);
     } catch (err) {
       const e = err as { status?: number; message?: string };
@@ -696,6 +701,21 @@ export default function AdminPage() {
     }
   }
 
+  async function setGlobalPauseSwitch(next: boolean) {
+    setSavingGlobalPause(true);
+    try {
+      const result = await api.put<{ paused: boolean }>('/admin/config/global-pause', {
+        paused: next,
+      });
+      setGlobalPause(result.paused);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update the global pause switch');
+    } finally {
+      setSavingGlobalPause(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-start justify-between">
@@ -713,6 +733,43 @@ export default function AdminPage() {
       </div>
 
       <FormError message={error} />
+
+      {/* Global pause. First thing on the page and the only control rendered as a button
+          rather than a checkbox: it is the one switch that changes what the whole system is
+          doing right now, and it has to be obvious both to reach and to notice when it is on. */}
+      {globalPause !== null && (
+        <Card
+          className={
+            globalPause ? 'border-amber-500/60 bg-amber-500/10' : 'border-red-900/60 bg-red-950/20'
+          }
+        >
+          <CardHeader>
+            <CardTitle className={globalPause ? 'text-amber-200' : undefined}>
+              {globalPause ? 'ALL EXECUTION PAUSED' : 'Global pause'}
+            </CardTitle>
+            <CardDescription>
+              {globalPause
+                ? 'No task is being advanced and no queued CLI run is being picked up. Runs that were already in flight finish normally.'
+                : 'Freeze every task at once without cancelling anything. The CLI run in flight finishes, then no step advances and no queued CLI run starts anywhere.'}{' '}
+              Terminals, the editor, the browser and the app environments keep working either way,
+              so a frozen system stays debuggable. Takes effect within ~30 seconds and persists
+              across restarts.
+            </CardDescription>
+          </CardHeader>
+          <Button
+            variant={globalPause ? 'primary' : 'destructive'}
+            disabled={savingGlobalPause}
+            onClick={() => void setGlobalPauseSwitch(!globalPause)}
+            className="w-full py-3 text-base font-semibold sm:w-auto sm:px-8"
+          >
+            {savingGlobalPause
+              ? 'Saving…'
+              : globalPause
+                ? 'Resume all execution'
+                : 'Pause all execution'}
+          </Button>
+        </Card>
+      )}
 
       {health && (
         <section className="grid gap-3 md:grid-cols-4">

@@ -62,6 +62,14 @@ export const CONFIG_KEYS = {
   // starved user instead of the next FIFO job from one task's fan-out. Set 'false'
   // to restore plain FIFO live without a redeploy.
   FAIR_SCHEDULING_ENABLED: 'config:worker:fairScheduling',
+  // Global pause switch (default 'false'). When 'true' the orchestrator stops handing
+  // out work everywhere: no step advances and no queued CLI invocation is picked up.
+  // A CLI already RUNNING is never interrupted — it finishes, as it does for a per-task
+  // pause. Deliberately scoped to orchestration: terminals, the browser IDE, VNC,
+  // DDEV/app runners and the login/probe/version jobs keep working, so a frozen system
+  // stays debuggable. Read per advance and per cli-exec pickup (~30s config cache), so a
+  // flip needs no redeploy and no live-retune channel.
+  GLOBAL_PAUSE: 'config:orchestrator:globalPause',
   // Global opt-in (default OFF) for the 1-hour prompt-cache TTL on Claude-family CLI
   // steps. When 'true', cli-exec sets ENABLE_PROMPT_CACHING_1H=1 so API-key / Bedrock /
   // Vertex claude runs use the 1h cache TTL (subscription auth is already 1h
@@ -349,6 +357,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS]: 'false',
   [CONFIG_KEYS.MODEL_HEALTH_CHECK_ENABLED]: 'true',
   [CONFIG_KEYS.FAIR_SCHEDULING_ENABLED]: 'true',
+  [CONFIG_KEYS.GLOBAL_PAUSE]: 'false',
   [CONFIG_KEYS.PROMPT_CACHING_1H]: 'false',
   [CONFIG_KEYS.HOST_REPO_ROOT]: '/host-fs',
   [CONFIG_KEYS.REPO_STORAGE_PATH]: '/var/lib/haive/repos',

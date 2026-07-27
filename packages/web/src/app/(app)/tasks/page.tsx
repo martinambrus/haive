@@ -49,9 +49,18 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <h2 className="text-lg font-semibold text-neutral-50">{task.title}</h2>
-            {/* A task queued behind a capacity cap stays `running` in the DB, which made
-                "working" and "waiting in line" look identical here — show the wait instead. */}
-            {task.slotWait ? (
+            {/* Both a paused task and one queued behind a capacity cap stay `running` in the
+                DB, which made "working", "held" and "waiting in line" look identical here.
+                Paused wins: it is the deliberate state, and the server already suppresses
+                slotWait for a paused task so the two can never both be set. */}
+            {task.pausedAt ? (
+              <Badge
+                variant="warning"
+                title={`Paused by you at ${new Date(task.pausedAt).toLocaleString()} — the orchestrator is not handing this task any work.`}
+              >
+                paused
+              </Badge>
+            ) : task.slotWait ? (
               <SlotWaitBadge slotWait={task.slotWait} />
             ) : (
               <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
@@ -366,6 +375,7 @@ export default function TasksPage() {
             <option value="active">In progress</option>
             <option value="running">Running</option>
             <option value="waiting_slot">Waiting for slot</option>
+            <option value="paused">Paused</option>
             <option value="waiting_user">Waiting on you</option>
             <option value="waiting_pr">Waiting on PR</option>
             <option value="open">Open</option>

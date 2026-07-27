@@ -5,10 +5,13 @@ import {
   buildEstimationAccuracy,
   computeFoldContribution,
   computeTaskTiming,
+  configService,
+  CONFIG_KEYS,
   createTaskRequestSchema,
   deriveSlotWait,
   expandTaskStatusFilter,
   logger,
+  PAUSED_FILTER_TOKEN,
   PROVIDER_SENSITIVE_STEP_IDS,
   renameTaskRequestSchema,
   setCliProviderRequestSchema,
@@ -72,13 +75,32 @@ taskRoutes.get('/', async (c) => {
     Math.max(1, Math.floor(Number(c.req.query('pageSize') ?? '20')) || 20),
   );
 
+  // Global pause suppresses every slot-wait reading below: a held task parks exactly the way a
+  // capacity-starved one does, and calling that "waiting for a slot" would be wrong in both the
+  // badge and the filter. Read once per request (~30s config cache).
+  const globalPause = await configService.getBoolean(CONFIG_KEYS.GLOBAL_PAUSE, false);
+
   const conds = [eq(schema.tasks.userId, userId)];
   if (repositoryId) conds.push(eq(schema.tasks.repositoryId, repositoryId));
-  if (statusToken === WAITING_SLOT_FILTER_TOKEN) {
+  if (statusToken === PAUSED_FILTER_TOKEN) {
+    // Derived state, not a task status: a paused task keeps whatever status it had (usually
+    // `running`) and carries `paused_at`, so expandTaskStatusFilter returns null for this token
+    // by design and the predicate lives here. Deliberately task-scoped — the GLOBAL pause is not
+    // folded in, or flipping the admin switch would swell this filter from a handful of
+    // deliberately-held tasks to every open task at once. The app-wide banner says that instead.
+    conds.push(isNotNull(schema.tasks.pausedAt));
+    conds.push(not(inArray(schema.tasks.status, ['completed', 'cancelled'])));
+  } else if (statusToken === WAITING_SLOT_FILTER_TOKEN) {
     // Derived state, not a task status: a task queued behind a capacity cap stays `running`
     // (see deriveSlotWait), so this token cannot be expanded into a status IN (...) list —
     // expandTaskStatusFilter returns null for it by design.
     conds.push(eq(schema.tasks.status, 'running'), currentStepParkedSql());
+    // A paused task's park is indistinguishable from a capacity park in SQL, so subtract it
+    // here exactly as deriveSlotWait does in the badge — otherwise "Waiting for slot" and
+    // "Paused" would both claim the same rows. With the global switch on, nothing is waiting
+    // for capacity at all.
+    conds.push(isNull(schema.tasks.pausedAt));
+    if (globalPause) conds.push(sql`false`);
   } else {
     const statuses = expandTaskStatusFilter(statusToken);
     if (statuses) {
@@ -93,6 +115,9 @@ taskRoutes.get('/', async (c) => {
       // — exactly the set the WAITING_SLOT_FILTER_TOKEN branch selects. The compound tokens
       // ('open'/'active'/'unfinished') deliberately keep both: they answer "still in flight".
       conds.push(not(currentStepParkedSql()));
+      // …and the paused half, which is also stored as `running`, so the three tokens name
+      // disjoint sets.
+      conds.push(isNull(schema.tasks.pausedAt));
     }
   }
   if (q) conds.push(sql`${schema.tasks.title} ilike ${`%${q}%`}`);
@@ -236,6 +261,7 @@ taskRoutes.get('/', async (c) => {
         currentRound: t.currentRound,
         steps,
         queuedInvocationStepRowIds: queuedInvocationStepIds,
+        paused: t.pausedAt !== null || globalPause,
         nowMs: now,
       }),
       allowanceReplenishedAt: t.allowanceReplenishedAt
@@ -250,7 +276,7 @@ taskRoutes.get('/', async (c) => {
       allowanceWatchReason: t.awaitingProviderReason ?? null,
     };
   });
-  return c.json({ tasks, total, page, pageSize, repositories });
+  return c.json({ tasks, total, page, pageSize, repositories, globalPause });
 });
 
 taskRoutes.post('/', async (c) => {
@@ -579,6 +605,7 @@ taskRoutes.get('/:id', async (c) => {
     columns: { id: true, title: true, status: true, createdAt: true },
     orderBy: [desc(schema.tasks.createdAt)],
   });
+  const globalPause = await configService.getBoolean(CONFIG_KEYS.GLOBAL_PAUSE, false);
   const taskWithActive = {
     ...task,
     activeCliInvocationId: active?.id ?? null,
@@ -591,13 +618,21 @@ taskRoutes.get('/:id', async (c) => {
       currentRound: task.currentRound,
       steps: stepRows,
       queuedInvocationStepRowIds: await findQueuedInvocationStepIds(db, [id]),
+      paused: task.pausedAt !== null || globalPause,
       nowMs: Date.now(),
     }),
     // Same helper the listing uses, over the already-ordered rows above, so the header
     // badge and the list badge render one identical string.
     currentStepLabel: currentStepLabel(stepRows, task.currentStepId, task.currentRound),
   };
-  return c.json({ task: taskWithActive, steps, providerBreakdown, parentTask, childTasks });
+  return c.json({
+    task: taskWithActive,
+    steps,
+    providerBreakdown,
+    parentTask,
+    childTasks,
+    globalPause,
+  });
 });
 
 taskRoutes.patch('/:id', async (c) => {
@@ -754,6 +789,16 @@ async function stopActiveCliInvocations(
   return { killed, cancelled: active.length, stopped: stopped.length };
 }
 
+/** Release a per-task pause. Clearing the column is the whole operation — the worker's
+ *  park loop and the deferred cli-exec jobs re-check it on their own schedule, so there is
+ *  no queue state to unwind here. */
+async function clearTaskPause(db: ReturnType<typeof getDb>, taskId: string): Promise<void> {
+  await db
+    .update(schema.tasks)
+    .set({ pausedAt: null, updatedAt: new Date() })
+    .where(and(eq(schema.tasks.id, taskId), isNotNull(schema.tasks.pausedAt)));
+}
+
 taskRoutes.post('/:id/action', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -776,6 +821,10 @@ taskRoutes.post('/:id/action', async (c) => {
       // full teardown job (tears down the DDEV/app runtime too).
       await stopActiveCliInvocations(db, id, { failTask: false });
       await cancelTaskRow(db, id, { by: userId });
+      // Cancelling a paused task must not leave the hold behind: the step-retry endpoint has
+      // no status guard, so a cancelled task is still resumable, and a stale paused_at would
+      // silently park it again the moment someone revived it.
+      await clearTaskPause(db, id);
       await enqueueCancelJob(id, userId);
       return c.json({ ok: true, status: 'cancelled' });
     case 'retry': {
@@ -826,6 +875,9 @@ taskRoutes.post('/:id/action', async (c) => {
           errorMessage: null,
           // full task restart → fresh auto-resume budget
           allowanceAutoResumeCount: 0,
+          // Retrying a paused task means "run it". Leaving the hold set would restart the task
+          // straight into the pause park, with Retry apparently doing nothing.
+          pausedAt: null,
           orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
           updatedAt: new Date(),
         })
@@ -836,6 +888,37 @@ taskRoutes.post('/:id/action', async (c) => {
         backoff: { type: 'exponential', delay: 5000 },
       });
       return c.json({ ok: true, status: 'queued' });
+    }
+    case 'pause': {
+      // Terminal tasks have nothing left to hold.
+      if (task.status === 'completed' || task.status === 'cancelled') {
+        throw new HttpError(409, `Cannot pause a ${task.status} task`);
+      }
+      // Idempotent: re-pausing keeps the ORIGINAL timestamp. It anchors the reaper's
+      // paused-grace, so re-stamping it on every click would push the runner's reclaim
+      // deadline out indefinitely.
+      if (task.pausedAt) return c.json({ ok: true, pausedAt: task.pausedAt.toISOString() });
+      const pausedAt = new Date();
+      await db
+        .update(schema.tasks)
+        .set({ pausedAt, updatedAt: pausedAt })
+        .where(eq(schema.tasks.id, id));
+      await appendTaskEvent(db, id, null, 'task.paused', { by: userId });
+      // Nothing is killed and nothing is superseded: the CLI in flight runs to completion
+      // and the worker's gates hold the task at the NEXT step / the next queued invocation.
+      logger.info({ taskId: id }, 'task paused');
+      return c.json({ ok: true, pausedAt: pausedAt.toISOString() });
+    }
+    case 'resume': {
+      if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
+      await clearTaskPause(db, id);
+      await appendTaskEvent(db, id, null, 'task.resumed', { by: userId });
+      // No re-drive needed: the pause park re-enqueues its own delayed advance every
+      // PAUSE_POLL_MS and the deferred cli-exec jobs re-deliver on their own, so both pick
+      // the task back up within ~30s. Enqueuing an extra advance here would race the park
+      // loop and risk two loops on one task.
+      logger.info({ taskId: id }, 'task resumed');
+      return c.json({ ok: true, pausedAt: null });
     }
     default:
       throw new HttpError(400, 'Unknown action');
