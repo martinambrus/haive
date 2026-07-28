@@ -254,7 +254,12 @@ export const WAITING_SLOT_FILTER_TOKEN = 'waiting_slot';
  *  state rather than a task status: the row keeps whatever status it had and carries
  *  `tasks.paused_at`. expandTaskStatusFilter returns null for it and the api branches on
  *  this constant to add its own predicate (paused_at IS NOT NULL, minus terminal tasks).
- *  Shared so the web dropdown and the query agree. */
+ *  Shared so the web dropdown and the query agree.
+ *
+ *  The listing also takes a separate `?hidePaused=1` flag, which subtracts exactly this set from
+ *  whatever status token is active (so "Unfinished" can mean "unfinished minus the ones I parked").
+ *  It is an exclusion, not a token — a paused task still has a real status — and the api ignores
+ *  it under this token, where the explicit filter wins. */
 export const PAUSED_FILTER_TOKEN = 'paused';
 
 const ALL_TASK_STATUSES = [

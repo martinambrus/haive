@@ -152,7 +152,7 @@ const POLL_MAX = 100;
 // not restored on a later visit.
 const FILTER_STORAGE_KEY = 'haive:tasks-filter';
 
-type SavedFilter = { repositoryId: string; status: string };
+type SavedFilter = { repositoryId: string; status: string; hidePaused: string };
 
 function readSavedFilter(): SavedFilter | null {
   if (typeof window === 'undefined') return null;
@@ -160,7 +160,13 @@ function readSavedFilter(): SavedFilter | null {
     const raw = window.localStorage.getItem(FILTER_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<SavedFilter>;
-    return { repositoryId: parsed.repositoryId ?? '', status: parsed.status ?? '' };
+    return {
+      repositoryId: parsed.repositoryId ?? '',
+      status: parsed.status ?? '',
+      // Absent in filters saved before this flag existed — read as "off" rather than
+      // undefined so the restore below never writes `hidePaused=undefined` into the URL.
+      hidePaused: parsed.hidePaused ?? '',
+    };
   } catch {
     return null;
   }
@@ -182,8 +188,13 @@ export default function TasksPage() {
   const repoFilter = searchParams.get('repositoryId') ?? '';
   const statusFilter = searchParams.get('status') ?? '';
   const q = searchParams.get('q') ?? '';
-  const filterKey = `${repoFilter}|${statusFilter}|${q}`;
-  const filtersActive = Boolean(repoFilter || statusFilter || q);
+  // Exclusion, not a status token: it rides ALONGSIDE the dropdown so "Unfinished" can mean
+  // "unfinished minus the ones I paused". Inert while the dropdown itself says Paused — the
+  // server ignores it there, and the checkbox renders disabled to say so.
+  const hidePaused = searchParams.get('hidePaused') === '1';
+  const hidePausedInert = statusFilter === 'paused';
+  const filterKey = `${repoFilter}|${statusFilter}|${q}|${hidePaused ? '1' : ''}`;
+  const filtersActive = Boolean(repoFilter || statusFilter || q || hidePaused);
 
   // On a bare, unfiltered visit that has a saved filter to restore, the mount
   // effect below router.replace()s to it. Detect that at render time so the
@@ -193,7 +204,7 @@ export default function TasksPage() {
   const willRestoreFilter = useMemo(() => {
     if (searchParams.has('repositoryId') || searchParams.has('status')) return false;
     const saved = readSavedFilter();
-    return Boolean(saved && (saved.repositoryId || saved.status));
+    return Boolean(saved && (saved.repositoryId || saved.status || saved.hidePaused));
   }, [searchParams]);
 
   const [tasks, setTasks] = useState<Task[] | null>(null);
@@ -220,6 +231,7 @@ export default function TasksPage() {
     if (repoFilter) params.set('repositoryId', repoFilter);
     if (statusFilter) params.set('status', statusFilter);
     if (q) params.set('q', q);
+    if (hidePaused) params.set('hidePaused', '1');
     return params.toString();
   }
 
@@ -311,24 +323,26 @@ export default function TasksPage() {
     const params = new URLSearchParams();
     if (saved.repositoryId) params.set('repositoryId', saved.repositoryId);
     if (saved.status) params.set('status', saved.status);
+    if (saved.hidePaused) params.set('hidePaused', saved.hidePaused);
     router.replace(`/tasks?${params.toString()}`, { scroll: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function setFilter(key: 'repositoryId' | 'status' | 'q', value: string) {
+  function setFilter(key: 'repositoryId' | 'status' | 'q' | 'hidePaused', value: string) {
     const params = new URLSearchParams(searchParams.toString());
     if (value) params.set(key, value);
     else params.delete(key);
     writeSavedFilter({
       repositoryId: params.get('repositoryId') ?? '',
       status: params.get('status') ?? '',
+      hidePaused: params.get('hidePaused') ?? '',
     });
     const qs = params.toString();
     router.replace(qs ? `/tasks?${qs}` : '/tasks', { scroll: false });
   }
 
   function clearFilters() {
-    writeSavedFilter({ repositoryId: '', status: '' });
+    writeSavedFilter({ repositoryId: '', status: '', hidePaused: '' });
     setSearch('');
     router.replace('/tasks', { scroll: false });
   }
@@ -383,6 +397,23 @@ export default function TasksPage() {
             <option value="failed">Failed</option>
             <option value="cancelled">Cancelled</option>
           </select>
+          <label
+            className={`flex items-center gap-2 text-sm ${hidePausedInert ? 'text-neutral-600' : 'text-neutral-300'}`}
+            title={
+              hidePausedInert
+                ? 'Not applied while the Paused filter is selected — that filter shows paused tasks on purpose.'
+                : 'Exclude tasks you have paused from whichever status filter is active.'
+            }
+          >
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-neutral-700 bg-neutral-900 text-indigo-500 focus:ring-indigo-500"
+              checked={hidePaused}
+              disabled={hidePausedInert}
+              onChange={(e) => setFilter('hidePaused', e.target.checked ? '1' : '')}
+            />
+            Hide paused
+          </label>
           <Link href="/tasks/new">
             <Button>New task</Button>
           </Link>

@@ -69,6 +69,12 @@ taskRoutes.get('/', async (c) => {
   // notifier rather than a paging artifact. A transition always bumps updated_at, so this
   // ordering keeps whatever just changed at the top regardless of task count.
   const sortByUpdated = c.req.query('sort')?.trim() === 'updated';
+  // "Hide paused" is an EXCLUSION layered on top of whatever status token is active, not a token
+  // of its own. A paused task keeps its real status, so it legitimately belongs to
+  // open/active/unfinished (see PAUSED_FILTER_TOKEN) — but a user holding a handful of tasks
+  // wants those lists minus the ones they deliberately parked. Ignored under ?status=paused,
+  // where the explicit filter wins over the generic exclusion.
+  const hidePaused = ['1', 'true'].includes(c.req.query('hidePaused')?.trim() ?? '');
   const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1')) || 1);
   const pageSize = Math.min(
     100,
@@ -118,6 +124,17 @@ taskRoutes.get('/', async (c) => {
       // …and the paused half, which is also stored as `running`, so the three tokens name
       // disjoint sets.
       conds.push(isNull(schema.tasks.pausedAt));
+    }
+    if (hidePaused) {
+      // Exact negation of the PAUSED_FILTER_TOKEN predicate above, so "Paused" and "Hide paused"
+      // name complementary sets rather than two sets that happen to disagree at the edges: cancel
+      // and retry clear paused_at, but nothing clears it on a task that FAILED while held, and the
+      // listing badges that row `paused` — so it must disappear here too. The WAITING_SLOT branch
+      // needs no copy of this: it already subtracts paused. Task-scoped only; folding in the GLOBAL
+      // pause would empty the whole listing the moment the admin switch flips.
+      conds.push(
+        sql`(${schema.tasks.pausedAt} is null or ${schema.tasks.status} in ('completed', 'cancelled'))`,
+      );
     }
   }
   if (q) conds.push(sql`${schema.tasks.title} ilike ${`%${q}%`}`);
