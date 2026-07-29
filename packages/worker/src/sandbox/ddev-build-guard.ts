@@ -1,5 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { DDEV_NGINX_INCLUDE_PREFIX } from './ddev-nginx-include-guard.js';
 
 /**
  * Pre-flight check that the project's own DDEV image-build inputs can build at all, plus
@@ -202,4 +203,45 @@ const BUILDKIT_FAILURE_RE = /did not complete successfully: exit code:|failed to
  */
 export function isDdevBuildInputFailure(errorMessage: string): boolean {
   return errorMessage.includes(DDEV_BUILD_INPUT_PREFIX) || BUILDKIT_FAILURE_RE.test(errorMessage);
+}
+
+/** Fatal, config-caused errors from the daemons inside the web/db containers, keyed on ERROR
+ *  IDs and fatal-level tags rather than on prose: nginx's `[emerg]` level, apache's AH00526,
+ *  php-fpm's configuration-load failure and its pool-fatal form. Each one means a file the
+ *  implementation authored under `.ddev/` is wrong. They only ever appear here because
+ *  `ddevFailureMessage` captures the container logs into the error — DDEV's own output never
+ *  contains them. */
+const CONTAINER_CONFIG_ERROR_RE =
+  /nginx: \[emerg\]|AH00526|Syntax error on line \d+ of|failed to load configuration file|\[pool [^\]]*\] cannot/i;
+
+/** The `[emerg]` shapes nginx raises for HOST problems rather than for the project's config:
+ *  a port already bound, a privilege it lacks. Editing `.ddev/` cannot fix those, so they
+ *  keep the hard-fail path. This exclusion is deliberately the conservative direction — a
+ *  wrong "agent-fixable" burns a whole fix round, while a wrong "host-level" only returns us
+ *  to the behaviour we already had. */
+const CONTAINER_HOST_LEVEL_RE = /bind\(\) to |Address already in use|Permission denied/i;
+
+/** True when a DDEV bring-up failed because a webserver/PHP config the implementation wrote
+ *  was rejected by the container, as proven by the captured container logs. */
+export function isDdevContainerConfigFailure(errorMessage: string): boolean {
+  return (
+    CONTAINER_CONFIG_ERROR_RE.test(errorMessage) && !CONTAINER_HOST_LEVEL_RE.test(errorMessage)
+  );
+}
+
+/**
+ * Every DDEV failure the implementing agent can fix on its own, and therefore the whole of
+ * what 07c-ddev-reconcile routes back to implementation: a bad image-build input, a
+ * webserver/PHP config the container refused to load, or the nginx include guard's verdict.
+ *
+ * Everything else — an unsatisfiable version constraint, a port collision, a reaped runner,
+ * an OOM — keeps the hard-fail path that exposes Retry / Retry with AI, because looping the
+ * implementation step would burn a round to arrive at exactly the same failure.
+ */
+export function isDdevAgentFixableFailure(errorMessage: string): boolean {
+  return (
+    isDdevBuildInputFailure(errorMessage) ||
+    isDdevContainerConfigFailure(errorMessage) ||
+    errorMessage.includes(DDEV_NGINX_INCLUDE_PREFIX)
+  );
 }

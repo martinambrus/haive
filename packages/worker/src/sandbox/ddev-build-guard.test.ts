@@ -3,8 +3,11 @@ import {
   dockerfileRunCommands,
   findDdevBuildBreakage,
   isBuildDockerfile,
+  isDdevAgentFixableFailure,
   isDdevBuildInputFailure,
+  isDdevContainerConfigFailure,
 } from './ddev-build-guard.js';
+import { findDdevNginxIncludeCollisions } from './ddev-nginx-include-guard.js';
 
 describe('dockerfileRunCommands', () => {
   it('reads the command out of a plain RUN line', () => {
@@ -132,6 +135,82 @@ describe('isDdevBuildInputFailure', () => {
   it('leaves a healthcheck timeout on the hard-fail path', () => {
     expect(
       isDdevBuildInputFailure('ddev restart failed: web container failed to become ready'),
+    ).toBe(false);
+  });
+});
+
+describe('isDdevContainerConfigFailure', () => {
+  // The line that killed task a0d1bbf9. It reaches the predicate only because
+  // ddevFailureMessage captures the web container's log into the error — DDEV's own output
+  // says nothing but "web container exited".
+  const DUPLICATE_LOCATION =
+    'ddev restart failed: Failed waiting for web/db containers to become ready: ' +
+    'ddev-rs-codex-5-6-high-web container exited.\n\n--- DDEV web/db container logs ---\n' +
+    'nginx: [emerg] duplicate location "/aliases.ser" in ' +
+    '/mnt/ddev_config/nginx/rs-codex-5-6-high.conf:37';
+
+  it('flags the real nginx failure that exited the web container', () => {
+    expect(isDdevContainerConfigFailure(DUPLICATE_LOCATION)).toBe(true);
+  });
+
+  it('flags an apache config syntax error and a php-fpm config load failure', () => {
+    expect(
+      isDdevContainerConfigFailure(
+        'AH00526: Syntax error on line 12 of /etc/apache2/sites-enabled/apache-site.conf',
+      ),
+    ).toBe(true);
+    expect(
+      isDdevContainerConfigFailure(
+        "ERROR: failed to load configuration file '/etc/php/5.6/fpm/php-fpm.conf'",
+      ),
+    ).toBe(true);
+  });
+
+  it('leaves an nginx emerg the implementation cannot fix on the hard-fail path', () => {
+    // A bound port is the host's problem; editing .ddev/ cannot resolve it, so looping the
+    // implementation step would burn a round to reach the same failure.
+    expect(
+      isDdevContainerConfigFailure(
+        'nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address already in use)',
+      ),
+    ).toBe(false);
+  });
+
+  it('does not fire on a healthy container log', () => {
+    // Both lines are routine in a working project's log (observed on rs_codex_low).
+    expect(
+      isDdevContainerConfigFailure(
+        'WARNING: [pool www] child 1797 said into stderr: "NOTICE: PHP message: ..."\n' +
+          "AH01071: Got error 'PHP message: PHP Notice: Undefined variable: step ... on line 146'",
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('isDdevAgentFixableFailure', () => {
+  it('covers build inputs, container config, and the nginx include guard', () => {
+    expect(isDdevAgentFixableFailure('#27 ERROR: failed to solve: exit code 127')).toBe(true);
+    expect(isDdevAgentFixableFailure('nginx: [emerg] unknown directive "locaton"')).toBe(true);
+
+    const collision = findDdevNginxIncludeCollisions({
+      siteConfs: [
+        {
+          name: 'rs.conf',
+          content:
+            'server {\n  location = /a {\n  }\n  include /mnt/ddev_config/nginx/*.conf;\n}\n',
+        },
+      ],
+      snippets: [{ name: 'rs.conf', content: 'location = /a {\n}\n' }],
+    });
+    expect(isDdevAgentFixableFailure(`DDEV cannot start: ${collision}`)).toBe(true);
+  });
+
+  it('leaves host-level failures on the hard-fail path', () => {
+    expect(isDdevAgentFixableFailure('Error response from daemon: No such container')).toBe(false);
+    expect(
+      isDdevAgentFixableFailure(
+        "ddev start blocked by an incompatible ddev_version_constraint: your DDEV version 'v1.25.3'",
+      ),
     ).toBe(false);
   });
 });

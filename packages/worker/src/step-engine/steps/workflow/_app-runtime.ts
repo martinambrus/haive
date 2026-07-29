@@ -30,6 +30,7 @@ import {
 import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
 import { checkDdevHealthcheckConfig } from '../../../sandbox/ddev-healthcheck-guard.js';
 import { checkDdevBuildInputs } from '../../../sandbox/ddev-build-guard.js';
+import { checkDdevNginxIncludes } from '../../../sandbox/ddev-nginx-include-guard.js';
 import { TaskCancelledError } from '../../step-definition.js';
 
 // The single "is the app actually serving, and at what URL" primitive. Browser
@@ -287,6 +288,13 @@ export async function ensureDdevWithProgress(
   // mechanism — which is also the text the "Retry with AI" fix agent gets to work from.
   const buildBreakage = await checkDdevBuildInputs(workspace);
   if (buildBreakage) throw new Error(`DDEV cannot start: ${buildBreakage}`);
+  // Third of the same trade: DDEV splices every `.ddev/nginx/*.conf` INSIDE every server
+  // block in `.ddev/nginx_full/`, so rules written into both collide with nginx's
+  // `[emerg] duplicate location`. That does not merely degrade the boot — nginx goes FATAL,
+  // and ddev-webserver's own healthcheck answers a FATAL nginx by shutting supervisord down,
+  // so the container EXITS and DDEV reports nothing but "web container exited".
+  const nginxBreakage = await checkDdevNginxIncludes(workspace);
+  if (nginxBreakage) throw new Error(`DDEV cannot start: ${nginxBreakage}`);
 
   const handle = await withDdevProgress(
     ctx,

@@ -20,9 +20,27 @@ import { parseDdevConfig } from '../step-engine/steps/_ddev-config.js';
 
 /** The path DDEV generates its site config at, per webserver family. A file anywhere else
  *  in these directories is the user's own and is never regenerated. */
-const GENERATED_SITE_CONF: Record<string, { dir: string; file: string }> = {
-  apache: { dir: 'apache', file: 'apache-site.conf' },
-  nginx: { dir: 'nginx_full', file: 'nginx-site.conf' },
+const GENERATED_SITE_CONF: Record<string, { dir: string; file: string; customAdvice: string }> = {
+  apache: {
+    dir: 'apache',
+    file: 'apache-site.conf',
+    // Apache loads every *.conf in the directory as its own vhost, so a sibling is the right
+    // home for custom rules and cannot collide with the generated one.
+    customAdvice: 'put any custom rules in a sibling file such as .ddev/apache/<project>.conf',
+  },
+  nginx: {
+    dir: 'nginx_full',
+    file: 'nginx-site.conf',
+    // NOT a nginx_full sibling. That would be a second SERVER block, and DDEV splices every
+    // `.ddev/nginx/*.conf` into it as well as into the generated one — so rules that end up
+    // in both abort nginx with `[emerg] duplicate location` and the web container exits
+    // (task a0d1bbf9, which followed this very sentence when it still said "sibling").
+    // `.ddev/nginx/` is DDEV's own add-on point: included inside the generated server block,
+    // applied exactly once. See ddev-nginx-include-guard.ts.
+    customAdvice:
+      'put any custom rules in .ddev/nginx/<project>.conf, which DDEV includes inside the ' +
+      'generated server block (do NOT add a second server block in .ddev/nginx_full/)',
+  },
 };
 
 const DDEV_GENERATED_MARKER = '#ddev-generated';
@@ -111,8 +129,8 @@ export function findDdevHealthcheckBreakage(input: {
     `was removed) and no config in .ddev/${generated.dir}/ serves \`${HEALTHCHECK_PATH}\`. ` +
     `DDEV's web container health check requests that path on every start, so it will never ` +
     `become healthy and \`ddev start\` will fail at its readiness timeout. ` +
-    `Fix: delete .ddev/${generated.dir}/${generated.file} so DDEV regenerates it, and put any ` +
-    `custom rules in a sibling file such as .ddev/${generated.dir}/<project>.conf.`
+    `Fix: delete .ddev/${generated.dir}/${generated.file} so DDEV regenerates it, and ` +
+    `${generated.customAdvice}.`
   );
 }
 

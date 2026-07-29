@@ -156,6 +156,26 @@ describe('findDdevHealthcheckBreakage', () => {
     ).toBeNull();
   });
 
+  it('sends nginx custom rules to .ddev/nginx/, not to a nginx_full sibling', () => {
+    // Regression: the sibling advice manufactured a SECOND server block, into which DDEV
+    // also splices every .ddev/nginx/*.conf — so rules landing in both aborted nginx with
+    // `[emerg] duplicate location` and exited the web container (task a0d1bbf9).
+    const reason = findDdevHealthcheckBreakage({
+      webserverType: 'nginx-fpm',
+      confs: [{ name: 'nginx-site.conf', content: 'server {\n  root /var/www/html;\n}\n' }],
+    })!;
+    expect(reason).toContain('.ddev/nginx/<project>.conf');
+    expect(reason).not.toContain('sibling');
+  });
+
+  it('keeps the sibling advice for apache, where vhosts cannot collide', () => {
+    const reason = findDdevHealthcheckBreakage({
+      webserverType: 'apache-fpm',
+      confs: [{ name: 'apache-site.conf', content: BROKEN_APACHE_SITE }],
+    })!;
+    expect(reason).toContain('sibling file such as .ddev/apache/<project>.conf');
+  });
+
   it('checks nginx projects against their own generated file', () => {
     const broken = findDdevHealthcheckBreakage({
       webserverType: 'nginx-fpm',

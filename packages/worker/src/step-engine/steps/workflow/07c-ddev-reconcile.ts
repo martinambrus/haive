@@ -15,9 +15,10 @@ import {
   ddevMigrateDatabase,
   ddevRegisteredProjectName,
   ddevSafeRename,
+  ddevFailureMessage,
 } from '../../../sandbox/ddev-runner.js';
 import { ensureDdevWithProgress, withDdevProgress } from './_app-runtime.js';
-import { isDdevBuildInputFailure } from '../../../sandbox/ddev-build-guard.js';
+import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 
 // Reconciles the per-task DDEV runtime with the post-implementation `.ddev/` inputs.
 // 01c-ddev-env booted DDEV ONCE early on the pre-change config; if the implementation
@@ -152,14 +153,20 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
   // `ddev_version_constraint` or a reaped runner cannot be fixed by looping the
   // implementation step, and looping them would burn a round to reach the same failure.
   //
-  // An image-BUILD failure is the exception, and the reason this predicate exists. The
-  // only mutable inputs to that build are the project's own `web-build`/`db-build`
-  // Dockerfiles and the `*image_extra_packages` lists — all authored by the implementation
-  // agent, none of them reachable by a retry, because the file is still there on the next
-  // attempt (task 4fad0c4f died on `RUN docker-php-ext-install mysql`, a command the DDEV
-  // web image has never had). That is a code defect found late, which is exactly what the
-  // fix loop is for: hand the build log back to the implementer, capped by max_fix_rounds.
-  fixLoopOnError: isDdevBuildInputFailure,
+  // An agent-authored `.ddev/` input is the exception, and the reason this predicate exists.
+  // Two shapes qualify, neither reachable by a retry because the offending file is still
+  // there on the next attempt:
+  //   - an image-BUILD failure, whose only mutable inputs are the project's own
+  //     `web-build`/`db-build` Dockerfiles and the `*image_extra_packages` lists (task
+  //     4fad0c4f died on `RUN docker-php-ext-install mysql`, a command the DDEV web image has
+  //     never had);
+  //   - a webserver/PHP config the CONTAINER rejected, which is visible only because
+  //     `ddevFailureMessage` captures the web/db logs into the error (task a0d1bbf9 died on
+  //     `nginx: [emerg] duplicate location`, and hard-failed at round 9 because the error
+  //     named no cause at all).
+  // Both are code defects found late, which is exactly what the fix loop is for: hand the log
+  // back to the implementer, capped by max_fix_rounds.
+  fixLoopOnError: isDdevAgentFixableFailure,
 
   async shouldRun(ctx: StepContext): Promise<boolean> {
     const row = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01c-ddev-env');
@@ -311,9 +318,12 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
         );
         if (mig.exitCode !== 0) {
           throw new Error(
-            `ddev migrate-database ${drift.migrateTarget} failed (DB backed up as snapshot ` +
-              `"${snapshotName}"; restore with: ddev snapshot restore ${snapshotName}): ` +
-              mig.output.slice(-1500),
+            await ddevFailureMessage(
+              handle,
+              `ddev migrate-database ${drift.migrateTarget} failed (DB backed up as snapshot ` +
+                `"${snapshotName}"; restore with: ddev snapshot restore ${snapshotName})`,
+              mig.output,
+            ),
           );
         }
         await runnerExec(handle, `touch ${marker}`, { timeoutMs: 15_000 });
@@ -329,7 +339,9 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
         { initialLine: 'stopping containers…' },
       );
       if (r.exitCode !== 0)
-        throw new Error(`ddev restart after migrate failed: ${r.output.slice(-1500)}`);
+        throw new Error(
+          await ddevFailureMessage(handle, 'ddev restart after migrate failed', r.output),
+        );
       return {
         action: 'migrate',
         reconciled: true,
@@ -361,7 +373,11 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
       );
       if (renamed.exitCode !== 0) {
         throw new Error(
-          `ddev rename ${registeredName} → ${configName} failed: ${renamed.output.slice(-1500)}`,
+          await ddevFailureMessage(
+            handle,
+            `ddev rename ${registeredName} → ${configName} failed`,
+            renamed.output,
+          ),
         );
       }
       return {
@@ -379,7 +395,8 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
       (onLine) => ddevRestart(handle, { onLine }),
       { initialLine: 'stopping containers…' },
     );
-    if (r.exitCode !== 0) throw new Error(`ddev restart failed: ${r.output.slice(-1500)}`);
+    if (r.exitCode !== 0)
+      throw new Error(await ddevFailureMessage(handle, 'ddev restart failed', r.output));
     return {
       action: 'restart',
       reconciled: true,

@@ -763,6 +763,79 @@ export async function ddevExec(
   }
 }
 
+/** How much of DDEV's own output a bring-up failure quotes. The TAIL: ddev's verdict lands
+ *  at the END, after image-pull and container-creation noise. */
+const DDEV_OUTPUT_TAIL = 1500;
+
+/** Lines of each container's log to quote, and the ceiling on the whole captured block.
+ *  Sized so DDEV_OUTPUT_TAIL plus this still fits inside the 6000-char budget cleanDiagnosis
+ *  applies before the fix agent reads it — the cause has to survive all the way there. */
+const CONTAINER_LOG_TAIL_LINES = 80;
+const CONTAINER_LOG_MAX_CHARS = 3000;
+
+/** Heading for the captured block. Ours, not DDEV's or docker's. */
+const CONTAINER_LOG_HEADING = '--- DDEV web/db container logs ---';
+
+/**
+ * Tail of the project's web and db container logs, for a bring-up that failed.
+ *
+ * DDEV's own output says only "web container exited" / "failed to become ready" and then
+ * points at `ddev logs -s web`; the cause — an nginx `[emerg]`, an apache syntax error, a
+ * failed entrypoint script — exists ONLY inside the container. Without this the error we
+ * store, render and hand to the fix agent names no cause at all, which is how task a0d1bbf9
+ * spent nine rounds and ~5 days on an undiagnosable failure.
+ *
+ * Goes through `docker logs` rather than `ddev logs -s web` because by this point the
+ * container is typically EXITED, and docker reads a stopped container's logs while DDEV can
+ * refuse once the project is down. Containers are selected by DDEV's own labels, which are
+ * structural — `com.ddev.approot` is the project dir we already hold — rather than by
+ * reconstructing the `ddev-<project>-web` name.
+ *
+ * Best-effort by design: returns '' on any failure. A diagnostic must never itself fail a
+ * boot, and an empty string simply returns the caller to the message it already had.
+ */
+export async function ddevContainerFailureLogs(handle: DdevRunnerHandle): Promise<string> {
+  const script = ['web', 'db']
+    .map(
+      (service) =>
+        `for c in $(docker ps -a --filter "label=com.ddev.approot=${handle.projectDir}" ` +
+        `--filter "label=com.docker.compose.service=${service}" --format '{{.Names}}'); do ` +
+        `echo "=== $c ==="; docker logs --tail ${CONTAINER_LOG_TAIL_LINES} "$c" 2>&1; done`,
+    )
+    .join('; ');
+  try {
+    // Root inside the runner (no `-u ddev`), mirroring runnerDockerdUp: the nested docker
+    // socket belongs to root.
+    const { stdout, stderr } = await exec(
+      'docker',
+      ['exec', handle.container, 'sh', '-c', script],
+      { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
+    );
+    return `${stdout}${stderr}`.trim().slice(-CONTAINER_LOG_MAX_CHARS);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Failure message for a `ddev start`/`restart`/`migrate`/`rename` that returned non-zero:
+ * DDEV's own output tail, then the container logs that actually explain it.
+ *
+ * The logs are appended AFTER the slice deliberately. That truncation is applied before the
+ * Error is ever constructed, so it is what decides both what `fixLoopOnError` classifies and
+ * what the fix agent reads; appending inside it would let a long DDEV tail push the cause
+ * straight back out again.
+ */
+export async function ddevFailureMessage(
+  handle: DdevRunnerHandle,
+  prefix: string,
+  ddevOutput: string,
+): Promise<string> {
+  const head = `${prefix}: ${ddevOutput.slice(-DDEV_OUTPUT_TAIL)}`;
+  const logs = await ddevContainerFailureLogs(handle);
+  return logs ? `${head}\n\n${CONTAINER_LOG_HEADING}\n${logs}` : head;
+}
+
 /** How a DB dump has to be fed to DDEV. */
 export interface DumpImportFormat {
   /** The dump is a pg_dump ARCHIVE (`-Fc` custom or `-Ft` tar) rather than plain
@@ -1252,7 +1325,7 @@ async function ensureDdevStartedInner(
       start = await ddevExec(handle, 'start', { onLine: opts.onProgress, timeoutMs: 900_000 });
     }
     if (start.exitCode !== 0) {
-      throw new Error(`ddev start failed: ${start.output.slice(-1500)}`);
+      throw new Error(await ddevFailureMessage(handle, 'ddev start failed', start.output));
     }
     // The prior runner (and its nested DB) is gone — destroyed by the worker-boot
     // reaper, a daemon/host restart, or task time elapsed — so the freshly-started
