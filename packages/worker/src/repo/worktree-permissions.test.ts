@@ -38,6 +38,7 @@ describe('isSandboxWritableTreeRoot', () => {
     const blocked = directory(1001, 1001, 0o40755);
     expect(sandboxWritableTreeRepair(blocked, 0)).toBe('chown');
     expect(sandboxWritableTreeRepair(blocked, 1001)).toBe('chmod-other');
+    expect(sandboxWritableTreeRepair(directory(1000, 1000, 0o40200), 1000)).toBe('chmod-owner');
     expect(sandboxWritableTreeRepair(blocked, 2000)).toBe('unavailable');
     expect(sandboxWritableTreeRepair(directory(1001, 1001, 0o40757), 2000)).toBe('none');
   });
@@ -54,13 +55,20 @@ rootIt('repairs a root-owned tree even when the legacy marker is present', async
     await mkdir(internalDir);
     await writeFile(marker, '');
     await writeFile(trackedLikeFile, '<?php\n');
+    // A mounted legacy app can chmod the checkout itself. Reproduce the actual
+    // DDEV failure: chown alone would leave this directory write-only (0200).
+    await chmod(tree, 0o200);
 
     expect((await stat(tree)).uid).toBe(0);
     await ensureSandboxWritableTree(tree);
 
-    expect((await stat(tree)).uid).toBe(1000);
+    const rootAfter = await stat(tree);
+    expect(rootAfter.uid).toBe(1000);
+    expect(rootAfter.mode & 0o700).toBe(0o700);
+    expect(isSandboxWritableTreeRoot(rootAfter)).toBe(true);
     expect((await stat(marker)).uid).toBe(1000);
     expect((await stat(trackedLikeFile)).uid).toBe(1000);
+    expect((await stat(trackedLikeFile)).mode & 0o700).toBe(0o600);
   } finally {
     await rm(tree, { recursive: true, force: true });
   }
@@ -91,6 +99,26 @@ rootIt('grants sandbox access when a non-root worker owns the tree', async () =>
     expect(rootAfter.mode & 0o007).toBe(0o007);
     expect(nestedAfter.mode & 0o007).toBe(0o007);
     expect(fileAfter.mode & 0o007).toBe(0o006);
+    expect(isSandboxWritableTreeRoot(rootAfter)).toBe(true);
+  } finally {
+    getuidSpy?.mockRestore();
+    await rm(tree, { recursive: true, force: true });
+  }
+});
+
+rootIt('repairs damaged owner mode when a uid-1000 worker owns the tree', async () => {
+  const tree = await mkdtemp(path.join(os.tmpdir(), 'haive-worktree-sandbox-owner-'));
+  let getuidSpy: ReturnType<typeof vi.spyOn> | undefined;
+  try {
+    await chown(tree, 1000, 1000);
+    await chmod(tree, 0o200);
+    getuidSpy = vi.spyOn(process, 'getuid').mockReturnValue(1000);
+
+    await ensureSandboxWritableTree(tree);
+
+    const rootAfter = await stat(tree);
+    expect(rootAfter.uid).toBe(1000);
+    expect(rootAfter.mode & 0o700).toBe(0o700);
     expect(isSandboxWritableTreeRoot(rootAfter)).toBe(true);
   } finally {
     getuidSpy?.mockRestore();

@@ -5,7 +5,8 @@ import { SANDBOX_GID, SANDBOX_UID } from '../sandbox/sandbox-identity.js';
 
 const exec = promisify(execFile);
 
-export type SandboxWritableTreeRepair = 'none' | 'chown' | 'chmod-other' | 'unavailable';
+export type SandboxWritableTreeRepair =
+  'none' | 'chown' | 'chmod-owner' | 'chmod-other' | 'unavailable';
 
 interface TreeRootStat {
   uid: number;
@@ -28,8 +29,8 @@ export function isSandboxWritableTreeRoot(root: TreeRootStat): boolean {
 }
 
 /** Select a repair available to this worker process. Root can normalize
- * ownership. A non-root worker may chmod a tree it owns so the fixed sandbox
- * uid can access it (notably GitHub's uid-1001 runner). */
+ * ownership and owner permissions. A non-root worker may chmod a tree it owns
+ * so the fixed sandbox uid can access it (notably GitHub's uid-1001 runner). */
 export function sandboxWritableTreeRepair(
   root: TreeRootStat,
   workerUid: number | undefined,
@@ -37,7 +38,11 @@ export function sandboxWritableTreeRepair(
   if (isSandboxWritableTreeRoot(root)) return 'none';
   if (!root.isDirectory()) return 'unavailable';
   if (workerUid === 0) return 'chown';
-  if (workerUid !== undefined && root.uid === workerUid) return 'chmod-other';
+  if (workerUid !== undefined && root.uid === workerUid) {
+    // A uid-1000 worker and the sandbox are the same identity. Granting `other`
+    // access would not help because the kernel selects the matching owner class.
+    return workerUid === SANDBOX_UID ? 'chmod-owner' : 'chmod-other';
+  }
   return 'unavailable';
 }
 
@@ -67,6 +72,16 @@ export async function ensureSandboxWritableTree(treePath: string): Promise<void>
   try {
     if (repair === 'chown') {
       await exec('chown', ['-R', `${SANDBOX_UID}:${SANDBOX_GID}`, treePath]);
+      // Chown deliberately leaves mode bits untouched. That is not sufficient
+      // when an app running inside DDEV chmods the mounted project root (a
+      // legacy installer has produced mode 0200 in practice): ownership becomes
+      // correct while the sandbox and DDEV still cannot read or traverse the
+      // checkout. Restore owner rwX recursively as part of the same repair.
+      // Uppercase X adds traversal to directories and preserves the executable
+      // status of ordinary source files.
+      await exec('chmod', ['-R', 'u+rwX', treePath]);
+    } else if (repair === 'chmod-owner') {
+      await exec('chmod', ['-R', 'u+rwX', treePath]);
     } else {
       // The non-root worker owns this checkout but cannot chown it to uid 1000.
       // Grant the `other` class (which includes the otherwise-unmatched sandbox
@@ -75,8 +90,9 @@ export async function ensureSandboxWritableTree(treePath: string): Promise<void>
       await exec('chmod', ['-R', 'o+rwX', treePath]);
     }
   } catch (err) {
+    const operation = repair === 'chown' ? 'chown/chmod' : 'chmod';
     throw new Error(
-      `failed to ${repair === 'chown' ? 'chown' : 'chmod'} workspace ${treePath} for sandbox ${SANDBOX_UID}:${SANDBOX_GID}: ${err instanceof Error ? err.message : String(err)}`,
+      `failed to ${operation} workspace ${treePath} for sandbox ${SANDBOX_UID}:${SANDBOX_GID}: ${err instanceof Error ? err.message : String(err)}`,
       { cause: err },
     );
   }

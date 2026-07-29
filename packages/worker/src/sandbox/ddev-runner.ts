@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { mkdir, open, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
 import { createGunzip } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +27,7 @@ import {
   resolveRuntimeWeightMb,
 } from './runtime-caps.js';
 import { acquireRuntimeSlot } from './runtime-admission.js';
+import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 
 // Per-task DDEV environment via nested Docker (DinD). DDEV can't run against the
 // shared host daemon here (repos live in the haive_repos NAMED VOLUME, which the
@@ -1235,6 +1236,39 @@ async function ensureDdevStartedInner(
   repoSubpath: string,
   opts: { onProgress?: (line: string) => void; signal?: AbortSignal },
 ): Promise<DdevRunnerHandle> {
+  // DDEV serves the real linked worktree directly. A legacy installer (or any
+  // other app code with chmod access) can therefore make the mount root
+  // unreadable between steps. Repair it before even probing `ddev describe`:
+  // otherwise warm-start and cold-boot both fail their initial `cd`, and the
+  // later CLI repair comes too late to bring the browser runtime back.
+  const workspacePath = path.join(XDEBUG_REPO_STORAGE_ROOT, repoSubpath);
+  const accessBefore = await stat(workspacePath);
+  await ensureSandboxWritableTree(workspacePath);
+  const accessAfter = await stat(workspacePath);
+  if (
+    accessBefore.uid !== accessAfter.uid ||
+    accessBefore.gid !== accessAfter.gid ||
+    (accessBefore.mode & 0o777) !== (accessAfter.mode & 0o777)
+  ) {
+    log.warn(
+      {
+        taskId,
+        repoSubpath,
+        before: {
+          uid: accessBefore.uid,
+          gid: accessBefore.gid,
+          mode: (accessBefore.mode & 0o777).toString(8),
+        },
+        after: {
+          uid: accessAfter.uid,
+          gid: accessAfter.gid,
+          mode: (accessAfter.mode & 0o777).toString(8),
+        },
+      },
+      'repaired DDEV workspace access before runtime probe',
+    );
+  }
+
   const existing = runnerHandleForTask(taskId, repoSubpath);
   const describe = await ddevExec(existing, 'describe -j', { timeoutMs: 15_000 });
   const describeOk = describe.exitCode === 0;
