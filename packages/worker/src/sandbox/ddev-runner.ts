@@ -777,6 +777,65 @@ const CONTAINER_LOG_MAX_CHARS = 3000;
 /** Heading for the captured block. Ours, not DDEV's or docker's. */
 const CONTAINER_LOG_HEADING = '--- DDEV web/db container logs ---';
 
+/** Per-container separator the capture script emits and {@link budgetContainerLogs} reads
+ *  back. Ours, not docker's, and a sentinel rather than a plain `=== name ===` heading so a
+ *  log line that merely looks like a heading can never be mistaken for one. */
+const LOG_BLOCK_SENTINEL = '@@HAIVE-DDEV-LOG@@';
+
+/**
+ * The captured containers' logs, each trimmed to its own share of `maxChars`.
+ *
+ * Slicing the CONCATENATION instead is what made task 3b7b8140 undiagnosable: db's mysqld
+ * boot trace (its `/start.sh` runs `set -x`, so every line is echoed twice) is on its own
+ * larger than the whole budget, and it is captured last — so the tail-slice kept only db and
+ * dropped the web block entirely. Web is precisely the container that had exited, so the one
+ * log that named the cause was the one guaranteed to be thrown away.
+ *
+ * Budgeting per block instead: the shortest block is served first and releases whatever it
+ * does not use to the rest, so a quiet container never costs a noisy one its share and a
+ * noisy one can still spend the whole budget when it is alone. Blocks are rendered in
+ * capture order, tails kept — the failing command is the last thing a container logs.
+ */
+export function budgetContainerLogs(raw: string, maxChars: number): string {
+  const blocks: { name: string; body: string }[] = [];
+  let current: { name: string; lines: string[] } | null = null;
+  const flush = () => {
+    if (!current) return;
+    const body = current.lines.join('\n').trim();
+    if (body) blocks.push({ name: current.name, body });
+  };
+  for (const line of raw.split('\n')) {
+    if (line.startsWith(LOG_BLOCK_SENTINEL)) {
+      flush();
+      current = { name: line.slice(LOG_BLOCK_SENTINEL.length).trim(), lines: [] };
+      continue;
+    }
+    if (current) current.lines.push(line);
+  }
+  flush();
+  // No sentinel at all means the capture itself misfired (a docker error on stderr, say).
+  // Returning its tail leaves the caller no worse off than before this budgeting existed.
+  if (blocks.length === 0) return raw.trim().slice(-maxChars);
+
+  const kept = new Array<string>(blocks.length);
+  const shortestFirst = blocks
+    .map((_, i) => i)
+    .sort((a, b) => blocks[a]!.body.length - blocks[b]!.body.length);
+  let remaining = maxChars;
+  let left = blocks.length;
+  for (const i of shortestFirst) {
+    const share = Math.max(0, Math.floor(remaining / left));
+    // `slice(-0)` returns the WHOLE string, so a zero share has to short-circuit.
+    kept[i] = share === 0 ? '' : blocks[i]!.body.slice(-share);
+    remaining -= kept[i]!.length;
+    left -= 1;
+  }
+  return blocks
+    .map((b, i) => `=== ${b.name} ===\n${kept[i]}`)
+    .join('\n')
+    .trim();
+}
+
 /**
  * Tail of the project's web and db container logs, for a bring-up that failed.
  *
@@ -801,7 +860,7 @@ export async function ddevContainerFailureLogs(handle: DdevRunnerHandle): Promis
       (service) =>
         `for c in $(docker ps -a --filter "label=com.ddev.approot=${handle.projectDir}" ` +
         `--filter "label=com.docker.compose.service=${service}" --format '{{.Names}}'); do ` +
-        `echo "=== $c ==="; docker logs --tail ${CONTAINER_LOG_TAIL_LINES} "$c" 2>&1; done`,
+        `echo "${LOG_BLOCK_SENTINEL}$c"; docker logs --tail ${CONTAINER_LOG_TAIL_LINES} "$c" 2>&1; done`,
     )
     .join('; ');
   try {
@@ -812,10 +871,21 @@ export async function ddevContainerFailureLogs(handle: DdevRunnerHandle): Promis
       ['exec', handle.container, 'sh', '-c', script],
       { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
     );
-    return `${stdout}${stderr}`.trim().slice(-CONTAINER_LOG_MAX_CHARS);
+    return budgetContainerLogs(`${stdout}${stderr}`, CONTAINER_LOG_MAX_CHARS);
   } catch {
     return '';
   }
+}
+
+/** Tail of `text` capped at `max` chars, started at a line boundary. A raw cut lands
+ *  mid-word ("ddev restart failed: ure-add-ddev/.ddev/…" was what task 3b7b8140 actually
+ *  showed), which reads as corruption to the user and to the fix agent alike. Only ever
+ *  drops the one partial line the cut created. */
+function tailFromLineStart(text: string, max: number): string {
+  const cut = text.slice(-max);
+  if (cut.length === text.length) return cut;
+  const nl = cut.indexOf('\n');
+  return nl === -1 ? cut : cut.slice(nl + 1);
 }
 
 /**
@@ -832,7 +902,7 @@ export async function ddevFailureMessage(
   prefix: string,
   ddevOutput: string,
 ): Promise<string> {
-  const head = `${prefix}: ${ddevOutput.slice(-DDEV_OUTPUT_TAIL)}`;
+  const head = `${prefix}: ${tailFromLineStart(ddevOutput, DDEV_OUTPUT_TAIL)}`;
   const logs = await ddevContainerFailureLogs(handle);
   return logs ? `${head}\n\n${CONTAINER_LOG_HEADING}\n${logs}` : head;
 }

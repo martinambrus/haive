@@ -9,6 +9,7 @@ import {
   ddevDbInternalPort,
   ddevRegistryMirrorUrl,
   buildRegistryDaemonJson,
+  budgetContainerLogs,
 } from './ddev-runner.js';
 
 // Pure recovery-path decision for ensureDdevStartedInner. The orchestrator gathers
@@ -224,5 +225,61 @@ describe('parseDdevPrimaryUrl', () => {
   it('returns null when no line carries raw.primary_url', () => {
     expect(parseDdevPrimaryUrl('{"level":"info","msg":"no url here"}\n')).toBeNull();
     expect(parseDdevPrimaryUrl('')).toBeNull();
+  });
+});
+
+// Regression for task 3b7b8140: the capture concatenated web's log then db's and
+// tail-sliced the RESULT, so db's mysqld boot trace (its own start.sh runs `set -x`)
+// evicted the web block entirely — and web was the container that had exited, so the
+// only log naming the cause was the one guaranteed to be dropped.
+describe('budgetContainerLogs', () => {
+  const sentinel = '@@HAIVE-DDEV-LOG@@';
+  const capture = (web: string, db: string) =>
+    `${sentinel}ddev-x-web\n${web}\n${sentinel}ddev-x-db\n${db}\n`;
+
+  it('keeps the web block even when db out-logs the whole budget', () => {
+    const out = budgetContainerLogs(
+      capture('chown: Operation not permitted', 'mysqld noise\n'.repeat(500)),
+      3000,
+    );
+    expect(out).toContain('=== ddev-x-web ===');
+    expect(out).toContain('chown: Operation not permitted');
+    expect(out).toContain('=== ddev-x-db ===');
+    expect(out.length).toBeLessThanOrEqual(3200);
+  });
+
+  it('keeps the TAIL of an over-budget block — the failing command logs last', () => {
+    const out = budgetContainerLogs(capture(`${'x'.repeat(5000)}\nFATAL last line`, 'db ok'), 1000);
+    expect(out).toContain('FATAL last line');
+  });
+
+  it('lets a lone noisy block spend the whole budget', () => {
+    const out = budgetContainerLogs(`${sentinel}ddev-x-web\n${'y'.repeat(9000)}`, 3000);
+    expect(out.length).toBeGreaterThan(2900);
+  });
+
+  it('gives a short block its remainder back to the noisy one', () => {
+    const short = budgetContainerLogs(capture('tiny', 'z'.repeat(9000)), 3000);
+    // db gets far more than an even 1500 split would have allowed it.
+    expect(short.length).toBeGreaterThan(2900);
+    expect(short).toContain('tiny');
+  });
+
+  it('drops empty blocks rather than emitting a bare heading', () => {
+    expect(budgetContainerLogs(capture('web line', '   '), 3000)).not.toContain('ddev-x-db');
+  });
+
+  it('falls back to a plain tail when the capture emitted no sentinel', () => {
+    expect(budgetContainerLogs('docker: no such container', 3000)).toBe(
+      'docker: no such container',
+    );
+    expect(budgetContainerLogs('', 3000)).toBe('');
+  });
+
+  it('emits nothing rather than everything when the budget is smaller than the block count', () => {
+    // `slice(-0)` returns the whole string, so a zero share has to short-circuit.
+    const out = budgetContainerLogs(capture('a'.repeat(100), 'b'.repeat(100)), 1);
+    expect(out).not.toContain('aaaa');
+    expect(out).not.toContain('bbbb');
   });
 });
