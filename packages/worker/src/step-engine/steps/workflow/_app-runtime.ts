@@ -31,6 +31,7 @@ import { RuntimeSlotAbortedError } from '../../../sandbox/runtime-admission.js';
 import { checkDdevHealthcheckConfig } from '../../../sandbox/ddev-healthcheck-guard.js';
 import { checkDdevBuildInputs } from '../../../sandbox/ddev-build-guard.js';
 import { checkDdevNginxIncludes } from '../../../sandbox/ddev-nginx-include-guard.js';
+import { checkDdevWebEntrypoints } from '../../../sandbox/ddev-entrypoint-guard.js';
 import { TaskCancelledError } from '../../step-definition.js';
 
 // The single "is the app actually serving, and at what URL" primitive. Browser
@@ -295,6 +296,13 @@ export async function ensureDdevWithProgress(
   // so the container EXITS and DDEV reports nothing but "web container exited".
   const nginxBreakage = await checkDdevNginxIncludes(workspace);
   if (nginxBreakage) throw new Error(`DDEV cannot start: ${nginxBreakage}`);
+  // Fourth: DDEV sources every `.ddev/web-entrypoint.d/*.sh` INTO the web container's
+  // `/start.sh`, which runs `set -o errexit` as the unprivileged `ddev` user — so one
+  // command needing root (task 3b7b8140's `chown -R www-data:www-data`) aborts the
+  // entrypoint and the container exits before supervisord starts, with DDEV reporting
+  // nothing but "web container exited".
+  const entrypointBreakage = await checkDdevWebEntrypoints(workspace);
+  if (entrypointBreakage) throw new Error(`DDEV cannot start: ${entrypointBreakage}`);
 
   const handle = await withDdevProgress(
     ctx,

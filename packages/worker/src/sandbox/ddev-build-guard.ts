@@ -1,6 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DDEV_NGINX_INCLUDE_PREFIX } from './ddev-nginx-include-guard.js';
+import { DDEV_ENTRYPOINT_PREFIX } from './ddev-entrypoint-guard.js';
 
 /**
  * Pre-flight check that the project's own DDEV image-build inputs can build at all, plus
@@ -232,7 +233,8 @@ export function isDdevContainerConfigFailure(errorMessage: string): boolean {
 /**
  * Every DDEV failure the implementing agent can fix on its own, and therefore the whole of
  * what 07c-ddev-reconcile routes back to implementation: a bad image-build input, a
- * webserver/PHP config the container refused to load, or the nginx include guard's verdict.
+ * webserver/PHP config the container refused to load, the nginx include guard's verdict, or
+ * a web-entrypoint script that cannot run unprivileged.
  *
  * Everything else — an unsatisfiable version constraint, a port collision, a reaped runner,
  * an OOM — keeps the hard-fail path that exposes Retry / Retry with AI, because looping the
@@ -242,6 +244,7 @@ export function isDdevAgentFixableFailure(errorMessage: string): boolean {
   return (
     isDdevBuildInputFailure(errorMessage) ||
     isDdevContainerConfigFailure(errorMessage) ||
-    errorMessage.includes(DDEV_NGINX_INCLUDE_PREFIX)
+    errorMessage.includes(DDEV_NGINX_INCLUDE_PREFIX) ||
+    errorMessage.includes(DDEV_ENTRYPOINT_PREFIX)
   );
 }
