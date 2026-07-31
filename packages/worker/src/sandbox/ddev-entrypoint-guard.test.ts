@@ -87,6 +87,42 @@ describe('findDdevEntrypointBreakage', () => {
     ).toBeNull();
   });
 
+  // The form the advice recommends, and the reason it does: it satisfies this guard AND a
+  // reviewer objecting to swallowed errors. Measured surviving on ddev/ddev-webserver.
+  it('leaves the recommended report-and-continue form alone', () => {
+    expect(
+      findDdevEntrypointBreakage([
+        {
+          name: 'ok.sh',
+          content: 'sudo chown -R www-data:www-data /x || echo "warning: chown failed" >&2\n',
+        },
+      ]),
+    ).toBeNull();
+    expect(
+      findDdevEntrypointBreakage([
+        { name: 'ok.sh', content: 'chown -R www-data:www-data /x || echo "warn" >&2\n' },
+      ]),
+    ).toBeNull();
+  });
+
+  it('leaves a command in an if-condition alone — a non-zero status is the point there', () => {
+    expect(
+      findDdevEntrypointBreakage([
+        { name: 'ok.sh', content: 'if ! chown -R www-data:www-data /x; then echo w >&2; fi\n' },
+      ]),
+    ).toBeNull();
+  });
+
+  it('still flags a root-only command on the left of && or before a ;', () => {
+    // Measured: both `chown && …` and `chown; …` kill the shell — only `||` protects.
+    expect(
+      findDdevEntrypointBreakage([{ name: 'bad.sh', content: 'chown www-data /x && echo ok\n' }]),
+    ).toContain('chown');
+    expect(
+      findDdevEntrypointBreakage([{ name: 'bad.sh', content: 'chown www-data /x; echo after\n' }]),
+    ).toContain('chown');
+  });
+
   it('leaves chmod alone — it succeeds on files the container user owns', () => {
     expect(
       findDdevEntrypointBreakage([
@@ -151,9 +187,79 @@ describe('findDdevEntrypointBreakage', () => {
   });
 });
 
+// Round 3 of the same task. Told to handle the chown failure rather than swallow it, the
+// implementer wrapped it in `|| { echo …; exit 1; }` — which kills the container just as
+// dead, because DDEV SOURCES the script into /start.sh. Measured: `exit 1`, `exit 0` and
+// `return 1` all kill the sourcing shell; `return 0` does not.
+describe('control flow that ends the sourcing shell', () => {
+  const ROUND3_SH = `#!/usr/bin/env bash
+set -e
+UPLOAD_DIR="/var/www/html/UserFiles"
+
+if [[ -d "$UPLOAD_DIR" ]]; then
+  if ! id www-data >/dev/null 2>&1; then
+    echo "ERROR: www-data user does not exist" >&2
+    exit 1
+  fi
+
+  chown -RP www-data:www-data "$UPLOAD_DIR" || {
+    echo "ERROR: chown to www-data failed" >&2
+    exit 1
+  }
+fi
+`;
+
+  it('catches the round-3 rewrite that the fix loop oscillated on', () => {
+    const reason = findDdevEntrypointBreakage([{ name: 'upload-perms.sh', content: ROUND3_SH }]);
+    expect(reason).toContain(DDEV_ENTRYPOINT_PREFIX);
+    expect(reason).toContain('ends the web');
+    expect(reason).toContain('return 0');
+  });
+
+  it('flags exit 0 too — it kills the container silently', () => {
+    expect(
+      findDdevEntrypointBreakage([{ name: 'bad.sh', content: 'echo done\nexit 0\n' }]),
+    ).toContain('ends the web');
+  });
+
+  it('flags return with a non-zero status', () => {
+    expect(findDdevEntrypointBreakage([{ name: 'bad.sh', content: 'return 1\n' }])).toContain(
+      'ends the web',
+    );
+  });
+
+  it('leaves return 0 and a bare return alone', () => {
+    expect(
+      findDdevEntrypointBreakage([{ name: 'ok.sh', content: 'echo hi\nreturn 0\n' }]),
+    ).toBeNull();
+    expect(
+      findDdevEntrypointBreakage([{ name: 'ok.sh', content: 'echo hi\nreturn\n' }]),
+    ).toBeNull();
+  });
+
+  it('does not mistake the word exit in an argument for the builtin', () => {
+    expect(
+      findDdevEntrypointBreakage([{ name: 'ok.sh', content: 'echo "exit 1 was not called"\n' }]),
+    ).toBeNull();
+  });
+});
+
 describe('shellCommands', () => {
   it('follows backslash continuations into one logical line', () => {
-    expect(shellCommands('chown -R www-data \\\n  /var/www/html || true\n')).toEqual([]);
+    // Joined, so the `|| true` on the second physical line still guards the chown on the
+    // first — the parser reports the command and tags it, rather than dropping the line.
+    const cmds = shellCommands('chown -R www-data \\\n  /var/www/html || true\n');
+    expect(cmds.map((c) => c.command)).toEqual(['chown', 'true']);
+    expect(cmds[0]!.guarded).toBe(true);
+  });
+
+  it('tags only the segment a `||` actually protects', () => {
+    const cmds = shellCommands('chown a /x && chown b /y || true\n');
+    expect(cmds.map((c) => [c.command, c.guarded])).toEqual([
+      ['chown', false],
+      ['chown', true],
+      ['true', false],
+    ]);
   });
 
   it('splits chains and skips VAR=value prefixes', () => {
