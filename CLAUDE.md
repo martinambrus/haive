@@ -120,7 +120,7 @@ The api and worker packages depend at build time on `@haive/shared` and `@haive/
 
 ## Phasing
 
-Phase 0 scaffold is complete when `pnpm install` and `pnpm docker:dev` boot all services on a clean host with only Docker installed. Subsequent phases build the database schemas, auth, repository management, CLI adapters, sandbox, terminal proxy, step engine, sub-agent emulator, autonomous workflow, and environment replication in that order. See the project plan in `/home/zathrus/.claude/plans/vivid-greeting-stroustrup.md` for the full sequence.
+Phase 0 scaffold is complete when `pnpm install` and `pnpm docker:dev` boot all services on a clean host with only Docker installed. Subsequent phases build the database schemas, auth, repository management, CLI adapters, sandbox, terminal proxy, step engine, sub-agent emulator, autonomous workflow, and environment replication in that order.
 
 ## Constraints
 

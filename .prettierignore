@@ -12,3 +12,7 @@ yarn.lock
 .env
 .env.local
 orchestration.zip
+
+# Verbatim archives of Claude Code plan files, which are auto-deleted from
+# ~/.claude/plans after 30 days. Kept byte-identical to the original.
+docs/plans

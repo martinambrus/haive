@@ -10,7 +10,6 @@ import type { ExecutionPath } from '@haive/shared';
 // SPINE is in EVERY path set, so the just-finished step is always present in the
 // filtered list and findIndex never returns -1. The loop-target closure invariant
 // (PATH_REQUIRED_TARGETS) is enforced at boot by assertPathStepSetsClosed.
-// See plan: ~/.claude/plans/hidden-puzzling-lantern.md.
 
 /** The pre-flight model-health canary id (workflow pipeline). Single source of
  *  truth — referenced by the SPINE and buildRunList (which pulls it to the very
