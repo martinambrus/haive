@@ -1912,6 +1912,23 @@ async function handleAdvanceStep(
     }
   }
 
+  // The worker is about to EXECUTE this step, so the task is running — say so before the work
+  // starts. Nothing else on this path does: the api's /submit writes the step row and enqueues
+  // this job without touching `tasks`, and handleResult only flips back to running when it hands
+  // off to the NEXT step (or on waiting_cli). A form submit therefore left the task at
+  // `waiting_user` for the whole apply(), so 01c-ddev-env advertised "waiting on user" in the
+  // listing for the ~2 min its DDEV boot ran while the step row already said `running`. Covers
+  // every re-entry (submit / clarify / resume / retry) in one place and re-asserts the
+  // current_step pointer. Idempotent on the forward walk (handleResult already stamped it), and
+  // a step that parks straight into waiting_form/waiting_pr is re-marked by handleResult after.
+  await markTaskRunningWithStep(
+    db,
+    ctx.taskId,
+    payload.stepId,
+    computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
+    round,
+  );
+
   const providers = await loadProviders(db, ctx.userId);
   try {
     const result = await advanceStep({
