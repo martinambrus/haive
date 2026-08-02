@@ -6,6 +6,7 @@ import {
   snapshotAllowance,
   detectAutoResumed,
   snapshotAutoResumed,
+  resolveChannels,
 } from './transitions';
 
 const task = (
@@ -303,5 +304,39 @@ describe('snapshotAutoResumed', () => {
     ]);
     expect(snap.get('a')).toBe('2026-07-03T01:00:00Z');
     expect(snap.get('b')).toBe('');
+  });
+});
+
+describe('resolveChannels', () => {
+  const live = { baseline: false };
+  const baseline = { baseline: true };
+
+  it('fires both channels for an unsurfaced live transition', () => {
+    expect(resolveChannels(live, false, false)).toEqual({ toast: true, alert: true });
+  });
+
+  it('still toasts a live transition a SIBLING tab already alerted for', () => {
+    // The regression: a background tab on /tasks/<id> suppressed its own toast, marked
+    // the episode seen, and the tab the user was reading rendered nothing.
+    expect(resolveChannels(live, true, false)).toEqual({ toast: true, alert: false });
+  });
+
+  it('does not toast twice in the same tab', () => {
+    expect(resolveChannels(live, true, true)).toEqual({ toast: false, alert: false });
+  });
+
+  it('never repeats the global channels once the shared store has the episode', () => {
+    expect(resolveChannels(live, true, true).alert).toBe(false);
+    expect(resolveChannels(baseline, true, false).alert).toBe(false);
+  });
+
+  it('replays neither channel on a baseline event the shared store already has', () => {
+    // A newly opened tab must not stack toasts for gates the user already handled.
+    expect(resolveChannels(baseline, true, false)).toEqual({ toast: false, alert: false });
+  });
+
+  it('surfaces a baseline event this session has never seen', () => {
+    // Task went to a gate while the browser was closed — first load must still say so.
+    expect(resolveChannels(baseline, false, false)).toEqual({ toast: true, alert: true });
   });
 });

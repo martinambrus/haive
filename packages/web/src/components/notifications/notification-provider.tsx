@@ -17,6 +17,7 @@ import {
   detectTransitions,
   detectAllowanceReplenished,
   detectAutoResumed,
+  resolveChannels,
   snapshotIdentities,
   snapshotAllowance,
   snapshotAutoResumed,
@@ -185,6 +186,12 @@ export function NotificationProvider() {
   pathRef.current = pathname;
 
   const [toasts, setToasts] = useState<AttentionToast[]>([]);
+  /** Episode keys THIS tab has already rendered a toast for. In-memory on purpose:
+   *  the toast it dedupes is this tab's own state, so a sibling tab must not be able
+   *  to consume the episode on its behalf (see resolveChannels). A reload drops the
+   *  set, but a reloaded tab re-enters via the baseline path, which dedupes on the
+   *  persistent store — so nothing replays. */
+  const shownToastsRef = useRef<Set<string>>(new Set());
   const prevRef = useRef<Map<string, string> | null>(null);
   // Separate prev-map for the allowance-back channel (taskId -> replenished stamp), diffed
   // independently of the status channel so the two never clobber each other's baseline.
@@ -366,9 +373,15 @@ export function NotificationProvider() {
 
   const handleEvent = useCallback(
     (e: TaskTransitionEvent) => {
-      // Already surfaced/handled (in any tab or a prior session) — never repeat.
+      // Already surfaced/handled — never repeat. Asked per channel: the shared
+      // seen-store answers for the global channels (sound, OS notification) while a
+      // live transition's toast is deduped against this tab's own set, so a sibling
+      // tab that legitimately suppressed its toast can no longer consume the episode
+      // for every other tab. See resolveChannels.
       const key = seenKey(e);
-      if (hasSeen(key)) return;
+      const seen = hasSeen(key);
+      const channels = resolveChannels(e, seen, shownToastsRef.current.has(key));
+      if (!channels.toast && !channels.alert) return;
 
       // '/tasks/new' yields 'new', which never equals a task uuid — safe.
       const m = /^\/tasks\/([^/]+)$/.exec(pathRef.current ?? '');
@@ -400,7 +413,10 @@ export function NotificationProvider() {
         return;
       }
 
-      if (!isCurrent) {
+      // `!isCurrent` stays a purely LOCAL decision now: this tab is showing the task,
+      // so it needs no toast pointing at it. It no longer speaks for the other tabs.
+      if (channels.toast && !isCurrent) {
+        shownToastsRef.current.add(key);
         const toast: AttentionToast = {
           key: `${e.taskId}:${e.status}:${e.currentStepId ?? ''}`,
           taskId: e.taskId,
@@ -410,13 +426,14 @@ export function NotificationProvider() {
         };
         setToasts((prev) => [...prev.filter((t) => t.key !== toast.key), toast]);
       }
-      if (e.status !== 'completed' && settingsRef.current.soundEnabled) {
+      if (channels.alert && e.status !== 'completed' && settingsRef.current.soundEnabled) {
         playSound();
       }
       // OS notification only when the browser window isn't focused (the user is
       // elsewhere). hasFocus() is the right signal here — distinct from the
       // visibility check above that gates the "viewing this task" suppression.
       if (
+        channels.alert &&
         typeof Notification !== 'undefined' &&
         Notification.permission === 'granted' &&
         !document.hasFocus() &&
@@ -434,7 +451,7 @@ export function NotificationProvider() {
           })
           .catch(() => {});
       }
-      markSeen(key); // surfaced once — other tabs/sessions skip it from here on
+      markSeen(key); // global channels spent — other tabs/sessions only toast from here on
     },
     [playSound],
   );

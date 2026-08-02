@@ -220,3 +220,33 @@ export function detectAutoResumed(
 export function snapshotAutoResumed(next: readonly TaskSnapshot[]): Map<string, string> {
   return new Map(next.map((t) => [t.id, t.allowanceAutoResumedAt ?? '']));
 }
+
+/** Which channels an episode may still fire. Answers "already surfaced?" PER CHANNEL,
+ *  because the two kinds of surface have different scopes:
+ *
+ *  - the toast is TAB-LOCAL React state (only the tab that renders it shows it),
+ *  - the sound and the OS notification are MACHINE-GLOBAL (heard/seen once, wherever
+ *    they fire from).
+ *
+ *  Gating all three on the shared (localStorage) seen-store handed the toast decision
+ *  to whichever tab won an arbitrary poll race. A background tab parked on
+ *  /tasks/<id> suppresses its own toast by design — it is already showing the task —
+ *  then marked the episode seen for everyone, so the tab the user was actually reading
+ *  skipped it entirely: an OS notification arrived and no toast ever appeared.
+ *
+ *  So a LIVE transition dedupes its toast per tab (`toastedInTab`) and every open tab
+ *  renders one, while only the global channels dedupe on the shared store. A BASELINE
+ *  event — the task was already waiting when this tab mounted — keeps the shared store
+ *  for the toast too, otherwise each newly opened tab replays a stack of gates the user
+ *  has already handled.
+ */
+export function resolveChannels(
+  event: Pick<TaskTransitionEvent, 'baseline'>,
+  seen: boolean,
+  toastedInTab: boolean,
+): { toast: boolean; alert: boolean } {
+  return {
+    toast: event.baseline ? !seen : !toastedInTab,
+    alert: !seen,
+  };
+}
