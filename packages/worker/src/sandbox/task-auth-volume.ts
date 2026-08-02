@@ -1,5 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
+import { eq } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
 import {
   CLI_PROVIDER_LIST,
   cliAuthProviderVolumeName,
@@ -11,6 +13,8 @@ import {
 import type { CliProviderName } from '@haive/shared';
 import { defaultDockerRunner, type DockerRunner, type DockerVolumeMount } from './docker-runner.js';
 import { expandTildeToSandbox } from './cli-auth-volume.js';
+import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
+import { readVolumeFile } from '../usage-window/token-source.js';
 
 export interface ProviderAuthCtx {
   userId: string;
@@ -405,6 +409,200 @@ chown 1000:1000 /vol/settings.json
     { taskId, count: Object.keys(mcpServers).length },
     'merged mcpServers into gemini settings.json',
   );
+}
+
+/** Should the task copy's credential replace the user volume's?
+ *
+ *  The mtime test is the one that is easy to get wrong. A task volume starts as a byte copy
+ *  of the user volume (`cp -a`, so mtimes carry over) and normally only the in-task CLI
+ *  writes to it, which tempts the shortcut "a differing token means the CLI rotated it, so
+ *  the task copy is newer". That is FALSE whenever the user volume is rewritten while the
+ *  task is still in flight — a mid-task re-login, or an operator repairing a rotted token
+ *  by hand. Both leave a task copy that differs and is OLDER, and syncing it back would
+ *  overwrite a fresh login with a dead token: this function's own failure mode, inverted.
+ *
+ *  So: last writer wins, by mtime. A tie means the CLI never touched the file and there is
+ *  nothing to carry back. An empty or unparseable task token is never written, because the
+ *  thing at stake is the user's login and leaving it alone is always survivable. */
+export function shouldSyncAuthBack(
+  taskToken: string | null,
+  userToken: string | null,
+  taskMtimeMs: number | null,
+  userMtimeMs: number | null,
+): boolean {
+  if (taskToken === null || taskToken.length === 0) return false;
+  if (taskToken === userToken) return false;
+  if (taskMtimeMs === null) return false;
+  return userMtimeMs === null || taskMtimeMs > userMtimeMs;
+}
+
+/** Copy any credential the in-task CLI refreshed back onto the user auth volume, before
+ *  the task volume is destroyed.
+ *
+ *  Without this the user volume keeps the exact token the task consumed and rots: codex
+ *  rotates its OAuth tokens single-use, so once an in-task run refreshes, the user
+ *  volume's copy is dead. Observed: a user volume 10 days and three in-task refreshes
+ *  behind, which silently killed the usage meter (the poller reads the USER volume) and
+ *  hands the next task an already-consumed refresh token.
+ *
+ *  Scope is deliberately narrow — only the `volumeJson` files the usage poller reads,
+ *  i.e. the credentials the CLIs refresh in place. Never a blanket copy of the volume:
+ *  that would push per-task mutations (rtk seeds, the gemini MCP merge) onto the user's
+ *  own settings.
+ *
+ *  Best-effort by contract. Every failure is logged and swallowed so a teardown never
+ *  fails on it; the cost of skipping is one more stale poll, not a broken task. */
+export async function syncRefreshedAuthToUserVolumes(
+  db: Database,
+  taskId: string,
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<void> {
+  // The provider ROWS this task actually used. The task volume name carries only
+  // (taskId, providerName, idx), which cannot disambiguate two isolated rows of the same
+  // CLI — the invocation ledger can, and it also skips providers the task never touched.
+  const used = await db
+    .selectDistinct({ providerId: schema.cliInvocations.cliProviderId })
+    .from(schema.cliInvocations)
+    .where(eq(schema.cliInvocations.taskId, taskId));
+
+  for (const { providerId } of used) {
+    if (!providerId) continue;
+    const provider = await db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, providerId),
+      columns: { id: true, userId: true, name: true, isolateAuth: true },
+    });
+    if (!provider) continue;
+
+    const source = USAGE_PROVIDERS[provider.name]?.token;
+    if (source?.kind !== 'volumeJson') continue;
+
+    const ctx: ProviderAuthCtx = {
+      userId: provider.userId,
+      providerId: provider.id,
+      providerName: provider.name,
+      isolateAuth: provider.isolateAuth,
+    };
+    const taskVol = cliAuthTaskVolumeName(taskId, provider.name, source.authPathIdx);
+    const userVol = userVolumeForCtx(ctx, source.authPathIdx);
+
+    try {
+      const taskRaw = await readVolumeFile(taskVol, source.relPath, runner);
+      if (!taskRaw) continue;
+      const taskToken = extractToken(source.extract, taskRaw);
+      const userRaw = await readVolumeFile(userVol, source.relPath, runner);
+      const userToken = userRaw ? extractToken(source.extract, userRaw) : null;
+      const [taskMtime, userMtime] = await Promise.all([
+        readVolumeFileMtimeMs(taskVol, source.relPath, runner),
+        readVolumeFileMtimeMs(userVol, source.relPath, runner),
+      ]);
+      if (!shouldSyncAuthBack(taskToken, userToken, taskMtime, userMtime)) continue;
+
+      const copied = await copyAuthFileBack(taskVol, userVol, source.relPath, runner);
+      if (copied) {
+        log.info(
+          { taskId, provider: provider.name, taskVol, userVol, relPath: source.relPath },
+          'synced CLI-refreshed credential back to the user auth volume',
+        );
+      }
+    } catch (err) {
+      log.warn(
+        { err, taskId, provider: provider.name, relPath: source.relPath },
+        'auth sync-back failed; user volume left as-is',
+      );
+    }
+  }
+}
+
+/** Last-modified time of a file inside a named volume, in epoch ms, or null when the
+ *  volume or file is absent. Feeds the last-writer-wins half of shouldSyncAuthBack. */
+async function readVolumeFileMtimeMs(
+  vol: string,
+  relPath: string,
+  runner: DockerRunner,
+): Promise<number | null> {
+  if (!(await runner.volumeExists(vol))) return null;
+  const safeRel = relPath.replace(/["'`$]/g, '');
+  const result = await runner.run({
+    image: HELPER_IMAGE,
+    entrypoint: '',
+    user: 'root',
+    cmd: ['sh', '-c', `stat -c %Y "/vol/${safeRel}" 2>/dev/null || true`],
+    mounts: [{ source: vol, target: '/vol', readOnly: true }],
+    timeoutMs: HELPER_TIMEOUT_MS,
+  });
+  const secs = Number.parseInt((result.stdout ?? '').trim(), 10);
+  return Number.isFinite(secs) ? secs * 1000 : null;
+}
+
+/** Run a `volumeJson` source's own extractor over raw file bytes. Returns null when the
+ *  file is not parseable JSON, so a half-written credential can never pass the guard. */
+function extractToken(
+  extract: (json: unknown) => { token: string | null },
+  raw: string,
+): string | null {
+  try {
+    return extract(JSON.parse(raw)).token;
+  } catch {
+    return null;
+  }
+}
+
+/** Distinct exit code from the sync-back helper when the user volume turned out to be at
+ *  least as new as the task copy, so nothing was written. Not a failure: it is the correct
+ *  outcome when a re-login landed between the worker's mtime read and this copy. */
+const SYNC_SKIPPED_NOT_NEWER_EXIT = 3;
+
+/** Replace one file on the user volume with the task volume's copy, atomically.
+ *  Writes a sibling temp and renames it, so a crash mid-copy can never leave a truncated
+ *  credential where a working login used to be, and restores the sandbox uid the CLI
+ *  needs to read it back.
+ *
+ *  Re-checks the mtime ordering here rather than trusting the caller's: the worker read
+ *  those timestamps in an earlier container, and a re-login in that gap must not be
+ *  clobbered. `-nt` decides it in the same container that performs the copy. */
+async function copyAuthFileBack(
+  taskVol: string,
+  userVol: string,
+  relPath: string,
+  runner: DockerRunner,
+): Promise<boolean> {
+  const safeRel = relPath.replace(/["'`$]/g, '');
+  const script = [
+    'set -e',
+    `if [ -e "/dst/${safeRel}" ] && [ ! "/src/${safeRel}" -nt "/dst/${safeRel}" ]; then exit ${SYNC_SKIPPED_NOT_NEWER_EXIT}; fi`,
+    `mkdir -p "$(dirname "/dst/${safeRel}")"`,
+    `cp "/src/${safeRel}" "/dst/${safeRel}.haive-tmp"`,
+    `chown 1000:1000 "/dst/${safeRel}.haive-tmp"`,
+    `chmod 600 "/dst/${safeRel}.haive-tmp"`,
+    `mv "/dst/${safeRel}.haive-tmp" "/dst/${safeRel}"`,
+  ].join('; ');
+
+  const result = await runner.run({
+    image: HELPER_IMAGE,
+    cmd: ['sh', '-c', script],
+    mounts: [
+      { source: taskVol, target: '/src', readOnly: true },
+      { source: userVol, target: '/dst', readOnly: false },
+    ],
+    entrypoint: '',
+    user: 'root',
+    timeoutMs: HELPER_TIMEOUT_MS,
+  });
+  if (result.exitCode === SYNC_SKIPPED_NOT_NEWER_EXIT) {
+    log.info(
+      { taskVol, userVol, relPath },
+      'auth sync-back skipped: user volume is not older than the task copy',
+    );
+    return false;
+  }
+  if (result.exitCode !== 0) {
+    log.warn(
+      { taskVol, userVol, relPath, exitCode: result.exitCode, stderr: result.stderr.slice(-300) },
+      'auth sync-back helper exited non-zero',
+    );
+    return false;
+  }
+  return true;
 }
 
 export async function cleanupTaskAuthVolumes(

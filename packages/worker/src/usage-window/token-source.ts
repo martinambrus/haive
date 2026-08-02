@@ -62,19 +62,16 @@ export interface AuthVolumeCtx {
   isolateAuth: boolean;
 }
 
-/** Read a file from a provider's PERSISTENT user auth volume via a short-lived
- *  helper container. The poller runs between tasks (no task container exists), so
- *  it mounts the user volume read-only and cats the file. Returns the raw file
- *  contents, or null when the volume or file is absent. */
-export async function readAuthVolumeFile(
-  ctx: AuthVolumeCtx,
-  authPathIdx: number,
+/** Read a file out of ANY named volume via a short-lived helper container that mounts it
+ *  read-only. Returns the raw contents, or null when the volume or the file is absent.
+ *  Split out from readAuthVolumeFile so the task-end auth sync can read a per-TASK volume
+ *  with the same code path the poller uses on the user volume — the two must agree on
+ *  what "the credential file" is. */
+export async function readVolumeFile(
+  vol: string,
   relPath: string,
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<string | null> {
-  const vol = ctx.isolateAuth
-    ? cliAuthProviderVolumeName(ctx.providerId, ctx.providerName, authPathIdx)
-    : cliAuthVolumeName(ctx.userId, ctx.providerName, authPathIdx);
   if (!(await runner.volumeExists(vol))) return null;
   // relPath is a fixed constant from the provider registry, but strip quotes
   // defensively since it's interpolated into a shell command.
@@ -89,4 +86,19 @@ export async function readAuthVolumeFile(
   });
   const out = (result.stdout ?? '').trim();
   return out.length > 0 ? out : null;
+}
+
+/** Read a file from a provider's PERSISTENT user auth volume. The poller runs between
+ *  tasks (no task container exists), so it mounts the user volume read-only and cats the
+ *  file. Returns the raw file contents, or null when the volume or file is absent. */
+export async function readAuthVolumeFile(
+  ctx: AuthVolumeCtx,
+  authPathIdx: number,
+  relPath: string,
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<string | null> {
+  const vol = ctx.isolateAuth
+    ? cliAuthProviderVolumeName(ctx.providerId, ctx.providerName, authPathIdx)
+    : cliAuthVolumeName(ctx.userId, ctx.providerName, authPathIdx);
+  return readVolumeFile(vol, relPath, runner);
 }

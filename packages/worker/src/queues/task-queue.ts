@@ -56,7 +56,10 @@ import { orderWorkflowRunList } from '../orchestrator/execution-paths.js';
 import { pauseParkMessage, resolvePause } from '../orchestrator/pause.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
-import { cleanupTaskAuthVolumes } from '../sandbox/task-auth-volume.js';
+import {
+  cleanupTaskAuthVolumes,
+  syncRefreshedAuthToUserVolumes,
+} from '../sandbox/task-auth-volume.js';
 import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { killTaskIdeContainers } from '../sandbox/ide-runner.js';
@@ -577,6 +580,16 @@ async function cleanupTaskContainers(
     } catch (err) {
       logger.warn({ err, taskId, reason }, 'cleanup-ide-containers failed');
     }
+  }
+
+  // Capture any credential the in-task CLI refreshed BEFORE the task volume that holds it
+  // is destroyed below. codex rotates its OAuth tokens single-use, so without this the
+  // user volume keeps the token the task already consumed — which kills the usage meter
+  // (the poller reads the user volume) and hands the next task a dead refresh token.
+  try {
+    await syncRefreshedAuthToUserVolumes(db, taskId);
+  } catch (err) {
+    logger.warn({ err, taskId, reason }, 'sync-refreshed-auth-to-user-volumes failed');
   }
 
   try {
