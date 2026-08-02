@@ -87,6 +87,68 @@ describe('parseZaiUsage', () => {
     const w = parseZaiUsage({ data: [{ type: 'TOKENS_LIMIT', percentage: 7 }] });
     expect(w.fiveHour?.usedPct).toBe(7);
   });
+
+  it('reads the {data:{limits:[...]}} envelope and splits both token windows', () => {
+    // Verbatim from a live api.z.ai response. The array moved under `data.limits`, which
+    // emptied the old parse and reported `unexpected response shape` on an HTTP 200.
+    // Period comes from nextResetTime, NOT the undocumented unit/number pair.
+    const now = 1_785_659_648_000;
+    const w = parseZaiUsage(
+      {
+        code: 200,
+        data: {
+          limits: [
+            { type: 'TOKENS_LIMIT', unit: 3, number: 5, percentage: 0 },
+            {
+              type: 'TOKENS_LIMIT',
+              unit: 6,
+              number: 1,
+              percentage: 1,
+              nextResetTime: 1_786_185_900_997,
+            },
+            {
+              type: 'TIME_LIMIT',
+              unit: 5,
+              number: 1,
+              percentage: 0,
+              nextResetTime: 1_787_654_700_995,
+            },
+          ],
+          level: 'pro',
+        },
+        success: true,
+      },
+      now,
+    );
+    expect(w.fiveHour?.usedPct).toBe(0);
+    expect(w.fiveHour?.resetsAt).toBeNull();
+    expect(w.sevenDay?.usedPct).toBe(1);
+    expect(w.sevenDay?.resetsAt).toBe(new Date(1_786_185_900_997).toISOString());
+    // TIME_LIMIT resets ~23d out but must never occupy the weekly slot.
+    expect(w.daily).toBeUndefined();
+  });
+
+  it('keeps the first item per period so a repeated window cannot flip the reading', () => {
+    const now = 1_785_659_648_000;
+    const w = parseZaiUsage(
+      {
+        data: {
+          limits: [
+            { type: 'TOKENS_LIMIT', percentage: 12 },
+            { type: 'TOKENS_LIMIT', percentage: 90 },
+          ],
+        },
+      },
+      now,
+    );
+    expect(w.fiveHour?.usedPct).toBe(12);
+    expect(w.sevenDay).toBeUndefined();
+  });
+
+  it('returns empty on an unknown envelope rather than drawing a zero', () => {
+    expect(parseZaiUsage({ foo: 1 })).toEqual({});
+    expect(parseZaiUsage({ data: { notLimits: [] } })).toEqual({});
+  });
 });
 
 describe('parseGeminiUsage', () => {

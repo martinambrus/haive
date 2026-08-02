@@ -2,6 +2,7 @@ import {
   clampPct,
   errMsg,
   httpErrorOutcome,
+  isWeeklyHorizon,
   isoOrNull,
   num,
   rec,
@@ -33,19 +34,6 @@ function pickWindow(w: unknown): UsageWindow | undefined {
     return { usedPct: clampPct(100 - left), resetsAt: isoOrNull(r['reset_at'] ?? r['resets_at']) };
   }
   return undefined;
-}
-
-// A 5-hour window always resets within 5h; anything resetting further out is the
-// weekly window. 6h leaves an hour of slack for clock skew / vendor rounding.
-const FIVE_HOUR_MAX_HORIZON_MS = 6 * 60 * 60 * 1000;
-
-/** A lone window's slot (`primary`) is NOT authoritative for its period across
- *  tiers, so classify it by its own reset horizon instead: a reset more than ~6h
- *  out cannot be a 5-hour window. No readable reset -> assume the 5-hour slot. */
-function isWeeklyHorizon(resetsAt: string | null, now: number): boolean {
-  if (!resetsAt) return false;
-  const t = new Date(resetsAt).getTime();
-  return Number.isFinite(t) && t - now > FIVE_HOUR_MAX_HORIZON_MS;
 }
 
 export function parseCodexUsage(json: unknown, now: number = Date.now()): UsageWindows {

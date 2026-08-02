@@ -97,3 +97,21 @@ export function isoOrNull(v: unknown): string | null {
 export function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+// A 5-hour window always resets within 5h; anything resetting further out is a longer
+// (weekly) window. 6h leaves an hour of slack for clock skew / vendor rounding.
+const FIVE_HOUR_MAX_HORIZON_MS = 6 * 60 * 60 * 1000;
+
+/** Classify a window by its OWN reset horizon rather than by the slot or label the vendor
+ *  filed it under: a reset more than ~6h out cannot be a 5-hour window. No readable reset
+ *  -> assume the 5-hour slot.
+ *
+ *  Shared by the codex and zai parsers because both receive windows whose period the
+ *  payload never states — codex returns a lone window in the `primary` slot that is really
+ *  the weekly limit on Plus, and zai tags its windows only with an undocumented
+ *  `unit`/`number` integer pair. The reset instant is the stable fact in both. */
+export function isWeeklyHorizon(resetsAt: string | null, now: number): boolean {
+  if (!resetsAt) return false;
+  const t = new Date(resetsAt).getTime();
+  return Number.isFinite(t) && t - now > FIVE_HOUR_MAX_HORIZON_MS;
+}
