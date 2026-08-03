@@ -27,7 +27,7 @@ import {
   type UsageWindowSnapshot,
 } from '@/lib/api-client';
 import { Badge, Button, Card, Input } from '@/components/ui';
-import { CircleDot, Route, FolderGit2 } from 'lucide-react';
+import { ArrowLeft, CircleDot, Route, FolderGit2 } from 'lucide-react';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
@@ -1056,6 +1056,16 @@ export default function TaskDetailPage() {
     <div className="flex flex-col gap-6">
       {titleStripVisible && (
         <div className="fixed left-64 right-0 top-0 z-30 flex items-center gap-3 border-b border-neutral-800 bg-neutral-950/90 px-8 py-2 backdrop-blur">
+          {/* Same destination as the header link the strip replaces, so scrolling never
+              costs the user the way out. */}
+          <Link
+            href={backHref}
+            aria-label={backLabel}
+            title={backLabel}
+            className="shrink-0 text-indigo-400 hover:text-indigo-300"
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </Link>
           <p className="min-w-0 truncate text-sm font-semibold text-indigo-300">{task.title}</p>
           {/* The strip carries no status badge, so a held task would otherwise look like it
               is working once the page is scrolled past the header. */}
