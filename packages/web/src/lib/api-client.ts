@@ -360,6 +360,18 @@ export interface CliProviderCatalogEntry extends CliProviderMetadata {
   versionCache: CliPackageVersionsEntry | null;
 }
 
+export interface CliModelLimits {
+  /** The `model` string these limits were learned for. */
+  model: string;
+  /** Present and false when the model rejects image input. */
+  vision?: false;
+  /** Output-token ceiling the worker settled on for this model. */
+  maxOutputTokens?: number;
+  /** The ceiling ladder is spent (or the provider rejected a raise). */
+  maxOutputTokensExhausted?: true;
+  learnedAt: string;
+}
+
 export interface CliProvider {
   id: string;
   userId: string;
@@ -385,6 +397,11 @@ export interface CliProvider {
   modelfile: string | null;
   modelProvisionStatus: CliModelProvisionStatus;
   modelProvisionError: string | null;
+  /** Limitations the worker LEARNED from a failed invocation (the model rejects images,
+   *  the output-token ceiling it needs). Applied automatically on the next dispatch.
+   *  Keyed by the model string it was learned for, so it stops applying by itself when
+   *  `model` changes. Null when nothing has been learned. */
+  modelLimits: CliModelLimits | null;
   sandboxDockerfileExtra: string | null;
   sandboxImageTag: string | null;
   sandboxImageBuildStatus: CliSandboxBuildStatus;

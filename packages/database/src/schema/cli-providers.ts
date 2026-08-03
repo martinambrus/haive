@@ -87,6 +87,24 @@ export const cliProviders = pgTable(
     // reversible. Values: 'idle' | 'provisioning' | 'ready' | 'failed'.
     modelProvisionStatus: text('model_provision_status').notNull().default('idle'),
     modelProvisionError: text('model_provision_error'),
+    // Model limitations LEARNED from a failed CLI invocation (no vision, output
+    // cap), so the next dispatch applies the remedy instead of surfacing an
+    // error the user cannot act on. Keyed by the model string it was learned
+    // for: readers ignore the whole object when it no longer matches
+    // `model`, so editing the provider's model self-invalidates a stale learn.
+    // Written by the worker (learnModelLimitFromFailure); cleared from the
+    // provider settings page. NULL = nothing learned yet.
+    modelLimits: jsonb('model_limits').$type<{
+      /** provider.model at learn time; '' when the provider has no model set. */
+      model: string;
+      /** Only ever written as `false` — a learned ABSENCE of image input support. */
+      vision?: false;
+      /** Value to set for CLAUDE_CODE_MAX_OUTPUT_TOKENS on claude-family adapters. */
+      maxOutputTokens?: number;
+      /** Ladder spent, or the provider rejected a rung as too large. Terminal. */
+      maxOutputTokensExhausted?: true;
+      learnedAt: string;
+    }>(),
     sandboxDockerfileExtra: text('sandbox_dockerfile_extra'),
     sandboxImageTag: text('sandbox_image_tag'),
     sandboxImageBuildStatus: cliSandboxBuildStatusEnum('sandbox_image_build_status')

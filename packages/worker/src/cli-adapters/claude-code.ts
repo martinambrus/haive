@@ -1,4 +1,5 @@
 import { BaseCliAdapter } from './base-adapter.js';
+import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
 import { claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
 import type {
   CliCommandSpec,
@@ -65,16 +66,18 @@ export class ClaudeCodeAdapter extends BaseCliAdapter {
       command: this.resolveExecutable(provider),
       args: this.mergedArgs(provider, baseArgs),
       env: {
-        // Claude Code caps a single response at 32000 output tokens by default
-        // and hard-fails when a step exceeds it (skill generation emits many
-        // sub-skill bodies in one JSON blob and blows past 32K). Raise to 128000
-        // — onboarding runs Claude Code on Opus (verified: claude-opus-4-8[1m]),
-        // whose 128K output ceiling this matches. It is a ceiling, not a target,
-        // so smaller-output steps are unaffected. NOTE: 128K is Opus-only — if
-        // Claude Code is switched to a 64K model (Sonnet 4.6 / Haiku 4.5) every
-        // request would 400; drop this to 64000 via the provider's envVars then
-        // (it wins because mergedEnv spreads last).
-        CLAUDE_CODE_MAX_OUTPUT_TOKENS: '128000',
+        // Claude Code caps a single response at 32000 output tokens by default and
+        // hard-fails when a step exceeds it (skill generation emits many sub-skill
+        // bodies in one JSON blob and blows past 32K). This adapter's declared
+        // starting ceiling is 128000 — onboarding runs Claude Code on Opus
+        // (verified: claude-opus-4-8[1m]), whose 128K output ceiling it matches. It
+        // is a ceiling, not a target, so smaller-output steps are unaffected. The
+        // value (and the ladder that raises it after an observed overflow) lives in
+        // model-capabilities.ts. NOTE: 128K is Opus-only — if Claude Code is
+        // switched to a 64K model (Sonnet 4.6 / Haiku 4.5) every request would 400;
+        // drop it to 64000 via the provider's envVars then (it wins because
+        // mergedEnv spreads last).
+        ...claudeFamilyOutputTokenEnv(provider),
         ...this.mergedEnv(provider, opts),
       },
       cwd: opts.cwd,

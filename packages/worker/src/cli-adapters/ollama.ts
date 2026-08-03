@@ -1,5 +1,6 @@
 import { isOllamaCloudModel } from '@haive/shared';
 import { BaseCliAdapter } from './base-adapter.js';
+import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
 import { claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
 import { OLLAMA_THINKING_PROXY_URL } from './ollama-thinking-proxy.js';
 import type {
@@ -73,7 +74,10 @@ export class OllamaAdapter extends BaseCliAdapter {
     prompt: string,
     opts: InvokeOpts,
   ): CliCommandSpec {
-    const env = this.mergedEnv(provider, opts);
+    // No declared output-token ceiling: the claude binary's own 32000 default applies
+    // until an overflow teaches us the model can do more (model-capabilities.ts). The
+    // provider's envVars still win — mergedEnv spreads last.
+    const env = { ...claudeFamilyOutputTokenEnv(provider), ...this.mergedEnv(provider, opts) };
     const model = provider.model ?? this.defaultModel;
     if (!model) {
       throw new Error('ollama provider requires a model (set the provider model field)');

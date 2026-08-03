@@ -43,6 +43,7 @@ import { provisionOllamaProvider } from '../../sandbox/ollama-provision.js';
 import { resolveGitEnv } from '../../secrets/user-git-identity.js';
 import { createSandboxLoginContainer } from '../../sandbox/login-container.js';
 import { buildSetupTokenCommand } from '../../cli-adapters/setup-token-command.js';
+import { learnModelLimitFromFailure } from '../../cli-adapters/model-capabilities.js';
 import { getDb } from '../../db.js';
 import { getBullRedis } from '../../redis.js';
 import { publishCliExit } from '../cli-stream-publisher.js';
@@ -143,6 +144,33 @@ export async function handleCliExecJob(
         endedAt: new Date(),
       })
       .where(eq(schema.cliInvocations.id, row.id));
+
+    // Record what a model-capability failure (no vision, output-token ceiling) taught us
+    // about this provider's model, so the NEXT dispatch carries the remedy. Deliberately
+    // here rather than in the step runner: every invocation kind passes through this path,
+    // so a mining agent or a DAG coder that discovers the limitation fixes it for the whole
+    // task even though only the single-CLI step path auto-retries. Best-effort — a learn
+    // must never fail the invocation it was observing.
+    if (payload.cliProviderId) {
+      try {
+        const learnt = await learnModelLimitFromFailure(
+          db,
+          payload.cliProviderId,
+          finalErrorMessage,
+        );
+        if (learnt) {
+          log.info(
+            { invocationId: row.id, providerId: payload.cliProviderId, limits: learnt },
+            'learned a model limitation from a failed invocation',
+          );
+        }
+      } catch (err) {
+        log.warn(
+          { err, invocationId: row.id, providerId: payload.cliProviderId },
+          'failed to record model limitation',
+        );
+      }
+    }
 
     // Best-effort per-step summarizer: write task_steps.summary and stop. This
     // invocation is unlinked (taskStepId=null) so it must not resume the step.

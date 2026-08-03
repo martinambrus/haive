@@ -1,4 +1,5 @@
 import { BaseCliAdapter } from './base-adapter.js';
+import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
 import { claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
 import type {
   CliCommandSpec,
@@ -63,7 +64,10 @@ export class ZaiAdapter extends BaseCliAdapter {
     prompt: string,
     opts: InvokeOpts,
   ): CliCommandSpec {
-    const env = this.mergedEnv(provider, opts);
+    // No declared output-token ceiling: the claude binary's own 32000 default applies
+    // until an overflow teaches us the model can do more (model-capabilities.ts). The
+    // provider's envVars still win — mergedEnv spreads last.
+    const env = { ...claudeFamilyOutputTokenEnv(provider), ...this.mergedEnv(provider, opts) };
     const baseUrl = env.Z_AI_API_URL ?? env.ANTHROPIC_BASE_URL ?? ZAI_DEFAULT_BASE_URL;
     env.ANTHROPIC_BASE_URL = baseUrl;
     const token = env.Z_AI_API_KEY ?? env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY;

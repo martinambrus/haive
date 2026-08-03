@@ -4,6 +4,8 @@ import type { CliExecJobPayload } from '@haive/shared';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
+import { MODEL_CAPABILITY_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
+import { MODEL_CAPABILITY_BOUNDARY_MARKER } from '../src/cli-adapters/model-capabilities.js';
 
 interface MockState {
   taskStepRow: Record<string, unknown>;
@@ -437,6 +439,64 @@ describe('advanceStep LLM phase', () => {
     expect(result.status).toBe('waiting_cli');
     expect(enqueued).toBe(1);
     expect(state.updates.some((u) => u.table === 'cli_invocations' && u.supersededAt)).toBe(true);
+  });
+
+  it('re-dispatches with the learned remedy after a model-capability failure', async () => {
+    // The failure that killed task 7780da14: the model cannot read images / blew past its
+    // output-token ceiling. Both are properties of the model, so re-running the identical
+    // request is pointless — but cli-exec has already recorded the limitation on the
+    // provider, and this re-dispatch must carry the remedies into the new invocation.
+    // The step here declares neither loop nor llm.retry (like 07-phase-2-implement), which
+    // is exactly why the existing truncation path could not cover it.
+    const state = freshState();
+    state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
+    state.cliInvocationRow = {
+      id: 'inv-1',
+      exitCode: 1,
+      rawOutput: null,
+      parsedOutput: null,
+      endedAt: new Date(),
+      errorMessage: `${MODEL_CAPABILITY_HEADLINES.no_image_support} — hint. (API Error: 400 this model does not support image input)`,
+      createdAt: new Date(),
+    };
+    const db = makeMockDb(state);
+    const enqueued: CliExecJobPayload[] = [];
+    const provider = {
+      ...makeProvider(),
+      modelLimits: {
+        model: '',
+        vision: false as const,
+        maxOutputTokens: 131072,
+        learnedAt: new Date().toISOString(),
+      },
+    } as CliProviderRecord;
+    const result = await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: baseStep(),
+      providers: [provider],
+      deps: {
+        async enqueueCliInvocation(payload: CliExecJobPayload) {
+          enqueued.push(payload);
+        },
+      },
+    });
+
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toHaveLength(1);
+    // Superseded, not consumed: a remediated attempt must not burn llm.retry budget.
+    expect(state.updates.some((u) => u.table === 'cli_invocations' && u.supersededAt)).toBe(true);
+
+    const spec = enqueued[0]!.spec as { args: string[]; env: Record<string, string> };
+    expect(spec.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('131072');
+    expect(spec.args).toContain('--disallowedTools');
+    expect(spec.args).toContain('mcp__chrome-devtools__take_screenshot');
+    // One-shot claude-family invocations carry the prompt as the `-p` positional.
+    expect(spec.args.some((a) => a.includes(MODEL_CAPABILITY_BOUNDARY_MARKER))).toBe(true);
   });
 
   it('blocks a local Ollama model on an unsafeForLocalModels step', async () => {

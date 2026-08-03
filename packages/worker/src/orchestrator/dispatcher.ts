@@ -17,6 +17,10 @@ import {
   withWorktreeGitBoundary,
 } from '../repo/worktree-git-boundary.js';
 import { withDdevGeneratedBoundary } from '../repo/ddev-generated-boundary.js';
+import {
+  visionDisallowedTools,
+  withModelCapabilityBoundary,
+} from '../cli-adapters/model-capabilities.js';
 
 export type DispatchMode = 'cli' | 'subagent_emulated' | 'skip';
 
@@ -160,8 +164,24 @@ function buildCliSidePlan(
     // exactly the one that gets the read-only `.git` and `#ddev-generated` masks, so a
     // prompt can never claim a boundary the mount does not enforce (or omit one it does).
     const gitBounded = withWorktreeGitBoundary(capabilityAdapted, req.worktreeGitBoundary === true);
-    return withDdevGeneratedBoundary(gitBounded, req.worktreeGitBoundary === true);
+    const ddevBounded = withDdevGeneratedBoundary(gitBounded, req.worktreeGitBoundary === true);
+    // Learned model limitations. Applied here, after the provider is resolved, so it
+    // reaches the prompt, every sub-agent prompt and the synthesis prompt alike — and
+    // pairs with the tool deny merged into invokeOpts below.
+    return withModelCapabilityBoundary(ddevBounded, provider);
   };
+
+  // A model that cannot read images must not be handed the screenshot tool: the prompt
+  // boundary above asks, this enforces. Merged once, before both the prompt and the
+  // sub-agent branches, so neither path can drift from the other.
+  const visionDenied = visionDisallowedTools(provider);
+  const invokeOpts: InvokeOpts =
+    visionDenied.length === 0
+      ? req.invokeOpts
+      : {
+          ...req.invokeOpts,
+          disallowedTools: [...(req.invokeOpts.disallowedTools ?? []), ...visionDenied],
+        };
 
   if (req.input.kind === 'prompt') {
     if (needsSubagents && !adapter.supportsSubagents) {
@@ -173,7 +193,7 @@ function buildCliSidePlan(
     const steeringMode = (req.steeringRequested ?? false) && adapter.supportsSteering;
     const effectivePrompt = adaptPrompt(req.input.prompt);
     const spec = adapter.buildCliInvocation(provider, effectivePrompt, {
-      ...req.invokeOpts,
+      ...invokeOpts,
       steeringMode,
     });
     return {
@@ -196,7 +216,7 @@ function buildCliSidePlan(
     })),
     synthesisPrompt: adaptPrompt(req.input.spec.synthesisPrompt),
   };
-  const split = splitSubAgentForProvider(adapter, provider, subAgentSpec, req.invokeOpts);
+  const split = splitSubAgentForProvider(adapter, provider, subAgentSpec, invokeOpts);
   return {
     mode: split.mode === 'native' ? 'cli' : 'subagent_emulated',
     providerId: provider.id,

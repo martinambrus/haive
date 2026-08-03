@@ -404,6 +404,9 @@ cliProviderRoutes.patch('/:id', async (c) => {
   if (body.isolateAuth !== undefined) updates.isolateAuth = body.isolateAuth;
   if (body.disableThinking !== undefined) updates.disableThinking = body.disableThinking;
   if (body.rulesContent !== undefined) updates.rulesContent = body.rulesContent;
+  // Discard the worker's learned model limitations. Only ever clears — the values
+  // themselves are written by the worker from observed failures, never by the client.
+  if (body.clearModelLimits) updates.modelLimits = null;
 
   const updated = await db
     .update(schema.cliProviders)

@@ -1,0 +1,22 @@
+-- Model limitations LEARNED from a failed CLI invocation.
+--
+-- Two failure classes are properties of the selected MODEL, not of the user's input, and
+-- neither is something the user can resolve from the error text:
+--   "API Error: 400 this model does not support image input"
+--   "API Error: Claude's response exceeded the 32000 output token maximum. To configure
+--    this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable."
+-- Both were surfaced raw and failed the task (7780da14, step 07-phase-2-implement, on
+-- ollama/deepseek-v4-flash:cloud). The worker now records the limitation here and applies
+-- the matching remedy on the next dispatch (raise the output-token env var; drop the
+-- chrome-devtools screenshot tool and tell the agent it has no vision), then auto-retries.
+--
+-- Keyed by the model string it was learned for. Readers ignore the whole object unless
+-- `model_limits->>'model'` equals the provider's current model, so editing the model field
+-- self-invalidates a stale learn without a clearing step to keep in sync.
+--
+-- Nullable with no default: NULL means "nothing learned", which is the state every existing
+-- row must land in. Additive + idempotent: a second run is a no-op, and leaving the column
+-- in place after a code revert is harmless (nothing else reads it). To clear every learn:
+--   UPDATE cli_providers SET model_limits = NULL;
+
+ALTER TABLE "cli_providers" ADD COLUMN IF NOT EXISTS "model_limits" jsonb;

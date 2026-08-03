@@ -55,9 +55,12 @@ import { resolveDdevGeneratedMasks } from './ddev-generated-mask.js';
 import { makeUsageSnapshotPersister } from './running-usage.js';
 import {
   classifyAntigravityDiagnostic,
+  classifyModelCapability,
   classifyProviderFatal,
   CLI_TIMEOUT_HEADLINE,
+  MODEL_CAPABILITY_HEADLINES,
   PROVIDER_FATAL_HEADLINES,
+  type ModelCapabilityClass,
   type ProviderFatalClass,
 } from './failure-class.js';
 
@@ -125,6 +128,19 @@ export function interpretCliFailure(
     return 'CLI process was stopped before it finished (cancelled or timed out).';
   }
 
+  // Model-capability failures (no vision, output-token ceiling) come FIRST: they are
+  // the most specific classes here, and unlike the fatal ones below they are things
+  // Haive itself fixes — the step runner remediates the provider and re-dispatches, so
+  // letting a generic classifier claim them would suppress the recovery entirely.
+  const capabilityClass = classifyModelCapability(
+    result.exitCode,
+    existing,
+    result.providerErrorScan ?? result.rawOutput,
+  );
+  if (capabilityClass) {
+    return buildModelCapabilityMessage(capabilityClass, formatAuthDetail(existing));
+  }
+
   // Persistent provider failures (rate-limit/quota, bad/expired auth, 5xx outage)
   // will not recover within this run. Headline them with a stable internal prefix
   // so looping consumers (isFatalProviderFailure → DAG escalation, merge-fix retry)
@@ -136,6 +152,24 @@ export function interpretCliFailure(
   );
   if (!fatalClass) return existing;
   return buildProviderFatalMessage(fatalClass, providerName, formatAuthDetail(existing));
+}
+
+/** Build the headlined model-capability errorMessage. The headline is what drives the
+ *  automatic remediation (capabilityClassFromMessage → step-runner re-dispatch); the hint
+ *  is only ever read by a human, and only when the remediation ran out of attempts — so it
+ *  names the manual lever for each class rather than restating the provider's error. */
+function buildModelCapabilityMessage(cls: ModelCapabilityClass, detail: string): string {
+  const hint =
+    cls === 'no_image_support'
+      ? 'the selected model cannot read images; Haive retried without screenshots. Pick a ' +
+        'vision-capable model for this step if the work needs visual verification'
+      : cls === 'output_cap_reached'
+        ? "the model's reply exceeded the output-token ceiling; Haive raised the ceiling and " +
+          'retried. If this keeps happening, the step is asking for more output than the ' +
+          'model can emit in one turn — pick a model with a larger output limit'
+        : 'the provider rejected the output-token ceiling Haive set as larger than the ' +
+          'model allows; the ceiling was rolled back and will not be raised again for this model';
+  return `${MODEL_CAPABILITY_HEADLINES[cls]} — ${hint}.${detail}`;
 }
 
 /** Build the headlined provider-fatal errorMessage for a class + detail. Shared by the

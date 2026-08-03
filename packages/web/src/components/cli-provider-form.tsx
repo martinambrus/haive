@@ -16,6 +16,7 @@ import {
   type CliProviderCatalogEntry,
   type CliProviderName,
   type CliProviderSecret,
+  type CliModelLimits,
   type CliModelProvisionStatus,
   type CliSandboxBuildStatus,
 } from '@/lib/api-client';
@@ -211,6 +212,12 @@ export function CliProviderForm({
     metadata.versionCache,
   );
   const [refreshingVersions, setRefreshingVersions] = useState(false);
+  // Limitations the worker learned from failed invocations. Read-only here: the values are
+  // written from observed failures, and the only client action is discarding them.
+  const [modelLimits, setModelLimits] = useState<CliModelLimits | null>(
+    provider?.modelLimits ?? null,
+  );
+  const [clearingLimits, setClearingLimits] = useState(false);
 
   const [state, setState] = useState<FormState>({
     name: provider?.name ?? metadata.name,
@@ -394,6 +401,23 @@ export function CliProviderForm({
       captureError(err, 'Failed to refresh versions');
     } finally {
       setRefreshingVersions(false);
+    }
+  }
+
+  // Discards the learned limitations. Standalone rather than part of persistEdit: the
+  // rest of the form may be mid-edit, and discarding a learn should not commit it.
+  async function handleClearModelLimits(): Promise<void> {
+    if (!provider?.id) return;
+    clearError();
+    setClearingLimits(true);
+    try {
+      await api.patch(`/cli-providers/${provider.id}`, { clearModelLimits: true });
+      setModelLimits(null);
+      router.refresh();
+    } catch (err) {
+      captureError(err, 'Failed to clear learned model limits');
+    } finally {
+      setClearingLimits(false);
     }
   }
 
@@ -788,6 +812,52 @@ export function CliProviderForm({
                 `Model provisioning failed: ${modelProvision.error ?? 'unknown error'}`}
             </p>
           )}
+        </div>
+      )}
+
+      {/* Outside the model-selection block on purpose: a CLI with no model field
+          (claude-code, codex, …) still learns limits, keyed under the empty model.
+          Shown only while the learn matches the SAVED model — the exact condition under
+          which the worker applies it. Saving a different model retires the learn on its
+          own, with no clearing step. */}
+      {mode === 'edit' && modelLimits && modelLimits.model === (provider?.model ?? '') && (
+        <div className="rounded-md border border-neutral-800 bg-neutral-950 p-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="text-xs text-neutral-400">
+              <p className="font-medium text-neutral-300">Learned model limits</p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                {modelLimits.vision === false && (
+                  <li>
+                    Cannot read images — screenshots are disabled and agents are told to verify with
+                    text-based browser tools.
+                  </li>
+                )}
+                {modelLimits.maxOutputTokens !== undefined && (
+                  <li>
+                    Output-token ceiling raised to{' '}
+                    <code className="font-mono">{modelLimits.maxOutputTokens}</code>.
+                  </li>
+                )}
+                {modelLimits.maxOutputTokensExhausted && (
+                  <li>Ceiling will not be raised further for this model.</li>
+                )}
+              </ul>
+              <p className="mt-1.5 text-neutral-500">
+                Recorded automatically from failed runs on{' '}
+                <code className="font-mono">{modelLimits.model || '(no model)'}</code>. Clear this
+                if the model itself has changed behind the same name.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={handleClearModelLimits}
+              disabled={clearingLimits}
+            >
+              {clearingLimits ? 'Clearing…' : 'Clear'}
+            </Button>
+          </div>
         </div>
       )}
 

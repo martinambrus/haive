@@ -213,6 +213,97 @@ export function classifyAntigravityDiagnostic(
   return null;
 }
 
+/* ------------------------------------------------------------------ */
+/* Model-capability failures (auto-remediable)                         */
+/* ------------------------------------------------------------------ */
+
+/** A failure caused by a limitation of the selected MODEL rather than by the prompt,
+ *  the credentials, or the provider's health. Neither is actionable by the user from
+ *  the error text, and both have a mechanical remedy Haive applies itself on the next
+ *  dispatch (see cli-adapters/model-capabilities.ts):
+ *  - no_image_support:     the model rejects image blocks (a chrome-devtools screenshot,
+ *                          an image file read). Remedy: drop the screenshot tool and tell
+ *                          the agent it has no vision.
+ *  - output_cap_reached:   the turn was cut off at the client's output-token ceiling.
+ *                          Remedy: raise CLAUDE_CODE_MAX_OUTPUT_TOKENS one rung.
+ *  - max_tokens_too_large: the provider rejected the ceiling we set as above the model's
+ *                          own maximum. Remedy: roll the rung back and stop raising.
+ *
+ *  Distinct from ProviderFatalClass (the provider is unusable for a while) and from
+ *  the transient classes (the run never got its chance): here the run genuinely happened
+ *  and will fail identically until we change the request. */
+export type ModelCapabilityClass =
+  'no_image_support' | 'output_cap_reached' | 'max_tokens_too_large';
+
+/** Stable headline per capability class. Built by interpretCliFailure, detected by
+ *  capabilityClassFromMessage — an internal contract we own end-to-end, exactly like
+ *  PROVIDER_FATAL_HEADLINES and OUTPUT_TRUNCATION_HEADLINE above. */
+export const MODEL_CAPABILITY_HEADLINES: Record<ModelCapabilityClass, string> = {
+  no_image_support: 'Model does not accept image input',
+  output_cap_reached: 'Model hit its output-token ceiling',
+  max_tokens_too_large: 'Provider rejected the requested output-token ceiling',
+};
+
+// --- Stable signal ----------------------------------------------------------
+// The env var NAME is a documented Claude Code contract, so matching it is safe.
+// Deliberately NOT matching the number ("32000") or the surrounding prose: both are
+// version-bound and would break silently when upstream rewords or changes the default.
+const OUTPUT_CAP_ENV_RE = /CLAUDE_CODE_MAX_OUTPUT_TOKENS/;
+
+// --- VOLATILE upstream prose ------------------------------------------------
+// These two match wording emitted by third-party providers. There is no stable token
+// to anchor on: the HTTP status is a bare 400, which every malformed request shares.
+// If upstream rewords, we simply stop matching and the step fails visibly exactly as it
+// did before this feature — a loud, already-understood outcome, never a silent wrong
+// branch. Revisit these when a real failure stops being auto-remediated.
+const NO_IMAGE_SUPPORT_RE =
+  /does not support image input|image input is not supported|does not support images\b|no vision support/i;
+// Two-part on purpose: "max_tokens" alone appears in ordinary truncation messages, and
+// the qualifier alone is far too generic. Both must be present.
+const MAX_TOKENS_NAME_RE = /\bmax_tokens\b/i;
+const MAX_TOKENS_REJECTED_RE =
+  /maximum allowed|too large|must be less than|must be <=|exceeds the maximum/i;
+
+/** Classify a model-capability failure from an ended invocation's fields, or null when
+ *  the failure is something else. Gated on a real failure exit code for the same reason
+ *  classifyProviderFatal is: exit 0 (success) and the termination codes (cancelled /
+ *  timed out) can carry text that merely MENTIONS these conditions.
+ *
+ *  max_tokens_too_large is checked first: it is the more specific of the two
+ *  output-token cases, and it is the one whose remedy is the opposite (lower the
+ *  ceiling, not raise it), so a mis-ordered match would push the ladder the wrong way. */
+export function classifyModelCapability(
+  exitCode: number | null,
+  errorMessage: string | null,
+  rawOutput: string | null,
+): ModelCapabilityClass | null {
+  if (exitCode === null || exitCode === 0 || CLI_TERMINATION_EXIT_CODES.has(exitCode)) {
+    return null;
+  }
+  const tail = typeof rawOutput === 'string' ? rawOutput.slice(-2000) : '';
+  const haystack = `${errorMessage ?? ''}\n${tail}`;
+  if (MAX_TOKENS_NAME_RE.test(haystack) && MAX_TOKENS_REJECTED_RE.test(haystack)) {
+    return 'max_tokens_too_large';
+  }
+  if (NO_IMAGE_SUPPORT_RE.test(haystack)) return 'no_image_support';
+  if (OUTPUT_CAP_ENV_RE.test(haystack)) return 'output_cap_reached';
+  return null;
+}
+
+/** The capability class encoded in a headlined errorMessage (built by
+ *  interpretCliFailure), or null when the message is not a capability message.
+ *  Inverse of MODEL_CAPABILITY_HEADLINES — lets the step runner decide to remediate
+ *  and re-dispatch without re-parsing raw CLI output or adding a DB column. */
+export function capabilityClassFromMessage(
+  message: string | null | undefined,
+): ModelCapabilityClass | null {
+  if (typeof message !== 'string') return null;
+  for (const cls of Object.keys(MODEL_CAPABILITY_HEADLINES) as ModelCapabilityClass[]) {
+    if (message.startsWith(MODEL_CAPABILITY_HEADLINES[cls])) return cls;
+  }
+  return null;
+}
+
 /** The fatal class encoded in a headlined errorMessage (built by interpretCliFailure),
  *  or null when the message is not a fatal-provider message. Inverse of
  *  PROVIDER_FATAL_HEADLINES — lets a consumer derive the UI hint's `reason` from the

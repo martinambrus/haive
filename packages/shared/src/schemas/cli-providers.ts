@@ -104,7 +104,13 @@ export const createCliProviderRequestSchema = z.object({
   rulesContent: z.string().optional(),
 });
 
-export const updateCliProviderRequestSchema = createCliProviderRequestSchema.partial();
+export const updateCliProviderRequestSchema = createCliProviderRequestSchema.partial().extend({
+  // Discard what the worker learned about this provider's model (no vision, output-token
+  // ceiling). Update-only: nothing is learned yet at create time. The learn is already
+  // keyed by the model string, so this is for the case the MODEL itself changed behind a
+  // stable name — a cloud alias gaining vision, a re-tagged local build.
+  clearModelLimits: z.boolean().optional(),
+});
 
 export type CreateCliProviderRequest = z.infer<typeof createCliProviderRequestSchema>;
 export type UpdateCliProviderRequest = z.infer<typeof updateCliProviderRequestSchema>;

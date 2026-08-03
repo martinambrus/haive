@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
+  capabilityClassFromMessage,
   classifyAntigravityDiagnostic,
+  classifyModelCapability,
   classifyProviderFatal,
   CLI_TIMEOUT_HEADLINE,
   cliTimeoutBudgetMinutes,
@@ -8,9 +10,27 @@ import {
   isCliTimeoutFailure,
   isFatalProviderFailure,
   isTransientCliFailure,
+  MODEL_CAPABILITY_HEADLINES,
   PROVIDER_FATAL_HEADLINES,
+  type ModelCapabilityClass,
   type ProviderFatalClass,
 } from './failure-class.js';
+
+// The EXACT errorMessage values captured from the production incident (task
+// 7780da14, step 07-phase-2-implement, ollama/deepseek-v4-flash:cloud). Both were
+// surfaced raw and failed the task. Verifies the fix against the original failing
+// input — every other assertion here is downstream of these two strings.
+const INCIDENT_NO_VISION =
+  'API Error: 400 this model does not support image input ' +
+  '(ref: 0c523fbc-d82b-4cba-a5e7-aa8530c019b4)';
+const INCIDENT_OUTPUT_CAP =
+  "API Error: Claude's response exceeded the 32000 output token maximum. To configure " +
+  'this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.';
+// Anthropic's shape for a max_tokens above the model's own ceiling — the rollback
+// trigger for a rung we set too high.
+const MAX_TOKENS_REJECTED =
+  'API Error: 400 max_tokens: 131072 > 64000, which is the maximum allowed number of ' +
+  'output tokens for claude-sonnet-4-20250514';
 
 // The EXACT message createSandboxSpawner stamps on a budget SIGKILL.
 const TIMEOUT_45M = `${CLI_TIMEOUT_HEADLINE} (45m).`;
@@ -299,5 +319,65 @@ describe('cliTimeoutBudgetMinutes', () => {
 
   it('returns null for a timeout headline with no parseable budget', () => {
     expect(cliTimeoutBudgetMinutes(CLI_TIMEOUT_HEADLINE)).toBeNull();
+  });
+});
+
+describe('classifyModelCapability', () => {
+  it('classifies both production incident messages', () => {
+    expect(classifyModelCapability(1, INCIDENT_NO_VISION, null)).toBe('no_image_support');
+    expect(classifyModelCapability(1, INCIDENT_OUTPUT_CAP, null)).toBe('output_cap_reached');
+  });
+
+  it('classifies a rejected max_tokens ceiling, not an output cap', () => {
+    // Opposite remedy (lower the ceiling, not raise it), so the ordering matters.
+    expect(classifyModelCapability(1, MAX_TOKENS_REJECTED, null)).toBe('max_tokens_too_large');
+  });
+
+  it('reads the raw-output tail when the CLI printed the error only to stdout', () => {
+    expect(classifyModelCapability(1, null, `...\n${INCIDENT_NO_VISION}\n`)).toBe(
+      'no_image_support',
+    );
+  });
+
+  it('ignores success and termination exit codes', () => {
+    for (const exitCode of [0, null, 130, 137, 143]) {
+      expect(classifyModelCapability(exitCode, INCIDENT_OUTPUT_CAP, null)).toBeNull();
+    }
+  });
+
+  it('returns null for unrelated failures', () => {
+    expect(classifyModelCapability(1, 'API Error: 401 Unauthorized', null)).toBeNull();
+    expect(classifyModelCapability(1, 'ENOENT: no such file or directory', null)).toBeNull();
+    // Ordinary truncation wording mentions max_tokens without the rejection qualifier.
+    expect(classifyModelCapability(1, 'stopped with stop_reason max_tokens', null)).toBeNull();
+  });
+
+  it('does not steal the incident messages from the provider-fatal classifier', () => {
+    // Both must stay OUT of auth / rate_limit / server_error: those fail the task fast
+    // and would suppress the remediation retry entirely.
+    expect(classifyProviderFatal(1, INCIDENT_NO_VISION, null)).toBeNull();
+    expect(classifyProviderFatal(1, INCIDENT_OUTPUT_CAP, null)).toBeNull();
+    expect(classifyProviderFatal(1, MAX_TOKENS_REJECTED, null)).toBeNull();
+  });
+});
+
+describe('capabilityClassFromMessage', () => {
+  it.each(Object.keys(MODEL_CAPABILITY_HEADLINES) as ModelCapabilityClass[])(
+    'round-trips the %s headline',
+    (cls) => {
+      expect(capabilityClassFromMessage(`${MODEL_CAPABILITY_HEADLINES[cls]} — detail.`)).toBe(cls);
+    },
+  );
+
+  it('returns null for a non-capability message', () => {
+    expect(capabilityClassFromMessage(PROVIDER_FATAL_HEADLINES.auth)).toBeNull();
+    expect(capabilityClassFromMessage('cli invocation failed: something else')).toBeNull();
+    expect(capabilityClassFromMessage(null)).toBeNull();
+  });
+
+  it('requires the headline at the START, not merely present', () => {
+    expect(
+      capabilityClassFromMessage(`the agent said ${MODEL_CAPABILITY_HEADLINES.no_image_support}`),
+    ).toBeNull();
   });
 });

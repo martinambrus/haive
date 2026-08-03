@@ -25,6 +25,7 @@ import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import {
+  capabilityClassFromMessage,
   cliTimeoutBudgetMinutes,
   isCliTimeoutFailure,
   isOutputTruncationMessage,
@@ -537,6 +538,38 @@ async function resolveLlmPhase(
           );
           if (!retryLlm.resolved) return retryLlm;
         }
+      }
+      // Model-capability failure (model cannot read images / hit its output-token
+      // ceiling). The run genuinely happened and will fail identically until the REQUEST
+      // changes, so a plain re-run is pointless — but the cli-exec handler has already
+      // recorded what the failure taught us about the provider's model, and a fresh
+      // dispatch picks the remedy up (raised ceiling, screenshot tool denied, no-vision
+      // prompt boundary). Independent of llm.retry on purpose: this is an environment
+      // repair, not a model re-roll, and the steps that hit it (e.g. 07-phase-2-implement)
+      // declare neither loop nor llm.retry. Supersede rather than consume so the repaired
+      // attempt does not burn the genuine retry budget — same as the orphan path.
+      if (capabilityClassFromMessage(errTrimmed)) {
+        if ((await countTrailingCapabilityFailures(db, current.id)) < MAX_CAPABILITY_RETRIES) {
+          ctx.logger.warn(
+            { stepId: stepDef.metadata.id, message },
+            'model-capability failure; re-dispatching with the learned remedy',
+          );
+          await db
+            .update(schema.cliInvocations)
+            .set({ supersededAt: new Date() })
+            .where(eq(schema.cliInvocations.id, invocation.id));
+          const retryLlm = await resolveLlmPhase(
+            db,
+            stepDef,
+            current,
+            ctx,
+            detected,
+            formValues,
+            params,
+          );
+          if (!retryLlm.resolved) return retryLlm;
+        }
+        // Remediation budget spent — fall through and fail with the capability reason.
       }
       const failed = await updateRow(db, current.id, {
         status: 'failed',
@@ -2564,6 +2597,38 @@ async function countTrailingTruncations(db: Database, taskStepId: string): Promi
   let n = 0;
   for (const r of rows) {
     if (isOutputTruncationMessage(r.errorMessage)) n++;
+    else break;
+  }
+  return n;
+}
+
+/** Max consecutive model-capability re-dispatches on a step before failing it. Two is the
+ *  whole remediation space, not a guess: the no-vision flag is learned once, and the
+ *  output-token ladder can climb at most one rung and then roll back if the provider
+ *  rejects it. A third attempt would repeat a request we already know fails. */
+const MAX_CAPABILITY_RETRIES = 2;
+
+/** Count the most-recent CONSECUTIVE invocations for a step that failed on a model
+ *  capability. Resets at the first row with any other outcome, so an earlier remediated
+ *  failure in the same step does not shrink the budget for a later, different one.
+ *  Like countTrailingOrphans it does NOT filter supersededAt: a re-dispatched capability
+ *  failure is superseded (to keep it out of the llm.retry budget) yet is exactly the
+ *  history this cap has to see. */
+async function countTrailingCapabilityFailures(db: Database, taskStepId: string): Promise<number> {
+  const rows = await db
+    .select({ errorMessage: schema.cliInvocations.errorMessage })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        ne(schema.cliInvocations.mode, 'agent_mining'),
+      ),
+    )
+    .orderBy(desc(schema.cliInvocations.createdAt))
+    .limit(10);
+  let n = 0;
+  for (const r of rows) {
+    if (capabilityClassFromMessage(r.errorMessage)) n++;
     else break;
   }
   return n;
