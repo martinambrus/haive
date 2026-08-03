@@ -1,0 +1,887 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Haive Onboarding — Full Model Comparison, 2026-08-03</title>
+<style>
+  :root{
+    --bg:#0b0f14; --bg2:#11171f; --card:#151c26; --card2:#1b2430;
+    --ink:#e7edf3; --mut:#8da0b3; --line:#243140;
+    --accent:#3ddc97; --accent2:#4aa8ff; --warn:#f5b14c; --bad:#f2607a;
+    --good:#3ddc97; --mid:#f5b14c; --weak:#f2607a;
+    --fam-opus:#b98cff; --fam-sonnet5:#3ddc97; --fam-sonnet46:#4aa8ff; --fam-codex:#f5b14c; --fam-glm:#f2607a; --fam-haiku:#8da0b3; --fam-fable:#ff8fd4; --fam-codex56:#2dd4bf;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;font-size:15px}
+  a{color:var(--accent2);text-decoration:none;overflow-wrap:anywhere}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 20px 80px}
+  header.hero{padding:54px 0 26px;border-bottom:1px solid var(--line)}
+  .kicker{font:600 12px/1 var(--mono);letter-spacing:0;text-transform:uppercase;color:var(--accent)}
+  h1{font-size:34px;line-height:1.12;margin:14px 0 8px;letter-spacing:0}
+  h2{font-size:22px;margin:46px 0 6px;letter-spacing:0}
+  h2 .num{font:600 13px/1 var(--mono);color:var(--accent);margin-right:10px;vertical-align:2px}
+  h3{font-size:16px;margin:22px 0 8px}
+  p.sub{color:var(--mut);max-width:82ch;margin:6px 0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:18px;font:500 13px/1.4 var(--mono);color:var(--mut)}
+  .meta b{color:var(--ink);font-weight:600}
+  .pill{display:inline-block;padding:3px 10px;border:1px solid var(--line);border-radius:999px;background:var(--bg2);font:600 12px/1.5 var(--mono)}
+  .src{margin-top:16px;padding:12px 16px;background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent2);border-radius:8px}
+  .src .t{font:600 12px/1 var(--mono);letter-spacing:0;text-transform:uppercase;color:var(--mut)}
+
+  .verdicts{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:24px}
+  .vcard{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px 16px 14px;position:relative;overflow:hidden}
+  .vcard .lab{font:700 11px/1 var(--mono);letter-spacing:0;text-transform:uppercase;color:var(--mut)}
+  .vcard .who{font-size:19px;font-weight:700;margin:8px 0 4px}
+  .vcard .why{font-size:13px;color:var(--mut)}
+  .vcard.win{border-color:#2f6b52}
+  .vcard.win::after,.vcard.val::after{content:"";position:absolute;inset:0 auto 0 0;width:3px}
+  .vcard.win::after{background:var(--good)}
+  .vcard.val{border-color:#2c4d70}.vcard.val::after{background:var(--accent2)}
+  .vcard.warnc{border-color:#7a5a1f}.vcard.warnc::after{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--warn)}
+  .vcard.avoid{border-color:#6b2f3e}.vcard.avoid::after{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--bad)}
+
+  .controls{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:16px 0 10px}
+  .controls .l{font:600 12px/1 var(--mono);color:var(--mut);margin-right:4px}
+  button.sb{font:600 12px/1 var(--mono);color:var(--ink);background:var(--bg2);border:1px solid var(--line);padding:7px 11px;border-radius:7px;cursor:pointer}
+  button.sb:hover{border-color:var(--accent)}
+  button.sb.on{background:var(--accent);color:#06120c;border-color:var(--accent)}
+  .tbl-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--card)}
+  table{border-collapse:collapse;width:100%;min-width:900px}
+  th,td{padding:9px 12px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+  th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+  thead th{position:sticky;top:0;background:var(--bg2);font:600 12px/1.2 var(--mono);color:var(--mut);cursor:pointer;user-select:none;letter-spacing:0}
+  thead th:hover{color:var(--ink)}
+  thead th.sorted{color:var(--accent)}
+  tbody tr:hover{background:#19222e}
+  tbody tr.tierA td:first-child{box-shadow:inset 3px 0 var(--good)}
+  tbody tr.tierB td:first-child{box-shadow:inset 3px 0 var(--mid)}
+  tbody tr.tierC td:first-child,tbody tr.tierD td:first-child{box-shadow:inset 3px 0 var(--bad)}
+  .llm{font-weight:600}
+  .prov{display:block;font:500 11px/1.3 var(--mono);color:var(--mut)}
+  .fam-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:0}
+  .sc{font:600 13px/1 var(--mono);color:#06120c;border-radius:6px;padding:4px 7px;display:inline-block;min-width:34px;text-align:center}
+  td.num{font:500 13px/1 var(--mono);color:var(--ink)}
+  td.dim{color:var(--mut)}
+  .rank{font:700 13px/1 var(--mono);color:var(--mut)}
+  .eff{font:600 11px/1 var(--mono);text-transform:uppercase;letter-spacing:.03em;padding:2px 6px;border-radius:5px;border:1px solid var(--line);color:var(--mut)}
+
+  .chartwrap{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;margin-top:8px}
+  .chartwrap svg{width:100%;height:auto;display:block}
+  .axt{fill:var(--mut);font:500 11px/1 var(--mono)}
+  .axl{fill:var(--ink);font:600 12px/1 var(--sans)}
+  .dotlab{fill:var(--ink);font:600 10px/1 var(--mono)}
+  .grid{stroke:var(--line);stroke-width:1}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font:600 12px/1 var(--mono);color:var(--mut)}
+  .legend i{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:6px;vertical-align:-1px}
+
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr));gap:12px;margin-top:10px}
+  details.llmc{background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  details.llmc[open]{border-color:var(--accent2)}
+  details.llmc summary{list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center;gap:12px}
+  details.llmc summary::-webkit-details-marker{display:none}
+  .badge{font:700 14px/1 var(--mono);color:#06120c;border-radius:8px;padding:7px 9px;min-width:46px;text-align:center}
+  .csum{flex:1}
+  .csum .n{font-weight:700;font-size:15px}
+  .csum .p{font:500 11px/1.3 var(--mono);color:var(--mut)}
+  .chev{color:var(--mut);font:600 12px/1 var(--mono)}
+  .cbody{padding:0 16px 16px;border-top:1px solid var(--line)}
+  .statline{display:flex;flex-wrap:wrap;gap:6px 14px;margin:12px 0;font:500 12px/1.4 var(--mono);color:var(--mut)}
+  .statline b{color:var(--ink)}
+  .cbody ul{margin:6px 0;padding-left:18px}
+  .cbody li{margin:3px 0;font-size:13.5px}
+  .cbody .pro li{color:#bfe9d4}
+  .cbody .con li{color:#f3c3cd}
+  .lbl{font:700 11px/1 var(--mono);letter-spacing:0;text-transform:uppercase;color:var(--mut);margin-top:10px;display:block}
+
+  .grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+  @media(max-width:720px){.grid2{grid-template-columns:1fr}}
+  .sweepgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(360px,100%),1fr));gap:14px;margin-top:10px}
+  .box{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px}
+  .box h3{margin-top:0}
+  table.mini{min-width:0}
+  table.mini th,table.mini td{padding:8px 10px;font-size:13px}
+  .flag{border-left:3px solid var(--bad);padding:8px 0 8px 14px;margin:10px 0;font-size:14px}
+  .flag b{color:#ffd2dc}
+  .note{border-left:3px solid var(--warn);padding:8px 0 8px 14px;margin:10px 0;font-size:14px;color:var(--mut)}
+  ol.recs{padding-left:20px}
+  ol.recs li{margin:8px 0}
+  ol.recs b{color:var(--ink)}
+  details.method summary{cursor:pointer;font:600 13px/1 var(--mono);color:var(--accent2);padding:6px 0}
+  footer{margin-top:50px;padding-top:18px;border-top:1px solid var(--line);color:var(--mut);font:500 12px/1.6 var(--mono)}
+  code{font-family:var(--mono);background:var(--bg2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12.5px;overflow-wrap:anywhere}
+  .delta-up{color:var(--good);font-weight:700}.delta-down{color:var(--bad);font-weight:700}.delta-flat{color:var(--mut);font-weight:700}
+  .dsub{display:block;font:500 10.5px/1.3 var(--mono);color:var(--mut);margin-top:3px;letter-spacing:0}
+  td.dnu{color:var(--ink);font-weight:600}
+  table.deltatbl td{font-variant-numeric:tabular-nums}
+  table.deltatbl td:nth-child(2),table.deltatbl th:nth-child(2){text-align:right}
+  .legendkey{display:inline-block;padding:1px 7px;border-radius:4px;font:600 11px/1.5 var(--mono)}
+  .peakrow td{background:rgba(61,220,151,.08)}
+  .peakrow td:first-child{box-shadow:inset 3px 0 var(--good)}
+  .swpk{font:700 10px/1 var(--mono);color:var(--good);margin-left:6px}
+  .tasklink{font:600 12px/1.4 var(--mono)}
+  @media(max-width:520px){h1{font-size:29px}.wrap{padding-left:14px;padding-right:14px}.cards{grid-template-columns:minmax(0,1fr)}.vcard,.box,details.llmc,.csum{min-width:0}.prov{white-space:normal;overflow-wrap:anywhere}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="kicker">Haive / Onboarding Benchmark / August 3 2026</div>
+  <h1>44 onboardings of one legacy repo: every source-verified run to date</h1>
+  <p class="sub">Every Haive onboarding run whose source tree is byte-identical to the same Redaction System repository, now in one leaderboard. Two <b>new Ollama Cloud model refreshes</b> &mdash; <b>kimi-k3</b> and <b>deepseek-v4-flash</b>, completed 2&ndash;3 August &mdash; were audited fresh against the shared fact dossier. The <b>six July-10 runs</b>, previously carried forward only as a summary line, are now promoted to full rows &mdash; their repositories were re-checked and hash-match the July-13/14 corpus exactly. The 36 July-13/14 effort&times;model runs are reproduced unchanged.</p>
+  <div class="meta">
+    <span><b>44</b> runs</span>
+    <span><b>3</b> benchmark rounds</span>
+    <span><b>15</b> model lines</span>
+    <span><b>5</b> correctness dims</span>
+    <span>New runs audited <b>2026-08-03</b></span>
+    <span class="pill">all runs completed</span>
+  </div>
+  <div class="src">
+    <div class="t">Onboarded project</div>
+    <div style="margin-top:6px"><b>Redaction System</b> &mdash; a legacy PHP content-management / page-&ldquo;redaction&rdquo; CMS (circa 2008), codename <code>calypso</code>.
+    Source: <a href="https://sourceforge.net/projects/redactionsystem/" target="_blank" rel="noopener">sourceforge.net/projects/redactionsystem</a></div>
+    <div style="margin-top:6px;color:var(--mut);font:500 12.5px/1.5 var(--mono)">Stack (ground truth): PHP (&le;5.6 idioms) / deprecated <code>mysql_*</code> extension / MySQL, all-MyISAM <b>23</b>-table schema / FCKeditor 2.x / YUI / jQuery 1.2 / <b>no framework, no test suite</b>. The <code>mariadb 10.11</code> + <code>apache</code> in run metadata are harness confirmation-form values, not the app's declared stack.</div>
+  </div>
+  <div class="src" style="border-left-color:var(--accent)">
+    <div class="t">What is new in this edition</div>
+    <div style="margin-top:6px">Two Ollama Cloud model refreshes with direct predecessors already in the benchmark &mdash; <b>kimi-k3</b> follows kimi-k2.7-code (June and July-10), and <b>deepseek-v4-flash</b> is the fast-tier sibling of June's deepseek-v4-pro. Both were audited from their on-disk artifacts, not self-reported. Neither promoted anything to the global KB, and <b>neither documents the <code>Db::Update</code> inverted return</b> &mdash; but both produced <b>100% resolvable citations</b> and the two sharpest edit-lock analyses in the field.</div>
+  </div>
+</header>
+
+<section>
+  <div class="verdicts">
+    <div class="vcard win"><div class="lab">Best overall</div><div class="who" id="bestOverall">&mdash;</div><div class="why" id="bestOverallWhy"></div></div>
+    <div class="vcard val"><div class="lab">Best value (A-tier)</div><div class="who" id="bestValue">&mdash;</div><div class="why" id="bestValueWhy"></div></div>
+    <div class="vcard warnc"><div class="lab">New Ollama refreshes</div><div class="who">Accurate, not ambitious</div><div class="why"><b>kimi-k3 8.05</b> and <b>deepseek-v4-flash 7.83</b> both land mid-B. Every sampled citation resolves and both nail the <code>elocks</code> asymmetry, but both miss the <code>Db::Update</code> landmine and neither promotes globally. Neither beats its own predecessor line.</div></div>
+    <div class="vcard avoid"><div class="lab">The persistent ceiling</div><div class="who">Global routing</div><div class="why"><b>34 of 44 runs promoted nothing.</b> Only Opus (every effort), Sonnet 4/5, Kimi K2.7, Sonnet 4.6, Fable and Codex 5.6 ever routed knowledge cross-project. Both August runs sit on the 6.0 floor, so the global-KB merge step never even had a pair to work on.</div></div>
+  </div>
+</section>
+
+<h2><span class="num">01</span>The leaderboard</h2>
+<p class="sub">All 44 source-verified runs across three rounds. Composite = weighted blend (KB 25% / Skills 25% / Detection 20% / Agents 15% / Global-KB 15%). Click any metric header to sort; the coloured dot marks the model family and the badge marks the round. Cells are heat-mapped 6&nbsp;&rarr;&nbsp;9.</p>
+<div class="controls">
+  <span class="l">Round:</span>
+  <button class="sb pf on" data-p="all">All 44</button>
+  <button class="sb pf" data-p="aug03">Aug-03 (2)</button>
+  <button class="sb pf" data-p="jul14">Jul-13/14 (36)</button>
+  <button class="sb pf" data-p="jul10">Jul-10 (6)</button>
+</div>
+<div class="controls">
+  <span class="l">Quick sort:</span>
+  <button class="sb" data-k="composite">Composite</button>
+  <button class="sb" data-k="detect">Detection</button>
+  <button class="sb" data-k="kb">Knowledge base</button>
+  <button class="sb" data-k="skills">Skills</button>
+  <button class="sb" data-k="agents">Agents</button>
+  <button class="sb" data-k="global">Global KB</button>
+  <button class="sb" data-k="cliMin" data-asc="1">Speed (fastest)</button>
+  <button class="sb" data-k="value">Value</button>
+</div>
+<div class="tbl-scroll">
+  <table id="tbl">
+    <thead><tr id="head"></tr></thead>
+    <tbody id="body"></tbody>
+  </table>
+</div>
+<p class="sub" style="font-size:13px;margin-top:8px"><b>Value</b> = composite / active CLI minutes. Compute and output totals include superseded retry invocations, matching every prior report. Global-KB is the count of task-attributed promotions across every status; a run with zero promotions sits at the neutral 6.0 floor.</p>
+
+<h2><span class="num">02</span>The two new Ollama runs, side by side</h2>
+<p class="sub">Both ran the same pipeline through the <code>ollama</code> adapter on the Claude binary, with <code>ignore_saved_step_clis</code> set so the headline model drove every LLM step. Neither provider exposes a reasoning-effort dial, so each is a single point rather than a sweep.</p>
+<div class="tbl-scroll">
+  <table class="mini" id="newTbl">
+    <thead><tr>
+      <th style="text-align:left">Measure</th><th style="text-align:left">Kimi K3</th><th style="text-align:left">DeepSeek V4 Flash</th><th style="text-align:left">Read</th>
+    </tr></thead>
+    <tbody id="newBody"></tbody>
+  </table>
+</div>
+
+<h2><span class="num">03</span>The effort curve <span style="font:500 13px/1 var(--mono);color:var(--mut)">&mdash; July-13/14 sweep only</span></h2>
+<p class="sub">Up = more correct; right = more compute. Restricted to the 36-run controlled effort experiment, because only those families were swept across effort levels. Each family's runs are connected in effort order (low&rarr;&hellip;&rarr;max/ultra). The dashed marker on a line is that family's quality peak.</p>
+<div class="chartwrap">
+  <svg id="effort" viewBox="0 0 900 560" role="img" aria-label="Composite score versus compute time, one trajectory per model family"></svg>
+  <div class="legend" id="effortLegend"></div>
+</div>
+
+<h2><span class="num">04</span>Quality vs compute, all 44 runs</h2>
+<p class="sub">Every source-verified run on one plane. Shape marks the round: the two August runs are ringed. The useful read is the empty upper-left &mdash; nothing has yet combined top-tier correctness with low compute, and the frontier has not moved since 13 July.</p>
+<div class="chartwrap">
+  <svg id="scatter" viewBox="0 0 900 520" role="img" aria-label="Composite score versus compute minutes for all 44 runs"></svg>
+  <div class="legend" id="scatterLegend"></div>
+</div>
+
+<h2><span class="num">05</span>Effort sweeps, family by family</h2>
+<p class="sub">Each table is one model family across effort, from the July-13/14 sweep. The <span class="delta-up">green</span> peak row is the best composite. Watch two columns: <b>Global</b> (only 8 of these 36 runs leave the 6.0 floor) and <b>compute/output</b> at <code>xhigh</code>/<code>max</code> (large jumps that rarely move the score &mdash; Codex 5.6 max being the lone exception).</p>
+<div class="sweepgrid" id="sweeps"></div>
+
+<h2><span class="num">06</span>Model variant at matched effort</h2>
+<p class="sub">The five claude-family models (Opus 4.8, Sonnet 5, Sonnet 4.6, Haiku 4.5, Fable 5) ran through the identical claude-code pipeline, and the two Codex models through the identical Codex pipeline, so within-CLI rows are directly comparable. At <b>high</b> effort (every swept family has it) the ordering is clear; the last two columns show each family's own best run and whether it ever promoted reusable knowledge to the global KB. The two August Ollama runs have no effort dial and so appear only in the leaderboard.</p>
+<div class="tbl-scroll">
+  <table class="mini" id="variantTbl">
+    <thead><tr>
+      <th style="text-align:left">Model family</th>
+      <th>Composite @ high</th><th>Detect</th><th>KB</th><th>Skills</th><th>Agents</th><th>Global</th>
+      <th style="text-align:left">Best run (any effort)</th><th>Promotes global?</th>
+    </tr></thead>
+    <tbody id="variantBody"></tbody>
+  </table>
+</div>
+<p class="note"><b>Sonnet 5 (high) still tops the whole 44-run field at 8.80.</b> Codex 5.6 posts the best family floor (every effort &ge;8.20) and the joint-#3 run overall (max, 8.55, tied with Opus medium); Fable 5 peaks at medium (8.48) and is the only family where effort past medium is a net regression. Global promotion is not an Opus + Sonnet-5 exclusive: Sonnet 4.6 (xhigh), Fable (high) and Codex 5.6 (high &mdash; six entries) each promoted at least once.</p>
+
+<h2><span class="num">07</span>Model-line continuity across rounds</h2>
+<p class="sub"><b>This is a pipeline + provider comparison, not a controlled model experiment.</b> Each model line is tracked explicitly rather than lumped together, because provider and model labels shifted between rounds. June (23rd, 11 runs) is summarised at section 09; its repositories are no longer on disk, so unlike every row above it cannot be re-verified.</p>
+<div class="tbl-scroll">
+  <table class="mini deltatbl" id="periodTbl">
+    <thead><tr>
+      <th style="text-align:left">Model line</th><th>Earlier</th><th>Latest</th><th>Change</th><th style="text-align:left">What moved</th>
+    </tr></thead>
+    <tbody id="periodBody"></tbody>
+  </table>
+</div>
+<div class="grid2" style="margin-top:16px">
+  <div class="box">
+    <h3 style="margin-top:0">What got better</h3>
+    <ul style="margin:6px 0;padding-left:18px;font-size:13.5px;line-height:1.5">
+      <li><b>Citation discipline is now near-universal at the top.</b> Both August runs resolve <b>100%</b> of their file:line claims (715 and 511 of them) &mdash; no invented paths, no line numbers past end-of-file. The fabricated-signature era of July-10 Codex (six invented <code>Db</code> methods) has no successor in this round.</li>
+      <li><b>The <code>elocks</code> subsystem finally has definitive coverage.</b> Both new runs independently reconstruct the asymmetric-freshness bug: the own-row <code>Delete</code> uses <code>timeout &gt; $time_delete</code> (thememanager_admin.php:844) while the foreign-lock <code>SELECT</code> at :845 has no freshness filter at all. DeepSeek states the polarity inversion outright; Kimi additionally traces the heartbeat re-arm and the per-theme <code>INSERT</code> mirrors.</li>
+      <li><b>The Codex line kept climbing</b> across rounds: o3 &rarr; gpt-5.5 fixed the invented <code>Db</code> signatures and the edit-lock misread; gpt-5.6-sol catches the <code>Db::Update</code> inverted return <b>at every effort level</b>, raised its family floor to 8.20 and produced the benchmark's first winning top-effort run (max, 8.55).</li>
+    </ul>
+  </div>
+  <div class="box">
+    <h3 style="margin-top:0">What got worse / didn't move</h3>
+    <ul style="margin:6px 0;padding-left:18px;font-size:13.5px;line-height:1.5">
+      <li><b>Neither Ollama refresh beats its own predecessor.</b> Kimi K2.7 scored 8.30 (June) and 8.28 (July-10); <b>kimi-k3 lands at 8.05</b>. June's deepseek-v4-pro scored 8.60; <b>deepseek-v4-flash lands at 7.83</b> &mdash; though flash is the fast tier of that family, not a straight successor, so that pair is a tier comparison rather than a regression.</li>
+      <li><b>Global routing is still the ceiling, and it widened.</b> 34 of 44 runs promoted nothing. Both August runs sit on the floor, which is why <code>09_6_4-global-kb-merge</code> skipped in both &mdash; with zero promoted drafts there was no colliding pair to merge.</li>
+      <li><b>Link hygiene regressed to a new worst.</b> DeepSeek V4 Flash breaks <b>44 of 272</b> relative links (16%), overtaking Sonnet-5-high's ~20 as the field record, and does it by repeating a wrong directory name (<code>../form-wizard-system/</code> against the real <code>form-wizard/</code>) rather than by volume alone.</li>
+    </ul>
+  </div>
+</div>
+
+<h2><span class="num">08</span>Every run, in detail</h2>
+<p class="sub">Click a card to expand strengths, weaknesses, and per-dimension scores. Cards are grouped by round, then family, best composite first. Findings were verified to file:line against the real repository.</p>
+<div class="controls">
+  <span class="l">Show:</span>
+  <button class="sb cf on" data-p="all">All rounds</button>
+  <button class="sb cf" data-p="aug03">Aug-03</button>
+  <button class="sb cf" data-p="jul14">Jul-13/14</button>
+  <button class="sb cf" data-p="jul10">Jul-10</button>
+</div>
+<div class="cards" id="cards"></div>
+
+<h2><span class="num">09</span>Notable defects &amp; patterns</h2>
+<div class="grid2">
+  <div class="box">
+    <h3>The <code>Db::Update</code> landmine</h3>
+    <div class="flag"><b>Still the single most discriminating fact.</b> <code>Update()</code> returns <code>true</code> on <em>failure</em> (database.php:456) and <code>false</code> on success (:459). <b>Codex 5.6 catches it at all six efforts</b> &mdash; the only family to do so. <b>Both August runs miss it</b>: Kimi's API_REFERENCE details dataset quoting and <code>CheckFieldSize</code> but never states polarity; DeepSeek reduces the method to &ldquo;UPDATE with field size check&rdquo;. Neither cites database.php:456/459 anywhere. <b>Haiku low</b> remains the only run to actively reverse it.</div>
+    <div class="flag"><b>Jest trap</b> &mdash; three July runs materialised a <code>jest-specialist</code> for a project with no tests. <b>Neither August run falls for it</b>: both write a TESTING_STANDARDS.md asserting no test infrastructure exists and ship no jest agent, but neither names Jest as the false signal, so both land short of <b>Codex-5.6 xhigh</b>, which identified it as the Polish/Slovenian word &ldquo;jest&rdquo; in bundled FCKeditor language files.</div>
+    <div class="flag"><b>Counting errors</b> &mdash; the 23-table schema keeps tripping models. <b>Codex-5.6 xhigh</b> counted &ldquo;20 UTF-8 MyISAM tables&rdquo;; <b>DeepSeek V4 Flash</b> writes &ldquo;creates 18 tables&rdquo; and then lists all 23 in the same sentence. <b>Kimi K3 counts 23 correctly</b> and adds the <code>utf8</code>/<code>utf8_bin</code> collation detail.</div>
+  </div>
+  <div class="box">
+    <h3>Hygiene &amp; routing</h3>
+    <div class="note"><b>Sandbox-path leaks</b>: <b>Sonnet-5 max</b> ships 5 literal <code>/haive/workdir</code> paths; <b>Fable xhigh</b> 4; <b>Kimi K2.7 (Jul-10)</b> 9 in one skill. <b>DeepSeek V4 Flash</b> leaks exactly one &mdash; but bakes it into a <em>runnable</em> <code>grep -rn ... /haive/workdir/</code> command, so it is a copy-paste trap rather than stray prose. <b>Kimi K3 is leak-free.</b></div>
+    <div class="note"><b>Harness-value bleed</b> keeps finding new surfaces. <b>Codex-5.6 high</b> branded 3 of its 6 global promotions &ldquo;MariaDB 10&rdquo;. <b>Kimi K3</b> names an entire local KB facet family <code>mariadb</code> and then prescribes InnoDB transactions over <code>LOCK TABLES</code> for an all-MyISAM app &mdash; accurate modern-DB advice aimed at the wrong database. Its prose, by contrast, is the field's cleanest separation of sandbox from application.</div>
+    <div class="note"><b>Broken cross-skill links</b> remain endemic and uncorrelated with spend (0 to 44 per run). The deterministic verify step checks structure, not link targets. <b>Codex 5.6</b> posts perfect 0/317 and 0/163 sweeps at one end; <b>DeepSeek V4 Flash</b> sets a new worst at 44/272 while spending the least compute of any August run.</div>
+    <div class="note"><b>Effort past the peak buys defects, not quality</b> for the claude families: every <code>xhigh</code> run lands below its family peak, and Sonnet-5/4.6/Haiku <code>max</code> all regress. The single counterexample is <b>Codex-5.6 max</b> &mdash; and even there, 2.8&times; the compute of high bought +0.20 composite.</div>
+  </div>
+</div>
+
+<h2><span class="num">10</span>Recommendations</h2>
+<ol class="recs">
+  <li><b>Highest-stakes onboarding: Sonnet 5 at high effort.</b> Still the top composite of all 44 runs (8.80) after two further rounds, and the only run combining a near-perfect KB with four clean, version-correct global promotions. Budget ~40 active CLI minutes; tidy the redundant skill cross-links.</li>
+  <li><b>Best value: Sonnet 5 at medium</b> (8.38 in ~26 min), with <b>GLM-5.2 via Ollama (Jul-10)</b> as the standing cheap alternative (8.25 in 31.8 min). Neither promotes globally; add an explicit promotion pass.</li>
+  <li><b>When accuracy on API contracts matters most: Codex gpt-5.6-sol.</b> The only family that catches the <code>Db::Update</code> inverted return at every effort, with zero fabricated APIs and mostly perfect link hygiene across ~250 files. Watch the high run's <code>Test frameworks: jest</code> line in AGENTS.md and the &ldquo;MariaDB 10&rdquo; branding in its promoted articles.</li>
+  <li><b>The new Ollama refreshes are usable, but not an upgrade.</b> Pick <b>kimi-k3</b> when you want citation-exact subsystem documentation and clean sandbox hygiene (0 leaks, 23 tables right, best edit-lock write-up); pick <b>deepseek-v4-flash</b> when compute is the binding constraint (27.1 min, the cheapest of the two) and budget a link-repair pass afterwards. Neither should be chosen over its predecessor line on quality alone.</li>
+  <li><b>The effort dial: stop at each family's peak &mdash; never xhigh.</b> No family peaks at the xhigh tier, and only Codex 5.6 rewards max. Opus <b>and Fable both peak at medium</b>.</li>
+  <li><b>Do not use Haiku 4.5 for legacy onboarding.</b> A full tier below (best 6.75): it reverses the <code>Update</code> contract, fabricates escaping, invents schema names, hallucinates a Jest agent at max &mdash; and at xhigh ships no testing doc at all.</li>
+</ol>
+
+<h2><span class="num">11</span>The June baseline <span style="font:500 13px/1 var(--mono);color:var(--mut)">&mdash; not re-verifiable</span></h2>
+<p class="sub">The 23 June round is shown for continuity only and is <b>excluded from the leaderboard above</b>. Its repositories have since been deleted from the <code>haive_repos</code> volume, so unlike every other row in this report its source tree cannot be hash-checked against the current corpus and its artifacts cannot be re-audited. Scores are reproduced from the June report exactly as published, under the same five-dimension weights.</p>
+<div class="tbl-scroll">
+  <table class="mini" id="juneTbl">
+    <thead><tr><th style="text-align:left">Model</th><th style="text-align:left">Provider</th><th>Composite</th><th>Det</th><th>KB</th><th>Sk</th><th>Ag</th><th>Gl</th><th>Compute</th><th>Global KB</th></tr></thead>
+    <tbody id="juneBody"></tbody>
+  </table>
+</div>
+
+<details class="method">
+  <summary>&#9656; Methodology &amp; caveats</summary>
+  <div class="box" style="margin-top:10px">
+    <ul>
+      <li><b>Ground truth and source identity.</b> Every one of the 44 leaderboard runs onboarded a byte-identical copy of the same Redaction System source. This was re-verified for this edition, not assumed: for each repository the import commit's tree was listed with <code>git ls-tree -r</code>, Haive-generated paths (<code>.claude/</code>, <code>.agents/</code>, <code>.codex/</code>, <code>.haive*</code>, <code>.ddev/</code>, <code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>.gitignore</code>) were excluded, and the remaining 828 application blobs were hashed. All 44 produce the identical digest. Two further candidates, <code>rs_test_gl</code> and <code>rs_test_gh</code> (14 July, Haiku Low), fail that raw digest on 362 of 828 blobs but pass once line endings are normalised &mdash; they are LF-normalised copies of the same corpus (verified: <code>tr -d '\r'</code> then re-hash yields the identical whole-tree digest as the other 44). They are excluded on <em>provenance</em>, not source: both are duplicate Haiku-Low control runs created back-to-back to exercise the global-KB supersede path, not distinct model or effort points, and neither promoted anything.</li>
+      <li><b>Audit dossier.</b> Findings were judged against the real files and one shared, source-verified fact dossier, each item re-confirmed for this edition: the <code>Db::Update</code> inverted return (<code>return true</code> on error at database.php:456, <code>return false</code> on success at :459), the <code>elocks</code> edit-lock table and its asymmetric freshness handling (thememanager_admin.php:844/845), <code>SECHASH</code> = <code>md5(HTTP_USER_AGENT.REMOTE_ADDR)</code> at installer/init.php:143 (IP/UA, not CSRF), no rank/CSRF API, <code>encryptPW</code> = <code>md5(crypt($pw, substr($salt,0,2)))</code> with default salt <code>salted_sardine</code> at functions.php:988, the <code>is_numeric</code>-guarded math-captcha <code>eval()</code> at functions.php:1301, the six <code>/e</code> <code>preg_replace</code> sites at functions.php:368-373, and the 23-table schema. Artifact count alone earned no credit.</li>
+      <li><b>Link and citation measurement (new this edition).</b> For the two August runs both figures are measured, not estimated. Every relative markdown link under <code>.claude/knowledge_base/</code> and <code>.claude/skills/</code> was resolved against the filesystem; every <code>file.php:NNN</code> citation was checked for file existence (matching by basename anywhere in the repo, so a bare <code>form_submit.php</code> resolves to <code>actions/form_submit.php</code>) and for the line number falling within the file. Kimi K3: 5/109 links broken, 715 citations, 0 unresolvable. DeepSeek V4 Flash: 44/272 links broken, 511 citations, 0 unresolvable.</li>
+      <li><b>Model identity.</b> Verified from each run's CLI init event rather than the task title or the <code>cli_providers.model</code> text column, which is known to go stale (the z.ai rows still read <code>glm-4.6</code> while the runs were <code>glm-5.2[1m]</code>). The August runs were launched as <code>claude --model kimi-k3:cloud</code> and <code>--model deepseek-v4-flash:cloud</code>, echoed back in the <code>system/init</code> event of each stream log. Neither Ollama provider exposes a reasoning-effort setting, so both are single points, not sweeps.</li>
+      <li><b>Detection (20%).</b> Audited LLM output plus <code>AGENTS.md</code>/<code>CLAUDE.md</code>; deterministic confirmation-form values (mariadb 10.11, apache) were separated from model judgment, and copying them into LLM-authored KB was penalised.</li>
+      <li><b>KB (25%), Skills (25%), Agents (15%).</b> Read every KB file (recursive), every <code>SKILL.md</code>, and only the <code>accepted.source = "llm"</code> discovered agents (the ~28 shared scan/template agents excluded). Both August runs discovered exactly three (fckeditor, mysql, legacy-php), read from the <code>06_5-agent-discovery</code> step output rather than inferred from filenames.</li>
+      <li><b>Global KB (15%).</b> Counted task-attributed promotions in <code>haive_kb_global.global_kb_entries</code> across every status. The query was calibrated against published values before use (Sonnet-5 high = 4, Codex-5.6 high = 6, Opus xhigh = 1, all exact). Zero promotions = the 6.0 neutral floor (no contamination, missed reuse), not a six-out-of-ten quality verdict. Both August runs returned zero rows. The consequent skip of <code>09_6_4-global-kb-merge</code> in both is a <em>downstream effect</em>, not a cause: that step's <code>shouldRun</code> gate asks whether any promoted draft collides with an existing entry, so no promotions means no pairs to merge.</li>
+      <li><b>Cost.</b> Active CLI minutes = sum of <code>cli_invocations.duration_ms</code> across all rows incl. superseded retries; output tokens and retry counts follow the same rule. The query was validated by reproducing published figures exactly for known runs before being applied to new ones (Sonnet-5 high 24 inv / 40.5 min / 184,147 tok; and all six July-10 runs to the decimal). Raw input/total tokens excluded (providers cache differently).</li>
+      <li><b>Wall time is contextual only</b> and omitted from rankings. <b>Kimi K3's 1,507 wall minutes are ~25 hours of unattended form-gate idle against 46.5 minutes of actual compute</b> &mdash; the same pattern as the three gpt-5.5 Codex runs (~40h) and the Fable overnight runs. Speed and value use active CLI minutes only.</li>
+      <li><b>Pipeline drift between rounds.</b> The step list is not frozen: the August runs execute 26 steps against the July-13/14 runs' 25, the added step being <code>13-onboarding-push</code> (skipped for both, as these repositories have no remote). Both August runs also skipped <code>09_3-qa-review</code>, <code>09_5b-skill-repair</code>, <code>09_6_4</code> and <code>09_6_5</code>. Cross-round deltas therefore mix model change with pipeline change and are reported per model line rather than pooled.</li>
+      <li><b>Calibration.</b> Dimension scores are evidence-calibrated 0.5-point judgments, not measurements; composite decimals come only from the published weights. The two August runs were scored against the previously published runs as fixed anchors &mdash; in particular the promotion-quality ladder and the treatment of naming echoes (a harness-named facet whose content is accurate caps detection rather than KB, matching how Sonnet-5 high and Codex-5.6 low were handled).</li>
+      <li><b>What is excluded.</b> Cancelled and failed onboarding tasks; the two <code>rs_test_gl</code>/<code>rs_test_gh</code> runs (content-identical source, excluded as duplicate Haiku-Low feature-test controls &mdash; see above); and the 23 June-round tasks whose repositories no longer exist on disk, which appear only as the unverifiable historical table in section 11.</li>
+    </ul>
+  </div>
+</details>
+
+<details class="method">
+  <summary>&#9656; Run provenance</summary>
+  <div class="tbl-scroll" style="margin-top:10px">
+    <table class="mini">
+      <thead><tr><th style="text-align:left">Run</th><th style="text-align:left">Round</th><th style="text-align:left">Task</th><th>Done</th><th>Skipped</th><th>CLI runs</th><th>Wall min</th></tr></thead>
+      <tbody id="provenanceBody"></tbody>
+    </table>
+  </div>
+  <p class="sub" style="font-size:12px;margin-top:8px">Wall min for the three gpt-5.5 Codex runs (~2394), the Fable low/med/high/max runs (~500&ndash;938) and Kimi K3 (~1507) is dominated by unattended form-gate idle, not compute; see caveats.</p>
+</details>
+
+<footer>
+  Generated 2026-08-03 for the Haive onboarding step-engine benchmark / Redaction System / self-contained, no runtime dependencies.
+  Prior editions: <a href="onboarding-llm-comparison-2026-07-14.html">14 July report</a> &middot; <a href="onboarding-llm-comparison-2026-07-10.html">10 July report</a> &middot; <a href="onboarding-llm-comparison.html">23 June report</a>.
+</footer>
+
+</div>
+
+<script>
+// ---------- family metadata ----------
+const FAM = {
+  "Kimi K3 (Ollama)":{hex:"#7ee787"},
+  "DeepSeek V4 Flash (Ollama)":{hex:"#ffa657"},
+  "Fable 5":{hex:"#ff8fd4"},
+  "Opus 4.8":{hex:"#b98cff"},
+  "Sonnet 5":{hex:"#3ddc97"},
+  "Sonnet 4.6":{hex:"#4aa8ff"},
+  "Codex 5.6":{hex:"#2dd4bf"},
+  "Codex 5.5":{hex:"#f5b14c"},
+  "GLM-5.2 (z.ai)":{hex:"#f2607a"},
+  "Haiku 4.5":{hex:"#8da0b3"},
+  "Sonnet 4 (Jul-10)":{hex:"#6ee7b7"},
+  "Codex o3 (Jul-10)":{hex:"#fbbf24"},
+  "Kimi K2.7 (Ollama)":{hex:"#a3e635"},
+  "GLM-5.2 (Ollama)":{hex:"#f472b6"},
+  "MiniMax M3 (Ollama)":{hex:"#94a3b8"},
+};
+// families that took part in the controlled July-13/14 effort sweep
+const SWEEP_FAMS = ["Fable 5","Opus 4.8","Sonnet 5","Sonnet 4.6","Codex 5.6","Codex 5.5","GLM-5.2 (z.ai)","Haiku 4.5"];
+const PERIOD_LABEL = {aug03:"Aug-03", jul14:"Jul-13/14", jul10:"Jul-10"};
+const EFFORT_ORDER = {default:-1,low:0,medium:1,high:2,xhigh:3,max:4,ultra:5};
+const EFF_ABBR = {default:"&mdash;",low:"L",medium:"M",high:"H",xhigh:"XH",max:"MX",ultra:"U"};
+
+const DATA = [
+
+  // Opus 4.8
+  {period:"jul14",id:"opus-low",fam:"Opus 4.8",model:"claude-opus-4-8",effort:"low",tier:"B",detect:8.0,kb:8.0,skills:8.0,agents:8.0,global:7.5,
+   cliMin:33.7,outTok:121027,invocations:26,retries:0,done:22,skipped:3,kbLocal:19,skillsN:4,agentsDisc:2,kbGlobal:4,wallMin:181.4,taskId:"364ee3cf-fef5-41a4-a87e-1b4162ac4e25",
+   pro:["encryptPW / Insert / Delete-OPTIMIZE all accurate; refuses to fabricate a rank API","FCKeditor content correctly flagged as stored-XSS","4 clean, project-clean global promotions"],
+   con:["Misses the Db::Update inverted-return landmine","Leakiest MariaDB-harness framing; shallowest coverage of its sweep"]},
+  {period:"jul14",id:"opus-medium",fam:"Opus 4.8",model:"claude-opus-4-8",effort:"medium",tier:"A",detect:8.5,kb:9.0,skills:8.5,agents:8.5,global:8.0,
+   cliMin:47.0,outTok:165151,invocations:27,retries:0,done:22,skipped:3,kbLocal:22,skillsN:5,agentsDisc:2,kbGlobal:4,wallMin:172.4,taskId:"ef5cb178-acb9-45ed-b874-f7700dd01b1c",
+   pro:["Catches the Db::Update inverted-return landmine twice (verified database.php:456-460)","Broadest accurate KB: both eval() sinks, reCAPTCHA-dead, CSRF/SECHASH nuance","Cleanly separates the harness MariaDB target from the real ext-mysql stack"],
+   con:["content-model skill loosely calls FCKeditor HTML 'sanitized' (contradicts its own anti-patterns)","6 broken links; a PHP7.3 cookie API slipped into a PHP-5 global ref"]},
+  {period:"jul14",id:"opus-high",fam:"Opus 4.8",model:"claude-opus-4-8",effort:"high",tier:"A",detect:9.0,kb:8.5,skills:8.5,agents:8.5,global:7.5,
+   cliMin:50.1,outTok:181677,invocations:26,retries:0,done:22,skipped:3,kbLocal:20,skillsN:5,agentsDisc:2,kbGlobal:3,wallMin:165.1,taskId:"fe40f2fa-aac5-4777-bada-c8c8abbd80e8",
+   pro:["Deepest bug-level edit-lock analysis (the exact semantics that reversed July-10 codex/glm/kimi)","Surfaces CheckFieldSize runtime ALTER TABLE; cleanest raw detection (no MariaDB leak)","Sharpest security: FCKeditor not sanitized, makeDBSafe not real parameterization"],
+   con:["Misses the Db::Update inverted-return landmine that medium caught — a gap for the top-effort run","8 broken links; global dips to 3 with 2 PHP7 slips in the promoted article"]},
+  // Sonnet 5
+  {period:"jul14",id:"sonnet5-low",fam:"Sonnet 5",model:"claude-sonnet-5",effort:"low",tier:"B",detect:8.0,kb:8.5,skills:8.5,agents:7.0,global:6.0,
+   cliMin:20.9,outTok:94120,invocations:21,retries:0,done:21,skipped:4,kbLocal:22,skillsN:3,agentsDisc:3,kbGlobal:0,wallMin:128.9,taskId:"28f71417-47c8-40aa-82c7-62c4efc0341b",
+   pro:["Stack correct; Jest fully debunked in KB; codename calypso cited correctly","Exact KB citations (makeDBSafe/RemoveHtml core_functions.php:42-54, encryptPW functions.php:988)"],
+   con:["Shipped a (neutered) jest-specialist agent — fell for the trap at the agent layer","mariadb-named KB echo; mysqli prepared-statement advice for a pure ext-mysql app"]},
+  {period:"jul14",id:"sonnet5-medium",fam:"Sonnet 5",model:"claude-sonnet-5",effort:"medium",tier:"A",detect:8.5,kb:9.0,skills:9.0,agents:8.5,global:6.0,
+   cliMin:26.4,outTok:109376,invocations:21,retries:0,done:21,skipped:4,kbLocal:27,skillsN:4,agentsDisc:2,kbGlobal:0,wallMin:98.5,taskId:"7c3e7ddb-f3eb-4b50-8a09-86af3632998a",
+   pro:["Sophisticated Jest debunk — identifies the installer env self-check (init.php:288) as the false signal","Real UploadFile RCE finding; forms-wizard contract fully verified (the one MiniMax got wrong in July-10)","Both discovered agents grounded in ext-mysql"],
+   con:["Calls the single-author app an 'open-source community project'","2 broken links; 0 global promotions (6.0 floor)"]},
+  {period:"jul14",id:"sonnet5-high",fam:"Sonnet 5",model:"claude-sonnet-5",effort:"high",tier:"A",detect:9.0,kb:9.0,skills:8.5,agents:9.0,global:8.5,
+   cliMin:40.5,outTok:184147,invocations:24,retries:0,done:22,skipped:3,kbLocal:23,skillsN:4,agentsDisc:3,kbGlobal:4,wallMin:93.4,taskId:"f8f774c1-6f87-40c5-bcef-b7e809eb07be",
+   pro:["Field-topping run: richest security KB, every landmine nailed (encryptPW, is_numeric-guarded eval, SECHASH not CSRF)","4 portable, project-clean, version-correct global promotions — zero PHP7 leakage","3 grounded agents incl a source-verified redsys-module-developer (not a Mods-class fabrication)"],
+   con:["Worst link hygiene of the field (~20, though 15 are redundant decision-tree shortcuts; 5 hard-broken)","2 mariadb-named local topics (minor naming echo)"]},
+  {period:"jul14",id:"sonnet5-max",fam:"Sonnet 5",model:"claude-sonnet-5",effort:"max",tier:"A",detect:9.0,kb:9.0,skills:8.0,agents:8.5,global:6.0,
+   cliMin:138.9,outTok:712290,invocations:26,retries:5,done:21,skipped:4,kbLocal:27,skillsN:4,agentsDisc:2,kbGlobal:0,wallMin:267.7,taskId:"765ee4bb-c8c4-431b-9742-c9f7526f4041",
+   pro:["Deepest all-verified security KB (3 real eval sites, deprecated /e preg_replace, yui2 dead code)","Best KB routing (php-mysql-ext, not a mariadb name); strongest Jest rejection in KB"],
+   con:["6.6x low's tokens (712K/139min/5 retries) did NOT buy quality — scores below high AND medium","5 /haive/workdir sandbox-path leaks (ship defect); 'jest' still lingers in AGENTS.md; 0 global"]},
+  // Sonnet 4.6
+  {period:"jul14",id:"sonnet46-low",fam:"Sonnet 4.6",model:"claude-sonnet-4-6",effort:"low",tier:"A",detect:9.0,kb:9.0,skills:8.5,agents:8.0,global:6.0,
+   cliMin:49.8,outTok:133986,invocations:24,retries:0,done:21,skipped:4,kbLocal:27,skillsN:7,agentsDisc:1,kbGlobal:0,wallMin:46.1,taskId:"7079dcab-4e42-424f-873e-cc40a4d71408",
+   pro:["Caught the Db::Update inverted-return landmine 3x (verified vs database.php:456/459)","Standout non-reversed edit-lock skill; cleanest DEPLOYMENT (no harness leak); 0 sandbox leaks","Broadest coverage of its sweep (27 KB files, 7 skills)"],
+   con:["Only 1 discovered agent (mysql) — half the subsystem breadth of its med/high/max","5 broken cross-skill links (worst hygiene of the sweep); some KB files are facet-scaffold padding"]},
+  {period:"jul14",id:"sonnet46-medium",fam:"Sonnet 4.6",model:"claude-sonnet-4-6",effort:"medium",tier:"B",detect:8.5,kb:8.0,skills:8.0,agents:8.5,global:6.0,
+   cliMin:65.6,outTok:171926,invocations:28,retries:0,done:22,skipped:3,kbLocal:16,skillsN:6,agentsDisc:2,kbGlobal:0,wallMin:166.4,taskId:"ef50eeb5-7cb3-40b4-a2da-e925c1632a09",
+   pro:["/e preg_replace framed as arbitrary-PHP-execution RCE (verified functions.php:368-373)","FCKeditor correctly non-sanitizing; deep, accurate rank-data-model (no fabricated rank/CSRF API)"],
+   con:["OMITS the Db::Update inverted-return landmine that low caught 3x","Dropped the edit-lock subsystem despite outspending low; a MariaDB-10.11 harness leak in DEPLOYMENT"]},
+  {period:"jul14",id:"sonnet46-high",fam:"Sonnet 4.6",model:"claude-sonnet-4-6",effort:"high",tier:"A",detect:9.0,kb:9.0,skills:8.5,agents:8.5,global:6.0,
+   cliMin:79.4,outTok:223181,invocations:25,retries:2,done:21,skipped:4,kbLocal:20,skillsN:6,agentsDisc:2,kbGlobal:0,wallMin:250.6,taskId:"3289df43-da0e-4632-a887-ca2b4d6f8ef8",
+   pro:["Caught the Db::Update inverted-return landmine (verified)","Cleanest DB handling of the sweep: a 'mysql' facet + the real 'MySQL 4.0+' requirement, DDEV kept in a labeled dev section","Deepest consolidated subsystem KB (standalone theme/module/alias/session docs, citations resolve)"],
+   con:["No dedicated edit-lock skill (the elocks subsystem is uncovered)","1 /haive/workdir leak; a phantom 'must pass CSRF/token check' comment"]},
+  {period:"jul14",id:"sonnet46-max",fam:"Sonnet 4.6",model:"claude-sonnet-4-6",effort:"max",tier:"B",detect:8.5,kb:8.0,skills:8.5,agents:8.5,global:6.0,
+   cliMin:129.7,outTok:343019,invocations:31,retries:7,done:21,skipped:4,kbLocal:16,skillsN:7,agentsDisc:2,kbGlobal:0,wallMin:240.4,taskId:"4a03b29b-2286-479e-ad51-81e158e06e06",
+   pro:["Deepest edit-lock coverage (int(11) timeout truncation + stale-lock bug, non-reversed)","Best FCKeditor doc + most complete API_REFERENCE; 0 broken links"],
+   con:["FALSE 'only eval() in the entire codebase' claim; misses the Update landmine the cheap low run caught","Worst DDEV/MariaDB harness leak of its sweep; 130min/343K/7 retries bought polish, not correctness"]},
+  // Codex gpt-5.5
+  {period:"jul14",id:"codex-low",fam:"Codex 5.5",model:"gpt-5.5",effort:"low",tier:"B",detect:8.5,kb:8.0,skills:8.5,agents:9.0,global:6.0,
+   cliMin:25.5,outTok:56657,invocations:21,retries:1,done:21,skipped:4,kbLocal:20,skillsN:3,agentsDisc:4,kbGlobal:0,wallMin:2393.8,taskId:"1238f0ce-d1a2-4dab-a421-a43d809b0b94",
+   pro:["Debunks Jest (no specialist created); 0 broken links","4 grounded discovered agents (mysql / legacy-php / legacy-js-ajax / fckeditor)","Edit-lock accurate — fixes July-10 Codex's misread"],
+   con:["Misses the Db::Update inverted-return landmine","Shallowest KB of its sweep (20 files)"]},
+  {period:"jul14",id:"codex-medium",fam:"Codex 5.5",model:"gpt-5.5",effort:"medium",tier:"A",detect:8.5,kb:8.5,skills:8.5,agents:9.0,global:6.0,
+   cliMin:37.5,outTok:90638,invocations:21,retries:0,done:21,skipped:4,kbLocal:27,skillsN:4,agentsDisc:5,kbGlobal:0,wallMin:2395.1,taskId:"4ee3df55-8ded-420b-ac29-666d2612be8a",
+   pro:["Correctly flags the Db::Update inverted-return landmine with the right Insert contrast","Deepest local KB (27 files); every spot-checked citation resolves","5 grounded agents incl a legacy-php-mail specialist"],
+   con:["1 broken KB-as-skill cross-reference","Mild MariaDB-into-testing-guidance leak"]},
+  {period:"jul14",id:"codex-high",fam:"Codex 5.5",model:"gpt-5.5",effort:"high",tier:"A",detect:9.0,kb:9.0,skills:8.5,agents:9.0,global:6.0,
+   cliMin:34.9,outTok:83046,invocations:20,retries:0,done:21,skipped:4,kbLocal:28,skillsN:3,agentsDisc:4,kbGlobal:0,wallMin:2396.1,taskId:"6d04cdfa-c27a-471e-8bd1-8d209cd61050",
+   pro:["Documents all 5 real Db signatures with 100% verified accuracy — fixes July-10 Codex's invented signatures","Best Jest debunk (names the yui/fck test assets, extracts the 2008 build date)","4 grounded agents, no fabricated tech or classes"],
+   con:["2 broken KB-as-skill cross-references","0 global promotions (6.0 floor)"]},
+  // GLM-5.2 (z.ai)
+  {period:"jul14",id:"glm-low",fam:"GLM-5.2 (z.ai)",model:"glm-5.2",effort:"low",tier:"B",detect:8.5,kb:8.5,skills:8.0,agents:7.5,global:6.0,
+   cliMin:55.6,outTok:142139,invocations:25,retries:2,done:21,skipped:4,kbLocal:22,skillsN:5,agentsDisc:2,kbGlobal:0,wallMin:70.1,taskId:"3421700b-ab54-43f8-9db4-cb81ee21d088",
+   pro:["Correct PHP4/5 + ext-mysql + all-MyISAM detection; Jest debunked","Precise KB citations; Db API kept as member vars, not methods"],
+   con:["Fabricates a 'CSRF token required for action dispatch' skill contract (RS has none)","encryptPW salt transcription error; only 2 discovered agents"]},
+  {period:"jul14",id:"glm-medium",fam:"GLM-5.2 (z.ai)",model:"glm-5.2",effort:"medium",tier:"B",detect:8.5,kb:8.5,skills:8.0,agents:8.0,global:6.0,
+   cliMin:46.3,outTok:100087,invocations:23,retries:1,done:21,skipped:4,kbLocal:24,skillsN:5,agentsDisc:3,kbGlobal:0,wallMin:78.2,taskId:"23b9fe59-7e04-40f8-b393-99025eb9d8e6",
+   pro:["Deepest edit-lock coverage (elocks vs the mailform flood-lock, both verified)","3 grounded agents incl a php-legacy-specialist with no anachronism"],
+   con:["A softened edit-lock prose reversal; a '10.11' harness echo in the KB","Misses the Db::Update inverted-return landmine"]},
+  {period:"jul14",id:"glm-high",fam:"GLM-5.2 (z.ai)",model:"glm-5.2",effort:"high",tier:"A",detect:9.0,kb:9.0,skills:8.5,agents:9.0,global:6.0,
+   cliMin:83.3,outTok:295984,invocations:24,retries:1,done:21,skipped:4,kbLocal:25,skillsN:6,agentsDisc:7,kbGlobal:0,wallMin:95.9,taskId:"effdd771-beab-43aa-87c6-d78a255a25de",
+   pro:["Deepest, most-precise KB of its sweep — all 3 eval() sinks, the /e patterns, editAccess signature exact","Best discovered-agent set of the field: 7 grounded, incl a correctly non-anachronistic php-modernization-specialist"],
+   con:[".live() cited as a jQuery-1.2 API (it is 1.3+); a /e-pattern undercount","0 global promotions (6.0 floor)"]},
+  // Haiku 4.5
+  {period:"jul14",id:"haiku-low",fam:"Haiku 4.5",model:"claude-haiku-4-5",effort:"low",tier:"C",detect:6.0,kb:6.5,skills:6.0,agents:5.5,global:6.0,
+   cliMin:32.4,outTok:136077,invocations:21,retries:0,done:21,skipped:4,kbLocal:21,skillsN:4,agentsDisc:1,kbGlobal:0,wallMin:197.8,taskId:"39fc93f8-9abd-4b87-9bbd-90696ae297bc",
+   pro:["Exact Db method line-range citations; CheckFieldSize VARCHAR->TEXT auto-expansion correct","SECHASH correctly labeled IP/UA session token, not CSRF"],
+   con:["REVERSES the Db::Update return (claims true-on-success); source returns true on failure","Fabricates makeDBSafe escaping the Db class never does; invents schema entity names; 10 broken links"]},
+  {period:"jul14",id:"haiku-medium",fam:"Haiku 4.5",model:"claude-haiku-4-5",effort:"medium",tier:"C",detect:6.5,kb:7.5,skills:7.0,agents:6.0,global:6.0,
+   cliMin:34.8,outTok:149351,invocations:21,retries:0,done:21,skipped:4,kbLocal:18,skillsN:4,agentsDisc:1,kbGlobal:0,wallMin:124.7,taskId:"6024677a-2f98-43bd-ba5f-be63c4b89d86",
+   pro:["Most accurate DB reference of its sweep (correctly: the Db class does NOT escape input)","Module system fully verified; 0 broken links (cleanest hygiene)"],
+   con:["Anachronistic mysqli/PDO advice (migration-framed)","Narrow domain; no explicit stack-level detection"]},
+  {period:"jul14",id:"haiku-high",fam:"Haiku 4.5",model:"claude-haiku-4-5",effort:"high",tier:"C",detect:7.5,kb:7.0,skills:6.5,agents:6.5,global:6.0,
+   cliMin:30.8,outTok:125749,invocations:20,retries:0,done:21,skipped:4,kbLocal:16,skillsN:3,agentsDisc:2,kbGlobal:0,wallMin:121.5,taskId:"e2d8a48f-7a9b-4369-9c9d-19935ee5b825",
+   pro:["Cleanly debunks the Jest trap by name (no config/CI/PHPUnit found)","fckeditor-specialist well-grounded (real plugins & paths); encryptPW correct"],
+   con:["mysql-specialist wrongly calls mysqli the 'existing codebase style' (app is ext-mysql)","8 broken skill links; fewest KB files (16)"]},
+  {period:"jul14",id:"haiku-max",fam:"Haiku 4.5",model:"claude-haiku-4-5",effort:"max",tier:"C",detect:6.0,kb:7.5,skills:7.0,agents:5.0,global:6.0,
+   cliMin:35.9,outTok:136248,invocations:22,retries:4,done:21,skipped:4,kbLocal:19,skillsN:3,agentsDisc:2,kbGlobal:0,wallMin:117.9,taskId:"d3f74b8b-3863-4967-9efe-395f8ffe70f9",
+   pro:["Strongest security KB (FCKeditor not-sanitized, caption-vs-txt distinction); broadest edit-lock coverage"],
+   con:["FELL FOR THE JEST TRAP at max: fabricated a jest-specialist while its own KB debunks Jest","Invents table 'rs2_editlock' (real is elocks); overstates CSRF; MariaDB harness bleed"]},
+  // Fable 5 (July-14 wave)
+  {period:"jul14",id:"fable-low",fam:"Fable 5",model:"claude-fable-5",effort:"low",tier:"A",detect:8.5,kb:9.0,skills:8.5,agents:8.5,global:6.0,
+   cliMin:32.8,outTok:122044,invocations:21,retries:0,done:21,skipped:4,kbLocal:23,skillsN:4,agentsDisc:3,kbGlobal:0,wallMin:506.2,taskId:"131f491b-f3af-4451-8f25-f38b264554c1",
+   pro:["Catches the Db::Update inverted-return landmine at the LOWEST tier ('true on ERROR, false on success' — verified database.php:456/459)","encryptPW documented to its actual default parameter ('salted_sardine', functions.php:988) — byte-exact","CheckFieldSize runtime-ALTER side effect found at low — a catch otherwise exclusive to the Opus-high anchor; 0 broken links; clean Jest debunk"],
+   con:["Edit-lock coverage stays CRUD-level — checkCPageLock()'s timeout comparison never described","One 'MySQL/MariaDB' title conflation in a KB index (elsewhere correctly scoped to the DDEV sandbox)"]},
+  {period:"jul14",id:"fable-medium",fam:"Fable 5",model:"claude-fable-5",effort:"medium",tier:"A",detect:9.0,kb:9.0,skills:9.0,agents:8.5,global:6.0,
+   cliMin:37.4,outTok:132180,invocations:20,retries:0,done:21,skipped:4,kbLocal:22,skillsN:3,agentsDisc:3,kbGlobal:0,wallMin:502.6,taskId:"613f12ad-7029-449e-84b3-192daba9dfdf",
+   pro:["Documents checkCPageLock() exactly — incl. the non-obvious 'foreign-lock SELECT has no timeout filter, so an expired foreign lock still blocks editing' (thememanager_admin.php:843-845)","Finds a THIRD /e preg_replace site beyond the dossier's two (html_entity_decode_utf8, core_functions.php:76-77) — novel and verified","Cleanest CSRF framing of its sweep ('No CSRF tokens on any action'); dual-salt encryptPW verified against every caller; 0 broken links, 0 leaks"],
+   con:["Narrowest breadth of the sweep (3 skills, 22 KB files) — pluggable modules and DB backup/restore get no dedicated coverage","0 global promotions (6.0 floor)"]},
+  {period:"jul14",id:"fable-high",fam:"Fable 5",model:"claude-fable-5",effort:"high",tier:"B",detect:8.5,kb:8.0,skills:8.0,agents:8.5,global:7.0,
+   cliMin:51.4,outTok:191439,invocations:25,retries:0,done:22,skipped:3,kbLocal:23,skillsN:4,agentsDisc:3,kbGlobal:3,wallMin:499.0,taskId:"4a6a34ad-3fc3-42ec-8b51-cc724b73c3a0",
+   pro:["Uniquely traces the Jest false-positive to its root cause — the vendored FCKeditor spellchecker/test files under dashboard/editor/ (verified real)","SECHASH nuance bridges the app's own mislabel: cites $lang->csfr_attack (langs/en.php:454) while correctly framing what it actually is","2 of 3 global promotions clean, portable and PHP-version-correct; version-gate citations byte-exact (database.php:87)"],
+   con:["MISSES the Db::Update landmine everywhere — while its own sweep's low and medium caught it","elocks nearly uncovered (zero checkCPageLock mentions) — the exact depth its sibling medium delivered","3rd global promotion mixes project-specific security bycatch into a 'generic' mysql_* article — a routing defect","Two MariaDB-as-app-stack prose slips ('runtime target is Apache + PHP + MariaDB'; 'test data lives in the live MariaDB schema') cap detection"]},
+  {period:"jul14",id:"fable-xhigh",fam:"Fable 5",model:"claude-fable-5",effort:"xhigh",tier:"B",detect:9.0,kb:8.0,skills:7.5,agents:8.5,global:6.0,
+   cliMin:82.0,outTok:324640,invocations:24,retries:1,done:21,skipped:4,kbLocal:24,skillsN:5,agentsDisc:3,kbGlobal:0,wallMin:154.7,taskId:"1512e267-65e0-4154-90bd-34e6e2f44930",
+   pro:["Independently converges on the same Jest root cause as high (the FCKeditor DTD test page) — cross-validating the trap's source","Largest corpus of its sweep (24 KB files, 5 skills); Db internals byte-exact (charset gating database.php:87, getNextID race)","loadAliases() key-collision behavior correctly flagged 'accepted behavior, do not redesign'"],
+   con:["4 literal /haive/workdir sandbox-path leaks in the url-alias-routing skill — the Sonnet-5-max regression pattern, arriving one tier earlier","Misses BOTH the Update landmine and checkCPageLock semantics (like high); encryptPW default-salt nuance lost","82 min / 325K tokens bought a hygiene regression; 1 broken link"]},
+  {period:"jul14",id:"fable-max",fam:"Fable 5",model:"claude-fable-5",effort:"max",tier:"A",detect:9.0,kb:8.5,skills:8.5,agents:9.0,global:6.0,
+   cliMin:270.2,outTok:446895,invocations:28,retries:8,done:21,skipped:4,kbLocal:21,skillsN:4,agentsDisc:3,kbGlobal:0,wallMin:938.0,taskId:"0b537266-a93b-4fbb-ba18-34bc2fb9c5fa",
+   pro:["Best CSRF/SECHASH treatment of its sweep: a dedicated sub-skill ('there is none; do not claim token protection exists') plus an operational csfr_attack runbook — every citation verified exact","Uniquely flags that the deployed init.php is installer-GENERATED, so init.php:N citations resolve to installer/init.php — a provenance subtlety no other run noticed","mysql-specialist bakes the Update() inverted return into mandatory agent verification steps; 0 broken links, 0 leaks despite 270 min / 8 retries"],
+   con:["The Update() inversion lives ONLY in agent instructions — API_REFERENCE lists Update()'s signature with zero mention of return polarity","Smallest KB of its sweep (21 files) despite by far the most compute — 8 retries bought narrower scope, not deeper coverage","DEPLOYMENT leads with 'target stack is DDEV with mariadb 10.11, apache' before pivoting to the real stack"]},
+  // xhigh backfills (July-14 wave)
+  {period:"jul14",id:"opus-xhigh",fam:"Opus 4.8",model:"claude-opus-4-8",effort:"xhigh",tier:"B",detect:8.0,kb:8.5,skills:8.0,agents:8.5,global:7.0,
+   cliMin:74.6,outTok:283459,invocations:28,retries:7,done:21,skipped:4,kbLocal:23,skillsN:6,agentsDisc:3,kbGlobal:1,wallMin:128.8,taskId:"0acb3c0d-ac2b-4d91-acad-217ccbaea2c8",
+   pro:["Catches the Db::Update inversion (like medium, unlike high/low) — verified in API_REFERENCE + ANTI_PATTERNS","Family's sharpest encryptPW finding: member logins hit the literal default salt 'salted_sardine' (loginfrm.php:70) while admin login salts with username (thememanager.php:123)","1 clean global promotion (portable, project-free, version-correct); both eval landmines correct; clean Jest debunk"],
+   con:["Harness bleed regresses to low's level: 'PHP 5 + MariaDB 10 + Apache… a HARD constraint' (DEPLOYMENT.md:13)","SECHASH mislabeled CSRF in a SECURITY_STANDARDS heading without the not-real-CSRF caveat","Family-worst 9 broken links; 7 retries; extends Opus's post-medium slide (8.55 → 8.45 → 8.05)"]},
+  {period:"jul14",id:"sonnet5-xhigh",fam:"Sonnet 5",model:"claude-sonnet-5",effort:"xhigh",tier:"A",detect:9.0,kb:9.0,skills:8.5,agents:9.0,global:6.0,
+   cliMin:64.5,outTok:297910,invocations:24,retries:6,done:21,skipped:4,kbLocal:25,skillsN:5,agentsDisc:3,kbGlobal:0,wallMin:129.3,taskId:"33921ab3-4d06-415f-9c89-76d577def2c3",
+   pro:["Every spot-checked citation exact (8+): SECHASH store/compare incl BYPASS_SECURITY, dual-salt encryptPW, is_numeric-guarded captcha eval","Strong Jest catch — names the injected project-metadata signal as false and supplies verification commands; no jest agent","FIXES max's regressions: 0 sandbox leaks (max had 5), 2 broken links (high had ~20), under half max's tokens; module-engine agent citation-verified"],
+   con:["0 global promotions — the ENTIRE gap to high's 8.80 (high promoted 4 clean articles)","Family's Update-landmine neutrality persists (documents Db across 4 files, never states return polarity)","elocks essentially uncovered; a 'CSRF/session-fixation' section heading (body scopes it correctly)"]},
+  {period:"jul14",id:"sonnet46-xhigh",fam:"Sonnet 4.6",model:"claude-sonnet-4-6",effort:"xhigh",tier:"B",detect:8.5,kb:8.0,skills:8.5,agents:8.0,global:7.0,
+   cliMin:86.4,outTok:244085,invocations:25,retries:1,done:21,skipped:4,kbLocal:18,skillsN:6,agentsDisc:1,kbGlobal:1,wallMin:133.3,taskId:"a2e1fd41-7566-45b8-aa80-f62f308cb099",
+   pro:["FIRST-EVER Sonnet-4.6 global promotion — and it's clean: portable, project-free, version-correct, abstracted from real verified app defects","Standout edit-locking skill, byte-verified: reproduces the asymmetric-freshness bug (own FRESH locks purged; other-user locks checked with NO freshness filter)","Bonus catch: a second real /e preg_replace site (admin_remove_cpage.php:81) beyond the canonical one"],
+   con:["MISSES the Db::Update inversion (joins med/max; low caught it 3x) and the math-captcha eval()","MariaDB harness bleed in the med/max band ('MariaDB 10 (tested)' unlabeled, a 'mariadb10' facet — high used a clean 'mysql' facet); a 'CSRF Prevention' section heading","Agent breadth regression: 1 discovered agent — FCKeditor unstaffed despite its own KB documenting FCKeditor bugs; 3 broken links"]},
+  {period:"jul14",id:"haiku-xhigh",fam:"Haiku 4.5",model:"claude-haiku-4-5",effort:"xhigh",tier:"C",detect:6.0,kb:6.5,skills:6.5,agents:5.5,global:6.0,
+   cliMin:29.6,outTok:133664,invocations:21,retries:1,done:21,skipped:4,kbLocal:15,skillsN:3,agentsDisc:1,kbGlobal:0,wallMin:110.4,taskId:"b967012d-ba5c-49ea-8e90-403c4fc74db7",
+   pro:["Only Haiku run fully clean of MariaDB/DDEV harness bleed; no fabricated jest agent (avoids max's headline failure)","encryptPW default-salt path correctly scoped and verified; covered ground genuinely cited (GetPHPVariables pipeline, CheckFieldSize, ModManager)"],
+   con:["NO Jest debunk at all — no TESTING_STANDARDS.md (a family first), so the injected 'Test frameworks: jest' stands uncorrected","Concretizes the makeDBSafe fabrication into a nonexistent $db->makeDBSafe() method 'used internally' by Insert/Update","Zero elocks coverage (documents the off-by-default lockTables mechanism instead); 13 broken links — new family worst; both eval landmines missed"]},
+  // Codex 5.6 / gpt-5.6-sol (July-14 wave)
+  {period:"jul14",id:"codex56-low",fam:"Codex 5.6",model:"gpt-5.6-sol",effort:"low",tier:"A",detect:9.0,kb:9.0,skills:9.0,agents:8.5,global:6.0,
+   cliMin:67.5,outTok:173680,invocations:32,retries:0,done:21,skipped:4,kbLocal:20,skillsN:15,agentsDisc:3,kbGlobal:0,wallMin:127.6,taskId:"3394da97-579e-43a2-b119-006b49438847",
+   pro:["Catches the Db::Update inversion byte-exact — which gpt-5.5 low missed; evidenced Jest debunk incl. the installer redsys_test probe reclassified","Sharp dual-salt auth finding: admin username-salted vs visitor default-salt encryptPW, both call sites verified","15-skill set verified as genuine non-overlapping breadth; 0 of 317 links broken — perfect integrity at the sweep's largest file volume"],
+   con:["Local KB taxonomy named 'mariadb10-*' after the harness-confirmed value (content itself accurate)","2× medium's tokens for a 'low' label — poor tier efficiency; 3 agents vs gpt-5.5 low's 4"]},
+  {period:"jul14",id:"codex56-medium",fam:"Codex 5.6",model:"gpt-5.6-sol",effort:"medium",tier:"A",detect:8.5,kb:8.5,skills:8.5,agents:9.0,global:6.0,
+   cliMin:35.0,outTok:85001,invocations:21,retries:0,done:21,skipped:4,kbLocal:20,skillsN:4,agentsDisc:3,kbGlobal:0,wallMin:66.5,taskId:"a3941779-3558-4e93-b9d4-26cb220c29ed",
+   pro:["Update inversion flagged byte-exact with the Insert/Delete contrast","Genuinely novel verified find: admin_remove_tab.php cleanup silently orphans cross-tab fixed rows keyed by the deleted tab's m_main","Most efficient run of its sweep: 35 min / 85K tokens (below even low) while staying dense and verified"],
+   con:["4 broken cross-skill links (worse than gpt-5.5 medium's 1)","No dedicated edit-lock skill; Db signatures shown as usage examples rather than full parameter lists"]},
+  {period:"jul14",id:"codex56-high",fam:"Codex 5.6",model:"gpt-5.6-sol",effort:"high",tier:"A",detect:7.5,kb:8.5,skills:9.0,agents:8.5,global:8.0,
+   cliMin:52.7,outTok:130684,invocations:28,retries:0,done:22,skipped:3,kbLocal:14,skillsN:4,agentsDisc:3,kbGlobal:6,wallMin:128.0,taskId:"ed640e25-d8f7-4419-9e1a-0bde25243ea4",
+   pro:["HISTORIC: first Codex-family global promotion ever — 6 entries; the 3 'PHP 5' articles are pristine (password_hash correctly gated 'PHP 5.5+', crypt() fallback) — cleaner version-discipline than both July-10 global anchors","Skills are bug-level: kword2element rows never decremented, content_default never repaired, %5B-encoded markers bypassing removal — real latent defects at exact lines","0 broken links; coherent routing — a tight 14-file local KB while the portable knowledge went global"],
+   con:["AGENTS.md:13 ships 'Test frameworks: jest' — verified trap propagation into the primary onboarding artifact, contradicting its own thorough TESTING_STANDARDS debunk","3 of 6 promotions brand portable content 'MariaDB 10' — the harness value baked into cross-project KB","Smallest local KB of its sweep; captcha eval and /e sites only generically pinned"]},
+  {period:"jul14",id:"codex56-xhigh",fam:"Codex 5.6",model:"gpt-5.6-sol",effort:"xhigh",tier:"A",detect:8.5,kb:8.5,skills:9.0,agents:9.0,global:6.0,
+   cliMin:63.8,outTok:163091,invocations:21,retries:0,done:21,skipped:4,kbLocal:20,skillsN:4,agentsDisc:3,kbGlobal:0,wallMin:120.2,taskId:"06c01f84-0863-4e46-b1ee-147787c0e445",
+   pro:["Edit-lock lifecycle byte-perfect vs checkCPageLock — incl. the own-row 'timeout > cutoff' asymmetry most runs miss","Best agent-embedded Jest debunk in the benchmark: names the false signal as Polish/Slovenian 'jest' translation strings in bundled FCKeditor language files","Update inversion in 2 KB files AND encoded as a DO-NOT in the mysql-specialist; link2 marker order correct; 0 of 124 links broken"],
+   con:["'20 UTF-8 MyISAM tables' claim — the actual count is 23 (verified)","'mariadb-10' category naming repeated across 4 local KB facets for version-agnostic content"]},
+  {period:"jul14",id:"codex56-max",fam:"Codex 5.6",model:"gpt-5.6-sol",effort:"max",tier:"A",detect:9.0,kb:9.0,skills:9.0,agents:9.0,global:6.0,
+   cliMin:147.2,outTok:366656,invocations:22,retries:0,done:21,skipped:4,kbLocal:32,skillsN:5,agentsDisc:4,kbGlobal:0,wallMin:154.0,taskId:"c03f37a2-d4af-4528-91c7-360f38512f90",
+   pro:["BREAKS the 'max never wins' pattern: sweep peak with the largest artifact set (32 KB + 26 skill files), every audited claim byte-exact, 0 of 163 links broken, zero leaks/jest/fabrications","Novel verified security finds: state-changing GET mutations (admin_remove_menu.php, the GET edit-lock heartbeat) + the RSID/fckconfig.js lockstep contract","4th grounded discovered agent unique to its sweep (yui2-specialist, re-debunks Jest inside the agent); installer dual-salt encryptPW nuance byte-exact"],
+   con:["Worst cost-efficiency of its sweep: 147 min / 367K tokens — 2.8× high's budget for an incremental gain","0 global promotions despite 32 clearly-portable local files — its own sibling (high) proved the family can promote","An 'apache' KB facet grounded only in the harness-confirmed webserver value"]},
+  {period:"jul14",id:"codex56-ultra",fam:"Codex 5.6",model:"gpt-5.6-sol",effort:"ultra",tier:"A",detect:8.5,kb:9.0,skills:8.5,agents:8.5,global:6.0,
+   cliMin:87.6,outTok:223624,invocations:21,retries:0,done:21,skipped:4,kbLocal:24,skillsN:4,agentsDisc:3,kbGlobal:0,wallMin:150.4,taskId:"43cb5c5d-fd7f-4788-ba87-e623759d5b9b",
+   pro:["Best-in-sweep citation precision: 14 of 14 spot-checks exact, incl. three separate /e preg_replace call sites across files","Update inversion in 4 files with the Insert contrast; most sophisticated skill format sampled (runnable verification commands, edge-case sections)","No max-style churn at the top tier: no redundancy or contradictions, zero leaks"],
+   con:["Prescribes an 'isolated MariaDB 10 schema' for test fixtures — the harness value authored into testing guidance (its max sibling avoided this)","3 broken folder-name links; 0 promotions; narrower agent set (3) than max (4)"]},
+  // ---- July-10 round (6 runs), carried forward as full rows: byte-identical source, published five-dimension scores ----
+  {period:"jul10",id:"jul10-sonnet4",fam:"Sonnet 4 (Jul-10)",model:"claude-sonnet-4",effort:"max",tier:"A",detect:9.0,kb:9.0,skills:9.0,agents:8.5,global:8.0,
+   cliMin:84.5,outTok:362755,invocations:26,retries:0,done:22,skipped:3,kbLocal:23,skillsN:4,agentsDisc:3,kbGlobal:4,wallMin:101.2,taskId:"d7aa3b3b-c875-4553-9139-002548b1db1a",
+   pro:["The July-10 field winner and the only run that round at 9.0 across detection, KB and skills","Deep repo-specific coverage of the 23-table MyISAM schema, forms, ACL cascade, sessions, aliases, modules, FCKeditor and dead reCAPTCHA","Caught real defects: undefined mpart, runtime schema mutation, OPTIMIZE-after-delete, multipart gap handling","Four portable, project-clean global articles with valid supersession lineage"],
+   con:["Highest cost of its round: 84.5 CLI min and 362.8K output tokens","Repeats the wrong [*link2:*] marker order and several incorrect skill contracts","Global PHP 5 quick reference uses a PHP 7.3 cookie API; MySQL advice has FK-index and MyISAM-backup errors"]},
+  {period:"jul10",id:"jul10-codex-o3",fam:"Codex o3 (Jul-10)",model:"o3",effort:"xhigh",tier:"A",detect:9.0,kb:8.5,skills:9.0,agents:9.5,global:6.0,
+   cliMin:60.9,outTok:147097,invocations:21,retries:1,done:21,skipped:4,kbLocal:24,skillsN:3,agentsDisc:4,kbGlobal:0,wallMin:98.7,taskId:"c7fe3765-ff6a-408a-af57-32c35ac0fe94",
+   pro:["Best discovered-agent set of its round: MySQL, FCKeditor, legacy PHP and legacy JavaScript, all grounded in real code","Clean detection: PHP <=5.6, docroot, no framework/build/tests, and explicitly rejects a Jest specialist","All cited paths and line ranges resolve; skills catch the inverted Db::Update() result, alias clearing and undefined mpart"],
+   con:["Six invented API signatures across the KB quick references","Misreads the edit-lock timeout bug; one skill SQL example omits quotes around the language value","Three broken links; no reusable PHP/MySQL knowledge promoted globally"]},
+  {period:"jul10",id:"jul10-kimi27",fam:"Kimi K2.7 (Ollama)",model:"kimi-k2.7-code:cloud",effort:"default",tier:"A",detect:8.5,kb:8.5,skills:8.5,agents:7.5,global:8.0,
+   cliMin:57.0,outTok:187108,invocations:29,retries:1,done:22,skipped:3,kbLocal:16,skillsN:6,agentsDisc:1,kbGlobal:5,wallMin:119.4,taskId:"77a7d868-62da-4efb-a6d2-ebb8ea6887d4",
+   pro:["Lean KB with 102 valid line anchors and strong legacy-architecture coverage","Five project-clean global promotions; four correctly merged existing topics and one was novel","Skills expose real bugs in tab moves, defaults, multipart deletion, activation and editAccess()"],
+   con:["Global PHP 5 advice includes PHP 7/7.3-only APIs and Argon2; MariaDB FK-index guidance is wrong","Nine /haive/workdir paths leak into one skill, plus four broken links","Local KB undercovers edit locks, history/SEO, multilingual behaviour and FCKeditor"]},
+  {period:"jul10",id:"jul10-glm-ollama",fam:"GLM-5.2 (Ollama)",model:"glm-5.2:cloud",effort:"default",tier:"A",detect:8.5,kb:8.5,skills:9.0,agents:8.5,global:6.0,
+   cliMin:31.8,outTok:144287,invocations:23,retries:0,done:21,skipped:4,kbLocal:29,skillsN:5,agentsDisc:4,kbGlobal:0,wallMin:93.6,taskId:"72ca3363-6f5c-4d37-92f0-ed50f0f90cd2",
+   pro:["Best value of the July-10 round by a wide margin: 8.25 composite in 31.8 active minutes","Deep skills across hierarchy, forms, mail/logging, ranks, themes and aliases","Four sensible discovered agents: MySQL, FCKeditor, legacy PHP and themes"],
+   con:["No global promotions despite 29 local KB files","Detection leaves webserver/docroot unresolved and leaks the harness DDEV/MariaDB values into testing guidance","Theme agent invents helpers/cached files; several claims reverse real bootstrap, prefix and form-save behaviour"]},
+  {period:"jul10",id:"jul10-glm-zai",fam:"GLM-5.2 (z.ai)",model:"glm-5.2[1m]",effort:"max",tier:"B",detect:8.0,kb:8.0,skills:8.5,agents:7.5,global:6.0,
+   cliMin:86.3,outTok:214493,invocations:23,retries:0,done:21,skipped:4,kbLocal:21,skillsN:6,agentsDisc:4,kbGlobal:0,wallMin:114.0,taskId:"75390f27-0fb0-4623-a44e-6d02a115bb83",
+   pro:["Very deep skills find dead ConvertStats, broken History wiring, undefined mpart and keyword SQL risk","Correct no-framework/no-tests result with no Jest contamination","Strong exact detail on ext/mysql, FCKeditor/YUI, form tables, aliases and content rendering"],
+   con:["Slowest run of its round at 86.3 active minutes","Edit-lock guidance reverses the actual timeout bug; alias and rank guidance also reverse persisted behaviour","Hallucinated Mods agent/settings storage; KB dangerously claims FCKeditor already sanitizes HTML","Four broken links and zero global promotions"]},
+  {period:"jul10",id:"jul10-minimax",fam:"MiniMax M3 (Ollama)",model:"minimax-m3:cloud",effort:"default",tier:"B",detect:9.0,kb:8.0,skills:7.0,agents:6.5,global:6.0,
+   cliMin:79.6,outTok:196164,invocations:27,retries:0,done:21,skipped:4,kbLocal:24,skillsN:9,agentsDisc:2,kbGlobal:0,wallMin:117.2,taskId:"03bd74bd-3cb7-44ed-bfa2-1e276bd19d06",
+   pro:["Best raw detection completeness of its round and exceptional subsystem breadth","KB line anchors resolve and cover aliases, locks, forms, modules, history, multilingual behaviour and legacy security","Seven of nine skill families are deep and useful"],
+   con:["Fabricates an entire rank/CSRF API family: nonexistent functions, constants, fields and hidden tokens","Mislabels the IP/UA session fingerprint as CSRF protection and falsely claims Db::Insert() sanitizes textarea content","19 broken links, four sandbox-path leaks and no global promotion"]},
+  // ---- August-03 round (2 runs): Ollama Cloud model refreshes, audited fresh with the same dossier ----
+  {period:"aug03",id:"kimi-k3",fam:"Kimi K3 (Ollama)",model:"kimi-k3:cloud",effort:"default",tier:"B",detect:8.5,kb:8.5,skills:8.5,agents:8.0,global:6.0,
+   cliMin:46.5,outTok:122696,invocations:23,retries:1,done:21,skipped:5,kbLocal:25,skillsN:4,agentsDisc:3,kbGlobal:0,wallMin:1506.7,taskId:"d954b50f-9bb6-4497-a978-133f448ad90f",
+   pro:["Best edit-lock analysis in the entire 44-run field: names BOTH halves of the asymmetry — checkCPageLock's own-row Delete uses timeout &gt; $time_delete (thememanager_admin.php:844) while the contention SELECT at :845 carries no timeout filter at all, so an ancient foreign lock blocks editing indefinitely","715 file:line citations, 100% of them resolving to a real file and an in-range line; spot-checks byte-exact (updateKeywords returns false BEFORE the DELETE at functions.php:961; the four SET character_set_* queries gated on MySQL &gt;= 4.1.1; upload chmod 0200/0644 at functions.php:1151/1155)","Sharpest harness/app separation of the pair: files DDEV + MariaDB 10.11 under an explicit 'Local Dev Environment' heading, then infers the real constraint — the PHP runtime must be pinned to a build still shipping the mysql extension (PHP &lt;= 5.6), it cannot run on PHP 7+ as-is","Counts 23 tables correctly with the utf8/utf8_bin collation detail; 0 sandbox-path leaks; SECHASH correctly decoded to md5(HTTP_USER_AGENT.REMOTE_ADDR) at installer/init.php:143"],
+   con:["Misses the Db::Update inverted return — API_REFERENCE details the dataset/quoting/CheckFieldSize behaviour but never states return polarity; database.php:456/459 is never cited","Harness value baked into the KB taxonomy: an entire mariadb facet family (TECH_PATTERNS + ANTI_PATTERNS + BEST_PRACTICES + QUICK_REFERENCE), though the content under it is accurate","mariadb-best-practices prescribes InnoDB transactions over LOCK TABLES for an all-MyISAM app and frames utf8mb4 migration for MariaDB 10.x — modern-DB guidance mistargeted at a PHP&lt;=5.6 ext-mysql codebase","Narrowest artifact set of the pair (4 skills / 25 KB files); 5 of 109 links broken, four of them the sub-skill nav block of a single SKILL.md"]},
+  {period:"aug03",id:"deepseek-v4-flash",fam:"DeepSeek V4 Flash (Ollama)",model:"deepseek-v4-flash:cloud",effort:"default",tier:"B",detect:8.0,kb:8.5,skills:8.0,agents:8.0,global:6.0,
+   cliMin:27.1,outTok:227198,invocations:26,retries:3,done:21,skipped:5,kbLocal:40,skillsN:5,agentsDisc:3,kbGlobal:0,wallMin:108.0,taskId:"59b1bf92-22b4-460d-9068-d88d55f450ac",
+   pro:["Deepest structural edit-lock coverage of the field: a dedicated six-sub-skill editation-lock-system that states the polarity bug outright ('the condition is timeout &gt; $time_delete but it should be &lt;  ... it deletes locks that are MORE RECENT than the threshold') and separately documents the unfiltered foreign-lock SELECT at :845","511 file:line citations, 100% resolving; the admin ACL bypass verified exact — checkForAdmin() ? '' : 'id_rank=...' loads ALL rank2page rows (thememanager.php:265)","Cleanest KB routing of the pair: php-mysql / jquery / fckeditor facets with no harness-named taxonomy, and SECURITY_STANDARDS states plainly that there is no per-form CSRF token","Largest corpus of the pair (40 KB files, 5 skills / 34 files) at the lowest compute of the two — 27.1 CLI min, the strongest quality-per-minute of any run outside the A tier"],
+   con:["Worst link hygiene of all 44 runs: 44 of 272 relative links broken (16%), including a wrong directory name repeated across skills (../form-wizard-system/ against the real form-wizard/)","DEPLOYMENT.md says the schema 'creates 18 tables' and then lists 23 — a self-contradicting miscount in the primary deployment document (actual: 23, verified)","Misses the Db::Update inverted return; API_REFERENCE reduces Update() to 'UPDATE with field size check'","One literal /haive/workdir sandbox path baked into a runnable grep command in the multi-language skill"]},
+];
+
+// ---------- June baseline (11 runs), reproduced from the June report; repos deleted, not re-verifiable ----------
+const JUNE = [
+  {name:"Claude Code",prov:"Anthropic · subscription",composite:8.95,detect:9.0,kb:9.5,skills:9.5,agents:7.0,global:9.0,cliMin:54.6,kbGlobal:8},
+  {name:"Sourcegraph Amp",prov:"Sourcegraph Amp · subscription",composite:8.68,detect:7.5,kb:10,skills:8.5,agents:7.5,global:9.5,cliMin:69.6,kbGlobal:6},
+  {name:"glm-5.2 (Ollama)",prov:"Ollama Cloud · glm-5.2:cloud",composite:8.70,detect:8.5,kb:9.5,skills:9.5,agents:9.0,global:6.0,cliMin:29.4,kbGlobal:0},
+  {name:"deepseek-v4-pro",prov:"Ollama Cloud · deepseek-v4-pro:cloud",composite:8.60,detect:9.5,kb:9.5,skills:8.0,agents:9.5,global:6.0,cliMin:27.9,kbGlobal:0},
+  {name:"glm-5.1 (z.ai)",prov:"Z.AI · glm-5.1[1m]",composite:8.58,detect:8.5,kb:9.0,skills:9.5,agents:9.0,global:6.0,cliMin:79.2,kbGlobal:0},
+  {name:"kimi-k2.7-code",prov:"Ollama Cloud · kimi-k2.7-code:cloud",composite:8.30,detect:8.5,kb:9.0,skills:9.0,agents:8.0,global:6.0,cliMin:40.0,kbGlobal:0},
+  {name:"minimax-m3",prov:"Ollama Cloud · minimax-m3:cloud",composite:8.25,detect:6.0,kb:10,skills:9.5,agents:8.5,global:6.0,cliMin:43.8,kbGlobal:0},
+  {name:"Google Antigravity",prov:"Google Antigravity · subscription",composite:7.93,detect:8.0,kb:9.0,skills:8.5,agents:7.0,global:6.0,cliMin:10.1,kbGlobal:0},
+  {name:"gpt-oss:120b",prov:"Ollama Cloud · gpt-oss:120b-cloud",composite:5.83,detect:5.0,kb:9.0,skills:4.0,agents:4.5,global:6.0,cliMin:15.2,kbGlobal:0},
+  {name:"gemma4:31b",prov:"Ollama Cloud · gemma4:31b-cloud",composite:5.43,detect:5.0,kb:7.0,skills:5.0,agents:3.5,global:6.0,cliMin:19.4,kbGlobal:0},
+  {name:"qwen3-coder:480b",prov:"Ollama Cloud · qwen3-coder:480b-cloud",composite:3.93,detect:3.5,kb:5.0,skills:4.0,agents:4.0,global:2.5,cliMin:31.9,kbGlobal:1},
+];
+
+// ---------- weights + composite ----------
+const WEIGHTS = {kb:0.25, skills:0.25, detect:0.20, agents:0.15, global:0.15};
+DATA.forEach(d=>{
+  d.name = d.fam + (d.effort==="default" ? "" : " · " + d.effort);
+  d.prov = d.model;
+  const weighted = Object.entries(WEIGHTS).reduce((s,[k,w])=>s+d[k]*w,0);
+  d.composite = Math.round((weighted+1e-9)*100)/100;
+  d.value = +(d.composite/d.cliMin).toFixed(3);
+});
+
+// ---------- helpers ----------
+const fmtTok = t => t===0 ? "n/a" : (t>=1000 ? (t/1000).toFixed(1)+"K" : ""+t);
+function scoreColor(v){ // 6 -> red, 7.5 -> amber, 9+ -> green (tuned to the 6-9 band)
+  const lo=6.0, mid=7.5, hi=9.0; let r,g,b;
+  const c=Math.max(lo,Math.min(hi,v));
+  if(c<=mid){ const t=(c-lo)/(mid-lo); r=242; g=Math.round(96+t*(177-96)); b=Math.round(122+t*(76-122)); }
+  else { const t=(c-mid)/(hi-mid); r=Math.round(245-t*(245-61)); g=Math.round(177-t*(177-220)); b=Math.round(76+t*(151-76)); }
+  return `rgb(${r},${g},${b})`;
+}
+const famDot = f => `<span class="fam-dot" style="background:${(FAM[f]||{hex:"#8da0b3"}).hex}"></span>`;
+const perBadge = p => `<span class="eff" style="opacity:.85">${PERIOD_LABEL[p]}</span>`;
+const sweepRuns = () => DATA.filter(d=>d.period==="jul14");
+
+// ---------- leaderboard ----------
+const COLS = [
+  {k:"rank",t:"#",kind:"rank"},
+  {k:"name",t:"Run",kind:"llm"},
+  {k:"period",t:"Round",kind:"per"},
+  {k:"composite",t:"Composite",kind:"score"},
+  {k:"detect",t:"Detect",kind:"score"},
+  {k:"kb",t:"KB",kind:"score"},
+  {k:"skills",t:"Skills",kind:"score"},
+  {k:"agents",t:"Agents",kind:"score"},
+  {k:"global",t:"Global KB",kind:"score"},
+  {k:"cliMin",t:"Compute min",kind:"num"},
+  {k:"outTok",t:"Out tokens",kind:"tok"},
+  {k:"value",t:"Value",kind:"num"},
+];
+let sortKey="composite", sortAsc=false, periodFilter="all";
+function renderHead(){
+  document.getElementById("head").innerHTML = COLS.map(c=>{
+    const s=c.k===sortKey?" sorted":""; const arrow=c.k===sortKey?(sortAsc?" ▲":" ▼"):"";
+    return `<th class="col-${c.k}${s}" data-k="${c.k}">${c.t}${arrow}</th>`;
+  }).join("");
+  document.querySelectorAll("#head th").forEach(th=>{
+    if(th.dataset.k==="rank"||th.dataset.k==="name"||th.dataset.k==="period") return;
+    th.addEventListener("click",()=>setSort(th.dataset.k));
+  });
+}
+function visible(){ return periodFilter==="all" ? DATA : DATA.filter(d=>d.period===periodFilter); }
+function sorted(){ const a=visible().slice(); if(sortKey!=="rank") a.sort((x,y)=> sortAsc? x[sortKey]-y[sortKey] : y[sortKey]-x[sortKey]); return a; }
+function renderBody(){
+  document.getElementById("body").innerHTML = sorted().map((d,i)=>{
+    const cells=COLS.map(c=>{
+      if(c.kind==="rank") return `<td><span class="rank">${i+1}</span></td>`;
+      if(c.kind==="llm") return `<td><span class="llm">${famDot(d.fam)}${d.fam}</span>${d.effort==="default"?"":` <span class="eff">${d.effort}</span>`}<span class="prov">${d.prov}</span></td>`;
+      if(c.kind==="per") return `<td>${perBadge(d.period)}</td>`;
+      if(c.kind==="score"){ const v=d[c.k]; const dg=c.k==="composite"?2:1; return `<td><span class="sc" style="background:${scoreColor(v)}">${v.toFixed(dg)}</span></td>`; }
+      if(c.kind==="num") return `<td class="num">${d[c.k]}</td>`;
+      if(c.kind==="tok") return `<td class="num dim">${fmtTok(d[c.k])}</td>`;
+      return `<td>${d[c.k]}</td>`;
+    }).join("");
+    return `<tr class="tier${d.tier}">${cells}</tr>`;
+  }).join("");
+}
+function setSort(k){
+  if(k===sortKey){ sortAsc=!sortAsc; } else { sortKey=k; sortAsc=(k==="cliMin"); }
+  document.querySelectorAll("button.sb[data-k]").forEach(b=>b.classList.toggle("on",b.dataset.k===k));
+  renderHead(); renderBody();
+}
+document.querySelectorAll("button.sb[data-k]").forEach(b=>{
+  b.addEventListener("click",()=>{ sortKey=b.dataset.k; sortAsc=b.dataset.asc==="1";
+    document.querySelectorAll("button.sb[data-k]").forEach(x=>x.classList.toggle("on",x===b));
+    renderHead(); renderBody(); });
+});
+document.querySelectorAll("button.sb.pf").forEach(b=>{
+  b.addEventListener("click",()=>{ periodFilter=b.dataset.p;
+    document.querySelectorAll("button.sb.pf").forEach(x=>x.classList.toggle("on",x===b));
+    renderBody(); });
+});
+
+// ---------- new-runs comparison ----------
+function renderNew(){
+  const k=DATA.find(d=>d.id==="kimi-k3"), s=DATA.find(d=>d.id==="deepseek-v4-flash");
+  const rows=[
+    ["Model (from CLI init)", "<code>kimi-k3:cloud</code>", "<code>deepseek-v4-flash:cloud</code>", "Both verified from the stream log, not the DB text field"],
+    ["Composite", `<b>${k.composite.toFixed(2)}</b>`, `<b>${s.composite.toFixed(2)}</b>`, "Kimi ahead on detection and skills"],
+    ["Active CLI minutes", `${k.cliMin}`, `<b>${s.cliMin}</b>`, "DeepSeek is 42% cheaper in compute"],
+    ["Output tokens", fmtTok(k.outTok), fmtTok(s.outTok), "DeepSeek writes ~85% more for less wall compute"],
+    ["Retries (superseded)", `${k.retries}`, `${s.retries}`, "Both recoverable; no failed steps"],
+    ["KB files / skills", `${k.kbLocal} / ${k.skillsN}`, `<b>${s.kbLocal} / ${s.skillsN}</b>`, "DeepSeek 60% larger corpus"],
+    ["LLM-discovered agents", `${k.agentsDisc}`, `${s.agentsDisc}`, "Identical set: fckeditor, mysql, legacy-php"],
+    ["file:line citations", "715", "511", "Both measured, not sampled"],
+    ["…unresolvable", "<b>0 (100%)</b>", "<b>0 (100%)</b>", "No invented paths, no line overruns"],
+    ["Broken relative links", "5 / 109", "<span class='delta-down'>44 / 272</span>", "DeepSeek sets a new field worst (16%)"],
+    ["Sandbox path leaks", "<b>0</b>", "1 (in a runnable command)", "Kimi is leak-free"],
+    ["<code>Db::Update</code> inverted return", "<span class='delta-down'>missed</span>", "<span class='delta-down'>missed</span>", "Neither cites database.php:456/459"],
+    ["<code>elocks</code> asymmetry", "<span class='delta-up'>both halves</span>", "<span class='delta-up'>both halves</span>", "Best two write-ups of the subsystem in the field"],
+    ["23-table schema", "<span class='delta-up'>23, correct</span>", "<span class='delta-down'>says 18, lists 23</span>", "Self-contradiction in DeepSeek's DEPLOYMENT.md"],
+    ["Harness (MariaDB) bleed", "whole <code>mariadb</code> facet family", "<span class='delta-up'>none in KB</span>", "Kimi's prose separates it best, its taxonomy worst"],
+    ["Global KB promotions", "0", "0", "Both on the 6.0 neutral floor"],
+    ["Wall time", "1,507 min", "108 min", "Kimi's is ~25h of form-gate idle, not compute"],
+  ];
+  document.getElementById("newBody").innerHTML = rows.map(r=>
+    `<tr><td style="text-align:left"><b>${r[0]}</b></td><td style="text-align:left">${r[1]}</td><td style="text-align:left">${r[2]}</td>`+
+    `<td style="text-align:left;white-space:normal;max-width:38ch;font-size:12.5px;color:var(--mut)">${r[3]}</td></tr>`).join("");
+}
+
+// ---------- effort curve (jul14 sweep only) ----------
+function renderEffort(){
+  const W=900,H=560,L=64,R=150,T=24,B=64;
+  const X0=L,X1=W-R,Y0=T,Y1=H-B;
+  const xmin=0,xmax=280,ymin=6,ymax=9;
+  const sx=v=>X0+(v-xmin)/(xmax-xmin)*(X1-X0);
+  const sy=v=>Y1-(v-ymin)/(ymax-ymin)*(Y1-Y0);
+  let s="";
+  for(let g=0;g<=280;g+=40){ s+=`<line class="grid" x1="${sx(g)}" y1="${Y0}" x2="${sx(g)}" y2="${Y1}"/>`;
+    s+=`<text class="axt" x="${sx(g)}" y="${Y1+20}" text-anchor="middle">${g}</text>`; }
+  for(let g=6;g<=9;g+=0.5){ s+=`<line class="grid" x1="${X0}" y1="${sy(g)}" x2="${X1}" y2="${sy(g)}"/>`;
+    s+=`<text class="axt" x="${X0-10}" y="${sy(g)+4}" text-anchor="end">${g.toFixed(1)}</text>`; }
+  s+=`<text class="axl" x="${(X0+X1)/2}" y="${H-12}" text-anchor="middle">Active CLI minutes &rarr; more compute</text>`;
+  s+=`<text class="axl" transform="translate(16,${(Y0+Y1)/2}) rotate(-90)" text-anchor="middle">Correctness composite &rarr; better</text>`;
+  SWEEP_FAMS.forEach(fam=>{
+    const runs=sweepRuns().filter(d=>d.fam===fam).sort((a,b)=>EFFORT_ORDER[a.effort]-EFFORT_ORDER[b.effort]);
+    if(!runs.length) return;
+    const hex=FAM[fam].hex;
+    const pts=runs.map(d=>[sx(d.cliMin),sy(d.composite)]);
+    for(let i=0;i<pts.length-1;i++) s+=`<line x1="${pts[i][0]}" y1="${pts[i][1]}" x2="${pts[i+1][0]}" y2="${pts[i+1][1]}" stroke="${hex}" stroke-width="1.6" stroke-opacity=".55"/>`;
+    const peak=runs.reduce((m,d)=>d.composite>m.composite?d:m,runs[0]);
+    runs.forEach(d=>{
+      const x=sx(d.cliMin),y=sy(d.composite),isPk=d===peak;
+      s+=`<circle cx="${x}" cy="${y}" r="${isPk?7:5}" fill="${hex}" fill-opacity="${isPk?.95:.5}" stroke="${hex}" stroke-width="1.6"><title>${d.name} — composite ${d.composite}, ${d.cliMin} min, ${fmtTok(d.outTok)} out</title></circle>`;
+      if(isPk) s+=`<circle cx="${x}" cy="${y}" r="11" fill="none" stroke="${hex}" stroke-width="1.2" stroke-dasharray="3 3"/>`;
+      s+=`<text class="dotlab" x="${x}" y="${y-11}" text-anchor="middle" fill="${hex}">${EFF_ABBR[d.effort]}</text>`;
+    });
+  });
+  document.getElementById("effort").innerHTML=s;
+  document.getElementById("effortLegend").innerHTML = SWEEP_FAMS.map(f=>`<span><i style="background:${FAM[f].hex}"></i>${f}</span>`).join("") + `<span style="color:var(--mut)">dashed ring = family peak &middot; L/M/H/XH/MX/U = low/medium/high/xhigh/max/ultra</span>`;
+}
+
+// ---------- scatter, all 44 ----------
+function renderScatter(){
+  const W=900,H=520,L=64,R=24,T=24,B=64;
+  const X0=L,X1=W-R,Y0=T,Y1=H-B;
+  const xmax=280,ymin=7.3,ymax=9;
+  const sx=v=>X0+Math.min(v,xmax)/xmax*(X1-X0);
+  const sy=v=>Y1-(Math.max(v,ymin)-ymin)/(ymax-ymin)*(Y1-Y0);
+  let s="";
+  for(let g=0;g<=280;g+=40){ s+=`<line class="grid" x1="${sx(g)}" y1="${Y0}" x2="${sx(g)}" y2="${Y1}"/>`;
+    s+=`<text class="axt" x="${sx(g)}" y="${Y1+20}" text-anchor="middle">${g}</text>`; }
+  for(let g=7.5;g<=9;g+=0.25){ s+=`<line class="grid" x1="${X0}" y1="${sy(g)}" x2="${X1}" y2="${sy(g)}"/>`;
+    s+=`<text class="axt" x="${X0-10}" y="${sy(g)+4}" text-anchor="end">${g.toFixed(2)}</text>`; }
+  s+=`<text class="axl" x="${(X0+X1)/2}" y="${H-12}" text-anchor="middle">Active CLI minutes &rarr; more compute</text>`;
+  s+=`<text class="axl" transform="translate(16,${(Y0+Y1)/2}) rotate(-90)" text-anchor="middle">Correctness composite &rarr; better</text>`;
+  DATA.filter(d=>d.composite>=ymin).forEach(d=>{
+    const x=sx(d.cliMin), y=sy(d.composite), hex=(FAM[d.fam]||{hex:"#8da0b3"}).hex;
+    const isNew=d.period==="aug03";
+    const op = d.period==="jul14" ? .40 : (d.period==="jul10" ? .70 : .95);
+    s+=`<circle cx="${x}" cy="${y}" r="${isNew?7:5}" fill="${hex}" fill-opacity="${op}" stroke="${hex}" stroke-width="1.4"><title>${d.name} (${PERIOD_LABEL[d.period]}) — composite ${d.composite}, ${d.cliMin} min</title></circle>`;
+    if(isNew){
+      s+=`<circle cx="${x}" cy="${y}" r="12" fill="none" stroke="${hex}" stroke-width="1.4" stroke-dasharray="3 3"/>`;
+      s+=`<text class="dotlab" x="${x}" y="${y-18}" text-anchor="middle" fill="${hex}">${d.fam.split(" (")[0]}</text>`;
+    }
+  });
+  document.getElementById("scatter").innerHTML=s;
+  document.getElementById("scatterLegend").innerHTML =
+    `<span style="color:var(--mut)">dashed ring = new August run &middot; solid = Jul-10 &middot; faded = Jul-13/14 sweep &middot; runs below 7.30 composite (the Haiku tier) are off-scale</span>`;
+}
+
+// ---------- per-family effort sweeps (jul14 only) ----------
+function renderSweeps(){
+  const dims=[["composite","Comp",2],["detect","Det",1],["kb","KB",1],["skills","Sk",1],["agents","Ag",1],["global","Gl",1]];
+  document.getElementById("sweeps").innerHTML = SWEEP_FAMS.map(fam=>{
+    const runs=sweepRuns().filter(d=>d.fam===fam).sort((a,b)=>EFFORT_ORDER[a.effort]-EFFORT_ORDER[b.effort]);
+    if(!runs.length) return "";
+    const peak=runs.reduce((m,d)=>d.composite>m.composite?d:m,runs[0]);
+    const rows=runs.map(d=>{
+      const cells=dims.map(([k,,dg])=>{
+        if(k==="composite") return `<td><b>${d.composite.toFixed(2)}</b>${d===peak?'<span class="swpk">peak</span>':''}</td>`;
+        return `<td class="num">${d[k].toFixed(1)}</td>`;
+      }).join("");
+      return `<tr class="${d===peak?'peakrow':''}"><td><span class="eff">${d.effort}</span></td>${cells}<td class="num dim">${d.cliMin}m</td><td class="num dim">${fmtTok(d.outTok)}</td></tr>`;
+    }).join("");
+    return `<div class="box" style="padding:12px 14px"><h3 style="margin:0 0 8px">${famDot(fam)}${fam} <span style="font:500 11px/1 var(--mono);color:var(--mut)">${runs[0].model}</span></h3>
+      <div class="tbl-scroll" style="border:none"><table class="mini" style="min-width:0">
+      <thead><tr><th style="text-align:left">Effort</th>${dims.map(([,t])=>`<th>${t}</th>`).join("")}<th>Compute</th><th>Out</th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div>`;
+  }).join("");
+}
+
+// ---------- model-variant table (jul14 only) ----------
+function renderVariant(){
+  const order=["Sonnet 5","Opus 4.8","Fable 5","Codex 5.6","Codex 5.5","Sonnet 4.6","GLM-5.2 (z.ai)","Haiku 4.5"];
+  document.getElementById("variantBody").innerHTML = order.map(fam=>{
+    const runs=sweepRuns().filter(d=>d.fam===fam);
+    const hi=runs.find(d=>d.effort==="high");
+    if(!hi) return "";
+    const best=runs.reduce((m,d)=>d.composite>m.composite?d:m,runs[0]);
+    const promotes=runs.some(d=>d.kbGlobal>0);
+    const pEff=runs.filter(d=>d.kbGlobal>0).sort((a,b)=>EFFORT_ORDER[a.effort]-EFFORT_ORDER[b.effort]).map(d=>d.effort);
+    const promoLabel = promotes ? (runs.every(d=>d.kbGlobal>0) ? "yes — every effort" : pEff.join(" + ")+" only") : "no";
+    const promoCls = promotes ? "delta-up" : "delta-down";
+    return `<tr>
+      <td style="text-align:left"><b>${famDot(fam)}${fam}</b></td>
+      <td><span class="sc" style="background:${scoreColor(hi.composite)}">${hi.composite.toFixed(2)}</span></td>
+      <td class="num">${hi.detect.toFixed(1)}</td><td class="num">${hi.kb.toFixed(1)}</td><td class="num">${hi.skills.toFixed(1)}</td><td class="num">${hi.agents.toFixed(1)}</td><td class="num">${hi.global.toFixed(1)}</td>
+      <td style="text-align:left">${best.composite.toFixed(2)} <span class="eff">${best.effort}</span></td>
+      <td class="${promoCls}">${promoLabel}</td></tr>`;
+  }).join("");
+}
+
+// ---------- cross-round continuity ----------
+function renderPeriod(){
+  const rows=[
+    {line:"Kimi (Ollama Cloud)", earlier:"8.28", earlierNote:"Jul-10, kimi-k2.7-code", now:"8.05", nowNote:"Aug-03, kimi-k3", moved:"A genuine model-version step (k2.7-code → k3) and the composite falls. K3 is materially cleaner — 100% resolvable citations, 0 sandbox leaks against k2.7's nine, the field's best elocks write-up — but it promotes nothing where k2.7 promoted five articles, and that lost 2.0 on the Global dimension is the whole gap"},
+    {line:"DeepSeek (Ollama Cloud)", earlier:"8.60", earlierNote:"Jun-23, deepseek-v4-pro", now:"7.83", nowNote:"Aug-03, deepseek-v4-flash", moved:"NOT a like-for-like succession: flash is the fast tier of the family, pro the large one. Flash builds the bigger corpus (40 KB files vs 22) at half the compute, but breaks 44 links, miscounts the schema as 18 tables while listing 23, and loses pro's standout stack detection (9.5 → 8.0)"},
+    {line:"Codex (OpenAI)", earlier:"8.50", earlierNote:"Jul-10, o3 default model", now:"8.55", nowNote:"Jul-14 gpt-5.6-sol max", moved:"o3 → gpt-5.5 (fixed the invented Db signatures) → gpt-5.6-sol: catches the Update landmine at EVERY effort, posts the first Codex global promotions (6 at high), and its max is the benchmark's first winning top-effort run"},
+    {line:"Sonnet (Anthropic)", earlier:"8.78", earlierNote:"Jul-10, Sonnet 4", now:"8.80", nowNote:"Jul-13, Sonnet 5 high", moved:"The all-time high, by 0.02, on four version-correct promotions with zero PHP7 leakage. The 4.x line meanwhile regressed: Sonnet 4.6 tops out at 8.35 and its xhigh lands at 8.08 while re-missing the Update landmine its own low caught 3×"},
+    {line:"GLM via z.ai", earlier:"7.75", earlierNote:"Jul-10, glm-5.2[1m]", now:"8.43", nowNote:"Jul-13 glm-5.2[1m] high", moved:"Same glm-5.2[1m] model both rounds — the gain is the pipeline/effort change, not a version upgrade: it dropped the FCKeditor-sanitize claim, the Mods hallucination and the edit-lock reversal"},
+    {line:"GLM via Ollama", earlier:"8.70", earlierNote:"Jun-23, glm-5.2:cloud", now:"8.25", nowNote:"Jul-10, glm-5.2:cloud", moved:"Same model, later pipeline, lower score — the clearest single illustration that cross-round deltas are not pure model signal. Still the cheapest strong run in the benchmark at 31.8 CLI minutes"},
+    {line:"Opus 4.8 / Fable 5 / Haiku 4.5", earlier:"—", earlierNote:"first ran Jul-13/14", now:"8.55 / 8.48 / 6.75", nowNote:"family peaks", moved:"Opus is the only family that promotes at every effort level; Fable peaks at medium and is the only family where more effort is a net regression; Haiku is a full tier below everything else and reverses the Update contract outright"},
+  ];
+  document.getElementById("periodBody").innerHTML = rows.map(r=>{
+    let chg="", cls="delta-flat";
+    if(r.earlier!=="—" && !r.now.includes("/")){ const d=(+r.now)-(+r.earlier); cls=Math.abs(d)<0.005?"delta-flat":(d>0?"delta-up":"delta-down"); chg=(d>0?"+":"−")+Math.abs(d).toFixed(2); }
+    else chg=r.earlier==="—"?"new":"—";
+    return `<tr>
+      <td style="text-align:left"><b>${r.line}</b></td>
+      <td>${r.earlier}<span class="dsub">${r.earlierNote}</span></td>
+      <td>${r.now}<span class="dsub">${r.nowNote}</span></td>
+      <td class="${cls}">${chg}</td>
+      <td style="text-align:left;white-space:normal;max-width:44ch;font-size:12.5px;color:var(--mut)">${r.moved}</td></tr>`;
+  }).join("");
+}
+
+// ---------- cards ----------
+const CARD_ORDER=["Kimi K3 (Ollama)","DeepSeek V4 Flash (Ollama)","Fable 5","Sonnet 5","Opus 4.8","Codex 5.6","Sonnet 4.6","Codex 5.5","GLM-5.2 (z.ai)","Haiku 4.5","Sonnet 4 (Jul-10)","Codex o3 (Jul-10)","Kimi K2.7 (Ollama)","GLM-5.2 (Ollama)","MiniMax M3 (Ollama)"];
+const PERIOD_RANK={aug03:0,jul10:1,jul14:2};
+let cardFilter="all";
+function renderCards(){
+  const src = cardFilter==="all" ? DATA : DATA.filter(d=>d.period===cardFilter);
+  const arr=src.slice().sort((a,b)=>
+    (PERIOD_RANK[a.period]-PERIOD_RANK[b.period]) ||
+    (CARD_ORDER.indexOf(a.fam)-CARD_ORDER.indexOf(b.fam)) || (b.composite-a.composite));
+  document.getElementById("cards").innerHTML = arr.map(d=>{
+    return `<details class="llmc"><summary>
+      <span class="badge" style="background:${scoreColor(d.composite)}">${d.composite.toFixed(2)}</span>
+      <span class="csum"><span class="n">${famDot(d.fam)}${d.fam}${d.effort==="default"?"":" · "+d.effort}</span><span class="p">${d.model} — tier ${d.tier} — ${PERIOD_LABEL[d.period]}</span></span>
+      <span class="chev">▾</span></summary>
+      <div class="cbody">
+        <div class="statline">
+          <span>Detect <b>${d.detect}</b></span><span>KB <b>${d.kb}</b></span><span>Skills <b>${d.skills}</b></span>
+          <span>Agents <b>${d.agents}</b></span><span>Global <b>${d.global}</b></span>
+          <span>· compute <b>${d.cliMin}m</b></span><span>out <b>${fmtTok(d.outTok)}</b></span><span>retries <b>${d.retries}</b></span>
+          <span>KB <b>${d.kbLocal}</b> local / <b>${d.kbGlobal}</b> global</span><span>skills <b>${d.skillsN}</b></span><span>agents <b>${d.agentsDisc}</b></span>
+        </div>
+        <span class="lbl">Strengths</span><ul class="pro">${d.pro.map(x=>`<li>${x}</li>`).join("")}</ul>
+        <span class="lbl">Weaknesses</span><ul class="con">${d.con.map(x=>`<li>${x}</li>`).join("")}</ul>
+      </div></details>`;
+  }).join("");
+}
+document.querySelectorAll("button.sb.cf").forEach(b=>{
+  b.addEventListener("click",()=>{ cardFilter=b.dataset.p;
+    document.querySelectorAll("button.sb.cf").forEach(x=>x.classList.toggle("on",x===b));
+    renderCards(); });
+});
+
+// ---------- provenance ----------
+function renderProvenance(){
+  const arr=DATA.slice().sort((a,b)=>(PERIOD_RANK[a.period]-PERIOD_RANK[b.period])||(b.composite-a.composite));
+  document.getElementById("provenanceBody").innerHTML = arr.map(d=>
+    `<tr><td style="text-align:left"><b>${d.fam}${d.effort==="default"?"":" · "+d.effort}</b></td>`+
+    `<td style="text-align:left">${perBadge(d.period)}</td>`+
+    `<td style="text-align:left"><a class="tasklink" target="_blank" rel="noopener" href="http://localhost:3000/tasks/${d.taskId}">${d.taskId.slice(0,8)}…</a></td>`+
+    `<td>${d.done}</td><td>${d.skipped}</td><td>${d.invocations}${d.retries?` (${d.retries} retry)`:""}</td><td>${d.wallMin.toFixed(1)}</td></tr>`
+  ).join("");
+}
+
+// ---------- June table ----------
+function renderJune(){
+  document.getElementById("juneBody").innerHTML = JUNE.map(d=>
+    `<tr><td style="text-align:left"><b>${d.name}</b></td><td style="text-align:left" class="dim">${d.prov}</td>`+
+    `<td><span class="sc" style="background:${scoreColor(d.composite)}">${d.composite.toFixed(2)}</span></td>`+
+    `<td class="num">${d.detect.toFixed(1)}</td><td class="num">${d.kb.toFixed(1)}</td><td class="num">${d.skills.toFixed(1)}</td>`+
+    `<td class="num">${d.agents.toFixed(1)}</td><td class="num">${d.global.toFixed(1)}</td>`+
+    `<td class="num dim">${d.cliMin}m</td><td class="num">${d.kbGlobal}</td></tr>`
+  ).join("");
+}
+
+// ---------- verdicts ----------
+function renderVerdicts(){
+  const overall=DATA.slice().sort((a,b)=>b.composite-a.composite)[0];
+  const bestValueA=DATA.filter(d=>d.tier==="A").sort((a,b)=>b.value-a.value)[0];
+  document.getElementById("bestOverall").textContent=overall.fam+(overall.effort==="default"?"":" · "+overall.effort);
+  document.getElementById("bestOverallWhy").innerHTML=overall.composite.toFixed(2)+" composite — the best of all "+DATA.length+" runs across three rounds; "+overall.kbGlobal+" clean version-correct global promotions.";
+  document.getElementById("bestValue").textContent=bestValueA.fam+(bestValueA.effort==="default"?"":" · "+bestValueA.effort);
+  document.getElementById("bestValueWhy").innerHTML=bestValueA.composite.toFixed(2)+" in "+bestValueA.cliMin.toFixed(1)+" min ("+bestValueA.value.toFixed(3)+"/min) — the strongest A-tier quality per compute minute.";
+}
+
+// init
+renderHead(); renderBody(); renderNew(); renderEffort(); renderScatter(); renderSweeps();
+renderVariant(); renderPeriod(); renderCards(); renderProvenance(); renderJune(); renderVerdicts();
+document.querySelector('button.sb[data-k="composite"]').classList.add("on");
+</script>
+</body>
+</html>
