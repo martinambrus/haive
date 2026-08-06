@@ -12,7 +12,11 @@ import {
   detectFixLoopOscillation,
   loadHonoredConstraints,
   loadPriorFixContext,
+  loadFixLoopDiagnosis,
+  buildGateDirectiveDiagnosis,
   FIX_LOOP_ACTION_FIELD,
+  FIX_LOOP_INSTRUCTION_FIELD,
+  FIX_LOOP_GATE_SOURCE,
 } from '../src/step-engine/steps/workflow/_fix-loop.js';
 
 // Slice 2 engine: a step that finds a blocking defect (via fixLoop.evaluate) or throws
@@ -322,6 +326,58 @@ describe('fix-loop escalation gate (slice 5c)', () => {
     // The diagnosis is surfaced read-only.
     expect(JSON.stringify(schema.infoSections)).toContain('SQLi in login');
   });
+
+  // Without this the gate's only "keep going" option is a blind retry against the diagnosis the
+  // loop has already failed on — the state task 72ccb002 sat in for twelve days.
+  it.each([
+    ['cap gate', buildFixLoopEscalationSchema('08c-code-review', 'diag', 5)],
+    ['oscillation gate', buildOscillationEscalationSchema('07c', '07b', 'a', 'b')],
+  ])('%s carries an optional instruction field shown only for Continue', (_name, schema) => {
+    const field = schema.fields.find((f) => f.id === FIX_LOOP_INSTRUCTION_FIELD);
+    expect(field?.type).toBe('textarea');
+    expect(field?.required).toBeFalsy();
+    expect(field?.visibleWhen).toEqual({ field: FIX_LOOP_ACTION_FIELD, equals: 'continue' });
+  });
+});
+
+describe('buildGateDirectiveDiagnosis', () => {
+  it('leads with the user directive and keeps the machine failure as context', () => {
+    const d = buildGateDirectiveDiagnosis(
+      '  delete .ddev/web-build/Dockerfile  ',
+      'ddev start failed: exit 127',
+    );
+    expect(d.indexOf('delete .ddev/web-build/Dockerfile')).toBeLessThan(
+      d.indexOf('ddev start failed: exit 127'),
+    );
+    expect(d).toContain('OVERRIDES');
+  });
+
+  it('omits the context section when nothing was recorded', () => {
+    const d = buildGateDirectiveDiagnosis('do X', '');
+    expect(d).toContain('do X');
+    expect(d).not.toContain('context, not an override');
+  });
+});
+
+describe('gate directive authority', () => {
+  it('is framed as human-sourced so the implement step treats it as a directive', async () => {
+    const r = await loadFixLoopDiagnosis(ctxWith([ev(FIX_LOOP_GATE_SOURCE, 7, 'do X')], 7));
+    expect(r?.humanSourced).toBe(true);
+    expect(r?.diagnosis).toContain('do X');
+  });
+
+  it('a machine source is still framed as raw tool output', async () => {
+    const r = await loadFixLoopDiagnosis(ctxWith([ev('07c-ddev-reconcile', 7, D07C)], 7));
+    expect(r?.humanSourced).toBe(false);
+  });
+
+  // The directive has to survive the rounds AFTER the one it was given for, or the gate just
+  // moves the deadlock one round later.
+  it('persists as an honored constraint in later rounds', async () => {
+    const block = await loadHonoredConstraints(ctxWith([ev(FIX_LOOP_GATE_SOURCE, 7, 'do X')], 8));
+    expect(block).toContain(FIX_LOOP_GATE_SOURCE);
+    expect(block).toContain('do X');
+  });
 });
 
 // --- Slice A: oscillation guard ------------------------------------------------
@@ -405,6 +461,22 @@ describe('detectFixLoopOscillation', () => {
     expect(r.tripped).toBe(false);
   });
 
+  // The 72ccb002 gate: 07c re-raised its build-guard error, and the only thing that "alternated
+  // in" was a 07b parse miss that named no defect. That is a repeated one-sided failure, not a
+  // deadlock — escalate at the round cap with the real diagnosis instead.
+  it('does NOT trip when the only alternation names no defect', async () => {
+    const noop = '**Verdict:** UNPARSEABLE\n\n_No issues found — nothing to fix._';
+    const db = eventsDb([ev('07c-ddev-reconcile', 2, D07C), ev('07b-phase-4-validate', 3, noop)]);
+    const r = await detectFixLoopOscillation(db, 't', '07c-ddev-reconcile', D07C, 4);
+    expect(r.tripped).toBe(false);
+  });
+
+  it('does NOT trip when the alternation carries an empty diagnosis', async () => {
+    const db = eventsDb([ev('07c-ddev-reconcile', 2, D07C), ev('07b-phase-4-validate', 3, '   ')]);
+    const r = await detectFixLoopOscillation(db, 't', '07c-ddev-reconcile', D07C, 4);
+    expect(r.tripped).toBe(false);
+  });
+
   it('recomputes the fingerprint for legacy events written before the field', async () => {
     const db = eventsDb([
       { payload: { sourceStepId: '07c-ddev-reconcile', diagnosis: D07C, round: 2 } },
@@ -476,6 +548,33 @@ describe('loadHonoredConstraints', () => {
     );
     expect(block).toContain('NEW reason');
     expect(block).not.toContain('OLD reason');
+  });
+
+  // Regression for the deadlock in task 72ccb002: a huge gate-2 diagnosis consumed the whole
+  // 3000-char budget and the single head-slice silently deleted 07c's build-guard constraint,
+  // so every later round was told to re-add the exact line 07c rejects.
+  it('never DROPS a source when an earlier diagnosis is huge', async () => {
+    const huge = `gate-2 rejected: ${'x'.repeat(6000)}`;
+    const block = await loadHonoredConstraints(
+      ctxWith([ev('09-gate-2-verify-approval', 5, huge), ev('07c-ddev-reconcile', 1, D07C)], 5),
+    );
+    expect(block).toContain('09-gate-2-verify-approval');
+    expect(block).toContain('07c-ddev-reconcile');
+    // The short constraint survives INTACT; only the oversized one is trimmed.
+    expect(block).toContain(D07C);
+    expect(block).toContain('…');
+  });
+
+  it('orders mechanical sources (07c) ahead of agent-opinion sources', async () => {
+    const block = await loadHonoredConstraints(
+      ctxWith(
+        [ev('09-gate-2-verify-approval', 5, 'developer reject'), ev('07c-ddev-reconcile', 1, D07C)],
+        5,
+      ),
+    );
+    expect(block.indexOf('07c-ddev-reconcile')).toBeLessThan(
+      block.indexOf('09-gate-2-verify-approval'),
+    );
   });
 });
 

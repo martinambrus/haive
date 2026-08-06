@@ -78,7 +78,11 @@ import {
   buildFixLoopEscalationSchema,
   buildOscillationEscalationSchema,
   detectFixLoopOscillation,
+  buildGateDirectiveDiagnosis,
+  loadRecordedDiagnosisForRound,
   FIX_LOOP_ACTION_FIELD,
+  FIX_LOOP_INSTRUCTION_FIELD,
+  FIX_LOOP_GATE_SOURCE,
   FIX_LOOP_TARGET_STEP_ID,
   DEFAULT_MAX_FIX_ROUNDS,
 } from '../step-engine/steps/workflow/_fix-loop.js';
@@ -1351,6 +1355,9 @@ async function resolveFixLoopGate(
   gateRow: typeof schema.taskSteps.$inferSelect,
   action: string,
   round: number,
+  /** Free text the user typed on the gate. Applies to 'continue' only — 'accept' skips the
+   *  implementation step and 'abort' fails the task, so there is nothing for it to reach. */
+  instruction: string,
 ): Promise<void> {
   await db
     .update(schema.taskSteps)
@@ -1391,7 +1398,24 @@ async function resolveFixLoopGate(
   // The fix request for that round was recorded when the gate was raised.
   const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
   const nextRound = round + 1;
-  await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.continued', { round: nextRound });
+  // A directive typed at the gate supersedes that recorded request. Written as a NEW event for
+  // the same round rather than mutating the old one: task_events is append-only, and
+  // loadFixLoopDiagnosis scans newest-first and takes the first row matching the round, so this
+  // one wins with no schema change. Re-fingerprinting the round also stops the oscillation guard
+  // from re-tripping on text the user has now arbitrated.
+  const directive = instruction.trim();
+  if (directive.length > 0) {
+    const prior = await loadRecordedDiagnosisForRound(db, ctx.taskId, nextRound);
+    await recordFixLoopRequest(db, ctx.taskId, gateRow.id, {
+      diagnosis: buildGateDirectiveDiagnosis(directive, prior),
+      sourceStepId: FIX_LOOP_GATE_SOURCE,
+      round: nextRound,
+    });
+  }
+  await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.continued', {
+    round: nextRound,
+    directed: directive.length > 0,
+  });
   await markTaskRunningWithStep(
     db,
     ctx.taskId,
@@ -1643,10 +1667,19 @@ async function handleAdvanceStep(
 
   // Fix-loop escalation gate: a submission carrying the gate's decision field resolves
   // the action (continue / accept / abort) here instead of re-running the parked step.
-  const gateAction = (payload.formValues ??
-    (existing?.formValues as Record<string, unknown> | null))?.[FIX_LOOP_ACTION_FIELD];
+  const gateValues =
+    payload.formValues ?? (existing?.formValues as Record<string, unknown> | null) ?? null;
+  const gateAction = gateValues?.[FIX_LOOP_ACTION_FIELD];
   if (existing && typeof gateAction === 'string') {
-    await resolveFixLoopGate(db, ctx, existing, gateAction, round);
+    const raw = gateValues?.[FIX_LOOP_INSTRUCTION_FIELD];
+    await resolveFixLoopGate(
+      db,
+      ctx,
+      existing,
+      gateAction,
+      round,
+      typeof raw === 'string' ? raw : '',
+    );
     return;
   }
 

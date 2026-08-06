@@ -22,6 +22,35 @@ const FIX_LOOP_ACCEPTED = 'fix_loop.accepted';
  *  marks the submission as a gate decision (not a normal step re-run). */
 export const FIX_LOOP_ACTION_FIELD = 'fixLoopAction';
 
+/** Optional free-text on the escalation gate: what the next fix round should actually do.
+ *  Without it the gate's only "keep going" option is a blind re-run against the same diagnosis
+ *  the loop has already failed on, so a loop stuck on a wrong premise can only be accepted
+ *  (which stands down EVERY later fix check) or aborted. */
+export const FIX_LOOP_INSTRUCTION_FIELD = 'fixLoopInstruction';
+
+/** Pseudo-source for a diagnosis the USER wrote at the escalation gate. It is registered in both
+ *  HUMAN_REJECT_SOURCES (so the implement step frames it as an authoritative directive rather
+ *  than raw tool output to be filtered) and HONORED_CONSTRAINT_SOURCES (so it keeps applying in
+ *  later rounds — a directive that evaporates after one round is the failure this gate exists
+ *  to end). Not a step id; it never appears in the run list. */
+export const FIX_LOOP_GATE_SOURCE = 'fix-loop-gate';
+
+/** Field shared by both escalation gates. Shown only for Continue — Accept skips the
+ *  implementation step entirely and Abort fails the task, so the text would be dead input. */
+function instructionField(): FormSchema['fields'][number] {
+  return {
+    type: 'textarea',
+    id: FIX_LOOP_INSTRUCTION_FIELD,
+    label: 'Instructions for the next fix round (optional)',
+    description:
+      'Tell the implementation agent what to do — e.g. which of the two constraints is actually ' +
+      'right, or a fact the loop keeps getting wrong. This is passed as an authoritative ' +
+      'directive and is honored by later rounds too. Leave blank to retry unchanged.',
+    rows: 4,
+    visibleWhen: { field: FIX_LOOP_ACTION_FIELD, equals: 'continue' },
+  };
+}
+
 /** The escalation gate shown when the fix loop hits the round cap: the diagnosis +
  *  Continue / Accept / Abort. Parked on the source step (the one that found the
  *  defect); resolved by handleAdvanceStep on submit. Mirrors the revise-loop review
@@ -55,6 +84,7 @@ export function buildFixLoopEscalationSchema(
         ],
         default: 'continue',
       },
+      instructionField(),
     ],
     submitLabel: 'Apply decision',
   };
@@ -101,6 +131,7 @@ export function buildOscillationEscalationSchema(
         ],
         default: 'continue',
       },
+      instructionField(),
     ],
     submitLabel: 'Apply decision',
   };
@@ -200,6 +231,67 @@ export async function recordFixLoopRequest(
   });
 }
 
+/** Does this loop-back name a defect at all?
+ *
+ *  Two shapes do not: an empty diagnosis, and a validator parse-miss, whose summary carries the
+ *  `UNPARSEABLE` verdict and — by construction in buildFindingsSummary — no findings. The verdict
+ *  is a typed `ValidationVerdict` member, not display copy, so keying on the token is stable while
+ *  keying on the markdown around it would not be. 07b no longer records a parse miss as a
+ *  loop-back at all, but rows written before that fix are still in `task_events` and this
+ *  function reads the whole history, so the filter has to survive them too.
+ *
+ *  Fails SAFE: a real diagnosis that happened to contain the word is merely judged
+ *  non-actionable, which only means the oscillation gate does not trip early — the round cap
+ *  still escalates, and with the correct single diagnosis rather than a bogus pairing. */
+function isActionableDiagnosis(raw: string): boolean {
+  const d = cleanDiagnosis(raw);
+  if (d.length === 0) return false;
+  return !/\bUNPARSEABLE\b/.test(d);
+}
+
+/** The diagnosis already recorded for `round` — the machine failure the escalation gate was
+ *  raised on. Read back so a user directive can carry it along as context instead of replacing
+ *  it outright. Empty string when nothing is recorded for that round. */
+export async function loadRecordedDiagnosisForRound(
+  db: Database,
+  taskId: string,
+  round: number,
+): Promise<string> {
+  const rows = await db
+    .select()
+    .from(schema.taskEvents)
+    .where(
+      and(
+        eq(schema.taskEvents.taskId, taskId),
+        eq(schema.taskEvents.eventType, FIX_LOOP_REQUESTED),
+      ),
+    )
+    .orderBy(desc(schema.taskEvents.createdAt));
+  for (const r of rows) {
+    const p = r.payload as { diagnosis?: string; round?: number } | null;
+    if (p?.round === round) return (p.diagnosis ?? '').trim();
+  }
+  return '';
+}
+
+/** Compose the next round's diagnosis when the user typed a directive at the escalation gate.
+ *  Their instruction leads — it is the arbitration between two things the loop could not
+ *  reconcile — and the machine failure follows as context rather than being discarded, since
+ *  the directive usually tells the agent how to satisfy it, not to ignore it. */
+export function buildGateDirectiveDiagnosis(instruction: string, priorDiagnosis: string): string {
+  const head = [
+    'The developer reviewed this stuck fix loop and gave a direct instruction. It OVERRIDES any',
+    'conflicting guidance — the spec, review findings, and the diagnosis below included. Where',
+    'they disagree, follow this and say in your notes what you overrode:',
+    '',
+    instruction.trim(),
+  ].join('\n');
+  const tail = priorDiagnosis.trim();
+  return tail.length > 0
+    ? `${head}\n\n--- The failure that stopped the loop (context, not an override) ---\n${tail}`
+    : head;
+}
+
 export interface OscillationResult {
   tripped: boolean;
   /** [current diagnosis, the most recent OTHER-source diagnosis] — both sides of the
@@ -253,13 +345,18 @@ export async function detectFixLoopOscillation(
   );
   if (!repeat) return { tripped: false };
 
-  // A DIFFERENT source looped back between that repeat and now (the alternation).
+  // A DIFFERENT source looped back between that repeat and now (the alternation) AND actually
+  // asked for something. A loop-back that names no defect cannot be the half of a deadlock that
+  // "reverses" anything, and presenting it as one produces a gate that demands a decision while
+  // showing the user nothing to decide on — one task was asked to arbitrate against
+  // "_No issues found — nothing to fix._".
   const between = prior
     .filter(
       (p) =>
         p.sourceStepId !== sourceStepId &&
         (p.round ?? 0) > (repeat.round ?? 0) &&
-        (p.round ?? 0) < nextRound,
+        (p.round ?? 0) < nextRound &&
+        isActionableDiagnosis(p.diagnosis ?? ''),
     )
     .sort((a, b) => (b.round ?? 0) - (a.round ?? 0));
   if (between.length === 0) return { tripped: false };
@@ -278,7 +375,13 @@ export async function detectFixLoopOscillation(
  *  real error". The implement fix prompt frames the two differently (see 07-phase-2-implement).
  *  08a-browser-verify is intentionally absent: it runs only in automated (mcp) mode, so its
  *  loop-backs are machine console/network dumps, not a person's observations. */
-const HUMAN_REJECT_SOURCES = new Set(['09-gate-2-verify-approval', '08d2-adversarial-qa-review']);
+const HUMAN_REJECT_SOURCES = new Set([
+  '09-gate-2-verify-approval',
+  '08d2-adversarial-qa-review',
+  // Text the user typed at the escalation gate. Same standing as a hands-on reject: they are
+  // looking at both sides of a stuck loop and directing the fix.
+  FIX_LOOP_GATE_SOURCE,
+]);
 
 /** The diagnosis the implementation step should fix on this round, with whether it came from a
  *  human reject gate (authoritative, every item required) vs a machine check. Null on the
@@ -319,7 +422,28 @@ const HONORED_CONSTRAINT_SOURCES = new Set([
   '08c-code-review',
   '08d-adversarial-qa',
   '09-gate-2-verify-approval',
+  FIX_LOOP_GATE_SOURCE,
 ]);
+
+/** Constraints that outrank an agent's opinion, most authoritative first: what the USER decided
+ *  at the escalation gate, then what a guard or runtime actually MEASURED. Emitted ahead of the
+ *  rest so that when the budget is tight the text surviving intact is the arbitration or the
+ *  verified fact, never the opinion. A task lost twelve days to the inverse: a code-audit
+ *  finding that contradicted 07c's DDEV build guard rode in at the top of this block (inside a
+ *  gate-2 reject) while 07c's own constraint fell off the end of a single head-slice, so every
+ *  later round was told to re-add the exact line the guard rejects. */
+const PRIORITY_CONSTRAINT_SOURCES = [
+  FIX_LOOP_GATE_SOURCE,
+  '07c-ddev-reconcile',
+  '08-phase-5-verify',
+];
+
+/** Whole-block target, and the room each surviving source is guaranteed. The floor WINS when
+ *  the two conflict: a block a few hundred chars over target costs tokens, while a dropped
+ *  source silently deletes a "do not revert this" that the implementation is currently shaped
+ *  by — and deletes it invisibly, which is what made the failure above so hard to see. */
+const HONORED_BLOCK_TARGET = 3000;
+const HONORED_ENTRY_MIN = 400;
 
 /** Prior objective/runtime fix-loop diagnoses (from HONORED_CONSTRAINT_SOURCES, this round
  *  or earlier) formatted as a "these are deliberate fixes — do not revert them" block for the
@@ -352,20 +476,39 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
       latestPerSource.set(p.sourceStepId, cleanDiagnosis((p.diagnosis ?? '').trim()));
     }
   }
-  const entries = [...latestPerSource.entries()]
+  // Priority sources first; everything else keeps its newest-first order (sort is stable, so
+  // equal ranks do not reshuffle). Ordering matters only because the budget below can truncate.
+  const rank = (src: string): number => {
+    const i = PRIORITY_CONSTRAINT_SOURCES.indexOf(src);
+    return i >= 0 ? i : PRIORITY_CONSTRAINT_SOURCES.length;
+  };
+  const ordered = [...latestPerSource.entries()]
     .filter(([, d]) => d.length > 0)
-    .map(([src, d]) => `- ${src}: ${d}`);
-  if (entries.length === 0) return '';
-  const block = [
+    .sort(([a], [b]) => rank(a) - rank(b));
+  if (ordered.length === 0) return '';
+  const header = [
     'HONORED CONSTRAINTS — the current code is shaped to satisfy these prior verification/',
     'runtime failures. They were DELIBERATE fixes, not defects. Do NOT recommend reverting them',
     'or flag them under Developer Experience / naming / style. In particular, the DDEV project',
     'name in .ddev/config.yaml is harness-owned and registered with the running environment —',
     'do not flag it. You MAY still flag genuine breakage (the code no longer works), but any fix',
     'you propose MUST preserve these constraints rather than undo them:',
-    ...entries,
   ].join('\n');
-  return block.length > 3000 ? block.slice(0, 3000) : block;
+  // Budget PER ENTRY rather than head-slicing the joined block. One slice over the whole string
+  // truncates by position, so a single long diagnosis evicts every source after it outright —
+  // the block then reads as a complete list while silently missing constraints.
+  const perEntry = Math.max(
+    HONORED_ENTRY_MIN,
+    Math.floor((HONORED_BLOCK_TARGET - header.length) / ordered.length),
+  );
+  const entries = ordered.map(([src, d]) => {
+    const label = `- ${src}: `;
+    const room = Math.max(HONORED_ENTRY_MIN, perEntry - label.length);
+    // Head-slice: a constraint states its rule up front (cleanDiagnosis already kept the tail
+    // of raw tool output, which is where those put their summary).
+    return d.length > room ? `${label}${d.slice(0, room)}…` : `${label}${d}`;
+  });
+  return [header, ...entries].join('\n');
 }
 
 /** Background ledger for the implementation fix pass: what earlier fix rounds already
