@@ -987,7 +987,16 @@ async function readDdevConfig(repoPath: string): Promise<DdevInfo> {
 
 function parseDdevDatabase(text: string): { kind: DatabaseKind; version: string | null } {
   const typeMatch = text.match(/database:\s*\n\s+type:\s*([a-z]+)/);
-  const versionMatch = text.match(/database:\s*\n(?:\s+[^\n]+\n)*?\s+version:\s*"?([^\s"]+)"?/);
+  // Indentation is matched with [ \t] rather than \s so it cannot span the line
+  // break. With \s the repeated group and its own trailing \n could each claim
+  // the same newline, and that ambiguity backtracks exponentially: a config.yaml
+  // of "database:\n" plus ~500 blank-ish "  \n" lines pinned a core indefinitely.
+  // This parses .ddev/config.yaml out of a cloned repository, so the input is
+  // attacker-supplied. Requiring one leading blank makes each iteration consume
+  // exactly one indented line, which is linear.
+  const versionMatch = text.match(
+    /database:[ \t]*\n(?:[ \t][^\n]*\n)*?[ \t]+version:[ \t]*"?([^\s"]+)"?/,
+  );
   const rawType = typeMatch?.[1]?.toLowerCase() ?? 'none';
   const kind: DatabaseKind =
     rawType === 'mariadb'

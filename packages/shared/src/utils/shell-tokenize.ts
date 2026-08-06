@@ -1,4 +1,9 @@
-const FLAG_LINE_PATTERN = /^(--?[A-Za-z][A-Za-z0-9-]*)\s+(.+)$/s;
+// The tail starts at a non-blank rather than `.` so it cannot overlap the `\s+`
+// separator ahead of it; under /s both match whitespace, and that ambiguity is
+// what CodeQL flags as polynomial backtracking. Callers trim the tail anyway
+// (see normalizeCliArgsArray), so refusing a blank first character changes no
+// result.
+const FLAG_LINE_PATTERN = /^(--?[A-Za-z][A-Za-z0-9-]*)\s+(\S[\s\S]*)$/s;
 const FLAG_EQ_QUOTED_PATTERN = /^(--?[A-Za-z][A-Za-z0-9-]*)=(["'])(.*)\2$/s;
 
 function stripOuterMatchingQuotes(s: string): string {
