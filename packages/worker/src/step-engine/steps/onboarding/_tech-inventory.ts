@@ -1116,10 +1116,11 @@ function matchesKey(parsedKey: string, catalogKey: string): boolean {
   if (parsedKey === catalogKey) return true;
   if (catalogKey === '*:*') return parsedKey.includes(':');
   if (!catalogKey.includes('*')) return false;
-  const escaped = catalogKey
-    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-    .replace(/\\\*/g, '\\*')
-    .replace(/\*/g, '[^:]+');
+  // No `\\\*` -> `\\*` pass here: the escape above already backslash-escapes any
+  // literal backslash, so that rewrite substituted a string for itself and did
+  // nothing. `*` is deliberately left out of the escaped set so it survives to
+  // become the wildcard below.
+  const escaped = catalogKey.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^:]+');
   return new RegExp(`^${escaped}$`).test(parsedKey);
 }
 
