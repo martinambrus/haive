@@ -46,12 +46,18 @@ export function generateTemporaryPassword(length = 24): string {
   if (length < 12) {
     throw new Error('temporary password length must be >= 12');
   }
-  const bytes = randomBytes(length);
+  // Rejection sampling. The alphabet is 65 chars, which does not divide 256, so
+  // a bare `byte % 65` would hand the first 61 characters a 4/256 chance and the
+  // last 4 only 3/256. Discarding bytes at or above the largest multiple of the
+  // alphabet length keeps every character equally likely.
+  const limit = Math.floor(256 / PASSWORD_ALPHABET.length) * PASSWORD_ALPHABET.length;
   let out = '';
-  for (let i = 0; i < length; i += 1) {
-    const byte = bytes[i] ?? 0;
-    const idx = byte % PASSWORD_ALPHABET.length;
-    out += PASSWORD_ALPHABET[idx];
+  while (out.length < length) {
+    for (const byte of randomBytes(length)) {
+      if (byte >= limit) continue;
+      out += PASSWORD_ALPHABET[byte % PASSWORD_ALPHABET.length];
+      if (out.length === length) break;
+    }
   }
   return out;
 }
