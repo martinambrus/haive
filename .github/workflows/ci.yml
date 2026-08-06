@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege GITHUB_TOKEN. No job here uses the token beyond cloning, so
+# read-only on contents is the whole requirement; a job that later needs to
+# comment or push must opt in explicitly with its own permissions block.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
