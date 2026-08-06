@@ -53,6 +53,21 @@ const SUCCESS_SAVE_TIMEOUT_MS = 40_000;
 // the OAuth URL without a client terminal). Set true only to inspect the TUI.
 const ANTIGRAVITY_DEBUG_TERMINAL = false;
 
+// The sign-in URL is scraped out of the CLI's stdout, so it reaches the browser
+// as provider-controlled text rather than something this app composed. React
+// does not sanitize `href`, which would make a `javascript:` or `data:` value a
+// click-to-execute script in the "Open the sign-in page" links. Only an http(s)
+// URL is ever handed to those anchors; anything else is dropped and the modal
+// falls through to its existing "waiting for sign-in URL" timeout path.
+function safeAuthUrl(raw: string): string | null {
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
 export function CliAuthBannerModal({
   open,
   providerId,
@@ -117,7 +132,7 @@ export function CliAuthBannerModal({
           else if (msg.phase === 'submitting') setPhase('submitting');
           break;
         case 'auth-url':
-          if (typeof msg.url === 'string') setAuthUrl(msg.url);
+          if (typeof msg.url === 'string') setAuthUrl(safeAuthUrl(msg.url));
           if (typeof msg.deviceCode === 'string') setDeviceCode(msg.deviceCode);
           if (!TOKEN_PASTE_PROVIDERS.has(providerName)) setPhase('awaiting-approval');
           else setPhase('awaiting-token');
