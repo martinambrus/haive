@@ -39,6 +39,7 @@ import {
   MiningWaveError,
   type AgentMiningDispatch,
   type AgentMiningResult,
+  type StepApplyArgs,
   type StepContext,
   type StepDefinition,
   type StepLoopPassRecord,
@@ -1663,113 +1664,117 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       process.env.HAIVE_TEST_BYPASS_LLM === '1' || !miningRetry || stepDef.loop
         ? true
         : !(await miningAgentsWithBudget(db, current.id, miningRetry.maxAttempts));
+    // EVERY apply() pass runs inside this loop, not just the first. apply() states its
+    // needs by THROWING — MiningRetryError to re-roll an agent, MiningWaveError to fan out
+    // a wave whose prompts depend on the first one's findings — and the degrade passes
+    // below can raise a signal of their own: a reviewer that burned its re-roll budget
+    // still leaves blocking findings to refute. Running those passes nested inside the
+    // catch left their signals with nobody to catch them, so a step (and a task that had
+    // been running for a day) died on "second mining wave requested" with every one of its
+    // CLI invocations exited 0. Each arm sets a monotone flag its own guard requires
+    // unset, so a signal is honored at most once and the loop is bounded at three passes.
+    const applyArgs: StepApplyArgs = {
+      detected,
+      formValues: formValues ?? {},
+      llmOutput,
+      agentMiningResults,
+      iteration,
+      previousIterations,
+      isFinalLlmAttempt,
+      isFinalMiningAttempt,
+    };
     let output: unknown;
-    try {
-      output = await stepDef.apply(ctx, {
-        detected,
-        formValues: formValues ?? {},
-        llmOutput,
-        agentMiningResults,
-        iteration,
-        previousIterations,
-        isFinalLlmAttempt,
-        isFinalMiningAttempt,
-      });
-    } catch (applyErr) {
-      // A second mining wave: agents whose prompts depend on what the first wave found.
-      // Fresh rows, so the fan-out barrier re-parks the step; apply() runs again with
-      // both waves in agentMiningResults. See MiningWaveError for why no other phase
-      // can express this.
-      if (
-        applyErr instanceof MiningWaveError &&
-        stepDef.agentMining &&
-        !stepDef.loop &&
-        params.providers &&
-        params.deps
-      ) {
-        const dispatched = await dispatchMiningAgents(
-          db,
-          stepDef,
-          current,
-          ctx,
-          params,
-          applyErr.dispatches,
-          null,
-        );
-        if (dispatched > 0) {
-          ctx.logger.info(
-            { stepId: meta.id, agentIds: applyErr.dispatches.map((d) => d.agentId) },
-            'second mining wave dispatched',
+    for (;;) {
+      try {
+        output = await stepDef.apply(ctx, { ...applyArgs });
+        break;
+      } catch (applyErr) {
+        // A second mining wave: agents whose prompts depend on what the first wave found.
+        // Fresh rows, so the fan-out barrier re-parks the step; apply() runs again with
+        // both waves in agentMiningResults. See MiningWaveError for why no other phase
+        // can express this.
+        if (
+          applyErr instanceof MiningWaveError &&
+          stepDef.agentMining &&
+          !stepDef.loop &&
+          params.providers &&
+          params.deps &&
+          applyArgs.miningWaveExhausted !== true
+        ) {
+          const dispatched = await dispatchMiningAgents(
+            db,
+            stepDef,
+            current,
+            ctx,
+            params,
+            applyErr.dispatches,
+            null,
           );
-          const parked = await updateRow(db, current.id, {
-            status: 'waiting_cli',
-            statusMessage: `Running ${dispatched} follow-up agent(s)...`,
-          });
-          return { status: 'waiting_cli', row: parked };
+          if (dispatched > 0) {
+            ctx.logger.info(
+              { stepId: meta.id, agentIds: applyErr.dispatches.map((d) => d.agentId) },
+              'second mining wave dispatched',
+            );
+            const parked = await updateRow(db, current.id, {
+              status: 'waiting_cli',
+              statusMessage: `Running ${dispatched} follow-up agent(s)...`,
+            });
+            return { status: 'waiting_cli', row: parked };
+          }
+          // Nothing went out: every agent already had a row, or no provider could take
+          // them (dispatchMiningAgents wrote those rows as failed). Parking would hang the
+          // step on a barrier with nothing pending, so run apply() again and tell it the
+          // wave is not coming. It must not ask a second time — the guard above is what
+          // stops a step that asks anyway from spinning here forever.
+          ctx.logger.warn(
+            { stepId: meta.id, agentIds: applyErr.dispatches.map((d) => d.agentId) },
+            'second mining wave dispatched no agents; continuing without it',
+          );
+          applyArgs.miningWaveExhausted = true;
+          continue;
         }
-        // Nothing went out: every agent already had a row, or no provider could take
-        // them (dispatchMiningAgents wrote those rows as failed). Parking would hang the
-        // step on a barrier with nothing pending, so run apply() again and tell it the
-        // wave is not coming. It must not ask a second time.
-        ctx.logger.warn(
-          { stepId: meta.id, agentIds: applyErr.dispatches.map((d) => d.agentId) },
-          'second mining wave dispatched no agents; continuing without it',
-        );
-        output = await stepDef.apply(ctx, {
-          detected,
-          formValues: formValues ?? {},
-          llmOutput,
-          agentMiningResults,
-          iteration,
-          previousIterations,
-          isFinalLlmAttempt,
-          isFinalMiningAttempt,
-          miningWaveExhausted: true,
-        });
-      }
-      // agentMining.retry: a reviewer that ran but emitted prose instead of its JSON
-      // contract is re-rolled on its own, leaving the other agents' completed rows
-      // alone. Re-running one agent is far cheaper than the alternatives: a fix round
-      // through implementation, or a developer reject at the gate.
-      else if (applyErr instanceof MiningRetryError && miningRetry && !stepDef.loop) {
-        const requeued = await retryMiningAgents(
-          db,
-          stepDef,
-          current,
-          ctx,
-          detected,
-          formValues,
-          llmOutput,
-          params,
-          applyErr.agentIds,
-          miningRetry.maxAttempts,
-        );
-        if (requeued > 0) {
-          const parked = await updateRow(db, current.id, {
-            status: 'waiting_cli',
-            statusMessage: `Re-running ${requeued} agent(s) whose output could not be read...`,
-          });
-          return { status: 'waiting_cli', row: parked };
+        // agentMining.retry: a reviewer that ran but emitted prose instead of its JSON
+        // contract is re-rolled on its own, leaving the other agents' completed rows
+        // alone. Re-running one agent is far cheaper than the alternatives: a fix round
+        // through implementation, or a developer reject at the gate.
+        if (
+          applyErr instanceof MiningRetryError &&
+          miningRetry &&
+          !stepDef.loop &&
+          applyArgs.isFinalMiningAttempt !== true
+        ) {
+          const requeued = await retryMiningAgents(
+            db,
+            stepDef,
+            current,
+            ctx,
+            detected,
+            formValues,
+            llmOutput,
+            params,
+            applyErr.agentIds,
+            miningRetry.maxAttempts,
+          );
+          if (requeued > 0) {
+            const parked = await updateRow(db, current.id, {
+              status: 'waiting_cli',
+              statusMessage: `Re-running ${requeued} agent(s) whose output could not be read...`,
+            });
+            return { status: 'waiting_cli', row: parked };
+          }
+          // Every NAMED agent is spent, but isFinalMiningAttempt was false because some
+          // OTHER agent still had budget (peer exhausted on its re-roll, security fine on
+          // its first). apply() cannot see that, so it threw. Re-run it as final and let
+          // it degrade: failing the step here would discard a review that mostly worked.
+          // Both MiningRetryError throw sites gate on isFinalMiningAttempt === false, so
+          // the guard above can only bite a step in breach of that contract.
+          ctx.logger.warn(
+            { stepId: meta.id, agentIds: applyErr.agentIds },
+            'no re-roll budget left for the named agents; degrading',
+          );
+          applyArgs.isFinalMiningAttempt = true;
+          continue;
         }
-        // Every NAMED agent is spent, but isFinalMiningAttempt was false because some
-        // OTHER agent still had budget (peer exhausted on its re-roll, security fine on
-        // its first). apply() cannot see that, so it threw. Re-run it as final and let
-        // it degrade: failing the step here would discard a review that mostly worked.
-        ctx.logger.warn(
-          { stepId: meta.id, agentIds: applyErr.agentIds },
-          'no re-roll budget left for the named agents; degrading',
-        );
-        output = await stepDef.apply(ctx, {
-          detected,
-          formValues: formValues ?? {},
-          llmOutput,
-          agentMiningResults,
-          iteration,
-          previousIterations,
-          isFinalLlmAttempt,
-          isFinalMiningAttempt: true,
-        });
-      } else {
         // llm.retry: a flaky model (e.g. a cloud Ollama model whose agentic tool-loop
         // intermittently ends with no JSON, or emits unparseable/truncated JSON) often
         // succeeds on a fresh roll. On a retryable apply throw, re-enqueue a NEW cli

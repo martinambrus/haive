@@ -257,7 +257,13 @@ function terminalFailureRetryStep(applyCalls: StepApplyArgs[]): StepDefinition {
 /** A mining step whose apply() asks for a SECOND wave (one refuter per finding) the
  *  first time it runs, and settles once those agents' results are present — the exact
  *  contract 08c's refutation pass implements. */
-function waveStep(applyCalls: StepApplyArgs[], waveAgentIds: string[]): StepDefinition {
+function waveStep(
+  applyCalls: StepApplyArgs[],
+  waveAgentIds: string[],
+  /** Keep asking even after the runner says no wave is coming — a step in breach of the
+   *  MiningWaveError contract. Pins the apply loop's upper bound. */
+  insist = false,
+): StepDefinition {
   return {
     metadata: {
       id: 'test-mining-step',
@@ -285,12 +291,66 @@ function waveStep(applyCalls: StepApplyArgs[], waveAgentIds: string[]): StepDefi
       const missing = waveAgentIds.filter((id) => !present.has(id));
       // Never ask twice: once the wave's rows exist (or the runner says none are
       // coming), settle. Otherwise the step would park on a barrier forever.
-      if (missing.length > 0 && !args.miningWaveExhausted) {
+      if (missing.length > 0 && (insist || !args.miningWaveExhausted)) {
         throw new MiningWaveError(
           missing.map((id) => ({ agentId: id, agentTitle: id, prompt: `refute ${id}` })),
         );
       }
       return { refuted: missing.length === 0, waveExhausted: args.miningWaveExhausted === true };
+    },
+  } as unknown as StepDefinition;
+}
+
+/** A mining step with 08c's round-9 shape: it re-rolls an unreadable reviewer while any
+ *  agent still has budget, and asks for a refutation wave once told the attempt is final.
+ *  The wave request therefore arrives from the DEGRADE pass rather than the first apply(),
+ *  which is the path that used to escape the runner's catch and fail the whole task. */
+function degradeThenWaveStep(
+  unreadable: string[],
+  waveAgentIds: string[],
+  applyCalls: StepApplyArgs[],
+): StepDefinition {
+  return {
+    metadata: {
+      id: 'test-mining-step',
+      workflowType: 'workflow',
+      index: 0,
+      title: 'test',
+      description: 'test',
+      requiresCli: true,
+    },
+    async detect() {
+      return { foo: 'bar' };
+    },
+    form() {
+      return null;
+    },
+    agentMining: {
+      requiredCapabilities: [],
+      retry: { maxAttempts: 2 },
+      async selectAgents() {
+        return [
+          { agentId: 'peer-reviewer', agentTitle: 'peer-reviewer', prompt: 'review' },
+          { agentId: 'security-code-reviewer', agentTitle: 'security', prompt: 'audit' },
+        ];
+      },
+    },
+    async apply(_ctx, args) {
+      applyCalls.push(args);
+      // 08c:1006 — re-roll the reviewer whose output could not be read, while anyone
+      // still has budget.
+      if (unreadable.length > 0 && args.isFinalMiningAttempt === false) {
+        throw new MiningRetryError(unreadable);
+      }
+      // 08c:1054 — the degraded reviewer still leaves blocking findings to refute.
+      const present = new Set((args.agentMiningResults ?? []).map((r) => r.agentId));
+      const missing = waveAgentIds.filter((id) => !present.has(id));
+      if (missing.length > 0 && !args.miningWaveExhausted) {
+        throw new MiningWaveError(
+          missing.map((id) => ({ agentId: id, agentTitle: id, prompt: `refute ${id}` })),
+        );
+      }
+      return { refuted: missing.length === 0, reviewIncomplete: unreadable.length > 0 };
     },
   } as unknown as StepDefinition;
 }
@@ -520,5 +580,57 @@ describe('advanceStep agentMining second wave', () => {
     if (result.status === 'done') {
       expect(result.output).toEqual({ refuted: false, waveExhausted: true });
     }
+  });
+
+  it('dispatches a wave requested from the degrade pass instead of failing the step', async () => {
+    // Round 9 of task 7780da14: the security reviewer's output was unreadable on both of
+    // its attempts while the peer reviewer still had budget, so miningAgentsWithBudget
+    // reported "not final", apply() threw MiningRetryError, nothing could be re-rolled,
+    // and the runner re-ran apply() as final. THAT pass asked for the refutation wave.
+    // The request used to be raised from inside the catch, where nothing handled it, so
+    // the step (and a 26-hour task) died on a control-flow signal.
+    const state = freshState([
+      miningRow('security-code-reviewer', 2),
+      miningRow('peer-reviewer', 1),
+    ]);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(
+      makeMockDb(state),
+      degradeThenWaveStep(['security-code-reviewer'], ['refute-abc', 'refute-def'], applyCalls),
+      enqueued,
+    );
+
+    expect(result.status).toBe('waiting_cli');
+    expect(applyCalls).toHaveLength(2);
+    expect(applyCalls[0]!.isFinalMiningAttempt).toBe(false);
+    expect(applyCalls[1]!.isFinalMiningAttempt).toBe(true);
+
+    // the wave went out as fresh rows; the spent reviewer was never re-rolled
+    const miningInserts = state.inserts.filter((i) => i.table === 'task_step_agent_minings');
+    expect(miningInserts.map((i) => i.row.agentId)).toEqual(['refute-abc', 'refute-def']);
+    expect(miningInserts.every((i) => i.row.status === 'pending')).toBe(true);
+    expect(enqueued).toHaveLength(2);
+    expect(state.updates.filter((u) => u.table === 'task_step_agent_minings')).toHaveLength(0);
+  });
+
+  it('fails rather than looping when the wave-exhausted pass asks again', async () => {
+    // Every insert loses the (task_step_id, agent_id) race, so the runner tells apply()
+    // the wave is not coming. A step that asks anyway is in breach of the contract: the
+    // loop must give up and surface the throw, not spin re-dispatching forever.
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    state.miningInsertConflicts = true;
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(
+      makeMockDb(state),
+      waveStep(applyCalls, ['refute-abc'], true),
+      enqueued,
+    );
+
+    expect(result.status).toBe('failed');
+    expect(applyCalls).toHaveLength(2);
+    expect(applyCalls[1]!.miningWaveExhausted).toBe(true);
+    expect(enqueued).toHaveLength(0);
   });
 });
