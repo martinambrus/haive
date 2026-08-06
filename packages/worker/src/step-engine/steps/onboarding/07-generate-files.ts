@@ -239,7 +239,14 @@ export function agentsIndexMarkdown(agents: AgentSpec[], ext: 'md' | 'toml' = 'm
     '|-------|-------------|',
   ];
   for (const a of sorted) {
-    const desc = a.description.replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
+    // Backslashes escape first: escaping only `|` turns an input `\|` into
+    // `\\|`, which Markdown reads as an escaped backslash followed by a live
+    // cell separator, splitting the row.
+    const desc = a.description
+      .replace(/\\/g, '\\\\')
+      .replace(/\|/g, '\\|')
+      .replace(/\s+/g, ' ')
+      .trim();
     lines.push(`| [${a.id}](${a.id}.${ext}) | ${desc} |`);
   }
   lines.push('');

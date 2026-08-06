@@ -723,7 +723,14 @@ export function skillsReadmeMarkdown(
     '|-------|---------|',
   ];
   for (const r of rows) {
-    const desc = r.description.replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
+    // Backslashes escape first: escaping only `|` turns an input `\|` into
+    // `\\|`, which Markdown reads as an escaped backslash followed by a live
+    // cell separator, splitting the row.
+    const desc = r.description
+      .replace(/\\/g, '\\\\')
+      .replace(/\|/g, '\\|')
+      .replace(/\s+/g, ' ')
+      .trim();
     lines.push(`| [${r.id}](./${r.id}/SKILL.md) | ${desc} |`);
   }
   lines.push('');
