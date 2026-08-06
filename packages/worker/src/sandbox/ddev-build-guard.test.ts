@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   dockerfileRunCommands,
   findDdevBuildBreakage,
+  findDdevSpecBreakage,
+  DDEV_BUILD_INPUT_PREFIX,
   isBuildDockerfile,
   isDdevAgentFixableFailure,
   isDdevBuildInputFailure,
@@ -93,6 +95,60 @@ describe('findDdevBuildBreakage', () => {
 
   it('passes an empty input set', () => {
     expect(findDdevBuildBreakage([])).toBeNull();
+  });
+});
+
+describe('findDdevSpecBreakage', () => {
+  // Verbatim from the spec that deadlocked task 72ccb002 for twelve days.
+  const PRESCRIBING_SPEC = [
+    '### 1. `ext/mysql` — the hard blocker',
+    '',
+    '`.ddev/web-build/Dockerfile.example` confirms that this file is **appended** to DDEV’s own',
+    'Dockerfile — no `FROM` line is needed or allowed.',
+    '',
+    '```dockerfile',
+    '# .ddev/web-build/Dockerfile',
+    'RUN docker-php-ext-install mysql',
+    '```',
+    '',
+    'Do **not** use `apt-get install php5.6-mysql`.',
+  ].join('\n');
+
+  // The corrected spec: names the command three times to WARN against it, prescribes nothing.
+  const WARNING_SPEC = [
+    'DDEV installs `php5.6-mysql` automatically for `php_version: "5.6"`.',
+    '',
+    'Do **not** add `RUN docker-php-ext-install mysql` to a build Dockerfile: it fails the image',
+    'build with "command not found" (exit 127) on every `ddev start`.',
+    '',
+    '### Q2: What is the correct way to get `ext/mysql`?',
+    '- [ ] `RUN docker-php-ext-install mysql` in `.ddev/web-build/Dockerfile`',
+    '- [x] Nothing — DDEV installs it automatically',
+    '> Explanation: `docker-php-ext-install` is NOT available in `ddev/ddev-webserver`.',
+  ].join('\n');
+
+  it('flags a spec that prescribes the command in a fenced block', () => {
+    const reason = findDdevSpecBreakage(PRESCRIBING_SPEC);
+    expect(reason).toContain('docker-php-ext-install');
+    expect(reason).toContain('webimage_extra_packages');
+    // Not the runtime-failure prefix: a spec finding is not a bring-up failure.
+    expect(reason).not.toContain(DDEV_BUILD_INPUT_PREFIX);
+  });
+
+  it('does NOT flag a spec that only warns against the command', () => {
+    expect(findDdevSpecBreakage(WARNING_SPEC)).toBeNull();
+  });
+
+  it('ignores a fenced line that cannot fail the build', () => {
+    expect(findDdevSpecBreakage('```sh\nRUN pecl install redis || true\n```')).toBeNull();
+  });
+
+  it('passes a spec with no fenced blocks at all', () => {
+    expect(findDdevSpecBreakage('Just prose about docker-php-ext-install.')).toBeNull();
+  });
+
+  it('finds a prescription in any fence language, not just dockerfile', () => {
+    expect(findDdevSpecBreakage('```\nRUN apk add curl\n```')).toContain('apt-get');
   });
 });
 

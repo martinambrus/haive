@@ -141,19 +141,63 @@ export interface DdevBuildFile {
   content: string;
 }
 
+/** First command in these Dockerfile contents that the image does not have, with its advice.
+ *  The single place the ABSENT_COMMANDS map is consulted, so the pre-flight check and the
+ *  spec check below can never disagree about what counts as broken. */
+function findAbsentCommand(content: string): { command: string; advice: string } | null {
+  for (const command of dockerfileRunCommands(content)) {
+    const advice = ABSENT_COMMANDS.get(command);
+    if (advice) return { command, advice };
+  }
+  return null;
+}
+
 /** Reason the next image build will fail with "command not found", or null when none of
  *  the build inputs reaches for a command the image does not have. */
 export function findDdevBuildBreakage(files: DdevBuildFile[]): string | null {
   for (const file of files) {
-    for (const command of dockerfileRunCommands(file.content)) {
-      const advice = ABSENT_COMMANDS.get(command);
-      if (advice) {
-        return (
-          `${DDEV_BUILD_INPUT_PREFIX} ${file.name} runs \`${command}\`, which is not installed ` +
-          `in the image DDEV builds from, so the build fails with "command not found" ` +
-          `(exit 127) on every start. ${advice}`
-        );
-      }
+    const hit = findAbsentCommand(file.content);
+    if (hit) {
+      return (
+        `${DDEV_BUILD_INPUT_PREFIX} ${file.name} runs \`${hit.command}\`, which is not installed ` +
+        `in the image DDEV builds from, so the build fails with "command not found" ` +
+        `(exit 127) on every start. ${hit.advice}`
+      );
+    }
+  }
+  return null;
+}
+
+/** Fenced code blocks in a markdown document — body only, language tag ignored. */
+const MD_FENCE_RE = /^```[^\n]*\n(.*?)^```/gms;
+
+/**
+ * A spec that PRESCRIBES a command the DDEV web image does not have, or null when it does not.
+ *
+ * Same parser as the pre-flight check, applied to each fenced code block, so the test is "this
+ * document contains a RUN line calling an absent command" — not "this document mentions the
+ * command". That distinction is the entire point. The corrected spec for the failure that
+ * motivated this check names `docker-php-ext-install` three times, in prose and as a deliberately
+ * wrong quiz answer, precisely to warn against it; flagging that would punish the fix.
+ *
+ * Deliberately partial: it catches the fenced Dockerfile snippet an implementing agent copies,
+ * not the same command inside a mermaid diagram or a prose checklist, neither of which is a RUN
+ * line. One finding is enough to route the spec to the corrector, which then fixes the rest.
+ *
+ * Reported with its own wording rather than DDEV_BUILD_INPUT_PREFIX: that prefix is what
+ * isDdevBuildInputFailure classifies as an agent-fixable RUNTIME failure, and a spec finding is
+ * not a bring-up failure.
+ */
+export function findDdevSpecBreakage(specText: string): string | null {
+  for (const match of specText.matchAll(MD_FENCE_RE)) {
+    const hit = findAbsentCommand(match[1] ?? '');
+    if (hit) {
+      return (
+        `The spec prescribes \`${hit.command}\` in a build Dockerfile, which does not exist in ` +
+        `the image DDEV builds from — following it fails the image build with "command not ` +
+        `found" (exit 127) on every \`ddev start\`, and no later step can undo a spec. ` +
+        `${hit.advice} Amend the spec so it does not prescribe this command.`
+      );
     }
   }
   return null;

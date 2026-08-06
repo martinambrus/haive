@@ -7,6 +7,7 @@ import { parseCorrectorOutput } from './05-phase-0b5-spec-quality.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { loadOutstandingSpecFeedback } from './_spec-feedback.js';
 import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
+import { findDdevSpecBreakage } from '../../../sandbox/ddev-build-guard.js';
 
 // The spec-quality (05) amended spec is written here so the user can hand-edit
 // it in the Terminal tab (the workspace mounts at ctx.sandboxWorkdir, RW for
@@ -75,6 +76,22 @@ async function loadAuditFindings(ctx: StepContext): Promise<QualityFinding[]> {
   return Array.isArray(findings) ? findings : [];
 }
 
+/** Mechanical check of the spec itself, as a finding in the same shape the reviewers emit.
+ *
+ *  Every agent in the run already receives the DDEV generated-file boundary — which states that
+ *  `docker-php-ext-install` does not exist in the DDEV web image — at the TOP of its prompt, and
+ *  one task still shipped a spec prescribing it, then spent six fix rounds and twelve days
+ *  oscillating because 07c's build guard rejects the file while the spec keeps mandating it. No
+ *  amount of extra prompt text fixes that; catching it in the spec does, at hour one.
+ *
+ *  Reported, never enforced: it joins the existing findings list, and the corrector's FIX_RULES
+ *  already require validating each finding against the code before acting, so a false positive
+ *  costs a paragraph of agent attention rather than blocking a working spec. */
+function specGuardFindings(spec: string): QualityFinding[] {
+  const reason = findDdevSpecBreakage(spec);
+  return reason ? [{ dimension: 'ddev-build-inputs', severity: 'critical', comment: reason }] : [];
+}
+
 /** Fallback spec body when 05 did not run (e.g. plan_tasklist): the 04 draft. */
 async function loadDraftSpec(ctx: StepContext): Promise<string> {
   const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
@@ -122,14 +139,21 @@ export const resolveSpecWarningsStep: StepDefinition<ResolveWarningsDetect, Reso
       const q = await loadQuality(ctx);
       const qf = Array.isArray(q.findings) ? q.findings.length : 0;
       if (qf > 0) return true;
-      return (await loadAuditFindings(ctx)).length > 0;
+      if ((await loadAuditFindings(ctx)).length > 0) return true;
+      // A spec clean by 05/04a can still prescribe something that cannot build, and skipping
+      // this step would carry it straight past gate 1 unmentioned.
+      return specGuardFindings(q.spec || (await loadDraftSpec(ctx))).length > 0;
     },
 
     async detect(ctx: StepContext): Promise<ResolveWarningsDetect> {
       const q = await loadQuality(ctx);
       const auditFindings = await loadAuditFindings(ctx);
-      const findings = [...(Array.isArray(q.findings) ? q.findings : []), ...auditFindings];
       const spec = q.spec || (await loadDraftSpec(ctx));
+      const findings = [
+        ...specGuardFindings(spec),
+        ...(Array.isArray(q.findings) ? q.findings : []),
+        ...auditFindings,
+      ];
       // Materialize the spec to a workspace file for hand-editing, but only if
       // absent so a re-detect (e.g. CLI-provider change) doesn't clobber edits.
       const fsPath = specReviewFsPath(ctx);
