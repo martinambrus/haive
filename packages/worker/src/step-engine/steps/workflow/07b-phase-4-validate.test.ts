@@ -200,6 +200,20 @@ describe('phase4ValidateStep churn bail wiring', () => {
     expect(v).not.toBeNull();
     expect(v!.blocking).toBe(true);
   });
+
+  // A parse miss names no defect — its summary literally reads "nothing to fix" — so it must
+  // reach gate-2 rather than spend a fix round and feed the oscillation guard a phantom side.
+  it('fixLoop does NOT route back on UNPARSEABLE', () => {
+    expect(
+      step.fixLoop!.evaluate(
+        mkValidateApply({
+          verdict: 'UNPARSEABLE',
+          churnFiles: [],
+          findingsSummary: '**Verdict:** UNPARSEABLE\n\n_No issues found — nothing to fix._',
+        }) as never,
+      ),
+    ).toBeNull();
+  });
 });
 
 describe('phase4ValidateStep.apply marks non-convergence', () => {

@@ -383,6 +383,12 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     // just burn another round.
     evaluate: (out) => {
       if (out.verdict === 'VALID') return null;
+      // A parse miss is not a finding. Its findingsSummary reads "_No issues found — nothing to
+      // fix._", so looping back spends a whole fix round on a diagnosis that names no defect —
+      // and hands the oscillation guard a phantom opposing side, which is how one task reached
+      // a "07c vs 07b" gate whose 07b half said nothing at all. The raw report still reaches
+      // the human at gate-2, which is where the UNPARSEABLE branch below intends it to land.
+      if (out.verdict === 'UNPARSEABLE') return null;
       if ((out.churnFiles?.length ?? 0) > 0) return null;
       return {
         blocking: true,
