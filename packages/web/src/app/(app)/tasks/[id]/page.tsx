@@ -371,17 +371,36 @@ export default function TaskDetailPage() {
   const [titleStripVisible, setTitleStripVisible] = useState(false);
 
   // Show the fixed title strip while the real header is scrolled out of view.
-  // Keyed on task presence, not the task object — the 2s poll replaces the
-  // object every tick and would re-create the observer.
+  // Re-derived from the row's live geometry on every scroll, NOT kept in sync by
+  // an IntersectionObserver: the observer subscribed to whichever node was mounted
+  // when the task first loaded, so anything that swapped that node or dropped a
+  // delivery left the strip frozen on the last value it happened to see — and
+  // since only the observer could change it back, scrolling did nothing and the
+  // header stayed gone until a reload. A geometric read carries no subscription,
+  // so a wrong value cannot survive the next scroll. Keyed on task presence, not
+  // the task object — the 2s poll replaces the object every tick and would
+  // re-attach the listeners each time.
   const hasTask = task !== null;
   useEffect(() => {
-    const el = titleRowRef.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(([entry]) => {
-      setTitleStripVisible(entry ? !entry.isIntersecting : false);
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
+    let frame = 0;
+    const sync = () => {
+      frame = 0;
+      const el = titleRowRef.current;
+      // No row in the DOM (loading / error branch): nothing has scrolled away.
+      setTitleStripVisible(el ? el.getBoundingClientRect().bottom <= 0 : false);
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(sync);
+    };
+    sync();
+    // Capture phase: a scroll inside a nested container never bubbles to window.
+    window.addEventListener('scroll', schedule, { capture: true, passive: true });
+    window.addEventListener('resize', schedule);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      window.removeEventListener('scroll', schedule, { capture: true });
+      window.removeEventListener('resize', schedule);
+    };
   }, [hasTask]);
 
   const reload = useCallback(async () => {
