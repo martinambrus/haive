@@ -27,7 +27,7 @@
     "@hono/node-server": "^2.0.12",
     "archiver": "^8.0.0",
     "bcrypt": "^6.0.0",
-    "bullmq": "^5.81.2",
+    "bullmq": "^6.0.6",
     "dockerode": "^5.0.1",
     "drizzle-orm": "0.45.2",
     "hono": "^4.12.34",
