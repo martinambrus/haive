@@ -411,6 +411,10 @@ export default function TaskDetailPage() {
       setProviderBreakdown(data.providerBreakdown ?? []);
       setParentTask(data.parentTask ?? null);
       setChildTasks(data.childTasks ?? []);
+      // Clear on success: this runs every 2s, so a single blipped poll (api
+      // restarting, a token refresh in flight) must not outlive the tick that
+      // recovers from it. Without this the first failure stuck forever.
+      setError(null);
     } catch (err) {
       setError((err as Error).message ?? 'Failed to load task');
     }
@@ -1004,7 +1008,11 @@ export default function TaskDetailPage() {
     }
   }
 
-  if (error) {
+  // Takeover only when there is nothing to show. A refresh that fails while the
+  // task is on screen is not a load failure: swapping the page for a red box
+  // would tear down the step cards and their live terminals over a hiccup that
+  // the next 2s tick usually undoes. That case renders a banner below instead.
+  if (error && !task) {
     return (
       <div className="flex flex-col gap-4">
         <Link href="/tasks" className="text-sm text-indigo-400 underline">
@@ -1273,6 +1281,15 @@ export default function TaskDetailPage() {
           )}
         </div>
       </div>
+
+      {/* The 2s refresh is failing but the task below is still on screen: say so
+          rather than hide it, since every timer keeps ticking on data that has
+          stopped arriving. Clears itself on the first tick that succeeds. */}
+      {error && (
+        <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+          Live updates stopped: {error}
+        </div>
+      )}
 
       {actionError && (
         <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300">
