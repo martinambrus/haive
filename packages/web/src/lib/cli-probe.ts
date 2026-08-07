@@ -1,4 +1,4 @@
-import { api, type CliProbeResult } from './api-client.js';
+import { api, type CliProbeResult } from './api-client';
 
 /** What a running "Test connection" is doing right now, for the button label.
  *

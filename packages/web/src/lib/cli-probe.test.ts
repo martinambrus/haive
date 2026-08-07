@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { probePhaseForState, PROBE_POLL_TIMEOUT_MS } from './cli-probe.js';
+import { probePhaseForState, PROBE_POLL_TIMEOUT_MS } from './cli-probe';
 
 describe('probePhaseForState', () => {
   it('calls only an active job running', () => {
