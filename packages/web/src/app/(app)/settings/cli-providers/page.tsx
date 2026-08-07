@@ -23,6 +23,7 @@ import {
 } from '@/components/ui';
 import { CliUpgradeAll } from '@/components/cli-upgrade-all';
 import { cliUpgradeLatest, groupUpgradable } from '@/components/cli-upgrade-selection';
+import { runCliProbe, type CliProbePhase } from '@/lib/cli-probe';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { usePageTitle } from '@/lib/use-page-title';
 
@@ -36,6 +37,9 @@ const LOGIN_RECOVERABLE: CliAuthStatus[] = [
 
 interface TestState {
   testing: boolean;
+  // Only meaningful while `testing` — a queued probe waits on the shared CLI queue and
+  // reports itself so the button can say so instead of looking stuck.
+  phase?: CliProbePhase;
   result: CliProbeResult | null;
   error: string | null;
 }
@@ -393,12 +397,14 @@ export default function CliProvidersPage() {
   }
 
   async function handleTest(id: string) {
-    setTestStates((s) => ({ ...s, [id]: { testing: true, result: null, error: null } }));
+    const setPhase = (phase: CliProbePhase) =>
+      setTestStates((s) => ({ ...s, [id]: { testing: true, phase, result: null, error: null } }));
+    setPhase('queued');
     try {
-      const data = await api.post<{ result: CliProbeResult }>(`/cli-providers/${id}/test`);
+      const result = await runCliProbe(id, setPhase);
       setTestStates((s) => ({
         ...s,
-        [id]: { testing: false, result: data.result, error: null },
+        [id]: { testing: false, result, error: null },
       }));
       // Probe wrote authStatus to the row — refetch so the Sign out button
       // appears/disappears in response to the new state.
@@ -500,7 +506,11 @@ export default function CliProvidersPage() {
                             onClick={() => handleTest(p.id)}
                             disabled={testState?.testing === true}
                           >
-                            {testState?.testing ? 'Testing...' : 'Test'}
+                            {testState?.testing
+                              ? testState.phase === 'running'
+                                ? 'Testing...'
+                                : 'Queued...'
+                              : 'Test'}
                           </Button>
                           {showLogin && (
                             <Button variant="secondary" size="sm" onClick={() => handleLogin(p)}>

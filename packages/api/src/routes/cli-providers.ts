@@ -53,6 +53,12 @@ async function loadOwnedProvider(db: Database, userId: string, providerId: strin
 const CLI_PROVIDER_LABEL_MAX_LENGTH = 255;
 const MAX_CLONE_ATTEMPTS = 1000;
 
+/** How long a finished cli-probe job stays readable so the browser can poll for its result.
+ *  Must outlast the client's poll window (PROBE_POLL_TIMEOUT_MS in
+ *  packages/web/src/lib/cli-probe.ts): a job reaped between finishing and the final poll
+ *  would be reported as expired for a probe that actually succeeded. */
+const PROBE_JOB_RETENTION_S = 900;
+
 export function makeCopyLabel(base: string, n: number): string {
   const suffix = n === 1 ? ' Copy' : ` Copy ${n}`;
   const room = CLI_PROVIDER_LABEL_MAX_LENGTH - suffix.length;
@@ -500,19 +506,50 @@ cliProviderRoutes.post('/:id/test', async (c) => {
   };
 
   const queue = getCliExecQueue();
-  const events = getCliExecQueueEvents();
   const job = await queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, {
-    removeOnComplete: true,
-    removeOnFail: true,
+    removeOnComplete: { age: PROBE_JOB_RETENTION_S },
+    removeOnFail: { age: PROBE_JOB_RETENTION_S },
   });
+  if (!job.id) throw new HttpError(500, 'probe was not queued', 'probe_enqueue_failed');
 
-  try {
-    const result = (await job.waitUntilFinished(events, 30_000)) as CliProbeResult;
-    return c.json({ result });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new HttpError(504, `probe timed out or failed: ${message}`, 'probe_failed');
+  return c.json({ jobId: job.id }, 202);
+});
+
+/** Poll target for a probe queued by POST /:id/test.
+ *
+ *  The probe shares `cli-exec-queue` with agent invocations and cannot preempt one, so it
+ *  routinely sits queued for minutes behind multi-minute CLI runs. This used to be awaited
+ *  inside the POST with a 30s deadline, which turned "the queue is busy" into a 504 that read
+ *  as "this provider is broken" — observed against a provider that then probed OK 8s later. */
+cliProviderRoutes.get('/:id/test/:jobId', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const jobId = c.req.param('jobId');
+  const db = getDb();
+  await loadOwnedProvider(db, userId, id);
+
+  const job = await getCliExecQueue().getJob(jobId);
+  const data = job?.data as CliProbeJobPayload | undefined;
+  // Anything that is not this user's probe for this provider is reported as missing rather
+  // than forbidden — the job id is the only handle, so a distinct "exists but not yours"
+  // would confirm live ids to whoever guesses one.
+  if (
+    !job ||
+    job.name !== CLI_EXEC_JOB_NAMES.PROBE ||
+    data?.providerId !== id ||
+    data?.userId !== userId
+  ) {
+    throw new HttpError(404, 'probe not found — it may have expired', 'probe_expired');
   }
+
+  const state = await job.getState();
+  if (state === 'completed') {
+    return c.json({ status: 'done', result: job.returnvalue as CliProbeResult });
+  }
+  if (state === 'failed') {
+    return c.json({ status: 'failed', error: job.failedReason || 'probe failed' });
+  }
+  return c.json({ status: 'pending', state });
 });
 
 cliProviderRoutes.post('/:id/sign-out', async (c) => {

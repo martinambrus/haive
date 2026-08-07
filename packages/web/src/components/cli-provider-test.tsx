@@ -2,13 +2,13 @@
 
 import { useState } from 'react';
 import {
-  api,
   type CliAuthStatus,
   type CliProbePathResult,
   type CliProbeResult,
   type CliProviderName,
 } from '@/lib/api-client';
 import { Badge, Button, FormError } from '@/components/ui';
+import { runCliProbe, type CliProbePhase } from '@/lib/cli-probe';
 import { useCliLogin } from '@/lib/use-cli-login';
 
 interface CliProviderTestProps {
@@ -55,6 +55,7 @@ export function CliProviderTest({
   onLoginCompleted,
 }: CliProviderTestProps) {
   const [testing, setTesting] = useState(false);
+  const [phase, setPhase] = useState<CliProbePhase>('queued');
   const [result, setResult] = useState<CliProbeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const blocked = Boolean(blockMessage);
@@ -62,11 +63,12 @@ export function CliProviderTest({
 
   async function runTest() {
     setError(null);
+    setPhase('queued');
     setTesting(true);
     try {
-      const data = await api.post<{ result: CliProbeResult }>(`/cli-providers/${providerId}/test`);
-      setResult(data.result);
-      return data.result;
+      const probeResult = await runCliProbe(providerId, setPhase);
+      setResult(probeResult);
+      return probeResult;
     } catch (err) {
       setError((err as Error).message ?? 'Test failed');
       return null;
@@ -107,7 +109,8 @@ export function CliProviderTest({
       <p className="text-sm text-neutral-400">
         Runs <code className="font-mono text-neutral-300">--version</code> against the provider's
         CLI binary inside the sandbox image; CLIs that ship a non-interactive auth check
-        (claude-code, codex, gemini, amp) also get an auth probe.
+        (claude-code, codex, gemini, amp) also get an auth probe. The probe shares the CLI queue
+        with running agents, so it can stay queued for a few minutes while they finish.
       </p>
 
       {blockMessage && (
@@ -118,7 +121,7 @@ export function CliProviderTest({
 
       <div className="flex gap-2">
         <Button onClick={handleTest} disabled={testing || blocked}>
-          {testing ? 'Testing...' : 'Test connection'}
+          {testing ? (phase === 'queued' ? 'Queued...' : 'Testing...') : 'Test connection'}
         </Button>
         {showLogin && (
           <Button variant="secondary" onClick={handleLogin} disabled={testing}>
