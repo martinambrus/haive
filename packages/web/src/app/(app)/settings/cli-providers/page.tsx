@@ -487,7 +487,11 @@ export default function CliProvidersPage() {
                             {needsReconnect[p.id] && (
                               <Badge
                                 variant="warning"
-                                title="This provider's usage token expired — Reconnect to restore its subscription meters"
+                                title={
+                                  p.name === 'claude-code'
+                                    ? "This provider's usage token expired — Reconnect to restore its subscription meters"
+                                    : "This provider's usage token was rejected — open Edit and replace its API token to restore its subscription meters"
+                                }
                               >
                                 ⚠ usage token expired
                               </Badge>

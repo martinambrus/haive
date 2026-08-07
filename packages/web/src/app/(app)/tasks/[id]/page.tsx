@@ -2042,15 +2042,23 @@ function HeaderUsageChip({
   if (!providerId || !snapshots) return null;
   const snap = snapshots.find((s) => s.providerId === providerId);
   // Dead usage token: don't vanish silently — prompt a reconnect and deep-link to the
-  // provider's page (where the Reconnect button lives) so the meter can be restored.
+  // provider's page so the meter can be restored. The `#usage-tracking` anchor belongs to
+  // ClaudeUsageAuth, which renders for claude-code only; every other reconnectable provider
+  // (zai) is fixed by replacing its API token secret on the same page, so it gets no anchor
+  // and copy that names the field instead of a Reconnect button it does not have.
   if (snap?.status === 'needs_reconnect') {
+    const usageOauth = providerName === 'claude-code';
     return (
       <a
-        href={`/settings/cli-providers/${providerId}#usage-tracking`}
+        href={`/settings/cli-providers/${providerId}${usageOauth ? '#usage-tracking' : ''}`}
         target="_blank"
         rel="noopener noreferrer"
         className="ml-auto flex shrink-0 items-center gap-1 px-2 font-mono text-xs font-semibold text-amber-400 hover:text-amber-300"
-        title={`${providerLabel ?? providerName ?? 'CLI'} usage token expired — open its Usage tracking in a new tab to reconnect`}
+        title={
+          usageOauth
+            ? `${providerLabel ?? providerName ?? 'CLI'} usage token expired — open its Usage tracking in a new tab to reconnect`
+            : `${providerLabel ?? providerName ?? 'CLI'} usage token was rejected — open its settings in a new tab and replace its API token`
+        }
       >
         <span aria-hidden>⚠</span>
         <span className="underline">reconnect</span>
