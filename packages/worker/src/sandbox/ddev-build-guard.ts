@@ -266,19 +266,66 @@ const CONTAINER_CONFIG_ERROR_RE =
  *  to the behaviour we already had. */
 const CONTAINER_HOST_LEVEL_RE = /bind\(\) to |Address already in use|Permission denied/i;
 
-/** True when a DDEV bring-up failed because a webserver/PHP config the implementation wrote
- *  was rejected by the container, as proven by the captured container logs. */
+/**
+ * True when a DDEV bring-up failed because a webserver/PHP config the implementation wrote
+ * was rejected by the container, as proven by the captured container logs.
+ *
+ * Both patterns are applied PER LINE, not to the whole message. Every host-level shape above
+ * is emitted by the same daemon on the same line as the `[emerg]` that carries it
+ * (`nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address already in use)`), so line
+ * scoping costs the exclusion nothing — while testing the whole blob let an unrelated
+ * "Permission denied" veto a real config error from anywhere in the message. Task f33d410a
+ * is where that mattered: the captured web log carried `touch: cannot touch …: Permission
+ * denied` from the project's own entrypoint, forty lines away from anything nginx said.
+ */
 export function isDdevContainerConfigFailure(errorMessage: string): boolean {
+  return errorMessage
+    .split('\n')
+    .some((line) => CONTAINER_CONFIG_ERROR_RE.test(line) && !CONTAINER_HOST_LEVEL_RE.test(line));
+}
+
+/** DDEV's report that a container's PID 1 RETURNED, as opposed to one that stayed unhealthy
+ *  or timed out waiting — the discriminator for "/start.sh aborted" rather than "the app
+ *  inside is unwell". */
+const CONTAINER_EXITED_RE = /\bcontainer exited\b/i;
+
+/** DDEV's own name for the directory it sources into the web container's entrypoint. It
+ *  appears in a captured log because `/start.sh` runs under `set -x` and traces the path of
+ *  every script it sources, so its presence proves the project's OWN hook ran — the one
+ *  piece of agent-authored code on that path. Same constant the entrypoint guard keys on. */
+const ENTRYPOINT_TRACE_RE = /web-entrypoint\.d\//;
+
+/** A command that FAILED inside the container's start-up trace. Kept to the three strerror
+ *  texts a wrong entrypoint actually produces; a container killed for a host reason (OOM,
+ *  a reaped runner) prints none of them, which is what stops this classifying those as the
+ *  agent's to fix. */
+const ENTRYPOINT_COMMAND_FAILURE_RE =
+  /: (Permission denied|Operation not permitted|command not found)\b/i;
+
+/**
+ * True when the project's own `web-entrypoint.d` hook aborted the web container at RUNTIME —
+ * as opposed to the static breakage {@link findDdevEntrypointBreakage} catches before boot.
+ *
+ * The entrypoint guard only sees what a script cannot do unprivileged; it cannot see what a
+ * script did to the workspace on an EARLIER boot. Task f33d410a is the shape it misses: a hook
+ * that `sudo chown`s a file to www-data and then bare-`touch`es it succeeds the first time and
+ * dies with EACCES on every start after that. All three conditions are required because any
+ * one alone over-reaches — "container exited" also covers an OOM kill, and the trace line
+ * alone only proves the hook ran, not that it failed.
+ */
+export function isDdevEntrypointRuntimeFailure(errorMessage: string): boolean {
   return (
-    CONTAINER_CONFIG_ERROR_RE.test(errorMessage) && !CONTAINER_HOST_LEVEL_RE.test(errorMessage)
+    CONTAINER_EXITED_RE.test(errorMessage) &&
+    ENTRYPOINT_TRACE_RE.test(errorMessage) &&
+    ENTRYPOINT_COMMAND_FAILURE_RE.test(errorMessage)
   );
 }
 
 /**
  * Every DDEV failure the implementing agent can fix on its own, and therefore the whole of
  * what 07c-ddev-reconcile routes back to implementation: a bad image-build input, a
- * webserver/PHP config the container refused to load, the nginx include guard's verdict, or
- * a web-entrypoint script that cannot run unprivileged.
+ * webserver/PHP config the container refused to load, the nginx include guard's verdict, a
+ * web-entrypoint script that cannot run unprivileged, or one that aborted at runtime.
  *
  * Everything else — an unsatisfiable version constraint, a port collision, a reaped runner,
  * an OOM — keeps the hard-fail path that exposes Retry / Retry with AI, because looping the
@@ -288,6 +335,7 @@ export function isDdevAgentFixableFailure(errorMessage: string): boolean {
   return (
     isDdevBuildInputFailure(errorMessage) ||
     isDdevContainerConfigFailure(errorMessage) ||
+    isDdevEntrypointRuntimeFailure(errorMessage) ||
     errorMessage.includes(DDEV_NGINX_INCLUDE_PREFIX) ||
     errorMessage.includes(DDEV_ENTRYPOINT_PREFIX)
   );

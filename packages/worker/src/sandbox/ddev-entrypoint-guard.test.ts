@@ -270,4 +270,127 @@ describe('shellCommands', () => {
   it('reduces an absolute path to its basename', () => {
     expect(shellCommands('/usr/bin/chown www-data /x\n')[0]!.command).toBe('chown');
   });
+
+  it('reports a sudo-wrapped command instead of dropping it, tagged privileged', () => {
+    // Dropped, the chown that hands a path away is invisible to the idempotence pass below.
+    const cmds = shellCommands('sudo chown www-data:www-data /x\n');
+    expect(cmds.map((c) => [c.command, c.privileged])).toEqual([['chown', true]]);
+  });
+
+  it("skips sudo's own flags to find the command it wraps", () => {
+    expect(shellCommands('sudo -n -u root chown www-data /x\n')[0]!.command).toBe('chown');
+  });
+});
+
+// Task f33d410a ("Add DDEV" on rs_claude_haiku_max), 2026-08-07. Round 6 of the fix loop was
+// caught by the `exit 1` rule above; the round-7 rewrite below is clean by every rule that
+// existed then and STILL exited the web container — on the second boot only, because its own
+// first boot is what made the file unwritable. The task hard-failed with DDEV reporting
+// `touch: cannot touch '/var/www/html/aliases.ser': Permission denied`.
+describe('a write to a path the same script hands away', () => {
+  const POST_START_SH = `#!/bin/bash
+
+echo "=== RS CMS DDEV Post-Start Configuration ==="
+
+mkdir -p /var/www/html/UserFiles /var/www/html/formphotos /var/www/html/modsData
+chmod 0755 /var/www/html/UserFiles /var/www/html/formphotos /var/www/html/modsData || echo "WARNING: Failed to set upload directory permissions—check mount settings" >&2
+sudo chown www-data:www-data /var/www/html/UserFiles /var/www/html/formphotos /var/www/html/modsData || echo "WARNING: Failed to set upload directory ownership—check permissions" >&2
+echo "✓ Upload directories created with permissions 0755 and www-data ownership"
+
+touch /var/www/html/aliases.ser
+chmod 0640 /var/www/html/aliases.ser || echo "WARNING: Failed to set aliases.ser permissions—check mount settings" >&2
+sudo chown www-data:www-data /var/www/html/aliases.ser || echo "WARNING: Failed to set aliases.ser ownership—check permissions" >&2
+echo "✓ Aliases cache file ready (www-data writable)"
+`;
+
+  it('catches the exact script that killed task f33d410a', () => {
+    const reason = findDdevEntrypointBreakage([{ name: 'post-start.sh', content: POST_START_SH }]);
+    expect(reason).toContain(DDEV_ENTRYPOINT_PREFIX);
+    expect(reason).toContain('.ddev/web-entrypoint.d/post-start.sh');
+    expect(reason).toContain('touch');
+    expect(reason).toContain('/var/www/html/aliases.ser');
+    expect(reason).toContain('[ -f … ] || touch …');
+  });
+
+  it('routes that failure back to the implementation agent rather than hard-failing', () => {
+    const reason = findDdevEntrypointBreakage([{ name: 'post-start.sh', content: POST_START_SH }])!;
+    expect(isDdevAgentFixableFailure(`DDEV cannot start: ${reason}`)).toBe(true);
+  });
+
+  it('leaves the guarded chmod on the very same path alone', () => {
+    // `chmod 0640 … || echo` is in the script above and answered "Operation not permitted"
+    // in the real log without killing anything — the `||` is what saved it. Flagging it would
+    // report a command that demonstrably survives.
+    expect(
+      findDdevEntrypointBreakage([
+        {
+          name: 'ok.sh',
+          content: 'sudo chown www-data /x\nchmod 0640 /x || echo "warn" >&2\n',
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it('leaves mkdir -p on a handed-away directory alone — it succeeds on an existing one', () => {
+    expect(
+      findDdevEntrypointBreakage([
+        {
+          name: 'ok.sh',
+          content:
+            'mkdir -p /var/www/html/UserFiles\nsudo chown -R www-data /var/www/html/UserFiles\n',
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it('follows a recursive chown into the subtree', () => {
+    expect(
+      findDdevEntrypointBreakage([
+        {
+          name: 'bad.sh',
+          content: 'sudo chown -R www-data /var/www/html/logs\ntouch /var/www/html/logs/app.log\n',
+        },
+      ]),
+    ).toContain('/var/www/html/logs/app.log');
+  });
+
+  it('does not follow a NON-recursive chown into the subtree', () => {
+    expect(
+      findDdevEntrypointBreakage([
+        {
+          name: 'ok.sh',
+          content: 'sudo chown www-data /var/www/html/logs\ntouch /var/www/html/logs/app.log\n',
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it('catches a redirect into a handed-away path, attached or spaced', () => {
+    expect(
+      findDdevEntrypointBreakage([
+        { name: 'bad.sh', content: 'sudo chown www-data /x\necho hi > /x\n' },
+      ]),
+    ).toContain('/x');
+    expect(
+      findDdevEntrypointBreakage([
+        { name: 'bad.sh', content: 'sudo chown www-data /x\necho hi >/x\n' },
+      ]),
+    ).toContain('/x');
+  });
+
+  it('leaves a chown to the container user itself alone — it hands nothing away', () => {
+    expect(
+      findDdevEntrypointBreakage([
+        { name: 'ok.sh', content: 'sudo chown ddev:ddev /x\ntouch /x\n' },
+      ]),
+    ).toBeNull();
+  });
+
+  it('leaves a write to a path no chown mentions alone', () => {
+    expect(
+      findDdevEntrypointBreakage([
+        { name: 'ok.sh', content: 'sudo chown www-data /x\ntouch /y\n' },
+      ]),
+    ).toBeNull();
+  });
 });

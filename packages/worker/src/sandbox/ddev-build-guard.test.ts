@@ -8,6 +8,7 @@ import {
   isDdevAgentFixableFailure,
   isDdevBuildInputFailure,
   isDdevContainerConfigFailure,
+  isDdevEntrypointRuntimeFailure,
 } from './ddev-build-guard.js';
 import { findDdevNginxIncludeCollisions } from './ddev-nginx-include-guard.js';
 
@@ -266,6 +267,79 @@ describe('isDdevAgentFixableFailure', () => {
     expect(
       isDdevAgentFixableFailure(
         "ddev start blocked by an incompatible ddev_version_constraint: your DDEV version 'v1.25.3'",
+      ),
+    ).toBe(false);
+  });
+});
+
+// Task f33d410a ("Add DDEV" on rs_claude_haiku_max), 2026-08-07, verbatim shape. The web
+// container exited inside the project's own entrypoint hook, which had chowned aliases.ser to
+// www-data on an earlier boot and then bare-`touch`ed it on this one. Every branch that
+// existed returned false, so 07c hard-failed at round 7 with fix rounds still available.
+const ENTRYPOINT_ABORT =
+  'ddev start failed: Waiting for containers to become ready: [web db]...\n' +
+  'Failed waiting for web/db containers to become ready: ' +
+  'ddev-rs-claude-haiku-max-web container exited.\n\n' +
+  '--- DDEV web/db container logs ---\n' +
+  '=== ddev-rs-claude-haiku-max-web ===\n' +
+  'mnt/ddev_config/web-entrypoint.d/post-start.sh\n' +
+  "++ '[' '!' -d /var/www/html/.ddev ']'\n" +
+  '++ mkdir -p /var/www/html/UserFiles\n' +
+  "chmod: changing permissions of '/var/www/html/UserFiles': Operation not permitted\n" +
+  '++ touch /var/www/html/aliases.ser\n' +
+  "touch: cannot touch '/var/www/html/aliases.ser': Permission denied\n" +
+  '+ trap - SIGTERM\n' +
+  '+ kill -- -1\n' +
+  '=== ddev-rs-claude-haiku-max-db ===\n' +
+  '2026-08-07 13:17:45 0 [Note] InnoDB: log sequence number 44776; transaction id 15\n' +
+  '2026-08-07 13:17:45 0 [Note] mysqld: ready for connections.';
+
+describe('isDdevEntrypointRuntimeFailure', () => {
+  it('flags the entrypoint abort that hard-failed task f33d410a', () => {
+    expect(isDdevEntrypointRuntimeFailure(ENTRYPOINT_ABORT)).toBe(true);
+    expect(isDdevAgentFixableFailure(ENTRYPOINT_ABORT)).toBe(true);
+  });
+
+  it('needs all three signals — a container that exited is not enough on its own', () => {
+    // An OOM-killed or reaped container exits too, and editing .ddev/ cannot fix that.
+    expect(
+      isDdevEntrypointRuntimeFailure(
+        'Failed waiting for web/db containers to become ready: ddev-x-web container exited.',
+      ),
+    ).toBe(false);
+    // The hook ran and the container exited, but nothing in it failed.
+    expect(
+      isDdevEntrypointRuntimeFailure(
+        'ddev-x-web container exited.\n/mnt/ddev_config/web-entrypoint.d/post-start.sh\n+ echo ok',
+      ),
+    ).toBe(false);
+    // A command failed, but no container exited — a readiness timeout, not an abort.
+    expect(
+      isDdevEntrypointRuntimeFailure(
+        'web container is unhealthy\n/mnt/ddev_config/web-entrypoint.d/x.sh\nfoo: command not found',
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('the host-level veto is scoped to the line that carries the config error', () => {
+  it('no longer lets an unrelated Permission denied veto a real config error', () => {
+    // Exactly what the captured entrypoint trace does: it puts "Permission denied" in the
+    // message forty lines away from anything nginx said. Tested against the whole blob, that
+    // vetoed the nginx emerg and sent an agent-fixable failure down the hard-fail path.
+    const mixed =
+      'ddev-x-web container exited.\n' +
+      '--- DDEV web/db container logs ---\n' +
+      "touch: cannot touch '/var/www/html/aliases.ser': Permission denied\n" +
+      'nginx: [emerg] unknown directive "locaton" in /mnt/ddev_config/nginx/x.conf:12';
+    expect(isDdevContainerConfigFailure(mixed)).toBe(true);
+  });
+
+  it('still keeps a bound port on the hard-fail path — both markers share one line', () => {
+    expect(
+      isDdevContainerConfigFailure(
+        'ddev-x-web container exited.\n' +
+          'nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address already in use)',
       ),
     ).toBe(false);
   });

@@ -8,16 +8,23 @@ import path from 'node:path';
  * `ddev_custom_init_scripts`, which `source`s every `.ddev/web-entrypoint.d/*.sh` into that
  * same shell — as the container's UNPRIVILEGED user, because DDEV's generated compose pins
  * the web service to `user: '$DDEV_UID:$DDEV_GID'` (the `ddev` account, uid 1000, in the
- * per-project image). Two consequences, and an agent writing such a hook hits both:
+ * per-project image). Three consequences, and an agent writing such a hook hits all of them:
  *
  *  - a command that needs root returns non-zero, errexit aborts /start.sh, and the container
  *    EXITS before supervisord ever starts;
  *  - because the script is SOURCED rather than executed, `exit` terminates /start.sh itself.
  *    `exit 0` kills the container exactly as dead as `exit 1`, only with a success status and
  *    nothing to show for it, and `return 1` is fatal too — `source` propagates the status and
- *    errexit acts on it.
+ *    errexit acts on it;
+ *  - the script re-runs on EVERY start against a bind-mounted workspace that keeps whatever
+ *    the last run did to it, so a `chown` is not idempotent the way the rest of a hook is: a
+ *    path handed to www-data on Monday is one the `ddev` user cannot write on Tuesday. A hook
+ *    that chowns a file and then writes it therefore works exactly once (task f33d410a:
+ *    `sudo chown www-data … aliases.ser` plus a bare `touch aliases.ser`, which is EACCES on
+ *    every later boot).
  *
- * Either way DDEV reports only "web container exited" and points at `ddev logs -s web`.
+ * Every one of them makes DDEV report only "web container exited" and point at
+ * `ddev logs -s web`.
  *
  * Task 3b7b8140 hit the first shape (`chown -R www-data:www-data` on the docroot's upload
  * directory) and then, when the fix loop asked the implementer to handle errors properly
@@ -82,9 +89,25 @@ const CONTROL_FLOW_ADVICE =
   `the script finish instead — ${REPORTING_FORM} keeps the message and still returns ` +
   'success — or `return 0` when there is genuinely nothing left to do.';
 
+const IDEMPOTENCE_ADVICE =
+  'DDEV sources this script on EVERY start, so it has to be idempotent — and a `chown` is the ' +
+  'one thing here that outlives the container, because the workspace is a bind mount. Once an ' +
+  'earlier boot has handed that path to another user, the unprivileged `ddev` user cannot ' +
+  'write it any more: the command fails with "Permission denied", `set -o errexit` aborts the ' +
+  'entrypoint, and the container exits. The first start succeeds and every later one dies, ' +
+  'which reads as an intermittent failure and is not one. Create the path only when it is ' +
+  'missing (`[ -f … ] || touch …`), do the write under `sudo`, or keep it on the LEFT of a ' +
+  `\`||\` — ${REPORTING_FORM} reports the problem without killing the container.`;
+
 /** Prefixes that make the rest of the segment privileged, so nothing after them is ours to
  *  flag. */
 const PRIVILEGED_PREFIXES = new Set(['sudo', 'doas']);
+
+/** Short options of `sudo`/`doas` that consume the FOLLOWING word, which would otherwise be
+ *  mistaken for the command they wrap (`sudo -u root chown …` reads as `root`). The long
+ *  spellings are not listed: `--user=root` is self-contained, and `--user root` simply falls
+ *  back to a missed detection, which is the lenient direction this module always takes. */
+const PRIVILEGED_VALUE_FLAGS = new Set(['-u', '-g', '-h', '-p', '-C', '-D', '-R', '-T', '-U']);
 
 /** Prefixes that merely wrap the real command, which is the next word. */
 const COMMAND_WRAPPERS = new Set(['command', 'exec', 'xargs', 'nohup', 'time']);
@@ -110,6 +133,24 @@ const APT_MUTATING =
 /** dpkg's mutating flags, same trade as {@link APT_MUTATING}. */
 const DPKG_MUTATING = /^(-i|-r|-P|--install|--remove|--purge|--configure|--unpack)$/;
 
+/** Owners that ARE the container user, so handing a path to one takes nothing away. DDEV's
+ *  generated compose pins the web service to `$DDEV_UID:$DDEV_GID`, which is the `ddev`
+ *  account, uid 1000. */
+const CONTAINER_OWNERS = new Set(['ddev', 'ddev:ddev', '1000', '1000:1000']);
+
+/** Commands that write a file's own content or inode, and therefore cannot touch a path the
+ *  container user no longer owns. Directory-level commands are deliberately absent: `rm`,
+ *  `mv`, `ln` and `mkdir -p` all need permission on the PARENT directory rather than on the
+ *  file, and the entrypoint never gives the parent away — flagging them would condemn the
+ *  `mkdir -p` that every one of these scripts opens with. */
+const WRITING_COMMANDS = new Set(['touch', 'chmod', 'cp', 'tee', 'truncate']);
+
+/** A `>`/`>>` written as its own word. The attached form (`>/path`) is handled separately. */
+const WRITE_REDIRECTS = new Set(['>', '>>']);
+
+/** Leading `>`/`>>` on a word, so `>/var/www/html/x` is recognised as a write to that path. */
+const REDIRECT_PREFIX_RE = /^>>?/;
+
 export interface ShellCommand {
   /** Basename of the command word, so `/usr/bin/chown` is recognised as `chown`. */
   command: string;
@@ -118,6 +159,11 @@ export interface ShellCommand {
    *  `||`, or in an `if`/`while`/`!` condition. Says nothing about the command exiting the
    *  shell outright, which no operator protects against. */
   guarded: boolean;
+  /** True when the segment ran under `sudo`/`doas`, so the privilege checks below are not
+   *  its to answer. Reported rather than dropped because a privileged `chown` is exactly
+   *  what {@link chownedAwayPaths} needs to see — it is the command that takes a path away
+   *  from the container user for every LATER start. */
+  privileged: boolean;
 }
 
 function unquote(word: string): string {
@@ -176,10 +222,16 @@ export function shellCommands(text: string): ShellCommand[] {
       const words = parts[p]!.trim().split(/\s+/).map(unquote).filter(Boolean);
       let i = 0;
       let inCondition = false;
+      let privileged = false;
       while (i < words.length) {
         const w = words[i]!;
         if (CONDITION_KEYWORDS.has(w)) inCondition = true;
-        else if (
+        else if (PRIVILEGED_PREFIXES.has(w)) privileged = true;
+        // Once past a `sudo`, a leading `-flag` belongs to sudo rather than to the command it
+        // wraps, so it is skipped — along with its value, for the flags that take one.
+        else if (privileged && w.startsWith('-')) {
+          if (PRIVILEGED_VALUE_FLAGS.has(w)) i += 1;
+        } else if (
           !BLOCK_KEYWORDS.has(w) &&
           !COMMAND_WRAPPERS.has(w) &&
           !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)
@@ -188,9 +240,13 @@ export function shellCommands(text: string): ShellCommand[] {
         i += 1;
       }
       if (i >= words.length) continue;
-      if (PRIVILEGED_PREFIXES.has(words[i]!)) continue;
       const guarded = inCondition || parts[p + 1] === '||';
-      out.push({ command: path.posix.basename(words[i]!), args: words.slice(i + 1), guarded });
+      out.push({
+        command: path.posix.basename(words[i]!),
+        args: words.slice(i + 1),
+        guarded,
+        privileged,
+      });
       for (let j = i + 1; j < words.length - 1; j += 1) {
         if (!FIND_EXEC_FLAGS.has(words[j]!)) continue;
         if (PRIVILEGED_PREFIXES.has(words[j + 1]!)) continue;
@@ -198,6 +254,7 @@ export function shellCommands(text: string): ShellCommand[] {
           command: path.posix.basename(words[j + 1]!),
           args: words.slice(j + 2),
           guarded,
+          privileged,
         });
       }
     }
@@ -212,6 +269,63 @@ export function shellCommands(text: string): ShellCommand[] {
 function chownChangesOwner(args: string[]): boolean {
   const spec = args.find((a) => !a.startsWith('-'));
   return spec !== undefined && !/^[:.]/.test(spec);
+}
+
+/** A path this script hands to another user, and whether it did so recursively. */
+interface HandedAwayPath {
+  path: string;
+  recursive: boolean;
+}
+
+/**
+ * The paths a `chown` invocation takes away from the container user.
+ *
+ * Empty for the spellings that take nothing: a group-only spec (a chgrp in disguise, which
+ * {@link chownChangesOwner} already excuses) and a spec naming the `ddev` user itself, which
+ * is who the entrypoint already runs as.
+ */
+function chownedAwayPaths(args: string[]): HandedAwayPath[] {
+  if (!chownChangesOwner(args)) return [];
+  const operands = args.filter((a) => !a.startsWith('-'));
+  const [spec, ...paths] = operands;
+  if (spec === undefined || CONTAINER_OWNERS.has(spec)) return [];
+  // `-R`, `--recursive`, and the bundled short form (`-RP`) all descend. Lowercase `-r` is
+  // NOT recursive for chown, so it is deliberately not matched.
+  const recursive = args.some((a) => a === '--recursive' || /^-[a-zA-Z]*R/.test(a));
+  return paths.map((p) => ({ path: p.replace(/\/+$/, ''), recursive }));
+}
+
+/** True when `arg` names a path this script handed away — the path itself, or anything under
+ *  it when the `chown` was recursive. */
+function isHandedAway(arg: string, handedAway: HandedAwayPath[]): boolean {
+  const a = arg.replace(/\/+$/, '');
+  return handedAway.some((t) => a === t.path || (t.recursive && a.startsWith(`${t.path}/`)));
+}
+
+/**
+ * The handed-away path this command writes, or null when it writes none.
+ *
+ * A path is a write target either because the command itself writes what it is given
+ * ({@link WRITING_COMMANDS}) or because a `>`/`>>` redirects into it, in which case the
+ * command in front is irrelevant — `echo … > f` kills the entrypoint exactly as `touch f`
+ * does.
+ */
+function handedAwayWriteTarget(
+  command: string,
+  args: string[],
+  handedAway: HandedAwayPath[],
+): string | null {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!;
+    // `>path` carries its own target; a bare `>` word leaves it to the next arg.
+    const attached = REDIRECT_PREFIX_RE.test(arg);
+    const target = attached ? arg.replace(REDIRECT_PREFIX_RE, '') : arg;
+    if (!target) continue;
+    const redirected = attached || WRITE_REDIRECTS.has(args[i - 1] ?? '');
+    if (!redirected && !WRITING_COMMANDS.has(command)) continue;
+    if (isHandedAway(target, handedAway)) return target;
+  }
+  return null;
 }
 
 /**
@@ -261,11 +375,18 @@ export interface DdevEntrypointScript {
 }
 
 /** Reason the web container will exit inside its entrypoint, or null when no script reaches
- *  for a privilege it does not have or ends the sourcing shell. */
+ *  for a privilege it does not have, ends the sourcing shell, or writes a path it has
+ *  already handed to another user.
+ *
+ *  The two passes are ordered by WHEN they bite: the first pass finds what kills the very
+ *  first start, the second what kills every start after it. Reporting the first-boot cause
+ *  first keeps the message pointed at what the agent will actually observe. */
 export function findDdevEntrypointBreakage(files: DdevEntrypointScript[]): string | null {
   for (const file of files) {
     const where = `${DDEV_ENTRYPOINT_PREFIX} .ddev/${ENTRYPOINT_DIR}/${file.name}`;
-    for (const { command, args, guarded } of shellCommands(file.content)) {
+    const commands = shellCommands(file.content);
+    for (const { command, args, guarded, privileged } of commands) {
+      if (privileged) continue;
       if (endsTheEntrypoint(command, args)) {
         return (
           `${where} calls \`${command}${args[0] ? ` ${args[0]}` : ''}\`, which ends the web ` +
@@ -279,6 +400,24 @@ export function findDdevEntrypointBreakage(files: DdevEntrypointScript[]): strin
         `${where} runs \`${command}\`, which needs root, where a failure aborts the ` +
         `entrypoint. DDEV sources every script in that directory into the web container's ` +
         `entrypoint on each start. ${advice}`
+      );
+    }
+
+    // Second pass, and it needs the WHOLE script first: the `chown` that poisons a write can
+    // sit either side of it, because what matters is the state the previous start left behind
+    // rather than the order of lines within one run.
+    const handedAway = commands.flatMap((c) =>
+      c.command === 'chown' ? chownedAwayPaths(c.args) : [],
+    );
+    if (handedAway.length === 0) continue;
+    for (const { command, args, guarded, privileged } of commands) {
+      if (guarded || privileged) continue;
+      const target = handedAwayWriteTarget(command, args, handedAway);
+      if (!target) continue;
+      return (
+        `${where} runs \`${command}\` on \`${target}\`, which the same script hands to another ` +
+        `user with \`chown\` — so the write succeeds on the first start and fails on every ` +
+        `one after it. ${IDEMPOTENCE_ADVICE}`
       );
     }
   }
