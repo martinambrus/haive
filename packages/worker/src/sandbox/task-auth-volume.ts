@@ -38,6 +38,7 @@ function rtkInitFlagFor(providerName: CliProviderName): string | undefined {
   switch (providerName) {
     case 'claude-code':
     case 'zai':
+    case 'muse':
       return '';
     case 'gemini':
       return '--gemini';

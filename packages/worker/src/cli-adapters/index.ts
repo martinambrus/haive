@@ -7,3 +7,4 @@ export { GeminiAdapter } from './gemini.js';
 export { AmpAdapter } from './amp.js';
 export { ZaiAdapter } from './zai.js';
 export { AntigravityAdapter } from './antigravity.js';
+export { MuseAdapter } from './muse.js';

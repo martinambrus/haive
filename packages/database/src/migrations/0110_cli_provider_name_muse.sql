@@ -1,0 +1,22 @@
+-- Add 'muse' to the cli_provider_name enum so a Meta Muse Spark provider
+-- (reusing the Claude binary against Meta's Anthropic-compatible Model API at
+-- api.meta.ai) can be created. Additive; existing rows are unaffected.
+--
+-- Why a separate adapter rather than reusing claude-code: the effort scale is
+-- per-adapter, and claude-code's includes `max`, which Muse rejects with a 400.
+-- An unset effort_level falls back to scale.max, so a Muse provider on the
+-- claude-code adapter fails by default. See 0111 for the data half.
+--
+-- Deploy note: applied via `drizzle-kit push --force` from the schema; this file
+-- is the idempotent parity/rollback record. Postgres cannot drop an enum value,
+-- so rollback requires recreating the type without 'muse' and is only safe when
+-- no row references it (both cli_providers.name and cli_package_versions.name) —
+-- run 0111's rollback FIRST, or this fails.
+--
+-- Rollback (only if no cli_providers / cli_package_versions row has name='muse'):
+--   ALTER TYPE "cli_provider_name" RENAME TO "cli_provider_name_old";
+--   CREATE TYPE "cli_provider_name" AS ENUM ('claude-code','codex','gemini','amp','zai','antigravity','ollama');
+--   ALTER TABLE "cli_providers" ALTER COLUMN "name" TYPE "cli_provider_name" USING "name"::text::"cli_provider_name";
+--   ALTER TABLE "cli_package_versions" ALTER COLUMN "name" TYPE "cli_provider_name" USING "name"::text::"cli_provider_name";
+--   DROP TYPE "cli_provider_name_old";
+ALTER TYPE "cli_provider_name" ADD VALUE IF NOT EXISTS 'muse';

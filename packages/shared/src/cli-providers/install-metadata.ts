@@ -93,4 +93,14 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
     autoUpdateDisable: [{ kind: 'env', vars: { DISABLE_AUTOUPDATER: '1' } }],
     versionPinnable: true,
   },
+  muse: {
+    // Muse reuses the Claude binary against Meta's Anthropic-compatible
+    // endpoint (like zai/ollama); no separate install. Piggybacking also means
+    // image-cache resolves it to the existing haive-cli-sandbox:claude-code-<ver>
+    // tag, so adding this provider builds no new sandbox image.
+    install: { kind: 'piggyback', uses: 'claude-code' },
+    versionSource: { kind: 'npm', package: '@anthropic-ai/claude-code' },
+    autoUpdateDisable: [{ kind: 'env', vars: { DISABLE_AUTOUPDATER: '1' } }],
+    versionPinnable: true,
+  },
 };

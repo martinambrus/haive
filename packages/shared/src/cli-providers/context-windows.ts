@@ -25,6 +25,8 @@ const MODEL_CONTEXT_WINDOWS: ReadonlyArray<{ match: string; tokens: number }> = 
   // Z.AI GLM.
   { match: 'glm-4.6', tokens: 200_000 },
   { match: 'glm', tokens: 128_000 },
+  // Meta Muse Spark — 1M.
+  { match: 'muse-spark', tokens: 1_048_576 },
 ];
 
 /** Provider-level fallback when no model id matches above (display-only). */
@@ -36,6 +38,7 @@ const PROVIDER_FALLBACK_WINDOW: Partial<Record<CliProviderName, number>> = {
   amp: 200_000,
   antigravity: 1_048_576,
   ollama: 128_000,
+  muse: 1_048_576,
 };
 
 /** Conservative global fallback when neither model nor provider is known. */

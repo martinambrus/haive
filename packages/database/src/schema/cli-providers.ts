@@ -23,6 +23,7 @@ export const cliProviderNameEnum = pgEnum('cli_provider_name', [
   'zai',
   'antigravity',
   'ollama',
+  'muse',
 ]);
 export const cliAuthModeEnum = pgEnum('cli_auth_mode', ['subscription', 'api_key']);
 export const cliSandboxBuildStatusEnum = pgEnum('cli_sandbox_build_status', [

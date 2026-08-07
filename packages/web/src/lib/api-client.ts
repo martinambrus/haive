@@ -285,7 +285,7 @@ export interface FilesystemListing {
 }
 
 export type CliProviderName =
-  'claude-code' | 'codex' | 'gemini' | 'amp' | 'zai' | 'antigravity' | 'ollama';
+  'claude-code' | 'codex' | 'gemini' | 'amp' | 'zai' | 'antigravity' | 'ollama' | 'muse';
 
 export type CliAuthMode = 'subscription' | 'api_key';
 export type CliSandboxBuildStatus = 'idle' | 'building' | 'ready' | 'failed';
@@ -318,6 +318,7 @@ export const CLI_DEFAULT_EGRESS_DOMAINS: Record<CliProviderName, string[]> = {
   zai: ['api.z.ai'],
   antigravity: [],
   ollama: ['ollama.com', '*.ollama.com'],
+  muse: ['api.meta.ai'],
 };
 
 export interface EffortScaleMetadata {

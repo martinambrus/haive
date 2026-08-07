@@ -785,7 +785,9 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     // CLAUDE.md/GEMINI.md stay a lone `@AGENTS.md` import.
     if (detected.rtkEnabled) {
       const enabled = detected.enabledCliProviders ?? [];
-      const hasClaudeFamily = enabled.some((p) => p.name === 'claude-code' || p.name === 'zai');
+      const hasClaudeFamily = enabled.some(
+        (p) => p.name === 'claude-code' || p.name === 'zai' || p.name === 'muse',
+      );
       const hasGemini = enabled.some((p) => p.name === 'gemini');
 
       if (hasClaudeFamily) {

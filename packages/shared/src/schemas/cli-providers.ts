@@ -8,6 +8,7 @@ export const cliProviderNameSchema = z.enum([
   'zai',
   'antigravity',
   'ollama',
+  'muse',
 ]);
 
 export const cliAuthModeSchema = z.enum(['subscription', 'api_key']);

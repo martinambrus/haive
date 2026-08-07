@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ClaudeCodeAdapter } from '../src/cli-adapters/claude-code.js';
 import { ZaiAdapter } from '../src/cli-adapters/zai.js';
 import { OllamaAdapter } from '../src/cli-adapters/ollama.js';
+import { MuseAdapter } from '../src/cli-adapters/muse.js';
 import { CodexAdapter } from '../src/cli-adapters/codex.js';
 import { GeminiAdapter } from '../src/cli-adapters/gemini.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
@@ -23,6 +24,7 @@ describe('supportsSteering capability', () => {
     expect(new ClaudeCodeAdapter().supportsSteering).toBe(true);
     expect(new ZaiAdapter().supportsSteering).toBe(true);
     expect(new OllamaAdapter().supportsSteering).toBe(true);
+    expect(new MuseAdapter().supportsSteering).toBe(true);
     expect(new CodexAdapter().supportsSteering).toBe(false);
     expect(new GeminiAdapter().supportsSteering).toBe(false);
   });

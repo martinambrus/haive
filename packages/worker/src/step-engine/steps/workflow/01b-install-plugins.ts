@@ -22,6 +22,7 @@ const DRUPAL_LSP_BASE_BY_PROVIDER: Record<string, string> = {
   'claude-code': '.claude/plugins/drupal-php-lsp',
   zai: '.claude/plugins/drupal-php-lsp',
   ollama: '.claude/plugins/drupal-php-lsp',
+  muse: '.claude/plugins/drupal-php-lsp',
 };
 
 interface InstallPluginsDetect {

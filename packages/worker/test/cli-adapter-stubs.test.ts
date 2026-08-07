@@ -48,7 +48,7 @@ describe('LSP capability matrix', () => {
   it('supports the Claude plugin family and fails closed for every other CLI', () => {
     expect(
       CLI_PROVIDER_LIST.filter((provider) => provider.supportsLsp).map((provider) => provider.name),
-    ).toEqual(['claude-code', 'zai', 'ollama']);
+    ).toEqual(['claude-code', 'zai', 'ollama', 'muse']);
     expect(
       CLI_PROVIDER_LIST.filter((provider) => !provider.supportsLsp).map(
         (provider) => provider.name,
@@ -182,6 +182,7 @@ describe('adapter outputFormat declarations', () => {
   const cases: [name: string, expected: string | undefined][] = [
     ['claude-code', 'claude-stream-json'],
     ['zai', 'claude-stream-json'],
+    ['muse', 'claude-stream-json'],
     ['amp', 'claude-stream-json'],
     ['codex', 'codex-jsonl'],
     ['gemini', 'gemini-json'],
@@ -249,7 +250,7 @@ describe('adapter outputFormat declarations', () => {
 // local drupal-php-lsp plugin, so PHP must NOT resolve to the marketplace
 // phpactor plugin in any claude-family adapter. These lock that in.
 describe('claude-family LSP plugin install (php uses local intelephense, not marketplace phpactor)', () => {
-  for (const name of ['claude-code', 'zai', 'ollama'] as const) {
+  for (const name of ['claude-code', 'zai', 'ollama', 'muse'] as const) {
     const adapter = cliAdapterRegistry.get(name);
     const provider = makeProvider({ id: `p-${name}`, name });
     const drupalLspPath = `/work/repo/.claude/plugins/drupal-php-lsp`;

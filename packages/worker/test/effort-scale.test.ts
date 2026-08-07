@@ -39,6 +39,17 @@ describe('effortScale declarations', () => {
     expect(adapter.effortScale!.max).toBe('max');
   });
 
+  // The mirror image of zai: Muse HAS xhigh but has no max. api.meta.ai rejects
+  // `max` with a 400, which is exactly why muse is its own adapter rather than a
+  // claude-code provider with a different base URL.
+  it('muse exposes low..xhigh with max=xhigh and no max level', () => {
+    const adapter = cliAdapterRegistry.get('muse');
+    expect(adapter.effortScale).not.toBeNull();
+    expect(adapter.effortScale!.values).toEqual(['low', 'medium', 'high', 'xhigh']);
+    expect(adapter.effortScale!.max).toBe('xhigh');
+    expect(adapter.effortScale!.values).not.toContain('max');
+  });
+
   it('codex exposes the six-level scale with max=ultra (no minimal)', () => {
     const adapter = cliAdapterRegistry.get('codex');
     expect(adapter.effortScale).not.toBeNull();
@@ -63,6 +74,13 @@ describe('effortEnv emission', () => {
     }
   });
 
+  it('muse translates each declared level into CLAUDE_CODE_EFFORT_LEVEL', () => {
+    const adapter = cliAdapterRegistry.get('muse');
+    for (const level of adapter.effortScale!.values) {
+      expect(adapter.effortEnv(level)).toEqual({ CLAUDE_CODE_EFFORT_LEVEL: level });
+    }
+  });
+
   it('codex emits no env (its effort knob is a CLI arg, not an env var)', () => {
     const adapter = cliAdapterRegistry.get('codex');
     expect(adapter.effortEnv('high')).toEqual({});
@@ -82,6 +100,27 @@ describe('mergedEnv resolution through buildCliInvocation', () => {
     const provider = makeProvider({ id: 'p1', name: 'claude-code' });
     const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w' });
     expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBe('max');
+  });
+
+  // Regression guard for the onboard_muse failure: on the claude-code adapter an
+  // unset effort_level fell back to scale.max = 'max', which api.meta.ai rejects
+  // with `400 unsupported output_config.effort value max`. On muse the same
+  // fallback must land on xhigh.
+  it('muse falls back to xhigh, never max, when provider.effortLevel is null', () => {
+    const adapter = cliAdapterRegistry.get('muse');
+    const provider = makeProvider({ id: 'p-muse', name: 'muse' });
+    const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w' });
+    expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBe('xhigh');
+  });
+
+  // A row carrying a stale 'max' (e.g. migrated from the claude-code adapter)
+  // must not reach the CLI at all: resolveEffortLevel drops out-of-scale values
+  // rather than passing them through.
+  it('muse drops an out-of-scale max instead of forwarding it', () => {
+    const adapter = cliAdapterRegistry.get('muse');
+    const provider = makeProvider({ id: 'p-muse', name: 'muse', effortLevel: 'max' });
+    const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w' });
+    expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
   });
 
   it('uses provider.effortLevel when set to a valid value', () => {

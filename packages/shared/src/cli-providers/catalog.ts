@@ -99,6 +99,21 @@ const CLAUDE_LIKE_EFFORT_SCALE: EffortScaleMetadata = {
   max: 'max',
 };
 
+// Meta Muse Spark via the claude binary. The mirror image of the zai scale: it
+// HAS `xhigh` but has no `max`, so neither of the scales above fits.
+//
+// MEASURED, not copied from Meta's docs. Probing api.meta.ai /v1/messages with
+// model muse-spark-1.2 accepts low/medium/high/xhigh and rejects both `max` and
+// `minimal` with the same 400 an unknown value gets. Meta's docs page does list
+// `none`/`minimal`, but that documents the OpenAI-compatible `reasoning_effort`
+// parameter; the claude binary sends the Anthropic-compatible
+// `output_config.effort`, where `minimal` is not accepted. Do not "fix" this
+// list against that page — re-probe instead.
+const MUSE_EFFORT_SCALE: EffortScaleMetadata = {
+  values: ['low', 'medium', 'high', 'xhigh'],
+  max: 'xhigh',
+};
+
 // Codex's native reasoning effort levels exposed via `model_reasoning_effort`
 // in config.toml or per-run as `-c model_reasoning_effort="<level>"` on
 // `codex exec`, ordered low-to-high per the CLI's own ReasoningEffort enum.
@@ -310,6 +325,36 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     authConfigPaths: ['~/.config/claude', '~/.claude'],
     docsUrl: 'https://docs.ollama.com',
     effortScale: null,
+    projectSkillsDir: '.claude/skills',
+    userSkillsPaths: [],
+    projectAgentsDir: '.claude/agents',
+    agentFileFormat: 'markdown',
+  },
+  muse: {
+    name: 'muse',
+    // The claude binary prices a run against Anthropic's table, which is wrong
+    // for a Meta backend — same reasoning as zai.
+    costBasis: 'estimate',
+    displayName: 'Muse Spark',
+    description:
+      "Meta Muse Spark. Reuses the Claude binary against Meta's Anthropic-compatible Model API; set the model per provider and supply the key as an ANTHROPIC_AUTH_TOKEN secret.",
+    defaultExecutable: 'claude',
+    // Native sub-agents via the claude binary's Task(), same as zai/ollama.
+    supportsSubagents: true,
+    supportsCliAuth: true,
+    supportsMcp: true,
+    supportsPlugins: true,
+    supportsLsp: true,
+    defaultAuthMode: 'api_key',
+    // Meta issues a Model API key; it rides the same env name the claude binary
+    // reads, so it is stored as a secret under this name (no remap).
+    apiKeyEnvName: 'ANTHROPIC_AUTH_TOKEN',
+    defaultModel: 'muse-spark-1.2',
+    // Meta exposes several ids (muse-spark-1.1, 1.2, 1.2-contributor).
+    supportsModelSelection: true,
+    authConfigPaths: ['~/.config/claude', '~/.claude'],
+    docsUrl: 'https://dev.meta.ai/docs',
+    effortScale: MUSE_EFFORT_SCALE,
     projectSkillsDir: '.claude/skills',
     userSkillsPaths: [],
     projectAgentsDir: '.claude/agents',
