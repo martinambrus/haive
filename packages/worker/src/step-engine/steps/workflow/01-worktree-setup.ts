@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
@@ -9,6 +9,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { ensureSandboxWritableTree } from '../../../repo/worktree-permissions.js';
+import { ensureGitExcludeEntry, initGitWorkspace } from '../../../repo/git-init.js';
 import {
   WORKTREE_SUBDIR,
   sandboxWorktreePath,
@@ -23,8 +24,6 @@ const FALLBACK_GIT_IDENTITY = {
   GIT_COMMITTER_NAME: 'Haive',
   GIT_COMMITTER_EMAIL: 'worker@haive.local',
 };
-
-const EXCLUDE_MARKER = '.haive/';
 
 interface WorktreeDetect {
   hasGit: boolean;
@@ -118,14 +117,10 @@ async function initGitRepo(
   const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
   const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
 
-  const init = await gitRun(ctx.repoPath, ['init', '-b', initBranch]);
-  if (init.code !== 0) {
-    throw new Error(`git init failed (exit ${init.code}): ${init.stderr || init.stdout}`);
-  }
-  // CLI preflight may previously have written internal `.haive/` data. Exclude
-  // it BEFORE the initial `git add -A`; doing this after the commit allowed the
+  // CLI preflight may previously have written internal `.haive/` data. initGitWorkspace
+  // excludes it BEFORE the initial `git add -A`; doing this after the commit allowed the
   // old ownership marker to become tracked and appear in every linked worktree.
-  await ensureExcludeEntry(ctx.repoPath);
+  await initGitWorkspace(ctx.repoPath, initBranch);
   const add = await gitRun(ctx.repoPath, ['add', '-A']);
   if (add.code !== 0) {
     throw new Error(`git add -A failed (exit ${add.code}): ${add.stderr || add.stdout}`);
@@ -139,21 +134,6 @@ async function initGitRepo(
     throw new Error(`git commit failed (exit ${commit.code}): ${commit.stderr || commit.stdout}`);
   }
   ctx.logger.info({ initBranch }, 'initialized new git repository');
-}
-
-async function ensureExcludeEntry(repoPath: string): Promise<void> {
-  const excludePath = path.join(repoPath, '.git', 'info', 'exclude');
-  await mkdir(path.dirname(excludePath), { recursive: true });
-  let content = '';
-  try {
-    content = await readFile(excludePath, 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-  }
-  const lines = content.split('\n').map((line) => line.trim());
-  if (lines.includes(EXCLUDE_MARKER)) return;
-  const suffix = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
-  await writeFile(excludePath, `${content}${suffix}${EXCLUDE_MARKER}\n`, 'utf8');
 }
 
 export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = {
@@ -272,7 +252,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       base = args.detected.syncedBase ?? values.baseBranch ?? args.detected.currentBranch ?? 'main';
     }
 
-    await ensureExcludeEntry(ctx.repoPath);
+    await ensureGitExcludeEntry(ctx.repoPath);
 
     const worktreePath = path.join(ctx.repoPath, WORKTREE_SUBDIR, dirName);
     const branchExists = await gitRun(ctx.repoPath, [
