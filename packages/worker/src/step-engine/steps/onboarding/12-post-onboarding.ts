@@ -30,6 +30,8 @@ import type { Database } from '@haive/database';
 import type { StepDefinition, StepContext } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, getOriginUrl, gitRun } from '../../../repo/git-push.js';
+import { initGitWorkspace } from '../../../repo/git-init.js';
+import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput, pathExists, resolveSkillTargetDirs } from './_helpers.js';
 import {
   expandCustomBundlesFor,
@@ -49,6 +51,15 @@ const DEFAULT_COMMIT_MESSAGE = [
   'add: agentic workflow setup',
   '',
   'Generated .claude/ (agents, skills, knowledge base) and the updated .gitignore.',
+].join('\n');
+
+/** Default for the no-git case, where the commit is also the repository's first and
+ *  therefore holds the pre-existing project files as well as the generated ones. */
+const INIT_COMMIT_MESSAGE = [
+  'add: initial commit with agentic workflow setup',
+  '',
+  'Initializes the repository with the existing project files plus the generated',
+  '.claude/ (agents, skills, knowledge base) and the updated .gitignore.',
 ].join('\n');
 
 const BASE_STAGE_PATHS = [
@@ -117,6 +128,10 @@ const FALLBACK_GIT_IDENTITY = {
 };
 
 interface PostOnboardingDetect {
+  /** False for an uploaded / in-place repo that carries no git history. The commit
+   *  path then runs `git init` first — without it `git add` fails with
+   *  "fatal: not a git repository" and the whole step dies. */
+  hasGit: boolean;
   /** The branch the onboarding commit lands on (parent checkout's current branch). */
   currentBranch: string | null;
   /** Whether the repo has a pushable origin remote (gates the push fields). */
@@ -368,15 +383,22 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
 
   async detect(ctx): Promise<PostOnboardingDetect> {
     const empty: PostOnboardingDetect = {
+      hasGit: false,
       currentBranch: null,
       hasOrigin: false,
       originUrl: null,
       boundCredentialId: null,
       credentials: [],
     };
-    const cur = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    // Classify rather than requireUsableGit: a corrupt `.git` must not fail this step
+    // for a user who never asked for a commit — the artifact rows and the .haive-data
+    // mirror below still have to be written. The commit path re-checks and throws.
+    const hasGit = (await gitWorkspaceStatus(ctx.repoPath)) === 'ok';
+    const cur = hasGit
+      ? await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD'])
+      : { code: 1, stdout: '', stderr: '' };
     const currentBranch = cur.code === 0 ? cur.stdout.trim() : null;
-    const hasOrigin = await detectOrigin(ctx.repoPath);
+    const hasOrigin = hasGit ? await detectOrigin(ctx.repoPath) : false;
     const originUrl = hasOrigin ? await getOriginUrl(ctx.repoPath) : null;
 
     const taskRow = await ctx.db
@@ -398,6 +420,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     });
     return {
       ...empty,
+      hasGit,
       currentBranch,
       hasOrigin,
       originUrl,
@@ -407,21 +430,57 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
   },
 
   form(_ctx, detected): FormSchema {
-    const fields: FormField[] = [
-      {
+    const fields: FormField[] = [];
+
+    // No git history (uploaded archive, in-place dir): committing has to create the
+    // repository first. The initial commit deliberately holds the WHOLE working tree,
+    // not only the generated files — `git worktree add` checks out tracked files only,
+    // so a first commit carrying just `.claude/` would hand every later workflow task
+    // an empty project.
+    if (!detected.hasGit) {
+      fields.push(
+        {
+          type: 'note',
+          id: 'noGitNote',
+          label: 'No git repository',
+          body:
+            'This repository has no git history. Committing will run `git init` in the ' +
+            'repository root and create an initial commit containing every current file ' +
+            '(honouring .gitignore), not only the generated ones. Use the Terminal tab if ' +
+            'you need a different setup (existing remote, custom .gitignore) and Retry afterwards.',
+          variant: 'warning',
+        },
+        {
+          type: 'checkbox',
+          id: 'commit',
+          label: 'Initialize git, then stage and commit',
+          default: false,
+        },
+        {
+          type: 'text',
+          id: 'initBranch',
+          label: 'Initial branch name',
+          default: 'main',
+          description: 'The branch `git init` creates.',
+          visibleWhen: { field: 'commit', equals: true },
+        },
+      );
+    } else {
+      fields.push({
         type: 'checkbox',
         id: 'commit',
         label: 'Stage and commit generated workflow files',
         default: false,
-      },
-      {
-        type: 'textarea',
-        id: 'commitMessage',
-        label: 'Commit message',
-        default: DEFAULT_COMMIT_MESSAGE,
-        rows: 6,
-      },
-    ];
+      });
+    }
+
+    fields.push({
+      type: 'textarea',
+      id: 'commitMessage',
+      label: 'Commit message',
+      default: detected.hasGit ? DEFAULT_COMMIT_MESSAGE : INIT_COMMIT_MESSAGE,
+      rows: 6,
+    });
 
     // Push-to-origin sub-option — only when the repo has a pushable origin. The push
     // fields are nested under the commit checkbox (visibleWhen commit=true); the
@@ -480,7 +539,8 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     let commitPerformed = false;
     let commitSha: string | null = null;
     const stagedPaths: string[] = [];
-    const branch = args.detected.currentBranch;
+    // Reassigned by the no-git path below, where the branch only exists after `git init`.
+    let branch = args.detected.currentBranch;
     let pushRequested = false;
     let pushCredentialId: string | null = null;
     let pushSetUpstream = true;
@@ -560,6 +620,24 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     }
 
     try {
+      // Uploaded / in-place repos carry no git history, so `git add` dies with
+      // "fatal: not a git repository". Create the repo first, then stage the WHOLE
+      // working tree: `git worktree add` checks out tracked files only, so a first
+      // commit holding just the generated files would hand every later workflow task
+      // an empty project. The generated .gitignore (written by 07) is already on disk,
+      // so `add -A` honours it. requireUsableGit rather than detect.hasGit: it throws on
+      // a `.git` git refuses (corruption gets reported, never initialized over) and it
+      // re-reads state detect may have missed, e.g. a Terminal-tab `git init`.
+      let didInit = false;
+      if (!(await requireUsableGit(ctx.repoPath))) {
+        const initBranch =
+          (typeof values.initBranch === 'string' ? values.initBranch : '').trim() || 'main';
+        await initGitWorkspace(ctx.repoPath, initBranch);
+        branch = initBranch;
+        didInit = true;
+        await exec('git', ['add', '-A'], { cwd: ctx.repoPath });
+        ctx.logger.info({ initBranch }, 'post-onboarding: initialized git repository');
+      }
       // -f: .haive/install.json lives under .haive/, which 01-worktree-setup adds to
       // .git/info/exclude on repos that ran a workflow task. A plain `git add` of an
       // excluded path exits non-zero and aborts the WHOLE stage (the other paths stay
@@ -583,7 +661,9 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       const message =
         typeof values.commitMessage === 'string' && values.commitMessage.trim().length > 0
           ? values.commitMessage
-          : DEFAULT_COMMIT_MESSAGE;
+          : didInit
+            ? INIT_COMMIT_MESSAGE
+            : DEFAULT_COMMIT_MESSAGE;
       const resolved = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
       const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
       await exec('git', ['commit', '-m', message], {

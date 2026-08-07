@@ -207,7 +207,34 @@ describe('onboarding registry', () => {
 
   it('post-onboarding form has commit and commitMessage fields', () => {
     const ctx = {} as never;
-    const schema = postOnboardingStep.form!(ctx, {});
+    const schema = postOnboardingStep.form!(ctx, {
+      hasGit: true,
+      currentBranch: 'main',
+      hasOrigin: false,
+      originUrl: null,
+      boundCredentialId: null,
+      credentials: [],
+    });
     expect(schema!.fields.map((f) => f.id)).toEqual(['commit', 'commitMessage']);
+  });
+
+  // An uploaded / in-place repo carries no git history; without the init the commit
+  // path dies with "fatal: not a git repository".
+  it('post-onboarding form offers git init when the repo has no history', () => {
+    const ctx = {} as never;
+    const schema = postOnboardingStep.form!(ctx, {
+      hasGit: false,
+      currentBranch: null,
+      hasOrigin: false,
+      originUrl: null,
+      boundCredentialId: null,
+      credentials: [],
+    });
+    expect(schema!.fields.map((f) => f.id)).toEqual([
+      'noGitNote',
+      'commit',
+      'initBranch',
+      'commitMessage',
+    ]);
   });
 });
