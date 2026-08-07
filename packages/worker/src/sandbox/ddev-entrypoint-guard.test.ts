@@ -393,4 +393,48 @@ echo "✓ Aliases cache file ready (www-data writable)"
       ]),
     ).toBeNull();
   });
+
+  // The guard must ACCEPT every form its own advice recommends. Shipping one it rejected is
+  // how the round-3 `exit 1` oscillation happened: the check and the advice disagreed, and
+  // the fix loop ping-ponged between two forms, burning a round each time.
+  it('accepts every fix form IDEMPOTENCE_ADVICE recommends', () => {
+    const chown = 'sudo chown www-data:www-data /var/www/html/aliases.ser\n';
+    for (const fix of [
+      '[ -f /var/www/html/aliases.ser ] || touch /var/www/html/aliases.ser\n',
+      'sudo touch /var/www/html/aliases.ser\n',
+      'touch /var/www/html/aliases.ser || echo "warning: not writable" >&2\n',
+    ]) {
+      expect(findDdevEntrypointBreakage([{ name: 'ok.sh', content: chown + fix }])).toBeNull();
+    }
+  });
+
+  it('excuses a write tested by a multi-line if, and by [[ and test', () => {
+    expect(
+      findDdevEntrypointBreakage([
+        {
+          name: 'ok.sh',
+          content: 'sudo chown www-data /x\nif [ ! -f /x ]; then\n  touch /x\nfi\n',
+        },
+      ]),
+    ).toBeNull();
+    expect(
+      findDdevEntrypointBreakage([
+        { name: 'ok.sh', content: 'sudo chown www-data /x\n[[ -e /x ]] || touch /x\n' },
+      ]),
+    ).toBeNull();
+    expect(
+      findDdevEntrypointBreakage([
+        { name: 'ok.sh', content: 'sudo chown www-data /x\ntest -f /x || touch /x\n' },
+      ]),
+    ).toBeNull();
+  });
+
+  it('still flags an untested write when a DIFFERENT path is the one tested', () => {
+    // The excuse is per path, not a blanket amnesty for any script containing a test.
+    expect(
+      findDdevEntrypointBreakage([
+        { name: 'bad.sh', content: 'sudo chown www-data /x\n[ -f /y ] || touch /y\ntouch /x\n' },
+      ]),
+    ).toContain('/x');
+  });
 });

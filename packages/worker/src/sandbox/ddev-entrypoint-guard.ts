@@ -323,9 +323,40 @@ function handedAwayWriteTarget(
     if (!target) continue;
     const redirected = attached || WRITE_REDIRECTS.has(args[i - 1] ?? '');
     if (!redirected && !WRITING_COMMANDS.has(command)) continue;
-    if (isHandedAway(target, handedAway)) return target;
+    if (isHandedAway(target, handedAway)) return target.replace(/\/+$/, '');
   }
   return null;
+}
+
+/** Everything inside a `[ … ]` that is not the path under test: the closing bracket and the
+ *  negation. Operators are excluded separately, by their leading `-`. */
+const TEST_NON_PATH = new Set(['!', ']', ']]']);
+
+/**
+ * Paths the script checks the existence of before acting on them.
+ *
+ * A write conditional on the path being ABSENT cannot hit the EACCES this pass exists to
+ * catch: `[ -f X ] || touch X` runs the touch only when X is missing, and creating it
+ * succeeds because the PARENT directory is still the container user's. That form is the FIRST
+ * thing {@link IDEMPOTENCE_ADVICE} recommends, so failing to excuse it would flag the very fix
+ * this guard asks for — the same shape as the round-3 `exit 1` oscillation, where the advice
+ * and the check disagreed and the fix loop ping-ponged between them.
+ *
+ * `guarded` cannot express this: it means "left of a `||`", and here the write is on the
+ * RIGHT. Collected script-wide rather than per line so a multi-line `if` counts too. The
+ * leniency that buys — a tested path is excused wherever it is written — is the direction
+ * this module always errs in.
+ */
+function existenceTestedPaths(commands: ShellCommand[]): Set<string> {
+  const out = new Set<string>();
+  for (const { command, args } of commands) {
+    if (command !== '[' && command !== '[[' && command !== 'test') continue;
+    for (const a of args) {
+      if (a.startsWith('-') || TEST_NON_PATH.has(a)) continue;
+      out.add(a.replace(/\/+$/, ''));
+    }
+  }
+  return out;
 }
 
 /**
@@ -410,10 +441,11 @@ export function findDdevEntrypointBreakage(files: DdevEntrypointScript[]): strin
       c.command === 'chown' ? chownedAwayPaths(c.args) : [],
     );
     if (handedAway.length === 0) continue;
+    const tested = existenceTestedPaths(commands);
     for (const { command, args, guarded, privileged } of commands) {
       if (guarded || privileged) continue;
       const target = handedAwayWriteTarget(command, args, handedAway);
-      if (!target) continue;
+      if (!target || tested.has(target)) continue;
       return (
         `${where} runs \`${command}\` on \`${target}\`, which the same script hands to another ` +
         `user with \`chown\` — so the write succeeds on the first start and fails on every ` +
