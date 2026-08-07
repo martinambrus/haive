@@ -55,6 +55,7 @@ import {
   type CliExecDeps,
   type CliExecQueuePayload,
 } from './_shared.js';
+import { enforceRuntimeHolderReserve } from './agent-reserve.js';
 import { executeByKind, interpretCliFailure } from './exec-core.js';
 import {
   resolveProviderNameForPayload,
@@ -823,6 +824,11 @@ export async function startCliExecWorker(
         // the job (freeing the slot for others) and let BullMQ redeliver it.
         // Throws DelayedError on defer; no-op when under the cap.
         await enforceTaskAgentCap(db, payload, job, token);
+        // Runtime-holder reserve: a task holding no live runtime runner yields the slot to one
+        // that does, so a primed DDEV environment is not left idle holding gigabytes it can only
+        // release by finishing. Last of the three because it is the only one that reads docker.
+        // Throws DelayedError on defer; no-op when this task holds a runner or none does.
+        await enforceRuntimeHolderReserve(db, payload, job, token);
         await handleCliExecJob(db, payload, deps);
         return;
       }

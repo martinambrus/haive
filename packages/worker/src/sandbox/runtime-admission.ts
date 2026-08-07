@@ -178,6 +178,28 @@ async function taskHasLiveRunner(taskId: string): Promise<boolean> {
   return ddev.length > 0 || app.length > 0;
 }
 
+/** Task ids that hold a live runtime runner right now. The agent-pool reserve
+ *  (`queues/cli-exec/agent-reserve.ts`) needs the whole set rather than one task's answer: it has
+ *  to decide both "does the job in my hand belong to a holder" and "does any QUEUED job", and one
+ *  docker query answers both. Keyed by task, so a task running a DDEV and an app runner appears
+ *  once — the same one-task-one-environment rule the rest of this module uses.
+ *
+ *  The weight is irrelevant here, so the fallback passed to the parser is a placeholder; runners
+ *  with no task label (which the parser keys by container id) are dropped, because no invocation
+ *  can ever belong to them. Fail-open to an empty set on a docker error, which makes the reserve a
+ *  no-op — never block an agent because `docker ps` blinked. */
+export async function runnerHoldingTaskIds(): Promise<Set<string>> {
+  const [ddev, app] = await Promise.all([
+    listRunnerWeightsByLabel('haive.ddev', 1),
+    listRunnerWeightsByLabel(APP_RUNNER_LABEL, 1),
+  ]);
+  const ids = new Set<string>();
+  for (const key of [...ddev.keys(), ...app.keys()]) {
+    if (!key.startsWith('container:')) ids.add(key);
+  }
+  return ids;
+}
+
 // --- Slot reservations -----------------------------------------------------------------
 // A task admitted by the TASK-level gate does not create its container until the step's boot
 // path runs, so between admit and `docker run` it occupied nothing: every task polling inside

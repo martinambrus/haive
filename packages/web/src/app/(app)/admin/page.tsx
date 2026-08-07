@@ -32,6 +32,8 @@ type RuntimeLimitsSettings = {
   agentWeightMb: number;
   browserWeightMb: number;
   agentFloor: number;
+  agentReserveEnabled: boolean;
+  agentReserveMaxHoldMinutes: number;
 };
 
 /** What those settings actually produce on this host, resolved server-side so the card can
@@ -50,8 +52,11 @@ type RuntimeCapacity = {
 
 type RuntimeLimitsResponse = RuntimeLimitsSettings & { capacity: RuntimeCapacity };
 
-/** The runtime-limits card's inputs, as raw text (so a half-typed value isn't clamped). */
-type RuntimeLimitsForm = { [K in keyof Omit<RuntimeLimitsSettings, 'enabled'>]: string };
+/** The runtime-limits card's inputs, as raw text (so a half-typed value isn't clamped). The
+ *  booleans are excluded: a checkbox saves on the spot, there is nothing to half-type. */
+type RuntimeLimitsForm = {
+  [K in keyof Omit<RuntimeLimitsSettings, 'enabled' | 'agentReserveEnabled'>]: string;
+};
 
 /** Settings -> text inputs. One place, so a new knob can't be loaded but not saved. */
 function runtimeLimitsFormOf(s: RuntimeLimitsSettings): RuntimeLimitsForm {
@@ -65,6 +70,7 @@ function runtimeLimitsFormOf(s: RuntimeLimitsSettings): RuntimeLimitsForm {
     agentWeightMb: String(s.agentWeightMb),
     browserWeightMb: String(s.browserWeightMb),
     agentFloor: String(s.agentFloor),
+    agentReserveMaxHoldMinutes: String(s.agentReserveMaxHoldMinutes),
   };
 }
 
@@ -141,6 +147,7 @@ export default function AdminPage() {
     agentWeightMb: '0',
     browserWeightMb: '0',
     agentFloor: '0',
+    agentReserveMaxHoldMinutes: '10',
   });
   const [savingRuntimeLimits, setSavingRuntimeLimits] = useState(false);
 
@@ -397,12 +404,17 @@ export default function AdminPage() {
       agentWeightMb: Number.parseInt(runtimeLimitsForm.agentWeightMb, 10),
       browserWeightMb: Number.parseInt(runtimeLimitsForm.browserWeightMb, 10),
       agentFloor: Number.parseInt(runtimeLimitsForm.agentFloor, 10),
+      agentReserveMaxHoldMinutes: Number.parseInt(runtimeLimitsForm.agentReserveMaxHoldMinutes, 10),
     };
     if (Object.values(numbers).some((n) => !Number.isInteger(n) || n < 0)) {
-      setError('Runtime limit values must be integers of 0 or more (0 = auto).');
+      setError('Runtime limit values must be integers of 0 or more.');
       return;
     }
-    void saveRuntimeLimits({ enabled: runtimeLimits.enabled, ...numbers });
+    void saveRuntimeLimits({
+      enabled: runtimeLimits.enabled,
+      agentReserveEnabled: runtimeLimits.agentReserveEnabled,
+      ...numbers,
+    });
   }
 
   async function setSteering(next: boolean) {
@@ -928,9 +940,13 @@ export default function AdminPage() {
               browser weight is charged only to tasks that run browser testing, because the VNC
               desktop (Xvfb + Chromium) runs inside that task&apos;s runner. Agents share the same
               budget: they use what the runtimes are not holding, never dropping below the agent
-              floor. Each number is 0 = auto-derive from this host&apos;s RAM/CPU. Caps apply at the
-              next runner start; weights retune the gate and the agent pool live. Persists across
-              restarts.
+              floor. The reserve decides who gets those few slots: a task holding no live
+              environment yields to one that does, because a primed DDEV sitting idle is holding
+              gigabytes it can only release by <em>finishing</em> — held no longer than the max
+              hold, so runner-less work (onboarding, early workflow steps) slows down rather than
+              stopping. Each number is 0 = auto-derive from this host&apos;s RAM/CPU, except the max
+              hold where 0 means strict (never release). Caps apply at the next runner start;
+              weights and the reserve retune live. Persists across restarts.
             </CardDescription>
           </CardHeader>
           <label className="flex items-center gap-2 text-sm text-neutral-200">
@@ -945,6 +961,18 @@ export default function AdminPage() {
             />
             {runtimeLimits.enabled ? 'Enabled' : 'Disabled'}
             {savingRuntimeLimits && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+          <label className="mt-2 flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={runtimeLimits.agentReserveEnabled}
+              disabled={savingRuntimeLimits || !runtimeLimits.enabled}
+              onChange={(e) =>
+                void saveRuntimeLimits({ ...runtimeLimits, agentReserveEnabled: e.target.checked })
+              }
+              className="h-4 w-4"
+            />
+            Reserve CLI slots for tasks with a live environment
           </label>
           <div className="mt-3 flex flex-wrap items-end gap-2">
             <label className="flex flex-col gap-1 text-xs text-neutral-400">
@@ -1000,6 +1028,7 @@ export default function AdminPage() {
                 ['browserWeightMb', 'Browser desktop weight (MB, 0=auto)'],
                 ['agentWeightMb', 'Agent weight (MB, 0=auto)'],
                 ['agentFloor', 'Agent floor (0=auto)'],
+                ['agentReserveMaxHoldMinutes', 'Reserve max hold (min, 0=strict)'],
               ] as const
             ).map(([field, label]) => (
               <label key={field} className="flex flex-col gap-1 text-xs text-neutral-400">

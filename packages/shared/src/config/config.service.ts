@@ -315,6 +315,18 @@ export const CONFIG_KEYS = {
   // Agents that stay runnable however full the runtime pool is. A task holding a runtime
   // needs an agent to finish, so a zero-agent state deadlocks. 0 = auto (2).
   AGENT_FLOOR: 'config:sandbox:agentFloor',
+  // Whether a task holding NO live runtime runner yields its cli-exec slot to a task that
+  // holds one. Runtime occupancy already caps the agent pool, but nothing made a fungible
+  // agent yield to a task whose idle time is billed in committed RAM: a runner-less task
+  // (onboarding, a workflow task before its env boots) took one of the few slots while a
+  // primed DDEV task sat idle holding gigabytes it could only release by finishing. Off =
+  // pre-feature first-come behavior.
+  AGENT_RESERVE_ENABLED: 'config:sandbox:agentReserveEnabled',
+  // How long a runner-less invocation may be held before it runs regardless. The escape
+  // hatch that turns "runner-holders have priority" into "runner-holders go first": without
+  // it a busy runtime fleet starves runner-less work for as long as it keeps queueing jobs.
+  // 0 = strict, no escape.
+  AGENT_RESERVE_MAX_HOLD_MINUTES: 'config:sandbox:agentReserveMaxHoldMinutes',
   // Grace (minutes) before the runtime reaper reclaims a FAILED task's leaked runner
   // (failed runners are kept for retry/recovery, so they need a grace). Runners whose
   // task is completed/cancelled/missing, or whose container has exited, are reaped
@@ -405,6 +417,8 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.AGENT_WEIGHT_MB]: '0',
   [CONFIG_KEYS.RUNTIME_BROWSER_WEIGHT_MB]: '0',
   [CONFIG_KEYS.AGENT_FLOOR]: '0',
+  [CONFIG_KEYS.AGENT_RESERVE_ENABLED]: 'true',
+  [CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES]: '10',
   [CONFIG_KEYS.RUNTIME_IDLE_REAP_MINUTES]: '180',
 };
 

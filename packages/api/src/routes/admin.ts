@@ -362,6 +362,11 @@ const runtimeLimitsSchema = z.object({
   agentWeightMb: z.number().int().min(0),
   browserWeightMb: z.number().int().min(0),
   agentFloor: z.number().int().min(0),
+  // Whether a task holding no live runtime runner yields its CLI slot to one that does.
+  agentReserveEnabled: z.boolean(),
+  // Cap on that yield. 0 = strict (no escape); anything else releases a held invocation after
+  // this many minutes so a busy runtime fleet slows runner-less work rather than stopping it.
+  agentReserveMaxHoldMinutes: z.number().int().min(0),
 });
 
 /** Capacity the current settings actually produce, so the admin card can state it instead of
@@ -414,9 +419,11 @@ function deriveCapacityPreview(overrides: {
 
 // Machine-aware runtime resource governor: master kill-switch, per-runner memory/CPU caps
 // (ceilings), the planning weights the byte budget is spent in, an optional hard count cap,
-// and the leaked-runner reap grace. Any number at 0 auto-derives from host size. Caps are read
-// at each runner START (~30s config cache); weights + master switch are also published so the
-// worker's admission gate and agent-pool sizing retune live.
+// the leaked-runner reap grace, and the runtime-holder agent reserve (whether a task holding no
+// live runner yields its CLI slot to one that does, and for how long). Any number at 0
+// auto-derives from host size. Caps are read at each runner START (~30s config cache); weights,
+// master switch and reserve are also published so the worker's admission gate, agent-pool sizing
+// and pickup gate retune live.
 adminRoutes.get('/config/runtime-limits', async (c) => {
   const [
     enabled,
@@ -429,6 +436,8 @@ adminRoutes.get('/config/runtime-limits', async (c) => {
     agentWeightMb,
     browserWeightMb,
     agentFloor,
+    agentReserveEnabled,
+    agentReserveMaxHoldMinutes,
   ] = await Promise.all([
     configService.getBoolean(CONFIG_KEYS.RESOURCE_LIMITS_ENABLED, true),
     configService.getNumber(CONFIG_KEYS.RUNTIME_MEMORY_MB, 0),
@@ -440,6 +449,8 @@ adminRoutes.get('/config/runtime-limits', async (c) => {
     configService.getNumber(CONFIG_KEYS.AGENT_WEIGHT_MB, 0),
     configService.getNumber(CONFIG_KEYS.RUNTIME_BROWSER_WEIGHT_MB, 0),
     configService.getNumber(CONFIG_KEYS.AGENT_FLOOR, 0),
+    configService.getBoolean(CONFIG_KEYS.AGENT_RESERVE_ENABLED, true),
+    configService.getNumber(CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES, 10),
   ]);
   const settings = {
     enabled,
@@ -452,6 +463,8 @@ adminRoutes.get('/config/runtime-limits', async (c) => {
     agentWeightMb,
     browserWeightMb,
     agentFloor,
+    agentReserveEnabled,
+    agentReserveMaxHoldMinutes,
   };
   return c.json({ ...settings, capacity: deriveCapacityPreview(settings) });
 });
@@ -469,6 +482,14 @@ adminRoutes.put('/config/runtime-limits', async (c) => {
     configService.set(CONFIG_KEYS.AGENT_WEIGHT_MB, String(body.agentWeightMb)),
     configService.set(CONFIG_KEYS.RUNTIME_BROWSER_WEIGHT_MB, String(body.browserWeightMb)),
     configService.set(CONFIG_KEYS.AGENT_FLOOR, String(body.agentFloor)),
+    configService.set(
+      CONFIG_KEYS.AGENT_RESERVE_ENABLED,
+      body.agentReserveEnabled ? 'true' : 'false',
+    ),
+    configService.set(
+      CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES,
+      String(body.agentReserveMaxHoldMinutes),
+    ),
   ]);
   // Retune the admission gate AND the agent pool live (both subscribe to this channel); the
   // per-container caps re-read at the next runner start within the config cache.
