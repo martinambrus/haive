@@ -3,11 +3,13 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { CliProviderName, FormSchema } from '@haive/shared';
+import type { CliProviderName, FormField, FormSchema } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
 import type { Database } from '@haive/database';
 import type { StepDefinition } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
+import { initGitWorkspace } from '../../../repo/git-init.js';
+import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { pathExists } from '../onboarding/_helpers.js';
 
 const execFileAsync = promisify(execFile);
@@ -16,6 +18,15 @@ const DEFAULT_COMMIT_MESSAGE = [
   'chore: apply Haive onboarding upgrade',
   '',
   'Applies selected template updates from the onboarding-upgrade workflow.',
+].join('\n');
+
+/** Default for the no-git case, where the commit is also the repository's first and
+ *  therefore holds the pre-existing project files as well as the upgraded ones. */
+const INIT_COMMIT_MESSAGE = [
+  'chore: initial commit with Haive onboarding upgrade',
+  '',
+  'Initializes the repository with the existing project files plus the selected',
+  'template updates from the onboarding-upgrade workflow.',
 ].join('\n');
 
 const BASE_STAGE_PATHS = [
@@ -54,6 +65,13 @@ const FALLBACK_GIT_IDENTITY = {
   GIT_COMMITTER_EMAIL: 'haive@local',
 };
 
+interface UpgradeCommitDetect {
+  /** False when the repo carries no git history — an uploaded / in-place repo whose
+   *  onboarding never committed. The commit path then runs `git init` first; without
+   *  it `git add` dies with "fatal: not a git repository". */
+  hasGit: boolean;
+}
+
 interface UpgradeCommitOutput {
   commitPerformed: boolean;
   commitSha: string | null;
@@ -61,7 +79,7 @@ interface UpgradeCommitOutput {
   warnings: string[];
 }
 
-export const upgradeCommitStep: StepDefinition<Record<string, never>, UpgradeCommitOutput> = {
+export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommitOutput> = {
   metadata: {
     id: '03-upgrade-commit',
     workflowType: 'onboarding_upgrade',
@@ -76,29 +94,70 @@ export const upgradeCommitStep: StepDefinition<Record<string, never>, UpgradeCom
     return shouldRunUpgrade(ctx);
   },
 
-  async detect(): Promise<Record<string, never>> {
-    return {};
+  async detect(ctx): Promise<UpgradeCommitDetect> {
+    // Classify rather than requireUsableGit: a corrupt `.git` must not fail this step
+    // for a user who only wants to skip the commit and finish the upgrade. The commit
+    // path re-checks and throws there.
+    return { hasGit: (await gitWorkspaceStatus(ctx.repoPath)) === 'ok' };
   },
 
-  form(): FormSchema {
-    return {
-      title: 'Commit upgrade changes',
-      description: 'Stage and commit the files the upgrade wrote, or skip and commit later.',
-      fields: [
+  form(_ctx, detected): FormSchema {
+    const fields: FormField[] = [];
+
+    // No git history (onboarding never committed): committing has to create the
+    // repository first. The initial commit deliberately holds the WHOLE working tree,
+    // not only the upgraded files — `git worktree add` checks out tracked files only,
+    // so a first commit carrying just `.claude/` would hand every later workflow task
+    // an empty project.
+    if (!detected.hasGit) {
+      fields.push(
+        {
+          type: 'note',
+          id: 'noGitNote',
+          label: 'No git repository',
+          body:
+            'This repository has no git history. Committing will run `git init` in the ' +
+            'repository root and create an initial commit containing every current file ' +
+            '(honouring .gitignore), not only the upgraded ones. Use the Terminal tab if ' +
+            'you need a different setup (existing remote, custom .gitignore) and Retry afterwards.',
+          variant: 'warning',
+        },
         {
           type: 'checkbox',
           id: 'commit',
-          label: 'Stage and commit upgrade changes',
+          label: 'Initialize git, then stage and commit',
           default: false,
         },
         {
-          type: 'textarea',
-          id: 'commitMessage',
-          label: 'Commit message',
-          default: DEFAULT_COMMIT_MESSAGE,
-          rows: 6,
+          type: 'text',
+          id: 'initBranch',
+          label: 'Initial branch name',
+          default: 'main',
+          description: 'The branch `git init` creates.',
+          visibleWhen: { field: 'commit', equals: true },
         },
-      ],
+      );
+    } else {
+      fields.push({
+        type: 'checkbox',
+        id: 'commit',
+        label: 'Stage and commit upgrade changes',
+        default: false,
+      });
+    }
+
+    fields.push({
+      type: 'textarea',
+      id: 'commitMessage',
+      label: 'Commit message',
+      default: detected.hasGit ? DEFAULT_COMMIT_MESSAGE : INIT_COMMIT_MESSAGE,
+      rows: 6,
+    });
+
+    return {
+      title: 'Commit upgrade changes',
+      description: 'Stage and commit the files the upgrade wrote, or skip and commit later.',
+      fields,
       submitLabel: 'Finish upgrade',
     };
   },
@@ -125,6 +184,23 @@ export const upgradeCommitStep: StepDefinition<Record<string, never>, UpgradeCom
     }
 
     try {
+      // A repo whose onboarding never committed carries no git history, so `git add`
+      // dies with "fatal: not a git repository". Create the repo first, then stage the
+      // WHOLE working tree: `git worktree add` checks out tracked files only, so a first
+      // commit holding just the upgraded files would hand every later workflow task an
+      // empty project. The .gitignore onboarding wrote is already on disk, so `add -A`
+      // honours it. requireUsableGit rather than detect.hasGit: it throws on a `.git` git
+      // refuses (corruption gets reported, never initialized over) and it re-reads state
+      // detect may have missed, e.g. a Terminal-tab `git init`.
+      let didInit = false;
+      if (!(await requireUsableGit(ctx.repoPath))) {
+        const initBranch =
+          (typeof values.initBranch === 'string' ? values.initBranch : '').trim() || 'main';
+        await initGitWorkspace(ctx.repoPath, initBranch);
+        didInit = true;
+        await execFileAsync('git', ['add', '-A'], { cwd: ctx.repoPath });
+        ctx.logger.info({ initBranch }, 'upgrade-commit: initialized git repository');
+      }
       // -f: .haive/install.json is under .haive/, which 01-worktree-setup excludes via
       // .git/info/exclude; a plain `git add` of an excluded path exits non-zero and
       // aborts the whole stage. Same fix as 12-post-onboarding.
@@ -148,7 +224,9 @@ export const upgradeCommitStep: StepDefinition<Record<string, never>, UpgradeCom
       const message =
         typeof values.commitMessage === 'string' && values.commitMessage.trim().length > 0
           ? values.commitMessage
-          : DEFAULT_COMMIT_MESSAGE;
+          : didInit
+            ? INIT_COMMIT_MESSAGE
+            : DEFAULT_COMMIT_MESSAGE;
       const resolved = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
       const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
       await execFileAsync('git', ['commit', '-m', message], {
@@ -160,8 +238,13 @@ export const upgradeCommitStep: StepDefinition<Record<string, never>, UpgradeCom
       commitPerformed = true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      warnings.push(`commit failed: ${message}`);
       ctx.logger.warn({ err }, 'upgrade-commit failed');
+      // The user explicitly asked to commit; a git failure must be loud, not a silent
+      // `done` with a buried warning. 02-upgrade-apply already wrote the files and the
+      // artifact rows, so a Retry re-attempts the stage + commit safely. The two no-op
+      // paths above (nothing to stage, nothing staged) stay warnings — they are
+      // legitimate outcomes, not failures.
+      throw new Error(`Staging or committing the upgrade changes failed: ${message}`);
     }
 
     return { commitPerformed, commitSha, stagedPaths, warnings };
