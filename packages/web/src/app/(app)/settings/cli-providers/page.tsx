@@ -23,7 +23,7 @@ import {
 } from '@/components/ui';
 import { CliUpgradeAll } from '@/components/cli-upgrade-all';
 import { cliUpgradeLatest, groupUpgradable } from '@/components/cli-upgrade-selection';
-import { runCliProbe, type CliProbePhase } from '@/lib/cli-probe';
+import { runCliProbe, runCliSignOut, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { usePageTitle } from '@/lib/use-page-title';
 
@@ -39,19 +39,16 @@ interface TestState {
   testing: boolean;
   // Only meaningful while `testing` — a queued probe waits on the shared CLI queue and
   // reports itself so the button can say so instead of looking stuck.
-  phase?: CliProbePhase;
+  phase?: QueuedJobPhase;
   result: CliProbeResult | null;
   error: string | null;
 }
 
-interface SignOutResult {
-  ok: boolean;
-  removed: string[];
-  failed: { name: string; stderr: string }[];
-}
-
 interface SignOutState {
   busy: boolean;
+  // Only meaningful while `busy` — sign-out waits on the shared CLI queue like every other
+  // cli-exec job, so the button says which of the two it is doing.
+  phase?: QueuedJobPhase;
   message: string | null;
   error: string | null;
 }
@@ -260,18 +257,19 @@ export default function CliProvidersPage() {
     ) {
       return;
     }
-    setSignOutStates((s) => ({
-      ...s,
-      [p.id]: { busy: true, message: null, error: null },
-    }));
+    const setPhase = (phase: QueuedJobPhase) =>
+      setSignOutStates((s) => ({
+        ...s,
+        [p.id]: { busy: true, phase, message: null, error: null },
+      }));
+    setPhase('queued');
     setTestStates((s) => {
       const next = { ...s };
       delete next[p.id];
       return next;
     });
     try {
-      const data = await api.post<{ result: SignOutResult }>(`/cli-providers/${p.id}/sign-out`);
-      const { ok, removed, failed } = data.result;
+      const { ok, removed, failed } = await runCliSignOut(p.id, setPhase);
       const summary = ok
         ? removed.length === 0
           ? 'Already signed out.'
@@ -397,7 +395,7 @@ export default function CliProvidersPage() {
   }
 
   async function handleTest(id: string) {
-    const setPhase = (phase: CliProbePhase) =>
+    const setPhase = (phase: QueuedJobPhase) =>
       setTestStates((s) => ({ ...s, [id]: { testing: true, phase, result: null, error: null } }));
     setPhase('queued');
     try {
@@ -524,7 +522,11 @@ export default function CliProvidersPage() {
                               onClick={() => handleSignOut(p)}
                               disabled={signOutState?.busy === true}
                             >
-                              {signOutState?.busy ? 'Signing out...' : 'Sign out'}
+                              {signOutState?.busy
+                                ? signOutState.phase === 'running'
+                                  ? 'Signing out...'
+                                  : 'Queued...'
+                                : 'Sign out'}
                             </Button>
                           )}
                           {p.name === 'claude-code' &&

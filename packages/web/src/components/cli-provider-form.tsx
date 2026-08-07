@@ -21,6 +21,7 @@ import {
   type CliSandboxBuildStatus,
 } from '@/lib/api-client';
 import { Button, FormError, Input, Label } from '@/components/ui';
+import { runCatalogVersionRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { OllamaModelDownload } from '@/components/ollama-model-download';
 
 interface CliProviderFormProps {
@@ -212,6 +213,7 @@ export function CliProviderForm({
     metadata.versionCache,
   );
   const [refreshingVersions, setRefreshingVersions] = useState(false);
+  const [refreshPhase, setRefreshPhase] = useState<QueuedJobPhase>('queued');
   // Limitations the worker learned from failed invocations. Read-only here: the values are
   // written from observed failures, and the only client action is discarding them.
   const [modelLimits, setModelLimits] = useState<CliModelLimits | null>(
@@ -388,12 +390,11 @@ export function CliProviderForm({
 
   async function handleRefreshVersions() {
     if (!metadata.versionPinnable) return;
+    setRefreshPhase('queued');
     setRefreshingVersions(true);
     clearError();
     try {
-      const { entry } = await api.post<{ entry: CliPackageVersionsEntry }>(
-        `/cli-providers/catalog/${metadata.name}/refresh-versions`,
-      );
+      const entry = await runCatalogVersionRefresh(metadata.name, setRefreshPhase);
       setVersionCache(entry);
       const newest = entry.versions[0] ?? entry.latestVersion;
       setState((prev) => (prev.cliVersion || !newest ? prev : { ...prev, cliVersion: newest }));
@@ -730,7 +731,11 @@ export function CliProviderForm({
                 disabled={refreshingVersions}
                 title="Refresh version list from registry"
               >
-                {refreshingVersions ? 'Refreshing...' : 'Refresh'}
+                {refreshingVersions
+                  ? refreshPhase === 'running'
+                    ? 'Refreshing...'
+                    : 'Queued...'
+                  : 'Refresh'}
               </Button>
             </div>
             {cliUpgradeAvailable && newestCliVersion && (

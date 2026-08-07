@@ -8,7 +8,7 @@ import {
   type CliProviderName,
 } from '@/lib/api-client';
 import { Badge, Button, FormError } from '@/components/ui';
-import { runCliProbe, type CliProbePhase } from '@/lib/cli-probe';
+import { runCliProbe, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { useCliLogin } from '@/lib/use-cli-login';
 
 interface CliProviderTestProps {
@@ -55,7 +55,7 @@ export function CliProviderTest({
   onLoginCompleted,
 }: CliProviderTestProps) {
   const [testing, setTesting] = useState(false);
-  const [phase, setPhase] = useState<CliProbePhase>('queued');
+  const [phase, setPhase] = useState<QueuedJobPhase>('queued');
   const [result, setResult] = useState<CliProbeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const blocked = Boolean(blockMessage);

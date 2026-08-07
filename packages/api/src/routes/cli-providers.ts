@@ -39,7 +39,7 @@ import {
 import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
-import { getCliExecQueue, getCliExecQueueEvents, getUsagePollQueue } from '../queues.js';
+import { getCliExecQueue, getUsagePollQueue } from '../queues.js';
 
 async function loadOwnedProvider(db: Database, userId: string, providerId: string) {
   const provider = await db.query.cliProviders.findFirst({
@@ -53,11 +53,42 @@ async function loadOwnedProvider(db: Database, userId: string, providerId: strin
 const CLI_PROVIDER_LABEL_MAX_LENGTH = 255;
 const MAX_CLONE_ATTEMPTS = 1000;
 
-/** How long a finished cli-probe job stays readable so the browser can poll for its result.
- *  Must outlast the client's poll window (PROBE_POLL_TIMEOUT_MS in
- *  packages/web/src/lib/cli-probe.ts): a job reaped between finishing and the final poll
- *  would be reported as expired for a probe that actually succeeded. */
-const PROBE_JOB_RETENTION_S = 900;
+/** How long a finished cli-exec job stays readable so the browser can poll for its result.
+ *  Must outlast the client's poll window (POLL_TIMEOUT_MS in
+ *  packages/web/src/lib/cli-jobs.ts): a job reaped between finishing and the final poll
+ *  would be reported as expired for work that actually succeeded. */
+const POLLABLE_JOB_RETENTION_S = 900;
+
+/** Enqueue options shared by every cli-exec job the UI starts and then polls. */
+const POLLABLE_JOB_OPTS = {
+  removeOnComplete: { age: POLLABLE_JOB_RETENTION_S },
+  removeOnFail: { age: POLLABLE_JOB_RETENTION_S },
+} as const;
+
+/** Load a job the UI is polling, or 404.
+ *
+ *  `name` pins the job kind so one poll route can never read another kind's return value —
+ *  the routes differ in what they expose (a probe result, a sign-out summary), and the job id
+ *  alone does not say which. `owner` additionally pins the payload to the caller for the
+ *  per-provider jobs. Everything that fails a check is reported as missing rather than
+ *  forbidden: the id is the only handle, so a distinct "exists but not yours" would confirm
+ *  live ids to whoever guesses one. */
+async function loadPollableJob(
+  jobId: string,
+  name: string,
+  owner?: { providerId: string; userId: string },
+) {
+  const job = await getCliExecQueue().getJob(jobId);
+  const data = job?.data as { providerId?: string; userId?: string } | undefined;
+  if (
+    !job ||
+    job.name !== name ||
+    (owner && (data?.providerId !== owner.providerId || data?.userId !== owner.userId))
+  ) {
+    throw new HttpError(404, 'job not found — it may have expired', 'job_expired');
+  }
+  return job;
+}
 
 export function makeCopyLabel(base: string, n: number): string {
   const suffix = n === 1 ? ' Copy' : ` Copy ${n}`;
@@ -210,43 +241,48 @@ cliProviderRoutes.get('/catalog', async (c) => {
 });
 
 cliProviderRoutes.post('/catalog/:name/refresh-versions', async (c) => {
-  const name = cliProviderNameSchema.parse(c.req.param('name'));
+  // Parsed for the 400 on an unknown CLI name; the job itself refreshes every catalog entry.
+  cliProviderNameSchema.parse(c.req.param('name'));
   const payload: RefreshCliVersionsJobPayload = { force: true };
   const queue = getCliExecQueue();
-  const events = getCliExecQueueEvents();
-  const job = await queue.add(CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS, payload, {
-    removeOnComplete: true,
-    removeOnFail: 20,
-  });
-  try {
-    await job.waitUntilFinished(events, 30_000);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new HttpError(504, `refresh timed out or failed: ${message}`, 'refresh_failed');
+  const job = await queue.add(CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS, payload, POLLABLE_JOB_OPTS);
+  if (!job.id) throw new HttpError(500, 'refresh was not queued', 'refresh_enqueue_failed');
+
+  return c.json({ jobId: job.id }, 202);
+});
+
+/** Poll target for a refresh queued by POST /catalog/:name/refresh-versions.
+ *
+ *  Registered alongside its POST — i.e. ahead of the `requireAuth` middleware below — so the
+ *  pair keeps the posture the catalog routes already have. It exposes nothing that the public
+ *  GET /catalog does not. */
+cliProviderRoutes.get('/catalog/:name/refresh-versions/:jobId', async (c) => {
+  const name = cliProviderNameSchema.parse(c.req.param('name'));
+  const jobId = c.req.param('jobId');
+  const job = await loadPollableJob(jobId, CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS);
+
+  const state = await job.getState();
+  if (state === 'failed') {
+    return c.json({ status: 'failed', error: job.failedReason || 'refresh failed' });
   }
+  if (state !== 'completed') return c.json({ status: 'pending', state });
+
+  // The job returns a summary across every CLI, while this route answers with one catalog
+  // entry — so read the row the job just wrote, exactly as the blocking version did.
   const db = getDb();
   const row = await db.query.cliPackageVersions.findFirst({
     where: eq(schema.cliPackageVersions.name, name),
   });
-  if (!row) {
-    return c.json({
-      entry: {
-        name,
-        versions: [],
-        latestVersion: null,
-        fetchedAt: null,
-        fetchError: null,
-      } satisfies CliPackageVersionsEntry,
-    });
-  }
-  const entry: CliPackageVersionsEntry = {
-    name: row.name,
-    versions: row.versions ?? [],
-    latestVersion: row.latestVersion,
-    fetchedAt: row.fetchedAt ? row.fetchedAt.toISOString() : null,
-    fetchError: row.fetchError,
-  };
-  return c.json({ entry });
+  const entry: CliPackageVersionsEntry = row
+    ? {
+        name: row.name,
+        versions: row.versions ?? [],
+        latestVersion: row.latestVersion,
+        fetchedAt: row.fetchedAt ? row.fetchedAt.toISOString() : null,
+        fetchError: row.fetchError,
+      }
+    : { name, versions: [], latestVersion: null, fetchedAt: null, fetchError: null };
+  return c.json({ status: 'done', entry });
 });
 
 cliProviderRoutes.use('*', requireAuth);
@@ -506,10 +542,7 @@ cliProviderRoutes.post('/:id/test', async (c) => {
   };
 
   const queue = getCliExecQueue();
-  const job = await queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, {
-    removeOnComplete: { age: PROBE_JOB_RETENTION_S },
-    removeOnFail: { age: PROBE_JOB_RETENTION_S },
-  });
+  const job = await queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, POLLABLE_JOB_OPTS);
   if (!job.id) throw new HttpError(500, 'probe was not queued', 'probe_enqueue_failed');
 
   return c.json({ jobId: job.id }, 202);
@@ -528,19 +561,10 @@ cliProviderRoutes.get('/:id/test/:jobId', async (c) => {
   const db = getDb();
   await loadOwnedProvider(db, userId, id);
 
-  const job = await getCliExecQueue().getJob(jobId);
-  const data = job?.data as CliProbeJobPayload | undefined;
-  // Anything that is not this user's probe for this provider is reported as missing rather
-  // than forbidden — the job id is the only handle, so a distinct "exists but not yours"
-  // would confirm live ids to whoever guesses one.
-  if (
-    !job ||
-    job.name !== CLI_EXEC_JOB_NAMES.PROBE ||
-    data?.providerId !== id ||
-    data?.userId !== userId
-  ) {
-    throw new HttpError(404, 'probe not found — it may have expired', 'probe_expired');
-  }
+  const job = await loadPollableJob(jobId, CLI_EXEC_JOB_NAMES.PROBE, {
+    providerId: id,
+    userId,
+  });
 
   const state = await job.getState();
   if (state === 'completed') {
@@ -564,19 +588,34 @@ cliProviderRoutes.post('/:id/sign-out', async (c) => {
 
   const payload: CliSignOutJobPayload = { providerId: provider.id, userId };
   const queue = getCliExecQueue();
-  const events = getCliExecQueueEvents();
-  const job = await queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, {
-    removeOnComplete: true,
-    removeOnFail: 20,
+  const job = await queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, POLLABLE_JOB_OPTS);
+  if (!job.id) throw new HttpError(500, 'sign-out was not queued', 'sign_out_enqueue_failed');
+
+  return c.json({ jobId: job.id }, 202);
+});
+
+/** Poll target for a sign-out queued by POST /:id/sign-out. Queued on the same shared
+ *  cli-exec queue as the agent invocations, so the same minutes-long wait applies. */
+cliProviderRoutes.get('/:id/sign-out/:jobId', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const jobId = c.req.param('jobId');
+  const db = getDb();
+  await loadOwnedProvider(db, userId, id);
+
+  const job = await loadPollableJob(jobId, CLI_EXEC_JOB_NAMES.SIGN_OUT, {
+    providerId: id,
+    userId,
   });
 
-  try {
-    const result = (await job.waitUntilFinished(events, 30_000)) as CliSignOutJobResult;
-    return c.json({ result });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new HttpError(504, `sign-out timed out or failed: ${message}`, 'sign_out_failed');
+  const state = await job.getState();
+  if (state === 'completed') {
+    return c.json({ status: 'done', result: job.returnvalue as CliSignOutJobResult });
   }
+  if (state === 'failed') {
+    return c.json({ status: 'failed', error: job.failedReason || 'sign-out failed' });
+  }
+  return c.json({ status: 'pending', state });
 });
 
 cliProviderRoutes.post('/:id/clone', async (c) => {
