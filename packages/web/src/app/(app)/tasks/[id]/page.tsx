@@ -274,6 +274,63 @@ function iterationBadgeLabel(step: Pick<TaskStep, 'iterationCount' | 'cliRoles'>
     : `iter ×${step.iterationCount}`;
 }
 
+/* --- Failed-step recovery. The header Retry and the failed step's own card must offer the
+   SAME primary action: the header used to hardcode `retry`, which resets a multi-pass step's
+   iterations to 0 and nulls its output (api routes/tasks/steps.ts, the `retry` branch), so it
+   threw away passes the card's Resume button would have kept. Derive both from here. --- */
+
+const BIZ_REQ_DRAFT_STEP_ID = '03b-business-requirements';
+const BIZ_REQ_REVIEW_STEP_ID = '03c-business-requirements-review';
+
+const BIZ_REQ_RERUN_TITLE =
+  'Reset and re-run the business-requirements step with your rejection feedback pre-filled, so the agent re-drafts addressing it. Retrying THIS step would only re-review the same draft.';
+const RESUME_TITLE =
+  'Continue this multi-pass step from where it failed. If a CLI ran out of credits, pick a different one above first. Completed passes are kept; a first-pass failure re-runs from the start with the new CLI.';
+const RETRY_TITLE = 'Reset this step and re-run it (downstream steps will also reset)';
+
+/** A failed step that can resume from the pass that failed instead of resetting to pass 0.
+ *  iterationCount > 0 means there are completed passes to keep; a loop step (cliRoles) that
+ *  failed on its FIRST pass keeps nothing but is still resumable — resume re-dispatches that
+ *  pass with the newly-picked CLI, which is the whole point when one ran out of credits. */
+function isResumableStep(step: Pick<TaskStep, 'status' | 'iterationCount' | 'cliRoles'>): boolean {
+  return step.status === 'failed' && (step.iterationCount > 0 || (step.cliRoles?.length ?? 0) > 0);
+}
+
+function resumeButtonLabel(step: Pick<TaskStep, 'iterationCount'>): string {
+  return step.iterationCount > 0
+    ? `Resume (keep ${step.iterationCount} pass${step.iterationCount === 1 ? '' : 'es'})`
+    : 'Resume (new CLI)';
+}
+
+/** The recovery the failed step's own card offers as its PRIMARY (non-secondary) button, so
+ *  the header Retry never does something more destructive than the button sitting next to the
+ *  step. Same precedence as the card's button order: the business-requirements review re-runs
+ *  the DRAFT step (re-reviewing the same rejected draft only fails again), then resume, then a
+ *  plain retry. */
+function primaryRecovery(
+  failedStep: TaskStep,
+  steps: TaskStep[],
+): { step: TaskStep; action: StepAction; label: string; title: string } {
+  if (failedStep.stepId === BIZ_REQ_REVIEW_STEP_ID) {
+    const draft = steps.find((s) => s.stepId === BIZ_REQ_DRAFT_STEP_ID);
+    if (draft)
+      return {
+        step: draft,
+        action: 'retry',
+        label: 'Re-run business requirements',
+        title: BIZ_REQ_RERUN_TITLE,
+      };
+  }
+  if (isResumableStep(failedStep))
+    return {
+      step: failedStep,
+      action: 'resume',
+      label: resumeButtonLabel(failedStep),
+      title: RESUME_TITLE,
+    };
+  return { step: failedStep, action: 'retry', label: 'Retry', title: RETRY_TITLE };
+}
+
 type Tab = 'steps' | 'editor' | 'terminal' | 'activity' | 'attachments';
 
 // Mirrors @haive/api TaskProviderUsage (kept local per the barrel-avoidance rule).
@@ -1223,14 +1280,25 @@ export default function TaskDetailPage() {
           )}
         </div>
         <div className="flex flex-wrap gap-2">
-          {canRetry && (
-            <Button
-              size="sm"
-              onClick={() => (failedStep ? runStepAction(failedStep, 'retry') : runAction('retry'))}
-            >
-              Retry
-            </Button>
-          )}
+          {canRetry &&
+            (() => {
+              // Mirror the failed step's own primary button (primaryRecovery) instead of
+              // hardcoding `retry`: on a multi-pass step that is Resume, so the header no
+              // longer discards passes the CLIs already delivered.
+              const recovery = failedStep ? primaryRecovery(failedStep, steps) : null;
+              return (
+                <Button
+                  size="sm"
+                  title={recovery?.title}
+                  onClick={() => {
+                    if (recovery) void runStepAction(recovery.step, recovery.action);
+                    else void runAction('retry');
+                  }}
+                >
+                  {recovery?.label ?? 'Retry'}
+                </Button>
+              );
+            })()}
           {/* Pause/Resume: hold this task so the CLI concurrency goes to the others. No
               confirm() — nothing is killed and nothing is lost, so it is cheap to undo. */}
           {canCancel &&
@@ -2705,12 +2773,12 @@ function StepCardImpl({
           <StepUsageStamp step={step} />
           {canActOnStep && (
             <>
-              {step.stepId === '03c-business-requirements-review' && step.status === 'failed' && (
+              {step.stepId === BIZ_REQ_REVIEW_STEP_ID && step.status === 'failed' && (
                 <Button
                   size="sm"
                   disabled={actionBusy}
-                  onClick={() => void onRetryStep('03b-business-requirements')}
-                  title="Reset and re-run the business-requirements step with your rejection feedback pre-filled, so the agent re-drafts addressing it. Retrying THIS step would only re-review the same draft."
+                  onClick={() => void onRetryStep(BIZ_REQ_DRAFT_STEP_ID)}
+                  title={BIZ_REQ_RERUN_TITLE}
                 >
                   Re-run business requirements
                 </Button>
@@ -2736,7 +2804,7 @@ function StepCardImpl({
                   const label = isActive ? 'Stop & retry' : 'Retry';
                   const title = isActive
                     ? 'Stop the running CLI for this step (and any downstream activity), then re-run from this step'
-                    : 'Reset this step and re-run it (downstream steps will also reset)';
+                    : RETRY_TITLE;
                   return (
                     <Button
                       size="sm"
@@ -2794,21 +2862,16 @@ function StepCardImpl({
                   {actionBusy ? 'Retrying…' : 'Retry with longer timeout'}
                 </Button>
               )}
-              {step.status === 'failed' &&
-                (step.iterationCount > 0 || (step.cliRoles?.length ?? 0) > 0) && (
-                  <Button
-                    size="sm"
-                    disabled={actionBusy}
-                    onClick={() => onAction('resume')}
-                    title="Continue this multi-pass step from where it failed. If a CLI ran out of credits, pick a different one above first. Completed passes are kept; a first-pass failure re-runs from the start with the new CLI."
-                  >
-                    {actionBusy
-                      ? 'Resuming…'
-                      : step.iterationCount > 0
-                        ? `Resume (keep ${step.iterationCount} pass${step.iterationCount === 1 ? '' : 'es'})`
-                        : 'Resume (new CLI)'}
-                  </Button>
-                )}
+              {isResumableStep(step) && (
+                <Button
+                  size="sm"
+                  disabled={actionBusy}
+                  onClick={() => onAction('resume')}
+                  title={RESUME_TITLE}
+                >
+                  {actionBusy ? 'Resuming…' : resumeButtonLabel(step)}
+                </Button>
+              )}
               {(step.status === 'failed' || step.status === 'waiting_form') && step.canSkip && (
                 <Button
                   size="sm"
