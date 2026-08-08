@@ -9,6 +9,7 @@ import { resolveDdevWorkspace } from './_task-meta.js';
 import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
 import { appRunnerExec } from '../../../sandbox/app-runner.js';
 import { ensureAppServing } from './_app-runtime.js';
+import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 
 // Phase 5 verify: runs the project's test / lint / typecheck checks and records
 // the outcome for gate 2. Each of the three slots is framework-aware — a JS
@@ -388,6 +389,14 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
     // manual mode still gates.
     autoSubmitDefaults: true,
   },
+
+  // The same route for a THROWN failure, which the fixLoop below cannot see: this step
+  // fails outright when the DDEV env will not boot (`failOnDdevBootError`), and the config
+  // that stops it booting is the implementation's own work. Without this the task dies at
+  // a step whose cause a retry cannot clear — the offending file is still there. Scoped by
+  // the same predicate 07c uses, so a host-level failure (version constraint, reaped
+  // runner, OOM) keeps the hard-fail path that exposes Retry / Retry with AI.
+  fixLoopOnError: isDdevAgentFixableFailure,
 
   // Fix-loop: a failing verification suite routes back to implementation with the
   // failing command output(s) as the diagnosis.

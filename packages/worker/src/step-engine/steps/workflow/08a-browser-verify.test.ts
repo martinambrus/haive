@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  browserVerifyStep,
   parseBrowserTestOutput,
   parseFixerOutput,
   parseChecklistOutput,
@@ -66,5 +67,24 @@ describe('parseChecklistOutput', () => {
   it('falls back to raw markdown when not fenced JSON', () => {
     const md = '# Manual checklist\n- [ ] open the page';
     expect(parseChecklistOutput(md)).toBe(md);
+  });
+});
+
+describe('browserVerifyStep.fixLoopOnError', () => {
+  const route = (msg: string) => (browserVerifyStep.fixLoopOnError as (m: string) => boolean)(msg);
+
+  it('routes an agent-authored .ddev defect back to implementation', () => {
+    // The mcp `prepare` hook does not catch, so this is the difference between a fix
+    // round and a dead task — reporting untested work as verified is the alternative.
+    expect(
+      route(
+        'DDEV cannot start: DDEV config is not valid YAML: .ddev/config.yaml cannot be ' +
+          'parsed — Nested mappings are not allowed in compact mappings at line 14, column 13.',
+      ),
+    ).toBe(true);
+  });
+
+  it('leaves a reaped runner on the hard-fail path', () => {
+    expect(route('ddev restart failed: Error response from daemon: No such container')).toBe(false);
   });
 });

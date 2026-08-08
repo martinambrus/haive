@@ -7,6 +7,7 @@ vi.mock('./_app-runtime.js', () => ({ ensureAppServing }));
 import {
   buildVerifyCommand,
   parseRuntimeSmokeOutput,
+  phase5VerifyStep,
   runRuntimeSmoke,
 } from './08-phase-5-verify.js';
 
@@ -190,5 +191,30 @@ describe('runRuntimeSmoke', () => {
       httpStatus: null,
       errorExcerpt: 'Runtime smoke could not run: host runtime unavailable',
     });
+  });
+});
+
+describe('phase5VerifyStep.fixLoopOnError', () => {
+  const route = (msg: string) => (phase5VerifyStep.fixLoopOnError as (m: string) => boolean)(msg);
+
+  it('routes an agent-authored .ddev defect back to implementation THROUGH the wrapper', () => {
+    // runRuntimeSmoke wraps the boot error in its own sentence, so the classifier only
+    // still fires because it matches on a substring. That is the property under test.
+    expect(
+      route(
+        'DDEV environment could not start for runtime verification: DDEV cannot start: ' +
+          'DDEV config is not valid YAML: .ddev/config.yaml cannot be parsed — Nested ' +
+          'mappings are not allowed in compact mappings at line 14, column 13.',
+      ),
+    ).toBe(true);
+  });
+
+  it('leaves a host-level boot failure on the hard-fail path', () => {
+    expect(
+      route(
+        'DDEV environment could not start for runtime verification: ddev start failed: ' +
+          "your DDEV version 'v1.25.3' doesn't meet the constraint '= v1.24.8'",
+      ),
+    ).toBe(false);
   });
 });

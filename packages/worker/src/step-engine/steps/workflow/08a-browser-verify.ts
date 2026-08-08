@@ -13,6 +13,7 @@ import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput, resolveDdevWorkspace } from './_task-meta.js';
 import { resolveBrowserRuntime } from './_browser-runtime.js';
 import { ensureAppServing } from './_app-runtime.js';
+import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { runnerExec, startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
 import {
   appRunnerExec,
@@ -360,6 +361,13 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     requiresCli: false,
     cliRoles: STEP_CLI_ROLES['08a-browser-verify'],
   },
+
+  // The same route for a THROWN failure. `bringUpLiveBrowser` degrades to "no panel" when
+  // the runtime will not come up, but the mcp `prepare` hook does NOT catch — the agent
+  // cannot drive a browser against an app that is not serving, and swallowing that would
+  // report untested work as verified. So an agent-authored `.ddev/` defect loops back to
+  // implementation instead of failing the task; host-level failures keep the hard-fail path.
+  fixLoopOnError: isDdevAgentFixableFailure,
 
   // Fix-loop: a failed browser verification routes back to implementation with the
   // observed failures + console/network errors as the diagnosis. Skipped runs pass.
