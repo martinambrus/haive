@@ -314,6 +314,22 @@ export const tasks = pgTable(
      *  its real status and "paused" is derived for display and filtering, the same way
      *  the runtime-slot wait is (see deriveSlotWait in @haive/shared). */
     pausedAt: timestamp('paused_at'),
+    /** Up/down vote score: how far ahead of the pack the owner wants this task's CLI
+     *  agents to run. Shifts the fair-scheduling band at enqueue
+     *  (`fairPriority` in @haive/shared/fair-priority), it does NOT create a priority
+     *  class — `rank` still climbs with each in-flight agent, so a boosted task takes
+     *  `vote_score` extra turns per cycle and then yields like everything else. 0 (the
+     *  default) reproduces the pre-feature ordering exactly.
+     *
+     *  Range is [-5, +5], enforced at the one write site (POST /tasks/:id/vote) and
+     *  clamped again inside fairPriority, so an out-of-range value can never push the
+     *  BullMQ priority past its 2^21 ceiling. No CHECK constraint: this schema uses none,
+     *  and the scheduler is defensive either way.
+     *
+     *  Single-owner by construction — every task query is scoped by user_id, so there is
+     *  no second voter and no ballot table. To neutralize the feature without a deploy:
+     *  UPDATE tasks SET vote_score = 0; */
+    voteScore: integer('vote_score').notNull().default(0),
     startedAt: timestamp('started_at'),
     completedAt: timestamp('completed_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),

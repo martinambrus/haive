@@ -58,6 +58,10 @@
     "./claude-oauth": {
       "types": "./dist/cli-providers/claude-oauth.d.ts",
       "import": "./dist/cli-providers/claude-oauth.js"
+    },
+    "./fair-priority": {
+      "types": "./dist/scheduling/fair-priority.d.ts",
+      "import": "./dist/scheduling/fair-priority.js"
     }
   },
   "scripts": {

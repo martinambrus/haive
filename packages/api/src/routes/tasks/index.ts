@@ -17,10 +17,12 @@ import {
   setCliProviderRequestSchema,
   STEER_IN_CHANNEL_PREFIX,
   taskActionRequestSchema,
+  taskVoteRequestSchema,
   TASK_JOB_NAMES,
   WAITING_SLOT_FILTER_TOKEN,
   type TaskJobPayload,
 } from '@haive/shared';
+import { clampVoteScore } from '@haive/shared/fair-priority';
 import { currentStepLabel } from './_step-label.js';
 import { getDb } from '../../db.js';
 import { getRedis } from '../../redis.js';
@@ -28,6 +30,7 @@ import { requireAuth } from '../../middleware/auth.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { cancelTaskRow, enqueueCancelJob } from '../../lib/cancel-task.js';
+import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   appendTaskEvent,
@@ -146,11 +149,17 @@ taskRoutes.get('/', async (c) => {
     .where(where);
   const total = totalRows[0]?.n ?? 0;
 
+  // Vote score as the listing's primary sort, so an upvoted task visibly rises. Terminal
+  // tasks read as 0 regardless of what they were voted: a finished task has no queue
+  // position left to boost, and without this a completed +5 would pin itself to the top of
+  // "All statuses" forever. With every score at 0 this collapses to the previous
+  // created_at ordering exactly, so the feature ships as a no-op until someone votes.
+  const effectiveVoteScore = sql`case when ${schema.tasks.status} in ('completed', 'cancelled', 'failed') then 0 else ${schema.tasks.voteScore} end`;
   const rows = await db.query.tasks.findMany({
     where,
     orderBy: sortByUpdated
       ? [desc(schema.tasks.updatedAt), desc(schema.tasks.createdAt)]
-      : [desc(schema.tasks.createdAt)],
+      : [desc(effectiveVoteScore), desc(schema.tasks.createdAt)],
     with: { repository: { columns: { id: true, name: true } } },
     limit: pageSize,
     offset: (page - 1) * pageSize,
@@ -940,6 +949,50 @@ taskRoutes.post('/:id/action', async (c) => {
     default:
       throw new HttpError(400, 'Unknown action');
   }
+});
+
+/** One click of the task's up/down control. Shifts the task's fair-scheduling band so its CLI
+ *  agents are picked up sooner (or later) when slots are scarce — it is not a priority class,
+ *  and `rank` still climbs with each in-flight agent, so an unvoted task keeps making progress.
+ *
+ *  A delta rather than an absolute, so two clients clicking at once compose instead of
+ *  overwriting, and the clamp lives server-side. Kept off /:id/action: that route's schema
+ *  carries no payload and every branch answers `{ ok, status }`.
+ *
+ *  No status guard. Voting on a finished task is harmless (nothing is queued, and the listing
+ *  reads its score as 0), and refusing it would only make the arrows fail confusingly on a task
+ *  that completed between render and click. */
+taskRoutes.post('/:id/vote', async (c) => {
+  const userId = c.get('userId');
+  const id = c.req.param('id');
+  const body = taskVoteRequestSchema.parse(await c.req.json());
+  const db = getDb();
+
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
+    columns: { id: true, voteScore: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+
+  const previous = clampVoteScore(task.voteScore);
+  const next = clampVoteScore(previous + body.delta);
+  // Already at the arrow's limit: nothing to write, and nothing to reprice.
+  if (next === previous) return c.json({ voteScore: previous });
+
+  await db
+    .update(schema.tasks)
+    .set({ voteScore: next, updatedAt: new Date() })
+    .where(eq(schema.tasks.id, id));
+  await appendTaskEvent(db, id, null, 'task.voted', { by: userId, from: previous, to: next });
+
+  // Re-price what this task has ALREADY queued. Without it a vote would only affect
+  // invocations enqueued after the click — the wrong half, since the reason to boost a task is
+  // the work it is currently waiting to run. Shifted by the APPLIED delta, not the requested
+  // one, so a click that clamped cannot move the queue. Best-effort; never throws.
+  const repriced = await repriceTaskCliJobs(id, next - previous);
+  logger.info({ taskId: id, from: previous, to: next, repriced }, 'task vote');
+
+  return c.json({ voteScore: next });
 });
 
 taskRoutes.post('/:id/cancel-active-cli', async (c) => {

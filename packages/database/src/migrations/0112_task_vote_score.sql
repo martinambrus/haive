@@ -1,0 +1,22 @@
+-- Task up/down vote score: how far ahead of the pack the owner wants this task's CLI
+-- agents to run. Read by the worker at cli-exec enqueue, where it shifts the
+-- fair-scheduling band: priority = (VOTE_BASE + rank - vote_score) * 1000 + user_tiebreak.
+--
+-- It is NOT a priority class. `rank` (the task's in-flight agent count) still climbs, so a
+-- boosted task gets vote_score extra turns per round-robin cycle and then yields like
+-- everything else — nothing starves. At the default 0 every band shifts by the same
+-- constant, so the ordering is identical to the pre-feature behaviour.
+--
+-- Range is [-5, +5]. Enforced at the single write site (POST /tasks/:id/vote) and clamped
+-- again in fairPriority(), which is what keeps the BullMQ priority under its 2^21 ceiling.
+-- No CHECK constraint: nothing in this schema uses one, and the scheduler is defensive
+-- anyway. No index: the listing sorts on it but is already scoped by user_id.
+--
+-- Additive + idempotent: a second run is a no-op, and NOT NULL DEFAULT 0 is safe on
+-- existing rows. Leaving the column in place after a code revert is harmless — nothing
+-- else reads it.
+--
+-- Rollback: UPDATE tasks SET vote_score = 0;  (neutralizes the feature with no deploy)
+-- Rollback (full): ALTER TABLE "tasks" DROP COLUMN IF EXISTS "vote_score";
+
+ALTER TABLE "tasks" ADD COLUMN IF NOT EXISTS "vote_score" integer NOT NULL DEFAULT 0;

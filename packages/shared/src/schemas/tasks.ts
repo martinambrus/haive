@@ -155,6 +155,15 @@ export const taskActionRequestSchema = z.object({
 
 export type TaskAction = z.infer<typeof taskActionSchema>;
 
+/** One click of the up/down control on a task. A delta, not an absolute score: the arrows
+ *  are the only way to move it, the server clamps the result to [TASK_VOTE_MIN,
+ *  TASK_VOTE_MAX], and two clients clicking at once compose instead of overwriting. */
+export const taskVoteRequestSchema = z.object({
+  delta: z.union([z.literal(1), z.literal(-1)]),
+});
+
+export type TaskVoteRequest = z.infer<typeof taskVoteRequestSchema>;
+
 /** PR close-out: whether a task auto-completes when its pull request merges, or
  *  waits for a manual Finalize click. Chosen per task at PR-open; stored on
  *  tasks.pr_finalize_mode. The background poller tracks PR status either way. */

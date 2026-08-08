@@ -56,6 +56,7 @@ import {
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { PersistedDetails } from '@/components/persisted-details';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
+import { TaskVote } from '@/components/task-vote';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { EditorTab } from '@/components/editor/editor-tab';
 import { AttachmentsPanel } from '@/components/attachments/attachments-panel';
@@ -1166,6 +1167,7 @@ export default function TaskDetailPage() {
               </>
             ) : (
               <>
+                <TaskVote taskId={task.id} score={task.voteScore ?? 0} />
                 <h1 className="text-2xl font-bold text-neutral-50">{task.title}</h1>
                 {/* Paused, or queued behind a capacity cap: the task row still says `running`
                     in both cases, so show the real state instead (same precedence as the

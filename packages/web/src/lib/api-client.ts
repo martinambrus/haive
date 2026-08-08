@@ -598,6 +598,11 @@ export interface Task {
    *  derived here for the badge and the ?status=paused filter — same shape as slotWait, which
    *  is suppressed while this is set. */
   pausedAt?: string | null;
+  /** Up/down vote score in [-5, +5], 0 by default. Shifts this task's fair-scheduling band
+   *  so its AI agents are picked up sooner (or later) when slots are scarce; it is not a
+   *  priority class, so an unvoted task still makes progress. Also the listing's primary
+   *  sort key. Optional so an older api that omits it renders as 0. */
+  voteScore?: number;
   /** ISO time the provider-outage watch was marked recovered (list endpoint only). Null
    *  until a task that failed on a provider rate-limit or 5xx has that provider come back;
    *  the notifier diffs its null->set flip to fire the "provider is back" notification. */

@@ -27,6 +27,7 @@ import {
   resolveTaskEmbedTarget,
 } from '@haive/shared/rag';
 import { resolveGlobalKbSettings } from '@haive/shared/global-kb';
+import { fairPriority } from '@haive/shared/fair-priority';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { getDb } from '../db.js';
 import { getBullRedis, getRedis } from '../redis.js';
@@ -821,37 +822,33 @@ async function loadProviders(db: Database, userId: string): Promise<CliProviderR
   return rows;
 }
 
-/** Composite fair-scheduling priority bands (BullMQ priority: lower = sooner, max
- *  ~2^21). priority = taskRank * FAIR_RANK_MULTIPLIER + userTiebreak, so a task's
- *  Nth in-flight agent shares a band with every other task's Nth agent (round-robin
- *  across tasks — one task's fan-out cannot front-load its later terminals ahead of
- *  another task's first terminal), and within a band the least-loaded user sorts
- *  first. Both terms are clamped so the product stays under the ceiling:
- *  FAIR_TASK_RANK_MAX * FAIR_RANK_MULTIPLIER + FAIR_USER_TIEBREAK_MAX < 2^21. */
-const FAIR_RANK_MULTIPLIER = 1000;
-const FAIR_USER_TIEBREAK_MAX = FAIR_RANK_MULTIPLIER - 1; // never bleeds into the next band
-const FAIR_TASK_RANK_MAX = 2000;
-
-/** In-flight (enqueued or running, not yet ended/superseded) CLI invocation counts
- *  for one enqueue, in a single scan of the small in-flight set: `task` = this
- *  task's count (its rank, since the invocation row is inserted before enqueue) and
- *  `user` = this user's count across all their tasks (the cross-user tiebreak).
- *  cli_invocations has no user_id, so join through tasks; the FILTERs partition the
- *  same in-flight set two ways. */
+/** The three inputs `fairPriority` (@haive/shared/fair-priority) turns into a BullMQ priority,
+ *  read in one round trip:
+ *   - `task` = this task's in-flight CLI invocations, i.e. its rank in the round-robin (the
+ *     invocation row is inserted before the enqueue, so this counts from 1)
+ *   - `user` = this user's in-flight invocations across all their tasks (the cross-user tiebreak)
+ *   - `score` = the task's up/down vote score, which shifts its band
+ *
+ *  cli_invocations has no user_id, so join through tasks; the FILTERs partition the same
+ *  in-flight set two ways. The aggregate has no GROUP BY, so it always returns exactly one row
+ *  and the vote-score subquery always evaluates — including on the very first enqueue. */
 async function cliBacklogCounts(
   db: Database,
   userId: string,
   taskId: string,
-): Promise<{ task: number; user: number }> {
+): Promise<{ task: number; user: number; score: number }> {
   const rows = await db
     .select({
       task: sql<number>`count(*) filter (where ${schema.cliInvocations.taskId} = ${taskId})::int`,
       user: sql<number>`count(*) filter (where ${schema.tasks.userId} = ${userId})::int`,
+      // Aliased on purpose: `tasks` is already joined above, and an unaliased subquery over
+      // the same table would rely on inner-FROM shadowing to mean the right thing.
+      score: sql<number>`coalesce((select tv.vote_score from ${schema.tasks} tv where tv.id = ${taskId}), 0)::int`,
     })
     .from(schema.cliInvocations)
     .innerJoin(schema.tasks, eq(schema.cliInvocations.taskId, schema.tasks.id))
     .where(and(isNull(schema.cliInvocations.endedAt), isNull(schema.cliInvocations.supersededAt)));
-  return { task: rows[0]?.task ?? 0, user: rows[0]?.user ?? 0 };
+  return { task: rows[0]?.task ?? 0, user: rows[0]?.user ?? 0, score: rows[0]?.score ?? 0 };
 }
 
 const workerDeps: WorkerDeps = {
@@ -867,13 +864,20 @@ const workerDeps: WorkerDeps = {
     // (primary = this task's in-flight rank) so one task's fan-out cannot front-load
     // its later terminals ahead of another task's first terminal, then breaks ties
     // by this user's in-flight backlog so the least-loaded user wins equal ranks
-    // (cross-user fairness). Fail-soft — a stale count only mis-orders, never blocks.
+    // (cross-user fairness). The task's vote score shifts its band within that scheme
+    // rather than overriding it, so a boosted task runs sooner and an unvoted one still
+    // makes progress. Fail-soft — a stale count only mis-orders, never blocks.
+    //
+    // The vote also rides this switch: with fair scheduling off there is no priority at all
+    // (plain FIFO), so votes are inert until it is turned back on.
     try {
       if (await configService.getBoolean(CONFIG_KEYS.FAIR_SCHEDULING_ENABLED, true)) {
         const counts = await cliBacklogCounts(getDb(), payload.userId, payload.taskId);
-        const rank = Math.min(Math.max(counts.task, 1), FAIR_TASK_RANK_MAX);
-        const tiebreak = Math.min(counts.user, FAIR_USER_TIEBREAK_MAX);
-        opts.priority = rank * FAIR_RANK_MULTIPLIER + tiebreak;
+        opts.priority = fairPriority({
+          rank: counts.task,
+          tiebreak: counts.user,
+          score: counts.score,
+        });
       }
     } catch (err) {
       logger.warn({ err, userId: payload.userId }, 'fair-scheduling priority compute failed; FIFO');

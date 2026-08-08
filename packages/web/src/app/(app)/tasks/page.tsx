@@ -7,6 +7,7 @@ import { api, type Task, type TaskListResponse, type TaskStatus } from '@/lib/ap
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { CircleDot, FolderGit2 } from 'lucide-react';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
+import { TaskVote } from '@/components/task-vote';
 import { UsageStrip } from '@/components/usage-strip';
 import { formatDuration } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
@@ -48,6 +49,9 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
       <Card className="flex flex-col gap-2 transition-colors hover:border-indigo-700">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
+            {/* Ahead of the title because this is where tasks are COMPARED — the list is
+                sorted by it, so the column of scores reads down the page. */}
+            <TaskVote taskId={task.id} score={task.voteScore ?? 0} />
             <h2 className="text-lg font-semibold text-neutral-50">{task.title}</h2>
             {/* Both a paused task and one queued behind a capacity cap stay `running` in the
                 DB, which made "working", "held" and "waiting in line" look identical here.
