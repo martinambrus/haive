@@ -154,8 +154,11 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
   // implementation step, and looping them would burn a round to reach the same failure.
   //
   // An agent-authored `.ddev/` input is the exception, and the reason this predicate exists.
-  // Two shapes qualify, neither reachable by a retry because the offending file is still
+  // Three shapes qualify, none reachable by a retry because the offending file is still
   // there on the next attempt:
+  //   - a `.ddev/` YAML file DDEV cannot parse, which fails `ddev start` before a container
+  //     exists (task fcf03ead wrote a post-start hook as a bare scalar containing `: ` and
+  //     hard-failed an 11-hour task that still had two of its five fix rounds left);
   //   - an image-BUILD failure, whose only mutable inputs are the project's own
   //     `web-build`/`db-build` Dockerfiles and the `*image_extra_packages` lists (task
   //     4fad0c4f died on `RUN docker-php-ext-install mysql`, a command the DDEV web image has

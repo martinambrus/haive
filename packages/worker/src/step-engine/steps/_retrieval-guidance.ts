@@ -144,6 +144,12 @@ export function adaptPromptForCliCapabilities(
 
 /** Rules for implementation agents that may author files under `.ddev/`.
  *
+ *  The first rule is the cheapest and the one that has cost the most: a shell command written
+ *  as a bare YAML scalar. Task fcf03ead's `- exec: chmod … || (echo 'WARN: chmod failed' >&2;
+ *  true)` is not YAML at all — the `: ` inside the message opens a nested mapping — so DDEV
+ *  refused the config before creating a container. ddev-config-yaml-guard.ts is what catches
+ *  it; this stops it being written.
+ *
  *  Agents add `ddev_version_constraint` unprompted — pinning is ordinary DDEV practice — and
  *  some write an EXACT version, which is dead the moment the runner's DDEV differs by a patch.
  *  Observed across six add-ddev tasks: four wrote ranges, two wrote exact pins and both tasks
@@ -162,6 +168,13 @@ export function adaptPromptForCliCapabilities(
 export function ddevConfigGuidanceLines(context: string): string[] {
   if (!/\bddev\b/i.test(context)) return [];
   return [
+    '',
+    'If you write a shell command into .ddev/config.yaml (a `hooks:` entry, `web_environment:`,',
+    'anything): QUOTE the whole value. An unquoted YAML scalar may not contain `: ` (colon then',
+    'space), and quotes inside it are literal characters rather than YAML quoting, so',
+    "`- exec: echo 'WARN: failed'` is a syntax error. DDEV parses config.yaml before it creates",
+    'any container, so one such line fails every `ddev start`. Write',
+    '`- exec: "echo \'WARN: failed\'"` instead.',
     '',
     'If you create or edit .ddev/config.yaml: do NOT pin `ddev_version_constraint` to an exact',
     'version (e.g. `v1.25.2`). The DDEV that runs this project is not necessarily the one you',

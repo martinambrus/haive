@@ -32,6 +32,7 @@ import { checkDdevHealthcheckConfig } from '../../../sandbox/ddev-healthcheck-gu
 import { checkDdevBuildInputs } from '../../../sandbox/ddev-build-guard.js';
 import { checkDdevNginxIncludes } from '../../../sandbox/ddev-nginx-include-guard.js';
 import { checkDdevWebEntrypoints } from '../../../sandbox/ddev-entrypoint-guard.js';
+import { checkDdevConfigYaml } from '../../../sandbox/ddev-config-yaml-guard.js';
 import { TaskCancelledError } from '../../step-definition.js';
 
 // The single "is the app actually serving, and at what URL" primitive. Browser
@@ -272,13 +273,22 @@ export async function ensureDdevWithProgress(
   ctx: Pick<AppRuntimeCtx, 'taskId' | 'emitProgress' | 'db' | 'signal'>,
   repoSubpath: string,
 ): Promise<DdevRunnerHandle> {
-  // Pre-flight: a webserver config that can no longer answer DDEV's own /phpstatus health
+  // Pre-flight, and FIRST of them: the files DDEV parses at start have to be YAML at all.
+  // A syntax error there fails `ddev start` before a container exists, and every check
+  // below reads the same config with a regex parser that reports nonsense for a file that
+  // does not parse. Unlike its siblings this one buys no time (DDEV rejects a broken config
+  // in seconds) — it buys the VERDICT: a failure carrying our own prefix is one
+  // isDdevAgentFixableFailure routes back to the agent that wrote it, without keying on
+  // DDEV's prose (task fcf03ead hard-failed at 11 hours with two fix rounds unspent).
+  const workspace = path.join(REPO_STORAGE_ROOT, repoSubpath);
+  const yamlBreakage = await checkDdevConfigYaml(workspace);
+  if (yamlBreakage) throw new Error(`DDEV cannot start: ${yamlBreakage}`);
+  // A webserver config that can no longer answer DDEV's own /phpstatus health
   // check makes the web container hang in `starting` until `ddev start` gives up at its
   // readiness timeout — six opaque minutes, twice (the cold-boot path retries once), with
   // nothing in the error naming the cause. Two file reads turn that into an instant,
   // actionable failure. Every DDEV bring-up routes through here, so this is the one place
   // it needs to live.
-  const workspace = path.join(REPO_STORAGE_ROOT, repoSubpath);
   const breakage = await checkDdevHealthcheckConfig(workspace);
   if (breakage) throw new Error(`DDEV cannot start: ${breakage}`);
   // Same trade for the image-build inputs: `.ddev/web-build/Dockerfile` is spliced verbatim
