@@ -67,7 +67,10 @@ import { BrowserVncPanel } from '@/components/terminal/BrowserVncPanel';
 import { BrowserDirectPanel } from '@/components/terminal/BrowserDirectPanel';
 import { DatabaseAccessPanel } from '@/components/terminal/DatabaseAccessPanel';
 import { InteractiveShell } from '@/components/terminal/InteractiveShell';
-import { autoScrollTerminalsEnabled } from '@/lib/terminal-autoscroll';
+import {
+  autoScrollTerminalsEnabled,
+  scrollToNewestRunningTerminal,
+} from '@/lib/terminal-autoscroll';
 import { usePageTitle } from '@/lib/use-page-title';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 
@@ -643,25 +646,12 @@ export default function TaskDetailPage() {
           .querySelector(`[data-step-id="${activeId}"]`)
           ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       };
+      // Target pick and framing live in lib/terminal-autoscroll so this and the
+      // per-step follow effect (StepTerminal) can never frame a terminal differently.
       const scrollToLastTerminal = (): boolean => {
         const stepEl = container.querySelector(`[data-step-id="${activeId}"]`);
         if (!stepEl) return false;
-        // Prefer the newest RUNNING run. The last panel (and the toggle below it)
-        // is often a queued, empty terminal — a step that fans out more
-        // invocations than the concurrency cap (03-phase-0a-discovery: 8
-        // dispatched, ~5 run at once) leaves the tail panels waiting their turn.
-        // Fall back to the toggle (keeps the checkbox visible), then the last
-        // panel, when nothing is running yet.
-        const running = stepEl.querySelectorAll('[data-cli-terminal][data-cli-running]');
-        const panels = stepEl.querySelectorAll('[data-cli-terminal]');
-        const target =
-          running[running.length - 1] ??
-          stepEl.querySelector('[data-cli-autoscroll]') ??
-          panels[panels.length - 1] ??
-          null;
-        if (!target) return false;
-        target.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        return true;
+        return scrollToNewestRunningTerminal(stepEl);
       };
 
       // Follow the active step into view only when the user is already looking

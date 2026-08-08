@@ -4,7 +4,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, type CliInvocationOutput, type CliInvocationSummary } from '@/lib/api-client';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import { CliStreamViewer } from './CliStreamViewer';
-import { useAutoScrollTerminals } from '@/lib/terminal-autoscroll';
+import {
+  scrollToNewestRunningTerminal,
+  shouldFollowRunningTerminals,
+  useAutoScrollTerminals,
+} from '@/lib/terminal-autoscroll';
 import { formatDuration } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
 import { invocationBanner } from '@/lib/step-banners';
@@ -89,43 +93,30 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
     return () => clearInterval(t);
   }, [expanded, invocations, autoExpand, reload]);
 
-  // Scroll the newest RUNNING run into view whenever the set of running runs gains
-  // a member — a fresh run starts OR a queued one finally gets a slot (its
-  // predecessor finished). Tracking the running SET, not just the count, is what
+  // Follow the newest RUNNING run whenever the set of running runs CHANGES — a
+  // fresh run starts, a queued one finally gets a slot, or a run ends while its
+  // siblings keep going. Tracking the running SET, not just the count, is what
   // makes the scroll follow the last ACTIVE terminal as the queue drains, instead
   // of stalling on whichever ran first (e.g. landing on terminal 7 when 7 AND 8 go
-  // active). Not on the initial load (the page-level effect scrolls to the first
-  // terminal when the step becomes active). Gated on the user's preference.
+  // active) — and reacting to a LOSS is what stops the view from staying parked on
+  // the terminal that just exited when no replacement starts in the same tick.
+  // Not on the initial load (the page-level effect scrolls to the first terminal
+  // when the step becomes active). Gated on the user's preference.
   useEffect(() => {
     if (invocations === null || !autoScroll) return;
     // "running" = started and not yet ended (mirrors the data-cli-running marker).
+    // isActive alone is true for a QUEUED run too (endedAt is null).
     const runningIds = invocations
       .filter((i) => i.isActive && i.startedAt !== null)
       .map((i) => i.id);
     const prev = prevRunningRef.current;
     prevRunningRef.current = runningIds;
-    if (prev === null) return;
-    const gainedActive = runningIds.some((id) => !prev.includes(id));
-    if (!gainedActive) return;
+    if (!shouldFollowRunningTerminals(prev, runningIds)) return;
     // The new panel and its xterm mount a tick later; retry briefly.
     const timers = [80, 300, 700].map((delay) =>
       setTimeout(() => {
         const root = containerRef.current;
-        if (!root) return;
-        // Prefer the newest RUNNING run. isActive alone is true for a QUEUED run
-        // too (endedAt is null), and the last panel is often that empty, waiting
-        // terminal — 03-phase-0a-discovery fans out more invocations than the
-        // concurrency cap (8 dispatched, ~5 run at once), so the tail panels sit
-        // queued. Fall back to the auto-scroll toggle (keeps the checkbox visible),
-        // then the last panel.
-        const running = root.querySelectorAll('[data-cli-terminal][data-cli-running]');
-        const panels = root.querySelectorAll('[data-cli-terminal]');
-        const target =
-          running[running.length - 1] ??
-          root.querySelector('[data-cli-autoscroll]') ??
-          panels[panels.length - 1] ??
-          null;
-        target?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        if (root) scrollToNewestRunningTerminal(root);
       }, delay),
     );
     return () => timers.forEach(clearTimeout);
@@ -254,10 +245,13 @@ function InvocationPanel({
   // run too (endedAt is null), so the auto-scroll target must exclude those.
   const isRunning = invocation.isActive && invocation.startedAt !== null;
   return (
+    // scroll-mt-12: the auto-scroll aligns a panel's TOP with the viewport top and a
+    // fixed 39px bar spans the content column — without the margin this panel's run
+    // label and status badges land behind it.
     <div
       data-cli-terminal
       data-cli-running={isRunning ? '' : undefined}
-      className="flex flex-col gap-1.5 rounded border border-neutral-800 p-2"
+      className="flex scroll-mt-12 flex-col gap-1.5 rounded border border-neutral-800 p-2"
     >
       <div className="flex flex-wrap items-center gap-2 text-[11px] text-neutral-400">
         {label && <span className="font-medium text-neutral-200">{label}</span>}
