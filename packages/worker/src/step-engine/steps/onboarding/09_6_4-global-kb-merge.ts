@@ -143,6 +143,11 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
     requiredCapabilities: ['tool_use'],
     // Merges KB entries against each other; reaches nothing outside the knowledge base.
     toolProfile: 'rag_only',
+    // An undeclared budget is not "no limit" — it falls through to the docker runner's
+    // DEFAULT_RUN_TIMEOUT_MS, which is 2 MINUTES. Every merge agent here was being
+    // SIGKILLed almost at spawn and its draft counted as "skipped". One hour, matching
+    // the other agent-backed mining steps (09_5, 09_5b, 11d, 03).
+    timeoutMs: 60 * 60 * 1000,
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       // Mining has no bypass stub; under test bypass return [] so the smoke pipeline
       // runs without a real CLI provider (the drafts stay linked, unmerged).

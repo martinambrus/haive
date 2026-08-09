@@ -515,6 +515,18 @@ export async function executeCliSpec(
     steerable && invocationId && softTimeout
       ? await scheduleSoftTimeout(invocationId, timeoutMs)
       : null;
+  // The wind-down travels as a steer, so it only exists for a steerable CLI — today
+  // claude-code, muse, zai and ollama. On codex/gemini/amp/antigravity a step that asked
+  // for softTimeout silently gets none: the run is SIGKILLed at its budget with zero grace
+  // and every unbanked finding dies with it. That is exactly how 08c lost three reviewers
+  // in one round on codex while its own comment promised they would be asked to bank first.
+  // Log it, because the step's mitigation is not merely weaker here — it is absent.
+  if (softTimeout && invocationId && !steerable) {
+    log.warn(
+      { invocationId, timeoutMs },
+      'soft timeout requested but this provider is not steerable — the run will be SIGKILLed with no wind-down',
+    );
+  }
 
   const collector = createStreamJsonCollector(
     statusCallback,
