@@ -5,6 +5,7 @@ import {
   CONFIG_KEYS,
   configService,
   DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
+  escalatedFromDeclaredMs,
   escalatedTimeoutMs,
   extractFormDefaults,
   isOllamaCloudModel,
@@ -1106,7 +1107,17 @@ async function resolveAgentMiningPhase(
  *  worker-restart recovery a mining agent gets. */
 type MiningRetryTargets = Map<
   string,
-  { id: string; attempts: number; cliInvocationId: string | null; chargeAttempt?: boolean }
+  {
+    id: string;
+    attempts: number;
+    cliInvocationId: string | null;
+    chargeAttempt?: boolean;
+    /** Rung the re-dispatch runs at: the row's stored consecutive-timeout count, already
+     *  incremented when the prior run burned its budget and reset to 0 when it did not.
+     *  Required, not optional — the one construction site must decide, because defaulting
+     *  it to 0 would quietly re-run a timed-out agent at the budget that just killed it. */
+    timeoutAttempts: number;
+  }
 >;
 
 /** Enqueue one cli invocation per dispatch.
@@ -1143,6 +1154,9 @@ async function dispatchMiningAgents(
 
   for (const dispatch of dispatches) {
     const prior = existing?.get(dispatch.agentId) ?? null;
+    // The first fan-out of an agent is always rung 0; a re-roll runs at whatever the
+    // retry path resolved from its prior invocation's failure.
+    const timeoutAttempt = prior?.timeoutAttempts ?? 0;
     // Close the mining terseness gap: the main dispatch gets the admin terseness level
     // at resolveLlmPhase, but fan-out sub-prompts are built per step and bypass it.
     // Apply the same directive so the level reaches mining output (skill-gen, discovery,
@@ -1226,6 +1240,7 @@ async function dispatchMiningAgents(
           endedAt: null,
           // A preemption re-dispatch is free: see MiningRetryTargets.chargeAttempt.
           attempts: prior.attempts + (prior.chargeAttempt === false ? 0 : 1),
+          timeoutAttempts: prior.timeoutAttempts,
           updatedAt: new Date(),
         })
         .where(eq(schema.taskStepAgentMinings.id, prior.id));
@@ -1264,6 +1279,20 @@ async function dispatchMiningAgents(
       miningId = miningRow.id;
     }
 
+    const budget = await resolveMiningTimeoutMs(current, spec.timeoutMs, timeoutAttempt);
+    if (budget.timeoutMs !== spec.timeoutMs) {
+      ctx.logger.info(
+        {
+          stepId: stepDef.metadata.id,
+          agentId: dispatch.agentId,
+          declaredMs: spec.timeoutMs ?? null,
+          timeoutMs: budget.timeoutMs,
+          timeoutAttempt,
+          timeoutSource: budget.timeoutSource,
+        },
+        'mining agent dispatched with a non-declared timeout budget',
+      );
+    }
     await params.deps!.enqueueCliInvocation({
       invocationId: invRow.id,
       taskId: params.taskId,
@@ -1272,7 +1301,7 @@ async function dispatchMiningAgents(
       cliProviderId: plan.providerId,
       kind: 'agent_mining',
       spec: plan.invocation.spec,
-      timeoutMs: spec.timeoutMs,
+      timeoutMs: budget.timeoutMs,
       toolProfile: spec.toolProfile,
       agentMiningId: miningId,
       softTimeout: spec.softTimeout === true,
@@ -2432,6 +2461,12 @@ async function retryMiningAgents(
   // whole batch; both callers (worker-restart reconcile and the unusable-output re-roll) get it,
   // so a future third caller cannot forget either half.
   const preemptedInvocationIds = new Set<string>();
+  // Which of those burned their whole budget and were SIGKILLed. Same query, because the
+  // two facts answer different questions about the same prior run: a preemption re-dispatches
+  // at the SAME budget (it never got its time), a timeout must re-dispatch at a BIGGER one
+  // (it got its time and needed more). Re-running a timeout identically is the failure mode
+  // CLI_TIMEOUT_HEADLINE exists to name.
+  const timedOutInvocationIds = new Set<string>();
   const priorIds = wantedRows.map((r) => r.cliInvocationId).filter((id): id is string => !!id);
   if (priorIds.length > 0) {
     const priors = await db
@@ -2441,10 +2476,13 @@ async function retryMiningAgents(
     for (const p of priors) {
       if (isCliPreemptionFailure({ errorMessage: p.errorMessage }))
         preemptedInvocationIds.add(p.id);
+      if (isCliTimeoutFailure({ errorMessage: p.errorMessage })) timedOutInvocationIds.add(p.id);
     }
   }
   const wasPreempted = (r: { cliInvocationId: string | null }): boolean =>
     !!r.cliInvocationId && preemptedInvocationIds.has(r.cliInvocationId);
+  const timedOut = (r: { cliInvocationId: string | null }): boolean =>
+    !!r.cliInvocationId && timedOutInvocationIds.has(r.cliInvocationId);
   const candidates = wantedRows.filter((r) => r.attempts < maxAttempts || wasPreempted(r));
   const targets: MiningRetryTargets = new Map();
   for (const r of candidates) {
@@ -2453,6 +2491,9 @@ async function retryMiningAgents(
       attempts: r.attempts,
       cliInvocationId: r.cliInvocationId,
       chargeAttempt: !wasPreempted(r),
+      // Consecutive, so anything that is not a timeout resets the chain. A preemption
+      // between two timeouts must not climb a rung — it never spent a budget to justify one.
+      timeoutAttempts: timedOut(r) ? r.timeoutAttempts + 1 : 0,
     });
   }
   if (targets.size === 0) {
@@ -2766,6 +2807,45 @@ export async function trailingTimeoutInfo(
   return { attempts, lastBudgetMinutes };
 }
 
+/** The same "this pass needs more time" signal, read from a step's MINING agents.
+ *
+ *  `trailingTimeoutInfo` cannot answer this: it scans `cli_invocations` per step and
+ *  excludes `agent_mining` outright, because those rows are N concurrent fan-outs rather
+ *  than one chain of re-dispatches. So a step whose reviewers all died at their budget
+ *  reported zero timeouts, no `cli_timeout` errorHint was written, and the UI never offered
+ *  "Retry with longer timeout" — the one control that fixes it.
+ *
+ *  Counts per AGENT and reports the worst: an agent whose CURRENT invocation is a budget
+ *  kill has burned `timeout_attempts + 1` of them (the column stores the rung the next run
+ *  would get, so the kill that has not been re-dispatched yet is not in it). */
+export async function miningTimeoutInfo(
+  db: Database,
+  taskStepId: string,
+): Promise<{ attempts: number; lastBudgetMinutes: number | null }> {
+  const rows = await db
+    .select({
+      timeoutAttempts: schema.taskStepAgentMinings.timeoutAttempts,
+      errorMessage: schema.cliInvocations.errorMessage,
+    })
+    .from(schema.taskStepAgentMinings)
+    .leftJoin(
+      schema.cliInvocations,
+      eq(schema.cliInvocations.id, schema.taskStepAgentMinings.cliInvocationId),
+    )
+    .where(eq(schema.taskStepAgentMinings.taskStepId, taskStepId));
+  let attempts = 0;
+  let lastBudgetMinutes: number | null = null;
+  for (const r of rows) {
+    if (!isCliTimeoutFailure({ errorMessage: r.errorMessage })) continue;
+    const burned = r.timeoutAttempts + 1;
+    if (burned > attempts) {
+      attempts = burned;
+      lastBudgetMinutes = cliTimeoutBudgetMinutes(r.errorMessage);
+    }
+  }
+  return { attempts, lastBudgetMinutes };
+}
+
 /** The hard-timeout budget this step's next invocation should be dispatched with.
  *
  *  Two sources, in order:
@@ -2807,6 +2887,49 @@ async function resolveDispatchTimeoutMs(
   return {
     timeoutMs: escalatedTimeoutMs(declaredMs, timeoutAttempt, { baseMinutes, ladder }),
     timeoutAttempt,
+    timeoutSource: 'ladder',
+  };
+}
+
+/** The hard-timeout budget ONE mining agent's next invocation should be dispatched with.
+ *
+ *  Same two sources as resolveDispatchTimeoutMs — the user's override wins outright, else the
+ *  ladder — but with two deliberate differences, because a fan-out agent is not the step's
+ *  own CLI:
+ *
+ *   - the rung is per AGENT (`timeout_attempts` on its mining row), not per step. A step's
+ *     reviewers fail independently; charging the peer reviewer's timeout to the security
+ *     reviewer would hand time to a run that never asked for it, and `trailingTimeoutInfo`
+ *     cannot express this at all (it scans invocations per step and excludes agent_mining).
+ *   - the base is the step's DECLARED budget, not CLI_TIMEOUT_BASE_MINUTES. Those per-role
+ *     figures are calibrations; see escalatedFromDeclaredMs.
+ *
+ *  A spec with no declared budget falls back to the configured base rather than the docker
+ *  runner's 2-minute default, which is a spawn-kill for anything doing real work. */
+async function resolveMiningTimeoutMs(
+  step: { cliTimeoutOverrideMs: number | null },
+  declaredMs: number | undefined,
+  timeoutAttempt: number,
+): Promise<{ timeoutMs: number; timeoutSource: 'override' | 'ladder' }> {
+  if (step.cliTimeoutOverrideMs && step.cliTimeoutOverrideMs > 0) {
+    return { timeoutMs: step.cliTimeoutOverrideMs, timeoutSource: 'override' };
+  }
+  // Same tolerate-and-continue stance as resolveDispatchTimeoutMs: both knobs have built-in
+  // defaults, so an unreadable config must not fail a dispatch.
+  let baseMinutes = DEFAULT_CLI_TIMEOUT_BASE_MINUTES;
+  let ladder = parseTimeoutLadder(null);
+  try {
+    baseMinutes = await configService.getNumber(
+      CONFIG_KEYS.CLI_TIMEOUT_BASE_MINUTES,
+      DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
+    );
+    ladder = parseTimeoutLadder(await configService.get(CONFIG_KEYS.CLI_TIMEOUT_LADDER));
+  } catch (err) {
+    logger.warn({ err }, 'cli timeout ladder config unreadable; using built-in defaults');
+  }
+  const declared = declaredMs && declaredMs > 0 ? declaredMs : baseMinutes * 60_000;
+  return {
+    timeoutMs: escalatedFromDeclaredMs(declared, timeoutAttempt, ladder),
     timeoutSource: 'ladder',
   };
 }

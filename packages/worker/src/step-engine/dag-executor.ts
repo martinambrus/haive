@@ -27,6 +27,7 @@ import {
   DAG_INFRA_EXHAUSTED_MARKER,
 } from './dag-failure-class.js';
 import { killCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
+import { overrideOr } from './dispatch-timeout.js';
 import type { DagCoderContext, StepContext, StepDefinition } from './step-definition.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
@@ -535,7 +536,7 @@ async function dispatchMergeFixAgent(m: MergeArgs, issue: DagIssueRow): Promise<
     cliProviderId: plan.providerId,
     kind: 'cli',
     spec: plan.invocation.spec,
-    timeoutMs: MERGE_FIX_TIMEOUT_MS,
+    timeoutMs: overrideOr(current, MERGE_FIX_TIMEOUT_MS),
   });
   return { kind: 'ok', invId };
 }
@@ -784,7 +785,7 @@ async function spawnReviewAgent(
     cliProviderId: plan.providerId,
     kind: 'cli',
     spec: plan.invocation.spec,
-    timeoutMs: REVIEW_TIMEOUT_MS,
+    timeoutMs: overrideOr(ra.current, REVIEW_TIMEOUT_MS),
   });
   return true;
 }
@@ -1294,7 +1295,7 @@ async function spawnReplanner(ea: EscalationArgs, failed: DagIssueRow[]): Promis
     cliProviderId: plan.providerId,
     kind: 'cli',
     spec: plan.invocation.spec,
-    timeoutMs: REVIEW_TIMEOUT_MS,
+    timeoutMs: overrideOr(ea.current, REVIEW_TIMEOUT_MS),
   });
   return true;
 }
@@ -1711,7 +1712,7 @@ export async function resolveDagPhase(
           cliProviderId: planDispatch.providerId,
           kind: 'cli',
           spec: planDispatch.invocation.spec,
-          timeoutMs: spec.timeoutMs,
+          timeoutMs: overrideOr(current, spec.timeoutMs),
         });
         dispatched += 1;
       }

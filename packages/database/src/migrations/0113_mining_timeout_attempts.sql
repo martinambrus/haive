@@ -1,0 +1,22 @@
+-- Per-mining-agent count of CONSECUTIVE budget timeouts. Read by the worker at mining
+-- dispatch to pick the rung its next run gets: escalatedFromDeclaredMs(spec.timeoutMs,
+-- timeout_attempts, ladder), i.e. 30m -> 40m -> 60m for a reviewer declaring 30m.
+--
+-- Why not reuse `attempts`: that counts EVERY re-roll, including a re-roll for unparseable
+-- output. A model that answered promptly in prose does not need more time, and escalating
+-- for it would hand budget to the one case a bigger budget cannot fix. This column only
+-- ever moves on a run that burned its whole allowance and was SIGKILLed.
+--
+-- Reset to 0 on any non-timeout failure, so a preemption or a worker-restart orphan
+-- landing between two timeouts cannot climb the ladder — same "skip, do not count"
+-- rule every other recovery budget in the step runner follows.
+--
+-- Additive + idempotent: a second run is a no-op, and NOT NULL DEFAULT 0 is safe on
+-- existing rows (every historical agent starts at the base rung, which is today's
+-- behaviour). Leaving the column after a code revert is harmless — nothing else reads it.
+--
+-- Rollback: set config:cli:timeoutLadder to "1" — every rung becomes 1x, so no mining
+--   agent escalates, with no deploy and no restart.
+-- Rollback (full): ALTER TABLE "task_step_agent_minings" DROP COLUMN IF EXISTS "timeout_attempts";
+
+ALTER TABLE "task_step_agent_minings" ADD COLUMN IF NOT EXISTS "timeout_attempts" integer NOT NULL DEFAULT 0;

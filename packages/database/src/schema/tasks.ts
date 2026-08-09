@@ -595,6 +595,12 @@ export const taskStepAgentMinings = pgTable(
      *  here: a mining row is UPDATEd in place on retry (the (task_step_id, agent_id)
      *  unique index forbids a second row), so the count has to live on the row. */
     attempts: integer('attempts').notNull().default(1),
+    /** CONSECUTIVE budget timeouts for this agent — the rung its next dispatch runs at.
+     *  Deliberately not `attempts`: that counts every re-roll, including a re-roll for
+     *  unparseable output, and handing more time to a model that answered promptly in
+     *  prose fixes nothing. Reset to 0 by any non-timeout failure, so a preemption or a
+     *  worker-restart orphan between two timeouts cannot climb the ladder either. */
+    timeoutAttempts: integer('timeout_attempts').notNull().default(0),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),

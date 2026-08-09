@@ -15,6 +15,7 @@ import { pathExists } from './steps/onboarding/_helpers.js';
 import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
 import { parseJsonLoose } from './steps/_fenced-json.js';
 import { resolvePreferredCli } from './step-runner.js';
+import { overrideOr } from './dispatch-timeout.js';
 import { worktreeDirName, worktreeDirPaths } from '../repo/worktree-paths.js';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
@@ -456,7 +457,7 @@ async function dispatchFixAgent(
     cliProviderId: plan.providerId,
     kind: 'cli',
     spec: plan.invocation.spec,
-    timeoutMs: spec.timeoutMs ?? MERGE_FIX_TIMEOUT_MS,
+    timeoutMs: overrideOr(current, spec.timeoutMs ?? MERGE_FIX_TIMEOUT_MS),
   });
   return invId;
 }

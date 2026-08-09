@@ -37,6 +37,7 @@ import {
   computeGlobalStepIndex,
   stepRegistry,
   registerAllSteps,
+  miningTimeoutInfo,
   trailingTimeoutInfo,
   upsertRow,
   type AdvanceStepResult,
@@ -932,6 +933,28 @@ async function handleResult(
       await appendEvent(db, ctx.taskId, result.row.id, `step.${result.status}`, {
         stepId,
       });
+      // A fan-out step DEGRADES on a dead agent rather than failing (a reviewer that died
+      // is not evidence the code is wrong), so its budget kills would otherwise leave no
+      // trace the UI can act on: the hint below is written only on the failed branch, and
+      // the "Retry with longer timeout" button is the only way to set an override. Record
+      // it here so a step that finished incomplete can still be re-run with more time.
+      if (result.status === 'done' && stepDef.agentMining) {
+        const mined = await miningTimeoutInfo(db, result.row.id);
+        if (mined.attempts > 0) {
+          await db
+            .update(schema.taskSteps)
+            .set({
+              errorHint: {
+                type: 'cli_timeout',
+                stepId,
+                lastBudgetMinutes: mined.lastBudgetMinutes ?? 0,
+                attempts: mined.attempts,
+              },
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.taskSteps.id, result.row.id));
+        }
+      }
       // A step completed → real progress; clear the consecutive auto-resume counter so only
       // back-to-back auto-resumes with no progress in between reach the anti-thrash cap.
       await db

@@ -461,6 +461,29 @@ export function escalatedTimeoutMs(
   return Math.max(1, Math.round((base * rung) / 60_000)) * 60_000;
 }
 
+/** Same ladder, but the caller's DECLARED budget is the base — the CLI_TIMEOUT_BASE_MINUTES
+ *  floor is deliberately NOT applied.
+ *
+ *  For a step's own CLI the floor is right: 45 minutes is what a coding pass generally needs,
+ *  and a step asking for less is usually just not thinking about it. For the FAN-OUT agents a
+ *  step spawns it is wrong: those numbers are per-role calibrations (a reviewer is not a
+ *  coder), so the floor would silently grow the first run of every mining step at once.
+ *  Escalation still applies, so a run that genuinely burned its allowance earns a bigger one.
+ *
+ *  `declaredMs` is required, not optional: an agent with no declared budget has no base to
+ *  escalate from, and inventing one here would hide the missing declaration from the step
+ *  that forgot it. Callers resolve that before calling. */
+export function escalatedFromDeclaredMs(
+  declaredMs: number,
+  attempt: number,
+  ladder: number[],
+): number {
+  return escalatedTimeoutMs(declaredMs, attempt, {
+    baseMinutes: Math.max(declaredMs, 0) / 60_000,
+    ladder,
+  });
+}
+
 /** Pub/sub channel the api publishes to when MAX_PARALLEL_AGENTS changes, so the
  *  worker live-retunes the cli-exec queue concurrency without a restart. Body is
  *  the new clamped integer as a string. */

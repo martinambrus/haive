@@ -2841,7 +2841,11 @@ function StepCardImpl({
                   {actionBusy ? 'Overriding…' : 'Override and run'}
                 </Button>
               )}
-              {step.errorHint?.type === 'cli_timeout' && step.status === 'failed' && (
+              {/* Not gated on status === 'failed': a fan-out step whose agents were killed
+                  at their budget DEGRADES to done (the agent failed, not the code), and
+                  that is precisely the step that needs a longer budget. errorHint is the
+                  structural proof either way, and canRetry already covers done. */}
+              {step.errorHint?.type === 'cli_timeout' && canRetry && (
                 <Button
                   size="sm"
                   disabled={actionBusy}

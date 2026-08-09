@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
   DEFAULT_CLI_TIMEOUT_LADDER,
+  escalatedFromDeclaredMs,
   escalatedTimeoutMs,
   parseTimeoutLadder,
 } from '../src/constants/index.js';
@@ -68,5 +69,40 @@ describe('escalatedTimeoutMs', () => {
 
   it('honours a custom base and ladder', () => {
     expect(escalatedTimeoutMs(10 * MIN, 1, { baseMinutes: 20, ladder: [1, 3] })).toBe(60 * MIN);
+  });
+});
+
+describe('escalatedFromDeclaredMs', () => {
+  const LADDER = [...DEFAULT_CLI_TIMEOUT_LADDER];
+
+  it('leaves the first run at exactly what the step declared', () => {
+    // The whole point: 08c calibrated its reviewers at 30m. Routing them through the
+    // step ladder would have made every first run 45m — a 50% cost rise nobody asked for.
+    expect(escalatedFromDeclaredMs(30 * MIN, 0, LADDER)).toBe(30 * MIN);
+    expect(escalatedFromDeclaredMs(45 * MIN, 0, LADDER)).toBe(45 * MIN);
+  });
+
+  it('escalates off the declared value, not off the global base', () => {
+    expect(escalatedFromDeclaredMs(30 * MIN, 1, LADDER)).toBe(40 * MIN);
+    expect(escalatedFromDeclaredMs(30 * MIN, 2, LADDER)).toBe(60 * MIN);
+  });
+
+  it('clamps an attempt past the end of the ladder to the last rung', () => {
+    expect(escalatedFromDeclaredMs(30 * MIN, 9, LADDER)).toBe(60 * MIN);
+  });
+
+  it('clamps a negative attempt to the first rung', () => {
+    expect(escalatedFromDeclaredMs(30 * MIN, -1, LADDER)).toBe(30 * MIN);
+  });
+
+  it('never returns a zero budget', () => {
+    // A zero budget SIGKILLs at spawn, so a nonsense declaration must still yield a
+    // runnable minute rather than an instant kill.
+    expect(escalatedFromDeclaredMs(0, 0, LADDER)).toBe(MIN);
+    expect(escalatedFromDeclaredMs(-5 * MIN, 1, LADDER)).toBe(MIN);
+  });
+
+  it('falls back to the built-in ladder when handed an empty one', () => {
+    expect(escalatedFromDeclaredMs(30 * MIN, 1, [])).toBe(40 * MIN);
   });
 });
