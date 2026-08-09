@@ -9,6 +9,7 @@ import {
   isDdevBuildInputFailure,
   isDdevContainerConfigFailure,
   isDdevEntrypointRuntimeFailure,
+  isDdevHookFailure,
 } from './ddev-build-guard.js';
 import { findDdevNginxIncludeCollisions } from './ddev-nginx-include-guard.js';
 
@@ -317,6 +318,59 @@ describe('isDdevEntrypointRuntimeFailure', () => {
     expect(
       isDdevEntrypointRuntimeFailure(
         'web container is unhealthy\n/mnt/ddev_config/web-entrypoint.d/x.sh\nfoo: command not found',
+      ),
+    ).toBe(false);
+  });
+});
+
+// Task 4ce9b4e1 ("Add DDEV" on rs_codex_5.6_max), 2026-08-09, verbatim shape. A post-start
+// hook on the DB service exited 1, and `fail_on_hook_fail: true` turned that into a failed
+// `ddev restart`. Every branch that existed returned false — hooks run scripts from wherever
+// the agent put them (`.ddev/scripts/`), which no pre-flight guard reads — so 07c hard-failed
+// the task at round 2 of its 5 fix rounds.
+const HOOK_ABORT =
+  'ddev restart failed: Waiting for containers to become ready: [web db]... ready in 7.0s\n' +
+  'ddev-router already running, pushing new config...\n' +
+  '[redsys-db-defaults] outcome=failure stage=startup-decision ' +
+  'reason=failure-environment-unavailable schema=db table_count=0\n' +
+  "Task failed: Exec command 'bash /mnt/ddev_config/scripts/ensure-legacy-db-defaults.sh' " +
+  "in container/service 'db': exit status 1\n" +
+  'Failed to restart rs-codex-5-6-max: task failed: exit status 1';
+
+describe('isDdevHookFailure', () => {
+  it('flags the post-start hook that hard-failed task 4ce9b4e1', () => {
+    expect(isDdevHookFailure(HOOK_ABORT)).toBe(true);
+    expect(isDdevAgentFixableFailure(HOOK_ABORT)).toBe(true);
+  });
+
+  it('flags an exec-host hook too', () => {
+    expect(
+      isDdevHookFailure(
+        "Task failed: Exec command 'rm -f .ddev/.ready' on the host " +
+          '(/var/lib/haive/repos/x): exit status 1',
+      ),
+    ).toBe(true);
+  });
+
+  it('needs both markers on one line', () => {
+    // The description alone is how DDEV narrates a hook it is about to run.
+    expect(
+      isDdevHookFailure("Exec command 'bash /mnt/ddev_config/scripts/x.sh' in container/service"),
+    ).toBe(false);
+    // And a failure word from elsewhere in the blob must not adopt it.
+    expect(
+      isDdevHookFailure(
+        'Failed to restart x: task failed: exit status 1\n' +
+          "Exec command 'bash /mnt/ddev_config/scripts/x.sh' in container/service 'db'",
+      ),
+    ).toBe(false);
+  });
+
+  it('leaves host-level bring-up failures alone', () => {
+    expect(isDdevHookFailure('ddev-x-web container exited.')).toBe(false);
+    expect(
+      isDdevHookFailure(
+        "ddev start blocked by an incompatible ddev_version_constraint: your DDEV version 'v1.25.3'",
       ),
     ).toBe(false);
   });

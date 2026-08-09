@@ -322,12 +322,45 @@ export function isDdevEntrypointRuntimeFailure(errorMessage: string): boolean {
   );
 }
 
+/** DDEV's own report of a `hooks:` task that failed, both halves on one line: the task
+ *  DESCRIPTION (`Exec command '<cmd>' in container/service '<svc>'` for an `exec`,
+ *  `Exec command '<cmd>' on the host` for an `exec-host`) under the `task failed` its runner
+ *  wraps a non-zero one in. Both format strings read out of the shipped `ddev` binary
+ *  (v1.25.3): `Task failed: %v: %v`, `task failed: %v`, `Exec command '%s' in
+ *  container/service '%s'`, `Exec command '%s' on the host (%s)`.
+ *
+ *  VOLATILE wording, same trade as BUILDKIT_FAILURE_RE: a miss only returns us to today's
+ *  hard-fail path, never to a wrong answer. Matched per line so the description and the
+ *  failure verdict have to belong to the same event — a healthy hook DDEV merely narrates
+ *  cannot borrow a failure word from somewhere else in the blob. */
+const DDEV_HOOK_FAILURE_RE =
+  /task failed:.*\bExec command '[^']*' (?:in container\/service '[^']*'|on the host\b)/i;
+
+/**
+ * True when a DDEV bring-up died on one of the project's own `hooks:` entries.
+ *
+ * `hooks:` exist only in agent-authored `.ddev/*.yaml` — DDEV generates none — so a failed
+ * hook task is by construction the implementation's to fix, and no retry clears it: the hook,
+ * its script and `fail_on_hook_fail` are all still there on the next attempt. Nothing else
+ * catches this. The pre-flight guards read the build Dockerfiles, the webserver confs and
+ * `.ddev/web-entrypoint.d/`; a hook script lives wherever the agent put it (task 4ce9b4e1:
+ * `.ddev/scripts/`) and runs in whichever service the hook names (there: `db`).
+ *
+ * Task 4ce9b4e1 is the shape: a `post-start` hook on the db service exited 1 because the
+ * mariadb init file it depends on could not `LOAD_FILE('/proc/self/environ')` and recorded a
+ * failure outcome the hook then refused to start on. With `fail_on_hook_fail: true` that
+ * failed every `ddev restart`, and 07c hard-failed the task at round 2 of 5.
+ */
+export function isDdevHookFailure(errorMessage: string): boolean {
+  return errorMessage.split('\n').some((line) => DDEV_HOOK_FAILURE_RE.test(line));
+}
+
 /**
  * Every DDEV failure the implementing agent can fix on its own, and therefore the whole of
  * what 07c-ddev-reconcile routes back to implementation: a bad image-build input, a
  * webserver/PHP config the container refused to load, a `.ddev/` YAML file that does not
  * parse, the nginx include guard's verdict, a web-entrypoint script that cannot run
- * unprivileged, or one that aborted at runtime.
+ * unprivileged, one that aborted at runtime, or a `hooks:` task that failed the boot.
  *
  * Everything else — an unsatisfiable version constraint, a port collision, a reaped runner,
  * an OOM — keeps the hard-fail path that exposes Retry / Retry with AI, because looping the
@@ -338,6 +371,7 @@ export function isDdevAgentFixableFailure(errorMessage: string): boolean {
     isDdevBuildInputFailure(errorMessage) ||
     isDdevContainerConfigFailure(errorMessage) ||
     isDdevEntrypointRuntimeFailure(errorMessage) ||
+    isDdevHookFailure(errorMessage) ||
     errorMessage.includes(DDEV_NGINX_INCLUDE_PREFIX) ||
     errorMessage.includes(DDEV_ENTRYPOINT_PREFIX) ||
     errorMessage.includes(DDEV_CONFIG_YAML_PREFIX)

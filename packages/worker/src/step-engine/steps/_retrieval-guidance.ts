@@ -162,6 +162,14 @@ export function adaptPromptForCliCapabilities(
  *  container exited". ddev-entrypoint-guard.ts is what actually catches it; this stops it
  *  being written.
  *
+ *  The last rule has no guard behind it at all, which is why it is here. A `hooks:` entry runs
+ *  a script from wherever the agent put it, in whichever service the hook names, so nothing
+ *  can be read ahead of the boot to prove it will succeed — and under `fail_on_hook_fail` a
+ *  non-zero exit fails every `ddev start` permanently. Task 4ce9b4e1 lost 3 of its 5 fix
+ *  rounds to a post-start hook that refused to start on state its own mariadb init file had
+ *  recorded on a previous boot. isDdevHookFailure now routes that back to implementation, but
+ *  a hook written non-fatally never gets there.
+ *
  *  Gated on the work actually mentioning DDEV so a repo that has nothing to do with it never
  *  pays for the lines. The match is a heuristic, not a contract: a miss costs the nudge, never
  *  correctness — the runtime repair still catches it. */
@@ -197,5 +205,17 @@ export function ddevConfigGuidanceLines(context: string): string[] {
     '  the write under `sudo`, or keep it left of a `||`.',
     'Install packages at build time instead, via `webimage_extra_packages` or',
     '.ddev/web-build/Dockerfile.',
+    '',
+    'If you add a `hooks:` entry to .ddev/config.yaml: it re-runs on EVERY `ddev start`, and',
+    'with `fail_on_hook_fail: true` a non-zero exit fails the whole start — permanently, since',
+    'the hook is still there on the next attempt and no retry can clear it. So:',
+    '- make the hook idempotent, and never make it depend on state a previous boot left behind',
+    '  (a marker file, a temp file, a row it wrote last time). It must succeed on a cold',
+    '  container with nothing carried over.',
+    '- treat anything it cannot control (a file it may not be able to read, a service that may',
+    '  not be up yet) as a reason to SKIP its work and exit 0, not to exit 1. Print the reason',
+    '  to stderr — DDEV shows it — and let the start finish.',
+    '- keep `fail_on_hook_fail` unset unless the project genuinely cannot run without the hook.',
+    '  The default already reports a failed hook as a warning.',
   ];
 }

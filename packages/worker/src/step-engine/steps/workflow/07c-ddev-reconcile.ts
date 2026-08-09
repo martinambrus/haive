@@ -154,7 +154,7 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
   // implementation step, and looping them would burn a round to reach the same failure.
   //
   // An agent-authored `.ddev/` input is the exception, and the reason this predicate exists.
-  // Three shapes qualify, none reachable by a retry because the offending file is still
+  // Four shapes qualify, none reachable by a retry because the offending file is still
   // there on the next attempt:
   //   - a `.ddev/` YAML file DDEV cannot parse, which fails `ddev start` before a container
   //     exists (task fcf03ead wrote a post-start hook as a bare scalar containing `: ` and
@@ -166,8 +166,13 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
   //   - a webserver/PHP config the CONTAINER rejected, which is visible only because
   //     `ddevFailureMessage` captures the web/db logs into the error (task a0d1bbf9 died on
   //     `nginx: [emerg] duplicate location`, and hard-failed at round 9 because the error
-  //     named no cause at all).
-  // Both are code defects found late, which is exactly what the fix loop is for: hand the log
+  //     named no cause at all);
+  //   - a `hooks:` task that failed the boot. DDEV generates no hooks, so one that exits
+  //     non-zero under `fail_on_hook_fail` is agent-authored by construction — and it is the
+  //     one shape no pre-flight guard can read ahead, since a hook runs a script from
+  //     wherever the agent put it, in whichever service it names (task 4ce9b4e1's post-start
+  //     hook on the `db` service, from `.ddev/scripts/`, hard-failed at round 2 of 5).
+  // These are code defects found late, which is exactly what the fix loop is for: hand the log
   // back to the implementer, capped by max_fix_rounds.
   fixLoopOnError: isDdevAgentFixableFailure,
 
