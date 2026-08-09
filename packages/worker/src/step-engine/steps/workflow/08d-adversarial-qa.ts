@@ -271,6 +271,10 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
   },
 
   agentMining: {
+    // NO toolProfile on purpose — this is the one fan-out that needs the full surface.
+    // buildAdversaryPrompt hands each agent the running app's URL "for runtime attacks"
+    // and asks for a proof located at a URL, so chrome-devtools and ddev-control are the
+    // tools the step is built around. Do not add 'rag_only' here to match its siblings.
     requiredCapabilities: ['tool_use'],
     timeoutMs: QA_TIMEOUT_MS,
     // Same bargain as 08c: an adversary's confirmed exploits are worth banking before

@@ -369,6 +369,8 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
   // test bypass → no dispatch, apply no-ops.
   agentMining: {
     requiredCapabilities: ['tool_use', 'file_write'],
+    // Repairs skill files in place from their own content; no runtime involved.
+    toolProfile: 'rag_only',
     timeoutMs: 60 * 60 * 1000,
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];

@@ -1165,6 +1165,8 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
   // llm + loop path to run unchanged.
   agentMining: {
     requiredCapabilities: ['tool_use', 'file_write'],
+    // Onboarding authors skills from the repo's source; no runtime exists at this point.
+    toolProfile: 'rag_only',
     timeoutMs: 60 * 60 * 1000,
     async selectAgents({ detected, formValues }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];

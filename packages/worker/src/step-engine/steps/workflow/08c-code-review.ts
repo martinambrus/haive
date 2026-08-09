@@ -859,6 +859,10 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
 
   agentMining: {
     requiredCapabilities: ['tool_use'],
+    // Source-level review by design: the personas read the change as written and never
+    // run the app, so a browser and a container control plane are tool definitions they
+    // pay for and cannot use.
+    toolProfile: 'rag_only',
     timeoutMs: REVIEW_TIMEOUT_MS,
     // A reviewer SIGKILLed at 30 minutes loses every finding it made. Steer it to bank
     // the verified ones first. Safe here because a reviewer only reads and reports.

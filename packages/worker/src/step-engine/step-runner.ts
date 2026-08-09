@@ -1268,6 +1268,7 @@ async function dispatchMiningAgents(
       kind: 'agent_mining',
       spec: plan.invocation.spec,
       timeoutMs: spec.timeoutMs,
+      toolProfile: spec.toolProfile,
       agentMiningId: miningId,
       softTimeout: spec.softTimeout === true,
     });

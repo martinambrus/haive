@@ -392,6 +392,8 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
   // removals-only run → no dispatch, apply still handles removals + the commit.
   agentMining: {
     requiredCapabilities: ['tool_use', 'file_write'],
+    // Writes skill files from what the task already learned; never exercises the app.
+    toolProfile: 'rag_only',
     timeoutMs: 60 * 60 * 1000,
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];

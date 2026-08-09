@@ -342,6 +342,8 @@ export const phase0aDiscoveryStep: StepDefinition<DiscoveryDetect, DiscoveryAppl
 
   agentMining: {
     requiredCapabilities: ['tool_use'],
+    // Read-only enrichment over the existing codebase; nothing is running yet.
+    toolProfile: 'rag_only',
     timeoutMs: 60 * 60 * 1000,
     // Three total attempts (the initial terminal plus up to two fresh terminals)
     // for a dropped/closed provider connection. Each re-roll is scoped to the

@@ -54,6 +54,10 @@ export async function executeSubAgentNative(
     payload.taskId,
     provider.name as CliProviderName,
     sandboxWorkdir,
+    // Honor the step's declared narrowing here too. Both sub-agent kinds used to
+    // ignore it and always take the full surface, so `toolProfile` meant one thing
+    // on the cli path and another on this one.
+    payload.toolProfile === 'rag_only',
   );
   const authMounts = await resolveAuthMounts(db, provider, payload.taskId);
   return executeCliSpec(
@@ -107,6 +111,10 @@ export async function executeSubAgentSequential(
     payload.taskId,
     provider.name as CliProviderName,
     sandboxWorkdir,
+    // Honor the step's declared narrowing here too. Both sub-agent kinds used to
+    // ignore it and always take the full surface, so `toolProfile` meant one thing
+    // on the cli path and another on this one.
+    payload.toolProfile === 'rag_only',
   );
   const authMounts = await resolveAuthMounts(db, provider, payload.taskId);
   const spawner = createSandboxSpawner(

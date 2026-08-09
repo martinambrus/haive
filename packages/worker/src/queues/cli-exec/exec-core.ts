@@ -331,10 +331,12 @@ export async function executeByKind(
             payload.taskId,
             providerRow.name as CliProviderName,
             sandboxWorkdir,
-            // Knowledge-mining invocations get a rag-only MCP surface, as does any
-            // step that declared toolProfile='rag_only' (report-only steps that
-            // cannot act on a browser or a container).
-            payload.kind === 'agent_mining' || payload.toolProfile === 'rag_only',
+            // Narrowed only when the STEP said so (report-only steps that cannot act on
+            // a browser or a container). Never inferred from `kind`: the fan-out
+            // machinery is shared by knowledge mining, the review personas and the
+            // adversarial-QA agents, and forcing rag-only on all three gave 08d a live
+            // app URL it had no browser to reach.
+            payload.toolProfile === 'rag_only',
           )
         : { files: [], extraArgs: [] };
       const statusUpdater = payload.taskStepId

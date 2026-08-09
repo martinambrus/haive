@@ -143,6 +143,17 @@ export interface AgentMiningSpec {
    *  skip mining entirely (apply runs with empty agentMiningResults). */
   selectAgents(args: AgentMiningSelectArgs): Promise<AgentMiningDispatch[]>;
   requiredCapabilities: StepCapability[];
+  /** Narrow the MCP surface every agent in this fan-out is given, with the same
+   *  meaning as `LlmInvocationSpec.toolProfile` above: `'rag_only'` cuts it to
+   *  rag_search, unset keeps the full surface.
+   *
+   *  Declare it — do not rely on the fan-out being narrowed for you. It used to be
+   *  forced for every `kind: 'agent_mining'` invocation, which silently applied a
+   *  knowledge-mining decision to the review and QA fan-outs that reuse the same
+   *  machinery. 08d-adversarial-qa is handed a live app URL for runtime attacks and
+   *  could not reach it; 08c-code-review wanted the narrow surface and got it by
+   *  accident rather than by saying so. */
+  toolProfile?: 'rag_only';
   /** Sandbox timeout per agent invocation. Defaults to step-runner default. */
   timeoutMs?: number;
   /** Opt in to the soft timeout: shortly before the hard SIGKILL, steer the agent to

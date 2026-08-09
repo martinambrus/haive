@@ -141,6 +141,8 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
 
   agentMining: {
     requiredCapabilities: ['tool_use'],
+    // Merges KB entries against each other; reaches nothing outside the knowledge base.
+    toolProfile: 'rag_only',
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       // Mining has no bypass stub; under test bypass return [] so the smoke pipeline
       // runs without a real CLI provider (the drafts stay linked, unmerged).
