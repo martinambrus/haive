@@ -56,7 +56,7 @@ import {
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { PersistedDetails } from '@/components/persisted-details';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
-import { TaskVote } from '@/components/task-vote';
+import { formatVoteScore, TaskVote, voteToneClass } from '@/components/task-vote';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { EditorTab } from '@/components/editor/editor-tab';
 import { AttachmentsPanel } from '@/components/attachments/attachments-panel';
@@ -1141,6 +1141,19 @@ export default function TaskDetailPage() {
           >
             <ArrowLeft className="h-4 w-4" />
           </Link>
+          {/* The SCORE only — no arrows. The strip is a scrolled-past summary, so it states the
+              priority in the same place the listing and the page header do; the control itself
+              stays in the header, one screen away, where a misclick is not a stray vote.
+              Hidden at the default 0, like every other conditional in this strip: an unvoted
+              task has nothing to say here, and a column of "0" is noise on most pages. */}
+          {(task.voteScore ?? 0) !== 0 && (
+            <span
+              className={`shrink-0 font-mono text-xs tabular-nums ${voteToneClass(task.voteScore ?? 0)}`}
+              title={`Priority ${formatVoteScore(task.voteScore ?? 0)} — vote in the task header above.`}
+            >
+              {formatVoteScore(task.voteScore ?? 0)}
+            </span>
+          )}
           <p className="min-w-0 truncate text-sm font-semibold text-indigo-300">{task.title}</p>
           {/* The strip carries no status badge, so a held task would otherwise look like it
               is working once the page is scrolled past the header. */}

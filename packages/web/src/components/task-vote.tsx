@@ -16,6 +16,18 @@ const HINT =
   'others go first. It shifts where the task enters the round-robin — it never starves ' +
   'the rest.';
 
+/** Score formatting and colour, shared with the read-only score shown in the task page's fixed
+ *  title strip so the same number never renders two different ways on one screen. */
+export function formatVoteScore(score: number): string {
+  return score > 0 ? `+${score}` : String(score);
+}
+
+export function voteToneClass(score: number): string {
+  if (score > 0) return 'text-emerald-400';
+  if (score < 0) return 'text-neutral-500';
+  return 'text-neutral-400';
+}
+
 /**
  * Up/down score control for a task, Stack-Overflow shaped: two arrows and the number.
  *
@@ -74,7 +86,6 @@ export function TaskVote({
   const atMax = shown >= VOTE_MAX;
   const atMin = shown <= VOTE_MIN;
   const arrow = 'rounded p-0.5 transition-colors disabled:opacity-30';
-
   return (
     <div
       className={`flex shrink-0 flex-col items-center leading-none ${className}`}
@@ -90,17 +101,9 @@ export function TaskVote({
         <ChevronUp className="h-4 w-4" />
       </button>
       <span
-        className={`font-mono text-xs tabular-nums ${
-          error
-            ? 'text-red-400'
-            : shown > 0
-              ? 'text-emerald-400'
-              : shown < 0
-                ? 'text-neutral-500'
-                : 'text-neutral-400'
-        }`}
+        className={`font-mono text-xs tabular-nums ${error ? 'text-red-400' : voteToneClass(shown)}`}
       >
-        {shown > 0 ? `+${shown}` : shown}
+        {formatVoteScore(shown)}
       </span>
       <button
         type="button"
