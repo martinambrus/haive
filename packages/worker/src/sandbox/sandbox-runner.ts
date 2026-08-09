@@ -130,6 +130,12 @@ export interface SandboxRunnerOptions {
   egressDomains?: string[];
   /** Stamped onto the spawned container as `haive.task.id=<taskId>` so cancel can find and kill it. */
   taskId?: string;
+  /** Stamped as `haive.invocation.id=<invocationId>`. The task label alone can only kill a
+   *  task's ENTIRE fan-out, which is right for Stop/cancel and wrong for preemption: the
+   *  sweeper frees exactly one agent slot, so it has to name exactly one container. Container
+   *  names are `haive-cli-<randomUUID>` and carry no invocation identity, so this label is the
+   *  only handle on a single run. */
+  invocationId?: string;
 }
 
 export interface SandboxRunResult extends DockerRunResult {
@@ -266,7 +272,13 @@ export async function runInSandbox(
       network,
       connectNetworks: resolveApiConnectNetworks(policy, gateway, modelsHost !== null),
       user: 'node',
-      labels: options.taskId ? { 'haive.task.id': options.taskId } : undefined,
+      labels:
+        options.taskId || options.invocationId
+          ? {
+              ...(options.taskId ? { 'haive.task.id': options.taskId } : {}),
+              ...(options.invocationId ? { 'haive.invocation.id': options.invocationId } : {}),
+            }
+          : undefined,
       ...(sandboxCaps
         ? {
             memoryLimitMb: sandboxCaps.memoryMb,

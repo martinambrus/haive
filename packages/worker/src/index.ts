@@ -32,6 +32,7 @@ import { ensureDdevCa, ensureDdevRegistryCache } from './sandbox/ddev-runner.js'
 import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
 import { IdeSessionReaper } from './sandbox/ide-session-reaper.js';
 import { RuntimeRunnerReaper } from './sandbox/runtime-runner-reaper.js';
+import { AgentPreemptionSweeper } from './sandbox/agent-preemption.js';
 import { CliStreamLogReaper } from './queues/cli-exec/stream-log-retention.js';
 import {
   startRuntimeLimitsWatch,
@@ -168,6 +169,12 @@ async function main(): Promise<void> {
   // Let the admission gate preempt a dead task's grace-runner for a waiting live task instead
   // of starving it behind the retry-cache (reuses the reaper's list/reap).
   setRuntimeReclaimer(() => runtimeRunnerReaper.reclaimOnePreemptible());
+  // Give an up-voted task a slot that is already occupied. BullMQ priority can only order the
+  // QUEUE, so without this a boosted task still waits behind whatever was enqueued first; a
+  // pickup gate cannot help either, since it only runs once a slot is free. Kills agent
+  // containers only — environments are never torn down.
+  const agentPreemptionSweeper = new AgentPreemptionSweeper({ db: getDb() });
+  agentPreemptionSweeper.start();
   // Live-retune the runtime admission gate when the resource-limit config changes.
   const stopRuntimeLimitsWatch = startRuntimeLimitsWatch();
   // Age out persisted CLI transcripts. Nothing else deletes cli_invocations.stream_log,
@@ -186,6 +193,7 @@ async function main(): Promise<void> {
     terminalReaper.stop();
     ideReaper.stop();
     runtimeRunnerReaper.stop();
+    agentPreemptionSweeper.stop();
     cliStreamLogReaper.stop();
     stopRuntimeLimitsWatch();
     await terminalManager.stop().catch((err) => {

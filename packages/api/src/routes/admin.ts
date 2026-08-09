@@ -367,6 +367,12 @@ const runtimeLimitsSchema = z.object({
   // Cap on that yield. 0 = strict (no escape); anything else releases a held invocation after
   // this many minutes so a busy runtime fleet slows runner-less work rather than stopping it.
   agentReserveMaxHoldMinutes: z.number().int().min(0),
+  // Whether an up-voted task may kill a lower-voted task's RUNNING agent to take its slot. The
+  // only lever that reorders work already in flight — vote scoring alone just orders the queue.
+  agentPreemptionEnabled: z.boolean(),
+  // How long a run is safe from that. Guards against killing a just-restarted victim before it
+  // achieves anything; 0 preempts as soon as a higher-voted task queues work.
+  agentPreemptionMinRunMinutes: z.number().int().min(0),
 });
 
 /** Capacity the current settings actually produce, so the admin card can state it instead of
@@ -438,6 +444,8 @@ adminRoutes.get('/config/runtime-limits', async (c) => {
     agentFloor,
     agentReserveEnabled,
     agentReserveMaxHoldMinutes,
+    agentPreemptionEnabled,
+    agentPreemptionMinRunMinutes,
   ] = await Promise.all([
     configService.getBoolean(CONFIG_KEYS.RESOURCE_LIMITS_ENABLED, true),
     configService.getNumber(CONFIG_KEYS.RUNTIME_MEMORY_MB, 0),
@@ -451,6 +459,8 @@ adminRoutes.get('/config/runtime-limits', async (c) => {
     configService.getNumber(CONFIG_KEYS.AGENT_FLOOR, 0),
     configService.getBoolean(CONFIG_KEYS.AGENT_RESERVE_ENABLED, true),
     configService.getNumber(CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES, 10),
+    configService.getBoolean(CONFIG_KEYS.AGENT_PREEMPTION_ENABLED, true),
+    configService.getNumber(CONFIG_KEYS.AGENT_PREEMPTION_MIN_RUN_MINUTES, 5),
   ]);
   const settings = {
     enabled,
@@ -465,6 +475,8 @@ adminRoutes.get('/config/runtime-limits', async (c) => {
     agentFloor,
     agentReserveEnabled,
     agentReserveMaxHoldMinutes,
+    agentPreemptionEnabled,
+    agentPreemptionMinRunMinutes,
   };
   return c.json({ ...settings, capacity: deriveCapacityPreview(settings) });
 });
@@ -489,6 +501,14 @@ adminRoutes.put('/config/runtime-limits', async (c) => {
     configService.set(
       CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES,
       String(body.agentReserveMaxHoldMinutes),
+    ),
+    configService.set(
+      CONFIG_KEYS.AGENT_PREEMPTION_ENABLED,
+      body.agentPreemptionEnabled ? 'true' : 'false',
+    ),
+    configService.set(
+      CONFIG_KEYS.AGENT_PREEMPTION_MIN_RUN_MINUTES,
+      String(body.agentPreemptionMinRunMinutes),
     ),
   ]);
   // Retune the admission gate AND the agent pool live (both subscribe to this channel); the

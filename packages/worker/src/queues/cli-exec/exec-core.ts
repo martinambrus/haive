@@ -51,13 +51,17 @@ import {
 import { executeSubAgentNative, executeSubAgentSequential } from './sub-agent.js';
 import { resolveSecretMasks } from './secret-mask.js';
 import { worktreeGitfileMask } from './gitfile-mask.js';
+import { consumePreemptionMark } from './preempt-mark.js';
 import { resolveDdevGeneratedMasks } from './ddev-generated-mask.js';
 import { makeUsageSnapshotPersister } from './running-usage.js';
 import {
   classifyAntigravityDiagnostic,
   classifyModelCapability,
   classifyProviderFatal,
+  CLI_PREEMPTED_HEADLINE,
   CLI_TIMEOUT_HEADLINE,
+  isCliPreemptionFailure,
+  isCliTimeoutFailure,
   MODEL_CAPABILITY_HEADLINES,
   PROVIDER_FATAL_HEADLINES,
   type ModelCapabilityClass,
@@ -120,11 +124,22 @@ export function interpretCliFailure(
   }
   if (result.exitCode === 0) return existing;
   if (result.exitCode === null || TERMINATION_EXIT_CODES.has(result.exitCode)) {
-    // A budget kill already identified itself (createSandboxSpawner stamps the headline
-    // and the minutes). Keep that: it is the same transient class, but the ONLY one the
-    // step runner re-dispatches at a LARGER budget, so collapsing it back into the
-    // generic sentence would silently disable the escalating ladder.
-    if (existing?.startsWith(CLI_TIMEOUT_HEADLINE)) return existing;
+    // A kill that already identified ITSELF keeps its headline. Both self-identified kills are
+    // the same transient class as the generic sentence below, and both are distinguished from it
+    // only by that headline — so collapsing either one back into the generic wording silently
+    // disables the behaviour that depends on it:
+    //  - a budget kill (createSandboxSpawner stamps the headline + minutes) is the only transient
+    //    the step runner re-dispatches at a LARGER budget; lose it and the escalating ladder
+    //    stops climbing;
+    //  - a preemption is the only transient that must NOT be charged to any retry budget; lose it
+    //    and every eviction counts as a worker-restart orphan, so three evictions fail a task
+    //    that never failed. Observed exactly that live before this line covered it.
+    if (
+      isCliTimeoutFailure({ errorMessage: existing }) ||
+      isCliPreemptionFailure({ errorMessage: existing })
+    ) {
+      return existing;
+    }
     return 'CLI process was stopped before it finished (cancelled or timed out).';
   }
 
@@ -917,6 +932,8 @@ export function createSandboxSpawner(
     if (networkPolicy) runnerOptions.networkPolicy = networkPolicy;
     if (egressDomains.length > 0) runnerOptions.egressDomains = egressDomains;
     if (taskId) runnerOptions.taskId = taskId;
+    // Lets the preemption sweeper kill exactly this run instead of the task's whole fan-out.
+    if (invocationId) runnerOptions.invocationId = invocationId;
     const finalArgs = mcpExtraArgs.length > 0 ? [...spec.args, ...mcpExtraArgs] : spec.args;
     const result = await runInSandbox(
       {
@@ -951,11 +968,18 @@ export function createSandboxSpawner(
       // formatCliErrorMessage prefers a spawn error, so it reaches every return site of
       // executeCliSpec without touching any of them. A real spawn error still wins: it
       // says why the process never ran, which outranks how long we waited.
+      // A preemption kill lands here identically to a budget kill (137/null, no spawn error), so
+      // it is stamped the same way and for the same reason — this is the one place that knows WHY
+      // the process died. Ordered AFTER timedOut deliberately: if the run's own timer fired, the
+      // timeout is the real cause and must win, or a preemption racing a genuine timeout would
+      // hide it and the escalating budget ladder would never climb.
       error:
         result.error ??
         (result.timedOut
           ? `${CLI_TIMEOUT_HEADLINE} (${Math.round((opts.timeoutMs ?? 0) / 60_000)}m).`
-          : undefined),
+          : invocationId && (await consumePreemptionMark(invocationId))
+            ? `${CLI_PREEMPTED_HEADLINE}. The step re-runs automatically; nothing is lost but this round's work.`
+            : undefined),
       capturedLog: result.capturedLog,
     };
   };

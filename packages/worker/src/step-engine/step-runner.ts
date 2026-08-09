@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNotNull, isNull, ne, notInArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, notInArray } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema, isUniqueViolation, type StepIterationEntry } from '@haive/database';
 import {
@@ -27,9 +27,11 @@ import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import {
   capabilityClassFromMessage,
   cliTimeoutBudgetMinutes,
+  isCliPreemptionFailure,
   isCliTimeoutFailure,
   isOutputTruncationMessage,
   isTransientCliFailure,
+  withoutPreemptions,
 } from '../queues/cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
 import { foldCliParkOnResume } from '../queues/cli-park-timing.js';
@@ -483,7 +485,16 @@ async function resolveLlmPhase(
       // failed step rather than an infinite re-drive. Supersede the orphan (not consume) so
       // it stays OUT of countLlmAttempts and does not burn the genuine llm.retry budget.
       if (isTransientCliFailure({ exitCode: invocation.exitCode, errorMessage: errTrimmed })) {
-        if ((await countTrailingOrphans(db, current.id)) < MAX_ORPHAN_REDISPATCH) {
+        // A preemption ALWAYS re-dispatches, budget or not. Keeping it out of the count is not
+        // enough on its own: an eviction that lands on a step whose budget genuine orphans have
+        // already spent would fall straight through to the failure below, so the eviction becomes
+        // the thing that kills the task — observed live (task 38f02dee, step 07b round 6, failed
+        // with "cli invocation failed: CLI run preempted…"). The cap exists to converge a
+        // CRASH-LOOPING worker; a run we chose to kill is not a crash loop, and re-running it is
+        // work we know is safe. The sweeper's own guards (min run age, a higher-voted task with
+        // real queued demand) are what bound how often this can happen.
+        const preempted = isCliPreemptionFailure({ errorMessage: errTrimmed });
+        if (preempted || (await countTrailingOrphans(db, current.id)) < MAX_ORPHAN_REDISPATCH) {
           ctx.logger.warn(
             { stepId: stepDef.metadata.id, message },
             'cli invocation orphaned/killed; re-dispatching a fresh invocation',
@@ -1082,10 +1093,16 @@ async function resolveAgentMiningPhase(
   return { resolved: false, result: { status: 'waiting_cli', row: updated } };
 }
 
-/** Existing mining row a retry re-dispatches onto, keyed by agentId. */
+/** Existing mining row a retry re-dispatches onto, keyed by agentId.
+ *
+ *  `chargeAttempt: false` re-dispatches WITHOUT spending the row's durable `attempts` budget —
+ *  used when the prior invocation was killed by the preemption sweeper. Unlike the LLM/timeout
+ *  caps (trailing scans that can simply skip a row) this budget is a stored counter, so the only
+ *  way to keep preemption out of it is not to increment. Three evictions must not exhaust the
+ *  worker-restart recovery a mining agent gets. */
 type MiningRetryTargets = Map<
   string,
-  { id: string; attempts: number; cliInvocationId: string | null }
+  { id: string; attempts: number; cliInvocationId: string | null; chargeAttempt?: boolean }
 >;
 
 /** Enqueue one cli invocation per dispatch.
@@ -1202,7 +1219,8 @@ async function dispatchMiningAgents(
           errorMessage: null,
           startedAt: null,
           endedAt: null,
-          attempts: prior.attempts + 1,
+          // A preemption re-dispatch is free: see MiningRetryTargets.chargeAttempt.
+          attempts: prior.attempts + (prior.chargeAttempt === false ? 0 : 1),
           updatedAt: new Date(),
         })
         .where(eq(schema.taskStepAgentMinings.id, prior.id));
@@ -2400,13 +2418,35 @@ async function retryMiningAgents(
     .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
 
   const wanted = new Set(agentIds);
+  const wantedRows = rows.filter((r) => wanted.has(r.agentId));
+  // Which of those were killed by the preemption sweeper rather than by anything wrong with the
+  // run. Resolved BEFORE the budget filter, because a preemption does two things: it re-dispatches
+  // without spending the row's attempts budget, AND it re-dispatches even when that budget is
+  // already spent — an eviction must never be the thing that retires an agent. One query for the
+  // whole batch; both callers (worker-restart reconcile and the unusable-output re-roll) get it,
+  // so a future third caller cannot forget either half.
+  const preemptedInvocationIds = new Set<string>();
+  const priorIds = wantedRows.map((r) => r.cliInvocationId).filter((id): id is string => !!id);
+  if (priorIds.length > 0) {
+    const priors = await db
+      .select({ id: schema.cliInvocations.id, errorMessage: schema.cliInvocations.errorMessage })
+      .from(schema.cliInvocations)
+      .where(inArray(schema.cliInvocations.id, priorIds));
+    for (const p of priors) {
+      if (isCliPreemptionFailure({ errorMessage: p.errorMessage }))
+        preemptedInvocationIds.add(p.id);
+    }
+  }
+  const wasPreempted = (r: { cliInvocationId: string | null }): boolean =>
+    !!r.cliInvocationId && preemptedInvocationIds.has(r.cliInvocationId);
+  const candidates = wantedRows.filter((r) => r.attempts < maxAttempts || wasPreempted(r));
   const targets: MiningRetryTargets = new Map();
-  for (const r of rows) {
-    if (!wanted.has(r.agentId) || r.attempts >= maxAttempts) continue;
+  for (const r of candidates) {
     targets.set(r.agentId, {
       id: r.id,
       attempts: r.attempts,
       cliInvocationId: r.cliInvocationId,
+      chargeAttempt: !wasPreempted(r),
     });
   }
   if (targets.size === 0) {
@@ -2501,9 +2541,12 @@ async function reconcileOrphanedMiningAgents(
       })
       .where(eq(schema.taskStepAgentMinings.id, row.id));
     changed = true;
+    // Same rule as the LLM path: an eviction re-dispatches whatever the budget says, because it
+    // is a scheduling decision rather than evidence the agent cannot run.
     if (
       isTransientCliFailure({ exitCode: inv.exitCode, errorMessage: inv.errorMessage }) &&
-      row.attempts < MAX_MINING_ORPHAN_REDISPATCH
+      (isCliPreemptionFailure({ errorMessage: inv.errorMessage }) ||
+        row.attempts < MAX_MINING_ORPHAN_REDISPATCH)
     ) {
       transientAgentIds.push(row.agentId);
     }
@@ -2632,7 +2675,9 @@ async function countTrailingCapabilityFailures(db: Database, taskStepId: string)
     .orderBy(desc(schema.cliInvocations.createdAt))
     .limit(10);
   let n = 0;
-  for (const r of rows) {
+  // Preemption rows are removed first: a scheduling eviction says nothing about whether the model
+  // can do the job, so it must neither count nor reset this budget.
+  for (const r of withoutPreemptions(rows)) {
     if (capabilityClassFromMessage(r.errorMessage)) n++;
     else break;
   }
@@ -2665,7 +2710,10 @@ async function countTrailingOrphans(db: Database, taskStepId: string): Promise<n
     .orderBy(desc(schema.cliInvocations.createdAt))
     .limit(10);
   let n = 0;
-  for (const r of rows) {
+  // Preemption rows are invisible here. They ARE transient (and re-dispatch on that basis), but
+  // this cap exists to stop a crash-looping worker, and a task the sweeper keeps evicting is not
+  // crash-looping — counting them would fail a perfectly healthy task at the third eviction.
+  for (const r of withoutPreemptions(rows)) {
     if (isTransientCliFailure({ exitCode: r.exitCode, errorMessage: r.errorMessage })) n++;
     else break;
   }
@@ -2702,7 +2750,9 @@ export async function trailingTimeoutInfo(
     .limit(10);
   let attempts = 0;
   let lastBudgetMinutes: number | null = null;
-  for (const r of rows) {
+  // Same removal as countTrailingOrphans: a preempted run never spent its budget, so it must
+  // neither climb the ladder nor reset a genuine timeout streak back to the base rung.
+  for (const r of withoutPreemptions(rows)) {
     if (!isCliTimeoutFailure({ errorMessage: r.errorMessage })) break;
     if (attempts === 0) lastBudgetMinutes = cliTimeoutBudgetMinutes(r.errorMessage);
     attempts++;

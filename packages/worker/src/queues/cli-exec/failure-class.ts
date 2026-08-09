@@ -59,7 +59,7 @@ export const CLI_TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137
  *  exec-core.ts (stop/cancel/timeout), stream.ts (premature stream end). Stable
  *  internal contracts we own end-to-end, never ephemeral upstream wording. */
 export const TRANSIENT_CLI_FAILURE_RE =
-  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out|exceeded its time budget/i;
+  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out|exceeded its time budget|preempted for a higher-priority task/i;
 
 /** Stable headline for the ONE transient case that must not be re-run identically: the
  *  CLI burned its whole budget and was SIGKILLed. Every other transient failure (worker
@@ -72,6 +72,24 @@ export const TRANSIENT_CLI_FAILURE_RE =
  *  Same "internal contract we own end-to-end" convention as OUTPUT_TRUNCATION_HEADLINE
  *  and PROVIDER_FATAL_HEADLINES — never matched against third-party CLI wording. */
 export const CLI_TIMEOUT_HEADLINE = 'CLI process exceeded its time budget';
+
+/** Stable headline for the OTHER transient case Haive inflicts on itself: the agent-preemption
+ *  sweeper killed a running CLI so a higher-voted task could take its slot. Transient like the
+ *  rest (the work never got to finish, so re-dispatching it identically is correct), but it must
+ *  be TELLABLE from a worker-restart orphan, because every retry budget in the step runner counts
+ *  orphans and none of them may count this.
+ *
+ *  Why that matters: MAX_ORPHAN_REDISPATCH is 3, so without the distinction a task preempted three
+ *  times would FAIL — silently turning "you deprioritised this" into "this is broken", which is
+ *  worse than the first-come behaviour preemption exists to replace. isCliPreemptionFailure is
+ *  what every counter uses to skip these rows.
+ *
+ *  Deliberately NOT a prefix of CLI_TIMEOUT_HEADLINE: a preemption never spent its budget, so it
+ *  must not climb the escalating timeout ladder.
+ *
+ *  Same "internal contract we own end-to-end" convention as CLI_TIMEOUT_HEADLINE and
+ *  OUTPUT_TRUNCATION_HEADLINE — written by exec-core, read only by us. */
+export const CLI_PREEMPTED_HEADLINE = 'CLI run preempted for a higher-priority task';
 
 /** True when an ended invocation did not finish under its own power — it was killed,
  *  orphaned by a worker restart, cancelled, or timed out — so its "failure" is an
@@ -97,6 +115,35 @@ export function isTransientCliFailure(sig: {
  *  interpretCliFailure wrote is the only signal that separates them. */
 export function isCliTimeoutFailure(sig: { errorMessage?: string | null }): boolean {
   return !!sig.errorMessage && sig.errorMessage.startsWith(CLI_TIMEOUT_HEADLINE);
+}
+
+/** True when an invocation was killed by the agent-preemption sweeper rather than by anything
+ *  wrong with the run. Every consecutive-failure budget (orphan re-dispatch, timeout ladder,
+ *  capability remediation, mining attempts, DAG infra retries) must SKIP these rows: preemption
+ *  is a scheduling decision Haive made, so charging it to a recovery budget would let a busy
+ *  machine fail a task that never actually failed.
+ *
+ *  Skip means skip — not "reset the count". A preemption between two genuine orphans must leave
+ *  those orphans adjacent, or repeated preemption would mask a real crash loop.
+ *
+ *  Text-only for the same reason as isCliTimeoutFailure: the exit signal (137/null) is identical
+ *  across every transient kind, so the headline is the only thing that separates them. */
+export function isCliPreemptionFailure(sig: { errorMessage?: string | null }): boolean {
+  return !!sig.errorMessage && sig.errorMessage.startsWith(CLI_PREEMPTED_HEADLINE);
+}
+
+/** Drop preemption rows from a step's invocation history before any consecutive-failure budget
+ *  scans it. One helper rather than a skip inside each loop, so the rule is stated (and tested)
+ *  once instead of three times — and so a fourth budget added later inherits it by using the same
+ *  entry point.
+ *
+ *  Removing rather than short-circuiting is the whole point: the remaining rows stay ADJACENT, so
+ *  a genuine crash loop interrupted by evictions is still counted as a crash loop. A `break` would
+ *  have let repeated preemption reset every budget and mask it. */
+export function withoutPreemptions<T extends { errorMessage: string | null }>(
+  rows: readonly T[],
+): T[] {
+  return rows.filter((r) => !isCliPreemptionFailure({ errorMessage: r.errorMessage }));
 }
 
 /** Minutes an invocation was allowed before the timeout killed it, recovered from the

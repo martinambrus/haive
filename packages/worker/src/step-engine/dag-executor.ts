@@ -17,7 +17,10 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
 import { loadPreviousStepOutput, pathExists } from './steps/onboarding/_helpers.js';
-import { isFatalProviderFailure } from '../queues/cli-exec/failure-class.js';
+import {
+  isCliPreemptionFailure,
+  isFatalProviderFailure,
+} from '../queues/cli-exec/failure-class.js';
 import {
   classifyDagIssueFailure,
   dagEnvironmentHaltReason,
@@ -851,10 +854,16 @@ async function ingestReviewRun(
         exitCode: inv.exitCode,
         errorMessage: inv.errorMessage,
       });
-      if (cls === 'transient' && issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES) {
+      // Free re-dispatch when the sweeper preempted the reviewer — same reasoning as the
+      // coder path: a scheduling eviction must not spend an infrastructure-recovery budget.
+      const preempted = isCliPreemptionFailure({ errorMessage: inv.errorMessage });
+      if (cls === 'transient' && (preempted || issue.reviewInfraRetries < DAG_MAX_INFRA_RETRIES)) {
         await ra.db
           .update(schema.taskDagIssues)
-          .set({ reviewInfraRetries: issue.reviewInfraRetries + 1, updatedAt: new Date() })
+          .set({
+            reviewInfraRetries: issue.reviewInfraRetries + (preempted ? 0 : 1),
+            updatedAt: new Date(),
+          })
           .where(eq(schema.taskDagIssues.id, issue.id));
         const ok = await spawnReviewAgent(
           ra,
@@ -1748,13 +1757,18 @@ export async function resolveDagPhase(
             exitCode: inv.exitCode,
             errorMessage: inv.errorMessage,
           });
-          if (cls === 'transient' && issue.infraRetries < DAG_MAX_INFRA_RETRIES) {
+          // Preemption is a scheduling decision Haive made, not an environment problem, so it
+          // re-dispatches for free. Charging it here would let a busy machine drive a healthy
+          // issue to DAG_INFRA_EXHAUSTED and halt the task with a misleading "raise
+          // RUNTIME_MEMORY_MB" diagnosis.
+          const preempted = isCliPreemptionFailure({ errorMessage: inv.errorMessage });
+          if (cls === 'transient' && (preempted || issue.infraRetries < DAG_MAX_INFRA_RETRIES)) {
             await db
               .update(schema.taskDagIssues)
               .set({
                 outcome: 'pending',
                 cliInvocationId: null,
-                infraRetries: issue.infraRetries + 1,
+                infraRetries: issue.infraRetries + (preempted ? 0 : 1),
                 concerns: null,
                 errorMessage: null,
                 rawOutput: null,

@@ -34,6 +34,8 @@ type RuntimeLimitsSettings = {
   agentFloor: number;
   agentReserveEnabled: boolean;
   agentReserveMaxHoldMinutes: number;
+  agentPreemptionEnabled: boolean;
+  agentPreemptionMinRunMinutes: number;
 };
 
 /** What those settings actually produce on this host, resolved server-side so the card can
@@ -55,7 +57,12 @@ type RuntimeLimitsResponse = RuntimeLimitsSettings & { capacity: RuntimeCapacity
 /** The runtime-limits card's inputs, as raw text (so a half-typed value isn't clamped). The
  *  booleans are excluded: a checkbox saves on the spot, there is nothing to half-type. */
 type RuntimeLimitsForm = {
-  [K in keyof Omit<RuntimeLimitsSettings, 'enabled' | 'agentReserveEnabled'>]: string;
+  [
+    K in keyof Omit<
+      RuntimeLimitsSettings,
+      'enabled' | 'agentReserveEnabled' | 'agentPreemptionEnabled'
+    >
+  ]: string;
 };
 
 /** Settings -> text inputs. One place, so a new knob can't be loaded but not saved. */
@@ -71,6 +78,7 @@ function runtimeLimitsFormOf(s: RuntimeLimitsSettings): RuntimeLimitsForm {
     browserWeightMb: String(s.browserWeightMb),
     agentFloor: String(s.agentFloor),
     agentReserveMaxHoldMinutes: String(s.agentReserveMaxHoldMinutes),
+    agentPreemptionMinRunMinutes: String(s.agentPreemptionMinRunMinutes),
   };
 }
 
@@ -148,6 +156,7 @@ export default function AdminPage() {
     browserWeightMb: '0',
     agentFloor: '0',
     agentReserveMaxHoldMinutes: '10',
+    agentPreemptionMinRunMinutes: '5',
   });
   const [savingRuntimeLimits, setSavingRuntimeLimits] = useState(false);
 
@@ -405,6 +414,10 @@ export default function AdminPage() {
       browserWeightMb: Number.parseInt(runtimeLimitsForm.browserWeightMb, 10),
       agentFloor: Number.parseInt(runtimeLimitsForm.agentFloor, 10),
       agentReserveMaxHoldMinutes: Number.parseInt(runtimeLimitsForm.agentReserveMaxHoldMinutes, 10),
+      agentPreemptionMinRunMinutes: Number.parseInt(
+        runtimeLimitsForm.agentPreemptionMinRunMinutes,
+        10,
+      ),
     };
     if (Object.values(numbers).some((n) => !Number.isInteger(n) || n < 0)) {
       setError('Runtime limit values must be integers of 0 or more.');
@@ -413,6 +426,7 @@ export default function AdminPage() {
     void saveRuntimeLimits({
       enabled: runtimeLimits.enabled,
       agentReserveEnabled: runtimeLimits.agentReserveEnabled,
+      agentPreemptionEnabled: runtimeLimits.agentPreemptionEnabled,
       ...numbers,
     });
   }
@@ -974,6 +988,30 @@ export default function AdminPage() {
             />
             Reserve CLI slots for tasks with a live environment
           </label>
+          {/* Preemption is the only lever that moves an ALREADY-RUNNING agent, so it is the one
+              part of vote scoring that can destroy work — its own switch, not folded into the
+              reserve above. */}
+          <label className="mt-2 flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={runtimeLimits.agentPreemptionEnabled}
+              disabled={savingRuntimeLimits || !runtimeLimits.enabled}
+              onChange={(e) =>
+                void saveRuntimeLimits({
+                  ...runtimeLimits,
+                  agentPreemptionEnabled: e.target.checked,
+                })
+              }
+              className="h-4 w-4"
+            />
+            Let an up-voted task preempt a lower-voted task&apos;s running agent
+          </label>
+          {runtimeLimits.agentPreemptionEnabled && (
+            <p className="mt-1 text-xs text-amber-400/80">
+              A preempted run loses the tokens and partial work it had spent; the step re-runs from
+              scratch. Environments are never torn down.
+            </p>
+          )}
           <div className="mt-3 flex flex-wrap items-end gap-2">
             <label className="flex flex-col gap-1 text-xs text-neutral-400">
               Memory per runner (MB, 0=auto)
@@ -1029,6 +1067,7 @@ export default function AdminPage() {
                 ['agentWeightMb', 'Agent weight (MB, 0=auto)'],
                 ['agentFloor', 'Agent floor (0=auto)'],
                 ['agentReserveMaxHoldMinutes', 'Reserve max hold (min, 0=strict)'],
+                ['agentPreemptionMinRunMinutes', 'Preempt after (min, 0=immediate)'],
               ] as const
             ).map(([field, label]) => (
               <label key={field} className="flex flex-col gap-1 text-xs text-neutral-400">

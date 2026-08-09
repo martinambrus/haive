@@ -4,12 +4,15 @@ import {
   classifyAntigravityDiagnostic,
   classifyModelCapability,
   classifyProviderFatal,
+  CLI_PREEMPTED_HEADLINE,
   CLI_TIMEOUT_HEADLINE,
   cliTimeoutBudgetMinutes,
   fatalClassFromMessage,
+  isCliPreemptionFailure,
   isCliTimeoutFailure,
   isFatalProviderFailure,
   isTransientCliFailure,
+  withoutPreemptions,
   MODEL_CAPABILITY_HEADLINES,
   PROVIDER_FATAL_HEADLINES,
   type ModelCapabilityClass,
@@ -379,5 +382,131 @@ describe('capabilityClassFromMessage', () => {
     expect(
       capabilityClassFromMessage(`the agent said ${MODEL_CAPABILITY_HEADLINES.no_image_support}`),
     ).toBeNull();
+  });
+});
+
+describe('preemption classification', () => {
+  const PREEMPTED = `${CLI_PREEMPTED_HEADLINE}. The step re-runs automatically.`;
+
+  it('is TRANSIENT, so the existing recovery path re-dispatches it', () => {
+    expect(isTransientCliFailure({ exitCode: 137, errorMessage: PREEMPTED })).toBe(true);
+    // …and from the text alone, with no exit signal to lean on.
+    expect(isTransientCliFailure({ exitCode: undefined, errorMessage: PREEMPTED })).toBe(true);
+  });
+
+  it('is NOT a timeout — a preempted run never spent its budget', () => {
+    // If this ever flips true, every eviction would climb the escalating timeout ladder and a
+    // step would silently be handed a bigger budget it never needed.
+    expect(isCliTimeoutFailure({ errorMessage: PREEMPTED })).toBe(false);
+    expect(cliTimeoutBudgetMinutes(PREEMPTED)).toBeNull();
+  });
+
+  it('recognises only its own headline, at the START', () => {
+    expect(isCliPreemptionFailure({ errorMessage: PREEMPTED })).toBe(true);
+    expect(isCliPreemptionFailure({ errorMessage: null })).toBe(false);
+    expect(
+      isCliPreemptionFailure({ errorMessage: 'CLI process was stopped before it finished' }),
+    ).toBe(false);
+    expect(
+      isCliPreemptionFailure({ errorMessage: `the agent said ${CLI_PREEMPTED_HEADLINE}` }),
+    ).toBe(false);
+  });
+
+  it('a timeout is not mistaken for a preemption', () => {
+    expect(isCliPreemptionFailure({ errorMessage: `${CLI_TIMEOUT_HEADLINE} (30m).` })).toBe(false);
+  });
+});
+
+describe('withoutPreemptions', () => {
+  const row = (errorMessage: string | null) => ({ errorMessage });
+  const PREEMPTED = `${CLI_PREEMPTED_HEADLINE}.`;
+  const ORPHAN = 'CLI invocation orphaned by a worker restart';
+
+  it('removes preemption rows and leaves everything else untouched', () => {
+    expect(withoutPreemptions([row(ORPHAN), row(PREEMPTED), row(null)])).toEqual([
+      row(ORPHAN),
+      row(null),
+    ]);
+  });
+
+  it('keeps real orphans ADJACENT so an interrupted crash loop still counts', () => {
+    // Three genuine orphans with evictions interleaved must still read as three in a row —
+    // otherwise repeated preemption would mask a crash-looping worker forever.
+    const history = [
+      row(ORPHAN),
+      row(PREEMPTED),
+      row(ORPHAN),
+      row(PREEMPTED),
+      row(PREEMPTED),
+      row(ORPHAN),
+    ];
+    expect(withoutPreemptions(history)).toEqual([row(ORPHAN), row(ORPHAN), row(ORPHAN)]);
+  });
+
+  it('an all-preemption history collapses to nothing, so no budget is spent', () => {
+    expect(withoutPreemptions([row(PREEMPTED), row(PREEMPTED), row(PREEMPTED)])).toEqual([]);
+  });
+
+  it('preserves order', () => {
+    expect(
+      withoutPreemptions([row('a'), row(PREEMPTED), row('b')]).map((r) => r.errorMessage),
+    ).toEqual(['a', 'b']);
+  });
+});
+
+/** The rule the live run disproved: keeping preemptions out of a COUNT is not the same as
+ *  keeping them from TRIGGERING an exhausted-budget failure. Both call sites must pass.
+ *
+ *  Modelled exactly as the gates are written:
+ *      preempted || countTrailingOrphans(...) < MAX
+ *  against the real history that failed task 38f02dee — a timeout plus three worker-restart
+ *  orphans, i.e. a budget already spent before the eviction ever arrived. */
+describe('a preemption re-dispatches regardless of the transient budget', () => {
+  const MAX_ORPHAN_REDISPATCH = 3;
+  const PREEMPTED = `${CLI_PREEMPTED_HEADLINE}.`;
+  const ORPHAN = 'CLI invocation orphaned by a worker restart';
+  const TIMEOUT = `${CLI_TIMEOUT_HEADLINE} (45m).`;
+
+  /** countTrailingOrphans, in miniature: drop preemptions, then count leading transients. */
+  const trailingOrphans = (messages: (string | null)[]): number => {
+    let n = 0;
+    for (const r of withoutPreemptions(messages.map((errorMessage) => ({ errorMessage })))) {
+      if (!isTransientCliFailure({ exitCode: null, errorMessage: r.errorMessage })) break;
+      n++;
+    }
+    return n;
+  };
+
+  const redispatches = (history: (string | null)[]): boolean => {
+    const [newest] = history;
+    return (
+      isCliPreemptionFailure({ errorMessage: newest }) ||
+      trailingOrphans(history) < MAX_ORPHAN_REDISPATCH
+    );
+  };
+
+  it('the eviction is excluded from the count', () => {
+    expect(trailingOrphans([PREEMPTED, TIMEOUT, ORPHAN, ORPHAN, ORPHAN])).toBe(4);
+    expect(trailingOrphans([PREEMPTED, PREEMPTED, PREEMPTED])).toBe(0);
+  });
+
+  it('re-dispatches on the exact history that failed 38f02dee', () => {
+    // Budget spent 4/3 by genuine failures — the eviction must still not be what kills it.
+    expect(redispatches([PREEMPTED, TIMEOUT, ORPHAN, ORPHAN, ORPHAN])).toBe(true);
+  });
+
+  it('re-dispatches an all-preemption history forever', () => {
+    expect(redispatches([PREEMPTED, PREEMPTED, PREEMPTED, PREEMPTED, PREEMPTED])).toBe(true);
+  });
+
+  it('still FAILS on a genuine crash loop, evictions interleaved or not', () => {
+    expect(redispatches([ORPHAN, ORPHAN, ORPHAN])).toBe(false);
+    // The interleaving must not rescue it: that is why withoutPreemptions removes rather than
+    // short-circuits — the real orphans stay adjacent and still count to 3.
+    expect(redispatches([ORPHAN, PREEMPTED, ORPHAN, PREEMPTED, ORPHAN])).toBe(false);
+  });
+
+  it('still re-dispatches a genuine orphan while its budget lasts', () => {
+    expect(redispatches([ORPHAN, ORPHAN])).toBe(true);
   });
 });

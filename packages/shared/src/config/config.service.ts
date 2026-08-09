@@ -327,6 +327,21 @@ export const CONFIG_KEYS = {
   // it a busy runtime fleet starves runner-less work for as long as it keeps queueing jobs.
   // 0 = strict, no escape.
   AGENT_RESERVE_MAX_HOLD_MINUTES: 'config:sandbox:agentReserveMaxHoldMinutes',
+  // Whether a RUNNING CLI agent on a lower-voted task is killed so a higher-voted task's
+  // queued job can take its slot. Vote scoring only orders the QUEUE, so a boosted task
+  // still waited behind whatever happened to be enqueued first — observed live: a +2 task
+  // held the queue's lowest priority number and could not run because both slots were taken
+  // first-come. Preemption is the only thing that changes that. It destroys the killed
+  // round's tokens and partial work, and it is the one part of vote scoring that can break
+  // the no-starvation property, so it is a switch. Off = first-come among running agents
+  // (the queue is still vote-ordered).
+  AGENT_PREEMPTION_ENABLED: 'config:sandbox:agentPreemptionEnabled',
+  // How long a CLI agent must have been running before it may be preempted. The trade in
+  // one number: lower reacts faster but destroys more short runs, higher lets a brief run
+  // finish under its own power while the boosted task waits longer. Also what stops a
+  // just-restarted victim from being killed again before it achieves anything. 0 = no
+  // guard (preempt as soon as a higher-voted task queues work).
+  AGENT_PREEMPTION_MIN_RUN_MINUTES: 'config:sandbox:agentPreemptionMinRunMinutes',
   // Grace (minutes) before the runtime reaper reclaims a FAILED task's leaked runner
   // (failed runners are kept for retry/recovery, so they need a grace). Runners whose
   // task is completed/cancelled/missing, or whose container has exited, are reaped
@@ -419,6 +434,8 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.AGENT_FLOOR]: '0',
   [CONFIG_KEYS.AGENT_RESERVE_ENABLED]: 'true',
   [CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES]: '10',
+  [CONFIG_KEYS.AGENT_PREEMPTION_ENABLED]: 'true',
+  [CONFIG_KEYS.AGENT_PREEMPTION_MIN_RUN_MINUTES]: '5',
   [CONFIG_KEYS.RUNTIME_IDLE_REAP_MINUTES]: '180',
 };
 

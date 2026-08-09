@@ -2,10 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { interpretCliFailure } from './exec-core.js';
 import {
   capabilityClassFromMessage,
+  CLI_PREEMPTED_HEADLINE,
+  CLI_TIMEOUT_HEADLINE,
+  isCliPreemptionFailure,
+  isCliTimeoutFailure,
   isFatalProviderFailure,
   isOutputTruncationMessage,
   isTransientCliFailure,
   MODEL_CAPABILITY_HEADLINES,
+  withoutPreemptions,
 } from './failure-class.js';
 
 // Verbatim cli_invocations.error_message values from the production incident (task
@@ -73,5 +78,50 @@ describe('interpretCliFailure: model-capability messages', () => {
     );
     expect(capabilityClassFromMessage(killed)).toBeNull();
     expect(isTransientCliFailure({ exitCode: 137, errorMessage: killed })).toBe(true);
+  });
+});
+
+/** A SIGKILLed run: no spawn error of its own, so whatever the spawner stamped is all that
+ *  separates one kind of kill from another. */
+const killed = (errorMessage: string | undefined) => ({
+  exitCode: 137,
+  rawOutput: '',
+  parsedOutput: null,
+  errorMessage,
+});
+
+describe('interpretCliFailure: self-identified kills keep their headline', () => {
+  // Regression. The termination branch used to preserve ONLY the timeout headline and rewrite
+  // everything else to the generic sentence, so a preemption reached the DB labelled as a plain
+  // transient stop. It still re-dispatched — which is why nothing looked broken — but it was
+  // then counted as a worker-restart orphan, and three evictions would fail a healthy task.
+  // Caught live, not by a unit test: the classifier was right, its caller never called it.
+  it('preserves the preemption headline through a 137 termination', () => {
+    const message = interpretCliFailure(
+      killed(`${CLI_PREEMPTED_HEADLINE}. The step re-runs.`),
+      null,
+    );
+    expect(isCliPreemptionFailure({ errorMessage: message })).toBe(true);
+    // …and the whole point of preserving it: the budgets can see it.
+    expect(withoutPreemptions([{ errorMessage: message }])).toEqual([]);
+  });
+
+  it('preserves the timeout headline through a 137 termination', () => {
+    const message = interpretCliFailure(killed(`${CLI_TIMEOUT_HEADLINE} (45m).`), null);
+    expect(isCliTimeoutFailure({ errorMessage: message })).toBe(true);
+  });
+
+  it('still collapses an UNlabelled kill to the generic transient sentence', () => {
+    const message = interpretCliFailure(killed(undefined), null);
+    expect(message).toBe('CLI process was stopped before it finished (cancelled or timed out).');
+    expect(isTransientCliFailure({ exitCode: 137, errorMessage: message })).toBe(true);
+    expect(isCliPreemptionFailure({ errorMessage: message })).toBe(false);
+  });
+
+  it('a preempted run is transient, so the existing recovery re-dispatches it', () => {
+    const message = interpretCliFailure(killed(`${CLI_PREEMPTED_HEADLINE}.`), null);
+    expect(isTransientCliFailure({ exitCode: 137, errorMessage: message })).toBe(true);
+    // But NOT a timeout, or every eviction would climb the escalating budget ladder.
+    expect(isCliTimeoutFailure({ errorMessage: message })).toBe(false);
   });
 });
