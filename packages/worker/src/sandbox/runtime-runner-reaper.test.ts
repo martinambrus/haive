@@ -208,3 +208,98 @@ describe('pickPreemptibleRunner', () => {
     expect(pick?.id).toBe('old');
   });
 });
+
+describe('pickPreemptibleRunner: score tier', () => {
+  const runner = (over: Partial<RunnerContainer> = {}): RunnerContainer => ({
+    id: 'c1',
+    taskId: 't1',
+    running: true,
+    startedAtMs: 1_000,
+    ...over,
+  });
+  const live = (voteScore: number, settled: boolean): ReaperTask => ({
+    status: 'running',
+    completedAt: null,
+    pausedAt: null,
+    settled,
+    voteScore,
+  });
+
+  it('is inert without a waiter score — the pre-feature behaviour', () => {
+    const c = [runner({ id: 'low', taskId: 'low' })];
+    const tasks = new Map([['low', live(0, true)]]);
+    expect(pickPreemptibleRunner(c, tasks)).toBeNull();
+    expect(pickPreemptibleRunner(c, tasks, null)).toBeNull();
+  });
+
+  it('takes a settled runner the waiter outscores', () => {
+    const c = [runner({ id: 'low', taskId: 'low' })];
+    expect(pickPreemptibleRunner(c, new Map([['low', live(0, true)]]), 2)?.id).toBe('low');
+  });
+
+  it('NEVER takes an unsettled runner — the guard that stops killing a live agent', () => {
+    const c = [runner({ id: 'low', taskId: 'low' })];
+    expect(pickPreemptibleRunner(c, new Map([['low', live(0, false)]]), 2)).toBeNull();
+  });
+
+  it('never takes an equal or higher score — ties stay first-come', () => {
+    const c = [runner({ id: 'peer', taskId: 'peer' })];
+    expect(pickPreemptibleRunner(c, new Map([['peer', live(2, true)]]), 2)).toBeNull();
+    expect(pickPreemptibleRunner(c, new Map([['peer', live(3, true)]]), 2)).toBeNull();
+  });
+
+  it('an absent score reads as neutral 0', () => {
+    const c = [runner({ id: 'x', taskId: 'x' })];
+    const t: ReaperTask = { status: 'running', completedAt: null, pausedAt: null, settled: true };
+    expect(pickPreemptibleRunner(c, new Map([['x', t]]), 1)?.id).toBe('x');
+  });
+
+  it('prefers the lowest score, then the LONGEST-running', () => {
+    const c = [
+      runner({ id: 'mid', taskId: 'mid', startedAtMs: 5_000 }),
+      runner({ id: 'oldest-low', taskId: 'oldest-low', startedAtMs: 1_000 }),
+      runner({ id: 'newest-low', taskId: 'newest-low', startedAtMs: 9_000 }),
+    ];
+    const tasks = new Map([
+      ['mid', live(1, true)],
+      ['oldest-low', live(0, true)],
+      ['newest-low', live(0, true)],
+    ]);
+    expect(pickPreemptibleRunner(c, tasks, 2)?.id).toBe('oldest-low');
+  });
+
+  it('tiers 1 and 2 still win over the score tier', () => {
+    const c = [
+      runner({ id: 'dead', taskId: 'dead' }),
+      runner({ id: 'low', taskId: 'low', startedAtMs: 1 }),
+    ];
+    const withDead = new Map<string, ReaperTask>([
+      ['dead', { status: 'failed', completedAt: new Date(0), settled: true, voteScore: 5 }],
+      ['low', live(0, true)],
+    ]);
+    expect(pickPreemptibleRunner(c, withDead, 2)?.id).toBe('dead');
+
+    const withPaused = new Map<string, ReaperTask>([
+      [
+        'dead',
+        {
+          status: 'running',
+          completedAt: null,
+          pausedAt: new Date(0),
+          settled: true,
+          voteScore: 5,
+        },
+      ],
+      ['low', live(0, true)],
+    ]);
+    expect(pickPreemptibleRunner(c, withPaused, 2)?.id).toBe('dead');
+  });
+
+  it('ignores non-running containers, like every other tier', () => {
+    // pickPreemptibleRunner filters to `running` before any tier: an exited container holds no
+    // gate slot, so reclaiming it would free nothing. (The periodic sweep still reaps it via
+    // reapDecision's 'exited' branch — a different code path with a different job.)
+    const c = [runner({ id: 'low', taskId: 'low', running: false })];
+    expect(pickPreemptibleRunner(c, new Map([['low', live(0, true)]]), 2)).toBeNull();
+  });
+});

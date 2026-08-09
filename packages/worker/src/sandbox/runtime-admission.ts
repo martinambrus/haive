@@ -10,6 +10,10 @@ import {
   logger,
   type RuntimeCaps,
 } from '@haive/shared';
+import { clampVoteScore, TASK_VOTE_MAX } from '@haive/shared/fair-priority';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
 import {
   RUNTIME_WEIGHT_LABEL,
@@ -57,6 +61,9 @@ export class RuntimeSlotAbortedError extends Error {
 interface Waiter {
   done: boolean;
   timer: ReturnType<typeof setTimeout> | null;
+  /** This waiter's vote score, so the reclaimer's score tier knows who it is freeing capacity
+   *  FOR — it may only take a runner from a strictly lower-voted task. */
+  voteScore: number;
   /** What this waiter's runner will occupy, so the head of the queue is admitted against the
    *  budget it actually needs rather than a one-size slot. */
   weightMb: number;
@@ -76,12 +83,16 @@ let pumping = false;
 let pumpAgain = false;
 let repumpTimer: ReturnType<typeof setInterval> | null = null;
 
-/** Optional hook to reclaim runtime capacity when the pool is full, by preempting a runner
- *  whose task is no longer running (a failed/terminal task's grace-runner). Wired at boot to
- *  the runner reaper; left unset it is exactly today's park-and-wait behavior. Returns true
- *  iff it freed a runner. */
-let reclaimer: (() => Promise<boolean>) | null = null;
-export function setRuntimeReclaimer(fn: (() => Promise<boolean>) | null): void {
+/** Optional hook to reclaim runtime capacity when the pool is full: a runner whose task is no
+ *  longer running (a failed/terminal task's grace-runner), one held by a settled pause, or — when
+ *  runtime preemption is on — one held by a task the WAITER outscores. `waiterScore` is what makes
+ *  that last tier possible; the reclaimer must never take a runner from an equal or higher score.
+ *  Wired at boot to the runner reaper; left unset it is exactly today's park-and-wait behavior.
+ *  Returns true iff it freed a runner. */
+let reclaimer: ((waiterScore: number, waitedMs: number) => Promise<boolean>) | null = null;
+export function setRuntimeReclaimer(
+  fn: ((waiterScore: number, waitedMs: number) => Promise<boolean>) | null,
+): void {
   reclaimer = fn;
 }
 
@@ -340,6 +351,60 @@ export async function resolveAgentConcurrency(fallback: number): Promise<number>
 // byte budget "am I next" is not enough — a waiter needs to know how much the tasks ahead of it
 // will take before it can claim what is free. Redis-only soft state — losing it costs fairness
 // for one round, never correctness.
+/** Original join time per parked task, so re-polling every ~15s cannot reset a ticket's place.
+ *  The ZSET score is recomputed on every poll (that is what lets a vote cast WHILE parked take
+ *  effect), so the "when did you get here" half has to live somewhere the recompute reads rather
+ *  than in the score it overwrites. Cleared in leaveParkQueue AND in the dead-ticket sweep — it
+ *  carries no TTL of its own, unlike the liveness key, so nothing else would ever remove it. */
+/** How long this task has held its park ticket, or 0 when it has none. Read from the join-time
+ *  hash rather than the ZSET score, which is a composite the vote can move. Feeds the reclaimer's
+ *  escape hatch: only a waiter that has genuinely been stuck earns the right to force a holder's
+ *  agent out of the way. */
+async function parkWaitedMs(taskId: string): Promise<number> {
+  try {
+    const raw = await getRedis().hget(PARK_JOINED_KEY, taskId);
+    const joined = Number.parseInt(raw ?? '', 10);
+    return Number.isFinite(joined) && joined > 0 ? Math.max(0, Date.now() - joined) : 0;
+  } catch {
+    return 0; // unknown wait counts as "just arrived" — never force a handover on a guess
+  }
+}
+
+/** This task's vote score, for the park order and the reclaim tier. Its own tiny query rather
+ *  than a join: the gate runs on a ~15s poll per parked task, and a stale-by-one-poll score only
+ *  mis-orders a queue that is about to be re-read. Fails to 0 (neutral) so a DB hiccup degrades to
+ *  the pre-feature FIFO instead of blocking admission. */
+async function taskVoteScore(taskId: string): Promise<number> {
+  try {
+    const rows = await getDb()
+      .select({ voteScore: schema.tasks.voteScore })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, taskId))
+      .limit(1);
+    return clampVoteScore(rows[0]?.voteScore ?? 0);
+  } catch (err) {
+    log.warn({ err, taskId }, 'park vote-score read failed; treating as neutral');
+    return 0;
+  }
+}
+
+const PARK_JOINED_KEY = 'haive:runtime-park-joined';
+
+/** Vote-score band width for the park order. `(TASK_VOTE_MAX - score)` spans 0..10, so the widest
+ *  composite is ~1.0e14 — exact in the IEEE-754 double a Redis ZSET score is (integers are exact
+ *  below 2^53 ≈ 9.0e15). Wide enough that a join time (~1.8e12 ms) can never bleed into the next
+ *  band, which is the property that makes "higher vote first, then first-come" hold. */
+const PARK_SCORE_BAND = 1e13;
+
+/** Park-queue ordering: higher vote first, then first-come within a band. Pure and exported so
+ *  the ordering is asserted rather than assumed — its failure mode is a silently mis-ordered
+ *  queue, which looks like "votes do nothing" rather than like an error. At vote 0 every entry
+ *  gets the same constant band, so an unvoted fleet keeps exactly the FIFO order this queue had
+ *  before scores existed. */
+export function parkQueueScore(voteScore: number, joinedMs: number): number {
+  return (TASK_VOTE_MAX - clampVoteScore(voteScore)) * PARK_SCORE_BAND + joinedMs;
+}
+
 const PARK_QUEUE_KEY = 'haive:runtime-park';
 const PARK_WEIGHT_KEY = 'haive:runtime-park-weight';
 const PARK_ALIVE_PREFIX = 'haive:runtime-park-alive:';
@@ -362,12 +427,24 @@ async function joinParkQueue(
   taskId: string,
   weightMb: number,
   caps: RuntimeCaps,
+  voteScore: number,
 ): Promise<ParkQueuePosition> {
   try {
     const redis = getRedis();
+    const now = Date.now();
+    // HSETNX: the first join wins and later polls read it back, so a ticket keeps its place in
+    // line. The ZADD deliberately does NOT use NX any more — the score is a function of the task's
+    // CURRENT vote, and re-scoring on each poll is how a vote cast while parked re-orders the
+    // queue. At vote 0 every entry shifts by the same constant band, so an unvoted fleet keeps
+    // exactly the FIFO order this queue had before scores existed.
+    await redis.hsetnx(PARK_JOINED_KEY, taskId, String(now));
+    const joinedRaw = await redis.hget(PARK_JOINED_KEY, taskId);
+    const joinedMs = Number.parseInt(joinedRaw ?? '', 10);
+    const joinedAt = Number.isFinite(joinedMs) && joinedMs > 0 ? joinedMs : now;
+    const parkScore = parkQueueScore(voteScore, joinedAt);
     await redis
       .multi()
-      .zadd(PARK_QUEUE_KEY, 'NX', Date.now(), taskId)
+      .zadd(PARK_QUEUE_KEY, parkScore, taskId)
       .hset(PARK_WEIGHT_KEY, taskId, String(weightMb))
       .set(`${PARK_ALIVE_PREFIX}${taskId}`, '1', 'EX', PARK_ALIVE_TTL_S)
       .exec();
@@ -382,6 +459,7 @@ async function joinParkQueue(
         .multi()
         .zrem(PARK_QUEUE_KEY, ...dead)
         .hdel(PARK_WEIGHT_KEY, ...dead)
+        .hdel(PARK_JOINED_KEY, ...dead)
         .exec();
     }
     const idx = live.indexOf(taskId);
@@ -412,6 +490,7 @@ async function leaveParkQueue(taskId: string): Promise<void> {
       .multi()
       .zrem(PARK_QUEUE_KEY, taskId)
       .hdel(PARK_WEIGHT_KEY, taskId)
+      .hdel(PARK_JOINED_KEY, taskId)
       .del(`${PARK_ALIVE_PREFIX}${taskId}`)
       .exec();
   } catch {
@@ -483,6 +562,7 @@ export async function runtimeAdmission(
     return { ...idle, budgetMb: caps.runtimeBudgetMb, myWeightMb: 0 };
   }
   const myWeightMb = await resolveRuntimeWeightMb(taskId, kind);
+  const myVoteScore = await taskVoteScore(taskId);
   let occupancy = await runtimeOccupancy(caps);
   let busyMb = sumWeights(occupancy) + inFlight.weightMb;
   // Pool full: before parking, try to preempt a runner from a task that is no longer running
@@ -493,14 +573,15 @@ export async function runtimeAdmission(
   if (
     busyMb + myWeightMb > caps.runtimeBudgetMb &&
     reclaimer &&
-    (await reclaimer().catch(() => false))
+    (await reclaimer(myVoteScore, await parkWaitedMs(taskId)).catch(() => false))
   ) {
     occupancy = await runtimeOccupancy(caps);
     busyMb = sumWeights(occupancy) + inFlight.weightMb;
   }
-  // Take (or keep) the FIFO ticket BEFORE deciding — the decision needs this task's position and
-  // the weights ahead of it, and an admitted task drops its ticket again right below.
-  const queue = await joinParkQueue(taskId, myWeightMb, caps);
+  // Take (or keep) the ticket BEFORE deciding — the decision needs this task's position and the
+  // weights ahead of it, and an admitted task drops its ticket again right below. Ordered by vote
+  // first and join time second, so a boosted task is handed the next runner that frees.
+  const queue = await joinParkQueue(taskId, myWeightMb, caps, myVoteScore);
   const decision = runtimeAdmissionDecision({
     budgetMb: caps.runtimeBudgetMb,
     busyMb,
@@ -575,7 +656,9 @@ async function pump(): Promise<void> {
           // runner whose task is no longer running (a dead task's grace-runner) — a live
           // waiter's demand outranks a retry-cache. A reclaim frees a running runner, so loop
           // again to re-count and admit. Best-effort: never let it fail the pump.
-          if (reclaimer && (await reclaimer().catch(() => false))) continue;
+          // waitedMs 0: this is the in-process cold-boot queue, which holds no park ticket. The
+          // escape hatch belongs to the task-level gate, where a wait is measured in minutes.
+          if (reclaimer && (await reclaimer(head.voteScore, 0).catch(() => false))) continue;
           // Nothing to preempt: tell every still-queued waiter WHY it's blocked (a resource
           // queue, not a slow boot) so its caller's progress line can say so. Fires on the
           // initial pump and each repump, refreshing the numbers as runners come/go.
@@ -620,8 +703,9 @@ export async function acquireRuntimeSlot(
   }
 
   const weightMb = await resolveRuntimeWeightMb(taskId, kind);
+  const voteScore = await taskVoteScore(taskId);
   return new Promise<ReleaseFn>((resolve, reject) => {
-    const w: Waiter = { done: false, timer: null, weightMb, admit: () => {}, onWait };
+    const w: Waiter = { done: false, timer: null, weightMb, voteScore, admit: () => {}, onWait };
     let onAbort: (() => void) | null = null;
     w.admit = (reason) => {
       if (w.done) return;

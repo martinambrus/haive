@@ -168,7 +168,9 @@ async function main(): Promise<void> {
   runtimeRunnerReaper.start();
   // Let the admission gate preempt a dead task's grace-runner for a waiting live task instead
   // of starving it behind the retry-cache (reuses the reaper's list/reap).
-  setRuntimeReclaimer(() => runtimeRunnerReaper.reclaimOnePreemptible());
+  // The waiter's vote score reaches the reaper here: it is what lets a boosted task reclaim a
+  // lower-voted task's LIVE (but settled) environment, on top of the dead/orphan and paused tiers.
+  setRuntimeReclaimer((waiterScore) => runtimeRunnerReaper.reclaimOnePreemptible(waiterScore));
   // Give an up-voted task a slot that is already occupied. BullMQ priority can only order the
   // QUEUE, so without this a boosted task still waits behind whatever was enqueued first; a
   // pickup gate cannot help either, since it only runs once a slot is free. Kills agent

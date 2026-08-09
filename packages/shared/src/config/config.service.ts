@@ -342,6 +342,19 @@ export const CONFIG_KEYS = {
   // just-restarted victim from being killed again before it achieves anything. 0 = no
   // guard (preempt as soon as a higher-voted task queues work).
   AGENT_PREEMPTION_MIN_RUN_MINUTES: 'config:sandbox:agentPreemptionMinRunMinutes',
+  // Whether a higher-voted task waiting for a RUNTIME (DDEV/app) slot may reclaim a lower-voted
+  // task's LIVE runner. Without it, holding a runner is a prerequisite for a vote to matter at
+  // all: a task that cannot get an environment never reaches the cli-exec queue, so its score is
+  // never consulted — observed as a score-1 task parked behind three live runners while a score-0
+  // holder kept running. Only ever reclaims a runner whose task has NO live CLI invocation, so an
+  // environment is never torn out from under a running agent. Off = the pre-feature tiers (dead,
+  // orphaned and paused-and-settled runners only).
+  RUNTIME_PREEMPTION_ENABLED: 'config:sandbox:runtimePreemptionEnabled',
+  // How long a higher-voted task may sit parked before the reclaimer forces the issue by
+  // preempting the HOLDER'S AGENT, which creates the settled window it needs. Without this the
+  // tier only fires when the agent sweeper happens to have evicted that holder for its own
+  // reasons, so a quiet machine can leave the waiter parked indefinitely. 0 = never force it.
+  RUNTIME_PREEMPTION_MAX_WAIT_MINUTES: 'config:sandbox:runtimePreemptionMaxWaitMinutes',
   // Grace (minutes) before the runtime reaper reclaims a FAILED task's leaked runner
   // (failed runners are kept for retry/recovery, so they need a grace). Runners whose
   // task is completed/cancelled/missing, or whose container has exited, are reaped
@@ -436,6 +449,8 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES]: '10',
   [CONFIG_KEYS.AGENT_PREEMPTION_ENABLED]: 'true',
   [CONFIG_KEYS.AGENT_PREEMPTION_MIN_RUN_MINUTES]: '5',
+  [CONFIG_KEYS.RUNTIME_PREEMPTION_ENABLED]: 'true',
+  [CONFIG_KEYS.RUNTIME_PREEMPTION_MAX_WAIT_MINUTES]: '10',
   [CONFIG_KEYS.RUNTIME_IDLE_REAP_MINUTES]: '180',
 };
 

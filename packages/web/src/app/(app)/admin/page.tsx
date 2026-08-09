@@ -36,6 +36,8 @@ type RuntimeLimitsSettings = {
   agentReserveMaxHoldMinutes: number;
   agentPreemptionEnabled: boolean;
   agentPreemptionMinRunMinutes: number;
+  runtimePreemptionEnabled: boolean;
+  runtimePreemptionMaxWaitMinutes: number;
 };
 
 /** What those settings actually produce on this host, resolved server-side so the card can
@@ -60,7 +62,7 @@ type RuntimeLimitsForm = {
   [
     K in keyof Omit<
       RuntimeLimitsSettings,
-      'enabled' | 'agentReserveEnabled' | 'agentPreemptionEnabled'
+      'enabled' | 'agentReserveEnabled' | 'agentPreemptionEnabled' | 'runtimePreemptionEnabled'
     >
   ]: string;
 };
@@ -79,6 +81,7 @@ function runtimeLimitsFormOf(s: RuntimeLimitsSettings): RuntimeLimitsForm {
     agentFloor: String(s.agentFloor),
     agentReserveMaxHoldMinutes: String(s.agentReserveMaxHoldMinutes),
     agentPreemptionMinRunMinutes: String(s.agentPreemptionMinRunMinutes),
+    runtimePreemptionMaxWaitMinutes: String(s.runtimePreemptionMaxWaitMinutes),
   };
 }
 
@@ -157,6 +160,7 @@ export default function AdminPage() {
     agentFloor: '0',
     agentReserveMaxHoldMinutes: '10',
     agentPreemptionMinRunMinutes: '5',
+    runtimePreemptionMaxWaitMinutes: '10',
   });
   const [savingRuntimeLimits, setSavingRuntimeLimits] = useState(false);
 
@@ -418,6 +422,10 @@ export default function AdminPage() {
         runtimeLimitsForm.agentPreemptionMinRunMinutes,
         10,
       ),
+      runtimePreemptionMaxWaitMinutes: Number.parseInt(
+        runtimeLimitsForm.runtimePreemptionMaxWaitMinutes,
+        10,
+      ),
     };
     if (Object.values(numbers).some((n) => !Number.isInteger(n) || n < 0)) {
       setError('Runtime limit values must be integers of 0 or more.');
@@ -427,6 +435,7 @@ export default function AdminPage() {
       enabled: runtimeLimits.enabled,
       agentReserveEnabled: runtimeLimits.agentReserveEnabled,
       agentPreemptionEnabled: runtimeLimits.agentPreemptionEnabled,
+      runtimePreemptionEnabled: runtimeLimits.runtimePreemptionEnabled,
       ...numbers,
     });
   }
@@ -1006,6 +1015,29 @@ export default function AdminPage() {
             />
             Let an up-voted task preempt a lower-voted task&apos;s running agent
           </label>
+          {/* Separate switch from agent preemption: this one reclaims an ENVIRONMENT, and it is
+              what stops "holding a DDEV" being a prerequisite for a vote to count at all. */}
+          <label className="mt-2 flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={runtimeLimits.runtimePreemptionEnabled}
+              disabled={savingRuntimeLimits || !runtimeLimits.enabled}
+              onChange={(e) =>
+                void saveRuntimeLimits({
+                  ...runtimeLimits,
+                  runtimePreemptionEnabled: e.target.checked,
+                })
+              }
+              className="h-4 w-4"
+            />
+            Let an up-voted task reclaim a lower-voted task&apos;s environment
+          </label>
+          {runtimeLimits.runtimePreemptionEnabled && (
+            <p className="mt-1 text-xs text-amber-400/80">
+              Only ever takes an environment whose task has no CLI run in flight, so nothing is
+              pulled out from under a running agent. The task that loses it re-queues for one.
+            </p>
+          )}
           {runtimeLimits.agentPreemptionEnabled && (
             <p className="mt-1 text-xs text-amber-400/80">
               A preempted run loses the tokens and partial work it had spent; the step re-runs from
@@ -1068,6 +1100,7 @@ export default function AdminPage() {
                 ['agentFloor', 'Agent floor (0=auto)'],
                 ['agentReserveMaxHoldMinutes', 'Reserve max hold (min, 0=strict)'],
                 ['agentPreemptionMinRunMinutes', 'Preempt after (min, 0=immediate)'],
+                ['runtimePreemptionMaxWaitMinutes', 'Force env handover after (min, 0=never)'],
               ] as const
             ).map(([field, label]) => (
               <label key={field} className="flex flex-col gap-1 text-xs text-neutral-400">

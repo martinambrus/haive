@@ -1,9 +1,10 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { APP_RUNNER_LABEL, CONFIG_KEYS, configService, logger } from '@haive/shared';
 import { hasLiveCliInvocation } from '../orchestrator/pause.js';
+import { markPreempted } from '../queues/cli-exec/preempt-mark.js';
 
 const exec = promisify(execFile);
 const log = logger.child({ module: 'runtime-runner-reaper' });
@@ -39,6 +40,8 @@ export interface ReaperTask {
   completedAt: Date | null;
   pausedAt?: Date | null;
   settled?: boolean;
+  /** Up/down vote score, read by the score tier. Absent reads as neutral (0). */
+  voteScore?: number;
 }
 
 /** Pure reap decision, split out from the DB lookup so the rules are directly testable.
@@ -116,6 +119,9 @@ export interface RunnerContainer {
 export function pickPreemptibleRunner(
   runners: RunnerContainer[],
   taskById: Map<string, ReaperTask>,
+  /** Vote score of the task waiting for capacity; null disables the score tier entirely (the
+   *  kill-switch, and the default for callers with no waiter in hand). */
+  waiterScore: number | null = null,
 ): RunnerContainer | null {
   const running = runners.filter((c) => c.running); // an exited runner holds no gate slot
   const dead = running.filter((c) => {
@@ -134,10 +140,85 @@ export function pickPreemptibleRunner(
     const task = taskById.get(c.taskId);
     return Boolean(task?.pausedAt && task.settled);
   });
-  if (paused.length === 0) return null;
-  const pausedAtMs = (c: RunnerContainer): number =>
-    (c.taskId ? taskById.get(c.taskId) : undefined)?.pausedAt?.getTime() ?? 0;
-  return paused.reduce((best, c) => (pausedAtMs(c) < pausedAtMs(best) ? c : best));
+  if (paused.length > 0) {
+    const pausedAtMs = (c: RunnerContainer): number =>
+      (c.taskId ? taskById.get(c.taskId) : undefined)?.pausedAt?.getTime() ?? 0;
+    return paused.reduce((best, c) => (pausedAtMs(c) < pausedAtMs(best) ? c : best));
+  }
+  // TIER 3 — a LIVE task the waiter outscores. Last, because unlike tiers 1 and 2 this takes an
+  // environment somebody is still working in. It exists because holding a runner was otherwise a
+  // prerequisite for a vote to count at all: a task that cannot get one never reaches the cli-exec
+  // queue, so its score is never consulted (observed: a score-1 task parked behind three live
+  // runners while a score-0 holder kept running).
+  //
+  // `settled` is non-negotiable here. Tearing a DDEV down under a running agent leaves that agent
+  // executing against a dead environment, failing in a way no retry classifier can attribute —
+  // strictly worse than making the waiter wait. The settled window is normally opened by the
+  // agent-preemption sweeper evicting that holder's agent; the runtime escape hatch forces one
+  // when it does not.
+  //
+  // Strictly-greater, never equal: equal scores stay first-come, which is what stops a fleet of
+  // equally-voted tasks trading environments in circles.
+  if (waiterScore === null) return null;
+  const scoreOf = (c: RunnerContainer): number =>
+    c.taskId ? (taskById.get(c.taskId)?.voteScore ?? 0) : 0;
+  const outscored = running.filter((c) => {
+    if (!c.taskId) return false;
+    const task = taskById.get(c.taskId);
+    if (!task || !task.settled) return false;
+    return (task.voteScore ?? 0) < waiterScore;
+  });
+  if (outscored.length === 0) return null;
+  // Lowest score first, then the LONGEST-running — the opposite tie-break to agent preemption.
+  // There the youngest victim has the least work to lose; here nothing is lost (the run is
+  // settled) and the oldest environment is the likeliest to be idle.
+  return outscored.reduce((best, c) => {
+    if (scoreOf(c) !== scoreOf(best)) return scoreOf(c) < scoreOf(best) ? c : best;
+    return (c.startedAtMs ?? Infinity) < (best.startedAtMs ?? Infinity) ? c : best;
+  });
+}
+
+/** Evict the AGENT of an outscored holder so its runner becomes settled (and therefore takeable)
+ *  on a later pass. Never touches the runner itself — that stays the reclaim path's job, behind
+ *  the same `settled` guard — so this cannot be the thing that kills an environment mid-run.
+ *  Reuses the agent-preemption kill exactly, headline and all, so the victim's step re-dispatches
+ *  and spends none of its retry budgets. Best-effort and silent on failure. */
+async function preemptHolderAgent(db: Database, taskId: string): Promise<boolean> {
+  try {
+    const rows = await db
+      .select({ id: schema.cliInvocations.id })
+      .from(schema.cliInvocations)
+      .where(
+        and(
+          eq(schema.cliInvocations.taskId, taskId),
+          isNotNull(schema.cliInvocations.startedAt),
+          isNull(schema.cliInvocations.endedAt),
+          isNull(schema.cliInvocations.supersededAt),
+        ),
+      );
+    if (rows.length === 0) return false;
+    let killed = 0;
+    for (const r of rows) {
+      await markPreempted(r.id);
+      const { stdout } = await exec('docker', [
+        'ps',
+        '-q',
+        '--filter',
+        `label=haive.invocation.id=${r.id}`,
+      ]);
+      const ids = stdout
+        .split('\n')
+        .map((x) => x.trim())
+        .filter(Boolean);
+      if (ids.length === 0) continue;
+      await exec('docker', ['rm', '-f', ...ids]);
+      killed += 1;
+    }
+    return killed > 0;
+  } catch (err) {
+    log.warn({ err, taskId }, 'forced settled-window agent preemption failed');
+    return false;
+  }
 }
 
 export interface RuntimeRunnerReaperOptions {
@@ -189,6 +270,49 @@ export class RuntimeRunnerReaper {
     this.timer = null;
   }
 
+  /** Force a settled window for a stuck runtime waiter. Returns true if it evicted an agent. */
+  private async forceSettledWindow(
+    scoreTier: number | null,
+    waitedMs: number,
+    containers: RunnerContainer[],
+    taskById: Map<string, ReaperTask>,
+  ): Promise<boolean> {
+    if (scoreTier === null || waitedMs <= 0) return false;
+    let thresholdMs: number;
+    try {
+      const minutes = await configService.getNumber(
+        CONFIG_KEYS.RUNTIME_PREEMPTION_MAX_WAIT_MINUTES,
+        10,
+      );
+      if (minutes <= 0) return false; // explicitly disabled
+      thresholdMs = minutes * 60_000;
+    } catch {
+      return false;
+    }
+    if (waitedMs < thresholdMs) return false;
+    // Lowest-scored outscored holder that is NOT settled — i.e. exactly the ones tier 3 had to
+    // skip. A settled one would already have been taken above.
+    const blockers = containers.filter((c) => {
+      if (!c.running || !c.taskId) return false;
+      const t = taskById.get(c.taskId);
+      return !!t && !t.settled && (t.voteScore ?? 0) < scoreTier;
+    });
+    if (blockers.length === 0) return false;
+    const victim = blockers.reduce((best, c) => {
+      const s = (a: RunnerContainer): number =>
+        a.taskId ? (taskById.get(a.taskId)?.voteScore ?? 0) : 0;
+      return s(c) < s(best) ? c : best;
+    });
+    const evicted = await preemptHolderAgent(this.db, victim.taskId!);
+    if (evicted) {
+      log.info(
+        { taskId: victim.taskId, waitedMs, waiterScore: scoreTier },
+        'forced a settled window: preempted the holder agent so its runner can be reclaimed',
+      );
+    }
+    return evicted;
+  }
+
   /** Single sweep pass. Exposed for tests so they can drive it deterministically. */
   async sweep(): Promise<{ scanned: number; reaped: number }> {
     const containers = await this.listRunnerContainers();
@@ -214,7 +338,19 @@ export class RuntimeRunnerReaper {
    *  tasks the user deliberately put on hold. Preempts WITHOUT either grace: a live task's
    *  demand outranks a dead task's retry-cache and a held task's warm environment. Returns true
    *  iff it reaped a runner. */
-  async reclaimOnePreemptible(): Promise<boolean> {
+  async reclaimOnePreemptible(waiterScore: number | null = null, waitedMs = 0): Promise<boolean> {
+    // The score tier is the only reason `waiterScore` exists, so read its switch once per call
+    // rather than per candidate. Off (or no waiter) collapses this to the pre-feature tiers.
+    let scoreTier: number | null = null;
+    if (waiterScore !== null) {
+      try {
+        scoreTier = (await configService.getBoolean(CONFIG_KEYS.RUNTIME_PREEMPTION_ENABLED, true))
+          ? waiterScore
+          : null;
+      } catch {
+        scoreTier = null; // config unavailable — never take a live runner on a guess
+      }
+    }
     const containers = await this.listRunnerContainers();
     const taskById = new Map<string, ReaperTask>();
     for (const c of containers) {
@@ -222,14 +358,19 @@ export class RuntimeRunnerReaper {
       try {
         const t = await this.db.query.tasks.findFirst({
           where: eq(schema.tasks.id, c.taskId),
-          columns: { status: true, completedAt: true, pausedAt: true },
+          columns: { status: true, completedAt: true, pausedAt: true, voteScore: true },
         });
-        // `settled` only decides tier 2, so the extra query runs for paused tasks only rather
-        // than for every runner on every gate miss.
+        // `settled` decides BOTH tier 2 and tier 3, so it is now needed for any live task the
+        // waiter outscores as well as for paused ones — but still not for every runner on every
+        // gate miss (a task that cannot be a candidate is not queried).
         if (t) {
+          const couldBeScoreTier = scoreTier !== null && t.voteScore < scoreTier;
           taskById.set(c.taskId, {
             ...t,
-            settled: t.pausedAt ? !(await hasLiveCliInvocation(this.db, c.taskId)) : false,
+            settled:
+              t.pausedAt || couldBeScoreTier
+                ? !(await hasLiveCliInvocation(this.db, c.taskId))
+                : false,
           });
         }
       } catch (err) {
@@ -238,8 +379,18 @@ export class RuntimeRunnerReaper {
         log.warn({ err, taskId: c.taskId }, 'preemption task lookup failed; skipping runner');
       }
     }
-    const pick = pickPreemptibleRunner(containers, taskById);
-    if (!pick) return false;
+    const pick = pickPreemptibleRunner(containers, taskById, scoreTier);
+    if (!pick) {
+      // Nothing takeable. The usual reason under the score tier is that every outscored holder is
+      // mid-CLI-run, and `settled` (rightly) refuses to pull an environment out from under a
+      // running agent. That window normally opens on its own — the agent-preemption sweeper
+      // evicts a lower-voted task's agent whenever a higher-voted task has queued AGENT work —
+      // but a waiter that only wants an ENVIRONMENT generates no agent demand, so on a quiet
+      // machine it could park forever. After the threshold, force the window: evict the holder's
+      // agent (budget-free, re-dispatches cleanly) and take the runner on the next pass.
+      await this.forceSettledWindow(scoreTier, waitedMs, containers, taskById);
+      return false;
+    }
     // Re-verify immediately before reaping: a `failed` task may have been retried, or a paused
     // one resumed, in the gap since we listed (list->reap TOCTOU). Only reap if the task is
     // still preemptible. An orphan (task row gone) stays reapable — findFirst returns undefined,
@@ -248,11 +399,21 @@ export class RuntimeRunnerReaper {
       try {
         const t = await this.db.query.tasks.findFirst({
           where: eq(schema.tasks.id, pick.taskId),
-          columns: { status: true, pausedAt: true },
+          columns: { status: true, pausedAt: true, voteScore: true },
         });
-        // Still a valid target if it is either dead OR still held. Checking only the status
-        // would veto every tier-2 pick, since a paused task's status is `running`.
-        if (t && !PREEMPTIBLE_TASK_STATUSES.has(t.status) && !t.pausedAt) return false;
+        // Still a valid target if it is dead, still held, OR still outscored-and-settled.
+        // Checking only the status would veto every tier-2 pick (a paused task's status is
+        // `running`) and, now, every tier-3 pick too. The settled re-check is the important half:
+        // the holder may have started a new agent since we listed, and taking its environment
+        // then is the one outcome tier 3 must never produce.
+        const stillOutscored =
+          !!t &&
+          scoreTier !== null &&
+          t.voteScore < scoreTier &&
+          !(await hasLiveCliInvocation(this.db, pick.taskId));
+        if (t && !PREEMPTIBLE_TASK_STATUSES.has(t.status) && !t.pausedAt && !stillOutscored) {
+          return false;
+        }
       } catch (err) {
         log.warn({ err, taskId: pick.taskId }, 'preemption re-check failed; not reaping');
         return false;
