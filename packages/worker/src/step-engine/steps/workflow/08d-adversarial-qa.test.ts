@@ -19,6 +19,18 @@ function mining(agentId: string, rawOutput: string | null): AgentMiningResult {
     errorMessage: null,
   };
 }
+/** An adversary DISPATCHED and killed before it finished — budget, orphan, preemption. */
+function failedMining(agentId: string, errorMessage: string): AgentMiningResult {
+  return {
+    agentId,
+    agentTitle: agentId,
+    status: 'failed',
+    output: null,
+    rawOutput: null,
+    errorMessage,
+  };
+}
+const TIMEOUT_ERR = 'CLI process exceeded its time budget (45m).';
 
 describe('adversaryIdsForLevel', () => {
   it('returns cumulative rosters of 2/4/6', () => {
@@ -112,5 +124,50 @@ describe('adversarialQaStep.apply de-silence', () => {
     );
     expect(out.ran).toBe(true);
     expect(out.findings).toEqual([]);
+    expect(out.qaIncomplete).toBe(false);
+  });
+
+  it('surfaces an adversary killed at its budget as a qa-gap, not a clean surface', async () => {
+    const out = await runQa([failedMining('edge-case-breaker', TIMEOUT_ERR)], true);
+    expect(out.qaIncomplete).toBe(true);
+    expect(out.findings.some((f) => f.category === 'qa-gap')).toBe(true);
+    // the cause travels with the gap — a budget kill wants a longer timeout
+    expect(out.findings.some((f) => (f.impact ?? '').includes('time budget'))).toBe(true);
+    // the adversary died, the code did not fail: no fix round
+    expect(out.blocking).toBe(false);
+  });
+
+  it('still reports ran:true when the whole roster died', async () => {
+    // ran:false makes gate 2 skip its entire adversarial row, so a roster that was
+    // dispatched and wiped out rendered as "QA never ran" — indistinguishable from a
+    // task that opted out of QA altogether.
+    const out = await runQa(
+      [
+        failedMining('edge-case-breaker', TIMEOUT_ERR),
+        failedMining('workflow-disruptor', TIMEOUT_ERR),
+      ],
+      true,
+    );
+    expect(out.ran).toBe(true);
+    expect(out.qaIncomplete).toBe(true);
+    expect(out.level).toBe('poc');
+  });
+
+  it('reports ran:false only when no adversary was dispatched', async () => {
+    const out = await runQa([], true);
+    expect(out.ran).toBe(false);
+    expect(out.qaIncomplete).toBe(false);
+  });
+
+  it('re-rolls a killed adversary while it still has budget', async () => {
+    const err = await runQa(
+      [
+        failedMining('edge-case-breaker', TIMEOUT_ERR),
+        mining('workflow-disruptor', '```json\n{"verdict":"PASS","findings":[]}\n```'),
+      ],
+      false,
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MiningRetryError);
+    expect((err as MiningRetryError).agentIds).toEqual(['edge-case-breaker']);
   });
 });

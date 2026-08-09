@@ -26,6 +26,20 @@ function mining(agentId: string, rawOutput: string | null): AgentMiningResult {
     errorMessage: null,
   };
 }
+/** A terminal that was DISPATCHED and died — killed at its budget, orphaned, preempted.
+ *  Distinct from `mining(id, null)`, which is an agent that finished and said nothing, and
+ *  from omitting the agent entirely, which means it was never dispatched at all. */
+function failedMining(agentId: string, errorMessage: string): AgentMiningResult {
+  return {
+    agentId,
+    agentTitle: agentId,
+    status: 'failed',
+    output: null,
+    rawOutput: null,
+    errorMessage,
+  };
+}
+const TIMEOUT_ERR = 'CLI process exceeded its time budget (30m).';
 /** Defaults `miningWaveExhausted: true` so a test that only cares about the review
  *  itself never fans out refuters. The refutation tests below opt back in. */
 function runReview(
@@ -443,6 +457,77 @@ describe('codeReviewStep.apply de-silence', () => {
     expect(op).toBeDefined();
     expect(op!.verdict).toBe('DISCUSS');
     expect(op!.findings.length).toBeGreaterThan(0);
+  });
+
+  // A reviewer KILLED before it finished is the other way to produce nothing, and the one
+  // that shipped a silent APPROVE: task 4ce9b4e1 lost all three reviewers to 30-minute
+  // budget kills and gate 2 was handed verdict APPROVE / SECURE / reviewIncomplete false.
+  it('surfaces a reviewer killed at its budget as non-approving, not silently approving', async () => {
+    const out = await runReview(
+      [
+        failedMining('peer-reviewer', TIMEOUT_ERR),
+        mining('security-code-reviewer', '```json\n{"verdict":"SECURE","findings":[]}\n```'),
+      ],
+      true,
+    );
+    expect(out.peer.verdict).toBe('DISCUSS');
+    expect(out.reviewIncomplete).toBe(true);
+    // the reviewer died, the code did not fail: still must not spend a fix round
+    expect(out.blocking).toBe(false);
+    // the cause travels with the finding — a budget kill wants a longer timeout, an
+    // orphan wants a plain re-run, and the reader cannot tell them apart without it
+    expect(out.peer.findings[0]?.issue).toContain('time budget');
+  });
+
+  it('does not report "not reviewed" when every reviewer was dispatched and died', async () => {
+    // The both-absent early return used to swallow this: `reviewed: false` makes gate 2
+    // skip its whole row, so three dead reviewers rendered as no review step at all.
+    const out = await runReview(
+      [
+        failedMining('peer-reviewer', TIMEOUT_ERR),
+        failedMining('security-code-reviewer', TIMEOUT_ERR),
+      ],
+      true,
+    );
+    expect(out.reviewed).toBe(true);
+    expect(out.reviewIncomplete).toBe(true);
+    expect(out.peer.verdict).toBe('DISCUSS');
+    expect(out.security.verdict).toBe('NEEDS_FIXES');
+    expect(out.blocking).toBe(false);
+  });
+
+  it('still reports "not reviewed" when no reviewer was dispatched at all', async () => {
+    // Test bypass / empty selectAgents: nothing was asked for, so nothing is missing.
+    const out = await runReview([], true);
+    expect(out.reviewed).toBe(false);
+    expect(out.reviewIncomplete).toBe(false);
+    expect(out.peer.verdict).toBe('APPROVE');
+  });
+
+  it('re-rolls a killed reviewer while it still has budget', async () => {
+    const err = await runReview(
+      [
+        failedMining('peer-reviewer', TIMEOUT_ERR),
+        mining('security-code-reviewer', '```json\n{"verdict":"SECURE","findings":[]}\n```'),
+      ],
+      false,
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MiningRetryError);
+    expect((err as MiningRetryError).agentIds).toEqual(['peer-reviewer']);
+  });
+
+  it('surfaces a killed lens instead of dropping it from the report', async () => {
+    const out = await runReview(
+      [
+        mining('peer-reviewer', '```json\n{"verdict":"APPROVE","findings":[],"positives":[]}\n```'),
+        failedMining('operational-reviewer', TIMEOUT_ERR),
+      ],
+      true,
+    );
+    const op = out.extraLenses.find((l) => l.id === 'operational-reviewer');
+    expect(op).toBeDefined();
+    expect(op!.verdict).toBe('DISCUSS');
+    expect(out.reviewIncomplete).toBe(true);
   });
 });
 

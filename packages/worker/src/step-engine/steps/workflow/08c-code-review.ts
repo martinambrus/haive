@@ -8,6 +8,12 @@ import type {
   AgentMiningDispatch,
   AgentMiningResult,
 } from '../../step-definition.js';
+import {
+  didNotCompleteIssue,
+  miningOutcome,
+  shouldRetryMiningTerminalFailure,
+  type MiningOutcome,
+} from '../../mining-failure.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
@@ -696,8 +702,26 @@ function buildLensPrompt(lens: ReviewLensDef, d: CodeReviewDetect): string {
 }
 
 function miningResult(results: AgentMiningResult[], agentId: string): unknown {
-  const r = results.find((m) => m.agentId === agentId && m.status === 'done');
-  return r ? (r.output ?? r.rawOutput) : null;
+  const outcome = miningOutcome(results, agentId);
+  return outcome.kind === 'done' ? outcome.raw : null;
+}
+
+/** The one line to report in place of a review that did not happen.
+ *
+ *  Two causes, one consequence. A reviewer KILLED at its budget and a reviewer that RAN but
+ *  emitted prose both leave the same hole — no verdict on this code — and both must read as
+ *  non-approving. Only the second was ever handled; the first is the case that let a
+ *  30-minute SIGKILL surface at gate 2 as a clean APPROVE with zero findings.
+ *
+ *  `absent` is excluded at the type level, not handled here: no agent was dispatched (test
+ *  bypass, or a lens this QA level did not select), so there is no gap to report and a caller
+ *  that asks for one has a bug. */
+function incompleteReviewIssue(
+  what: string,
+  outcome: Exclude<MiningOutcome, { kind: 'absent' }>,
+): string {
+  if (outcome.kind === 'failed') return didNotCompleteIssue(what, outcome.errorMessage);
+  return `${what} output was unparseable — review did not complete; re-run code review.`;
 }
 
 // Preamble to the fix-loop diagnosis. Every other finding path in the workflow hands
@@ -866,6 +890,11 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     timeoutMs: REVIEW_TIMEOUT_MS,
     // A reviewer SIGKILLed at 30 minutes loses every finding it made. Steer it to bank
     // the verified ones first. Safe here because a reviewer only reads and reports.
+    //
+    // Only reaches a STEERABLE provider (claude-code, muse, zai, ollama). On codex,
+    // gemini, amp or antigravity there is no wind-down at all and the kill is
+    // zero-grace — so on those the escalating per-agent budget, not this, is what keeps
+    // a long review from dying empty. exec-core logs when the request cannot be honored.
     softTimeout: true,
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       // Mining has no bypass stub; under test bypass return [] so the smoke
@@ -891,20 +920,34 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // that still yields nothing usually emitted prose — a fresh roll fixes that far
     // more cheaply than a fix round or a developer reject. Two, not three: the
     // failure is rare, and the degrade path below is a safe floor.
-    retry: { maxAttempts: 2 },
+    //
+    // retryOnInvocationFailure re-rolls the OTHER way a reviewer produces nothing: a
+    // terminal killed before it finished. That re-roll happens at the barrier, before
+    // apply() sees the batch, and a budget kill comes back on the next rung of the
+    // per-agent ladder — re-running a 30-minute timeout at 30 minutes just buys the
+    // same kill twice.
+    retry: { maxAttempts: 2, retryOnInvocationFailure: shouldRetryMiningTerminalFailure },
   },
 
   async apply(ctx, args): Promise<CodeReviewApply> {
     const results = args.agentMiningResults ?? [];
-    const peerRaw = miningResult(results, 'peer-reviewer');
-    const securityRaw = miningResult(results, 'security-code-reviewer');
+    const peerOutcome = miningOutcome(results, 'peer-reviewer');
+    const securityOutcome = miningOutcome(results, 'security-code-reviewer');
+    const peerRaw = peerOutcome.kind === 'done' ? peerOutcome.raw : null;
+    const securityRaw = securityOutcome.kind === 'done' ? securityOutcome.raw : null;
     const peer = parsePeerReview(peerRaw);
     const security = parseSecurityReview(securityRaw);
 
-    if (peerRaw == null && securityRaw == null) {
-      // No reviewer produced output (test bypass, or both agents no-op'd). Nothing
-      // was reviewed, so there is nothing to block on.
-      ctx.logger.info('code review produced no agent output (bypass or no-op)');
+    if (peerOutcome.kind === 'absent' && securityOutcome.kind === 'absent') {
+      // No reviewer was ever DISPATCHED (test bypass, or selectAgents returned nothing).
+      // Nothing was asked for, so nothing is missing and there is nothing to block on.
+      //
+      // Deliberately keyed on 'absent', not on empty output: two reviewers that were
+      // dispatched and then killed at their budget also produce no output, and taking this
+      // exit for them reported `reviewed: false` — which gate 2 reads as "no review step
+      // ran" and skips its row entirely. That is how a task with THREE dead reviewers
+      // showed a clean bill of health. Those fall through to the degrade path below.
+      ctx.logger.info('code review dispatched no agents (bypass or no-op)');
       return {
         reviewed: false,
         peer: { verdict: 'APPROVE', findings: [], positives: [] },
@@ -918,17 +961,24 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       };
     }
 
-    // A reviewer that RAN but whose output could not be parsed (even after the
-    // jsonrepair salvage) must NOT be reported as APPROVE/SECURE — that would
-    // advance unreviewed code. While the agent still has a re-roll left, throw so
-    // the runner re-dispatches just that reviewer; once its budget is spent, degrade
-    // to a visible, non-approving finding and flag the review as incomplete.
-    const peerUnparsed = peerRaw != null && peer == null;
-    const securityUnparsed = securityRaw != null && security == null;
-    if (peerUnparsed || securityUnparsed) {
+    // A reviewer that produced no usable verdict must NOT be reported as APPROVE/SECURE —
+    // that would advance unreviewed code. Two ways to get here and they are treated
+    // identically: KILLED before finishing (budget, orphan, preemption, no provider), or RAN
+    // and emitted something the jsonrepair salvage still could not read. While the agent has
+    // a re-roll left, throw so the runner re-dispatches just that reviewer; once its budget
+    // is spent, degrade to a visible, non-approving finding and flag the review incomplete.
+    const peerIssue =
+      peerOutcome.kind === 'absent' || peer != null
+        ? null
+        : incompleteReviewIssue('Peer review', peerOutcome);
+    const securityIssue =
+      securityOutcome.kind === 'absent' || security != null
+        ? null
+        : incompleteReviewIssue('Security review', securityOutcome);
+    if (peerIssue || securityIssue) {
       ctx.logger.warn(
-        { peerUnparsed, securityUnparsed },
-        'code review output unparseable — surfacing as non-approving, not silently approving',
+        { peer: peerIssue, security: securityIssue },
+        'code review incomplete — surfacing as non-approving, not silently approving',
       );
     }
 
@@ -937,56 +987,37 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // wrong, so it must not route the change back to the implementer. It is
     // non-approving, and the developer decides at gate 2.
     const peerOut: { verdict: string; findings: PeerFinding[]; positives: string[] } = peer ?? {
-      verdict: peerUnparsed ? 'DISCUSS' : 'APPROVE',
-      findings: peerUnparsed
-        ? [
-            {
-              severity: 'medium',
-              issue:
-                'Peer review output was unparseable — review did not complete; re-run code review.',
-            },
-          ]
-        : [],
+      verdict: peerIssue ? 'DISCUSS' : 'APPROVE',
+      findings: peerIssue ? [{ severity: 'medium', issue: peerIssue }] : [],
       positives: [],
     };
     const securityOut: { verdict: string; findings: SecurityFinding[] } = security ?? {
-      verdict: securityUnparsed ? 'NEEDS_FIXES' : 'SECURE',
-      findings: securityUnparsed
-        ? [
-            {
-              severity: 'medium',
-              issue:
-                'Security review output was unparseable — review did not complete; re-run code review.',
-            },
-          ]
-        : [],
+      verdict: securityIssue ? 'NEEDS_FIXES' : 'SECURE',
+      findings: securityIssue ? [{ severity: 'medium', issue: securityIssue }] : [],
     };
 
     // Extra review lenses (operational/performance) — present only when the task
-    // level enabled them. Mirror the peer/security de-silence rule: a lens that
-    // RAN but whose output is unparseable surfaces as non-approving, never silent.
+    // level enabled them. Mirror the peer/security de-silence rule exactly: a lens that
+    // was DISPATCHED and produced no usable verdict surfaces as non-approving, never
+    // silent. Only a lens this level never selected is skipped.
     const extraLenses: ReviewLensResult[] = [];
     const unparsedLensIds: string[] = [];
     for (const lens of REVIEW_LENSES) {
-      const raw = miningResult(results, lens.id);
-      if (raw == null) continue;
-      const parsed = parseReviewLens(raw);
+      const outcome = miningOutcome(results, lens.id);
+      if (outcome.kind === 'absent') continue;
+      const parsed = outcome.kind === 'done' ? parseReviewLens(outcome.raw) : null;
       if (parsed == null) {
+        const issue = incompleteReviewIssue(lens.title, outcome);
         unparsedLensIds.push(lens.id);
         ctx.logger.warn(
-          { lens: lens.id },
-          'review lens output unparseable — surfacing as non-approving, not silently approving',
+          { lens: lens.id, issue },
+          'review lens incomplete — surfacing as non-approving, not silently approving',
         );
         extraLenses.push({
           id: lens.id,
           title: lens.title,
           verdict: 'DISCUSS',
-          findings: [
-            {
-              severity: 'medium',
-              issue: `${lens.title} output was unparseable — review did not complete; re-run code review.`,
-            },
-          ],
+          findings: [{ severity: 'medium', issue }],
         });
         continue;
       }
@@ -1002,8 +1033,8 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // has budget. The runner re-dispatches only these; the other agents' completed
     // rows are untouched, and apply() runs again once they finish.
     const unreadable = [
-      ...(peerUnparsed ? ['peer-reviewer'] : []),
-      ...(securityUnparsed ? ['security-code-reviewer'] : []),
+      ...(peerIssue ? ['peer-reviewer'] : []),
+      ...(securityIssue ? ['security-code-reviewer'] : []),
       ...unparsedLensIds,
     ];
     if (unreadable.length > 0 && args.isFinalMiningAttempt === false) {

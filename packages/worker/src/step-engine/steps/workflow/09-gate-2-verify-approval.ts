@@ -83,6 +83,10 @@ interface VerifyGateDetect {
     blocking: boolean;
     counts: { critical: number; high: number; total: number };
     findings: string[];
+    /** An adversary left a hole — killed before finishing, or unreadable output. Not
+     *  blocking (the agent failed, not the code), but never OK: a partial attack surface
+     *  must not default this gate to approve. */
+    incomplete: boolean;
   } | null;
   /** In-page live browser for this gate: the per-task DDEV headed-browser
    *  desktop, brought up (idempotent) and pointed at the app URL so the user can
@@ -117,6 +121,9 @@ interface Phase8dOutput {
   ran?: boolean;
   level?: string;
   blocking?: boolean;
+  /** Absent on rows written before 08d reported it; treated as false (an older QA run
+   *  either completed or already surfaced its gap as a qa-gap finding). */
+  qaIncomplete?: boolean;
   counts?: { critical?: number; high?: number; total?: number };
   findings?: {
     severity?: string;
@@ -482,6 +489,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         findings: (pd.findings ?? []).map((f) =>
           `[${f.severity ?? '?'}] ${f.category ?? ''} ${f.location ?? ''} ${f.impact ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
+        incomplete: pd.qaIncomplete === true,
       };
     }
 
@@ -613,7 +621,9 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       cr === null || (!cr.blocking && !cr.reviewIncomplete && !cr.advisoryVerdict);
     const cAudit = detected.codeAudit;
     const aq = detected.adversarial;
-    const adversarialOk = aq === null || !aq.blocking;
+    // Same contract as codeReviewOk above: an attack surface only partly probed is not a
+    // clean one. It does not block, but it must not default the gate to approve either.
+    const adversarialOk = aq === null || (!aq.blocking && !aq.incomplete);
     const rs = detected.runtimeSmoke;
     const smokeFailed = rs != null && rs.ran && !rs.passed;
     // A real-browser agent/interactive test that PASSED is a stronger runtime signal
@@ -804,15 +814,21 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       }
       rows.push({
         label: `Adversarial QA (${aq.level})`,
-        status: aq.blocking ? 'fail' : aq.counts.total > 0 ? 'warn' : 'pass',
+        status: aq.blocking ? 'fail' : aq.counts.total > 0 || aq.incomplete ? 'warn' : 'pass',
+        // INCOMPLETE outranks the finding count in the label: "3 FINDINGS" on a roster that
+        // half died reads as a completed probe that found three things.
         statusLabel: aq.blocking
           ? 'BLOCKING'
-          : aq.counts.total > 0
-            ? `${aq.counts.total} FINDINGS`
-            : 'CLEAN',
-        detail: `${aq.counts.total} findings (${aq.counts.critical} critical, ${aq.counts.high} high)`,
+          : aq.incomplete
+            ? 'INCOMPLETE'
+            : aq.counts.total > 0
+              ? `${aq.counts.total} FINDINGS`
+              : 'CLEAN',
+        detail: aq.incomplete
+          ? `QA did not complete — ${aq.counts.total} findings (${aq.counts.critical} critical, ${aq.counts.high} high) from a partial roster`
+          : `${aq.counts.total} findings (${aq.counts.critical} critical, ${aq.counts.high} high)`,
         body: aq.findings.length ? lines.join('\n') : undefined,
-        defaultOpen: aq.blocking,
+        defaultOpen: aq.blocking || aq.incomplete,
       });
     }
 

@@ -8,6 +8,7 @@ import type {
   AgentMiningDispatch,
   AgentMiningResult,
 } from '../../step-definition.js';
+import { didNotCompleteIssue, shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { parseReviewJson } from './_agent-json.js';
@@ -105,11 +106,17 @@ interface AdversarialFinding {
 }
 
 interface AdversarialApply {
+  /** True when a roster was DISPATCHED — not when one of them succeeded. Gate 2 skips its
+   *  whole adversarial row on `ran: false`, so keying this on success meant a roster that
+   *  was entirely killed rendered as "no QA step ran" instead of "QA did not complete". */
   ran: boolean;
   level: QaLevel | null;
   findings: AdversarialFinding[];
   counts: { critical: number; high: number; total: number };
   blocking: boolean;
+  /** At least one adversary left a hole: killed before finishing, or unreadable output.
+   *  Non-blocking (the agent failed, not the code) but never OK at gate 2. */
+  qaIncomplete: boolean;
 }
 
 const adversaryOutputSchema = z.object({
@@ -278,7 +285,9 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     requiredCapabilities: ['tool_use'],
     timeoutMs: QA_TIMEOUT_MS,
     // Same bargain as 08c: an adversary's confirmed exploits are worth banking before
-    // the SIGKILL. Its proofs are non-destructive, so it writes nothing to lose.
+    // the SIGKILL. Its proofs are non-destructive, so it writes nothing to lose. And the
+    // same limit: the wind-down is a steer, so a non-steerable provider (codex, gemini,
+    // amp, antigravity) gets none and is killed with zero grace.
     softTimeout: true,
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       // No bypass stub for mining; return [] under test bypass (08c pattern).
@@ -292,8 +301,11 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     },
     // One re-roll per adversary. An adversary whose output cannot be read leaves a
     // hole in the attack surface that only shows up as a qa-gap finding; re-rolling
-    // it is cheaper than the human deciding what to do about the gap.
-    retry: { maxAttempts: 2 },
+    // it is cheaper than the human deciding what to do about the gap. The same holds
+    // for one killed before it finished, which retryOnInvocationFailure re-rolls at the
+    // barrier — on the next rung of its per-agent timeout ladder when the cause was a
+    // budget kill, since an identical re-run just buys the same kill twice.
+    retry: { maxAttempts: 2, retryOnInvocationFailure: shouldRetryMiningTerminalFailure },
   },
 
   async apply(ctx, args): Promise<AdversarialApply> {
@@ -305,21 +317,23 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     const unlocated: AdversarialFinding[] = [];
     const unreadable: string[] = [];
     for (const r of results) {
-      if (r.status !== 'done') continue;
-      const raw = r.output ?? r.rawOutput;
-      const parsed = parseAdversaryOutput(raw);
+      const raw = r.status === 'done' ? (r.output ?? r.rawOutput) : null;
+      const parsed = raw == null ? null : parseAdversaryOutput(raw);
       if (parsed == null) {
-        // Adversary ran but its output was unparseable (even after jsonrepair salvage).
-        // Do NOT treat that as "no vulnerabilities" — re-roll it while it has budget,
-        // and once spent surface a visible QA-gap finding so the hole shows at gate 2.
-        if (raw != null) {
-          unreadable.push(r.agentId);
-          unlocated.push({
-            severity: 'medium',
-            category: 'qa-gap',
-            impact: `Adversarial agent "${r.agentId}" produced unparseable output — its findings may be missing; re-run adversarial QA.`,
-          });
-        }
+        // The adversary reported nothing usable. Two causes, one consequence: it RAN and
+        // emitted output the jsonrepair salvage could not read, or it was KILLED before it
+        // finished (budget, orphan, preemption). Neither is evidence of "no vulnerabilities"
+        // — re-roll it while it has budget, and once spent surface a visible QA-gap finding
+        // so the hole shows at gate 2 instead of passing as a clean attack surface.
+        unreadable.push(r.agentId);
+        unlocated.push({
+          severity: 'medium',
+          category: 'qa-gap',
+          impact:
+            r.status === 'done'
+              ? `Adversarial agent "${r.agentId}" produced unparseable output — its findings may be missing; re-run adversarial QA.`
+              : didNotCompleteIssue(`Adversarial agent "${r.agentId}"`, r.errorMessage),
+        });
         continue;
       }
       for (const f of parsed) {
@@ -348,7 +362,9 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     const critical = findings.filter((f) => f.severity === 'critical').length;
     const high = findings.filter((f) => f.severity === 'high').length;
     const blocking = findings.some((f) => isBlockingSeverity(f.severity));
-    const ran = results.some((r) => r.status === 'done');
+    // Dispatched, not succeeded — see AdversarialApply.ran.
+    const ran = results.length > 0;
+    const qaIncomplete = unreadable.length > 0;
 
     // Recorded post-dedupe, so the reviewer is the step rather than the adversary
     // that happened to win the keep-highest-severity merge for a location.
@@ -373,7 +389,14 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     );
 
     ctx.logger.info(
-      { level: detected.level, agents: results.length, findings: findings.length, blocking },
+      {
+        level: detected.level,
+        agents: results.length,
+        findings: findings.length,
+        blocking,
+        qaIncomplete,
+        unreadable,
+      },
       'adversarial QA complete',
     );
 
@@ -383,6 +406,7 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
       findings,
       counts: { critical, high, total: findings.length },
       blocking,
+      qaIncomplete,
     };
   },
 };

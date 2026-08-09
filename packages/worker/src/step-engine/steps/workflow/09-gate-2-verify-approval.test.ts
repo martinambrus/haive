@@ -112,6 +112,50 @@ describe('gate-2 status summary', () => {
     expect(decisionDefault(d)).toBe('reject');
   });
 
+  const cleanQa = {
+    level: 'poc',
+    blocking: false,
+    counts: { critical: 0, high: 0, total: 0 },
+    findings: [],
+    incomplete: false,
+  };
+
+  it('does not report an incomplete adversarial QA as OK, and does not default to approve', () => {
+    // Same regression as the code-review row above: an adversary that died is non-blocking,
+    // which made adversarialOk true — so a half-probed attack surface rendered CLEAN.
+    const d = baseDetect({ adversarial: { ...cleanQa, incomplete: true } });
+    const r = row(d, 'Adversarial QA (poc)');
+    expect(r?.status).toBe('warn');
+    expect(r?.statusLabel).toBe('INCOMPLETE');
+    expect(r?.defaultOpen).toBe(true);
+    expect(decisionDefault(d)).toBe('reject');
+  });
+
+  it('INCOMPLETE outranks the finding count on a partial roster', () => {
+    const d = baseDetect({
+      adversarial: {
+        ...cleanQa,
+        incomplete: true,
+        counts: { critical: 0, high: 0, total: 3 },
+        findings: ['[medium] qa-gap  agent died'],
+      },
+    });
+    expect(row(d, 'Adversarial QA (poc)')?.statusLabel).toBe('INCOMPLETE');
+  });
+
+  it('still reports a complete, clean adversarial QA as CLEAN and defaults to approve', () => {
+    const d = baseDetect({ adversarial: cleanQa });
+    expect(row(d, 'Adversarial QA (poc)')?.status).toBe('pass');
+    expect(row(d, 'Adversarial QA (poc)')?.statusLabel).toBe('CLEAN');
+    expect(decisionDefault(d)).toBe('approve');
+  });
+
+  it('a blocking adversarial QA still outranks incomplete', () => {
+    const d = baseDetect({ adversarial: { ...cleanQa, blocking: true, incomplete: true } });
+    expect(row(d, 'Adversarial QA (poc)')?.statusLabel).toBe('BLOCKING');
+    expect(decisionDefault(d)).toBe('reject');
+  });
+
   it('hides skipped verify checks and shows ran ones with PASS/FAIL', () => {
     const d = baseDetect({
       verify: {
