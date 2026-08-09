@@ -1,18 +1,14 @@
 import { stat } from 'node:fs/promises';
 import { join, posix } from 'node:path';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   type CliExecJobPayload,
   type CliNetworkPolicy,
   type CliProviderName,
-  type OnboardingToolingMirror,
   type TaskJobPayload,
   TASK_JOB_NAMES,
   isReadOnlyLocalRepo,
-  CONFIG_KEYS,
-  ONBOARDING_TOOLING_SCHEMA_VERSION,
-  configService,
 } from '@haive/shared';
 import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import {
@@ -27,9 +23,9 @@ import {
 } from '../../sandbox/mcp-config.js';
 import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
 import { DDEV_MCP_SERVER_JS, DDEV_MCP_SERVER_PATH } from '../../sandbox/ddev-mcp-server.js';
+import { resolveMcpSurface } from '../../sandbox/mcp-surface.js';
 import { runnerBrowserCdpUrl } from '../../sandbox/ddev-runner.js';
 import { appRunnerBrowserCdpUrl } from '../../sandbox/app-runner.js';
-import { signRagToken } from '@haive/shared/rag';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliProviderRecord } from '../../cli-adapters/types.js';
 import {
@@ -144,147 +140,6 @@ export interface McpResolution {
   extraArgs: string[];
 }
 
-/** Resolve whether the haive-rag MCP server should be wired for this task,
- *  and mint its task-scoped token. Gated on the step-04 ragMode (independent of
- *  the chrome-devtools/envTemplate path), so RAG retrieval is available to
- *  agents whenever the project has a populated index. */
-async function resolveRagMcpConfig(
-  db: Database,
-  taskId: string,
-): Promise<{ enabled: boolean; apiUrl: string; token: string }> {
-  const disabled = { enabled: false, apiUrl: '', token: '' };
-  const readRagMode = (output: unknown): string | undefined =>
-    (output as { tooling?: { ragMode?: string } } | null)?.tooling?.ragMode;
-
-  // ragMode from the task's OWN step-04 output, else the repo's most recent
-  // onboarding step-04 output. Workflow tasks have no 04-tooling-infrastructure
-  // step of their own, so without this fallback RAG retrieval would never be
-  // wired for them even when onboarding configured it (mirrors the repo
-  // fallback in loadUserMcpServers below).
-  const ownStep = await db.query.taskSteps.findFirst({
-    where: and(
-      eq(schema.taskSteps.taskId, taskId),
-      eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
-    ),
-    columns: { output: true },
-  });
-  let ragMode = readRagMode(ownStep?.output);
-  if (!ragMode) {
-    const task = await db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, taskId),
-      columns: { repositoryId: true },
-    });
-    if (task?.repositoryId) {
-      // Prefer the repo-level onboarding mirror (survives a clone, where the
-      // onboarding task's step outputs don't exist); fall back to the repo's
-      // most recent onboarding 04-tooling output for legacy repos.
-      const repo = await db.query.repositories.findFirst({
-        where: eq(schema.repositories.id, task.repositoryId),
-        columns: { onboardingTooling: true },
-      });
-      const mirror = repo?.onboardingTooling as OnboardingToolingMirror | null | undefined;
-      if (mirror?.schemaVersion === ONBOARDING_TOOLING_SCHEMA_VERSION && mirror.tooling) {
-        ragMode = readRagMode({ tooling: mirror.tooling });
-      }
-      if (!ragMode) {
-        const rows = await db
-          .select({ output: schema.taskSteps.output })
-          .from(schema.taskSteps)
-          .innerJoin(schema.tasks, eq(schema.taskSteps.taskId, schema.tasks.id))
-          .where(
-            and(
-              eq(schema.tasks.repositoryId, task.repositoryId),
-              eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
-            ),
-          )
-          .orderBy(desc(schema.taskSteps.createdAt))
-          .limit(1);
-        ragMode = readRagMode(rows[0]?.output);
-      }
-    }
-  }
-  if (!ragMode || ragMode === 'none') return disabled;
-
-  const secret = process.env.CONFIG_ENCRYPTION_KEY;
-  if (!secret) {
-    log.warn({ taskId }, 'CONFIG_ENCRYPTION_KEY unset; haive-rag MCP disabled');
-    return disabled;
-  }
-  // Sandbox -> API base URL. Defaults to the compose service name; override via
-  // RAG_API_INTERNAL_URL when the sandbox reaches the API by another route
-  // (e.g. host.docker.internal). Under networkPolicy 'allowlist' this host must
-  // be allowlisted; under 'none' the proxy cannot reach the API and rag_search
-  // will report a request failure (agents then fall through to KB/LSP/GREP).
-  const apiUrl = process.env.RAG_API_INTERNAL_URL || 'http://api:3001';
-  return { enabled: true, apiUrl, token: signRagToken(taskId, secret) };
-}
-
-/** Load the user's custom MCP servers (the `mcpServers` object from the repo's
- *  `.claude/mcp_settings.json`) so they can be merged additively into the
- *  generated runtime config. Sourced from the step-04 tooling output — this
- *  task's own if present, else the repository's most recent onboarding run —
- *  which is the canonical record of what was written to mcp_settings.json. */
-async function loadUserMcpServers(db: Database, taskId: string): Promise<Record<string, unknown>> {
-  const parse = (output: unknown): Record<string, unknown> | null => {
-    const raw = (output as { tooling?: { mcpSettingsJson?: string } } | null)?.tooling
-      ?.mcpSettingsJson;
-    if (typeof raw !== 'string' || raw.trim().length === 0) return null;
-    try {
-      const obj = JSON.parse(raw) as { mcpServers?: unknown };
-      return obj && typeof obj.mcpServers === 'object' && obj.mcpServers
-        ? (obj.mcpServers as Record<string, unknown>)
-        : {};
-    } catch {
-      return null;
-    }
-  };
-
-  const own = await db.query.taskSteps.findFirst({
-    where: and(
-      eq(schema.taskSteps.taskId, taskId),
-      eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
-    ),
-    columns: { output: true },
-  });
-  const fromOwn = parse(own?.output);
-  if (fromOwn) return fromOwn;
-
-  const task = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { repositoryId: true },
-  });
-  if (!task?.repositoryId) return {};
-
-  // Prefer the repo-level onboarding mirror (survives a clone, where the
-  // onboarding task's step outputs don't exist — the committed
-  // .claude/mcp_settings.json file is NOT read back at runtime, this DB record
-  // is the source); fall back to the repo's most recent onboarding 04-tooling
-  // output for legacy repos.
-  const repo = await db.query.repositories.findFirst({
-    where: eq(schema.repositories.id, task.repositoryId),
-    columns: { onboardingTooling: true },
-  });
-  const mirror = repo?.onboardingTooling as OnboardingToolingMirror | null | undefined;
-  if (mirror?.schemaVersion === ONBOARDING_TOOLING_SCHEMA_VERSION && mirror.tooling) {
-    const fromMirror = parse({ tooling: mirror.tooling });
-    if (fromMirror) return fromMirror;
-  }
-
-  const rows = await db
-    .select({ output: schema.taskSteps.output })
-    .from(schema.taskSteps)
-    .innerJoin(schema.tasks, eq(schema.taskSteps.taskId, schema.tasks.id))
-    .where(
-      and(
-        eq(schema.tasks.repositoryId, task.repositoryId),
-        eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
-      ),
-    )
-    .orderBy(desc(schema.taskSteps.createdAt))
-    .limit(1);
-  return parse(rows[0]?.output) ?? {};
-}
-
 const CDP_PROBE_ATTEMPTS = 3;
 const CDP_PROBE_RETRY_MS = 2_000;
 
@@ -317,43 +172,11 @@ export async function resolveMcpExtraFiles(
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
 
-  // chrome-devtools is gated on a ready envTemplate with browserTesting.
-  let includeChromeDevtools = false;
-  let chromeDevtoolsMcpVersion: string | null = null;
-  // ddev-control is gated on the task being a DDEV task (declared container tool).
-  let isDdevTask = false;
-  const task = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { envTemplateId: true },
-  });
-  if (!ragOnly && task?.envTemplateId) {
-    const envTemplate = await db.query.envTemplates.findFirst({
-      where: eq(schema.envTemplates.id, task.envTemplateId),
-      columns: { declaredDeps: true, status: true },
-    });
-    if (envTemplate && envTemplate.status === 'ready') {
-      const deps = envTemplate.declaredDeps as Record<string, unknown> | null;
-      includeChromeDevtools = !!deps?.browserTesting;
-      isDdevTask = deps?.containerTool === 'ddev';
-      // Operative chrome-devtools-mcp pin for this repo (null = latest).
-      chromeDevtoolsMcpVersion =
-        (deps?.chromeDevtoolsMcpVersion as string | null | undefined) ?? null;
-    }
-  }
+  // THE decision — shared with the dispatcher, which renders the same object into the
+  // prompt. Materialization below must read it rather than re-deriving any part, or a
+  // prompt can advertise a server this mount does not wire.
+  const surface = await resolveMcpSurface(db, taskId, ragOnly);
 
-  // ddev-control MCP: enabled for a DDEV task when the global kill-switch is on and a
-  // secret is present to mint the task token. Not for rag-only (mining) invocations —
-  // isDdevTask is only set inside the !ragOnly branch above.
-  const ddevSecret = process.env.CONFIG_ENCRYPTION_KEY;
-  const ddevControlEnabled =
-    isDdevTask &&
-    !!ddevSecret &&
-    (await configService.getBoolean(CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED, true));
-  const ddevToken = ddevControlEnabled ? signRagToken(taskId, ddevSecret as string) : '';
-  const ddevApiUrl =
-    process.env.DDEV_API_INTERNAL_URL || process.env.RAG_API_INTERNAL_URL || 'http://api:3001';
-
-  const rag = await resolveRagMcpConfig(db, taskId);
   const ragLspAvailable =
     cliAdapterRegistry.has(providerName) &&
     cliAdapterRegistry.get(providerName).supportsLsp &&
@@ -362,41 +185,43 @@ export async function resolveMcpExtraFiles(
   // When chrome-devtools is on AND the task's runner has a live headed browser
   // (interactive/mcp testing), connect the agent to THAT visible browser instead
   // of self-launching an isolated headless one — so it co-drives what the user
-  // watches in the VNC panel.
-  const chromeDevtoolsBrowserUrl = includeChromeDevtools
+  // watches in the VNC panel. Deliberately NOT part of resolveMcpSurface: this probe
+  // costs up to 3 x 2s and only picks browser-url vs headless, never presence, so the
+  // dispatcher must not pay for it on every enqueue.
+  const chromeDevtoolsBrowserUrl = surface.chromeDevtools.enabled
     ? await resolveRunnerBrowserCdpUrl(taskId)
     : undefined;
 
   const servers = buildDefaultMcpServers({
     repoPath: sandboxWorkdir,
-    includeChromeDevtools,
+    includeChromeDevtools: surface.chromeDevtools.enabled,
     chromeDevtoolsBrowserUrl,
-    chromeDevtoolsMcpVersion,
-    includeRagSearch: rag.enabled,
+    chromeDevtoolsMcpVersion: surface.chromeDevtools.version,
+    includeRagSearch: surface.rag.enabled,
     ragServerPath: RAG_MCP_SERVER_PATH,
-    ragApiUrl: rag.apiUrl,
-    ragToken: rag.token,
+    ragApiUrl: surface.rag.apiUrl,
+    ragToken: surface.rag.token,
     ragLspAvailable,
-    includeDdevControl: ddevControlEnabled,
+    includeDdevControl: surface.ddevControl.enabled,
     ddevControlServerPath: DDEV_MCP_SERVER_PATH,
-    ddevApiUrl,
-    ddevToken,
+    ddevApiUrl: surface.ddevControl.apiUrl,
+    ddevToken: surface.ddevControl.token,
   });
 
   // User's custom MCP servers (.claude/mcp_settings.json) merged additively so
   // the generated --strict-mcp-config bundle doesn't shadow them. Haive's
-  // reserved servers win on name collision (see serversToJsonObject). Skipped
-  // entirely for rag-only (mining) invocations so they reach nothing but RAG.
-  const userServers = ragOnly ? {} : await loadUserMcpServers(db, taskId);
+  // reserved servers win on name collision (see serversToJsonObject). Empty for
+  // rag-only invocations so they reach nothing but RAG.
+  const userServers = surface.userServers;
 
   if (servers.length === 0 && Object.keys(userServers).length === 0) return empty;
 
   // The haive-rag proxy is a bind-mounted script run via `node`; ship it
   // whenever rag is enabled so the MCP server command resolves.
-  const ragFiles: SandboxExtraFile[] = rag.enabled
+  const ragFiles: SandboxExtraFile[] = surface.rag.enabled
     ? [{ containerPath: RAG_MCP_SERVER_PATH, content: RAG_MCP_SERVER_JS }]
     : [];
-  const ddevFiles: SandboxExtraFile[] = ddevControlEnabled
+  const ddevFiles: SandboxExtraFile[] = surface.ddevControl.enabled
     ? [{ containerPath: DDEV_MCP_SERVER_PATH, content: DDEV_MCP_SERVER_JS }]
     : [];
 

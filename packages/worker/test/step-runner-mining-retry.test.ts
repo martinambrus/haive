@@ -112,6 +112,11 @@ function makeMockDb(state: MockState): Database {
     query: {
       userStepCliPreferences: { findFirst: async () => undefined },
       tasks: { findFirst: async () => undefined },
+      // resolveTaskDispatch resolves the invocation's MCP surface so the prompt can
+      // state it; that reads the step-04 tooling output and the env template.
+      taskSteps: { findFirst: async () => undefined },
+      envTemplates: { findFirst: async () => undefined },
+      repositories: { findFirst: async () => undefined },
     },
   } as unknown as Database;
   return db;

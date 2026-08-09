@@ -362,7 +362,18 @@ describe('resolveDispatch', () => {
         repositories: {
           findFirst: async () => ({ storagePath: null, localPath: null }),
         },
+        // resolveTaskDispatch also resolves the MCP surface for the prompt block.
+        taskSteps: { findFirst: async () => undefined },
+        envTemplates: { findFirst: async () => undefined },
       },
+      // Repo-level fallback for the step-04 tooling output (ragMode / mcp_settings).
+      select: () => ({
+        from: () => ({
+          innerJoin: () => ({
+            where: () => ({ orderBy: () => ({ limit: async () => [] }) }),
+          }),
+        }),
+      }),
     } as unknown as Database;
     const provider = makeProvider({ id: 'prov-codex', name: 'codex' });
     const worktreePlan = await resolveTaskDispatch(db, 'task-1', {

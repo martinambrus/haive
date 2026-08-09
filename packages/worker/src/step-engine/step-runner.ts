@@ -676,6 +676,7 @@ async function resolveLlmPhase(
       prompt,
       capabilities: llmSpec.requiredCapabilities,
     },
+    toolProfile: llmSpec.toolProfile,
     invokeOpts: {
       cwd: params.workspacePath,
       effortLevel: preferredEffort ?? undefined,
@@ -861,6 +862,9 @@ async function resolveAiFixPhase(
     providers: params.providers,
     preferredProviderId,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
+    // Same step, so the same declared surface: a fix agent for a report-only step
+    // must not be told it has tools the step never gets.
+    toolProfile: stepDef.llm?.toolProfile,
     invokeOpts: { cwd: params.workspacePath, effortLevel: preferredEffort ?? undefined },
   });
   if (plan.mode === 'skip' || !plan.invocation) {
@@ -1154,6 +1158,7 @@ async function dispatchMiningAgents(
         prompt,
         capabilities: spec.requiredCapabilities,
       },
+      toolProfile: spec.toolProfile,
       invokeOpts: {
         cwd: params.workspacePath,
         effortLevel: preferredEffort ?? undefined,

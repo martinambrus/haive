@@ -161,6 +161,10 @@ function makeMockDb(state: MockState): Database {
         findFirst: async () => state.taskRow ?? undefined,
       },
       taskSteps: { findFirst: async () => undefined },
+      // resolveTaskDispatch resolves the invocation's MCP surface so the prompt can
+      // state it; that reads the env template and the repo onboarding mirror.
+      envTemplates: { findFirst: async () => undefined },
+      repositories: { findFirst: async () => undefined },
     },
   } as unknown as Database;
   return db;

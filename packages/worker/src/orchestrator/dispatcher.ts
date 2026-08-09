@@ -17,6 +17,7 @@ import {
   withWorktreeGitBoundary,
 } from '../repo/worktree-git-boundary.js';
 import { withDdevGeneratedBoundary } from '../repo/ddev-generated-boundary.js';
+import { resolveMcpSurface, withMcpSurface, type McpSurface } from '../sandbox/mcp-surface.js';
 import {
   visionDisallowedTools,
   withModelCapabilityBoundary,
@@ -82,6 +83,12 @@ export interface DispatchRequest {
   /** Computed by resolveTaskDispatch from the actual invocation target. Exposed
    *  on the pure resolver only for deterministic unit tests. */
   worktreeGitBoundary?: boolean;
+  /** The step's declared MCP narrowing, passed straight to resolveMcpSurface so the
+   *  advertised surface matches the one cli-exec will wire for the same invocation. */
+  toolProfile?: 'rag_only';
+  /** Computed by resolveTaskDispatch. Exposed on the pure resolver only for
+   *  deterministic unit tests; null means "advertise nothing". */
+  mcpSurface?: McpSurface | null;
   registry?: CliAdapterRegistry;
 }
 
@@ -92,9 +99,10 @@ export async function resolveTaskDispatch(
   taskId: string,
   req: DispatchRequest,
 ): Promise<DispatchPlan> {
-  const [lspConfigured, worktreeGitBoundary] = await Promise.all([
+  const [lspConfigured, worktreeGitBoundary, mcpSurface] = await Promise.all([
     hasReadyLspBridge(db, taskId),
     resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
+    resolveMcpSurface(db, taskId, req.toolProfile === 'rag_only'),
   ]);
   return resolveDispatch({
     ...req,
@@ -102,6 +110,7 @@ export async function resolveTaskDispatch(
     // Production callers cannot accidentally claim a boundary the mount will
     // not apply (or omit one it will): the DB-backed target wins any input.
     worktreeGitBoundary,
+    mcpSurface,
   });
 }
 
@@ -165,10 +174,18 @@ function buildCliSidePlan(
     // prompt can never claim a boundary the mount does not enforce (or omit one it does).
     const gitBounded = withWorktreeGitBoundary(capabilityAdapted, req.worktreeGitBoundary === true);
     const ddevBounded = withDdevGeneratedBoundary(gitBounded, req.worktreeGitBoundary === true);
+    // What the agent CAN reach, stated rather than left to be inferred — the same
+    // surface object cli-exec materializes into the sandbox's MCP config. Suppressed
+    // for an adapter that gets no MCP config at all (amp), since there would be
+    // nothing behind the claim.
+    const mcpBounded = withMcpSurface(
+      ddevBounded,
+      adapter.supportsMcp ? (req.mcpSurface ?? null) : null,
+    );
     // Learned model limitations. Applied here, after the provider is resolved, so it
     // reaches the prompt, every sub-agent prompt and the synthesis prompt alike — and
     // pairs with the tool deny merged into invokeOpts below.
-    return withModelCapabilityBoundary(ddevBounded, provider);
+    return withModelCapabilityBoundary(mcpBounded, provider);
   };
 
   // A model that cannot read images must not be handed the screenshot tool: the prompt
