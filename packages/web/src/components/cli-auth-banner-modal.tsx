@@ -80,6 +80,8 @@ export function CliAuthBannerModal({
   const termRef = useRef<XTerm | null>(null);
   const termMountRef = useRef<HTMLDivElement | null>(null);
   const [phase, setPhase] = useState<Phase>('connecting');
+  /** Non-null while a cli-exec job this dialog started is waiting for a free slot. */
+  const [queueWait, setQueueWait] = useState<{ running: number; ahead: number } | null>(null);
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [deviceCode, setDeviceCode] = useState<string | null>(null);
   const [token, setToken] = useState('');
@@ -96,6 +98,7 @@ export function CliAuthBannerModal({
     setToken('');
     setError(null);
     setSavedResult(null);
+    setQueueWait(null);
 
     const ws = new WebSocket(apiWebSocketUrl(`/cli-login-banner/${providerId}`));
     wsRef.current = ws;
@@ -140,6 +143,19 @@ export function CliAuthBannerModal({
         case 'output':
           // antigravity debug terminal: write raw agy TUI output to the xterm.
           if (typeof msg.data === 'string') termRef.current?.write(msg.data);
+          break;
+        case 'queue':
+          // The job this dialog is waiting on is queued behind the CLI slots agents share.
+          // Carries its own state rather than a phase, because it can happen twice in one
+          // sign-in (container create, then the post-login probe) and must not overwrite the
+          // phase either of them is on.
+          setQueueWait({
+            running: typeof msg.running === 'number' ? msg.running : 0,
+            ahead: typeof msg.ahead === 'number' ? msg.ahead : 0,
+          });
+          break;
+        case 'queue-cleared':
+          setQueueWait(null);
           break;
         case 'auth-success':
           setPhase('success');
@@ -217,8 +233,14 @@ export function CliAuthBannerModal({
   // closed mid-probe, so the server's wsSend was dropped), the modal would hang
   // here forever. Bound it: after SUCCESS_SAVE_TIMEOUT_MS, surface an escape. The
   // probe already persisted auth_status server-side, so re-testing reflects truth.
+  //
+  // Suspended while the probe is QUEUED. This timer was written when the probe was capped at
+  // 30s server-side; it now waits for a CLI slot that agents can hold for minutes, and a
+  // deadline running through that would fail a sign-in that is merely waiting its turn — the
+  // same bug this whole change removes. `queueWait` going null restarts it, so the safety net
+  // still covers the part it was built for: the probe actually running.
   useEffect(() => {
-    if (phase !== 'success') return;
+    if (phase !== 'success' || queueWait !== null) return;
     const timer = setTimeout(() => {
       setPhase('error');
       setError(
@@ -227,7 +249,7 @@ export function CliAuthBannerModal({
       );
     }, SUCCESS_SAVE_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [phase]);
+  }, [phase, queueWait]);
 
   // antigravity debug terminal: render agy's TUI in an xterm bound to the same
   // banner WS the modal owns. 'output' frames are written to the term (see
@@ -380,7 +402,32 @@ export function CliAuthBannerModal({
           </div>
         )}
 
-        {(phase === 'connecting' || phase === 'starting') && (
+        {/* Outranks the phase rows below: while this is up, the phase they would describe has
+            not begun. Deliberately states the machine's condition and never an ETA — `running`
+            falls as agents finish and `ahead` is almost always 0, so any countdown would be a
+            promise this cannot keep. */}
+        {queueWait !== null && (
+          <BannerRow tone="info">
+            <Spinner />
+            <span>
+              {queueWait.running === 0
+                ? // Queued with nothing running means no worker is taking jobs — paused queue,
+                  // or one restarting. Saying "0 jobs are using every slot" would be nonsense.
+                  'Queued — waiting for a CLI worker to pick this up.'
+                : `Waiting for a free CLI slot — ${queueWait.running} ${
+                    queueWait.running === 1 ? 'job is' : 'jobs are'
+                  } using them all.`}
+              {queueWait.ahead > 0
+                ? ` ${queueWait.ahead} other sign-in or test is ahead of you.`
+                : queueWait.running > 0
+                  ? ' Your sign-in starts as soon as one finishes.'
+                  : ''}{' '}
+              Cancel below if you would rather not wait.
+            </span>
+          </BannerRow>
+        )}
+
+        {queueWait === null && (phase === 'connecting' || phase === 'starting') && (
           <BannerRow tone="info">
             <Spinner />
             <span>{phase === 'connecting' ? 'Connecting...' : 'Starting login container...'}</span>
@@ -544,7 +591,12 @@ export function CliAuthBannerModal({
             );
           })()}
 
-        {phase !== 'saved' && phase !== 'error' && phase !== 'success' && (
+        {/* `success` normally has nothing to cancel — the credential is already written and the
+            dialog is a second from closing. But when the verification probe is QUEUED that
+            second becomes minutes, and a dialog with no way out is what makes a user force-quit
+            a sign-in that actually worked. */}
+        {((phase !== 'saved' && phase !== 'error' && phase !== 'success') ||
+          (phase === 'success' && queueWait !== null)) && (
           <div className="flex items-center justify-end gap-2 border-t border-neutral-800 pt-3">
             <Button variant="ghost" onClick={handleClose}>
               Cancel

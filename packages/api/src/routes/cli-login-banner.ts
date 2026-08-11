@@ -1,6 +1,7 @@
 import type { Server, IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
+import type { Job } from 'bullmq';
 import Docker from 'dockerode';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -37,6 +38,65 @@ const RAW_BUFFER_MAX = 64 * 1024;
 const CLEAN_BUFFER_MAX = 32 * 1024;
 const HEARTBEAT_MS = 15_000;
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
+// How often the queued dialog is told what it is waiting for. Two queue reads per tick, both
+// O(queue length) against Redis, so keep it lazy — the numbers move on the scale of a CLI run
+// finishing, not of a spinner.
+const QUEUE_REPORT_MS = 2_000;
+// Bound on the post-cancel drain only. Reached only when the worker had already picked the job
+// up, so it is waiting on a container create that is seconds away, not on a queue.
+const CANCEL_DRAIN_MS = 2 * 60 * 1000;
+
+/** Raised when the user closes the dialog while a cli-exec job is still queued. Distinct from a
+ *  failure so the caller can tear down quietly instead of reporting an error to a dead socket. */
+class LoginCancelled extends Error {
+  constructor() {
+    super('login cancelled');
+    this.name = 'LoginCancelled';
+  }
+}
+
+/** Lets an await race the socket closing. `signal` never resolves — it only rejects — so
+ *  `Promise.race([work, abort.signal])` yields the work result or throws LoginCancelled. */
+interface AbortHandle {
+  aborted: boolean;
+  signal: Promise<never>;
+  fire: () => void;
+}
+
+function createAbortHandle(): AbortHandle {
+  let reject!: (err: Error) => void;
+  const signal = new Promise<never>((_, rej) => {
+    reject = rej;
+  });
+  // Marks the rejection handled at creation time: nothing awaits `signal` until a race starts,
+  // and an unobserved rejection in between would surface as an unhandled rejection warning.
+  signal.catch(() => {});
+  const handle: AbortHandle = {
+    aborted: false,
+    signal,
+    fire: () => {
+      if (handle.aborted) return;
+      handle.aborted = true;
+      reject(new LoginCancelled());
+    },
+  };
+  return handle;
+}
+
+/** How many queued cli-exec jobs are served before `jobId`.
+ *
+ *  BullMQ pushes a new job onto the HEAD of the wait list (`addStandardJob-9.lua`: LPUSH unless
+ *  lifo) and the worker takes from the TAIL (`fetchNextJob.lua`: RPOPLPUSH), so the list is
+ *  FIFO with the oldest job last. `getWaiting` hands back LRANGE order, head first, which means
+ *  the number of jobs ahead of ours is its distance from the END of that array — the opposite
+ *  of the index it is tempting to read. Returns null when the job is not waiting any more.
+ *
+ *  Prioritized jobs are deliberately not counted: moveToActive drains the plain wait list before
+ *  it looks at the prioritized set, so an agent invocation never delays a login. */
+export function waitAheadCount(waitingJobIds: readonly string[], jobId: string): number | null {
+  const idx = waitingJobIds.indexOf(jobId);
+  return idx === -1 ? null : waitingJobIds.length - 1 - idx;
+}
 
 const SUPPORTED_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'claude-code',
@@ -64,6 +124,10 @@ interface BannerSession {
   dockerContainerId: string;
   stream: Duplex;
   docker: Docker;
+  /** Carried so the post-login probe can be awaited and cancelled on the same terms as the
+   *  container create — it queues for the same slots and can wait just as long. */
+  abort: AbortHandle;
+  pending: { job: Job | null };
   rawBuffer: string;
   cleanBuffer: string;
   authUrlSent: boolean;
@@ -169,6 +233,12 @@ export function installCliLoginBannerWebSocket(
             providerName: provider.name,
             docker,
           }).catch((err) => {
+            // The user closing the dialog unwinds the session through the same throw path as a
+            // real failure. It is not one, and the socket it would report to is already gone.
+            if (err instanceof LoginCancelled) {
+              log.info({ providerId }, 'login dialog closed by the user');
+              return;
+            }
             log.error({ err, providerId }, 'banner session crashed');
             wsSend(ws, { type: 'error', message: errorMessage(err) });
             try {
@@ -199,9 +269,20 @@ interface RunBannerOpts {
 async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   const { ws, userId, providerId, providerName, docker } = opts;
 
+  // Registered BEFORE the first await, not with the session's other listeners further down: the
+  // session object does not exist until the container is attached, so until now a dialog closed
+  // mid-queue was simply unobserved. The 30s ttl used to bound the damage; without it a job the
+  // user gave up on would go on to build a container nobody is attached to.
+  const abort = createAbortHandle();
+  const pending: { job: Job | null } = { job: null };
+  ws.on('close', () => {
+    abort.fire();
+    void discardPendingLogin(pending, docker);
+  });
+
   wsSend(ws, { type: 'phase', phase: 'starting' });
 
-  const createResult = await enqueueLoginCreate(providerId, userId);
+  const createResult = await enqueueLoginCreate(providerId, userId, abort, ws, pending);
   if (!createResult.ok || !createResult.containerRowId || !createResult.dockerContainerId) {
     wsSend(ws, {
       type: 'error',
@@ -254,6 +335,8 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     dockerContainerId: createResult.dockerContainerId,
     stream,
     docker,
+    abort,
+    pending,
     rawBuffer: '',
     cleanBuffer: '',
     authUrlSent: false,
@@ -844,7 +927,13 @@ async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string
         .where(eq(schema.cliProviders.id, session.providerId));
     }
     log.info({ providerId: session.providerId }, 'oauth token saved to encrypted secret');
-    const result = await enqueueProbe(session.providerId, session.userId);
+    const result = await enqueueProbe(
+      session.providerId,
+      session.userId,
+      session.abort,
+      session.ws,
+      session.pending,
+    );
     log.info(
       {
         providerId: session.providerId,
@@ -855,6 +944,12 @@ async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string
     );
     wsSend(session.ws, { type: 'saved', result });
   } catch (err) {
+    // The token is already saved by this point; a cancel here only abandons the verification
+    // probe, so it is not a failure and there is no socket left to tell.
+    if (err instanceof LoginCancelled) {
+      log.info({ providerId: session.providerId }, 'login dialog closed while verifying');
+      return; // the finally below still clears probePending and tears the session down
+    }
     log.error({ err, providerId: session.providerId }, 'save-token/probe failed');
     wsSend(session.ws, {
       type: 'error',
@@ -868,7 +963,13 @@ async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string
 
 async function runProbeAndSave(session: BannerSession): Promise<void> {
   try {
-    const result = await enqueueProbe(session.providerId, session.userId);
+    const result = await enqueueProbe(
+      session.providerId,
+      session.userId,
+      session.abort,
+      session.ws,
+      session.pending,
+    );
     log.info(
       {
         providerId: session.providerId,
@@ -879,6 +980,12 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
     );
     wsSend(session.ws, { type: 'saved', result });
   } catch (err) {
+    // Same as saveOauthTokenAndProbe: the login itself already landed, so a cancel during
+    // verification is the user leaving, not a failure to report.
+    if (err instanceof LoginCancelled) {
+      log.info({ providerId: session.providerId }, 'login dialog closed while verifying');
+      return; // the finally below still clears probePending and tears the session down
+    }
     log.error({ err, providerId: session.providerId }, 'post-login probe failed');
     wsSend(session.ws, {
       type: 'error',
@@ -927,29 +1034,120 @@ async function upsertProviderSecret(
   });
 }
 
+/** Await a cli-exec job with no deadline, telling the dialog what it is waiting for and giving
+ *  up the moment the user closes it.
+ *
+ *  Replaces a 30s ttl that was wrong by orders of magnitude: these jobs share the cli-exec
+ *  worker's concurrency with agent invocations that hold a slot for minutes, so a busy machine
+ *  was reported to the user as a broken provider. There is deliberately no replacement
+ *  deadline — the dialog shows the queue state and the user decides how long to wait — and
+ *  SESSION_TIMEOUT_MS still bounds everything from the moment a container exists.
+ */
+async function awaitQueuedJob<T>(job: Job, abort: AbortHandle, ws: WebSocket): Promise<T> {
+  const queue = getCliExecQueue();
+  let announced = false;
+  const report = async (): Promise<void> => {
+    try {
+      const state = await job.getState();
+      if (state !== 'waiting' && state !== 'delayed' && state !== 'prioritized') return;
+      const [running, waiting] = await Promise.all([
+        queue.getActiveCount(),
+        queue.getWaiting(0, -1),
+      ]);
+      const ahead = waitAheadCount(
+        waiting.map((j) => j.id ?? ''),
+        job.id ?? '',
+      );
+      // Gone from the wait list between the two reads — it is starting, so say nothing rather
+      // than publish a position that no longer exists.
+      if (ahead === null) return;
+      announced = true;
+      wsSend(ws, { type: 'queue', running, ahead });
+    } catch (err) {
+      log.debug({ err, jobId: job.id }, 'queue position read failed');
+    }
+  };
+  void report();
+  const ticker = setInterval(() => void report(), QUEUE_REPORT_MS);
+  try {
+    return (await Promise.race([
+      job.waitUntilFinished(getCliExecQueueEvents()),
+      abort.signal,
+    ])) as T;
+  } finally {
+    clearInterval(ticker);
+    // Only if we ever said "queued": an unmatched clear would blank a panel the dialog never
+    // showed, and on the idle path the dialog must look exactly as it did before.
+    if (announced) wsSend(ws, { type: 'queue-cleared' });
+  }
+}
+
+/** Undo whatever a closed dialog left behind.
+ *
+ *  Order matters: a job still in the wait list can simply be removed, but one the worker has
+ *  already picked up will go on to build a container that nobody is attached to, and removing
+ *  its record first would lose the only handle on that container. So a running job is allowed
+ *  to finish and its container is destroyed instead. Best-effort throughout — this runs on a
+ *  socket that is already gone, and there is nobody left to report a failure to. */
+async function discardPendingLogin(pending: { job: Job | null }, docker: Docker): Promise<void> {
+  const job = pending.job;
+  if (!job) return;
+  try {
+    const state = await job.getState();
+    if (state === 'waiting' || state === 'delayed' || state === 'prioritized') {
+      await job.remove();
+      log.info({ jobId: job.id }, 'login cancelled while queued; job removed');
+      return;
+    }
+  } catch (err) {
+    log.debug({ err, jobId: job.id }, 'queued-job removal skipped');
+  }
+  try {
+    const result = (await job.waitUntilFinished(
+      getCliExecQueueEvents(),
+      CANCEL_DRAIN_MS,
+    )) as CliLoginCreateResult;
+    if (result?.containerRowId && result.dockerContainerId) {
+      await teardownContainer(result.containerRowId, docker, result.dockerContainerId);
+      log.info({ jobId: job.id }, 'login cancelled after start; container destroyed');
+    }
+  } catch (err) {
+    log.debug({ err, jobId: job.id }, 'cancelled login produced no container to destroy');
+  }
+}
+
 async function enqueueLoginCreate(
   providerId: string,
   userId: string,
+  abort: AbortHandle,
+  ws: WebSocket,
+  pending: { job: Job | null },
 ): Promise<CliLoginCreateResult> {
   const queue = getCliExecQueue();
-  const events = getCliExecQueueEvents();
   const payload: CliLoginCreateJobPayload = { providerId, userId };
   const job = await queue.add(CLI_EXEC_JOB_NAMES.LOGIN_CREATE, payload, {
     removeOnComplete: true,
     removeOnFail: true,
   });
-  return (await job.waitUntilFinished(events, 30_000)) as CliLoginCreateResult;
+  pending.job = job;
+  return awaitQueuedJob<CliLoginCreateResult>(job, abort, ws);
 }
 
-async function enqueueProbe(providerId: string, userId: string): Promise<CliProbeResult> {
+async function enqueueProbe(
+  providerId: string,
+  userId: string,
+  abort: AbortHandle,
+  ws: WebSocket,
+  pending: { job: Job | null },
+): Promise<CliProbeResult> {
   const queue = getCliExecQueue();
-  const events = getCliExecQueueEvents();
   const payload: CliProbeJobPayload = { providerId, userId, targetMode: 'cli' };
   const job = await queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, {
     removeOnComplete: true,
     removeOnFail: true,
   });
-  const result = (await job.waitUntilFinished(events, 30_000)) as CliProbeResult;
+  pending.job = job;
+  const result = await awaitQueuedJob<CliProbeResult>(job, abort, ws);
   // A login just rewrote this provider's credential, which for the volumeJson CLIs is the
   // very file the usage poller reads — so kick a tick and let the meter come back in seconds
   // instead of leaving a "reconnect" prompt up for a whole ~5-min repeatable interval after
