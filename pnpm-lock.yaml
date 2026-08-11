@@ -64,7 +64,7 @@ importers:
         version: link:../shared
       '@hono/node-server':
         specifier: ^2.0.12
-        version: 2.1.0(hono@4.13.0)
+        version: 2.1.0(hono@4.13.1)
       archiver:
         specifier: ^8.0.0
         version: 8.0.0
@@ -81,8 +81,8 @@ importers:
         specifier: 0.45.2
         version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9)
       hono:
-        specifier: ^4.12.34
-        version: 4.13.0
+        specifier: ^4.13.1
+        version: 4.13.1
       ioredis:
         specifier: ^5.11.1
         version: 5.11.1
@@ -1901,8 +1901,8 @@ packages:
     resolution: {integrity: sha512-Xwwo44whKBVCYoliBQwaPvtd/2tYFkRQtXDWj1nackaV2JPXx3L0+Jvd8/qCJ2p+ML0/XVkJ2q+Mr+UVdpJK5w==}
     engines: {node: '>=12.0.0'}
 
-  hono@4.13.0:
-    resolution: {integrity: sha512-jhunvfHWxd7J5EFfSgH4xsYJzSe/lfqbUCxiyyeaQasUsXeEHXtzVid+7EOGByc5JnFa23SSFL3Y2RV/z1T+eQ==}
+  hono@4.13.1:
+    resolution: {integrity: sha512-kdJoFVv2xmayw6cY09H7AbMJMt8Jn5jdlEdXsP7AGBdF2DIptVlKlOLKXP41yPip4/a3yQPv9gVcJYI8YY04dw==}
     engines: {node: '>=16.9.0'}
 
   html-url-attributes@3.0.1:
@@ -3043,9 +3043,9 @@ snapshots:
       protobufjs: 7.6.5
       yargs: 17.7.2
 
-  '@hono/node-server@2.1.0(hono@4.13.0)':
+  '@hono/node-server@2.1.0(hono@4.13.1)':
     dependencies:
-      hono: 4.13.0
+      hono: 4.13.1
 
   '@iconify/types@2.0.0': {}
 
@@ -4275,7 +4275,7 @@ snapshots:
 
   highlight.js@11.11.1: {}
 
-  hono@4.13.0: {}
+  hono@4.13.1: {}
 
   html-url-attributes@3.0.1: {}
 
