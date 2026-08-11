@@ -10,6 +10,7 @@ import {
 import { Badge, Button, FormError } from '@/components/ui';
 import { runCliProbe, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { useCliLogin } from '@/lib/use-cli-login';
+import { CLI_LOGIN_PROVIDERS } from '@/lib/usage-reconnect';
 
 interface CliProviderTestProps {
   providerId: string;
@@ -25,7 +26,6 @@ interface CliProviderTestProps {
   onLoginCompleted?: () => void;
 }
 
-const LOGIN_SUPPORTED: CliProviderName[] = ['claude-code', 'codex', 'amp', 'antigravity'];
 const LOGIN_RECOVERABLE: CliAuthStatus[] = [
   'auth_expired',
   'auth_denied',
@@ -103,7 +103,7 @@ export function CliProviderTest({
 
   const cliAuthStatus = result?.cli?.authStatus;
   const showLogin =
-    LOGIN_SUPPORTED.includes(providerName) &&
+    CLI_LOGIN_PROVIDERS.includes(providerName) &&
     ((cliAuthStatus !== undefined && LOGIN_RECOVERABLE.includes(cliAuthStatus)) ||
       needsUsageReconnect === true);
 
@@ -171,7 +171,7 @@ function PathResultRow({
   const loginPrompt =
     !res.ok &&
     res.authStatus &&
-    LOGIN_SUPPORTED.includes(providerName) &&
+    CLI_LOGIN_PROVIDERS.includes(providerName) &&
     LOGIN_RECOVERABLE.includes(res.authStatus);
   return (
     <div className="rounded-md border border-neutral-800 bg-neutral-900/50 p-3">
