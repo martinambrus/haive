@@ -16,6 +16,10 @@ interface CliProviderTestProps {
   providerName: CliProviderName;
   providerLabel: string;
   blockMessage?: string | null;
+  /** The poller found this provider's usage token dead. Reveals Log in on its own, because a
+   *  rejected token is already the evidence a Test would go and fetch — and this is where the
+   *  reconnect prompts deep-link to, so the button has to be here when they arrive. */
+  needsUsageReconnect?: boolean;
   // Fired after a successful interactive CLI login wrote a new encrypted
   // secret. Parent uses this to re-fetch the sibling form's secret list.
   onLoginCompleted?: () => void;
@@ -52,6 +56,7 @@ export function CliProviderTest({
   providerName,
   providerLabel,
   blockMessage,
+  needsUsageReconnect,
   onLoginCompleted,
 }: CliProviderTestProps) {
   const [testing, setTesting] = useState(false);
@@ -99,8 +104,8 @@ export function CliProviderTest({
   const cliAuthStatus = result?.cli?.authStatus;
   const showLogin =
     LOGIN_SUPPORTED.includes(providerName) &&
-    cliAuthStatus !== undefined &&
-    LOGIN_RECOVERABLE.includes(cliAuthStatus);
+    ((cliAuthStatus !== undefined && LOGIN_RECOVERABLE.includes(cliAuthStatus)) ||
+      needsUsageReconnect === true);
 
   return (
     <div className="flex flex-col gap-4">

@@ -18,6 +18,9 @@ export default function EditCliProviderPage() {
   const [error, setError] = useState<string | null>(null);
   const [testBlockMessage, setTestBlockMessage] = useState<string | null>(null);
   const [secretsReloadNonce, setSecretsReloadNonce] = useState(0);
+  /** This provider's usage token is dead. Reveals the Log in button below without a Test
+   *  first, so the `#cli-login` deep-link the reconnect prompts use lands on a live control. */
+  const [needsUsageReconnect, setNeedsUsageReconnect] = useState(false);
   usePageTitle(provider ? provider.label : 'CLI Provider');
 
   useEffect(() => {
@@ -32,6 +35,29 @@ export default function EditCliProviderPage() {
       })
       .catch((err) => setError((err as Error).message ?? 'Failed to load provider'));
   }, [id]);
+
+  // The Test-connection card mounts only after the provider loads, so the browser's on-load
+  // `#cli-login` scroll (from a reconnect prompt's deep-link) has already missed the anchor.
+  // Mirrors what ClaudeUsageAuth does for its own `#usage-tracking` anchor.
+  useEffect(() => {
+    if (!provider) return;
+    if (typeof window !== 'undefined' && window.location.hash === '#cli-login') {
+      document.getElementById('cli-login')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [provider]);
+
+  // Separate from the load above so a usage-window failure never blocks the page: not knowing
+  // the token is dead costs a hidden button, not the editor.
+  useEffect(() => {
+    api
+      .get<{ snapshots: { providerId: string; status: string }[] }>('/usage-window')
+      .then((d) =>
+        setNeedsUsageReconnect(
+          d.snapshots.some((s) => s.providerId === id && s.status === 'needs_reconnect'),
+        ),
+      )
+      .catch(() => setNeedsUsageReconnect(false));
+  }, [id, secretsReloadNonce]);
 
   if (error) return <FormError message={error} />;
   if (!provider || !meta) return <p className="text-sm text-neutral-500">Loading...</p>;
@@ -66,7 +92,9 @@ export default function EditCliProviderPage() {
         />
       </Card>
 
-      <Card>
+      {/* `#cli-login` is where every reconnect prompt for an interactive-login CLI points —
+          this card owns the Log in button, so the anchor has to live on it. */}
+      <Card id="cli-login" className="scroll-mt-6">
         <CardHeader>
           <CardTitle>Test connection</CardTitle>
           <CardDescription>
@@ -78,6 +106,7 @@ export default function EditCliProviderPage() {
           providerName={provider.name}
           providerLabel={provider.label}
           blockMessage={testBlockMessage}
+          needsUsageReconnect={needsUsageReconnect}
           onLoginCompleted={() => setSecretsReloadNonce((n) => n + 1)}
         />
       </Card>

@@ -93,6 +93,100 @@ describe('selectStripMeters', () => {
     expect(meters[0]!.snapshot.stale).toBe(true);
   });
 
+  it('prompts a reconnect when a visible subscription has nothing readable left', () => {
+    // The codex incident: every row on the subscription carries a dead token, so without
+    // this the strip renders nothing at all and the user gets no signal.
+    const meters = selectStripMeters(
+      [task('x1')],
+      [snap({ providerId: 'x1', providerName: 'codex', status: 'needs_reconnect' })],
+      KEYS,
+    );
+    expect(meters).toHaveLength(1);
+    expect(meters[0]!.status).toBe('needs_reconnect');
+    expect(meters[0]!.allowanceKey).toBe('shared:codex');
+  });
+
+  it('picks the same dead row on every poll regardless of snapshot order', () => {
+    const dead = (providerId: string) =>
+      snap({ providerId, providerName: 'codex', status: 'needs_reconnect' });
+    const forward = selectStripMeters([task('x1')], [dead('x1'), dead('x0')], {
+      x0: 'shared:codex',
+      x1: 'shared:codex',
+    });
+    const reversed = selectStripMeters([task('x1')], [dead('x0'), dead('x1')], {
+      x0: 'shared:codex',
+      x1: 'shared:codex',
+    });
+    expect(forward[0]!.snapshot.providerId).toBe('x0');
+    expect(reversed[0]!.snapshot.providerId).toBe('x0');
+  });
+
+  it('prefers a live reading over a reconnect prompt on the same subscription', () => {
+    const meters = selectStripMeters(
+      [task('c1')],
+      [
+        snap({ providerId: 'c1', status: 'needs_reconnect' }),
+        snap({ providerId: 'c2', fiveHour: { usedPct: 92, resetsAt: null } }),
+      ],
+      KEYS,
+    );
+    expect(meters).toHaveLength(1);
+    expect(meters[0]!.status).toBe('ok');
+    expect(meters[0]!.snapshot.providerId).toBe('c2');
+  });
+
+  it('says it is waiting once the credential has been repaired', () => {
+    const meters = selectStripMeters(
+      [task('x1')],
+      [snap({ providerId: 'x1', providerName: 'codex', status: 'pending' })],
+      KEYS,
+    );
+    expect(meters).toHaveLength(1);
+    expect(meters[0]!.status).toBe('pending');
+  });
+
+  it('never asks for a reconnect that is already in flight on the same subscription', () => {
+    // The trap this exists for: the user reconnects, the poller has not ticked, and a sibling
+    // row still reads needs_reconnect — so the page tells them to redo a fix that worked.
+    const meters = selectStripMeters(
+      [task('x1')],
+      [
+        snap({ providerId: 'x1', providerName: 'codex', status: 'needs_reconnect' }),
+        snap({ providerId: 'x2', providerName: 'codex', status: 'pending' }),
+      ],
+      { x1: 'shared:codex', x2: 'shared:codex' },
+    );
+    expect(meters).toHaveLength(1);
+    expect(meters[0]!.status).toBe('pending');
+  });
+
+  it('prefers a live reading over a pending one', () => {
+    const meters = selectStripMeters(
+      [task('x1')],
+      [
+        snap({ providerId: 'x1', providerName: 'codex', status: 'pending' }),
+        snap({
+          providerId: 'x2',
+          providerName: 'codex',
+          sevenDay: { usedPct: 40, resetsAt: null },
+        }),
+      ],
+      { x1: 'shared:codex', x2: 'shared:codex' },
+    );
+    expect(meters).toHaveLength(1);
+    expect(meters[0]!.status).toBe('ok');
+  });
+
+  it('stays silent for a plain error — nothing to show and nothing to act on', () => {
+    expect(
+      selectStripMeters(
+        [task('x1')],
+        [snap({ providerId: 'x1', providerName: 'codex', status: 'error' })],
+        KEYS,
+      ),
+    ).toEqual([]);
+  });
+
   it('falls back to per-provider keys when the api omits allowanceKeys', () => {
     const meters = selectStripMeters([task('c1'), task('c2')], CLAUDE, undefined);
     expect(meters.map((m) => m.allowanceKey)).toEqual(['provider:c1', 'provider:c2']);

@@ -5,6 +5,7 @@ import { api, type CliProviderName, type Task, type UsageWindowSnapshot } from '
 import { CLI_USAGE_LABEL } from '@/lib/usage-format';
 import { UsageBars, usageTooltip, usageWindowsOf } from '@/components/usage-meter';
 import { selectStripMeters } from '@/components/usage-strip-select';
+import { UsagePendingChip, UsageReconnectAction } from '@/components/usage-reconnect-action';
 
 /** Subscription meters above the task list: how much allowance is left on each CLI the
  *  VISIBLE rows use, so the answer to "can these tasks still run?" is on the page you are
@@ -63,11 +64,34 @@ export function UsageStrip({ tasks }: { tasks: readonly Task[] | null }) {
 
   return (
     <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
-      {meters.map(({ allowanceKey, snapshot }) => {
+      {meters.map(({ allowanceKey, snapshot, status }) => {
+        const providerName = snapshot.providerName as CliProviderName;
+        const name = CLI_USAGE_LABEL[providerName] ?? snapshot.providerName;
+        // Dead token: the numbers are gone and only a user action brings them back, so say so
+        // here rather than leaving the strip blank on the page the user is already looking at.
+        if (status === 'pending') {
+          return (
+            <UsagePendingChip
+              key={allowanceKey}
+              displayName={name}
+              className="flex shrink-0 items-center gap-1 font-mono text-xs font-semibold text-neutral-400"
+            />
+          );
+        }
+        if (status === 'needs_reconnect') {
+          return (
+            <UsageReconnectAction
+              key={allowanceKey}
+              providerId={snapshot.providerId}
+              providerName={providerName}
+              providerLabel={null}
+              displayName={name}
+              className="flex shrink-0 items-center gap-1 font-mono text-xs font-semibold text-amber-400 hover:text-amber-300"
+            />
+          );
+        }
         const windows = usageWindowsOf(snapshot);
         if (windows.length === 0) return null;
-        const name =
-          CLI_USAGE_LABEL[snapshot.providerName as CliProviderName] ?? snapshot.providerName;
         return (
           <span
             key={allowanceKey}

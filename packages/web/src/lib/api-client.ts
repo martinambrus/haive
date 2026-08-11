@@ -435,8 +435,10 @@ export interface UsageWindowSnapshot {
   fetchedAt: string;
   stale: boolean;
   /** 'needs_reconnect' = the usage token was rejected and only a re-auth fixes it;
-   *  the header chip prompts a reconnect instead of hiding. */
-  status: 'ok' | 'error' | 'needs_reconnect';
+   *  the header chip prompts a reconnect instead of hiding. 'pending' = that re-auth
+   *  already happened and the poller has not caught up, so the chip says it is waiting
+   *  instead of asking for a reconnect the user just performed. */
+  status: 'ok' | 'error' | 'needs_reconnect' | 'pending';
 }
 
 export interface CliProviderSecret {

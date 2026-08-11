@@ -26,8 +26,8 @@ import { cliUpgradeLatest, groupUpgradable } from '@/components/cli-upgrade-sele
 import { runCliProbe, runCliSignOut, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { usePageTitle } from '@/lib/use-page-title';
+import { CLI_LOGIN_PROVIDERS, usageReconnectFix, usageReconnectHint } from '@/lib/usage-reconnect';
 
-const LOGIN_SUPPORTED: CliProviderName[] = ['claude-code', 'codex', 'amp', 'antigravity'];
 const LOGIN_RECOVERABLE: CliAuthStatus[] = [
   'auth_expired',
   'auth_denied',
@@ -74,6 +74,9 @@ export default function CliProvidersPage() {
   const [usageConnected, setUsageConnected] = useState<Record<string, boolean>>({});
   /** Providers whose stored usage token the poller marked dead — a re-auth is needed. */
   const [needsReconnect, setNeedsReconnect] = useState<Record<string, boolean>>({});
+  /** Providers already re-authed, waiting on the next poll. Mutually exclusive with the
+   *  above (the API reports one status), so the row never asks for a fix that is in flight. */
+  const [usagePending, setUsagePending] = useState<Record<string, boolean>>({});
   const [cloningIds, setCloningIds] = useState<Record<string, boolean>>({});
   const [upgradingIds, setUpgradingIds] = useState<Record<string, boolean>>({});
   /** Bulk ("Upgrade All") run state — separate from upgradingIds, which drives
@@ -134,6 +137,11 @@ export default function CliProvidersPage() {
           usage.snapshots
             .filter((s) => s.status === 'needs_reconnect')
             .map((s) => [s.providerId, true]),
+        ),
+      );
+      setUsagePending(
+        Object.fromEntries(
+          usage.snapshots.filter((s) => s.status === 'pending').map((s) => [s.providerId, true]),
         ),
       );
     } catch (err) {
@@ -454,11 +462,18 @@ export default function CliProvidersPage() {
                   const upgrading = upgradingIds[p.id] === true;
                   const testState = testStates[p.id];
                   const cliAuthStatus = testState?.result?.cli?.authStatus;
+                  // A usage token the poller found dead is itself proof the login needs
+                  // redoing, so offer the button straight away instead of making the user run
+                  // a Test first to discover that. Only for the CLIs a login actually repairs:
+                  // claude-code's meters run on a separate usage-OAuth token and get their own
+                  // Reconnect button below, so `claude login` would fix nothing there.
+                  const loginRepairsUsage =
+                    needsReconnect[p.id] === true && usageReconnectFix(p.name) === 'cli-login';
                   const showLogin =
-                    LOGIN_SUPPORTED.includes(p.name) &&
-                    cliAuthStatus !== undefined &&
-                    LOGIN_RECOVERABLE.includes(cliAuthStatus);
-                  const showSignOut = LOGIN_SUPPORTED.includes(p.name) && p.authStatus === 'ok';
+                    CLI_LOGIN_PROVIDERS.includes(p.name) &&
+                    ((cliAuthStatus !== undefined && LOGIN_RECOVERABLE.includes(cliAuthStatus)) ||
+                      loginRepairsUsage);
+                  const showSignOut = CLI_LOGIN_PROVIDERS.includes(p.name) && p.authStatus === 'ok';
                   const signOutState = signOutStates[p.id];
                   const usageState = usageStates[p.id];
                   return (
@@ -485,15 +500,13 @@ export default function CliProvidersPage() {
                               </Badge>
                             )}
                             {needsReconnect[p.id] && (
-                              <Badge
-                                variant="warning"
-                                title={
-                                  p.name === 'claude-code'
-                                    ? "This provider's usage token expired — Reconnect to restore its subscription meters"
-                                    : "This provider's usage token was rejected — open Edit and replace its API token to restore its subscription meters"
-                                }
-                              >
-                                ⚠ usage token expired
+                              <Badge variant="warning" title={usageReconnectHint(p.label, p.name)}>
+                                ⚠ usage token rejected
+                              </Badge>
+                            )}
+                            {usagePending[p.id] && (
+                              <Badge title="Reconnected — waiting for the next usage reading (up to ~5 min). No action needed.">
+                                ⏳ waiting for usage data
                               </Badge>
                             )}
                           </div>
@@ -515,7 +528,20 @@ export default function CliProvidersPage() {
                               : 'Test'}
                           </Button>
                           {showLogin && (
-                            <Button variant="secondary" size="sm" onClick={() => handleLogin(p)}>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => handleLogin(p)}
+                              // No separate Reconnect for these CLIs, and that is not an
+                              // omission: their meter reads the very file the login writes, so
+                              // logging in IS the reconnect. Only claude-code needs its own
+                              // button, because its meter runs on a different credential.
+                              title={
+                                loginRepairsUsage
+                                  ? 'Logging in rewrites the credential its usage meter reads — this is the reconnect for this CLI'
+                                  : undefined
+                              }
+                            >
                               Log in
                             </Button>
                           )}
@@ -756,7 +782,7 @@ function TestPathLine({
   const loginPrompt =
     !res.ok &&
     res.authStatus &&
-    LOGIN_SUPPORTED.includes(providerName) &&
+    CLI_LOGIN_PROVIDERS.includes(providerName) &&
     LOGIN_RECOVERABLE.includes(res.authStatus);
   return (
     <div className="mt-1 flex items-start gap-2 text-xs">

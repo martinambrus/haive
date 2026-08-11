@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { and, eq, isNull, notInArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, type UsageWindowSnapshot } from '@haive/shared';
+import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import type { AppEnv } from '../context.js';
@@ -21,7 +22,31 @@ function toWindow(pct: number | null, resetAt: Date | null): UsageWindowSnapshot
     : { usedPct: pct, resetsAt: resetAt ? resetAt.toISOString() : null };
 }
 
-function toSnapshot(row: SnapshotRow, now: number): UsageWindowSnapshot {
+// How long after a credential repair we are still willing to call a dead-token snapshot
+// "pending" rather than "reconnect". Three poll cycles: past that the poller has had every
+// chance to overwrite the row, so a still-unchanged snapshot means the repair did not take
+// and the user deserves the prompt back rather than a spinner that never resolves.
+const REPAIR_PENDING_MS = 15 * 60 * 1000;
+
+function toSnapshot(
+  row: SnapshotRow,
+  now: number,
+  repairedAt: Record<string, Date>,
+): UsageWindowSnapshot {
+  const base =
+    row.status === 'error' ? 'error' : row.status === 'needs_reconnect' ? 'needs_reconnect' : 'ok';
+  // A reconnect the poller has not caught up with yet. The snapshot still SAYS the token is
+  // dead because only a poll tick can change that, and the tick is up to ~5 min out — so
+  // without this the user fixes the credential, reloads, is told to reconnect again, and
+  // reasonably concludes the fix did not work. Bounded by both ends: the repair must be newer
+  // than the reading it contradicts, and recent enough to still be plausibly in flight.
+  const repaired = repairedAt[row.providerId];
+  const pending =
+    base === 'needs_reconnect' &&
+    repaired !== undefined &&
+    repaired.getTime() > row.fetchedAt.getTime() &&
+    now - repaired.getTime() < REPAIR_PENDING_MS;
+
   return {
     providerId: row.providerId,
     providerName: row.providerName,
@@ -30,13 +55,62 @@ function toSnapshot(row: SnapshotRow, now: number): UsageWindowSnapshot {
     daily: toWindow(row.dailyPct, row.dailyResetAt),
     fetchedAt: row.fetchedAt.toISOString(),
     stale: now - row.fetchedAt.getTime() > STALE_AFTER_MS,
-    status:
-      row.status === 'error'
-        ? 'error'
-        : row.status === 'needs_reconnect'
-          ? 'needs_reconnect'
-          : 'ok',
+    status: pending ? 'pending' : base,
   };
+}
+
+/** When each provider's usage credential was last replaced, per the repair path that owns it:
+ *
+ *  - Interactive CLI login (codex/amp/antigravity) ends in a probe that stamps
+ *    `auth_last_checked_at` and `auth_status`. Only a PASSING probe counts — a login the user
+ *    abandoned leaves the dead credential exactly where it was, and calling that a repair
+ *    would swallow the prompt they still need.
+ *  - The claude usage-OAuth reconnect writes a new usage secret, so that row's `updated_at`
+ *    is the repair instant. Its own CLI login is irrelevant here: the meters run on this
+ *    separate credential.
+ *
+ *  This is what separates "the token is dead" from "the user just fixed it and the poller has
+ *  not run yet" — one snapshot row, two very different things to tell the user. */
+async function credentialRepairedAt(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+): Promise<Record<string, Date>> {
+  const [probes, secrets] = await Promise.all([
+    db
+      .select({
+        id: schema.cliProviders.id,
+        authStatus: schema.cliProviders.authStatus,
+        authLastCheckedAt: schema.cliProviders.authLastCheckedAt,
+      })
+      .from(schema.cliProviders)
+      .where(eq(schema.cliProviders.userId, userId)),
+    db
+      .select({
+        providerId: schema.cliProviderSecrets.providerId,
+        updatedAt: schema.cliProviderSecrets.updatedAt,
+      })
+      .from(schema.cliProviderSecrets)
+      .innerJoin(
+        schema.cliProviders,
+        eq(schema.cliProviderSecrets.providerId, schema.cliProviders.id),
+      )
+      .where(
+        and(
+          eq(schema.cliProviders.userId, userId),
+          eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
+        ),
+      ),
+  ]);
+
+  const out: Record<string, Date> = {};
+  const keepLatest = (id: string, at: Date | null) => {
+    if (!at) return;
+    const current = out[id];
+    if (!current || at.getTime() > current.getTime()) out[id] = at;
+  };
+  for (const p of probes) if (p.authStatus === 'ok') keepLatest(p.id, p.authLastCheckedAt);
+  for (const s of secrets) keepLatest(s.providerId, s.updatedAt);
+  return out;
 }
 
 /** Provider ids the caller has live work on right now. Two sources, unioned:
@@ -126,7 +200,7 @@ usageWindowRoutes.get('/', async (c) => {
   const rows = await db.query.usageWindowSnapshots.findMany({
     where: eq(schema.usageWindowSnapshots.userId, userId),
   });
-  const [alertEnabled, windowEnabled, thresholdPct, prefs, activeIds, allowance] =
+  const [alertEnabled, windowEnabled, thresholdPct, prefs, activeIds, allowance, repairedAt] =
     await Promise.all([
       configService.getBoolean(CONFIG_KEYS.USAGE_ALERT_ENABLED, true),
       configService.getBoolean(CONFIG_KEYS.USAGE_WINDOW_ENABLED, true),
@@ -137,10 +211,11 @@ usageWindowRoutes.get('/', async (c) => {
       }),
       activeProviderIds(db, userId),
       allowanceKeys(db, userId),
+      credentialRepairedAt(db, userId),
     ]);
   const now = Date.now();
   return c.json({
-    snapshots: rows.map((r) => toSnapshot(r, now)),
+    snapshots: rows.map((r) => toSnapshot(r, now, repairedAt)),
     alert: {
       enabled: alertEnabled && windowEnabled && (prefs?.usageAlertEnabled ?? true),
       thresholdPct,

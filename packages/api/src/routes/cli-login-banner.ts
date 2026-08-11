@@ -26,7 +26,7 @@ import {
 import { getDb } from '../db.js';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
-import { getCliExecQueue, getCliExecQueueEvents } from '../queues.js';
+import { getCliExecQueue, getCliExecQueueEvents, getUsagePollQueue } from '../queues.js';
 import { attachContainerStream } from './terminal.js';
 import { execInContainer } from './docker-exec.js';
 
@@ -949,7 +949,17 @@ async function enqueueProbe(providerId: string, userId: string): Promise<CliProb
     removeOnComplete: true,
     removeOnFail: true,
   });
-  return (await job.waitUntilFinished(events, 30_000)) as CliProbeResult;
+  const result = (await job.waitUntilFinished(events, 30_000)) as CliProbeResult;
+  // A login just rewrote this provider's credential, which for the volumeJson CLIs is the
+  // very file the usage poller reads — so kick a tick and let the meter come back in seconds
+  // instead of leaving a "reconnect" prompt up for a whole ~5-min repeatable interval after
+  // the user already fixed it. The claude usage-OAuth callback has done this for a while;
+  // this is the interactive-login path catching up. Both post-login paths funnel through
+  // here, so one enqueue covers them.
+  void getUsagePollQueue()
+    .add('usage-poll-tick', {}, { removeOnComplete: true, removeOnFail: 10 })
+    .catch(() => {});
+  return result;
 }
 
 async function cleanupSession(session: BannerSession): Promise<void> {

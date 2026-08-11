@@ -18,6 +18,12 @@ import { allowanceKeyOf } from './notifications/usage-alerts';
 export interface StripMeter {
   allowanceKey: string;
   snapshot: UsageWindowSnapshot;
+  /** 'ok' draws the bars. 'needs_reconnect' draws a repair prompt instead: the subscription
+   *  has no readable reading left AND a user action is what restores it, which is worth a
+   *  line on the page the user is already on. 'pending' says the repair is done and a reading
+   *  is on its way — never a prompt, or the user re-does a fix that already worked. A plain
+   *  `error` gets none of them: nothing to show and nothing to do about it. */
+  status: 'ok' | 'needs_reconnect' | 'pending';
 }
 
 /** Lowest remaining headroom across a snapshot's windows, i.e. how close it is to running
@@ -46,21 +52,44 @@ export function selectStripMeters(
   if (visible.size === 0) return [];
 
   const byAllowance = new Map<string, UsageWindowSnapshot>();
+  const deadByAllowance = new Map<string, UsageWindowSnapshot>();
+  const pendingByAllowance = new Map<string, UsageWindowSnapshot>();
   for (const snap of snapshots) {
-    // Only readable numbers: an errored or reconnect-needing snapshot has nothing
-    // trustworthy to draw, and a provider may still have a healthy sibling on the same
-    // subscription. Stale is kept — the chip dims it rather than hiding it.
-    if (snap.status !== 'ok') continue;
     const key = allowanceKeyOf(snap.providerId, allowanceKeys);
     if (!visible.has(key)) continue;
+    if (snap.status === 'needs_reconnect' || snap.status === 'pending') {
+      // Held aside, not drawn yet: a healthy sibling row on the same subscription still
+      // speaks for it. Ties broken on provider id rather than array order so the strip picks
+      // the same row on every poll.
+      const bucket = snap.status === 'pending' ? pendingByAllowance : deadByAllowance;
+      const held = bucket.get(key);
+      if (!held || snap.providerId < held.providerId) bucket.set(key, snap);
+      continue;
+    }
+    // Only readable numbers: an errored snapshot has nothing trustworthy to draw and no
+    // repair to offer. Stale is kept — the chip dims it rather than hiding it.
+    if (snap.status !== 'ok') continue;
     const current = byAllowance.get(key);
     if (!current || worstRemaining(snap) < worstRemaining(current)) byAllowance.set(key, snap);
   }
 
-  return (
-    [...byAllowance.entries()]
-      .map(([allowanceKey, snapshot]) => ({ allowanceKey, snapshot }))
-      // Stable order so the strip does not reshuffle on every 3s poll.
-      .sort((a, b) => a.allowanceKey.localeCompare(b.allowanceKey))
-  );
+  const meters: StripMeter[] = [...byAllowance.entries()].map(([allowanceKey, snapshot]) => ({
+    allowanceKey,
+    snapshot,
+    status: 'ok' as const,
+  }));
+  // Prompt only for a subscription that produced NO reading at all. A live number always
+  // beats a repair nag, so one healthy row suppresses its dead siblings — and a repair
+  // already under way outranks the prompt for the same reason: telling someone to reconnect
+  // what they just reconnected is the one message guaranteed to be wrong.
+  for (const [allowanceKey, snapshot] of deadByAllowance) {
+    if (byAllowance.has(allowanceKey) || pendingByAllowance.has(allowanceKey)) continue;
+    meters.push({ allowanceKey, snapshot, status: 'needs_reconnect' });
+  }
+  for (const [allowanceKey, snapshot] of pendingByAllowance) {
+    if (byAllowance.has(allowanceKey)) continue;
+    meters.push({ allowanceKey, snapshot, status: 'pending' });
+  }
+  // Stable order so the strip does not reshuffle on every 3s poll.
+  return meters.sort((a, b) => a.allowanceKey.localeCompare(b.allowanceKey));
 }

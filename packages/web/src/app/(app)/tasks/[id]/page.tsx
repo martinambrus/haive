@@ -41,6 +41,7 @@ import {
 } from '@/lib/retry-timeout';
 import { formatTokens } from '@/lib/format-tokens';
 import { CLI_USAGE_LABEL } from '@/lib/usage-format';
+import { UsagePendingChip, UsageReconnectAction } from '@/components/usage-reconnect-action';
 import {
   UsageBars,
   usageRemainingColor,
@@ -1282,7 +1283,16 @@ export default function TaskDetailPage() {
             </div>
           )}
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Sits with the recovery buttons, not in the title strip: on a task that failed on
+              a dead CLI token this is the action, and the strip's copy only appears once the
+              user has scrolled the header away. */}
+          <HeaderUsageChip
+            providerId={usageProviderId}
+            providerName={usageProvider?.name ?? null}
+            providerLabel={usageProvider?.label ?? null}
+            reconnectOnly
+          />
           {canRetry &&
             (() => {
               // Mirror the failed step's own primary button (primaryRecovery) instead of
@@ -2071,10 +2081,16 @@ function HeaderUsageChip({
   providerId,
   providerName,
   providerLabel,
+  reconnectOnly,
 }: {
   providerId: string | null;
   providerName: CliProviderName | null;
   providerLabel: string | null;
+  /** Render the dead-token prompt and nothing else. The meter is a summary and can live in
+   *  the title strip the user only sees after scrolling; a repair is an action and has to be
+   *  on screen when the page opens, which is why the always-visible header mounts this
+   *  variant alongside the strip's full one. */
+  reconnectOnly?: boolean;
 }) {
   const [snapshots, setSnapshots] = useState<UsageWindowSnapshot[] | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -2114,30 +2130,35 @@ function HeaderUsageChip({
 
   if (!providerId || !snapshots) return null;
   const snap = snapshots.find((s) => s.providerId === providerId);
-  // Dead usage token: don't vanish silently — prompt a reconnect and deep-link to the
-  // provider's page so the meter can be restored. The `#usage-tracking` anchor belongs to
-  // ClaudeUsageAuth, which renders for claude-code only; every other reconnectable provider
-  // (zai) is fixed by replacing its API token secret on the same page, so it gets no anchor
-  // and copy that names the field instead of a Reconnect button it does not have.
-  if (snap?.status === 'needs_reconnect') {
-    const usageOauth = providerName === 'claude-code';
+  // Dead usage token: don't vanish silently — prompt a reconnect and deep-link to the repair
+  // that actually applies to this provider (usage-OAuth, an interactive CLI login, or an API
+  // token). usage-reconnect owns that fork so this chip, the tasks-list strip and the CLI
+  // providers list cannot disagree about how a given CLI is fixed.
+  const who = (providerName && CLI_USAGE_LABEL[providerName]) || providerLabel || 'CLI';
+  if (snap?.status === 'pending') {
     return (
-      <a
-        href={`/settings/cli-providers/${providerId}${usageOauth ? '#usage-tracking' : ''}`}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="ml-auto flex shrink-0 items-center gap-1 px-2 font-mono text-xs font-semibold text-amber-400 hover:text-amber-300"
-        title={
-          usageOauth
-            ? `${providerLabel ?? providerName ?? 'CLI'} usage token expired — open its Usage tracking in a new tab to reconnect`
-            : `${providerLabel ?? providerName ?? 'CLI'} usage token was rejected — open its settings in a new tab and replace its API token`
-        }
-      >
-        <span aria-hidden>⚠</span>
-        <span className="underline">reconnect</span>
-      </a>
+      <UsagePendingChip
+        displayName={who}
+        className={`flex shrink-0 items-center gap-1 px-2 font-mono text-xs font-semibold text-neutral-400 ${
+          reconnectOnly ? '' : 'ml-auto'
+        }`}
+      />
     );
   }
+  if (snap?.status === 'needs_reconnect') {
+    return (
+      <UsageReconnectAction
+        providerId={providerId}
+        providerName={providerName}
+        providerLabel={providerLabel}
+        displayName={who}
+        className={`flex shrink-0 items-center gap-1 px-2 font-mono text-xs font-semibold text-amber-400 hover:text-amber-300 ${
+          reconnectOnly ? '' : 'ml-auto'
+        }`}
+      />
+    );
+  }
+  if (reconnectOnly) return null;
   if (!snap || snap.status !== 'ok') return null;
 
   const windows = usageWindowsOf(snap);
