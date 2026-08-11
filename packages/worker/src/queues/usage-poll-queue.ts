@@ -28,7 +28,7 @@ import {
   readProviderSecretToken,
   writeProviderSecret,
 } from '../usage-window/token-source.js';
-import { nextAuthStrike } from '../usage-window/types.js';
+import { authDenialSeverity, nextAuthStrike } from '../usage-window/types.js';
 import type { UsageFetchContext, UsageFetchOutcome } from '../usage-window/types.js';
 import { getTaskQueue } from './task-queue.js';
 import { autoResumeFailedStep } from './_step-reset.js';
@@ -357,20 +357,29 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
     }
     // Escalate: gate this token so we stop re-polling a guaranteed deny (the gate lifts on its
     // own when a reconnect / CLI refresh rotates the token), clear any 429 backoff, reset the
-    // streak. Providers with no in-product fix path (codex/gemini) record a hidden `error`
-    // instead of the actionable needs_reconnect nag.
+    // streak. A self-healing provider (codex/gemini) records a hidden `error` instead of the
+    // actionable needs_reconnect nag — UNLESS the token it rejected had not expired yet, which
+    // means the vendor revoked it and no amount of waiting for the CLI to refresh will help.
     deadUsageFetchToken.set(provider.id, creds.token);
     backoff.delete(provider.id);
     authStrikes.delete(provider.id);
-    const reconnectable = cfg.reconnectable !== false;
+    const reconnectable =
+      authDenialSeverity({
+        reconnectable: cfg.reconnectable !== false,
+        token: creds.token,
+        now: Date.now(),
+      }) === 'reconnect';
     log.warn(
       { providerId: provider.id, provider: provider.name, error: outcome.error, reconnectable },
       'usage endpoint rejected the token past the strike threshold; pausing polls until it rotates',
     );
     await upsertSnapshot(db, provider, {
       ok: false,
+      // "rejected", not "expired": this branch now also covers a token the vendor revoked
+      // while it was still within its own lifetime, and a diagnostic column that names the
+      // wrong cause sends the next person debugging this in the wrong direction.
       error: reconnectable
-        ? 'Usage tracking token expired — reconnect this provider to restore its meters.'
+        ? 'Usage tracking token was rejected — reconnect this provider to restore its meters.'
         : 'Usage tracking temporarily unavailable.',
       reconnect: reconnectable,
     });

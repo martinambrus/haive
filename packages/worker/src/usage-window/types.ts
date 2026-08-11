@@ -47,6 +47,34 @@ export function nextAuthStrike(
   return { strikes, action: strikes >= threshold ? 'escalate' : 'hold' };
 }
 
+/** Whether a persistent auth denial deserves the actionable `needs_reconnect` status or the
+ *  quiet `error` that just hides the meter.
+ *
+ *  `reconnectable` providers (claude usage-OAuth, zai) always nag: their token only ever dies
+ *  in ways a user action fixes. The `volumeJson` CLIs (codex, gemini) are the interesting
+ *  case — the flag was set false because their cached access token lapses benignly whenever
+ *  the CLI sits idle, and the CLI refreshes it itself on its next run, so nagging there cries
+ *  wolf. That reasoning only covers a token that had actually EXPIRED. A vendor rejecting a
+ *  token whose own `exp` is still in the future is a server-side revocation (observed: codex
+ *  401 `token_expired` on a token with a day left on it, after the ChatGPT session was
+ *  revoked), and nothing but a re-login brings that back.
+ *
+ *  Keyed on the JWT `exp` claim rather than the vendor's error `code`: the code is
+ *  human-facing copy that can be reworded at any time, `exp` is structural. A token with no
+ *  readable `exp` keeps the old quiet behaviour, so gemini is untouched.
+ *
+ *  Blind spot, accepted: a token revoked and THEN left idle past its own expiry reads as a
+ *  benign lapse and stays quiet — which is exactly what it did before this existed. */
+export function authDenialSeverity(opts: {
+  reconnectable: boolean;
+  token: string;
+  now: number;
+}): 'reconnect' | 'silent' {
+  if (opts.reconnectable) return 'reconnect';
+  const exp = jwtExpMs(opts.token);
+  return exp !== null && exp > opts.now ? 'reconnect' : 'silent';
+}
+
 export interface UsageFetchContext {
   providerName: CliProviderName;
   /** provider.cliVersion — feeds the claude `User-Agent: claude-code/<ver>`,
@@ -92,6 +120,23 @@ export function isoOrNull(v: unknown): string | null {
     return Number.isNaN(d.getTime()) ? null : d.toISOString();
   }
   return null;
+}
+
+/** `exp` of a JWT access token in epoch ms, or null for anything that is not a JWT carrying
+ *  a finite numeric `exp` — an opaque bearer (gemini hands out `ya29.*`), a truncated file,
+ *  garbage. Only the payload is decoded and nothing is verified: the signature is the
+ *  vendor's business, and this reads the token's own claim about itself rather than trusting
+ *  it with anything. Feeds authDenialSeverity. */
+export function jwtExpMs(token: string): number | null {
+  const parts = token.split('.');
+  if (parts.length !== 3 || !parts[1]) return null;
+  try {
+    const payload: unknown = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    const exp = num(rec(payload)?.['exp']);
+    return exp === undefined ? null : exp * 1000;
+  } catch {
+    return null;
+  }
 }
 
 export function errMsg(err: unknown): string {
