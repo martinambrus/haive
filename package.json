@@ -36,7 +36,7 @@
     "@playwright/test": "^1.62.0",
     "@types/node": "^26.1.2",
     "husky": "^9.1.7",
-    "lint-staged": "^17.0.8",
+    "lint-staged": "^17.3.0",
     "postgres": "^3.4.5",
     "prettier": "^3.9.4",
     "tsx": "^4.23.1",
