@@ -34,7 +34,7 @@
   "packageManager": "pnpm@9.15.4",
   "devDependencies": {
     "@playwright/test": "^1.62.0",
-    "@types/node": "^26.1.2",
+    "@types/node": "^26.2.0",
     "husky": "^9.1.7",
     "lint-staged": "^17.0.8",
     "postgres": "^3.4.5",
