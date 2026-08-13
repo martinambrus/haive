@@ -127,6 +127,20 @@ describe('chunkSection', () => {
   });
 });
 
+describe('contextHeader', () => {
+  it('joins the root with the breadcrumb', () => {
+    expect(contextHeader('src/Foo.php', ['class Foo', 'function bar'])).toBe(
+      'src/Foo.php > class Foo > function bar',
+    );
+  });
+
+  it('collapses a repeat of the root (a KB entry whose H1 is its title)', () => {
+    expect(contextHeader('ext/mysql Quick Reference', ['ext/mysql Quick Reference', 'Usage'])).toBe(
+      'ext/mysql Quick Reference > Usage',
+    );
+  });
+});
+
 describe('capChunks', () => {
   it('keeps the budget and reports what it dropped', () => {
     const chunks = chunkSection({

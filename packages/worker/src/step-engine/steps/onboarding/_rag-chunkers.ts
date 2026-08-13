@@ -538,7 +538,11 @@ export function chunkSection(section: RagSection, opts: ChunkOptions = {}): RagC
  *  global KB entry's title — never that store's synthetic filename) followed by
  *  the section's structural ancestry. */
 export function contextHeader(root: string, breadcrumb: string[]): string {
-  return [root, ...breadcrumb].join(' > ');
+  const parts = [root, ...breadcrumb];
+  // A global KB entry's H1 is usually its title verbatim, which would render as
+  // "[Foo > Foo]" — no signal, and it eats the one context line a chunk gets.
+  // Collapse any consecutive repeat rather than only the title/H1 pair.
+  return parts.filter((p, i) => i === 0 || p !== parts[i - 1]).join(' > ');
 }
 
 export interface CappedChunks {
