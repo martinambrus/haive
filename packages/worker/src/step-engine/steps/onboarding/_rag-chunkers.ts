@@ -8,6 +8,10 @@ import path from 'node:path';
 export interface RagSection {
   sectionId: string;
   content: string;
+  /** Structural ancestry, outermost first: ['Deployment','DDEV','Ports'] for a
+   *  markdown H3, ['class Foo','function bar'] for a PHP method. Empty for gap
+   *  sections. Callers turn it into the chunk context header. */
+  breadcrumb: string[];
 }
 
 export interface RagChunk {
@@ -24,6 +28,7 @@ interface SectionRange {
   sectionId: string;
   start: number;
   end: number;
+  breadcrumb: string[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -116,29 +121,37 @@ const HEADING_RE = /^(#{1,3})\s+(.+)$/;
 export function extractMarkdownSections(content: string, _filePath: string): RagSection[] {
   const lines = content.split('\n');
   const sections: RagSection[] = [];
+  // Heading text per level (1-3). A heading clears every deeper level, so an H3
+  // under a fresh H2 never inherits the previous H2's ancestry.
+  const stack: Array<string | undefined> = [undefined, undefined, undefined];
   let currentId = 'intro';
+  let currentBreadcrumb: string[] = [];
   let currentLines: string[] = [];
+
+  const flush = (): void => {
+    const text = currentLines.join('\n').trim();
+    if (text) {
+      sections.push({ sectionId: currentId, content: text, breadcrumb: currentBreadcrumb });
+    }
+  };
 
   for (const line of lines) {
     const m = HEADING_RE.exec(line);
     if (m) {
-      // Flush previous section
-      const text = currentLines.join('\n').trim();
-      if (text) {
-        sections.push({ sectionId: currentId, content: text });
-      }
-      currentId = safeSectionId(slugifyHeading(m[2]!));
+      flush();
+      const level = m[1]!.length;
+      const title = m[2]!.trim();
+      stack[level - 1] = title;
+      for (let deeper = level; deeper < stack.length; deeper += 1) stack[deeper] = undefined;
+      currentId = safeSectionId(slugifyHeading(title));
+      currentBreadcrumb = stack.slice(0, level).filter((s): s is string => !!s);
       currentLines = [line];
     } else {
       currentLines.push(line);
     }
   }
 
-  // Flush final section
-  const text = currentLines.join('\n').trim();
-  if (text) {
-    sections.push({ sectionId: currentId, content: text });
-  }
+  flush();
 
   return sections;
 }
@@ -177,18 +190,40 @@ function phpRanges(content: string): SectionRange[] {
   const docMatch = /^<\?php\s*(\/\*\*[\s\S]*?\*\/)/.exec(content);
   if (docMatch) {
     const start = content.indexOf(docMatch[1]!);
-    ranges.push({ sectionId: 'file-docblock', start, end: start + docMatch[1]!.length });
+    ranges.push({
+      sectionId: 'file-docblock',
+      start,
+      end: start + docMatch[1]!.length,
+      breadcrumb: [],
+    });
+  }
+
+  // Class extents are NOT emitted as sections of their own — that would
+  // duplicate every method inside them. They exist only to name the method that
+  // sits within, so a chunk can say which class it belongs to.
+  const classes: Array<{ name: string; start: number; end: number }> = [];
+  const classRe = /class\s+(\w+)[^{;]*\{/g;
+  let match: RegExpExecArray | null;
+  while ((match = classRe.exec(content)) !== null) {
+    const end = blockEndFromMatch(content, match);
+    if (end !== null) classes.push({ name: match[1]!, start: match.index, end });
   }
 
   // Functions (standalone and methods)
   const funcRe =
     /(\/\*\*[\s\S]*?\*\/\s*)?((?:public|protected|private|static)\s+)*function\s+(\w+)\s*\([^)]*\)\s*\{/g;
-  let match: RegExpExecArray | null;
   while ((match = funcRe.exec(content)) !== null) {
     const end = blockEndFromMatch(content, match);
-    if (end !== null) {
-      ranges.push({ sectionId: `function-${match[3]!}`, start: match.index, end });
-    }
+    if (end === null) continue;
+    const name = match[3]!;
+    const start = match.index;
+    const owner = classes.find((c) => start > c.start && end <= c.end);
+    ranges.push({
+      sectionId: owner ? `method-${owner.name}-${name}` : `function-${name}`,
+      start,
+      end,
+      breadcrumb: owner ? [`class ${owner.name}`, `function ${name}`] : [`function ${name}`],
+    });
   }
 
   return ranges;
@@ -202,7 +237,14 @@ function jsRanges(content: string): SectionRange[] {
   const funcRe = /function\s+(\w+)\s*\([^)]*\)\s*\{/g;
   while ((match = funcRe.exec(content)) !== null) {
     const end = blockEndFromMatch(content, match);
-    if (end !== null) ranges.push({ sectionId: `function-${match[1]!}`, start: match.index, end });
+    if (end !== null) {
+      ranges.push({
+        sectionId: `function-${match[1]!}`,
+        start: match.index,
+        end,
+        breadcrumb: [`function ${match[1]!}`],
+      });
+    }
   }
 
   // Arrow functions assigned to const/let/var
@@ -211,14 +253,28 @@ function jsRanges(content: string): SectionRange[] {
   while ((match = arrowRe.exec(content)) !== null) {
     const braceStart = content.lastIndexOf('{', match.index + match[0].length);
     const end = braceBlockEnd(content, braceStart);
-    if (end !== null) ranges.push({ sectionId: `function-${match[1]!}`, start: match.index, end });
+    if (end !== null) {
+      ranges.push({
+        sectionId: `function-${match[1]!}`,
+        start: match.index,
+        end,
+        breadcrumb: [`function ${match[1]!}`],
+      });
+    }
   }
 
   // Classes
   const classRe = /class\s+(\w+)(?:\s+extends\s+\w+)?\s*\{/g;
   while ((match = classRe.exec(content)) !== null) {
     const end = blockEndFromMatch(content, match);
-    if (end !== null) ranges.push({ sectionId: `class-${match[1]!}`, start: match.index, end });
+    if (end !== null) {
+      ranges.push({
+        sectionId: `class-${match[1]!}`,
+        start: match.index,
+        end,
+        breadcrumb: [`class ${match[1]!}`],
+      });
+    }
   }
 
   return ranges;
@@ -261,6 +317,7 @@ function pythonRanges(content: string): SectionRange[] {
         sectionId: `${kind}-${name}`,
         start: offsets[startLine]!,
         end: i < lines.length ? offsets[i]! : content.length,
+        breadcrumb: [`${kind} ${name}`],
       });
     } else {
       i += 1;
@@ -276,7 +333,14 @@ function goRanges(content: string): SectionRange[] {
   let match: RegExpExecArray | null;
   while ((match = funcRe.exec(content)) !== null) {
     const end = blockEndFromMatch(content, match);
-    if (end !== null) ranges.push({ sectionId: `function-${match[1]!}`, start: match.index, end });
+    if (end !== null) {
+      ranges.push({
+        sectionId: `function-${match[1]!}`,
+        start: match.index,
+        end,
+        breadcrumb: [`function ${match[1]!}`],
+      });
+    }
   }
   return ranges;
 }
@@ -288,13 +352,27 @@ function rustRanges(content: string): SectionRange[] {
   const fnRe = /(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\([^)]*\)[^{]*\{/g;
   while ((match = fnRe.exec(content)) !== null) {
     const end = blockEndFromMatch(content, match);
-    if (end !== null) ranges.push({ sectionId: `function-${match[1]!}`, start: match.index, end });
+    if (end !== null) {
+      ranges.push({
+        sectionId: `function-${match[1]!}`,
+        start: match.index,
+        end,
+        breadcrumb: [`function ${match[1]!}`],
+      });
+    }
   }
 
   const implRe = /impl\s+(?:<[^>]*>\s+)?(\w+)(?:\s+for\s+\w+)?\s*\{/g;
   while ((match = implRe.exec(content)) !== null) {
     const end = blockEndFromMatch(content, match);
-    if (end !== null) ranges.push({ sectionId: `impl-${match[1]!}`, start: match.index, end });
+    if (end !== null) {
+      ranges.push({
+        sectionId: `impl-${match[1]!}`,
+        start: match.index,
+        end,
+        breadcrumb: [`impl ${match[1]!}`],
+      });
+    }
   }
 
   return ranges;
@@ -327,7 +405,7 @@ export function assembleSections(content: string, ranges: SectionRange[]): RagSe
     if (to <= from) return;
     const text = content.slice(from, to);
     if (text.trim().length < MIN_GAP_CHARS) return;
-    sections.push({ sectionId: `chunk-${gapIndex}`, content: text });
+    sections.push({ sectionId: `chunk-${gapIndex}`, content: text, breadcrumb: [] });
     gapIndex += 1;
   };
 
@@ -339,6 +417,7 @@ export function assembleSections(content: string, ranges: SectionRange[]): RagSe
     sections.push({
       sectionId: safeSectionId(r.sectionId),
       content: content.slice(r.start, r.end),
+      breadcrumb: r.breadcrumb,
     });
     cursor = r.end;
   }
@@ -384,23 +463,37 @@ export function extractCodeSections(content: string, filePath: string): RagSecti
 const DEFAULT_MAX_SIZE = 2000;
 const DEFAULT_OVERLAP = 200;
 
-export function chunkSection(
-  section: RagSection,
-  maxSize = DEFAULT_MAX_SIZE,
-  overlap = DEFAULT_OVERLAP,
-): RagChunk[] {
+export interface ChunkOptions {
+  /** Context line prepended to EVERY chunk, e.g.
+   *  "modules/foo/foo.module > class Foo > function bar". Omitting it produces
+   *  output byte-identical to the header-less form. */
+  header?: string;
+  maxSize?: number;
+  overlap?: number;
+}
+
+export function chunkSection(section: RagSection, opts: ChunkOptions = {}): RagChunk[] {
+  const maxSize = opts.maxSize ?? DEFAULT_MAX_SIZE;
+  const overlap = opts.overlap ?? DEFAULT_OVERLAP;
+  // The header rides INSIDE content: it is what the agent reads in a hit, and it
+  // is indexed into content_tsv, so the lexical half of the RRF fusion can match
+  // a heading or path term the body itself never spells out.
+  const header = opts.header ? `[${opts.header}]\n\n` : '';
   const trimmed = section.content.trim();
   if (trimmed.length === 0) return [];
 
+  const emit = (body: string, chunkIndex: number): RagChunk => {
+    const content = header + body;
+    return {
+      sectionId: section.sectionId,
+      chunkIndex,
+      content,
+      chunkHash: computeChunkHash(content),
+    };
+  };
+
   if (trimmed.length <= maxSize) {
-    return [
-      {
-        sectionId: section.sectionId,
-        chunkIndex: 0,
-        content: trimmed,
-        chunkHash: computeChunkHash(trimmed),
-      },
-    ];
+    return [emit(trimmed, 0)];
   }
 
   const chunks: RagChunk[] = [];
@@ -423,13 +516,7 @@ export function chunkSection(
       }
     }
 
-    const text = trimmed.slice(start, splitAt);
-    chunks.push({
-      sectionId: section.sectionId,
-      chunkIndex: idx,
-      content: text,
-      chunkHash: computeChunkHash(text),
-    });
+    chunks.push(emit(trimmed.slice(start, splitAt), idx));
     idx += 1;
 
     if (splitAt >= trimmed.length) break;
@@ -446,6 +533,13 @@ export function chunkSection(
 /* ------------------------------------------------------------------ */
 /* Per-file budget                                                     */
 /* ------------------------------------------------------------------ */
+
+/** Context header for a chunk: the source root (a repo-relative path, or a
+ *  global KB entry's title — never that store's synthetic filename) followed by
+ *  the section's structural ancestry. */
+export function contextHeader(root: string, breadcrumb: string[]): string {
+  return [root, ...breadcrumb].join(' > ');
+}
 
 export interface CappedChunks {
   chunks: RagChunk[];

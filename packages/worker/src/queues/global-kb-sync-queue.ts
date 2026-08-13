@@ -17,7 +17,9 @@ import {
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
+  capChunks,
   chunkSection,
+  contextHeader,
   extractMarkdownSections,
   slugifyHeading,
 } from '../step-engine/steps/onboarding/_rag-chunkers.js';
@@ -74,7 +76,18 @@ export async function syncGlobalKbEntry(payload: GlobalKbSyncJobPayload): Promis
     try {
       const sourcePath = `global_kb/${slugifyHeading(entry.title)}-${entry.id.slice(0, 8)}.md`;
       const sections = extractMarkdownSections(entry.body, sourcePath);
-      const chunks = sections.flatMap((s) => chunkSection(s));
+      // The header roots on the entry TITLE, never on sourcePath — that filename
+      // is synthetic and would only add noise to the embedding.
+      const built = sections.flatMap((s) =>
+        chunkSection(s, { header: contextHeader(entry.title, s.breadcrumb) }),
+      );
+      const { chunks, dropped } = capChunks(built);
+      if (dropped > 0) {
+        log.warn(
+          { entryId: entry.id, kept: chunks.length, dropped },
+          'global KB entry exceeded the per-entry chunk budget; tail not embedded',
+        );
+      }
 
       if (chunks.length > 0) {
         const texts = chunks.map((c) => c.content);

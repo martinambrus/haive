@@ -22,6 +22,7 @@ import {
   extractCodeSections,
   chunkSection,
   capChunks,
+  contextHeader,
   CODE_EXTENSIONS,
   MAX_FILE_BYTES,
   type RagChunk,
@@ -348,7 +349,9 @@ export async function runRagIndexSync(
           : extractMarkdownSections(text, relPath);
       const built: RagChunk[] = [];
       for (const section of sections) {
-        built.push(...chunkSection(section));
+        built.push(
+          ...chunkSection(section, { header: contextHeader(relPath, section.breadcrumb) }),
+        );
       }
       const { chunks, dropped } = capChunks(built);
       if (dropped > 0) {

@@ -20,6 +20,7 @@ import {
   extractCodeSections,
   chunkSection,
   capChunks,
+  contextHeader,
   CODE_EXTENSIONS,
   isMinifiedPath,
   MAX_FILE_BYTES,
@@ -807,7 +808,9 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         const sections = extractMarkdownSections(text, file.relPath);
         const built: RagChunk[] = [];
         for (const section of sections) {
-          built.push(...chunkSection(section));
+          built.push(
+            ...chunkSection(section, { header: contextHeader(file.relPath, section.breadcrumb) }),
+          );
         }
         const { chunks, dropped } = capChunks(built);
         if (dropped > 0) {
@@ -865,7 +868,9 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         const sections = extractCodeSections(text, file.relPath);
         const built: RagChunk[] = [];
         for (const section of sections) {
-          built.push(...chunkSection(section));
+          built.push(
+            ...chunkSection(section, { header: contextHeader(file.relPath, section.breadcrumb) }),
+          );
         }
         const { chunks, dropped } = capChunks(built);
         if (dropped > 0) {
