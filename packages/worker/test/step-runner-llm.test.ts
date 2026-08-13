@@ -20,6 +20,9 @@ function makeMockDb(state: MockState): Database {
     select: () => ({
       from: (table: unknown) => {
         const tableName = tableNameOf(table);
+        // Every row of the table, for the un-limited/un-ordered form of the query.
+        const allRows = async () =>
+          tableName === 'task_steps' && state.taskStepRow.id ? [state.taskStepRow] : [];
         return {
           where: (_cond: unknown) => ({
             limit: async (_n: number) => {
@@ -36,6 +39,12 @@ function makeMockDb(state: MockState): Database {
                 return [];
               },
             }),
+            // Drizzle's query builder is a thenable: awaiting .where() directly, with no
+            // .limit()/.orderBy(), runs the query. learnedTimeoutMs does exactly that, and
+            // without this the await yielded the builder object itself — not iterable, so
+            // the dispatch threw and the step came back `failed`.
+            then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
+              allRows().then(onOk, onErr),
           }),
         };
       },

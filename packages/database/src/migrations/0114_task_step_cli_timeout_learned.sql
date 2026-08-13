@@ -1,0 +1,26 @@
+-- Per-step LEARNED hard-timeout budget: the largest budget any invocation of this row was
+-- actually dispatched with.
+--
+-- cli_timeout_override_ms (0107) is a user PIN and dies with the row it was written on. A
+-- fix-loop round fork does not reuse rows: upsertRow INSERTs a fresh (task_id, step_id, round)
+-- row, so a 120-minute pin set at round 6 was gone at round 7 and the step went straight back
+-- to burning the base budget it had already proven insufficient. Observed on task 38f02dee:
+-- round 7 spent five 45-minute Fixer invocations, and every one of them died at 45 minutes.
+--
+-- This column is HISTORY, not a pin. Later rounds of the same (task_id, step_id) read the
+-- maximum across sibling rows and use it as the FLOOR their ladder escalates from, so a budget
+-- the task has already proven it needs is paid for once. Read excludes the reading row itself:
+-- folding a row's own stamped value back into its base would compound within a single round.
+--
+-- Deliberately NOT cleared by a plain Retry (unlike the override) — the user clearing their pin
+-- does not un-learn what the CLI actually did. The escape hatch is to NULL it directly.
+--
+-- Nullable with no default: NULL means "nothing learned", which is the state every existing row
+-- must land in. Additive + idempotent: a second run is a no-op, and leaving the column in place
+-- after a code revert is harmless (nothing reads it).
+--
+-- Rollback: UPDATE task_steps SET cli_timeout_learned_ms = NULL;  (un-learns everything, so every
+--   step falls back to its declared budget + the ladder, with no deploy and no restart)
+-- Rollback (full): ALTER TABLE "task_steps" DROP COLUMN IF EXISTS "cli_timeout_learned_ms";
+
+ALTER TABLE "task_steps" ADD COLUMN IF NOT EXISTS "cli_timeout_learned_ms" integer;

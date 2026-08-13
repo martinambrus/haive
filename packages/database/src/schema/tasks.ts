@@ -434,6 +434,17 @@ export const taskSteps = pgTable(
      *  Per-step and set by the same retry endpoint update as localModelOverride, so a
      *  plain Retry clears it back to null (no worker-side lifecycle). */
     cliTimeoutOverrideMs: integer('cli_timeout_override_ms'),
+    /** Largest hard-timeout budget (ms) any invocation of THIS row was dispatched with —
+     *  history, not a user pin. A round fork does not reuse rows (upsertRow INSERTs a fresh
+     *  (task_id, step_id, round) row), so both the pin above and the ladder's attempt count
+     *  reset every round and the step re-paid for the same discovery. Later rounds read the
+     *  maximum of this and cli_timeout_override_ms across their SIBLING rows (same task_id +
+     *  step_id, excluding themselves — folding a row's own value back in would compound
+     *  within one round) and use it as the floor their ladder escalates from.
+     *
+     *  Deliberately NOT cleared by a plain Retry, unlike the override: clearing a pin does not
+     *  un-learn what the CLI actually did. NULL it directly to forget. */
+    cliTimeoutLearnedMs: integer('cli_timeout_learned_ms'),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
     /** Accumulated time (ms) the step spent idle waiting for user input

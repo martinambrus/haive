@@ -1,4 +1,16 @@
-import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, notInArray } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  ne,
+  notInArray,
+  or,
+} from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema, isUniqueViolation, type StepIterationEntry } from '@haive/database';
 import {
@@ -48,6 +60,7 @@ import {
   type StepLoopPassRecord,
 } from './step-definition.js';
 import { resolveDagPhase } from './dag-executor.js';
+import { learnedLadderBaseMs } from './dispatch-timeout.js';
 import { resolveMergePhase } from './merge-resolver.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
@@ -724,6 +737,18 @@ async function resolveLlmPhase(
   // Compute in the narrowed scope: `plan.invocation` is non-null here, but inside
   // the insertInvocationOrNull closure TS widens it back (a closure may run later).
   const steerable = plan.invocation.kind === 'cli' && plan.invocation.spec.steerable === true;
+  // Budget: the user's explicit override, else the base learned from earlier rounds, escalated
+  // one rung per consecutive timeout this step has already burned. Resolved here rather than in
+  // the step definition so a re-dispatch after a kill can differ from the first attempt.
+  //
+  // Resolved BEFORE the insert, and that order is load-bearing: trailingTimeoutInfo scans this
+  // step's invocations newest-first and stops at the first row that is not a timeout. The row
+  // inserted below is the newest by created_at and carries a NULL error_message, so resolving
+  // afterwards read a zero-length streak every single time and the ladder never left rung 0 —
+  // five consecutive 45-minute kills on one step, each re-dispatched at 45 minutes.
+  // countTrailingOrphans (the sibling counter for the re-dispatch cap) has always been called
+  // pre-insert for the same reason.
+  const budget = await resolveDispatchTimeoutMs(db, current, llmSpec.timeoutMs);
   const inserted = await insertInvocationOrNull(() =>
     db
       .insert(schema.cliInvocations)
@@ -747,10 +772,6 @@ async function resolveLlmPhase(
   }
   const invRow = inserted[0];
   if (!invRow) throw new Error('failed to insert cli_invocations row');
-  // Budget: the user's explicit override, else one rung up the ladder per consecutive
-  // timeout this step has already burned. Resolved here rather than in the step
-  // definition so a re-dispatch after a kill can differ from the first attempt.
-  const budget = await resolveDispatchTimeoutMs(db, current, llmSpec.timeoutMs);
   await params.deps.enqueueCliInvocation({
     invocationId: invRow.id,
     taskId: params.taskId,
@@ -895,6 +916,11 @@ async function resolveAiFixPhase(
   if (await hasLiveInvocation(db, current.id)) {
     return { resolved: false, result: { status: 'waiting_cli', row: current } };
   }
+  // Same ladder as a normal dispatch: the fix agent declares nothing of its own, so it runs at
+  // the configured base and escalates if it too gets killed at its budget. Resolved before the
+  // insert for the reason spelled out in resolveLlmPhase — the fresh row would otherwise be the
+  // newest non-timeout row and reset the streak to zero on every attempt.
+  const fixBudget = await resolveDispatchTimeoutMs(db, current, undefined);
   const inserted = await insertInvocationOrNull(() =>
     db
       .insert(schema.cliInvocations)
@@ -916,9 +942,6 @@ async function resolveAiFixPhase(
   }
   const invRow = inserted[0];
   if (!invRow) throw new Error('failed to insert ai-fix cli_invocations row');
-  // Same ladder as a normal dispatch: the fix agent declares nothing of its own, so it
-  // runs at the configured base and escalates if it too gets killed at its budget.
-  const fixBudget = await resolveDispatchTimeoutMs(db, current, undefined);
   await params.deps.enqueueCliInvocation({
     invocationId: invRow.id,
     taskId: params.taskId,
@@ -1150,13 +1173,27 @@ async function dispatchMiningAgents(
   // Each mining agent is its own Claude-family invocation with its own terminal,
   // so each is independently steerable (gated globally + by adapter support).
   const steeringRequested = await resolveSteeringEnabled();
+  // Cross-round memory is a property of the STEP, not of one agent, so resolve it once for the
+  // whole fan-out instead of per agent.
+  const learnedMs = await learnedTimeoutMs(db, params.taskId, stepDef.metadata.id, current.id);
   let enqueued = 0;
 
   for (const dispatch of dispatches) {
     const prior = existing?.get(dispatch.agentId) ?? null;
-    // The first fan-out of an agent is always rung 0; a re-roll runs at whatever the
-    // retry path resolved from its prior invocation's failure.
-    const timeoutAttempt = prior?.timeoutAttempts ?? 0;
+    // A re-roll runs at whatever the retry path resolved from its prior invocation's failure.
+    // A FIRST fan-out is rung 0 only if this agent has no history: a round fork creates fresh
+    // mining rows, so an agent that burned two rungs at round 6 started round 7 back at its
+    // declared budget and re-bought the same discovery. Seed from the same agent's earlier
+    // rounds instead.
+    const timeoutAttempt =
+      prior?.timeoutAttempts ??
+      (await priorRoundTimeoutAttempts(
+        db,
+        params.taskId,
+        stepDef.metadata.id,
+        dispatch.agentId,
+        current.id,
+      ));
     // Close the mining terseness gap: the main dispatch gets the admin terseness level
     // at resolveLlmPhase, but fan-out sub-prompts are built per step and bypass it.
     // Apply the same directive so the level reaches mining output (skill-gen, discovery,
@@ -1279,7 +1316,8 @@ async function dispatchMiningAgents(
       miningId = miningRow.id;
     }
 
-    const budget = await resolveMiningTimeoutMs(current, spec.timeoutMs, timeoutAttempt);
+    const budget = await resolveMiningTimeoutMs(current, spec.timeoutMs, timeoutAttempt, learnedMs);
+    await stampLearnedTimeout(db, current.id, budget.timeoutMs);
     if (budget.timeoutMs !== spec.timeoutMs) {
       ctx.logger.info(
         {
@@ -2846,21 +2884,123 @@ export async function miningTimeoutInfo(
   return { attempts, lastBudgetMinutes };
 }
 
+/** The largest budget any EARLIER round of this (task, step) already proved it needed.
+ *
+ *  Reads both columns: a pin the user set on an earlier round is evidence just as much as a
+ *  budget the ladder climbed to on its own. Excludes the row asking, and that exclusion is what
+ *  keeps the number stable within a round — folding a row's own stamped value back into its base
+ *  would compound it every dispatch (90 escalates to 120, stamps 120, escalates to 160…), so
+ *  within-round escalation stays exactly the ladder and the base only steps up at a round fork.
+ *
+ *  Reduced in JS rather than aggregated in SQL: a task has a handful of rounds, and this keeps
+ *  the arithmetic in `learnedLadderBaseMs`, where it is unit-tested. */
+async function learnedTimeoutMs(
+  db: Database,
+  taskId: string,
+  stepId: string,
+  excludeRowId: string,
+): Promise<number> {
+  const rows = await db
+    .select({
+      overrideMs: schema.taskSteps.cliTimeoutOverrideMs,
+      learnedMs: schema.taskSteps.cliTimeoutLearnedMs,
+    })
+    .from(schema.taskSteps)
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, taskId),
+        eq(schema.taskSteps.stepId, stepId),
+        ne(schema.taskSteps.id, excludeRowId),
+      ),
+    );
+  let best = 0;
+  for (const r of rows) best = Math.max(best, r.overrideMs ?? 0, r.learnedMs ?? 0);
+  return best;
+}
+
+/** The ladder rung ONE mining agent's first fan-out of this round should start at, carried across
+ *  round forks.
+ *
+ *  Keyed on `(task, step, agent_id)`, matching the per-agent granularity `timeout_attempts` already
+ *  has: a step's reviewers fail independently, so the security reviewer must not inherit the peer
+ *  reviewer's rung. Excludes the current step row so a re-roll within the round keeps using the
+ *  live row's own counter.
+ *
+ *  Returns 0 when there is no history — which is also what happens when a manual Retry has been
+ *  through: the API retry's downstream reset DELETEs mining rows, so earlier rounds' counters can
+ *  legitimately be gone. Rung 0 is then simply today's behaviour, not a wrong answer. */
+async function priorRoundTimeoutAttempts(
+  db: Database,
+  taskId: string,
+  stepId: string,
+  agentId: string,
+  excludeRowId: string,
+): Promise<number> {
+  const rows = await db
+    .select({ timeoutAttempts: schema.taskStepAgentMinings.timeoutAttempts })
+    .from(schema.taskStepAgentMinings)
+    .innerJoin(schema.taskSteps, eq(schema.taskSteps.id, schema.taskStepAgentMinings.taskStepId))
+    .where(
+      and(
+        eq(schema.taskSteps.taskId, taskId),
+        eq(schema.taskSteps.stepId, stepId),
+        eq(schema.taskStepAgentMinings.agentId, agentId),
+        ne(schema.taskStepAgentMinings.taskStepId, excludeRowId),
+      ),
+    );
+  let best = 0;
+  for (const r of rows) best = Math.max(best, r.timeoutAttempts);
+  return best;
+}
+
+/** Record the budget a row was actually dispatched with, as a high-water mark.
+ *
+ *  Only ever raises. Best-effort: a step must not fail because its bookkeeping write did, and the
+ *  only cost of losing one is that the next round re-discovers the budget — today's behaviour. */
+async function stampLearnedTimeout(
+  db: Database,
+  stepRowId: string,
+  timeoutMs: number,
+): Promise<void> {
+  try {
+    await db
+      .update(schema.taskSteps)
+      .set({ cliTimeoutLearnedMs: timeoutMs })
+      .where(
+        and(
+          eq(schema.taskSteps.id, stepRowId),
+          or(
+            isNull(schema.taskSteps.cliTimeoutLearnedMs),
+            lt(schema.taskSteps.cliTimeoutLearnedMs, timeoutMs),
+          ),
+        ),
+      );
+  } catch (err) {
+    log.warn({ err, stepRowId, timeoutMs }, 'failed to record learned cli timeout');
+  }
+}
+
 /** The hard-timeout budget this step's next invocation should be dispatched with.
  *
- *  Two sources, in order:
+ *  Three sources, in order:
  *   - the user's explicit "Retry with longer timeout" choice, which wins outright — they
  *     named a number, so escalating on top of it would ignore what they asked for;
  *   - otherwise the escalating ladder, indexed by how many consecutive timeouts this step
- *     has already burned.
+ *     has already burned, based on the largest budget an EARLIER ROUND of this step already
+ *     proved it needed. Without that base a round fork threw the discovery away and re-bought
+ *     it from scratch, once per round.
  *
  *  Returns the reasoning alongside the number so the dispatch log says WHY a run got the
  *  budget it did — the previous behaviour (same budget forever) was invisible in logs. */
 async function resolveDispatchTimeoutMs(
   db: Database,
-  step: { id: string; cliTimeoutOverrideMs: number | null },
+  step: { id: string; taskId: string; stepId: string; cliTimeoutOverrideMs: number | null },
   declaredMs: number | undefined,
-): Promise<{ timeoutMs: number; timeoutAttempt: number; timeoutSource: 'override' | 'ladder' }> {
+): Promise<{
+  timeoutMs: number;
+  timeoutAttempt: number;
+  timeoutSource: 'override' | 'ladder' | 'learned';
+}> {
   if (step.cliTimeoutOverrideMs && step.cliTimeoutOverrideMs > 0) {
     return {
       timeoutMs: step.cliTimeoutOverrideMs,
@@ -2884,10 +3024,16 @@ async function resolveDispatchTimeoutMs(
   } catch (err) {
     logger.warn({ err }, 'cli timeout ladder config unreadable; using built-in defaults');
   }
+  const learnedMs = await learnedTimeoutMs(db, step.taskId, step.stepId, step.id);
+  const baseMs = learnedLadderBaseMs(declaredMs, learnedMs);
+  const timeoutMs = escalatedTimeoutMs(baseMs, timeoutAttempt, { baseMinutes, ladder });
+  await stampLearnedTimeout(db, step.id, timeoutMs);
   return {
-    timeoutMs: escalatedTimeoutMs(declaredMs, timeoutAttempt, { baseMinutes, ladder }),
+    timeoutMs,
     timeoutAttempt,
-    timeoutSource: 'ladder',
+    // 'learned' only when an earlier round is what raised the base — a learned value the step
+    // already declares on its own tells the reader nothing.
+    timeoutSource: learnedMs > (declaredMs ?? 0) ? 'learned' : 'ladder',
   };
 }
 
@@ -2905,12 +3051,21 @@ async function resolveDispatchTimeoutMs(
  *     figures are calibrations; see escalatedFromDeclaredMs.
  *
  *  A spec with no declared budget falls back to the configured base rather than the docker
- *  runner's 2-minute default, which is a spawn-kill for anything doing real work. */
+ *  runner's 2-minute default, which is a spawn-kill for anything doing real work.
+ *
+ *  `learnedMs` (the step's cross-round high-water mark) raises that declared base the same way it
+ *  does for the step's own CLI. It is computed once per fan-out by the caller rather than per
+ *  agent, because it is a property of the step. Cost worth naming: on a step that runs both its
+ *  own CLI and a per-role fan-out, a budget learned from the coder also raises the reviewers, and
+ *  an over-long budget holds a scarce agent slot longer. Accepted because the step-level OVERRIDE
+ *  already behaves exactly this way (the branch directly below), so this is the existing coupling
+ *  rather than a new one. */
 async function resolveMiningTimeoutMs(
   step: { cliTimeoutOverrideMs: number | null },
   declaredMs: number | undefined,
   timeoutAttempt: number,
-): Promise<{ timeoutMs: number; timeoutSource: 'override' | 'ladder' }> {
+  learnedMs: number,
+): Promise<{ timeoutMs: number; timeoutSource: 'override' | 'ladder' | 'learned' }> {
   if (step.cliTimeoutOverrideMs && step.cliTimeoutOverrideMs > 0) {
     return { timeoutMs: step.cliTimeoutOverrideMs, timeoutSource: 'override' };
   }
@@ -2928,9 +3083,10 @@ async function resolveMiningTimeoutMs(
     logger.warn({ err }, 'cli timeout ladder config unreadable; using built-in defaults');
   }
   const declared = declaredMs && declaredMs > 0 ? declaredMs : baseMinutes * 60_000;
+  const base = learnedLadderBaseMs(declared, learnedMs) ?? declared;
   return {
-    timeoutMs: escalatedFromDeclaredMs(declared, timeoutAttempt, ladder),
-    timeoutSource: 'ladder',
+    timeoutMs: escalatedFromDeclaredMs(base, timeoutAttempt, ladder),
+    timeoutSource: learnedMs > declared ? 'learned' : 'ladder',
   };
 }
 

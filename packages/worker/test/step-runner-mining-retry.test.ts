@@ -59,7 +59,10 @@ function makeMockDb(state: MockState): Database {
           limit: async () => rows,
           orderBy: () => thenable(),
         });
-        return { where: thenable };
+        // A joined read (priorRoundTimeoutAttempts, which asks earlier rounds what rung this
+        // agent reached) projects from the base table and uses task_steps only to scope the
+        // task/step; the mock ignores the join condition and returns the base rows unchanged.
+        return { where: thenable, innerJoin: () => ({ where: thenable }) };
       },
     }),
     insert: (table: unknown) => {

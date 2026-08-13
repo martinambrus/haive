@@ -449,12 +449,24 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       // to the minutes the user picked; every other retry path writes null, so the
       // escalating ladder applies again and no stale override outlives the run that
       // needed it. Same scoping as the two above.
+      //
+      // cliTimeoutLearnedMs: the same number is also EVIDENCE about this step, and evidence
+      // must outlive the row. The pin alone died at the next round fork (upsertRow INSERTs a
+      // fresh row), so a 120-minute choice at round 6 was back to the base budget at round 7.
+      // Raise the high-water mark here and later rounds start from it. Omitted rather than
+      // nulled on a plain retry: clearing the pin does not un-learn what the CLI did.
+      const pinnedTimeoutMs = body.timeoutMinutes ? body.timeoutMinutes * 60_000 : null;
       await tx
         .update(schema.taskSteps)
         .set({
           localModelOverride: body.overrideLocalModel === true,
           pauseFormOnRetry: body.overrideLocalModel !== true,
-          cliTimeoutOverrideMs: body.timeoutMinutes ? body.timeoutMinutes * 60_000 : null,
+          cliTimeoutOverrideMs: pinnedTimeoutMs,
+          ...(pinnedTimeoutMs
+            ? {
+                cliTimeoutLearnedMs: sql`greatest(coalesce(${schema.taskSteps.cliTimeoutLearnedMs}, 0), ${pinnedTimeoutMs})`,
+              }
+            : {}),
         })
         .where(eq(schema.taskSteps.id, step.id));
       const bumped = await tx
