@@ -21,7 +21,9 @@ import {
   extractMarkdownSections,
   extractCodeSections,
   chunkSection,
+  capChunks,
   CODE_EXTENSIONS,
+  MAX_FILE_BYTES,
   type RagChunk,
 } from '../onboarding/_rag-chunkers.js';
 import {
@@ -327,13 +329,33 @@ export async function runRagIndexSync(
         continue;
       }
 
+      const bytes = Buffer.byteLength(text, 'utf8');
+      if (bytes > MAX_FILE_BYTES) {
+        // Drop it from processedPaths so the orphan sweep below deletes whatever
+        // this file had indexed before it grew past the limit — otherwise stale
+        // chunks of a no-longer-indexed file would linger forever.
+        processedPaths.delete(relPath);
+        ctx.logger.warn(
+          { relPath, bytes, max: MAX_FILE_BYTES },
+          'file exceeds the RAG size limit; skipped',
+        );
+        continue;
+      }
+
       const sections =
         sourceType === 'code'
           ? extractCodeSections(text, relPath)
           : extractMarkdownSections(text, relPath);
-      const chunks: RagChunk[] = [];
+      const built: RagChunk[] = [];
       for (const section of sections) {
-        chunks.push(...chunkSection(section));
+        built.push(...chunkSection(section));
+      }
+      const { chunks, dropped } = capChunks(built);
+      if (dropped > 0) {
+        ctx.logger.warn(
+          { relPath, kept: chunks.length, dropped },
+          'file exceeded the per-file RAG chunk budget; tail not indexed',
+        );
       }
 
       // Claim legacy onboarding rows (repository_id IS NULL) for this file into

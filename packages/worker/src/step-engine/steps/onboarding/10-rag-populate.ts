@@ -19,8 +19,10 @@ import {
   extractMarkdownSections,
   extractCodeSections,
   chunkSection,
+  capChunks,
   CODE_EXTENSIONS,
   isMinifiedPath,
+  MAX_FILE_BYTES,
   type RagChunk,
 } from './_rag-chunkers.js';
 import {
@@ -793,10 +795,26 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           continue;
         }
 
+        const kbBytes = Buffer.byteLength(text, 'utf8');
+        if (kbBytes > MAX_FILE_BYTES) {
+          ctx.logger.warn(
+            { file: file.relPath, bytes: kbBytes, max: MAX_FILE_BYTES },
+            'KB file exceeds the RAG size limit; skipped',
+          );
+          continue;
+        }
+
         const sections = extractMarkdownSections(text, file.relPath);
-        const chunks: RagChunk[] = [];
+        const built: RagChunk[] = [];
         for (const section of sections) {
-          chunks.push(...chunkSection(section));
+          built.push(...chunkSection(section));
+        }
+        const { chunks, dropped } = capChunks(built);
+        if (dropped > 0) {
+          ctx.logger.warn(
+            { file: file.relPath, kept: chunks.length, dropped },
+            'KB file exceeded the per-file RAG chunk budget; tail not indexed',
+          );
         }
         if (chunks.length === 0) continue;
         kbFileCount += 1;
@@ -835,10 +853,26 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           continue;
         }
 
+        const codeBytes = Buffer.byteLength(text, 'utf8');
+        if (codeBytes > MAX_FILE_BYTES) {
+          ctx.logger.warn(
+            { file: file.relPath, bytes: codeBytes, max: MAX_FILE_BYTES },
+            'code file exceeds the RAG size limit; skipped',
+          );
+          continue;
+        }
+
         const sections = extractCodeSections(text, file.relPath);
-        const chunks: RagChunk[] = [];
+        const built: RagChunk[] = [];
         for (const section of sections) {
-          chunks.push(...chunkSection(section));
+          built.push(...chunkSection(section));
+        }
+        const { chunks, dropped } = capChunks(built);
+        if (dropped > 0) {
+          ctx.logger.warn(
+            { file: file.relPath, kept: chunks.length, dropped },
+            'code file exceeded the per-file RAG chunk budget; tail not indexed',
+          );
         }
         if (chunks.length === 0) continue;
         codeFileCount += 1;

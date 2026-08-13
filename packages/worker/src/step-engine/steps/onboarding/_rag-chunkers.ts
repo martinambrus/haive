@@ -17,6 +17,15 @@ export interface RagChunk {
   chunkHash: string;
 }
 
+/** A matched syntactic construct, as offsets into the file. Extractors return
+ *  offsets rather than pre-sliced text so `assembleSections` can also see the
+ *  spans BETWEEN matches and index those instead of discarding them. */
+interface SectionRange {
+  sectionId: string;
+  start: number;
+  end: number;
+}
+
 /* ------------------------------------------------------------------ */
 /* Code extension map                                                  */
 /* ------------------------------------------------------------------ */
@@ -55,6 +64,26 @@ export function isMinifiedPath(rel: string): boolean {
 }
 
 /* ------------------------------------------------------------------ */
+/* Budgets                                                             */
+/* ------------------------------------------------------------------ */
+
+/** Files bigger than this are skipped whole rather than indexed in part. Real
+ *  hand-written source never reaches it; past this size the cost is embedding
+ *  time, not retrieval value. Callers log the skip — never drop a file quietly. */
+export const MAX_FILE_BYTES = 512_000;
+
+/** Per-file chunk budget (~160 KB of covered text at DEFAULT_MAX_SIZE). This is
+ *  the real constraint the old 3000/5000-char slices were groping at: peak
+ *  memory is bounded by the file itself either way, but every extra chunk is
+ *  another embedding call. Over-budget files keep the first N chunks and report
+ *  the remainder so the loss is logged rather than silent. */
+export const MAX_CHUNKS_PER_FILE = 80;
+
+/** Uncovered spans with less non-whitespace than this are not worth an embedding
+ *  of their own — import blocks, closing braces, blank lines between functions. */
+const MIN_GAP_CHARS = 120;
+
+/* ------------------------------------------------------------------ */
 /* Hashing / slugify                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -68,6 +97,14 @@ export function slugifyHeading(text: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 48);
+}
+
+/** Section ids are encoded into stale-reconcile keys as `${sectionId}:${chunkIndex}`
+ *  and parsed back on the FIRST colon (steps/workflow/_rag-index.ts), so an id
+ *  containing ':' would split at the wrong place and orphan the row. Normalise
+ *  here rather than relying on every extractor to remember. */
+function safeSectionId(id: string): string {
+  return id.replace(/:/g, '-');
 }
 
 /* ------------------------------------------------------------------ */
@@ -90,7 +127,7 @@ export function extractMarkdownSections(content: string, _filePath: string): Rag
       if (text) {
         sections.push({ sectionId: currentId, content: text });
       }
-      currentId = slugifyHeading(m[2]!);
+      currentId = safeSectionId(slugifyHeading(m[2]!));
       currentLines = [line];
     } else {
       currentLines.push(line);
@@ -110,14 +147,37 @@ export function extractMarkdownSections(content: string, _filePath: string): Rag
 /* Code section extraction (regex fallback)                            */
 /* ------------------------------------------------------------------ */
 
-function extractPhpSections(content: string): RagSection[] {
-  const sections: RagSection[] = [];
+/** Index just past the '}' that closes the block opening at `start` (which must
+ *  be a '{'), or null when it is not. An unclosed block runs to EOF — the
+ *  section is still emitted whole rather than cut at an arbitrary offset. */
+function braceBlockEnd(content: string, start: number): number | null {
+  if (start < 0 || content[start] !== '{') return null;
+  let depth = 0;
+  for (let i = start; i < content.length; i += 1) {
+    if (content[i] === '{') depth += 1;
+    else if (content[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return content.length;
+}
+
+/** End offset of the brace block a match opens. Every pattern below ends AT its
+ *  opening '{', so that brace is the last character of the match. */
+function blockEndFromMatch(content: string, m: RegExpExecArray): number | null {
+  const braceStart = content.indexOf('{', m.index + m[0].length - 1);
+  return braceBlockEnd(content, braceStart);
+}
+
+function phpRanges(content: string): SectionRange[] {
+  const ranges: SectionRange[] = [];
 
   // File docblock
-  const docblockRe = /^<\?php\s*(\/\*\*[\s\S]*?\*\/)/;
-  const docMatch = docblockRe.exec(content);
+  const docMatch = /^<\?php\s*(\/\*\*[\s\S]*?\*\/)/.exec(content);
   if (docMatch) {
-    sections.push({ sectionId: 'file-docblock', content: docMatch[1]! });
+    const start = content.indexOf(docMatch[1]!);
+    ranges.push({ sectionId: 'file-docblock', start, end: start + docMatch[1]!.length });
   }
 
   // Functions (standalone and methods)
@@ -125,78 +185,56 @@ function extractPhpSections(content: string): RagSection[] {
     /(\/\*\*[\s\S]*?\*\/\s*)?((?:public|protected|private|static)\s+)*function\s+(\w+)\s*\([^)]*\)\s*\{/g;
   let match: RegExpExecArray | null;
   while ((match = funcRe.exec(content)) !== null) {
-    const funcName = match[3]!;
-    const funcStart = match.index;
-    const bodyStart = content.indexOf('{', funcStart + match[0].length - 1);
-    const body = extractBraceBlock(content, bodyStart);
-    if (body) {
-      const full = (match[1] || '') + content.slice(funcStart, bodyStart) + body;
-      sections.push({ sectionId: `function-${funcName}`, content: full.slice(0, 3000) });
+    const end = blockEndFromMatch(content, match);
+    if (end !== null) {
+      ranges.push({ sectionId: `function-${match[3]!}`, start: match.index, end });
     }
   }
 
-  if (sections.length === 0) {
-    sections.push({ sectionId: 'full-file', content: content.slice(0, 5000) });
-  }
-  return sections;
+  return ranges;
 }
 
-function extractJsSections(content: string): RagSection[] {
-  const sections: RagSection[] = [];
+function jsRanges(content: string): SectionRange[] {
+  const ranges: SectionRange[] = [];
+  let match: RegExpExecArray | null;
 
   // Named functions
   const funcRe = /function\s+(\w+)\s*\([^)]*\)\s*\{/g;
-  let match: RegExpExecArray | null;
   while ((match = funcRe.exec(content)) !== null) {
-    const name = match[1]!;
-    const bodyStart = content.indexOf('{', match.index + match[0].length - 1);
-    const body = extractBraceBlock(content, bodyStart);
-    if (body) {
-      sections.push({
-        sectionId: `function-${name}`,
-        content: (content.slice(match.index, bodyStart) + body).slice(0, 3000),
-      });
-    }
+    const end = blockEndFromMatch(content, match);
+    if (end !== null) ranges.push({ sectionId: `function-${match[1]!}`, start: match.index, end });
   }
 
   // Arrow functions assigned to const/let/var
   const arrowRe =
     /(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[a-zA-Z_]\w*)\s*=>\s*\{/g;
   while ((match = arrowRe.exec(content)) !== null) {
-    const name = match[1]!;
-    const bodyStart = content.lastIndexOf('{', match.index + match[0].length);
-    const body = extractBraceBlock(content, bodyStart);
-    if (body) {
-      sections.push({
-        sectionId: `function-${name}`,
-        content: (content.slice(match.index, bodyStart) + body).slice(0, 3000),
-      });
-    }
+    const braceStart = content.lastIndexOf('{', match.index + match[0].length);
+    const end = braceBlockEnd(content, braceStart);
+    if (end !== null) ranges.push({ sectionId: `function-${match[1]!}`, start: match.index, end });
   }
 
   // Classes
   const classRe = /class\s+(\w+)(?:\s+extends\s+\w+)?\s*\{/g;
   while ((match = classRe.exec(content)) !== null) {
-    const name = match[1]!;
-    const bodyStart = content.indexOf('{', match.index + match[0].length - 1);
-    const body = extractBraceBlock(content, bodyStart);
-    if (body) {
-      sections.push({
-        sectionId: `class-${name}`,
-        content: (content.slice(match.index, bodyStart) + body).slice(0, 3000),
-      });
-    }
+    const end = blockEndFromMatch(content, match);
+    if (end !== null) ranges.push({ sectionId: `class-${match[1]!}`, start: match.index, end });
   }
 
-  if (sections.length === 0) {
-    sections.push({ sectionId: 'full-file', content: content.slice(0, 5000) });
-  }
-  return sections;
+  return ranges;
 }
 
-function extractPythonSections(content: string): RagSection[] {
-  const sections: RagSection[] = [];
+function pythonRanges(content: string): SectionRange[] {
+  const ranges: SectionRange[] = [];
   const lines = content.split('\n');
+
+  // Offset of each line start, so the line-based scan can report file offsets.
+  const offsets: number[] = [];
+  let acc = 0;
+  for (const line of lines) {
+    offsets.push(acc);
+    acc += line.length + 1;
+  }
 
   const defRe = /^(\s*)(def|class)\s+(\w+)/;
   let i = 0;
@@ -219,111 +257,124 @@ function extractPythonSections(content: string): RagSection[] {
         if (lineIndent <= indent) break;
         i += 1;
       }
-      const body = lines.slice(startLine, i).join('\n');
-      sections.push({ sectionId: `${kind}-${name}`, content: body.slice(0, 3000) });
+      ranges.push({
+        sectionId: `${kind}-${name}`,
+        start: offsets[startLine]!,
+        end: i < lines.length ? offsets[i]! : content.length,
+      });
     } else {
       i += 1;
     }
   }
 
-  if (sections.length === 0) {
-    sections.push({ sectionId: 'full-file', content: content.slice(0, 5000) });
-  }
-  return sections;
+  return ranges;
 }
 
-/** Extract a brace-delimited block starting at position `start` (which must be '{'). */
-function extractBraceBlock(content: string, start: number): string | null {
-  if (start < 0 || content[start] !== '{') return null;
-  let depth = 0;
-  for (let i = start; i < content.length; i += 1) {
-    if (content[i] === '{') depth += 1;
-    else if (content[i] === '}') {
-      depth -= 1;
-      if (depth === 0) return content.slice(start, i + 1);
-    }
-  }
-  // Unclosed brace — return up to 3000 chars
-  return content.slice(start, start + 3000);
-}
-
-function extractGoSections(content: string): RagSection[] {
-  const sections: RagSection[] = [];
+function goRanges(content: string): SectionRange[] {
+  const ranges: SectionRange[] = [];
   const funcRe = /func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\([^)]*\)[^{]*\{/g;
   let match: RegExpExecArray | null;
   while ((match = funcRe.exec(content)) !== null) {
-    const name = match[1]!;
-    const bodyStart = content.indexOf('{', match.index + match[0].length - 1);
-    const body = extractBraceBlock(content, bodyStart);
-    if (body) {
-      sections.push({
-        sectionId: `function-${name}`,
-        content: (content.slice(match.index, bodyStart) + body).slice(0, 3000),
-      });
-    }
+    const end = blockEndFromMatch(content, match);
+    if (end !== null) ranges.push({ sectionId: `function-${match[1]!}`, start: match.index, end });
   }
-  if (sections.length === 0) {
-    sections.push({ sectionId: 'full-file', content: content.slice(0, 5000) });
-  }
-  return sections;
+  return ranges;
 }
 
-function extractRustSections(content: string): RagSection[] {
-  const sections: RagSection[] = [];
-  // Functions
-  const fnRe = /(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\([^)]*\)[^{]*\{/g;
+function rustRanges(content: string): SectionRange[] {
+  const ranges: SectionRange[] = [];
   let match: RegExpExecArray | null;
+
+  const fnRe = /(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\([^)]*\)[^{]*\{/g;
   while ((match = fnRe.exec(content)) !== null) {
-    const name = match[1]!;
-    const bodyStart = content.indexOf('{', match.index + match[0].length - 1);
-    const body = extractBraceBlock(content, bodyStart);
-    if (body) {
-      sections.push({
-        sectionId: `function-${name}`,
-        content: (content.slice(match.index, bodyStart) + body).slice(0, 3000),
-      });
-    }
+    const end = blockEndFromMatch(content, match);
+    if (end !== null) ranges.push({ sectionId: `function-${match[1]!}`, start: match.index, end });
   }
-  // Impl blocks
+
   const implRe = /impl\s+(?:<[^>]*>\s+)?(\w+)(?:\s+for\s+\w+)?\s*\{/g;
   while ((match = implRe.exec(content)) !== null) {
-    const name = match[1]!;
-    const bodyStart = content.indexOf('{', match.index + match[0].length - 1);
-    const body = extractBraceBlock(content, bodyStart);
-    if (body) {
-      sections.push({
-        sectionId: `impl-${name}`,
-        content: (content.slice(match.index, bodyStart) + body).slice(0, 3000),
-      });
-    }
+    const end = blockEndFromMatch(content, match);
+    if (end !== null) ranges.push({ sectionId: `impl-${match[1]!}`, start: match.index, end });
   }
-  if (sections.length === 0) {
-    sections.push({ sectionId: 'full-file', content: content.slice(0, 5000) });
+
+  return ranges;
+}
+
+/** Turn matched ranges into a section list that COVERS the whole file: matched
+ *  constructs keep their own ids, and every span between them is emitted as a
+ *  `chunk-<n>` gap section. This is what stops a file whose regexes matched
+ *  nothing (73% of legacy .js in the measured index) from being cut at a fixed
+ *  offset — such a file is simply one big gap section that `chunkSection` splits
+ *  normally.
+ *
+ *  A range that strictly contains another is dropped in favour of the finer one,
+ *  so a class yields its methods rather than one duplicate copy of both. */
+export function assembleSections(content: string, ranges: SectionRange[]): RagSection[] {
+  const kept = ranges.filter(
+    (r) =>
+      !ranges.some(
+        (s) =>
+          s !== r && s.start >= r.start && s.end <= r.end && (s.start > r.start || s.end < r.end),
+      ),
+  );
+  kept.sort((a, b) => a.start - b.start || a.end - b.end);
+
+  const sections: RagSection[] = [];
+  let cursor = 0;
+  let gapIndex = 0;
+
+  const pushGap = (from: number, to: number): void => {
+    if (to <= from) return;
+    const text = content.slice(from, to);
+    if (text.trim().length < MIN_GAP_CHARS) return;
+    sections.push({ sectionId: `chunk-${gapIndex}`, content: text });
+    gapIndex += 1;
+  };
+
+  for (const r of kept) {
+    // Partial overlaps (a regex that ran past its construct) would double-index
+    // the shared bytes; skip the later range rather than emit them twice.
+    if (r.start < cursor) continue;
+    pushGap(cursor, r.start);
+    sections.push({
+      sectionId: safeSectionId(r.sectionId),
+      content: content.slice(r.start, r.end),
+    });
+    cursor = r.end;
   }
+  pushGap(cursor, content.length);
+
   return sections;
 }
 
 export function extractCodeSections(content: string, filePath: string): RagSection[] {
   const ext = path.extname(filePath).toLowerCase();
   const lang = CODE_EXTENSIONS[ext];
+  let ranges: SectionRange[];
   switch (lang) {
     case 'php':
-      return extractPhpSections(content);
+      ranges = phpRanges(content);
+      break;
     case 'javascript':
     case 'typescript':
     case 'tsx':
     case 'java':
-      return extractJsSections(content);
+      ranges = jsRanges(content);
+      break;
     case 'python':
     case 'ruby':
-      return extractPythonSections(content);
+      ranges = pythonRanges(content);
+      break;
     case 'go':
-      return extractGoSections(content);
+      ranges = goRanges(content);
+      break;
     case 'rust':
-      return extractRustSections(content);
+      ranges = rustRanges(content);
+      break;
     default:
-      return [{ sectionId: 'full-file', content: content.slice(0, 5000) }];
+      ranges = [];
   }
+  return assembleSections(content, ranges);
 }
 
 /* ------------------------------------------------------------------ */
@@ -382,11 +433,28 @@ export function chunkSection(
     idx += 1;
 
     if (splitAt >= trimmed.length) break;
-    start = splitAt - overlap;
-    if (start <= chunks[chunks.length - 1]!.content.length - overlap) {
-      start = splitAt; // prevent infinite loop
-    }
+    // Step back by `overlap`, but never to or before the current start. The old
+    // guard compared an absolute offset against a chunk LENGTH, which silently
+    // dropped the overlap on the first chunk and only avoided looping by luck.
+    // Multi-chunk sections are the norm now, so the guard has to actually hold.
+    start = Math.max(splitAt - overlap, start + 1);
   }
 
   return chunks;
+}
+
+/* ------------------------------------------------------------------ */
+/* Per-file budget                                                     */
+/* ------------------------------------------------------------------ */
+
+export interface CappedChunks {
+  chunks: RagChunk[];
+  /** Chunks dropped by the per-file budget. Non-zero obliges the caller to log
+   *  it: a silent cap is indistinguishable from full coverage. */
+  dropped: number;
+}
+
+export function capChunks(chunks: RagChunk[], max = MAX_CHUNKS_PER_FILE): CappedChunks {
+  if (chunks.length <= max) return { chunks, dropped: 0 };
+  return { chunks: chunks.slice(0, max), dropped: chunks.length - max };
 }
