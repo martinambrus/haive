@@ -612,6 +612,16 @@ export const taskStepAgentMinings = pgTable(
      *  prose fixes nothing. Reset to 0 by any non-timeout failure, so a preemption or a
      *  worker-restart orphan between two timeouts cannot climb the ladder either. */
     timeoutAttempts: integer('timeout_attempts').notNull().default(0),
+    /** Set when a HUMAN asked for this one agent to be re-run, keeping its siblings' output.
+     *  The fan-out barrier re-dispatches marked rows through retryMiningAgents and clears the
+     *  mark, so it fires exactly once.
+     *
+     *  A marker rather than a restored `attempts` budget because only 08c and 08d declare a
+     *  retry spec at all — for the other five fan-out steps `spec.retry` is undefined and both
+     *  automatic re-roll paths are dead code, so a budget-based trigger would reach two steps
+     *  out of seven. For the same reason the mark BYPASSES the per-agent budget: that budget
+     *  bounds automatic thrash, and a person asking is not thrash. */
+    userRetryRequestedAt: timestamp('user_retry_requested_at'),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),

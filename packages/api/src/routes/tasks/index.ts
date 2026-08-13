@@ -36,6 +36,7 @@ import {
   appendTaskEvent,
   currentStepParkedSql,
   enrichStepsWithActiveRole,
+  enrichStepsWithAgentCounts,
   enrichStepsWithCliStats,
   enrichStepsWithCliPreferences,
   enrichStepsWithCliUsage,
@@ -615,7 +616,8 @@ taskRoutes.get('/:id', async (c) => {
   const withSkip = await enrichStepsWithSkipFlag(db, id, enriched);
   const withStats = await enrichStepsWithCliStats(db, id, withSkip);
   const withActiveRole = await enrichStepsWithActiveRole(db, id, withStats);
-  const steps = enrichStepsWithCliUsage(withActiveRole);
+  const withAgentCounts = await enrichStepsWithAgentCounts(db, id, withActiveRole);
+  const steps = enrichStepsWithCliUsage(withAgentCounts);
   const active = await findActiveCliInvocation(db, id);
   const providerBreakdown = await sumTaskProviderBreakdown(db, id);
   // Parent + linked bug fixes (one level; see tasks.parent_task_id). Both scoped

@@ -583,6 +583,42 @@ export async function enrichStepsWithSkipFlag<
   return steps.map((s) => withFlags(s, manualSet.has(s.id)));
 }
 
+/** Annotate each step with how its CONCURRENT agent terminals ended, so the web can offer
+ *  "re-run only the ones that failed" on a fan-out step (08c's peer reviewer, security reviewer
+ *  and extra lenses).
+ *
+ *  Counted from `task_step_agent_minings.status`, the structural column, never from
+ *  `error_message` — a message outlives the state it describes, and an agent that failed once
+ *  and succeeded on a re-roll keeps its error text on the row.
+ *
+ *  `{ done: 0, failed: 0 }` for a step with no fan-out, so callers need no null check and a
+ *  sequential loop step simply reports nothing to re-run. */
+export async function enrichStepsWithAgentCounts<T extends { id: string }>(
+  db: ReturnType<typeof getDb>,
+  taskId: string,
+  steps: T[],
+): Promise<(T & { agentCounts: { done: number; failed: number } })[]> {
+  if (steps.length === 0) return [];
+  const rows = await db
+    .select({
+      taskStepId: schema.taskStepAgentMinings.taskStepId,
+      done: sql<number>`count(*) filter (where ${schema.taskStepAgentMinings.status} = 'done')::int`,
+      failed: sql<number>`count(*) filter (where ${schema.taskStepAgentMinings.status} = 'failed')::int`,
+    })
+    .from(schema.taskStepAgentMinings)
+    .innerJoin(schema.taskSteps, eq(schema.taskSteps.id, schema.taskStepAgentMinings.taskStepId))
+    .where(eq(schema.taskSteps.taskId, taskId))
+    .groupBy(schema.taskStepAgentMinings.taskStepId);
+  const byStep = new Map(rows.map((r) => [r.taskStepId, r]));
+  return steps.map((s) => {
+    const row = byStep.get(s.id);
+    return {
+      ...s,
+      agentCounts: { done: Number(row?.done ?? 0), failed: Number(row?.failed ?? 0) },
+    };
+  });
+}
+
 const CLI_DISPATCH_STEP_ID_SET = new Set<string>(CLI_DISPATCH_STEP_IDS);
 
 /** Annotate each step with whether it ever dispatches a CLI (llm | agentMining |

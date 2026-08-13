@@ -31,7 +31,7 @@ import { ArrowLeft, CircleDot, Route, FolderGit2 } from 'lucide-react';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
-import { isAfterFrontier, type StepOrderKey } from '@/lib/step-order';
+import { isAfterFrontier, isBeforeFrontier, type StepOrderKey } from '@/lib/step-order';
 import { failureBanner, parkBanner } from '@/lib/step-banners';
 import {
   defaultRetryTimeoutMinutes,
@@ -296,11 +296,25 @@ const RETRY_TITLE = 'Reset this step and re-run it (downstream steps will also r
  *  iterationCount > 0 means there are completed passes to keep; a loop step (cliRoles) that
  *  failed on its FIRST pass keeps nothing but is still resumable — resume re-dispatches that
  *  pass with the newly-picked CLI, which is the whole point when one ran out of credits. */
-function isResumableStep(step: Pick<TaskStep, 'status' | 'iterationCount' | 'cliRoles'>): boolean {
+function isResumableStep(
+  step: Pick<TaskStep, 'status' | 'iterationCount' | 'cliRoles' | 'agentCounts'>,
+): boolean {
+  // Fan-out steps first, and deliberately NOT gated on status === 'failed': a step whose
+  // concurrent terminals include a dead one DEGRADES to `done` (the agent failed, not the
+  // code), which is exactly the state that needs "re-run just that terminal". Gating on
+  // 'failed' is why the button never appeared on 08c.
+  if ((step.agentCounts?.failed ?? 0) > 0) return true;
   return step.status === 'failed' && (step.iterationCount > 0 || (step.cliRoles?.length ?? 0) > 0);
 }
 
-function resumeButtonLabel(step: Pick<TaskStep, 'iterationCount'>): string {
+function resumeButtonLabel(step: Pick<TaskStep, 'iterationCount' | 'agentCounts'>): string {
+  const failed = step.agentCounts?.failed ?? 0;
+  if (failed > 0) {
+    const kept = step.agentCounts?.done ?? 0;
+    return kept > 0
+      ? `Resume (keep ${kept} of ${kept + failed} terminals)`
+      : `Re-run ${failed} failed terminal${failed === 1 ? '' : 's'}`;
+  }
   return step.iterationCount > 0
     ? `Resume (keep ${step.iterationCount} pass${step.iterationCount === 1 ? '' : 'es'})`
     : 'Resume (new CLI)';
@@ -314,6 +328,7 @@ function resumeButtonLabel(step: Pick<TaskStep, 'iterationCount'>): string {
 function primaryRecovery(
   failedStep: TaskStep,
   steps: TaskStep[],
+  frontier: StepOrderKey | null,
 ): { step: TaskStep; action: StepAction; label: string; title: string } {
   if (failedStep.stepId === BIZ_REQ_REVIEW_STEP_ID) {
     const draft = steps.find((s) => s.stepId === BIZ_REQ_DRAFT_STEP_ID);
@@ -325,7 +340,11 @@ function primaryRecovery(
         title: BIZ_REQ_RERUN_TITLE,
       };
   }
-  if (isResumableStep(failedStep))
+  // Same rule as the card: never resume a step the run has moved past. This path can target a
+  // non-frontier row — the caller picks the FIRST failed step while the frontier is the LAST —
+  // so it needs its own guard rather than inheriting the card's.
+  const isPast = frontier != null && isBeforeFrontier(failedStep, frontier);
+  if (!isPast && isResumableStep(failedStep))
     return {
       step: failedStep,
       action: 'resume',
@@ -919,9 +938,18 @@ export default function TaskDetailPage() {
                 ? 'Work from the project root (the repo’s current branch) instead of an isolated branch/worktree? You can still commit your edits at the end.'
                 : 'Skip this step and continue to the next step?'
               : action === 'resume'
-                ? step.iterationCount > 0
-                  ? `Resume this step from the last completed pass (${step.iterationCount} kept) with the currently-selected CLI?`
-                  : `Resume this step's first pass with the currently-selected CLI?`
+                ? (step.agentCounts?.failed ?? 0) > 0
+                  ? // Fan-out resume. It must state the cascade: a step that DEGRADED ended
+                    // `done`, so the endpoint resets what already consumed its result. A step
+                    // still sitting `failed` has nothing downstream that ran, and resets none.
+                    `Re-run ${step.agentCounts.failed} failed terminal(s) and keep the ${step.agentCounts.done} that finished?${
+                      step.status === 'done' && downstreamCount
+                        ? ` ${downstreamCount} downstream step(s) will also be reset and re-run.`
+                        : ''
+                    }`
+                  : step.iterationCount > 0
+                    ? `Resume this step from the last completed pass (${step.iterationCount} kept) with the currently-selected CLI?`
+                    : `Resume this step's first pass with the currently-selected CLI?`
                 : downstreamCount
                   ? `Retry this step? ${downstreamCount} downstream step(s) will also be reset and re-run.`
                   : 'Retry this step?';
@@ -1302,7 +1330,7 @@ export default function TaskDetailPage() {
               // Mirror the failed step's own primary button (primaryRecovery) instead of
               // hardcoding `retry`: on a multi-pass step that is Resume, so the header no
               // longer discards passes the CLIs already delivered.
-              const recovery = failedStep ? primaryRecovery(failedStep, steps) : null;
+              const recovery = failedStep ? primaryRecovery(failedStep, steps, frontierKey) : null;
               return (
                 <Button
                   size="sm"
@@ -1451,6 +1479,14 @@ export default function TaskDetailPage() {
             // Steps below the frontier get reset + re-run on any at-or-before retry, so
             // they hide their own action buttons (see frontierKey).
             const isDownstreamOfActive = frontierKey != null && isAfterFrontier(step, frontierKey);
+            // The mirror: a step the run has already moved PAST. It keeps Retry (which resets
+            // it and everything after it, so the task ends up on one coherent frontier) but
+            // must not offer Resume — resume flips this row back to `running` without standing
+            // down the row the task is actually on, leaving two live steps for the
+            // other-step-active guard to refuse. Reachable in the wild because a fan-out step
+            // DEGRADES to `done` when a terminal dies, so the task advances past a step that
+            // still has something worth re-running.
+            const isPastStep = frontierKey != null && isBeforeFrontier(step, frontierKey);
             return (
               <div key={step.id} data-step-id={step.id}>
                 {loopHeader && (
@@ -1465,6 +1501,7 @@ export default function TaskDetailPage() {
                 <StepCard
                   step={step}
                   isDownstreamOfActive={isDownstreamOfActive}
+                  isPastStep={isPastStep}
                   taskId={task.id}
                   taskStatus={task.status}
                   taskCompletedAt={task.completedAt}
@@ -1698,6 +1735,8 @@ interface StepCardProps {
    *  Such steps are pending and get reset + re-run on any at-or-before retry, so their
    *  per-step action buttons (Retry / Stop / Skip / ...) are hidden. */
   isDownstreamOfActive: boolean;
+  /** The run has already moved past this step. Suppresses Resume; Retry stays. */
+  isPastStep: boolean;
   taskId: string;
   taskStatus: TaskStatus;
   /** Caps step timers when the task ended without the step itself ending. */
@@ -2419,6 +2458,7 @@ function TaskTotalTime({
 function StepCardImpl({
   step,
   isDownstreamOfActive,
+  isPastStep,
   taskId,
   taskStatus,
   taskCompletedAt,
@@ -2894,7 +2934,10 @@ function StepCardImpl({
                   {actionBusy ? 'Retrying…' : 'Retry with longer timeout'}
                 </Button>
               )}
-              {isResumableStep(step) && (
+              {/* Never on a step the run has moved past: there, Retry is the only coherent
+                  recovery (it resets this step and everything after it), while a resume would
+                  leave this row and the frontier row both live. */}
+              {isResumableStep(step) && !isPastStep && (
                 <Button
                   size="sm"
                   disabled={actionBusy}

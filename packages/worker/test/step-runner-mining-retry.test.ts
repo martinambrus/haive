@@ -16,6 +16,8 @@ interface MiningRow {
   errorMessage: string | null;
   cliInvocationId: string | null;
   attempts: number;
+  /** Set when a human asked for THIS terminal to be re-run (the fan-out half of Resume). */
+  userRetryRequestedAt?: Date | null;
 }
 
 interface MockState {
@@ -382,6 +384,123 @@ function run(db: Database, stepDef: StepDefinition, enqueued: CliExecJobPayload[
     },
   });
 }
+
+/** A fan-out step declaring NO retry spec at all — the shape of five of the seven mining steps
+ *  (03, 09_5, 09_5b, 09_6_4, 11d). Both automatic re-roll paths are inert here, so this is what
+ *  proves a user-requested re-run does not depend on per-step retry config. */
+function noRetryMiningStep(applyCalls: StepApplyArgs[]): StepDefinition {
+  return {
+    metadata: {
+      id: 'test-mining-step',
+      workflowType: 'workflow',
+      index: 0,
+      title: 'test',
+      description: 'test',
+      requiresCli: true,
+    },
+    async detect() {
+      return { foo: 'bar' };
+    },
+    form() {
+      return null;
+    },
+    agentMining: {
+      requiredCapabilities: [],
+      async selectAgents() {
+        return [
+          { agentId: 'peer-reviewer', agentTitle: 'peer-reviewer', prompt: 'review' },
+          { agentId: 'security-code-reviewer', agentTitle: 'security', prompt: 'audit' },
+        ];
+      },
+    },
+    async apply(_ctx, args) {
+      applyCalls.push(args);
+      return { settled: true };
+    },
+  } as unknown as StepDefinition;
+}
+
+describe('advanceStep agentMining user-requested re-run', () => {
+  it('re-runs only the marked terminal and leaves a done sibling alone', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'CLI process exceeded its time budget (30m).',
+        userRetryRequestedAt: new Date(),
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), noRetryMiningStep(applyCalls), enqueued);
+
+    // Parked on the re-roll, so apply() has NOT consumed the batch yet.
+    expect(result.status).toBe('waiting_cli');
+    expect(applyCalls).toHaveLength(0);
+    // Exactly one agent re-dispatched — the whole point. The sibling that finished keeps its
+    // output instead of being re-bought.
+    expect(enqueued).toHaveLength(1);
+    const reroll = state.inserts.find((i) => i.table === 'task_step_agent_minings');
+    expect(reroll).toBeUndefined(); // UPDATEd in place, never a second row
+    const miningUpdates = state.updates.filter((u) => u.table === 'task_step_agent_minings');
+    expect(miningUpdates.some((u) => u.status === 'pending')).toBe(true);
+  });
+
+  it('re-runs a marked terminal whose automatic budget is already spent', async () => {
+    // The case that matters in practice: the user reaches for this control precisely AFTER the
+    // automatic re-rolls are gone. attempts (9) is far past any maxAttempts, and the step
+    // declares none at all.
+    const state = freshState([
+      miningRow('peer-reviewer', 9, {
+        status: 'failed',
+        errorMessage: 'CLI process exceeded its time budget (30m).',
+        userRetryRequestedAt: new Date(),
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), noRetryMiningStep([]), enqueued);
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toHaveLength(1);
+  });
+
+  it('clears the marker so the request fires exactly once', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'CLI process exceeded its time budget (30m).',
+        userRetryRequestedAt: new Date(),
+      }),
+    ]);
+    await run(makeMockDb(state), noRetryMiningStep([]), []);
+    const cleared = state.updates.filter(
+      (u) => u.table === 'task_step_agent_minings' && u.userRetryRequestedAt === null,
+    );
+    expect(cleared.length).toBeGreaterThan(0);
+  });
+
+  it('does not re-run anything when no terminal is marked', async () => {
+    // An unmarked failed row must stay failed and fall through to apply(): without a retry
+    // spec there is nothing automatic to fire, and inventing one would re-run agents nobody
+    // asked to re-run.
+    const state = freshState([
+      miningRow('peer-reviewer', 1, {
+        status: 'failed',
+        errorMessage: 'CLI process exceeded its time budget (30m).',
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    await run(makeMockDb(state), noRetryMiningStep(applyCalls), enqueued);
+    expect(enqueued).toHaveLength(0);
+    expect(applyCalls).toHaveLength(1);
+    expect(applyCalls[0]!.agentMiningResults?.map((r) => r.status).sort()).toEqual([
+      'done',
+      'failed',
+    ]);
+  });
+});
 
 describe('advanceStep agentMining retry', () => {
   it('re-runs only a transiently failed terminal before apply, preserving its siblings', async () => {

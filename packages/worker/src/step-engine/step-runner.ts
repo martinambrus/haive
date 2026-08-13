@@ -1010,6 +1010,54 @@ async function resolveAgentMiningPhase(
         .where(eq(schema.taskStepAgentMinings.taskStepId, current.id));
     }
 
+    // A human asked for specific terminals to be re-run — the fan-out half of Resume, where the
+    // user keeps the agents that finished and redoes only the ones that died. Handled here, and
+    // the position is deliberate on both sides: AFTER the orphan reconcile so a row whose
+    // invocation quietly died is classified first, but BEFORE the `pending` barrier and the
+    // automatic re-roll below, so an explicit request is never read as a settled failure nor
+    // shadowed by a classifier that judged the failure non-transient.
+    //
+    // This is also the only route to a partial re-dispatch: the branch we are inside returns for
+    // every path once any mining row exists, so selectAgents never re-runs and the step can
+    // never re-fan-out by itself.
+    const userRequested = existing.filter((r) => r.userRetryRequestedAt != null);
+    if (userRequested.length > 0 && params.providers && params.deps) {
+      const requeued = await retryMiningAgents(
+        db,
+        stepDef,
+        current,
+        ctx,
+        detected,
+        formValues,
+        llmOutput,
+        params,
+        userRequested.map((r) => r.agentId),
+        spec.retry?.maxAttempts ?? 1,
+      );
+      // Cleared whether or not it was honoured. A request that cannot be met — selectAgents no
+      // longer offers that agent — must not re-fire on every subsequent advance.
+      await db
+        .update(schema.taskStepAgentMinings)
+        .set({ userRetryRequestedAt: null, updatedAt: new Date() })
+        .where(
+          inArray(
+            schema.taskStepAgentMinings.id,
+            userRequested.map((r) => r.id),
+          ),
+        );
+      ctx.logger.info(
+        { stepId: stepDef.metadata.id, agentIds: userRequested.map((r) => r.agentId), requeued },
+        'user-requested mining re-run',
+      );
+      if (requeued > 0) {
+        const parked = await updateRow(db, current.id, {
+          status: 'waiting_cli',
+          statusMessage: `Re-running ${requeued} agent(s) at your request...`,
+        });
+        return { resolved: false, result: { status: 'waiting_cli', row: parked } };
+      }
+    }
+
     const pending = existing.filter((r) => r.status === 'pending' || r.status === 'running');
     if (pending.length > 0) {
       return { resolved: false, result: { status: 'waiting_cli', row: current } };
@@ -2521,7 +2569,17 @@ async function retryMiningAgents(
     !!r.cliInvocationId && preemptedInvocationIds.has(r.cliInvocationId);
   const timedOut = (r: { cliInvocationId: string | null }): boolean =>
     !!r.cliInvocationId && timedOutInvocationIds.has(r.cliInvocationId);
-  const candidates = wantedRows.filter((r) => r.attempts < maxAttempts || wasPreempted(r));
+  // A HUMAN asking for this agent bypasses the budget too, for a stronger reason than the
+  // preemption case above: that budget bounds automatic thrash, and five of the seven fan-out
+  // steps declare no retry spec at all, so there is frequently no budget to be within. Without
+  // the bypass the one control a user has would silently do nothing on 03 / 09_5 / 09_5b /
+  // 09_6_4 / 11d, and on 08c/08d only until the automatic re-rolls had been spent — which is
+  // exactly when someone reaches for it.
+  const userAsked = (r: { userRetryRequestedAt: Date | null }): boolean =>
+    r.userRetryRequestedAt != null;
+  const candidates = wantedRows.filter(
+    (r) => r.attempts < maxAttempts || wasPreempted(r) || userAsked(r),
+  );
   const targets: MiningRetryTargets = new Map();
   for (const r of candidates) {
     targets.set(r.agentId, {

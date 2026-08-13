@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
-import { schema, resetDagCurrentLevelForRetry } from '@haive/database';
+import { schema, resetDagCurrentLevelForRetry, type Database } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
 import {
   CLI_PROVIDER_CATALOG,
@@ -24,6 +24,7 @@ import { getTaskQueue } from '../../queues.js';
 import {
   appendTaskEvent,
   enrichStepsWithActiveRole,
+  enrichStepsWithAgentCounts,
   enrichStepsWithCliStats,
   enrichStepsWithCliPreferences,
   enrichStepsWithSkipFlag,
@@ -39,6 +40,85 @@ function clampEffort(name: CliProviderName, level: string | null | undefined): s
   if (!level) return null;
   const scale = CLI_PROVIDER_CATALOG[name].effortScale;
   return scale && scale.values.includes(level) ? level : null;
+}
+
+/** Transaction handle (the callback arg of Database.transaction). A full Database is also
+ *  assignable, so callers may pass either. Mirrors the same alias in @haive/database. */
+type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
+
+/** Blank a set of step rows so the worker re-runs them from detect: supersede their live
+ *  invocations, drop their agent minings, clear the wedged DAG level, and zero each row's
+ *  live state after folding its finishing run into carried_*.
+ *
+ *  Shared by the two callers that mean different things by "the set": Retry passes the clicked
+ *  step PLUS its downstream, while the resume mining arm passes the downstream ONLY — there the
+ *  clicked step deliberately keeps its detect/form output and its surviving agents' rows.
+ *  Extracted so those two can never disagree about what a re-run resets. (The worker's
+ *  resetStepAndDownstream is a third, deliberate copy; keep it in sync.)
+ *
+ *  Callers pass only rows worth resetting — a row already `pending` has nothing to blank.
+ *
+ *  Clearing formSchema is essential: step-runner only re-renders the form when the persisted
+ *  schema is null, so without this a re-run would re-run the LLM against a stale schema.
+ *  formValues is cleared so the user re-confirms inputs against the regenerated schema.
+ *  computeFoldContribution counts a failed step's fail->retry wait as idle so wall-clock
+ *  reconciles, and reclassifies an orphaned still-open run's span as idle rather than inflating
+ *  carried work — per row, because each contributes differently. */
+async function resetRowsForRerun(
+  tx: DbHandle,
+  taskId: string,
+  rows: (typeof schema.taskSteps.$inferSelect)[],
+  now: Date,
+): Promise<void> {
+  if (rows.length === 0) return;
+  const ids = rows.map((r) => r.id);
+  await tx
+    .update(schema.cliInvocations)
+    .set({ supersededAt: now })
+    .where(
+      and(
+        inArray(schema.cliInvocations.taskStepId, ids),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
+  await tx
+    .delete(schema.taskStepAgentMinings)
+    .where(inArray(schema.taskStepAgentMinings.taskStepId, ids));
+  // Re-running 06c-dag-execute (or any step whose set includes it) must also clear the wedged
+  // DAG level: resetting task_steps alone leaves task_dag_issues failed_unrecoverable, so
+  // resolveDagPhase re-derives the same failure and the step re-halts identically. No-op when
+  // the task has no DAG / no stuck issue.
+  await resetDagCurrentLevelForRetry(tx, taskId);
+  for (const r of rows) {
+    const contrib = computeFoldContribution(r, now.getTime());
+    await tx
+      .update(schema.taskSteps)
+      .set({
+        status: 'pending',
+        detectOutput: null,
+        formSchema: null,
+        formValues: null,
+        output: null,
+        // Loop state must reset too. A stale iterationCount/iterations makes a re-run loop
+        // step (e.g. spec quality) resume at the old count — past its budget — and carry the
+        // prior passes forward instead of starting a clean loop.
+        iterations: [],
+        iterationCount: 0,
+        statusMessage: null,
+        errorMessage: null,
+        errorHint: null,
+        startedAt: null,
+        endedAt: null,
+        idleMs: 0,
+        waitingStartedAt: null,
+        userActiveMs: 0,
+        carriedWorkMs: r.carriedWorkMs + contrib.workMs,
+        carriedIdleMs: r.carriedIdleMs + contrib.idleMs,
+        carriedUserActiveMs: r.carriedUserActiveMs + contrib.userActiveMs,
+        updatedAt: now,
+      })
+      .where(eq(schema.taskSteps.id, r.id));
+  }
 }
 
 export const stepRoutes = new Hono<AppEnv>();
@@ -78,7 +158,8 @@ stepRoutes.get('/:id/steps', async (c) => {
   );
   const withSkip = await enrichStepsWithSkipFlag(db, id, enriched);
   const withStats = await enrichStepsWithCliStats(db, id, withSkip);
-  const steps = await enrichStepsWithActiveRole(db, id, withStats);
+  const withActiveRole = await enrichStepsWithActiveRole(db, id, withStats);
+  const steps = await enrichStepsWithAgentCounts(db, id, withActiveRole);
   return c.json({ steps });
 });
 
@@ -381,70 +462,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     let newEpoch = 0;
     await db.transaction(async (tx) => {
       const now = new Date();
-      const downstreamToReset = downstream.filter((r) => r.status !== 'pending').map((r) => r.id);
-      const allStepIds = [step.id, ...downstreamToReset];
-
-      await tx
-        .update(schema.cliInvocations)
-        .set({ supersededAt: now })
-        .where(
-          and(
-            inArray(schema.cliInvocations.taskStepId, allStepIds),
-            isNull(schema.cliInvocations.supersededAt),
-          ),
-        );
-      await tx
-        .delete(schema.taskStepAgentMinings)
-        .where(inArray(schema.taskStepAgentMinings.taskStepId, allStepIds));
-      // Retrying 06c-dag-execute (or any step whose cascade includes it) must also clear
-      // the wedged DAG level: resetting task_steps alone leaves task_dag_issues
-      // failed_unrecoverable, so resolveDagPhase re-derives the same failure and the step
-      // re-halts with the identical error. No-op when the task has no DAG / no stuck issue.
-      // Keep in sync with resetStepAndDownstream in the worker.
-      await resetDagCurrentLevelForRetry(tx, id);
-      // Clearing formSchema is essential: step-runner only re-renders the form
-      // when persistedSchema is null (step-runner.ts ~L287). Without this, a
-      // retry would re-run the LLM but reuse the stale form schema.
-      // formValues is cleared so the user re-confirms inputs against the
-      // (possibly different) regenerated schema.
-      // Zero the live timing per row, but first fold the finishing run's work/idle/
-      // user into carried_* so the step's timing survives the retry (a plain reset
-      // discards the prior run, undercounting effort). computeFoldContribution counts a
-      // failed step's fail->retry wait as idle so wall reconciles, and reclassifies an
-      // orphaned still-open run's span as idle instead of inflating carried work. Per-row
-      // because each contributes differently. Mirrors resetStepAndDownstream in the worker.
-      const resetRows = [step, ...downstream.filter((r) => r.status !== 'pending')];
-      for (const r of resetRows) {
-        const contrib = computeFoldContribution(r, now.getTime());
-        await tx
-          .update(schema.taskSteps)
-          .set({
-            status: 'pending',
-            detectOutput: null,
-            formSchema: null,
-            formValues: null,
-            output: null,
-            // Loop state must reset too. Leaving a stale iterationCount/iterations
-            // makes a retried loop step (e.g. spec quality) resume at the old count —
-            // past its budget — and carry the prior passes forward instead of starting
-            // a clean loop.
-            iterations: [],
-            iterationCount: 0,
-            statusMessage: null,
-            errorMessage: null,
-            errorHint: null,
-            startedAt: null,
-            endedAt: null,
-            idleMs: 0,
-            waitingStartedAt: null,
-            userActiveMs: 0,
-            carriedWorkMs: r.carriedWorkMs + contrib.workMs,
-            carriedIdleMs: r.carriedIdleMs + contrib.idleMs,
-            carriedUserActiveMs: r.carriedUserActiveMs + contrib.userActiveMs,
-            updatedAt: now,
-          })
-          .where(eq(schema.taskSteps.id, r.id));
-      }
+      const downstreamToReset = downstream.filter((r) => r.status !== 'pending');
+      // Retry resets the clicked step AND its downstream; see resetRowsForRerun for what a
+      // reset blanks and why. Mirrors resetStepAndDownstream in the worker.
+      await resetRowsForRerun(tx, id, [step, ...downstreamToReset], now);
       // Per-step "Override and run": only the clicked step bypasses the
       // unsafe-for-local-models guard on re-run. A plain retry sets this false
       // (re-arming the guard); the override button sets it true. Scoped to
@@ -540,6 +561,140 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // resumable — supersede the failed invocation and re-dispatch pass 0 with the
     // newly-picked CLI. A non-loop step (no cliRoles) at iterationCount 0 has
     // nothing to preserve — use Retry.
+    // Fan-out arm, checked BEFORE the loop gate below. A step whose CONCURRENT agent terminals
+    // (08c runs a peer reviewer, a security reviewer and extra lenses side by side) include at
+    // least one failed row. Resume's promise — keep what finished, redo what did not — was only
+    // ever built for SEQUENTIAL passes, so every fan-out step fell through to the 409 below and
+    // the sole recovery was Retry, which deletes every agent row and re-buys the reviewers that
+    // had already succeeded.
+    //
+    // The re-dispatch itself is the worker's job: partial re-dispatch is reachable ONLY through
+    // retryMiningAgents, because the fan-out barrier returns early whenever any mining row
+    // exists and so never re-runs selectAgents. This marks the failed rows and hands over.
+    // Deleting them instead would be worse than doing nothing — miningOutcome would then report
+    // `absent`, which 08c reads as "this lens was never asked for" and silently approves.
+    const failedAgents = await db
+      .select({ id: schema.taskStepAgentMinings.id })
+      .from(schema.taskStepAgentMinings)
+      .where(
+        and(
+          eq(schema.taskStepAgentMinings.taskStepId, step.id),
+          eq(schema.taskStepAgentMinings.status, 'failed'),
+        ),
+      );
+    if (failedAgents.length > 0) {
+      const now = new Date();
+      // A step that DEGRADED ended `done` and the task moved past it, so whatever consumed its
+      // verdict (08c2, gate 2) must be invalidated — that verdict is about to change. A step
+      // sitting `failed` has nothing downstream that ran, and cascading there would destroy
+      // work for no reason. This conditional is also what keeps 09_5-skill-generation, the one
+      // step that is both a fan-out AND a loop, from cascading when it fails mid-loop.
+      const targetSeq = step.runSeq;
+      const downstream =
+        step.status === 'done'
+          ? await db
+              .select()
+              .from(schema.taskSteps)
+              .where(
+                and(
+                  eq(schema.taskSteps.taskId, id),
+                  eq(schema.taskSteps.round, step.round),
+                  targetSeq != null
+                    ? gt(schema.taskSteps.runSeq, targetSeq)
+                    : gt(schema.taskSteps.stepIndex, step.stepIndex),
+                ),
+              )
+          : [];
+      const downstreamToReset = downstream.filter((r) => r.status !== 'pending');
+      // Same rule as Retry: if anything in the set being reset is in flight, its sandbox has to
+      // go first, or the reset row's CLI keeps running against a step that no longer owns it.
+      // The clicked step counts too — a fan-out step can be re-run while its own barrier is
+      // still parked. The web hides this action on a passed step, but the endpoint cannot rely
+      // on that: a live downstream row reaching the reset below is the case that would leave
+      // two steps live for the orchestrator's other-step-active guard to refuse.
+      const liveInCascade =
+        step.status === 'running' ||
+        step.status === 'waiting_cli' ||
+        downstreamToReset.some((r) => r.status === 'running' || r.status === 'waiting_cli');
+      if (liveInCascade) {
+        const killed = await killTaskSandboxes(id);
+        logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for fan-out resume');
+      }
+      let newEpoch = task.orchestrationEpoch;
+      await db.transaction(async (tx) => {
+        await tx
+          .update(schema.taskStepAgentMinings)
+          .set({ userRetryRequestedAt: now, updatedAt: now })
+          .where(
+            inArray(
+              schema.taskStepAgentMinings.id,
+              failedAgents.map((a) => a.id),
+            ),
+          );
+        // Downstream ONLY. The clicked step keeps its detectOutput / formSchema / formValues /
+        // iterations / output and — the whole point — the `done` rows of the agents that
+        // succeeded, which resetRowsForRerun would have deleted.
+        await resetRowsForRerun(tx, id, downstreamToReset, now);
+        await tx
+          .update(schema.taskSteps)
+          .set({
+            status: 'running',
+            errorMessage: null,
+            errorHint: null,
+            endedAt: null,
+            statusMessage: null,
+            updatedAt: now,
+          })
+          .where(eq(schema.taskSteps.id, step.id));
+        const bumped = await tx
+          .update(schema.tasks)
+          .set({
+            status: 'running',
+            errorMessage: null,
+            completedAt: null,
+            allowanceAutoResumeCount: 0,
+            currentStepId: stepId,
+            currentStepIndex: step.runSeq ?? step.stepIndex,
+            // Bumped like a retry: this re-run invalidates any advance still queued against
+            // the state it is replacing.
+            orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
+            ...CLEAR_ALLOWANCE_WATCH,
+            updatedAt: now,
+          })
+          .where(eq(schema.tasks.id, id))
+          .returning({ epoch: schema.tasks.orchestrationEpoch });
+        newEpoch = bumped[0]?.epoch ?? newEpoch;
+        await tx.insert(schema.taskEvents).values({
+          taskId: id,
+          taskStepId: step.id,
+          eventType: 'step.resume',
+          payload: {
+            stepId,
+            round: step.round,
+            retriedAgents: failedAgents.length,
+            cascadedSteps: downstreamToReset.length,
+            note: body.note ?? null,
+          },
+        });
+      });
+      await getTaskQueue().add(
+        TASK_JOB_NAMES.ADVANCE_STEP,
+        {
+          taskId: id,
+          userId,
+          stepId,
+          round: step.round,
+          epoch: newEpoch,
+        } as TaskJobPayload,
+        {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 },
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        },
+      );
+      return c.json({ ok: true, status: 'running', retriedAgents: failedAgents.length });
+    }
     const isLoopStep = (STEP_CLI_ROLES[stepId]?.length ?? 0) > 0;
     if (step.iterationCount <= 0 && !isLoopStep) {
       throw new HttpError(

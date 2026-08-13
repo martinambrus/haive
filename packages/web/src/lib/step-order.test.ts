@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isAfterFrontier } from './step-order';
+import { isAfterFrontier, isBeforeFrontier } from './step-order';
 
 describe('isAfterFrontier', () => {
   it('orders within a round by run_seq', () => {
@@ -36,5 +36,32 @@ describe('isAfterFrontier', () => {
     expect(isAfterFrontier({ round: 0, runSeq: 9 }, { round: 0, runSeq: null })).toBe(false);
     // …but round still decides when both rounds differ, run_seq or not.
     expect(isAfterFrontier({ round: 2, runSeq: null }, { round: 1, runSeq: null })).toBe(true);
+  });
+});
+
+describe('isBeforeFrontier', () => {
+  it('orders within a round by run_seq', () => {
+    expect(isBeforeFrontier({ round: 0, runSeq: 26 }, { round: 0, runSeq: 27 })).toBe(true);
+    expect(isBeforeFrontier({ round: 0, runSeq: 28 }, { round: 0, runSeq: 27 })).toBe(false);
+  });
+
+  it('is NOT the negation of isAfterFrontier — the frontier row is neither', () => {
+    const key = { round: 3, runSeq: 27 };
+    expect(isAfterFrontier(key, key)).toBe(false);
+    expect(isBeforeFrontier(key, key)).toBe(false);
+  });
+
+  it('calls an EARLIER round past, even at a higher run_seq', () => {
+    // The case this exists for (38f02dee): 08c-code-review degraded to `done` at round 7 with a
+    // dead reviewer, the task advanced to 08c2, and the passed 08c card offered a Resume
+    // alongside its Retry. Resuming it would have left two live steps.
+    expect(isBeforeFrontier({ round: 0, runSeq: 32 }, { round: 1, runSeq: 26 })).toBe(true);
+    expect(isBeforeFrontier({ round: 7, runSeq: 30 }, { round: 7, runSeq: 31 })).toBe(true);
+  });
+
+  it('never claims an unorderable row is past', () => {
+    expect(isBeforeFrontier({ round: 0, runSeq: null }, { round: 0, runSeq: 5 })).toBe(false);
+    expect(isBeforeFrontier({ round: 0, runSeq: 2 }, { round: 0, runSeq: null })).toBe(false);
+    expect(isBeforeFrontier({ round: 1, runSeq: null }, { round: 2, runSeq: null })).toBe(true);
   });
 });

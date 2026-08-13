@@ -794,6 +794,12 @@ export interface TaskStep {
    *  card surfaces this as an "iteration N/M" badge while the step is
    *  active so the user sees progress through the loop budget. */
   iterationCount: number;
+  /** How this step's CONCURRENT agent terminals ended — 08c runs a peer reviewer, a
+   *  security reviewer and extra lenses side by side. Both 0 for a step with no fan-out,
+   *  so a sequential loop step simply reports nothing to re-run. Counted server-side from
+   *  the mining rows' status column, never from their error text. `failed > 0` is what
+   *  offers "re-run only the terminals that failed". */
+  agentCounts: { done: number; failed: number };
   /** Accumulated idle time (ms) the step spent waiting for user input,
    *  excluded from the active-work timer. */
   idleMs: number;

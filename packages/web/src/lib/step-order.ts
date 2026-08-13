@@ -22,3 +22,20 @@ export function isAfterFrontier(step: StepOrderKey, frontier: StepOrderKey): boo
   if (step.runSeq == null || frontier.runSeq == null) return false;
   return step.runSeq > frontier.runSeq;
 }
+
+/** Has the run already moved PAST `step` — i.e. is it rendered above the frontier?
+ *
+ *  The mirror of isAfterFrontier, and not simply its negation: the frontier row itself is
+ *  neither after nor before. Same null rule, for the same reason — an unorderable row keeps its
+ *  own actions rather than silently losing them.
+ *
+ *  Drives which recoveries a passed step may offer. Retry is always safe there (it resets the
+ *  step and everything after it), but a RESUME is not: resume flips one row back to `running`
+ *  without standing down the row the task is actually on, so two steps end up live and the
+ *  orchestrator's other-step-active guard refuses to advance either.
+ */
+export function isBeforeFrontier(step: StepOrderKey, frontier: StepOrderKey): boolean {
+  if (step.round !== frontier.round) return step.round < frontier.round;
+  if (step.runSeq == null || frontier.runSeq == null) return false;
+  return step.runSeq < frontier.runSeq;
+}

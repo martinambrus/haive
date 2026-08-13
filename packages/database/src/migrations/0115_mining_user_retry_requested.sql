@@ -1,0 +1,28 @@
+-- Human-requested re-run of ONE mining agent, keeping its siblings' output.
+--
+-- A fan-out step (08c-code-review runs a peer reviewer, a security reviewer and extra lenses
+-- as concurrent terminals) had no partial recovery: the only control was Retry, which deletes
+-- every agent row for the step, so one dead reviewer cost a re-run of the reviewers that had
+-- already succeeded. "Resume (keep N passes)" did not help either -- it was built for the
+-- sequential loop steps (STEP_CLI_ROLES) and a mining step is neither a loop step nor
+-- iterationCount > 0, so the endpoint refused it and the button never rendered.
+--
+-- The re-dispatch primitive already existed (retryMiningAgents: re-runs only the named agents,
+-- UPDATEs their rows in place, never touches a sibling's `done` row). This column is only the
+-- door: the API stamps it on the failed rows, the fan-out barrier re-dispatches them and clears
+-- it, so it fires exactly once per request.
+--
+-- Deliberately a marker and not a restored `attempts` budget: only 08c and 08d declare a retry
+-- spec, so for 03 / 09_5 / 09_5b / 09_6_4 / 11d there is no budget to restore and both
+-- automatic re-roll paths are inert. The mark also BYPASSES that budget where it does exist --
+-- it bounds automatic thrash, and a human asking is not thrash.
+--
+-- Nullable with no default: NULL means "nothing requested", the state every existing row must
+-- land in. Additive + idempotent: a second run is a no-op, and a stale mark left behind after a
+-- code revert is inert (nothing reads it).
+--
+-- Rollback: UPDATE task_step_agent_minings SET user_retry_requested_at = NULL;  (disables the
+--   feature with no deploy and no restart)
+-- Rollback (full): ALTER TABLE "task_step_agent_minings" DROP COLUMN IF EXISTS "user_retry_requested_at";
+
+ALTER TABLE "task_step_agent_minings" ADD COLUMN IF NOT EXISTS "user_retry_requested_at" timestamp;
