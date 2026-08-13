@@ -896,11 +896,15 @@ export default function TaskDetailPage() {
     // this step — pending steps run too, non-pending ones are also reset first — so
     // count EVERY later step, which is what the user sees in the list. (Counting only
     // non-pending undercounts to ~1 whenever the tail hasn't run yet.) Fall back to
-    // step_index for legacy rows with no run_seq.
-    const downstreamCount = steps.filter((s) =>
-      step.runSeq != null && s.runSeq != null
-        ? s.runSeq > step.runSeq
-        : s.stepIndex > step.stepIndex,
+    // step_index for legacy rows with no run_seq. Same ROUND only, matching what the
+    // retry endpoint actually resets — counting every round's cards overstated the
+    // cascade on any task that has been through a fix loop.
+    const downstreamCount = steps.filter(
+      (s) =>
+        s.round === step.round &&
+        (step.runSeq != null && s.runSeq != null
+          ? s.runSeq > step.runSeq
+          : s.stepIndex > step.stepIndex),
     ).length;
     const label = opts?.overrideLocalModel
       ? 'Run this step on the current local model anyway?\n\nLocal models are unreliable at rewriting long-lived project files (skills, agents, config) and may produce low-quality or damaging output. Proceed only if you understand the risk.'

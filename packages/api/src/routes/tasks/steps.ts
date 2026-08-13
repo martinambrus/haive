@@ -347,6 +347,14 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // workflow, run_app env steps). Keying downstream on step_index reset the wrong set
     // (missed earlier-running reused steps; swept genuinely-earlier ones). Fall back to
     // step_index only for legacy rows with no run_seq.
+    // Scoped to the clicked card's ROUND, mirroring resetStepAndDownstream in the worker (the
+    // two are intentional duplicates). Without the round predicate this swept every round: a
+    // retry of 07b at round 7 also blanked the round 0-6 rows of every later step — their
+    // output, form values and agent-mining rows deleted — even though the forward walk only
+    // ever runs the current round's rows. Those earlier rows are settled history the task page
+    // renders as its own cards, and a step's mining rows are the per-agent timeout history a
+    // later round reads. Rows the walk has yet to materialise at this round simply do not exist
+    // yet; upsertRow creates them pending when it reaches them, so nothing is left unreset.
     const targetSeq = step.runSeq;
     const downstream = await db
       .select()
@@ -354,6 +362,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       .where(
         and(
           eq(schema.taskSteps.taskId, id),
+          eq(schema.taskSteps.round, step.round),
           targetSeq != null
             ? gt(schema.taskSteps.runSeq, targetSeq)
             : gt(schema.taskSteps.stepIndex, step.stepIndex),
