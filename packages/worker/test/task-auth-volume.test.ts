@@ -2,12 +2,15 @@ import { describe, expect, it } from 'vitest';
 import {
   cleanupTaskAuthVolumes,
   ensureTaskAuthVolumes,
+  mergeCliMcpIntoTaskVolume,
   resolveTaskAuthMounts,
   RTK_HELPER_MISSING_BINARY_EXIT,
   seedRtkInTaskVolume,
   userAuthVolumeExists,
+  writeMcpFileIntoTaskVolume,
   type ProviderAuthCtx,
 } from '../src/sandbox/task-auth-volume.js';
+import type { McpServerSpec } from '../src/sandbox/mcp-config.js';
 import type { CliProviderName } from '@haive/shared';
 import type {
   DockerRunner,
@@ -253,6 +256,8 @@ describe('resolveTaskAuthMounts', () => {
       source: 'haive_cli_auth_task_taskabc_codex_0',
       target: '/home/node/.codex',
       readOnly: false,
+      // Marks it for the runInSandbox guard that keeps extra files from being bound inside it.
+      kind: 'auth',
     });
   });
 
@@ -408,6 +413,94 @@ describe('seedRtkInTaskVolume', () => {
   it('skips entirely for amp (no rtk-native flag)', async () => {
     const runner = makeRunner();
     await seedRtkInTaskVolume('task-rtk-6', 'amp', runner);
+    expect(runner.runCalls).toHaveLength(0);
+  });
+});
+
+describe('mergeCliMcpIntoTaskVolume', () => {
+  const RAG: McpServerSpec = {
+    name: 'haive-rag',
+    command: 'node',
+    args: ['/haive/haive-rag-mcp.mjs'],
+    env: { RAG_TASK_TOKEN: 'tok' },
+  };
+  const taskVol = 'haive_cli_auth_task_taskmcp0000_grok_0';
+
+  it('runs the CLI as root against the mounted volume and chowns back to the sandbox uid', async () => {
+    const runner = makeRunner({ preExistingVolumes: [taskVol] });
+    await mergeCliMcpIntoTaskVolume('taskmcp-0000', 'grok', 'img:tag', [RAG], runner);
+
+    expect(runner.runCalls).toHaveLength(1);
+    const call = runner.runCalls[0]!;
+    expect(call.image).toBe('img:tag');
+    expect(call.user).toBe('root');
+    // The mount target IS the CLI's config dir, and HOME must resolve `~/.grok` onto it.
+    expect(call.mounts).toEqual([{ source: taskVol, target: '/home/node/.grok', readOnly: false }]);
+    expect(call.cmd[2]).toContain(`export HOME='/home/node'`);
+    expect(call.cmd[2]).toContain(`'grok' 'mcp' 'add' '-s' 'user'`);
+    expect(call.cmd[2]).toContain('chown -R 1000:1000');
+  });
+
+  it('removes everything the previous run registered before adding the current set', async () => {
+    const runner = makeRunner({ preExistingVolumes: [taskVol] });
+    await mergeCliMcpIntoTaskVolume('taskmcp-0000', 'grok', 'img:tag', [RAG], runner);
+    const script = runner.runCalls[0]!.cmd[2]!;
+
+    // Reads the marker, removes each name, then rewrites the marker with the new set.
+    expect(script).toContain(`< '/home/node/.grok/.haive-mcp-managed'`);
+    expect(script).toContain(`'grok' mcp remove "$name" </dev/null`);
+    expect(script).toContain(`printf '%s\\n' 'haive-rag' > '/home/node/.grok/.haive-mcp-managed'`);
+    // The remove loop must not eat its own stdin — the marker IS the loop's input.
+    expect(script).toMatch(/mcp remove "\$name" <\/dev\/null/);
+  });
+
+  it('truncates the marker when the surface drops to no servers', async () => {
+    const runner = makeRunner({ preExistingVolumes: [taskVol] });
+    await mergeCliMcpIntoTaskVolume('taskmcp-0000', 'grok', 'img:tag', [], runner);
+    const script = runner.runCalls[0]!.cmd[2]!;
+    expect(script).toContain(`: > '/home/node/.grok/.haive-mcp-managed'`);
+    expect(script).not.toContain('mcp add');
+  });
+
+  it('does nothing without an image: the CLI binary lives in it, not in the helper image', async () => {
+    const runner = makeRunner({ preExistingVolumes: [taskVol] });
+    await mergeCliMcpIntoTaskVolume('taskmcp-0000', 'grok', null, [RAG], runner);
+    expect(runner.runCalls).toHaveLength(0);
+  });
+
+  // Creating the volume here would leave it without the readiness marker, so the next
+  // ensureTaskAuthVolumes would recreate it and throw away everything written.
+  it('does nothing when the task volume has not been created yet', async () => {
+    const runner = makeRunner();
+    await mergeCliMcpIntoTaskVolume('taskmcp-0000', 'grok', 'img:tag', [RAG], runner);
+    expect(runner.runCalls).toHaveLength(0);
+  });
+});
+
+describe('writeMcpFileIntoTaskVolume', () => {
+  const taskVol = 'haive_cli_auth_task_taskagy0000_antigravity_0';
+  const configPath = '/home/node/.gemini/antigravity-cli/mcp_config.json';
+
+  it('writes into the volume rather than binding over it', async () => {
+    const runner = makeRunner({ preExistingVolumes: [taskVol] });
+    await writeMcpFileIntoTaskVolume('taskagy-0000', 'antigravity', configPath, '{"a":1}', runner);
+    const call = runner.runCalls[0]!;
+    expect(call.mounts).toEqual([
+      { source: taskVol, target: '/home/node/.gemini/antigravity-cli', readOnly: false },
+    ]);
+    expect(call.cmd[2]).toContain(`printf '%s' '{"a":1}' > '${configPath}'`);
+    expect(call.cmd[2]).toContain('chown -R 1000:1000');
+  });
+
+  it('refuses a path outside the auth mount instead of writing it somewhere unmounted', async () => {
+    const runner = makeRunner({ preExistingVolumes: [taskVol] });
+    await writeMcpFileIntoTaskVolume(
+      'taskagy-0000',
+      'antigravity',
+      '/haive/mcp.json',
+      '{}',
+      runner,
+    );
     expect(runner.runCalls).toHaveLength(0);
   });
 });

@@ -331,6 +331,7 @@ export async function executeByKind(
             payload.taskId,
             providerRow.name as CliProviderName,
             sandboxWorkdir,
+            sandboxImage,
             // Narrowed only when the STEP said so (report-only steps that cannot act on
             // a browser or a container). Never inferred from `kind`: the fan-out
             // machinery is shared by knowledge mining, the review personas and the

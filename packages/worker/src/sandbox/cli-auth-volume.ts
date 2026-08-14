@@ -31,6 +31,7 @@ export function resolveCliAuthMounts(
       : cliAuthVolumeName(ctx.userId, ctx.providerName, idx),
     target: expandTildeToSandbox(raw),
     readOnly,
+    kind: 'auth' as const,
   }));
 }
 

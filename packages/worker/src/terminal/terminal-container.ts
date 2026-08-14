@@ -3,14 +3,17 @@ import Docker from 'dockerode';
 import { schema, type Database } from '@haive/database';
 import {
   CLAUDE_MCP_CONFIG_PATH,
+  buildMcpAddArgv,
   buildMcpConfigForCli,
+  resolveStdioMcpServers,
+  serversToJsonObject,
   type McpServerSpec,
 } from '../sandbox/mcp-config.js';
 import { resolveCliAuthMounts } from '../sandbox/cli-auth-volume.js';
 import type { DockerVolumeMount } from '../sandbox/docker-runner.js';
 import { resolveSandboxImageTag } from '../queues/cli-exec-queue.js';
 import { SANDBOX_USER, SANDBOX_USER_HOME, SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
-import { logger, signRepoGitCredToken } from '@haive/shared';
+import { getCliProviderMetadata, logger, signRepoGitCredToken } from '@haive/shared';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 
 const log = logger.child({ module: 'terminal-container' });
@@ -434,6 +437,24 @@ async function chownWorkdir(docker: Docker, containerName: string, target: strin
   }
 }
 
+/**
+ * Put Haive's MCP servers in front of the CLI running in the terminal container.
+ *
+ * Unlike the cli-exec sandbox this NEVER bind-mounts — it writes through `docker exec` — but the
+ * volume it writes into is the user's PERMANENT per-provider auth volume, mounted writable
+ * (see resolveCliAuthMounts above). So a wholesale `cat >` is only safe for a file Haive owns
+ * outright. For grok and codex that same file also holds marketplace sources, installed plugins
+ * and user settings; for gemini it holds `selectedAuthType`. Truncating any of those breaks the
+ * user's real CLI config, permanently, every time a Terminal tab is opened.
+ *
+ * `McpConfigFile.delivery` decides which of the two paths applies, so a new provider inherits the
+ * rule instead of re-deriving it.
+ *
+ * Deliberately does NOT reconcile like the per-task merge does: removing servers here would fight
+ * the user's own config. Haive's entries therefore persist in the user volume after the task ends
+ * (pointing at task tokens that are already dead) until the next terminal refreshes them. That is
+ * the accepted cost of not touching anything we did not write.
+ */
 async function writeMcpConfigInto(
   docker: Docker,
   containerName: string,
@@ -443,6 +464,15 @@ async function writeMcpConfigInto(
   const config = buildMcpConfigForCli(cliName, servers, SANDBOX_USER_HOME);
   const targetPath = config?.path ?? CLAUDE_MCP_CONFIG_PATH;
   const targetContent = config?.content ?? JSON.stringify({ mcpServers: {} }, null, 2);
+
+  if (config?.delivery === 'cli-merge') {
+    await addMcpServersViaCli(docker, containerName, cliName, servers);
+    return;
+  }
+  if (config?.delivery === 'volume-merge') {
+    await mergeMcpServersIntoJson(docker, containerName, targetPath, servers);
+    return;
+  }
 
   const container = docker.getContainer(containerName);
   const parent = parentDir(targetPath);
@@ -475,6 +505,56 @@ async function writeMcpConfigInto(
     wstream.on('error', (err) => reject(err));
     wstream.resume();
   });
+}
+
+/** Register each server with the CLI's own `mcp add`, which merges into its config file instead
+ *  of replacing it. Add-or-update, never remove — see writeMcpConfigInto. Runs as the container's
+ *  user (node), so the files stay owned by the uid the CLI runs as. */
+async function addMcpServersViaCli(
+  docker: Docker,
+  containerName: string,
+  cliName: CliProviderRecord['name'],
+  servers: McpServerSpec[],
+): Promise<void> {
+  const executable = getCliProviderMetadata(cliName).defaultExecutable;
+  for (const server of resolveStdioMcpServers(servers)) {
+    const code = await execDrain(docker, containerName, [
+      executable,
+      ...buildMcpAddArgv(cliName, server),
+    ]);
+    if (code !== 0) {
+      log.warn(
+        { containerName, cli: cliName, server: server.name, code },
+        'mcp add exited non-zero',
+      );
+    }
+  }
+}
+
+/** Deep-merge `mcpServers` into a JSON config the CLI shares with its own settings (gemini's
+ *  settings.json holds `selectedAuthType` in the same file). Mirrors the per-task merge in
+ *  task-auth-volume.ts; a parse failure replaces rather than throws, since a corrupt settings
+ *  file would otherwise wedge every terminal for that provider. */
+async function mergeMcpServersIntoJson(
+  docker: Docker,
+  containerName: string,
+  targetPath: string,
+  servers: McpServerSpec[],
+): Promise<void> {
+  const incoming = JSON.stringify(JSON.stringify(serversToJsonObject(servers)));
+  const script = [
+    'const fs = require("fs");',
+    `const p = ${JSON.stringify(targetPath)};`,
+    'let cur = {};',
+    'try { cur = JSON.parse(fs.readFileSync(p, "utf8")) || {}; } catch (err) { cur = {}; }',
+    `cur.mcpServers = { ...(cur.mcpServers || {}), ...JSON.parse(${incoming}) };`,
+    'fs.mkdirSync(require("path").dirname(p), { recursive: true });',
+    'fs.writeFileSync(p, JSON.stringify(cur, null, 2));',
+  ].join('\n');
+  const code = await execDrain(docker, containerName, ['node', '-e', script]);
+  if (code !== 0) {
+    log.warn({ containerName, targetPath, code }, 'mcp json merge exited non-zero');
+  }
 }
 
 async function connectSandboxNetwork(docker: Docker, containerName: string): Promise<void> {

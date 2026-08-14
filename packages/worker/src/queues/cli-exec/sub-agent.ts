@@ -49,17 +49,21 @@ export async function executeSubAgentNative(
     effortLevel: payload.effortLevel,
   });
   const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
+  // BEFORE resolveMcpExtraFiles: a `cli-merge` provider writes its MCP servers INTO the task
+  // auth volume, which resolveAuthMounts is what creates. Reversed, the merge finds no volume
+  // and the agent silently runs with no MCP servers at all.
+  const authMounts = await resolveAuthMounts(db, provider, payload.taskId);
   const mcp = await resolveMcpExtraFiles(
     db,
     payload.taskId,
     provider.name as CliProviderName,
     sandboxWorkdir,
+    sandboxImage,
     // Honor the step's declared narrowing here too. Both sub-agent kinds used to
     // ignore it and always take the full surface, so `toolProfile` meant one thing
     // on the cli path and another on this one.
     payload.toolProfile === 'rag_only',
   );
-  const authMounts = await resolveAuthMounts(db, provider, payload.taskId);
   return executeCliSpec(
     spec,
     deps,
@@ -106,17 +110,21 @@ export async function executeSubAgentSequential(
   }
 
   const sandboxImage = await resolveSandboxImageTag(db, payload.taskId, provider);
+  // BEFORE resolveMcpExtraFiles: a `cli-merge` provider writes its MCP servers INTO the task
+  // auth volume, which resolveAuthMounts is what creates. Reversed, the merge finds no volume
+  // and the agent silently runs with no MCP servers at all.
+  const authMounts = await resolveAuthMounts(db, provider, payload.taskId);
   const mcp = await resolveMcpExtraFiles(
     db,
     payload.taskId,
     provider.name as CliProviderName,
     sandboxWorkdir,
+    sandboxImage,
     // Honor the step's declared narrowing here too. Both sub-agent kinds used to
     // ignore it and always take the full surface, so `toolProfile` meant one thing
     // on the cli path and another on this one.
     payload.toolProfile === 'rag_only',
   );
-  const authMounts = await resolveAuthMounts(db, provider, payload.taskId);
   const spawner = createSandboxSpawner(
     provider.wrapperContent,
     sandboxImage,

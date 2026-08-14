@@ -1,8 +1,11 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
+import { getCliProviderMetadata } from '@haive/shared';
 import {
   buildDefaultMcpServers,
+  buildMcpAddArgv,
   buildMcpConfigForCli,
+  resolveStdioMcpServers,
   serversToJsonObject,
   type McpServerSpec,
 } from '../src/sandbox/mcp-config.js';
@@ -227,6 +230,107 @@ describe('buildMcpConfigForCli', () => {
 
   it('returns null when the server list is empty', () => {
     expect(buildMcpConfigForCli('claude-code', [])).toBeNull();
+  });
+
+  // The delivery mode is what keeps a config file from being bind-mounted over a path inside an
+  // auth-volume mount — where Docker leaves a root-owned stub the CLI can no longer write, and
+  // the mount hides whatever else the file held. Only a path Haive fully owns may be 'bind'.
+  it.each([
+    ['claude-code', 'bind'],
+    ['zai', 'bind'],
+    ['ollama', 'bind'],
+    ['muse', 'bind'],
+    ['gemini', 'volume-merge'],
+    ['codex', 'cli-merge'],
+    ['grok', 'cli-merge'],
+    ['antigravity', 'volume-write'],
+  ] as const)('%s delivers its mcp config as %s', (cli, delivery) => {
+    expect(buildMcpConfigForCli(cli, sampleServers, '/home/node')?.delivery).toBe(delivery);
+  });
+
+  it('never marks a path inside the auth-volume mount as bind-deliverable', () => {
+    for (const cli of [
+      'claude-code',
+      'zai',
+      'ollama',
+      'muse',
+      'gemini',
+      'codex',
+      'grok',
+      'antigravity',
+    ] as const) {
+      const config = buildMcpConfigForCli(cli, sampleServers, '/home/node');
+      if (config?.delivery !== 'bind') continue;
+      const authRoots = getCliProviderMetadata(cli).authConfigPaths.map((p) =>
+        p.replace(/^~/, '/home/node'),
+      );
+      for (const root of authRoots) {
+        expect(config.path.startsWith(`${root}/`)).toBe(false);
+      }
+    }
+  });
+});
+
+describe('buildMcpAddArgv', () => {
+  const server: McpServerSpec = {
+    name: 'haive-rag',
+    command: 'node',
+    args: ['/haive/haive-rag-mcp.mjs', '--verbose'],
+    env: { RAG_API_URL: 'http://api:3001' },
+  };
+
+  // Both orderings are measured against grok 1.0.3 / codex 0.147.0. They are NOT interchangeable
+  // even though both CLIs store the result in the same TOML shape.
+  it('orders grok as: flags, name, command, -- args', () => {
+    expect(buildMcpAddArgv('grok', server)).toEqual([
+      'mcp',
+      'add',
+      '-s',
+      'user',
+      '-e',
+      'RAG_API_URL=http://api:3001',
+      'haive-rag',
+      'node',
+      '--',
+      '/haive/haive-rag-mcp.mjs',
+      '--verbose',
+    ]);
+  });
+
+  it('orders codex as: flags, name, -- command args', () => {
+    expect(buildMcpAddArgv('codex', server)).toEqual([
+      'mcp',
+      'add',
+      '--env',
+      'RAG_API_URL=http://api:3001',
+      'haive-rag',
+      '--',
+      'node',
+      '/haive/haive-rag-mcp.mjs',
+      '--verbose',
+    ]);
+  });
+
+  // A server with no args must not emit a dangling `--`: grok reads the next token as the
+  // command, so a trailing separator with nothing after it is a parse error rather than a no-op.
+  it('omits the grok separator when the server takes no args', () => {
+    const argv = buildMcpAddArgv('grok', { name: 'x', command: 'run-me', args: [] });
+    expect(argv).toEqual(['mcp', 'add', '-s', 'user', 'x', 'run-me']);
+  });
+});
+
+describe('resolveStdioMcpServers', () => {
+  it('puts user servers first, drops collisions and non-stdio entries', () => {
+    const resolved = resolveStdioMcpServers(sampleServers, {
+      mine: { command: 'node', args: ['/srv.js'], env: { A: '1' } },
+      // collides with a Haive server — Haive's wins, the user copy is dropped
+      filesystem: { command: 'other', args: [] },
+      // url/sse entries cannot be expressed as a command, so they cannot survive here
+      remote: { url: 'https://example.test/sse' },
+    });
+    expect(resolved.map((s) => s.name)).toEqual(['mine', 'filesystem', 'git']);
+    expect(resolved[0]?.env).toEqual({ A: '1' });
+    expect(resolved[1]?.command).toBe('npx');
   });
 });
 

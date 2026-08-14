@@ -19,6 +19,7 @@ import {
 import {
   buildDefaultMcpServers,
   buildMcpConfigForCli,
+  resolveStdioMcpServers,
   serversToJsonObject,
 } from '../../sandbox/mcp-config.js';
 import { RAG_MCP_SERVER_JS, RAG_MCP_SERVER_PATH } from '../../sandbox/rag-mcp-server.js';
@@ -30,11 +31,13 @@ import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliProviderRecord } from '../../cli-adapters/types.js';
 import {
   ensureTaskAuthVolumes,
+  mergeCliMcpIntoTaskVolume,
   mergeGeminiMcpIntoSettings,
   resolveTaskAuthMounts,
   resolveTaskSkillMounts,
   seedRtkInTaskVolume,
   userAuthVolumeExists,
+  writeMcpFileIntoTaskVolume,
 } from '../../sandbox/task-auth-volume.js';
 import { getDb } from '../../db.js';
 import { getTaskQueue } from '../task-queue.js';
@@ -165,6 +168,11 @@ export async function resolveMcpExtraFiles(
   taskId: string,
   providerName: CliProviderName,
   sandboxWorkdir: string,
+  /** The task's resolved sandbox image. Needed only by `cli-merge` providers, whose config is
+   *  written by running the CLI's own `mcp add` — the generic helper image has no such binary.
+   *  Callers already resolve it for the invocation itself; pass that value rather than a second
+   *  lookup, so the merge and the run can never target different images. */
+  sandboxImage: string | null,
   /** Restrict the MCP surface to the haive-rag server only — no chrome-devtools
    *  and no user MCP servers. Used for knowledge-mining invocations, which are
    *  read-only analysis and should reach nothing but rag_search. */
@@ -225,23 +233,36 @@ export async function resolveMcpExtraFiles(
     ? [{ containerPath: DDEV_MCP_SERVER_PATH, content: DDEV_MCP_SERVER_JS }]
     : [];
 
-  // Gemini reads MCP servers from the SAME settings.json that holds
-  // `selectedAuthType`. Bind-mounting an MCP-only file at that path
-  // overlays — and obscures — the auth volume's settings.json, leaving
-  // the CLI without an auth method. Merge the MCP servers into the
-  // task auth volume in-place instead, so the auth fields survive.
-  if (providerName === 'gemini') {
-    await mergeGeminiMcpIntoSettings(taskId, serversToJsonObject(servers, userServers));
-    return { files: [...ragFiles, ...ddevFiles], extraArgs: [] };
-  }
-
   const config = buildMcpConfigForCli(providerName, servers, SANDBOX_USER_HOME, userServers);
   if (!config) return empty;
 
-  return {
-    files: [{ containerPath: config.path, content: config.content }, ...ragFiles, ...ddevFiles],
-    extraArgs: config.cliArgs ?? [],
-  };
+  // Only a `bind` config may become an extra file. Every other delivery mode names a path INSIDE
+  // the CLI's auth-volume mount, where a bind mount is destructive in two ways at once — see the
+  // McpDelivery docs and mergeCliMcpIntoTaskVolume. Each of these writes into the volume instead
+  // and contributes no config file to the invocation.
+  switch (config.delivery) {
+    case 'volume-merge':
+      // Gemini reads MCP servers from the SAME settings.json that holds `selectedAuthType`, so
+      // the merge has to preserve the fields it does not own.
+      await mergeGeminiMcpIntoSettings(taskId, serversToJsonObject(servers, userServers));
+      return { files: [...ragFiles, ...ddevFiles], extraArgs: [] };
+    case 'cli-merge':
+      await mergeCliMcpIntoTaskVolume(
+        taskId,
+        providerName,
+        sandboxImage,
+        resolveStdioMcpServers(servers, userServers),
+      );
+      return { files: [...ragFiles, ...ddevFiles], extraArgs: [] };
+    case 'volume-write':
+      await writeMcpFileIntoTaskVolume(taskId, providerName, config.path, config.content);
+      return { files: [...ragFiles, ...ddevFiles], extraArgs: [] };
+    case 'bind':
+      return {
+        files: [{ containerPath: config.path, content: config.content }, ...ragFiles, ...ddevFiles],
+        extraArgs: config.cliArgs ?? [],
+      };
+  }
 }
 
 const REPO_VOLUME_NAME = 'haive_repos';

@@ -87,6 +87,39 @@ export function dedupeExtraFilesByPath(files: SandboxExtraFile[]): SandboxExtraF
   return out;
 }
 
+/**
+ * Refuse to bind an extra file at a path inside a CLI auth-volume mount.
+ *
+ * Docker materialises a missing file mount target INSIDE the volume, owned by root, and that stub
+ * outlives the container — the CLI, running as uid 1000, then cannot write its own config. That is
+ * how a grok task reached `Permission denied (os error 13)` on `plugin marketplace add`: earlier
+ * invocations had bind-mounted an MCP config at `~/.grok/config.toml`. The mount is also opaque
+ * while it is up, so anything else the real file held (grok's marketplace sources and installed
+ * plugins, gemini's `selectedAuthType`) is invisible to that run.
+ *
+ * Scoped to `kind: 'auth'` on purpose. Nesting under the REPO mount is not a mistake — it is
+ * exactly how secret masking and the worktree gitfile mask work, and both must keep working.
+ *
+ * Fails loud rather than degrading: the alternative is a root-owned stub in a volume that only
+ * surfaces as an unrelated permission error, several steps later. Exported for unit testing.
+ */
+export function assertNoAuthVolumeNesting(
+  files: SandboxExtraFile[],
+  mounts: DockerVolumeMount[],
+): void {
+  const authTargets = mounts.filter((m) => m.kind === 'auth').map((m) => m.target);
+  for (const file of files) {
+    const conflict = authTargets.find((target) => file.containerPath.startsWith(`${target}/`));
+    if (!conflict) continue;
+    throw new Error(
+      `sandbox extra file ${file.containerPath} is inside the auth-volume mount ${conflict}. ` +
+        'Bind-mounting there leaves a root-owned stub in the volume that the CLI cannot write, ' +
+        "and hides the real file's other contents for the length of the run. Deliver it through " +
+        "the CLI's own config writer instead (see McpDelivery in sandbox/mcp-config.ts).",
+    );
+  }
+}
+
 export interface SandboxRunSpec {
   command: string;
   args: string[];
@@ -209,6 +242,7 @@ export async function runInSandbox(
     }
 
     if (spec.extraFiles && spec.extraFiles.length > 0) {
+      assertNoAuthVolumeNesting(spec.extraFiles, mounts);
       // Docker rejects the WHOLE `docker run` with "Duplicate mount point" if two mounts
       // share a target, so one container path may be claimed only once. Independent mask
       // sources can legitimately pick the same file — `.ddev/traefik/certs/<project>.key`

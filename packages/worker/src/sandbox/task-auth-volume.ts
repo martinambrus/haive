@@ -13,6 +13,9 @@ import {
 import type { CliProviderName } from '@haive/shared';
 import { defaultDockerRunner, type DockerRunner, type DockerVolumeMount } from './docker-runner.js';
 import { expandTildeToSandbox } from './cli-auth-volume.js';
+import { buildMcpAddArgv, type McpServerSpec } from './mcp-config.js';
+import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
+import { SANDBOX_USER_HOME } from './sandbox-runner.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
 import { readVolumeFile } from '../usage-window/token-source.js';
 
@@ -225,6 +228,7 @@ export function resolveTaskAuthMounts(
     source: cliAuthTaskVolumeName(taskId, providerName, idx),
     target: expandTildeToSandbox(raw),
     readOnly: false,
+    kind: 'auth' as const,
   }));
 }
 
@@ -410,6 +414,177 @@ chown 1000:1000 /vol/settings.json
     { taskId, count: Object.keys(mcpServers).length },
     'merged mcpServers into gemini settings.json',
   );
+}
+
+/** Names Haive wrote into the CLI's own MCP config last time, one per line. Lives in the
+ *  per-task auth volume, so it dies with the task. */
+const MCP_MANAGED_MARKER = '.haive-mcp-managed';
+
+/** Shell-quote a value for the `sh -c` scripts the helper containers run. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Write Haive's MCP servers into the task auth volume using the CLI's OWN `mcp add`.
+ *
+ * grok and codex keep MCP servers in the same file as everything else they know —
+ * `~/.grok/config.toml` also holds `[[marketplace.sources]]` and `[plugins]`, `~/.codex/config.toml`
+ * holds user settings — and that file sits INSIDE the auth-volume mount. Bind-mounting an
+ * MCP-only body over it does two silent kinds of damage. Docker materialises the missing mount
+ * target inside the volume as a ROOT-owned stub that outlives the container, so the next
+ * invocation that writes config as uid 1000 dies with `Permission denied (os error 13)` — that is
+ * exactly how `01b-install-plugins` failed on grok. And for as long as the bind is in place it
+ * HIDES the plugin registration, so the LSP plugins the step installed never load.
+ *
+ * Letting each CLI write its own config also keeps Haive out of the business of merging someone
+ * else's TOML, which would drift the moment either format changes.
+ *
+ * Reconciles rather than only adding: the MCP surface varies per invocation (a rag-only mining
+ * run, a step with no browser), and a server left behind points at a proxy script that is no
+ * longer bind-mounted. Everything named in the marker is removed first and the current set
+ * re-added — `mcp add` is add-or-update, so a survivor costs one redundant write and no
+ * membership test.
+ *
+ * Runs as root with HOME pointed at the sandbox user's home, then chowns back to the sandbox uid:
+ * same shape as {@link seedRtkInTaskVolume}, and it also repairs a root-owned stub left in the
+ * volume by a task that started before this existed.
+ *
+ * Best-effort by contract, like {@link mergeGeminiMcpIntoSettings}: every failure is logged and
+ * swallowed. A missing MCP server degrades a run; throwing here would kill it.
+ */
+export async function mergeCliMcpIntoTaskVolume(
+  taskId: string,
+  providerName: CliProviderName,
+  image: string | null,
+  servers: McpServerSpec[],
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<void> {
+  const meta = getCliProviderMetadata(providerName);
+  // Index 0 is the CLI's own home dir for both cli-merge providers (`~/.grok`, `~/.codex`).
+  const authPath = meta.authConfigPaths[0];
+  if (!authPath) return;
+  if (!image) {
+    log.warn(
+      { taskId, providerName },
+      'mcp merge skipped: no sandbox image resolved, so the CLI binary is unreachable',
+    );
+    return;
+  }
+  const taskVol = cliAuthTaskVolumeName(taskId, providerName, 0);
+  // ensureTaskAuthVolumes (via resolveAuthMounts) is what creates this, and it must have run
+  // first — creating the volume here would leave it without the readiness marker, so that call
+  // would then RECREATE it and discard the servers just written. Warn rather than return quietly:
+  // the symptom of a reversed call order is an agent with no MCP tools and nothing in the log.
+  if (!(await runner.volumeExists(taskVol))) {
+    log.warn(
+      { taskId, providerName, taskVol },
+      'mcp merge skipped: task auth volume does not exist yet — resolveAuthMounts must run first',
+    );
+    return;
+  }
+
+  const home = expandTildeToSandbox(authPath);
+  const marker = `${home}/${MCP_MANAGED_MARKER}`;
+  const exec = shellQuote(meta.defaultExecutable);
+  const quotedMarker = shellQuote(marker);
+
+  const script = [
+    'set -u',
+    `export HOME=${shellQuote(SANDBOX_USER_HOME)}`,
+    // `mcp remove <name>` is the same on grok and codex (measured against 1.0.3 / 0.147.0);
+    // only `mcp add` differs, which is why that one goes through buildMcpAddArgv.
+    `if [ -f ${quotedMarker} ]; then`,
+    '  while IFS= read -r name; do',
+    '    [ -n "$name" ] || continue',
+    // `</dev/null` is load-bearing: the loop's stdin IS the marker file, and a CLI that reads
+    // stdin would swallow the remaining names and silently skip their removal.
+    `    ${exec} mcp remove "$name" </dev/null >/dev/null 2>&1 || true`,
+    `  done < ${quotedMarker}`,
+    'fi',
+    ...servers.map((server) => {
+      const argv = buildMcpAddArgv(providerName, server).map(shellQuote).join(' ');
+      const failure = shellQuote(`haive-mcp: add ${server.name} failed`);
+      return `${exec} ${argv} >/dev/null || echo ${failure} >&2`;
+    }),
+    servers.length > 0
+      ? `printf '%s\\n' ${servers.map((s) => shellQuote(s.name)).join(' ')} > ${quotedMarker}`
+      : `: > ${quotedMarker}`,
+    `chown -R ${SANDBOX_UID}:${SANDBOX_GID} ${shellQuote(home)} 2>/dev/null || true`,
+  ].join('\n');
+
+  const result = await runner.run({
+    image,
+    cmd: ['sh', '-c', script],
+    mounts: [{ source: taskVol, target: home, readOnly: false }],
+    entrypoint: '',
+    user: 'root',
+    timeoutMs: HELPER_TIMEOUT_MS,
+  });
+  if (result.exitCode !== 0) {
+    log.warn(
+      { taskId, providerName, exitCode: result.exitCode, stderr: result.stderr.slice(-500) },
+      'mcp merge helper exited non-zero',
+    );
+    return;
+  }
+  log.info({ taskId, providerName, count: servers.length }, 'merged mcp servers into CLI config');
+}
+
+/**
+ * Write a whole MCP config file INTO the task auth volume.
+ *
+ * For a CLI whose MCP file holds nothing else (antigravity's `mcp_config.json`) there is no merge
+ * to do — but the path still sits inside the auth-volume mount, so it must not be bind-mounted
+ * over. See {@link mergeCliMcpIntoTaskVolume} for what a nested bind costs.
+ *
+ * Best-effort, same contract as the merges above.
+ */
+export async function writeMcpFileIntoTaskVolume(
+  taskId: string,
+  providerName: CliProviderName,
+  containerPath: string,
+  content: string,
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<void> {
+  const meta = getCliProviderMetadata(providerName);
+  const authPath = meta.authConfigPaths[0];
+  if (!authPath) return;
+  const home = expandTildeToSandbox(authPath);
+  if (!containerPath.startsWith(`${home}/`)) {
+    log.warn(
+      { taskId, providerName, containerPath, home },
+      'mcp file write skipped: path is not inside the auth volume mount',
+    );
+    return;
+  }
+  const taskVol = cliAuthTaskVolumeName(taskId, providerName, 0);
+  if (!(await runner.volumeExists(taskVol))) return;
+
+  const relDir = containerPath.slice(0, containerPath.lastIndexOf('/'));
+  const script = [
+    'set -e',
+    `mkdir -p ${shellQuote(relDir)}`,
+    `printf '%s' ${shellQuote(content)} > ${shellQuote(containerPath)}`,
+    `chown -R ${SANDBOX_UID}:${SANDBOX_GID} ${shellQuote(home)}`,
+  ].join('\n');
+
+  const result = await runner.run({
+    image: HELPER_IMAGE,
+    cmd: ['sh', '-c', script],
+    mounts: [{ source: taskVol, target: home, readOnly: false }],
+    entrypoint: '',
+    user: 'root',
+    timeoutMs: HELPER_TIMEOUT_MS,
+  });
+  if (result.exitCode !== 0) {
+    log.warn(
+      { taskId, providerName, containerPath, exitCode: result.exitCode },
+      'mcp file write helper exited non-zero',
+    );
+    return;
+  }
+  log.info({ taskId, providerName, containerPath }, 'wrote mcp config into task auth volume');
 }
 
 /** Should the task copy's credential replace the user volume's?

@@ -20,10 +20,31 @@ export interface McpServerSpec {
   env?: Record<string, string>;
 }
 
+/**
+ * How a CLI's MCP configuration is allowed to reach the sandbox.
+ *
+ * - `bind`: the file is Haive-owned and lives OUTSIDE any auth-volume mount, so it can be
+ *   bind-mounted (cli-exec) or written wholesale (terminal).
+ * - `cli-merge`: the file is the CLI's OWN config, it sits INSIDE the auth-volume mount, and it
+ *   holds state Haive does not own — grok keeps `[[marketplace.sources]]` and `[plugins]` there,
+ *   codex keeps user settings. Merge it with the CLI's own `mcp add` / `mcp remove`.
+ * - `volume-merge`: same nesting, but the CLI has no `mcp add` subcommand (gemini), so the merge
+ *   is performed on the file itself.
+ * - `volume-write`: nested too, but the file holds NOTHING except MCP servers (antigravity), so
+ *   Haive owns it outright and writes it whole — into the volume, still never over it.
+ *
+ * Bind-mounting a path nested inside a named-volume mount is what this field exists to prevent.
+ * Docker materialises the missing mount target INSIDE the volume as a root-owned stub that
+ * outlives the container, so the CLI (uid 1000) can no longer write its own config — and the
+ * mount hides whatever else the file held for as long as it is in place.
+ */
+export type McpDelivery = 'bind' | 'cli-merge' | 'volume-merge' | 'volume-write';
+
 export interface McpConfigFile {
   path: string;
   content: string;
   format: 'json' | 'toml';
+  delivery: McpDelivery;
   /** Extra CLI args the caller must append so the binary actually picks up
    *  the bind-mounted file (e.g. claude-code's `--mcp-config <path>`). */
   cliArgs?: string[];
@@ -183,6 +204,8 @@ export function buildMcpConfigForCli(
       return {
         path: CLAUDE_MCP_CONFIG_PATH,
         format: 'json',
+        // Standalone path under /haive, outside every auth mount — safe to bind.
+        delivery: 'bind',
         content: JSON.stringify({ mcpServers: serversToJsonObject(servers, userServers) }, null, 2),
         cliArgs: ['--mcp-config', CLAUDE_MCP_CONFIG_PATH, '--strict-mcp-config'],
       };
@@ -191,6 +214,9 @@ export function buildMcpConfigForCli(
       return {
         path: `${targetHome}/.gemini/settings.json`,
         format: 'json',
+        // Same file that holds `selectedAuthType`, inside the ~/.gemini auth mount, and gemini
+        // has no `mcp add` — merge the file in place.
+        delivery: 'volume-merge',
         content: JSON.stringify({ mcpServers: serversToJsonObject(servers, userServers) }, null, 2),
       };
 
@@ -198,6 +224,25 @@ export function buildMcpConfigForCli(
       return {
         path: `${targetHome}/.codex/config.toml`,
         format: 'toml',
+        // Inside the ~/.codex auth mount and shared with codex's own settings.
+        delivery: 'cli-merge',
+        content: serversToCodexToml(servers, userServers),
+      };
+
+    case 'grok':
+      // grok declares MCP servers as `[mcp_servers.<name>]` blocks with
+      // command/args/env — the same TOML shape codex uses, so the codex
+      // serializer is reused verbatim rather than duplicated. It carries the same
+      // limitation: stdio (command-based) entries only, so a url/sse user server
+      // is dropped for grok exactly as it is for codex.
+      return {
+        path: `${targetHome}/.grok/config.toml`,
+        format: 'toml',
+        // Inside the ~/.grok auth mount, and the SAME file `01b-install-plugins` writes its
+        // marketplace source + enabled plugins into. Binding an MCP-only body over it left a
+        // root-owned stub in the volume (`Permission denied (os error 13)` on the next plugin
+        // install) and hid the plugin registration from every run that had the bind.
+        delivery: 'cli-merge',
         content: serversToCodexToml(servers, userServers),
       };
 
@@ -208,13 +253,14 @@ export function buildMcpConfigForCli(
       // Antigravity reads MCP servers from a dedicated file (separate from its
       // auth token), per docs at ~/.gemini/antigravity-cli/mcp_config.json.
       // NOTE: a real agy run also created ~/.gemini/config/mcp_config.json —
-      // confirm the actual read path during MCP testing. For task runs this is
-      // written into the auth volume (resolveMcpExtraFiles) rather than
-      // bind-mounted, to avoid a file mount nested inside the antigravity-cli
-      // auth-volume mount.
+      // confirm the actual read path during MCP testing. The path sits inside the
+      // antigravity-cli auth mount, so it is written INTO the volume rather than
+      // bind-mounted over it; the file holds nothing but MCP servers, so Haive
+      // owns it whole and no merge is needed.
       return {
         path: `${targetHome}/.gemini/antigravity-cli/mcp_config.json`,
         format: 'json',
+        delivery: 'volume-write',
         content: JSON.stringify({ mcpServers: serversToJsonObject(servers, userServers) }, null, 2),
       };
 
@@ -267,11 +313,21 @@ function codexTomlBlock(
   return lines.join('\n');
 }
 
-function serversToCodexToml(servers: McpServerSpec[], userServers: UserMcpServers = {}): string {
-  const blocks: string[] = [];
+/**
+ * The stdio servers a TOML-config CLI actually ends up with: user-defined entries first (skipping
+ * name collisions with Haive's own, and skipping non-stdio entries — this format renders only
+ * command-based servers), then Haive's.
+ *
+ * ONE definition, two consumers: the TOML renderer below and the `mcp add` argv builder. A
+ * `cli-merge` provider reaches the same servers through a different mechanism than a `bind` one,
+ * and the set they disagree on would be invisible until an agent asked for a missing tool.
+ */
+export function resolveStdioMcpServers(
+  servers: McpServerSpec[],
+  userServers: UserMcpServers = {},
+): McpServerSpec[] {
   const haiveNames = new Set(servers.map((s) => s.name));
-  // User stdio servers first (skip name collisions with Haive defaults, and
-  // skip non-stdio entries — Codex TOML here only renders command-based servers).
+  const resolved: McpServerSpec[] = [];
   for (const [name, defRaw] of Object.entries(userServers)) {
     if (haiveNames.has(name)) continue;
     const def = defRaw as { command?: unknown; args?: unknown; env?: unknown };
@@ -287,12 +343,40 @@ function serversToCodexToml(servers: McpServerSpec[], userServers: UserMcpServer
             ),
           ) as Record<string, string>)
         : undefined;
-    blocks.push(codexTomlBlock(name, def.command, args, env));
+    resolved.push({ name, command: def.command, args, ...(env ? { env } : {}) });
   }
-  for (const server of servers) {
-    blocks.push(codexTomlBlock(server.name, server.command, server.args, server.env));
-  }
+  resolved.push(...servers);
+  return resolved;
+}
+
+function serversToCodexToml(servers: McpServerSpec[], userServers: UserMcpServers = {}): string {
+  const blocks = resolveStdioMcpServers(servers, userServers).map((s) =>
+    codexTomlBlock(s.name, s.command, s.args, s.env),
+  );
   return `${blocks.join('\n\n')}\n`;
+}
+
+/**
+ * argv AFTER the binary for one `<cli> mcp add`, or null for a CLI with no such subcommand.
+ *
+ * The two orderings are MEASURED against grok 1.0.3 and codex 0.147.0, not inferred from the
+ * shared TOML shape: grok takes `mcp add [-s user] [-e K=V]… <name> <command> -- <args…>`, codex
+ * takes `mcp add [--env K=V]… <name> -- <command> <args…>`. The `--` is load-bearing in both —
+ * server args routinely start with a flag (`npx -y …`) and are otherwise parsed as the CLI's own.
+ */
+export function buildMcpAddArgv(cliProvider: CliProviderName, server: McpServerSpec): string[] {
+  const env = Object.entries(server.env ?? {});
+  if (cliProvider === 'grok') {
+    const argv = ['mcp', 'add', '-s', 'user'];
+    for (const [key, value] of env) argv.push('-e', `${key}=${value}`);
+    argv.push(server.name, server.command);
+    if (server.args.length > 0) argv.push('--', ...server.args);
+    return argv;
+  }
+  const argv = ['mcp', 'add'];
+  for (const [key, value] of env) argv.push('--env', `${key}=${value}`);
+  argv.push(server.name, '--', server.command, ...server.args);
+  return argv;
 }
 
 function tomlString(value: string): string {

@@ -30,6 +30,12 @@ export interface DockerVolumeMount {
   target: string;
   readOnly?: boolean;
   subpath?: string;
+  /** `'auth'` marks a CLI auth volume — a persistent volume holding the CLI's own credentials and
+   *  config. Nothing may be bind-mounted at a path INSIDE one: Docker materialises the missing
+   *  mount target in the volume as a root-owned stub that outlives the container, and the mount
+   *  hides whatever the real file held. runInSandbox enforces it. Left unset for the repo mount,
+   *  where nesting is how secret masking works. */
+  kind?: 'auth';
 }
 
 export interface DockerRunOpts {
