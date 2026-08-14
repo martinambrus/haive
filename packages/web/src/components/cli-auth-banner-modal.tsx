@@ -8,6 +8,7 @@ import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import { Button, FormError } from '@/components/ui';
 import { apiWebSocketUrl, type CliProbeResult, type CliProviderName } from '@/lib/api-client';
+import { osc52ClipboardProvider } from '@/lib/terminal-copy';
 
 interface CliAuthBannerModalProps {
   open: boolean;
@@ -276,13 +277,16 @@ export function CliAuthBannerModal({
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.loadAddon(new WebLinksAddon());
-    term.loadAddon(new ClipboardAddon());
+    term.loadAddon(new ClipboardAddon(undefined, osc52ClipboardProvider));
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== 'keydown') return true;
       if (ev.ctrlKey && ev.shiftKey && (ev.key === 'V' || ev.key === 'v')) {
-        void navigator.clipboard.readText().then((t) => {
-          if (t) term.paste(t);
-        });
+        void navigator.clipboard
+          .readText()
+          .then((t) => {
+            if (t) term.paste(t);
+          })
+          .catch(() => {});
         return false;
       }
       return true;

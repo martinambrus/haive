@@ -13,6 +13,7 @@ import {
   type TerminalSessionSummary,
 } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
+import { copyTerminalSelection, osc52ClipboardProvider } from '@/lib/terminal-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
@@ -96,7 +97,7 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
 
     const fitAddon = new FitAddon();
     const webLinksAddon = new WebLinksAddon();
-    const clipboardAddon = new ClipboardAddon();
+    const clipboardAddon = new ClipboardAddon(undefined, osc52ClipboardProvider);
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
     term.loadAddon(clipboardAddon);
@@ -105,14 +106,17 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
       if (ev.ctrlKey && ev.shiftKey && (ev.key === 'C' || ev.key === 'c')) {
         const sel = term.getSelection();
         if (sel) {
-          void navigator.clipboard.writeText(sel);
+          copyTerminalSelection(sel);
           return false;
         }
       }
       if (ev.ctrlKey && ev.shiftKey && (ev.key === 'V' || ev.key === 'v')) {
-        void navigator.clipboard.readText().then((text) => {
-          if (text) term.paste(text);
-        });
+        void navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (text) term.paste(text);
+          })
+          .catch(() => {});
         return false;
       }
       return true;

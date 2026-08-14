@@ -8,6 +8,7 @@ import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import { api, apiWebSocketUrl } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
+import { copyTerminalSelection, osc52ClipboardProvider } from '@/lib/terminal-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
 import { MarkdownView, looksLikeMarkdown } from '@/components/markdown/markdown-view';
 
@@ -211,7 +212,7 @@ export function CliStreamViewer({
 
     const fitAddon = new FitAddon();
     const webLinksAddon = new WebLinksAddon();
-    const clipboardAddon = new ClipboardAddon();
+    const clipboardAddon = new ClipboardAddon(undefined, osc52ClipboardProvider);
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
     term.loadAddon(clipboardAddon);
@@ -227,7 +228,7 @@ export function CliStreamViewer({
       if (ev.ctrlKey && (ev.key === 'C' || ev.key === 'c')) {
         const sel = term.getSelection();
         if (sel) {
-          void navigator.clipboard.writeText(sel);
+          copyTerminalSelection(sel);
           return false;
         }
       }

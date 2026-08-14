@@ -9,6 +9,7 @@ import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import { apiWebSocketUrl } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
+import { copyTerminalSelection, osc52ClipboardProvider } from '@/lib/terminal-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
@@ -74,20 +75,23 @@ export function InteractiveShell(props: InteractiveShellProps) {
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.loadAddon(new WebLinksAddon());
-    term.loadAddon(new ClipboardAddon());
+    term.loadAddon(new ClipboardAddon(undefined, osc52ClipboardProvider));
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== 'keydown') return true;
       if (ev.ctrlKey && ev.shiftKey && (ev.key === 'C' || ev.key === 'c')) {
         const sel = term.getSelection();
         if (sel) {
-          void navigator.clipboard.writeText(sel);
+          copyTerminalSelection(sel);
           return false;
         }
       }
       if (ev.ctrlKey && ev.shiftKey && (ev.key === 'V' || ev.key === 'v')) {
-        void navigator.clipboard.readText().then((text) => {
-          if (text) term.paste(text);
-        });
+        void navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (text) term.paste(text);
+          })
+          .catch(() => {});
         return false;
       }
       return true;
