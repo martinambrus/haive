@@ -22,8 +22,14 @@ export interface AuthProbeExecResult {
 }
 
 const AUTH_PROBE_PROMPT = 'respond with the single word pong';
+// `not authenticated` is here for grok: `grok models` exits 0 whether or not it
+// has credentials, printing "You are not authenticated." on stdout when it does
+// not. Without it in this guard the exit-0 short-circuit below returns `ok` and a
+// completely unauthenticated provider reports as signed in. The PATTERNS list
+// already carried `not[_\s-]?authenticated` (it classifies as auth_expired) — it
+// was simply unreachable for an exit-0 CLI. Same shape as the agy precedent.
 const AUTH_FAILURE_GUARD =
-  /invalid[_\s-]?token|unauthor(ised|ized)|\b401\b|authentication[_\s-]?required|please[_\s-]?sign[_\s-]?in/i;
+  /invalid[_\s-]?token|unauthor(ised|ized)|\b401\b|authentication[_\s-]?required|not[_\s-]?authenticated|please[_\s-]?sign[_\s-]?in/i;
 
 // Gemini's folder-trust feature, when enabled, overrides --yolo to "default"
 // and prints a warning whenever the CWD is not in trustedFolders.json. The
@@ -152,7 +158,8 @@ export function isAuthProbeSupported(name: CliProviderName): boolean {
     name === 'codex' ||
     name === 'gemini' ||
     name === 'amp' ||
-    name === 'antigravity'
+    name === 'antigravity' ||
+    name === 'grok'
   );
 }
 
@@ -207,6 +214,24 @@ export function buildAuthProbeCommand(
       // as "not logged in"). Unauthenticated, agy prints "Please sign in to view
       // available models" and exits 0 — caught as auth_expired via the sign-in
       // pattern (also in AUTH_FAILURE_GUARD so the exit-0 isn't read as ok).
+      return {
+        command: executable,
+        args: ['models'],
+        env,
+      };
+    case 'grok':
+      // `grok models` fetches the account's model list — fast, no LLM round-trip,
+      // same shape as `agy models` / `amp usage`.
+      //
+      // KNOWN LIMIT, measured against grok 1.0.3: this probe detects MISSING
+      // credentials, not INVALID ones. All three states exit 0. With no
+      // credentials stdout leads with "You are not authenticated." (caught by
+      // AUTH_FAILURE_GUARD above, classified auth_expired); with a key — valid or
+      // bogus — it leads with "You are using XAI_API_KEY." either way. The only
+      // observable difference for a bad key is that the model LIST falls back to
+      // the built-in single entry instead of the server's, and a count is exactly
+      // the kind of vendor-volatile value that must not be branched on. So a bad
+      // key reports `ok` here and surfaces on the first real run instead.
       return {
         command: executable,
         args: ['models'],

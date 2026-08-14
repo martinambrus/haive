@@ -9,7 +9,13 @@ export class CliSetupTokenUnsupportedError extends Error {
 }
 
 export function isCliSetupTokenSupported(name: CliProviderName): boolean {
-  return name === 'claude-code' || name === 'codex' || name === 'amp' || name === 'antigravity';
+  return (
+    name === 'claude-code' ||
+    name === 'codex' ||
+    name === 'amp' ||
+    name === 'antigravity' ||
+    name === 'grok'
+  );
 }
 
 /** Non-REPL auth command that prints an OAuth URL to stdout:
@@ -51,6 +57,12 @@ export function buildSetupTokenCommand(
       // (BROWSER=/bin/false, DISPLAY=) makes agy print the URL rather than open a
       // browser. The trivial initial prompt drives the first-run auth gate.
       return { command: executable, args: ['-i', 'respond with the word ready'], env };
+    case 'grok':
+      // Device-code flow, same shape as codex: prints a URL plus a short code and
+      // polls for approval, so it needs no browser on the container. Success
+      // lands as ~/.grok/auth.json, which is the provider's authConfigPaths root
+      // and so is captured by the auth volume.
+      return { command: executable, args: ['login', '--device-auth'], env };
     default:
       throw new CliSetupTokenUnsupportedError(provider.name);
   }

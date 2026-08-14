@@ -13,7 +13,19 @@ export type VersionSource =
 
 export type InstallSpec =
   | { kind: 'npm'; package: string; binary: string }
-  | { kind: 'curl-script'; url: string; binary: string }
+  | {
+      kind: 'curl-script';
+      url: string;
+      binary: string;
+      /** Arguments passed after `bash -s --`. Used to steer installers that take
+       *  a target-directory FLAG (agy's `--dir /usr/local/bin`). */
+      installArgs?: string[];
+      /** Environment assignments prefixed to the `bash` invocation. Used to steer
+       *  installers that take a target directory as an ENV var instead of a flag
+       *  (grok's `GROK_BIN_DIR`), because grok parses `$1` as a version string and
+       *  rejects an unexpected flag outright. */
+      env?: Record<string, string>;
+    }
   | { kind: 'piggyback'; uses: CliProviderName }
   | { kind: 'unsupported'; reason: string };
 
@@ -77,6 +89,9 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
       kind: 'curl-script',
       url: 'https://antigravity.google/cli/install.sh',
       binary: 'agy',
+      // Was hardcoded in cli-versions/codegen; moved here when grok arrived with
+      // an env-var-based installer. The rendered line must stay byte-identical.
+      installArgs: ['--dir', '/usr/local/bin'],
     },
     // Manifest-based downloader, no plain registry to pin against.
     versionSource: { kind: 'none' },
@@ -101,6 +116,45 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
     install: { kind: 'piggyback', uses: 'claude-code' },
     versionSource: { kind: 'npm', package: '@anthropic-ai/claude-code' },
     autoUpdateDisable: [{ kind: 'env', vars: { DISABLE_AUTOUPDATER: '1' } }],
+    versionPinnable: true,
+  },
+  grok: {
+    // TWO env vars, and BOTH are load-bearing — `--dir` is not an option here at all:
+    // the installer validates `$1` against ^[0-9]+\.[0-9]+\.[0-9]+ and exits
+    // "Invalid version format" on a flag.
+    //
+    // GROK_BIN_DIR only moves the SYMLINK. The payload path is hardcoded
+    // (`DOWNLOAD_DIR="$HOME/.grok/downloads"`), so with the build's default HOME the
+    // real binary lands under /root — mode 0700 — and /usr/local/bin/grok becomes a
+    // link the sandbox's non-root `node` user cannot follow. Measured: as uid 1000
+    // that image fails with `Cannot find module '/grok'` while root runs it fine.
+    // HOME=/opt/grok moves the payload to a 0755 path, verified working as uid 1000.
+    //
+    // It also keeps ~/.grok free at RUNTIME, which is what the provider's
+    // authConfigPaths mount needs — a binary living there would be shadowed by the
+    // per-task auth volume the moment a task starts.
+    install: {
+      kind: 'curl-script',
+      url: 'https://x.ai/cli/install.sh',
+      binary: 'grok',
+      env: { HOME: '/opt/grok', GROK_BIN_DIR: '/usr/local/bin' },
+    },
+    // xai-org/grok-build publishes NO GitHub releases and NO tags, so the npm
+    // package is the only machine-readable version feed. It is the same version
+    // stream as the curl installer (npm 1.0.3 == `grok --version` 1.0.3), which
+    // the installer takes as its `$1` positional. A drift between the two fails
+    // the image build loudly rather than silently installing the wrong version.
+    versionSource: { kind: 'npm', package: '@xai-official/grok' },
+    // No env var disables grok's updater — the only knob is `[cli] auto_update`
+    // in config.toml (docs 05-configuration). Every orchestrated run also passes
+    // `--no-auto-update`, which is the per-run guarantee this file cannot give.
+    autoUpdateDisable: [
+      {
+        kind: 'config-file',
+        path: '/root/.grok/config.toml',
+        content: '[cli]\nauto_update = false\n',
+      },
+    ],
     versionPinnable: true,
   },
 };

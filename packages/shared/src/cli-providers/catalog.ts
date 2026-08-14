@@ -360,6 +360,57 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectAgentsDir: '.claude/agents',
     agentFileFormat: 'markdown',
   },
+  grok: {
+    name: 'grok',
+    // Grok Build reports a real server-side price on its own result event
+    // (`total_cost_usd`), so unlike zai/muse this is not a mispriced Anthropic
+    // estimate — it is the backend's own number.
+    costBasis: 'metered',
+    displayName: 'Grok Build',
+    description:
+      "xAI's Grok Build CLI. Native sub-agents, MCP and plugins; supply an xAI API key as an XAI_API_KEY secret or sign in with the device-code flow.",
+    defaultExecutable: 'grok',
+    // Native subagents via the `spawn_subagent` tool (with git-worktree
+    // isolation), so the splitter dispatches one native invocation rather than
+    // a sequential script. `--disallowed-tools Agent` removes them again for
+    // onboarding mining — verified: the tool drops out of the init event.
+    supportsSubagents: true,
+    supportsCliAuth: true,
+    supportsMcp: true,
+    supportsPlugins: true,
+    supportsLsp: true,
+    defaultAuthMode: 'api_key',
+    apiKeyEnvName: 'XAI_API_KEY',
+    // grok-build-0.1 is xAI's coding-tuned model and roughly half the per-token
+    // price of grok-4.6; users switch per provider via the model field.
+    defaultModel: 'grok-build-0.1',
+    supportsModelSelection: true,
+    // ~/.grok holds auth.json + config.toml + skills/. The BINARY must not live
+    // here — the installer puts both its symlink and its payload under $HOME/.grok
+    // by default, and the per-task auth volume mounted at this path would shadow
+    // them. install-metadata pins it elsewhere with HOME + GROK_BIN_DIR.
+    authConfigPaths: ['~/.grok'],
+    docsUrl: 'https://docs.x.ai/build/overview',
+    // NO effort knob is exposed, even though `grok --effort <level>` exists and
+    // the docs advertise none/minimal/low/medium/high/xhigh/max.
+    //
+    // MEASURED, not assumed: the flag is INERT on the models Haive can reach.
+    // Same prompt on grok-4.6 across all seven levels produced reasoning_tokens
+    // 389/327/158/281/260/269/440 — non-monotonic, with `none` reasoning MORE
+    // than `low`; grok-build-0.1 gave none=424 vs max=367. Worse, a bogus
+    // `--effort bogus-level` is ACCEPTED SILENTLY (the run succeeds) rather than
+    // rejected, so there is no probe that can discover a model's real menu.
+    // A selector here would be a control that does nothing. The real lever is
+    // the model id (xAI splits reasoning by model, e.g.
+    // grok-4.20-0309-reasoning vs -non-reasoning). Re-measure before adding a
+    // scale; do not restore one from xAI's docs.
+    effortScale: null,
+    projectSkillsDir: '.grok/skills',
+    // ~/.grok is already mounted via authConfigPaths and contains skills/.
+    userSkillsPaths: [],
+    projectAgentsDir: '.grok/agents',
+    agentFileFormat: 'markdown',
+  },
 };
 
 export const CLI_PROVIDER_LIST: CliProviderMetadata[] = Object.values(CLI_PROVIDER_CATALOG);

@@ -55,6 +55,10 @@ function buildSequentialForProvider(name: CliProviderName, spec: SubAgentSpec): 
     case 'ollama':
     case 'muse':
       return buildCodexSequentialInvocation(spec);
+    // grok has native subagents (supportsSubagents=true), so the splitter always
+    // takes the native path for it and this arm is unreachable — kept for the
+    // exhaustive switch, same as antigravity below.
+    case 'grok':
     case 'claude-code':
       return buildCodexSequentialInvocation(spec);
   }

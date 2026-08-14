@@ -5,6 +5,7 @@ import { OllamaAdapter } from '../src/cli-adapters/ollama.js';
 import { MuseAdapter } from '../src/cli-adapters/muse.js';
 import { CodexAdapter } from '../src/cli-adapters/codex.js';
 import { GeminiAdapter } from '../src/cli-adapters/gemini.js';
+import { GrokAdapter } from '../src/cli-adapters/grok.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 
 const provider = (over: Partial<CliProviderRecord> = {}): CliProviderRecord =>
@@ -27,6 +28,59 @@ describe('supportsSteering capability', () => {
     expect(new MuseAdapter().supportsSteering).toBe(true);
     expect(new CodexAdapter().supportsSteering).toBe(false);
     expect(new GeminiAdapter().supportsSteering).toBe(false);
+    // grok is agentic and Claude-shaped on the wire, but its headless streams are
+    // read-only — bidirectional flows need its ACP interface (`grok agent`), not stdin.
+    expect(new GrokAdapter().supportsSteering).toBe(false);
+  });
+});
+
+describe('grok buildCliInvocation', () => {
+  it('emits an Anthropic-wire stream and parses as claude-stream-json', () => {
+    const spec = new GrokAdapter().buildCliInvocation(provider(), 'hello world', {});
+    expect(spec.command).toBe('grok');
+    expect(spec.outputFormat).toBe('claude-stream-json');
+    expect(spec.args).toContain('--output-format');
+    expect(spec.args).toContain('streaming-messages-json');
+    expect(spec.args).toContain('--always-approve');
+    // Prompt rides -p, and every flag stays ahead of it.
+    expect(spec.args.slice(-2)).toEqual(['-p', 'hello world']);
+    expect(spec.steerable).toBeUndefined();
+  });
+
+  it('falls back to the catalog default model rather than letting grok pick its own', () => {
+    // grok's built-in default is a different family (grok-4.20-*-non-reasoning), so omitting
+    // -m would silently contradict the model the catalog and the provider form advertise.
+    const spec = new GrokAdapter().buildCliInvocation(provider(), 'p', {});
+    expect(spec.args).toContain('-m');
+    expect(spec.args[spec.args.indexOf('-m') + 1]).toBe('grok-build-0.1');
+  });
+
+  it('passes the provider model when set', () => {
+    const spec = new GrokAdapter().buildCliInvocation(provider({ model: 'grok-4.6' }), 'p', {});
+    expect(spec.args[spec.args.indexOf('-m') + 1]).toBe('grok-4.6');
+  });
+
+  it('maps disallowedTools onto the comma-separated deny-list (mining blocks Agent)', () => {
+    const spec = new GrokAdapter().buildCliInvocation(provider(), 'p', {
+      disallowedTools: ['Agent'],
+    });
+    expect(spec.args[spec.args.indexOf('--disallowed-tools') + 1]).toBe('Agent');
+  });
+
+  it('maps disableTools onto an emptied allow-list', () => {
+    const spec = new GrokAdapter().buildCliInvocation(provider(), 'p', { disableTools: true });
+    expect(spec.args[spec.args.indexOf('--tools') + 1]).toBe('');
+  });
+
+  it('omits both tool flags when neither option is set', () => {
+    const spec = new GrokAdapter().buildCliInvocation(provider(), 'p', {});
+    expect(spec.args).not.toContain('--disallowed-tools');
+    expect(spec.args).not.toContain('--tools');
+  });
+
+  it("never requests grok's own sandbox (the task container is the boundary)", () => {
+    const spec = new GrokAdapter().buildCliInvocation(provider(), 'p', {});
+    expect(spec.args).not.toContain('--sandbox');
   });
 });
 

@@ -1,0 +1,25 @@
+-- Add 'grok' to the cli_provider_name enum so an xAI Grok Build provider can be
+-- created. Additive; existing rows are unaffected.
+--
+-- Note this value EXISTED once before: 0006_drop_legacy_cli_providers removed the
+-- original grok/qwen/kiro adapters, on the grounds that grok had no first-party
+-- binary. xAI has since shipped Grok Build (a real terminal coding agent), so the
+-- adapter is back — this time on that binary rather than on a bare API.
+--
+-- Unlike muse (0110 + 0111) this needs NO companion data migration: 0006 deleted
+-- every row that referenced the old value, so there is nothing to re-point and no
+-- second transaction is required.
+--
+-- Deploy note: applied via `drizzle-kit push --force` from the schema; this file
+-- is the idempotent parity/rollback record. Postgres cannot drop an enum value, so
+-- rollback requires recreating the type without 'grok' and is only safe when no
+-- row references it (both cli_providers.name and cli_package_versions.name) —
+-- delete any Grok provider from the settings page FIRST, or this fails.
+--
+-- Rollback (only if no cli_providers / cli_package_versions row has name='grok'):
+--   ALTER TYPE "cli_provider_name" RENAME TO "cli_provider_name_old";
+--   CREATE TYPE "cli_provider_name" AS ENUM ('claude-code','codex','gemini','amp','zai','antigravity','ollama','muse');
+--   ALTER TABLE "cli_providers" ALTER COLUMN "name" TYPE "cli_provider_name" USING "name"::text::"cli_provider_name";
+--   ALTER TABLE "cli_package_versions" ALTER COLUMN "name" TYPE "cli_provider_name" USING "name"::text::"cli_provider_name";
+--   DROP TYPE "cli_provider_name_old";
+ALTER TYPE "cli_provider_name" ADD VALUE IF NOT EXISTS 'grok';

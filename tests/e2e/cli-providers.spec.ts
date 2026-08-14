@@ -31,7 +31,7 @@ test.describe('cli providers', () => {
         supportsSubagents: boolean;
       }>;
     };
-    expect(body.providers.length).toBe(8);
+    expect(body.providers.length).toBe(9);
     const names = body.providers.map((p) => p.name);
     expect(names).toEqual(
       expect.arrayContaining([
@@ -43,6 +43,7 @@ test.describe('cli providers', () => {
         'antigravity',
         'ollama',
         'muse',
+        'grok',
       ]),
     );
     const claudeCode = body.providers.find((p) => p.name === 'claude-code');

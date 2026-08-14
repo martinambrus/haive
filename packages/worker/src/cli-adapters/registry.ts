@@ -4,6 +4,7 @@ import type { BaseCliAdapter } from './base-adapter.js';
 import { ClaudeCodeAdapter } from './claude-code.js';
 import { CodexAdapter } from './codex.js';
 import { GeminiAdapter } from './gemini.js';
+import { GrokAdapter } from './grok.js';
 import { MuseAdapter } from './muse.js';
 import { OllamaAdapter } from './ollama.js';
 import type { CliProviderName } from './types.js';
@@ -21,6 +22,7 @@ export class CliAdapterRegistry {
     this.register(new AntigravityAdapter());
     this.register(new OllamaAdapter());
     this.register(new MuseAdapter());
+    this.register(new GrokAdapter());
   }
 
   private register(adapter: BaseCliAdapter): void {

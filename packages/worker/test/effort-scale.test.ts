@@ -57,7 +57,11 @@ describe('effortScale declarations', () => {
     expect(adapter.effortScale!.max).toBe('ultra');
   });
 
-  it.each<CliProviderName>(['gemini', 'amp'])(
+  // grok is here despite `grok --effort <level>` existing, because the flag is inert on the
+  // models Haive reaches AND an unknown level is accepted silently instead of rejected — so
+  // there is no menu to expose and no probe that could discover one. See the measurement on the
+  // catalog entry before reinstating a scale.
+  it.each<CliProviderName>(['gemini', 'amp', 'grok'])(
     '%s reports no effort knob (effortScale=null)',
     (name) => {
       const adapter = cliAdapterRegistry.get(name);
@@ -78,6 +82,13 @@ describe('effortEnv emission', () => {
     const adapter = cliAdapterRegistry.get('muse');
     for (const level of adapter.effortScale!.values) {
       expect(adapter.effortEnv(level)).toEqual({ CLAUDE_CODE_EFFORT_LEVEL: level });
+    }
+  });
+
+  it('grok emits no env for any level (it has no effort knob at all)', () => {
+    const adapter = cliAdapterRegistry.get('grok');
+    for (const level of ['low', 'high', 'max', 'bogus-level']) {
+      expect(adapter.effortEnv(level)).toEqual({});
     }
   });
 

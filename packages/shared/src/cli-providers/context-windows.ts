@@ -27,6 +27,12 @@ const MODEL_CONTEXT_WINDOWS: ReadonlyArray<{ match: string; tokens: number }> = 
   { match: 'glm', tokens: 128_000 },
   // Meta Muse Spark — 1M.
   { match: 'muse-spark', tokens: 1_048_576 },
+  // xAI Grok. MEASURED from the CLI, not from xAI's model docs: a live
+  // `grok -p` run reports modelUsage["grok-4.6"].contextWindow = 256000, and the
+  // same for grok-build-0.1, while docs.x.ai lists 500k (4.6) and 1M (4.20/4.3).
+  // The CLI's number is the one that governs auto-compaction, so it is the one
+  // that describes the context a step actually gets.
+  { match: 'grok', tokens: 256_000 },
 ];
 
 /** Provider-level fallback when no model id matches above (display-only). */
@@ -39,6 +45,7 @@ const PROVIDER_FALLBACK_WINDOW: Partial<Record<CliProviderName, number>> = {
   antigravity: 1_048_576,
   ollama: 128_000,
   muse: 1_048_576,
+  grok: 256_000,
 };
 
 /** Conservative global fallback when neither model nor provider is known. */

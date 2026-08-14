@@ -23,6 +23,13 @@ const DRUPAL_LSP_BASE_BY_PROVIDER: Record<string, string> = {
   zai: '.claude/plugins/drupal-php-lsp',
   ollama: '.claude/plugins/drupal-php-lsp',
   muse: '.claude/plugins/drupal-php-lsp',
+  // grok deliberately reuses the .claude path rather than getting a .grok copy:
+  // `grok plugin marketplace add <folder>` takes ANY local folder, and grok reads
+  // the Claude plugin format natively (verified against grok 1.0.3). A second
+  // target base would mean step 07 writing a duplicate plugin tree into every
+  // repo, new onboarding_artifacts rows, and a template-manifest entry — all to
+  // produce byte-identical files.
+  grok: '.claude/plugins/drupal-php-lsp',
 };
 
 interface InstallPluginsDetect {

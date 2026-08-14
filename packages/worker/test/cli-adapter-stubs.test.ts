@@ -48,7 +48,7 @@ describe('LSP capability matrix', () => {
   it('supports the Claude plugin family and fails closed for every other CLI', () => {
     expect(
       CLI_PROVIDER_LIST.filter((provider) => provider.supportsLsp).map((provider) => provider.name),
-    ).toEqual(['claude-code', 'zai', 'ollama', 'muse']);
+    ).toEqual(['claude-code', 'zai', 'ollama', 'muse', 'grok']);
     expect(
       CLI_PROVIDER_LIST.filter((provider) => !provider.supportsLsp).map(
         (provider) => provider.name,
@@ -183,6 +183,9 @@ describe('adapter outputFormat declarations', () => {
     ['claude-code', 'claude-stream-json'],
     ['zai', 'claude-stream-json'],
     ['muse', 'claude-stream-json'],
+    // grok is NOT a claude binary — it reuses the parser because its
+    // `--output-format streaming-messages-json` emits the Anthropic Messages wire format.
+    ['grok', 'claude-stream-json'],
     ['amp', 'claude-stream-json'],
     ['codex', 'codex-jsonl'],
     ['gemini', 'gemini-json'],
@@ -249,8 +252,11 @@ describe('adapter outputFormat declarations', () => {
 // phpactor, whose binary Haive never installs). PHP LSP is intelephense via the
 // local drupal-php-lsp plugin, so PHP must NOT resolve to the marketplace
 // phpactor plugin in any claude-family adapter. These lock that in.
-describe('claude-family LSP plugin install (php uses local intelephense, not marketplace phpactor)', () => {
-  for (const name of ['claude-code', 'zai', 'ollama', 'muse'] as const) {
+// grok is included even though it is not a claude binary: it reads the Claude plugin format
+// and installs from the same marketplace with the same `<name>@<marketplace-id>` syntax
+// (verified against grok 1.0.3), so the same PHP rule has to hold for it.
+describe('LSP plugin install (php uses local intelephense, not marketplace phpactor)', () => {
+  for (const name of ['claude-code', 'zai', 'ollama', 'muse', 'grok'] as const) {
     const adapter = cliAdapterRegistry.get(name);
     const provider = makeProvider({ id: `p-${name}`, name });
     const drupalLspPath = `/work/repo/.claude/plugins/drupal-php-lsp`;
@@ -264,11 +270,17 @@ describe('claude-family LSP plugin install (php uses local intelephense, not mar
         .flatMap((c) => c.args)
         .join(' ');
 
+    // The claude family qualifies a LOCAL marketplace with the `name` inside
+    // `.claude-plugin/marketplace.json`; grok qualifies it with the FOLDER BASENAME it was
+    // added from. Installing with the other one fails outright ("Unknown marketplace"),
+    // so the two must stay distinct here.
+    const localQualifier = name === 'grok' ? 'drupal-php-lsp' : 'drupal-lsp-marketplace';
+
     for (const lang of ['php', 'php-extended'] as const) {
       it(`${name}: ${lang} installs drupal-php-lsp and never phpactor`, () => {
         const flat = flatArgs([lang]);
         expect(flat).not.toContain('phpactor');
-        expect(flat).toContain('drupal-php-lsp@drupal-lsp-marketplace');
+        expect(flat).toContain(`drupal-php-lsp@${localQualifier}`);
       });
     }
 
@@ -285,5 +297,30 @@ describe('claude-family LSP plugin install (php uses local intelephense, not mar
         expect(flat).not.toContain('phpactor');
       });
     }
+
+    // grok keeps a plugin's hooks and MCP servers INACTIVE until it is trusted, so an
+    // install without --trust succeeds and then silently does nothing. No claude-family
+    // adapter has that gate, which is why this is asserted per-adapter rather than globally.
+    it(`${name}: ${name === 'grok' ? 'trusts' : 'does not pass --trust for'} installed plugins`, () => {
+      const flat = flatArgs(['typescript']);
+      expect(flat.includes('--trust')).toBe(name === 'grok');
+    });
   }
+
+  // Guards the DERIVATION, not today's value: with the qualifier hardcoded, moving or
+  // renaming the plugin directory produces an install that grok rejects at runtime while
+  // every assertion above still passes (the fixture path ends in `drupal-php-lsp`).
+  it('grok derives the local marketplace qualifier from the plugin directory', () => {
+    const flat = cliAdapterRegistry.get('grok').buildPluginInstallCommands!(
+      makeProvider({ id: 'p-grok', name: 'grok' }),
+      {
+        repoRoot: '/work/repo',
+        lspLanguages: ['php'],
+        drupalLspPath: '/work/repo/.grok/plugins/renamed-lsp-dir',
+      },
+    )
+      .flatMap((c) => c.args)
+      .join(' ');
+    expect(flat).toContain('drupal-php-lsp@renamed-lsp-dir');
+  });
 });
