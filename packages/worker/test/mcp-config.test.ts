@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS } from '@haive/shared';
 import { getCliProviderMetadata } from '@haive/shared';
 import {
   buildDefaultMcpServers,
@@ -82,6 +83,30 @@ describe('buildDefaultMcpServers', () => {
         ddevApiUrl: 'http://api:3001',
       }).find((s) => s.name === 'ddev-control'),
     ).toBeUndefined();
+  });
+
+  it('caps chrome-devtools tool calls, and only that server', () => {
+    const servers = buildDefaultMcpServers({
+      repoPath: '/workspace/repo',
+      includeChromeDevtools: true,
+    });
+    const chrome = servers.find((s) => s.name === 'chrome-devtools');
+    expect(chrome?.timeout).toBe(DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS);
+    // filesystem/git run local, fast and silent — a cap there would only add a way to fail.
+    expect(servers.filter((s) => s.name !== 'chrome-devtools').map((s) => s.timeout)).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it('drops the cap entirely at 0 rather than emitting a zero timeout', () => {
+    const chrome = buildDefaultMcpServers({
+      repoPath: '/workspace/repo',
+      includeChromeDevtools: true,
+      chromeDevtoolsToolTimeoutMs: 0,
+    }).find((s) => s.name === 'chrome-devtools');
+    expect(chrome).toBeDefined();
+    expect(chrome?.timeout).toBeUndefined();
   });
 
   it('marks RAG grounding as LSP-capable only for a capable resolved CLI', () => {
@@ -199,6 +224,41 @@ describe('buildMcpConfigForCli', () => {
     // claude-code flag into the wrong binary.
     expect(buildMcpConfigForCli('gemini', sampleServers)?.cliArgs).toBeUndefined();
     expect(buildMcpConfigForCli('codex', sampleServers)?.cliArgs).toBeUndefined();
+  });
+
+  it('carries a capped server timeout into the claude JSON entry', () => {
+    const capped: McpServerSpec[] = [
+      {
+        name: 'chrome-devtools',
+        command: 'npx',
+        args: ['-y', 'chrome-devtools-mcp@latest'],
+        timeout: 300_000,
+      },
+    ];
+    const parsed = JSON.parse(buildMcpConfigForCli('claude-code', capped)!.content) as {
+      mcpServers: Record<string, { timeout?: number }>;
+    };
+    expect(parsed.mcpServers['chrome-devtools']?.timeout).toBe(300_000);
+    // uncapped servers must not gain a field the CLI would then enforce
+    const plain = JSON.parse(buildMcpConfigForCli('claude-code', sampleServers)!.content) as {
+      mcpServers: Record<string, { timeout?: number }>;
+    };
+    expect(plain.mcpServers.filesystem?.timeout).toBeUndefined();
+  });
+
+  it('leaves codex TOML uncapped — its own tool_timeout_sec default (60s) is tighter', () => {
+    const capped: McpServerSpec[] = [
+      {
+        name: 'chrome-devtools',
+        command: 'npx',
+        args: ['-y', 'chrome-devtools-mcp@latest'],
+        timeout: 300_000,
+      },
+    ];
+    const content = buildMcpConfigForCli('codex', capped)!.content;
+    expect(content).toContain('[mcp_servers.chrome-devtools]');
+    expect(content).not.toContain('timeout');
+    expect(content).not.toContain('300000');
   });
 
   it('emits codex TOML with [mcp_servers.<name>] sections', () => {

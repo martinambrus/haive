@@ -1,4 +1,4 @@
-import type { CliProviderName } from '@haive/shared';
+import { DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS, type CliProviderName } from '@haive/shared';
 
 const EMPTY_MCP_SETTINGS = '{\n  "mcpServers": {}\n}\n';
 
@@ -18,6 +18,10 @@ export interface McpServerSpec {
   command: string;
   args: string[];
   env?: Record<string, string>;
+  /** Hard per-tool-call wall clock in ms, emitted as the server's `timeout` field. Only
+   *  the JSON formats carry it (claude-family + gemini both read `timeout` in ms); the
+   *  codex/grok TOML serializer deliberately ignores it. */
+  timeout?: number;
 }
 
 /**
@@ -87,6 +91,11 @@ export interface BuildDefaultMcpServersOptions {
   ddevApiUrl?: string;
   /** Task-scoped bearer token the ddev proxy presents to the API. */
   ddevToken?: string;
+  /** Hard wall-clock cap in ms on a single chrome-devtools tool call. Defaults to
+   *  DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS; 0 emits no cap at all (the CLI's own ~28h
+   *  default returns). Only chrome-devtools gets one — filesystem/git/rag/ddev-control
+   *  are local and fast, so a cap there would only add a way to fail. */
+  chromeDevtoolsToolTimeoutMs?: number;
 }
 
 /** Chromium binary path inside browserTesting sandboxes. The env-template
@@ -144,7 +153,18 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
           '--isolated=true',
           '--viewport=1920x1080',
         ];
-    servers.push({ name: 'chrome-devtools', command: 'npx', args: chromeArgs });
+    // Cap a single browser tool call. Nothing else bounds one: MCP_TOOL_TIMEOUT is unset
+    // (~28h default), and the stdio idle timeout only fires on a fully silent server —
+    // chrome-devtools-mcp emits progress, so a hung call (observed: close_page, 26 minutes)
+    // ran until the step budget killed it. The per-server `timeout` is explicitly immune to
+    // progress notifications, which is why it is the field used here.
+    const chromeTimeout = opts.chromeDevtoolsToolTimeoutMs ?? DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS;
+    servers.push({
+      name: 'chrome-devtools',
+      command: 'npx',
+      args: chromeArgs,
+      ...(chromeTimeout > 0 ? { timeout: chromeTimeout } : {}),
+    });
   }
 
   if (opts.includeRagSearch && opts.ragServerPath && opts.ragApiUrl && opts.ragToken) {
@@ -285,18 +305,32 @@ export function serversToJsonObject(
     if (def && typeof def === 'object') out[name] = def;
   }
   for (const server of servers) {
-    const entry: { command: string; args: string[]; env?: Record<string, string> } = {
+    const entry: {
+      command: string;
+      args: string[];
+      env?: Record<string, string>;
+      timeout?: number;
+    } = {
       command: server.command,
       args: server.args,
     };
     if (server.env && Object.keys(server.env).length > 0) {
       entry.env = server.env;
     }
+    // Both JSON consumers read `timeout` as milliseconds per tool call: claude-family
+    // (default unset, ~28h) and gemini (default 600000).
+    if (server.timeout && server.timeout > 0) {
+      entry.timeout = server.timeout;
+    }
     out[server.name] = entry;
   }
   return out;
 }
 
+/** Deliberately ignores McpServerSpec.timeout. The TOML CLIs express a per-tool cap as
+ *  `tool_timeout_sec` (seconds), and codex already defaults it to 60s — tighter than the
+ *  cap the JSON side needs. Rendering our millisecond value here would either be read as
+ *  seconds or, at 300, loosen codex from 60s to five minutes. */
 function codexTomlBlock(
   name: string,
   command: string,

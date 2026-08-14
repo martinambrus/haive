@@ -10,6 +10,7 @@ import {
   CONFIG_RUNTIME_LIMITS_CHANNEL,
   configService,
   decryptEmail,
+  DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
   DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS,
   DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
   DEFAULT_CLI_TIMEOUT_LADDER,
@@ -881,6 +882,39 @@ adminRoutes.put('/config/ddev-control', async (c) => {
   await configService.set(CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED, enabled ? 'true' : 'false');
   log.info({ enabled }, 'ddev-control MCP switch updated');
   return c.json({ enabled });
+});
+
+// 1..999 is rejected rather than clamped: the CLI silently ignores a per-server timeout
+// below 1000ms and falls back to its own ~28h default, so accepting one would store a
+// setting that does nothing. 0 is the explicit "no cap" escape hatch.
+const chromeMcpTimeoutSchema = z.object({
+  timeoutMs: z
+    .number()
+    .int()
+    .min(0)
+    .max(3_600_000)
+    .refine((v) => v === 0 || v >= 1000, {
+      message: 'timeoutMs must be 0 (no cap) or at least 1000',
+    }),
+});
+
+// Hard per-call cap on chrome-devtools MCP tools, emitted as that server's `timeout` in the
+// generated MCP config. Bounds a hung browser tool (observed: a 26-minute close_page) that
+// nothing else bounds — progress notifications do not extend it. The worker reads this at
+// cli-exec build time (within the ~30s config cache), so a retune needs no redeploy.
+adminRoutes.get('/config/chrome-mcp-timeout', async (c) => {
+  const timeoutMs = await configService.getNumber(
+    CONFIG_KEYS.CHROME_MCP_TOOL_TIMEOUT_MS,
+    DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
+  );
+  return c.json({ timeoutMs });
+});
+
+adminRoutes.put('/config/chrome-mcp-timeout', async (c) => {
+  const { timeoutMs } = chromeMcpTimeoutSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.CHROME_MCP_TOOL_TIMEOUT_MS, String(timeoutMs));
+  log.info({ timeoutMs }, 'chrome-devtools MCP tool timeout updated');
+  return c.json({ timeoutMs });
 });
 
 const globalPauseSchema = z.object({ paused: z.boolean() });

@@ -147,6 +147,9 @@ export default function AdminPage() {
   const [streamLogRetentionDays, setStreamLogRetentionDays] = useState<number | null>(null);
   const [streamLogRetentionInput, setStreamLogRetentionInput] = useState('');
   const [savingStreamLogRetention, setSavingStreamLogRetention] = useState(false);
+  const [chromeMcpTimeoutMs, setChromeMcpTimeoutMs] = useState<number | null>(null);
+  const [chromeMcpTimeoutInput, setChromeMcpTimeoutInput] = useState('');
+  const [savingChromeMcpTimeout, setSavingChromeMcpTimeout] = useState(false);
   const [runtimeLimits, setRuntimeLimits] = useState<RuntimeLimitsResponse | null>(null);
   const [runtimeLimitsForm, setRuntimeLimitsForm] = useState<RuntimeLimitsForm>({
     memoryMb: '0',
@@ -192,6 +195,7 @@ export default function AdminPage() {
         prWorkflowData,
         runtimeLimitsData,
         streamLogRetentionData,
+        chromeMcpTimeoutData,
         globalPauseData,
       ] = await Promise.all([
         api.get<{ users: AdminUser[] }>('/admin/users'),
@@ -221,6 +225,7 @@ export default function AdminPage() {
         api.get<{ enabled: boolean }>('/admin/config/pr-workflow'),
         api.get<RuntimeLimitsResponse>('/admin/config/runtime-limits'),
         api.get<{ retentionDays: number }>('/admin/config/cli-stream-log-retention'),
+        api.get<{ timeoutMs: number }>('/admin/config/chrome-mcp-timeout'),
         api.get<{ paused: boolean }>('/admin/config/global-pause'),
       ]);
       setUsers(usersData.users);
@@ -259,6 +264,8 @@ export default function AdminPage() {
       setRuntimeLimitsForm(runtimeLimitsFormOf(runtimeLimitsData));
       setStreamLogRetentionDays(streamLogRetentionData.retentionDays);
       setStreamLogRetentionInput(String(streamLogRetentionData.retentionDays));
+      setChromeMcpTimeoutMs(chromeMcpTimeoutData.timeoutMs);
+      setChromeMcpTimeoutInput(String(chromeMcpTimeoutData.timeoutMs));
       setGlobalPause(globalPauseData.paused);
       setError(null);
     } catch (err) {
@@ -388,6 +395,27 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update CLI transcript retention');
     } finally {
       setSavingStreamLogRetention(false);
+    }
+  }
+
+  async function saveChromeMcpTimeout() {
+    const ms = Number.parseInt(chromeMcpTimeoutInput, 10);
+    if (!Number.isFinite(ms) || ms < 0 || ms > 3_600_000 || (ms > 0 && ms < 1000)) {
+      setError('Chrome MCP tool timeout must be 0 (no cap) or between 1000 and 3600000 ms.');
+      return;
+    }
+    setSavingChromeMcpTimeout(true);
+    try {
+      const result = await api.put<{ timeoutMs: number }>('/admin/config/chrome-mcp-timeout', {
+        timeoutMs: ms,
+      });
+      setChromeMcpTimeoutMs(result.timeoutMs);
+      setChromeMcpTimeoutInput(String(result.timeoutMs));
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update Chrome MCP tool timeout');
+    } finally {
+      setSavingChromeMcpTimeout(false);
     }
   }
 
@@ -1735,6 +1763,44 @@ export default function AdminPage() {
             {ddevControlEnabled ? 'Enabled' : 'Disabled'}
             {savingDdevControl && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
+        </Card>
+      )}
+
+      {chromeMcpTimeoutMs !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Chrome MCP tool timeout</CardTitle>
+            <CardDescription>
+              Hard wall-clock cap on a single chrome-devtools MCP tool call. Without it the CLI
+              default is ~28 hours and a hung browser tool burns the whole step budget (observed: a
+              26-minute close_page). Progress from the server does not extend the cap. An expired
+              call returns an error to the agent, which keeps working — it does not fail the step.
+              The longest successful calls seen here were ~220s, so keep headroom above that. 0
+              removes the cap. Read at cli-exec build time (a change applies to the next CLI
+              invocation); persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <div className="flex items-end gap-2">
+            <label className="flex flex-col gap-1 text-xs text-neutral-400">
+              Timeout (ms, 0 = no cap)
+              <input
+                type="number"
+                min={0}
+                max={3600000}
+                value={chromeMcpTimeoutInput}
+                onChange={(e) => setChromeMcpTimeoutInput(e.target.value)}
+                className="w-28 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100"
+              />
+            </label>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={savingChromeMcpTimeout}
+              onClick={() => void saveChromeMcpTimeout()}
+            >
+              {savingChromeMcpTimeout ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
         </Card>
       )}
 

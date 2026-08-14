@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { createRedisConnection } from '../utils/redis-factory.js';
 import { logger } from '../logger/index.js';
 import {
+  DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
   DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
   DEFAULT_CLI_TIMEOUT_LADDER,
 } from '../constants/index.js';
@@ -188,6 +189,13 @@ export const CONFIG_KEYS = {
   // recover its OWN per-task DDEV when the app 404s. Set 'false' to stop injecting that
   // server everywhere (no redeploy). Read at cli-exec invocation build time.
   DDEV_CONTROL_MCP_ENABLED: 'config:ddev:controlMcpEnabled',
+
+  // Hard per-call wall-clock cap (ms) on the chrome-devtools MCP server, emitted as that
+  // server's `timeout` field in the generated MCP config. Progress notifications do NOT
+  // extend it, which is what makes it bite on a hung browser tool. 0 disables the cap
+  // (the CLI's own ~28h default returns). Read at cli-exec invocation build time within
+  // the ~30s config cache, so a retune takes effect without a redeploy.
+  CHROME_MCP_TOOL_TIMEOUT_MS: 'config:mcp:chromeToolTimeoutMs',
 
   // Global kill-switch for the DDEV image pull-through cache. When 'true' (default),
   // each per-task DDEV runner routes its nested dockerd Docker Hub pulls through a
@@ -415,6 +423,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.IDE_ENABLED]: 'true',
   [CONFIG_KEYS.DEBUG_MODE_ENABLED]: 'true',
   [CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED]: 'true',
+  [CONFIG_KEYS.CHROME_MCP_TOOL_TIMEOUT_MS]: String(DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS),
   [CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED]: 'true',
   [CONFIG_KEYS.ALLOWANCE_WATCH_MODE]: 'notify',
   [CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES]: String(DEFAULT_TASK_ATTACHMENT_MAX_BYTES),

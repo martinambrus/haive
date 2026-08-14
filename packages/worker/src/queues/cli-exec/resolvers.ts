@@ -7,6 +7,9 @@ import {
   type CliNetworkPolicy,
   type CliProviderName,
   type TaskJobPayload,
+  CONFIG_KEYS,
+  configService,
+  DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
   TASK_JOB_NAMES,
   isReadOnlyLocalRepo,
 } from '@haive/shared';
@@ -205,6 +208,10 @@ export async function resolveMcpExtraFiles(
     includeChromeDevtools: surface.chromeDevtools.enabled,
     chromeDevtoolsBrowserUrl,
     chromeDevtoolsMcpVersion: surface.chromeDevtools.version,
+    chromeDevtoolsToolTimeoutMs: await configService.getNumber(
+      CONFIG_KEYS.CHROME_MCP_TOOL_TIMEOUT_MS,
+      DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
+    ),
     includeRagSearch: surface.rag.enabled,
     ragServerPath: RAG_MCP_SERVER_PATH,
     ragApiUrl: surface.rag.apiUrl,

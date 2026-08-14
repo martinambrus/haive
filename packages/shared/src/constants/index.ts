@@ -416,6 +416,15 @@ export const CLI_SOFT_TIMEOUT_WIND_DOWN =
  *  declaring less than this gets this instead; a step declaring more keeps its own
  *  number. Admin-tunable via CONFIG_KEYS.CLI_TIMEOUT_BASE_MINUTES. */
 export const DEFAULT_CLI_TIMEOUT_BASE_MINUTES = 45;
+/** Hard wall-clock cap, in ms, on a single chrome-devtools MCP tool call. Claude Code's
+ *  own default (MCP_TOOL_TIMEOUT, unset) is ~28 hours and the stdio idle timeout only
+ *  fires when the server goes fully silent — chrome-devtools-mcp emits progress, so a
+ *  hung call (observed: close_page, 26 minutes) is bounded by nothing but the step budget.
+ *  The server has no timeout flag of its own, so the cap has to come from the client
+ *  config. 300000 sits above the longest observed SUCCESSFUL call (navigate_page 221s,
+ *  take_screenshot 189s, click 180s); an expired call returns an error to the agent rather
+ *  than failing the run. Admin-tunable via CONFIG_KEYS.CHROME_MCP_TOOL_TIMEOUT_MS; 0 = no cap. */
+export const DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS = 300_000;
 /** Multipliers on the base budget, one per attempt. Attempt 0 runs at the base; each
  *  consecutive TIMEOUT moves one rung up. Three rungs because the step runner
  *  re-dispatches a transient failure at most MAX_ORPHAN_REDISPATCH (3) times, so a
