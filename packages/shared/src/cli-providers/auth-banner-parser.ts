@@ -40,6 +40,11 @@ export const AUTH_URL_PREFIXES: Partial<Record<CliProviderName, string[]>> = {
   amp: ['https://ampcode.com/auth/cli-login'],
   // Antigravity (agy) prints the same Google OAuth endpoint as gemini.
   antigravity: ['https://accounts.google.com/o/oauth2/'],
+  // MEASURED from a real `grok login --device-auth`, not from xAI's docs, which
+  // talk about auth.x.ai: the device flow prints
+  // `https://accounts.x.ai/oauth2/device?user_code=XXXX-XXXX`. The bare host is
+  // kept as a second prefix so a path change still resolves to a usable URL.
+  grok: ['https://accounts.x.ai/oauth2/device', 'https://accounts.x.ai/'],
 };
 
 export const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([

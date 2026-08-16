@@ -37,11 +37,13 @@ export class GrokAdapter extends BaseCliAdapter {
   readonly supportsMcp = true;
   readonly supportsPlugins = true;
   override readonly supportsLsp = true;
-  // API key by default (XAI_API_KEY). `grok login --device-auth` also works for a
-  // SuperGrok subscription — see setup-token-command. assertUserAuthReady
-  // short-circuits when authMode is 'api_key', so supportsCliAuth being true does
-  // not force a login.
-  readonly defaultAuthMode = 'api_key' as const;
+  // Kept in sync with the catalog entry, which uses this as a CAPABILITY flag
+  // rather than a mere default: 'subscription' is what allows a provider row to
+  // be saved in either mode (api_key stays legal because apiKeyEnvName is set).
+  // A SuperGrok sign-in goes through `grok login --device-auth`
+  // (setup-token-command); assertUserAuthReady short-circuits for api_key rows,
+  // so neither mode forces a login the other way.
+  readonly defaultAuthMode = 'subscription' as const;
   // grok reads this env var directly; no remap needed (contrast zai/muse, which
   // have to alias their key onto ANTHROPIC_AUTH_TOKEN).
   readonly apiKeyEnvName = 'XAI_API_KEY';
@@ -50,7 +52,12 @@ export class GrokAdapter extends BaseCliAdapter {
   // step 07 appends its rules block straight to the shared repo-root AGENTS.md.
   readonly rulesFile = 'AGENTS.md';
   readonly rulesFileMode = 'native' as const;
-  override readonly defaultEgressDomains = ['api.x.ai', 'auth.x.ai', 'grok.com'];
+  // accounts.x.ai is the DEVICE-CODE endpoint, captured from a real
+  // `grok login --device-auth` run (it prints
+  // https://accounts.x.ai/oauth2/device?user_code=XXXX-XXXX) and confirmed as a
+  // literal in the binary. Without it a login under network policy
+  // none/allowlist cannot reach the authorization server.
+  override readonly defaultEgressDomains = ['api.x.ai', 'accounts.x.ai', 'auth.x.ai', 'grok.com'];
 
   // effortScale stays null (BaseCliAdapter's default) even though `grok --effort`
   // exists. It is INERT on the models Haive reaches, and an unknown level is

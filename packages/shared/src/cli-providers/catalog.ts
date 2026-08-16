@@ -379,7 +379,14 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsMcp: true,
     supportsPlugins: true,
     supportsLsp: true,
-    defaultAuthMode: 'api_key',
+    // 'subscription' PERMITS BOTH MODES here; it is not merely a default.
+    // assertAuthModeSupported() reads this as a capability flag: it rejects
+    // subscription outright when this says 'api_key', and rejects api_key only
+    // when apiKeyEnvName is null. grok has both a device-code login (SuperGrok)
+    // and XAI_API_KEY, so declaring 'subscription' is what makes the pair legal —
+    // same shape as claude-code and codex. Flipping this to 'api_key' would make
+    // `grok login --device-auth` unreachable from the UI.
+    defaultAuthMode: 'subscription',
     apiKeyEnvName: 'XAI_API_KEY',
     // grok-build-0.1 is xAI's coding-tuned model and roughly half the per-token
     // price of grok-4.6; users switch per provider via the model field.

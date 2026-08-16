@@ -103,6 +103,11 @@ const SUPPORTED_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderNam
   'codex',
   'amp',
   'antigravity',
+  // grok: device-code flow, the same shape as codex — it prints a URL plus a
+  // short code and polls for approval, so it needs neither a paste-back nor a
+  // creds-file poller. Deliberately absent from TOKEN_PASTE_PROVIDERS and from
+  // TERMINAL_LOGIN_PROVIDERS for that reason.
+  'grok',
 ]);
 
 // Providers whose login is driven by the user inside an interactive terminal
@@ -113,6 +118,21 @@ const SUPPORTED_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderNam
 // -p mode caps the auth wait at ~30s, so the user must drive it directly.
 const TERMINAL_LOGIN_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
   'antigravity',
+]);
+
+// Providers whose login is an OAuth DEVICE-CODE flow: the CLI prints an
+// authorization URL plus a short user code, the user approves in a browser, and
+// the CLI polls for the grant. Nothing is pasted back, so the modal shows the
+// code and reports 'awaiting-approval', and success is read from the CLI's own
+// stdout rather than from a creds-file poller.
+//   - codex: `codex login --device-auth`
+//   - grok:  `grok login --device-auth`  ->
+//     https://accounts.x.ai/oauth2/device?user_code=XXXX-XXXX, then "Signed in as ..."
+//     (both verified against the shipped binary; the code matches the shared
+//     DEVICE_CODE_PATTERN and the success line matches detectAuthResult).
+const DEVICE_CODE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderName>([
+  'codex',
+  'grok',
 ]);
 
 interface BannerSession {
@@ -370,7 +390,9 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
 
   wsSend(ws, {
     type: 'phase',
-    phase: providerName === 'codex' ? 'awaiting-approval' : 'awaiting-token',
+    // Device-code providers wait on a browser approval; everything else waits on
+    // a token/code the user pastes back into the modal.
+    phase: DEVICE_CODE_PROVIDERS.has(providerName) ? 'awaiting-approval' : 'awaiting-token',
   });
 
   if (TERMINAL_LOGIN_PROVIDERS.has(providerName)) {
@@ -601,8 +623,9 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
     }
     if (url) {
       session.authUrlSent = true;
-      const deviceCode =
-        session.providerName === 'codex' ? extractDeviceCode(session.rawBuffer) : undefined;
+      const deviceCode = DEVICE_CODE_PROVIDERS.has(session.providerName)
+        ? extractDeviceCode(session.rawBuffer)
+        : undefined;
       log.info({ providerId: session.providerId, url: url.slice(0, 120) }, 'auth url extracted');
       wsSend(session.ws, { type: 'auth-url', url, deviceCode });
     }

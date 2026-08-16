@@ -35,6 +35,17 @@ describe('supportsSteering capability', () => {
 });
 
 describe('grok buildCliInvocation', () => {
+  it('declares subscription auth so BOTH login modes stay legal', () => {
+    // Mirrors the catalog, where this value is a capability flag rather than a
+    // default: 'api_key' there would make `grok login --device-auth` unreachable.
+    const adapter = new GrokAdapter();
+    expect(adapter.defaultAuthMode).toBe('subscription');
+    expect(adapter.apiKeyEnvName).toBe('XAI_API_KEY');
+    // The device-code authorization server, not just the inference host.
+    expect(adapter.defaultEgressDomains).toContain('accounts.x.ai');
+    expect(adapter.defaultEgressDomains).toContain('api.x.ai');
+  });
+
   it('emits an Anthropic-wire stream and parses as claude-stream-json', () => {
     const spec = new GrokAdapter().buildCliInvocation(provider(), 'hello world', {});
     expect(spec.command).toBe('grok');

@@ -28,11 +28,12 @@ function makeProvider(
 }
 
 describe('isCliSetupTokenSupported', () => {
-  it('is true for claude-code, codex, amp, antigravity; false for gemini (BYOK-only) and zai', () => {
+  it('is true for claude-code, codex, amp, antigravity, grok; false for gemini (BYOK-only) and zai', () => {
     expect(isCliSetupTokenSupported('claude-code')).toBe(true);
     expect(isCliSetupTokenSupported('codex')).toBe(true);
     expect(isCliSetupTokenSupported('amp')).toBe(true);
     expect(isCliSetupTokenSupported('antigravity')).toBe(true);
+    expect(isCliSetupTokenSupported('grok')).toBe(true);
     expect(isCliSetupTokenSupported('gemini')).toBe(false);
     expect(isCliSetupTokenSupported('zai')).toBe(false);
   });

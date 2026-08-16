@@ -319,7 +319,7 @@ export const CLI_DEFAULT_EGRESS_DOMAINS: Record<CliProviderName, string[]> = {
   antigravity: [],
   ollama: ['ollama.com', '*.ollama.com'],
   muse: ['api.meta.ai'],
-  grok: ['api.x.ai', 'auth.x.ai', 'grok.com'],
+  grok: ['api.x.ai', 'accounts.x.ai', 'auth.x.ai', 'grok.com'],
 };
 
 export interface EffortScaleMetadata {

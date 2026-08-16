@@ -30,4 +30,14 @@ describe('assertAuthModeSupported', () => {
   it('rejects api_key for antigravity (subscription-only, apiKeyEnvName null)', () => {
     expect(() => assertAuthModeSupported('antigravity', 'api_key')).toThrow(HttpError);
   });
+
+  // grok is the both-modes case: a SuperGrok device-code login OR an XAI_API_KEY.
+  // The catalog reaches that by declaring defaultAuthMode 'subscription' — this
+  // function treats 'api_key' there as "subscription unsupported", so declaring
+  // api_key would silently make `grok login --device-auth` unreachable from the UI
+  // even though the setup-token command exists.
+  it('allows BOTH modes for grok', () => {
+    expect(() => assertAuthModeSupported('grok', 'subscription')).not.toThrow();
+    expect(() => assertAuthModeSupported('grok', 'api_key')).not.toThrow();
+  });
 });
