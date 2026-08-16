@@ -33,6 +33,7 @@ import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
 import { isAfterFrontier, isBeforeFrontier, type StepOrderKey } from '@/lib/step-order';
 import { failureBanner, parkBanner } from '@/lib/step-banners';
+import { useGlobalPause } from '@/lib/use-global-pause';
 import {
   defaultRetryTimeoutMinutes,
   parseRetryTimeoutMinutes,
@@ -2503,7 +2504,13 @@ function StepCardImpl({
   const taskEnded = taskCancelled || taskStatus === 'completed' || taskStatus === 'failed';
   // Banner visibility comes from the structural columns, never from the presence of the copy —
   // lib/step-banners is the single tested source of that rule.
-  const park = parkBanner(step, { taskEnded });
+  //
+  // Global pause is one of those structural inputs: a parked step under pause is not waiting for
+  // a machine slot, it is waiting for the switch, and its stored "Queued — machine at capacity"
+  // line would otherwise promise a slot nothing is handing out. Cheap to read per card — the
+  // hook shares ONE poller across every consumer on the page.
+  const globalPaused = useGlobalPause();
+  const park = parkBanner(step, { taskEnded, paused: globalPaused });
   const failure = failureBanner(step);
   // The live browser/VNC needs a running task runtime; once the task is completed or
   // cancelled that runtime is torn down (cleanup/teardown), so hide the browser

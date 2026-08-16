@@ -1,13 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
 import { PauseCircle } from 'lucide-react';
-import { api, type SystemPauseResponse } from '@/lib/api-client';
-
-/** How often to re-check the switch. The worker reads it through the ~30s config cache, so
- *  polling much faster than that would only make the banner disagree with reality sooner. */
-const POLL_MS = 15_000;
+import { useGlobalPause } from '@/lib/use-global-pause';
 
 /**
  * App-wide banner for the admin global pause switch. Renders nothing while the switch is off,
@@ -22,26 +17,9 @@ const POLL_MS = 15_000;
  * keeps both readable.
  */
 export function GlobalPauseBanner({ role }: { role: 'admin' | 'user' }) {
-  const [paused, setPaused] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    const check = async () => {
-      try {
-        const data = await api.get<SystemPauseResponse>('/system/pause');
-        if (!cancelled) setPaused(data.globalPause);
-      } catch {
-        // A failed poll must not flip the banner: claiming "nothing is paused" because the
-        // api hiccuped is worse than showing the last known state.
-      }
-    };
-    void check();
-    const timer = setInterval(() => void check(), POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, []);
+  // Polling lives in lib/use-global-pause so this banner and the step/terminal copy that also
+  // depends on the switch cannot drift apart or double up on requests.
+  const paused = useGlobalPause();
 
   if (!paused) return null;
 

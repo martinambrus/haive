@@ -12,6 +12,7 @@ import {
 import { formatDuration } from '@/lib/format-duration';
 import { formatTokens } from '@/lib/format-tokens';
 import { invocationBanner } from '@/lib/step-banners';
+import { useGlobalPause } from '@/lib/use-global-pause';
 
 interface StepTerminalProps {
   taskId: string;
@@ -216,7 +217,10 @@ function InvocationPanel({
   const [replay, setReplay] = useState<CliInvocationOutput | null>(null);
   const [replayError, setReplayError] = useState<string | null>(null);
   // Which state this invocation's copy belongs to — decided on startedAt, not on the words.
-  const banner = invocationBanner(invocation);
+  // Under global pause a QUEUED run says so instead of claiming a slot is coming; a run that
+  // already started is left alone, because pause never interrupts work in flight.
+  const globalPaused = useGlobalPause();
+  const banner = invocationBanner(invocation, { paused: globalPaused });
 
   // Active invocation → live WebSocket via CliStreamViewer (no fetch needed).
   // Ended invocation → fetch persisted rawOutput once and render statically.

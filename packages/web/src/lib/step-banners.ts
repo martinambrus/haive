@@ -13,6 +13,17 @@
  *  exist so that decision lives in one tested place instead of being re-derived per call site.
  */
 
+/** Copy shown in place of a queue/park line while execution is paused.
+ *
+ *  Pause gates job PICKUP, never work already in flight, so this replaces the copy of things
+ *  that are WAITING and nothing else. A run that was already started keeps reporting itself as
+ *  running, because it genuinely still is — the sandbox keeps going and its output keeps
+ *  streaming. Getting that split backwards in either direction is a lie: relabel a running CLI
+ *  and the user thinks their in-flight work stopped; leave a queued one alone and the UI claims
+ *  a slot is coming that nothing will hand out until the switch flips. */
+export const PAUSED_WAIT_TEXT =
+  'Paused — execution is paused, so this will not start until it resumes.';
+
 /** The step fields the banner rules read. Dates accept a `Date` or an ISO string. */
 export interface StepBannerRow {
   status: string;
@@ -30,11 +41,17 @@ export interface StepBannerRow {
  *  or completed task can still hold a marker, and nothing is queued there. */
 export function parkBanner(
   step: StepBannerRow,
-  opts: { taskEnded: boolean },
+  opts: { taskEnded: boolean; paused?: boolean },
 ): { text: string } | null {
   if (opts.taskEnded) return null;
   if (step.status !== 'pending') return null;
   if (step.waitingStartedAt == null) return null;
+  // Paused overrides the stored queue line. The park marker is still the thing that proves the
+  // step is waiting — pause only changes WHY it is waiting, and the stored copy ("Queued —
+  // machine at capacity…") would otherwise promise a slot that no one is handing out. The
+  // statusMessage guard is skipped here for the same reason: under pause the step is provably
+  // waiting whether or not the park ever wrote its line.
+  if (opts.paused) return { text: PAUSED_WAIT_TEXT };
   if (!step.statusMessage) return null;
   return { text: step.statusMessage };
 }
@@ -67,7 +84,12 @@ export interface InvocationBannerRow {
  *  banner is worth the space; this only decides which state the copy belongs to. */
 export function invocationBanner(
   inv: InvocationBannerRow,
+  opts: { paused?: boolean } = {},
 ): { kind: 'queued' | 'running'; text: string } | null {
+  const queued = inv.startedAt == null;
+  // Only the queued half is relabelled — see PAUSED_WAIT_TEXT. A started invocation under pause
+  // is still a live sandbox streaming output, so its copy is left exactly as it was.
+  if (opts.paused && queued) return { kind: 'queued', text: PAUSED_WAIT_TEXT };
   if (!inv.statusMessage) return null;
-  return { kind: inv.startedAt == null ? 'queued' : 'running', text: inv.statusMessage };
+  return { kind: queued ? 'queued' : 'running', text: inv.statusMessage };
 }

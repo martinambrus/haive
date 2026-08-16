@@ -3,6 +3,7 @@ import {
   failureBanner,
   invocationBanner,
   parkBanner,
+  PAUSED_WAIT_TEXT,
   type StepBannerRow,
   type InvocationBannerRow,
 } from './step-banners';
@@ -29,6 +30,29 @@ describe('parkBanner', () => {
     // advertising a live wait beside the task's real one — two amber banners on one task.
     const leftover = step({ statusMessage: PARK_COPY, waitingStartedAt: null });
     expect(parkBanner(leftover, { taskEnded: false })).toBeNull();
+  });
+
+  it('says paused, not "machine at capacity", while execution is paused', () => {
+    // The bug: with the global switch on, a parked step still advertised its stored queue line,
+    // so the page promised a runtime slot that nothing was handing out until the switch flipped.
+    const parked = step({ statusMessage: PARK_COPY, waitingStartedAt: '2026-07-24T13:00:00Z' });
+    expect(parkBanner(parked, { taskEnded: false, paused: true })).toEqual({
+      text: PAUSED_WAIT_TEXT,
+    });
+  });
+
+  it('still says paused when the park never wrote a line', () => {
+    const parked = step({ statusMessage: null, waitingStartedAt: '2026-07-24T13:00:00Z' });
+    expect(parkBanner(parked, { taskEnded: false, paused: true })).toEqual({
+      text: PAUSED_WAIT_TEXT,
+    });
+  });
+
+  it('pause does not resurrect a banner for an unparked or terminal step', () => {
+    const unparked = step({ statusMessage: PARK_COPY, waitingStartedAt: null });
+    expect(parkBanner(unparked, { taskEnded: false, paused: true })).toBeNull();
+    const parked = step({ statusMessage: PARK_COPY, waitingStartedAt: '2026-07-24T13:00:00Z' });
+    expect(parkBanner(parked, { taskEnded: true, paused: true })).toBeNull();
   });
 
   it('hides on a terminal task that still holds a marker', () => {
@@ -101,5 +125,29 @@ describe('invocationBanner', () => {
 
   it('is null with no copy', () => {
     expect(invocationBanner(inv({ startedAt: '2026-07-24T15:44:12Z' }))).toBeNull();
+  });
+
+  it('relabels a QUEUED invocation while paused', () => {
+    expect(invocationBanner(inv({ statusMessage: QUEUED_COPY }), { paused: true })).toEqual({
+      kind: 'queued',
+      text: PAUSED_WAIT_TEXT,
+    });
+  });
+
+  it('leaves a STARTED invocation alone while paused', () => {
+    // Pause gates job pickup, never work in flight: this sandbox is still running and still
+    // streaming. Relabelling it would tell the user their live run had stopped.
+    const running = inv({ startedAt: '2026-07-24T15:44:12Z', statusMessage: 'Running: pnpm test' });
+    expect(invocationBanner(running, { paused: true })).toEqual({
+      kind: 'running',
+      text: 'Running: pnpm test',
+    });
+  });
+
+  it('speaks for a queued invocation that never wrote a status line', () => {
+    expect(invocationBanner(inv(), { paused: true })).toEqual({
+      kind: 'queued',
+      text: PAUSED_WAIT_TEXT,
+    });
   });
 });
