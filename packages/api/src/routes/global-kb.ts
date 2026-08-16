@@ -116,6 +116,7 @@ globalKbRoutes.use('*', requireAuth);
 function configResponse(s: Awaited<ReturnType<typeof resolveGlobalKbSettings>>) {
   return {
     enabled: s.enabled,
+    digestEnabled: s.digestEnabled,
     mode: s.mode,
     namespace: s.namespace,
     ollamaUrl: s.ollamaUrl ?? '',
@@ -129,6 +130,7 @@ function configResponse(s: Awaited<ReturnType<typeof resolveGlobalKbSettings>>) 
 const configSchema = z
   .object({
     enabled: z.boolean().optional(),
+    digestEnabled: z.boolean().optional(),
     mode: z.enum(['internal', 'external']).optional(),
     namespace: z.string().min(1).max(120).optional(),
     ollamaUrl: z.string().optional(),
@@ -149,6 +151,8 @@ globalKbRoutes.put('/config', async (c) => {
   const d = parsed.data;
   if (d.enabled !== undefined)
     await configService.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled));
+  if (d.digestEnabled !== undefined)
+    await configService.set(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, String(d.digestEnabled));
   if (d.mode !== undefined) await configService.set(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode);
   if (d.namespace !== undefined)
     await configService.set(CONFIG_KEYS.GLOBAL_KB_NAMESPACE, d.namespace);

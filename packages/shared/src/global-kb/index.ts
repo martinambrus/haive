@@ -3,3 +3,4 @@ export * from './connection.js';
 export * from './ensure-schema.js';
 export * from './client.js';
 export * from './facets.js';
+export * from './task-context.js';

@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { and, desc, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
 import {
@@ -16,9 +16,10 @@ import {
   type RagToolingPrefs,
 } from '@haive/shared/rag';
 import {
+  confirmedStackValues,
   extractProjectFacets,
+  resolveTaskStackContext,
   withGlobalKb,
-  type ConfirmedStackValues,
   type ProjectFacetSet,
 } from '@haive/shared/global-kb';
 import { getDb } from '../db.js';
@@ -65,11 +66,11 @@ async function resolveRunbookBoost(db: ReturnType<typeof getDb>, taskId: string)
 }
 
 /** Resolve RAG prefs (ragMode/connection) + project name + the project FACET SET
- *  for a task. Workflow tasks have no 04-tooling-infrastructure / 01-env-detect
- *  steps of their own, so fall back to the repo's most recent onboarding run
- *  (mirrors the 02-pre-rag-sync detect resolution). Without this, ragMode
- *  resolves to 'none' and projectName to 'default' → empty hits / wrong DB for
- *  every workflow task. The facet set scopes the GLOBAL KB at query time. */
+ *  for a task. The step-output resolution (including the fall back to the repo's
+ *  most recent onboarding run, without which ragMode resolves to 'none' and
+ *  projectName to 'default' for every workflow task) lives in
+ *  resolveTaskStackContext, shared with the worker's global KB digest so both
+ *  scope the GLOBAL KB by the same facet set. */
 async function resolveTaskRagContext(
   db: ReturnType<typeof getDb>,
   taskId: string,
@@ -79,92 +80,18 @@ async function resolveTaskRagContext(
   facets: ProjectFacetSet;
   repositoryId: string | null;
 }> {
-  const taskRow = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { repositoryId: true },
-  });
-  const repositoryId = taskRow?.repositoryId ?? null;
-  let toolingOutput = (
-    await db.query.taskSteps.findFirst({
-      where: and(
-        eq(schema.taskSteps.taskId, taskId),
-        eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
-      ),
-      columns: { output: true },
-    })
-  )?.output;
-  let envDetect = (
-    await db.query.taskSteps.findFirst({
-      where: and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, '01-env-detect')),
-      columns: { detectOutput: true },
-    })
-  )?.detectOutput;
-  let confirmedOutput = (
-    await db.query.taskSteps.findFirst({
-      where: and(
-        eq(schema.taskSteps.taskId, taskId),
-        eq(schema.taskSteps.stepId, '02-detection-confirmation'),
-      ),
-      columns: { output: true },
-    })
-  )?.output;
-
-  if (!toolingOutput || !envDetect) {
-    if (taskRow?.repositoryId) {
-      const onboarding = await db.query.tasks.findFirst({
-        where: and(
-          eq(schema.tasks.repositoryId, taskRow.repositoryId),
-          eq(schema.tasks.type, 'onboarding'),
-        ),
-        orderBy: [desc(schema.tasks.createdAt)],
-        columns: { id: true },
-      });
-      if (onboarding) {
-        if (!toolingOutput) {
-          toolingOutput = (
-            await db.query.taskSteps.findFirst({
-              where: and(
-                eq(schema.taskSteps.taskId, onboarding.id),
-                eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
-              ),
-              columns: { output: true },
-            })
-          )?.output;
-        }
-        if (!envDetect) {
-          envDetect = (
-            await db.query.taskSteps.findFirst({
-              where: and(
-                eq(schema.taskSteps.taskId, onboarding.id),
-                eq(schema.taskSteps.stepId, '01-env-detect'),
-              ),
-              columns: { detectOutput: true },
-            })
-          )?.detectOutput;
-        }
-        if (!confirmedOutput) {
-          confirmedOutput = (
-            await db.query.taskSteps.findFirst({
-              where: and(
-                eq(schema.taskSteps.taskId, onboarding.id),
-                eq(schema.taskSteps.stepId, '02-detection-confirmation'),
-              ),
-              columns: { output: true },
-            })
-          )?.output;
-        }
-      }
-    }
-  }
+  const { repositoryId, toolingOutput, envDetect, confirmedOutput } = await resolveTaskStackContext(
+    db,
+    taskId,
+  );
 
   const projectName =
     (envDetect as { data?: { project?: { name?: string } } } | null)?.data?.project?.name ??
     'default';
-  const confirmed = (confirmedOutput as { values?: ConfirmedStackValues } | null)?.values ?? null;
   return {
     prefs: prefsFromTooling(toolingOutput),
     projectName,
-    facets: extractProjectFacets(envDetect, confirmed),
+    facets: extractProjectFacets(envDetect, confirmedStackValues(confirmedOutput)),
     repositoryId,
   };
 }

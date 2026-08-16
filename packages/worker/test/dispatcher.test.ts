@@ -8,6 +8,7 @@ import {
   retrievalGuidanceLines,
 } from '../src/step-engine/steps/_retrieval-guidance.js';
 import { WORKTREE_GIT_BOUNDARY_MARKER } from '../src/repo/worktree-git-boundary.js';
+import type { McpSurface } from '../src/sandbox/mcp-surface.js';
 
 type ProviderOverrides = Partial<CliProviderRecord> & Pick<CliProviderRecord, 'id' | 'name'>;
 
@@ -390,5 +391,66 @@ describe('resolveDispatch', () => {
       invokeOpts: {},
     });
     expect(repoRootPlan.effectivePrompt).toBe('Repo-root task.');
+  });
+});
+
+describe('global KB digest', () => {
+  const digest = [
+    { title: 'DDEV post-start hooks cannot inject settings', category: 'tech_pattern' },
+  ];
+
+  function surface(ragEnabled: boolean): McpSurface {
+    return {
+      ragOnly: false,
+      rag: { enabled: ragEnabled, apiUrl: 'http://api:3001', token: 't' },
+      chromeDevtools: { enabled: false, version: null },
+      ddevControl: { enabled: false, apiUrl: '', token: '' },
+      userServers: {},
+    };
+  }
+
+  it('advertises the titles when the rag server is wired', () => {
+    const plan = resolveDispatch({
+      providers: [makeProvider({ id: 'prov-claude', name: 'claude-code' })],
+      mcpSurface: surface(true),
+      globalKbDigest: digest,
+      input: { kind: 'prompt', prompt: 'Add DDEV.', capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(plan.effectivePrompt).toContain('DDEV post-start hooks cannot inject settings');
+    expect(plan.effectivePrompt).toContain('rag_search');
+  });
+
+  it('advertises nothing when the rag server is not wired', () => {
+    const plan = resolveDispatch({
+      providers: [makeProvider({ id: 'prov-claude', name: 'claude-code' })],
+      mcpSurface: surface(false),
+      globalKbDigest: digest,
+      input: { kind: 'prompt', prompt: 'Add DDEV.', capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(plan.effectivePrompt).not.toContain('DDEV post-start hooks cannot inject settings');
+  });
+
+  it('advertises nothing to an adapter that gets no MCP config at all', () => {
+    const plan = resolveDispatch({
+      providers: [makeProvider({ id: 'prov-amp', name: 'amp' })],
+      mcpSurface: surface(true),
+      globalKbDigest: digest,
+      input: { kind: 'prompt', prompt: 'Add DDEV.', capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(plan.effectivePrompt).not.toContain('DDEV post-start hooks cannot inject settings');
+  });
+
+  it('leaves the prompt untouched when the digest is empty', () => {
+    const plan = resolveDispatch({
+      providers: [makeProvider({ id: 'prov-claude', name: 'claude-code' })],
+      mcpSurface: surface(true),
+      globalKbDigest: [],
+      input: { kind: 'prompt', prompt: 'Add DDEV.', capabilities: [] },
+      invokeOpts: {},
+    });
+    expect(plan.effectivePrompt).not.toContain('haive_global_kb_index');
   });
 });

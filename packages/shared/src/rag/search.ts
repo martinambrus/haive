@@ -85,7 +85,10 @@ export interface RagFacetFilter {
   facets: Record<string, string[]>;
 }
 
-const FACET_FILTER_DIMENSIONS = [
+/** The dimensions the facet filter constrains. Exported so a consumer that
+ *  filters the same facet shape outside SQL (the global KB prompt digest) cannot
+ *  drift from what retrieval actually scopes on. */
+export const FACET_FILTER_DIMENSIONS = [
   'framework',
   'frameworkMajor',
   'language',

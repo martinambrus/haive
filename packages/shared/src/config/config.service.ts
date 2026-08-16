@@ -249,6 +249,12 @@ export const CONFIG_KEYS = {
   GLOBAL_KB_EMBED_MODEL: 'config:globalKb:embedModel',
   GLOBAL_KB_EMBED_DIMS: 'config:globalKb:embedDims',
   GLOBAL_KB_ARCHIVE_RETENTION_DAYS: 'config:globalKb:archiveRetentionDays',
+  // Prompt-side counterpart to retrieval: list the titles of the stack-matching
+  // global KB entries in every rag-wired agent prompt, so an agent that would
+  // otherwise never call rag_search at least knows what exists. Kill switch —
+  // it costs prompt tokens on every dispatch. Separate from GLOBAL_KB_ENABLED so
+  // the digest can be turned off without disabling global KB retrieval.
+  GLOBAL_KB_DIGEST_ENABLED: 'config:globalKb:digestEnabled',
 
   // Global terseness level for agent OUTPUT prose, applied as a directive appended to
   // each CLI step's main prompt (lite | full | ultra; default full). Only the model's
@@ -439,6 +445,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.GLOBAL_KB_MODE]: 'internal',
   [CONFIG_KEYS.GLOBAL_KB_NAMESPACE]: 'default',
   [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS]: '2560',
+  [CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED]: 'true',
   [CONFIG_KEYS.TERSENESS_LEVEL]: 'full',
   [CONFIG_KEYS.REVIEW_FANOUT_DISTILL]: 'false',
   [CONFIG_KEYS.REVIEW_REFUTE_ENABLED]: 'true',

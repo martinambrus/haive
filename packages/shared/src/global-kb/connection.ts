@@ -27,6 +27,10 @@ const DEFAULT_ARCHIVE_RETENTION_DAYS = 30;
 /** Instance-level global KB settings resolved from ConfigService + SecretsService. */
 export interface GlobalKbSettings {
   enabled: boolean;
+  /** List stack-matching entry titles in every rag-wired agent prompt. Costs
+   *  prompt tokens on each dispatch, so it carries its own kill switch rather
+   *  than riding `enabled`. */
+  digestEnabled: boolean;
   mode: GlobalKbMode;
   namespace: string;
   /** External connection string (secret). Required when `mode='external'`. */
@@ -56,6 +60,7 @@ export interface GlobalKbConnection {
 export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
   const [
     enabled,
+    digestEnabled,
     mode,
     namespace,
     ollamaUrl,
@@ -64,6 +69,7 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
     archiveRetentionDays,
   ] = await Promise.all([
     configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_ENABLED, false),
+    configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, true),
     configService.get(CONFIG_KEYS.GLOBAL_KB_MODE),
     configService.get(CONFIG_KEYS.GLOBAL_KB_NAMESPACE),
     configService.get(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL),
@@ -77,6 +83,7 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
   const connectionString = await secretsService.get(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
   return {
     enabled,
+    digestEnabled,
     mode: mode === 'external' ? 'external' : 'internal',
     namespace: namespace || 'default',
     connectionString: connectionString || null,

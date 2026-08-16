@@ -50,6 +50,7 @@ const STATUS_VARIANT: Record<string, 'success' | 'error' | 'warning' | 'default'
 
 interface GlobalKbConfig {
   enabled: boolean;
+  digestEnabled: boolean;
   mode: 'internal' | 'external';
   namespace: string;
   ollamaUrl: string;
@@ -232,6 +233,7 @@ export default function GlobalKbPage() {
   }, []);
   const [cfg, setCfg] = useState({
     enabled: true,
+    digestEnabled: true,
     mode: 'internal' as 'internal' | 'external',
     namespace: 'default',
     ollamaMode: 'internal' as 'internal' | 'external',
@@ -264,6 +266,7 @@ export default function GlobalKbPage() {
       setCfg((p) => ({
         ...p,
         enabled: cc.enabled,
+        digestEnabled: cc.digestEnabled,
         mode: cc.mode,
         namespace: cc.namespace,
         ollamaMode: deriveOllamaMode(cc.ollamaUrl),
@@ -330,6 +333,7 @@ export default function GlobalKbPage() {
     try {
       const payload: Record<string, unknown> = {
         enabled: cfg.enabled,
+        digestEnabled: cfg.digestEnabled,
         mode: cfg.mode,
         namespace: cfg.namespace,
         ollamaUrl: effectiveOllamaUrl,
@@ -651,6 +655,15 @@ export default function GlobalKbPage() {
                 className="h-4 w-4 rounded border-neutral-700 bg-neutral-950"
               />
               Enabled (tasks retrieve global entries)
+            </label>
+            <label className="flex items-center gap-2 text-sm text-neutral-100">
+              <input
+                type="checkbox"
+                checked={cfg.digestEnabled}
+                onChange={(e) => setCfg({ ...cfg, digestEnabled: e.target.checked })}
+                className="h-4 w-4 rounded border-neutral-700 bg-neutral-950"
+              />
+              List matching entry titles in agent prompts (costs prompt tokens per run)
             </label>
             <div className="flex flex-wrap gap-3">
               <div className="flex flex-col gap-1.5">

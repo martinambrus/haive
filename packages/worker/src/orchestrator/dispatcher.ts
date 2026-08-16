@@ -11,6 +11,11 @@ import type {
 } from '../cli-adapters/types.js';
 import { splitSubAgentForProvider } from '../sub-agent-emulator/splitter.js';
 import { adaptPromptForCliCapabilities } from '../step-engine/steps/_retrieval-guidance.js';
+import {
+  resolveGlobalKbDigest,
+  withGlobalKbDigest,
+  type GlobalKbDigestEntry,
+} from '../step-engine/steps/_global-kb-digest.js';
 import { hasReadyLspBridge } from '../lsp/configured-lsp.js';
 import {
   resolveInvocationUsesWorktreeGitBoundary,
@@ -89,6 +94,10 @@ export interface DispatchRequest {
   /** Computed by resolveTaskDispatch. Exposed on the pure resolver only for
    *  deterministic unit tests; null means "advertise nothing". */
   mcpSurface?: McpSurface | null;
+  /** Stack-matching global KB titles to advertise. Computed by
+   *  resolveTaskDispatch; exposed on the pure resolver only for deterministic
+   *  unit tests. Empty means there is nothing to advertise. */
+  globalKbDigest?: GlobalKbDigestEntry[];
   registry?: CliAdapterRegistry;
 }
 
@@ -99,10 +108,11 @@ export async function resolveTaskDispatch(
   taskId: string,
   req: DispatchRequest,
 ): Promise<DispatchPlan> {
-  const [lspConfigured, worktreeGitBoundary, mcpSurface] = await Promise.all([
+  const [lspConfigured, worktreeGitBoundary, mcpSurface, globalKbDigest] = await Promise.all([
     hasReadyLspBridge(db, taskId),
     resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
     resolveMcpSurface(db, taskId, req.toolProfile === 'rag_only'),
+    resolveGlobalKbDigest(db, taskId),
   ]);
   return resolveDispatch({
     ...req,
@@ -111,6 +121,7 @@ export async function resolveTaskDispatch(
     // not apply (or omit one it will): the DB-backed target wins any input.
     worktreeGitBoundary,
     mcpSurface,
+    globalKbDigest,
   });
 }
 
@@ -182,10 +193,21 @@ function buildCliSidePlan(
       ddevBounded,
       adapter.supportsMcp ? (req.mcpSurface ?? null) : null,
     );
+    // House standards from other projects, as titles. They live behind rag_search and
+    // nowhere else — grep cannot reach them — so they are worth prompt tokens exactly
+    // when that tool is actually wired for this invocation. Gated on the resolved
+    // surface rather than on prompt wording, so a step that gets no rag server never
+    // advertises a door it does not have. Applied at the same choke point as the
+    // boundaries above, which is what puts it in front of a model like muse that
+    // never picks the tool on its own.
+    const ragWired = adapter.supportsMcp && req.mcpSurface?.rag.enabled === true;
+    const digested = ragWired
+      ? withGlobalKbDigest(mcpBounded, req.globalKbDigest ?? [])
+      : mcpBounded;
     // Learned model limitations. Applied here, after the provider is resolved, so it
     // reaches the prompt, every sub-agent prompt and the synthesis prompt alike — and
     // pairs with the tool deny merged into invokeOpts below.
-    return withModelCapabilityBoundary(mcpBounded, provider);
+    return withModelCapabilityBoundary(digested, provider);
   };
 
   // A model that cannot read images must not be handed the screenshot tool: the prompt
