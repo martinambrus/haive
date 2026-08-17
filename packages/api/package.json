@@ -30,7 +30,7 @@
     "bullmq": "^5.81.2",
     "dockerode": "^5.0.1",
     "drizzle-orm": "0.45.2",
-    "hono": "^4.12.34",
+    "hono": "^4.13.1",
     "ioredis": "^5.11.1",
     "jsonwebtoken": "^9.0.2",
     "ws": "^8.21.1",
@@ -42,7 +42,7 @@
     "@types/dockerode": "^4.0.1",
     "@types/jsonwebtoken": "^9.0.7",
     "@types/ws": "^8.18.1",
-    "tsx": "^4.23.1",
+    "tsx": "^4.23.11",
     "typescript": "^5.7.3",
     "vitest": "^4.1.10"
   }
