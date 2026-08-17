@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { isUndefinedTable, schema } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
 import {
   DEFAULT_RAG_SEARCH_CONFIG,
@@ -128,12 +128,23 @@ async function logRagQuery(
 /** Merge per-repo (local) and global hits, guaranteeing the global KB a slot
  *  budget (up to half of topK) so relevant house standards always surface
  *  without drowning repo-specific code. Tunable; recalibrate with rag-eval. */
-function mergeHits(local: RagSearchHit[], global: RagSearchHit[], topK: number): RagSearchHit[] {
+export function mergeHits(
+  local: RagSearchHit[],
+  global: RagSearchHit[],
+  topK: number,
+): RagSearchHit[] {
   const byRrf = (a: RagSearchHit, b: RagSearchHit): number => b.rrf - a.rrf;
+  const gSorted = [...global].sort(byRrf);
+  const lSorted = [...local].sort(byRrf);
   const globalCap = Math.floor(topK / 2);
-  const selGlobal = [...global].sort(byRrf).slice(0, globalCap);
-  const remaining = Math.max(0, topK - selGlobal.length);
-  const selLocal = [...local].sort(byRrf).slice(0, remaining);
+  const selGlobal = gSorted.slice(0, globalCap);
+  const selLocal = lSorted.slice(0, Math.max(0, topK - selGlobal.length));
+  // Slots local did not fill go back to global (the reverse is already handled by
+  // sizing selLocal off selGlobal.length). Without this a repo whose local index
+  // is not built yet got half a page of global KB hits: the reserve was a floor
+  // for global, never a ceiling on what it may fill when local is short.
+  const spare = Math.max(0, topK - selLocal.length - selGlobal.length);
+  if (spare > 0) selGlobal.push(...gSorted.slice(globalCap, globalCap + spare));
   return [...selLocal, ...selGlobal].sort(byRrf);
 }
 
@@ -197,8 +208,18 @@ ragRoutes.post('/search', async (c) => {
         localHits = hits.map((h) => ({ ...h, scope: 'local' as const }));
       }
     } catch (err) {
-      log.error({ err, taskId, projectName }, 'local rag search failed');
-      throw new HttpError(500, 'rag search failed');
+      // The per-project RAG database is created lazily by resolveRagConnection, but
+      // ai_rag_embeddings is only created by the onboarding step 10-rag-populate.
+      // Agents run LLM steps well before that (06_5-agent-discovery), so a missing
+      // table means "this repo is not indexed yet", not "RAG is broken" — degrade to
+      // zero local hits and still serve the global KB. Any other local failure stays
+      // a loud 500: a genuinely misconfigured RAG connection must not be swallowed.
+      if (isUndefinedTable(err)) {
+        log.warn({ taskId, projectName }, 'local rag index not built yet; returning global-only');
+      } else {
+        log.error({ err, taskId, projectName }, 'local rag search failed');
+        throw new HttpError(500, 'rag search failed');
+      }
     } finally {
       if (conn) await conn.close().catch(() => {});
     }

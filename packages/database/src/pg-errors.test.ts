@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isUniqueViolation } from './pg-errors.js';
+import { isUniqueViolation, isUndefinedTable } from './pg-errors.js';
 
 /** The EXACT shape drizzle-orm throws, captured from a live duplicate insert:
  *  ctor=DrizzleQueryError code=undefined causeCtor=PostgresError causeCode=23505.
@@ -48,5 +48,37 @@ describe('isUniqueViolation', () => {
     a.cause = b;
     b.cause = a;
     expect(isUniqueViolation(a)).toBe(false);
+  });
+});
+
+/** The shape the raw postgres.js driver throws on the RAG search path, captured from the
+ *  live api log: a bare PostgresError with the SQLSTATE on the error itself (no drizzle
+ *  wrapper, because ragHybridSearch queries through `conn.pg.unsafe`). */
+function bareDriverError(code: string): Error {
+  return Object.assign(new Error('relation "ai_rag_embeddings" does not exist'), { code });
+}
+
+describe('isUndefinedTable', () => {
+  it('matches the bare driver error the RAG search path throws', () => {
+    expect(isUndefinedTable(bareDriverError('42P01'))).toBe(true);
+  });
+
+  it('matches a drizzle-wrapped PostgresError', () => {
+    const wrapped = Object.assign(new Error('Failed query: select ...'), {
+      cause: bareDriverError('42P01'),
+    });
+    expect(isUndefinedTable(wrapped)).toBe(true);
+  });
+
+  it('is false for a different SQLSTATE (e.g. unique_violation)', () => {
+    expect(isUndefinedTable(bareDriverError('23505'))).toBe(false);
+    expect(isUniqueViolation(bareDriverError('42P01'))).toBe(false);
+  });
+
+  it('is false for a plain error, a code-less object, null and undefined', () => {
+    expect(isUndefinedTable(new Error('boom'))).toBe(false);
+    expect(isUndefinedTable({})).toBe(false);
+    expect(isUndefinedTable(null)).toBe(false);
+    expect(isUndefinedTable(undefined)).toBe(false);
   });
 });
