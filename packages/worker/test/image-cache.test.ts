@@ -1,11 +1,27 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { renderDockerfile, resolveImageTag } from '../src/sandbox/image-cache.js';
+import {
+  renderDockerfile,
+  resolveImageTag,
+  type ImageTagResolution,
+} from '../src/sandbox/image-cache.js';
 
 const baseParams = {
   name: 'claude-code' as const,
   cliVersion: '1.2.3',
   providerId: 'provider-abc',
 };
+
+/** The content identity a tag must carry, derived from the resolution itself.
+ *
+ *  Deliberately NOT a hardcoded hex literal: the rendered Dockerfile legitimately changes
+ *  whenever install metadata does (a version bump, a new autoUpdateDisable knob), and a
+ *  pinned literal would fail on those without anything being wrong. Deriving it pins the
+ *  INVARIANT — the tag names what the image contains — which is the property that was
+ *  missing and let a stale image be served with no build error. */
+function expectedHash(result: ImageTagResolution): string {
+  return createHash('sha256').update(renderDockerfile(result), 'utf8').digest('hex').slice(0, 16);
+}
 
 describe('resolveImageTag', () => {
   it('produces a shared, version-pinned tag when only install lines are present', () => {
@@ -15,7 +31,7 @@ describe('resolveImageTag', () => {
     });
     expect(result).not.toBeNull();
     expect(result!.shared).toBe(true);
-    expect(result!.tag).toBe('haive-cli-sandbox:claude-code-1.2.3');
+    expect(result!.tag).toBe(`haive-cli-sandbox:claude-code-1.2.3-${expectedHash(result!)}`);
   });
 
   it('falls back to "installer" segment when cliVersion is null for a pinnable CLI', () => {
@@ -24,7 +40,7 @@ describe('resolveImageTag', () => {
       cliVersion: null,
       sandboxDockerfileExtra: null,
     });
-    expect(result!.tag).toBe('haive-cli-sandbox:claude-code-installer');
+    expect(result!.tag).toBe(`haive-cli-sandbox:claude-code-installer-${expectedHash(result!)}`);
   });
 
   it('uses the piggyback target name for a piggyback CLI (zai -> claude-code)', () => {
@@ -35,7 +51,49 @@ describe('resolveImageTag', () => {
       sandboxDockerfileExtra: null,
     });
     expect(result!.shared).toBe(true);
-    expect(result!.tag).toBe('haive-cli-sandbox:claude-code-9.9.9');
+    expect(result!.tag).toBe(`haive-cli-sandbox:claude-code-9.9.9-${expectedHash(result!)}`);
+  });
+
+  it('SHARING SURVIVES the hash: piggybacks still collapse onto one tag', () => {
+    // The point of the shared branch. zai/ollama/muse all npm-install the claude binary, so
+    // their rendered Dockerfiles are byte-identical to claude-code's and must hash the same —
+    // one image, one build. If this ever fails, the hash has started keying on something that
+    // is not content and the fleet just multiplied its image count.
+    const claude = resolveImageTag({ ...baseParams, sandboxDockerfileExtra: null });
+    for (const name of ['zai', 'ollama', 'muse'] as const) {
+      const piggyback = resolveImageTag({
+        name,
+        cliVersion: '1.2.3',
+        providerId: `provider-${name}`,
+        sandboxDockerfileExtra: null,
+      });
+      expect(renderDockerfile(piggyback!)).toBe(renderDockerfile(claude!));
+      expect(piggyback!.tag).toBe(claude!.tag);
+    }
+  });
+
+  it('THE BUG: a changed Dockerfile changes the shared tag, hash and all', () => {
+    // Keyed on name+version alone, an edit to a provider's install lines produced a tag that
+    // already existed — docker served the stale image and never built, so there was no build
+    // error to notice and the breakage surfaced at run time instead. Asserting the HASH halves
+    // differ (not merely the version segment) is what covers the changes name+version cannot
+    // see: a new BASE_IMAGE, a different autoUpdateDisable knob, an altered install flag.
+    const before = resolveImageTag({ ...baseParams, sandboxDockerfileExtra: null });
+    const after = resolveImageTag({
+      ...baseParams,
+      cliVersion: '1.2.4',
+      sandboxDockerfileExtra: null,
+    });
+    expect(renderDockerfile(before!)).not.toBe(renderDockerfile(after!));
+    expect(before!.tag).not.toBe(after!.tag);
+    expect(expectedHash(before!)).not.toBe(expectedHash(after!));
+  });
+
+  it('is deterministic — identical inputs resolve to the identical tag', () => {
+    // Otherwise every resolution would look like a content change and rebuild forever.
+    const a = resolveImageTag({ ...baseParams, sandboxDockerfileExtra: null });
+    const b = resolveImageTag({ ...baseParams, sandboxDockerfileExtra: null });
+    expect(a!.tag).toBe(b!.tag);
   });
 
   it('embeds custom Dockerfile extras verbatim in the rendered Dockerfile', () => {
@@ -122,7 +180,7 @@ describe('resolveImageTag', () => {
       sandboxDockerfileExtra: '   \n  \n',
     });
     expect(result!.shared).toBe(true);
-    expect(result!.tag).toBe('haive-cli-sandbox:claude-code-1.2.3');
+    expect(result!.tag).toBe(`haive-cli-sandbox:claude-code-1.2.3-${expectedHash(result!)}`);
   });
 
   it('produces different tags for two providers even when extras content is identical', () => {
