@@ -52,6 +52,21 @@ const STREAM_RATE_LIMIT = 'LLM blocked by rate limit (overage rejected)';
 const STREAM_PREMATURE_END =
   'LLM emitted no result event (stream ended prematurely — likely timeout, session abort, or quota rejection)';
 
+// The EXACT pair captured from the production incident (task dd682d32, step
+// 08c2-code-audit, invocation 2d97813a): a MODEL error from grok, plus the stream-json
+// tail that reaches the classifier as providerErrorScan. The `usage` block's
+// `input_tokens` keys are what a bare `token.*invalid` matched, so a dead model slug was
+// reported as an auth failure telling the user to check XAI_API_KEY. Every claude-family
+// CLI emits the same terminal line, so this is not a grok-only shape.
+const INCIDENT_GROK_MODEL_ID = `Couldn't set model 'grok-build-0.1': Invalid params: "unknown model id". Run 'grok models' to see available models.`;
+const INCIDENT_GROK_MODEL_ID_SCAN =
+  `{"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":0,` +
+  `"num_turns":0,"stop_reason":null,"total_cost_usd":0.0,"usage":{"input_tokens":0,` +
+  `"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,` +
+  `"server_tool_use":{"web_search_requests":0}},"modelUsage":{},"errors":["Couldn't set ` +
+  `model 'grok-build-0.1': Invalid params: \\"unknown model id\\". Run 'grok models' to ` +
+  `see available models."],"session_id":"01a00fe6-4db1-7b72-b500-9b5f6f6c1dbc"}`;
+
 describe('classifyProviderFatal', () => {
   it('classifies the production 429 weekly-limit message as rate_limit', () => {
     expect(classifyProviderFatal(1, INCIDENT_429, null)).toBe('rate_limit');
@@ -78,8 +93,24 @@ describe('classifyProviderFatal', () => {
     'authentication_error: invalid x-api-key',
     'Error 403: permission_error',
     'your token has expired, please log in',
+    // grok's wording for a rejected/absent credential — the only signal it emits.
+    'Not signed in. To authenticate without a browser, run:\n  grok login --device-code',
+    // Bare token-state wording, with no other auth marker to fall back on.
+    'refresh token invalid',
+    'the access token expired',
+    'token has been revoked',
   ])('classifies %s as auth', (msg) => {
     expect(classifyProviderFatal(1, msg, null)).toBe('auth');
+  });
+
+  // The original failing input. A model-id rejection is NOT an auth failure: the CLI
+  // authenticated fine (the session_id in the scan proves it) and the user was told to
+  // check a credential that was never the problem. Guards the `\btoken\b` boundary in
+  // AUTH_RE against the stream-json `usage` block.
+  it('does NOT classify a model-id rejection as auth despite the stream-json usage block', () => {
+    expect(classifyProviderFatal(1, INCIDENT_GROK_MODEL_ID, INCIDENT_GROK_MODEL_ID_SCAN)).toBe(
+      null,
+    );
   });
 
   it.each([

@@ -215,8 +215,19 @@ const BILLING_EXHAUSTED_RE =
 // `not signed in` is grok's phrasing for a rejected or absent credential. Without it that
 // failure matched nothing at all and was passed through as a bare CLI error, so the step
 // carried no fatal classification and no actionable hint.
+//
+// The last alternative's WORD BOUNDARY and same-line bound are load-bearing, not style.
+// The haystack includes providerErrorScan (raw stdout+stderr), and for every claude-family
+// / grok CLI that stream is NDJSON whose terminal `result` line always carries
+// `input_tokens` / `output_tokens` / `cache_read_input_tokens`. A bare `token.*invalid`
+// therefore matched that line in ANY failure whose error text happens to contain "invalid"
+// or "expired" — measured on grok answering
+// `Couldn't set model 'grok-build-0.1': Invalid params: "unknown model id"`, a model
+// error reported to the user as "check your XAI_API_KEY". `\btoken\b` cannot match
+// `input_tokens` (word char on both sides), and `[^\n]{0,40}?` stops a match bridging a
+// whole JSON line. Do not relax either back.
 const AUTH_RE =
-  /\b40[13]\b|authentication_error|invalid authentication credentials|\bunauthorized\b|\bunauthenticated\b|permission_error|please log.?in|not authenticated|not signed in|token.*(?:expired|invalid)/i;
+  /\b40[13]\b|authentication_error|invalid authentication credentials|\bunauthorized\b|\bunauthenticated\b|permission_error|please log.?in|not authenticated|not signed in|\btoken\b[^\n]{0,40}?\b(?:expired|invalid|revoked)\b/i;
 const SERVER_ERROR_RE =
   /\b529\b|(?:status|http|error|code|\()[\s:/]*5\d{2}\b|\b5\d{2}\b\s*(?:error|status|service|unavailable|gateway|bad gateway|overloaded)|service unavailable|bad gateway|gateway time-?out|internal server error|\boverloaded\b/i;
 
