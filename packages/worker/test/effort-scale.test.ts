@@ -255,3 +255,48 @@ describe('codex arg-based effort injection', () => {
     expect(promptIdx).toBeGreaterThan(skipIdx);
   });
 });
+
+// OpenRouter's accepted effort levels are a GATEWAY contract, measured by posting an
+// out-of-range `output_config.effort` and reading the 400 back:
+//   "Invalid option: expected one of \"low\"|\"medium\"|\"high\"|\"xhigh\"|\"max\""
+// The same enum is returned for a model whose supported_parameters has no `reasoning`,
+// so it is not per-model — those models answer 200 and normalize the level away. Two
+// consequences this locks down: the scale is the five-level claude-code one (NOT the
+// four-level CLAUDE_LIKE scale the other wrapper adapters use), and since no level can
+// 400 on a model basis the ordinary unset -> scale.max default is safe.
+describe('openrouter effort scale', () => {
+  it('declares the measured five-level gateway enum, including xhigh', () => {
+    const adapter = cliAdapterRegistry.get('openrouter');
+    expect(adapter.effortScale).not.toBeNull();
+    expect(adapter.effortScale!.values).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+    expect(adapter.effortScale!.max).toBe('max');
+  });
+
+  it('sends xhigh — the level the four-level CLAUDE_LIKE scale would have dropped', () => {
+    const adapter = cliAdapterRegistry.get('openrouter');
+    const provider = makeProvider({ id: 'p1', name: 'openrouter', effortLevel: 'xhigh' });
+    const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w' });
+    expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBe('xhigh');
+  });
+
+  it('defaults an unset level to scale.max like its claude-family siblings', () => {
+    const adapter = cliAdapterRegistry.get('openrouter');
+    const provider = makeProvider({ id: 'p1', name: 'openrouter', effortLevel: null });
+    const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w' });
+    expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBe('max');
+  });
+
+  it('lets an explicit per-step level win over the stored one', () => {
+    const adapter = cliAdapterRegistry.get('openrouter');
+    const provider = makeProvider({ id: 'p1', name: 'openrouter', effortLevel: 'high' });
+    const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w', effortLevel: 'low' });
+    expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBe('low');
+  });
+
+  it('drops a level the gateway would reject rather than forwarding it', () => {
+    const adapter = cliAdapterRegistry.get('openrouter');
+    const provider = makeProvider({ id: 'p1', name: 'openrouter', effortLevel: 'ultra' });
+    const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w' });
+    expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+  });
+});

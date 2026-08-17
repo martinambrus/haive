@@ -891,7 +891,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // A reviewer SIGKILLed at 30 minutes loses every finding it made. Steer it to bank
     // the verified ones first. Safe here because a reviewer only reads and reports.
     //
-    // Only reaches a STEERABLE provider (claude-code, muse, zai, ollama). On codex,
+    // Only reaches a STEERABLE provider (claude-code, muse, zai, ollama, openrouter). On codex,
     // gemini, amp or antigravity there is no wind-down at all and the kill is
     // zero-grace — so on those the escalating per-agent budget, not this, is what keeps
     // a long review from dying empty. exec-core logs when the request cannot be honored.

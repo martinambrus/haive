@@ -30,6 +30,7 @@ const DRUPAL_LSP_BASE_BY_PROVIDER: Record<string, string> = {
   // repo, new onboarding_artifacts rows, and a template-manifest entry — all to
   // produce byte-identical files.
   grok: '.claude/plugins/drupal-php-lsp',
+  openrouter: '.claude/plugins/drupal-php-lsp',
 };
 
 interface InstallPluginsDetect {

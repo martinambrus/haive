@@ -10,6 +10,7 @@ export const cliProviderNameSchema = z.enum([
   'ollama',
   'muse',
   'grok',
+  'openrouter',
 ]);
 
 export const cliAuthModeSchema = z.enum(['subscription', 'api_key']);

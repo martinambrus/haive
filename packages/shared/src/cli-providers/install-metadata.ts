@@ -160,4 +160,14 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
     ],
     versionPinnable: true,
   },
+  openrouter: {
+    // OpenRouter reuses the Claude binary against its Anthropic-compatible endpoint
+    // (like zai/ollama/muse); no separate install. Piggybacking also means
+    // image-cache resolves it to the existing haive-cli-sandbox:claude-code-<ver>
+    // tag, so adding this provider builds no new sandbox image.
+    install: { kind: 'piggyback', uses: 'claude-code' },
+    versionSource: { kind: 'npm', package: '@anthropic-ai/claude-code' },
+    autoUpdateDisable: [{ kind: 'env', vars: { DISABLE_AUTOUPDATER: '1' } }],
+    versionPinnable: true,
+  },
 };

@@ -7,6 +7,7 @@ import { GeminiAdapter } from './gemini.js';
 import { GrokAdapter } from './grok.js';
 import { MuseAdapter } from './muse.js';
 import { OllamaAdapter } from './ollama.js';
+import { OpenRouterAdapter } from './openrouter.js';
 import type { CliProviderName } from './types.js';
 import { ZaiAdapter } from './zai.js';
 
@@ -23,6 +24,7 @@ export class CliAdapterRegistry {
     this.register(new OllamaAdapter());
     this.register(new MuseAdapter());
     this.register(new GrokAdapter());
+    this.register(new OpenRouterAdapter());
   }
 
   private register(adapter: BaseCliAdapter): void {

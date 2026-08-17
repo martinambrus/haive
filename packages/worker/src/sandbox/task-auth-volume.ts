@@ -40,6 +40,7 @@ function rtkInitFlagFor(providerName: CliProviderName): string | undefined {
     case 'claude-code':
     case 'zai':
     case 'muse':
+    case 'openrouter':
       return '';
     case 'gemini':
       return '--gemini';

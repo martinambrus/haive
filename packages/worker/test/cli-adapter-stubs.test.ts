@@ -48,7 +48,7 @@ describe('LSP capability matrix', () => {
   it('supports the Claude plugin family and fails closed for every other CLI', () => {
     expect(
       CLI_PROVIDER_LIST.filter((provider) => provider.supportsLsp).map((provider) => provider.name),
-    ).toEqual(['claude-code', 'zai', 'ollama', 'muse', 'grok']);
+    ).toEqual(['claude-code', 'zai', 'ollama', 'muse', 'grok', 'openrouter']);
     expect(
       CLI_PROVIDER_LIST.filter((provider) => !provider.supportsLsp).map(
         (provider) => provider.name,

@@ -45,7 +45,8 @@ export interface RtkRenderInputs {
 
 function hasClaudeFamily(ctx: RtkRenderInputs): boolean {
   return ctx.enabledCliProviders.some(
-    (p) => p.name === 'claude-code' || p.name === 'zai' || p.name === 'muse',
+    (p) =>
+      p.name === 'claude-code' || p.name === 'zai' || p.name === 'muse' || p.name === 'openrouter',
   );
 }
 

@@ -1,0 +1,24 @@
+-- Add 'openrouter' to the cli_provider_name enum so an OpenRouter gateway provider
+-- (reusing the Claude binary against OpenRouter's Anthropic-compatible endpoint at
+-- openrouter.ai/api) can be created. Additive; existing rows are unaffected.
+--
+-- Unlike muse (0110 + 0111) this needs NO companion data migration: openrouter is a
+-- brand-new value with no prior rows to re-point, so there is nothing to move off
+-- the claude-code adapter and no second transaction is required.
+--
+-- Deploy note: applied via `drizzle-kit push --force` from the schema; this file
+-- is the idempotent parity/rollback record. Postgres cannot drop an enum value, so
+-- rollback requires recreating the type without 'openrouter' and is only safe when
+-- no row references it (both cli_providers.name and cli_package_versions.name) —
+-- delete any OpenRouter provider from the settings page FIRST, or this fails.
+--
+-- Rollback (only if no cli_providers / cli_package_versions row has name='openrouter'):
+--   ALTER TYPE "cli_provider_name" RENAME TO "cli_provider_name_old";
+--   CREATE TYPE "cli_provider_name" AS ENUM ('claude-code','codex','gemini','amp','zai','antigravity','ollama','muse','grok');
+--   ALTER TABLE "cli_providers" ALTER COLUMN "name" TYPE "cli_provider_name" USING "name"::text::"cli_provider_name";
+--   ALTER TABLE "cli_package_versions" ALTER COLUMN "name" TYPE "cli_provider_name" USING "name"::text::"cli_provider_name";
+--   DROP TYPE "cli_provider_name_old";
+--
+-- Reverting the CODE while leaving this value in place is harmless and is the
+-- preferred undo; the recipe above is only for a full schema rollback.
+ALTER TYPE "cli_provider_name" ADD VALUE IF NOT EXISTS 'openrouter';

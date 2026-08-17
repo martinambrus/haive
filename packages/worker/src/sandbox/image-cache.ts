@@ -50,9 +50,9 @@ export function resolveImageTag(params: {
     //
     // Sharing is preserved, which is the whole point of this branch: providers whose rendered
     // Dockerfile is byte-identical hash identically, so claude-code and its piggybacks
-    // (zai / ollama / muse) still collapse onto ONE tag and one build. Only a real change to
-    // the rendered content moves the tag — including changes name+version cannot see, such as
-    // a new BASE_IMAGE or a different autoUpdateDisable knob.
+    // (zai / ollama / muse / openrouter) still collapse onto ONE tag and one build. Only a real
+    // change to the rendered content moves the tag — including changes name+version cannot
+    // see, such as a new BASE_IMAGE or a different autoUpdateDisable knob.
     //
     // The version segment stays for legibility (the tag says which CLI build it is); the hash
     // is what correctness rests on. Nothing parses this string — every consumer stores it,

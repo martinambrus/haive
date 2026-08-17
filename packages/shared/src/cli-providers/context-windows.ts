@@ -46,6 +46,12 @@ const PROVIDER_FALLBACK_WINDOW: Partial<Record<CliProviderName, number>> = {
   ollama: 128_000,
   muse: 1_048_576,
   grok: 256_000,
+  // Gateway: the real window belongs to the ROUTED model, and OpenRouter reports it
+  // per model (`context_length`) in the cached catalog. This fallback only covers a
+  // row whose model id matches nothing above — OpenRouter slugs are `vendor/model`,
+  // so the substring matcher already resolves `anthropic/claude-*` to 200k and
+  // `openai/gpt-5*` to 400k on its own.
+  openrouter: 200_000,
 };
 
 /** Conservative global fallback when neither model nor provider is known. */

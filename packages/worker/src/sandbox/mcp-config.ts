@@ -221,6 +221,7 @@ export function buildMcpConfigForCli(
     case 'zai':
     case 'ollama':
     case 'muse':
+    case 'openrouter':
       return {
         path: CLAUDE_MCP_CONFIG_PATH,
         format: 'json',

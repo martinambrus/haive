@@ -285,7 +285,16 @@ export interface FilesystemListing {
 }
 
 export type CliProviderName =
-  'claude-code' | 'codex' | 'gemini' | 'amp' | 'zai' | 'antigravity' | 'ollama' | 'muse' | 'grok';
+  | 'claude-code'
+  | 'codex'
+  | 'gemini'
+  | 'amp'
+  | 'zai'
+  | 'antigravity'
+  | 'ollama'
+  | 'muse'
+  | 'grok'
+  | 'openrouter';
 
 export type CliAuthMode = 'subscription' | 'api_key';
 export type CliSandboxBuildStatus = 'idle' | 'building' | 'ready' | 'failed';
@@ -320,6 +329,7 @@ export const CLI_DEFAULT_EGRESS_DOMAINS: Record<CliProviderName, string[]> = {
   ollama: ['ollama.com', '*.ollama.com'],
   muse: ['api.meta.ai'],
   grok: ['api.x.ai', 'accounts.x.ai', 'auth.x.ai', 'grok.com'],
+  openrouter: ['openrouter.ai'],
 };
 
 export interface EffortScaleMetadata {

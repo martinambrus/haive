@@ -418,6 +418,55 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     projectAgentsDir: '.grok/agents',
     agentFileFormat: 'markdown',
   },
+  openrouter: {
+    name: 'openrouter',
+    // The claude binary prices every run against ANTHROPIC's table, which is wrong
+    // for a gateway that bills OpenRouter credits at the ROUTED model's price — and
+    // wrong by a different factor per model, since one provider row can point at
+    // anything from a free model to Opus. Same reasoning as zai/muse: reported for
+    // observability, never summed as real dollars.
+    costBasis: 'estimate',
+    displayName: 'OpenRouter',
+    description:
+      "OpenRouter gateway. Reuses the Claude binary against OpenRouter's Anthropic-compatible endpoint; pick the model per provider and supply the key as an ANTHROPIC_AUTH_TOKEN secret.",
+    defaultExecutable: 'claude',
+    // Native sub-agents via the claude binary's Task(), same as zai/ollama/muse.
+    supportsSubagents: true,
+    supportsCliAuth: true,
+    supportsMcp: true,
+    supportsPlugins: true,
+    supportsLsp: true,
+    // No `claude /login` flow; the key arrives via env. OpenRouter's docs insist
+    // ANTHROPIC_API_KEY be explicitly empty, but that is NOT a wire requirement —
+    // probed against openrouter.ai/api/v1/messages, `x-api-key` alone, `Authorization:
+    // Bearer` alone, and BOTH together each authenticate (a bogus key returns
+    // "User not found."; no credential returns "No cookie auth credentials found").
+    // So the claude-family habit of setting both env vars is safe here. Do not
+    // "fix" the adapter to blank one of them.
+    defaultAuthMode: 'api_key',
+    apiKeyEnvName: 'ANTHROPIC_AUTH_TOKEN',
+    // No sensible default: OpenRouter fronts 400+ models across every vendor, and a
+    // default would silently bill a model the user never chose. The per-provider
+    // model field is required.
+    defaultModel: null,
+    supportsModelSelection: true,
+    authConfigPaths: ['~/.config/claude', '~/.claude'],
+    docsUrl: 'https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration',
+    // The FIVE-level claude-code scale, not the four-level CLAUDE_LIKE one the other
+    // wrapper adapters use. MEASURED, not assumed: posting an out-of-range
+    // `output_config.effort` to openrouter.ai returns a 400 enumerating
+    // low|medium|high|xhigh|max, and the identical enum comes back for a model whose
+    // `supported_parameters` contains no `reasoning` — so the accepted set is a
+    // GATEWAY contract, not a per-model one. Models without reasoning answer 200 and
+    // normalize the level away, so no level can 400 on a model basis and the ordinary
+    // unset -> scale.max default is safe here. Keep in sync with the copy in
+    // cli-adapters/openrouter.ts; re-probe rather than editing against the docs page.
+    effortScale: CLAUDE_CODE_EFFORT_SCALE,
+    projectSkillsDir: '.claude/skills',
+    userSkillsPaths: [],
+    projectAgentsDir: '.claude/agents',
+    agentFileFormat: 'markdown',
+  },
 };
 
 export const CLI_PROVIDER_LIST: CliProviderMetadata[] = Object.values(CLI_PROVIDER_CATALOG);

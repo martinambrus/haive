@@ -786,7 +786,11 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     if (detected.rtkEnabled) {
       const enabled = detected.enabledCliProviders ?? [];
       const hasClaudeFamily = enabled.some(
-        (p) => p.name === 'claude-code' || p.name === 'zai' || p.name === 'muse',
+        (p) =>
+          p.name === 'claude-code' ||
+          p.name === 'zai' ||
+          p.name === 'muse' ||
+          p.name === 'openrouter',
       );
       const hasGemini = enabled.some((p) => p.name === 'gemini');
 

@@ -14,7 +14,16 @@ export type StepStatus =
   'pending' | 'running' | 'waiting_form' | 'waiting_cli' | 'done' | 'failed' | 'skipped';
 
 export type CliProviderName =
-  'claude-code' | 'codex' | 'gemini' | 'amp' | 'zai' | 'antigravity' | 'ollama' | 'muse' | 'grok';
+  | 'claude-code'
+  | 'codex'
+  | 'gemini'
+  | 'amp'
+  | 'zai'
+  | 'antigravity'
+  | 'ollama'
+  | 'muse'
+  | 'grok'
+  | 'openrouter';
 
 export type AuthMode = 'subscription' | 'api_key';
 

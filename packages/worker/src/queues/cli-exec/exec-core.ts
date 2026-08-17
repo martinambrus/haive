@@ -542,7 +542,7 @@ export async function executeCliSpec(
       ? await scheduleSoftTimeout(invocationId, timeoutMs)
       : null;
   // The wind-down travels as a steer, so it only exists for a steerable CLI — today
-  // claude-code, muse, zai and ollama. On codex/gemini/amp/antigravity a step that asked
+  // claude-code, muse, zai, ollama and openrouter. On codex/gemini/amp/antigravity a step that asked
   // for softTimeout silently gets none: the run is SIGKILLed at its budget with zero grace
   // and every unbanked finding dies with it. That is exactly how 08c lost three reviewers
   // in one round on codex while its own comment promised they would be asked to bank first.
