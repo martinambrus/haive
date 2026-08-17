@@ -11,6 +11,10 @@ describe('usageReconnectFix', () => {
     expect(usageReconnectFix('codex')).toBe('cli-login');
     expect(usageReconnectFix('amp')).toBe('cli-login');
     expect(usageReconnectFix('antigravity')).toBe('cli-login');
+    // grok's SuperGrok device-code login. Membership in CLI_LOGIN_PROVIDERS is what
+    // renders every login affordance; without it a subscription row probes auth_expired
+    // ("credentials expired — please sign in again") and offers no way to sign in.
+    expect(usageReconnectFix('grok')).toBe('cli-login');
   });
 
   it('sends the rest to their API token', () => {

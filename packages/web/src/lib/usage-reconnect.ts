@@ -19,6 +19,13 @@ export const CLI_LOGIN_PROVIDERS: CliProviderName[] = [
   'codex',
   'amp',
   'antigravity',
+  // grok: device-code login for a SuperGrok subscription. This list is the WEB's own copy of
+  // the api's SUPPORTED_PROVIDERS (cli-login-banner) and every login affordance is gated on
+  // it — the Log in button on the detail page, the list page and the Test-connection card,
+  // plus Sign out and the "Not logged in" prompt. Adding a provider to the api side alone
+  // leaves a row that probes `auth_expired` with no way to act on it, which is exactly what
+  // happened here. Keep the two lists moving together.
+  'grok',
 ];
 
 /** claude-code first even though it is also a CLI-login provider: its usage meters run on a
