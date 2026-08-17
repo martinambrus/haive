@@ -15,7 +15,7 @@ import { expandTildeToSandbox } from './cli-auth-volume.js';
 import { buildMcpAddArgv, type McpServerSpec } from './mcp-config.js';
 import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 import { SANDBOX_USER_HOME } from './sandbox-runner.js';
-import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
+import { CLI_CREDENTIAL_FILES } from '../usage-window/credential-files.js';
 import { readVolumeFile } from '../usage-window/token-source.js';
 
 export interface ProviderAuthCtx {
@@ -620,10 +620,15 @@ export function shouldSyncAuthBack(
  *  behind, which silently killed the usage meter (the poller reads the USER volume) and
  *  hands the next task an already-consumed refresh token.
  *
- *  Scope is deliberately narrow — only the `volumeJson` files the usage poller reads,
- *  i.e. the credentials the CLIs refresh in place. Never a blanket copy of the volume:
- *  that would push per-task mutations (rtk seeds, the gemini MCP merge) onto the user's
- *  own settings.
+ *  Scope is deliberately narrow — only the files in CLI_CREDENTIAL_FILES, i.e. the
+ *  credentials the CLIs refresh in place. Never a blanket copy of the volume: that would
+ *  push per-task mutations (rtk seeds, the gemini MCP merge) onto the user's own settings.
+ *
+ *  That registry is NOT the usage-metering map, which is what this used to read. Keying
+ *  the sync on USAGE_PROVIDERS silently meant "we only protect the credential of a CLI
+ *  that also exposes a usage endpoint" — so grok, which has no such endpoint, was skipped
+ *  and its refreshed token was dropped on every teardown until grok deleted auth.json
+ *  outright. Add a CLI to CLI_CREDENTIAL_FILES, not to USAGE_PROVIDERS, to cover it here.
  *
  *  Best-effort by contract. Every failure is logged and swallowed so a teardown never
  *  fails on it; the cost of skipping is one more stale poll, not a broken task. */
@@ -650,8 +655,8 @@ export async function syncRefreshedAuthToUserVolumes(
     });
     if (!provider) continue;
 
-    const source = USAGE_PROVIDERS[provider.name]?.token;
-    if (source?.kind !== 'volumeJson') continue;
+    const source = CLI_CREDENTIAL_FILES[provider.name];
+    if (!source) continue;
 
     const ctx: ProviderAuthCtx = {
       userId: provider.userId,

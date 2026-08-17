@@ -1,6 +1,11 @@
 import type { CliProviderName } from '@haive/shared';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
-import { rec, str, type UsageFetcher } from '../types.js';
+import {
+  CODEX_CREDENTIAL_FILE,
+  GEMINI_CREDENTIAL_FILE,
+  type CliCredentialFile,
+} from '../credential-files.js';
+import { type UsageFetcher } from '../types.js';
 import { fetchClaudeUsage } from './claude-code.js';
 import { fetchCodexUsage } from './codex.js';
 import { fetchZaiUsage } from './zai.js';
@@ -11,14 +16,10 @@ import { fetchGeminiUsage } from './gemini.js';
  *  from the user's persistent auth volume via a helper container. */
 export type UsageTokenSource =
   | { kind: 'secret'; secretName: string }
-  | {
-      kind: 'volumeJson';
-      /** Index into the provider's authConfigPaths whose volume holds the file. */
-      authPathIdx: number;
-      /** File path relative to that auth dir (the volume root). */
-      relPath: string;
-      extract: (json: unknown) => { token: string | null; accountId?: string | null };
-    }
+  // Structurally `CliCredentialFile` + a tag. The fields are spread in from
+  // CLI_CREDENTIAL_FILES rather than written out per provider, because the task-end auth
+  // sync reads the same descriptors and the two must never drift apart.
+  | ({ kind: 'volumeJson' } & CliCredentialFile)
   // A cli_provider_secret holding JSON-serialized ClaudeOauthTokens. The poller reads
   // it, refreshes the access token if near expiry (rotating + re-storing the secret),
   // and uses the (fresh) access token. Absent secret -> not connected -> chip hides.
@@ -55,15 +56,7 @@ export const USAGE_PROVIDERS: Partial<Record<CliProviderName, ProviderUsageConfi
     // refreshes it on its next run. The poller cannot safely refresh it (single-use OpenAI
     // refresh tokens; per-task auth-copy divergence), so a denial hides the chip, never nags.
     reconnectable: false,
-    token: {
-      kind: 'volumeJson',
-      authPathIdx: 0, // ~/.codex
-      relPath: 'auth.json',
-      extract: (j) => {
-        const tokens = rec(rec(j)?.['tokens']);
-        return { token: str(tokens?.['access_token']), accountId: str(tokens?.['account_id']) };
-      },
-    },
+    token: { kind: 'volumeJson', ...CODEX_CREDENTIAL_FILE },
   },
   gemini: {
     fetch: fetchGeminiUsage,
@@ -71,11 +64,6 @@ export const USAGE_PROVIDERS: Partial<Record<CliProviderName, ProviderUsageConfi
     // only if the user logged the CLI in outside Haive, and its access token expires when idle.
     // A denial hides the chip rather than prompting a reconnect the user can't perform here.
     reconnectable: false,
-    token: {
-      kind: 'volumeJson',
-      authPathIdx: 1, // ~/.gemini (authConfigPaths = ['~/.config/gemini', '~/.gemini'])
-      relPath: 'oauth_creds.json',
-      extract: (j) => ({ token: str(rec(j)?.['access_token']) }),
-    },
+    token: { kind: 'volumeJson', ...GEMINI_CREDENTIAL_FILE },
   },
 };
