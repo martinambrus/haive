@@ -163,7 +163,8 @@ async function main(): Promise<void> {
     assertEq('task status', taskAfter?.status, 'queued');
     assertEq('epoch bumped', taskAfter?.orchestrationEpoch, epochBefore + 1);
 
-    const queued = await getTaskQueue().getJobs(['wait', 'delayed', 'paused', 'prioritized']);
+    // bullmq 6 removed 'paused' from JobType — a paused queue's jobs report as 'waiting'.
+    const queued = await getTaskQueue().getJobs(['wait', 'delayed', 'prioritized']);
     const startJob = queued.find(
       (j) => j.name === 'start-task' && (j.data as { taskId?: string })?.taskId === task.id,
     );
@@ -206,12 +207,7 @@ async function main(): Promise<void> {
     try {
       const db = getDb();
       if (state.taskId) {
-        for (const job of await getTaskQueue().getJobs([
-          'wait',
-          'delayed',
-          'paused',
-          'prioritized',
-        ])) {
+        for (const job of await getTaskQueue().getJobs(['wait', 'delayed', 'prioritized'])) {
           if ((job.data as { taskId?: string })?.taskId === state.taskId) {
             await job.remove().catch(() => {});
           }

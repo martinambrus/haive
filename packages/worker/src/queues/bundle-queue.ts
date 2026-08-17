@@ -24,16 +24,13 @@ function getBundleQueueLocal(): Queue {
  *  keeping on a daily tick — because a scheduler is keyed by its id, not by a hash of its
  *  options.
  *
- *  The pre-sweep clears the legacy repeatables earlier boots registered. The old
- *  `repeat: { every }` key WAS an options hash, so the jitter minted a fresh key every
- *  restart and `jobId` never deduplicated them — 3308 had accumulated on this queue, and
- *  they all kept firing (56 ticks in a 400-line log window) rather than lying dormant. */
+ *  Do NOT go back to `repeat: { every }`. That key WAS an options hash, so the jitter minted
+ *  a fresh key on every restart and `jobId` never deduplicated them — 3308 accumulated on this
+ *  queue and all kept firing. The one-time sweep that cleared them shipped in 38e13a2 and was
+ *  removed with the bullmq 6 bump, which deletes getRepeatableJobs/removeRepeatableByKey. */
 export async function scheduleBundleGitSyncTick(): Promise<void> {
   const queue = getBundleQueueLocal();
   const jitter = Math.floor((Math.random() * 4 - 2) * 60 * 60 * 1000);
-  for (const r of await queue.getRepeatableJobs().catch(() => [])) {
-    await queue.removeRepeatableByKey(r.key).catch(() => {});
-  }
   await queue.upsertJobScheduler(
     GIT_SYNC_JOB_ID,
     { every: GIT_SYNC_BASE_INTERVAL_MS + jitter },

@@ -641,11 +641,6 @@ const VERSION_REFRESH_JOB_ID = 'cli-refresh-versions-repeatable';
 export async function scheduleCliVersionRefresh(): Promise<void> {
   const queue = getCliExecQueue();
   // Idempotent: keyed on VERSION_REFRESH_JOB_ID, so a restart updates the one scheduler.
-  // The pre-sweep clears any orphaned legacy repeatable from the old `repeat: { every }`
-  // registration. Only repeatables are swept — queued invocations are untouched.
-  for (const r of await queue.getRepeatableJobs().catch(() => [])) {
-    await queue.removeRepeatableByKey(r.key).catch(() => {});
-  }
   await queue.upsertJobScheduler(
     VERSION_REFRESH_JOB_ID,
     { every: VERSION_REFRESH_INTERVAL_MS },

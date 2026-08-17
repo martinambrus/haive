@@ -107,14 +107,12 @@ function getUsagePollQueue(): Queue {
 }
 
 /** Idempotent: upsertJobScheduler keys on POLL_JOB_ID, so a restart UPDATES the one
- *  scheduler rather than adding a duplicate. A fixed interval (no jitter) keeps it
- *  stable; the pre-sweep clears any orphaned legacy repeatable from an earlier boot
- *  (a jittered `every` used to register a fresh repeatable each restart). */
+ *  scheduler rather than adding a duplicate. A fixed interval (no jitter) keeps it stable.
+ *  The legacy-repeatable pre-sweep this used to carry is gone — bullmq 6 removed
+ *  getRepeatableJobs/removeRepeatableByKey, and 38e13a2 already cleared the backlog while
+ *  those APIs still existed. */
 export async function scheduleUsagePollTick(): Promise<void> {
   const queue = getUsagePollQueue();
-  for (const r of await queue.getRepeatableJobs().catch(() => [])) {
-    await queue.removeRepeatableByKey(r.key).catch(() => {});
-  }
   await queue.upsertJobScheduler(
     POLL_JOB_ID,
     { every: POLL_BASE_INTERVAL_MS },

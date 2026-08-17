@@ -285,12 +285,7 @@ async function main(): Promise<void> {
     try {
       const db = getDb();
       if (state.taskId) {
-        for (const job of await getTaskQueue().getJobs([
-          'wait',
-          'delayed',
-          'paused',
-          'prioritized',
-        ])) {
+        for (const job of await getTaskQueue().getJobs(['wait', 'delayed', 'prioritized'])) {
           if ((job.data as { taskId?: string })?.taskId === state.taskId) {
             await job.remove().catch(() => {});
           }

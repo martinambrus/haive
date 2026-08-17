@@ -61,12 +61,11 @@ function getTaskQueue(): Queue<TaskJobPayload> {
 }
 
 /** Idempotent: upsertJobScheduler keys on POLL_JOB_ID so a restart updates the one
- *  scheduler; the pre-sweep clears any orphaned legacy repeatable. */
+ *  scheduler. The legacy-repeatable pre-sweep this used to carry is gone — bullmq 6
+ *  removed getRepeatableJobs/removeRepeatableByKey, and 38e13a2 already cleared the
+ *  backlog while those APIs still existed. */
 export async function schedulePrPollTick(): Promise<void> {
   const queue = getPrPollQueue();
-  for (const r of await queue.getRepeatableJobs().catch(() => [])) {
-    await queue.removeRepeatableByKey(r.key).catch(() => {});
-  }
   await queue.upsertJobScheduler(
     POLL_JOB_ID,
     { every: POLL_INTERVAL_MS },

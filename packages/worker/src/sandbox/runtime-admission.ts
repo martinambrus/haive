@@ -448,7 +448,11 @@ async function joinParkQueue(
       .hset(PARK_WEIGHT_KEY, taskId, String(weightMb))
       .set(`${PARK_ALIVE_PREFIX}${taskId}`, '1', 'EX', PARK_ALIVE_TTL_S)
       .exec();
-    const members = await redis.zrange(PARK_QUEUE_KEY, 0, -1);
+    // `-1` is a STRING on purpose: every ioredis 6 zrange overload types `start` as
+    // `string | Buffer | number` but `stop` as `string | Buffer` only. Redis takes either
+    // (the wire protocol is all strings), so this is a typing asymmetry upstream, not a
+    // behaviour change — do not "fix" the inconsistency by making stop a number again.
+    const members = await redis.zrange(PARK_QUEUE_KEY, 0, '-1');
     if (members.length === 0) return { position: 1, waiting: 1, weightsAheadMb: [] };
     const alive = await redis.mget(...members.map((m) => `${PARK_ALIVE_PREFIX}${m}`));
     const live: string[] = [];
