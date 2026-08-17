@@ -666,9 +666,16 @@ interface ReviewArgs {
 
 function reviewerPrompt(issue: DagIssueRow): string {
   const criteria = (issue.acceptanceCriteria ?? []) as string[];
+  const files = (issue.filesModified ?? []) as string[];
   return [
     `You are reviewing the implementation of ${issue.issueKey}: ${issue.title}`,
     'Your working directory is the issue worktree containing the implementation.',
+    // The coder's own files_modified IS the change set here: git is unavailable in the
+    // sandbox, so without this list a reviewer has no way to find what changed except by
+    // reaching for git — and then treating the zero-byte `.git` boundary as corruption.
+    files.length > 0
+      ? `Files the coder reported changing — this list is the change set (read each in full):\n- ${files.join('\n- ')}`
+      : '',
     'Review it as a senior engineer would before merge; verify each acceptance criterion against the code.',
     criteria.length > 0 ? `Acceptance criteria:\n- ${criteria.join('\n- ')}` : '',
     '',
@@ -682,14 +689,18 @@ function reviewerPrompt(issue: DagIssueRow): string {
 }
 
 function fixCoderPrompt(issue: DagIssueRow, reviewIssues: unknown[]): string {
+  const files = (issue.filesModified ?? []) as string[];
   return [
     `You are addressing reviewer findings for ${issue.issueKey}: ${issue.title}`,
     'Your working directory is the issue worktree. Validate each finding against the actual code and fix the real ones by editing files; ignore findings that are wrong or out of scope. Match the existing style.',
+    files.length > 0 ? `Files the issue changed so far:\n- ${files.join('\n- ')}` : '',
     `Reviewer findings:\n${JSON.stringify(reviewIssues).slice(0, 4000)}`,
     '',
     'When done, emit ONE JSON object inside a ```json fenced code block:',
     `{ "issue_id": "${issue.issueKey}", "outcome": "completed|completed_with_debt|failed_unrecoverable", "files_modified": [], "debt_items": [], "concerns": "" }`,
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 export function parseReviewerOutput(

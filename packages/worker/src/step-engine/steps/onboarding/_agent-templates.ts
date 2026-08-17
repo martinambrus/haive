@@ -247,7 +247,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Collect the change',
-        body: 'Use `git diff` (working tree or `<base>..HEAD`) to read the exact set of lines that will land. Do not guess; do not review files you did not diff.',
+        body: 'Read the exact set of lines that will land: take the changed-file list from your task prompt and read each file in full, or use `git diff` (working tree or `<base>..HEAD`) where git is available. Do not guess; do not review files you did not read.',
       },
       {
         title: 'Search for conventions and prior art',
@@ -1315,7 +1315,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Collect the change',
-        body: 'Read the exact diff with `git diff` and the full content of each changed file, not just the hunks. Do not review files you did not diff.',
+        body: 'Read the exact change — the changed-file list from your task prompt, or `git diff` where git is available — plus the full content of each changed file, not just the hunks. Do not review files you did not read.',
       },
       {
         title: 'Consult conventions',
@@ -1460,7 +1460,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Collect the change',
-        body: 'Read the exact diff with `git diff` and the full content of each changed file, not just the hunks. Identify new runtime behavior, external calls, migrations, and API/schema changes.',
+        body: 'Read the exact change — the changed-file list from your task prompt, or `git diff` where git is available — plus the full content of each changed file, not just the hunks. Identify new runtime behavior, external calls, migrations, and API/schema changes.',
       },
       {
         title: 'Consult conventions',
@@ -1525,7 +1525,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
     executionSteps: [
       {
         title: 'Collect the change',
-        body: 'Read the exact diff with `git diff` and the full content of each changed file. Identify new queries, loops over data, writes, and code on request/event hot paths.',
+        body: 'Read the exact change — the changed-file list from your task prompt, or `git diff` where git is available — plus the full content of each changed file. Identify new queries, loops over data, writes, and code on request/event hot paths.',
       },
       {
         title: 'Consult conventions',

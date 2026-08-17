@@ -90,6 +90,8 @@ The post-2.1.110 harness regression causes jump-to-conclusion behaviour: hypothe
 
 - The \`ddev\` CLI is not on PATH inside your sandbox, and you cannot start, restart, or otherwise run DDEV. Do not run \`ddev\` or spend time checking whether it is available. If a fix needs a DDEV environment change (\`php_version\`, the database type/version, a \`php/*.ini\`, \`web-build/Dockerfile\`, webserver config, the docroot, or any other authored file under \`.ddev/\`), edit those files directly and validate the change by reading the config only — you cannot apply or test it yourself. A later automatic step restarts DDEV to apply your \`.ddev/\` edits before the verification step runs, so make the edit, hand it off, and let that step apply it and check whether it worked.
 
+- Inside the Haive sandbox git is deliberately unavailable, and the \`.git\` entry at the workspace root is a zero-byte, read-only file. That is a containment boundary — not repository corruption, not a permission problem, and not a blocker to report. When you see it: do not run git commands, and do not inspect, edit, delete, replace, chmod, chown, repair, re-point, or otherwise work around \`.git\`. The mount is read-only, so every such attempt fails and only burns budget. Establish what changed from the changed-file list in your task prompt and read those files directly. Haive stages, commits, and merges your work host-side after the step finishes.
+
 - Only make changes that are directly requested. Keep solutions simple and focused.
 
 - ALWAYS read and understand the relevant files before proposing a code edit or answering a question about the codebase. Never speculate about code you have not opened: when a specific file or path is referenced, you MUST open and inspect it before explaining or proposing a fix. Be rigorous and persistent in searching code for the key facts, and review the surrounding style, conventions, and abstractions before implementing a new feature or abstraction. Make no claim about code you have not investigated unless you are certain of the answer — give grounded, hallucination-free answers.
@@ -148,5 +150,6 @@ export const KNOWN_DEFAULT_RULES_HASHES: ReadonlySet<string> = new Set([
   '3a052a7ef7d4d74918fefca987471e71ce340482925f5c974d37aec0a2b58e6f', // + ddev change-in-code + auto-restart workflow
   'a2afb02998cfbe4fd9b19eabcbc8958c136402d7fb65e5e1237f6921c7c0c9bd', // + reuse-before-writing rung
   '341e83c8af394739148260e3ccb2f51847f40e8e39374222337fed2fafe03aa1', // VCS-agnostic blast-radius step
-  '6b120eb904ccade5842b6d24ee315dfed988931df976648f7ad3e7c3293f1ac2', // current: merged duplicate rules, restored stripped placeholders
+  '6b120eb904ccade5842b6d24ee315dfed988931df976648f7ad3e7c3293f1ac2', // merged duplicate rules, restored stripped placeholders
+  '6801d5a5d5ccd083ad9a8f7da394ce2f0261f413a19ef01a12fab0b7f45922ac', // current: + sandbox `.git` boundary rule
 ]);
