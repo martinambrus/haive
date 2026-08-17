@@ -22,12 +22,18 @@
  * silently degrades a non-matching row to the FULL window instead of 0 — a plausible-but-wrong
  * result that reports overlap for steps with zero invocations.
  *
- * PARK_MIN_HOURS (default 6) is a correctness guard, not a performance knob. A step re-entered
- * from `waiting_cli` keeps that status through its whole apply phase (step-runner.ts only flips
- * pending -> running), so a marker legitimately stays set while real apply work runs, and that
- * span SHOULD bill as work. Those windows are sub-minute here (777 rows totalling 0.04h) and
- * every genuine phantom is >6h, so the threshold cleanly separates them. Lowering it risks
- * moving real apply work into idle.
+ * PARK_MIN_HOURS (default 6) is a correctness guard, not a performance knob. HISTORICAL reason:
+ * when this script was written, step-runner.ts folded the marker only on the pending -> running
+ * flip, so a step re-entered from `waiting_cli` kept a live marker through its whole apply phase
+ * and that span — real work — was indistinguishable from a dead park in the rows this script
+ * reads. Those windows were sub-minute (777 rows totalling 0.04h) and every genuine phantom was
+ * >6h, so the threshold cleanly separated them.
+ *
+ * step-runner.ts now folds on the waiting_cli continuation too, so newly-written rows no longer
+ * conflate the two: the marker closes when the advance resumes the step, leaving apply as work.
+ * The threshold still matters here because this script repairs rows written BEFORE that fix,
+ * where the two spans are already fused and cannot be separated after the fact. Lowering it
+ * still risks moving real apply work into idle on those legacy rows.
  *
  * Deliberately NOT reusing backfill-phantom-carried-work.ts's "sum of invocation runtimes"
  * ceiling: that is wrong for parallel fan-out. Task bfad7af9's 06c-dag-execute sums 5.02h of

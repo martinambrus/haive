@@ -16,10 +16,15 @@ import { schema, type Database } from '@haive/database';
 // deriveSlotWait keys the "queued for a runtime slot" badge on.
 //
 // Invariant: for a waiting_cli step, `waiting_started_at` is non-null iff no invocation is
-// currently running. Both writes below are single atomic UPDATEs whose WHERE clause enforces
-// the invariant, so concurrent invocation start/end and the transition write can interleave
-// in any order without corrupting it (last writer that satisfies the predicate wins; the
-// rest no-op).
+// running AND the step is not mid-continuation. The second clause is not a loophole, it is the
+// point: a waiting_cli step keeps that status through its apply phase, so advanceStep folds the
+// marker when it picks the step back up (step-runner.ts) and apply then bills as WORK rather
+// than as a park that never closed. A step that re-parks instead of finishing gets a fresh
+// marker from markCliParkBegin on the way out (task-queue.ts's waiting_cli case).
+//
+// Both writes below are single atomic UPDATEs whose WHERE clause enforces the invariant, so
+// concurrent invocation start/end and the transition write can interleave in any order without
+// corrupting it (last writer that satisfies the predicate wins; the rest no-op).
 
 /** Park begins: stamp `waiting_started_at = now()` for a waiting_cli step that has NO
  *  invocation running. Guarded (status, null-marker, and no-running-invocation) so it is a

@@ -1497,6 +1497,21 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         // not linger once the step actually runs; the run's own emitProgress takes over.
         statusMessage: null,
       });
+    } else if (current.status === 'waiting_cli') {
+      // Same fold, for the CLI continuation. The invocation ended, markCliParkBegin stamped the
+      // wait (cli-exec/handlers.ts), and THIS advance is where work actually resumes — so the
+      // park ends here. Without the fold the marker rides the row until `ended_at` is stamped,
+      // and computeStepContribution only counts an open wait while `ended_at` is null, so the
+      // whole dispatch gap silently reclassifies from idle back into WORK (observed: 23min of a
+      // wedged advance queue billed as work on 11-final-review).
+      //
+      // No status flip here: a waiting_cli step keeps that status through its apply phase, which
+      // is exactly why the fold has to be its own branch. Folding at this instant splits the
+      // window on the real boundary — dispatch gap becomes idle, apply stays work. If the step
+      // re-parks instead of finishing (invocation queued but not started, more agents pending),
+      // handleAdvanceStep's waiting_cli case re-opens the park via markCliParkBegin, so a split
+      // fold totals the same as one long one.
+      await foldCliParkOnResume(db, current.id);
     }
 
     let detected = current.detectOutput;
