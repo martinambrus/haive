@@ -332,6 +332,27 @@ export const CLI_DEFAULT_EGRESS_DOMAINS: Record<CliProviderName, string[]> = {
   openrouter: ['openrouter.ai'],
 };
 
+/** One entry of the cached OpenRouter model catalog, as served by
+ *  GET /cli-providers/openrouter/models. Local mirror of the shared
+ *  `OpenRouterModelEntry` — web keeps its own copies of API response types rather
+ *  than importing the @haive/shared barrel (which drags ioredis/dns into the
+ *  bundle). Keep the two in sync. */
+export interface OpenRouterModelEntry {
+  id: string;
+  name: string;
+  contextLength: number | null;
+  promptPrice: number | null;
+  completionPrice: number | null;
+  /** Drives whether the effort selector is worth offering. Display-only: OpenRouter
+   *  validates the effort parameter globally, so a model without reasoning still
+   *  accepts every level and normalizes it away. */
+  supportsReasoning: boolean;
+  /** Load-bearing: Claude Code cannot run a step without native tool use, so a
+   *  model without this cannot be selected. */
+  supportsTools: boolean;
+  supportsImages: boolean;
+}
+
 export interface EffortScaleMetadata {
   values: readonly string[];
   max: string;

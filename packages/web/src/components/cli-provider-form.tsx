@@ -19,10 +19,12 @@ import {
   type CliModelLimits,
   type CliModelProvisionStatus,
   type CliSandboxBuildStatus,
+  type OpenRouterModelEntry,
 } from '@/lib/api-client';
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { runCatalogVersionRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { OllamaModelDownload } from '@/components/ollama-model-download';
+import { OpenRouterModelPicker } from '@/components/openrouter-model-picker';
 
 interface CliProviderFormProps {
   mode: 'create' | 'edit';
@@ -249,6 +251,13 @@ export function CliProviderForm({
     networkIpsText: (provider?.networkPolicy?.ips ?? []).join('\n'),
     egressDomainsText: (provider?.egressDomains ?? []).join('\n'),
   });
+
+  // Catalog entry for the currently selected OpenRouter model, reported up by the
+  // picker. Only used to decide whether the reasoning-effort selector is worth
+  // showing; null whenever the model is unknown to the catalog, which deliberately
+  // FAILS OPEN (the selector stays visible) rather than hiding a control we are not
+  // sure about.
+  const [openRouterModel, setOpenRouterModel] = useState<OpenRouterModelEntry | null>(null);
 
   // Full snapshot of the last known saved form state. Any field that diverges
   // from this snapshot is considered unsaved, and the edit page uses that to
@@ -778,13 +787,21 @@ export function CliProviderForm({
       {metadata.supportsModelSelection && (
         <div>
           <Label htmlFor="model">Model</Label>
-          <Input
-            id="model"
-            value={state.model}
-            onChange={(e) => update('model', e.target.value)}
-            placeholder={metadata.defaultModel ?? 'qwen3-coder:480b-cloud'}
-          />
-          {metadata.name === 'ollama' ? (
+          {metadata.name === 'openrouter' ? (
+            <OpenRouterModelPicker
+              value={state.model}
+              onChange={(model) => update('model', model)}
+              onSelectedMetaChange={setOpenRouterModel}
+            />
+          ) : (
+            <Input
+              id="model"
+              value={state.model}
+              onChange={(e) => update('model', e.target.value)}
+              placeholder={metadata.defaultModel ?? 'qwen3-coder:480b-cloud'}
+            />
+          )}
+          {metadata.name === 'openrouter' ? null : metadata.name === 'ollama' ? (
             <p className="mt-1 text-xs text-neutral-500">
               The Ollama model this provider runs (required). Use a local/pulled name (
               <code className="font-mono">qwen3-coder:30b</code>), a cloud model (
@@ -937,6 +954,14 @@ export function CliProviderForm({
             long-lived configuration (onboarding) warn before starting if this provider is set below
             the maximum.
           </p>
+          {metadata.name === 'openrouter' && openRouterModel?.supportsReasoning === false && (
+            <p className="mt-1 text-xs text-amber-500">
+              <code className="font-mono">{openRouterModel.id}</code> does not advertise a reasoning
+              parameter, so this setting will have no effect on it. It is harmless — OpenRouter
+              accepts every level and normalizes it away for such models — but pick a
+              reasoning-capable model if you want the knob to do something.
+            </p>
+          )}
         </div>
       )}
 
