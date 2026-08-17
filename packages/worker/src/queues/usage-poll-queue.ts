@@ -29,6 +29,7 @@ import {
   readProviderSecretToken,
   writeProviderSecret,
 } from '../usage-window/token-source.js';
+import { refreshExpiringCliCredentials } from '../usage-window/credential-refresh.js';
 import { authDenialSeverity, nextAuthStrike } from '../usage-window/types.js';
 import type { UsageFetchContext, UsageFetchOutcome } from '../usage-window/types.js';
 import { getTaskQueue } from './task-queue.js';
@@ -629,7 +630,17 @@ export function startUsagePollWorker(): Worker {
   const worker = new Worker(
     QUEUE_NAMES.USAGE_POLL,
     async (_job: Job) => {
-      await runUsagePollTick(getDb());
+      const db = getDb();
+      // Credential rotation rides this tick because the poll worker is the only singleton
+      // that runs between tasks — a second refresher racing it would spend the same
+      // single-use refresh token twice. It is NOT part of the poll: it must still run when
+      // USAGE_WINDOW_ENABLED is off (a user who hides the meters still expects to stay
+      // signed in), and it must not be skipped when the poll throws. Hence: first, and
+      // separately caught.
+      await refreshExpiringCliCredentials(db).catch((err) => {
+        log.warn({ err }, 'cli credential refresh sweep failed');
+      });
+      await runUsagePollTick(db);
     },
     { connection: getBullRedis(), concurrency: 1 },
   );
