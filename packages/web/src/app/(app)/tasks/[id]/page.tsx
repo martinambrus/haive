@@ -304,7 +304,15 @@ function isResumableStep(
   // concurrent terminals include a dead one DEGRADES to `done` (the agent failed, not the
   // code), which is exactly the state that needs "re-run just that terminal". Gating on
   // 'failed' is why the button never appeared on 08c.
-  if ((step.agentCounts?.failed ?? 0) > 0) return true;
+  //
+  // Gated on inFlight instead, the structural proof the fan-out has SETTLED. A dead terminal
+  // beside live siblings is a run still in progress, not a finished one with something to
+  // redo: resuming there kills every sibling's sandbox (the endpoint's liveInCascade reads
+  // this step's own waiting_cli) and loses their verdicts, while the label counts the settled
+  // subset as the whole fan-out — observed as "keep 8 of 9 terminals" on a 13-wide 08c with 4
+  // still running. Once inFlight is 0, done + failed IS the fan-out, so the label is correct
+  // as written. Stop / Stop & retry stay available meanwhile.
+  if ((step.agentCounts?.failed ?? 0) > 0) return (step.agentCounts?.inFlight ?? 0) === 0;
   return step.status === 'failed' && (step.iterationCount > 0 || (step.cliRoles?.length ?? 0) > 0);
 }
 

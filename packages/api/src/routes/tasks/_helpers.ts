@@ -591,19 +591,26 @@ export async function enrichStepsWithSkipFlag<
  *  `error_message` — a message outlives the state it describes, and an agent that failed once
  *  and succeeded on a re-roll keeps its error text on the row.
  *
- *  `{ done: 0, failed: 0 }` for a step with no fan-out, so callers need no null check and a
- *  sequential loop step simply reports nothing to re-run. */
+ *  `inFlight` counts the terminals that have NOT ended yet, and is what makes `failed > 0`
+ *  safe to act on: a dead terminal alongside live siblings is a fan-out still in progress,
+ *  not a settled one with something to re-run. Without it the web sees `failed > 0` the
+ *  instant the FIRST terminal dies and offers a resume that kills every sibling sandbox,
+ *  while its "N of M" reads the settled subset as if it were the whole fan-out.
+ *
+ *  All zero for a step with no fan-out, so callers need no null check and a sequential loop
+ *  step simply reports nothing to re-run. */
 export async function enrichStepsWithAgentCounts<T extends { id: string }>(
   db: ReturnType<typeof getDb>,
   taskId: string,
   steps: T[],
-): Promise<(T & { agentCounts: { done: number; failed: number } })[]> {
+): Promise<(T & { agentCounts: { done: number; failed: number; inFlight: number } })[]> {
   if (steps.length === 0) return [];
   const rows = await db
     .select({
       taskStepId: schema.taskStepAgentMinings.taskStepId,
       done: sql<number>`count(*) filter (where ${schema.taskStepAgentMinings.status} = 'done')::int`,
       failed: sql<number>`count(*) filter (where ${schema.taskStepAgentMinings.status} = 'failed')::int`,
+      inFlight: sql<number>`count(*) filter (where ${schema.taskStepAgentMinings.status} in ('pending', 'running'))::int`,
     })
     .from(schema.taskStepAgentMinings)
     .innerJoin(schema.taskSteps, eq(schema.taskSteps.id, schema.taskStepAgentMinings.taskStepId))
@@ -614,7 +621,11 @@ export async function enrichStepsWithAgentCounts<T extends { id: string }>(
     const row = byStep.get(s.id);
     return {
       ...s,
-      agentCounts: { done: Number(row?.done ?? 0), failed: Number(row?.failed ?? 0) },
+      agentCounts: {
+        done: Number(row?.done ?? 0),
+        failed: Number(row?.failed ?? 0),
+        inFlight: Number(row?.inFlight ?? 0),
+      },
     };
   });
 }

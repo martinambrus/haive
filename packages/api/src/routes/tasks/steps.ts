@@ -599,6 +599,32 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // exists and so never re-runs selectAgents. This marks the failed rows and hands over.
     // Deleting them instead would be worse than doing nothing — miningOutcome would then report
     // `absent`, which 08c reads as "this lens was never asked for" and silently approves.
+    //
+    // Refused while the fan-out is still in progress, BEFORE anything is written or killed. A
+    // resume here is not "redo what died": `liveInCascade` below reads this step's own
+    // `waiting_cli` and calls killTaskSandboxes, which destroys the sandboxes of the siblings
+    // that are still working — and only the flagged rows are re-dispatched, so their verdicts
+    // are simply lost. Scoped to THIS step's mining rows, never to downstream liveness: a
+    // DEGRADED (`done`) step with live downstream work must still cascade-kill, and it can
+    // never have live mining rows of its own (the barrier parks `waiting_cli` while any row is
+    // pending/running). The web hides the button in this state too, but a stale tab or a direct
+    // POST reaches here regardless.
+    const liveAgents = await db
+      .select({ id: schema.taskStepAgentMinings.id })
+      .from(schema.taskStepAgentMinings)
+      .where(
+        and(
+          eq(schema.taskStepAgentMinings.taskStepId, step.id),
+          inArray(schema.taskStepAgentMinings.status, ['pending', 'running']),
+        ),
+      );
+    if (liveAgents.length > 0) {
+      throw new HttpError(
+        409,
+        `${liveAgents.length} terminal(s) are still running — wait for the fan-out to finish, or use Stop & retry to reset the whole step`,
+        'fanout_in_flight',
+      );
+    }
     const failedAgents = await db
       .select({ id: schema.taskStepAgentMinings.id })
       .from(schema.taskStepAgentMinings)
