@@ -162,6 +162,51 @@ export const cliPackageVersions = pgTable('cli_package_versions', {
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
 
+// --- OpenRouter model catalog cache ------------------------------------
+// OpenRouter fronts 400+ models, so the provider form cannot offer a static list
+// and a free-text slug is a 404 waiting to happen. This caches the gateway's own
+// `GET /api/v1/models` so the picker can show what actually exists.
+//
+// Deliberately the SAME shape as cliPackageVersions above (single row keyed by
+// provider name, list in jsonb, fetchedAt/fetchError) rather than a row-per-model
+// table: it is refreshed wholesale by the same REFRESH_VERSIONS job, nothing joins
+// against individual models, and the upsert-by-primary-key needs no first-insert
+// branch. Only the fields the picker and the context-window lookup read are stored
+// — the raw payload is ~4 MB, mostly prose descriptions.
+//
+// A cache, never a source of truth: dropping this table loses nothing that the next
+// refresh does not rebuild, and an empty/stale cache must degrade to a free-text
+// model field rather than blocking provider creation.
+export const openrouterModelCache = pgTable('openrouter_model_cache', {
+  name: cliProviderNameEnum('name').primaryKey(),
+  models: jsonb('models')
+    .$type<
+      {
+        /** OpenRouter slug, e.g. `anthropic/claude-opus-5`. Goes in cli_providers.model. */
+        id: string;
+        /** Human label, e.g. "Anthropic: Claude Opus 5". */
+        name: string;
+        /** Max input tokens the gateway reports for this model. */
+        contextLength: number | null;
+        /** USD per input/output token, as reported (strings upstream; parsed here). */
+        promptPrice: number | null;
+        completionPrice: number | null;
+        /** From `supported_parameters`. `reasoning` drives whether the effort
+         *  selector is worth showing; `tools` decides usability outright, since
+         *  Claude Code cannot function without native tool use. */
+        supportsReasoning: boolean;
+        supportsTools: boolean;
+        /** From `architecture.input_modalities` — feeds the no-vision remedy. */
+        supportsImages: boolean;
+      }[]
+    >()
+    .notNull()
+    .default([]),
+  fetchedAt: timestamp('fetched_at'),
+  fetchError: text('fetch_error'),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+});
+
 // --- Per-user, per-step CLI provider preferences -----------------------
 // Records which CLI a user last picked for each step id. Step-runner uses
 // this as the preferred provider when dispatching that step. Set by:

@@ -287,6 +287,30 @@ cliProviderRoutes.get('/catalog/:name/refresh-versions/:jobId', async (c) => {
 
 cliProviderRoutes.use('*', requireAuth);
 
+/** The cached OpenRouter model catalog, for the provider form's model picker.
+ *
+ *  Behind requireAuth and deliberately NOT folded into GET /catalog: that route is
+ *  registered ahead of the auth middleware and is fetched on every settings page
+ *  load, so adding 400+ models with pricing to it would be a large public payload
+ *  on a request that does not need it.
+ *
+ *  Degrades rather than fails. A missing row (never refreshed) answers with an empty
+ *  list and a null fetchedAt, and the form falls back to a free-text model field —
+ *  the picker is an affordance, never a gate on creating a provider. `fetchError`
+ *  and `fetchedAt` are returned so the UI can say the list is stale instead of
+ *  silently showing an old one. */
+cliProviderRoutes.get('/openrouter/models', async (c) => {
+  const db = getDb();
+  const row = await db.query.openrouterModelCache.findFirst({
+    where: eq(schema.openrouterModelCache.name, 'openrouter'),
+  });
+  return c.json({
+    models: row?.models ?? [],
+    fetchedAt: row?.fetchedAt ? row.fetchedAt.toISOString() : null,
+    fetchError: row?.fetchError ?? null,
+  });
+});
+
 cliProviderRoutes.get('/', async (c) => {
   const userId = c.get('userId');
   const db = getDb();

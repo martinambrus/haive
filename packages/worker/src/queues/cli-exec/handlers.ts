@@ -34,7 +34,11 @@ import {
 } from '@haive/shared';
 import { resolveAgentConcurrency } from '../../sandbox/runtime-admission.js';
 import { resolvePause } from '../../orchestrator/pause.js';
-import { refreshAllCliVersions, refreshAllToolVersions } from '../../cli-versions/index.js';
+import {
+  refreshAllCliVersions,
+  refreshAllToolVersions,
+  refreshOpenRouterModels,
+} from '../../cli-versions/index.js';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
 import { renderDockerfile, resolveImageTag } from '../../sandbox/image-cache.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
@@ -490,11 +494,20 @@ export async function handleBuildSandboxImageJob(
 export async function handleRefreshCliVersionsJob(
   db: Database,
 ): Promise<RefreshCliVersionsJobResult> {
-  const [cli, tools] = await Promise.all([refreshAllCliVersions(db), refreshAllToolVersions(db)]);
+  // The OpenRouter model catalog rides this job rather than getting its own: it is
+  // the same kind of cached remote list on the same cadence, and reusing the job
+  // means the provider form's existing "refresh versions" button refreshes it too.
+  // Each refresher records its own failure and returns rather than throwing, so one
+  // unreachable source cannot fail the job or wipe the other two caches.
+  const [cli, tools, openrouter] = await Promise.all([
+    refreshAllCliVersions(db),
+    refreshAllToolVersions(db),
+    refreshOpenRouterModels(db),
+  ]);
   return {
-    ok: cli.ok && tools.ok,
-    refreshed: [...cli.refreshed, ...tools.refreshed],
-    errors: [...cli.errors, ...tools.errors],
+    ok: cli.ok && tools.ok && openrouter.ok,
+    refreshed: [...cli.refreshed, ...tools.refreshed, ...openrouter.refreshed],
+    errors: [...cli.errors, ...tools.errors, ...openrouter.errors],
   };
 }
 
