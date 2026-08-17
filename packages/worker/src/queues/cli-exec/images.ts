@@ -15,6 +15,8 @@ import {
   detectAmpCreditsWarning,
   isAuthProbeSupported,
 } from '../../cli-adapters/auth-probe.js';
+import { probeOpenRouterModelCompat } from '../../cli-adapters/openrouter-compat.js';
+import { OPENROUTER_DEFAULT_BASE_URL } from '../../cli-adapters/openrouter.js';
 import { log } from './_shared.js';
 import { createSandboxSpawner } from './exec-core.js';
 import { handleBuildSandboxImageJob } from './handlers.js';
@@ -146,7 +148,20 @@ export async function probeCliPath(
       versionResult.stdout.trim() || versionResult.stderr.trim() || 'binary reachable';
 
     if (!isAuthProbeSupported(provider.name)) {
-      return { ok: true, detail: versionDetail, durationMs: Date.now() - startedAt };
+      // OpenRouter: the binary reaching the endpoint says nothing about whether the
+      // CHOSEN MODEL can run a step. Some backends reject the trailing system message
+      // the claude binary appends, and the catalog cannot predict it (the failing
+      // model still advertises `tools`). One direct request finds out, and unlike the
+      // CLI path it can read the upstream's actual sentence. Advisory only — same
+      // shape as amp's $0-balance warning: credentials and binary are fine, the model
+      // choice is not.
+      const compatWarning = await resolveOpenRouterCompatWarning(provider, secrets);
+      return {
+        ok: true,
+        detail: versionDetail,
+        durationMs: Date.now() - startedAt,
+        ...(compatWarning ? { warning: compatWarning } : {}),
+      };
     }
 
     const authSpec = buildAuthProbeCommand(provider, resolvedCommand);
@@ -193,6 +208,35 @@ export async function probeCliPath(
       durationMs: Date.now() - startedAt,
     };
   }
+}
+
+/** The Test-connection advisory for an OpenRouter provider whose selected model
+ *  rejects the claude binary's request shape, or null when there is nothing to say.
+ *
+ *  Returns null for every inconclusive outcome (no model set, no key, unreachable,
+ *  auth/quota error) — see probeOpenRouterModelCompat. A false alarm here would tell
+ *  the user to change a model that is actually fine, which is worse than staying
+ *  quiet and letting the run report it. */
+async function resolveOpenRouterCompatWarning(
+  provider: CliProviderRecord,
+  secrets: Record<string, string>,
+): Promise<string | null> {
+  if (provider.name !== 'openrouter') return null;
+  const model = provider.model?.trim();
+  if (!model) return null;
+  const env = { ...(provider.envVars ?? {}), ...secrets };
+  const token = env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY;
+  if (!token) return null;
+  const baseUrl = env.ANTHROPIC_BASE_URL ?? OPENROUTER_DEFAULT_BASE_URL;
+  const compat = await probeOpenRouterModelCompat({ baseUrl, token, model });
+  if (compat.compatible) return null;
+  const because = compat.detail ? ` Upstream said: "${compat.detail}".` : '';
+  return (
+    `The model "${model}" rejects the request shape Claude Code sends (a trailing system ` +
+    `message alongside tool definitions), so it cannot run a task step.${because} ` +
+    `Pick a different OpenRouter model — Anthropic models always work, and openai/*, ` +
+    `x-ai/* and most others do too.`
+  );
 }
 
 function resolveProviderExecutable(adapter: BaseCliAdapter, provider: CliProviderRecord): string {

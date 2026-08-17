@@ -47,7 +47,7 @@ const OPENROUTER_LSP_MARKETPLACE_ID = 'claude-code-lsps';
 // OpenRouter's Anthropic-compatible root ("Anthropic Skin"). NO `/v1` and no
 // trailing slash: the claude binary appends `/v1/messages` itself, so anything
 // more specific here produces a 404 on a path the binary built.
-const OPENROUTER_DEFAULT_BASE_URL = 'https://openrouter.ai/api';
+export const OPENROUTER_DEFAULT_BASE_URL = 'https://openrouter.ai/api';
 
 export class OpenRouterAdapter extends BaseCliAdapter {
   readonly providerName = 'openrouter' as const;
