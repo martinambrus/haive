@@ -1,9 +1,8 @@
-import type { CliProviderName } from '@haive/shared';
+import type { AuthMode, CliProviderName } from '@haive/shared';
 import {
-  cliAuthProviderVolumeName,
-  cliAuthVolumeName,
   computeKeyFingerprint,
   envelopeEncrypt,
+  resolveCliAuthUserVolumeName,
   secretsService,
 } from '@haive/shared';
 import { schema, type Database } from '@haive/database';
@@ -59,6 +58,7 @@ export interface AuthVolumeCtx {
   userId: string;
   providerId: string;
   providerName: CliProviderName;
+  authMode: AuthMode;
   isolateAuth: boolean;
 }
 
@@ -97,8 +97,6 @@ export async function readAuthVolumeFile(
   relPath: string,
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<string | null> {
-  const vol = ctx.isolateAuth
-    ? cliAuthProviderVolumeName(ctx.providerId, ctx.providerName, authPathIdx)
-    : cliAuthVolumeName(ctx.userId, ctx.providerName, authPathIdx);
+  const vol = resolveCliAuthUserVolumeName(ctx, authPathIdx);
   return readVolumeFile(vol, relPath, runner);
 }

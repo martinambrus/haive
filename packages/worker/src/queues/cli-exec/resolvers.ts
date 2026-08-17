@@ -597,6 +597,7 @@ export async function resolveAuthMounts(
       userId: provider.userId,
       providerId: provider.id,
       providerName,
+      authMode: provider.authMode,
       isolateAuth: provider.isolateAuth,
     },
     taskId,
@@ -644,6 +645,7 @@ async function assertUserAuthReady(db: Database, provider: CliProviderRecord): P
     userId: provider.userId,
     providerId: provider.id,
     providerName,
+    authMode: provider.authMode,
     isolateAuth: provider.isolateAuth,
   });
   if (hasVolume) return;

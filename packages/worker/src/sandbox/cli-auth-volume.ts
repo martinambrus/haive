@@ -1,10 +1,6 @@
 import { join } from 'node:path';
-import {
-  cliAuthProviderVolumeName,
-  cliAuthVolumeName,
-  getCliProviderMetadata,
-} from '@haive/shared';
-import type { CliProviderName } from '@haive/shared';
+import { getCliProviderMetadata, resolveCliAuthUserVolumeName } from '@haive/shared';
+import type { AuthMode, CliProviderName } from '@haive/shared';
 import type { DockerVolumeMount } from './docker-runner.js';
 import { SANDBOX_USER_HOME } from './sandbox-runner.js';
 
@@ -16,6 +12,7 @@ export interface CliAuthMountContext {
   userId: string;
   providerId: string;
   providerName: CliProviderName;
+  authMode: AuthMode;
   isolateAuth: boolean;
 }
 
@@ -26,9 +23,7 @@ export function resolveCliAuthMounts(
   const meta = getCliProviderMetadata(ctx.providerName);
   const readOnly = !(opts.writable ?? false);
   return meta.authConfigPaths.map((raw, idx) => ({
-    source: ctx.isolateAuth
-      ? cliAuthProviderVolumeName(ctx.providerId, ctx.providerName, idx)
-      : cliAuthVolumeName(ctx.userId, ctx.providerName, idx),
+    source: resolveCliAuthUserVolumeName(ctx, idx),
     target: expandTildeToSandbox(raw),
     readOnly,
     kind: 'auth' as const,

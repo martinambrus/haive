@@ -12,11 +12,11 @@ import {
   CONFIG_KEYS,
   CONFIG_RUNTIME_LIMITS_CHANNEL,
   QUEUE_NAMES,
-  cliAuthProviderVolumeName,
-  cliAuthVolumeName,
   configService,
   createRedisConnection,
   getCliProviderMetadata,
+  resolveCliAuthUserVolumeName,
+  type AuthMode,
   type CliExecJobPayload,
   type CliLoginCreateJobPayload,
   type CliLoginCreateResult,
@@ -64,6 +64,32 @@ import {
 } from './resolvers.js';
 import { markProvidersReady, probeCliPath, removeOrphanedPreviousImage } from './images.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../cli-park-timing.js';
+
+/** The auth volume a provider row owns. Both users here (the pre-login chown and sign-out)
+ *  must agree with what a task actually mounts, so they resolve it through the same shared
+ *  function rather than re-deriving it — a sign-out that computed a different name would
+ *  report success while leaving the credential in place. */
+function authVolumeFor(
+  provider: {
+    id: string;
+    userId: string;
+    name: CliProviderName;
+    authMode: AuthMode;
+    isolateAuth: boolean;
+  },
+  pathIndex: number,
+): string {
+  return resolveCliAuthUserVolumeName(
+    {
+      userId: provider.userId,
+      providerId: provider.id,
+      providerName: provider.name,
+      authMode: provider.authMode,
+      isolateAuth: provider.isolateAuth,
+    },
+    pathIndex,
+  );
+}
 
 export async function handleCliExecJob(
   db: Database,
@@ -507,9 +533,7 @@ export async function handleLoginCreateJob(
   const authHelperImage = process.env.SANDBOX_IMAGE ?? 'haive-cli-sandbox:latest';
   const authMeta = getCliProviderMetadata(provider.name);
   for (let idx = 0; idx < authMeta.authConfigPaths.length; idx += 1) {
-    const vol = provider.isolateAuth
-      ? cliAuthProviderVolumeName(provider.id, provider.name, idx)
-      : cliAuthVolumeName(provider.userId, provider.name, idx);
+    const vol = authVolumeFor(provider, idx);
     try {
       const chownRes = await defaultDockerRunner.run({
         image: authHelperImage,
@@ -566,9 +590,7 @@ export async function handleSignOutJob(
   const removed: string[] = [];
   const failed: { name: string; stderr: string }[] = [];
   for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
-    const name = provider.isolateAuth
-      ? cliAuthProviderVolumeName(provider.id, provider.name, idx)
-      : cliAuthVolumeName(provider.userId, provider.name, idx);
+    const name = authVolumeFor(provider, idx);
     if (!(await runner.volumeExists(name))) continue;
     const result = await runner.volumeRemove(name);
     if (result.ok) removed.push(name);

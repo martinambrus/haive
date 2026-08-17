@@ -1259,10 +1259,12 @@ export function CliProviderForm({
         <div className="flex flex-col">
           <Label htmlFor="isolateAuth">Isolate auth from other {state.name} providers</Label>
           <p className="text-xs text-neutral-500">
-            By default, every {state.name} provider for your account shares one auth volume — login
-            once, all of them work. Enable this to give this provider its own credential store, so
-            you can keep two separate accounts side-by-side. Existing logins do not migrate; sign in
-            again after toggling.
+            By default, {state.name} providers for your account that use the <em>same</em> auth mode
+            share one auth volume — login once, all of them work. API-key and subscription providers
+            are always kept apart, so a subscription login can never become the credential an
+            API-key provider runs on. Enable this to give this provider its own credential store
+            even against providers of the same mode, so you can keep two separate accounts
+            side-by-side. Existing logins do not migrate; sign in again after toggling.
           </p>
         </div>
       </div>

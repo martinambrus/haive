@@ -7,6 +7,7 @@ import {
   configService,
   logger,
   parseAllowanceWatchMode,
+  type AuthMode,
   type CliProviderName,
 } from '@haive/shared';
 import { schema, type Database } from '@haive/database';
@@ -139,6 +140,11 @@ interface ProviderRow {
   userId: string;
   name: CliProviderName;
   cliVersion: string | null;
+  /** Part of the auth-volume identity (resolveCliAuthUserVolumeName). NOTE: the query below
+   *  casts its result to this type, so tsc cannot catch a field that is declared here but not
+   *  SELECTed — it would simply arrive undefined and silently resolve the wrong volume. Add
+   *  the column and the field together. */
+  authMode: AuthMode;
   isolateAuth: boolean;
   envVars: Record<string, string> | null;
 }
@@ -224,6 +230,7 @@ async function resolveToken(
       userId: provider.userId,
       providerId: provider.id,
       providerName: provider.name,
+      authMode: provider.authMode,
       isolateAuth: provider.isolateAuth,
     },
     cfg.token.authPathIdx,
@@ -403,6 +410,7 @@ async function runUsagePollTick(db: Database): Promise<void> {
       userId: true,
       name: true,
       cliVersion: true,
+      authMode: true,
       isolateAuth: true,
       envVars: true,
     },

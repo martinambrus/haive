@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { and, eq, isNull, notInArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { CONFIG_KEYS, configService, type UsageWindowSnapshot } from '@haive/shared';
+import { CONFIG_KEYS, configService, type AuthMode, type UsageWindowSnapshot } from '@haive/shared';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -153,17 +153,34 @@ async function activeProviderIds(db: ReturnType<typeof getDb>, userId: string): 
 /** Stable identity of the ALLOWANCE a snapshot's numbers describe — the credential set the
  *  CLI actually spends, not the provider row that happens to report it.
  *
- *  `isolate_auth` is exactly what resolveCliAuthMounts branches on (worker
- *  sandbox/cli-auth-volume.ts): an isolated row mounts its own per-provider auth volume and
- *  therefore has its own login and its own quota, while every NON-isolated row of the same
- *  CLI name mounts one shared volume — one login, one subscription, one allowance. Four
- *  `claude-code` rows (Fable Low / Max / xHigh, Sonnet xHigh) are a single Claude
- *  subscription, which is why they report the same reset instant and the same weekly
+ *  This mirrors what resolveCliAuthUserVolumeName (@haive/shared) actually resolves, and has
+ *  to keep mirroring it — the key is only meaningful because it names the same sharing the
+ *  volume does. An isolated row mounts its own per-provider volume and therefore has its own
+ *  login and its own quota. Non-isolated rows of the same CLI name share a volume ONLY when
+ *  they also share an auth mode: an API-key row and a subscription row are two credentials
+ *  billing two accounts, so collapsing them would attribute a subscription's depletion to a
+ *  row spending a metered key.
+ *
+ *  Four `claude-code` rows (Fable Low / Max / xHigh, Sonnet xHigh) in one mode are a single
+ *  Claude subscription, which is why they report the same reset instant and the same weekly
  *  percentage; alerting per row fired four identical "usage low" notifications for one
  *  depleting allowance. Per-user by construction — the route is already scoped to the
  *  caller, so a shared key never spans two people. */
-function providerAllowanceKey(row: { id: string; name: string; isolateAuth: boolean }): string {
-  return row.isolateAuth ? `provider:${row.id}` : `shared:${row.name}`;
+function providerAllowanceKey(row: {
+  id: string;
+  name: string;
+  isolateAuth: boolean;
+  authMode: AuthMode;
+}): string {
+  if (row.isolateAuth) return `provider:${row.id}`;
+  // Auth mode is part of the key for the same reason it is part of the volume name
+  // (resolveCliAuthUserVolumeName): rows of one CLI no longer share a credential across
+  // modes, so an API-key row and a subscription row are two allowances, not one. Collapsing
+  // them would attribute a subscription's depletion to a row billing a metered key.
+  // Mirrors the volume scheme's asymmetry deliberately — subscription keeps the historical
+  // key so existing depletion episodes are not re-baselined, and only api_key gains a
+  // suffix. Keep the two in lockstep; they describe the same sharing.
+  return row.authMode === 'api_key' ? `shared:${row.name}:api_key` : `shared:${row.name}`;
 }
 
 /** providerId -> allowance key, for every CLI provider the caller owns. The notifier keys
@@ -178,6 +195,7 @@ async function allowanceKeys(
       id: schema.cliProviders.id,
       name: schema.cliProviders.name,
       isolateAuth: schema.cliProviders.isolateAuth,
+      authMode: schema.cliProviders.authMode,
     })
     .from(schema.cliProviders)
     .where(eq(schema.cliProviders.userId, userId));

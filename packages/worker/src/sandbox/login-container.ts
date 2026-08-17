@@ -56,6 +56,10 @@ export async function createSandboxLoginContainer(
       userId: provider.userId,
       providerId: provider.id,
       providerName: provider.name,
+      // The login writes its credential into whichever volume this resolves to, so it must
+      // match what a task later mounts — otherwise the user signs in successfully and every
+      // run still reports "not signed in".
+      authMode: provider.authMode,
       isolateAuth: provider.isolateAuth,
     },
     { writable: true },

@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  cliAuthApiKeyVolumeName,
   cliAuthProviderVolumeName,
   cliAuthTaskVolumeName,
   cliAuthVolumeName,
   isCliAuthProviderVolume,
   isCliAuthTaskVolume,
   isCliAuthVolume,
+  resolveCliAuthUserVolumeName,
+  type CliAuthVolumeCtx,
 } from '../src/cli-providers/auth-volume.js';
 
 describe('cliAuthVolumeName (per-user shared)', () => {
@@ -37,6 +40,71 @@ describe('cliAuthProviderVolumeName (per-provider isolated)', () => {
     const a = cliAuthProviderVolumeName('11111111-aaaa-bbbb', 'gemini', 0);
     const b = cliAuthProviderVolumeName('22222222-aaaa-bbbb', 'gemini', 0);
     expect(a).not.toBe(b);
+  });
+});
+
+describe('resolveCliAuthUserVolumeName (auth-mode scoping)', () => {
+  const ctx = (over: Partial<CliAuthVolumeCtx> = {}): CliAuthVolumeCtx => ({
+    userId: 'aaaa-bbbb-cccc-dddd',
+    providerId: '9999-8888-7777-6666',
+    providerName: 'grok',
+    authMode: 'subscription',
+    isolateAuth: false,
+    ...over,
+  });
+
+  it('THE BUG: the two modes of one user+CLI never share a volume', () => {
+    // A subscription login wrote ~/.grok/auth.json into the shared volume; the API-key row
+    // mounted the same volume, and grok prefers a session token over a key — so the row
+    // configured for a key silently spent the subscription.
+    const sub = resolveCliAuthUserVolumeName(ctx({ authMode: 'subscription' }), 0);
+    const key = resolveCliAuthUserVolumeName(ctx({ authMode: 'api_key' }), 0);
+    expect(sub).not.toBe(key);
+  });
+
+  it('COMPATIBILITY: a subscription row resolves byte-identically to the pre-change name', () => {
+    // Pinned as a literal on purpose. This name addresses volumes that already exist on every
+    // installation and hold the credential that actually authenticates; changing it logs every
+    // user out of every CLI at once. A failure here is a migration, never a rename.
+    expect(resolveCliAuthUserVolumeName(ctx({ authMode: 'subscription' }), 0)).toBe(
+      'haive_cli_auth_aaaabbbbcccc_grok_0',
+    );
+    expect(resolveCliAuthUserVolumeName(ctx({ authMode: 'subscription' }), 0)).toBe(
+      cliAuthVolumeName('aaaa-bbbb-cccc-dddd', 'grok', 0),
+    );
+  });
+
+  it('an api_key row gets its own namespace', () => {
+    expect(resolveCliAuthUserVolumeName(ctx({ authMode: 'api_key' }), 0)).toBe(
+      'haive_cli_auth_aaaabbbbcccc_grok_k_0',
+    );
+    expect(resolveCliAuthUserVolumeName(ctx({ authMode: 'api_key' }), 0)).toBe(
+      cliAuthApiKeyVolumeName('aaaa-bbbb-cccc-dddd', 'grok', 0),
+    );
+  });
+
+  it('isolate_auth still wins and is unaffected by mode', () => {
+    // Per-row already, so two rows cannot collide whatever their modes.
+    const a = resolveCliAuthUserVolumeName(ctx({ isolateAuth: true, authMode: 'api_key' }), 0);
+    const b = resolveCliAuthUserVolumeName(ctx({ isolateAuth: true, authMode: 'subscription' }), 0);
+    expect(a).toBe(b);
+    expect(a).toBe(cliAuthProviderVolumeName('9999-8888-7777-6666', 'grok', 0));
+  });
+
+  it('keeps the path index and provider name distinct per mode', () => {
+    expect(resolveCliAuthUserVolumeName(ctx({ authMode: 'api_key' }), 1)).toBe(
+      'haive_cli_auth_aaaabbbbcccc_grok_k_1',
+    );
+    expect(
+      resolveCliAuthUserVolumeName(ctx({ authMode: 'api_key', providerName: 'codex' }), 0),
+    ).toBe('haive_cli_auth_aaaabbbbcccc_codex_k_0');
+  });
+
+  it('an api_key volume is still recognised as a CLI auth volume, and is not task/provider scoped', () => {
+    const name = cliAuthApiKeyVolumeName('u1', 'codex', 0);
+    expect(isCliAuthVolume(name)).toBe(true);
+    expect(isCliAuthTaskVolume(name)).toBe(false);
+    expect(isCliAuthProviderVolume(name)).toBe(false);
   });
 });
 

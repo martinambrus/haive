@@ -4,13 +4,12 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_PROVIDER_LIST,
-  cliAuthProviderVolumeName,
   cliAuthTaskVolumeName,
-  cliAuthVolumeName,
   getCliProviderMetadata,
   logger,
+  resolveCliAuthUserVolumeName,
 } from '@haive/shared';
-import type { CliProviderName } from '@haive/shared';
+import type { AuthMode, CliProviderName } from '@haive/shared';
 import { defaultDockerRunner, type DockerRunner, type DockerVolumeMount } from './docker-runner.js';
 import { expandTildeToSandbox } from './cli-auth-volume.js';
 import { buildMcpAddArgv, type McpServerSpec } from './mcp-config.js';
@@ -23,13 +22,12 @@ export interface ProviderAuthCtx {
   userId: string;
   providerId: string;
   providerName: CliProviderName;
+  authMode: AuthMode;
   isolateAuth: boolean;
 }
 
 function userVolumeForCtx(ctx: ProviderAuthCtx, idx: number): string {
-  return ctx.isolateAuth
-    ? cliAuthProviderVolumeName(ctx.providerId, ctx.providerName, idx)
-    : cliAuthVolumeName(ctx.userId, ctx.providerName, idx);
+  return resolveCliAuthUserVolumeName(ctx, idx);
 }
 
 /** Map our CLI provider names to the corresponding `rtk init` flag. Returns
@@ -645,7 +643,9 @@ export async function syncRefreshedAuthToUserVolumes(
     if (!providerId) continue;
     const provider = await db.query.cliProviders.findFirst({
       where: eq(schema.cliProviders.id, providerId),
-      columns: { id: true, userId: true, name: true, isolateAuth: true },
+      // authMode is part of the auth-volume identity (resolveCliAuthUserVolumeName), so
+      // omitting it here would resolve every row to the subscription volume.
+      columns: { id: true, userId: true, name: true, isolateAuth: true, authMode: true },
     });
     if (!provider) continue;
 
@@ -656,6 +656,7 @@ export async function syncRefreshedAuthToUserVolumes(
       userId: provider.userId,
       providerId: provider.id,
       providerName: provider.name,
+      authMode: provider.authMode,
       isolateAuth: provider.isolateAuth,
     };
     const taskVol = cliAuthTaskVolumeName(taskId, provider.name, source.authPathIdx);

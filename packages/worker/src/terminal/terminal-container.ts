@@ -190,6 +190,7 @@ export async function ensureShellContainer(
       userId: provider.userId,
       providerId: provider.id,
       providerName: provider.name,
+      authMode: provider.authMode,
       isolateAuth: provider.isolateAuth,
     },
     { writable: true },
