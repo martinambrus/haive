@@ -37,10 +37,31 @@ export class AntigravityAdapter extends BaseCliAdapter {
   // codex/amp; step 07 merges the rules blocks).
   readonly rulesFile = 'AGENTS.md';
   readonly rulesFileMode = 'native' as const;
-  // agy's inference/auth endpoints aren't derivable from the CLI's flags; the
-  // user must add them per provider (Settings → network) to run under
-  // allowlist/none. Empty default keeps the base behavior explicit.
-  override readonly defaultEgressDomains: readonly string[] = [];
+  // MEASURED against the live CLI (test/egress-discover.ts, agy 2026-08-17), not
+  // taken from vendor docs — an empty default here meant `none`/`allowlist` gave
+  // agy no gateway at all and every run died on "auth timed out".
+  //
+  // The two google.com hosts are not optional extras: agy's ELIGIBILITY CHECK
+  // calls www.googleapis.com/oauth2/v2/userinfo AND fetches the account's profile
+  // picture from googleusercontent, and a 403 on either aborts the whole run
+  // before a single token is generated ("Eligibility check failed"). Both
+  // verified by removing them one at a time.
+  //
+  // cloudcode-pa is the model backend (loadCodeAssist / streamGenerateContent).
+  // The live host carries a release-channel prefix (`daily-`), so the bare form
+  // is listed alongside it; a future channel prefix squid cannot wildcard-match
+  // needs a per-provider egress entry.
+  //
+  // Deliberately NOT included, though agy contacts them: play.googleapis.com
+  // (telemetry), antigravity-unleash.goog (experiments), api.mixpanel.com. A run
+  // completes with all three blocked, so they buy nothing and widen the allow-set.
+  override readonly defaultEgressDomains = [
+    'oauth2.googleapis.com',
+    'www.googleapis.com',
+    'cloudcode-pa.googleapis.com',
+    'daily-cloudcode-pa.googleapis.com',
+    '*.googleusercontent.com',
+  ];
 
   buildCliInvocation(
     provider: CliProviderRecord,
