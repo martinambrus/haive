@@ -91,6 +91,28 @@ const PROVIDER_API_KEY_HINTS: Record<string, string> = {
 // page), not via a terminal command. On auth failure, point users there.
 const PROVIDER_HAIVE_LOGIN: ReadonlySet<string> = new Set(['antigravity']);
 
+// Auth hints the three maps above cannot express, keyed by provider name.
+//
+// grok needs one for two compounding reasons. It supports BOTH an XAI_API_KEY
+// secret and an in-Haive device login, and this builder only receives a provider
+// NAME, so it cannot tell which mode the failing row used — neither the api-key
+// map nor the Haive-login set is right on its own. And grok collapses "not logged
+// in", "key rejected" and "account out of credits" into a single "Not signed in"
+// string: measured on a real failure whose own init line reported
+// `apiKeySource: "user"` (the key WAS supplied and used) yet still errored with it.
+// That text carries `unauthenticated`, so classifyProviderFatal reaches 'auth'
+// before RATE_LIMIT_RE can ever see it — an exhausted account is therefore
+// reported as an auth problem, and without this hint the user was told to
+// "re-authenticate your CLI in your terminal", which an API-key provider has no
+// way to do. The wording covers every case grok conflates, because nothing in its
+// output distinguishes them.
+const PROVIDER_AUTH_HINT_OVERRIDES: Record<string, string> = {
+  grok:
+    "check this provider's credentials (the `XAI_API_KEY` secret, or sign in from the Haive " +
+    'providers page) and confirm the xAI account still has credits — grok reports an exhausted ' +
+    'or rejected key with the same "Not signed in" message it uses for no login',
+};
+
 // Exit codes that mean the process was terminated rather than exiting on its
 // own: 130 (SIGINT), 137 (SIGKILL — task cancel and step stop-&-retry force-
 // remove the container, which surfaces as 137), 143 (SIGTERM). Together with a
@@ -196,15 +218,18 @@ function buildProviderFatalMessage(
   detail: string,
 ): string {
   if (fatalClass === 'auth') {
+    const override = providerName ? PROVIDER_AUTH_HINT_OVERRIDES[providerName] : null;
     const apiKeyName = providerName ? PROVIDER_API_KEY_HINTS[providerName] : null;
     const loginCmd = providerName ? PROVIDER_LOGIN_HINTS[providerName] : null;
-    const hint = apiKeyName
-      ? `check or replace the \`${apiKeyName}\` secret for this provider in Haive settings and then retry this step`
-      : providerName && PROVIDER_HAIVE_LOGIN.has(providerName)
-        ? `log in to ${providerName} from the Haive providers page (Test connection then Log in) and then retry this step`
-        : loginCmd
-          ? `run \`${loginCmd}\` in your terminal and then retry this step`
-          : 're-authenticate your CLI in your terminal and then retry this step';
+    const hint = override
+      ? `${override}, then retry this step`
+      : apiKeyName
+        ? `check or replace the \`${apiKeyName}\` secret for this provider in Haive settings and then retry this step`
+        : providerName && PROVIDER_HAIVE_LOGIN.has(providerName)
+          ? `log in to ${providerName} from the Haive providers page (Test connection then Log in) and then retry this step`
+          : loginCmd
+            ? `run \`${loginCmd}\` in your terminal and then retry this step`
+            : 're-authenticate your CLI in your terminal and then retry this step';
     return `${PROVIDER_FATAL_HEADLINES.auth} — ${hint}.${detail}`;
   }
   const hint =

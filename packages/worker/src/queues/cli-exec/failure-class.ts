@@ -194,8 +194,29 @@ export const PROVIDER_FATAL_HEADLINES: Record<ProviderFatalClass, string> = {
 // "$500" are too false-positive); 5xx must carry HTTP context.
 const RATE_LIMIT_RE =
   /\b429\b|too[_\s-]?many[_\s-]?requests|\brate[_\s-]?limit(?:ed|ing)?\b|\b(?:usage|session) limit\b|quota[_\s-]?(?:exceeded|exhausted|reached|limit)|\boverage\b/i;
+// Billing exhaustion. Checked BEFORE auth, because providers report it on a 403 that
+// AUTH_RE already matches via `\b40[13]\b` — xAI's is verbatim:
+//   API error (status 403 Forbidden): permission-denied: Your team <id> has either used
+//   all available credits or reached its monthly spending limit. To continue making API
+//   requests, please purchase more credits or raise your spending limit.
+// Left to AUTH_RE that becomes "CLI authentication failed — re-authenticate your CLI",
+// which is both wrong and unactionable: the credentials are fine and there is nothing to
+// re-authenticate. RATE_LIMIT_RE does not catch it either ("spending limit" is not
+// "usage limit", and no `quota` token appears), so it needs its own pattern rather than
+// a widening of that one.
+//
+// VOLATILE by nature — this is human-facing billing prose, not a documented code, so a
+// vendor reword silently stops matching. That is contained by design: this check only
+// ever RECLASSIFIES a failure that is already fatal, so a miss falls through to exactly
+// today's behaviour (auth on the 403) rather than to no classification at all.
+const BILLING_EXHAUSTED_RE =
+  /used all available credits|purchase more credits|spending limit|insufficient (?:credits|balance|funds)|out of credits|credit balance (?:is )?too low/i;
+
+// `not signed in` is grok's phrasing for a rejected or absent credential. Without it that
+// failure matched nothing at all and was passed through as a bare CLI error, so the step
+// carried no fatal classification and no actionable hint.
 const AUTH_RE =
-  /\b40[13]\b|authentication_error|invalid authentication credentials|\bunauthorized\b|\bunauthenticated\b|permission_error|please log.?in|not authenticated|token.*(?:expired|invalid)/i;
+  /\b40[13]\b|authentication_error|invalid authentication credentials|\bunauthorized\b|\bunauthenticated\b|permission_error|please log.?in|not authenticated|not signed in|token.*(?:expired|invalid)/i;
 const SERVER_ERROR_RE =
   /\b529\b|(?:status|http|error|code|\()[\s:/]*5\d{2}\b|\b5\d{2}\b\s*(?:error|status|service|unavailable|gateway|bad gateway|overloaded)|service unavailable|bad gateway|gateway time-?out|internal server error|\boverloaded\b/i;
 
@@ -217,6 +238,8 @@ export function classifyProviderFatal(
   }
   const tail = typeof rawOutput === 'string' ? rawOutput.slice(-2000) : '';
   const haystack = `${errorMessage ?? ''}\n${tail}`;
+  // Billing first: an exhausted account answers 403, which AUTH_RE would otherwise claim.
+  if (BILLING_EXHAUSTED_RE.test(haystack)) return 'rate_limit';
   if (AUTH_RE.test(haystack)) return 'auth';
   if (RATE_LIMIT_RE.test(haystack)) return 'rate_limit';
   if (SERVER_ERROR_RE.test(haystack)) return 'server_error';

@@ -38,6 +38,76 @@ describe('interpretCliFailure', () => {
     expect(msg).toMatch(/codex login/);
   });
 
+  // VERBATIM tail of a real failing grok run. Its own init line reported
+  // apiKeySource:"user" — the XAI_API_KEY reached the CLI and was used — and the account
+  // was simply out of credits, yet grok emits the string it uses for "never logged in".
+  const GROK_NOT_SIGNED_IN =
+    '{"type":"result","subtype":"error_during_execution","is_error":true,"errors":' +
+    '["Not signed in. To authenticate without a browser, run:\\n  grok login --device-code' +
+    '\\n\\nAlternatively, set the XAI_API_KEY environment variable or run `grok login` on a ' +
+    'machine with a browser."]}\n' +
+    'Error: Not signed in. To authenticate without a browser, run:\n  grok login --device-code\n';
+
+  // VERBATIM xAI billing error, from the run that actually failed this way. It arrives on a
+  // 403, so AUTH_RE claims it via `\b40[13]\b` unless the billing check runs first — and
+  // RATE_LIMIT_RE never matches it ("spending limit" is not "usage limit", no `quota` token).
+  const GROK_OUT_OF_CREDITS =
+    'Error: Internal error: {\n  "message": "API error (status 403 Forbidden): permission-denied: ' +
+    'Your team 92d549b8 has either used all available credits or reached its monthly spending ' +
+    'limit. To continue making API requests, please purchase more credits or raise your ' +
+    'spending limit."\n}';
+
+  it('classifies an exhausted account as a QUOTA failure, not an auth failure', () => {
+    // The defect this fixes: an out-of-credits account was reported as "CLI authentication
+    // failed — re-authenticate your CLI in your terminal", which is both wrong (the
+    // credentials are fine) and impossible to act on. It must read as a spend problem.
+    // errorMessage, not rawOutput: that is where this arrived on the real invocation, and it
+    // is also what formatAuthDetail excerpts, so the provider's own "purchase more credits"
+    // wording reaches the user even though the headline is generic.
+    const msg = interpretCliFailure(outcome({ errorMessage: GROK_OUT_OF_CREDITS }), 'grok');
+    expect(msg).toMatch(/usage limit or quota is exhausted/);
+    expect(msg).not.toMatch(/authentication failed/);
+    expect(msg).not.toMatch(/re-authenticate/);
+    expect(msg).toMatch(/purchase more credits/);
+  });
+
+  it('still classifies a plain 403 with no billing wording as auth', () => {
+    // The billing check must not swallow ordinary permission failures — it runs first only
+    // to win the 403 that names credits.
+    const msg = interpretCliFailure(
+      outcome({ rawOutput: '403 Forbidden permission_error' }),
+      'codex',
+    );
+    expect(msg).toMatch(/authentication failed/);
+  });
+
+  it('gives grok an ACTIONABLE auth hint, not "re-authenticate your CLI"', () => {
+    // grok's other degradation: a rejected credential reported as "Not signed in". That
+    // phrase previously matched nothing, so the failure carried no classification at all and
+    // was passed through raw. Now it classifies as auth and gets a hint naming both routes.
+    const msg = interpretCliFailure(outcome({ rawOutput: GROK_NOT_SIGNED_IN }), 'grok');
+    expect(msg).toMatch(/XAI_API_KEY/);
+    expect(msg).toMatch(/credits/);
+    expect(msg).not.toMatch(/re-authenticate your CLI in your terminal/);
+  });
+
+  it('covers both grok auth modes, since the classifier only sees a provider name', () => {
+    // grok takes either a secret or an in-Haive device login and this code path never
+    // learns which the failing row used, so the hint has to name both routes.
+    const msg = interpretCliFailure(outcome({ rawOutput: GROK_NOT_SIGNED_IN }), 'grok');
+    expect(msg).toMatch(/Haive providers page/);
+  });
+
+  it('leaves other providers’ auth hints untouched', () => {
+    // The override is keyed by name; nothing else may shift.
+    expect(interpretCliFailure(outcome({ rawOutput: 'Unauthorized 401' }), 'codex')).toMatch(
+      /codex login/,
+    );
+    expect(interpretCliFailure(outcome({ rawOutput: 'Unauthorized 401' }), 'antigravity')).toMatch(
+      /Haive providers page/,
+    );
+  });
+
   it('points gemini at the GEMINI_API_KEY secret instead of a CLI login', () => {
     const result = outcome({ rawOutput: 'Unauthorized 401' });
     const msg = interpretCliFailure(result, 'gemini');
