@@ -10,6 +10,7 @@ import {
 } from './docker-runner.js';
 import { createEgressGateway, type EgressGateway } from './egress-gateway.js';
 import { OLLAMA_THINKING_PROXY_HOST } from '../cli-adapters/ollama-thinking-proxy.js';
+import { OPENROUTER_COMPAT_PROXY_HOST } from '../cli-adapters/openrouter-proxy.js';
 import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 import { resolveRunnerCaps } from './runtime-caps.js';
 
@@ -417,7 +418,17 @@ function mergeProxyEnv(
   // in-stack Ollama host is likewise reached directly over the models network.
   // The thinking-disable proxy is an internal sandbox-network hostname (like
   // `api`), reached directly — never via the squid allowlist proxy.
-  const noProxyHosts = ['localhost', '127.0.0.1', '::1', 'api', OLLAMA_THINKING_PROXY_HOST];
+  const noProxyHosts = [
+    'localhost',
+    '127.0.0.1',
+    '::1',
+    'api',
+    OLLAMA_THINKING_PROXY_HOST,
+    // Same shape as the thinking proxy: an internal sandbox-network hostname the
+    // claude binary must reach directly. It forwards to openrouter.ai itself, so
+    // the user's egress allowlist still governs what actually leaves the stack.
+    OPENROUTER_COMPAT_PROXY_HOST,
+  ];
   if (modelsHost) noProxyHosts.push(modelsHost);
   const noProxy = noProxyHosts.join(',');
   return {

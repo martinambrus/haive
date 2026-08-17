@@ -16,7 +16,7 @@ import {
   isAuthProbeSupported,
 } from '../../cli-adapters/auth-probe.js';
 import { probeOpenRouterModelCompat } from '../../cli-adapters/openrouter-compat.js';
-import { OPENROUTER_DEFAULT_BASE_URL } from '../../cli-adapters/openrouter.js';
+import { resolveOpenRouterBaseUrl } from '../../cli-adapters/openrouter-proxy.js';
 import { log } from './_shared.js';
 import { createSandboxSpawner } from './exec-core.js';
 import { handleBuildSandboxImageJob } from './handlers.js';
@@ -149,19 +149,25 @@ export async function probeCliPath(
 
     if (!isAuthProbeSupported(provider.name)) {
       // OpenRouter: the binary reaching the endpoint says nothing about whether the
-      // CHOSEN MODEL can run a step. Some backends reject the trailing system message
-      // the claude binary appends, and the catalog cannot predict it (the failing
-      // model still advertises `tools`). One direct request finds out, and unlike the
-      // CLI path it can read the upstream's actual sentence. Advisory only — same
-      // shape as amp's $0-balance warning: credentials and binary are fine, the model
-      // choice is not.
-      const compatWarning = await resolveOpenRouterCompatWarning(provider, secrets);
-      return {
-        ok: true,
-        detail: versionDetail,
-        durationMs: Date.now() - startedAt,
-        ...(compatWarning ? { warning: compatWarning } : {}),
-      };
+      // CHOSEN MODEL can run a step, and the catalog cannot predict it (a failing
+      // model still advertises `tools`). One request through the real base URL finds
+      // out, and unlike the CLI path it can read the upstream's actual sentence.
+      //
+      // Reported as a FAILED test rather than amp-style advisory. Amp's $0-balance
+      // warning describes a risk; this describes a certainty — the model cannot run
+      // any step that has tools, which is nearly all of them. Returning ok:true
+      // alongside "cannot run a task step" is a contradiction that reads as noise,
+      // and it was reported as confusing the first time it fired.
+      const compatError = await resolveOpenRouterCompatWarning(provider, secrets);
+      if (compatError) {
+        return {
+          ok: false,
+          detail: versionDetail,
+          error: compatError,
+          durationMs: Date.now() - startedAt,
+        };
+      }
+      return { ok: true, detail: versionDetail, durationMs: Date.now() - startedAt };
     }
 
     const authSpec = buildAuthProbeCommand(provider, resolvedCommand);
@@ -213,6 +219,13 @@ export async function probeCliPath(
 /** The Test-connection advisory for an OpenRouter provider whose selected model
  *  rejects the claude binary's request shape, or null when there is nothing to say.
  *
+ *  Probes THROUGH whatever base URL the run will actually use (resolveOpenRouterBaseUrl
+ *  — normally the compat proxy), not the raw gateway. That is the whole point: the
+ *  proxy hoists the trailing system message that most of this class trips over, so
+ *  probing openrouter.ai directly would condemn models that work perfectly well in
+ *  practice. Reaching this warning now means the model fails even WITH the rewrite,
+ *  or that the provider has been pointed at the raw endpoint by hand.
+ *
  *  Returns null for every inconclusive outcome (no model set, no key, unreachable,
  *  auth/quota error) — see probeOpenRouterModelCompat. A false alarm here would tell
  *  the user to change a model that is actually fine, which is worse than staying
@@ -227,15 +240,19 @@ async function resolveOpenRouterCompatWarning(
   const env = { ...(provider.envVars ?? {}), ...secrets };
   const token = env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY;
   if (!token) return null;
-  const baseUrl = env.ANTHROPIC_BASE_URL ?? OPENROUTER_DEFAULT_BASE_URL;
+  const baseUrl = resolveOpenRouterBaseUrl(env);
   const compat = await probeOpenRouterModelCompat({ baseUrl, token, model });
   if (compat.compatible) return null;
   const because = compat.detail ? ` Upstream said: "${compat.detail}".` : '';
+  const custom = env.ANTHROPIC_BASE_URL
+    ? ` This provider sets ANTHROPIC_BASE_URL by hand, so it bypasses Haive's ` +
+      `OpenRouter compatibility proxy — clearing that env var may be enough to fix it.`
+    : ` Haive's compatibility proxy already rewrites the request and this model still ` +
+      `rejects it, so pick a different one — Anthropic models always work, and openai/*, ` +
+      `x-ai/* and most others do too.`;
   return (
-    `The model "${model}" rejects the request shape Claude Code sends (a trailing system ` +
-    `message alongside tool definitions), so it cannot run a task step.${because} ` +
-    `Pick a different OpenRouter model — Anthropic models always work, and openai/*, ` +
-    `x-ai/* and most others do too.`
+    `The model "${model}" rejects the request Claude Code sends, so it cannot run a ` +
+    `task step.${because}${custom}`
   );
 }
 

@@ -195,6 +195,23 @@ services:
       - haive-network
       - haive-sandbox
 
+  # Request-shape compatibility proxy in front of openrouter.ai. The claude binary
+  # appends a trailing role:"system" message that several OpenRouter backends reject
+  # with 400 "System message must be at the beginning."; this hoists it into the
+  # top-level `system` field. Unconditional for openrouter (the rewrite is a no-op
+  # when there is no such message), so unlike the thinking proxy there is no toggle.
+  # Dual-homed the same way: haive-network for outbound internet to openrouter.ai,
+  # haive-sandbox (internal) so per-task sandboxes reach it by name.
+  openrouter-compat-proxy:
+    build:
+      context: ./docker/openrouter-compat-proxy
+      dockerfile: Dockerfile
+    container_name: haive-openrouter-compat-proxy
+    restart: unless-stopped
+    networks:
+      - haive-network
+      - haive-sandbox
+
 networks:
   haive-network:
     driver: bridge

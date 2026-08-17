@@ -1,6 +1,7 @@
 import { BaseCliAdapter } from './base-adapter.js';
 import { claudeFamilyOutputTokenEnv } from './model-capabilities.js';
 import { claudeFamilyArgs, steeringUserMessageLine } from './steering.js';
+import { resolveOpenRouterBaseUrl } from './openrouter-proxy.js';
 import type {
   CliCommandSpec,
   CliProviderRecord,
@@ -44,10 +45,14 @@ const OPENROUTER_LSP_PLUGINS: Record<string, string> = {
 const OPENROUTER_LSP_MARKETPLACE_REF = 'Piebald-AI/claude-code-lsps';
 const OPENROUTER_LSP_MARKETPLACE_ID = 'claude-code-lsps';
 
-// OpenRouter's Anthropic-compatible root ("Anthropic Skin"). NO `/v1` and no
-// trailing slash: the claude binary appends `/v1/messages` itself, so anything
-// more specific here produces a 404 on a path the binary built.
-export const OPENROUTER_DEFAULT_BASE_URL = 'https://openrouter.ai/api';
+// The base URL comes from resolveOpenRouterBaseUrl (openrouter-proxy.ts), which
+// points at the in-stack compat proxy unless the provider set one by hand. The
+// proxy exists because the claude binary appends a trailing `role:"system"`
+// message that several OpenRouter backends reject outright — see that module.
+//
+// Whatever it resolves to carries NO `/v1` and no trailing slash: the claude binary
+// appends `/v1/messages` itself, so anything more specific produces a 404 on a path
+// the binary built.
 
 export class OpenRouterAdapter extends BaseCliAdapter {
   readonly providerName = 'openrouter' as const;
@@ -85,7 +90,7 @@ export class OpenRouterAdapter extends BaseCliAdapter {
     // until an overflow teaches us the model can do more (model-capabilities.ts). The
     // provider's envVars still win — mergedEnv spreads last.
     const env = { ...claudeFamilyOutputTokenEnv(provider), ...this.mergedEnv(provider, opts) };
-    env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL ?? OPENROUTER_DEFAULT_BASE_URL;
+    env.ANTHROPIC_BASE_URL = resolveOpenRouterBaseUrl(env);
     const token = env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY;
     if (token) {
       env.ANTHROPIC_AUTH_TOKEN = token;
@@ -132,7 +137,7 @@ export class OpenRouterAdapter extends BaseCliAdapter {
     extraEnv: Record<string, string> = {},
   ): Record<string, string> {
     const env = super.buildShellEnv(provider, secrets, extraEnv);
-    env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL ?? OPENROUTER_DEFAULT_BASE_URL;
+    env.ANTHROPIC_BASE_URL = resolveOpenRouterBaseUrl(env);
     // Interactive `claude` warns when both ANTHROPIC_AUTH_TOKEN and
     // ANTHROPIC_API_KEY are present. Set only AUTH_TOKEN here; the
     // non-interactive orchestrator path (buildCliInvocation) still sets both for
