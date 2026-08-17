@@ -1,5 +1,5 @@
-import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { and, eq, ne, notInArray } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import { stableStringify } from './01-declare-deps.js';
@@ -120,14 +120,20 @@ export const generateDockerfileStep: StepDefinition<
     const existingByHash = await findEnvTemplateByHash(ctx.db, ctx.userId, dockerfileHash);
     if (existingByHash && existingByHash.id !== currentId) {
       await linkTaskToEnvTemplate(ctx.db, ctx.taskId, existingByHash.id);
-      await ctx.db.delete(schema.envTemplates).where(eq(schema.envTemplates.id, currentId));
+      const sharedWith = await liveTasksSharingEnvTemplate(ctx.db, currentId, ctx.taskId);
+      if (sharedWith.length === 0) {
+        await ctx.db.delete(schema.envTemplates).where(eq(schema.envTemplates.id, currentId));
+      }
       ctx.logger.info(
         {
           dedupedFrom: currentId,
           envTemplateId: existingByHash.id,
           dockerfileHash,
+          ...(sharedWith.length > 0 ? { keptForTasks: sharedWith } : {}),
         },
-        'env template deduped to existing hash',
+        sharedWith.length > 0
+          ? 'env template deduped to existing hash; superseded row kept (live tasks reference it)'
+          : 'env template deduped to existing hash',
       );
       return {
         envTemplateId: existingByHash.id,
@@ -157,6 +163,43 @@ export const generateDockerfileStep: StepDefinition<
     };
   },
 };
+
+/** Tasks past this point no longer need their env template link intact. */
+const TERMINAL_TASK_STATUSES = ['completed', 'failed', 'cancelled'] as const;
+
+/** Ids of OTHER still-live tasks whose `env_template_id` points at `templateId`.
+ *
+ *  The dedupe path in apply() is not free to delete the row it superseded: that row can
+ *  be shared. 02 relinks a task onto ANOTHER task's template whenever the hashes match,
+ *  and a later re-run of 01-declare-deps then updates that shared row in place rather
+ *  than inserting one (its `existing` is just `getTaskEnvTemplate`). `tasks.env_template_id`
+ *  is `ON DELETE SET NULL`, so deleting a row a live task still points at silently nulls
+ *  that task's link — no error, no event on the victim. The victim only finds out much
+ *  later and indirectly: 09-gate-2-verify-approval computes `browserTesting` off the
+ *  template row, so a nulled link makes it false and the gate quietly stops offering its
+ *  live browser on a task whose runner is up and serving.
+ *
+ *  Same still-live reference count `cleanupTaskEnvImage` (task-queue.ts) already applies
+ *  before reaping a template. References from terminal tasks deliberately do not count —
+ *  `reapOrphanEnvTemplates` assumes exactly that, so honoring them here would leak rows
+ *  the boot sweep is meant to collect. */
+export async function liveTasksSharingEnvTemplate(
+  db: Database,
+  templateId: string,
+  exceptTaskId: string,
+): Promise<string[]> {
+  const rows = await db
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.envTemplateId, templateId),
+        ne(schema.tasks.id, exceptTaskId),
+        notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
+      ),
+    );
+  return rows.map((r) => r.id);
+}
 
 type PackageManager =
   | 'npm'
