@@ -829,10 +829,34 @@ export function formatCliErrorMessage(
 const BENIGN_CLI_NOISE_LINE =
   /^(Claude configuration file not found at:|A backup file exists at:|You can manually restore it by running:|Reading additional input from stdin)/;
 
+// The claude binary also logs STRUCTURED diagnostics to stderr for its own internal
+// side queries — conversation titling, and similar background calls:
+//
+//   [claude-code:unrecognized_model] {"model":"…","query_source":"generate_session_title"}
+//
+// These are NOT the run's outcome. The binary emits them and carries on: the line
+// above appears BEFORE the session `init` event, and the session then starts fine.
+// But stderr outranks stdout in formatCliErrorMessage, so one of these would become
+// the surfaced error and bury the real failure sitting in the stream-json result —
+// observed exactly that on an OpenRouter task, where the step reported
+// `unrecognized_model … generate_session_title` while the actual cause was a 400 on
+// the main request. The wrong sentence sent the diagnosis in the wrong direction.
+//
+// Keyed on the STRUCTURE, not the wording: a bracketed `[tag:class]` prefix followed
+// by a JSON object carrying `query_source`, which is what marks the line as being
+// about an internal sub-query rather than the invocation. If the binary reworks this
+// format we simply stop stripping (the line shows again) — never a crash, and the
+// full text always remains in rawOutput/streamLog either way.
+const CLI_SIDE_QUERY_DIAGNOSTIC_LINE = /^\[[a-z0-9-]+:[a-z0-9_]+\]\s*\{.*"query_source"\s*:/i;
+
 function stripBenignCliNoise(text: string): string {
   return text
     .split('\n')
-    .filter((line) => !BENIGN_CLI_NOISE_LINE.test(line.trim()))
+    .filter(
+      (line) =>
+        !BENIGN_CLI_NOISE_LINE.test(line.trim()) &&
+        !CLI_SIDE_QUERY_DIAGNOSTIC_LINE.test(line.trim()),
+    )
     .join('\n')
     .trim();
 }

@@ -244,4 +244,36 @@ describe('formatCliErrorMessage', () => {
     expect(out).not.toBeNull();
     expect(out!.length).toBe(2000);
   });
+
+  // The claude binary logs structured diagnostics for its own internal side queries
+  // (conversation titling and similar). They are not the run's outcome — the binary
+  // carries on and the session starts — but stderr outranks stdout here, so one of
+  // them would bury the real failure. Observed on an OpenRouter task: the step
+  // reported `unrecognized_model … generate_session_title` while the actual cause
+  // was a 400 on the main request, which sent the diagnosis the wrong way.
+  it('ignores a side-query diagnostic so the real API error on stdout wins', () => {
+    const stderr =
+      '[claude-code:unrecognized_model] {"model":"qwen/qwen3.8-27b","query_source":"generate_session_title"}';
+    const stdout = 'API Error: 400 Provider returned error';
+    expect(formatCliErrorMessage(1, stderr, stdout, undefined)).toBe(stdout);
+  });
+
+  it('still reports a bracketed stderr line that is NOT a side-query diagnostic', () => {
+    // No `query_source`, so it describes the run itself and must survive.
+    const stderr = '[claude-code:auth_error] {"model":"x"}';
+    expect(formatCliErrorMessage(1, stderr, 'ignored stdout', undefined)).toBe(stderr);
+  });
+
+  it('keeps surrounding stderr lines while dropping only the diagnostic', () => {
+    const stderr = [
+      '[claude-code:unrecognized_model] {"query_source":"generate_session_title"}',
+      'real failure on stderr',
+    ].join('\n');
+    expect(formatCliErrorMessage(1, stderr, '', undefined)).toBe('real failure on stderr');
+  });
+
+  it('falls back to the generic message when the diagnostic was the only output', () => {
+    const stderr = '[claude-code:unrecognized_model] {"query_source":"generate_session_title"}';
+    expect(formatCliErrorMessage(1, stderr, '', undefined)).toBe('cli exited with code 1');
+  });
 });
