@@ -58,7 +58,7 @@ function makeProvider(overrides: Partial<CliProviderRecord>): CliProviderRecord 
   } as CliProviderRecord;
 }
 
-describe('probeCliPath: openrouter with no API key', () => {
+describe('probeCliPath: wrapper CLI with no API key', () => {
   it('fails the test instead of reporting ok', async () => {
     const result = await probeCliPath(db, adapter, makeProvider({}), {});
 
@@ -94,7 +94,40 @@ describe('probeCliPath: openrouter with no API key', () => {
     expect(result.ok).toBe(true);
   });
 
-  it('leaves a keyless model-less provider of another wrapper CLI alone', async () => {
+  // zai and muse share the gap: same claude binary, same absent /login flow, same
+  // exclusion from isAuthProbeSupported, and neither adapter has a fallback token.
+  it.each([
+    ['zai', 'Z.AI'],
+    ['muse', 'Muse Spark'],
+  ] as const)('fails a keyless %s provider', async (name, displayName) => {
+    const result = await probeCliPath(
+      db,
+      cliAdapterRegistry.get(name),
+      makeProvider({ name, model: null }),
+      {},
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain(`No ${displayName} API key`);
+    expect(result.error).toContain('ANTHROPIC_AUTH_TOKEN');
+  });
+
+  it('accepts a zai provider keyed only by Z_AI_API_KEY', async () => {
+    // zai's token line reads Z_AI_API_KEY first (zai.ts). Checking the canonical
+    // apiKeyEnvName alone would fail this correctly-configured provider.
+    const result = await probeCliPath(
+      db,
+      cliAdapterRegistry.get('zai'),
+      makeProvider({ name: 'zai' }),
+      {
+        Z_AI_API_KEY: 'zai-test-key',
+      },
+    );
+
+    expect(result.ok).toBe(true);
+  });
+
+  it('leaves a keyless ollama provider alone', async () => {
     // ollama falls back to the literal `ollama` token its local daemon accepts, so an
     // empty key set is its normal in-stack state and must not fail the probe.
     const result = await probeCliPath(

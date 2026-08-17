@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { type CliProviderName } from '@haive/shared';
+import { getCliProviderMetadata, type CliProviderName } from '@haive/shared';
 import type { CliProbePathResult } from '@haive/shared';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
 import { resolveImageTag } from '../../sandbox/image-cache.js';
@@ -153,7 +153,7 @@ export async function probeCliPath(
       // succeeds regardless, and the compat check below returns null without a token —
       // so a provider saved with no key reported a fully green Test and then failed
       // every step on the binary's own "Not logged in · Please run /login".
-      const missingKey = resolveOpenRouterMissingKeyError(provider, secrets);
+      const missingKey = resolveMissingApiKeyError(provider, secrets);
       if (missingKey) {
         return {
           ok: false,
@@ -231,13 +231,29 @@ export async function probeCliPath(
   }
 }
 
-/** The Test-connection failure for an OpenRouter provider that has no API key at all,
- *  or null when a key is present (and for every other provider).
+/** Wrapper CLIs that cannot run at all without a user-supplied key, mapped to the env
+ *  names their adapter's own token line actually reads.
  *
- *  OpenRouter ships no `claude /login` flow — the key arrives only as a provider env
- *  var or an encrypted secret — so an empty one means the run gets no token whatsoever.
- *  OpenRouter is also outside isAuthProbeSupported, which is what left this uncovered:
- *  that branch runs a real `<cli> <auth probe>` and would have caught it.
+ *  These three ship no `claude /login` flow — the key arrives only as a provider env var
+ *  or an encrypted secret — and they sit outside isAuthProbeSupported, which is what left
+ *  this uncovered: that branch runs a real `<cli> <auth probe>` and would have caught it.
+ *
+ *  The lists mirror each adapter's precedence expression, NOT the single canonical
+ *  `apiKeyEnvName`: zai also accepts Z_AI_API_KEY (zai.ts), so checking the narrower
+ *  field alone would fail a zai provider that is correctly configured. Add a name here
+ *  whenever an adapter's token line gains one.
+ *
+ *  ollama is deliberately absent though it is the same shape of provider: it falls back
+ *  to the literal `ollama` token a local daemon accepts (ollama.ts), so an empty key set
+ *  is its normal in-stack state rather than a fault. */
+const WRAPPER_REQUIRED_KEY_ENVS: Partial<Record<CliProviderName, readonly string[]>> = {
+  openrouter: ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'],
+  zai: ['Z_AI_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'],
+  muse: ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'],
+};
+
+/** The Test-connection failure for a wrapper provider that has no API key at all, or
+ *  null when a key is present (and for every provider outside the map above).
  *
  *  Reports only a MISSING key, never an invalid one. probeOpenRouterModelCompat treats
  *  401/403 as inconclusive on purpose (see its comment) and this keeps that contract:
@@ -245,22 +261,21 @@ export async function probeCliPath(
  *
  *  Deliberately carries no `authStatus`. Nothing ever writes auth_status back to `ok`
  *  for an api_key provider — assertUserAuthReady only touches subscription rows — so a
- *  status set here would outlive the user adding the key and go permanently stale.
- *
- *  Scoped to openrouter, NOT to every api_key claude-family wrapper: ollama falls back
- *  to the literal `ollama` token a local daemon accepts, so "no stored key" is its
- *  normal in-stack state rather than a fault. */
-function resolveOpenRouterMissingKeyError(
+ *  status set here would outlive the user adding the key and go permanently stale. */
+function resolveMissingApiKeyError(
   provider: CliProviderRecord,
   secrets: Record<string, string>,
 ): string | null {
-  if (provider.name !== 'openrouter') return null;
+  const accepted = WRAPPER_REQUIRED_KEY_ENVS[provider.name];
+  if (!accepted) return null;
   const env = { ...(provider.envVars ?? {}), ...secrets };
-  if (env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY) return null;
+  if (accepted.some((name) => env[name])) return null;
+  const meta = getCliProviderMetadata(provider.name);
   return (
-    'No OpenRouter API key is configured for this provider. Add a secret named ' +
-    'ANTHROPIC_AUTH_TOKEN holding your sk-or-... key — without it the CLI starts with ' +
-    'no credentials and every task step fails with "Not logged in · Please run /login".'
+    `No ${meta.displayName} API key is configured for this provider. Add a secret named ` +
+    `${meta.apiKeyEnvName ?? 'ANTHROPIC_AUTH_TOKEN'} holding your key — without it the CLI ` +
+    `starts with no credentials and every task step fails with the CLI's own ` +
+    `"Not logged in · Please run /login".`
   );
 }
 
