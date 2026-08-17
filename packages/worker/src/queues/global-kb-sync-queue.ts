@@ -200,17 +200,21 @@ export async function purgeArchivedGlobalKbEntries(): Promise<void> {
   });
 }
 
-/** Register the daily archived-entry retention sweep (idempotent — fixed jobId). */
+/** Register the daily archived-entry retention sweep. Idempotent: upsertJobScheduler keys on
+ *  PURGE_JOB_ID, so a restart UPDATES the one scheduler; the pre-sweep clears any orphaned
+ *  legacy repeatable left behind by the old `repeat: { every }` registration. */
 export async function scheduleGlobalKbPurge(): Promise<void> {
   const queue = new Queue(QUEUE_NAMES.GLOBAL_KB_SYNC, { connection: getBullRedis() });
-  await queue.add(
-    GLOBAL_KB_JOB_NAMES.PURGE_ARCHIVED,
-    {},
+  for (const r of await queue.getRepeatableJobs().catch(() => [])) {
+    await queue.removeRepeatableByKey(r.key).catch(() => {});
+  }
+  await queue.upsertJobScheduler(
+    PURGE_JOB_ID,
+    { every: PURGE_INTERVAL_MS },
     {
-      repeat: { every: PURGE_INTERVAL_MS },
-      jobId: PURGE_JOB_ID,
-      removeOnComplete: true,
-      removeOnFail: 5,
+      name: GLOBAL_KB_JOB_NAMES.PURGE_ARCHIVED,
+      data: {},
+      opts: { removeOnComplete: true, removeOnFail: 5 },
     },
   );
 }
