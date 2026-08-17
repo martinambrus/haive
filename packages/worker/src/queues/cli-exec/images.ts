@@ -148,6 +148,21 @@ export async function probeCliPath(
       versionResult.stdout.trim() || versionResult.stderr.trim() || 'binary reachable';
 
     if (!isAuthProbeSupported(provider.name)) {
+      // Before anything about the model: does this provider have a credential at all?
+      // Nothing else in this branch notices when it does not — `claude --version`
+      // succeeds regardless, and the compat check below returns null without a token —
+      // so a provider saved with no key reported a fully green Test and then failed
+      // every step on the binary's own "Not logged in · Please run /login".
+      const missingKey = resolveOpenRouterMissingKeyError(provider, secrets);
+      if (missingKey) {
+        return {
+          ok: false,
+          detail: versionDetail,
+          error: missingKey,
+          durationMs: Date.now() - startedAt,
+        };
+      }
+
       // OpenRouter: the binary reaching the endpoint says nothing about whether the
       // CHOSEN MODEL can run a step, and the catalog cannot predict it (a failing
       // model still advertises `tools`). One request through the real base URL finds
@@ -214,6 +229,39 @@ export async function probeCliPath(
       durationMs: Date.now() - startedAt,
     };
   }
+}
+
+/** The Test-connection failure for an OpenRouter provider that has no API key at all,
+ *  or null when a key is present (and for every other provider).
+ *
+ *  OpenRouter ships no `claude /login` flow — the key arrives only as a provider env
+ *  var or an encrypted secret — so an empty one means the run gets no token whatsoever.
+ *  OpenRouter is also outside isAuthProbeSupported, which is what left this uncovered:
+ *  that branch runs a real `<cli> <auth probe>` and would have caught it.
+ *
+ *  Reports only a MISSING key, never an invalid one. probeOpenRouterModelCompat treats
+ *  401/403 as inconclusive on purpose (see its comment) and this keeps that contract:
+ *  absence is a fact we can read locally, rejection is the upstream's opinion.
+ *
+ *  Deliberately carries no `authStatus`. Nothing ever writes auth_status back to `ok`
+ *  for an api_key provider — assertUserAuthReady only touches subscription rows — so a
+ *  status set here would outlive the user adding the key and go permanently stale.
+ *
+ *  Scoped to openrouter, NOT to every api_key claude-family wrapper: ollama falls back
+ *  to the literal `ollama` token a local daemon accepts, so "no stored key" is its
+ *  normal in-stack state rather than a fault. */
+function resolveOpenRouterMissingKeyError(
+  provider: CliProviderRecord,
+  secrets: Record<string, string>,
+): string | null {
+  if (provider.name !== 'openrouter') return null;
+  const env = { ...(provider.envVars ?? {}), ...secrets };
+  if (env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY) return null;
+  return (
+    'No OpenRouter API key is configured for this provider. Add a secret named ' +
+    'ANTHROPIC_AUTH_TOKEN holding your sk-or-... key — without it the CLI starts with ' +
+    'no credentials and every task step fails with "Not logged in · Please run /login".'
+  );
 }
 
 /** The Test-connection advisory for an OpenRouter provider whose selected model
