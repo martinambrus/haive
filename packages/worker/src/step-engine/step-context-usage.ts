@@ -74,7 +74,20 @@ export async function writeStepContextUsage(db: Database, stepId: string): Promi
     }
   }
 
-  const windowSize = resolveContextWindow(providerName, model);
+  // OpenRouter reports a real per-model context_length, so prefer it over the
+  // substring table — one gateway provider row can point at anything from a 32k
+  // model to a 1M one, which no provider-level fallback can describe. Only the
+  // openrouter rows pay for the extra read, and a miss (never refreshed, model not
+  // in the catalog) simply leaves the override undefined.
+  let knownContextLength: number | null = null;
+  if (providerName === 'openrouter' && model) {
+    const cache = await db.query.openrouterModelCache.findFirst({
+      where: eq(schema.openrouterModelCache.name, 'openrouter'),
+      columns: { models: true },
+    });
+    knownContextLength = cache?.models.find((m) => m.id === model)?.contextLength ?? null;
+  }
+  const windowSize = resolveContextWindow(providerName, model, knownContextLength);
   const leftPct = Math.max(0, Math.min(100, 100 - Math.round((peak / windowSize) * 100)));
 
   await db

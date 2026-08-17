@@ -61,11 +61,26 @@ export const DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000;
  * Resolve the context-window size (max input tokens) for a provider/model.
  * Best-effort + volatile (see MODEL_CONTEXT_WINDOWS). Never throws; always
  * returns a positive number so callers can compute a percentage safely.
+ *
+ * `knownContextLength` is a value the PROVIDER itself reported for this exact
+ * model — today the OpenRouter catalog's `context_length`. It wins outright,
+ * because it is the vendor's own number for the specific model rather than the
+ * substring guess the table below makes. Ignored unless it is a positive finite
+ * number, so a null/0/NaN from a stale cache falls through to the old behaviour
+ * rather than producing a divide-by-zero percentage.
  */
 export function resolveContextWindow(
   providerName: CliProviderName | string | null | undefined,
   model: string | null | undefined,
+  knownContextLength?: number | null,
 ): number {
+  if (
+    typeof knownContextLength === 'number' &&
+    Number.isFinite(knownContextLength) &&
+    knownContextLength > 0
+  ) {
+    return knownContextLength;
+  }
   const m = (model ?? '').toLowerCase();
   if (m) {
     const matches = MODEL_CONTEXT_WINDOWS.filter((e) => m.includes(e.match)).sort(
