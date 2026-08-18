@@ -3,6 +3,7 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import {
   buildSpecSummary,
+  extractMermaidBlocks,
   gate1SpecApprovalStep,
 } from '../src/step-engine/steps/workflow/06-gate-1-spec-approval.js';
 
@@ -187,5 +188,85 @@ describe('gate-1 spec approval (run config now lives in 06-run-config)', () => {
     expect(ids).toContain('feedback');
     expect(ids).not.toContain('runConfig');
     expect(ids).not.toContain('runConfigNote');
+  });
+});
+
+describe('extractMermaidBlocks', () => {
+  it('returns the mermaid fences in document order and ignores other languages', () => {
+    const md = [
+      '# Spec',
+      '```ts',
+      'const x = 1;',
+      '```',
+      '```mermaid',
+      'graph LR',
+      '  A --> B',
+      '```',
+      'prose',
+      '```mermaid',
+      'sequenceDiagram',
+      '  A->>B: hi',
+      '```',
+    ].join('\n');
+    expect(extractMermaidBlocks(md)).toEqual([
+      '```mermaid\ngraph LR\n  A --> B\n```',
+      '```mermaid\nsequenceDiagram\n  A->>B: hi\n```',
+    ]);
+  });
+
+  it('ignores a mermaid fence nested inside a longer fence', () => {
+    const md = ['````markdown', '```mermaid', 'graph LR', '  A --> B', '```', '````'].join('\n');
+    expect(extractMermaidBlocks(md)).toEqual([]);
+  });
+
+  it('drops an unterminated or empty mermaid fence', () => {
+    expect(extractMermaidBlocks('```mermaid\ngraph LR')).toEqual([]);
+    expect(extractMermaidBlocks('```mermaid\n\n```')).toEqual([]);
+  });
+});
+
+describe('gate-1 summary carries the spec diagrams', () => {
+  const specBody = [
+    '# Spec: thing',
+    '',
+    'Goal prose.',
+    '',
+    '```mermaid',
+    'graph LR',
+    '  A[Task] --> B[Draft spec]',
+    '```',
+    '',
+    '## Comprehension Quiz',
+  ].join('\n');
+
+  function summaryBody(overrides: Record<string, unknown> = {}): string {
+    const detected = {
+      ...detectedStub(),
+      specBody,
+      specSummary: buildSpecSummary(specBody),
+      ...overrides,
+    };
+    const schema = gate1SpecApprovalStep.form!(makeApplyCtx().ctx, detected) as FormSchema;
+    return schema.infoSections!.find((s) => s.title === 'Specification summary')!.body;
+  }
+
+  it('renders the diagram in the summary disclosure, above the quality review', () => {
+    const body = summaryBody();
+    expect(body).toContain('## Diagram');
+    expect(body).toContain('```mermaid\ngraph LR\n  A[Task] --> B[Draft spec]\n```');
+    expect(body.indexOf('## Diagram')).toBeLessThan(body.indexOf('## Quality review'));
+    // The prose preview itself still skips fences.
+    expect(buildSpecSummary(specBody)).not.toContain('mermaid');
+  });
+
+  it('does not duplicate a diagram the head-slice fallback already carried', () => {
+    const onlyFence = '```mermaid\ngraph LR\n  A --> B\n```';
+    const body = summaryBody({ specBody: onlyFence, specSummary: buildSpecSummary(onlyFence) });
+    expect(body.match(/```mermaid/g)).toHaveLength(1);
+    expect(body).not.toContain('## Diagram');
+  });
+
+  it('omits the diagram heading when the spec draws none', () => {
+    expect(summaryBody({ specBody: '# Spec\n\nprose only.' })).not.toContain('## Diagram');
   });
 });

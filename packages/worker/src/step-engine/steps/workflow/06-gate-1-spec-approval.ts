@@ -106,6 +106,41 @@ export function buildSpecSummary(body: string): string {
   return result.length > 0 ? result : trimmed.slice(0, 1500);
 }
 
+/** Pull the ```mermaid fenced blocks out of a spec body, in document order.
+ *  The summary disclosure re-emits them so the architecture diagram the spec
+ *  draws is visible without expanding the full spec. Tracks the opening
+ *  fence's backtick run so a mermaid fence nested inside a longer fence is
+ *  not mistaken for a top-level one; an unterminated fence is dropped. */
+export function extractMermaidBlocks(body: string): string[] {
+  const blocks: string[] = [];
+  let fence: string | null = null;
+  let lang = '';
+  let current: string[] = [];
+  for (const raw of body.split('\n')) {
+    const marker = /^\s*(`{3,})(.*)$/.exec(raw);
+    const ticks = marker?.[1] ?? '';
+    const info = marker?.[2] ?? '';
+    if (fence === null) {
+      if (marker) {
+        fence = ticks;
+        lang = info.trim().toLowerCase();
+        current = [];
+      }
+      continue;
+    }
+    // A closing fence is a bare run of at least as many backticks as the opener.
+    if (marker && ticks.length >= fence.length && info.trim() === '') {
+      if (lang === 'mermaid' && current.join('\n').trim().length > 0) {
+        blocks.push(['```mermaid', ...current, '```'].join('\n'));
+      }
+      fence = null;
+      continue;
+    }
+    current.push(raw);
+  }
+  return blocks;
+}
+
 /** Compose the markdown body for the "Specification summary" disclosure.
  *  Bundles the spec preview with the quality review snapshot and any
  *  iteration / budget warnings so the user has everything they need to
@@ -118,6 +153,20 @@ function buildSummarySection(detected: SpecGateDetect): string {
   } else {
     lines.push('_No specification was produced. The pre-planning step may have been skipped._');
     lines.push('');
+  }
+  // The prose preview walks past fenced blocks, so the spec's diagrams are
+  // re-emitted here rather than left behind the "Full specification" toggle.
+  // Skipped when the preview fell back to a head slice that already holds them.
+  const diagrams = extractMermaidBlocks(detected.specBody).filter(
+    (block) => !detected.specSummary.includes(block),
+  );
+  if (diagrams.length > 0) {
+    lines.push(diagrams.length === 1 ? '## Diagram' : '## Diagrams');
+    lines.push('');
+    for (const block of diagrams) {
+      lines.push(block);
+      lines.push('');
+    }
   }
   lines.push('## Quality review');
   if (detected.qualityVerdict) {
