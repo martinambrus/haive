@@ -14,7 +14,7 @@ The legacy markdown step content has been ported into TypeScript step modules un
 - BullMQ on Redis 8 (noeviction policy is required)
 - Uploaded repo archives live in the `haive_repos` named volume (shared by api and worker); Mailpit for dev SMTP
 - Docker Compose orchestrates everything; the dev stack is driven by `scripts/dev.sh` (aliased `pnpm docker:dev`), which wraps `docker compose up` with the dev override and GPU layering
-- clawker (Apache 2.0 Go binary) wrapped via child_process for per-task Docker sandboxes; pinned at worker image build time
+- clawker (Apache 2.0 Go binary) wrapped via child_process in `sandbox/clawker-client.ts`. The binary is installed only when the worker image is built with `CLAWKER_RELEASE_URL` plus a matching `CLAWKER_SHA256`; nothing in this repo sets either, so the binary is absent from the shipped image and the wrapper is inert until someone wires it
 
 ## Monorepo layout
 

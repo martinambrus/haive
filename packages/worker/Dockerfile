@@ -21,8 +21,20 @@ RUN npm install -g corepack@latest && \
 # leaves the binary uninstalled so Phase 0 scaffold builds without an external
 # fetch. Phase 4 sets CLAWKER_RELEASE_URL to a real release asset URL.
 ARG CLAWKER_RELEASE_URL=""
+# Checksum is REQUIRED whenever a URL is given. This binary is handed the host
+# Docker socket, so an unverified fetch is root on the host sourced from a URL a
+# build arg supplies; a release asset can also be re-uploaded under the same tag.
+# Fail loud rather than install something unverified -- an empty URL still skips
+# cleanly, which is the default and what every build in this repo currently does.
+# Get the digest with: curl -fsSL "$URL" | sha256sum
+ARG CLAWKER_SHA256=""
 RUN if [ -n "$CLAWKER_RELEASE_URL" ]; then \
+      if [ -z "$CLAWKER_SHA256" ]; then \
+        echo "clawker: CLAWKER_RELEASE_URL is set but CLAWKER_SHA256 is empty; refusing to install an unverified binary" >&2; \
+        exit 1; \
+      fi; \
       curl -fsSL -o /usr/local/bin/clawker "$CLAWKER_RELEASE_URL" && \
+      echo "${CLAWKER_SHA256}  /usr/local/bin/clawker" | sha256sum -c - && \
       chmod +x /usr/local/bin/clawker && \
       /usr/local/bin/clawker --version; \
     else \
