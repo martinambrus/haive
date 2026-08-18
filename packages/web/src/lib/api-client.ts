@@ -637,6 +637,19 @@ export interface Task {
    *  priority class, so an unvoted task still makes progress. Also the listing's primary
    *  sort key. Optional so an older api that omits it renders as 0. */
   voteScore?: number;
+  /** Which model actually ran this task, captured by the 00-model-health canary from its
+   *  own CLI stream. `requested` is what we asked for, `served` is what answered, and they
+   *  can disagree (measured: a provider configured for glm-5.2[1m] was served glm-5.3).
+   *  `served` is null for CLIs that report no model at all — codex and amp — which is what
+   *  `match: 'unknown'` means. Detail endpoint only; optional so an older api renders as
+   *  absent rather than throwing. */
+  modelIdentity?: {
+    requested: string | null;
+    served: string | null;
+    billed: string[];
+    source: 'stream-json' | 'gemini-stats' | 'antigravity-log' | 'provider-config' | null;
+    match: 'exact' | 'differs' | 'unknown';
+  } | null;
   /** ISO time the provider-outage watch was marked recovered (list endpoint only). Null
    *  until a task that failed on a provider rate-limit or 5xx has that provider come back;
    *  the notifier diffs its null->set flip to fire the "provider is back" notification. */

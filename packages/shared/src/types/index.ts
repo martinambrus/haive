@@ -95,6 +95,48 @@ export interface CliTokenUsage {
   costUsd?: number;
 }
 
+/** Which model actually answered a CLI invocation, as reported by the CLI itself.
+ *
+ *  `requested` and `served` are DIFFERENT channels, not two names for one value:
+ *  the claude-family stream-json `system`/`init` event carries what the binary
+ *  asked for, while each `assistant` event's `message.model` carries what the
+ *  endpoint returned. They can disagree — MEASURED 2026-08-18, a provider
+ *  configured for `glm-5.2[1m]` was served `glm-5.3` by api.z.ai with no config
+ *  change on our side. Recording only one of them cannot detect that.
+ *
+ *  Deliberately NOT normalized (no suffix stripping, no case folding): the
+ *  cosmetic-looking differences are exactly where a real swap hides. `[1m]` is a
+ *  context-window variant tag and `glm-5.2` -> `glm-5.3` is a version change, and
+ *  a normalizer aggressive enough to fold the first folds the second too.
+ *
+ *  Per-provider coverage is measured, not assumed (see
+ *  packages/worker/test/model-report-discover.ts, which re-measures it):
+ *    - claude-code / zai / ollama / muse / grok / openrouter: both channels.
+ *    - gemini: `stats.models` keys (served only).
+ *    - antigravity: a human LABEL scraped from its own --log-file, never an id.
+ *    - codex / amp: report NO model at all, so `served` stays null and `match`
+ *      is 'unknown'. amp reports `agent_mode` instead; codex's `exec --json`
+ *      carries no model on any typed event (verified against a full 3.4 MB run). */
+export interface ModelIdentity {
+  /** What we asked for: the CLI's own init event, else the provider config. */
+  requested: string | null;
+  /** What answered. Null when the CLI does not report it (codex, amp) or when the
+   *  run failed before any assistant turn. */
+  served: string | null;
+  /** Every model billed for this run, including side calls the CLI makes on its
+   *  own (claude-code bills a haiku call for session titling). Supplementary
+   *  only — grok reports `grok-4.6-build` here while serving `grok-4.6`, so this
+   *  is NOT an identity source. */
+  billed: string[];
+  /** Provenance of this record, so a reader can weigh it. The first three mean a
+   *  CLI named the answering model; 'provider-config' means it did not, and only
+   *  `requested` is known (codex, amp). Null when no channel said anything. */
+  source: 'stream-json' | 'gemini-stats' | 'antigravity-log' | 'provider-config' | null;
+  /** 'unknown' whenever `served` is null — those providers can never trip the
+   *  strict-mode failure, because we have no evidence either way. */
+  match: 'exact' | 'differs' | 'unknown';
+}
+
 export type RepoSource =
   'local_path' | 'git_https' | 'github_https' | 'github_oauth' | 'gitlab_https' | 'upload';
 

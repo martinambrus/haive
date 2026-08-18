@@ -335,3 +335,101 @@ describe('createStreamJsonCollector onText (Clean-tab prose stream)', () => {
     expect(prose).toEqual([]);
   });
 });
+
+describe('createStreamJsonCollector.getModelIdentity', () => {
+  // Fixtures below are the shapes MEASURED off live CLIs on 2026-08-18 via
+  // test/model-report-discover.ts, not invented ones.
+
+  it('separates what zai ASKED for from what it was SERVED', () => {
+    // The measured swap: the provider is configured for glm-5.2[1m] and api.z.ai
+    // answered as glm-5.3. Collapsing these into one field would hide it entirely.
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init', model: 'glm-5.2[1m]', session_id: 'a' },
+      { type: 'assistant', message: { model: 'glm-5.3', content: [{ type: 'text', text: 'ok' }] } },
+      { type: 'result', subtype: 'success', result: 'ok', modelUsage: { 'glm-5.2[1m]': {} } },
+    ]);
+    expect(c.getModelIdentity()).toEqual({
+      requested: 'glm-5.2[1m]',
+      served: 'glm-5.3',
+      billed: ['glm-5.2[1m]'],
+    });
+  });
+
+  it('ignores the <synthetic> assistant the CLI authors for its own errors', () => {
+    // Measured on an OpenRouter 402: the last assistant event is CLI-generated with
+    // model "<synthetic>". Taking it would report "<synthetic>" as the model served.
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init', model: 'deepseek/deepseek-v4-pro-0813' },
+      { type: 'assistant', message: { model: 'deepseek/deepseek-v4-pro-0813', content: [] } },
+      { type: 'assistant', message: { model: '<synthetic>', content: [] } },
+    ]);
+    expect(c.getModelIdentity()?.served).toBe('deepseek/deepseek-v4-pro-0813');
+  });
+
+  it('reports served null when every assistant turn was synthetic', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init', model: 'qwen/qwen3.8-27b' },
+      { type: 'assistant', message: { model: '<synthetic>', content: [] } },
+    ]);
+    expect(c.getModelIdentity()).toEqual({
+      requested: 'qwen/qwen3.8-27b',
+      served: null,
+      billed: [],
+    });
+  });
+
+  it('keeps claude-code’s billed side model out of served', () => {
+    // claude-code bills a haiku call for session titling; it is not what answered.
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init', model: 'claude-sonnet-4-6' },
+      { type: 'assistant', message: { model: 'claude-sonnet-4-6', content: [] } },
+      {
+        type: 'result',
+        subtype: 'success',
+        result: 'ok',
+        modelUsage: { 'claude-haiku-4-5-20251001': {}, 'claude-sonnet-4-6': {} },
+      },
+    ]);
+    const id = c.getModelIdentity()!;
+    expect(id.served).toBe('claude-sonnet-4-6');
+    expect(id.billed).toEqual(['claude-haiku-4-5-20251001', 'claude-sonnet-4-6']);
+  });
+
+  it('does not let grok’s billing alias become the served model', () => {
+    // Measured: grok serves `grok-4.6` but bills usage under `grok-4.6-build`.
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init', model: 'grok-4.6' },
+      { type: 'assistant', message: { model: 'grok-4.6', content: [] } },
+      { type: 'result', subtype: 'success', result: 'ok', modelUsage: { 'grok-4.6-build': {} } },
+    ]);
+    const id = c.getModelIdentity()!;
+    expect(id.served).toBe('grok-4.6');
+    expect(id.billed).toEqual(['grok-4.6-build']);
+  });
+
+  it('still names the requested model when the run died before any turn', () => {
+    // ollama timed out mid-run in the live probe: only the init event arrived.
+    const c = createStreamJsonCollector();
+    feed(c, [{ type: 'system', subtype: 'init', model: 'nemotron-3-ultra:cloud' }]);
+    expect(c.getModelIdentity()).toEqual({
+      requested: 'nemotron-3-ultra:cloud',
+      served: null,
+      billed: [],
+    });
+  });
+
+  it('returns null for a stream that names no model (amp)', () => {
+    // Measured: amp's init reports `agent_mode`, never a model.
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init', agent_mode: 'medium', session_id: 'T-1' },
+      { type: 'result', subtype: 'error_during_execution', error: 'Out of Credits' },
+    ]);
+    expect(c.getModelIdentity()).toBeNull();
+  });
+});

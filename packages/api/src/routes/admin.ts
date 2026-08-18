@@ -937,6 +937,31 @@ adminRoutes.put('/config/global-pause', async (c) => {
   return c.json({ paused });
 });
 
+const modelIdentityStrictSchema = z.object({ enabled: z.boolean() });
+
+// Strict model identity. The 00-model-health canary always RECORDS which model actually
+// answered (requested vs served, read from the CLI's own output); this decides whether a
+// proven mismatch stops the task or merely warns.
+//
+// Default OFF, and that default is load-bearing: a mismatch is not inherently an error.
+// claude-code legitimately resolves an alias to a dated snapshot, so failing on any
+// difference would break ordinary runs. Turn it ON when a provider must be pinned exactly
+// and a silent upstream swap — measured 2026-08-18, a provider configured for glm-5.2[1m]
+// was served glm-5.3 — should stop the task rather than quietly change the model doing the
+// work. Never fires when the CLI reports no model at all (codex, amp): absent evidence is
+// 'unknown', not a mismatch.
+adminRoutes.get('/config/model-identity-strict', async (c) => {
+  const enabled = await configService.getBoolean(CONFIG_KEYS.MODEL_IDENTITY_STRICT, false);
+  return c.json({ enabled });
+});
+
+adminRoutes.put('/config/model-identity-strict', async (c) => {
+  const { enabled } = modelIdentityStrictSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.MODEL_IDENTITY_STRICT, enabled ? 'true' : 'false');
+  log.info({ enabled }, 'strict model identity switch updated');
+  return c.json({ enabled });
+});
+
 const fairSchedulingSchema = z.object({ enabled: z.boolean() });
 
 // Global fair cli-exec scheduling kill-switch. The worker reads this at each

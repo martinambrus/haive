@@ -12,6 +12,7 @@ import {
   type CliNetworkPolicy,
   type CliProviderName,
   type CliTokenUsage,
+  type ModelIdentity,
 } from '@haive/shared';
 import { DEFAULT_RUN_TIMEOUT_MS, type DockerVolumeMount } from '../../sandbox/docker-runner.js';
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
@@ -32,6 +33,11 @@ import {
 } from '../cli-stream-publisher.js';
 import { log, type CliExecDeps, type ExecutionOutcome } from './_shared.js';
 import { createStreamJsonCollector } from './stream.js';
+import {
+  buildModelIdentity,
+  requestedFromSpec,
+  type ModelIdentityInput,
+} from './model-identity.js';
 import { looksLikeJson, proseForClean } from './clean-output.js';
 import { createStreamLogBuffer } from './stream-log-buffer.js';
 import { createSteerForwarder, type SteerForwarder } from './steer-forwarder.js';
@@ -609,6 +615,16 @@ export async function executeCliSpec(
   const providerErrorScan = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.slice(-4000);
   void deps;
 
+  // Which model actually answered. Built from whichever channel this CLI speaks and
+  // attached to every return branch beside tokenUsage — same parse of the same
+  // output, so nothing extra is spawned, prompted or billed to collect it. The
+  // spec-derived value is the fallback for CLIs whose output names no model at all
+  // (codex names it only in its own argv; amp not at all).
+  const specRequestedModel = requestedFromSpec(mergedSpec);
+  const modelIdentityFrom = (
+    extra: Omit<ModelIdentityInput, 'specRequested'> = {},
+  ): ModelIdentity | null => buildModelIdentity({ specRequested: specRequestedModel, ...extra });
+
   if (codexCollector && codexCollector.isJsonl()) {
     const codexText = codexCollector.getResult();
     const tokenUsage = codexCollector.getTokenUsage();
@@ -626,6 +642,9 @@ export async function executeCliSpec(
           result.error,
         ),
         tokenUsage,
+        // codex names no model on any typed event (verified against a complete
+        // successful run), so this carries the argv value only, with served null.
+        modelIdentity: modelIdentityFrom(),
         streamLog,
       };
     }
@@ -641,6 +660,7 @@ export async function executeCliSpec(
         codexCollector.getNoResultReason() ??
         'codex emitted no agent message',
       tokenUsage,
+      modelIdentity: modelIdentityFrom(),
       streamLog,
       providerErrorScan,
     };
@@ -700,6 +720,7 @@ export async function executeCliSpec(
         result.error,
       ),
       tokenUsage: collector.getTokenUsage(),
+      modelIdentity: modelIdentityFrom({ stream: collector.getModelIdentity() }),
       streamLog,
     };
   }
@@ -724,6 +745,10 @@ export async function executeCliSpec(
         reason,
       // Tokens were burned even without a result event (e.g. error_max_turns).
       tokenUsage: collector.getTokenUsage(),
+      // Worth keeping on a failed run: the init event still names what was asked
+      // for, which is how a task that died on "unrecognized model" shows which
+      // model it tried. served stays null unless a turn came back before the fault.
+      modelIdentity: modelIdentityFrom({ stream: collector.getModelIdentity() }),
       streamLog,
       providerErrorScan,
     };
@@ -746,6 +771,8 @@ export async function executeCliSpec(
           result.error,
         ),
         tokenUsage: extracted.tokenUsage,
+        // gemini names its models only as the keys of stats.models.
+        modelIdentity: modelIdentityFrom({ geminiModels: extracted.models }),
         streamLog,
       };
     }
@@ -765,6 +792,7 @@ export async function executeCliSpec(
           result.error,
         ),
         tokenUsage: null,
+        modelIdentity: modelIdentityFrom(),
         streamLog,
         providerErrorScan,
       };
@@ -786,6 +814,12 @@ export async function executeCliSpec(
       result.error,
     ),
     tokenUsage: collector.getTokenUsage(),
+    // antigravity lands here. Its captured --log-file is the only place it names a
+    // model, and then only as a human label ("Gemini 3.7 Flash (High)").
+    modelIdentity: modelIdentityFrom({
+      stream: collector.getModelIdentity(),
+      antigravityLog: result.capturedLog ?? null,
+    }),
     streamLog,
     providerErrorScan,
     providerDiagnosticLog: result.capturedLog ?? undefined,

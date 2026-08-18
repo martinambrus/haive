@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   failureBanner,
   invocationBanner,
+  modelIdentityBanner,
   parkBanner,
   PAUSED_WAIT_TEXT,
   type StepBannerRow,
@@ -149,5 +150,45 @@ describe('invocationBanner', () => {
       kind: 'queued',
       text: PAUSED_WAIT_TEXT,
     });
+  });
+});
+
+describe('modelIdentityBanner', () => {
+  it('warns on the measured Z.AI swap', () => {
+    // Asked glm-5.2[1m], api.z.ai served glm-5.3 — the case the feature exists for.
+    expect(
+      modelIdentityBanner({ requested: 'glm-5.2[1m]', served: 'glm-5.3', match: 'differs' }),
+    ).toEqual({ text: 'Model mismatch: configured glm-5.2[1m], but glm-5.3 answered.' });
+  });
+
+  it('stays silent when the endpoint echoed what was asked', () => {
+    expect(
+      modelIdentityBanner({
+        requested: 'claude-sonnet-4-6',
+        served: 'claude-sonnet-4-6',
+        match: 'exact',
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent for CLIs that report no model at all', () => {
+    // codex and amp are permanently 'unknown'. A banner there would be unactionable
+    // and would render "we could not check" as if it were "something is wrong".
+    expect(
+      modelIdentityBanner({ requested: 'gpt-5.6-sol', served: null, match: 'unknown' }),
+    ).toBeNull();
+  });
+
+  it('is silent when there is no identity at all', () => {
+    expect(modelIdentityBanner(null)).toBeNull();
+    expect(modelIdentityBanner(undefined)).toBeNull();
+  });
+
+  it('trusts `match` rather than re-comparing the strings', () => {
+    // The comparison happens once, where the evidence is. If a caller could re-derive
+    // it here the rule would have two homes and could drift; this asserts it does not.
+    expect(
+      modelIdentityBanner({ requested: 'same-model', served: 'same-model', match: 'differs' }),
+    ).not.toBeNull();
   });
 });

@@ -70,6 +70,37 @@ export function failureBanner(step: StepBannerRow): { text: string } | null {
   return { text: step.errorMessage };
 }
 
+/** The model-identity fields the banner rule reads. Mirrors `ModelIdentity` in
+ *  @haive/shared; declared locally because this package reads the shared barrel only
+ *  through subpaths (importing it whole pulls ioredis -> dns into the bundle). */
+export interface ModelIdentityRow {
+  requested: string | null;
+  served: string | null;
+  match: 'exact' | 'differs' | 'unknown';
+}
+
+/** Copy for the "the model that answered is not the one configured" warning, or null.
+ *
+ *  Gated on `match`, which is computed once at capture from the two model strings —
+ *  never on any message column, and never by re-comparing requested/served here. A
+ *  second comparison at the call site is a second place for the rule to drift, and
+ *  the whole point of `match` is that the decision was made where the evidence was.
+ *
+ *  Silent for 'unknown' on purpose. That is the PERMANENT state for codex and amp,
+ *  whose CLIs report no model at all — warning there would put a banner nobody can
+ *  act on next to every one of those runs, and it would say "we could not check"
+ *  in the visual language of "something is wrong". */
+export function modelIdentityBanner(
+  identity: ModelIdentityRow | null | undefined,
+): { text: string } | null {
+  if (!identity || identity.match !== 'differs') return null;
+  return {
+    text:
+      `Model mismatch: configured ${identity.requested ?? 'unknown'}, ` +
+      `but ${identity.served ?? 'unknown'} answered.`,
+  };
+}
+
 /** The invocation fields the banner rules read. */
 export interface InvocationBannerRow {
   startedAt: Date | string | null;

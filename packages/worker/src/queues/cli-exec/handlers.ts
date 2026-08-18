@@ -170,6 +170,7 @@ export async function handleCliExecJob(
         streamLog: result.streamLog ?? null,
         parsedOutput: result.parsedOutput as unknown,
         tokenUsage: result.tokenUsage ?? null,
+        modelIdentity: result.modelIdentity ?? null,
         durationMs,
         errorMessage: finalErrorMessage,
         endedAt: new Date(),

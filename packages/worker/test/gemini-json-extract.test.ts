@@ -112,3 +112,17 @@ describe('sumTokenUsage', () => {
     expect(sumTokenUsage(null, null)).toBeNull();
   });
 });
+
+describe('extractGeminiJsonOutput model names', () => {
+  it('returns the stats.models keys, which are gemini’s only model signal', () => {
+    // gemini has no dedicated model field: the map keys ARE the models it used.
+    expect(extractGeminiJsonOutput(TWO_MODEL_DOC)!.models).toEqual([
+      'gemini-2.5-pro',
+      'gemini-2.5-flash',
+    ]);
+  });
+
+  it('is an empty list when the envelope carries no stats', () => {
+    expect(extractGeminiJsonOutput(JSON.stringify({ response: 'hello' }))!.models).toEqual([]);
+  });
+});

@@ -72,6 +72,11 @@ export function tokenUsageFromCodexUsage(raw: unknown): CliTokenUsage | null {
 export interface ExtractedGeminiOutput {
   responseText: string;
   tokenUsage: CliTokenUsage | null;
+  /** The `stats.models` keys, in document order. gemini names the models it used
+   *  only as the keys of that map — there is no dedicated model field — so this is
+   *  the sole identity channel for this CLI. Usually one entry; two when the run
+   *  fell back (e.g. pro plus flash). Empty when stats are absent. */
+  models: string[];
 }
 
 /** Parse `gemini --output-format json` stdout: one JSON document
@@ -93,10 +98,14 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
   if (typeof doc.response !== 'string') return null;
 
   let tokenUsage: CliTokenUsage | null = null;
+  const modelNames: string[] = [];
   const stats = doc.stats as Record<string, unknown> | undefined;
   const models =
     stats && typeof stats === 'object' ? (stats.models as Record<string, unknown>) : undefined;
   if (models && typeof models === 'object') {
+    for (const name of Object.keys(models)) {
+      if (name.trim()) modelNames.push(name.trim());
+    }
     for (const entry of Object.values(models)) {
       const tokens = (entry as Record<string, unknown> | null)?.tokens as
         Record<string, unknown> | undefined;
@@ -115,5 +124,5 @@ export function extractGeminiJsonOutput(stdout: string): ExtractedGeminiOutput |
       tokenUsage = sumTokenUsage(tokenUsage, modelUsage);
     }
   }
-  return { responseText: doc.response, tokenUsage };
+  return { responseText: doc.response, tokenUsage, models: modelNames };
 }

@@ -5,6 +5,7 @@
 import type { CliTokenUsage } from '@haive/shared';
 import { normalizeClaudeUsage } from '../../cli-executor/usage-extract.js';
 import { classifyStreamFailure, OUTPUT_TRUNCATION_HEADLINE } from './failure-class.js';
+import { isPlaceholderModel, type StreamModelReport } from './model-identity.js';
 
 interface StreamJsonCollector {
   /** Feed raw stdout chunks. Parses NDJSON lines, emits progress, collects result. */
@@ -25,6 +26,10 @@ interface StreamJsonCollector {
    *  never summed with assistant usages), else the sum of assistant-event
    *  usages (amp emits no result usage). Null when nothing reported. */
   getTokenUsage: () => CliTokenUsage | null;
+  /** Which model this stream ASKED for vs which one ANSWERED. Two distinct
+   *  channels — see StreamModelReport / model-identity.ts. Null when the stream
+   *  named no model anywhere (amp's init reports `agent_mode` instead). */
+  getModelIdentity: () => StreamModelReport | null;
 }
 
 export function createStreamJsonCollector(
@@ -60,6 +65,15 @@ export function createStreamJsonCollector(
   let assistantCacheReadMax = 0;
   let assistantCacheCreationSum = 0;
   let sawAssistantUsage = false;
+  // Model identity. `requestedModel` comes from the init event (what the binary
+  // asked for) and `servedModel` from the assistant events (what the endpoint
+  // returned) — they are NOT the same value and can disagree, which is the entire
+  // reason both are tracked. servedModel keeps the LAST non-placeholder value, so a
+  // run whose final turn is a CLI-authored `<synthetic>` error still reports the
+  // real model from the turns that did come back.
+  let requestedModel: string | null = null;
+  let servedModel: string | null = null;
+  const billedModels = new Set<string>();
   let costUsd: number | null = null;
   let lastRateLimit: {
     status?: string;
@@ -89,6 +103,15 @@ export function createStreamJsonCollector(
       if (info) lastRateLimit = info;
     }
 
+    // The init event names the model the binary resolved from its own config/env.
+    // First one wins: a session emits exactly one, and a later one would be a new
+    // session rather than a correction.
+    if (type === 'system' && subtype === 'init' && requestedModel === null) {
+      if (typeof event.model === 'string' && event.model.trim()) {
+        requestedModel = event.model.trim();
+      }
+    }
+
     // Extract final result
     if (type === 'result') {
       if (!resultFired) {
@@ -102,6 +125,16 @@ export function createStreamJsonCollector(
       if (usage) resultUsage = usage;
       if (typeof event.total_cost_usd === 'number' && Number.isFinite(event.total_cost_usd)) {
         costUsd = event.total_cost_usd;
+      }
+      // modelUsage is keyed by model and lists EVERY model billed for the run,
+      // including side calls the CLI makes on its own (claude-code bills a haiku
+      // call for session titling). Recorded for visibility only — it is not an
+      // identity source: grok bills under `grok-4.6-build` while serving `grok-4.6`.
+      const modelUsage = event.modelUsage as Record<string, unknown> | undefined;
+      if (modelUsage && typeof modelUsage === 'object') {
+        for (const key of Object.keys(modelUsage)) {
+          if (key.trim() && !isPlaceholderModel(key)) billedModels.add(key.trim());
+        }
       }
       // Some CLIs (e.g. amp) put a human-readable failure reason on the result
       // event's `error` field — surface it instead of the bare subtype.
@@ -118,6 +151,13 @@ export function createStreamJsonCollector(
     // result event when downstream parsing fails.
     if (type === 'assistant') {
       const msg = event.message as Record<string, unknown> | undefined;
+      // What actually answered. Placeholders are skipped: claude-code emits
+      // model:"<synthetic>" with zero usage for messages IT authored (e.g. an API
+      // error), and taking that would report "<synthetic>" as the model of every
+      // failed run — measured on an OpenRouter 402.
+      if (typeof msg?.model === 'string' && msg.model.trim() && !isPlaceholderModel(msg.model)) {
+        servedModel = msg.model.trim();
+      }
       // Amp's usage placement is undocumented — accept both message.usage and
       // a top-level usage, preferring message.usage, counted ONCE per event.
       const usage = normalizeClaudeUsage(msg?.usage ?? event.usage);
@@ -210,6 +250,14 @@ export function createStreamJsonCollector(
     },
     getMalformedLineCount(): number {
       return malformedLineCount;
+    },
+    getModelIdentity(): StreamModelReport | null {
+      if (buffer.trim()) {
+        processLine(buffer);
+        buffer = '';
+      }
+      if (requestedModel === null && servedModel === null && billedModels.size === 0) return null;
+      return { requested: requestedModel, served: servedModel, billed: [...billedModels] };
     },
     getTokenUsage(): CliTokenUsage | null {
       if (buffer.trim()) {

@@ -32,7 +32,7 @@ import { useCliLogin } from '@/lib/use-cli-login';
 import { shouldClearSubmitting } from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
 import { isAfterFrontier, isBeforeFrontier, type StepOrderKey } from '@/lib/step-order';
-import { failureBanner, parkBanner } from '@/lib/step-banners';
+import { failureBanner, modelIdentityBanner, parkBanner } from '@/lib/step-banners';
 import { useGlobalPause } from '@/lib/use-global-pause';
 import {
   defaultRetryTimeoutMinutes,
@@ -1289,6 +1289,22 @@ export default function TaskDetailPage() {
                   </Badge>
                 )}
                 {task.repository && <Badge variant="info">repo: {task.repository.name}</Badge>}
+                {/* Which model ANSWERED, not which one is configured — captured by the
+                    00-model-health canary from the CLI's own stream. Shown only when a CLI
+                    actually reported one; codex and amp report none, and an empty badge
+                    would read as "no model" rather than "this CLI does not say". */}
+                {task.modelIdentity?.served && (
+                  <Badge
+                    variant={task.modelIdentity.match === 'differs' ? 'warning' : 'info'}
+                    title={
+                      task.modelIdentity.match === 'differs'
+                        ? `Configured ${task.modelIdentity.requested ?? 'unknown'}, but ${task.modelIdentity.served} answered.`
+                        : `Requested ${task.modelIdentity.requested ?? 'unknown'} · reported by ${task.modelIdentity.source ?? 'unknown'}`
+                    }
+                  >
+                    model: {task.modelIdentity.served}
+                  </Badge>
+                )}
                 <Button size="sm" variant="secondary" onClick={startRename}>
                   Rename
                 </Button>
@@ -1299,6 +1315,16 @@ export default function TaskDetailPage() {
           {task.description && <p className="text-sm text-neutral-400">{task.description}</p>}
           {task.status === 'failed' && task.errorMessage && (
             <p className="text-sm text-red-400">Error: {task.errorMessage}</p>
+          )}
+          {/* Amber, not red: a mismatch is a fact worth seeing, not a failure. Some are
+              benign (an alias resolving to a dated snapshot); the one that matters is an
+              endpoint quietly serving a different model than the one configured. The
+              visibility rule lives in modelIdentityBanner (lib/step-banners), gated on the
+              structural `match` field rather than re-compared here. */}
+          {modelIdentityBanner(task.modelIdentity) && (
+            <p className="mt-1 text-sm text-amber-400">
+              {modelIdentityBanner(task.modelIdentity)!.text}
+            </p>
           )}
           {parentTask && (
             <p className="mt-1 text-sm text-neutral-400">

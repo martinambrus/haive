@@ -57,6 +57,13 @@ export const CONFIG_KEYS = {
   // that fails a task/onboarding loudly when the configured model can't emit valid
   // fenced JSON / follow instructions. Default true; set 'false' to skip the canary.
   MODEL_HEALTH_CHECK_ENABLED: 'config:worker:modelHealthCheckEnabled',
+  // Whether a requested-vs-served model mismatch FAILS the model-health canary.
+  // Default 'false': the canary records both and warns, but the task runs. A
+  // mismatch is not inherently an error — claude-code legitimately resolves an
+  // alias to a dated snapshot — so failing by default would break normal runs.
+  // Set 'true' when a provider must be pinned exactly and a silent upstream swap
+  // (measured: zai served glm-5.3 for a glm-5.2[1m] request) should stop the task.
+  MODEL_IDENTITY_STRICT: 'config:worker:modelIdentityStrict',
   // Global kill-switch for fair cli-exec scheduling. When 'true' (default), each
   // CLI invocation is enqueued with a BullMQ priority equal to the enqueuing user's
   // in-flight invocation backlog, so a freed concurrency slot goes to the most-
@@ -410,6 +417,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.OLLAMA_CLI_TIMEOUT_MS]: '7200000',
   [CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS]: 'false',
   [CONFIG_KEYS.MODEL_HEALTH_CHECK_ENABLED]: 'true',
+  [CONFIG_KEYS.MODEL_IDENTITY_STRICT]: 'false',
   [CONFIG_KEYS.FAIR_SCHEDULING_ENABLED]: 'true',
   [CONFIG_KEYS.GLOBAL_PAUSE]: 'false',
   [CONFIG_KEYS.PROMPT_CACHING_1H]: 'false',

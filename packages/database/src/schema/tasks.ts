@@ -131,6 +131,22 @@ export const tasks = pgTable(
      *  an audit record. */
     worktreePath: text('worktree_path'),
     worktreeBranch: text('worktree_branch'),
+    /** Which model actually ran this task, captured from the 00-model-health canary's
+     *  own CLI stream (requested vs served — see `ModelIdentity` in @haive/shared,
+     *  kept in sync by hand because this package cannot import shared: circular).
+     *  On the task row rather than the step's `output` because step output is not
+     *  durable — _step-reset nulls it on a Retry cascade, and "which model ran this
+     *  task" must survive that. Per-invocation truth lives on
+     *  cli_invocations.model_identity; this is the task-default provider's identity.
+     *  NULL on legacy rows, when the canary is disabled, and under
+     *  HAIVE_TEST_BYPASS_LLM (no invocation to read). */
+    modelIdentity: jsonb('model_identity').$type<{
+      requested: string | null;
+      served: string | null;
+      billed: string[];
+      source: 'stream-json' | 'gemini-stats' | 'antigravity-log' | 'provider-config' | null;
+      match: 'exact' | 'differs' | 'unknown';
+    }>(),
     /** Durable record of the final workflow commit and the repo-relative paths it
      *  changed, written by 10-gate-3-commit apply. Both are computed today but only
      *  survive in step output (nulled by _step-reset) or a worktree artifact (deleted on
@@ -708,6 +724,19 @@ export const cliInvocations = pgTable(
       cacheReadTokens?: number;
       cacheCreationTokens?: number;
       costUsd?: number;
+    }>(),
+    /** Which model actually answered THIS invocation, parsed from the CLI's own
+     *  output by the same pass that extracts tokenUsage. Per-invocation rather than
+     *  per-task because per-step CLI preferences mean two steps of one task can run
+     *  different models. Keep in sync with `ModelIdentity` in @haive/shared (this
+     *  package cannot import shared — circular; same note as tokenUsage above).
+     *  NULL on legacy rows and whenever the CLI reports no model (codex, amp). */
+    modelIdentity: jsonb('model_identity').$type<{
+      requested: string | null;
+      served: string | null;
+      billed: string[];
+      source: 'stream-json' | 'gemini-stats' | 'antigravity-log' | 'provider-config' | null;
+      match: 'exact' | 'differs' | 'unknown';
     }>(),
     durationMs: integer('duration_ms'),
     containerId: varchar('container_id', { length: 255 }),

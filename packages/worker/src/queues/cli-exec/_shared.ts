@@ -1,5 +1,5 @@
 import { Queue } from 'bullmq';
-import { logger, type CliTokenUsage, type StepErrorHint } from '@haive/shared';
+import { logger, type CliTokenUsage, type ModelIdentity, type StepErrorHint } from '@haive/shared';
 import type {
   CliExecJobPayload,
   CliProbeJobPayload,
@@ -59,6 +59,10 @@ export interface ExecutionOutcome {
    *  CliTokenUsage in @haive/shared). Undefined/null when the CLI reported
    *  nothing (plain-text output, legacy payloads, antigravity). */
   tokenUsage?: CliTokenUsage | null;
+  /** Which model actually answered, parsed from the same output as tokenUsage.
+   *  Persisted to cli_invocations.model_identity. Null when this execution path
+   *  captures no stream, and for CLIs that name no model at all (codex, amp). */
+  modelIdentity?: ModelIdentity | null;
   /** Full live-stream transcript (header + every stdout/stderr chunk) the
    *  same bytes published to the cli-stream Redis channel. Persisted to
    *  cli_invocations.stream_log for historical replay. Null when the

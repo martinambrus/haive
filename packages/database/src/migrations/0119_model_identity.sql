@@ -1,0 +1,51 @@
+-- Model identity: which model actually answered, as reported by the CLI itself,
+-- alongside which one we asked for.
+--
+-- Haive already records the model it REQUESTS (cli_providers.model, `--model` in
+-- cli_args, ANTHROPIC_DEFAULT_*_MODEL env). It never recorded which model replied, so
+-- an upstream swap was invisible. MEASURED 2026-08-18: the `Z.AI Low` provider requests
+-- `glm-5.2[1m]` and api.z.ai serves `glm-5.3`; recorded streams from 2026-07-24 show the
+-- same provider being served `glm-5.2`. The endpoint changed under us, with no config
+-- change, and nothing in the product noticed.
+--
+-- Two columns, not one, because they answer different questions:
+--
+--   cli_invocations.model_identity — per-invocation truth. Per-step CLI preferences mean
+--     two steps of the same task can run different models, so the task row alone cannot
+--     represent a run. Written by the cli-exec completion path beside token_usage, from
+--     the same parse of the CLI's output.
+--
+--   tasks.model_identity — the task-default provider's identity, written by the
+--     00-model-health canary's apply. On the task row rather than in the step's `output`
+--     because step output is NOT durable: _step-reset nulls it on a Retry cascade, and
+--     "which model ran this task" has to survive that (same reasoning as worktree_path
+--     and commit_sha above it).
+--
+-- Shape (kept in sync with `ModelIdentity` in @haive/shared):
+--   { requested, served, billed[], source, match }
+-- `match` is 'exact' | 'differs' | 'unknown'; 'unknown' whenever `served` is null, which
+-- is the permanent state for codex and amp — neither CLI reports a model at all (verified
+-- against a complete 3.4 MB successful codex run; amp reports `agent_mode` instead).
+--
+-- jsonb rather than two text columns: the payload is read whole for display and never
+-- filtered or joined on, and it keeps the pair atomic — a requested without its served is
+-- meaningless. Same choice, and same reasoning, as token_usage next to it.
+--
+-- No NOT NULL and no default: NULL is meaningful and unavoidable here — legacy rows, a
+-- disabled canary, a HAIVE_TEST_BYPASS_LLM smoke run with no invocation to read, and any
+-- CLI that reports nothing all legitimately have no identity. A default would fabricate
+-- evidence we do not have, which is the one thing this column exists to prevent.
+--
+-- No index: nothing queries by it; both columns are read by primary key with the row.
+--
+-- Additive + idempotent: a second run is a no-op. Purely additive to existing rows (they
+-- stay NULL), and with MODEL_IDENTITY_STRICT defaulting to 'false' the feature cannot
+-- change whether any task runs. Leaving the columns after a code revert is harmless —
+-- nothing else reads them.
+--
+-- Rollback: ALTER TABLE "cli_invocations" DROP COLUMN IF EXISTS "model_identity";
+--           ALTER TABLE "tasks"           DROP COLUMN IF EXISTS "model_identity";
+--           (No data loss beyond the observations themselves; nothing derives from them.)
+
+ALTER TABLE "cli_invocations" ADD COLUMN IF NOT EXISTS "model_identity" jsonb;
+ALTER TABLE "tasks" ADD COLUMN IF NOT EXISTS "model_identity" jsonb;

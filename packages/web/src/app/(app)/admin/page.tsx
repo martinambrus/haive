@@ -127,6 +127,8 @@ export default function AdminPage() {
   const [savingDdevControl, setSavingDdevControl] = useState(false);
   const [fairEnabled, setFairEnabled] = useState<boolean | null>(null);
   const [savingFair, setSavingFair] = useState(false);
+  const [modelIdentityStrict, setModelIdentityStrict] = useState<boolean | null>(null);
+  const [savingModelIdentityStrict, setSavingModelIdentityStrict] = useState(false);
   const [globalPause, setGlobalPause] = useState<boolean | null>(null);
   const [savingGlobalPause, setSavingGlobalPause] = useState(false);
   const [promptCaching1hEnabled, setPromptCaching1hEnabled] = useState<boolean | null>(null);
@@ -184,6 +186,7 @@ export default function AdminPage() {
         allowanceWatchData,
         ddevControlData,
         fairData,
+        modelIdentityStrictData,
         perTaskData,
         attachmentData,
         promptCaching1hData,
@@ -214,6 +217,7 @@ export default function AdminPage() {
         api.get<{ mode: string }>('/admin/config/allowance-watch'),
         api.get<{ enabled: boolean }>('/admin/config/ddev-control'),
         api.get<{ enabled: boolean }>('/admin/config/fair-scheduling'),
+        api.get<{ enabled: boolean }>('/admin/config/model-identity-strict'),
         api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
         api.get<{ maxBytes: number }>('/admin/config/attachment-max-bytes'),
         api.get<{ enabled: boolean }>('/admin/config/prompt-caching-1h'),
@@ -247,6 +251,7 @@ export default function AdminPage() {
       setAllowanceWatchModeState(allowanceWatchData.mode);
       setDdevControlEnabled(ddevControlData.enabled);
       setFairEnabled(fairData.enabled);
+      setModelIdentityStrict(modelIdentityStrictData.enabled);
       setPromptCaching1hEnabled(promptCaching1hData.enabled);
       setTersenessLevel(tersenessData.level);
       setReviewDistillEnabled(reviewDistillData.enabled);
@@ -761,6 +766,21 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update fair scheduling');
     } finally {
       setSavingFair(false);
+    }
+  }
+
+  async function setModelIdentityStrictSwitch(next: boolean) {
+    setSavingModelIdentityStrict(true);
+    try {
+      const result = await api.put<{ enabled: boolean }>('/admin/config/model-identity-strict', {
+        enabled: next,
+      });
+      setModelIdentityStrict(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update strict model identity');
+    } finally {
+      setSavingModelIdentityStrict(false);
     }
   }
 
@@ -1825,6 +1845,34 @@ export default function AdminPage() {
             />
             {fairEnabled ? 'Enabled' : 'Disabled'}
             {savingFair && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+        </Card>
+      )}
+
+      {modelIdentityStrict !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Strict model identity</CardTitle>
+            <CardDescription>
+              The model-health step always records which model actually answered — read from the
+              CLI&apos;s own output, not from what was configured. This decides what happens when
+              those disagree. Off (default) = record it, show a warning on the task, keep running; a
+              difference is often benign, since a model alias legitimately resolves to a dated
+              snapshot. On = fail the task instead, for providers that must be pinned exactly
+              (measured: a provider configured for glm-5.2[1m] was served glm-5.3). Never fires for
+              CLIs that report no model at all, such as codex and amp. Takes effect within ~30s.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={modelIdentityStrict}
+              disabled={savingModelIdentityStrict}
+              onChange={(e) => void setModelIdentityStrictSwitch(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {modelIdentityStrict ? 'Enabled' : 'Disabled'}
+            {savingModelIdentityStrict && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}
