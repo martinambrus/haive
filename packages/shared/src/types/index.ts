@@ -104,10 +104,13 @@ export interface CliTokenUsage {
  *  configured for `glm-5.2[1m]` was served `glm-5.3` by api.z.ai with no config
  *  change on our side. Recording only one of them cannot detect that.
  *
- *  Deliberately NOT normalized (no suffix stripping, no case folding): the
- *  cosmetic-looking differences are exactly where a real swap hides. `[1m]` is a
- *  context-window variant tag and `glm-5.2` -> `glm-5.3` is a version change, and
- *  a normalizer aggressive enough to fold the first folds the second too.
+ *  `requested` and `served` are always stored VERBATIM. Only `match` applies any
+ *  leniency, and only one kind: an endpoint that drops a trailing variant tag while
+ *  naming the same model (`glm-5.3[1m]` answered as `glm-5.3`) counts as 'exact'.
+ *  Nothing else is folded — not case, not other suffixes, and not two different
+ *  tags (`[1m]` vs `[200k]` stays 'differs', since a different context variant is a
+ *  real difference). A version change such as `glm-5.2` -> `glm-5.3` is always
+ *  'differs', which is the case the whole record exists to catch.
  *
  *  Per-provider coverage is measured, not assumed (see
  *  packages/worker/test/model-report-discover.ts, which re-measures it):

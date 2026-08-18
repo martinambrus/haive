@@ -97,9 +97,39 @@ describe('classifyModelMatch', () => {
     expect(classifyModelMatch('glm-5.2[1m]', 'glm-5.3')).toBe('differs');
   });
 
-  it('does not normalize away a variant-tag difference either', () => {
-    // Stripping `[1m]` here would need a rule loose enough to also hide 5.2 -> 5.3.
-    expect(classifyModelMatch('glm-5.2[1m]', 'glm-5.2')).toBe('differs');
+  it('forgives an endpoint dropping a trailing variant tag', () => {
+    // Measured: zai asks for glm-5.3[1m] and is served glm-5.3. Same model, tag not
+    // echoed — warning on it every single run was noise nobody could act on.
+    expect(classifyModelMatch('glm-5.3[1m]', 'glm-5.3')).toBe('exact');
+    // Symmetric: forgiveness is about the tag's PRESENCE, not which side carries it.
+    expect(classifyModelMatch('glm-5.3', 'glm-5.3[1m]')).toBe('exact');
+  });
+
+  it('still flags a version change that also drops the tag', () => {
+    // The rule must not degrade into "strip tags, then compare": this is a real swap.
+    expect(classifyModelMatch('glm-5.2[1m]', 'glm-5.3')).toBe('differs');
+    expect(classifyModelMatch('glm-5.2[1m]', 'glm-5.2')).toBe('exact');
+  });
+
+  it('flags two DIFFERENT variant tags', () => {
+    // Being handed a different context variant is a real difference, not cosmetic —
+    // which is why the rule keys on tag presence rather than tag-stripped equality.
+    expect(classifyModelMatch('glm-5.3[1m]', 'glm-5.3[200k]')).toBe('differs');
+  });
+
+  it('leaves non-bracket variant markers alone', () => {
+    // ollama marks variants with a colon; nothing here may touch that.
+    expect(classifyModelMatch('glm-5.2:cloud', 'glm-5.2')).toBe('differs');
+  });
+
+  it('strips at most one trailing tag and never eats the base', () => {
+    // Only the final bracket group is ever a candidate, so a doubly-tagged id cannot
+    // collapse onto a bare base. 'differs' is the conservative verdict for an exotic
+    // shape nothing in the measured set produces.
+    expect(classifyModelMatch('model[a][b]', 'model[a]')).toBe('differs');
+    expect(classifyModelMatch('model[a][b]', 'model')).toBe('differs');
+    // A tagged id compared with itself is still exact, tag and all.
+    expect(classifyModelMatch('glm-5.3[1m]', 'glm-5.3[1m]')).toBe('exact');
   });
 
   it('reports exact when the endpoint echoes what was asked', () => {

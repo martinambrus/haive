@@ -96,15 +96,40 @@ export function requestedFromSpec(spec: Pick<CliCommandSpec, 'args' | 'env'>): s
   return null;
 }
 
+/** A trailing bracketed variant tag: the `[1m]` in `glm-5.3[1m]`.
+ *
+ *  Z.AI names a context-window variant this way and then echoes the model back
+ *  WITHOUT the tag, so every zai run reported a mismatch it could do nothing about.
+ *  Anchored to the end and forbidding nested brackets, so it can only ever match a
+ *  trailing `[...]` segment and never eat part of a model id. Nothing else in the
+ *  measured set uses brackets — claude-code, grok, muse and openrouter have none,
+ *  and ollama's variant marker is a colon (`glm-5.2:cloud`), untouched by this. */
+const TRAILING_VARIANT_TAG_RE = /\[[^[\]]*\]$/;
+
+function stripTrailingVariantTag(value: string): string {
+  return value.replace(TRAILING_VARIANT_TAG_RE, '');
+}
+
 /** Compare what we asked for against what answered.
  *
- *  NO normalization — not case folding, not suffix stripping. The differences that
- *  look cosmetic are exactly where a real swap hides: `glm-5.2[1m]` -> `glm-5.2` is
- *  a context-variant tag being dropped, `glm-5.2[1m]` -> `glm-5.3` is a version
- *  change, and any normalizer loose enough to forgive the first also forgives the
- *  second. Reporting 'differs' for a benign alias resolution is a cheap, visible,
- *  correctable false positive; hiding a real swap is the failure this exists to
- *  prevent.
+ *  Beyond exact equality there is ONE forgiven difference, deliberately the
+ *  narrowest one that fixes the zai false positive: the endpoint dropped a trailing
+ *  variant tag while naming the same model. Note what this does NOT do — it does not
+ *  case-fold, does not strip any other suffix, and crucially does not compare
+ *  tag-stripped strings in general. It forgives only the PRESENCE of a tag on one
+ *  side. Two DIFFERENT tags (`glm-5.3[1m]` vs `glm-5.3[200k]`) stay 'differs',
+ *  because being handed a different context variant is a real difference, not a
+ *  cosmetic one.
+ *
+ *  The reason for that care: `glm-5.3[1m]` -> `glm-5.3` is a tag being dropped, but
+ *  `glm-5.2[1m]` -> `glm-5.3` is a version swap, and a normalizer that merely
+ *  stripped tags from both sides before comparing would still catch the second only
+ *  by luck. Keying on tag PRESENCE rather than tag-stripped equality keeps the two
+ *  cases structurally distinct.
+ *
+ *  `match` is a verdict about whether the same MODEL answered, not about byte
+ *  equality; `requested` and `served` are always stored verbatim, so a forgiven
+ *  difference is still visible to anyone reading the record.
  *
  *  'unknown' whenever either side is missing. That is the permanent state for codex
  *  and amp, and it is what keeps strict mode from failing providers we simply have
@@ -114,7 +139,16 @@ export function classifyModelMatch(
   served: string | null,
 ): ModelIdentity['match'] {
   if (!requested || !served) return 'unknown';
-  return requested === served ? 'exact' : 'differs';
+  if (requested === served) return 'exact';
+  const requestedTagged = TRAILING_VARIANT_TAG_RE.test(requested);
+  const servedTagged = TRAILING_VARIANT_TAG_RE.test(served);
+  if (
+    requestedTagged !== servedTagged &&
+    stripTrailingVariantTag(requested) === stripTrailingVariantTag(served)
+  ) {
+    return 'exact';
+  }
+  return 'differs';
 }
 
 /** What a CLI's own output said about the models it used. */
