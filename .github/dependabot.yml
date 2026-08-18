@@ -16,12 +16,28 @@ updates:
     schedule:
       interval: weekly
 
-  # Base images in the service Dockerfiles.
+  # Base images in the service Dockerfiles. Every Dockerfile in the repo must be
+  # listed here or its FROM tag never gets a security bump; the ddev-runner and
+  # sandbox images matter most because they are what task workloads execute in.
   - package-ecosystem: docker
     directories:
       - "/packages/api"
       - "/packages/worker"
       - "/packages/web"
       - "/docker/ollama-thinking-proxy"
+      - "/docker/openrouter-compat-proxy"
+      - "/packages/worker/docker/ddev-runner"
     schedule:
       interval: weekly
+
+  # The sandbox image is deliberately held on node:24: node:26-alpine/bookworm
+  # unbundles corepack, which the image's CLI install path relies on. Track it
+  # for patch/minor so a base-image fix still surfaces, but ignore the major so
+  # Dependabot stops re-proposing the bump that was already rejected.
+  - package-ecosystem: docker
+    directory: "/packages/worker/sandbox-image"
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
