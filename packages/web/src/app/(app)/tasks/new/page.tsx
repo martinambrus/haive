@@ -5,13 +5,11 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Lock, Unlock } from 'lucide-react';
 import { usePageTitle } from '@/lib/use-page-title';
-import { isBelowDefaultEffort } from '@/lib/effort-scale';
 import {
   api,
   API_BASE_URL,
   uploadTaskAttachment,
   type CliProvider,
-  type CliProviderCatalogEntry,
   type OnboardingStatus,
   type Repository,
   type Task,
@@ -98,7 +96,6 @@ export default function NewTaskPage() {
   const presetAppliedRef = useRef(false);
   const [repos, setRepos] = useState<Repository[] | null>(null);
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
-  const [catalog, setCatalog] = useState<CliProviderCatalogEntry[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [title, setTitle] = useState('');
@@ -133,19 +130,15 @@ export default function NewTaskPage() {
     let cancelled = false;
     async function load() {
       try {
-        const [repoRes, providerRes, catalogRes] = await Promise.all([
+        const [repoRes, providerRes] = await Promise.all([
           api.get<{ repositories: Repository[] }>('/repos'),
           api.get<{ providers: CliProvider[] }>('/cli-providers').catch(() => ({
             providers: [],
           })),
-          api
-            .get<{ providers: CliProviderCatalogEntry[] }>('/cli-providers/catalog')
-            .catch(() => ({ providers: [] })),
         ]);
         if (cancelled) return;
         setRepos(repoRes.repositories);
         setProviders(providerRes.providers);
-        setCatalog(catalogRes.providers);
       } catch (err) {
         if (cancelled) return;
         setLoadError((err as Error).message ?? 'Failed to load repositories');
@@ -385,32 +378,6 @@ export default function NewTaskPage() {
       ? onboardingStatus.onboarded
         ? 'workflow'
         : 'onboarding'
-      : null;
-
-  const selectedProvider = (providers ?? []).find((p) => p.id === cliProviderId) ?? null;
-  const selectedProviderMeta = selectedProvider
-    ? ((catalog ?? []).find((c) => c.name === selectedProvider.name) ?? null)
-    : null;
-  // Onboarding produces long-lived agent/skill/KB files. An effort below the
-  // provider's default here propagates into every later task that runs against
-  // the same repo, so we surface a yellow warning before the user commits to it.
-  // Compared by POSITION in the scale, not equality with `.max`: on ollama the
-  // default is `high` while `max` is still selectable, so an equality test would
-  // flag the stronger level as a downgrade.
-  const effortWarning =
-    inferredType === 'onboarding' &&
-    selectedProvider &&
-    selectedProviderMeta?.effortScale &&
-    isBelowDefaultEffort(
-      selectedProviderMeta.effortScale.values,
-      selectedProvider.effortLevel ?? selectedProviderMeta.effortScale.max,
-      selectedProviderMeta.effortScale.max,
-    )
-      ? {
-          chosen: selectedProvider.effortLevel ?? selectedProviderMeta.effortScale.max,
-          defaultLevel: selectedProviderMeta.effortScale.max,
-          providerLabel: selectedProvider.label,
-        }
       : null;
 
   return (
@@ -666,18 +633,6 @@ export default function NewTaskPage() {
             this task only — your saved choices are left untouched. Steps you change manually during
             the task are still saved as usual.
           </p>
-          {effortWarning && (
-            <div className="mt-2 rounded-md border border-amber-700 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
-              <strong>Reasoning effort below the default level.</strong> Provider{' '}
-              <code className="font-mono">{effortWarning.providerLabel}</code> is set to{' '}
-              <code className="font-mono">{effortWarning.chosen}</code> (default:{' '}
-              <code className="font-mono">{effortWarning.defaultLevel}</code>). Onboarding produces
-              long-lived agent, skill, and knowledge-base files that every later task against this
-              repository inherits — running it below the default effort can degrade the quality of
-              every future workflow. Adjust the level on the provider in Settings &rarr; CLI
-              providers, or pick a different provider, before continuing.
-            </div>
-          )}
         </div>
 
         {(inferredType === 'workflow' || inferredType === 'run_app') && (
