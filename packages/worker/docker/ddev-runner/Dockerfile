@@ -53,7 +53,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY browser-check.js /opt/browser-check.js
 COPY browser-probe-connect.js /opt/browser-probe-connect.js
-RUN cd /opt && npm init -y >/dev/null 2>&1 && npm install puppeteer-core@22 >/dev/null 2>&1
+# puppeteer-core is pinned EXACT, not to a major. A bare `@22` re-resolved on
+# every image build, so the browser-verify step could change behaviour with no
+# commit of ours -- and there is no lockfile here for Dependabot to watch. The
+# ceiling is set by node, not by us: this image takes nodejs from bookworm apt,
+# which is 18.20.4, and puppeteer-core >= 25 requires node >= 22.12.0. Bump the
+# node source first if you want to cross that line; 24.x is the last line that
+# runs on 18. Verify a bump with a real browser-verify task -- CI never builds
+# this image, so nothing else exercises the CDP path.
+ARG PUPPETEER_CORE_VERSION=24.43.1
+RUN cd /opt && npm init -y >/dev/null 2>&1 \
+    && npm install "puppeteer-core@${PUPPETEER_CORE_VERSION}" >/dev/null 2>&1
 ENV CHROME_PATH=/usr/bin/chromium
 COPY start-browser-desktop.sh /usr/local/bin/start-browser-desktop.sh
 RUN chmod +x /usr/local/bin/start-browser-desktop.sh
