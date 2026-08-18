@@ -800,9 +800,23 @@ async function stopActiveCliInvocations(
   if (opts.failTask && (active.length > 0 || stopped.length > 0)) {
     // Drop the task to `failed` (restartable) from any non-terminal state — incl.
     // `waiting_user`, which a half-finished step transition can leave behind.
+    //
+    // completedAt is the exit stamp every other terminal task write makes (markTaskCompleted
+    // / markTaskFailed / handleCancelTask / cancelTaskRow), and Stop was the one path that
+    // skipped it. Without it the task reads as terminal while carrying no exit time, which two
+    // consumers then get wrong: computeTaskTiming ends the span at `completedAt ?? now`, so a
+    // Stopped task's wall clock ticks forever, and the runtime reaper's failed-grace falls back
+    // to the CONTAINER start — the anchor its own comment warns re-arms a full grace on every
+    // stray reboot and lets a dead task squat a runtime slot. A retry or an allowance resume
+    // clears it again (task-queue.ts), so restartability is unaffected.
     await db
       .update(schema.tasks)
-      .set({ status: 'failed', errorMessage: 'Stopped by user', updatedAt: now })
+      .set({
+        status: 'failed',
+        errorMessage: 'Stopped by user',
+        completedAt: now,
+        updatedAt: now,
+      })
       .where(
         and(
           eq(schema.tasks.id, taskId),

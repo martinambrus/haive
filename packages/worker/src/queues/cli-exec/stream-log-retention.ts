@@ -41,10 +41,10 @@ export interface CliStreamLogReaperOptions {
  *    costs almost no reclaim — 99.6% of ended invocations holding a transcript belong to
  *    a task that has already exited.
  *
- *  A terminal task with a NULL completed_at is never swept. That is deliberate rather than
- *  incidental: the Stop path (api tasks route) sets status=failed without stamping an exit
- *  time, and aging such a row off some other clock would be a guess. Not aging it loses
- *  disk, not history. */
+ *  A terminal task with a NULL completed_at is never swept. Every task-level terminal write
+ *  stamps an exit time, so this should not arise — but a row that reads terminal while
+ *  carrying none has no clock to age from, and falling back to created_at or updated_at would
+ *  age it off something unrelated to the work. Not aging it loses disk, not history. */
 export function expiredStreamLogFilter(db: Database, cutoff: Date): SQL | undefined {
   return and(
     // stream_log NOT NULL makes a repeat sweep a no-op rather than a rewrite of rows it
