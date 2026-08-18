@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# Third-party actions are pinned to a full commit SHA, not a tag. A tag is a
+# mutable ref the upstream owner can repoint, so `@v7` is a promise, not a
+# contract; the SHA is the contract. Dependabot still bumps these -- it rewrites
+# the SHA and the trailing version comment together -- so the pin costs nothing
+# in maintenance. Keep the `# vX.Y.Z` comment: it is what makes the diff
+# readable and what Dependabot keys its update on.
+
 # Least-privilege GITHUB_TOKEN. No job here uses the token beyond cloning, so
 # read-only on contents is the whole requirement; a job that later needs to
 # comment or push must opt in explicitly with its own permissions block.
@@ -22,15 +29,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: 9.15.4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 26
           cache: pnpm
@@ -86,15 +93,15 @@ jobs:
       JWT_SECRET: ci-smoke-jwt-secret-not-real-just-for-smoke-tests-padding
       NODE_ENV: test
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: 9.15.4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 26
           cache: pnpm
@@ -129,7 +136,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Seed .env for compose
         run: |
