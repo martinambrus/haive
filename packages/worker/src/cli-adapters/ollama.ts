@@ -6,11 +6,49 @@ import { OLLAMA_THINKING_PROXY_URL } from './ollama-thinking-proxy.js';
 import type {
   CliCommandSpec,
   CliProviderRecord,
+  EffortScale,
   EnvInjection,
   InvokeOpts,
   PluginInstallCommand,
   PluginInstallOpts,
 } from './types.js';
+
+// Mirrors shared/catalog's OLLAMA_EFFORT_SCALE; keep the two in sync when levels
+// change. The only scale in the codebase whose default is NOT its top level.
+//
+// MEASURED against the running daemon and the claude binary, not copied from
+// Ollama's docs — those document `/api/chat`'s `think` and `/v1/chat/completions`'
+// `reasoning_effort`, neither of which is the endpoint this adapter uses.
+//
+// How the level actually arrives: the claude binary posts `output_config.effort`
+// alongside `thinking:{"type":"adaptive"}`. Ollama's Anthropic layer honors
+// `thinking.type` only for the literals "enabled"/"disabled", so `adaptive` always
+// falls through to the effort branch, which accepts exactly low/medium/high/max
+// (`api.ThinkValue.IsValid`) and folds `xhigh` into `high`. An out-of-range level
+// never 400s: it leaves the think value unset, which Ollama then forces to `true`
+// for a thinking-capable model. That is also why an unset CLAUDE_CODE_EFFORT_LEVEL
+// is not "no thinking" — the binary defaults to `high` on its own.
+//
+// `max` is exposed but is deliberately NOT the default:
+//   - gpt-oss:120b-cloud does not recognise it as a harmony level. Asked to read
+//     its own reasoning setting back it echoes "max", but reasons LESS than at
+//     `high` (385 vs 9612 thinking chars on the same prompt).
+//   - deepseek-v4-pro:cloud at `max` spent an entire 8000-token budget in the
+//     thinking channel and returned empty visible text — the exact failure the
+//     disable-thinking proxy exists to work around.
+// `high` is additionally what the binary already sent before this scale existed,
+// so it keeps every pre-existing provider on its current behaviour. Models that
+// do reason harder at `max` (deepseek-v4-pro, kimi-k3) can still opt in per
+// provider. Re-probe rather than "correcting" this to match ZAI_EFFORT_SCALE.
+//
+// Orthogonal to the level: for many LOCAL models it only toggles thinking on/off.
+// Every built-in renderer in ollama 0.24.0 reads `think.Bool()` and none reads
+// `ThinkLevel`, so local qwen3.5 et al. are flat across all four. Ollama Cloud
+// models are rendered upstream and do honor it.
+const OLLAMA_EFFORT_SCALE: EffortScale = {
+  values: ['low', 'medium', 'high', 'max'],
+  max: 'high',
+};
 
 // In-stack daemon default; remote/cloud providers override via
 // provider.envVars.ANTHROPIC_BASE_URL (a remote host, or https://ollama.com).
@@ -64,6 +102,7 @@ export class OllamaAdapter extends BaseCliAdapter {
   readonly defaultModel = null;
   readonly rulesFile = 'CLAUDE.md';
   readonly rulesFileMode = 'import' as const;
+  override readonly effortScale = OLLAMA_EFFORT_SCALE;
   // Ollama Cloud host only. Local in-stack models are reached over the models
   // network (not egress); an external remote host is added per provider.
   override readonly defaultEgressDomains = ['ollama.com', '*.ollama.com'];
@@ -131,6 +170,10 @@ export class OllamaAdapter extends BaseCliAdapter {
       spec.steerable = true;
     }
     return spec;
+  }
+
+  override effortEnv(level: string): Record<string, string> {
+    return { CLAUDE_CODE_EFFORT_LEVEL: level };
   }
 
   override buildShellEnv(

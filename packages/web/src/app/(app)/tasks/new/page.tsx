@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Lock, Unlock } from 'lucide-react';
 import { usePageTitle } from '@/lib/use-page-title';
+import { isBelowDefaultEffort } from '@/lib/effort-scale';
 import {
   api,
   API_BASE_URL,
@@ -390,18 +391,24 @@ export default function NewTaskPage() {
   const selectedProviderMeta = selectedProvider
     ? ((catalog ?? []).find((c) => c.name === selectedProvider.name) ?? null)
     : null;
-  // Onboarding produces long-lived agent/skill/KB files. A below-max effort
-  // here propagates into every later task that runs against the same repo,
-  // so we surface a yellow warning before the user commits to it.
+  // Onboarding produces long-lived agent/skill/KB files. An effort below the
+  // provider's default here propagates into every later task that runs against
+  // the same repo, so we surface a yellow warning before the user commits to it.
+  // Compared by POSITION in the scale, not equality with `.max`: on ollama the
+  // default is `high` while `max` is still selectable, so an equality test would
+  // flag the stronger level as a downgrade.
   const effortWarning =
     inferredType === 'onboarding' &&
     selectedProvider &&
     selectedProviderMeta?.effortScale &&
-    (selectedProvider.effortLevel ?? selectedProviderMeta.effortScale.max) !==
-      selectedProviderMeta.effortScale.max
+    isBelowDefaultEffort(
+      selectedProviderMeta.effortScale.values,
+      selectedProvider.effortLevel ?? selectedProviderMeta.effortScale.max,
+      selectedProviderMeta.effortScale.max,
+    )
       ? {
           chosen: selectedProvider.effortLevel ?? selectedProviderMeta.effortScale.max,
-          max: selectedProviderMeta.effortScale.max,
+          defaultLevel: selectedProviderMeta.effortScale.max,
           providerLabel: selectedProvider.label,
         }
       : null;
@@ -661,12 +668,12 @@ export default function NewTaskPage() {
           </p>
           {effortWarning && (
             <div className="mt-2 rounded-md border border-amber-700 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
-              <strong>Reasoning effort below maximum.</strong> Provider{' '}
+              <strong>Reasoning effort below the default level.</strong> Provider{' '}
               <code className="font-mono">{effortWarning.providerLabel}</code> is set to{' '}
-              <code className="font-mono">{effortWarning.chosen}</code> (max:{' '}
-              <code className="font-mono">{effortWarning.max}</code>). Onboarding produces
+              <code className="font-mono">{effortWarning.chosen}</code> (default:{' '}
+              <code className="font-mono">{effortWarning.defaultLevel}</code>). Onboarding produces
               long-lived agent, skill, and knowledge-base files that every later task against this
-              repository inherits — running it below the maximum effort can degrade the quality of
+              repository inherits — running it below the default effort can degrade the quality of
               every future workflow. Adjust the level on the provider in Settings &rarr; CLI
               providers, or pick a different provider, before continuing.
             </div>

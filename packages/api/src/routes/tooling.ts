@@ -125,6 +125,78 @@ tooling.post('/test-ollama', async (c) => {
 });
 
 /* ------------------------------------------------------------------ */
+/* Ollama model capabilities                                           */
+/* ------------------------------------------------------------------ */
+
+/** Does this Ollama model reason at all?
+ *
+ *  `/api/show` returns a `capabilities` array; `"thinking"` is present exactly when
+ *  the model can produce a reasoning trace. Answers for cloud tags too — a
+ *  `:cloud` model registered on the daemon shows its capabilities even though its
+ *  weights live upstream.
+ *
+ *  Purely an ADVISORY for the reasoning-effort selector, never a gate. Ollama's
+ *  Anthropic middleware sets `relax_thinking`, so on `/v1/messages` a model without
+ *  the capability has its think value nulled with a warning instead of the 400
+ *  `/api/chat` would return — a run can't break on a wrong or missing answer here.
+ *  Degrades like /test-ollama: an unreachable daemon or an unknown model answers
+ *  `found:false` with a null verdict rather than failing the request. */
+tooling.post('/ollama-model-capabilities', async (c) => {
+  const body = (await c.req.json()) as { ollamaUrl?: string; model?: string };
+  const url = body.ollamaUrl;
+  const model = body.model;
+  if (!url || typeof url !== 'string' || !model || typeof model !== 'string') {
+    return c.json({ ok: false, error: 'ollamaUrl and model are required' }, 400);
+  }
+
+  try {
+    const resp = await fetch(`${url}/api/show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+      signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
+    });
+    if (resp.status === 404) {
+      return c.json({
+        ok: true,
+        reachable: true,
+        found: false,
+        capabilities: [],
+        supportsThinking: null,
+      });
+    }
+    if (!resp.ok) {
+      return c.json({
+        ok: true,
+        reachable: true,
+        found: false,
+        capabilities: [],
+        supportsThinking: null,
+        error: `Ollama returned HTTP ${resp.status}`,
+      });
+    }
+    const data = (await resp.json()) as { capabilities?: string[] };
+    const capabilities = Array.isArray(data.capabilities) ? data.capabilities : [];
+    return c.json({
+      ok: true,
+      reachable: true,
+      found: true,
+      capabilities,
+      supportsThinking: capabilities.includes('thinking'),
+    });
+  } catch (err) {
+    return c.json({
+      ok: true,
+      reachable: false,
+      found: false,
+      capabilities: [],
+      supportsThinking: null,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+/* ------------------------------------------------------------------ */
 /* Ollama model pull (SSE streaming)                                   */
 /* ------------------------------------------------------------------ */
 

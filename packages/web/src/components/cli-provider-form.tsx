@@ -298,6 +298,41 @@ export function CliProviderForm({
         })()
       : null;
 
+  // Does the chosen Ollama model reason at all? Read from /api/show's
+  // `capabilities`, which answers for cloud tags too. Advisory for the
+  // reasoning-effort selector only: Ollama's Anthropic endpoint nulls the think
+  // value for a model without the capability instead of failing, so a null
+  // verdict — unreachable daemon, model not pulled yet, probe errored — simply
+  // renders nothing rather than blocking anything.
+  const [ollamaSupportsThinking, setOllamaSupportsThinking] = useState<boolean | null>(null);
+  const ollamaProbeModel = metadata.name === 'ollama' ? state.model.trim() : '';
+  useEffect(() => {
+    if (!ollamaInStackUrl || !ollamaProbeModel) {
+      setOllamaSupportsThinking(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void api
+        .post<{
+          supportsThinking: boolean | null;
+        }>('/tooling/ollama-model-capabilities', {
+          ollamaUrl: ollamaInStackUrl,
+          model: ollamaProbeModel,
+        })
+        .then((r) => {
+          if (!cancelled) setOllamaSupportsThinking(r.supportsThinking);
+        })
+        .catch(() => {
+          if (!cancelled) setOllamaSupportsThinking(null);
+        });
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [ollamaInStackUrl, ollamaProbeModel]);
+
   // Precedence: dirty wins over building wins over failed. A dirty form
   // overrides an in-flight build so the user is told to save first; after
   // save/rebuild the building state takes over so the probe is held back
@@ -920,7 +955,9 @@ export function CliProviderForm({
               return an empty visible response (e.g.{' '}
               <code className="font-mono">deepseek-v4-pro:cloud</code>). Routes this provider&apos;s
               requests through a proxy that disables thinking, so the model replies with visible
-              text. No effect on local models.
+              text. Currently wired for cloud models only — a provider on a local model keeps
+              thinking on regardless. Lowering Reasoning effort below is often enough to fix an
+              empty response without turning thinking off.
             </p>
           </div>
         </div>
@@ -952,8 +989,28 @@ export function CliProviderForm({
             levels are faster and cheaper but reduce reasoning depth. Default is{' '}
             <code className="font-mono">{metadata.effortScale.max}</code>; tasks that produce
             long-lived configuration (onboarding) warn before starting if this provider is set below
-            the maximum.
+            that default.
           </p>
+          {metadata.name === 'ollama' && (
+            <p className="mt-1 text-xs text-neutral-500">
+              Ollama Cloud models honor all four levels. Most local models treat the setting as
+              on/off only — their built-in renderers read whether thinking is enabled, not how hard
+              to think — so expect no difference between levels there. The exception to
+              &ldquo;higher is stronger&rdquo; is <code className="font-mono">max</code>: some
+              models (gpt-oss) do not recognise it and reason less than at{' '}
+              <code className="font-mono">high</code>, which is why the default is{' '}
+              <code className="font-mono">high</code>.
+            </p>
+          )}
+          {metadata.name === 'ollama' && ollamaSupportsThinking === false && (
+            <p className="mt-1 text-xs text-amber-500">
+              No <code className="font-mono">thinking</code> capability reported for{' '}
+              <code className="font-mono">{ollamaProbeModel}</code>, so this setting will have no
+              effect on it. It is harmless — Ollama drops the level for such models rather than
+              failing the run — but pick a reasoning-capable model if you want the knob to do
+              something.
+            </p>
+          )}
           {metadata.name === 'openrouter' && openRouterModel?.supportsReasoning === false && (
             <p className="mt-1 text-xs text-amber-500">
               <code className="font-mono">{openRouterModel.id}</code> does not advertise a reasoning

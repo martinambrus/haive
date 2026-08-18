@@ -3,8 +3,12 @@ import type { AuthMode, CliProviderName } from '../types/index.js';
 export interface EffortScaleMetadata {
   /** Allowed level identifiers for this CLI, ordered low-to-high. */
   values: readonly string[];
-  /** Identifier for the highest effort level. Used as the default when no
-   *  per-provider override is set, and to gate the onboarding warning. */
+  /** Identifier for the DEFAULT effort level: what a provider runs at when no
+   *  per-provider override is set, and the baseline the onboarding warning
+   *  compares against. It is the highest level in `values` for every CLI except
+   *  ollama, whose top level is measured as unreliable — see
+   *  OLLAMA_EFFORT_SCALE. Consumers must therefore compare POSITION in `values`,
+   *  not equality with this field, when asking "is the chosen level lower?". */
   max: string;
 }
 
@@ -125,6 +129,15 @@ const MUSE_EFFORT_SCALE: EffortScaleMetadata = {
 const CODEX_EFFORT_SCALE: EffortScaleMetadata = {
   values: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   max: 'ultra',
+};
+
+// Mirrors the adapter's OLLAMA_EFFORT_SCALE; keep the two in sync when levels
+// change. Same four levels as CLAUDE_LIKE_EFFORT_SCALE but the DEFAULT is
+// `high`, not `max` — the one scale in this file whose default is not its top
+// level. See the adapter const for the measurements behind that.
+const OLLAMA_EFFORT_SCALE: EffortScaleMetadata = {
+  values: ['low', 'medium', 'high', 'max'],
+  max: 'high',
 };
 
 export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> = {
@@ -324,7 +337,7 @@ export const CLI_PROVIDER_CATALOG: Record<CliProviderName, CliProviderMetadata> 
     supportsModelSelection: true,
     authConfigPaths: ['~/.config/claude', '~/.claude'],
     docsUrl: 'https://docs.ollama.com',
-    effortScale: null,
+    effortScale: OLLAMA_EFFORT_SCALE,
     projectSkillsDir: '.claude/skills',
     userSkillsPaths: [],
     projectAgentsDir: '.claude/agents',

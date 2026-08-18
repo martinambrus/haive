@@ -19,6 +19,9 @@ function makeProvider(overrides: ProviderOverrides): CliProviderRecord {
     authMode: overrides.authMode ?? 'subscription',
     enabled: overrides.enabled ?? true,
     effortLevel: overrides.effortLevel ?? null,
+    // Only ollama reads this in buildCliInvocation (and throws without it); every
+    // other adapter treats a null the same as the absent field it saw before.
+    model: overrides.model ?? null,
     createdAt: overrides.createdAt ?? now,
     updatedAt: overrides.updatedAt ?? now,
   } as CliProviderRecord;
@@ -298,5 +301,74 @@ describe('openrouter effort scale', () => {
     const provider = makeProvider({ id: 'p1', name: 'openrouter', effortLevel: 'ultra' });
     const spec = adapter.buildCliInvocation(provider, 'hi', { cwd: '/w' });
     expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+  });
+});
+
+// Ollama's levels are Anthropic-wire `output_config.effort`, which its compat layer
+// maps to the native think level. Accepted set is api.ThinkValue.IsValid, measured
+// against the running daemon. The scale is the ONE in the codebase whose default is
+// not its top level — see OLLAMA_EFFORT_SCALE in the adapter for the measurements
+// (gpt-oss reasons LESS at `max` than at `high`; deepseek-v4-pro at `max` emptied its
+// whole budget into the thinking channel). `high` is also what the claude binary sent
+// on its own before this scale existed, so the default is behaviour-preserving.
+describe('ollama effort scale', () => {
+  function ollamaProvider(overrides: Partial<CliProviderRecord> = {}): CliProviderRecord {
+    return makeProvider({ id: 'p-ollama', name: 'ollama', model: 'qwen3.5:2b', ...overrides });
+  }
+
+  it('declares the four levels ollama accepts', () => {
+    const adapter = cliAdapterRegistry.get('ollama');
+    expect(adapter.effortScale).not.toBeNull();
+    expect(adapter.effortScale!.values).toEqual(['low', 'medium', 'high', 'max']);
+  });
+
+  it('defaults to high rather than its top level', () => {
+    const adapter = cliAdapterRegistry.get('ollama');
+    expect(adapter.effortScale!.max).toBe('high');
+    const spec = adapter.buildCliInvocation(ollamaProvider(), 'hi', { cwd: '/w' });
+    expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBe('high');
+  });
+
+  it('forwards max when the user explicitly opts into it', () => {
+    const adapter = cliAdapterRegistry.get('ollama');
+    const spec = adapter.buildCliInvocation(ollamaProvider({ effortLevel: 'max' }), 'hi', {
+      cwd: '/w',
+    });
+    expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBe('max');
+  });
+
+  it('lets an explicit per-step level win over the stored one', () => {
+    const adapter = cliAdapterRegistry.get('ollama');
+    const spec = adapter.buildCliInvocation(ollamaProvider({ effortLevel: 'high' }), 'hi', {
+      cwd: '/w',
+      effortLevel: 'low',
+    });
+    expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBe('low');
+  });
+
+  // xhigh is not in the scale even though ollama's compat layer folds it into
+  // `high`: exposing a level that silently becomes another one is a worse UI than
+  // not offering it, and resolveEffortLevel drops it rather than forwarding.
+  it.each(['xhigh', 'ultra', 'super-extreme'])('drops the out-of-scale level %s', (level) => {
+    const adapter = cliAdapterRegistry.get('ollama');
+    const spec = adapter.buildCliInvocation(ollamaProvider({ effortLevel: level }), 'hi', {
+      cwd: '/w',
+    });
+    expect(spec.env.CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+  });
+
+  it('translates each declared level into CLAUDE_CODE_EFFORT_LEVEL', () => {
+    const adapter = cliAdapterRegistry.get('ollama');
+    for (const level of adapter.effortScale!.values) {
+      expect(adapter.effortEnv(level)).toEqual({ CLAUDE_CODE_EFFORT_LEVEL: level });
+    }
+  });
+
+  // The interactive/terminal path resolves effort too, so a shell opened against an
+  // ollama provider reasons at the same level its steps do.
+  it('applies the level to buildShellEnv as well', () => {
+    const adapter = cliAdapterRegistry.get('ollama');
+    const env = adapter.buildShellEnv(ollamaProvider({ effortLevel: 'low' }), {});
+    expect(env.CLAUDE_CODE_EFFORT_LEVEL).toBe('low');
   });
 });
