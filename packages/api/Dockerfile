@@ -12,7 +12,7 @@ RUN apk add --no-cache python3 make g++ libc6-compat docker-cli
 RUN npm install -g corepack@latest && \
     corepack enable && \
     for i in 1 2 3; do \
-      corepack prepare pnpm@9.15.4 --activate && break || { [ "$i" = 3 ] && exit 1; sleep 5; }; \
+      corepack prepare pnpm@10.34.5 --activate && break || { [ "$i" = 3 ] && exit 1; sleep 5; }; \
     done
 WORKDIR /app
 
