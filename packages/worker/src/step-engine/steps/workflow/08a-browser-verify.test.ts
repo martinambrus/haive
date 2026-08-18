@@ -51,7 +51,21 @@ describe('parseFixerOutput', () => {
   });
 
   it('falls back to no-fixes on garbled output', () => {
-    expect(parseFixerOutput('nope')).toEqual({ fixesMade: [], notes: '' });
+    expect(parseFixerOutput('nope')).toEqual({ fixesMade: [], screenshots: [], notes: '' });
+  });
+
+  it('carries the screenshot captions the fixer reported', () => {
+    const p = parseFixerOutput(
+      '```json\n{"fixes_made":["fixed contrast"],"screenshots":[{"file":"01-fix-button.webp","caption":"Button after contrast fix","test_case":"T2","result":"pass"}],"notes":""}\n```',
+    );
+    expect(p.screenshots).toEqual([
+      {
+        file: '01-fix-button.webp',
+        caption: 'Button after contrast fix',
+        testCase: 'T2',
+        result: 'pass',
+      },
+    ]);
   });
 });
 

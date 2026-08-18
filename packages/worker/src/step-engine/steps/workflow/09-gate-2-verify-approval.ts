@@ -22,6 +22,7 @@ import {
 } from '../../../sandbox/app-runner.js';
 import { ensureDdevWithProgress } from './_app-runtime.js';
 import { resolveTaskDirectAccess } from '../../../sandbox/_browser-access.js';
+import { SCREENSHOT_MANIFEST_NAME } from './_screenshots.js';
 
 interface VerifyGateDetect {
   /** Per-slot verify results from 08-phase-5-verify. A check with ran:false was
@@ -106,6 +107,11 @@ interface VerifyGateDetect {
   /** True when the task opted into direct database access (and the global switch is on):
    *  the web shows the DB connection panel alongside the gate. Independent of directAccess. */
   dbAccess: boolean;
+  /** Absolute path of the browser-tester's screenshot manifest, or null when 08a wrote
+   *  none. A POINTER only — the gallery fetches the artifact itself via /files/raw, so the
+   *  2s task-detail poll never carries the shot list. 08a owns building it; this gate only
+   *  reports whether it is there. */
+  screenshotsArtifactPath: string | null;
   /** Mandatory runtime HTTP smoke from 08-phase-5-verify (null when not probed).
    *  A failure defaults this gate to reject but never auto-reroutes to implement. */
   runtimeSmoke: {
@@ -584,6 +590,14 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       (dbTaskRow?.exposeDbPort ?? false) &&
       (await configService.getBoolean(CONFIG_KEYS.DB_DIRECT_ACCESS, true));
 
+    // Point at 08a's gallery manifest when it wrote one. Checked on disk rather than read
+    // out of 08a's step output, because that column is not durable (_step-reset nulls it)
+    // while the artifact lives in the worktree for as long as the shots themselves do.
+    const screenshotsManifest = path.join(ctx.workspacePath, '.haive', SCREENSHOT_MANIFEST_NAME);
+    const screenshotsArtifactPath = (await pathExists(screenshotsManifest))
+      ? screenshotsManifest
+      : null;
+
     return {
       verify: {
         test: liteCheck(output.test),
@@ -600,6 +614,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       liveBrowser,
       directAccess,
       dbAccess,
+      screenshotsArtifactPath,
       runtimeSmoke,
     };
   },

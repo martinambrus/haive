@@ -143,8 +143,21 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
     // --executable-path — --channel=stable looks for Google Chrome, which the
     // Debian sandbox lacks (the cause of past "Could not connect to Chrome").
     const cdmSpec = `chrome-devtools-mcp@${opts.chromeDevtoolsMcpVersion?.trim() || 'latest'}`;
+    // The browser-verification gallery has the tester save screenshots into the worktree
+    // via take_screenshot's `filePath`. Since 1.7 that path is validated against the MCP
+    // `roots` the CLIENT negotiated, and a client that negotiates NONE leaves os.tmpdir()
+    // as the only writable root — every capture then fails with "Access denied". This flag
+    // restores the permissive behavior in exactly that no-roots case (it is ignored once a
+    // client does negotiate roots), and grants nothing new: the agent already has
+    // unrestricted write access inside the sandbox via its shell, and the sandbox boundary
+    // is what actually contains it.
     const chromeArgs = opts.chromeDevtoolsBrowserUrl
-      ? ['-y', cdmSpec, `--browser-url=${opts.chromeDevtoolsBrowserUrl}`]
+      ? [
+          '-y',
+          cdmSpec,
+          `--browser-url=${opts.chromeDevtoolsBrowserUrl}`,
+          '--allow-unrestricted-paths',
+        ]
       : [
           '-y',
           cdmSpec,
@@ -152,6 +165,7 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
           '--headless=true',
           '--isolated=true',
           '--viewport=1920x1080',
+          '--allow-unrestricted-paths',
         ];
     // Cap a single browser tool call. Nothing else bounds one: MCP_TOOL_TIMEOUT is unset
     // (~28h default), and the stdio idle timeout only fires on a fully silent server —

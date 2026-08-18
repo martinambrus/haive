@@ -66,6 +66,7 @@ import { CommitDiffViewer } from '@/components/commit-diff-viewer';
 import { PrStatusPanel } from '@/components/PrStatusPanel';
 import { StepTerminal } from '@/components/terminal/StepTerminal';
 import { BrowserVncPanel } from '@/components/terminal/BrowserVncPanel';
+import { ScreenshotGallery } from '@/components/browser/screenshot-gallery';
 import { BrowserDirectPanel } from '@/components/terminal/BrowserDirectPanel';
 import { DatabaseAccessPanel } from '@/components/terminal/DatabaseAccessPanel';
 import { InteractiveShell } from '@/components/terminal/InteractiveShell';
@@ -79,6 +80,28 @@ import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 /** Pick the live-browser surface for a step: the URL info box when the user chose
  *  `direct` (test in your own browser) mode, else the in-app VNC panel when the
  *  in-container headed browser is up, else nothing. */
+/** The browser tester's screenshot evidence, when the step recorded a manifest.
+ *  08a writes the pointer to its apply output (`step.output`); gate 2 re-derives it in
+ *  detect (`step.detectOutput`), because 08a's output column is not durable. Renders
+ *  nothing without a pointer — a task whose tester took no shots shows no gallery. */
+function screenshotGallery(
+  step: { id: string; detectOutput: unknown; output: unknown },
+  taskId: string,
+  source: 'output' | 'detect',
+) {
+  const bag = (source === 'output' ? step.output : step.detectOutput) as {
+    screenshotsArtifactPath?: string | null;
+  } | null;
+  if (!bag?.screenshotsArtifactPath) return null;
+  return (
+    <ScreenshotGallery
+      taskId={taskId}
+      artifactPath={bag.screenshotsArtifactPath}
+      persistId={step.id}
+    />
+  );
+}
+
 function liveBrowserPanel(
   step: { id: string; detectOutput: unknown },
   taskId: string,
@@ -3188,9 +3211,12 @@ function StepCardImpl({
               headerSlot={
                 !runtimeTornDown &&
                 step.stepId === '08a-browser-verify' &&
-                step.activeRole !== 'fixer'
-                  ? liveBrowserPanel(step, taskId, { autoCollapse: taskEnded })
-                  : undefined
+                step.activeRole !== 'fixer' ? (
+                  <>
+                    {liveBrowserPanel(step, taskId, { autoCollapse: taskEnded })}
+                    {screenshotGallery(step, taskId, 'output')}
+                  </>
+                ) : undefined
               }
               beforeFieldsSlot={
                 !runtimeTornDown && step.stepId === '99-run-app-ready' ? (
@@ -3199,10 +3225,13 @@ function StepCardImpl({
                   // Gate-2: the live browser (or, in direct mode, the URL info box) sits
                   // BELOW the verification status table but ABOVE the approve/reject
                   // decision — review the results, test, then decide.
-                  liveBrowserPanel(step, taskId, {
-                    autoCollapse: taskEnded,
-                    title: 'Browser — test the app here',
-                  })
+                  <>
+                    {liveBrowserPanel(step, taskId, {
+                      autoCollapse: taskEnded,
+                      title: 'Browser — test the app here',
+                    })}
+                    {screenshotGallery(step, taskId, 'detect')}
+                  </>
                 ) : step.stepId === '11-phase-8-learning' &&
                   step.status === 'waiting_form' &&
                   (step.detectOutput as { knowledgeDiffArtifactPath?: string | null } | null)
@@ -3320,6 +3349,11 @@ function StepCardImpl({
         step.status !== 'waiting_form' &&
         step.activeRole !== 'fixer' &&
         liveBrowserPanel(step, taskId, { autoCollapse: step.status === 'done' || taskEnded })}
+
+      {!runtimeTornDown &&
+        step.stepId === '08a-browser-verify' &&
+        step.status !== 'waiting_form' &&
+        screenshotGallery(step, taskId, 'output')}
 
       {step.stepId === '08a-browser-verify' && step.activeRole === 'fixer' && (
         <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">

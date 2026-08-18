@@ -12,9 +12,16 @@ import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { collectImplementationFiles } from './_impl-changes.js';
 import { loadAppBootOutput, resolveDdevWorkspace } from './_task-meta.js';
 import { resolveBrowserRuntime } from './_browser-runtime.js';
+import {
+  buildScreenshotManifest,
+  ensureScreenshotsDir,
+  SCREENSHOTS_DIR_REL,
+  type ReportedScreenshot,
+} from './_screenshots.js';
 import { ensureAppServing } from './_app-runtime.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { runnerExec, startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
+import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import {
   appRunnerExec,
   startBrowserDesktop as startAppBrowserDesktop,
@@ -94,15 +101,31 @@ interface BrowserVerifyApply {
   /** Tester's fix-scope judgement on a failed mcp pass (null otherwise): 'trivial'
    *  keeps the in-step fixer loop, 'implementation' stops it so fixLoop escalates. */
   fixScope: 'trivial' | 'implementation' | null;
+  /** Every screenshot the agent has reported across this step's passes (cumulative,
+   *  like fixesApplied) — captions for the gallery, never proof a file exists. */
+  screenshots: ReportedScreenshot[];
+  /** Absolute path of the gallery manifest, or null when no screenshot was written.
+   *  The task page reads this off `task_steps.output` to render the 08a gallery. */
+  screenshotsArtifactPath: string | null;
   /** Internal loop bookkeeping (the runner re-applies per pass). */
   source: 'probe' | 'tester' | 'fixer' | 'manual' | 'skip';
 }
+
+/** One capture the agent claims it took. Descriptive only — the manifest builder takes
+ *  existence from disk, so an entry naming a file that was never written is dropped. */
+const screenshotReportSchema = z.object({
+  file: z.string(),
+  caption: z.string().default(''),
+  test_case: z.string().optional(),
+  result: z.enum(['pass', 'fail', 'info']).default('info'),
+});
 
 const testerOutputSchema = z.object({
   passed: z.boolean(),
   failures: z
     .array(z.object({ description: z.string(), evidence: z.string().optional() }))
     .default([]),
+  screenshots: z.array(screenshotReportSchema).default([]),
   visual_verdict: z.enum(['STYLED', 'NEEDS_POLISH', 'UNSTYLED', 'SKIPPED']).optional(),
   // On a failure, the tester's judgement of WHERE the fix belongs: 'trivial' = an
   // in-step fixer can patch it (typo/one-liner); 'implementation' = route to the
@@ -113,6 +136,7 @@ const testerOutputSchema = z.object({
 
 const fixerOutputSchema = z.object({
   fixes_made: z.array(z.string()).default([]),
+  screenshots: z.array(screenshotReportSchema).default([]),
   notes: z.string().default(''),
 });
 
@@ -134,6 +158,7 @@ export function parseBrowserTestOutput(raw: unknown): {
   failures: TestFailure[];
   visualVerdict: string | null;
   fixScope: 'trivial' | 'implementation';
+  screenshots: ReportedScreenshot[];
   notes: string;
 } | null {
   return parseAgentJson(raw, (candidate) => {
@@ -144,20 +169,41 @@ export function parseBrowserTestOutput(raw: unknown): {
       failures: parsed.data.failures,
       visualVerdict: parsed.data.visual_verdict ?? null,
       fixScope: parsed.data.fix_scope,
+      screenshots: toReportedScreenshots(parsed.data.screenshots),
       notes: parsed.data.notes,
     };
   });
 }
 
-export function parseFixerOutput(raw: unknown): { fixesMade: string[]; notes: string } {
+export function parseFixerOutput(raw: unknown): {
+  fixesMade: string[];
+  screenshots: ReportedScreenshot[];
+  notes: string;
+} {
   return (
     parseAgentJson(raw, (candidate) => {
       if (!hasAnyKey(candidate, FIXER_KEYS)) return null;
       const parsed = fixerOutputSchema.safeParse(candidate);
       if (!parsed.success) return null;
-      return { fixesMade: parsed.data.fixes_made, notes: parsed.data.notes };
-    }) ?? { fixesMade: [], notes: '' }
+      return {
+        fixesMade: parsed.data.fixes_made,
+        screenshots: toReportedScreenshots(parsed.data.screenshots),
+        notes: parsed.data.notes,
+      };
+    }) ?? { fixesMade: [], screenshots: [], notes: '' }
   );
+}
+
+/** Snake-case agent JSON to the camelCase shape the manifest builder joins on. */
+function toReportedScreenshots(
+  reported: z.infer<typeof screenshotReportSchema>[],
+): ReportedScreenshot[] {
+  return reported.map((s) => ({
+    file: s.file,
+    caption: s.caption,
+    testCase: s.test_case ?? null,
+    result: s.result,
+  }));
 }
 
 export function parseChecklistOutput(raw: unknown): string {
@@ -188,6 +234,13 @@ function accumulatedFixes(previous: StepLoopPassRecord[]): string[] {
   return last?.fixesApplied ?? [];
 }
 
+/** Cumulative like accumulatedFixes: each pass stores prior + own, so the last record
+ *  already holds every caption reported so far. */
+function accumulatedScreenshots(previous: StepLoopPassRecord[]): ReportedScreenshot[] {
+  const last = previous[previous.length - 1]?.applyOutput as BrowserVerifyApply | undefined;
+  return last?.screenshots ?? [];
+}
+
 const SEARCH_LADDER = [
   'When you need existing patterns or context, search in this order:',
   ...retrievalGuidanceLines(),
@@ -204,9 +257,40 @@ const VISUAL_PROTOCOL = [
   '- Sibling-style consistency: same visual group shares font/color/spacing/control styling.',
   '- Offscreen controls: no interactive element clipped by overflow or outside the viewport.',
   '- Console errors: no JS errors or uncaught rejections during the flow.',
-  'Take screenshots ONLY on a suspected anomaly, saved compressed (webp) to',
-  '.claude/tasks/<task>/screenshots/. A visibility/contrast/consistency failure is a BLOCKING test',
-  'failure, same as a functional one.',
+  'A visibility/contrast/consistency failure is a BLOCKING test failure, same as a functional one.',
+] as const;
+
+/** Where evidence screenshots go INSIDE the sandbox. Absolute on purpose: the MCP server
+ *  resolves a relative filePath against its own working directory, which is not something
+ *  the prompt should depend on. */
+const SCREENSHOT_DIR_ABS = `${SANDBOX_WORKDIR}/${SCREENSHOTS_DIR_REL}`;
+
+/** Capture-as-you-go contract. The gallery this feeds is what lets a reviewer approve at
+ *  Gate 2 without logging into the project and redoing the flow, so the captures have to
+ *  track the test cases rather than only the anomalies. `filePath` is mandatory: it writes
+ *  the image to disk INSTEAD of attaching it to the response, which is what keeps the whole
+ *  feature free of image tokens and safe on models that cannot read images. */
+const SCREENSHOT_PROTOCOL = [
+  'SCREENSHOT EVIDENCE (mandatory): a human reviews this run as a screenshot gallery at the',
+  'verification gate instead of re-testing the app by hand. Capture ONE screenshot at each test-case',
+  'boundary — the state that proves the case passed or failed — AS YOU GO, not at the end.',
+  'Every capture MUST pass `filePath`, which writes the image to disk instead of attaching it to',
+  'your response:',
+  '',
+  '```',
+  'mcp__chrome-devtools__take_screenshot({',
+  `  filePath: "${SCREENSHOT_DIR_ABS}/01-login-page-loaded.webp",`,
+  '  format: "webp",',
+  '  quality: 60',
+  '})',
+  '```',
+  '',
+  `Rules: absolute path under ${SCREENSHOT_DIR_ABS} (never rely on the working directory);`,
+  'filename `NN-slug.webp`, NN a two-digit sequence, slug describing the STATE shown; resize the',
+  'page to 1280x800 once before the first capture; pass `uid` for an element-level shot; at most 20',
+  'per pass. NEVER attach a screenshot inline — it costs the run and fails outright on a model that',
+  'cannot read images; the only exception is a hard failure whose visual cannot be put into words.',
+  'Report every capture in the `screenshots` array of your final JSON.',
 ] as const;
 
 interface BrowserReport {
@@ -595,6 +679,9 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
     // to the SAME browser the user watches. Idempotent (pgrep-guarded).
     prepare: async ({ ctx, detected }) => {
       if ((detected as BrowserVerifyDetect).mode !== 'mcp') return;
+      // Hand the capture directory to the sandbox uid before the agent asks
+      // chrome-devtools to write its first screenshot into it.
+      await ensureScreenshotsDir(ctx.workspacePath);
       await ctx.emitProgress('Starting the browser desktop for agent testing…');
       // mcp drives the SAME visible browser via chrome-devtools, so the app must
       // be serving and the headed desktop up. ensureAppServing boots DDEV /
@@ -676,6 +763,8 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       checklistMarkdown: null as string | null,
       fixesApplied: [] as string[],
       fixScope: null as 'trivial' | 'implementation' | null,
+      screenshots: [] as ReportedScreenshot[],
+      screenshotsArtifactPath: null as string | null,
     };
     const skipped: BrowserVerifyApply = {
       ...baseApply,
@@ -907,11 +996,25 @@ async function applyMcp(
     fixScope: null as 'trivial' | 'implementation' | null,
   };
 
+  // Rebuild the gallery manifest from disk after every pass, so a fixer round's
+  // re-shots join the tester's set and a deleted file drops back out. Never fatal:
+  // the evidence gallery must not be able to fail a browser verification.
+  const manifest = async (reported: ReportedScreenshot[]): Promise<string | null> => {
+    try {
+      const res = await buildScreenshotManifest(ctx.workspacePath, reported);
+      return res.count > 0 ? res.artifactPath : null;
+    } catch (err) {
+      ctx.logger.warn({ err }, 'screenshot manifest build failed');
+      return null;
+    }
+  };
+
   // Fixer pass: record fixes, carry the prior tester verdict forward (still
   // failing until the next tester pass re-scores).
   if (roleForIteration(args.iteration) === ROLE_FIXER) {
     const fix = parseFixerOutput(args.llmOutput ?? null);
     const prior = latestTester(args.previousIterations);
+    const shots = [...accumulatedScreenshots(args.previousIterations), ...fix.screenshots];
     ctx.logger.info({ fixes: fix.fixesMade.length }, 'browser-test fixer pass complete');
     return {
       ...base,
@@ -919,6 +1022,8 @@ async function applyMcp(
       visualVerdict: prior?.visualVerdict ?? null,
       checklistMarkdown: null,
       fixesApplied: [...accumulatedFixes(args.previousIterations), ...fix.fixesMade],
+      screenshots: shots,
+      screenshotsArtifactPath: await manifest(shots),
       passed: false,
       output: '',
       source: 'fixer',
@@ -928,14 +1033,19 @@ async function applyMcp(
   // Tester pass: parse the verdict. A parse miss = FAILED (never silently pass).
   const verdict = parseBrowserTestOutput(args.llmOutput ?? null);
   const fixesSoFar = accumulatedFixes(args.previousIterations);
+  const shotsSoFar = accumulatedScreenshots(args.previousIterations);
   if (!verdict) {
     ctx.logger.warn('browser tester output unparseable — treating as failed');
+    // Captions are lost with the unparseable report, but the files it wrote are real —
+    // scan anyway so the reviewer still sees what the tester saw.
     return {
       ...base,
       failures: [{ description: 'Tester output could not be parsed; review the raw report.' }],
       visualVerdict: null,
       checklistMarkdown: null,
       fixesApplied: fixesSoFar,
+      screenshots: shotsSoFar,
+      screenshotsArtifactPath: await manifest(shotsSoFar),
       passed: false,
       fixScope: 'implementation',
       output: typeof args.llmOutput === 'string' ? args.llmOutput.slice(-2000) : '',
@@ -944,8 +1054,14 @@ async function applyMcp(
   }
   const visualFail = verdict.visualVerdict === 'UNSTYLED';
   const passed = verdict.passed && !visualFail;
+  const shots = [...shotsSoFar, ...verdict.screenshots];
   ctx.logger.info(
-    { passed, failures: verdict.failures.length, visual: verdict.visualVerdict },
+    {
+      passed,
+      failures: verdict.failures.length,
+      visual: verdict.visualVerdict,
+      screenshots: verdict.screenshots.length,
+    },
     'browser tester pass complete',
   );
   return {
@@ -954,6 +1070,8 @@ async function applyMcp(
     visualVerdict: verdict.visualVerdict,
     checklistMarkdown: null,
     fixesApplied: fixesSoFar,
+    screenshots: shots,
+    screenshotsArtifactPath: await manifest(shots),
     passed,
     fixScope: passed ? null : verdict.fixScope,
     output: verdict.notes,
@@ -984,11 +1102,13 @@ function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string): string {
     '',
     ...VISUAL_PROTOCOL,
     '',
+    ...SCREENSHOT_PROTOCOL,
+    '',
     'Do NOT run git. Do NOT edit application code in this pass (a separate fix pass does that).',
     ...SEARCH_LADDER,
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
-    '{ "passed": true|false, "failures": [{ "description": "...", "evidence": "file:line or screenshot path" }], "visual_verdict": "STYLED|NEEDS_POLISH|UNSTYLED|SKIPPED", "fix_scope": "trivial|implementation", "notes": "" }',
+    '{ "passed": true|false, "failures": [{ "description": "...", "evidence": "file:line or screenshot path" }], "visual_verdict": "STYLED|NEEDS_POLISH|UNSTYLED|SKIPPED", "fix_scope": "trivial|implementation", "screenshots": [{ "file": "01-login-page-loaded.webp", "caption": "<what the shot shows>", "test_case": "<the case it evidences>", "result": "pass|fail|info" }], "notes": "" }',
     'passed=false if ANY functional OR blocking visual check failed. visual_verdict SKIPPED for',
     'backend-only changes. On a failure, set fix_scope "trivial" ONLY for a tiny self-evident bug',
     '(a JS typo, a one-line logic slip, a wrong CSS value) a focused fixer can patch in place; use',
@@ -1017,10 +1137,13 @@ function buildFixerPrompt(d: BrowserVerifyDetect, failures: TestFailure[]): stri
     'affected view, reproduce each failure above, and confirm it is resolved before finishing. If a',
     'fix did not hold, iterate until the browser confirms it; note anything still broken. Do not run',
     'the project test suite — the tester re-checks after you.',
+    '',
+    ...SCREENSHOT_PROTOCOL,
+    'Prefix YOUR captures `NN-fix-` so the reviewer sees the before and after side by side.',
     ...SEARCH_LADDER,
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
-    '{ "fixes_made": ["<each fix>"], "notes": "<caveats or empty>" }',
+    '{ "fixes_made": ["<each fix>"], "screenshots": [{ "file": "01-fix-login-page-loaded.webp", "caption": "<what the shot shows>", "test_case": "<the failure it evidences>", "result": "pass|fail|info" }], "notes": "<caveats or empty>" }',
     '',
     '=== Spec (the expected behavior) ===',
     d.spec || '(no spec recorded)',
