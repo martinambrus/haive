@@ -24,6 +24,7 @@ import {
   type CliProbeResult,
   type CliProviderName,
   type CliSignOutJobPayload,
+  type InvocationCost,
   type CliSignOutJobResult,
   type RefreshCliVersionsJobPayload,
   type RefreshCliVersionsJobResult,
@@ -37,6 +38,8 @@ import { resolvePause } from '../../orchestrator/pause.js';
 import {
   refreshAllCliVersions,
   refreshAllToolVersions,
+  refreshFxRates,
+  refreshModelPrices,
   refreshOpenRouterModels,
 } from '../../cli-versions/index.js';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
@@ -67,6 +70,7 @@ import {
   STATUS_DEFAULT_MESSAGE,
 } from './resolvers.js';
 import { markProvidersReady, probeCliPath, removeOrphanedPreviousImage } from './images.js';
+import { resolveInvocationCost } from './invocation-cost.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../cli-park-timing.js';
 
 /** The auth volume a provider row owns. Both users here (the pre-login chown and sign-out)
@@ -162,6 +166,22 @@ export async function handleCliExecJob(
 
     await publishCliExit(payload.invocationId, result.exitCode);
 
+    // What this run cost, decided from the same token buckets and model identity that
+    // are being written below. Best-effort by design: a pricing gap must never fail an
+    // invocation that already did its work, so a throw here leaves `cost` NULL and the
+    // reads fall back to the legacy token_usage path.
+    let cost: InvocationCost | null = null;
+    try {
+      cost = await resolveInvocationCost(db, {
+        cliProviderId: payload.cliProviderId ?? null,
+        providerName,
+        tokenUsage: result.tokenUsage ?? null,
+        modelIdentity: result.modelIdentity ?? null,
+      });
+    } catch (err) {
+      log.warn({ err, invocationId: row.id }, 'invocation cost resolution failed');
+    }
+
     await db
       .update(schema.cliInvocations)
       .set({
@@ -171,6 +191,7 @@ export async function handleCliExecJob(
         parsedOutput: result.parsedOutput as unknown,
         tokenUsage: result.tokenUsage ?? null,
         modelIdentity: result.modelIdentity ?? null,
+        cost,
         durationMs,
         errorMessage: finalErrorMessage,
         endedAt: new Date(),
@@ -505,10 +526,23 @@ export async function handleRefreshCliVersionsJob(
     refreshAllToolVersions(db),
     refreshOpenRouterModels(db),
   ]);
+  // Model prices and FX ride the same job for the same reasons, but SEQUENTIALLY after
+  // the catalog rather than beside it: refreshModelPrices reads openrouter_model_cache
+  // for the gateway's own resale rates instead of re-fetching that 4 MB payload, so it
+  // must see the refresh above rather than race it. Both follow the same
+  // record-the-error-and-return contract, so neither can fail the job.
+  const prices = await refreshModelPrices(db);
+  const fx = await refreshFxRates(db);
   return {
-    ok: cli.ok && tools.ok && openrouter.ok,
-    refreshed: [...cli.refreshed, ...tools.refreshed, ...openrouter.refreshed],
-    errors: [...cli.errors, ...tools.errors, ...openrouter.errors],
+    ok: cli.ok && tools.ok && openrouter.ok && prices.ok && fx.ok,
+    refreshed: [
+      ...cli.refreshed,
+      ...tools.refreshed,
+      ...openrouter.refreshed,
+      ...prices.refreshed,
+      ...fx.refreshed,
+    ],
+    errors: [...cli.errors, ...tools.errors, ...openrouter.errors, ...prices.errors, ...fx.errors],
   };
 }
 

@@ -21,6 +21,15 @@ export interface OpenRouterModelEntry {
   /** USD per token. Upstream sends these as decimal STRINGS; parsed on ingest. */
   promptPrice: number | null;
   completionPrice: number | null;
+  /** USD per token for the cache buckets, from the same `pricing` object
+   *  (`input_cache_read`, `input_cache_write`, `input_cache_write_1h` — verified
+   *  live 2026-08-18). Feeds the price sync, which needs all four buckets to price
+   *  an invocation; the model picker itself only reads prompt/completion. Null when
+   *  the routed provider does not offer caching, which is common — a null bucket is
+   *  only a problem when an invocation actually reports tokens in it. */
+  cacheReadPrice: number | null;
+  cacheWritePrice: number | null;
+  cacheWrite1hPrice: number | null;
   /** Whether `supported_parameters` advertises a reasoning knob. Drives whether the
    *  effort selector is worth offering — NOT a correctness gate: OpenRouter validates
    *  `output_config.effort` globally and models without reasoning accept every level
@@ -41,7 +50,13 @@ interface RawOpenRouterModel {
   id?: unknown;
   name?: unknown;
   context_length?: unknown;
-  pricing?: { prompt?: unknown; completion?: unknown };
+  pricing?: {
+    prompt?: unknown;
+    completion?: unknown;
+    input_cache_read?: unknown;
+    input_cache_write?: unknown;
+    input_cache_write_1h?: unknown;
+  };
   supported_parameters?: unknown;
   architecture?: { input_modalities?: unknown };
 }
@@ -83,6 +98,9 @@ export function trimOpenRouterModels(payload: unknown): OpenRouterModelEntry[] {
           : null,
       promptPrice: parsePrice(raw.pricing?.prompt),
       completionPrice: parsePrice(raw.pricing?.completion),
+      cacheReadPrice: parsePrice(raw.pricing?.input_cache_read),
+      cacheWritePrice: parsePrice(raw.pricing?.input_cache_write),
+      cacheWrite1hPrice: parsePrice(raw.pricing?.input_cache_write_1h),
       supportsReasoning: hasStringItem(params, 'reasoning'),
       supportsTools: hasStringItem(params, 'tools'),
       supportsImages: hasStringItem(raw.architecture?.input_modalities, 'image'),

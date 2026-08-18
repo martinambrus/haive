@@ -725,6 +725,49 @@ export const cliInvocations = pgTable(
       cacheCreationTokens?: number;
       costUsd?: number;
     }>(),
+    /** What this invocation COST, decided at completion and then immutable.
+     *
+     *  Separate from `token_usage.costUsd`, which stays exactly what it always was:
+     *  the number the CLI itself reported. That number is real only where the CLI
+     *  prices its own backend — the claude binary applies ANTHROPIC's table to every
+     *  backend, so for zai/muse/openrouter/ollama it is fiction, and codex/gemini
+     *  report nothing at all. This column holds the number the product may show,
+     *  together with WHERE it came from.
+     *
+     *  A SNAPSHOT, deliberately: `rates` and `priceRowId` record the price that was
+     *  in force when the invocation ran, so a later vendor price change never
+     *  rewrites what a finished task cost. Recomputing from the live price table
+     *  would silently restate history.
+     *
+     *  `billable` is decided here, at write time, where provider, auth mode, model
+     *  and price source are all in hand — rather than re-derived by each read query,
+     *  which is how three separate SQL filters ended up duplicating the rule.
+     *  False for a subscription plan (flat fee: per-token dollars are notional) and
+     *  for `source: 'none'`.
+     *
+     *  Keep in sync with `InvocationCost` in @haive/shared (this package cannot
+     *  import shared — circular; same note as tokenUsage above). NULL on rows
+     *  written before this column existed and whenever the cost pass could not run;
+     *  reads fall back to the legacy token_usage filter for those. */
+    cost: jsonb('cost').$type<{
+      costUsd: number;
+      currency: string;
+      source: 'manual' | 'reported' | 'computed' | 'none';
+      billable: boolean;
+      modelKey: string | null;
+      priceRowId: string | null;
+      rates: {
+        inputRate: number | null;
+        outputRate: number | null;
+        cacheReadRate: number | null;
+        cacheWriteRate: number | null;
+        cacheWrite1hRate: number | null;
+      } | null;
+      cacheTtl: '5m' | '1h';
+      /** Buckets that had tokens but no rate. Non-empty means the total is partial,
+       *  which is why such a row is reported unpriced rather than summed. */
+      unpricedBuckets: string[];
+    }>(),
     /** Which model actually answered THIS invocation, parsed from the CLI's own
      *  output by the same pass that extracts tokenUsage. Per-invocation rather than
      *  per-task because per-step CLI preferences mean two steps of one task can run

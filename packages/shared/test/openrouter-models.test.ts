@@ -10,7 +10,13 @@ const REAL_ENTRY = {
     modality: 'text+image+file->text',
     input_modalities: ['text', 'image', 'file'],
   },
-  pricing: { prompt: '0.00001', completion: '0.00005' },
+  pricing: {
+    prompt: '0.00001',
+    completion: '0.00005',
+    input_cache_read: '0.000001',
+    input_cache_write: '0.0000125',
+    input_cache_write_1h: '0.00002',
+  },
   supported_parameters: ['include_reasoning', 'max_tokens', 'reasoning', 'tools'],
 };
 
@@ -23,6 +29,9 @@ describe('trimOpenRouterModels', () => {
         contextLength: 1000000,
         promptPrice: 0.00001,
         completionPrice: 0.00005,
+        cacheReadPrice: 0.000001,
+        cacheWritePrice: 0.0000125,
+        cacheWrite1hPrice: 0.00002,
         supportsReasoning: true,
         supportsTools: true,
         supportsImages: true,
@@ -66,6 +75,10 @@ describe('trimOpenRouterModels', () => {
     });
     expect(entry!.promptPrice).toBeNull();
     expect(entry!.completionPrice).toBeNull();
+    // An absent cache price is null too, never 0 — same reason.
+    expect(entry!.cacheReadPrice).toBeNull();
+    expect(entry!.cacheWritePrice).toBeNull();
+    expect(entry!.cacheWrite1hPrice).toBeNull();
   });
 
   it('accepts a numeric price as well as the upstream string form', () => {

@@ -279,6 +279,19 @@ export const CONFIG_KEYS = {
   // default until token metrics justify it.
   REVIEW_FANOUT_DISTILL: 'config:output:reviewFanoutDistill',
 
+  // --- Cost / pricing -----------------------------------------------------
+  // Master switch for the per-model price sync. OFF stops both feeds being fetched at
+  // all, so every rate stays exactly as it is and pricing keeps working from the last
+  // sync — the intended posture for an install on negotiated rates that has entered
+  // its own. The per-CLI `cli_pricing_sync.auto_update_enabled` toggles are the
+  // finer-grained version of the same idea; this one wins over all of them.
+  PRICING_AUTO_UPDATE_ENABLED: 'config:pricing:autoUpdateEnabled',
+  // Which currency costs are DISPLAYED in. Storage is always USD (what every vendor
+  // bills); this only picks the conversion applied at read time, using the ECB rate
+  // effective on the task's own date so an old task keeps reporting the same figure.
+  // One of DISPLAY_CURRENCIES; anything else falls back to USD.
+  COST_DISPLAY_CURRENCY: 'config:pricing:displayCurrency',
+
   // Refutation pass over 08c's BLOCKING review findings (default ON). Each such finding
   // routes the change back through implementation and costs one of the capped fix
   // rounds, so before that happens a refuter per finding is asked to disprove it against
@@ -456,6 +469,11 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED]: 'true',
   [CONFIG_KEYS.TERSENESS_LEVEL]: 'full',
   [CONFIG_KEYS.REVIEW_FANOUT_DISTILL]: 'false',
+  // Pricing: sync ON by default (a fresh install should price itself without setup);
+  // display in USD, which is also the storage currency, so the default path applies no
+  // conversion at all.
+  [CONFIG_KEYS.PRICING_AUTO_UPDATE_ENABLED]: 'true',
+  [CONFIG_KEYS.COST_DISPLAY_CURRENCY]: 'USD',
   [CONFIG_KEYS.REVIEW_REFUTE_ENABLED]: 'true',
   [CONFIG_KEYS.PR_WORKFLOW_ENABLED]: 'false',
   // Runtime resource governor: ON by default; the numeric caps default to 0 (auto-derive

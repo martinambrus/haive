@@ -8,6 +8,7 @@ import type { AppEnv } from './context.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { requestLogger } from './middleware/request-logger.js';
 import { adminRoutes } from './routes/admin.js';
+import { cliPricingRoutes } from './routes/cli-pricing.js';
 import { authRoutes } from './routes/auth.js';
 import { bundleRoutes } from './routes/bundles.js';
 import { cliProviderRoutes } from './routes/cli-providers.js';
@@ -58,6 +59,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/auth', authRoutes);
   app.route('/bundles', bundleRoutes);
   app.route('/cli-providers', cliProviderRoutes);
+  app.route('/cli-pricing', cliPricingRoutes);
   app.route('/env-dep-presets', envDepPresetRoutes);
   app.route('/repos', repoRoutes);
   app.route('/db-dumps', dbDumpRoutes);

@@ -7,6 +7,7 @@ import {
   computeTaskTiming,
   configService,
   CONFIG_KEYS,
+  isDisplayCurrency,
   createTaskRequestSchema,
   deriveSlotWait,
   expandTaskStatusFilter,
@@ -45,6 +46,7 @@ import {
   findQueuedInvocationStepIds,
   sumTaskTokens,
   sumTaskProviderBreakdown,
+  resolveCostDisplay,
 } from './_helpers.js';
 import { fileRoutes } from './files.js';
 import { stepRoutes } from './steps.js';
@@ -620,6 +622,14 @@ taskRoutes.get('/:id', async (c) => {
   const steps = enrichStepsWithCliUsage(withAgentCounts);
   const active = await findActiveCliInvocation(db, id);
   const providerBreakdown = await sumTaskProviderBreakdown(db, id);
+  // Costs are stored in USD (what every vendor bills); this is the rate the UI formats
+  // them at, dated on the task so a finished task keeps reporting the same figure.
+  const displayCurrencyRaw = await configService.get(CONFIG_KEYS.COST_DISPLAY_CURRENCY);
+  const costDisplay = await resolveCostDisplay(
+    db,
+    isDisplayCurrency(displayCurrencyRaw) ? displayCurrencyRaw : 'USD',
+    task.completedAt ?? task.createdAt ?? null,
+  );
   // Parent + linked bug fixes (one level; see tasks.parent_task_id). Both scoped
   // to the owner. parentTask is null unless this task is itself a linked bug fix.
   const parentTask = task.parentTaskId
@@ -657,6 +667,7 @@ taskRoutes.get('/:id', async (c) => {
     task: taskWithActive,
     steps,
     providerBreakdown,
+    costDisplay,
     parentTask,
     childTasks,
     globalPause,

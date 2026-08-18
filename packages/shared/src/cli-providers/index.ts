@@ -8,3 +8,4 @@ export * from './ollama.js';
 export * from './openrouter-models.js';
 export * from './context-windows.js';
 export * from './usage-window.js';
+export * from './model-pricing.js';

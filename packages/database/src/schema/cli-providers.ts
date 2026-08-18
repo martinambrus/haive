@@ -191,6 +191,12 @@ export const openrouterModelCache = pgTable('openrouter_model_cache', {
         /** USD per input/output token, as reported (strings upstream; parsed here). */
         promptPrice: number | null;
         completionPrice: number | null;
+        /** USD per token for the cache buckets. Read by the price sync, which needs
+         *  all four buckets to price an invocation; null where the routed provider
+         *  offers no caching. */
+        cacheReadPrice: number | null;
+        cacheWritePrice: number | null;
+        cacheWrite1hPrice: number | null;
         /** From `supported_parameters`. `reasoning` drives whether the effort
          *  selector is worth showing; `tools` decides usability outright, since
          *  Claude Code cannot function without native tool use. */

@@ -58,6 +58,13 @@ import {
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { PersistedDetails } from '@/components/persisted-details';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
+import {
+  describeCostSource,
+  formatCost,
+  USD_DISPLAY,
+  type CostDisplay,
+  type CostSource,
+} from '@/lib/format-cost';
 import { formatVoteScore, TaskVote, voteToneClass } from '@/components/task-vote';
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { EditorTab } from '@/components/editor/editor-tab';
@@ -399,6 +406,11 @@ interface TaskProviderUsage {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   costUsd: number;
+  /** Where the dollars came from, so the number can be labelled rather than guessed at. */
+  costSource: CostSource;
+  /** Invocations with tokens but no usable rate — excluded from costUsd, shown so a low
+   *  total is explained rather than silently understated. */
+  unpricedInvocations: number;
 }
 
 interface LinkedTask {
@@ -412,6 +424,9 @@ interface TaskDetailResponse {
   task: Task;
   steps: TaskStep[];
   providerBreakdown: TaskProviderUsage[];
+  /** Currency + dated FX rate the server resolved for THIS task, so costs render the
+   *  same on every later view. Absent on an older server: fall back to USD. */
+  costDisplay?: CostDisplay | null;
   /** The completed task this one belongs to (bug fixes only; null otherwise). */
   parentTask?: LinkedTask | null;
   /** Tasks that link to this one as their parent (its linked bug fixes). */
@@ -423,6 +438,7 @@ export default function TaskDetailPage() {
   const id = params.id;
 
   const [task, setTask] = useState<Task | null>(null);
+  const [costDisplay, setCostDisplay] = useState<CostDisplay>(USD_DISPLAY);
   const [providerBreakdown, setProviderBreakdown] = useState<TaskProviderUsage[]>([]);
   const [parentTask, setParentTask] = useState<LinkedTask | null>(null);
   const [childTasks, setChildTasks] = useState<LinkedTask[]>([]);
@@ -522,6 +538,7 @@ export default function TaskDetailPage() {
       setTask(data.task);
       setSteps(data.steps);
       setProviderBreakdown(data.providerBreakdown ?? []);
+      setCostDisplay(data.costDisplay ?? USD_DISPLAY);
       setParentTask(data.parentTask ?? null);
       setChildTasks(data.childTasks ?? []);
       // Clear on success: this runs every 2s, so a single blipped poll (api
@@ -1605,6 +1622,7 @@ export default function TaskDetailPage() {
             steps={steps}
             userActive={userActive}
             providerBreakdown={providerBreakdown}
+            costDisplay={costDisplay}
           />
           {task.status === 'completed' && promotedDraftCount > 0 && (
             <div className="flex justify-center pt-2">
@@ -2305,11 +2323,13 @@ function TaskTotalTime({
   steps,
   userActive,
   providerBreakdown,
+  costDisplay,
 }: {
   task: Task;
   steps: TaskStep[];
   userActive: { activeStepId: string | null; displayMs: number };
   providerBreakdown: TaskProviderUsage[];
+  costDisplay: CostDisplay;
 }) {
   const ticking = !!task.startedAt && !task.completedAt;
   const [now, setNow] = useState(() => Date.now());
@@ -2456,16 +2476,24 @@ function TaskTotalTime({
       {providerBreakdown.length > 0 && (
         <Card className="py-3">
           <div className="mb-2 flex items-center justify-between gap-2">
-            <span className="text-sm font-medium text-neutral-200">Tokens by provider</span>
+            <span className="text-sm font-medium text-neutral-200">
+              Tokens and spend by provider
+            </span>
             <span className="text-[11px] text-neutral-500">
-              cost is real for metered providers only — local / subscription / estimate show tokens
-              only
+              {costDisplay.currency === 'USD'
+                ? 'real spend only — a subscription plan and an unpriced model both show as no cost'
+                : `shown in ${costDisplay.currency} at the ${costDisplay.approximate ? 'nearest known' : (costDisplay.rateDate ?? 'current')} ECB rate`}
             </span>
           </div>
           <div className="space-y-1">
             {providerBreakdown.map((p) => {
               const cache = p.cacheReadTokens + p.cacheCreationTokens;
-              const metered = p.costBasis === 'metered';
+              // Gate the money on whether a cost was actually established for THESE
+              // invocations, not on the provider's static basis: a claude-binary wrapper
+              // is 'estimate' yet now carries a real computed cost, and a metered CLI on
+              // a subscription plan carries none. costUsd is already the billable total.
+              const priced =
+                p.costUsd > 0 || p.costSource === 'computed' || p.costSource === 'manual';
               return (
                 <div
                   key={`${p.provider}-${p.costBasis}`}
@@ -2477,13 +2505,24 @@ function TaskTotalTime({
                     <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-neutral-400">
                       {p.costBasis}
                     </span>
+                    {p.unpricedInvocations > 0 && (
+                      <span
+                        className="rounded bg-amber-950/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-amber-300"
+                        title={`${p.unpricedInvocations} invocation(s) ran a model with no rate on record, so their cost is not included. Add a rate on the admin pricing page.`}
+                      >
+                        {p.unpricedInvocations} unpriced
+                      </span>
+                    )}
                   </span>
                   <span className="flex items-center gap-3 font-mono text-neutral-400">
                     <span>in {formatTokens(p.inputTokens)}</span>
                     <span>out {formatTokens(p.outputTokens)}</span>
                     <span className="text-cyan-400/80">cache {formatTokens(cache)}</span>
-                    <span className={metered ? 'text-emerald-300' : 'text-neutral-600'}>
-                      {metered ? `~$${p.costUsd.toFixed(2)}` : '—'}
+                    <span
+                      className={priced ? 'text-emerald-300' : 'text-neutral-600'}
+                      title={describeCostSource(p.costSource, costDisplay, p.unpricedInvocations)}
+                    >
+                      {priced ? formatCost(p.costUsd, costDisplay) : '—'}
                     </span>
                   </span>
                 </div>

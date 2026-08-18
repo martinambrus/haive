@@ -132,6 +132,12 @@ export default function AdminPage() {
   const [globalPause, setGlobalPause] = useState<boolean | null>(null);
   const [savingGlobalPause, setSavingGlobalPause] = useState(false);
   const [promptCaching1hEnabled, setPromptCaching1hEnabled] = useState<boolean | null>(null);
+  const [pricing, setPricing] = useState<{
+    autoUpdateEnabled: boolean;
+    displayCurrency: string;
+    currencies: readonly string[];
+  } | null>(null);
+  const [savingPricing, setSavingPricing] = useState(false);
   const [savingPromptCaching1h, setSavingPromptCaching1h] = useState(false);
   const [tersenessLevel, setTersenessLevel] = useState<string | null>(null);
   const [savingTerseness, setSavingTerseness] = useState(false);
@@ -190,6 +196,7 @@ export default function AdminPage() {
         perTaskData,
         attachmentData,
         promptCaching1hData,
+        pricingData,
         tersenessData,
         reviewDistillData,
         reviewRefuteData,
@@ -221,6 +228,9 @@ export default function AdminPage() {
         api.get<{ maxAgentsPerTask: number }>('/admin/config/max-agents-per-task'),
         api.get<{ maxBytes: number }>('/admin/config/attachment-max-bytes'),
         api.get<{ enabled: boolean }>('/admin/config/prompt-caching-1h'),
+        api.get<{ autoUpdateEnabled: boolean; displayCurrency: string; currencies: string[] }>(
+          '/admin/config/cli-pricing',
+        ),
         api.get<{ level: string }>('/admin/config/terseness'),
         api.get<{ enabled: boolean }>('/admin/config/review-fanout-distill'),
         api.get<{ enabled: boolean }>('/admin/config/review-refute'),
@@ -253,6 +263,7 @@ export default function AdminPage() {
       setFairEnabled(fairData.enabled);
       setModelIdentityStrict(modelIdentityStrictData.enabled);
       setPromptCaching1hEnabled(promptCaching1hData.enabled);
+      setPricing(pricingData);
       setTersenessLevel(tersenessData.level);
       setReviewDistillEnabled(reviewDistillData.enabled);
       setReviewRefuteEnabled(reviewRefuteData.enabled);
@@ -601,6 +612,30 @@ export default function AdminPage() {
       setError((err as Error).message ?? 'Failed to update prompt caching');
     } finally {
       setSavingPromptCaching1h(false);
+    }
+  }
+
+  /** One PUT for both pricing settings: the API takes them together, and they are the
+   *  same decision (whether rates track the feeds, and what currency they are shown in). */
+  async function savePricing(patch: { autoUpdateEnabled?: boolean; displayCurrency?: string }) {
+    if (!pricing) return;
+    setSavingPricing(true);
+    setError(null);
+    try {
+      const next = {
+        autoUpdateEnabled: patch.autoUpdateEnabled ?? pricing.autoUpdateEnabled,
+        displayCurrency: patch.displayCurrency ?? pricing.displayCurrency,
+      };
+      const result = await api.put<{
+        autoUpdateEnabled: boolean;
+        displayCurrency: string;
+        currencies: string[];
+      }>('/admin/config/cli-pricing', next);
+      setPricing(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update pricing settings');
+    } finally {
+      setSavingPricing(false);
     }
   }
 
@@ -1485,6 +1520,58 @@ export default function AdminPage() {
                 {savingUsageAlert ? 'Saving...' : 'Save'}
               </Button>
             </div>
+          </div>
+        </Card>
+      )}
+
+      {pricing !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Model pricing and spend</CardTitle>
+            <CardDescription>
+              Per-model token rates are synced twice daily from public feeds (OpenRouter for the
+              gateway&apos;s own resale prices, LiteLLM for direct-vendor rates) and used to price
+              each CLI invocation. This is what lets the claude-binary wrappers &mdash; zai, muse,
+              openrouter &mdash; report real money instead of the Anthropic-priced figure their CLI
+              emits, and it is the only cost codex and gemini have at all. Costs are stored in USD;
+              the display currency converts at the ECB rate effective on each task&apos;s own date,
+              so a finished task keeps reporting the same figure. Turn the sync off to freeze every
+              rate where it is &mdash; the posture for an install running on negotiated prices it
+              has entered itself.
+            </CardDescription>
+          </CardHeader>
+          <div className="flex flex-wrap items-center gap-6">
+            <label className="flex items-center gap-2 text-sm text-neutral-200">
+              <input
+                type="checkbox"
+                checked={pricing.autoUpdateEnabled}
+                disabled={savingPricing}
+                onChange={(e) => void savePricing({ autoUpdateEnabled: e.target.checked })}
+                className="h-4 w-4"
+              />
+              {pricing.autoUpdateEnabled ? 'Auto-update on' : 'Auto-update off'}
+            </label>
+            <label className="flex items-center gap-2 text-sm text-neutral-200">
+              Display currency
+              <select
+                value={pricing.displayCurrency}
+                disabled={savingPricing}
+                onChange={(e) => void savePricing({ displayCurrency: e.target.value })}
+                className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm"
+              >
+                {pricing.currencies.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <Link href="/admin/pricing">
+              <Button variant="secondary" size="sm">
+                Rates and overrides
+              </Button>
+            </Link>
+            {savingPricing && <span className="text-xs text-neutral-500">saving…</span>}
           </div>
         </Card>
       )}

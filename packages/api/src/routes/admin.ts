@@ -22,6 +22,8 @@ import {
   parseTimeoutLadder,
   readHostResources,
   TERSENESS_LEVELS,
+  DISPLAY_CURRENCIES,
+  isDisplayCurrency,
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { hashPassword } from '../auth/password.js';
@@ -703,6 +705,41 @@ adminRoutes.put('/config/prompt-caching-1h', async (c) => {
   await configService.set(CONFIG_KEYS.PROMPT_CACHING_1H, enabled ? 'true' : 'false');
   log.info({ enabled }, 'global prompt-caching-1h switch updated');
   return c.json({ enabled });
+});
+
+const cliPricingSchema = z.object({
+  autoUpdateEnabled: z.boolean(),
+  displayCurrency: z.enum(DISPLAY_CURRENCIES),
+});
+
+// Global pricing settings: the master switch for the per-model price sync, and the
+// currency costs are DISPLAYED in. Storage stays USD (what every vendor bills) — the
+// currency only picks the conversion applied at read time, at the ECB rate effective on
+// the task's own date, so an old task keeps reporting the same figure. The per-CLI
+// auto-update toggles live on the pricing page (/cli-pricing); this switch wins over
+// all of them.
+adminRoutes.get('/config/cli-pricing', async (c) => {
+  const autoUpdateEnabled = await configService.getBoolean(
+    CONFIG_KEYS.PRICING_AUTO_UPDATE_ENABLED,
+    true,
+  );
+  const raw = await configService.get(CONFIG_KEYS.COST_DISPLAY_CURRENCY);
+  return c.json({
+    autoUpdateEnabled,
+    displayCurrency: isDisplayCurrency(raw) ? raw : 'USD',
+    currencies: DISPLAY_CURRENCIES,
+  });
+});
+
+adminRoutes.put('/config/cli-pricing', async (c) => {
+  const { autoUpdateEnabled, displayCurrency } = cliPricingSchema.parse(await c.req.json());
+  await configService.set(
+    CONFIG_KEYS.PRICING_AUTO_UPDATE_ENABLED,
+    autoUpdateEnabled ? 'true' : 'false',
+  );
+  await configService.set(CONFIG_KEYS.COST_DISPLAY_CURRENCY, displayCurrency);
+  log.info({ autoUpdateEnabled, displayCurrency }, 'global cli pricing settings updated');
+  return c.json({ autoUpdateEnabled, displayCurrency, currencies: DISPLAY_CURRENCIES });
 });
 
 const tersenessSchema = z.object({ level: z.enum(TERSENESS_LEVELS) });
