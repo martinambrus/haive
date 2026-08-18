@@ -1228,9 +1228,11 @@ export default function AdminPage() {
             <CardTitle>CLI transcript retention</CardTitle>
             <CardDescription>
               Age out the full CLI transcript behind each step&apos;s Raw terminal tab. Nothing else
-              ever deletes it, so it only accrues. Only the transcript is dropped — the invocation
-              row keeps its result, token usage and timings, and the Raw tab falls back to the
-              parsed result.{' '}
+              ever deletes it, so it only accrues. Age counts from when the task finished
+              (completed, failed or cancelled), never from the invocation, so a task still running
+              past the window keeps the transcripts of its earlier rounds. Only the transcript is
+              dropped — the invocation row keeps its result, token usage and timings, and the Raw
+              tab falls back to the parsed result.{' '}
               <span className="text-amber-400">Dropping a transcript cannot be undone.</span> 0
               keeps every transcript forever (default). Applies within ~30s; persists across
               restarts.
