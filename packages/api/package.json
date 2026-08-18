@@ -24,7 +24,7 @@
   "dependencies": {
     "@haive/database": "workspace:*",
     "@haive/shared": "workspace:*",
-    "@hono/node-server": "^2.0.12",
+    "@hono/node-server": "^2.1.1",
     "archiver": "^8.0.0",
     "bcrypt": "^6.0.0",
     "bullmq": "^6.1.2",
