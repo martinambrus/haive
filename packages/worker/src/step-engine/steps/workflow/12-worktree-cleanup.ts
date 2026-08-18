@@ -335,7 +335,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         type: 'checkbox',
         id: 'deleteBranch',
         label: `Delete the ${branch} branch after merging (safe — only if fully merged)`,
-        default: false,
+        default: true,
         visibleWhen: { field: 'action', equals: 'merge_remove' },
       },
       {
@@ -566,6 +566,12 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     // A requested delete that git refused must not read as a silent success.
     else if (values.deleteBranch && d.branchName)
       parts.push(`branch ${d.branchName} NOT deleted (git refused; see worker log)`);
+    // Merged but the delete was declined. The worktree (and its terminal) is gone, so
+    // name the only remaining path to that branch on the step card itself.
+    else if (action === 'merge_remove' && d.branchName)
+      parts.push(
+        `kept branch ${d.branchName} (delete it in the repository terminal: git branch -d ${d.branchName})`,
+      );
 
     ctx.logger.info({ action, merged, branchDeleted }, 'worktree cleanup complete');
     return {
