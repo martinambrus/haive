@@ -2099,8 +2099,9 @@ function StepUsageStamp({ step }: { step: TaskStep }) {
 // second) and frozen once it ends. Renders nothing until the task has started.
 /** Live effort-vs-estimate chip for the fixed header (top-right). Owns its own
  *  1s tick — like TaskTotalTime — so only this chip re-renders each second, not
- *  the whole task page. Renders nothing unless an estimate is set and the task
- *  has started; effort freezes at completedAt once done. */
+ *  the whole task page. Renders as soon as the task has started: against a pace
+ *  budget when one exists, else as a bare effort timer, so a task nobody
+ *  estimated still gets a clock in the header. Effort freezes at completedAt. */
 function HeaderPaceChip({
   task,
   steps,
@@ -2117,33 +2118,51 @@ function HeaderPaceChip({
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [ticking]);
-  const estHours = task.estimatedTimeHours ?? 0;
-  if (estHours <= 0 || !task.startedAt) return null;
+  if (!task.startedAt) return null;
   const endMs = task.completedAt ? new Date(task.completedAt).getTime() : now;
   const effortMs = liveEffortMs(steps, userActive, endMs);
-  const estimateMs = estHours * 3_600_000;
-  const pct = estimateMs > 0 ? (effortMs / estimateMs) * 100 : 0;
-  // AI's learned estimate (decimal hours) as a muted middle segment between effort
-  // and your estimate. Null on legacy tasks and when 00b-estimate didn't run — then
-  // the chip falls back to the two-part effort / estimate form.
+  const confirmedHours = task.estimatedTimeHours ?? 0;
+  // AI's learned estimate (decimal hours). Zero on legacy tasks and on every task type
+  // that never runs 00b-estimate (onboarding, onboarding_upgrade, run_app, kb_author).
   const aiEstHours = task.aiEstimatedTimeHours ?? 0;
-  const aiEstimateMs = aiEstHours > 0 ? aiEstHours * 3_600_000 : 0;
+  // Budget the pace is measured against: the confirmed estimate when one was set, else
+  // the AI's own number — a task the user never estimated still gets a pace. With
+  // neither, the chip degrades to a bare effort timer instead of disappearing.
+  const budgetHours = confirmedHours > 0 ? confirmedHours : aiEstHours;
+  const budgetMs = budgetHours * 3_600_000;
+  const pct = budgetMs > 0 ? (effortMs / budgetMs) * 100 : 0;
+  // Muted middle segment only when the AI number is not already the budget on the right.
+  const aiSegmentMs = aiEstHours > 0 && confirmedHours > 0 ? aiEstHours * 3_600_000 : 0;
+  const title =
+    budgetMs <= 0
+      ? 'Effort — agent work + your active time. No estimate set for this task.'
+      : confirmedHours <= 0
+        ? `Effort vs AI estimate — ${Math.round(pct)}% of the ${aiEstHours}h AI estimate (you set none)`
+        : aiSegmentMs > 0
+          ? `Effort / AI estimate / your estimate — ${Math.round(pct)}% of the ${confirmedHours}h estimate (AI predicted ${aiEstHours}h)`
+          : `Effort vs estimate — ${Math.round(pct)}% of the ${confirmedHours}h estimate`;
   return (
     <span
-      className={`ml-auto shrink-0 font-mono text-sm font-semibold ${paceColorClass(pct)}`}
-      title={
-        aiEstimateMs > 0
-          ? `Effort / AI estimate / your estimate — ${Math.round(pct)}% of the ${estHours}h estimate (AI predicted ${aiEstHours}h)`
-          : `Effort vs estimate — ${Math.round(pct)}% of the ${estHours}h estimate`
-      }
+      className={`ml-auto shrink-0 font-mono text-sm font-semibold ${
+        budgetMs > 0 ? paceColorClass(pct) : 'text-neutral-300'
+      }`}
+      title={title}
     >
-      {formatHoursMinutes(effortMs)} /{' '}
-      {aiEstimateMs > 0 && (
+      {formatHoursMinutes(effortMs)}
+      {budgetMs > 0 && (
         <>
-          <span className="text-neutral-400">{formatHoursMinutes(aiEstimateMs)}</span> /{' '}
+          {' / '}
+          {aiSegmentMs > 0 && (
+            <>
+              <span className="text-neutral-400">{formatHoursMinutes(aiSegmentMs)}</span>
+              {' / '}
+            </>
+          )}
+          <span className={confirmedHours > 0 ? undefined : 'text-neutral-400'}>
+            {formatHoursMinutes(budgetMs)}
+          </span>
         </>
       )}
-      {formatHoursMinutes(estimateMs)}
     </span>
   );
 }
