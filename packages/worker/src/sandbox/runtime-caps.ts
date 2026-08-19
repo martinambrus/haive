@@ -25,6 +25,12 @@ function host(): HostResources {
   return cachedHost;
 }
 
+/** The host's total RAM (cached with the rest of the host read). Feeds the auto-derived agent
+ *  safety reserve, which is a fraction of the machine rather than an absolute. */
+export function hostTotalMemMb(): number {
+  return host().totalMemMb;
+}
+
 /** The host's CPU count (cached with the rest of the host read). Used to bound auto-sized
  *  agent concurrency — RAM is not the only thing an agent consumes. */
 export function hostCpuCount(): number {

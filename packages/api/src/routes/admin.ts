@@ -16,10 +16,12 @@ import {
   DEFAULT_CLI_TIMEOUT_LADDER,
   DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   deriveAgentConcurrency,
+  deriveAgentSafetyMb,
   deriveRuntimeCaps,
   logger,
   parseAllowanceWatchMode,
   parseTimeoutLadder,
+  readHostAvailableMb,
   readHostResources,
   TERSENESS_LEVELS,
   DISPLAY_CURRENCIES,
@@ -365,6 +367,12 @@ const runtimeLimitsSchema = z.object({
   agentWeightMb: z.number().int().min(0),
   browserWeightMb: z.number().int().min(0),
   agentFloor: z.number().int().min(0),
+  // Whether the agent pool is sized from the host's MEASURED free memory rather than from the
+  // planned budget minus the runtime weights, which is a difference of two peak-calibrated
+  // estimates and is wrong in both directions at once. Off = the planned-only sizing.
+  agentPoolMeasuredEnabled: z.boolean(),
+  // MB held back from that measurement. 0 = auto (a fifth of the host, clamped to 2048..4096).
+  agentPoolSafetyMb: z.number().int().min(0),
   // Whether a task holding no live runtime runner yields its CLI slot to one that does.
   agentReserveEnabled: z.boolean(),
   // Cap on that yield. 0 = strict (no escape); anything else releases a held invocation after
@@ -397,6 +405,8 @@ function deriveCapacityPreview(overrides: {
   agentWeightMb: number;
   browserWeightMb: number;
   agentFloor: number;
+  agentPoolMeasuredEnabled?: boolean;
+  agentPoolSafetyMb?: number;
 }): {
   budgetMb: number;
   ddevWeightMb: number;
@@ -407,6 +417,13 @@ function deriveCapacityPreview(overrides: {
   concurrentDdevWithBrowser: number;
   concurrentApp: number;
   agentsIdle: number;
+  /** Agent safety reserve in effect (auto-derived when the override is 0). */
+  agentSafetyMb: number;
+  /** What the MEASURED path targets on this host right now, ignoring the per-evaluation ramp;
+   *  null when it is switched off or the host's free memory cannot be read. Stated separately
+   *  from `agentsIdle` because the two answer different questions: what the plan allows on an
+   *  idle machine, and what the machine itself says it can hold at this moment. */
+  agentsMeasured: number | null;
 } {
   const host = readHostResources();
   const caps = deriveRuntimeCaps({
@@ -415,6 +432,8 @@ function deriveCapacityPreview(overrides: {
     overrides,
   });
   const fits = (weightMb: number): number => Math.floor(caps.runtimeBudgetMb / weightMb);
+  const agentSafetyMb = deriveAgentSafetyMb(host.totalMemMb, overrides.agentPoolSafetyMb);
+  const availableMb = overrides.agentPoolMeasuredEnabled === false ? null : readHostAvailableMb();
   return {
     budgetMb: caps.runtimeBudgetMb,
     ddevWeightMb: caps.ddevWeightMb,
@@ -424,6 +443,25 @@ function deriveCapacityPreview(overrides: {
     concurrentDdev: fits(caps.ddevWeightMb),
     concurrentDdevWithBrowser: fits(caps.ddevWeightMb + caps.browserWeightMb),
     concurrentApp: fits(caps.appWeightMb),
+    agentSafetyMb,
+    agentsMeasured:
+      availableMb === null
+        ? null
+        : deriveAgentConcurrency({
+            caps,
+            liveRuntimeWeightMb: 0,
+            cpuCount: host.cpuCount,
+            // rampStep at the core ceiling so the preview states the TARGET rather than one
+            // step toward it — the ramp is a property of successive evaluations, not of the
+            // capacity this host has.
+            measured: {
+              availableMb,
+              pendingRuntimeMb: 0,
+              liveAgents: 0,
+              safetyMb: agentSafetyMb,
+              rampStep: host.cpuCount,
+            },
+          }),
     agentsIdle: deriveAgentConcurrency({
       caps,
       liveRuntimeWeightMb: 0,
@@ -451,6 +489,8 @@ adminRoutes.get('/config/runtime-limits', async (c) => {
     agentWeightMb,
     browserWeightMb,
     agentFloor,
+    agentPoolMeasuredEnabled,
+    agentPoolSafetyMb,
     agentReserveEnabled,
     agentReserveMaxHoldMinutes,
     agentPreemptionEnabled,
@@ -468,6 +508,8 @@ adminRoutes.get('/config/runtime-limits', async (c) => {
     configService.getNumber(CONFIG_KEYS.AGENT_WEIGHT_MB, 0),
     configService.getNumber(CONFIG_KEYS.RUNTIME_BROWSER_WEIGHT_MB, 0),
     configService.getNumber(CONFIG_KEYS.AGENT_FLOOR, 0),
+    configService.getBoolean(CONFIG_KEYS.AGENT_POOL_MEASURED_ENABLED, true),
+    configService.getNumber(CONFIG_KEYS.AGENT_POOL_SAFETY_MB, 0),
     configService.getBoolean(CONFIG_KEYS.AGENT_RESERVE_ENABLED, true),
     configService.getNumber(CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES, 3),
     configService.getBoolean(CONFIG_KEYS.AGENT_PREEMPTION_ENABLED, true),
@@ -486,6 +528,8 @@ adminRoutes.get('/config/runtime-limits', async (c) => {
     agentWeightMb,
     browserWeightMb,
     agentFloor,
+    agentPoolMeasuredEnabled,
+    agentPoolSafetyMb,
     agentReserveEnabled,
     agentReserveMaxHoldMinutes,
     agentPreemptionEnabled,
@@ -509,6 +553,11 @@ adminRoutes.put('/config/runtime-limits', async (c) => {
     configService.set(CONFIG_KEYS.AGENT_WEIGHT_MB, String(body.agentWeightMb)),
     configService.set(CONFIG_KEYS.RUNTIME_BROWSER_WEIGHT_MB, String(body.browserWeightMb)),
     configService.set(CONFIG_KEYS.AGENT_FLOOR, String(body.agentFloor)),
+    configService.set(
+      CONFIG_KEYS.AGENT_POOL_MEASURED_ENABLED,
+      body.agentPoolMeasuredEnabled ? 'true' : 'false',
+    ),
+    configService.set(CONFIG_KEYS.AGENT_POOL_SAFETY_MB, String(body.agentPoolSafetyMb)),
     configService.set(
       CONFIG_KEYS.AGENT_RESERVE_ENABLED,
       body.agentReserveEnabled ? 'true' : 'false',

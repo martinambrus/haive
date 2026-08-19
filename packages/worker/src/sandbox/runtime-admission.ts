@@ -4,10 +4,14 @@ import {
   APP_RUNNER_LABEL,
   CONFIG_KEYS,
   CONFIG_RUNTIME_LIMITS_CHANNEL,
+  DEFAULT_AGENT_RAMP_STEP,
   configService,
   createRedisConnection,
   deriveAgentConcurrency,
+  deriveAgentSafetyMb,
   logger,
+  readHostAvailableMb,
+  type AgentPoolMeasurement,
   type RuntimeCaps,
 } from '@haive/shared';
 import { clampVoteScore, TASK_VOTE_MAX } from '@haive/shared/fair-priority';
@@ -18,6 +22,7 @@ import { getRedis } from '../redis.js';
 import {
   RUNTIME_WEIGHT_LABEL,
   hostCpuCount,
+  hostTotalMemMb,
   resolveRuntimeCaps,
   resolveRuntimeWeightMb,
   resourceLimitsEnabled,
@@ -389,16 +394,29 @@ export async function clearBrowserSurcharges(): Promise<void> {
   }
 }
 
+/** Capacity in use, split by whether the container EXISTS yet. Both halves count against the
+ *  runtime budget identically, but the agent pool needs them apart: a live runner's RAM is
+ *  already missing from the host's measured free memory, while a reservation's is not. One pair
+ *  of docker/redis reads serves both, so nothing is queried twice. */
+async function runtimeOccupancySplit(
+  caps: RuntimeCaps,
+): Promise<{ merged: Map<string, number>; pendingMb: number }> {
+  const [running, reserved] = await Promise.all([liveRuntimeWeights(caps), reservedWeights(caps)]);
+  const merged = new Map(running);
+  let pendingMb = inFlight.weightMb;
+  for (const [taskId, weightMb] of reserved) {
+    // A reservation held by a task whose runner is already up describes no future allocation.
+    if (!running.has(taskId)) pendingMb += weightMb;
+    merged.set(taskId, Math.max(merged.get(taskId) ?? 0, weightMb));
+  }
+  return { merged, pendingMb };
+}
+
 /** Capacity in use: tasks holding a live runtime runner plus tasks holding a reservation for one
  *  they have not booted yet. Keyed by task id, so a task whose container already exists is not
  *  counted twice while its reservation is still open. */
 async function runtimeOccupancy(caps: RuntimeCaps): Promise<Map<string, number>> {
-  const [running, reserved] = await Promise.all([liveRuntimeWeights(caps), reservedWeights(caps)]);
-  const merged = new Map(running);
-  for (const [taskId, weightMb] of reserved) {
-    merged.set(taskId, Math.max(merged.get(taskId) ?? 0, weightMb));
-  }
-  return merged;
+  return (await runtimeOccupancySplit(caps)).merged;
 }
 
 function sumWeights(weights: Map<string, number>): number {
@@ -416,12 +434,52 @@ export async function runtimeOccupancyMb(): Promise<number> {
   return sumWeights(await runtimeOccupancy(caps)) + inFlight.weightMb;
 }
 
+/** Agent sandboxes running right now. `haive.invocation.id` is stamped on every cli-exec sandbox
+ *  and on nothing else, so it counts exactly the containers whose RAM the measured pool is about
+ *  to reason over — sub-agent sandboxes spawned inside one job included, since those consume the
+ *  host the same way. Fails to 0, which only makes the ramp start from the floor. */
+async function liveAgentCount(): Promise<number> {
+  return (await listRunningIdsByLabels(['haive.invocation.id'])).length;
+}
+
+/** The host measurement the agent pool grows into, or null when it is switched off or the host
+ *  cannot be read (either way the planned sizing stands alone). */
+async function agentPoolMeasurement(
+  pendingRuntimeMb: number,
+): Promise<AgentPoolMeasurement | null> {
+  let enabled: boolean;
+  let safetyOverride: number;
+  try {
+    [enabled, safetyOverride] = await Promise.all([
+      configService.getBoolean(CONFIG_KEYS.AGENT_POOL_MEASURED_ENABLED, true),
+      configService.getNumber(CONFIG_KEYS.AGENT_POOL_SAFETY_MB, 0),
+    ]);
+  } catch {
+    return null; // config unavailable — never size the pool on a guess
+  }
+  if (!enabled) return null;
+  const availableMb = readHostAvailableMb();
+  if (availableMb === null) return null;
+  return {
+    availableMb,
+    pendingRuntimeMb,
+    liveAgents: await liveAgentCount(),
+    safetyMb: deriveAgentSafetyMb(hostTotalMemMb(), safetyOverride),
+    rampStep: DEFAULT_AGENT_RAMP_STEP,
+  };
+}
+
 /** Concurrency the cli-exec queue should run at right now.
  *
  *  A positive MAX_PARALLEL_AGENTS is an admin pin and wins outright (that is the rollback to the
  *  fixed behavior). At 0 the count is sized from what the runtime pool leaves free, so agent
  *  throughput rises on an idle host and falls back to the floor while DDEV runners are up —
  *  the two pools finally spend one budget instead of two independent ones.
+ *
+ *  On top of that the host's own free memory is consulted when AGENT_POOL_MEASURED_ENABLED is on,
+ *  because the planned subtraction is a difference of two peak-calibrated estimates and is wrong
+ *  in both directions at once — see deriveAgentConcurrency. Only the reservations half of the
+ *  occupancy is passed through: the live runners are already absent from the measurement.
  *
  *  With the governor off there is no budget to divide, so it falls back to the historical fixed
  *  default: "governor disabled" must mean pre-feature behavior everywhere. */
@@ -430,10 +488,12 @@ export async function resolveAgentConcurrency(fallback: number): Promise<number>
   if (pinned > 0) return Math.floor(pinned);
   const caps = await governor();
   if (!caps) return fallback;
+  const { merged, pendingMb } = await runtimeOccupancySplit(caps);
   return deriveAgentConcurrency({
     caps,
-    liveRuntimeWeightMb: sumWeights(await runtimeOccupancy(caps)) + inFlight.weightMb,
+    liveRuntimeWeightMb: sumWeights(merged) + inFlight.weightMb,
     cpuCount: hostCpuCount(),
+    measured: await agentPoolMeasurement(pendingMb),
   });
 }
 

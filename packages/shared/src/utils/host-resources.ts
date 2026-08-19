@@ -17,9 +17,11 @@
  * Calibrate by sampling `docker stats` across a real boot / `ddev start` / agent run
  * and lowering them; lower weights are what buy extra concurrency.
  *
- * deriveRuntimeCaps is pure (no `node:os`) so the sizing formula is unit-testable;
- * readHostResources is the one impure entry point.
+ * deriveRuntimeCaps and deriveAgentConcurrency are pure (no `node:os`, no `node:fs`) so the
+ * sizing formulas are unit-testable; readHostResources and readHostAvailableMb are the impure
+ * entry points.
  */
+import fs from 'node:fs';
 import os from 'node:os';
 
 export interface HostResources {
@@ -158,6 +160,40 @@ function clamp(value: number, lo: number, hi: number): number {
   return Math.min(Math.max(value, lo), hi);
 }
 
+/** What the agent pool measures about the host, when measurement is available. Supplied by the
+ *  caller so deriveAgentConcurrency stays pure. */
+export interface AgentPoolMeasurement {
+  /** MB the host can hand out without swapping, from readHostAvailableMb(). */
+  availableMb: number;
+  /** MB committed to runtime runners that do NOT exist yet — reservations for a boot in progress
+   *  plus in-flight admissions. Live runners are deliberately excluded: their RSS is already
+   *  missing from `availableMb`, while a reservation's is not, and an agent must not be handed
+   *  headroom a DDEV is seconds away from taking. */
+  pendingRuntimeMb: number;
+  /** Agent sandboxes running right now. The anchor for both the headroom sum (measured WITH them
+   *  resident) and the ramp. */
+  liveAgents: number;
+  /** Kept free for the base stack's own growth and for the running agents' climb toward their
+   *  peak — the gap between the ~450 MB an agent occupies early and the 1736 MB one peaked at. */
+  safetyMb: number;
+  /** Most agents that may be ADDED per evaluation. */
+  rampStep: number;
+}
+
+/** Agents added per evaluation when growing into measured headroom. Small on purpose: the pool is
+ *  re-measured every 30s WITH the previously added agents resident, so growth stops itself the
+ *  moment the headroom turns out to have been illusory. A big step would commit to a number the
+ *  next measurement could only regret. */
+export const DEFAULT_AGENT_RAMP_STEP = 2;
+
+/** Auto-derived `safetyMb` for the measured path: a fifth of the host, bounded. A fraction rather
+ *  than an absolute because what the base stack grows by scales with the machine, and bounded
+ *  because a thin box cannot afford to reserve much and a fat one does not need to. */
+export function deriveAgentSafetyMb(totalMemMb: number, override?: number): number {
+  if (override && override > 0) return Math.floor(override);
+  return clamp(Math.round(Math.max(0, totalMemMb) * 0.2), 2048, 4096);
+}
+
 /** How many cli-exec agent sandboxes may run alongside what the runtime pool currently holds.
  *  One host budget, two consumers: agents get what the runtimes are not holding. Previously the
  *  two pools never reconciled — a fixed agent count ran regardless of how many DDEV runners were
@@ -170,17 +206,47 @@ function clamp(value: number, lo: number, hi: number): number {
  *   - `cpuCount`, because an agent is a full CLI process tree and more of them than cores is
  *     thrash no matter how much RAM is free.
  *  The floor yields to `cpuCount` only if a host has fewer cores than the floor — a hard limit
- *  stays hard. */
+ *  stays hard.
+ *
+ *  With `measured` supplied, the host's OWN free memory replaces the planned subtraction as the
+ *  RAM authority, in BOTH directions. The planned figure is a difference of two peak-calibrated
+ *  estimates and is wrong by a different factor at each end: MEASURED on a 16 GB dev host, three
+ *  DDEV runners charged 9216 MB were occupying 2551, which starved the pool to its floor, while
+ *  the base stack (a `next dev` server plus Ollama) overran its 30% reserve, which the planned
+ *  figure cannot see at all. The agent weight stays the divisor — it is peak-safe, and being
+ *  coarse (19% of a 16 GB budget) is precisely why the planned quantisation could not express the
+ *  difference. Growth BEYOND the planned figure is capped at `rampStep` per evaluation so each
+ *  step is re-measured with the previous one resident; shrinking is not capped, because a smaller
+ *  cap only stops NEW jobs starting and never touches a running agent. */
 export function deriveAgentConcurrency(input: {
   caps: RuntimeCaps;
   /** MB the runtime pool commits right now (live runners + reservations + in-flight boots). */
   liveRuntimeWeightMb: number;
   cpuCount: number;
+  /** Live host measurement; absent (or null, when it cannot be read) keeps the planned-only
+   *  behavior byte for byte. */
+  measured?: AgentPoolMeasurement | null;
 }): number {
   const freeMb = Math.max(0, input.caps.runtimeBudgetMb - Math.max(0, input.liveRuntimeWeightMb));
   const fits = Math.floor(freeMb / Math.max(1, input.caps.agentWeightMb));
   const ceiling = Math.max(1, Math.floor(input.cpuCount));
-  return Math.min(ceiling, Math.max(input.caps.agentFloor, fits));
+  const planned = Math.min(ceiling, Math.max(input.caps.agentFloor, fits));
+  const m = input.measured;
+  if (!m) return planned;
+
+  const liveAgents = Math.max(0, Math.floor(m.liveAgents));
+  const headroomMb = Math.max(
+    0,
+    m.availableMb - Math.max(0, m.safetyMb) - Math.max(0, m.pendingRuntimeMb),
+  );
+  const measuredFits = liveAgents + Math.floor(headroomMb / Math.max(1, input.caps.agentWeightMb));
+  const target = Math.min(ceiling, Math.max(input.caps.agentFloor, measuredFits));
+  // The ramp bounds growth BEYOND what the plan already allowed, not the plan itself: an idle
+  // host used to start a fan-out at `planned` immediately, and making it climb there two at a
+  // time would be a regression in the one case that was never broken. Clamping DOWN is never
+  // ramped — a smaller cap only stops new jobs starting.
+  const rampCeiling = Math.max(planned, liveAgents + Math.max(1, Math.floor(m.rampStep)));
+  return Math.max(input.caps.agentFloor, Math.min(target, rampCeiling));
 }
 
 /** Read the worker host's live memory + CPU. Uses availableParallelism (respects any
@@ -196,6 +262,56 @@ export function readHostResources(): HostResources {
     freeMemMb: bytesToMb(os.freemem()),
     cpuCount: Math.max(1, cpuCount),
   };
+}
+
+function readNumericFile(path: string): number | null {
+  try {
+    const parsed = Number.parseInt(fs.readFileSync(path, 'utf8').trim(), 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** MB this host can hand out right now without swapping, or null when it cannot be read (which
+ *  turns the measured agent-pool path off rather than guessing).
+ *
+ *  `MemAvailable`, NOT `os.freemem()`: freemem is MemFree, which excludes the page cache the
+ *  kernel would evict on demand — MEASURED on the dev host, 750 MB free against 7.9 GB actually
+ *  available, i.e. using it would zero the measured term permanently. MemAvailable is the
+ *  kernel's own estimate of the same question this function asks.
+ *
+ *  A cgroup memory limit wins when one is set below the host total, because `/proc/meminfo`
+ *  reports the HOST even inside a capped container: a worker running under `--memory` would
+ *  otherwise read headroom it is not allowed to use. Limit minus current usage understates the
+ *  answer slightly (usage counts reclaimable page cache), which errs toward fewer agents. */
+export function readHostAvailableMb(): number | null {
+  const bytesToMb = (b: number): number => Math.floor(b / 1024 / 1024);
+  const totalMb = bytesToMb(os.totalmem());
+
+  // cgroup v2, then v1. An unlimited cgroup reports "max" (unparseable) or a sentinel far above
+  // host RAM, so the `< totalMb` test rejects both without special-casing either.
+  const limits: Array<[string, string]> = [
+    ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current'],
+    ['/sys/fs/cgroup/memory/memory.limit_in_bytes', '/sys/fs/cgroup/memory/memory.usage_in_bytes'],
+  ];
+  for (const [limitPath, usagePath] of limits) {
+    const limit = readNumericFile(limitPath);
+    if (limit === null) continue;
+    const limitMb = bytesToMb(limit);
+    if (limitMb <= 0 || limitMb >= totalMb) continue;
+    const usage = readNumericFile(usagePath);
+    if (usage === null) continue;
+    return Math.max(0, limitMb - bytesToMb(usage));
+  }
+
+  try {
+    const match = /^MemAvailable:\s+(\d+)\s+kB$/m.exec(fs.readFileSync('/proc/meminfo', 'utf8'));
+    if (!match) return null;
+    return Math.floor(Number.parseInt(match[1]!, 10) / 1024);
+  } catch {
+    return null;
+  }
 }
 
 /** Derive per-runner ceilings, the runtime byte budget and the planning weights from host

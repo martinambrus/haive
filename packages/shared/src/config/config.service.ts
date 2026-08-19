@@ -349,6 +349,17 @@ export const CONFIG_KEYS = {
   // Agents that stay runnable however full the runtime pool is. A task holding a runtime
   // needs an agent to finish, so a zero-agent state deadlocks. 0 = auto (2).
   AGENT_FLOOR: 'config:sandbox:agentFloor',
+  // Whether the agent pool is sized from the host's MEASURED free memory instead of from the
+  // planned budget minus the runtime pool's planning weights. Both ends of that subtraction are
+  // peak-calibrated estimates that are wrong by different factors: MEASURED, three DDEV runners
+  // charged 9216 MB were occupying 2551 (starving agents to the floor) while the dev base stack
+  // overran its 30% reserve (which the planned figure cannot see at all). Off = the planned-only
+  // sizing, byte for byte.
+  AGENT_POOL_MEASURED_ENABLED: 'config:sandbox:agentPoolMeasuredEnabled',
+  // MB held back from the measured headroom for the base stack's growth and for running agents
+  // climbing toward their peak (~450 MB early against a 1736 MB peak). 0 = auto (a fifth of the
+  // host, clamped to 2048..4096). Raise it if the host starts swapping as the pool ramps.
+  AGENT_POOL_SAFETY_MB: 'config:sandbox:agentPoolSafetyMb',
   // Whether a task holding NO live runtime runner yields its cli-exec slot to a task that
   // holds one. Runtime occupancy already caps the agent pool, but nothing made a fungible
   // agent yield to a task whose idle time is billed in committed RAM: a runner-less task
@@ -487,6 +498,8 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.AGENT_WEIGHT_MB]: '0',
   [CONFIG_KEYS.RUNTIME_BROWSER_WEIGHT_MB]: '0',
   [CONFIG_KEYS.AGENT_FLOOR]: '0',
+  [CONFIG_KEYS.AGENT_POOL_MEASURED_ENABLED]: 'true',
+  [CONFIG_KEYS.AGENT_POOL_SAFETY_MB]: '0',
   [CONFIG_KEYS.AGENT_RESERVE_ENABLED]: 'true',
   // 3, not 10: the hold is only HALF the wait. A released job still has to wait for a slot to
   // free, and that term is invisible in the knob — measured with the hold at 10, runner-less

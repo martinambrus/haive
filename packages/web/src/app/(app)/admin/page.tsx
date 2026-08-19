@@ -32,6 +32,8 @@ type RuntimeLimitsSettings = {
   agentWeightMb: number;
   browserWeightMb: number;
   agentFloor: number;
+  agentPoolMeasuredEnabled: boolean;
+  agentPoolSafetyMb: number;
   agentReserveEnabled: boolean;
   agentReserveMaxHoldMinutes: number;
   agentPreemptionEnabled: boolean;
@@ -52,6 +54,9 @@ type RuntimeCapacity = {
   concurrentDdevWithBrowser: number;
   concurrentApp: number;
   agentsIdle: number;
+  agentSafetyMb: number;
+  /** Null when the measured path is off or the host's free memory cannot be read. */
+  agentsMeasured: number | null;
 };
 
 type RuntimeLimitsResponse = RuntimeLimitsSettings & { capacity: RuntimeCapacity };
@@ -62,7 +67,11 @@ type RuntimeLimitsForm = {
   [
     K in keyof Omit<
       RuntimeLimitsSettings,
-      'enabled' | 'agentReserveEnabled' | 'agentPreemptionEnabled' | 'runtimePreemptionEnabled'
+      | 'enabled'
+      | 'agentPoolMeasuredEnabled'
+      | 'agentReserveEnabled'
+      | 'agentPreemptionEnabled'
+      | 'runtimePreemptionEnabled'
     >
   ]: string;
 };
@@ -79,6 +88,7 @@ function runtimeLimitsFormOf(s: RuntimeLimitsSettings): RuntimeLimitsForm {
     agentWeightMb: String(s.agentWeightMb),
     browserWeightMb: String(s.browserWeightMb),
     agentFloor: String(s.agentFloor),
+    agentPoolSafetyMb: String(s.agentPoolSafetyMb),
     agentReserveMaxHoldMinutes: String(s.agentReserveMaxHoldMinutes),
     agentPreemptionMinRunMinutes: String(s.agentPreemptionMinRunMinutes),
     runtimePreemptionMaxWaitMinutes: String(s.runtimePreemptionMaxWaitMinutes),
@@ -169,6 +179,7 @@ export default function AdminPage() {
     agentWeightMb: '0',
     browserWeightMb: '0',
     agentFloor: '0',
+    agentPoolSafetyMb: '0',
     agentReserveMaxHoldMinutes: '3',
     agentPreemptionMinRunMinutes: '5',
     runtimePreemptionMaxWaitMinutes: '10',
@@ -461,6 +472,7 @@ export default function AdminPage() {
       agentWeightMb: Number.parseInt(runtimeLimitsForm.agentWeightMb, 10),
       browserWeightMb: Number.parseInt(runtimeLimitsForm.browserWeightMb, 10),
       agentFloor: Number.parseInt(runtimeLimitsForm.agentFloor, 10),
+      agentPoolSafetyMb: Number.parseInt(runtimeLimitsForm.agentPoolSafetyMb, 10),
       agentReserveMaxHoldMinutes: Number.parseInt(runtimeLimitsForm.agentReserveMaxHoldMinutes, 10),
       agentPreemptionMinRunMinutes: Number.parseInt(
         runtimeLimitsForm.agentPreemptionMinRunMinutes,
@@ -477,6 +489,7 @@ export default function AdminPage() {
     }
     void saveRuntimeLimits({
       enabled: runtimeLimits.enabled,
+      agentPoolMeasuredEnabled: runtimeLimits.agentPoolMeasuredEnabled,
       agentReserveEnabled: runtimeLimits.agentReserveEnabled,
       agentPreemptionEnabled: runtimeLimits.agentPreemptionEnabled,
       runtimePreemptionEnabled: runtimeLimits.runtimePreemptionEnabled,
@@ -1080,6 +1093,24 @@ export default function AdminPage() {
             />
             Reserve CLI slots for tasks with a live environment (an upvoted task overtakes)
           </label>
+          {/* The planned budget is a difference of two peak-calibrated estimates, so it both
+              over-charges idle runners and cannot see the base stack. This lets the host's own
+              free memory answer instead, growing a couple of agents per evaluation. */}
+          <label className="mt-2 flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={runtimeLimits.agentPoolMeasuredEnabled}
+              disabled={savingRuntimeLimits || !runtimeLimits.enabled}
+              onChange={(e) =>
+                void saveRuntimeLimits({
+                  ...runtimeLimits,
+                  agentPoolMeasuredEnabled: e.target.checked,
+                })
+              }
+              className="h-4 w-4"
+            />
+            Size the agent pool from measured free memory, not planned weights
+          </label>
           {/* Preemption is the only lever that moves an ALREADY-RUNNING agent, so it is the one
               part of vote scoring that can destroy work — its own switch, not folded into the
               reserve above. */}
@@ -1181,6 +1212,7 @@ export default function AdminPage() {
                 ['browserWeightMb', 'Browser desktop weight (MB, 0=auto)'],
                 ['agentWeightMb', 'Agent weight (MB, 0=auto)'],
                 ['agentFloor', 'Agent floor (0=auto)'],
+                ['agentPoolSafetyMb', 'Agent safety reserve (MB, 0=auto)'],
                 ['agentReserveMaxHoldMinutes', 'Reserve max hold (min, 0=strict)'],
                 ['agentPreemptionMinRunMinutes', 'Preempt after (min, 0=immediate)'],
                 ['runtimePreemptionMaxWaitMinutes', 'Force env handover after (min, 0=never)'],
@@ -1220,6 +1252,17 @@ export default function AdminPage() {
             <span className="text-neutral-200">{runtimeLimits.capacity.agentsIdle}</span> (
             {runtimeLimits.capacity.agentWeightMb} MB each), shrinking toward the floor as runtimes
             come up.
+            {runtimeLimits.capacity.agentsMeasured !== null && (
+              <>
+                {' '}
+                Measured right now, this host holds{' '}
+                <span className="text-neutral-200">
+                  {runtimeLimits.capacity.agentsMeasured}
+                </span>{' '}
+                agents (keeping {runtimeLimits.capacity.agentSafetyMb} MB in reserve); the pool
+                grows toward that a couple at a time and re-measures between steps.
+              </>
+            )}
           </p>
         </Card>
       )}

@@ -1,8 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
+  DEFAULT_AGENT_RAMP_STEP,
   deriveAgentConcurrency,
+  deriveAgentSafetyMb,
   deriveRuntimeCaps,
+  readHostAvailableMb,
   readHostResources,
+  type AgentPoolMeasurement,
   type RuntimeCaps,
 } from './host-resources.js';
 
@@ -189,6 +193,132 @@ describe('deriveAgentConcurrency', () => {
   });
 });
 
+describe('deriveAgentConcurrency with a live measurement', () => {
+  const caps = deriveRuntimeCaps({ totalMemMb: 16384, cpuCount: 16 });
+  /** The jam this exists for: three DDEV runners charged 3072 each leave 1725 MB planned free,
+   *  which floors the pool at 2 while the host really has ~7.9 GB available. */
+  const JAMMED = 9216;
+  const measure = (over: Partial<AgentPoolMeasurement> = {}): AgentPoolMeasurement => ({
+    availableMb: 7900,
+    pendingRuntimeMb: 0,
+    liveAgents: 2,
+    safetyMb: 3072,
+    rampStep: DEFAULT_AGENT_RAMP_STEP,
+    ...over,
+  });
+
+  it('grows past the planned floor when the host really is free', () => {
+    expect(deriveAgentConcurrency({ caps, liveRuntimeWeightMb: JAMMED, cpuCount: 16 })).toBe(
+      caps.agentFloor,
+    );
+    // (7900 - 3072) / 2048 = 2 more than the 2 already running.
+    expect(
+      deriveAgentConcurrency({
+        caps,
+        liveRuntimeWeightMb: JAMMED,
+        cpuCount: 16,
+        measured: measure(),
+      }),
+    ).toBe(4);
+  });
+
+  it('adds at most rampStep per evaluation beyond what the plan already allowed', () => {
+    // Planned on an idle 16 GB host is 5. Measured headroom would fit 11, but growth past the
+    // plan is two at a time so each step is re-measured with the previous one resident.
+    expect(deriveAgentConcurrency({ caps, liveRuntimeWeightMb: 0, cpuCount: 16 })).toBe(5);
+    expect(
+      deriveAgentConcurrency({
+        caps,
+        liveRuntimeWeightMb: 0,
+        cpuCount: 16,
+        measured: measure({ availableMb: 20_000, liveAgents: 5, rampStep: 2 }),
+      }),
+    ).toBe(7);
+  });
+
+  it('never starts a burst below what the plan alone would have allowed', () => {
+    // The one case that was never broken: an idle host with capacity to spare used to open the
+    // whole planned width at once, and ramping up to it two at a time would be a regression.
+    expect(
+      deriveAgentConcurrency({
+        caps,
+        liveRuntimeWeightMb: 0,
+        cpuCount: 16,
+        measured: measure({ availableMb: 20_000, liveAgents: 0, rampStep: 2 }),
+      }),
+    ).toBe(5);
+  });
+
+  it('clamps DOWN when the host is tighter than the plan believes', () => {
+    // The dev-host case: nothing in the runtime pool, so the planned figure says 5, while the
+    // base stack has already eaten the machine. Measurement is authoritative in both directions.
+    expect(deriveAgentConcurrency({ caps, liveRuntimeWeightMb: 0, cpuCount: 16 })).toBe(5);
+    expect(
+      deriveAgentConcurrency({
+        caps,
+        liveRuntimeWeightMb: 0,
+        cpuCount: 16,
+        measured: measure({ availableMb: 3500, liveAgents: 5 }),
+      }),
+    ).toBe(5);
+    expect(
+      deriveAgentConcurrency({
+        caps,
+        liveRuntimeWeightMb: 0,
+        cpuCount: 16,
+        measured: measure({ availableMb: 3000, liveAgents: 0 }),
+      }),
+    ).toBe(caps.agentFloor);
+  });
+
+  it('never hands an agent the headroom a reserved boot is about to take', () => {
+    // A live runner's RSS is already missing from availableMb; a reservation's is not.
+    expect(
+      deriveAgentConcurrency({
+        caps,
+        liveRuntimeWeightMb: JAMMED,
+        cpuCount: 16,
+        measured: measure({ pendingRuntimeMb: 3072 }),
+      }),
+    ).toBe(caps.agentFloor);
+  });
+
+  it('keeps the deadlock floor whatever the measurement says', () => {
+    expect(
+      deriveAgentConcurrency({
+        caps,
+        liveRuntimeWeightMb: JAMMED,
+        cpuCount: 16,
+        measured: measure({ availableMb: 0, liveAgents: 0 }),
+      }),
+    ).toBe(caps.agentFloor);
+  });
+
+  it('still bounds by cores', () => {
+    expect(
+      deriveAgentConcurrency({
+        caps,
+        liveRuntimeWeightMb: 0,
+        cpuCount: 2,
+        measured: measure({ availableMb: 64_000, liveAgents: 8, rampStep: 8 }),
+      }),
+    ).toBe(2);
+  });
+});
+
+describe('deriveAgentSafetyMb', () => {
+  it('reserves a fifth of the host, bounded at both ends', () => {
+    expect(deriveAgentSafetyMb(16384)).toBe(3277);
+    expect(deriveAgentSafetyMb(4096)).toBe(2048); // thin box: the floor binds
+    expect(deriveAgentSafetyMb(131_072)).toBe(4096); // fat box: the ceiling binds
+  });
+
+  it('honours a positive override as-is', () => {
+    expect(deriveAgentSafetyMb(16384, 6000)).toBe(6000);
+    expect(deriveAgentSafetyMb(16384, 0)).toBe(3277);
+  });
+});
+
 describe('readHostResources', () => {
   it('returns positive finite memory and cpu figures', () => {
     const h = readHostResources();
@@ -196,5 +326,14 @@ describe('readHostResources', () => {
     expect(h.freeMemMb).toBeGreaterThanOrEqual(0);
     expect(h.cpuCount).toBeGreaterThanOrEqual(1);
     expect(Number.isFinite(h.totalMemMb)).toBe(true);
+  });
+});
+
+describe('readHostAvailableMb', () => {
+  it('reads more than MemFree on a Linux host, or null where it cannot', () => {
+    const available = readHostAvailableMb();
+    if (available === null) return; // non-Linux: the measured path stays off
+    expect(available).toBeGreaterThanOrEqual(0);
+    expect(available).toBeLessThanOrEqual(readHostResources().totalMemMb);
   });
 });
