@@ -527,3 +527,73 @@ describe('createStreamJsonCollector: run-level is_error on a "success" subtype',
     expect(classifyProviderFatal(1, reason, c.getAssistantText())).toBe('rate_limit');
   });
 });
+
+describe('createStreamJsonCollector: structured rate-limit rejection', () => {
+  // The real rate_limit_info from invocation 065ce2d0 (claude-code). Note
+  // isUsingOverage:false — the old guard required it true, so this never matched and
+  // fell through to the provider's prose, where "You've hit your limit" (no "session")
+  // matches no RATE_LIMIT_RE alternative. 22 live invocations were unclassified.
+  const REJECTED = {
+    type: 'rate_limit_event',
+    rate_limit_info: {
+      status: 'rejected',
+      resetsAt: 1786046400,
+      rateLimitType: 'five_hour',
+      overageStatus: 'rejected',
+      overageDisabledReason: 'org_level_disabled',
+      isUsingOverage: false,
+    },
+  };
+  const LIMIT_RESULT = {
+    type: 'result',
+    subtype: 'success',
+    is_error: true,
+    terminal_reason: 'api_error',
+    result: "You've hit your limit · resets 2:50pm (UTC)",
+  };
+
+  it('classifies as rate_limit despite isUsingOverage being false', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [{ type: 'system', subtype: 'init' }, REJECTED, LIMIT_RESULT]);
+    const reason = c.getNoResultReason();
+    expect(reason).toMatch(/rate limit/i);
+    expect(reason).toMatch(/five_hour/);
+    expect(classifyProviderFatal(1, reason, c.getAssistantText())).toBe('rate_limit');
+  });
+
+  it('wins over the generic is_error report, which would not classify', () => {
+    // Ordering is the whole fix: the is_error branch would return "LLM run reported a
+    // failure ...: You've hit your limit", which carries no token RATE_LIMIT_RE matches.
+    const c = createStreamJsonCollector();
+    feed(c, [{ type: 'system', subtype: 'init' }, REJECTED, LIMIT_RESULT]);
+    expect(c.getNoResultReason()).not.toMatch(/LLM run reported a failure/);
+  });
+
+  it('leaves a non-rejected rate_limit_event alone', () => {
+    // An "allowed" status is a routine usage heartbeat, not a refusal.
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init' },
+      { type: 'rate_limit_event', rate_limit_info: { status: 'allowed', isUsingOverage: false } },
+      LIMIT_RESULT,
+    ]);
+    expect(c.getNoResultReason()).toMatch(/LLM run reported a failure/);
+  });
+
+  it('still honours the legacy overage-rejected shape', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init' },
+      {
+        type: 'rate_limit_event',
+        rate_limit_info: {
+          status: 'allowed',
+          overageStatus: 'rejected',
+          overageDisabledReason: 'org_level_disabled',
+          isUsingOverage: true,
+        },
+      },
+    ]);
+    expect(c.getNoResultReason()).toMatch(/rate limit/i);
+  });
+});

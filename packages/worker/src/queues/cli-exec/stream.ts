@@ -88,6 +88,10 @@ export function createStreamJsonCollector(
   let costUsd: number | null = null;
   let lastRateLimit: {
     status?: string;
+    /** Which window was exhausted, e.g. "five_hour". Names the limit in the message. */
+    rateLimitType?: string;
+    /** Unix SECONDS (not ms) — the provider sends epoch seconds. */
+    resetsAt?: number;
     overageStatus?: string;
     overageDisabledReason?: string;
     isUsingOverage?: boolean;
@@ -274,6 +278,27 @@ export function createStreamJsonCollector(
         const base = `LLM stream ended with result subtype "${lastResultSubtype}"`;
         return lastResultError ? `${base}: ${lastResultError}` : base;
       }
+      // Rate limit FIRST — ahead of the is_error branch below, which would otherwise
+      // claim these runs and report them as a generic failure. `rate_limit_info.status`
+      // is the STRUCTURED signal that the request was refused; the provider's prose is
+      // not. The old guard also required `isUsingOverage`, which only says whether the
+      // account was on overage when it was refused — orthogonal to being refused at all.
+      // MEASURED on the 22 rows this missed: every one carries status "rejected" and
+      // NONE has isUsingOverage, so the structured path never fired and they fell
+      // through to prose. "You've hit your limit" (unlike the "session limit" variant)
+      // matches no RATE_LIMIT_RE alternative, so they ended up unclassified — no
+      // rate-limit headline, no provider-outage watch, just a bare CLI failure.
+      // The message keeps a literal "rate limit" so classifyProviderFatal still matches.
+      if (lastRateLimit?.status === 'rejected') {
+        const kind = lastRateLimit.rateLimitType ? `${lastRateLimit.rateLimitType}, ` : '';
+        const resets = lastRateLimit.resetsAt
+          ? `resets ${new Date(lastRateLimit.resetsAt * 1000).toISOString()}`
+          : (lastRateLimit.overageDisabledReason ?? 'no reset time reported');
+        return `LLM blocked by rate limit (${kind}${resets})`;
+      }
+      if (lastRateLimit?.overageStatus === 'rejected' && lastRateLimit.isUsingOverage) {
+        return `LLM blocked by rate limit (${lastRateLimit.overageDisabledReason ?? 'overage rejected'})`;
+      }
       // Result event flagged is_error while carrying a "success" subtype (the
       // mid-stream API abort above). Report the binary's own error text: it is far
       // more specific than the generic fallback below, and — load-bearing — that
@@ -285,9 +310,6 @@ export function createStreamJsonCollector(
         const where = resultTerminalReason ? ` (terminal_reason "${resultTerminalReason}")` : '';
         const base = `LLM run reported a failure${where}`;
         return detail ? `${base}: ${detail}` : base;
-      }
-      if (lastRateLimit?.overageStatus === 'rejected' && lastRateLimit.isUsingOverage) {
-        return `LLM blocked by rate limit (${lastRateLimit.overageDisabledReason ?? 'overage rejected'})`;
       }
       return 'LLM emitted no result event (stream ended prematurely — likely timeout, session abort, or quota rejection)';
     },
