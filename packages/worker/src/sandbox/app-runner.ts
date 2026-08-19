@@ -14,7 +14,11 @@ import {
   resolveRunnerCaps,
   resolveRuntimeWeightMb,
 } from './runtime-caps.js';
-import { acquireRuntimeSlot } from './runtime-admission.js';
+import {
+  acquireRuntimeSlot,
+  markBrowserDesktopDown,
+  markBrowserDesktopUp,
+} from './runtime-admission.js';
 
 // Per-task app-runner: a plain (non-DinD) container built from the repo's
 // env-replicate image. It runs a single-process non-DDEV app AND hosts the
@@ -346,6 +350,8 @@ export async function startBrowserDesktop(handle: AppRunnerHandle): Promise<void
   if (res.exitCode !== 0) {
     throw new Error(`browser desktop failed to start: ${res.output.slice(-1000)}`);
   }
+  // See the ddev-runner twin: the surcharge is charged while the desktop is up, not from create.
+  await markBrowserDesktopUp(handle.container);
 }
 
 /** pkill patterns reversing start-browser-desktop.sh's pgrep guards; the trailing
@@ -360,6 +366,8 @@ const BROWSER_DESKTOP_STOP_CMD =
  *  startBrowserDesktop brings it back up. */
 export async function stopBrowserDesktop(taskId: string): Promise<void> {
   const container = appRunnerName(taskId);
+  // Before the running check: a stopped runner must not stay on the surcharge list either.
+  await markBrowserDesktopDown(container);
   if (!(await isRunning(container))) return;
   try {
     await exec('docker', ['exec', container, 'bash', '-lc', BROWSER_DESKTOP_STOP_CMD], {

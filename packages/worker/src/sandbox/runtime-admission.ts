@@ -103,21 +103,47 @@ function listRunningIdsByLabels(labels: string[]): Promise<string[]> {
     .catch(() => []);
 }
 
+/** The browser desktop's surcharge for one runner, applied only while that desktop is actually
+ *  running. Bounded by `capMb` (the kind's class weight plus the surcharge) so a runner whose
+ *  LABEL already includes the surcharge — every runner created before it moved out of the label
+ *  — is not charged for it twice. A label above the cap is a per-task memory pin, which already
+ *  states exactly what the container may occupy, so it is left alone. */
+export interface BrowserSurcharge {
+  /** Runner container names whose headed desktop is up right now. */
+  containers: Set<string>;
+  weightMb: number;
+  capMb: number;
+}
+
+function withBrowserSurcharge(
+  weightMb: number,
+  containerName: string | undefined,
+  surcharge: BrowserSurcharge | undefined,
+): number {
+  if (!surcharge || !containerName || !surcharge.containers.has(containerName)) return weightMb;
+  return Math.min(weightMb + surcharge.weightMb, Math.max(weightMb, surcharge.capMb));
+}
+
 /** Weight each live runner carrying `label` contributes, keyed by TASK rather than container
  *  because admission is per task — a task running both a DDEV and an app runner holds ONE
  *  environment, which is already how taskHasLiveRunner treats it, so it contributes the heavier
  *  of the two rather than their sum. A runner missing the task label falls back to its container
  *  id so it still occupies capacity; one missing the weight label (started before this existed,
  *  or with the governor off) falls back to the caller's class weight rather than to zero. */
-export function parseRunnerWeights(stdout: string, fallbackWeightMb: number): Map<string, number> {
+export function parseRunnerWeights(
+  stdout: string,
+  fallbackWeightMb: number,
+  surcharge?: BrowserSurcharge,
+): Map<string, number> {
   const weights = new Map<string, number>();
   for (const raw of stdout.split('\n')) {
     const line = raw.trim();
     if (line.length === 0) continue;
-    const [taskId, containerId, weightRaw] = line.split('|');
+    const [taskId, containerId, weightRaw, containerName] = line.split('|');
     const key = taskId && taskId.length > 0 ? taskId : `container:${containerId}`;
     const parsed = Number.parseInt(weightRaw ?? '', 10);
-    const weightMb = Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackWeightMb;
+    const base = Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackWeightMb;
+    const weightMb = withBrowserSurcharge(base, containerName, surcharge);
     weights.set(key, Math.max(weights.get(key) ?? 0, weightMb));
   }
   return weights;
@@ -126,6 +152,7 @@ export function parseRunnerWeights(stdout: string, fallbackWeightMb: number): Ma
 function listRunnerWeightsByLabel(
   label: string,
   fallbackWeightMb: number,
+  surcharge?: BrowserSurcharge,
 ): Promise<Map<string, number>> {
   return exec(
     'docker',
@@ -134,11 +161,11 @@ function listRunnerWeightsByLabel(
       '--filter',
       `label=${label}`,
       '--format',
-      `{{.Label "haive.task.id"}}|{{.ID}}|{{.Label "${RUNTIME_WEIGHT_LABEL}"}}`,
+      `{{.Label "haive.task.id"}}|{{.ID}}|{{.Label "${RUNTIME_WEIGHT_LABEL}"}}|{{.Names}}`,
     ],
     { timeout: 10_000 },
   )
-    .then(({ stdout }) => parseRunnerWeights(stdout, fallbackWeightMb))
+    .then(({ stdout }) => parseRunnerWeights(stdout, fallbackWeightMb, surcharge))
     .catch(() => new Map<string, number>());
 }
 
@@ -151,11 +178,22 @@ function heaviestWeightMb(caps: RuntimeCaps): number {
 }
 
 /** Tasks holding a live runtime runner, with the MB each occupies. Two label queries unioned —
- *  docker ANDs multiple --filter label flags, so a single call can't OR the two labels. */
+ *  docker ANDs multiple --filter label flags, so a single call can't OR the two labels. Each
+ *  runner is charged its stamped class weight plus the browser surcharge for as long as its
+ *  headed desktop is up. */
 async function liveRuntimeWeights(caps: RuntimeCaps): Promise<Map<string, number>> {
+  const browserContainers = await browserDesktopContainers();
   const [ddev, app] = await Promise.all([
-    listRunnerWeightsByLabel('haive.ddev', heaviestWeightMb(caps)),
-    listRunnerWeightsByLabel(APP_RUNNER_LABEL, caps.appWeightMb + caps.browserWeightMb),
+    listRunnerWeightsByLabel('haive.ddev', heaviestWeightMb(caps), {
+      containers: browserContainers,
+      weightMb: caps.browserWeightMb,
+      capMb: heaviestWeightMb(caps),
+    }),
+    listRunnerWeightsByLabel(APP_RUNNER_LABEL, caps.appWeightMb + caps.browserWeightMb, {
+      containers: browserContainers,
+      weightMb: caps.browserWeightMb,
+      capMb: caps.appWeightMb + caps.browserWeightMb,
+    }),
   ]);
   const merged = new Map(ddev);
   for (const [taskId, weightMb] of app) {
@@ -290,6 +328,64 @@ export async function clearRuntimeReservations(): Promise<void> {
     await getRedis().del(RESERVE_KEY);
   } catch (err) {
     log.warn({ err }, 'clearing runtime reservations on boot failed');
+  }
+}
+
+// --- Browser-desktop surcharge ----------------------------------------------------------
+// The headed desktop (Xvfb + x11vnc + Chromium) runs INSIDE a runtime runner and shares its
+// --memory cap, so it makes that one runner heavier rather than adding a pool entry. It used to
+// be folded into the weight LABEL at container create for any task whose env template declared
+// browserTesting — but the desktop does not start until step 07, so a runner spent the whole
+// discovery/spec phase charged for a Chromium that did not exist. Labels are immutable after
+// create, so the live half lives here: a Redis SET of runner CONTAINER NAMES, added by
+// startBrowserDesktop and removed by stopBrowserDesktop. Keyed on the container name because
+// neither runner handle carries a task id, while both ends can derive the name from one.
+//
+// Soft state, and deliberately without a TTL: the surcharge is only ever applied to containers
+// that `docker ps` returns in the same read, so an entry whose runner is gone contributes
+// nothing and needs no sweep. Losing the set costs one under-charged runner until its desktop
+// is restarted, never correctness.
+const BROWSER_KEY = 'haive:runtime-browser';
+
+/** Runner containers whose headed desktop is up. Fails to an empty set — an unreadable set means
+ *  the surcharge is not applied, which is the same under-count as a runner started before this
+ *  existed, rather than a blocked boot. */
+async function browserDesktopContainers(): Promise<Set<string>> {
+  try {
+    return new Set(await getRedis().smembers(BROWSER_KEY));
+  } catch (err) {
+    log.warn({ err }, 'browser surcharge read failed; charging runners without it');
+    return new Set();
+  }
+}
+
+/** Start charging `container` the browser surcharge. Called by startBrowserDesktop after the
+ *  desktop is confirmed up. Idempotent. */
+export async function markBrowserDesktopUp(container: string): Promise<void> {
+  try {
+    await getRedis().sadd(BROWSER_KEY, container);
+  } catch (err) {
+    log.warn({ err, container }, 'browser surcharge write failed; runner counted without it');
+  }
+}
+
+/** Stop charging `container`. Called by stopBrowserDesktop and safe to call for a container that
+ *  never had a desktop. */
+export async function markBrowserDesktopDown(container: string): Promise<void> {
+  try {
+    await getRedis().srem(BROWSER_KEY, container);
+  } catch {
+    // Soft state: the container going away drops it from occupancy anyway.
+  }
+}
+
+/** Wipe every surcharge. Called on worker boot beside clearRuntimeReservations, where the boot
+ *  reaper removes all runtime runners — so every entry is stale by definition. */
+export async function clearBrowserSurcharges(): Promise<void> {
+  try {
+    await getRedis().del(BROWSER_KEY);
+  } catch (err) {
+    log.warn({ err }, 'clearing browser surcharges on boot failed');
   }
 }
 

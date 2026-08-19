@@ -38,6 +38,7 @@ import { CliStreamLogReaper } from './queues/cli-exec/stream-log-retention.js';
 import {
   startRuntimeLimitsWatch,
   setRuntimeReclaimer,
+  clearBrowserSurcharges,
   clearRuntimeReservations,
 } from './sandbox/runtime-admission.js';
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
@@ -75,6 +76,8 @@ async function main(): Promise<void> {
   // runtime runner, so a reservation from before this boot can only describe a boot that no
   // longer exists — leaving it would hold a slot out of the pool until its 45-min expiry.
   await clearRuntimeReservations();
+  // Same reasoning for the browser-desktop surcharges: every runner they described is gone.
+  await clearBrowserSurcharges();
 
   const repoWorker = startRepoWorker(repoStoragePath);
   const bundleWorker = startBundleWorker(bundleStoragePath);

@@ -26,7 +26,11 @@ import {
   resolveRunnerCaps,
   resolveRuntimeWeightMb,
 } from './runtime-caps.js';
-import { acquireRuntimeSlot } from './runtime-admission.js';
+import {
+  acquireRuntimeSlot,
+  markBrowserDesktopDown,
+  markBrowserDesktopUp,
+} from './runtime-admission.js';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 
 // Per-task DDEV environment via nested Docker (DinD). DDEV can't run against the
@@ -1552,6 +1556,9 @@ export async function startBrowserDesktop(handle: DdevRunnerHandle): Promise<voi
   if (res.exitCode !== 0) {
     throw new Error(`browser desktop failed to start: ${res.output.slice(-1000)}`);
   }
+  // From here the runner really is carrying a Chromium, so the admission gate starts charging
+  // its surcharge — the runner's weight label cannot, being fixed at create.
+  await markBrowserDesktopUp(handle.container);
 }
 
 /** pkill patterns reversing start-browser-desktop.sh's pgrep guards; the trailing
@@ -1566,6 +1573,8 @@ const BROWSER_DESKTOP_STOP_CMD =
  *  startBrowserDesktop brings it back up. */
 export async function stopBrowserDesktop(taskId: string): Promise<void> {
   const container = ddevRunnerName(taskId);
+  // Before the running check: a stopped runner must not stay on the surcharge list either.
+  await markBrowserDesktopDown(container);
   if (!(await containerRunning(container))) return;
   try {
     await exec(

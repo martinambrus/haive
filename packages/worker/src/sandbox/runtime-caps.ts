@@ -7,9 +7,7 @@ import {
   type HostResources,
   type RuntimeCaps,
 } from '@haive/shared';
-import type { Database } from '@haive/database';
 import { getDb } from '../db.js';
-import { getTaskEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
 import { loadTaskResourceLimits } from './container-manager.js';
 
 // Resolves the effective Docker resource caps for a spawned container from three
@@ -117,33 +115,31 @@ export async function resolveRuntimeCaps(): Promise<RuntimeCaps> {
   });
 }
 
-/** Planning weight (MB) for THIS task's runner of `kind`. A per-task memory pin wins outright:
- *  that is exactly what the container is allowed to occupy, so budgeting it at a class weight
- *  would under-count a deliberately fattened runner. Otherwise the kind's class weight, plus the
- *  browser surcharge when this task runs browser testing — the headed desktop lives inside the
- *  runner, so a browser task's runner really is heavier than a browser-less one's. Falls back to
- *  the bare class weight when the task rows cannot be read — never to 0, which would make the
- *  runner free. */
+/** Planning weight (MB) for THIS task's runner of `kind`, stamped into the container label at
+ *  create. A per-task memory pin wins outright: that is exactly what the container is allowed to
+ *  occupy, so budgeting it at a class weight would under-count a deliberately fattened runner.
+ *  Otherwise the kind's bare class weight. Falls back to that same class weight when the task
+ *  rows cannot be read — never to 0, which would make the runner free.
+ *
+ *  The browser surcharge is deliberately NOT here. It used to be added for the whole lifetime of
+ *  any task whose env template declared `browserTesting`, but the desktop does not start until
+ *  step 07 (startBrowserDesktop), so a task sitting in discovery/spec steps was charged for a
+ *  Chromium that did not exist — MEASURED: two of three live DDEV runners had zero
+ *  Xvfb/x11vnc/chrome processes while each was charged 1536 MB for one, which is what parked
+ *  other tasks against a budget that was not really spent. The surcharge is now applied for as
+ *  long as the desktop is actually up, tracked per runner container in runtime-admission.ts
+ *  (`markBrowserDesktopUp`/`Down`) and folded into occupancy there. A docker label cannot carry
+ *  it because labels are immutable after create. */
 export async function resolveRuntimeWeightMb(taskId: string, kind: RuntimeKind): Promise<number> {
   const caps = await resolveRuntimeCaps();
   const classWeight = kind === 'ddev' ? caps.ddevWeightMb : caps.appWeightMb;
   try {
-    const db = getDb();
-    const t = await loadTaskResourceLimits(db, taskId);
+    const t = await loadTaskResourceLimits(getDb(), taskId);
     if (t.memoryLimitMb != null && t.memoryLimitMb > 0) return t.memoryLimitMb;
-    return classWeight + ((await taskUsesBrowser(db, taskId)) ? caps.browserWeightMb : 0);
+    return classWeight;
   } catch {
     return classWeight;
   }
-}
-
-/** Whether this task's environment runs browser testing — the same `declaredDeps.browserTesting`
- *  flag 07/07b/08a/09 read before calling startBrowserDesktop, so the weight matches what those
- *  steps will actually start inside the runner. */
-async function taskUsesBrowser(db: Database, taskId: string): Promise<boolean> {
-  const template = await getTaskEnvTemplate(db, taskId);
-  if (!template || template.status !== 'ready') return false;
-  return !!(template.declaredDeps as Record<string, unknown> | null)?.browserTesting;
 }
 
 /** Effective per-container caps for a task's runner, or null when the governor is

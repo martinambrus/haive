@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   runtimeAdmissionDecision,
   parseRunnerWeights,
+  type BrowserSurcharge,
   type RuntimeAdmissionInput,
 } from './runtime-admission.js';
 
@@ -128,6 +129,62 @@ describe('parseRunnerWeights', () => {
     expect(parseRunnerWeights('', DDEV).size).toBe(0);
     expect(parseRunnerWeights('\n  \ntask-a|c001|4096\n', DDEV)).toEqual(
       new Map([['task-a', 4096]]),
+    );
+  });
+});
+
+describe('parseRunnerWeights browser surcharge', () => {
+  /** A 16 GB host's calibrated weights: ddev 1536 + browser 1536. */
+  const DDEV_BASE = 1536;
+  const BROWSER = 1536;
+  const surcharge = (containers: string[]): BrowserSurcharge => ({
+    containers: new Set(containers),
+    weightMb: BROWSER,
+    capMb: DDEV_BASE + BROWSER,
+  });
+
+  it('charges a runner only while its desktop is up', () => {
+    const line = `task-a|c001|${DDEV_BASE}|haive-ddev-aaaa\n`;
+    expect(parseRunnerWeights(line, DDEV_BASE, surcharge([]))).toEqual(
+      new Map([['task-a', DDEV_BASE]]),
+    );
+    expect(parseRunnerWeights(line, DDEV_BASE, surcharge(['haive-ddev-aaaa']))).toEqual(
+      new Map([['task-a', DDEV_BASE + BROWSER]]),
+    );
+  });
+
+  it('never double-charges a runner whose label already includes the surcharge', () => {
+    // Every runner created before the surcharge moved out of the label carries base+browser in
+    // it. Adding the live surcharge on top would price one Chromium twice.
+    const legacy = `task-a|c001|${DDEV_BASE + BROWSER}|haive-ddev-aaaa\n`;
+    expect(parseRunnerWeights(legacy, DDEV_BASE, surcharge(['haive-ddev-aaaa']))).toEqual(
+      new Map([['task-a', DDEV_BASE + BROWSER]]),
+    );
+  });
+
+  it('leaves a per-task memory pin alone', () => {
+    // A pin states exactly what the container may occupy, desktop included, so the cap must not
+    // clamp it DOWN to the class ceiling either.
+    const pinned = `task-a|c001|8192|haive-ddev-aaaa\n`;
+    expect(parseRunnerWeights(pinned, DDEV_BASE, surcharge(['haive-ddev-aaaa']))).toEqual(
+      new Map([['task-a', 8192]]),
+    );
+  });
+
+  it('only charges the containers on the list', () => {
+    const two = `task-a|c001|${DDEV_BASE}|haive-ddev-aaaa\ntask-b|c002|${DDEV_BASE}|haive-ddev-bbbb\n`;
+    expect(parseRunnerWeights(two, DDEV_BASE, surcharge(['haive-ddev-bbbb']))).toEqual(
+      new Map([
+        ['task-a', DDEV_BASE],
+        ['task-b', DDEV_BASE + BROWSER],
+      ]),
+    );
+  });
+
+  it('is a no-op for callers that pass no surcharge', () => {
+    // The pre-feature shape (three fields, no name) must parse identically.
+    expect(parseRunnerWeights(`task-a|c001|${DDEV_BASE}|haive-ddev-aaaa\n`, DDEV_BASE)).toEqual(
+      new Map([['task-a', DDEV_BASE]]),
     );
   });
 });
