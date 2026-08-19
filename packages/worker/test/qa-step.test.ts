@@ -126,6 +126,23 @@ describe('parseQaPrepOutput', () => {
     expect(() => parseQaPrepOutput(raw)).toThrow(/explicitNoQuestions/);
   });
 
+  it('accepts a non-empty list without explicitNoQuestions', () => {
+    const raw = fence({
+      agentQuestions: [{ id: 'x', topic: 't', question: 'q?', context: 'c' }],
+    });
+    const out = parseQaPrepOutput(raw);
+    expect(out.agentQuestions).toHaveLength(1);
+    expect(out.explicitNoQuestions).toBe(false);
+  });
+
+  it('throws when explicitNoQuestions is present but not a boolean', () => {
+    const raw = fence({
+      agentQuestions: [{ id: 'x', topic: 't', question: 'q?', context: 'c' }],
+      explicitNoQuestions: 'false',
+    });
+    expect(() => parseQaPrepOutput(raw)).toThrow(/must be a boolean/);
+  });
+
   it('unwraps Claude Code { result: "..." } wrapper', () => {
     const inner = fence({
       agentQuestions: [{ id: 'x', topic: 't', question: 'q?', context: 'c' }],

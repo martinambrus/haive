@@ -293,7 +293,7 @@ function validateParsed(parsed: unknown): KnowledgeQaPrepApply {
   if (!Array.isArray(obj.agentQuestions)) {
     throw new QaPrepParseError('"agentQuestions" must be an array');
   }
-  if (typeof obj.explicitNoQuestions !== 'boolean') {
+  if (obj.explicitNoQuestions !== undefined && typeof obj.explicitNoQuestions !== 'boolean') {
     throw new QaPrepParseError('"explicitNoQuestions" must be a boolean');
   }
   const list = obj.agentQuestions as unknown[];
@@ -319,7 +319,7 @@ function validateParsed(parsed: unknown): KnowledgeQaPrepApply {
       'Empty agentQuestions array without explicitNoQuestions=true is not allowed',
     );
   }
-  return { agentQuestions: validated, explicitNoQuestions: obj.explicitNoQuestions };
+  return { agentQuestions: validated, explicitNoQuestions: obj.explicitNoQuestions === true };
 }
 
 /* ------------------------------------------------------------------ */
