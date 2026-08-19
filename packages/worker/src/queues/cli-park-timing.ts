@@ -130,10 +130,31 @@ async function foldPark(
     opts?.requireMarker === false
       ? sql`(${schema.taskSteps.waitingStartedAt} IS NOT NULL OR ${schema.taskSteps.statusMessage} IS NOT NULL)`
       : sql`${schema.taskSteps.waitingStartedAt} IS NOT NULL`;
+  // WHICH column the park lands in is decided by whether the row has a span to subtract it from.
+  // computeStepContribution reads work as `span - idle_ms`, so idle_ms may only ever hold a wait
+  // that happened INSIDE the current run. A PRE-RUN park has no started_at — both the runtime-slot
+  // admission park and the GLOBAL_PAUSE hold reset the row to `pending` with started_at null — and
+  // is followed immediately by a FRESH started_at (step-runner.ts stamps it in the very next write
+  // after this fold). Booking that into idle_ms subtracts a wait that PREDATES the span, so the
+  // step's work contribution clamps to 0 for exactly as long as the park lasted: the task page's
+  // global Work timer sits frozen while a CLI is visibly running, and only the wall clock moves
+  // (observed 2026-08-19: a 30m35s global pause froze Work on two tasks for 30 minutes after they
+  // resumed, while their terminals ran). carried_idle_ms is the right column for it — computeTaskTiming
+  // ADDS carried_* on top of the span instead of subtracting it — and the idle TOTAL is identical
+  // either way, so nothing moves except the work arithmetic. Keyed on `started_at IS NULL`, the
+  // structural signature of a pre-run park, not on which caller folded it.
+  //
+  // least() clamps both columns to int4 headroom: a hold can outlive the ~24.8 days a millisecond
+  // int holds, and an overflow raised here would abort the very resume trying to end the park.
+  const parkMs = sql`greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000))`;
+  const preRun = sql`${schema.taskSteps.startedAt} IS NULL`;
   await db
     .update(schema.taskSteps)
     .set({
-      idleMs: sql`${schema.taskSteps.idleMs} + greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000))::int`,
+      idleMs: sql`${schema.taskSteps.idleMs} + case when ${preRun} then 0
+        else least(2147483647 - ${schema.taskSteps.idleMs}, ${parkMs})::int end`,
+      carriedIdleMs: sql`${schema.taskSteps.carriedIdleMs} + case when ${preRun}
+        then least(2147483647 - ${schema.taskSteps.carriedIdleMs}, ${parkMs})::int else 0 end`,
       waitingStartedAt: null,
       ...(opts?.clearMessage ? { statusMessage: null } : {}),
       updatedAt: sql`now()`,
