@@ -2855,6 +2855,7 @@ const MAX_ORPHAN_REDISPATCH = 3;
 async function countTrailingOrphans(db: Database, taskStepId: string): Promise<number> {
   const rows = await db
     .select({
+      startedAt: schema.cliInvocations.startedAt,
       exitCode: schema.cliInvocations.exitCode,
       errorMessage: schema.cliInvocations.errorMessage,
     })
@@ -2872,6 +2873,14 @@ async function countTrailingOrphans(db: Database, taskStepId: string): Promise<n
   // this cap exists to stop a crash-looping worker, and a task the sweeper keeps evicting is not
   // crash-looping — counting them would fail a perfectly healthy task at the third eviction.
   for (const r of withoutPreemptions(rows)) {
+    // A row that never STARTED is no evidence of a crash loop — nothing ran. It can only be a
+    // queued invocation an older reconcile pass ended (the pre-fix behaviour, guaranteed for
+    // every parked step under GLOBAL_PAUSE), so counting it spends the budget on runs that
+    // never happened and leaves the step unrecoverable by Resume. BREAK rather than skip: the
+    // cap converges a crash-looping worker, and the lenient reading costs at most one extra
+    // re-dispatch. This is the read side of the started_at filter reconcileOrphanedSteps now
+    // applies on the write side; it is what heals rows already written.
+    if (r.startedAt == null) break;
     if (isTransientCliFailure({ exitCode: r.exitCode, errorMessage: r.errorMessage })) n++;
     else break;
   }

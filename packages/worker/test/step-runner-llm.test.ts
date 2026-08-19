@@ -10,6 +10,10 @@ import { MODEL_CAPABILITY_BOUNDARY_MARKER } from '../src/cli-adapters/model-capa
 interface MockState {
   taskStepRow: Record<string, unknown>;
   cliInvocationRow: Record<string, unknown> | null;
+  /** Rows the WIDE invocation reads see — the trailing-history counters
+   *  (countTrailingOrphans and friends read `limit(10)`, newest first). Unset means
+   *  "the history is just the live row", which is what every test predating it assumes. */
+  cliInvocationHistory?: Record<string, unknown>[];
   updates: Record<string, unknown>[];
   inserts: { table: string; row: Record<string, unknown> }[];
 }
@@ -32,8 +36,12 @@ function makeMockDb(state: MockState): Database {
               return [];
             },
             orderBy: (_o: unknown) => ({
-              limit: async (_n: number) => {
+              limit: async (n: number) => {
                 if (tableName === 'cli_invocations') {
+                  // limit(1) is the "latest live invocation" read; anything wider is a
+                  // trailing-history count, which needs more than the one live row.
+                  if (n > 1 && state.cliInvocationHistory)
+                    return state.cliInvocationHistory.slice(0, n);
                   return state.cliInvocationRow ? [state.cliInvocationRow] : [];
                 }
                 return [];
@@ -453,6 +461,90 @@ describe('advanceStep LLM phase', () => {
     expect(result.status).toBe('waiting_cli');
     expect(enqueued).toBe(1);
     expect(state.updates.some((u) => u.table === 'cli_invocations' && u.supersededAt)).toBe(true);
+  });
+
+  it('does not spend the orphan budget on invocations that never STARTED', async () => {
+    // Under GLOBAL_PAUSE the cli-exec pickup gate holds every invocation at started_at NULL
+    // by design, and reconcileOrphanedSteps used to end them all as "orphaned by a worker
+    // restart" on each boot. Three tsx restarts in 40s therefore spent MAX_ORPHAN_REDISPATCH
+    // on runs that never happened and failed the step (task 977e1c5a, step 09_5), which no
+    // Resume could then recover. A row that never started is no evidence of a crash loop, so
+    // the count stops there and the step re-dispatches.
+    const state = freshState();
+    state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
+    const orphan = (id: string, startedAt: Date | null): Record<string, unknown> => ({
+      id,
+      startedAt,
+      exitCode: null,
+      rawOutput: null,
+      parsedOutput: null,
+      endedAt: new Date(),
+      errorMessage: 'CLI invocation orphaned by a worker restart (worker exited mid-run)',
+      createdAt: new Date(),
+    });
+    state.cliInvocationRow = orphan('inv-3', null);
+    state.cliInvocationHistory = [
+      orphan('inv-3', null),
+      orphan('inv-2', null),
+      orphan('inv-1', null),
+    ];
+    const db = makeMockDb(state);
+    let enqueued = 0;
+    const result = await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: baseStep(),
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation() {
+          enqueued += 1;
+        },
+      },
+    });
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toBe(1);
+  });
+
+  it('still fails the step once MAX_ORPHAN_REDISPATCH real orphans are trailing', async () => {
+    // The complement of the test above: the cap still converges a genuinely crash-looping
+    // worker. Same three orphan rows, but each one actually RAN, so all three count.
+    const state = freshState();
+    state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
+    const ran = (id: string): Record<string, unknown> => ({
+      id,
+      startedAt: new Date(),
+      exitCode: null,
+      rawOutput: null,
+      parsedOutput: null,
+      endedAt: new Date(),
+      errorMessage: 'CLI invocation orphaned by a worker restart (worker exited mid-run)',
+      createdAt: new Date(),
+    });
+    state.cliInvocationRow = ran('inv-3');
+    state.cliInvocationHistory = [ran('inv-3'), ran('inv-2'), ran('inv-1')];
+    const db = makeMockDb(state);
+    let enqueued = 0;
+    const result = await advanceStep({
+      db,
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: baseStep(),
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation() {
+          enqueued += 1;
+        },
+      },
+    });
+    expect(result.status).toBe('failed');
+    expect(enqueued).toBe(0);
   });
 
   it('re-dispatches with the learned remedy after a model-capability failure', async () => {

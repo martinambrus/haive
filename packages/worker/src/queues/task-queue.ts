@@ -2155,6 +2155,16 @@ export async function reconcileOrphanedSteps(db: Database): Promise<void> {
       // them as still-in-flight forever. Safe: sandbox containers are reaped before the
       // workers start (index.ts), so none is genuinely running at reconcile time. The
       // per-phase resolvers then classify each orphan and re-dispatch it (bounded).
+      //
+      // STARTED runs only. A `started_at IS NULL` row is QUEUED, not orphaned: it spawned
+      // no container (so the boot reap killed nothing of its) and its BullMQ job survives
+      // the restart in Redis, so the queue still owes it a run — and handleCliExecJob
+      // no-ops a redelivered job whose row was already finalized, so ending it here only
+      // throws the run away. Under GLOBAL_PAUSE this is not an edge case: the pickup gate
+      // holds every invocation at started_at NULL by design, so without this filter each
+      // worker restart during a pause window invents one orphan per parked step and three
+      // of them spend MAX_ORPHAN_REDISPATCH on runs that never happened. Same invariant
+      // enforceTaskAgentCap and foldOrphanedCliParkOnBoot already use for "actually live".
       await db
         .update(schema.cliInvocations)
         .set({
@@ -2164,6 +2174,7 @@ export async function reconcileOrphanedSteps(db: Database): Promise<void> {
         .where(
           and(
             eq(schema.cliInvocations.taskStepId, s.taskStepId),
+            isNotNull(schema.cliInvocations.startedAt),
             isNull(schema.cliInvocations.endedAt),
             isNull(schema.cliInvocations.supersededAt),
           ),
