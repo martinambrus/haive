@@ -2236,6 +2236,8 @@ function HeaderUsageChip({
 }) {
   const [snapshots, setSnapshots] = useState<UsageWindowSnapshot[] | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  /** Bumped when a repair completes in this tab — see UsageReconnectAction's onRepaired. */
+  const [repairNonce, setRepairNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -2263,7 +2265,7 @@ function HeaderUsageChip({
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onVisible);
     };
-  }, []);
+  }, [repairNonce]);
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 30_000);
@@ -2297,6 +2299,7 @@ function HeaderUsageChip({
         className={`flex shrink-0 items-center gap-1 px-2 font-mono text-xs font-semibold text-amber-400 hover:text-amber-300 ${
           reconnectOnly ? '' : 'ml-auto'
         }`}
+        onRepaired={() => setRepairNonce((n) => n + 1)}
       />
     );
   }

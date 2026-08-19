@@ -19,6 +19,8 @@ export function UsageStrip({ tasks }: { tasks: readonly Task[] | null }) {
   const [snapshots, setSnapshots] = useState<UsageWindowSnapshot[] | null>(null);
   const [allowanceKeys, setAllowanceKeys] = useState<Record<string, string> | undefined>(undefined);
   const [now, setNow] = useState(() => Date.now());
+  /** Bumped when a repair completes in this tab — see UsageReconnectAction's onRepaired. */
+  const [repairNonce, setRepairNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,7 +53,7 @@ export function UsageStrip({ tasks }: { tasks: readonly Task[] | null }) {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onVisible);
     };
-  }, []);
+  }, [repairNonce]);
 
   // Only drives the relative reset labels ("resets 19:30"), so a slow tick is plenty.
   useEffect(() => {
@@ -87,6 +89,7 @@ export function UsageStrip({ tasks }: { tasks: readonly Task[] | null }) {
               providerLabel={null}
               displayName={name}
               className="flex shrink-0 items-center gap-1 font-mono text-xs font-semibold text-amber-400 hover:text-amber-300"
+              onRepaired={() => setRepairNonce((n) => n + 1)}
             />
           );
         }

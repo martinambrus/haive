@@ -349,8 +349,13 @@ export default function CliProvidersPage() {
         },
       }));
       setUsageConnected((s) => ({ ...s, [p.id]: true }));
-      setNeedsReconnect((s) => ({ ...s, [p.id]: false }));
       setUsageCodes((s) => ({ ...s, [p.id]: '' }));
+      // Refetch rather than clearing the badge by hand: the api turns the dead-token row
+      // into `pending` as soon as the new secret lands, so a reload swaps "⚠ usage token
+      // rejected" for "⏳ waiting for usage data" — the honest state until the poller reads
+      // the new token. Flipping it off locally instead just made the warning vanish, which
+      // reads as "nothing is tracking this any more". Same call the login path already makes.
+      void load();
     } catch (err) {
       setUsageStates((s) => ({
         ...s,

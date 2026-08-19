@@ -52,6 +52,7 @@ export function UsageReconnectAction({
   providerLabel,
   displayName,
   className,
+  onRepaired,
 }: {
   providerId: string;
   providerName: CliProviderName | null;
@@ -60,6 +61,16 @@ export function UsageReconnectAction({
   /** Short CLI name for the chip itself ("Codex"), so both surfaces read the same. */
   displayName: string;
   className?: string;
+  /** Refetch `/usage-window` — the repair finished in THIS tab, so nothing else will.
+   *
+   *  Both in-place flows end without a navigation or a focus change, which is what the
+   *  surfaces' other refresh triggers key on, so the prompt sat there for up to a poll
+   *  interval telling the user to redo what they had just done. The api already answers
+   *  `pending` the moment the repair lands (it compares the credential's write time against
+   *  the reading it contradicts), so a plain refetch is the whole fix — do NOT flip the chip
+   *  locally instead: that re-derives server state at the call site, and a repair that did
+   *  not take would then show a spinner that never resolves. */
+  onRepaired?: () => void;
 }) {
   const { requireCliLogin } = useCliLogin();
   const [oauthOpen, setOauthOpen] = useState(false);
@@ -86,6 +97,11 @@ export function UsageReconnectAction({
             providerId,
             providerLabel: providerLabel ?? displayName,
             providerName,
+            // Fires on the modal's 'saved' frame, after the server-side probe has written
+            // auth_status/auth_last_checked_at — the pair the api reads as this CLI's repair
+            // instant. Unconditional: only a PASSING probe counts as a repair there, so an
+            // abandoned login just refetches the same prompt.
+            onComplete: () => onRepaired?.(),
           });
         }}
         className={className}
@@ -107,6 +123,7 @@ export function UsageReconnectAction({
           providerId={providerId}
           providerLabel={providerLabel ?? displayName}
           onClose={() => setOauthOpen(false)}
+          onReconnected={() => onRepaired?.()}
         />
       )}
     </>
