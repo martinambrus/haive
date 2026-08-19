@@ -496,17 +496,30 @@ export function isCostMetered(name: CliProviderName): boolean {
 }
 
 /** The effective cost basis for an invocation given its provider's auth mode.
- *  A metered backend bills real per-token money ONLY under api_key auth; under a
- *  flat subscription plan the CLI still reports a notional (Anthropic-price)
- *  costUsd, so classify it as 'subscription' — token-only, no real $. All other
- *  bases are auth-mode-independent and pass through unchanged. Equivalent to the
- *  SQL cost filters (`name in <metered> and auth_mode = 'api_key'`). */
+ *  A per-token backend bills real money ONLY under api_key auth; under a flat plan
+ *  the tokens are already paid for, so classify the invocation as 'subscription' —
+ *  token-only, no real $.
+ *
+ *  BOTH per-token bases demote, and for the same reason: 'metered' (the vendor's own
+ *  CLI billing its own vendor) and 'estimate' (the claude binary pointed at a
+ *  non-Anthropic endpoint — zai / muse / openrouter, whose real rates Haive computes
+ *  from its own feeds). A GLM coding plan is as flat a fee as a Claude Max plan;
+ *  while 'estimate' passed through, those computed per-token dollars were summed as
+ *  real spend nobody was ever charged. 'local' and 'subscription' are auth-mode
+ *  independent and pass through unchanged.
+ *
+ *  NOT the same test as the SQL legacy-cost filters (`name in <metered> and
+ *  auth_mode = ...`), and no longer equivalent to them: those read a CLI-REPORTED
+ *  total, which is only usable from a metered CLI, while this classifies the
+ *  invocation itself however it was priced. */
 export function resolveCostBasis(
   name: CliProviderName,
   authMode: AuthMode,
 ): CliProviderMetadata['costBasis'] {
   const base = CLI_PROVIDER_CATALOG[name].costBasis;
-  if (base === 'metered' && authMode === 'subscription') return 'subscription';
+  if ((base === 'metered' || base === 'estimate') && authMode === 'subscription') {
+    return 'subscription';
+  }
   return base;
 }
 

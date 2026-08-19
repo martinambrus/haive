@@ -14,7 +14,7 @@
  */
 
 import type { AuthMode, CliProviderName } from '../types/index.js';
-import { resolveCostBasis } from './catalog.js';
+import { getCliProviderMetadata, resolveCostBasis } from './catalog.js';
 
 /** USD per single token, per bucket. Every bucket is independently nullable: a
  *  feed may price input/output and say nothing about caching, and a null must stay
@@ -389,7 +389,10 @@ export interface CostDecision {
  *  Subscription auth short-circuits to non-billable regardless: a Pro/Max plan is a
  *  flat fee and the binary still emits a notional per-token total, which is the
  *  double-count this guard exists to prevent (see the AUTH-MODE COST GATING note in
- *  the token-telemetry work). */
+ *  the token-telemetry work). Since `resolveCostBasis` demotes 'estimate' too, that
+ *  now covers a wrapper on a flat plan (a GLM coding plan): it stays priced — from
+ *  Haive's own feed rate, never from the binary's Anthropic-table total — but the
+ *  dollars are the subscription counterfactual, not spend. */
 export function resolveCostDecision(input: {
   provider: CliProviderName;
   authMode: AuthMode;
@@ -398,11 +401,20 @@ export function resolveCostDecision(input: {
   hasReportedCost: boolean;
 }): CostDecision {
   const basis = resolveCostBasis(input.provider, input.authMode);
+  // Whether the CLI's own total prices the backend that actually answered. Read from
+  // the UNRESOLVED catalog basis, not from `basis`: a flat plan demotes the basis
+  // without changing who did the pricing, and the two questions have different
+  // answers for exactly the wrappers this matters for.
+  const cliPricesOwnBackend = getCliProviderMetadata(input.provider).costBasis === 'metered';
   if (basis === 'subscription') {
-    // Priced for observability if we can, but never summed.
+    // Priced for observability if we can, but never summed — this is the number the UI
+    // shows as the subscription counterfactual. `reported` only where the CLI prices its
+    // own backend: on a claude-binary wrapper that total is Anthropic's table applied to
+    // someone else's tokens, and a counterfactual has to be the right alternative price,
+    // not fiction. Where it cannot be priced the answer is 'none', never a 0.
     const source: CostSource = input.hasManualRate
       ? 'manual'
-      : input.hasReportedCost
+      : cliPricesOwnBackend && input.hasReportedCost
         ? 'reported'
         : input.hasFeedRate
           ? 'computed'

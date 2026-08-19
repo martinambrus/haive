@@ -17,6 +17,7 @@ import {
   type LivePriceRow,
   type ModelPriceRates,
 } from '../src/cli-providers/model-pricing.js';
+import { resolveCostBasis } from '../src/cli-providers/catalog.js';
 
 const RATES: ModelPriceRates = {
   inputRate: 5e-6,
@@ -377,11 +378,53 @@ describe('resolveCostDecision', () => {
     ).toEqual({ source: 'manual', billable: false });
   });
 
+  it('treats a flat plan on a claude-binary wrapper as non-billable too', () => {
+    // A GLM/Meta/OpenRouter coding plan is as flat a fee as a Claude Max plan. Before the
+    // 'estimate' basis demoted, these computed dollars were summed as real spend.
+    for (const provider of ['zai', 'muse', 'openrouter'] as const) {
+      expect(
+        resolveCostDecision({
+          ...base,
+          provider,
+          authMode: 'subscription',
+          hasReportedCost: true,
+          hasFeedRate: true,
+        }),
+      ).toEqual({ source: 'computed', billable: false });
+    }
+  });
+
+  it('never prices a flat-plan wrapper from the binary total, even as a counterfactual', () => {
+    // The wrapper's reported total is Anthropic's table applied to someone else's tokens.
+    // With no feed rate there is no honest alternative price, so it is unpriced — a
+    // counterfactual built from fiction is worse than an admitted gap.
+    expect(
+      resolveCostDecision({
+        ...base,
+        provider: 'zai',
+        authMode: 'subscription',
+        hasReportedCost: true,
+      }),
+    ).toEqual({ source: 'none', billable: false });
+  });
+
   it('reports nothing usable as unpriced rather than as zero spend', () => {
     expect(resolveCostDecision({ ...base, provider: 'codex', authMode: 'api_key' })).toEqual({
       source: 'none',
       billable: false,
     });
+  });
+});
+
+describe('resolveCostBasis', () => {
+  it('demotes both per-token bases under a flat plan, and nothing else', () => {
+    expect(resolveCostBasis('claude-code', 'subscription')).toBe('subscription');
+    expect(resolveCostBasis('zai', 'subscription')).toBe('subscription');
+    expect(resolveCostBasis('claude-code', 'api_key')).toBe('metered');
+    expect(resolveCostBasis('zai', 'api_key')).toBe('estimate');
+    // Auth-mode independent: local inference stays local, a flat-plan CLI stays flat.
+    expect(resolveCostBasis('ollama', 'subscription')).toBe('local');
+    expect(resolveCostBasis('amp', 'api_key')).toBe('subscription');
   });
 });
 
