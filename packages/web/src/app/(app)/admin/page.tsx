@@ -169,7 +169,7 @@ export default function AdminPage() {
     agentWeightMb: '0',
     browserWeightMb: '0',
     agentFloor: '0',
-    agentReserveMaxHoldMinutes: '10',
+    agentReserveMaxHoldMinutes: '3',
     agentPreemptionMinRunMinutes: '5',
     runtimePreemptionMaxWaitMinutes: '10',
   });
@@ -1078,7 +1078,7 @@ export default function AdminPage() {
               }
               className="h-4 w-4"
             />
-            Reserve CLI slots for tasks with a live environment
+            Reserve CLI slots for tasks with a live environment (an upvoted task overtakes)
           </label>
           {/* Preemption is the only lever that moves an ALREADY-RUNNING agent, so it is the one
               part of vote scoring that can destroy work — its own switch, not folded into the

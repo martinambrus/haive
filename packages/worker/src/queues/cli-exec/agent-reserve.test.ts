@@ -21,6 +21,8 @@ function decide(over: Partial<AgentReserveInput> = {}): 'allow' | 'defer' {
     waitingHolderJobs: 1,
     heldForMs: 0,
     maxHoldMs: TEN_MIN,
+    voteScore: 0,
+    maxHolderVoteScore: 0,
     ...over,
   });
 }
@@ -62,6 +64,38 @@ describe('agentReserveDecision', () => {
     // crawling and one that never yields at all.
     expect(decide({ maxHoldMs: 0, heldForMs: 0 })).toBe('defer');
     expect(decide({ maxHoldMs: 0, heldForMs: TEN_MIN * 100 })).toBe('defer');
+  });
+
+  it('yields while nobody has voted, so the vote term is inert by default', () => {
+    // score 0 everywhere must reproduce the pre-vote behaviour exactly, the same property
+    // fairPriority holds. Anything else makes rollout a silent behaviour change.
+    expect(decide({ voteScore: 0, maxHolderVoteScore: 0 })).toBe('defer');
+  });
+
+  it('lets an explicit vote outrank the runner holders', () => {
+    // The gap this closes: a vote re-prices the QUEUE, and this gate then handed the slot away
+    // regardless — so an upvoted runner-less task sat behind neutral holders until the escape
+    // hatch fired. Measured on a live host: 12.6, 14.1 and 21.9 minutes of queue wait for
+    // +1 onboarding tasks while unvoted DDEV holders took every slot.
+    expect(decide({ voteScore: 1, maxHolderVoteScore: 0 })).toBe('allow');
+  });
+
+  it('treats a downvoted holder as outranked by a neutral task', () => {
+    // Downvoting the background work is the other half of the same lever.
+    expect(decide({ voteScore: 0, maxHolderVoteScore: -1 })).toBe('allow');
+  });
+
+  it('needs a STRICT win — an equal or higher holder still gets the slot', () => {
+    // A tie states no preference between the two, so the committed-RAM argument decides.
+    expect(decide({ voteScore: 1, maxHolderVoteScore: 1 })).toBe('defer');
+    expect(decide({ voteScore: 1, maxHolderVoteScore: 2 })).toBe('defer');
+    expect(decide({ voteScore: -1, maxHolderVoteScore: 0 })).toBe('defer');
+  });
+
+  it('never lets the vote term gate a holder or an idle pool', () => {
+    // Both earlier allows must survive a losing vote — a holder is never gated by its own rule.
+    expect(decide({ holdsRunner: true, voteScore: -5, maxHolderVoteScore: 5 })).toBe('allow');
+    expect(decide({ holderCount: 0, waitingHolderJobs: 0, voteScore: -5 })).toBe('allow');
   });
 
   it('checks the switch before anything else', () => {

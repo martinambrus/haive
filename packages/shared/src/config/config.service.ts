@@ -488,7 +488,10 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.RUNTIME_BROWSER_WEIGHT_MB]: '0',
   [CONFIG_KEYS.AGENT_FLOOR]: '0',
   [CONFIG_KEYS.AGENT_RESERVE_ENABLED]: 'true',
-  [CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES]: '10',
+  // 3, not 10: the hold is only HALF the wait. A released job still has to wait for a slot to
+  // free, and that term is invisible in the knob — measured with the hold at 10, runner-less
+  // invocations waited 12.6, 14.1 and 21.9 minutes. 3 bounds the total to roughly one agent run.
+  [CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES]: '3',
   [CONFIG_KEYS.AGENT_PREEMPTION_ENABLED]: 'true',
   [CONFIG_KEYS.AGENT_PREEMPTION_MIN_RUN_MINUTES]: '5',
   [CONFIG_KEYS.RUNTIME_PREEMPTION_ENABLED]: 'true',

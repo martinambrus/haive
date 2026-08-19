@@ -469,7 +469,7 @@ adminRoutes.get('/config/runtime-limits', async (c) => {
     configService.getNumber(CONFIG_KEYS.RUNTIME_BROWSER_WEIGHT_MB, 0),
     configService.getNumber(CONFIG_KEYS.AGENT_FLOOR, 0),
     configService.getBoolean(CONFIG_KEYS.AGENT_RESERVE_ENABLED, true),
-    configService.getNumber(CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES, 10),
+    configService.getNumber(CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES, 3),
     configService.getBoolean(CONFIG_KEYS.AGENT_PREEMPTION_ENABLED, true),
     configService.getNumber(CONFIG_KEYS.AGENT_PREEMPTION_MIN_RUN_MINUTES, 5),
     configService.getBoolean(CONFIG_KEYS.RUNTIME_PREEMPTION_ENABLED, true),

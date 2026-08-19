@@ -1,5 +1,5 @@
 import { DelayedError, type Job, type JobType } from 'bullmq';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
@@ -55,6 +55,18 @@ export interface AgentReserveInput {
    *  (a paused task, a task over its per-task cap) or not yet enqueued at all — yielding to those
    *  would leave the slot idle with nothing able to take it. */
   waitingHolderJobs: number;
+  /** This task's vote score, and the highest score among the runner holders.
+   *
+   *  A vote is the operator stating outright which task should run first; holding a runner is
+   *  this module INFERRING it from committed RAM. The explicit statement wins — but only a
+   *  strict one, because equal scores say nothing and there the RAM argument still decides.
+   *  Read live at pickup, never carried on the job, for the same reason the whole gate is at
+   *  pickup: a vote lands long after `queue.add` froze the job's priority.
+   *
+   *  Both default to 0, so on an install where nobody has voted this term is inert and the
+   *  reserve behaves exactly as it did before it existed. */
+  voteScore: number;
+  maxHolderVoteScore: number;
   /** How long this invocation has already been held here. */
   heldForMs: number;
   /** Escape hatch: hold no longer than this. Without it a busy runtime fleet starves runner-less
@@ -69,6 +81,8 @@ export function agentReserveDecision(input: AgentReserveInput): 'allow' | 'defer
   if (!input.enabled) return 'allow';
   if (input.holderCount === 0) return 'allow';
   if (input.holdsRunner) return 'allow';
+  // Explicit intent over inferred intent. Strictly greater: a tie is not a statement.
+  if (input.voteScore > input.maxHolderVoteScore) return 'allow';
   if (input.waitingHolderJobs === 0) return 'allow';
   if (input.maxHoldMs > 0 && input.heldForMs >= input.maxHoldMs) return 'allow';
   return 'defer';
@@ -163,16 +177,57 @@ export async function countWaitingHolderJobs(
  *  The window is short enough that a decision can only ever be one beat stale, and every mistake it
  *  can make self-corrects on the next 10s slice. */
 const CONTEXT_TTL_MS = 2000;
-let cachedContext: { at: number; holders: Set<string>; waitingHolderJobs: number } | null = null;
+let cachedContext: {
+  at: number;
+  holders: Set<string>;
+  waitingHolderJobs: number;
+  maxHolderVoteScore: number;
+} | null = null;
+
+/** Highest vote score among the tasks holding a runner. Its own try/catch rather than the
+ *  caller's: holder ids come from a docker LABEL, so a single malformed value fails the uuid
+ *  cast, and inside reserveContext's catch that would disable the ENTIRE gate rather than this
+ *  one term. Falling back to 0 claims only "no holder is boosted", whose worst case is letting
+ *  an upvoted runner-less job through. */
+async function readMaxHolderVoteScore(db: Database, holders: ReadonlySet<string>): Promise<number> {
+  try {
+    const [row] = await db
+      .select({ max: sql<number | null>`max(${schema.tasks.voteScore})` })
+      .from(schema.tasks)
+      .where(inArray(schema.tasks.id, [...holders]));
+    return row?.max ?? 0;
+  } catch (err) {
+    log.warn({ err }, 'agent reserve: holder vote read failed; treating holders as unvoted');
+    return 0;
+  }
+}
+
+/** This job's task score. One indexed primary-key read per pickup — cheap beside the docker
+ *  call the context memo exists to amortise, and it cannot join that memo: it is per job, and a
+ *  vote cast a second ago has to count. */
+async function readTaskVoteScore(db: Database, taskId: string): Promise<number> {
+  const [row] = await db
+    .select({ voteScore: schema.tasks.voteScore })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId))
+    .limit(1);
+  return row?.voteScore ?? 0;
+}
 
 async function reserveContext(
+  db: Database,
   now: number,
-): Promise<{ holders: Set<string>; waitingHolderJobs: number }> {
+): Promise<{ holders: Set<string>; waitingHolderJobs: number; maxHolderVoteScore: number }> {
   if (cachedContext && now - cachedContext.at < CONTEXT_TTL_MS) return cachedContext;
   const holders = await runnerHoldingTaskIds();
-  const waitingHolderJobs =
-    holders.size === 0 ? 0 : await countWaitingHolderJobs(getCliExecQueue(), holders);
-  cachedContext = { at: now, holders, waitingHolderJobs };
+  const [waitingHolderJobs, maxHolderVoteScore] =
+    holders.size === 0
+      ? [0, 0]
+      : await Promise.all([
+          countWaitingHolderJobs(getCliExecQueue(), holders),
+          readMaxHolderVoteScore(db, holders),
+        ]);
+  cachedContext = { at: now, holders, waitingHolderJobs, maxHolderVoteScore };
   return cachedContext;
 }
 
@@ -216,7 +271,7 @@ export async function enforceRuntimeHolderReserve(
     const [reserve, governor, holdMinutes] = await Promise.all([
       configService.getBoolean(CONFIG_KEYS.AGENT_RESERVE_ENABLED, true),
       resourceLimitsEnabled(),
-      configService.getNumber(CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES, 10),
+      configService.getNumber(CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES, 3),
     ]);
     enabled = reserve && governor;
     maxHoldMs = Math.max(0, Math.floor(holdMinutes)) * 60_000;
@@ -229,9 +284,11 @@ export async function enforceRuntimeHolderReserve(
   let holdsRunner: boolean;
   let waitingHolderJobs: number;
   let heldForMs: number;
+  let voteScore: number;
+  let maxHolderVoteScore: number;
   try {
     const now = Date.now();
-    ({ holders, waitingHolderJobs } = await reserveContext(now));
+    ({ holders, waitingHolderJobs, maxHolderVoteScore } = await reserveContext(db, now));
     holdsRunner = holders.has(payload.taskId);
     // Cost guard, not a second rule: agentReserveDecision would allow on either of these anyway,
     // and the hold read is pointless once it is settled.
@@ -239,6 +296,7 @@ export async function enforceRuntimeHolderReserve(
       void clearHold(payload.invocationId);
       return;
     }
+    voteScore = await readTaskVoteScore(db, payload.taskId);
     heldForMs = await readHoldAgeMs(payload.invocationId, now);
   } catch (err) {
     log.warn({ err, taskId: payload.taskId }, 'agent reserve check failed; allowing job');
@@ -252,8 +310,21 @@ export async function enforceRuntimeHolderReserve(
     waitingHolderJobs,
     heldForMs,
     maxHoldMs,
+    voteScore,
+    maxHolderVoteScore,
   });
   if (decision === 'allow') {
+    if (voteScore > maxHolderVoteScore && waitingHolderJobs > 0) {
+      log.info(
+        {
+          taskId: payload.taskId,
+          invocationId: payload.invocationId,
+          voteScore,
+          maxHolderVoteScore,
+        },
+        'agent reserve: vote outranks the runner holders; not yielding',
+      );
+    }
     if (heldForMs > 0) {
       log.info(
         { taskId: payload.taskId, invocationId: payload.invocationId, heldForMs, maxHoldMs },
