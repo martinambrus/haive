@@ -735,12 +735,20 @@ export async function executeCliSpec(
     // result.stdout only when no prose streamed at all — preserving prior behavior
     // and the provider-fatal rawOutput tail scan for that case.
     const partialProse = proseForClean(collector.getAssistantText(), result.stdout);
+    // A run-level `is_error` result carries the binary's own error text ("API Error:
+    // The response stopped arriving."), which is strictly better than what
+    // formatCliErrorMessage would produce here: with stderr empty it falls back to
+    // the stdout tail, and for a stream-json CLI that is 2000 chars of raw NDJSON.
+    // Still below result.error, so a Haive-inflicted kill keeps its headline (the
+    // timeout ladder reads it).
+    const apiErrorReason = collector.hadResultError() ? reason : null;
     return {
       exitCode: result.exitCode,
       rawOutput: partialProse,
       parsedOutput: null,
       errorMessage:
         result.error ??
+        apiErrorReason ??
         formatCliErrorMessage(result.exitCode, result.stderr, result.stdout, undefined) ??
         reason,
       // Tokens were burned even without a result event (e.g. error_max_turns).

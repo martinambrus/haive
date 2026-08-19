@@ -4,6 +4,8 @@ import {
   classifyStreamFailure,
   isOutputTruncationMessage,
   OUTPUT_TRUNCATION_HEADLINE,
+  isTransientCliFailure,
+  classifyProviderFatal,
 } from '../src/queues/cli-exec/failure-class.js';
 
 function feed(collector: ReturnType<typeof createStreamJsonCollector>, events: unknown[]): void {
@@ -431,5 +433,97 @@ describe('createStreamJsonCollector.getModelIdentity', () => {
       { type: 'result', subtype: 'error_during_execution', error: 'Out of Credits' },
     ]);
     expect(c.getModelIdentity()).toBeNull();
+  });
+});
+
+describe('createStreamJsonCollector: run-level is_error on a "success" subtype', () => {
+  // Both payloads are the REAL result events from ollama.com stalling mid-response
+  // on nemotron-3-ultra:cloud (invocations cdf09b04 and 0cf1adec). The binary reports
+  // an aborted stream as subtype "success" with is_error true and the error text in
+  // `result` — so subtype alone cannot be trusted to mean the run produced an answer.
+  const STALLED_RESULT = {
+    type: 'result',
+    subtype: 'success',
+    is_error: true,
+    terminal_reason: 'api_error',
+    result: 'API Error: The response stopped arriving. The response above may be incomplete.',
+  };
+
+  it('does NOT return the error text as the model answer', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [{ type: 'system', subtype: 'init' }, STALLED_RESULT]);
+    expect(c.getResult()).toBeNull();
+    expect(c.hadResultError()).toBe(true);
+  });
+
+  it('reports the binary error text and terminal_reason as the failure reason', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [{ type: 'system', subtype: 'init' }, STALLED_RESULT]);
+    const reason = c.getNoResultReason();
+    expect(reason).toMatch(/response stopped arriving/);
+    expect(reason).toMatch(/api_error/);
+  });
+
+  it('avoids the transient "stream ended prematurely" wording that triggers re-dispatch', () => {
+    // TRANSIENT_CLI_FAILURE_RE means "killed before it got its chance", which would
+    // re-dispatch. A provider error got its chance and failed, so it must not match.
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init' },
+      { ...STALLED_RESULT, result: 'API Error: The operation timed out.' },
+    ]);
+    const reason = c.getNoResultReason()!;
+    expect(isTransientCliFailure({ exitCode: 1, errorMessage: reason })).toBe(false);
+  });
+
+  it('still treats a genuine success (is_error false) as a result', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init' },
+      { type: 'result', subtype: 'success', is_error: false, result: '{"answer":1}' },
+    ]);
+    expect(c.getResult()).toBe('{"answer":1}');
+    expect(c.hadResultError()).toBe(false);
+    expect(c.getNoResultReason()).toBeNull();
+  });
+
+  it('ignores is_error on tool_result blocks — only the result event counts', () => {
+    // A successful claude-code run legitimately carries failed tool calls; keying on
+    // is_error anywhere in the stream would fail every run that had one (verified on
+    // invocation f5933ed9, which succeeded with several such blocks).
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init' },
+      {
+        type: 'user',
+        message: {
+          content: [{ type: 'tool_result', is_error: true, content: 'file not found' }],
+        },
+      },
+      { type: 'result', subtype: 'success', is_error: false, result: 'done' },
+    ]);
+    expect(c.getResult()).toBe('done');
+    expect(c.hadResultError()).toBe(false);
+  });
+
+  it('keeps the provider error text intact so classifyProviderFatal still matches', () => {
+    // 92 historical invocations reached the correct 'rate_limit' classification only
+    // because the provider's wording ("session limit") was in the haystack. The reason
+    // string must carry that text verbatim or routing this event to the no-result
+    // branch would silently downgrade them to unclassified failures.
+    const c = createStreamJsonCollector();
+    feed(c, [
+      { type: 'system', subtype: 'init' },
+      {
+        type: 'result',
+        subtype: 'success',
+        is_error: true,
+        terminal_reason: 'api_error',
+        result: "You've hit your session limit · resets 7:30pm (UTC)",
+      },
+    ]);
+    const reason = c.getNoResultReason();
+    expect(reason).toContain("You've hit your session limit");
+    expect(classifyProviderFatal(1, reason, c.getAssistantText())).toBe('rate_limit');
   });
 });

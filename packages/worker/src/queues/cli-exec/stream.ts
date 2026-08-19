@@ -16,6 +16,10 @@ interface StreamJsonCollector {
   isStreamJson: () => boolean;
   /** Human-readable reason when the stream ended without a success result. */
   getNoResultReason: () => string | null;
+  /** True when the result event set the run-level `is_error` flag. Lets the caller
+   *  prefer getNoResultReason() (the binary's own error text) over the stdout tail,
+   *  which for a stream-json CLI is raw NDJSON. */
+  hadResultError: () => boolean;
   /** Concatenation of every text block from assistant events. Lets us cross-check
    *  the result event's payload against the deltas claude-code actually streamed. */
   getAssistantText: () => string;
@@ -54,6 +58,13 @@ export function createStreamJsonCollector(
   let assistantText = '';
   let lastResultSubtype: string | null = null;
   let lastResultError: string | null = null;
+  // Run-level failure reported by the result event's `is_error` flag, plus the
+  // text and terminal_reason that came with it. Tracked separately from
+  // lastResultSubtype because the two disagree: a mid-stream API abort is
+  // subtype "success" with is_error true (see the result handler).
+  let resultIsError = false;
+  let resultErrorText: string | null = null;
+  let resultTerminalReason: string | null = null;
   let resultUsage: CliTokenUsage | null = null;
   // Live fallback (mid-stream snapshots, before the authoritative `result` event
   // arrives): sum fresh input/output across assistant turns. Cache is asymmetric:
@@ -141,7 +152,30 @@ export function createStreamJsonCollector(
       if (typeof event.error === 'string' && event.error.trim()) {
         lastResultError = event.error.trim();
       }
-      if (subtype === 'success' && typeof event.result === 'string') {
+      // `is_error` is the RUN-LEVEL outcome flag and is the authoritative failure
+      // signal; `subtype` is not. The claude binary reports a mid-stream API abort
+      // as subtype "success" WITH is_error true, putting the error text in `result`.
+      // MEASURED against ollama.com stalling mid-response:
+      //   {"subtype":"success","is_error":true,"terminal_reason":"api_error",
+      //    "result":"API Error: The response stopped arriving. ..."}
+      // Keying the success branch on subtype alone stored that error string as the
+      // model's ANSWER (and, on the exit-0 variant, fed it to the step's parser as a
+      // real reply) while dropping providerErrorScan, blinding classifyProviderFatal.
+      //
+      // Read ONLY from the `result` event: `is_error` also appears on tool_result
+      // blocks inside `user` events, where it means one tool call failed and says
+      // nothing about the run — a successful claude-code run legitimately carries
+      // several of those (verified on f5933ed9, is_error:false at the result event).
+      if (event.is_error === true) resultIsError = true;
+      if (typeof event.terminal_reason === 'string' && event.terminal_reason.trim()) {
+        resultTerminalReason = event.terminal_reason.trim();
+      }
+      // On a failed run `result` holds the error text, not an answer — keep it for
+      // the reason message rather than letting it become the result payload.
+      if (resultIsError && typeof event.result === 'string' && event.result.trim()) {
+        resultErrorText = event.result.trim();
+      }
+      if (subtype === 'success' && !resultIsError && typeof event.result === 'string') {
         resultText = event.result;
         return;
       }
@@ -240,10 +274,25 @@ export function createStreamJsonCollector(
         const base = `LLM stream ended with result subtype "${lastResultSubtype}"`;
         return lastResultError ? `${base}: ${lastResultError}` : base;
       }
+      // Result event flagged is_error while carrying a "success" subtype (the
+      // mid-stream API abort above). Report the binary's own error text: it is far
+      // more specific than the generic fallback below, and — load-bearing — that
+      // fallback's "stream ended prematurely" wording matches
+      // TRANSIENT_CLI_FAILURE_RE, which would misread a provider error as a
+      // killed-run and silently re-dispatch it.
+      if (resultIsError) {
+        const detail = resultErrorText ?? lastResultError;
+        const where = resultTerminalReason ? ` (terminal_reason "${resultTerminalReason}")` : '';
+        const base = `LLM run reported a failure${where}`;
+        return detail ? `${base}: ${detail}` : base;
+      }
       if (lastRateLimit?.overageStatus === 'rejected' && lastRateLimit.isUsingOverage) {
         return `LLM blocked by rate limit (${lastRateLimit.overageDisabledReason ?? 'overage rejected'})`;
       }
       return 'LLM emitted no result event (stream ended prematurely — likely timeout, session abort, or quota rejection)';
+    },
+    hadResultError(): boolean {
+      return resultIsError;
     },
     getAssistantText(): string {
       return assistantText;
