@@ -252,6 +252,56 @@ async function markWaiting(db: Database, invocationId: string, holders: number):
     );
 }
 
+/** Would the reserve let ANY of these tasks take a free slot right now?
+ *
+ *  The agent-preemption sweeper's question. Evicting a running agent is only worth its cost if
+ *  the freed slot actually reaches the task the eviction was for, so the sweeper has to know
+ *  what this gate would do. It used to answer that with its own hand-rolled copy of the yield
+ *  rule — which was faithful right up until the rule gained the vote term and then silently
+ *  went stale, blocking every eviction the vote was supposed to enable. Exactly the drift
+ *  `fair-priority.ts` was factored out to prevent: one implementation, two callers.
+ *
+ *  `heldForMs` is deliberately 0. A candidate already near its escape hatch gets released BY
+ *  the hatch a moment later, and destroying a running agent to hurry that along is the trade
+ *  this guard exists to refuse — so only the structural allows (and the vote) can answer yes.
+ *
+ *  Fail-open (true) on any read failure, preserving the sweeper's own previous behaviour: a
+ *  docker or config hiccup must not quietly disable preemption. Every other eviction guard —
+ *  strict outscoring, the min-run age, one victim per pass — still applies. */
+export async function reserveAllowsAnyOf(
+  db: Database,
+  candidates: ReadonlyArray<{ taskId: string; voteScore: number }>,
+): Promise<boolean> {
+  if (candidates.length === 0) return false;
+  try {
+    const [reserve, governor] = await Promise.all([
+      configService.getBoolean(CONFIG_KEYS.AGENT_RESERVE_ENABLED, true),
+      resourceLimitsEnabled(),
+    ]);
+    const enabled = reserve && governor;
+    // With the reserve off nothing yields, so every candidate can run. The hand-rolled copy
+    // never checked the switch and would still have consulted holders here.
+    if (!enabled) return true;
+    const { holders, waitingHolderJobs, maxHolderVoteScore } = await reserveContext(db, Date.now());
+    return candidates.some(
+      (c) =>
+        agentReserveDecision({
+          enabled,
+          holderCount: holders.size,
+          holdsRunner: holders.has(c.taskId),
+          waitingHolderJobs,
+          heldForMs: 0,
+          maxHoldMs: 0,
+          voteScore: c.voteScore,
+          maxHolderVoteScore,
+        }) === 'allow',
+    );
+  } catch (err) {
+    log.warn({ err }, 'reserve pre-check failed; assuming a candidate can take the slot');
+    return true;
+  }
+}
+
 /** The gate. Resolves to nothing when the job may run; throws DelayedError when it yielded.
  *
  *  Fail-open on every error, matching its siblings — a docker hiccup, an unavailable config or a

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { preemptionDecision, type RunningAgent } from './agent-preemption.js';
+import { boostersOver, preemptionDecision, type RunningAgent } from './agent-preemption.js';
 
 const NOW = 1_800_000_000_000;
 const MIN_AGE = 5 * 60_000;
@@ -101,5 +101,31 @@ describe('preemptionDecision', () => {
   it('uses the BEST queued score, not the first', () => {
     expect(decide({ queuedScores: [-1, 0, 4], running: [agent({ voteScore: 2 })] })).not.toBeNull();
     expect(decide({ queuedScores: [-1, 0, 1], running: [agent({ voteScore: 2 })] })).toBeNull();
+  });
+});
+
+describe('boostersOver', () => {
+  const scores = new Map([
+    ['a', 2],
+    ['b', 0],
+    ['c', -1],
+  ]);
+  const queued = new Set(['a', 'b', 'c', 'd']);
+
+  it('keeps only the queued tasks that STRICTLY outscore the victim', () => {
+    expect(boostersOver(queued, scores, 0).map((c) => c.taskId)).toEqual(['a']);
+  });
+
+  it('treats a queued task with no score row as 0, not as excluded', () => {
+    // 'd' is queued but absent from the map. An unvoted task is neutral, and at victim -1 a
+    // neutral task IS a booster — dropping it would make the reserve pre-check miss real demand.
+    const ids = boostersOver(queued, scores, -1)
+      .map((c) => c.taskId)
+      .sort();
+    expect(ids).toEqual(['a', 'b', 'd']);
+  });
+
+  it('is empty when nothing outranks the victim, so no eviction is considered at all', () => {
+    expect(boostersOver(queued, scores, 2)).toEqual([]);
   });
 });

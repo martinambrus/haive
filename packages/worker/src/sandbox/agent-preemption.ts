@@ -10,9 +10,8 @@ import {
   type CliExecJobPayload,
 } from '@haive/shared';
 import { getCliExecQueue } from '../queues/cli-exec/_shared.js';
-import { countWaitingHolderJobs, QUEUED_STATES } from '../queues/cli-exec/agent-reserve.js';
+import { QUEUED_STATES, reserveAllowsAnyOf } from '../queues/cli-exec/agent-reserve.js';
 import { markPreempted } from '../queues/cli-exec/preempt-mark.js';
-import { runnerHoldingTaskIds } from './runtime-admission.js';
 
 const exec = promisify(execFile);
 const log = logger.child({ module: 'agent-preemption' });
@@ -68,6 +67,19 @@ export function preemptionDecision(input: PreemptionInput): RunningAgent | null 
     if (r.voteScore !== best.voteScore) return r.voteScore < best.voteScore ? r : best;
     return r.startedAtMs > best.startedAtMs ? r : best;
   });
+}
+
+/** The queued tasks that strictly outscore the victim — the ones an eviction would be FOR.
+ *  Strict, matching preemptionDecision's own rule: an equal score is first-come, never a
+ *  reason to destroy someone's work. */
+export function boostersOver(
+  queuedTaskIds: ReadonlySet<string>,
+  scores: ReadonlyMap<string, number>,
+  victimScore: number,
+): Array<{ taskId: string; voteScore: number }> {
+  return [...queuedTaskIds]
+    .map((taskId) => ({ taskId, voteScore: scores.get(taskId) ?? 0 }))
+    .filter((c) => c.voteScore > victimScore);
 }
 
 export interface AgentPreemptionSweeperOptions {
@@ -150,7 +162,9 @@ export class AgentPreemptionSweeper {
     // Would the freed slot actually reach a booster? The runtime-holder reserve defers a
     // runner-less task's job at pickup, so evicting for one would destroy work and hand the slot
     // to somebody else entirely. Only the boosters that outscore this victim matter.
-    if (!(await this.aBoosterCanRun(queuedTaskIds, scores, victim.voteScore))) {
+    if (
+      !(await reserveAllowsAnyOf(this.db, boostersOver(queuedTaskIds, scores, victim.voteScore)))
+    ) {
       log.debug(
         { victim: victim.invocationId },
         'preemption skipped: every higher-voted task would be deferred by the runtime reserve',
@@ -232,32 +246,6 @@ export class AgentPreemptionSweeper {
       .where(inArray(schema.tasks.id, taskIds));
     for (const r of rows) out.set(r.id, r.voteScore);
     return out;
-  }
-
-  /** True when at least one task that outscores the victim would actually be allowed to start.
-   *  A task holding a live runner always can; a runner-less one only when no holder has queued
-   *  demand (the runtime-holder reserve's rule, read from the same source of truth). */
-  private async aBoosterCanRun(
-    queuedTaskIds: ReadonlySet<string>,
-    scores: ReadonlyMap<string, number>,
-    victimScore: number,
-  ): Promise<boolean> {
-    const boosters = [...queuedTaskIds].filter((id) => (scores.get(id) ?? 0) > victimScore);
-    if (boosters.length === 0) return false;
-    let holders: ReadonlySet<string>;
-    try {
-      holders = await runnerHoldingTaskIds();
-    } catch (err) {
-      // Cannot read the pool — assume the booster can run rather than blocking preemption on a
-      // docker hiccup. The eviction is still bounded by every other guard.
-      log.warn({ err }, 'runner-holder lookup failed; assuming the booster can take the slot');
-      return true;
-    }
-    if (holders.size === 0) return true; // the reserve never fires with no holders
-    if (boosters.some((id) => holders.has(id))) return true;
-    // Every booster is runner-less. It can only run if no holder has queued demand.
-    const holderDemand = await countWaitingHolderJobs(getCliExecQueue(), holders);
-    return holderDemand === 0;
   }
 
   /** Force-remove the ONE container running this invocation. Keyed on the `haive.invocation.id`

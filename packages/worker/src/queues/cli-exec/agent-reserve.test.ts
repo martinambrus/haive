@@ -98,6 +98,16 @@ describe('agentReserveDecision', () => {
     expect(decide({ holderCount: 0, waitingHolderJobs: 0, voteScore: -5 })).toBe('allow');
   });
 
+  it('answers the preemption pre-check shape, where only the vote can flip it', () => {
+    // reserveAllowsAnyOf passes heldForMs 0 / maxHoldMs 0 on purpose: a candidate near its
+    // escape hatch is released BY the hatch a moment later, and killing a running agent to
+    // hurry that along is the trade the guard refuses. So on this input shape the escape
+    // clause can never answer 'allow' — only the structural allows and the vote can.
+    const preCheck = { heldForMs: 0, maxHoldMs: 0 } as const;
+    expect(decide({ ...preCheck, voteScore: 0, maxHolderVoteScore: 0 })).toBe('defer');
+    expect(decide({ ...preCheck, voteScore: 1, maxHolderVoteScore: 0 })).toBe('allow');
+  });
+
   it('checks the switch before anything else', () => {
     // A disabled reserve must not depend on a docker read having succeeded.
     expect(decide({ enabled: false, holderCount: 0, holdsRunner: false })).toBe('allow');
