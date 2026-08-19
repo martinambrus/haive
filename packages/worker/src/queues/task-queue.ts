@@ -1019,6 +1019,19 @@ async function handleResult(
           updatedAt: new Date(),
         })
         .where(eq(schema.tasks.id, ctx.taskId));
+      // Assert the parked status on the ROW first. It can still read `running` here, which makes
+      // the park below a silent no-op (markCliParkBegin is guarded on status = waiting_cli): a
+      // CONTINUATION advance re-validates the persisted formValues and flips the row back to
+      // `running` (step-runner.ts), and the mining fan-out barrier then returns waiting_cli
+      // WITHOUT writing the row. So every wave after the first parked unmarked and billed its
+      // whole inter-wave queue wait as WORK instead of idle (observed 2026-08-19 on
+      // 09_5-skill-generation: three step.waiting_cli events, waiting_started_at still null).
+      // The returned status is the authoritative outcome for the step, so write it; guarded to
+      // `running` so a concurrent terminal write is never clobbered.
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'waiting_cli', updatedAt: new Date() })
+        .where(and(eq(schema.taskSteps.id, result.row.id), eq(schema.taskSteps.status, 'running')));
       // Park-begin candidate: the step just entered waiting_cli. If its invocations are still
       // only queued (none running yet — e.g. deferred by the per-task agent cap), stamp the
       // wait as idle; the first invocation to start running folds it back. Guarded/atomic, so
