@@ -33,6 +33,7 @@ import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
 import { IdeSessionReaper } from './sandbox/ide-session-reaper.js';
 import { RuntimeRunnerReaper } from './sandbox/runtime-runner-reaper.js';
 import { AgentPreemptionSweeper } from './sandbox/agent-preemption.js';
+import { CliPriorityDecaySweeper } from './queues/cli-exec/priority-decay.js';
 import { CliStreamLogReaper } from './queues/cli-exec/stream-log-retention.js';
 import {
   startRuntimeLimitsWatch,
@@ -177,6 +178,11 @@ async function main(): Promise<void> {
   // containers only — environments are never torn down.
   const agentPreemptionSweeper = new AgentPreemptionSweeper({ db: getDb() });
   agentPreemptionSweeper.start();
+  // Rebuild queued cli-exec priorities from live load. BullMQ freezes priority at queue.add, so
+  // the `rank` term keeps whatever agent count the task had during its last fan-out — measured,
+  // an idle +1 task sat behind a neutral task with two agents running, purely on enqueue order.
+  const cliPriorityDecaySweeper = new CliPriorityDecaySweeper({ db: getDb() });
+  cliPriorityDecaySweeper.start();
   // Live-retune the runtime admission gate when the resource-limit config changes.
   const stopRuntimeLimitsWatch = startRuntimeLimitsWatch();
   // Age out persisted CLI transcripts. Nothing else deletes cli_invocations.stream_log,
@@ -196,6 +202,7 @@ async function main(): Promise<void> {
     ideReaper.stop();
     runtimeRunnerReaper.stop();
     agentPreemptionSweeper.stop();
+    cliPriorityDecaySweeper.stop();
     cliStreamLogReaper.stop();
     stopRuntimeLimitsWatch();
     await terminalManager.stop().catch((err) => {
