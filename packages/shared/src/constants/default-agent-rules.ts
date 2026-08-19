@@ -108,6 +108,8 @@ The post-2.1.110 harness regression causes jump-to-conclusion behaviour: hypothe
 
 - Read the call graph before the code. Before changing any function, method, hook, or endpoint, first find its callers and usages (search references) to learn the contract it must honor: who calls it, with what inputs, and what they expect back. Map the callers, then read and change the body. A fix that satisfies the function but breaks a caller is a regression, not a fix.
 
+- When implementing or fixing a functionality, check for other parts of the project where the same functionality is used and implement or fix it everywhere unless specifically asked to only concentrate on a single code section for this feature or bugfix.
+
 - After reaching a conclusion, take an adversarial position and ask yourself at least 3 questions that could disprove it before acting on it. Example: an API call returns 403 — before concluding there is no access, verify the credentials used were correct and that the request shape matches the API's documented auth route (there may be more than one auth route, each taking different inputs).
 
 - When asked which approach to take, state a single specific recommendation and the reason; do not return a menu of equal options or hedge with "it depends". Update that position visibly and immediately when better evidence or a stronger argument appears: say plainly that you are switching to X because Y.
@@ -151,5 +153,6 @@ export const KNOWN_DEFAULT_RULES_HASHES: ReadonlySet<string> = new Set([
   'a2afb02998cfbe4fd9b19eabcbc8958c136402d7fb65e5e1237f6921c7c0c9bd', // + reuse-before-writing rung
   '341e83c8af394739148260e3ccb2f51847f40e8e39374222337fed2fafe03aa1', // VCS-agnostic blast-radius step
   '6b120eb904ccade5842b6d24ee315dfed988931df976648f7ad3e7c3293f1ac2', // merged duplicate rules, restored stripped placeholders
-  '6801d5a5d5ccd083ad9a8f7da394ce2f0261f413a19ef01a12fab0b7f45922ac', // current: + sandbox `.git` boundary rule
+  '6801d5a5d5ccd083ad9a8f7da394ce2f0261f413a19ef01a12fab0b7f45922ac', // + sandbox `.git` boundary rule
+  '88e79873bae534b8947b9523077b06969816cc3791b0ee024fa79a04681a7909', // current: + fix-everywhere rule
 ]);
