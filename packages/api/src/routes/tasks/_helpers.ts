@@ -328,6 +328,43 @@ function realCostUsdSql() {
   ), 0)::double precision`;
 }
 
+/** The mirror of realCostUsdSql: what the invocations that are NOT billed per token
+ *  WOULD have cost at list API rates. Never summed into real spend and never shown in
+ *  the same colour — it is the counterfactual that says what the subscriptions save,
+ *  which is exactly the number a flat plan hides.
+ *
+ *  Same two eras as the real rule, each restricted to the half that one throws away:
+ *
+ *  - snapshot present — `billable = false`, minus `source = 'none'`. A `none` row's
+ *    costUsd is 0 by construction (unpriced model, partial computation), and a 0 here
+ *    would read as "this run was free" rather than "we could not price it".
+ *
+ *  - `cost` NULL (legacy) — a metered provider on SUBSCRIPTION auth, the exact
+ *    complement of the legacy real rule's api_key filter. Metered ONLY, because just a
+ *    CLI that prices its own backend reports a usable number: the claude binary applies
+ *    Anthropic's table to the zai/muse/openrouter/ollama wrappers too, and that total is
+ *    fiction (5,968 USD of it against local ollama tokens on this install alone). codex
+ *    and gemini report no cost at all and contribute 0, which is the honest answer.
+ *
+ *  Priced at whatever rate applied when the run happened, which is the right reading of
+ *  "what we would have paid" rather than "what those tokens would cost today". */
+function notionalCostUsdSql() {
+  const cost = schema.cliInvocations.cost;
+  const tu = schema.cliInvocations.tokenUsage;
+  return sql<number>`coalesce(sum(
+    case
+      when ${cost} is not null then
+        (case when ${cost} ->> 'billable' = 'false' and ${cost} ->> 'source' <> 'none'
+              then coalesce((${cost} ->> 'costUsd')::numeric, 0)
+              else 0 end)
+      when ${schema.cliProviders.name}::text in ${COST_METERED_PROVIDERS}
+           and ${schema.cliProviders.authMode} = 'subscription' then
+        coalesce((${tu} ->> 'costUsd')::numeric, 0)
+      else 0
+    end
+  ), 0)::double precision`;
+}
+
 /** Annotate each step with the count of non-superseded CLI invocations attached
  *  to it AND the summed token usage across those invocations. The count drives
  *  the inline-terminal toggle (hidden on steps that never spawned a CLI); the
@@ -476,6 +513,10 @@ export interface TaskProviderUsage {
   cacheCreationTokens: number;
   /** Real dollars, by the shared rule in realCostUsdSql. */
   costUsd: number;
+  /** What this provider's non-billed-per-token invocations WOULD have cost at list API
+   *  rates (see notionalCostUsdSql). Informational only: never added to costUsd, and 0
+   *  when nothing in the group could be priced. */
+  notionalCostUsd: number;
   /** Where those dollars came from, so the UI can label the number instead of leaving
    *  the reader to guess whether a CLI reported it or Haive priced it. `mixed` when
    *  one provider's invocations in this task used more than one source — normal for a
@@ -588,6 +629,9 @@ export async function sumTaskProviderBreakdown(
       cacheReadTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheReadTokens')::numeric), 0)::int`,
       cacheCreationTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheCreationTokens')::numeric), 0)::int`,
       costUsd: realCostUsdSql(),
+      // The subscription counterfactual, kept beside the real number rather than folded
+      // into it — the UI shows it greyed and clearly labelled as not-spent.
+      notionalCostUsd: notionalCostUsdSql(),
       // Distinct non-null sources present in this group, so the caller can label the
       // number ('mixed' when a provider's invocations disagree). Legacy rows report no
       // source at all and fall out as an empty array.
@@ -629,6 +673,7 @@ export async function sumTaskProviderBreakdown(
       // decision per row, and re-gating on the CURRENT provider config would zero a
       // legitimately-computed cost whenever a provider's auth mode changed later.
       costUsd: Number(row.costUsd) || 0,
+      notionalCostUsd: Number(row.notionalCostUsd) || 0,
       costSource: summarizeCostSources(row.costSources),
       unpricedInvocations: Number(row.unpricedInvocations) || 0,
     });

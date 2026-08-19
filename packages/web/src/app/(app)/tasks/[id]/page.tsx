@@ -406,6 +406,10 @@ interface TaskProviderUsage {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   costUsd: number;
+  /** What these invocations WOULD have cost at list API rates, for the ones not billed
+   *  per token (a subscription or flat plan). Informational — never real money, never
+   *  added to costUsd. */
+  notionalCostUsd: number;
   /** Where the dollars came from, so the number can be labelled rather than guessed at. */
   costSource: CostSource;
   /** Invocations with tokens but no usable rate — excluded from costUsd, shown so a low
@@ -2396,6 +2400,10 @@ function TaskTotalTime({
   const aiVerdictPct = showVerdict && aiEstimateMs > 0 ? (effortMs / aiEstimateMs) * 100 : null;
   const aiLow = task.aiEstimateLowHours ?? null;
   const aiHigh = task.aiEstimateHighHours ?? null;
+  // The subscription counterfactual: what the runs that were NOT billed per token would
+  // have cost at list API rates. Kept apart from costUsd everywhere — it is money saved,
+  // not money spent, and adding the two would report a total nobody was ever charged.
+  const notionalCostUsd = providerBreakdown.reduce((sum, p) => sum + (p.notionalCostUsd || 0), 0);
   return (
     <>
       <Card className="flex items-center justify-between gap-3 py-3">
@@ -2524,11 +2532,27 @@ function TaskTotalTime({
                     >
                       {priced ? formatCost(p.costUsd, costDisplay) : '—'}
                     </span>
+                    {p.notionalCostUsd > 0 && (
+                      <span
+                        className="text-neutral-500"
+                        title={`Not spent. These invocations ran on a subscription or flat plan; at list API rates the same tokens would have cost ${formatCost(p.notionalCostUsd, costDisplay)}.`}
+                      >
+                        ~{formatCost(p.notionalCostUsd, costDisplay)} if API
+                      </span>
+                    )}
                   </span>
                 </div>
               );
             })}
           </div>
+          {notionalCostUsd > 0 && (
+            <div className="mt-2 flex items-center justify-between gap-3 border-t border-neutral-800 pt-2 text-xs text-neutral-500">
+              <span>Estimate if task used API pricing instead of subscription:</span>
+              <span className="font-mono text-sm font-bold text-neutral-300">
+                {formatCost(notionalCostUsd, costDisplay)}
+              </span>
+            </div>
+          )}
         </Card>
       )}
       {showVerdict && (
