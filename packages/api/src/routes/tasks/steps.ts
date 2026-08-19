@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, ne, sql } from 'drizzle-orm';
 import { schema, resetDagCurrentLevelForRetry, type Database } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
 import {
@@ -145,6 +145,61 @@ async function resetRowsForRerun(
       })
       .where(eq(schema.taskSteps.id, r.id));
   }
+}
+
+/** Supersede the step's trailing FAILED non-mining invocation, if it has one, and answer which.
+ *
+ *  The fan-out arm of `resume` marks the dead terminals and hands back to the worker — but
+ *  `resolveLlmPhase` runs BEFORE `resolveAgentMiningPhase`, so a trailing failed invocation fails
+ *  the step on the very next advance and the marker is never read. Observed on task 977e1c5a:
+ *  "Re-run 5 failed terminals" wrote `step.resume` and `step.failed` 0.5s apart, twice, with
+ *  `user_retry_requested_at` still set on all five mining rows afterwards. The loop arm supersedes
+ *  its failed pass for the same reason; the fan-out arm returns long before reaching that code.
+ *
+ *  Narrower than the loop arm's blanket supersede on purpose. This arm can target a DEGRADED
+ *  (`done`) step whose trailing invocation SUCCEEDED and is not yet consumed, and superseding that
+ *  would throw away good output and buy a fresh CLI call for nothing. `agent_mining` rows are
+ *  excluded for the same reason — the fan-out's results live on `task_step_agent_minings`, which
+ *  `retryMiningAgents` reads `cli_invocation_id` off, and `resolveLlmPhase` never reads them
+ *  either. Filters and failure test mirror that resolver exactly, so the two cannot disagree
+ *  about which row is the blocker. */
+export async function supersedeBlockingInvocation(
+  tx: DbHandle,
+  taskStepId: string,
+  now: Date,
+): Promise<string | null> {
+  const rows = await tx
+    .select({
+      id: schema.cliInvocations.id,
+      endedAt: schema.cliInvocations.endedAt,
+      exitCode: schema.cliInvocations.exitCode,
+      errorMessage: schema.cliInvocations.errorMessage,
+    })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskStepId, taskStepId),
+        isNull(schema.cliInvocations.supersededAt),
+        isNull(schema.cliInvocations.consumedAt),
+        ne(schema.cliInvocations.mode, 'agent_mining'),
+      ),
+    )
+    .orderBy(desc(schema.cliInvocations.createdAt))
+    .limit(1);
+  const blocker = rows[0];
+  if (!blocker || blocker.endedAt == null) return null;
+  // A non-zero exit, a null exit (killed / orphaned), or any error text (a stream that ended
+  // without a result) — the same three the resolver treats as a failed invocation.
+  const failed =
+    blocker.exitCode == null ||
+    blocker.exitCode !== 0 ||
+    (blocker.errorMessage?.trim().length ?? 0) > 0;
+  if (!failed) return null;
+  await tx
+    .update(schema.cliInvocations)
+    .set({ supersededAt: now })
+    .where(eq(schema.cliInvocations.id, blocker.id));
+  return blocker.id;
 }
 
 export const stepRoutes = new Hono<AppEnv>();
@@ -683,6 +738,9 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
               failedAgents.map((a) => a.id),
             ),
           );
+        // Clear the step's OWN blocker before handing back to the worker; without it the
+        // marker written above is never even read. See the helper for why.
+        await supersedeBlockingInvocation(tx, step.id, now);
         // Downstream ONLY. The clicked step keeps its detectOutput / formSchema / formValues /
         // iterations / output and — the whole point — the `done` rows of the agents that
         // succeeded, which resetRowsForRerun would have deleted.
