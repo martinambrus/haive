@@ -31,6 +31,14 @@ import { getCliExecQueue } from './_shared.js';
  * that code — a worker restart's orphan sweep, a preemption, a cancel — and a periodic
  * recompute is idempotent, so a missed tick costs latency and nothing else.
  *
+ * Settled invocations are excluded, and that is load-bearing rather than tidiness. Superseding
+ * an invocation (a step reset, a retry) does NOT remove its queued BullMQ job, so the queue
+ * carries ghosts: MEASURED, five of nine queued jobs pointed at superseded rows and held the
+ * five best priorities. A ghost is cheap to RUN — `handleCliExecJob` returns immediately on
+ * `endedAt || supersededAt` — but it is not cheap to COUNT, because a task's rank here is its
+ * job's position in its own backlog. Three ghosts ahead of a live job price that job at rank 4,
+ * so the pollution lands on exactly the work that should lead.
+ *
  * Rides `FAIR_SCHEDULING_ENABLED` with no switch of its own: with fair scheduling off, jobs are
  * enqueued without a priority, `job.priority` is 0, and every one of them is skipped below.
  */
@@ -52,6 +60,9 @@ const DEFAULT_SWEEP_INTERVAL_MS = 30_000;
 export interface QueuedJobView {
   jobId: string;
   taskId: string;
+  /** The invocation this job would run. Checked for liveness, because a queued job outlives the
+   *  row it points at. */
+  invocationId: string;
   /** LIVE priority — `job.priority`, never `job.opts.priority`, which changePriority never
    *  rewrites. 0 (or NaN on a pre-field hash) means the job was enqueued with fair scheduling
    *  off: it lives in `waiting` and is deliberately unordered, so it is never touched. */
@@ -98,10 +109,15 @@ function byJobId(a: QueuedJobView, b: QueuedJobView): number {
 export function decayedPriorities(
   queued: readonly QueuedJobView[],
   loads: ReadonlyMap<string, TaskLoad>,
+  liveInvocationIds: ReadonlySet<string>,
 ): Reprice[] {
   const byTask = new Map<string, QueuedJobView[]>();
   for (const j of queued) {
     if (!j.priority) continue; // FIFO job — see QueuedJobView.priority
+    // Ghost: the invocation is ended or superseded, so this job will no-op at pickup. Dropping
+    // it here does two things, and the second is the point — it stops the ghost occupying a
+    // rank position ahead of its task's live work.
+    if (!liveInvocationIds.has(j.invocationId)) continue;
     if (!loads.has(j.taskId)) continue; // task not resolvable: leave it exactly as it is
     const list = byTask.get(j.taskId);
     if (list) list.push(j);
@@ -178,15 +194,19 @@ export class CliPriorityDecaySweeper {
     for (const job of jobs) {
       if (job.name !== CLI_EXEC_JOB_NAMES.INVOKE) continue;
       const taskId = job.data?.taskId;
+      const invocationId = job.data?.invocationId;
       const jobId = job.id;
-      if (!taskId || !jobId) continue;
+      if (!taskId || !invocationId || !jobId) continue;
       handles.set(jobId, job);
-      views.push({ jobId, taskId, priority: job.priority });
+      views.push({ jobId, taskId, invocationId, priority: job.priority });
     }
     if (views.length === 0) return { repriced: 0 };
 
-    const loads = await this.loads([...new Set(views.map((v) => v.taskId))]);
-    const changes = decayedPriorities(views, loads);
+    const [loads, live] = await Promise.all([
+      this.loads([...new Set(views.map((v) => v.taskId))]),
+      this.liveInvocations([...new Set(views.map((v) => v.invocationId))]),
+    ]);
+    const changes = decayedPriorities(views, loads, live);
     if (changes.length === 0) return { repriced: 0 };
 
     let repriced = 0;
@@ -202,6 +222,23 @@ export class CliPriorityDecaySweeper {
     }
     log.info({ repriced, considered: views.length }, 'cli priority decay repriced queued jobs');
     return { repriced };
+  }
+
+  /** Of these invocations, the ones that would actually run. An id with no row at all (a task
+   *  deleted out from under its queued jobs) is absent, hence not live, which is correct. */
+  private async liveInvocations(ids: string[]): Promise<Set<string>> {
+    if (ids.length === 0) return new Set();
+    const rows = await this.db
+      .select({ id: schema.cliInvocations.id })
+      .from(schema.cliInvocations)
+      .where(
+        and(
+          inArray(schema.cliInvocations.id, ids),
+          isNull(schema.cliInvocations.endedAt),
+          isNull(schema.cliInvocations.supersededAt),
+        ),
+      );
+    return new Set(rows.map((r) => r.id));
   }
 
   /** Live load for the tasks that have something queued. */

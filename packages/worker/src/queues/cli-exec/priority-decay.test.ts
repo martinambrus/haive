@@ -17,49 +17,61 @@ const load = (over: Partial<TaskLoad> = {}): TaskLoad => ({
 const job = (jobId: string, priority: number, taskId = 't1'): QueuedJobView => ({
   jobId,
   taskId,
+  invocationId: `inv-${jobId}`,
   priority,
 });
+
+/** Every listed job is live unless a test deliberately withholds one. */
+const live = (...jobs: QueuedJobView[]): Set<string> => new Set(jobs.map((j) => j.invocationId));
+
+/** Default arrangement: one task, everything live. */
+function decay(
+  queued: QueuedJobView[],
+  loads: ReadonlyMap<string, TaskLoad>,
+  liveIds: ReadonlySet<string> = live(...queued),
+): ReturnType<typeof decayedPriorities> {
+  return decayedPriorities(queued, loads, liveIds);
+}
 
 describe('decayedPriorities', () => {
   it('decays a drained fan-out back to rank 1', () => {
     // The bug, in miniature: three jobs priced during a 5-wide mining fan-out (bands 9/10/11)
     // whose agents have all since finished. Their bands must fall to 5/6/7, not stay put.
     const queued = [job('1', 9000), job('2', 10_000), job('3', 11_000)];
-    const out = decayedPriorities(queued, new Map([['t1', load({ voteScore: 1 })]]));
+    const out = decay(queued, new Map([['t1', load({ voteScore: 1 })]]));
     expect(out.map((r) => r.to)).toEqual([5000, 6000, 7000]);
   });
 
   it('counts STARTED agents as the base the queue positions build on', () => {
     // Two agents already running means the next queued job is this task's third, not its first
     // — dropping rank entirely would let one task's fan-out eat the whole pool.
-    const out = decayedPriorities([job('1', 9000)], new Map([['t1', load({ runningCount: 2 })]]));
+    const out = decay([job('1', 9000)], new Map([['t1', load({ runningCount: 2 })]]));
     expect(out[0]?.to).toBe(8000); // band 5 + 3 - 0
   });
 
   it('returns nothing when every band already matches, so a settled queue writes nothing', () => {
-    const out = decayedPriorities([job('1', 6007)], new Map([['t1', load({ userTiebreak: 7 })]]));
-    expect(out).toEqual([]);
+    expect(decay([job('1', 6007)], new Map([['t1', load({ userTiebreak: 7 })]]))).toEqual([]);
   });
 
   it('never touches a FIFO job', () => {
     // priority 0 means fair scheduling was off at enqueue: the job sits in `waiting`, which is
     // deliberately unordered. Assigning it a priority would move it into `prioritized` and
     // reorder it against jobs nobody ordered — the same rule repriceTaskCliJobs follows.
-    expect(decayedPriorities([job('1', 0)], new Map([['t1', load()]]))).toEqual([]);
-    expect(decayedPriorities([job('1', Number.NaN)], new Map([['t1', load()]]))).toEqual([]);
+    expect(decay([job('1', 0)], new Map([['t1', load()]]))).toEqual([]);
+    expect(decay([job('1', Number.NaN)], new Map([['t1', load()]]))).toEqual([]);
   });
 
   it('leaves a job alone when its task cannot be resolved', () => {
     // A task row that is gone (or a queue entry from another install) must not be repriced from
     // a guessed load.
-    expect(decayedPriorities([job('1', 9000, 'ghost')], new Map())).toEqual([]);
+    expect(decay([job('1', 9000, 'ghost')], new Map())).toEqual([]);
   });
 
   it('re-prices a task backlog without reshuffling it', () => {
     // Input deliberately out of order; the output ranks must follow CURRENT priority order,
     // because that is the order BullMQ will actually serve them in.
     const queued = [job('7', 11_000), job('3', 9000), job('5', 10_000)];
-    const out = decayedPriorities(queued, new Map([['t1', load()]]));
+    const out = decay(queued, new Map([['t1', load()]]));
     expect(out.map((r) => [r.jobId, r.to])).toEqual([
       ['3', 6000],
       ['5', 7000],
@@ -70,12 +82,12 @@ describe('decayedPriorities', () => {
   it('breaks an equal-priority tie by numeric job id, so a sweep cannot oscillate', () => {
     // "9" must sort before "10" — a string compare would flip these two every pass, and each
     // flip is a queue write.
-    const out = decayedPriorities([job('10', 9000), job('9', 9000)], new Map([['t1', load()]]));
+    const out = decay([job('10', 9000), job('9', 9000)], new Map([['t1', load()]]));
     expect(out.map((r) => r.jobId)).toEqual(['9', '10']);
   });
 
   it('keeps the vote term — the decay rebuilds the band, it does not erase the boost', () => {
-    const out = decayedPriorities([job('1', 9000)], new Map([['t1', load({ voteScore: 5 })]]));
+    const out = decay([job('1', 9000)], new Map([['t1', load({ voteScore: 5 })]]));
     expect(out[0]?.to).toBe(1000); // band = rank at +5, which is what outranks every neutral job
   });
 
@@ -83,12 +95,30 @@ describe('decayedPriorities', () => {
     // Live numbers from the dev host. onboard_glm_53_max sat at 9012 with ZERO agents in
     // flight, behind a neutral Add DDEV job at 6007 that had two agents running. After the
     // decay the upvoted idle task must sort ahead of that 6007.
-    const out = decayedPriorities(
+    const out = decay(
       [job('20687', 9012)],
       new Map([['t1', load({ runningCount: 0, userTiebreak: 12, voteScore: 1 })]]),
     );
     expect(out[0]?.to).toBe(5012);
     expect(out[0]?.to).toBeLessThan(6007);
+  });
+
+  it('skips a job whose invocation is settled', () => {
+    const ghost = job('1', 9000);
+    expect(decay([ghost], new Map([['t1', load()]]), new Set())).toEqual([]);
+  });
+
+  it('does NOT let a ghost consume a rank position ahead of live work', () => {
+    // The reason the liveness filter exists at all. Superseding an invocation leaves its BullMQ
+    // job queued (measured: five of nine queued jobs were superseded, holding the five best
+    // priorities). Counting those as backlog would price this task's one real job at rank 3
+    // instead of rank 1 — the pollution landing on exactly the work that should lead.
+    const g1 = job('1', 5000);
+    const g2 = job('2', 6000);
+    const real = job('3', 7000);
+    const out = decay([g1, g2, real], new Map([['t1', load()]]), live(real));
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ jobId: '3', to: 6000 }); // rank 1, not rank 3
   });
 
   it('reaches delayed jobs too, or a gated job keeps a stale band until it promotes', () => {
