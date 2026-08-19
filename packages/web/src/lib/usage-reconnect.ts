@@ -39,9 +39,12 @@ export function usageReconnectFix(name: CliProviderName | null | undefined): Usa
 /** Deep link that lands on the control which performs the repair, not merely on the
  *  provider's page — dropping a user on an edit form when what they need is a login button is
  *  the same failure as naming the wrong repair. `#usage-tracking` is ClaudeUsageAuth's card
- *  (claude-code only) and `#cli-login` is the Test-connection card that carries the Log in
- *  button. An api-token provider gets no fragment: the credential field is the edit form the
- *  page opens on anyway. */
+ *  (claude-code only), `#cli-login` is the Test-connection card that carries the Log in
+ *  button, and `#secrets` is the credential textarea an api-token provider is fixed in.
+ *
+ *  This is the FALLBACK path, not the main one: UsageReconnectAction pre-empts a plain click
+ *  on the two fixes that have an in-product flow and runs it in place, so these URLs are what
+ *  a middle-click / open-in-new-tab resolves to, plus the whole story for api-token. */
 export function usageReconnectHref(
   providerId: string,
   name: CliProviderName | null | undefined,
@@ -53,7 +56,7 @@ export function usageReconnectHref(
     case 'cli-login':
       return `${base}#cli-login`;
     case 'api-token':
-      return base;
+      return `${base}#secrets`;
   }
 }
 

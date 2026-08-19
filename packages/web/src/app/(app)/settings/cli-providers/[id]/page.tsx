@@ -36,14 +36,20 @@ export default function EditCliProviderPage() {
       .catch((err) => setError((err as Error).message ?? 'Failed to load provider'));
   }, [id]);
 
-  // The Test-connection card mounts only after the provider loads, so the browser's on-load
-  // `#cli-login` scroll (from a reconnect prompt's deep-link) has already missed the anchor.
-  // Mirrors what ClaudeUsageAuth does for its own `#usage-tracking` anchor.
+  // Both cards mount only after the provider loads, so the browser's on-load scroll (from a
+  // reconnect prompt's deep-link) has already missed the anchor. Mirrors what ClaudeUsageAuth
+  // does for its own `#usage-tracking` anchor. `#secrets` is the credential textarea, where a
+  // BYOK provider's dead usage token is replaced — focused as well as scrolled to, since for
+  // that fix the field IS the repair and the user arrives with a key on the clipboard.
   useEffect(() => {
     if (!provider) return;
-    if (typeof window !== 'undefined' && window.location.hash === '#cli-login') {
-      document.getElementById('cli-login')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
+    if (typeof window === 'undefined') return;
+    const hash = window.location.hash;
+    if (hash !== '#cli-login' && hash !== '#secrets') return;
+    const target = document.getElementById(hash.slice(1));
+    // The card carries `scroll-mt-6` and wants its top; the textarea has no such margin.
+    target?.scrollIntoView({ behavior: 'smooth', block: hash === '#secrets' ? 'center' : 'start' });
+    if (hash === '#secrets') (target as HTMLTextAreaElement | null)?.focus({ preventScroll: true });
   }, [provider]);
 
   // Separate from the load above so a usage-window failure never blocks the page: not knowing
