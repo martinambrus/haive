@@ -7,7 +7,11 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
-import { collectImplementationFiles } from './_impl-changes.js';
+import {
+  changedFilesBlock,
+  collectImplementationFiles,
+  type ImplementationFileSet,
+} from './_impl-changes.js';
 import { loadHonoredConstraints } from './_fix-loop.js';
 import { coerceReviewSeverity } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
@@ -45,7 +49,7 @@ interface ValidateDetect {
   worktreePath: string;
   sandboxWorktreePath: string;
   spec: string;
-  implementationFiles: string[];
+  implementationFiles: ImplementationFileSet;
   /** Pre-formatted KNOWN TECHNICAL DEBT block from DAG execution ('' if none). */
   debtBlock: string;
   /** Prior objective/runtime fix-loop constraints the validator must not revert ('' if none). */
@@ -490,9 +494,11 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         '=== Your assignment ===',
         `An implementation just finished in the workspace: ${d.sandboxWorktreePath}`,
         'Your current working directory has the workspace mounted; work on the files there.',
-        d.implementationFiles.length > 0
-          ? `Changed files (your validation scope):\n- ${d.implementationFiles.join('\n- ')}`
-          : 'Determine the recently-implemented files from the workspace.',
+        changedFilesBlock(
+          d.implementationFiles,
+          'Changed files (your validation scope)',
+          'Determine the recently-implemented files from the workspace.',
+        ),
         d.debtBlock ? `\n${d.debtBlock}` : '',
         d.honoredBlock ? `\n${d.honoredBlock}` : '',
         '',
@@ -578,9 +584,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         `A fix agent just addressed your previous findings in the workspace: ${d.sandboxWorktreePath}`,
         'Your current working directory has the workspace mounted; work on the files there.',
         fixes.length > 0 ? `Fixes the fix agent reported:\n- ${fixes.join('\n- ')}` : '',
-        d.implementationFiles.length > 0
-          ? `Changed files (your validation scope):\n- ${d.implementationFiles.join('\n- ')}`
-          : '',
+        changedFilesBlock(d.implementationFiles, 'Changed files (your validation scope)', ''),
         d.debtBlock ? `\n${d.debtBlock}` : '',
         d.honoredBlock ? `\n${d.honoredBlock}` : '',
         '',

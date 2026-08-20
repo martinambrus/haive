@@ -12,7 +12,13 @@ import { didNotCompleteIssue, shouldRetryMiningTerminalFailure } from '../../min
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { parseReviewJson } from './_agent-json.js';
-import { collectImplementationFiles } from './_impl-changes.js';
+import {
+  changedFilesBlock,
+  collectImplementationFiles,
+  fileCoverage,
+  type FileCoverage,
+  type ImplementationFileSet,
+} from './_impl-changes.js';
 import { loadAppBootOutput } from './_task-meta.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { coerceReviewSeverity, isBlockingSeverity, severityRank } from '@haive/shared/review';
@@ -91,7 +97,7 @@ function rosterForLevel(level: QaLevel): AdversaryDef[] {
 interface AdversarialDetect {
   level: QaLevel;
   spec: string;
-  implementationFiles: string[];
+  implementationFiles: ImplementationFileSet;
   appUrl: string | null;
   debtBlock: string;
 }
@@ -117,6 +123,9 @@ interface AdversarialApply {
   /** At least one adversary left a hole: killed before finishing, or unreadable output.
    *  Non-blocking (the agent failed, not the code) but never OK at gate 2. */
   qaIncomplete: boolean;
+  /** How much of the change the adversaries were actually given as attack surface; null
+   *  when the step replayed a pre-coverage detect output. */
+  coverage: FileCoverage | null;
 }
 
 const adversaryOutputSchema = z.object({
@@ -177,9 +186,11 @@ function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
     '',
     ...SAFETY,
     '',
-    d.implementationFiles.length > 0
-      ? `Changed files (attack surface):\n- ${d.implementationFiles.join('\n- ')}`
-      : 'Determine the changed files from the workspace.',
+    changedFilesBlock(
+      d.implementationFiles,
+      'Changed files (attack surface)',
+      'Determine the changed files from the workspace.',
+    ),
     d.appUrl ? `Running app URL (for runtime attacks): ${d.appUrl}` : '',
     d.debtBlock ? `\n${d.debtBlock}` : '',
     'Do NOT edit code and do NOT run git.',
@@ -407,6 +418,7 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
       counts: { critical, high, total: findings.length },
       blocking,
       qaIncomplete,
+      coverage: fileCoverage(detected.implementationFiles),
     };
   },
 };

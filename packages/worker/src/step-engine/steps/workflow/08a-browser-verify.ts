@@ -9,7 +9,11 @@ import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
-import { collectImplementationFiles } from './_impl-changes.js';
+import {
+  changedFilesBlock,
+  collectImplementationFiles,
+  type ImplementationFileSet,
+} from './_impl-changes.js';
 import { loadAppBootOutput, resolveDdevWorkspace } from './_task-meta.js';
 import { resolveBrowserRuntime } from './_browser-runtime.js';
 import {
@@ -63,7 +67,7 @@ interface BrowserVerifyDetect {
   repoSubpath: string | null;
   /** Spec + changed files for the MCP tester / manual-checklist prompts. */
   spec: string;
-  implementationFiles: string[];
+  implementationFiles: ImplementationFileSet;
   /** Live headed browser for the interactive gate: brought up + navigated in
    *  detect (idempotent, mirrors 09-gate-2) so the noVNC panel shows the running
    *  app during the form, with the probe verdict to pre-set the approve/reject
@@ -556,7 +560,12 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
       directAccess,
     };
     if (!rt.available || mode === 'skip') {
-      return { ...baseDetect, spec: '', implementationFiles: [], liveBrowser: null };
+      return {
+        ...baseDetect,
+        spec: '',
+        implementationFiles: { files: [], total: 0, truncated: false },
+        liveBrowser: null,
+      };
     }
 
     // Spec (05a → 05 → 04 precedence) + changed files for the tester prompts.
@@ -1093,9 +1102,7 @@ function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string): string {
         'otherwise follow the protocol below.',
       ].join('\n'),
     ),
-    d.implementationFiles.length > 0
-      ? `Changed files (focus your testing here):\n- ${d.implementationFiles.join('\n- ')}`
-      : '',
+    changedFilesBlock(d.implementationFiles, 'Changed files (focus your testing here)', ''),
     '',
     'Test the spec acceptance criteria end-to-end from the user perspective. MCP clicks are REAL',
     'tests — if an interaction fails, it is a bug.',
@@ -1157,9 +1164,7 @@ function buildChecklistPrompt(d: BrowserVerifyDetect, appUrl: string): string {
     'Generate a structured MANUAL testing checklist for the implemented feature, for a human to',
     'verify by hand in the browser.',
     `Application URL: ${appUrl}`,
-    d.implementationFiles.length > 0
-      ? `Changed files:\n- ${d.implementationFiles.join('\n- ')}`
-      : '',
+    changedFilesBlock(d.implementationFiles, 'Changed files', ''),
     '',
     'Cover: 1) pre-test setup (URL, credentials, prerequisites), 2) happy-path tests (step by step),',
     '3) edge cases, 4) error scenarios, 5) visual/UI checks, 6) data validation. Each test has a',

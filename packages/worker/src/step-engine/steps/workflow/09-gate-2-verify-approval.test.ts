@@ -112,6 +112,65 @@ describe('gate-2 status summary', () => {
     expect(decisionDefault(d)).toBe('reject');
   });
 
+  it('does not report a partially-covered review as OK, and does not default to approve', () => {
+    // The reviewers approved everything they were handed -- but the changed-file list was
+    // capped, so they never saw 50 of the 150 changed files. A clean verdict over code
+    // nobody read is exactly what this row must not render.
+    const d = baseDetect({
+      codeReview: { ...cleanReview, coverage: { listed: 100, total: 150, truncated: true } },
+    });
+    const r = row(d, 'Code review');
+    expect(r?.status).toBe('warn');
+    expect(r?.statusLabel).toBe('PARTIAL');
+    expect(r?.detail).toContain('only 100 of 150 changed files');
+    expect(r?.body).toContain('## Coverage');
+    expect(decisionDefault(d)).toBe('reject');
+  });
+
+  it('reports a review that covered the whole change as OK', () => {
+    const d = baseDetect({
+      codeReview: { ...cleanReview, coverage: { listed: 12, total: 12, truncated: false } },
+    });
+    expect(row(d, 'Code review')?.statusLabel).toBe('OK');
+    expect(row(d, 'Code review')?.detail).not.toContain('changed files were given');
+    expect(decisionDefault(d)).toBe('approve');
+  });
+
+  it('an unreadable reviewer still outranks a partial one in the label', () => {
+    const d = baseDetect({
+      codeReview: {
+        ...cleanReview,
+        reviewIncomplete: true,
+        coverage: { listed: 100, total: 150, truncated: true },
+      },
+    });
+    // Both are true; INCOMPLETE names the more serious of the two, and the coverage line
+    // is appended to the detail rather than lost.
+    expect(row(d, 'Code review')?.statusLabel).toBe('INCOMPLETE');
+    expect(row(d, 'Code review')?.detail).toContain('only 100 of 150 changed files');
+  });
+
+  it('renders the broad audit row for a partial audit that found nothing', () => {
+    // "No findings" over an unseen remainder is the claim worth disclosing, so the row
+    // appears even with an empty findings list -- it never gates, the disclosure is the point.
+    const d = baseDetect({
+      codeAudit: { findings: [], coverage: { listed: 100, total: 150, truncated: true } },
+    });
+    const r = row(d, 'Code audit (broad)');
+    expect(r?.statusLabel).toBe('PARTIAL');
+    expect(r?.status).toBe('info');
+    expect(r?.detail).toContain('only 100 of 150 changed files');
+    // Advisory by design: a report-only step must not flip the gate.
+    expect(decisionDefault(d)).toBe('approve');
+  });
+
+  it('still renders no audit row when the audit was complete and clean', () => {
+    const d = baseDetect({
+      codeAudit: { findings: [], coverage: { listed: 12, total: 12, truncated: false } },
+    });
+    expect(row(d, 'Code audit (broad)')).toBeUndefined();
+  });
+
   const cleanQa = {
     level: 'poc',
     blocking: false,
@@ -148,6 +207,17 @@ describe('gate-2 status summary', () => {
     expect(row(d, 'Adversarial QA (poc)')?.status).toBe('pass');
     expect(row(d, 'Adversarial QA (poc)')?.statusLabel).toBe('CLEAN');
     expect(decisionDefault(d)).toBe('approve');
+  });
+
+  it('does not report a partially-covered adversarial QA as CLEAN', () => {
+    const d = baseDetect({
+      adversarial: { ...cleanQa, coverage: { listed: 100, total: 150, truncated: true } },
+    });
+    const r = row(d, 'Adversarial QA (poc)');
+    expect(r?.status).toBe('warn');
+    expect(r?.statusLabel).toBe('PARTIAL');
+    expect(r?.detail).toContain('only 100 of 150 changed files');
+    expect(decisionDefault(d)).toBe('reject');
   });
 
   it('a blocking adversarial QA still outranks incomplete', () => {

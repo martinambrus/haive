@@ -23,6 +23,29 @@ import {
 import { ensureDdevWithProgress } from './_app-runtime.js';
 import { resolveTaskDirectAccess } from '../../../sandbox/_browser-access.js';
 import { SCREENSHOT_MANIFEST_NAME } from './_screenshots.js';
+import type { FileCoverage } from './_impl-changes.js';
+
+/** Coverage as a step wrote it into `task_steps.output`. */
+interface CoverageOutput {
+  listed?: number;
+  total?: number;
+  truncated?: boolean;
+}
+
+/** Read a step's recorded coverage. Null on rows written before the steps recorded it —
+ *  those are treated as complete, which is what they claimed at the time. */
+function readCoverage(raw: CoverageOutput | undefined): FileCoverage | null {
+  if (!raw || typeof raw.total !== 'number') return null;
+  const listed = typeof raw.listed === 'number' ? raw.listed : raw.total;
+  return { listed, total: raw.total, truncated: raw.truncated === true };
+}
+
+/** The one line that names what a step's agents were NOT given; empty when they got
+ *  the whole change. A cap is disclosure, not failure — but only if it is disclosed. */
+function coverageNote(c: FileCoverage | null): string {
+  if (!c?.truncated) return '';
+  return `only ${c.listed} of ${c.total} changed files were given to the agents — ${c.total - c.listed} were not looked at`;
+}
 
 interface VerifyGateDetect {
   /** Per-slot verify results from 08-phase-5-verify. A check with ran:false was
@@ -70,6 +93,9 @@ interface VerifyGateDetect {
     /** A reviewer requested changes with no critical/high finding behind it. Same
      *  contract as reviewIncomplete: no fix round, but no silent approve either. */
     advisoryVerdict: boolean;
+    /** How much of the change the reviewers were given. Same contract again: a review
+     *  that approved everything it saw is not a clean review of the whole change. */
+    coverage: FileCoverage | null;
     peerFindings: string[];
     securityFindings: string[];
     /** Findings from the level-gated extra review lenses (operational/performance). */
@@ -77,7 +103,7 @@ interface VerifyGateDetect {
     positives: string[];
   } | null;
   /** Phase 6b broad code audit (08c2) result — advisory; null when it didn't run. */
-  codeAudit: { findings: string[] } | null;
+  codeAudit: { findings: string[]; coverage: FileCoverage | null } | null;
   /** Phase 7 adversarial QA result (null when the step didn't run). */
   adversarial: {
     level: string;
@@ -88,6 +114,8 @@ interface VerifyGateDetect {
      *  blocking (the agent failed, not the code), but never OK: a partial attack surface
      *  must not default this gate to approve. */
     incomplete: boolean;
+    /** How much of the change the adversaries were given as attack surface. */
+    coverage: FileCoverage | null;
   } | null;
   /** In-page live browser for this gate: the per-task DDEV headed-browser
    *  desktop, brought up (idempotent) and pointed at the app URL so the user can
@@ -130,6 +158,7 @@ interface Phase8dOutput {
   /** Absent on rows written before 08d reported it; treated as false (an older QA run
    *  either completed or already surfaced its gap as a qa-gap finding). */
   qaIncomplete?: boolean;
+  coverage?: CoverageOutput;
   counts?: { critical?: number; high?: number; total?: number };
   findings?: {
     severity?: string;
@@ -150,6 +179,7 @@ interface Phase8cOutput {
    *  written before 08c reported it — those blocked on the verdict instead, so the gate
    *  already defaulted to reject. */
   advisoryVerdict?: boolean;
+  coverage?: CoverageOutput;
   peer?: {
     verdict?: string;
     findings?: {
@@ -440,6 +470,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         blocking: pc.blocking === true,
         reviewIncomplete: pc.reviewIncomplete === true,
         advisoryVerdict: pc.advisoryVerdict === true,
+        coverage: readCoverage(pc.coverage),
         // A refuted finding is shown, not hidden: a refuter disproved it, and the human
         // at this gate is the one entitled to disagree with that. It no longer blocks,
         // and the implementer never saw it.
@@ -469,6 +500,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         issue?: string;
         fix?: string;
       }[];
+      coverage?: CoverageOutput;
     } | null;
     let codeAudit: VerifyGateDetect['codeAudit'] = null;
     if (pc2?.audited) {
@@ -476,6 +508,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         findings: (pc2.findings ?? []).map((f) =>
           `[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
+        coverage: readCoverage(pc2.coverage),
       };
     }
 
@@ -496,6 +529,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           `[${f.severity ?? '?'}] ${f.category ?? ''} ${f.location ?? ''} ${f.impact ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
         incomplete: pd.qaIncomplete === true,
+        coverage: readCoverage(pd.coverage),
       };
     }
 
@@ -632,13 +666,19 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // by default either — the developer decides what to do about the unreviewed part.
     // A reviewer that requested changes without a critical/high finding behind it carries
     // the same contract: no fix round to spend, but no silent approve either.
+    // A capped changed-file list is the third way a review can be non-blocking and still
+    // not clean: the reviewers may have approved everything they were given and never seen
+    // the rest of the change. Same contract as the two above — no fix round, no silent
+    // approve either.
     const codeReviewOk =
-      cr === null || (!cr.blocking && !cr.reviewIncomplete && !cr.advisoryVerdict);
+      cr === null ||
+      (!cr.blocking && !cr.reviewIncomplete && !cr.advisoryVerdict && !cr.coverage?.truncated);
     const cAudit = detected.codeAudit;
     const aq = detected.adversarial;
     // Same contract as codeReviewOk above: an attack surface only partly probed is not a
     // clean one. It does not block, but it must not default the gate to approve either.
-    const adversarialOk = aq === null || (!aq.blocking && !aq.incomplete);
+    const adversarialOk =
+      aq === null || (!aq.blocking && !aq.incomplete && !aq.coverage?.truncated);
     const rs = detected.runtimeSmoke;
     const smokeFailed = rs != null && rs.ran && !rs.passed;
     // A real-browser agent/interactive test that PASSED is a stronger runtime signal
@@ -786,34 +826,60 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       // An unreadable reviewer used to render as pass/OK and collapse its own evidence,
       // so a review that never completed looked like a clean one. A reviewer that asked
       // for changes over nothing worse than `medium` must not read as OK either.
-      const detail = cr.reviewIncomplete
+      // Coverage is orthogonal to the verdicts: a review can be entirely non-blocking AND
+      // have been handed only part of the change, so it is appended to whichever detail
+      // applies rather than replacing it.
+      const crCoverage = coverageNote(cr.coverage);
+      if (crCoverage) lines.push('', `## Coverage`, `- ${crCoverage}`);
+      const base = cr.reviewIncomplete
         ? `a reviewer's output could not be read after re-rolling — part of the change is unreviewed (peer ${cr.peerVerdict}, security ${cr.securityVerdict})`
         : cr.advisoryVerdict
           ? `a reviewer requested changes but raised no critical/high finding, so nothing was sent back — read the findings and decide (peer ${cr.peerVerdict}, security ${cr.securityVerdict})`
           : `peer ${cr.peerVerdict}, security ${cr.securityVerdict}${cr.lensFindings.length ? `, +${cr.lensFindings.length} ops/perf` : ''}`;
+      const detail = crCoverage ? `${base}; ${crCoverage}` : base;
+      const crPartial = cr.coverage?.truncated === true;
       rows.push({
         label: 'Code review',
-        status: cr.blocking ? 'fail' : cr.reviewIncomplete || cr.advisoryVerdict ? 'warn' : 'pass',
+        status: cr.blocking
+          ? 'fail'
+          : cr.reviewIncomplete || cr.advisoryVerdict || crPartial
+            ? 'warn'
+            : 'pass',
         statusLabel: cr.blocking
           ? 'BLOCKING'
           : cr.reviewIncomplete
             ? 'INCOMPLETE'
             : cr.advisoryVerdict
               ? 'ADVISORY'
-              : 'OK',
+              : crPartial
+                ? 'PARTIAL'
+                : 'OK',
         detail,
         body: lines.join('\n'),
-        defaultOpen: cr.blocking || cr.reviewIncomplete || cr.advisoryVerdict,
+        defaultOpen: cr.blocking || cr.reviewIncomplete || cr.advisoryVerdict || crPartial,
       });
     }
 
-    if (cAudit && cAudit.findings.length > 0) {
+    // Rendered when the audit found something OR when it was handed only part of the
+    // change: "no findings" over an unseen remainder is exactly the claim to disclose.
+    const caCoverage = cAudit ? coverageNote(cAudit.coverage) : '';
+    if (cAudit && (cAudit.findings.length > 0 || caCoverage)) {
+      const body = [
+        ...(cAudit.findings.length > 0
+          ? ['## Findings', ...cAudit.findings.map((f) => `- ${f}`)]
+          : []),
+        ...(caCoverage ? ['', '## Coverage', `- ${caCoverage}`] : []),
+      ].join('\n');
       rows.push({
         label: 'Code audit (broad)',
+        // Report-only step: it never gates, so a partial audit stays advisory rather than
+        // holding the gate. The disclosure is the point, not a status change.
         status: 'info',
-        statusLabel: 'ADVISORY',
-        detail: `${cAudit.findings.length} finding(s)`,
-        body: ['## Findings', ...cAudit.findings.map((f) => `- ${f}`)].join('\n'),
+        statusLabel: caCoverage ? 'PARTIAL' : 'ADVISORY',
+        detail: caCoverage
+          ? `${cAudit.findings.length} finding(s); ${caCoverage}`
+          : `${cAudit.findings.length} finding(s)`,
+        body,
         defaultOpen: false,
       });
     }
@@ -829,7 +895,11 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
       }
       rows.push({
         label: `Adversarial QA (${aq.level})`,
-        status: aq.blocking ? 'fail' : aq.counts.total > 0 || aq.incomplete ? 'warn' : 'pass',
+        status: aq.blocking
+          ? 'fail'
+          : aq.counts.total > 0 || aq.incomplete || aq.coverage?.truncated
+            ? 'warn'
+            : 'pass',
         // INCOMPLETE outranks the finding count in the label: "3 FINDINGS" on a roster that
         // half died reads as a completed probe that found three things.
         statusLabel: aq.blocking
@@ -838,10 +908,17 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
             ? 'INCOMPLETE'
             : aq.counts.total > 0
               ? `${aq.counts.total} FINDINGS`
-              : 'CLEAN',
-        detail: aq.incomplete
-          ? `QA did not complete — ${aq.counts.total} findings (${aq.counts.critical} critical, ${aq.counts.high} high) from a partial roster`
-          : `${aq.counts.total} findings (${aq.counts.critical} critical, ${aq.counts.high} high)`,
+              : aq.coverage?.truncated
+                ? 'PARTIAL'
+                : 'CLEAN',
+        detail: [
+          aq.incomplete
+            ? `QA did not complete — ${aq.counts.total} findings (${aq.counts.critical} critical, ${aq.counts.high} high) from a partial roster`
+            : `${aq.counts.total} findings (${aq.counts.critical} critical, ${aq.counts.high} high)`,
+          coverageNote(aq.coverage),
+        ]
+          .filter(Boolean)
+          .join('; '),
         body: aq.findings.length ? lines.join('\n') : undefined,
         defaultOpen: aq.blocking || aq.incomplete,
       });

@@ -8,7 +8,11 @@ import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
-import { collectImplementationFiles } from './_impl-changes.js';
+import {
+  changedFilesBlock,
+  collectImplementationFiles,
+  type ImplementationFileSet,
+} from './_impl-changes.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
 
@@ -44,7 +48,7 @@ interface TestManagementDetect {
   ddevPlaywrightAddon: boolean;
   repoSubpath: string | null;
   spec: string;
-  implementationFiles: string[];
+  implementationFiles: ImplementationFileSet;
 }
 
 interface TestRunResult {
@@ -407,9 +411,7 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
         `Workspace: ${d.sandboxWorktreePath}`,
         'Your current working directory has the workspace mounted; work on the files there.',
         `Test infrastructure: ${d.frameworks.join(', ')}${d.testDirs.length > 0 ? ` (directories: ${d.testDirs.join(', ')})` : ''}`,
-        d.implementationFiles.length > 0
-          ? `Files changed by the implementation:\n- ${d.implementationFiles.join('\n- ')}`
-          : '',
+        changedFilesBlock(d.implementationFiles, 'Files changed by the implementation', ''),
         values.hints ? `User hints for locating related tests: ${values.hints}` : '',
         '',
         ...actionInstructions(),

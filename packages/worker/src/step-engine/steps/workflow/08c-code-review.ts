@@ -18,7 +18,13 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
 import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
-import { collectImplementationFiles } from './_impl-changes.js';
+import {
+  changedFilesBlock,
+  collectImplementationFiles,
+  fileCoverage,
+  type FileCoverage,
+  type ImplementationFileSet,
+} from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
@@ -51,7 +57,7 @@ type QaLevel = 'none' | 'poc' | 'standard' | 'enterprise';
 
 interface CodeReviewDetect {
   spec: string;
-  implementationFiles: string[];
+  implementationFiles: ImplementationFileSet;
   debtBlock: string;
   /** Task adversarial-QA level, reused to gate the extra review lenses. */
   level: QaLevel;
@@ -106,6 +112,10 @@ interface CodeReviewApply {
   /** A reviewer requested changes without a critical/high finding to point at. Does not
    *  block (no fix round, nothing to refute), but holds gate 2 off its approve default. */
   advisoryVerdict: boolean;
+  /** How much of the change the reviewers were actually given. `truncated` holds gate 2
+   *  off its approve default the same way `advisoryVerdict` does: the reviewers may have
+   *  approved everything they saw, and still not have seen the whole change. */
+  coverage: FileCoverage | null;
   /** Blocking findings a refuter disproved. 0 when the pass is off or nothing blocked. */
   refutedCount: number;
   counts: { peer: number; securityCriticalHigh: number };
@@ -628,9 +638,11 @@ function condenseSpecForReview(spec: string): { text: string; dropped: boolean }
 
 function reviewAssignment(d: CodeReviewDetect): string {
   return [
-    d.implementationFiles.length > 0
-      ? `Changed files to review (read each in full):\n- ${d.implementationFiles.join('\n- ')}`
-      : 'Determine the recently-changed files from the workspace and read each in full.',
+    changedFilesBlock(
+      d.implementationFiles,
+      'Changed files to review (read each in full)',
+      'Determine the recently-changed files from the workspace and read each in full.',
+    ),
     d.debtBlock ? `\n${d.debtBlock}` : '',
     '',
     ...SEARCH_LADDER,
@@ -956,6 +968,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         blocking: false,
         reviewIncomplete: false,
         advisoryVerdict: false,
+        coverage: fileCoverage(args.detected.implementationFiles),
         refutedCount: 0,
         counts: { peer: 0, securityCriticalHigh: 0 },
       };
@@ -1168,6 +1181,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       blocking,
       reviewIncomplete,
       advisoryVerdict,
+      coverage: fileCoverage(args.detected.implementationFiles),
       refutedCount,
       counts: { peer: peerOut.findings.length, securityCriticalHigh },
     };

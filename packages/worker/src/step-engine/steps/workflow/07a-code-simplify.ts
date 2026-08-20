@@ -6,7 +6,11 @@ import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
-import { collectImplementationFiles } from './_impl-changes.js';
+import {
+  changedFilesBlock,
+  collectImplementationFiles,
+  type ImplementationFileSet,
+} from './_impl-changes.js';
 
 // Phase 3.5 — Code simplification (legacy phase3_5-code-simplification.md). A
 // simplifier agent reviews the just-implemented code in the integration worktree
@@ -26,8 +30,9 @@ interface SimplifyDetect {
   sandboxWorktreePath: string;
   spec: string;
   /** Files touched by implementation (single-agent output or DAG issue union)
-   *  plus currently-dirty worktree files; deduped, capped for prompt size. */
-  implementationFiles: string[];
+   *  plus currently-dirty worktree files; deduped, capped for prompt size — the
+   *  set reports the cap rather than hiding it. */
+  implementationFiles: ImplementationFileSet;
 }
 
 interface SimplifyApply {
@@ -221,9 +226,11 @@ export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
         '=== Your assignment ===',
         `An implementation just finished in the workspace: ${d.sandboxWorktreePath}`,
         'Your current working directory has the workspace mounted; work on the files there.',
-        d.implementationFiles.length > 0
-          ? `The recently modified code (your Focus Scope):\n- ${d.implementationFiles.join('\n- ')}`
-          : 'Determine the recently-implemented files from the workspace — they are your Focus Scope.',
+        changedFilesBlock(
+          d.implementationFiles,
+          'The recently modified code (your Focus Scope)',
+          'Determine the recently-implemented files from the workspace — they are your Focus Scope.',
+        ),
         '',
         'If you find areas to simplify, edit the files directly. If the code is already clean,',
         'report that no changes were needed.',

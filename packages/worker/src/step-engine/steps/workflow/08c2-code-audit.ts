@@ -4,7 +4,13 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
-import { collectImplementationFiles } from './_impl-changes.js';
+import {
+  changedFilesBlock,
+  collectImplementationFiles,
+  fileCoverage,
+  type FileCoverage,
+  type ImplementationFileSet,
+} from './_impl-changes.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { coerceReviewSeverity } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
@@ -24,7 +30,7 @@ const AUDIT_TIMEOUT_MS = 30 * 60 * 1000;
 
 interface CodeAuditDetect {
   spec: string;
-  implementationFiles: string[];
+  implementationFiles: ImplementationFileSet;
 }
 
 interface AuditFinding {
@@ -38,6 +44,9 @@ interface AuditFinding {
 interface CodeAuditApply {
   audited: boolean;
   findings: AuditFinding[];
+  /** How much of the change the auditor was actually given; null when the step replayed
+   *  a pre-coverage detect output. */
+  coverage: FileCoverage | null;
 }
 
 const AUDIT_RULES = [
@@ -146,9 +155,11 @@ export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
       return [
         ...AUDIT_RULES,
         '',
-        d.implementationFiles.length > 0
-          ? `Changed files to review (read each in full):\n- ${d.implementationFiles.join('\n- ')}`
-          : 'Determine the recently-changed files from the workspace and read each in full.',
+        changedFilesBlock(
+          d.implementationFiles,
+          'Changed files to review (read each in full)',
+          'Determine the recently-changed files from the workspace and read each in full.',
+        ),
         '',
         '=== Spec (what the change must deliver) ===',
         d.spec || '(no spec recorded)',
@@ -179,6 +190,10 @@ export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
           raw: f,
         })),
     );
-    return { audited: true, findings };
+    return {
+      audited: true,
+      findings,
+      coverage: fileCoverage(args.detected.implementationFiles),
+    };
   },
 };
