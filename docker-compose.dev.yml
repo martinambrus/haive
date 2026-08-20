@@ -60,7 +60,10 @@ services:
       - haive_node_modules_root:/app/node_modules
       - haive_node_modules_shared:/app/packages/shared/node_modules
       - haive_node_modules_database:/app/packages/database/node_modules
-    command: sh -c "pnpm --filter @haive/database build && pnpm --filter @haive/shared build"
+    # Runs as root (no USER in the image), and the developer builds these same two packages
+    # on the host via turbo's `^build`. scripts/build-libs.sh is what keeps those two writers
+    # from poisoning each other's incremental cache — read its header before changing this.
+    command: sh /app/scripts/build-libs.sh
     networks:
       - haive-network
     restart: "no"
