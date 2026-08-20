@@ -27,6 +27,14 @@ services:
       - .:/app
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-haive}:${POSTGRES_PASSWORD:-haive_dev_password}@postgres:5432/${POSTGRES_DB:-haive}
+      # This container is non-interactive by construction — it runs under `up -d` and
+      # under `run --rm` from scripts/dev.sh — so pnpm can never obtain a TTY. Without
+      # CI, pnpm 10 aborts with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY whenever it
+      # must recreate a node_modules tree left behind by an older pnpm, which is every
+      # existing checkout crossing the pnpm 9 -> 10 move. Unlike api/worker/web this is
+      # the one service with no node_modules volume override, so it installs directly
+      # into the bind-mounted host tree and is the only one exposed to that purge.
+      CI: "true"
     command: >
       sh -c "npm install -g corepack@latest &&
              corepack enable &&
