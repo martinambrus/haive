@@ -79,9 +79,11 @@ Named because a gap you know about is a decision, and a gap you don't is a surpr
   third-party package is invisible here.
 - **Infrastructure and deployment configuration.** Container, network, TLS, cloud IAM and CI
   configuration are not examined.
-- **Authenticated application surface.** Browser testing reaches only what the app serves without
-  logging in. There is no app-credential concept, so for a login-gated app the runtime stages see
-  the login page and nothing behind it.
+- **Authenticated application surface, beyond a form login.** A repository can configure an app
+  login (repo → Tooling → App login), which logs the task's browser in once before any agent runs
+  and is inherited by every later stage. Only username/password form logins are supported: **SSO,
+  2FA/TOTP, and magic-link or email-OTP flows are not**, and a repository without app login
+  configured sees only what the app serves logged out.
 - **Exploitation against a deployed target.** Runtime testing runs against the task's own
   throwaway environment, never a staging or production deployment.
 - **Determinism.** These stages reason with language models. Two runs over the same code can

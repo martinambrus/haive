@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { TOOL_INSTALL_METADATA, type ToolName } from '@haive/shared';
+import { TOOL_INSTALL_METADATA, userSecretsService, type ToolName } from '@haive/shared';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -245,6 +245,7 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
       secretMaskEnabled: true,
       secretMaskAllow: true,
       secretMaskDenyExtend: true,
+      appAuth: true,
       prWorkflowEnabled: true,
     },
   });
@@ -289,6 +290,13 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
     secretMaskEnabled: repo.secretMaskEnabled,
     secretMaskAllow: repo.secretMaskAllow ?? [],
     secretMaskDenyExtend: repo.secretMaskDenyExtend ?? [],
+    appAuth: repo.appAuth ?? null,
+    // Whether credentials exist, never what they are. The password is in the encrypted
+    // secret store precisely so it never travels back out over an API.
+    appAuthCredentialsSet: Boolean(
+      (await userSecretsService.get(userId, `app_auth:${repositoryId}:username`)) &&
+      (await userSecretsService.get(userId, `app_auth:${repositoryId}:password`)),
+    ),
     prWorkflowEnabled: repo.prWorkflowEnabled,
     lspOptions,
   });
@@ -299,6 +307,36 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
  *  01-declare-deps re-injection). Disabling RTK flips rtk_enabled — the
  *  .claude/settings.json hook is then reconciled by the existing onboarding
  *  upgrade flow (the workflow upgrade banner surfaces rtk-config as removable). */
+/** Accept an app-login config only if it is complete, else store null.
+ *
+ *  A half-filled config is worse than none: browser-login.js would fail on a missing
+ *  selector, which the user reads as "the login is broken" rather than "I have not
+ *  finished configuring it". Mirrors isUsableAppAuth in the worker, which is its reader.
+ *  Credentials are never part of this object — they live in user_secrets. */
+function normalizeAppAuth(raw: unknown): typeof schema.repositories.$inferInsert.appAuth {
+  if (!raw || typeof raw !== 'object') return null;
+  const c = raw as Record<string, unknown>;
+  const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+  const cond = (c.successCondition ?? {}) as Record<string, unknown>;
+  const type =
+    cond.type === 'element_present' ? ('element_present' as const) : ('url_contains' as const);
+  const config = {
+    enabled: c.enabled === true,
+    loginUrl: str(c.loginUrl),
+    usernameSelector: str(c.usernameSelector),
+    passwordSelector: str(c.passwordSelector),
+    submitSelector: str(c.submitSelector),
+    successCondition: { type, value: str(cond.value) },
+  };
+  return config.loginUrl &&
+    config.usernameSelector &&
+    config.passwordSelector &&
+    config.submitSelector &&
+    config.successCondition.value
+    ? config
+    : null;
+}
+
 toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   const userId = c.get('userId');
   const repositoryId = c.req.param('id');
@@ -320,6 +358,11 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     secretMaskAllow?: string[];
     secretMaskDenyExtend?: string[];
     prWorkflowEnabled?: boolean;
+    appAuth?: unknown;
+    /** Write-only. Stored in user_secrets, never on the repositories row and never
+     *  returned by the GET above. */
+    appAuthUsername?: string;
+    appAuthPassword?: string;
   };
 
   const updates: Partial<typeof schema.repositories.$inferInsert> = { updatedAt: new Date() };
@@ -355,6 +398,22 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   }
   if (typeof body.prWorkflowEnabled === 'boolean') {
     updates.prWorkflowEnabled = body.prWorkflowEnabled;
+  }
+  if (body.appAuth !== undefined) {
+    updates.appAuth = normalizeAppAuth(body.appAuth);
+  }
+  // Credentials go to the encrypted per-user store, keyed per repository. An empty
+  // string is a deliberate clear; `undefined` leaves the stored value alone, so saving
+  // the form without retyping the password does not wipe it.
+  for (const [field, suffix] of [
+    ['appAuthUsername', 'username'],
+    ['appAuthPassword', 'password'],
+  ] as const) {
+    const value = body[field];
+    if (typeof value !== 'string') continue;
+    const key = `app_auth:${repositoryId}:${suffix}`;
+    if (value) await userSecretsService.set(userId, key, value, `App login ${suffix}`);
+    else await userSecretsService.delete(userId, key);
   }
 
   await db.update(schema.repositories).set(updates).where(eq(schema.repositories.id, repositoryId));

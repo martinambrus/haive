@@ -25,6 +25,7 @@ import {
 import { ensureAppServing } from './_app-runtime.js';
 import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js';
 import { runnerExec, startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
+import { appAuthPromptLines, loginAppBrowser, type AppLoginOutcome } from './_app-auth.js';
 import { SANDBOX_WORKDIR } from '../../../sandbox/sandbox-runner.js';
 import {
   appRunnerExec,
@@ -65,6 +66,11 @@ interface BrowserVerifyDetect {
   /** The env-replicate image tag, needed to (re)start the app-runner. */
   envImageTag: string | null;
   repoSubpath: string | null;
+  /** Result of the deterministic app login, set by `prepare` immediately before the
+   *  tester is dispatched — NOT by detect(), and deliberately never persisted into
+   *  detect_output. A retry re-runs prepare and logs in again, which is right: the
+   *  runner (and its cookie jar) may have been recreated in between. */
+  appLogin?: AppLoginOutcome;
   /** Spec + changed files for the MCP tester / manual-checklist prompts. */
   spec: string;
   implementationFiles: ImplementationFileSet;
@@ -105,6 +111,11 @@ interface BrowserVerifyApply {
   /** Tester's fix-scope judgement on a failed mcp pass (null otherwise): 'trivial'
    *  keeps the in-step fixer loop, 'implementation' stops it so fixLoop escalates. */
   fixScope: 'trivial' | 'implementation' | null;
+  /** Whether the shared browser was logged into the app. Recorded so 08d — which
+   *  inherits the very same browser and cookie jar — can tell its adversaries which
+   *  session they have, instead of each one working it out by walking into a login
+   *  wall. Absent on rows written before app login existed. */
+  appLogin?: AppLoginOutcome;
   /** Every screenshot the agent has reported across this step's passes (cumulative,
    *  like fixesApplied) — captions for the gallery, never proof a file exists. */
   screenshots: ReportedScreenshot[];
@@ -714,6 +725,24 @@ export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerif
           { timeoutMs: 30_000 },
         ).catch(() => {});
       }
+
+      // Log the (now running) browser in, if this repository has it configured. Done
+      // here rather than in detect() because it needs the desktop up, and because the
+      // outcome must reflect THIS attempt rather than a cached one.
+      //
+      // Warns, never blocks: a failed or absent login leaves the tester on the
+      // logged-out app, which is what it always had. What must not happen is the tester
+      // guessing which it got — appAuthPromptLines states it either way.
+      if (runtime.mode === 'ddev' || runtime.mode === 'app-runner') {
+        const outcome = await loginAppBrowser(ctx, runtime);
+        (detected as BrowserVerifyDetect).appLogin = outcome;
+        if (outcome.attempted) {
+          await ctx.emitProgress(
+            outcome.ok ? 'Logged the browser into the app.' : `App login failed: ${outcome.reason}`,
+          );
+          ctx.logger.info({ ok: outcome.ok, reason: outcome.reason }, 'app login attempted');
+        }
+      }
     },
     buildPrompt: (args) => {
       const d = args.detected as BrowserVerifyDetect;
@@ -998,6 +1027,9 @@ async function applyMcp(
     consoleWarnings: [],
     networkErrors: [],
     pageTitle: null,
+    // Carried onto every mcp result so 08d, which inherits this very browser, can tell
+    // its adversaries whether they are behind the login or in front of it.
+    appLogin: detected.appLogin,
     appUrl: detected.appUrl,
     ran: true,
     skipped: false,
@@ -1095,6 +1127,9 @@ function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string): string {
     'You are the browser integration-tester. Test the implemented feature in a REAL browser using',
     'the chrome-devtools MCP tools (the browser is already running — connect to it).',
     `Application URL: ${appUrl}`,
+    '',
+    ...appAuthPromptLines(d.appLogin ?? { attempted: false, ok: false, reason: '' }),
+    '',
     agentDefinitionGuidance(
       'integration-tester',
       [

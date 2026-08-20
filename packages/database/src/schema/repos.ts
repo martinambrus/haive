@@ -140,6 +140,24 @@ export const repositories = pgTable(
      *  credential with a forge provider) surfaces the option without the user having to
      *  find the tooling-page toggle. Turn it off per repo to suppress the option there. */
     prWorkflowEnabled: boolean('pr_workflow_enabled').notNull().default(true),
+    /** Deterministic form login for browser testing (default: absent = disabled).
+     *
+     *  Holds only the SHAPE of the login — where it is and how to recognise success.
+     *  The username and password live in user_secrets under `app_auth:<repoId>:*`,
+     *  because this row is read into prompts and step outputs all over the codebase
+     *  and a credential in it would leak by a dozen routes.
+     *
+     *  Selector-based rather than natural language on purpose: the login runs in
+     *  browser-login.js inside the runner, with no model involved, which is the only
+     *  way the credentials never reach a CLI provider's context. */
+    appAuth: jsonb('app_auth').$type<{
+      enabled: boolean;
+      loginUrl: string;
+      usernameSelector: string;
+      passwordSelector: string;
+      submitSelector: string;
+      successCondition: { type: 'url_contains' | 'element_present'; value: string };
+    } | null>(),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },

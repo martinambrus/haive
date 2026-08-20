@@ -12,6 +12,7 @@ import { didNotCompleteIssue, shouldRetryMiningTerminalFailure } from '../../min
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
+import { appAuthPromptLines, type AppLoginOutcome } from './_app-auth.js';
 import { parseReviewJson } from './_agent-json.js';
 import {
   changedFilesBlock,
@@ -100,6 +101,9 @@ interface AdversarialDetect {
   spec: string;
   implementationFiles: ImplementationFileSet;
   appUrl: string | null;
+  /** The session 08a left the shared browser in. 08d drives the SAME browser, so this
+   *  is inherited rather than established — it only has to be stated. */
+  appLogin: AppLoginOutcome | null;
   debtBlock: string;
 }
 
@@ -195,6 +199,9 @@ function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
       'Determine the changed files from the workspace.',
     ),
     d.appUrl ? `Running app URL (for runtime attacks): ${d.appUrl}` : '',
+    ...(d.appUrl
+      ? appAuthPromptLines(d.appLogin ?? { attempted: false, ok: false, reason: '' })
+      : []),
     d.debtBlock ? `\n${d.debtBlock}` : '',
     'Do NOT edit code and do NOT run git.',
     ...SEARCH_LADDER,
@@ -253,7 +260,12 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
 
     const boot = await loadAppBootOutput(ctx.db, ctx.taskId);
     const browser = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-verify');
-    const appUrl = (browser?.output as { appUrl?: string } | null)?.appUrl ?? boot?.appUrl ?? null;
+    const browserOut = browser?.output as { appUrl?: string; appLogin?: AppLoginOutcome } | null;
+    const appUrl = browserOut?.appUrl ?? boot?.appUrl ?? null;
+    // Absent on rows written before app login existed, and on the probe/manual paths
+    // that never attempt one — both mean "not logged in", which is what the adversaries
+    // are then told.
+    const appLogin = browserOut?.appLogin ?? null;
 
     // DAG debt (07b/08c pattern).
     let debtBlock = '';
@@ -287,6 +299,7 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
       spec,
       implementationFiles: await collectImplementationFiles(ctx, workspace),
       appUrl,
+      appLogin,
       debtBlock,
     };
   },

@@ -85,7 +85,7 @@ async function isRunning(name: string): Promise<boolean> {
 async function injectBrowserAssets(container: string): Promise<void> {
   const dir = browserAssetsDir();
   await exec('docker', ['exec', container, 'mkdir', '-p', '/opt/browser'], { timeout: 15_000 });
-  for (const f of ['browser-check.js', 'browser-probe-connect.js']) {
+  for (const f of ['browser-check.js', 'browser-probe-connect.js', 'browser-login.js']) {
     await exec('docker', ['cp', path.join(dir, f), `${container}:/opt/browser/${f}`], {
       timeout: 30_000,
     });
@@ -276,12 +276,15 @@ async function isTaskDebugMode(taskId: string): Promise<boolean> {
 export async function appRunnerExec(
   handle: AppRunnerHandle,
   command: string,
-  opts: { timeoutMs?: number } = {},
+  /** See runnerExec: `env` becomes `docker exec -e`, for values that must stay out of
+   *  the command string. */
+  opts: { timeoutMs?: number; env?: Record<string, string> } = {},
 ): Promise<{ exitCode: number; output: string }> {
+  const envArgs = Object.entries(opts.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
   try {
     const { stdout, stderr } = await exec(
       'docker',
-      ['exec', handle.container, 'bash', '-lc', command],
+      ['exec', ...envArgs, handle.container, 'bash', '-lc', command],
       { timeout: opts.timeoutMs ?? 120_000, maxBuffer: 10 * 1024 * 1024 },
     );
     return { exitCode: 0, output: `${stdout}${stderr}` };

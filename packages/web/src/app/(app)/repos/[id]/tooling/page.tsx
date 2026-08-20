@@ -27,6 +27,15 @@ interface ToolingConfig {
   secretMaskEnabled: boolean;
   secretMaskAllow: string[];
   secretMaskDenyExtend: string[];
+  appAuth: {
+    enabled: boolean;
+    loginUrl: string;
+    usernameSelector: string;
+    passwordSelector: string;
+    submitSelector: string;
+    successCondition: { type: string; value: string };
+  } | null;
+  appAuthCredentialsSet: boolean;
   prWorkflowEnabled: boolean;
   lspOptions: LspOption[];
 }
@@ -78,6 +87,16 @@ export default function RepoToolingPage() {
   const [secretMaskEnabled, setSecretMaskEnabled] = useState(true);
   const [secretMaskAllow, setSecretMaskAllow] = useState('');
   const [secretMaskDenyExtend, setSecretMaskDenyExtend] = useState('');
+  const [appAuthEnabled, setAppAuthEnabled] = useState(false);
+  const [appAuthLoginUrl, setAppAuthLoginUrl] = useState('');
+  const [appAuthUserSel, setAppAuthUserSel] = useState('');
+  const [appAuthPassSel, setAppAuthPassSel] = useState('');
+  const [appAuthSubmitSel, setAppAuthSubmitSel] = useState('');
+  const [appAuthCondType, setAppAuthCondType] = useState('url_contains');
+  const [appAuthCondValue, setAppAuthCondValue] = useState('');
+  const [appAuthUsername, setAppAuthUsername] = useState('');
+  const [appAuthPassword, setAppAuthPassword] = useState('');
+  const [appAuthCredsSet, setAppAuthCredsSet] = useState(false);
   const [prWorkflowEnabled, setPrWorkflowEnabled] = useState(false);
 
   useEffect(() => {
@@ -97,6 +116,14 @@ export default function RepoToolingPage() {
         setSecretMaskEnabled(cfg.secretMaskEnabled);
         setSecretMaskAllow((cfg.secretMaskAllow ?? []).join('\n'));
         setSecretMaskDenyExtend((cfg.secretMaskDenyExtend ?? []).join('\n'));
+        setAppAuthEnabled(cfg.appAuth?.enabled ?? false);
+        setAppAuthLoginUrl(cfg.appAuth?.loginUrl ?? '');
+        setAppAuthUserSel(cfg.appAuth?.usernameSelector ?? '');
+        setAppAuthPassSel(cfg.appAuth?.passwordSelector ?? '');
+        setAppAuthSubmitSel(cfg.appAuth?.submitSelector ?? '');
+        setAppAuthCondType(cfg.appAuth?.successCondition?.type ?? 'url_contains');
+        setAppAuthCondValue(cfg.appAuth?.successCondition?.value ?? '');
+        setAppAuthCredsSet(cfg.appAuthCredentialsSet ?? false);
         setPrWorkflowEnabled(cfg.prWorkflowEnabled);
       } catch (err) {
         if (!cancelled) setError((err as Error).message ?? 'Failed to load tooling config');
@@ -139,7 +166,21 @@ export default function RepoToolingPage() {
           .map((l) => l.trim())
           .filter(Boolean),
         prWorkflowEnabled,
+        appAuth: {
+          enabled: appAuthEnabled,
+          loginUrl: appAuthLoginUrl,
+          usernameSelector: appAuthUserSel,
+          passwordSelector: appAuthPassSel,
+          submitSelector: appAuthSubmitSel,
+          successCondition: { type: appAuthCondType, value: appAuthCondValue },
+        },
+        // Sent only when retyped: an untouched field must not wipe a stored credential.
+        ...(appAuthUsername ? { appAuthUsername } : {}),
+        ...(appAuthPassword ? { appAuthPassword } : {}),
       });
+      if (appAuthUsername || appAuthPassword) setAppAuthCredsSet(true);
+      setAppAuthUsername('');
+      setAppAuthPassword('');
       setSaved(true);
     } catch (err) {
       setError((err as Error).message ?? 'Failed to save tooling');
@@ -322,6 +363,151 @@ export default function RepoToolingPage() {
                 uses them as dumps rather than schema/migrations).
               </p>
             </div>
+          </Card>
+
+          <Card>
+            <h2 className="text-lg font-semibold text-neutral-100">App login (browser testing)</h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              Logs the task&apos;s browser into your app once, before any agent tests it, so browser
+              testing reaches what is behind the login instead of stopping at it. The login runs as
+              plain code inside the runner — the username and password are stored encrypted and are
+              never put in a prompt, so they never reach a CLI provider. Form logins only: SSO,
+              2FA/TOTP and magic-link flows are not supported.
+            </p>
+            <div className="mt-3 flex items-center gap-2">
+              <input
+                id="appAuthEnabled"
+                type="checkbox"
+                className="h-4 w-4 rounded border-neutral-700 bg-neutral-900 text-indigo-500"
+                checked={appAuthEnabled}
+                onChange={(e) => {
+                  setAppAuthEnabled(e.target.checked);
+                  markDirty();
+                }}
+              />
+              <Label htmlFor="appAuthEnabled">Log in before browser testing</Label>
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              {(
+                [
+                  [
+                    'appAuthLoginUrl',
+                    'Login page URL',
+                    appAuthLoginUrl,
+                    setAppAuthLoginUrl,
+                    'https://myapp.ddev.site/login',
+                  ],
+                  [
+                    'appAuthUserSel',
+                    'Username field selector',
+                    appAuthUserSel,
+                    setAppAuthUserSel,
+                    '#email',
+                  ],
+                  [
+                    'appAuthPassSel',
+                    'Password field selector',
+                    appAuthPassSel,
+                    setAppAuthPassSel,
+                    '#password',
+                  ],
+                  [
+                    'appAuthSubmitSel',
+                    'Submit button selector',
+                    appAuthSubmitSel,
+                    setAppAuthSubmitSel,
+                    'button[type="submit"]',
+                  ],
+                ] as const
+              ).map(([id, label, value, setter, placeholder]) => (
+                <div key={id} className="flex flex-col gap-1.5">
+                  <Label htmlFor={id}>{label}</Label>
+                  <input
+                    id={id}
+                    className="rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1.5 font-mono text-xs text-neutral-100 disabled:opacity-50"
+                    placeholder={placeholder}
+                    value={value}
+                    disabled={!appAuthEnabled}
+                    onChange={(e) => {
+                      setter(e.target.value);
+                      markDirty();
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="appAuthCondType">Confirm the login worked by</Label>
+                <select
+                  id="appAuthCondType"
+                  className="rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-xs text-neutral-100 disabled:opacity-50"
+                  value={appAuthCondType}
+                  disabled={!appAuthEnabled}
+                  onChange={(e) => {
+                    setAppAuthCondType(e.target.value);
+                    markDirty();
+                  }}
+                >
+                  <option value="url_contains">URL contains</option>
+                  <option value="element_present">Element is present</option>
+                </select>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="appAuthCondValue">
+                  {appAuthCondType === 'url_contains' ? 'URL fragment' : 'Selector'}
+                </Label>
+                <input
+                  id="appAuthCondValue"
+                  className="rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1.5 font-mono text-xs text-neutral-100 disabled:opacity-50"
+                  placeholder={appAuthCondType === 'url_contains' ? '/dashboard' : '.avatar'}
+                  value={appAuthCondValue}
+                  disabled={!appAuthEnabled}
+                  onChange={(e) => {
+                    setAppAuthCondValue(e.target.value);
+                    markDirty();
+                  }}
+                />
+              </div>
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="appAuthUsername">Username</Label>
+                <input
+                  id="appAuthUsername"
+                  autoComplete="off"
+                  className="rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-xs text-neutral-100 disabled:opacity-50"
+                  placeholder={appAuthCredsSet ? '•••••• (stored)' : 'test user'}
+                  value={appAuthUsername}
+                  disabled={!appAuthEnabled}
+                  onChange={(e) => {
+                    setAppAuthUsername(e.target.value);
+                    markDirty();
+                  }}
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="appAuthPassword">Password</Label>
+                <input
+                  id="appAuthPassword"
+                  type="password"
+                  autoComplete="new-password"
+                  className="rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-xs text-neutral-100 disabled:opacity-50"
+                  placeholder={appAuthCredsSet ? '•••••• (stored)' : ''}
+                  value={appAuthPassword}
+                  disabled={!appAuthEnabled}
+                  onChange={(e) => {
+                    setAppAuthPassword(e.target.value);
+                    markDirty();
+                  }}
+                />
+              </div>
+            </div>
+            <p className="mt-2 text-xs text-neutral-600">
+              {appAuthCredsSet
+                ? 'Credentials are stored. Leave both blank to keep them; type to replace.'
+                : "Credentials are stored encrypted, separately from this repository's settings."}
+            </p>
           </Card>
 
           <Card>

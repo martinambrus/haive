@@ -70,13 +70,15 @@ let cachedTag: string | null = null;
 async function resolveImageTag(): Promise<string> {
   if (cachedTag) return cachedTag;
   const dir = runnerContextDir();
-  const [dockerfile, entrypoint, browserCheck, probeConnect, desktopSh] = await Promise.all([
-    readFile(path.join(dir, 'Dockerfile'), 'utf8'),
-    readFile(path.join(dir, 'entrypoint.sh'), 'utf8'),
-    readFile(path.join(dir, 'browser-check.js'), 'utf8'),
-    readFile(path.join(dir, 'browser-probe-connect.js'), 'utf8'),
-    readFile(path.join(dir, 'start-browser-desktop.sh'), 'utf8'),
-  ]);
+  const [dockerfile, entrypoint, browserCheck, probeConnect, browserLogin, desktopSh] =
+    await Promise.all([
+      readFile(path.join(dir, 'Dockerfile'), 'utf8'),
+      readFile(path.join(dir, 'entrypoint.sh'), 'utf8'),
+      readFile(path.join(dir, 'browser-check.js'), 'utf8'),
+      readFile(path.join(dir, 'browser-probe-connect.js'), 'utf8'),
+      readFile(path.join(dir, 'browser-login.js'), 'utf8'),
+      readFile(path.join(dir, 'start-browser-desktop.sh'), 'utf8'),
+    ]);
   const hash = createHash('sha256')
     .update(dockerfile)
     .update('\0')
@@ -85,6 +87,8 @@ async function resolveImageTag(): Promise<string> {
     .update(browserCheck)
     .update('\0')
     .update(probeConnect)
+    .update('\0')
+    .update(browserLogin)
     .update('\0')
     .update(desktopSh)
     .digest('hex')
@@ -1532,12 +1536,16 @@ function runnerShellStreaming(
 export async function runnerExec(
   handle: DdevRunnerHandle,
   command: string,
-  opts: { timeoutMs?: number } = {},
+  /** `env` reaches the container as `docker exec -e`, the same way provider secrets
+   *  already do (docker-runner.ts). Use it for anything that must not appear in the
+   *  command string, which is what a caller passing a credential needs. */
+  opts: { timeoutMs?: number; env?: Record<string, string> } = {},
 ): Promise<{ exitCode: number; output: string }> {
+  const envArgs = Object.entries(opts.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
   try {
     const { stdout, stderr } = await exec(
       'docker',
-      ['exec', '-u', 'ddev', handle.container, 'bash', '-lc', command],
+      ['exec', '-u', 'ddev', ...envArgs, handle.container, 'bash', '-lc', command],
       { timeout: opts.timeoutMs ?? 120_000, maxBuffer: 10 * 1024 * 1024 },
     );
     return { exitCode: 0, output: `${stdout}${stderr}` };
