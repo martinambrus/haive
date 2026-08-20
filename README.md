@@ -208,6 +208,9 @@ The container caps above still apply inside whatever size the VM is; `.wslconfig
 
 ## Hardening
 
+What the security review stages examine — and what they deliberately do not — is documented in
+[docs/SECURITY-COVERAGE.md](./docs/SECURITY-COVERAGE.md).
+
 ### Multi-user isolation
 
 Every task, repository, credential, and CLI provider row is scoped by `userId`. API routes filter by the authenticated user in every query; there is no implicit admin bypass. A regression smoke test (`packages/api/test/multi-user-isolation-smoke.ts`) creates two users and asserts that user B cannot read, list, submit, action, or otherwise observe user A's resources.
@@ -261,7 +264,32 @@ Caveats: rootless Docker uses user-namespaced uid mapping, so files written insi
 
 ## Acknowledgements
 
-The workflow DAG design is directly inspired by [SWE-AF](https://github.com/Agent-Field/SWE-AF).
+hAIv<sup>e</sup> has taken design ideas from several other projects, and ingests a few public
+data feeds. Everything listed here is either something we **learned from** or something we
+**consume at runtime** — ordinary npm dependencies are declared in `package.json` and are not
+repeated here.
+
+Where a row says _ideas only_, it means exactly that: the design was studied and reimplemented
+from scratch. No source was copied, which matters most for AGPL-licensed work — hAIv<sup>e</sup>
+is MIT, and incorporating AGPL code would change that for everyone downstream.
+
+| Source                                                                                                                 | What it gave us                                                                                                                                                                                                                                                                                                   | Licence            |
+| ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| [SWE-AF](https://github.com/Agent-Field/SWE-AF)                                                                        | The workflow DAG design                                                                                                                                                                                                                                                                                           | —                  |
+| [Claude Security](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/claude-security) (Anthropic) | Coverage disclosure as a first-class result, the CWE-798 hard-coded-credential family, the three refuter lenses (reachability / impact / defenses), treating repository text as data rather than instructions, and the secrets sweep that deliberately inverts its own skip list for test fixtures                | Apache-2.0         |
+| [Shannon](https://github.com/KeygraphHQ/shannon) (Keygraph)                                                            | Joining structured finding data by id instead of asking an agent to re-transcribe it across stages; replaying recorded provider streams as test fixtures; the login-flow and success-condition config shape behind authenticated browser testing; and this coverage-document idea. **Ideas only — no code taken** | AGPL-3.0           |
+| DoorDash DashBench                                                                                                     | The severity weight ladder in `packages/shared/src/review/severity.ts`, and the published false-positive-cost finding that the refutation pass argues against when it fails closed                                                                                                                                | Published research |
+| [LiteLLM](https://github.com/BerriAI/litellm) (BerriAI)                                                                | `model_prices_and_context_window.json`, the direct-vendor rate feed behind per-invocation cost                                                                                                                                                                                                                    | MIT                |
+| [OpenRouter](https://openrouter.ai)                                                                                    | The `/api/v1/models` catalog — both the model picker's list and the gateway's own resale rates                                                                                                                                                                                                                    | Public API         |
+| [European Central Bank](https://www.ecb.europa.eu/stats/eurofxref/)                                                    | Daily euro reference rates, used to display costs in a currency other than USD                                                                                                                                                                                                                                    | Public data        |
+| [CWE™](https://cwe.mitre.org/) (MITRE)                                                                                 | The CWE identifiers carried on security findings                                                                                                                                                                                                                                                                  | See below          |
+
+CWE™ is a trademark of The MITRE Corporation. Copyright © 2006–2026, The MITRE Corporation.
+CWE is used here under the [CWE Terms of Use](https://cwe.mitre.org/about/termsofuse.html);
+hAIv<sup>e</sup> carries CWE identifiers only, not the catalog's titles or category data.
+
+What each security stage does and does not cover is documented separately in
+[docs/SECURITY-COVERAGE.md](./docs/SECURITY-COVERAGE.md).
 
 ## License
 
