@@ -596,6 +596,31 @@ describe('collectRefutable', () => {
     };
     expect(collectRefutable(dup, { findings: [] }, [])).toHaveLength(1);
   });
+
+  it('collapses the same bug named by two different reviewers into one refuter', () => {
+    // The peer and security reviewers read the same diff and routinely name the same
+    // defect. One refuter each spent two of the ten sandboxed invocations proving the
+    // same thing twice.
+    const r = collectRefutable(
+      { findings: [{ severity: 'high' as const, path: 'q.ts', lines: '5', issue: 'sqli' }] },
+      { findings: [{ severity: 'critical' as const, path: 'q.ts', line: 5, issue: 'SQLi' }] },
+      [],
+    );
+    expect(r).toHaveLength(1);
+    // Both reviewers' own fingerprints ride along, so one refutation answers both.
+    expect(r[0]!.fingerprints).toHaveLength(2);
+    // The worst severity wins: the fan-out is spent most-severe first.
+    expect(r[0]!.severity).toBe('critical');
+  });
+
+  it('keeps two reviewers naming DIFFERENT bugs in the same file apart', () => {
+    const r = collectRefutable(
+      { findings: [{ severity: 'critical' as const, path: 'q.ts', lines: '5', issue: 'npe' }] },
+      { findings: [{ severity: 'critical' as const, path: 'q.ts', line: 9, issue: 'sqli' }] },
+      [],
+    );
+    expect(r).toHaveLength(2);
+  });
 });
 
 describe('isRefuted', () => {
@@ -738,6 +763,33 @@ describe('codeReviewStep refutation pass', () => {
     expect(out.peer.verdict).toBe('DISCUSS');
     expect(out.blocking).toBe(false);
     expect(out.advisoryVerdict).toBe(false);
+  });
+
+  it('one refuter dismisses the same bug on every reviewer that raised it', async () => {
+    // Two reviewers, one defect, one refuter. Before the dispatch was keyed per bug this
+    // needed two refuters and a single refutation left the other reviewer's copy standing,
+    // so the change went back to the implementer anyway.
+    const bug = { severity: 'critical', path: 'q.ts', issue: 'sqli', fix: 'parameterise' };
+    const sharedRefuterId = collectRefutable(
+      { findings: [{ ...bug, lines: '5' } as never] },
+      { findings: [] },
+      [],
+    )[0]!.agentId;
+    const out = await firstPass([
+      mining(
+        'peer-reviewer',
+        `\`\`\`json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"critical","path":"q.ts","lines":"5","issue":"sqli","fix":"parameterise"}],"positives":[]}\n\`\`\``,
+      ),
+      mining(
+        'security-code-reviewer',
+        `\`\`\`json\n{"verdict":"VULNERABLE","findings":[{"severity":"critical","path":"q.ts","line":5,"cwe":"CWE-89","issue":"sqli","fix":"parameterise"}]}\n\`\`\``,
+      ),
+      mining(sharedRefuterId, '```json\n{"refuted":true,"evidence":"q.ts:5 binds the value"}\n```'),
+    ]);
+    expect(out.refutedCount).toBe(2);
+    expect(out.blocking).toBe(false);
+    expect(out.peer.verdict).toBe('DISCUSS');
+    expect(out.security.verdict).toBe('NEEDS_FIXES');
   });
 
   it('never fans out when the kill-switch is off', async () => {

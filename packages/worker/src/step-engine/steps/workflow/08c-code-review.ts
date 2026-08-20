@@ -306,16 +306,33 @@ const REFUTER_PREFIX = 'refute-';
  *  disprove; the overflow stands unrefuted (fail closed) and is logged. */
 const MAX_REFUTERS = 10;
 
-/** One blocking finding, paired with the refuter that will try to disprove it. */
+/** One blocking BUG, paired with the refuter that will try to disprove it.
+ *
+ *  One per bug, not one per (reviewer, bug): the peer and security reviewers looking at
+ *  the same diff routinely name the same defect, and dispatching a refuter each spent two
+ *  of the ten sandboxed invocations proving the same thing twice. */
 export interface RefutableFinding {
+  /** The reviewer that raised it first — for the refuter prompt's attribution line. */
   reviewerId: string;
-  fingerprint: string;
+  /** Every reviewer-namespaced fingerprint that collapsed onto this dispatch, so one
+   *  refutation dismisses the bug for each reviewer that raised it. */
+  fingerprints: string[];
   agentId: string;
   severity: ReviewSeverity;
   path: string;
   lines: string;
   issue: string;
   fix: string;
+}
+
+/** The reviewer-agnostic key two reviewers naming the same defect collapse onto.
+ *
+ *  findingFingerprint with an empty reviewer id, rather than a second normalizer: the
+ *  path/issue normalization (case, whitespace, embedded ids and line numbers) is the same
+ *  question and must not drift. The per-reviewer fingerprints are still what identifies a
+ *  finding in `review_findings` — this key only decides the fan-out. */
+function dispatchKey(path: string, issue: string): string {
+  return findingFingerprint('', path, issue);
 }
 
 /** Deterministic, so the agent id is the same on the apply() that dispatches the wave
@@ -340,8 +357,8 @@ export function refuterTitle(
 }
 
 /** Every critical/high finding across all reviewers — exactly the ones that cost a fix
- *  round. Medium/low are advisory already and are never refuted: the invocation would
- *  buy nothing. */
+ *  round — collapsed to one entry per distinct bug. Medium/low are advisory already and
+ *  are never refuted: the invocation would buy nothing. */
 export function collectRefutable(
   peer: { findings: PeerFinding[] },
   security: { findings: SecurityFinding[] },
@@ -352,19 +369,29 @@ export function collectRefutable(
     ...security.findings.map((f) => ({ reviewerId: 'security-code-reviewer', f })),
     ...lenses.flatMap((l) => l.findings.map((f) => ({ reviewerId: l.id, f: f as PeerFinding }))),
   ];
-  const out: RefutableFinding[] = [];
-  const seen = new Set<string>();
+  const byBug = new Map<string, RefutableFinding>();
   for (const { reviewerId, f } of rows) {
     if (!isBlockingSeverity(f.severity)) continue;
     const path = f.path ?? '';
+    const key = dispatchKey(path, f.issue);
     const fingerprint = findingFingerprint(reviewerId, path, f.issue);
-    if (seen.has(fingerprint)) continue; // one refuter per distinct finding
-    seen.add(fingerprint);
+    const existing = byBug.get(key);
+    if (existing) {
+      // Same bug, another reviewer (or the same one twice). Keep one dispatch, but
+      // remember every fingerprint so the refutation reaches all of them, and keep the
+      // worst severity — the fan-out is spent most-severe first.
+      if (!existing.fingerprints.includes(fingerprint)) existing.fingerprints.push(fingerprint);
+      if (severityRank(f.severity) < severityRank(existing.severity)) {
+        existing.severity = f.severity;
+      }
+      if (!existing.fix && f.fix) existing.fix = f.fix;
+      continue;
+    }
     const lines = 'lines' in f ? (f.lines ?? '') : String((f as SecurityFinding).line ?? '');
-    out.push({
+    byBug.set(key, {
       reviewerId,
-      fingerprint,
-      agentId: refuterAgentId(fingerprint),
+      fingerprints: [fingerprint],
+      agentId: refuterAgentId(key),
       severity: f.severity,
       path,
       lines,
@@ -372,7 +399,7 @@ export function collectRefutable(
       fix: f.fix ?? '',
     });
   }
-  return out;
+  return [...byBug.values()];
 }
 
 const refutationSchema = z.object({
@@ -457,7 +484,9 @@ export function applyRefutations(
 ): number {
   const dismissed = new Set<string>();
   for (const f of collectRefutable(peer, security, lenses)) {
-    if (isRefuted(miningResult(results, f.agentId))) dismissed.add(f.fingerprint);
+    if (!isRefuted(miningResult(results, f.agentId))) continue;
+    // One refuter answered for the bug, so every reviewer that raised it is answered.
+    for (const fingerprint of f.fingerprints) dismissed.add(fingerprint);
   }
   if (dismissed.size === 0) return 0;
 
