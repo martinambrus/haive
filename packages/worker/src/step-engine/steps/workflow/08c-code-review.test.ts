@@ -10,6 +10,7 @@ import {
   collectRefutable,
   isRefuted,
   refuterTitle,
+  lensAgentId,
   codeReviewStep,
 } from './08c-code-review.js';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
@@ -653,15 +654,26 @@ describe('codeReviewStep refutation pass', () => {
     '```json\n{"verdict":"REQUEST_CHANGES","findings":[{"severity":"critical","path":"a.ts","lines":"4","issue":"npe","fix":"guard"}],"positives":[]}\n```';
   const CLEAN_SECURITY = '```json\n{"verdict":"SECURE","findings":[]}\n```';
 
-  /** The agent id 08c will address this finding's refuter by. */
+  /** The base agent id 08c derives this finding's refuters from. */
   const refuterId = collectRefutable(
     { findings: [{ severity: 'critical', path: 'a.ts', lines: '4', issue: 'npe', fix: 'guard' }] },
     { findings: [] },
     [],
   )[0]!.agentId;
 
+  /** The three lens ids one finding's panel is addressed by. */
+  const LENS_IDS = ['reach', 'impact', 'defense'] as const;
+  const panelIds = (base: string) => LENS_IDS.map((id) => `${base}-${id}`);
+
+  /** Every lens of `base` refuting with a citation — what a dismissal takes. */
+  const unanimous = (base: string, evidence = 'a.ts:4') =>
+    panelIds(base).map((id) =>
+      mining(id, `\`\`\`json\n{"refuted":true,"evidence":"${evidence}"}\n\`\`\``),
+    );
+
   beforeEach(() => {
     vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    vi.spyOn(configService, 'getNumber').mockResolvedValue(3);
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -670,17 +682,81 @@ describe('codeReviewStep refutation pass', () => {
   /** apply() with no wave dispatched yet — the first pass, which may throw. */
   const firstPass = (results: AgentMiningResult[]) => runReview(results, true, false);
 
-  it('fans out one refuter per blocking finding', async () => {
+  it('fans out one panel per blocking finding, a voter per lens', async () => {
     const err = await firstPass([
       mining('peer-reviewer', CRITICAL_PEER),
       mining('security-code-reviewer', CLEAN_SECURITY),
     ]).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(MiningWaveError);
     const dispatches = (err as MiningWaveError).dispatches;
+    expect(dispatches.map((d) => d.agentId)).toEqual(panelIds(refuterId));
+    for (const d of dispatches) {
+      expect(d.prompt).toContain('DISPROVE');
+      expect(d.prompt).toContain('npe');
+    }
+    // Each voter is told where to spend its effort, and the lens never lowers the bar.
+    expect(dispatches[0]!.prompt).toContain('YOUR LENS: REACHABILITY');
+    expect(dispatches[1]!.prompt).toContain('YOUR LENS: IMPACT');
+    expect(dispatches[2]!.prompt).toContain('YOUR LENS: DEFENSES');
+    for (const d of dispatches) {
+      expect(d.prompt).toContain('does NOT lower the bar');
+    }
+    // Three terminals for one finding read as duplicates unless the label distinguishes them.
+    expect(dispatches.map((d) => d.agentTitle)).toEqual([
+      expect.stringContaining('[reachability]'),
+      expect.stringContaining('[impact]'),
+      expect.stringContaining('[defenses]'),
+    ]);
+  });
+
+  it('runs the original single generic pass when the panel is dialled down', async () => {
+    // The admin escape hatch. Below the full panel it is one generalist, not a subset:
+    // a two-lens panel cannot be unanimous about what the third would have caught.
+    vi.spyOn(configService, 'getNumber').mockResolvedValue(1);
+    const err = await firstPass([mining('peer-reviewer', CRITICAL_PEER)]).catch((e: unknown) => e);
+    const dispatches = (err as MiningWaveError).dispatches;
     expect(dispatches).toHaveLength(1);
     expect(dispatches[0]!.agentId).toBe(refuterId);
-    expect(dispatches[0]!.prompt).toContain('DISPROVE');
-    expect(dispatches[0]!.prompt).toContain('npe');
+    expect(dispatches[0]!.prompt).not.toContain('YOUR LENS');
+  });
+
+  it('keeps a finding two of three lenses refuted', async () => {
+    // The whole point of a panel. Unanimity, not a majority: gate 2 defaults to approve
+    // when nothing blocks, so a wrongly-dismissed critical is one click from shipping,
+    // while a wrongly-kept one costs a fix round.
+    const [reach, impact] = panelIds(refuterId);
+    const out = await firstPass([
+      mining('peer-reviewer', CRITICAL_PEER),
+      mining(reach!, '```json\n{"refuted":true,"evidence":"a.ts:4"}\n```'),
+      mining(impact!, '```json\n{"refuted":true,"evidence":"a.ts:9"}\n```'),
+      // the defenses voter found a real problem
+      mining(
+        `${refuterId}-defense`,
+        '```json\n{"refuted":false,"reason":"nothing guards it"}\n```',
+      ),
+    ]);
+    expect(out.refutedCount).toBe(0);
+    expect(out.blocking).toBe(true);
+  });
+
+  it('keeps a finding when one lens is silent, so a dead voter cannot dismiss it', async () => {
+    const [reach, impact, defense] = panelIds(refuterId);
+    const killed: AgentMiningResult = {
+      agentId: defense!,
+      agentTitle: 'Refuter [defenses]',
+      status: 'failed',
+      output: null,
+      rawOutput: null,
+      errorMessage: 'timed out',
+    };
+    const out = await firstPass([
+      mining('peer-reviewer', CRITICAL_PEER),
+      mining(reach!, '```json\n{"refuted":true,"evidence":"a.ts:4"}\n```'),
+      mining(impact!, '```json\n{"refuted":true,"evidence":"a.ts:4"}\n```'),
+      killed,
+    ]);
+    expect(out.refutedCount).toBe(0);
+    expect(out.blocking).toBe(true);
   });
 
   it('tells the refuter that a claim in the tree is not a mitigation', async () => {
@@ -692,9 +768,10 @@ describe('codeReviewStep refutation pass', () => {
       mining('peer-reviewer', CRITICAL_PEER),
       mining('security-code-reviewer', CLEAN_SECURITY),
     ]).catch((e: unknown) => e);
-    const prompt = (err as MiningWaveError).dispatches[0]!.prompt;
-    expect(prompt).toContain('never a mitigation');
-    expect(prompt).toContain('Refute only with a defense you located and read');
+    for (const d of (err as MiningWaveError).dispatches) {
+      expect(d.prompt, d.agentId).toContain('never a mitigation');
+      expect(d.prompt, d.agentId).toContain('Refute only with a defense you located and read');
+    }
   });
 
   it('caps the fan-out and refutes the most severe findings first', async () => {
@@ -721,12 +798,13 @@ describe('codeReviewStep refutation pass', () => {
     ]).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(MiningWaveError);
     const prompts = (err as MiningWaveError).dispatches.map((d) => d.prompt);
-    expect(prompts).toHaveLength(10);
-    // every critical got a refuter; two of the highs were dropped
+    // MAX_REFUTERS bounds BUGS, not invocations: 10 findings, a panel of three each.
+    expect(prompts).toHaveLength(30);
+    // every critical got a panel; two of the highs were dropped
     for (let i = 0; i < 4; i += 1) {
       expect(prompts.some((p) => p.includes(`critical ${i}`))).toBe(true);
     }
-    expect(prompts.filter((p) => p.includes('severity high'))).toHaveLength(6);
+    expect(prompts.filter((p) => p.includes('severity high'))).toHaveLength(18);
   });
 
   it('never fans out when nothing blocks', async () => {
@@ -754,10 +832,7 @@ describe('codeReviewStep refutation pass', () => {
   });
 
   it('clears advisoryVerdict when refutation downgrades the verdict', async () => {
-    const out = await firstPass([
-      mining('peer-reviewer', CRITICAL_PEER),
-      mining(refuterId, '```json\n{"refuted":true,"evidence":"a.ts:4"}\n```'),
-    ]);
+    const out = await firstPass([mining('peer-reviewer', CRITICAL_PEER), ...unanimous(refuterId)]);
     // REQUEST_CHANGES rested on the refuted critical, so it became DISCUSS: the gate is
     // free to default to approve. A verdict that survived would have held it.
     expect(out.peer.verdict).toBe('DISCUSS');
@@ -765,7 +840,7 @@ describe('codeReviewStep refutation pass', () => {
     expect(out.advisoryVerdict).toBe(false);
   });
 
-  it('one refuter dismisses the same bug on every reviewer that raised it', async () => {
+  it('one panel dismisses the same bug on every reviewer that raised it', async () => {
     // Two reviewers, one defect, one refuter. Before the dispatch was keyed per bug this
     // needed two refuters and a single refutation left the other reviewer's copy standing,
     // so the change went back to the implementer anyway.
@@ -784,7 +859,7 @@ describe('codeReviewStep refutation pass', () => {
         'security-code-reviewer',
         `\`\`\`json\n{"verdict":"VULNERABLE","findings":[{"severity":"critical","path":"q.ts","line":5,"cwe":"CWE-89","issue":"sqli","fix":"parameterise"}]}\n\`\`\``,
       ),
-      mining(sharedRefuterId, '```json\n{"refuted":true,"evidence":"q.ts:5 binds the value"}\n```'),
+      ...unanimous(sharedRefuterId, 'q.ts:5 binds the value'),
     ]);
     expect(out.refutedCount).toBe(2);
     expect(out.blocking).toBe(false);
@@ -809,10 +884,7 @@ describe('codeReviewStep refutation pass', () => {
     const out = await firstPass([
       mining('peer-reviewer', CRITICAL_PEER),
       mining('security-code-reviewer', CLEAN_SECURITY),
-      mining(
-        refuterId,
-        '```json\n{"refuted":true,"evidence":"a.ts:4 guards the value already"}\n```',
-      ),
+      ...unanimous(refuterId, 'a.ts:4 guards the value already'),
     ]);
     expect(out.refutedCount).toBe(1);
     expect(out.blocking).toBe(false);
@@ -830,7 +902,9 @@ describe('codeReviewStep refutation pass', () => {
     // that sentence verbatim, so a blocking review must never carry it.
     const out = await firstPass([
       mining('peer-reviewer', CRITICAL_PEER),
-      mining(refuterId, '```json\n{"refuted":false,"reason":"the npe is real"}\n```'),
+      ...panelIds(refuterId).map((id) =>
+        mining(id, '```json\n{"refuted":false,"reason":"the npe is real"}\n```'),
+      ),
     ]);
     expect(out.blocking).toBe(true);
     expect(out.peer.verdict).toBe('REQUEST_CHANGES');
@@ -840,7 +914,9 @@ describe('codeReviewStep refutation pass', () => {
   it('keeps a finding whose refuter cited nothing', async () => {
     const out = await firstPass([
       mining('peer-reviewer', CRITICAL_PEER),
-      mining(refuterId, '```json\n{"refuted":true,"reason":"seems fine"}\n```'),
+      ...panelIds(refuterId).map((id) =>
+        mining(id, '```json\n{"refuted":true,"reason":"seems fine"}\n```'),
+      ),
     ]);
     expect(out.refutedCount).toBe(0);
     expect(out.blocking).toBe(true);
@@ -849,8 +925,8 @@ describe('codeReviewStep refutation pass', () => {
 
   it('keeps a finding whose refuter never reported', async () => {
     const failed: AgentMiningResult = {
-      agentId: refuterId,
-      agentTitle: 'Refuter',
+      agentId: panelIds(refuterId)[0]!,
+      agentTitle: 'Refuter [reachability]',
       status: 'failed',
       output: null,
       rawOutput: null,
@@ -871,8 +947,10 @@ describe('codeReviewStep refutation pass', () => {
     )[0]!.agentId;
     const out = await firstPass([
       mining('peer-reviewer', twoFindings),
-      mining(refuterId, '```json\n{"refuted":true,"evidence":"a.ts:4"}\n```'),
-      mining(raceId, '```json\n{"refuted":false,"reason":"the race is real"}\n```'),
+      ...unanimous(refuterId),
+      ...panelIds(raceId).map((id) =>
+        mining(id, '```json\n{"refuted":false,"reason":"the race is real"}\n```'),
+      ),
     ]);
     expect(out.refutedCount).toBe(1);
     expect(out.blocking).toBe(true);
@@ -903,10 +981,7 @@ describe('codeReviewStep refutation pass', () => {
     } as unknown as StepContext;
     await codeReviewStep.apply(ctx, {
       detected: { spec: 's', implementationFiles: [], debtBlock: '', level: 'none' },
-      agentMiningResults: [
-        mining('peer-reviewer', CRITICAL_PEER),
-        mining(refuterId, '```json\n{"refuted":true,"evidence":"a.ts:4"}\n```'),
-      ],
+      agentMiningResults: [mining('peer-reviewer', CRITICAL_PEER), ...unanimous(refuterId)],
       isFinalMiningAttempt: true,
       miningWaveExhausted: false,
     } as unknown as Parameters<typeof codeReviewStep.apply>[1]);
@@ -929,10 +1004,7 @@ describe('codeReviewStep refutation pass', () => {
     const out = await firstPass([
       mining('peer-reviewer', '```json\n{"verdict":"APPROVE","findings":[],"positives":[]}\n```'),
       mining('security-code-reviewer', vulnerable),
-      mining(
-        sqliId,
-        '```json\n{"refuted":true,"evidence":"c.ts:9 uses a prepared statement"}\n```',
-      ),
+      ...unanimous(sqliId, 'c.ts:9 uses a prepared statement'),
     ]);
     expect(out.refutedCount).toBe(1);
     expect(out.security.verdict).toBe('NEEDS_FIXES');

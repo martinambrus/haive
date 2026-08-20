@@ -301,6 +301,20 @@ export const CONFIG_KEYS = {
   // on the reviewers' word alone. Read per 08c apply (~30s config cache).
   REVIEW_REFUTE_ENABLED: 'config:review:refuteEnabled',
 
+  // How many angles each blocking finding is attacked from before it can be dismissed
+  // (default 3: reachability, impact, defenses). A single generic refuter finds one kind
+  // of reason a finding is wrong and stops; three voters, each told where to spend their
+  // effort, do not. Dismissal is UNANIMOUS — one silent, unreadable or uncertain voter
+  // keeps the finding, which is the fail-closed direction (see 08c's asymmetry note).
+  //
+  // Costs 3 sandboxed invocations per blocking finding instead of 1, capped at
+  // MAX_REFUTERS bugs per round. It cannot starve other tasks — enforceTaskAgentCap
+  // defers past MAX_PARALLEL_AGENTS_PER_TASK at pickup — so the cost is wall-clock,
+  // several serial batches rather than one. Anything BELOW 3 runs the original single
+  // generic pass rather than a subset: a two-lens panel cannot be unanimous about what
+  // the third would have caught. Read per 08c apply (~30s config cache).
+  REVIEW_REFUTE_LENSES: 'config:review:refuteLenses',
+
   // Global kill-switch for the pull-request close-out workflow. When 'true', a
   // workflow task's final worktree-cleanup step offers a "Create a pull request"
   // action (open a PR/MR on the repo's forge instead of a local merge), and the
@@ -486,6 +500,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.PRICING_AUTO_UPDATE_ENABLED]: 'true',
   [CONFIG_KEYS.COST_DISPLAY_CURRENCY]: 'USD',
   [CONFIG_KEYS.REVIEW_REFUTE_ENABLED]: 'true',
+  [CONFIG_KEYS.REVIEW_REFUTE_LENSES]: '3',
   [CONFIG_KEYS.PR_WORKFLOW_ENABLED]: 'false',
   // Runtime resource governor: ON by default; the numeric caps default to 0 (auto-derive
   // from host RAM/CPU via deriveRuntimeCaps) so a fresh install self-tunes to its machine.

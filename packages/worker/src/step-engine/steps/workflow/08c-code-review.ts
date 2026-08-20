@@ -301,10 +301,69 @@ export function hasNonApprovingVerdict(
 
 const REFUTER_PREFIX = 'refute-';
 
-/** One sandboxed CLI invocation per refuter, so the fan-out is bounded. A round with more
- *  blocking findings than this is going back to the implementer regardless of how many we
- *  disprove; the overflow stands unrefuted (fail closed) and is logged. */
+/** How many distinct bugs one round will refute, so the fan-out is bounded. A round with
+ *  more blocking findings than this is going back to the implementer regardless of how many
+ *  we disprove; the overflow stands unrefuted (fail closed) and is logged.
+ *
+ *  Bugs, not invocations: each is examined through every lens below, so the ceiling is
+ *  MAX_REFUTERS x lenses sandboxed calls. They do not starve other tasks —
+ *  enforceTaskAgentCap defers a task past MAX_PARALLEL_AGENTS_PER_TASK at pickup — so the
+ *  cost is wall-clock, several serial batches rather than one. */
 const MAX_REFUTERS = 10;
+
+/** The angles a finding is attacked from, borrowed from the claude-security plugin's
+ *  verifier panel. The lens directs where a refuter spends its effort; it never changes the
+ *  bar for a dismissal, which is the same for all three.
+ *
+ *  Three voters rather than one because a single generic refuter finds one kind of reason a
+ *  finding is wrong and stops. Unanimity rather than the plugin's 2-of-3 majority because
+ *  our default runs the other way: the plugin's verifiers default to FALSE_POSITIVE and a
+ *  wrong dismissal there costs a reader's attention, while here gate 2 defaults to approve
+ *  when nothing blocks, so a wrongly-dismissed critical is one click from shipping. */
+const REFUTE_LENSES = [
+  {
+    id: 'reach',
+    title: 'reachability',
+    lines: [
+      'YOUR LENS: REACHABILITY. Can an attacker, or a real caller, actually get here? Is the',
+      'input genuinely attacker-controlled or does it come from a trusted producer? Is the',
+      'path reachable at all in a default configuration? Check EVERY route to the code, not',
+      'only the one the reviewer looked at — a guard on one caller proves nothing about the',
+      'others.',
+    ],
+  },
+  {
+    id: 'impact',
+    title: 'impact',
+    lines: [
+      'YOUR LENS: IMPACT. If execution does reach here, does the consequence the reviewer',
+      'claims actually follow? Is the data really sensitive, the write really destructive,',
+      'the failure really unrecoverable? A finding whose real effect is a logged warning is',
+      'not the critical it was filed as.',
+    ],
+  },
+  {
+    id: 'defense',
+    title: 'defenses',
+    lines: [
+      'YOUR LENS: DEFENSES. Is something already stopping this? A framework default, a',
+      'middleware, a type or schema that cannot hold the bad value, an escape, a prepared',
+      'statement, a check one frame up. Read the defense — do not assume a framework',
+      'sanitises something because it usually does.',
+    ],
+  },
+] as const;
+
+type RefuteLens = (typeof REFUTE_LENSES)[number];
+
+/** The lenses one finding is examined through.
+ *
+ *  Fewer than the full panel means the original single generic pass rather than a subset:
+ *  two lenses would be a panel that cannot be unanimous about anything the third would have
+ *  caught, which is a worse bargain than one honest generalist. */
+function refuteLensesFor(lensCount: number): (RefuteLens | null)[] {
+  return lensCount >= REFUTE_LENSES.length ? [...REFUTE_LENSES] : [null];
+}
 
 /** One blocking BUG, paired with the refuter that will try to disprove it.
  *
@@ -341,6 +400,12 @@ function refuterAgentId(fingerprint: string): string {
   return `${REFUTER_PREFIX}${fingerprint.slice(0, 16)}`;
 }
 
+/** The agent id for one lens's pass over a finding. A null lens keeps the bare base id, so
+ *  dialling REVIEW_REFUTE_LENSES below the panel reproduces the original ids exactly. */
+export function lensAgentId(baseAgentId: string, lens: RefuteLens | null): string {
+  return lens ? `${baseAgentId}-${lens.id}` : baseAgentId;
+}
+
 /** Human terminal label for a refuter. Every refuter used to render as the identical
  *  "Refuter (<reviewer>)", so a fan-out of N distinct findings looked like N duplicate
  *  terminals. Include the position (i/total), the severity, and the finding's location +
@@ -349,10 +414,14 @@ export function refuterTitle(
   f: Pick<RefutableFinding, 'severity' | 'path' | 'lines' | 'issue'>,
   index: number,
   total: number,
+  lens?: RefuteLens | null,
 ): string {
   const loc = [f.path, f.lines].filter(Boolean).join(':');
   const issue = f.issue.replace(/\s+/g, ' ').trim();
-  const head = `Refuter ${index + 1}/${total} — ${f.severity}${loc ? ` ${loc}` : ''}`;
+  // The lens goes in the label because a three-voter panel renders as three terminals per
+  // finding; without it they read as the same refuter dispatched three times.
+  const which = lens ? ` [${lens.title}]` : '';
+  const head = `Refuter ${index + 1}/${total}${which} — ${f.severity}${loc ? ` ${loc}` : ''}`;
   return issue ? `${head} · ${issue.slice(0, 80)}` : head;
 }
 
@@ -422,7 +491,11 @@ export function isRefuted(raw: unknown): boolean {
   return hasFileLineEvidence(parsed.evidence);
 }
 
-function buildRefutePrompt(d: CodeReviewDetect, f: RefutableFinding): string {
+function buildRefutePrompt(
+  d: CodeReviewDetect,
+  f: RefutableFinding,
+  lens: RefuteLens | null,
+): string {
   return [
     'You are a REFUTER. A code reviewer raised the finding below against a change, and',
     'acting on it will send the whole change back to be reimplemented. Your job is to try',
@@ -436,6 +509,11 @@ function buildRefutePrompt(d: CodeReviewDetect, f: RefutableFinding): string {
     'If you cannot show that — if the finding might be right, if you are unsure, or if you',
     'cannot find the code — then it STANDS. Say refuted: false. An uncertain refutation is',
     'a wrong one: a real defect dismissed here reaches the developer marked as disproved.',
+    '',
+    ...(lens ? [...lens.lines, ''] : []),
+    lens
+      ? 'The lens says where to spend your effort. It does NOT lower the bar: a refutation still needs a cited file:line either way.'
+      : '',
     '',
     `Finding (from ${f.reviewerId}, severity ${f.severity}):`,
     `  location: ${f.path || '(unspecified)'}${f.lines ? `:${f.lines}` : ''}`,
@@ -476,16 +554,32 @@ function adjustVerdict<T extends { severity: ReviewSeverity; refuted?: boolean }
 
 /** Mark every blocking finding its refuter disproved, and downgrade the verdicts that
  *  rested entirely on those findings. Mutates in place; returns how many were dismissed. */
+/** Did the whole panel disprove this finding?
+ *
+ *  UNANIMOUS, and deliberately not a majority: `isRefuted` already answers false for a lens
+ *  that was killed, returned prose, or cited nothing, so one silent voter keeps the finding.
+ *  That is the fail-closed direction — the asymmetry argument above decides it. */
+function isRefutedByPanel(
+  results: AgentMiningResult[],
+  f: RefutableFinding,
+  refuteLenses: (RefuteLens | null)[],
+): boolean {
+  return refuteLenses.every((lens) =>
+    isRefuted(miningResult(results, lensAgentId(f.agentId, lens))),
+  );
+}
+
 export function applyRefutations(
   results: AgentMiningResult[],
   peer: { verdict: string; findings: PeerFinding[] },
   security: { verdict: string; findings: SecurityFinding[] },
   lenses: ReviewLensResult[],
+  refuteLenses: (RefuteLens | null)[] = refuteLensesFor(REFUTE_LENSES.length),
 ): number {
   const dismissed = new Set<string>();
   for (const f of collectRefutable(peer, security, lenses)) {
-    if (!isRefuted(miningResult(results, f.agentId))) continue;
-    // One refuter answered for the bug, so every reviewer that raised it is answered.
+    if (!isRefutedByPanel(results, f, refuteLenses)) continue;
+    // One panel answered for the bug, so every reviewer that raised it is answered.
     for (const fingerprint of f.fingerprints) dismissed.add(fingerprint);
   }
   if (dismissed.size === 0) return 0;
@@ -1125,8 +1219,16 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // and there is no claim to disprove.
     const waveRan = results.some((r) => r.agentId.startsWith(REFUTER_PREFIX));
     let refutedCount = 0;
+    // How many angles each finding is attacked from. Read on BOTH passes — the one that
+    // dispatches the wave and the one that reads it back — so the ids cannot disagree. An
+    // admin who changes it mid-review just leaves the panel short a voter, which fails
+    // closed. Read lazily, inside the refutation branches, so a review with nothing
+    // blocking touches the config service no more than it did before.
     if (waveRan) {
-      refutedCount = applyRefutations(results, peerOut, securityOut, extraLenses);
+      const refuteLenses = refuteLensesFor(
+        await configService.getNumber(CONFIG_KEYS.REVIEW_REFUTE_LENSES, REFUTE_LENSES.length),
+      );
+      refutedCount = applyRefutations(results, peerOut, securityOut, extraLenses, refuteLenses);
       blocking = computeBlocking(
         { findings: live(peerOut.findings) },
         { findings: live(securityOut.findings) },
@@ -1138,6 +1240,9 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         refutable.length > 0 &&
         (await configService.getBoolean(CONFIG_KEYS.REVIEW_REFUTE_ENABLED, true))
       ) {
+        const refuteLenses = refuteLensesFor(
+          await configService.getNumber(CONFIG_KEYS.REVIEW_REFUTE_LENSES, REFUTE_LENSES.length),
+        );
         // Worst first (severityRank: lower is more severe), so a capped wave spends its
         // invocations on the findings that hurt most if they are wrong.
         const wave = [...refutable]
@@ -1149,13 +1254,18 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
             'more blocking findings than refuters; the overflow stands unrefuted',
           );
         }
-        ctx.logger.info({ count: wave.length }, 'dispatching refuters for blocking findings');
+        ctx.logger.info(
+          { count: wave.length, lenses: refuteLenses.length },
+          'dispatching refuters for blocking findings',
+        );
         throw new MiningWaveError(
-          wave.map((f, i) => ({
-            agentId: f.agentId,
-            agentTitle: refuterTitle(f, i, wave.length),
-            prompt: buildRefutePrompt(args.detected, f),
-          })),
+          wave.flatMap((f, i) =>
+            refuteLenses.map((lens) => ({
+              agentId: lensAgentId(f.agentId, lens),
+              agentTitle: refuterTitle(f, i, wave.length, lens),
+              prompt: buildRefutePrompt(args.detected, f, lens),
+            })),
+          ),
         );
       }
     }
