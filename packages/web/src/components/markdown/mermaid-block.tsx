@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useId, useState } from 'react';
-import { repairSequenceSemicolons } from './mermaid-repair';
+import { repairFlowchartLabelParens, repairSequenceSemicolons } from './mermaid-repair';
 
 /** Module-level singleton so mermaid (a ~1.5MB chunk) loads once, lazily, and
  *  only on pages that actually render a diagram. The dynamic import keeps it
@@ -46,12 +46,14 @@ export function MermaidBlock({ source }: { source: string }) {
         }
       };
       let svg = await attempt(source, renderId);
-      if (svg === null) {
-        // One targeted repair pass for the common LLM sequenceDiagram mistake
-        // (a bare `;` read as a statement separator). Retry-only, so a diagram
-        // that already renders is never altered. See mermaid-repair.
-        const repaired = repairSequenceSemicolons(source);
-        if (repaired !== null) svg = await attempt(repaired, `${renderId}-repaired`);
+      // Targeted repair passes for the LLM authoring mistakes that abort the
+      // strict parser: a bare `;` in a sequence message, raw parens in a
+      // flowchart label. Each is gated to its own diagram type and retry-only,
+      // so a diagram that already renders is never altered. See mermaid-repair.
+      const repairs = [repairSequenceSemicolons, repairFlowchartLabelParens];
+      for (let i = 0; svg === null && i < repairs.length; i++) {
+        const repaired = repairs[i]!(source);
+        if (repaired !== null) svg = await attempt(repaired, `${renderId}-repaired-${i}`);
       }
       if (cancelled) return;
       setState(svg !== null ? { kind: 'done', svg } : { kind: 'error' });
