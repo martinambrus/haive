@@ -904,6 +904,33 @@ const VALIDATE_THEN_ACT = [
   'advisory — fix them only if they are real and cheap.',
 ].join('\n');
 
+/** One finding as the implementer receives it.
+ *
+ *  Carries the LINE the reviewer already supplied. It used to be dropped here while gate 2
+ *  rendered the same finding to the human WITH it, so the person reading got `q.ts:42` and the
+ *  agent that had to fix it got `q.ts` — and nothing about copying a line number is a judgement
+ *  call, so it should never have been left for the implementer to re-derive. (07b already does
+ *  this for its validator issues; this is the same shape.)
+ *
+ *  Deliberately NOT the `snippet`: this string becomes a PROMPT, and a hard-coded-credential
+ *  finding's quoted snippet is the credential itself — the same reason it is dropped before
+ *  review_findings.raw is written. path + line locate the code without it.
+ */
+function diagnosisLine(f: {
+  severity: ReviewSeverity;
+  path?: string;
+  issue: string;
+  fix?: string;
+  cwe?: string;
+  lines?: string;
+  line?: string | number;
+}): string {
+  const at = f.lines ?? (f.line != null && f.line !== '' ? String(f.line) : '');
+  const loc = `${f.path ?? ''}${at ? `:${at}` : ''}`;
+  const cwe = f.cwe ? ` (${f.cwe})` : '';
+  return `- [${f.severity}]${cwe} ${loc}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`;
+}
+
 export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> = {
   metadata: {
     id: '08c-code-review',
@@ -928,37 +955,15 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       // as a single block rather than one paragraph per line.
       const parts: string[] = [VALIDATE_THEN_ACT];
       if (peerFindings.length) {
-        parts.push(
-          '### Peer review\n' +
-            peerFindings
-              .map(
-                (f) => `- [${f.severity}] ${f.path}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`,
-              )
-              .join('\n'),
-        );
+        parts.push('### Peer review\n' + peerFindings.map(diagnosisLine).join('\n'));
       }
       if (securityFindings.length) {
-        parts.push(
-          '### Security\n' +
-            securityFindings
-              .map(
-                (f) => `- [${f.severity}] ${f.path}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`,
-              )
-              .join('\n'),
-        );
+        parts.push('### Security\n' + securityFindings.map(diagnosisLine).join('\n'));
       }
       for (const lens of out.extraLenses) {
         const lensFindings = live(lens.findings);
         if (!lensFindings.length) continue;
-        parts.push(
-          `### ${lens.title}\n` +
-            lensFindings
-              .map(
-                (f) =>
-                  `- [${f.severity}] ${f.path ?? ''}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`,
-              )
-              .join('\n'),
-        );
+        parts.push(`### ${lens.title}\n` + lensFindings.map(diagnosisLine).join('\n'));
       }
       return { blocking: true, diagnosis: parts.join('\n\n') || 'Code review requested changes.' };
     },

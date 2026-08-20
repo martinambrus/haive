@@ -1047,3 +1047,84 @@ describe('repository text is data, not direction', () => {
     }
   });
 });
+
+describe('fix-loop diagnosis carries the location', () => {
+  const diagnosisFor = (peer: unknown, security: unknown) =>
+    codeReviewStep.fixLoop!.evaluate({
+      blocking: true,
+      peer: peer as never,
+      security: security as never,
+      extraLenses: [],
+    } as never)!.diagnosis;
+
+  const CLEAN = { verdict: 'SECURE', findings: [] };
+
+  it('gives the implementer the same line gate 2 shows the human', () => {
+    // It used to render `q.ts: sqli` while gate 2 rendered `q.ts:42 sqli`, so the person
+    // reading got the location and the agent that had to act on it did not.
+    const d = diagnosisFor(
+      {
+        verdict: 'REQUEST_CHANGES',
+        findings: [
+          { severity: 'critical', path: 'src/a.ts', lines: '12-18', issue: 'npe', fix: 'guard' },
+        ],
+      },
+      CLEAN,
+    );
+    expect(d).toContain('src/a.ts:12-18');
+  });
+
+  it('reads a security finding line from `line`, and carries its CWE', () => {
+    const d = diagnosisFor(
+      { verdict: 'APPROVE', findings: [], positives: [] },
+      {
+        verdict: 'VULNERABLE',
+        findings: [
+          {
+            severity: 'critical',
+            path: 'q.ts',
+            line: 42,
+            cwe: 'CWE-89',
+            issue: 'sqli',
+            fix: 'bind',
+          },
+        ],
+      },
+    );
+    expect(d).toContain('q.ts:42');
+    expect(d).toContain('(CWE-89)');
+  });
+
+  it('renders cleanly when the reviewer gave no line at all', () => {
+    const d = diagnosisFor(
+      { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'high', path: 'b.ts', issue: 'race' }] },
+      CLEAN,
+    );
+    expect(d).toContain('b.ts: race');
+    expect(d).not.toContain('b.ts:: race');
+    expect(d).not.toContain('undefined');
+  });
+
+  it('never puts a finding snippet in the diagnosis', () => {
+    // The diagnosis is a prompt, and a hard-coded-credential finding's snippet IS the
+    // credential — the same reason it is dropped before review_findings.raw is written.
+    const d = diagnosisFor(
+      { verdict: 'APPROVE', findings: [], positives: [] },
+      {
+        verdict: 'VULNERABLE',
+        findings: [
+          {
+            severity: 'critical',
+            path: 'conf.ts',
+            line: 3,
+            cwe: 'CWE-798',
+            issue: 'hardcoded aws key',
+            snippet: 'AKIAIOSFODNN7EXAMPLE',
+          },
+        ],
+      },
+    );
+    expect(d).toContain('conf.ts:3');
+    expect(d).not.toContain('AKIAIOSFODNN7EXAMPLE');
+  });
+});
