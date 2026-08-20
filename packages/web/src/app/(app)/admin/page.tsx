@@ -153,6 +153,7 @@ export default function AdminPage() {
   const [savingTerseness, setSavingTerseness] = useState(false);
   const [reviewDistillEnabled, setReviewDistillEnabled] = useState<boolean | null>(null);
   const [savingReviewDistill, setSavingReviewDistill] = useState(false);
+  const [reviewRefuteLenses, setReviewRefuteLenses] = useState<number>(3);
   const [reviewRefuteEnabled, setReviewRefuteEnabled] = useState<boolean | null>(null);
   const [savingReviewRefute, setSavingReviewRefute] = useState(false);
   const [maxPerTask, setMaxPerTask] = useState<number | null>(null);
@@ -244,7 +245,7 @@ export default function AdminPage() {
         ),
         api.get<{ level: string }>('/admin/config/terseness'),
         api.get<{ enabled: boolean }>('/admin/config/review-fanout-distill'),
-        api.get<{ enabled: boolean }>('/admin/config/review-refute'),
+        api.get<{ enabled: boolean; lenses: number }>('/admin/config/review-refute'),
         api.get<{ enabled: boolean }>('/admin/config/usage-window'),
         api.get<{ enabled: boolean; thresholdPct: number }>('/admin/config/usage-alert'),
         api.get<{ enabled: boolean }>('/admin/config/pr-workflow'),
@@ -278,6 +279,7 @@ export default function AdminPage() {
       setTersenessLevel(tersenessData.level);
       setReviewDistillEnabled(reviewDistillData.enabled);
       setReviewRefuteEnabled(reviewRefuteData.enabled);
+      setReviewRefuteLenses(reviewRefuteData.lenses ?? 3);
       setUsageWindowEnabled(usageWindowData.enabled);
       setUsageAlertEnabled(usageAlertData.enabled);
       setUsageAlertThresholdInput(String(usageAlertData.thresholdPct));
@@ -682,13 +684,15 @@ export default function AdminPage() {
     }
   }
 
-  async function setReviewRefute(next: boolean) {
+  async function setReviewRefute(next: boolean, lenses = reviewRefuteLenses) {
     setSavingReviewRefute(true);
     try {
-      const result = await api.put<{ enabled: boolean }>('/admin/config/review-refute', {
-        enabled: next,
-      });
+      const result = await api.put<{ enabled: boolean; lenses: number }>(
+        '/admin/config/review-refute',
+        { enabled: next, lenses },
+      );
       setReviewRefuteEnabled(result.enabled);
+      setReviewRefuteLenses(result.lenses ?? lenses);
       setError(null);
     } catch (err) {
       setError((err as Error).message ?? 'Failed to update review refutation');
@@ -1711,8 +1715,7 @@ export default function AdminPage() {
               a refuter agent that tries to disprove it against the code. A finding is dismissed
               only on positive evidence, cited at a file and line, that it is wrong; an uncertain,
               unreadable or failed refuter leaves it blocking. Dismissed findings stay visible at
-              gate 2 as advisory. Costs one extra CLI invocation per blocking finding, and only in a
-              round that has one. Takes effect on the next review; persists across restarts.
+              gate 2 as advisory. Takes effect on the next review; persists across restarts.
             </CardDescription>
           </CardHeader>
           <label className="flex items-center gap-2 text-sm text-neutral-200">
@@ -1725,6 +1728,25 @@ export default function AdminPage() {
             />
             {reviewRefuteEnabled ? 'Enabled' : 'Disabled'}
             {savingReviewRefute && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
+          <label className="mt-3 flex items-start gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={reviewRefuteLenses >= 3}
+              disabled={savingReviewRefute || !reviewRefuteEnabled}
+              onChange={(e) => void setReviewRefute(reviewRefuteEnabled, e.target.checked ? 3 : 1)}
+              className="mt-0.5 h-4 w-4"
+            />
+            <span>
+              Attack each finding from three angles — reachability, impact, defenses
+              <span className="block text-xs text-neutral-500">
+                Default ON. Three refuters instead of one, and the finding is dismissed only if ALL
+                of them disprove it with a citation — one silent or uncertain voter keeps it. Costs
+                3 CLI invocations per blocking finding instead of 1; they queue behind the per-task
+                agent cap rather than crowding other tasks, so the cost is elapsed time. Turn off to
+                run a single general-purpose refuter.
+              </span>
+            </span>
           </label>
         </Card>
       )}

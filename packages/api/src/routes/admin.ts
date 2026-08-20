@@ -826,7 +826,15 @@ adminRoutes.put('/config/review-fanout-distill', async (c) => {
   return c.json({ enabled });
 });
 
-const reviewRefuteSchema = z.object({ enabled: z.boolean() });
+// 3 = the full lens panel (reachability, impact, defenses); 1 = the original single
+// generic refuter. Only those two values are meaningful — the worker treats anything
+// below the panel size as the single pass, because a partial panel cannot be unanimous
+// about what its missing lens would have caught.
+const REFUTE_PANEL_LENSES = 3;
+const reviewRefuteSchema = z.object({
+  enabled: z.boolean(),
+  lenses: z.union([z.literal(1), z.literal(REFUTE_PANEL_LENSES)]).optional(),
+});
 
 // Refutation pass over blocking code-review findings (default ON). A blocking finding
 // costs one of the capped fix rounds, so a refuter is asked to disprove it first; only
@@ -834,14 +842,26 @@ const reviewRefuteSchema = z.object({ enabled: z.boolean() });
 // cache), so a flip applies to the next review, not a running one.
 adminRoutes.get('/config/review-refute', async (c) => {
   const enabled = await configService.getBoolean(CONFIG_KEYS.REVIEW_REFUTE_ENABLED, true);
-  return c.json({ enabled });
+  const lenses = await configService.getNumber(
+    CONFIG_KEYS.REVIEW_REFUTE_LENSES,
+    REFUTE_PANEL_LENSES,
+  );
+  return c.json({ enabled, lenses: lenses >= REFUTE_PANEL_LENSES ? REFUTE_PANEL_LENSES : 1 });
 });
 
 adminRoutes.put('/config/review-refute', async (c) => {
-  const { enabled } = reviewRefuteSchema.parse(await c.req.json());
+  const { enabled, lenses } = reviewRefuteSchema.parse(await c.req.json());
   await configService.set(CONFIG_KEYS.REVIEW_REFUTE_ENABLED, enabled ? 'true' : 'false');
-  log.info({ enabled }, 'global review-refute switch updated');
-  return c.json({ enabled });
+  if (lenses !== undefined) {
+    await configService.set(CONFIG_KEYS.REVIEW_REFUTE_LENSES, String(lenses));
+  }
+  log.info({ enabled, lenses }, 'global review-refute switch updated');
+  return c.json({
+    enabled,
+    lenses:
+      lenses ??
+      (await configService.getNumber(CONFIG_KEYS.REVIEW_REFUTE_LENSES, REFUTE_PANEL_LENSES)),
+  });
 });
 
 const browserAccessSchema = z.object({ enabled: z.boolean() });
