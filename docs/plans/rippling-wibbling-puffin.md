@@ -168,3 +168,53 @@ Phase 1 is the foundation and the bulk of the value and risk (schema, seed, byte
 - Arbitrary admin-authored MCP callback handler code (vetted allow-list only for MVP).
 - Per-user (non-global) task types.
 - Exposing all ~60 registered steps as composable (curated allow-list only).
+
+---
+
+# Amendment — 2026-08-20: composing module-contributed steps
+
+*Appended after the original plan was archived; the body above is unchanged. Companion to the
+amendment on `serialized-chasing-thacker.md`. Added so a distributed module (the deep project
+analysis scan) can contribute steps that a task type is then composed from.*
+
+## F. Definitions may reference module-contributed steps
+
+The module system exports `./steps` and its loader registers them, but this plan composes task types
+from a **curated** `composable_step_catalog` — so without this, a module's steps are registered yet
+invisible to the composer and unusable by any task type.
+
+- The catalog is the union of core entries and every loaded module's `composableSteps`, namespaced
+  `module.<moduleId>.<stepId>` so a module can never shadow a core step id (companion amendment A).
+- The prereq validator needs **no special-casing**: it walks `requires`/`provides` capability tokens,
+  not step ids, so a module step that `provides: ['worktree']` satisfies a core step's need exactly as
+  `01-worktree-setup` does. This is the payoff of the capability-token design already in this plan.
+- `buildRunList` resolves module step ids through the same registry, which the module loader has
+  populated before the catalog sync runs.
+
+## G. Dangling references — a module removed under a live definition
+
+Data-driven types plus distributed modules create a failure mode neither has alone: a definition's
+ordered step list can reference steps that no longer exist, because the module supplying them was
+disabled, removed, or failed to load after a rebuild.
+
+- Validate that every `stepId` resolves at boot **and** at task-create (the existing defence-in-depth
+  pattern this plan already applies to prereq validation).
+- A definition with an unresolvable step becomes **not selectable, with a named reason** — "requires
+  module `deep-analysis`, which is not installed". Never a crash, and never silently dropping the
+  missing step, which would run a truncated pipeline the admin never authored and cannot see.
+- Tasks already running are untouched: their run list is materialised, and `buildRunList` is
+  forward-walked from the current step. This gates new task creation only.
+
+## H. A module may seed a task-type definition
+
+A module that ships steps will usually want to ship the task type that composes them, so the customer
+does not have to hand-assemble it in the composer to get the thing they paid for.
+
+- Manifest gains `taskTypes?: TaskTypeDefinitionSeed[]`, upserted by the module loader the same way
+  the composable catalog is — the boot-upsert pattern this plan already borrows from
+  `syncTemplateManifestCache`.
+- Seeded rows carry `source: 'module:<id>'` so an admin can see they are vendor-supplied, and so they
+  are removed with the module.
+- An admin may **disable** a module-seeded definition but not delete it: deletion would simply be
+  undone at the next boot upsert, and a control that silently reverts is worse than no control.
+  Removing it for real means removing the module.

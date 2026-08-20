@@ -187,3 +187,122 @@ the renderer fetches via `api.get(endpoint)`.
 5. e2e Playwright smoke for the nav -> page -> data flow.
 6. Adversarial: a module route with no auth declaration is still gated (loader default); a module DB
    bootstrap re-run is a no-op; removing the module + rebuild cleanly drops its nav/routes.
+
+---
+
+# Amendment — 2026-08-20: private module distribution + steps into the task catalog
+
+*Appended after the original plan was archived; the body above is unchanged. Added to support a
+resellable third-party module (the deep project analysis scan) that lives in its own private
+repository and is cloned into `modules/` against an access key. Four things that Task 1 as written
+does not cover, plus one thing it should state out loud.*
+
+## A. Module-contributed steps must reach the composable step catalog
+
+Task 1 exports `./steps` and the worker loader registers them, but the companion plan
+(`rippling-wibbling-puffin`) composes task types from a **curated** `composable_step_catalog` — so a
+module's steps are registered yet invisible to the composer, and no task type can use them. This is
+the exact joint a step-contributing module sits on.
+
+- Manifest gains `composableSteps?: ComposableStepEntry[]` — the same shape the core catalog uses
+  (`stepId`, `label`, `group`, `dispatchesCli`, `requires`/`provides` capability tokens,
+  `paramFormSchema?`).
+- `syncComposableCatalog(db)` unions core entries with every loaded module's entries, namespaced
+  `module.<moduleId>.<stepId>` so a module can never shadow a core step id.
+- Boot ordering: the module loader must run before `syncComposableCatalog`, which itself already runs
+  after `registerAllSteps`.
+
+## B. Distribution: a private npm registry (GitHub Packages), not a git clone
+
+**Decision (2026-08-20):** paid modules are published to a private npm registry and installed as
+dependencies. A git clone against a deploy key was considered and rejected: it hands the customer
+full source and complete history permanently, and revoking the key claws nothing back — the wrong
+default for a closed-source resellable module. Git-based install is not built.
+
+What this costs the plan is almost nothing, because the module *contract* is unchanged: a distributed
+module is still a package with an `exports` map exposing `./manifest`, `./steps`, `./routes`. Only
+**discovery** generalises.
+
+- `scripts/gen-modules.mjs` scans `modules/*/package.json` **and** installed dependencies matching
+  `@haive-module/*`, emitting one registry from the union. `modules/*` remains the path for
+  first-party modules developed in this workspace; the registry is the path for distributed ones.
+- The published package contains **compiled `dist` only** — `files: ["dist"]`, no `src`, no history.
+- Versions are immutable and integrity-hashed into `pnpm-lock.yaml`, so an install is reproducible
+  and a swapped artifact is detectable. This is strictly better than a branch tip.
+- Root `.npmrc` gains the scope mapping (`@haive-module:registry=https://npm.pkg.github.com`) and
+  reads the token from the environment. `.npmrc` stays committed; the token never does.
+
+### The token must be a BuildKit secret, never a build ARG
+
+The api and worker images install dependencies at build time, so the read token has to be present
+during `docker build`. Passing it as `ARG`/`ENV` **bakes it into the image layers**, where anyone with
+the image can recover it — including, for a distributed product, other customers.
+
+- Use `RUN --mount=type=secret,id=npmrc` in the deps stage and pass `--secret id=npmrc,src=...` from
+  compose/build. The token is present for the install and absent from every layer.
+- `docker history` on a built image must show no token. Make that an explicit verification step, not
+  an assumption.
+
+## C. Install is add-dependency + install + rebuild + restart, and the UI must say so
+
+Discovery is build-time codegen (Slice 0), so a module is only active once the api/worker images have
+been rebuilt with it. Pretending a click installs it would produce a silent half-install — the
+failure this project keeps designing against.
+
+- Model install as an explicit lifecycle with a visible status:
+  `requested → resolved (pending rebuild) → active`, plus `update_available`.
+- A `modules` table records **intent**: `moduleId`, `packageName`, `requestedVersion`,
+  `installedVersion`, `enabled`, `status`, `entitlementId`. It is not the source of truth for what is
+  loaded — the loader's boot report is.
+- The mechanical steps (add the dependency to `packages/{api,worker}/package.json`, `pnpm install`,
+  rebuild) are a documented operator action driven by a `pnpm module add <pkg>` script, not something
+  the admin UI performs silently on a running stack. The UI shows the status and the exact command.
+- A module contributing routes/steps/jobs/nav requires an **api + worker** rebuild; web is untouched
+  because nav and pages are runtime-fetched — this plan's own verification step 4 already asserts
+  that. Only an escape-hatch `./web` module needs a web rebuild, so make that a manifest flag the
+  installer reads to say which services to rebuild.
+- The row flips to `active` on the **loader's boot report** of the module ids it actually registered,
+  never on a successful `pnpm install`. That is the only evidence the rebuilt process loaded it.
+
+## D. Entitlement: the registry token is the licence
+
+`entitlementId` exists in the manifest with nothing behind it. With registry distribution the MVP is
+honest and needs no new machinery: **a per-customer read token scoped to the `@haive-module` scope is
+the licence.** Revoking it blocks future installs and upgrades, which is real enforcement — unlike a
+deploy key, which only stops updates to a repository the customer already has in full.
+
+- Record `entitlementId` and the resolved version on the `modules` row so an admin can see what
+  authorises the install and what is running.
+- Deliberately NOT in scope: a licence server, phone-home, or runtime key validation. A self-hosted
+  product must work offline, and a check that fails closed on network loss would brick a paid install
+  — a worse outcome than the piracy it prevents.
+- Stated plainly because it is true of any JS product: a customer with `dist` can read `dist`.
+  Distribution controls what you *hand over as the normal install path*; it is not obfuscation. If
+  stronger guarantees are ever wanted, the honest options are a signed manifest verified against a
+  public key pinned in core, or per-customer builds — named here so nobody assumes they exist.
+
+## E. Trust boundary — state it, because Task 1 does not
+
+A module's `./routes`, `./steps`, `./jobs` and `./ensure-schema` run **in-process inside api and
+worker**. That is full trust — not the CLI sandbox that untrusted agent code runs in. Installing a
+third-party module is a supply-chain decision equivalent to adding any other dependency, and the
+admin install UI should say so plainly rather than implying a sandbox.
+
+What does apply, and is worth listing beside that statement: module routers are auth-gated by default
+at mount, module databases are separate with idempotent `ensure-schema`, and module config keys are
+namespaced. Those are hygiene, not isolation.
+
+## Verification additions
+
+1. Install a private module with a scoped read token: status reaches `resolved (pending rebuild)`,
+   and only after an api+worker rebuild does the loader's boot report flip it to `active`.
+2. `docker history` on the built api and worker images reveals **no registry token** (proves the
+   BuildKit secret mount, not an ARG).
+3. An absent or revoked token fails `pnpm install` with a clear message and leaves the previously
+   installed version running — a failed upgrade must not disable a paid module already in service.
+4. A module's composable steps appear in the task-type composer palette (companion amendment F).
+5. Removing the dependency + rebuild returns to the zero-module state, and any task-type definition
+   that referenced the module's steps is disabled with a named reason rather than crashing
+   (companion amendment G).
+6. `pnpm build` + `pnpm typecheck` clean with zero modules present — the union discovery must be a
+   no-op when neither `modules/*` nor any `@haive-module/*` dependency exists.
