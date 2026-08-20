@@ -118,9 +118,41 @@ function safeSectionId(id: string): string {
 
 const HEADING_RE = /^(#{1,3})\s+(.+)$/;
 
+/** True when a block of markdown holds nothing but its own heading — an H1 whose
+ *  first child is an H2, or a heading at EOF.
+ *
+ *  Such a section chunks into pure title text, which is the worst possible shape
+ *  for this index: it embeds sharply, so on the title-shaped query the global KB
+ *  digest instructs agents to make ("call `rag_search` with a title to read the
+ *  entry behind it") it OUTRANKS the entry's own body chunks and then spends the
+ *  entry's single merge slot on zero information. MEASURED before this guard:
+ *  37 of 370 global KB chunks were these, and one beat its own body at
+ *  dense=0.903 on a query naming that entry's own subject matter.
+ *
+ *  Nothing is lost by dropping it — every child section already carries the
+ *  parent heading in its breadcrumb, and therefore in its chunk context header. */
+export function isHeadingOnlyMarkdown(text: string): boolean {
+  const lines = text.split('\n').filter((l) => l.trim().length > 0);
+  return lines.length === 1 && HEADING_RE.test(lines[0]!.trim());
+}
+
+/** Chunk-level counterpart: a STORED chunk carries the `[context header]` line
+ *  `chunkSection` prepends, so strip that before applying the section-level
+ *  rule. Conservative by construction — content whose first line is not a
+ *  bracketed header keeps that line, so it reads as two lines and is never
+ *  reported as heading-only. */
+export function isHeadingOnlyChunk(content: string): boolean {
+  const body = /^\[[^\n]*\]\n/.test(content) ? content.slice(content.indexOf('\n') + 1) : content;
+  return isHeadingOnlyMarkdown(body);
+}
+
 export function extractMarkdownSections(content: string, _filePath: string): RagSection[] {
   const lines = content.split('\n');
   const sections: RagSection[] = [];
+  // Heading-only sections are dropped, but held aside: a document that is
+  // NOTHING but headings would otherwise index to zero chunks and become
+  // unretrievable, which is worse than one weak chunk.
+  const headingOnly: RagSection[] = [];
   // Heading text per level (1-3). A heading clears every deeper level, so an H3
   // under a fresh H2 never inherits the previous H2's ancestry.
   const stack: Array<string | undefined> = [undefined, undefined, undefined];
@@ -130,9 +162,10 @@ export function extractMarkdownSections(content: string, _filePath: string): Rag
 
   const flush = (): void => {
     const text = currentLines.join('\n').trim();
-    if (text) {
-      sections.push({ sectionId: currentId, content: text, breadcrumb: currentBreadcrumb });
-    }
+    if (!text) return;
+    const section = { sectionId: currentId, content: text, breadcrumb: currentBreadcrumb };
+    if (isHeadingOnlyMarkdown(text)) headingOnly.push(section);
+    else sections.push(section);
   };
 
   for (const line of lines) {
@@ -153,7 +186,7 @@ export function extractMarkdownSections(content: string, _filePath: string): Rag
 
   flush();
 
-  return sections;
+  return sections.length > 0 ? sections : headingOnly;
 }
 
 /* ------------------------------------------------------------------ */

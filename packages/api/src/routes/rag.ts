@@ -148,6 +148,84 @@ export function mergeHits(
   return [...selLocal, ...selGlobal].sort(byRrf);
 }
 
+/** Per-response budget for expanding global KB hits from a chunk to the whole
+ *  entry. A tuning constant, not a config key — the kill switch is
+ *  GLOBAL_KB_ENABLED, the size is tuning (same split as the digest's title cap).
+ *  Sized against the corpus it serves: MEASURED, the median active entry is
+ *  ~3.3 KB and p90 ~6 KB, so a default top_k=8 page expands roughly every global
+ *  slot it reserves. */
+const GLOBAL_KB_EXPAND_BUDGET_CHARS = 12_000;
+
+/** One global KB entry, keyed by the source path its chunks carry. */
+export interface GlobalKbEntryBody {
+  title: string;
+  body: string;
+}
+
+/** Collapse a global result set to ONE hit per entry, keeping each entry's
+ *  best-scoring chunk.
+ *
+ *  Without this a single entry's chunks can spend every slot mergeHits reserves
+ *  for the global KB, so the caller reads one article four times instead of four
+ *  articles. `sourcePath` is the key because the global sync writes exactly one
+ *  per entry (`global_kb/<slug>-<id8>.md`) and stores it on every chunk row. */
+export function dedupeGlobalByEntry(hits: RagSearchHit[]): RagSearchHit[] {
+  const best = new Map<string, RagSearchHit>();
+  for (const h of hits) {
+    const prev = best.get(h.sourcePath);
+    if (!prev || h.rrf > prev.rrf) best.set(h.sourcePath, h);
+  }
+  return [...best.values()].sort((a, b) => b.rrf - a.rrf);
+}
+
+/** Replace each surviving global hit's CHUNK with its entry's full body, highest
+ *  score first, while the response budget allows.
+ *
+ *  The global KB has exactly one door — `rag_search` — and the `sourcePath` its
+ *  hits carry is SYNTHETIC: no such file exists in the sandbox, so an agent
+ *  holding a partial global hit has no second way to read the rest. That made a
+ *  partial hit a dead end by construction, and the prompt digest sends agents
+ *  straight into it ("call `rag_search` with a title to read the entry behind
+ *  it"). Observed on task 201dfef3: a title query returned the entry's bare
+ *  heading, three re-queries returned the same heading, and the agent correctly
+ *  refused to author a merge it could not ground.
+ *
+ *  The BEST-scoring entry expands whatever it costs; the budget bounds only the
+ *  tail. Budgeting it too would leave the largest entries permanently
+ *  unreadable — the corpus already holds one body bigger than the whole budget —
+ *  which is the exact promise ("call rag_search with a title to read the entry")
+ *  this exists to keep. Beyond the first, an entry the budget cannot fit keeps
+ *  its chunk and is LABELLED a snippet rather than passing for the whole
+ *  article: the failure being fixed was a partial that looked complete. */
+export function expandGlobalHits(
+  hits: RagSearchHit[],
+  bodies: Map<string, GlobalKbEntryBody>,
+  budget = GLOBAL_KB_EXPAND_BUDGET_CHARS,
+): RagSearchHit[] {
+  let remaining = budget;
+  let expanded = 0;
+  return hits.map((h) => {
+    if (h.scope !== 'global') return h;
+    const entry = bodies.get(h.sourcePath);
+    if (!entry) return h;
+    const full = `[${entry.title} — FULL ENTRY]\n\n${entry.body}`;
+    if (expanded === 0 || full.length <= remaining) {
+      remaining = Math.max(0, remaining - full.length);
+      expanded += 1;
+      // sectionId is cleared: a whole-entry hit anchors to no single section,
+      // and the proxy renders '#<sectionId>' only when it is set.
+      return { ...h, sectionId: '', content: full };
+    }
+    return {
+      ...h,
+      content:
+        `${h.content}\n\n[SNIPPET ONLY — one section of a ${entry.body.length}-char entry, ` +
+        `not the whole article. Query this title on its own, or with a lower top_k, ` +
+        `so fewer entries share the expansion budget and this one is returned in full.]`,
+    };
+  });
+}
+
 /** RAG retrieval for sandbox CLI agents via the haive-rag MCP proxy.
  *  Auth is a task-scoped bearer token (not a user session): the proxy holds
  *  no DB credentials and can only query its own task's project + the global KB. */
@@ -228,28 +306,50 @@ ragRoutes.post('/search', async (c) => {
   // --- Global KB search: flag-gated, facet-scoped, and fully isolated — its
   // failure must never break per-repo retrieval (plan §6.4). ---
   let globalHits: RagSearchHit[] = [];
+  let globalBodies = new Map<string, GlobalKbEntryBody>();
   const globalEnabled = await configService.getBoolean(CONFIG_KEYS.GLOBAL_KB_ENABLED, true);
   if (globalEnabled) {
     try {
-      globalHits = await withGlobalKb(db, async ({ conn, settings }) => {
+      const result = await withGlobalKb(db, async ({ conn, settings }) => {
         const gvec = await embedQuery(query, {
           ollamaUrl: settings.ollamaUrl,
           model: settings.embedModel,
           dimensions: settings.embeddingDimensions,
         });
-        const hits = await ragHybridSearch(conn, gvec, query, topK ? { topK } : {}, {
+        const raw = await ragHybridSearch(conn, gvec, query, topK ? { topK } : {}, {
           namespace: settings.namespace,
           facets,
         });
-        return hits.map((h) => ({ ...h, scope: 'global' as const }));
+        const scoped = dedupeGlobalByEntry(raw.map((h) => ({ ...h, scope: 'global' as const })));
+        // Bodies for the entries that survived dedup, fetched on the SAME
+        // connection this block already holds (withGlobalKb opens and closes one
+        // per call). Numbered placeholders rather than `= ANY($2)` so the bind
+        // does not depend on array-type inference.
+        const bodies = new Map<string, GlobalKbEntryBody>();
+        if (scoped.length > 0) {
+          const paths = scoped.map((h) => h.sourcePath);
+          const placeholders = paths.map((_, i) => `$${i + 2}`).join(', ');
+          const rows = (await conn.pg.unsafe(
+            `SELECT DISTINCT ON (r.source_path) r.source_path, e.title, e.body
+               FROM ai_rag_embeddings r
+               JOIN global_kb_entries e ON e.id = r.entry_id
+              WHERE r.namespace = $1 AND r.source_path IN (${placeholders})`,
+            [settings.namespace, ...paths],
+          )) as unknown as Array<{ source_path: string; title: string; body: string }>;
+          for (const row of rows) bodies.set(row.source_path, { title: row.title, body: row.body });
+        }
+        return { scoped, bodies };
       });
+      globalHits = result.scoped;
+      globalBodies = result.bodies;
     } catch (err) {
       log.warn({ err, taskId }, 'global KB search failed; returning local-only');
       globalHits = [];
+      globalBodies = new Map();
     }
   }
 
-  const hits = mergeHits(localHits, globalHits, effectiveTopK);
+  const hits = expandGlobalHits(mergeHits(localHits, globalHits, effectiveTopK), globalBodies);
   await logRagQuery(db, taskId, query, topK ?? null, hits);
   return c.json({ hits });
 });

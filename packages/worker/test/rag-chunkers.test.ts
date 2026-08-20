@@ -5,6 +5,8 @@ import {
   chunkSection,
   capChunks,
   contextHeader,
+  isHeadingOnlyChunk,
+  isHeadingOnlyMarkdown,
   MAX_CHUNKS_PER_FILE,
 } from '../src/step-engine/steps/onboarding/_rag-chunkers.js';
 
@@ -45,6 +47,71 @@ describe('extractMarkdownSections', () => {
     // A sibling H2 must clear the deeper level rather than inherit 'Ports'.
     expect(byId.get('docker')?.breadcrumb).toEqual(['Deployment', 'Docker']);
     expect(byId.get('deployment')?.breadcrumb).toEqual(['Deployment']);
+  });
+});
+
+describe('heading-only sections', () => {
+  it('drops a heading that carries no prose of its own', () => {
+    // The global KB shape: an H1 immediately followed by an H2. The H1 section
+    // would chunk to pure title text and outrank the body it introduces.
+    const md = ['# Apache 2.4', '## Require all denied', 'authz merges under RequireAny'].join(
+      '\n',
+    );
+
+    const ids = extractMarkdownSections(md, 'doc.md').map((s) => s.sectionId);
+
+    expect(ids).toEqual(['require-all-denied']);
+  });
+
+  it('drops a trailing heading with nothing under it', () => {
+    const md = ['# Guide', 'body text', '## Appendix'].join('\n');
+
+    const ids = extractMarkdownSections(md, 'doc.md').map((s) => s.sectionId);
+
+    expect(ids).toEqual(['guide']);
+  });
+
+  it('keeps the parent title reachable through the surviving breadcrumb', () => {
+    const md = ['# Apache 2.4', '## Require all denied', 'authz merges'].join('\n');
+
+    const [section] = extractMarkdownSections(md, 'doc.md');
+
+    expect(section?.breadcrumb).toEqual(['Apache 2.4', 'Require all denied']);
+  });
+
+  it('falls back to the headings when a document is nothing but headings', () => {
+    // Zero sections would index to zero chunks and make the document
+    // unretrievable, which is worse than one weak chunk.
+    const md = ['# Only', '## Headings'].join('\n');
+
+    const ids = extractMarkdownSections(md, 'doc.md').map((s) => s.sectionId);
+
+    expect(ids).toEqual(['only', 'headings']);
+  });
+
+  it('does not drop a heading whose section has prose', () => {
+    const md = ['# Deployment', 'intro text', '## DDEV', 'ddev text'].join('\n');
+
+    const ids = extractMarkdownSections(md, 'doc.md').map((s) => s.sectionId);
+
+    expect(ids).toEqual(['deployment', 'ddev']);
+  });
+
+  it('recognises a heading-only STORED chunk through its context header', () => {
+    // What the data migration matches: chunkSection prepends '[header]\n\n'.
+    expect(isHeadingOnlyChunk('[Title > Heading]\n\n# Heading')).toBe(true);
+    expect(isHeadingOnlyChunk('[Title > Heading]\n\n# Heading\n\nbody')).toBe(false);
+    // Headerless content still works, and a first line that is not a bracketed
+    // header is kept — so it reads as two lines and is never matched.
+    expect(isHeadingOnlyChunk('# Heading')).toBe(true);
+    expect(isHeadingOnlyChunk('not a header\n# Heading')).toBe(false);
+  });
+
+  it('treats only real markdown headings as heading-only', () => {
+    expect(isHeadingOnlyMarkdown('### Deep')).toBe(true);
+    expect(isHeadingOnlyMarkdown('#### Too deep')).toBe(false);
+    expect(isHeadingOnlyMarkdown('#NoSpace')).toBe(false);
+    expect(isHeadingOnlyMarkdown('plain line')).toBe(false);
   });
 });
 

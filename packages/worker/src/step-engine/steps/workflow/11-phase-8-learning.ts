@@ -16,7 +16,7 @@ import { agentDefinitionGuidance } from '../_retrieval-guidance.js';
 import {
   clearTaskPromotedDrafts,
   globalKbTopicKey,
-  loadActiveGlobalArticlesForStack,
+  loadActiveGlobalArticlesForTask,
   promoteToGlobalKbDraft,
 } from '../_global-kb-promote.js';
 import { loadRepoStackAnchors, techAnchorFacets } from '../_repo-stack.js';
@@ -189,6 +189,30 @@ async function gitRun(
 }
 
 /** Valid op values for a reported KB sync change. */
+/** Per-article budget in the existing-global-articles prompt block. A cap, not
+ *  a target: up to 15 articles ride every step-11 dispatch, so it is bounded
+ *  prompt cost. */
+const GLOBAL_ARTICLE_PROMPT_CHARS = 1500;
+
+/** Render one existing global article for the prompt.
+ *
+ *  A body over budget is cut WITH A MARKER that names the tool returning the
+ *  rest. The agent is asked to author a FULL MERGED body for an article it
+ *  updates, and a silently cut source makes that impossible to do faithfully
+ *  while looking complete — it reads as a whole article that simply ends. The
+ *  marker is what turns "this is all there is" into "fetch the rest first".
+ *  MEASURED: the median active entry is ~3.3 KB and p90 is ~6 KB, so most
+ *  articles here ARE cut. */
+export function renderExistingGlobalArticle(a: { title: string; body: string }): string {
+  const head = `--- ${a.title} ---`;
+  if (a.body.length <= GLOBAL_ARTICLE_PROMPT_CHARS) return `${head}\n${a.body}`;
+  return [
+    head,
+    a.body.slice(0, GLOBAL_ARTICLE_PROMPT_CHARS),
+    `[... TRUNCATED — this is the first ${GLOBAL_ARTICLE_PROMPT_CHARS} of ${a.body.length} chars. Before you author an UPDATE to this article, call \`rag_search\` with its exact title: it returns the entry IN FULL. Merging from this excerpt would silently delete the rest.]`,
+  ].join('\n');
+}
+
 const KB_SYNC_OPS = new Set(['insert', 'update', 'delete']);
 
 // The admission bar's one machine-checkable rule is a file:line citation
@@ -723,13 +747,11 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         })
       )?.repositoryId ?? null;
     const repoStack = repositoryId ? await loadRepoStackAnchors(ctx.db, repositoryId) : null;
-    const existingGlobalArticles = repoStack
-      ? await loadActiveGlobalArticlesForStack(ctx.db, [
-          repoStack.anchors.framework,
-          repoStack.language,
-          repoStack.anchors.database,
-        ])
-      : [];
+    // Facet-matched against the task's project by the same predicate the prompt
+    // digest uses, so the two can never disagree about which articles apply.
+    // Not gated on `repoStack`: an entry that constrains no dimension is a
+    // universal house standard and applies to a repo that never onboarded too.
+    const existingGlobalArticles = await loadActiveGlobalArticlesForTask(ctx.db, ctx.taskId);
     // Self-target revise channel: a reviewer's outstanding instruction (recorded by a
     // prior apply) steers this re-run; pair it with the prior run's drafts so the agent
     // revises THOSE rather than re-deriving from scratch. The prior cli_invocation row
@@ -847,7 +869,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
           ? 'This task was a BUG FIX: ALSO produce an `investigation`. In `symptoms`, lead with the observable symptoms and quote the EXACT error strings/messages verbatim — these are the lexical anchor future searches match on; name the affected feature/area. Give the root cause (why/how the bug existed, grounded in the implementation, citing the `path/to/file.ext:LINE` the bug lived on) and the durable lesson for future work. Set its `scope` to "global" ONLY when the lesson is a reusable house standard for any project of this stack (not specific to this repo) AND it clears the ADMISSION BAR above — a lesson CI would catch, or one you already knew, stays "local" at most; otherwise "local".'
           : '',
         '',
-        'GLOBAL KB CANDIDATES (optional, separate from the per-repo learnings above): if this run produced REUSABLE, PORTABLE house-standard knowledge about a PUBLIC tech (a framework/library/language/datastore — NOT this repo\'s own code, names, or paths), add a `globalCandidates` array to the JSON: [ { "title": "<short>", "category": "tech_pattern|best_practice|anti_pattern|quick_reference", "tech": "<public tech slug, e.g. drupal, php, mariadb>", "evidence": "<path/to/file.ext:LINE from THIS run that demonstrates it>", "body": "<full portable markdown article, no repo-specific names/paths>" } ]. Omit it or use [] when nothing is genuinely portable. The ADMISSION BAR above applies with full force here — a global article is read by every repo, so a candidate the model already knew, or that CI would catch, is worse than no candidate. `evidence` is checked and then discarded: it stays OUT of `body`, which must remain portable, and a candidate without it is dropped. If a candidate covers the SAME topic as one of the existing global articles shown below, author `body` as the FULL UPDATED article: keep the existing wording VERBATIM where unchanged and only add or adjust what this task learned — the body is diffed against the existing article for human approval, so minimize churn.',
+        'GLOBAL KB CANDIDATES (optional, separate from the per-repo learnings above): if this run produced REUSABLE, PORTABLE house-standard knowledge about a PUBLIC tech (a framework/library/language/datastore — NOT this repo\'s own code, names, or paths), add a `globalCandidates` array to the JSON: [ { "title": "<short>", "category": "tech_pattern|best_practice|anti_pattern|quick_reference", "tech": "<public tech slug, e.g. drupal, php, mariadb>", "evidence": "<path/to/file.ext:LINE from THIS run that demonstrates it>", "body": "<full portable markdown article, no repo-specific names/paths>" } ]. Omit it or use [] when nothing is genuinely portable. The ADMISSION BAR above applies with full force here — a global article is read by every repo, so a candidate the model already knew, or that CI would catch, is worse than no candidate. `evidence` is checked and then discarded: it stays OUT of `body`, which must remain portable, and a candidate without it is dropped. If a candidate covers the SAME topic as one of the existing global articles shown below, author `body` as the FULL UPDATED article: keep the existing wording VERBATIM where unchanged and only add or adjust what this task learned — the body is diffed against the existing article for human approval, so minimize churn. An article shown below marked TRUNCATED is an EXCERPT: call `rag_search` with its exact title to read it in full before you merge, or you will delete the part you never saw.',
         '',
         `Task title: ${detected.taskTitle || '(untitled)'}`,
         `Task description: ${detected.taskDescription || '(none)'}`,
@@ -871,9 +893,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         '',
         '=== Existing global house-standard articles for this stack (to UPDATE one, re-use its tech and author the full merged body) ===',
         detected.existingGlobalArticles.length > 0
-          ? detected.existingGlobalArticles
-              .map((a) => `--- ${a.title} ---\n${a.body.slice(0, 1500)}`)
-              .join('\n\n')
+          ? detected.existingGlobalArticles.map(renderExistingGlobalArticle).join('\n\n')
           : '(none)',
         '',
         '=== What happened during this task (mine this — it is the real, persisted run history) ===',

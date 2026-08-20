@@ -8,6 +8,7 @@ import {
   parseInvestigation,
   parseKbSync,
   parseSkillSync,
+  renderExistingGlobalArticle,
   parseLearningOutput,
   writeInvestigation,
   phase8LearningStep,
@@ -598,5 +599,28 @@ describe('parseGlobalCandidates', () => {
     const cands = parseGlobalCandidates(raw);
     expect(cands).toHaveLength(1);
     expect(cands[0]).toMatchObject({ title: 'T', tech: 'mariadb', category: 'tech_pattern' });
+  });
+});
+
+describe('renderExistingGlobalArticle', () => {
+  it('renders a short article whole, with no marker', () => {
+    const out = renderExistingGlobalArticle({ title: 'House rule', body: 'short body' });
+
+    expect(out).toBe('--- House rule ---\nshort body');
+    expect(out).not.toContain('TRUNCATED');
+  });
+
+  it('marks a cut article and names the tool that returns the rest', () => {
+    // The agent is asked to author a FULL MERGED body for an article it
+    // updates. A silently cut source reads as a whole article that simply ends,
+    // so the merge deletes everything past the cut.
+    const body = 'x'.repeat(4000);
+    const out = renderExistingGlobalArticle({ title: 'Long rule', body });
+
+    expect(out).toContain('TRUNCATED');
+    expect(out).toContain('4000 chars');
+    expect(out).toContain('rag_search');
+    expect(out).toContain('x'.repeat(1500));
+    expect(out).not.toContain('x'.repeat(1501));
   });
 });

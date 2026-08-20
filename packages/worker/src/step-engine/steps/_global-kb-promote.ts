@@ -1,12 +1,14 @@
-import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   globalKbEntries,
   resolveGlobalKbSettings,
+  resolveTaskFacets,
   withGlobalKb,
   type GlobalKbCategory,
   type GlobalKbFacets,
 } from '@haive/shared/global-kb';
+import { facetsMatchProject } from './_global-kb-digest.js';
 import { confirmSupersedeByEmbedding, SUPERSEDE_CANDIDATE_LIMIT } from './_global-kb-similarity.js';
 
 export interface GlobalKbPromotion {
@@ -97,18 +99,30 @@ export function sanitizeGlobalArticle(input: {
   return { title, body };
 }
 
-/** Fetch the active global KB articles whose facets match the given stack tech
- *  tokens (framework / language / database), so a step can show the agent which
- *  existing house-standard articles it could update. Best-effort: [] when the
- *  global KB is off/unavailable or nothing matches. */
-export async function loadActiveGlobalArticlesForStack(
+/** Fetch the active global KB articles that apply to THIS task's project, so a
+ *  step can show the agent which existing house-standard articles it could
+ *  update. Best-effort: [] when the global KB is off/unavailable or nothing
+ *  matches.
+ *
+ *  Compatibility is `facetsMatchProject` — the SAME predicate the prompt digest
+ *  and the rag_search facet filter use. It previously had a private rule here
+ *  that required a positive intersection on framework/language/database, which
+ *  silently inverted the meaning of an UNCONSTRAINED entry: the shared rule
+ *  treats a dimension an entry does not constrain as universal (it applies
+ *  everywhere), the private one matched it against nothing and dropped it.
+ *  MEASURED: 19 of 60 active entries carry no facets at all. The digest listed
+ *  those titles as available while this loader withheld their bodies, so step 11
+ *  advertised an article and then refused to show it — on task 201dfef3 the
+ *  agent saw "Apache 2.4 authz merging ..." in the index, could not read its
+ *  body, and skipped the update it was asked to author. Two predicates for one
+ *  question is the bug; there is now one. */
+export async function loadActiveGlobalArticlesForTask(
   db: Database,
-  techs: (string | null)[],
+  taskId: string,
   limit = 15,
 ): Promise<{ title: string; body: string }[]> {
-  const want = new Set(techs.filter((t): t is string => !!t).map((t) => t.toLowerCase()));
-  if (want.size === 0) return [];
   try {
+    const projectFacets = await resolveTaskFacets(db, taskId);
     return await withGlobalKb(db, async ({ db: gdb, settings }) => {
       const rows = await gdb
         .select({
@@ -121,18 +135,15 @@ export async function loadActiveGlobalArticlesForStack(
           and(
             eq(globalKbEntries.namespace, settings.namespace),
             eq(globalKbEntries.status, 'active'),
+            isNull(globalKbEntries.supersededAt),
           ),
         )
         .orderBy(desc(globalKbEntries.updatedAt))
         .limit(80);
-      const matched = rows.filter((r) => {
-        const f = (r.facets ?? {}) as GlobalKbFacets;
-        const vals = [...(f.framework ?? []), ...(f.language ?? []), ...(f.database ?? [])].map(
-          (s) => s.toLowerCase(),
-        );
-        return vals.some((v) => want.has(v));
-      });
-      return matched.slice(0, limit).map((r) => ({ title: r.title, body: r.body }));
+      return rows
+        .filter((r) => facetsMatchProject(r.facets, projectFacets))
+        .slice(0, limit)
+        .map((r) => ({ title: r.title, body: r.body }));
     });
   } catch {
     return [];
