@@ -11,6 +11,7 @@ import type {
 import {
   didNotCompleteIssue,
   miningOutcome,
+  shouldRerollMiningAgent,
   shouldRetryMiningTerminalFailure,
   type MiningOutcome,
 } from '../../mining-failure.js';
@@ -1200,8 +1201,14 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       ...(securityIssue ? ['security-code-reviewer'] : []),
       ...unparsedLensIds,
     ];
-    if (unreadable.length > 0 && args.isFinalMiningAttempt === false) {
-      throw new MiningRetryError(unreadable);
+    // A reviewer that DIED is re-rolled only when its failure was transient — the same veto
+    // retryOnInvocationFailure applies at the barrier. Re-rolling every unreadable reviewer
+    // bypassed it: three reviewers killed by one 429 were asked again from here and burned a
+    // second wave of doomed calls. `unreadable` stays UNFILTERED below, because an agent that
+    // cannot be re-rolled still leaves the review incomplete.
+    const rerollable = unreadable.filter((id) => shouldRerollMiningAgent(results, id));
+    if (rerollable.length > 0 && args.isFinalMiningAttempt === false) {
+      throw new MiningRetryError(rerollable);
     }
 
     // Budget spent (or no retry configured): the review did not complete. This is NOT

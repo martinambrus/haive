@@ -645,6 +645,65 @@ describe('advanceStep agentMining retry', () => {
   });
 });
 
+/** The fatal class a fan-out must never degrade past: the provider is gone for hours, so
+ *  every downstream step re-hits it and the review that "passed" never happened. */
+const RATE_LIMIT_ERR =
+  "Provider rate limit or quota exhausted — the provider's usage limit or quota is exhausted; " +
+  'retry this task once it resets. (LLM run reported a failure (terminal_reason "api_error"): ' +
+  'API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour.])';
+
+describe('advanceStep agentMining fatal provider failure', () => {
+  it('fails the step instead of handing apply() a degraded batch', async () => {
+    // Task 88b8c808: all three 08c reviewers answered 429, apply() degraded them to
+    // non-blocking "did not complete" findings, the step went done, and the next step
+    // fired another doomed call. Failing here is what lets task-queue arm the
+    // provider_unavailable errorHint and the allowance watch.
+    const state = freshState([
+      miningRow('peer-reviewer', 2, { status: 'failed', errorMessage: RATE_LIMIT_ERR }),
+      miningRow('security-code-reviewer', 2, { status: 'failed', errorMessage: RATE_LIMIT_ERR }),
+    ]);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), terminalFailureRetryStep(applyCalls), enqueued);
+
+    expect(result.status).toBe('failed');
+    expect(applyCalls).toHaveLength(0);
+    expect(enqueued).toHaveLength(0);
+    // The RAW headline reaches the step row — task-queue's failed path matches on it to
+    // pick the outage reason, so a prefixed or reworded message would lose the watch.
+    expect(result.status === 'failed' && result.error).toBe(RATE_LIMIT_ERR);
+  });
+
+  it('fails even when a sibling finished, rather than reporting a partial review', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 1),
+      miningRow('security-code-reviewer', 2, { status: 'failed', errorMessage: RATE_LIMIT_ERR }),
+    ]);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), terminalFailureRetryStep(applyCalls), enqueued);
+
+    expect(result.status).toBe('failed');
+    expect(applyCalls).toHaveLength(0);
+  });
+
+  it('leaves an ordinary failure to the existing degrade path', async () => {
+    const state = freshState([
+      miningRow('peer-reviewer', 3, {
+        status: 'failed',
+        errorMessage: 'the model disagreed with itself',
+      }),
+      miningRow('security-code-reviewer', 1),
+    ]);
+    const applyCalls: StepApplyArgs[] = [];
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), terminalFailureRetryStep(applyCalls), enqueued);
+
+    expect(result.status).toBe('done');
+    expect(applyCalls).toHaveLength(1);
+  });
+});
+
 describe('advanceStep agentMining second wave', () => {
   it('dispatches the wave and parks, leaving the first wave’s row alone', async () => {
     const state = freshState([miningRow('peer-reviewer', 1)]);

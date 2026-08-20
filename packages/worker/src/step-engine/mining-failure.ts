@@ -80,3 +80,25 @@ export function shouldRetryMiningTerminalFailure(result: AgentMiningResult): boo
     TRANSIENT_MINING_TERMINAL_ERROR_RE.test(diagnostic)
   );
 }
+
+/** True when a fan-out agent that produced nothing usable is worth re-dispatching from
+ *  apply() via MiningRetryError.
+ *
+ *  Two ways an agent produces nothing, and only one is always worth a re-roll. An agent that
+ *  RAN and emitted prose the jsonrepair salvage could not read usually parses on a fresh roll.
+ *  An agent that DIED is re-rollable only when its failure was transient — exactly the veto
+ *  `retryOnInvocationFailure` already applies at the barrier.
+ *
+ *  apply() used to name both kinds, which made that veto decorative: the barrier refused to
+ *  re-run three reviewers killed by a 429, and apply() then asked for the same three through
+ *  MiningRetryError and got them, spending a second wave of doomed calls against an exhausted
+ *  quota. Callers keep the UNFILTERED list for their "incomplete" flag — an agent that died
+ *  non-retryably still leaves the hole its silence must never be read as approval of.
+ *
+ *  An agent with no row at all is never re-rolled: nothing was asked for, so nothing is
+ *  missing (mirrors MiningOutcome's `absent`). */
+export function shouldRerollMiningAgent(results: AgentMiningResult[], agentId: string): boolean {
+  const r = results.find((m) => m.agentId === agentId);
+  if (!r) return false;
+  return r.status === 'done' || shouldRetryMiningTerminalFailure(r);
+}

@@ -42,6 +42,7 @@ import {
   cliTimeoutBudgetMinutes,
   isCliPreemptionFailure,
   isCliTimeoutFailure,
+  isFatalProviderFailure,
   isOutputTruncationMessage,
   isTransientCliFailure,
   withoutPreemptions,
@@ -1062,6 +1063,41 @@ async function resolveAgentMiningPhase(
     if (pending.length > 0) {
       return { resolved: false, result: { status: 'waiting_cli', row: current } };
     }
+
+    // Fail fast on a fatal provider failure (rate-limit/quota, bad/expired auth, 5xx),
+    // mirroring the DAG guard (pickFatalProviderError in dag-executor). A fan-out otherwise
+    // DEGRADES every terminal failure identically: apply() reports the dead agent as a
+    // non-approving finding and the step still passes, so a depleted provider silently became
+    // "review done, advance" and every later step re-hit the same dead provider. It also never
+    // reached the task-queue failed path, so the provider-outage errorHint and the allowance
+    // watch (auto-resume once the quota resets) were never armed — measured on a task whose
+    // three 08c reviewers all died on one 429 and whose next step fired another doomed call.
+    // The user's Retry re-runs the fan-out once the provider is back.
+    //
+    // Placed AFTER the barrier rather than cancelling in-flight siblings the way the DAG does:
+    // mining agents are short and dispatched together, so the doomed calls a sibling kill would
+    // save are already spent by the time any row lands here, whereas a coder fan-out runs for
+    // half an hour. Scans every row, not just the newest, because a sibling can finish AFTER
+    // the one that hit the wall.
+    const fatalAgent = existing.find(
+      (r) => r.status === 'failed' && isFatalProviderFailure(r.errorMessage),
+    );
+    if (fatalAgent?.errorMessage) {
+      ctx.logger.warn(
+        { stepId: stepDef.metadata.id, agentId: fatalAgent.agentId },
+        'mining fan-out hit a fatal provider failure; failing the step instead of degrading',
+      );
+      const failedRow = await updateRow(db, current.id, {
+        status: 'failed',
+        errorMessage: fatalAgent.errorMessage,
+        endedAt: new Date(),
+      });
+      return {
+        resolved: false,
+        result: { status: 'failed', row: failedRow, error: fatalAgent.errorMessage },
+      };
+    }
+
     const results: AgentMiningResult[] = existing.map((r) => ({
       agentId: r.agentId,
       agentTitle: r.agentTitle,

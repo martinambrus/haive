@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   didNotCompleteIssue,
   miningOutcome,
+  shouldRerollMiningAgent,
   shouldRetryMiningTerminalFailure,
 } from './mining-failure.js';
 import { overrideOr } from './dispatch-timeout.js';
@@ -92,6 +93,45 @@ describe('shouldRetryMiningTerminalFailure', () => {
     expect(shouldRetryMiningTerminalFailure(failed('a', 'the model disagreed with itself'))).toBe(
       false,
     );
+  });
+});
+
+describe('shouldRerollMiningAgent', () => {
+  it('re-rolls an agent that RAN — its prose usually parses on a fresh roll', () => {
+    expect(shouldRerollMiningAgent([done('a', 'prose, no json')], 'a')).toBe(true);
+  });
+
+  it('re-rolls an agent killed by infrastructure', () => {
+    expect(
+      shouldRerollMiningAgent([failed('a', 'CLI process exceeded its time budget (30m).')], 'a'),
+    ).toBe(true);
+  });
+
+  it('refuses an agent that died on a fatal provider failure', () => {
+    // The bug this exists for: retryOnInvocationFailure vetoed the re-run at the barrier,
+    // then apply() asked for the same agent through MiningRetryError and got it — a second
+    // wave of doomed calls into an exhausted quota.
+    for (const msg of [
+      'Provider rate limit or quota exhausted — the provider usage limit is exhausted. (429)',
+      'CLI authentication failed — re-authenticate your CLI.',
+      'Provider server error (service unavailable) — 503.',
+    ]) {
+      expect(shouldRerollMiningAgent([failed('a', msg)], 'a')).toBe(false);
+    }
+  });
+
+  it('refuses a deliberate stop and an unclassifiable failure', () => {
+    expect(
+      shouldRerollMiningAgent(
+        [failed('a', 'CLI process was stopped before it finished (cancelled or timed out).')],
+        'a',
+      ),
+    ).toBe(false);
+    expect(shouldRerollMiningAgent([failed('a', null)], 'a')).toBe(false);
+  });
+
+  it('refuses an agent that was never dispatched', () => {
+    expect(shouldRerollMiningAgent([done('a', '{}')], 'b')).toBe(false);
   });
 });
 

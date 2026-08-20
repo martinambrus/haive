@@ -8,7 +8,11 @@ import type {
   AgentMiningDispatch,
   AgentMiningResult,
 } from '../../step-definition.js';
-import { didNotCompleteIssue, shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
+import {
+  didNotCompleteIssue,
+  shouldRerollMiningAgent,
+  shouldRetryMiningTerminalFailure,
+} from '../../mining-failure.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
@@ -377,9 +381,14 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
       }
     }
     // Re-roll the adversaries whose output could not be read, while they have budget.
-    // Only these are re-dispatched; the other adversaries' completed rows stand.
-    if (unreadable.length > 0 && args.isFinalMiningAttempt === false) {
-      throw new MiningRetryError(unreadable);
+    // Only these are re-dispatched; the other adversaries' completed rows stand. One that
+    // DIED is re-rolled only when its failure was transient — the same veto
+    // retryOnInvocationFailure applies at the barrier, which this path used to bypass.
+    // `unreadable` stays UNFILTERED for qaIncomplete: an adversary that cannot be re-rolled
+    // still leaves a hole in the attack surface.
+    const rerollable = unreadable.filter((id) => shouldRerollMiningAgent(results, id));
+    if (rerollable.length > 0 && args.isFinalMiningAttempt === false) {
+      throw new MiningRetryError(rerollable);
     }
 
     // Consolidate: sort by severity (critical → low), like the legacy phase-7b consolidator.

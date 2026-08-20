@@ -41,6 +41,12 @@ function failedMining(agentId: string, errorMessage: string): AgentMiningResult 
   };
 }
 const TIMEOUT_ERR = 'CLI process exceeded its time budget (30m).';
+/** A reviewer whose PROVIDER died, not the run: the fatal class that must never be
+ *  re-dispatched, because the next call answers 429 exactly as this one did. */
+const RATE_LIMIT_ERR =
+  "Provider rate limit or quota exhausted — the provider's usage limit or quota is exhausted; " +
+  'retry this task once it resets. (LLM run reported a failure (terminal_reason "api_error"): ' +
+  'API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour.])';
 /** Defaults `miningWaveExhausted: true` so a test that only cares about the review
  *  itself never fans out refuters. The refutation tests below opt back in. */
 function runReview(
@@ -541,6 +547,36 @@ describe('codeReviewStep.apply de-silence', () => {
       [
         failedMining('peer-reviewer', TIMEOUT_ERR),
         mining('security-code-reviewer', '```json\n{"verdict":"SECURE","findings":[]}\n```'),
+      ],
+      false,
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MiningRetryError);
+    expect((err as MiningRetryError).agentIds).toEqual(['peer-reviewer']);
+  });
+
+  it('does NOT re-roll a reviewer that died on a fatal provider failure', async () => {
+    // Task 88b8c808: all three reviewers answered 429 ("Usage limit reached for 5 hour").
+    // retryOnInvocationFailure vetoed the re-run at the barrier, then this path asked for
+    // the same three anyway and burned a second wave into the same exhausted quota. The
+    // review is still INCOMPLETE — the veto is about not re-asking, not about approving.
+    const out = await runReview(
+      [
+        failedMining('peer-reviewer', RATE_LIMIT_ERR),
+        failedMining('security-code-reviewer', RATE_LIMIT_ERR),
+      ],
+      false,
+    );
+    expect(out.reviewIncomplete).toBe(true);
+    expect(out.peer.verdict).toBe('DISCUSS');
+    expect(out.security.verdict).toBe('NEEDS_FIXES');
+    expect(out.blocking).toBe(false);
+  });
+
+  it('still re-rolls a readable-but-unparseable reviewer beside a rate-limited one', async () => {
+    const err = await runReview(
+      [
+        mining('peer-reviewer', 'prose, no json'),
+        failedMining('security-code-reviewer', RATE_LIMIT_ERR),
       ],
       false,
     ).catch((e: unknown) => e);
