@@ -9,6 +9,7 @@ import {
   parseKbSync,
   parseSkillSync,
   renderExistingGlobalArticle,
+  renderOtherGlobalArticleTitles,
   parseLearningOutput,
   writeInvestigation,
   phase8LearningStep,
@@ -622,5 +623,29 @@ describe('renderExistingGlobalArticle', () => {
     expect(out).toContain('rag_search');
     expect(out).toContain('x'.repeat(1500));
     expect(out).not.toContain('x'.repeat(1501));
+  });
+});
+
+describe('renderOtherGlobalArticleTitles', () => {
+  it('adds nothing when every applicable article got a body', () => {
+    expect(renderOtherGlobalArticleTitles([], 0)).toBe('');
+  });
+
+  it('names the articles the body block had no room for', () => {
+    // 15 body slots against 56 applicable articles: whichever ordering fills
+    // them, the one the agent needs is more likely outside than in. It must
+    // still be nameable.
+    const out = renderOtherGlobalArticleTitles(['Apache 2.4 authz merging', 'Second rule'], 0);
+
+    expect(out).toContain('- Apache 2.4 authz merging');
+    expect(out).toContain('- Second rule');
+    expect(out).toContain('rag_search');
+    expect(out).not.toContain('more applicable articles');
+  });
+
+  it('reports a tail too long to list rather than hiding it', () => {
+    const out = renderOtherGlobalArticleTitles(['One'], 7);
+
+    expect(out).toContain('+7 more applicable articles');
   });
 });

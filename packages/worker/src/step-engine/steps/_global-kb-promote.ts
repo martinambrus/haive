@@ -7,7 +7,9 @@ import {
   withGlobalKb,
   type GlobalKbCategory,
   type GlobalKbFacets,
+  type ProjectFacetSet,
 } from '@haive/shared/global-kb';
+import { embedQuery, ragHybridSearch, type RagConnection } from '@haive/shared/rag';
 import { facetsMatchProject } from './_global-kb-digest.js';
 import { confirmSupersedeByEmbedding, SUPERSEDE_CANDIDATE_LIMIT } from './_global-kb-similarity.js';
 
@@ -99,6 +101,23 @@ export function sanitizeGlobalArticle(input: {
   return { title, body };
 }
 
+/** Entries scanned (titles + facets only) before facet filtering and ranking.
+ *  Wide because it no longer costs prompt tokens: bodies are read for the
+ *  `limit` articles that actually get rendered. Ordered newest-first, so what an
+ *  overflowing corpus drops is the stalest. */
+const ARTICLE_SCAN_LIMIT = 400;
+
+/** Compatible titles listed after the rendered bodies. Generous — a title is a
+ *  dozen words and the point is that no applicable article is dropped without
+ *  the agent being told it exists. Whatever exceeds it is reported as a count,
+ *  never omitted in silence. */
+const OTHER_TITLE_LIMIT = 100;
+
+/** Chunks requested per article slot. An entry chunks into a handful of
+ *  sections, so asking for several times the entry budget is what makes it
+ *  likely that `limit` DISTINCT entries appear in the ranked chunk list. */
+const CHUNKS_PER_ARTICLE_ALLOWANCE = 5;
+
 /** Fetch the active global KB articles that apply to THIS task's project, so a
  *  step can show the agent which existing house-standard articles it could
  *  update. Best-effort: [] when the global KB is off/unavailable or nothing
@@ -115,19 +134,41 @@ export function sanitizeGlobalArticle(input: {
  *  advertised an article and then refused to show it — on task 201dfef3 the
  *  agent saw "Apache 2.4 authz merging ..." in the index, could not read its
  *  body, and skipped the update it was asked to author. Two predicates for one
- *  question is the bug; there is now one. */
+ *  question is the bug; there is now one.
+ *
+ *  Compatible entries are then ORDERED by similarity to `relevanceQuery` (the
+ *  task's own subject), not by recency. `updated_at desc` was standing in for
+ *  relevance, which holds only while the compatible set is smaller than `limit`:
+ *  past that the cut is arbitrary, and the article this block exists to offer is
+ *  as likely to be dropped as kept. Ranking is best-effort — with no query, or
+ *  when the search itself fails, this falls back to exactly the recency order it
+ *  replaced. */
+export interface GlobalArticleSelection {
+  /** Rendered in full (subject to the prompt's per-article budget), best match first. */
+  articles: { title: string; body: string }[];
+  /** Every OTHER applicable article, by title. Reachable with `rag_search`. */
+  otherTitles: string[];
+  /** Applicable articles that did not fit even the title list. Reported, not hidden. */
+  omittedTitleCount: number;
+}
+
 export async function loadActiveGlobalArticlesForTask(
   db: Database,
   taskId: string,
+  relevanceQuery = '',
   limit = 15,
-): Promise<{ title: string; body: string }[]> {
+): Promise<GlobalArticleSelection> {
+  const empty: GlobalArticleSelection = { articles: [], otherTitles: [], omittedTitleCount: 0 };
   try {
     const projectFacets = await resolveTaskFacets(db, taskId);
-    return await withGlobalKb(db, async ({ db: gdb, settings }) => {
+    return await withGlobalKb(db, async ({ conn, db: gdb, settings }) => {
+      // Titles + facets only. Bodies are fetched for the chosen few at the end,
+      // so the scan can be wide enough to survive corpus growth without the
+      // prompt paying for it.
       const rows = await gdb
         .select({
+          id: globalKbEntries.id,
           title: globalKbEntries.title,
-          body: globalKbEntries.body,
           facets: globalKbEntries.facets,
         })
         .from(globalKbEntries)
@@ -139,12 +180,147 @@ export async function loadActiveGlobalArticlesForTask(
           ),
         )
         .orderBy(desc(globalKbEntries.updatedAt))
-        .limit(80);
-      return rows
-        .filter((r) => facetsMatchProject(r.facets, projectFacets))
-        .slice(0, limit)
-        .map((r) => ({ title: r.title, body: r.body }));
+        .limit(ARTICLE_SCAN_LIMIT);
+      const compatible = rows.filter((r) => facetsMatchProject(r.facets, projectFacets));
+      if (compatible.length === 0) return empty;
+
+      const compatibleIds = new Set(compatible.map((r) => r.id));
+      const ranked = relevanceQuery.trim()
+        ? await rankArticleIdsByRelevance(
+            conn,
+            settings,
+            projectFacets,
+            relevanceQuery,
+            compatibleIds,
+            limit,
+          )
+        : [];
+
+      const ids = mergeRankedWithRecency(
+        ranked,
+        compatible.map((r) => r.id),
+        limit,
+      );
+      if (ids.length === 0) return empty;
+
+      const bodies = await gdb
+        .select({
+          id: globalKbEntries.id,
+          title: globalKbEntries.title,
+          body: globalKbEntries.body,
+        })
+        .from(globalKbEntries)
+        .where(inArray(globalKbEntries.id, ids));
+      const byId = new Map(bodies.map((b) => [b.id, b]));
+      const articles = ids
+        .map((id) => byId.get(id))
+        .filter((b): b is { id: string; title: string; body: string } => !!b)
+        .map((b) => ({ title: b.title, body: b.body }));
+
+      // Everything else that APPLIES, by title. Bodies are budgeted; awareness is
+      // not. 15 body slots against 56 compatible entries (measured) means the
+      // ordering only decides which bodies ride along — whichever article the
+      // agent actually needs must still be nameable, and `rag_search` returns any
+      // title in full.
+      const rest = compatible.filter((r) => !ids.includes(r.id)).map((r) => r.title);
+      return {
+        articles,
+        otherTitles: rest.slice(0, OTHER_TITLE_LIMIT),
+        omittedTitleCount: Math.max(0, rest.length - OTHER_TITLE_LIMIT),
+      };
     });
+  } catch {
+    return empty;
+  }
+}
+
+/** Relevance order first, then the newest of whatever it did not name, capped at
+ *  `limit`. The top-up keeps the block the size it has always been, so a task
+ *  whose subject matches nothing is no worse off than it was before ranking
+ *  existed — degrading to the old behaviour, never to a shorter list. */
+export function mergeRankedWithRecency(
+  ranked: string[],
+  byRecency: string[],
+  limit: number,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const id of [...ranked, ...byRecency]) {
+    if (out.length >= limit) break;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+/** Active entry ids most similar to `query`, best first, restricted to
+ *  `compatibleIds`.
+ *
+ *  Ranking is the SAME hybrid search an agent's `rag_search` runs against the
+ *  same store with the same facet filter, so an article this block offers is one
+ *  the agent could also have found — there is no third notion of relevance in
+ *  the codebase.
+ *
+ *  Degrades in two stages, never to nothing. With no embedding model configured
+ *  `embedQuery` hash-embeds instead of throwing, so the dense half becomes noise
+ *  and the ranking falls back to the LEXICAL half of the same fusion. Only a
+ *  thrown search (an index that is not built, an unreachable store) returns [],
+ *  and the caller then falls back to the recency order this replaced. Retrieval
+ *  degrading must never cost the step its article list. */
+async function rankArticleIdsByRelevance(
+  conn: RagConnection,
+  settings: {
+    namespace: string;
+    ollamaUrl: string | null;
+    embedModel: string | null;
+    embeddingDimensions: number;
+  },
+  facets: ProjectFacetSet,
+  query: string,
+  compatibleIds: Set<string>,
+  limit: number,
+): Promise<string[]> {
+  try {
+    const vec = await embedQuery(query, {
+      ollamaUrl: settings.ollamaUrl,
+      model: settings.embedModel,
+      dimensions: settings.embeddingDimensions,
+    });
+    const hits = await ragHybridSearch(
+      conn,
+      vec,
+      query,
+      { topK: limit * CHUNKS_PER_ARTICLE_ALLOWANCE },
+      { namespace: settings.namespace, facets },
+    );
+    if (hits.length === 0) return [];
+
+    // Chunks carry a source path, not an entry id. Resolve through the stored
+    // column rather than re-deriving the synthetic path a third time.
+    const paths = [...new Set(hits.map((h) => h.sourcePath))];
+    const placeholders = paths.map((_, i) => `$${i + 2}`).join(', ');
+    const rows = (await conn.pg.unsafe(
+      `SELECT DISTINCT ON (source_path) source_path, entry_id
+         FROM ai_rag_embeddings
+        WHERE namespace = $1 AND source_path IN (${placeholders})`,
+      [settings.namespace, ...paths],
+    )) as unknown as Array<{ source_path: string; entry_id: string }>;
+    const entryByPath = new Map(rows.map((r) => [r.source_path, r.entry_id]));
+
+    const ordered: string[] = [];
+    const seen = new Set<string>();
+    for (const h of hits) {
+      const entryId = entryByPath.get(h.sourcePath);
+      // compatibleIds is belt-and-braces: the SQL facet filter above already
+      // applies the same rule, but it reads the chunk's copy of the facets and
+      // this reads the entry's, so an entry mid-re-embed cannot slip through.
+      if (!entryId || seen.has(entryId) || !compatibleIds.has(entryId)) continue;
+      seen.add(entryId);
+      ordered.push(entryId);
+      if (ordered.length >= limit) break;
+    }
+    return ordered;
   } catch {
     return [];
   }

@@ -58,9 +58,15 @@ interface LearningDetect {
   /** Repo's installed-stack anchors (from its onboarding) for version-anchoring a
    *  promoted global article; null when the repo never completed onboarding. */
   repoStack: Awaited<ReturnType<typeof loadRepoStackAnchors>>;
-  /** Existing active global house-standard articles matching this repo's stack —
-   *  shown to the agent so it can author an UPDATE (full merged body) vs a new one. */
+  /** Existing active global house-standard articles that apply to this task,
+   *  closest first — shown to the agent so it can author an UPDATE (full merged
+   *  body) rather than a duplicate. */
   existingGlobalArticles: { title: string; body: string }[];
+  /** The applicable articles whose bodies did not fit the block, by title, plus
+   *  a count of any that did not fit even that. Bodies are budgeted; awareness is
+   *  not — the agent can `rag_search` any title to read it in full. */
+  otherGlobalArticleTitles: string[];
+  omittedGlobalArticleCount: number;
   /** A reviewer's outstanding refinement instruction (from the prior form submit),
    *  or '' on a first/accepted pass. When set, buildPrompt steers the agent with it
    *  and the form re-parks the regenerated drafts for review. */
@@ -211,6 +217,29 @@ export function renderExistingGlobalArticle(a: { title: string; body: string }):
     a.body.slice(0, GLOBAL_ARTICLE_PROMPT_CHARS),
     `[... TRUNCATED — this is the first ${GLOBAL_ARTICLE_PROMPT_CHARS} of ${a.body.length} chars. Before you author an UPDATE to this article, call \`rag_search\` with its exact title: it returns the entry IN FULL. Merging from this excerpt would silently delete the rest.]`,
   ].join('\n');
+}
+
+/** The applicable articles the body block had no room for.
+ *
+ *  Bodies are budgeted, awareness is not: MEASURED, 56 articles applied to one
+ *  task against 15 body slots, so whichever ordering fills those slots, the
+ *  article the agent actually needs is more likely outside them than in. Naming
+ *  the rest costs a dozen words each and turns "it was not shown" into "it was
+ *  shown as a title I can fetch". Returns '' when there is no tail, so the block
+ *  is unchanged for a small corpus. */
+export function renderOtherGlobalArticleTitles(titles: string[], omitted: number): string {
+  if (titles.length === 0 && omitted === 0) return '';
+  const lines = [
+    '',
+    'Other applicable house-standard articles — TITLES ONLY. Call `rag_search` with a title to read that entry in full; do it before you write a candidate that overlaps one of them:',
+    ...titles.map((t) => `- ${t}`),
+  ];
+  if (omitted > 0) {
+    lines.push(
+      `(+${omitted} more applicable articles not listed here — search by topic with \`rag_search\` rather than by title.)`,
+    );
+  }
+  return lines.join('\n');
 }
 
 const KB_SYNC_OPS = new Set(['insert', 'update', 'delete']);
@@ -748,10 +777,18 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       )?.repositoryId ?? null;
     const repoStack = repositoryId ? await loadRepoStackAnchors(ctx.db, repositoryId) : null;
     // Facet-matched against the task's project by the same predicate the prompt
-    // digest uses, so the two can never disagree about which articles apply.
-    // Not gated on `repoStack`: an entry that constrains no dimension is a
-    // universal house standard and applies to a repo that never onboarded too.
-    const existingGlobalArticles = await loadActiveGlobalArticlesForTask(ctx.db, ctx.taskId);
+    // digest uses, so the two can never disagree about which articles apply, then
+    // ordered by similarity to what THIS task was about: the block exists so the
+    // agent can UPDATE an overlapping article instead of duplicating it, and once
+    // more than `limit` entries are compatible a recency cut drops that article as
+    // readily as any other. Not gated on `repoStack`: an entry that constrains no
+    // dimension is a universal house standard and applies to a repo that never
+    // onboarded too.
+    const globalArticleSelection = await loadActiveGlobalArticlesForTask(
+      ctx.db,
+      ctx.taskId,
+      [meta.title, meta.description, implementOutput.summary].filter(Boolean).join('\n'),
+    );
     // Self-target revise channel: a reviewer's outstanding instruction (recorded by a
     // prior apply) steers this re-run; pair it with the prior run's drafts so the agent
     // revises THOSE rather than re-deriving from scratch. The prior cli_invocation row
@@ -782,7 +819,9 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       existingLearnings,
       existingSkills,
       repoStack,
-      existingGlobalArticles,
+      existingGlobalArticles: globalArticleSelection.articles,
+      otherGlobalArticleTitles: globalArticleSelection.otherTitles,
+      omittedGlobalArticleCount: globalArticleSelection.omittedTitleCount,
       refineInstruction,
       priorDrafts,
       worktreePath,
@@ -895,6 +934,10 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         detected.existingGlobalArticles.length > 0
           ? detected.existingGlobalArticles.map(renderExistingGlobalArticle).join('\n\n')
           : '(none)',
+        renderOtherGlobalArticleTitles(
+          detected.otherGlobalArticleTitles,
+          detected.omittedGlobalArticleCount,
+        ),
         '',
         '=== What happened during this task (mine this — it is the real, persisted run history) ===',
         detected.historyDigest.text,
