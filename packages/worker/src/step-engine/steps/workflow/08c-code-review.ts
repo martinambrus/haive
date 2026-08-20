@@ -29,7 +29,12 @@ import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { CONFIG_KEYS, configService } from '@haive/shared';
-import { coerceReviewSeverity, isBlockingSeverity, severityRank } from '@haive/shared/review';
+import {
+  coerceReviewSeverity,
+  isBlockingSeverity,
+  normalizeCweId,
+  severityRank,
+} from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
 import {
   findingFingerprint,
@@ -156,7 +161,14 @@ const securitySchema = z.object({
         in_scope: z.string().optional(),
         path: z.string().optional(),
         line: z.union([z.string(), z.number()]).optional(),
-        cwe: z.string().optional(),
+        // Normalized at the boundary rather than at each reader: isCredentialCwe decides
+        // from this whether the finding's snippet is a secret, and it cannot decide that
+        // on `cwe_089`, `n/a`, or a sentence. z.unknown for the same reason as severity
+        // above — a reviewer answering with a number must not fail the whole finding.
+        cwe: z
+          .unknown()
+          .optional()
+          .transform((v) => normalizeCweId(v) ?? undefined),
         issue: z.string(),
         snippet: z.string().optional(),
         attack: z.string().optional(),

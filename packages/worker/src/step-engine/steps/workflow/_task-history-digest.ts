@@ -1,6 +1,11 @@
 import { asc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { coerceReviewSeverity, isBlockingSeverity, severityRank } from '@haive/shared/review';
+import {
+  coerceReviewSeverity,
+  isBlockingSeverity,
+  normalizeCweId,
+  severityRank,
+} from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
 
 /* ------------------------------------------------------------------ */
@@ -88,7 +93,9 @@ function extractFindings(stepId: string, output: unknown): Finding[] {
     for (const it of asArray((o.security as Record<string, unknown> | undefined)?.findings)) {
       const i = it as Record<string, unknown>;
       if (i.refuted === true) continue;
-      const cwe = str(i.cwe);
+      // Normalized here too, not only at parse: this also reads rows written before
+      // 08c normalized the field, where `n/a` and prose were stored verbatim.
+      const cwe = normalizeCweId(i.cwe) ?? '';
       out.push({
         severity: coerceReviewSeverity(i.severity, 'low'),
         where: str(i.path),

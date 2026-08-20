@@ -181,6 +181,37 @@ describe('parseSecurityReview', () => {
     expect(p!.verdict).toBe('SECURE');
   });
 
+  it('normalizes the cwe at parse, so one spelling reaches every reader', () => {
+    // isCredentialCwe decides from this whether the finding's snippet is a secret; it
+    // cannot decide that on `cwe_798` or a bare number.
+    const p = parseSecurityReview({
+      verdict: 'VULNERABLE',
+      findings: [
+        { severity: 'high', issue: 'hardcoded key', cwe: 'cwe_798' },
+        { severity: 'high', issue: 'sqli', cwe: '89' },
+      ],
+    });
+    expect(p!.findings[0]!.cwe).toBe('CWE-798');
+    expect(p!.findings[1]!.cwe).toBe('CWE-89');
+  });
+
+  it('drops a cwe that is not an id rather than storing it verbatim', () => {
+    const p = parseSecurityReview({
+      verdict: 'NEEDS_FIXES',
+      findings: [
+        { severity: 'low', issue: 'a', cwe: 'n/a' },
+        { severity: 'low', issue: 'b', cwe: 'SQL injection' },
+        // A reviewer answering with a number must not fail the whole finding.
+        { severity: 'low', issue: 'c', cwe: 89 },
+      ],
+    });
+    expect(p!.findings).toHaveLength(3);
+    expect(p!.findings[0]!.cwe).toBeUndefined();
+    expect(p!.findings[1]!.cwe).toBeUndefined();
+    expect(p!.findings[2]!.cwe).toBeUndefined();
+    expect(p!.findings[2]!.issue).toBe('c');
+  });
+
   it('parses its own JSON, not a config it quoted as evidence', () => {
     const raw = [
       'Offending config:',
