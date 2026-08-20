@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { schema } from '@haive/database';
+import { isCredentialCwe } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
 import type { StepContext } from '../../step-definition.js';
 
@@ -102,6 +103,32 @@ export interface RecordableFinding {
   raw?: unknown;
 }
 
+/** Reviewers whose every finding quotes a credential, whatever CWE they name.
+ *
+ *  The secret sweeper looks for nothing else, so its snippet is a secret by
+ *  construction — which is what keeps the redaction below off the model's word. */
+const CREDENTIAL_REVIEWERS = new Set(['secret-sweeper']);
+
+/** `raw` as the table stores it: a credential finding's quoted line is dropped.
+ *
+ *  For a hard-coded-credential finding the line a reviewer quotes as evidence IS the
+ *  credential, and `path` + `lineStart` locate the code perfectly well without it —
+ *  so persisting the snippet only writes the secret into a second place. Nothing
+ *  reads it: gate 2's renderer never prints a snippet and the task-history digest
+ *  carries only cwe/issue/fix/path, so dropping it costs nothing.
+ *
+ *  `task_steps.output` deliberately keeps the snippet. It is ephemeral (a manual
+ *  retry nulls it via resetStepAndDownstream) and the fix-loop diagnosis reads it,
+ *  whereas a review_findings row is written to outlive the step by design. */
+function withheldRaw(f: RecordableFinding): unknown {
+  const raw = f.raw;
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw ?? null;
+  const record = raw as Record<string, unknown>;
+  if (!('snippet' in record)) return raw;
+  const credential = CREDENTIAL_REVIEWERS.has(f.reviewerId) || isCredentialCwe(record.cwe);
+  return credential ? { ...record, snippet: '' } : raw;
+}
+
 /** Persist a review step's findings. Never throws — a failed insert is logged and
  *  swallowed, because a telemetry write must not fail the review that produced it. */
 export async function recordReviewFindings(
@@ -132,7 +159,7 @@ export async function recordReviewFindings(
         disposition,
         dispositionAt: disposition === 'open' ? null : new Date(),
         dispositionSource: disposition === 'open' ? null : (f.dispositionSource ?? null),
-        raw: f.raw ?? null,
+        raw: withheldRaw(f),
       };
     });
     // A step's apply() can run more than once per round (07b's validator/fixer loop,

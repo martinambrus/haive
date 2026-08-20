@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { findingFingerprint, parseLineRange, splitLocation } from './_review-findings.js';
+import {
+  findingFingerprint,
+  parseLineRange,
+  recordReviewFindings,
+  splitLocation,
+  type RecordableFinding,
+} from './_review-findings.js';
+import type { StepContext } from '../../step-definition.js';
 
 describe('findingFingerprint', () => {
   it('hashes the same defect equal after line numbers move', () => {
@@ -75,5 +82,83 @@ describe('splitLocation', () => {
   it('handles absent locations', () => {
     expect(splitLocation(undefined)).toEqual({ path: '', lines: null });
     expect(splitLocation('')).toEqual({ path: '', lines: null });
+  });
+});
+
+describe('recordReviewFindings — credential snippets', () => {
+  /** Captures the rows the insert would have written. */
+  function captureCtx(): { ctx: StepContext; rows: Record<string, unknown>[] } {
+    const rows: Record<string, unknown>[] = [];
+    const ctx = {
+      taskId: 'task-1',
+      taskStepId: 'step-1',
+      round: 0,
+      logger: { warn: () => {} },
+      db: {
+        insert: () => ({
+          values: (values: Record<string, unknown>[]) => {
+            rows.push(...values);
+            return { onConflictDoNothing: () => Promise.resolve() };
+          },
+        }),
+      },
+    } as unknown as StepContext;
+    return { ctx, rows };
+  }
+
+  const finding = (over: Partial<RecordableFinding>): RecordableFinding => ({
+    reviewerId: 'security-code-reviewer',
+    severity: 'high',
+    issue: 'an issue',
+    path: 'src/a.ts',
+    lines: '12',
+    ...over,
+  });
+
+  it('drops the quoted line of a hard-coded-credential finding', async () => {
+    // The line such a finding quotes as evidence IS the credential; path + line locate
+    // the code without it, so persisting it only writes the secret to a second place.
+    const { ctx, rows } = captureCtx();
+    await recordReviewFindings(ctx, '08c-code-review', [
+      finding({ raw: { cwe: 'CWE-798', snippet: 'AKIAIOSFODNN7EXAMPLE', issue: 'aws key' } }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect((rows[0]!.raw as Record<string, unknown>).snippet).toBe('');
+    // Everything else survives — the finding is still fully locatable and actionable.
+    expect((rows[0]!.raw as Record<string, unknown>).cwe).toBe('CWE-798');
+    expect(rows[0]!.path).toBe('src/a.ts');
+    expect(rows[0]!.lineStart).toBe(12);
+  });
+
+  it('keeps the snippet for a weakness whose evidence is ordinary code', async () => {
+    const { ctx, rows } = captureCtx();
+    await recordReviewFindings(ctx, '08c-code-review', [
+      finding({ raw: { cwe: 'CWE-89', snippet: 'db.query("SELECT " + name)' } }),
+    ]);
+    expect((rows[0]!.raw as Record<string, unknown>).snippet).toBe('db.query("SELECT " + name)');
+  });
+
+  it('drops the snippet for the secret sweeper whatever CWE it names', async () => {
+    // The sweeper looks for nothing but credentials, so its snippet is a secret by
+    // construction — the redaction must not depend on the model naming a CWE.
+    const { ctx, rows } = captureCtx();
+    await recordReviewFindings(ctx, '07_7-secret-sweep', [
+      finding({ reviewerId: 'secret-sweeper', raw: { snippet: 'ghp_realtokenvalue' } }),
+    ]);
+    expect((rows[0]!.raw as Record<string, unknown>).snippet).toBe('');
+  });
+
+  it('leaves a finding that carries no snippet untouched', async () => {
+    const { ctx, rows } = captureCtx();
+    await recordReviewFindings(ctx, '08c-code-review', [
+      finding({ raw: { cwe: 'CWE-798', attack: 'reuse the key' } }),
+    ]);
+    expect(rows[0]!.raw).toEqual({ cwe: 'CWE-798', attack: 'reuse the key' });
+  });
+
+  it('records nothing but null when the finding carried no raw at all', async () => {
+    const { ctx, rows } = captureCtx();
+    await recordReviewFindings(ctx, '08c-code-review', [finding({})]);
+    expect(rows[0]!.raw).toBeNull();
   });
 });
