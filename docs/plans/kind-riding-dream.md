@@ -135,3 +135,31 @@ cross-cutting rule says the latter but not the former, and this module does both
 
 **Adversarial:** remove the module while a `deep_scan` definition exists — the definition must become
 non-selectable with a named reason, and an in-flight task must finish on its materialised run list.
+
+---
+
+# Amendment — 2026-08-20: reuse the multi-model fan-out, do not rebuild it
+
+The plan above fans out across **dimensions** (N different prompts, one model each). The separate
+plan `purring-marinating-peacock.md` fans out across **models** (one prompt, N models, then a
+consolidator merges the drafts). Those are orthogonal axes, so nothing here duplicates it — but the
+plan as written silently dropped the cross-model axis, which is where much of the original
+workflow's value lived: its four CLIs all answered the SAME question and disagreed usefully.
+
+**They compose at that plan's Phase 2b (agent-mining nested barrier).** Each `scan-analyze` dimension
+agent becomes a group of M members plus a consolidator, giving dimension x model. That is already
+specified there; this module declares the dependency and builds none of it. In particular it must NOT
+introduce a consolidator of its own — `buildConsolidatorPrompt` is generic by design and lives in
+core.
+
+**Optional, never a prerequisite.** Phase 2b is that plan's hardest piece and may be deferred, so
+`deep_scan` must run correctly single-model and merely improve when 2b exists. The scope step's
+budget knob governs it: 10 dimensions x 3 members + 10 consolidators is 40 invocations, drained 5 at
+a time by `MAX_PARALLEL_AGENTS_PER_TASK` — eight serial batches. Multi-model is opt-in per run.
+
+**`scan-verify` is not made redundant by the consolidator**, and the plan should say so where a
+reader might assume otherwise. Consolidation reconciles drafts of one answer; refutation checks a
+claim against the code and demands a cited `file:line`. That plan's own caveat is explicit —
+consolidator contradiction-validation is "best-effort model judgement, NOT a correctness guarantee" —
+so consolidating three models' findings still yields findings nobody verified. Consolidate first,
+refute second, and keep the inverted 2-of-3 default described above.
