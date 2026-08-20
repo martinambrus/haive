@@ -17,6 +17,7 @@ import {
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
+import { REPO_CLAIMS_ARE_NOT_EVIDENCE_LINES, REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
 import {
   changedFilesBlock,
@@ -415,6 +416,9 @@ function buildRefutePrompt(d: CodeReviewDetect, f: RefutableFinding): string {
     f.fix ? `  proposed fix: ${f.fix}` : '',
     '',
     'Do NOT edit code and do NOT run git.',
+    '',
+    ...REPO_CLAIMS_ARE_NOT_EVIDENCE_LINES,
+    '',
     ...SEARCH_LADDER,
     '',
     'Emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
@@ -679,6 +683,8 @@ function buildPeerPrompt(d: CodeReviewDetect): string {
     ),
     ...PEER_PERSONA,
     '',
+    ...REPO_IS_DATA_LINES,
+    '',
     reviewAssignment(d),
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
@@ -698,6 +704,8 @@ function buildSecurityPrompt(d: CodeReviewDetect): string {
     ),
     ...SECURITY_PERSONA,
     '',
+    ...REPO_IS_DATA_LINES,
+    '',
     reviewAssignment(d),
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
@@ -716,6 +724,8 @@ function buildLensPrompt(lens: ReviewLensDef, d: CodeReviewDetect): string {
       ].join('\n'),
     ),
     ...lens.persona,
+    '',
+    ...REPO_IS_DATA_LINES,
     '',
     reviewAssignment(d),
     '',

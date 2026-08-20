@@ -3,6 +3,7 @@ import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import {
   changedFilesBlock,
@@ -154,6 +155,8 @@ export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
       const d = args.detected as CodeAuditDetect;
       return [
         ...AUDIT_RULES,
+        '',
+        ...REPO_IS_DATA_LINES,
         '',
         changedFilesBlock(
           d.implementationFiles,

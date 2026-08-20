@@ -11,6 +11,7 @@ import type {
 import { didNotCompleteIssue, shouldRetryMiningTerminalFailure } from '../../mining-failure.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
+import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { parseReviewJson } from './_agent-json.js';
 import {
   changedFilesBlock,
@@ -185,6 +186,8 @@ function buildAdversaryPrompt(a: AdversaryDef, d: AdversarialDetect): string {
     a.persona,
     '',
     ...SAFETY,
+    '',
+    ...REPO_IS_DATA_LINES,
     '',
     changedFilesBlock(
       d.implementationFiles,
