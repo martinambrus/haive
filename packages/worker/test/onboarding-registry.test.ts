@@ -25,6 +25,7 @@ describe('onboarding registry', () => {
       '06_7-scope-selection',
       '07-generate-files',
       '07_5-verify-files',
+      '07_7-secret-sweep',
       '08-knowledge-acquisition',
       '09-qa',
       '09_1-qa-suggestions',
@@ -42,8 +43,8 @@ describe('onboarding registry', () => {
       '13-onboarding-push',
     ]);
     expect(steps.map((s) => s.metadata.index)).toEqual([
-      0, 1, 2, 3, 4, 4.5, 5.5, 6, 6.5, 7, 8, 9, 10, 10.25, 10.5, 10.75, 11, 11.5, 12, 12.4, 12.5,
-      13, 14, 15, 16, 17,
+      0, 1, 2, 3, 4, 4.5, 5.5, 6, 6.5, 7, 8, 8.5, 9, 10, 10.25, 10.5, 10.75, 11, 11.5, 12, 12.4,
+      12.5, 13, 14, 15, 16, 17,
     ]);
   });
 

@@ -10,6 +10,7 @@ import { agentDiscoveryStep } from './06_5-agent-discovery.js';
 import { scopeSelectionStep } from './06_7-scope-selection.js';
 import { generateFilesStep } from './07-generate-files.js';
 import { verifyFilesStep } from './07_5-verify-files.js';
+import { secretSweepStep } from './07_7-secret-sweep.js';
 import { knowledgeAcquisitionStep } from './08-knowledge-acquisition.js';
 import { knowledgeQaPrepStep } from './09-qa.js';
 import { knowledgeQaSuggestionsStep } from './09_1-qa-suggestions.js';
@@ -37,6 +38,7 @@ export {
   scopeSelectionStep,
   generateFilesStep,
   verifyFilesStep,
+  secretSweepStep,
   knowledgeAcquisitionStep,
   knowledgeQaPrepStep,
   knowledgeQaSuggestionsStep,
@@ -66,6 +68,7 @@ export function registerOnboardingSteps(registry: StepRegistry): void {
   registry.register(scopeSelectionStep);
   registry.register(generateFilesStep);
   registry.register(verifyFilesStep);
+  registry.register(secretSweepStep);
   registry.register(knowledgeAcquisitionStep);
   registry.register(knowledgeQaPrepStep);
   registry.register(knowledgeQaSuggestionsStep);

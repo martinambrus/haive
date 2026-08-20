@@ -158,6 +158,7 @@ export const CLI_DISPATCH_STEP_IDS: readonly string[] = [
   // onboarding
   '01-env-detect',
   '06_5-agent-discovery',
+  '07_7-secret-sweep',
   '08-knowledge-acquisition',
   '09-qa',
   '09_1-qa-suggestions',
