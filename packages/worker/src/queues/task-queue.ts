@@ -66,7 +66,7 @@ import { killTaskDdevRunners } from '../sandbox/ddev-runner.js';
 import { killTaskAppRunners } from '../sandbox/app-runner.js';
 import { killTaskIdeContainers } from '../sandbox/ide-runner.js';
 import { removeTaskWorktree } from '../repo/worktree-remove.js';
-import { getTaskEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
+import { getTaskEnvTemplate, pinsEnvTemplate } from '../step-engine/steps/env-replicate/_shared.js';
 import { cleanupRagForRepository } from '../step-engine/steps/onboarding/_rag-connection.js';
 import { fatalClassFromMessage } from './cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
@@ -700,9 +700,10 @@ async function cleanupTaskEnvImage(
     .select({ id: schema.tasks.id, status: schema.tasks.status })
     .from(schema.tasks)
     .where(and(eq(schema.tasks.envTemplateId, envTemplateId), ne(schema.tasks.id, taskId)));
-  const stillLive = others.some(
-    (t) => t.status !== 'cancelled' && t.status !== 'failed' && t.status !== 'completed',
-  );
+  // A `failed` or `completed` sibling still pins the row: it resumes / reopens and reads
+  // the template again (pinsEnvTemplate). Counting those as dead reaped a template out
+  // from under a failed-then-resumed task and nulled its link. Only `cancelled` is dead.
+  const stillLive = others.some((t) => pinsEnvTemplate(t.status));
   if (stillLive) return;
 
   const tpl = await db.query.envTemplates.findFirst({

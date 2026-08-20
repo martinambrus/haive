@@ -51,3 +51,23 @@ export function deriveEnvTemplateName(taskId: string): string {
 export function hashDockerfile(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex');
 }
+
+/** Task statuses whose `env_template_id` link is disposable — i.e. the only ones a
+ *  sibling task's teardown may delete an env template out from under.
+ *
+ *  ONLY `cancelled` qualifies. A `failed` task auto-resumes via reset and a `completed`
+ *  one is reopened by flipping `tasks.status`; both then read their template row again,
+ *  and 09-gate-2-verify-approval derives `browserTesting` from it. The FK is
+ *  `ON DELETE SET NULL`, so deleting a row either still points at nulls the link with no
+ *  error and no event on the victim — the task comes back with its live-browser panel
+ *  silently gone while its runner is up and serving. Observed 2026-08-16: cancelling one
+ *  task reaped the template a second, `failed` task shared, and that task's next gate
+ *  round (after a reset-resume) rendered without the VNC browser. */
+export const DISPOSABLE_TASK_STATUSES = ['cancelled'] as const;
+
+/** True when a task in `status` still pins its env template (see
+ *  {@link DISPOSABLE_TASK_STATUSES}). Pure so both reference counts — the cancel reap in
+ *  task-queue and the dedupe delete in 02-generate-dockerfile — apply one rule. */
+export function pinsEnvTemplate(status: string): boolean {
+  return !(DISPOSABLE_TASK_STATUSES as readonly string[]).includes(status);
+}

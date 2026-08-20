@@ -4,6 +4,7 @@ import type { FormSchema } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
 import { stableStringify } from './01-declare-deps.js';
 import {
+  DISPOSABLE_TASK_STATUSES,
   findEnvTemplateByHash,
   getTaskEnvTemplate,
   hashDockerfile,
@@ -164,9 +165,6 @@ export const generateDockerfileStep: StepDefinition<
   },
 };
 
-/** Tasks past this point no longer need their env template link intact. */
-const TERMINAL_TASK_STATUSES = ['completed', 'failed', 'cancelled'] as const;
-
 /** Ids of OTHER still-live tasks whose `env_template_id` points at `templateId`.
  *
  *  The dedupe path in apply() is not free to delete the row it superseded: that row can
@@ -179,10 +177,11 @@ const TERMINAL_TASK_STATUSES = ['completed', 'failed', 'cancelled'] as const;
  *  template row, so a nulled link makes it false and the gate quietly stops offering its
  *  live browser on a task whose runner is up and serving.
  *
- *  Same still-live reference count `cleanupTaskEnvImage` (task-queue.ts) already applies
- *  before reaping a template. References from terminal tasks deliberately do not count —
- *  `reapOrphanEnvTemplates` assumes exactly that, so honoring them here would leak rows
- *  the boot sweep is meant to collect. */
+ *  Same reference count `cleanupTaskEnvImage` (task-queue.ts) applies before reaping a
+ *  template; both share `DISPOSABLE_TASK_STATUSES`, so a `failed` or `completed` task
+ *  still counts — it can resume or be reopened. `reapOrphanEnvTemplates` keeps its own
+ *  wider dead-set, which is sound because it only ever sweeps rows that never reached
+ *  `ready`; a kept row of that kind is still collected at the next worker boot. */
 export async function liveTasksSharingEnvTemplate(
   db: Database,
   templateId: string,
@@ -195,7 +194,7 @@ export async function liveTasksSharingEnvTemplate(
       and(
         eq(schema.tasks.envTemplateId, templateId),
         ne(schema.tasks.id, exceptTaskId),
-        notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
+        notInArray(schema.tasks.status, [...DISPOSABLE_TASK_STATUSES]),
       ),
     );
   return rows.map((r) => r.id);

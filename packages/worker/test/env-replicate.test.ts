@@ -11,6 +11,10 @@ import {
   dockerfileTargetsUnbuildablePhp,
   renderDockerfile,
 } from '../src/step-engine/steps/env-replicate/02-generate-dockerfile.js';
+import {
+  DISPOSABLE_TASK_STATUSES,
+  pinsEnvTemplate,
+} from '../src/step-engine/steps/env-replicate/_shared.js';
 
 let tmpRoot: string;
 
@@ -536,5 +540,26 @@ describe('computeBaseImage', () => {
   it('uses ubuntu for non-container projects too', () => {
     expect(computeBaseImage('none')).toBe('ubuntu:24.04');
     expect(computeBaseImage('docker-compose')).toBe('ubuntu:24.04');
+  });
+});
+
+describe('pinsEnvTemplate', () => {
+  it('treats only a cancelled task as done with its env template', () => {
+    expect(DISPOSABLE_TASK_STATUSES).toEqual(['cancelled']);
+    expect(pinsEnvTemplate('cancelled')).toBe(false);
+  });
+
+  it('keeps the link pinned for a failed task (auto-resumes via reset)', () => {
+    expect(pinsEnvTemplate('failed')).toBe(true);
+  });
+
+  it('keeps the link pinned for a completed task (reopened for retry)', () => {
+    expect(pinsEnvTemplate('completed')).toBe(true);
+  });
+
+  it('keeps the link pinned for in-flight tasks', () => {
+    for (const status of ['pending', 'running', 'waiting_user', 'paused']) {
+      expect(pinsEnvTemplate(status)).toBe(true);
+    }
   });
 });
