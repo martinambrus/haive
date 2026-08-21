@@ -132,6 +132,20 @@ interface BrowserVerifyApply {
   /** Absolute path of the gallery manifest, or null when no screenshot was written.
    *  The task page reads this off `task_steps.output` to render the 08a gallery. */
   screenshotsArtifactPath: string | null;
+  /** The tester reported a PASS but produced no evidence it ever drove a browser (mcp
+   *  mode, zero screenshot files on disk). The change may well be fine — what failed is
+   *  the VERIFICATION — so this does not flip `passed` and never spends a fix round.
+   *  Gate 2 reads it the way it reads `reviewIncomplete`: no silent approve.
+   *
+   *  MEASURED on task de2b313d: method=mcp, passed=true, screenshots=0, with the tester's
+   *  own notes saying "Chrome DevTools MCP server never connected ... All testing was
+   *  performed via static code analysis". A browser step passing without a browser is
+   *  manufactured evidence, and gate 2 then treated it as the AUTHORITATIVE runtime
+   *  signal — which demotes a genuinely failed HTTP smoke to advisory.
+   *
+   *  Optional like `appLogin`: only the mcp tester path can set it, and rows written
+   *  before this existed have no value. Read it as `=== true`, never as truthy-absent. */
+  verificationIncomplete?: boolean;
   /** Internal loop bookkeeping (the runner re-applies per pass). */
   source: 'probe' | 'tester' | 'fixer' | 'manual' | 'skip';
 }
@@ -1117,6 +1131,17 @@ async function applyMcp(
   const visualFail = verdict.visualVerdict === 'UNSTYLED';
   const passed = verdict.passed && !visualFail;
   const shots = [...shotsSoFar, ...verdict.screenshots];
+  const artifactPath = await manifest(shots);
+  // Evidence, not self-report: `manifest` takes existence from DISK and drops entries
+  // naming a file that was never written, so a null path means nothing was captured.
+  // Deliberately NOT keyed on the tester's notes — that is model prose and will drift.
+  const verificationIncomplete = passed && artifactPath === null;
+  if (verificationIncomplete) {
+    ctx.logger.warn(
+      { method: 'mcp', reportedPassed: verdict.passed },
+      'browser tester reported a pass with no screenshot evidence — marking the verification incomplete',
+    );
+  }
   ctx.logger.info(
     {
       passed,
@@ -1133,8 +1158,9 @@ async function applyMcp(
     checklistMarkdown: null,
     fixesApplied: fixesSoFar,
     screenshots: shots,
-    screenshotsArtifactPath: await manifest(shots),
+    screenshotsArtifactPath: artifactPath,
     passed,
+    verificationIncomplete,
     fixScope: passed ? null : verdict.fixScope,
     output: verdict.notes,
     source: 'tester',

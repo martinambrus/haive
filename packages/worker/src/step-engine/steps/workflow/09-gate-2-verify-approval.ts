@@ -81,6 +81,9 @@ interface VerifyGateDetect {
     visualVerdict: string | null;
     checklistMarkdown: string | null;
     skipped: boolean;
+    /** The browser tester claimed a pass but left no evidence it drove a browser.
+     *  Same contract as codeReview.reviewIncomplete: no fix round, no silent approve. */
+    verificationIncomplete: boolean;
   } | null;
   /** Phase 6 code review result (null when the step didn't run / no reviews). */
   codeReview: {
@@ -235,6 +238,9 @@ function scopeTag(f: { in_scope?: unknown }): string {
 }
 
 interface Phase5aOutput {
+  /** Absent on rows written before 08a reported it; treated as false. A pass with no
+   *  browser evidence used to be indistinguishable from a real one. */
+  verificationIncomplete?: boolean;
   ran?: boolean;
   skipped?: boolean;
   method?: string;
@@ -465,6 +471,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         visualVerdict: pa.visualVerdict ?? null,
         checklistMarkdown: pa.checklistMarkdown ?? null,
         skipped: pa.skipped === true,
+        verificationIncomplete: pa.verificationIncomplete === true,
       };
     }
 
@@ -669,7 +676,10 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     const testsOk =
       detected.testManagement === null || detected.testManagement.testsPassed !== false;
     const b = detected.browser;
-    const browserOk = b === null || b.passed;
+    // A pass with no evidence the browser was ever driven is not a clean check. It does
+    // not block (the CODE may be fine — the VERIFICATION failed), but it must not default
+    // the gate to approve either. Same contract as reviewIncomplete / advisoryVerdict.
+    const browserOk = b === null || (b.passed && !b.verificationIncomplete);
     const cr = detected.codeReview;
     // An incomplete review is not a passing review. It does not block (that would spend
     // a fix round because a reviewer failed), but it must not flip the gate to approve
@@ -696,8 +706,15 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
     // but it no longer flips the gate default to reject. Manual checklists aren't
     // authoritative (the human confirms at THIS gate), so they don't demote it; a
     // FAILED browser test leaves the smoke a hard fail (both point the same way).
+    // ...and it certainly cannot OUTRANK the HTTP smoke. Treating a phantom browser pass
+    // as authoritative demotes a genuinely failed smoke to advisory, which is how a real
+    // runtime failure gets suppressed by a check that never ran.
     const browserRuntimeAuthoritative =
-      b !== null && !b.skipped && b.passed && (b.method === 'mcp' || b.method === 'interactive');
+      b !== null &&
+      !b.skipped &&
+      b.passed &&
+      !b.verificationIncomplete &&
+      (b.method === 'mcp' || b.method === 'interactive');
     const smokeAdvisory = smokeFailed && browserRuntimeAuthoritative;
     const runtimeSmokeOk = !smokeFailed || smokeAdvisory;
     // The verification roll-up is a coloured status table (label + pill), each row
@@ -794,6 +811,14 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         );
       } else {
         lines.push('', `**Result:** ${b.passed ? 'PASS' : 'FAIL'}`);
+        if (b.verificationIncomplete) {
+          lines.push(
+            '',
+            '> **The browser test reported a pass but captured no screenshots, so there is no',
+            '> evidence a browser was actually driven.** Read its notes below before approving —',
+            '> the change itself may be fine, but this check did not verify it.',
+          );
+        }
         if (b.visualVerdict) lines.push(`**Visual verdict:** ${b.visualVerdict}`);
         if (b.failures.length > 0) {
           lines.push('', '## Failures');
@@ -804,8 +829,22 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
         b.visualVerdict && b.visualVerdict !== 'SKIPPED' ? ` • visual ${b.visualVerdict}` : '';
       rows.push({
         label: 'Browser testing',
-        status: b.method === 'manual' ? 'info' : b.passed ? 'pass' : 'fail',
-        statusLabel: b.method === 'manual' ? 'CHECKLIST' : b.passed ? 'PASS' : 'FAIL',
+        status:
+          b.method === 'manual'
+            ? 'info'
+            : b.verificationIncomplete
+              ? 'warn'
+              : b.passed
+                ? 'pass'
+                : 'fail',
+        statusLabel:
+          b.method === 'manual'
+            ? 'CHECKLIST'
+            : b.verificationIncomplete
+              ? 'NO EVIDENCE'
+              : b.passed
+                ? 'PASS'
+                : 'FAIL',
         detail: `method: ${b.method}${visual}`,
         body: lines.join('\n'),
         defaultOpen: !browserOk || b.method === 'manual',
