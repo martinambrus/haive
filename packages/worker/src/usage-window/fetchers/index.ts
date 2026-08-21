@@ -1,4 +1,4 @@
-import type { CliProviderName } from '@haive/shared';
+import type { CliProviderName, UsageWindowProviderName } from '@haive/shared';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import {
   CODEX_CREDENTIAL_FILE,
@@ -37,9 +37,15 @@ export interface ProviderUsageConfig {
 }
 
 /** Providers with a (vendor-confirmed but undocumented) usage-window endpoint.
- *  Absent providers (amp, ollama, antigravity) have no readable window -> the
- *  chip simply hides for them. */
-export const USAGE_PROVIDERS: Partial<Record<CliProviderName, ProviderUsageConfig>> = {
+ *  Absent providers (amp, ollama, grok, antigravity) have no readable window -> the
+ *  chip simply hides for them.
+ *
+ *  `satisfies` against the shared union is a drift guard, not decoration: the WEB keeps its own
+ *  map of the same CLIs (lib/usage-chip-state) to tell "no endpoint exists" from "endpoint
+ *  exists but this provider never reported", and it cannot import this file. Adding a fetcher
+ *  here without adding the name to USAGE_WINDOW_PROVIDERS fails to compile here; adding it
+ *  there without a fetcher fails to compile in web. */
+const FETCHERS = {
   'claude-code': {
     fetch: fetchClaudeUsage,
     // NOT CLAUDE_CODE_OAUTH_TOKEN: that setup-token is user:inference-only and 403s on
@@ -66,4 +72,8 @@ export const USAGE_PROVIDERS: Partial<Record<CliProviderName, ProviderUsageConfi
     reconnectable: false,
     token: { kind: 'volumeJson', ...GEMINI_CREDENTIAL_FILE },
   },
-};
+} satisfies Record<UsageWindowProviderName, ProviderUsageConfig>;
+
+/** Widened for lookup: callers index by a plain CliProviderName and check for undefined.
+ *  FETCHERS above carries the exhaustiveness check; this is the same object. */
+export const USAGE_PROVIDERS: Partial<Record<CliProviderName, ProviderUsageConfig>> = FETCHERS;

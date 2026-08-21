@@ -42,7 +42,12 @@ import {
 } from '@/lib/retry-timeout';
 import { formatTokens } from '@/lib/format-tokens';
 import { CLI_USAGE_LABEL } from '@/lib/usage-format';
-import { UsagePendingChip, UsageReconnectAction } from '@/components/usage-reconnect-action';
+import {
+  UsageFaultChip,
+  UsagePendingChip,
+  UsageReconnectAction,
+} from '@/components/usage-reconnect-action';
+import { resolveUsageChipState } from '@/lib/usage-chip-state';
 import {
   UsageBars,
   usageRemainingColor,
@@ -2272,14 +2277,18 @@ function HeaderUsageChip({
     return () => clearInterval(t);
   }, []);
 
-  if (!providerId || !snapshots) return null;
-  const snap = snapshots.find((s) => s.providerId === providerId);
-  // Dead usage token: don't vanish silently — prompt a reconnect and deep-link to the repair
-  // that actually applies to this provider (usage-OAuth, an interactive CLI login, or an API
-  // token). usage-reconnect owns that fork so this chip, the tasks-list strip and the CLI
-  // providers list cannot disagree about how a given CLI is fixed.
+  // Every reason the bars are absent, decided in one place (lib/usage-chip-state) so the four
+  // situations that used to share a single blank can be told apart. Dead usage token: don't
+  // vanish silently — prompt a reconnect and deep-link to the repair that actually applies to
+  // this provider (usage-OAuth, an interactive CLI login, or an API token). usage-reconnect
+  // owns that fork so this chip, the tasks-list strip and the CLI providers list cannot
+  // disagree about how a given CLI is fixed.
+  // Narrowing guard, not a duplicate of the resolver's own: `reconnect` implies a provider id,
+  // but only this early return proves it to tsc for the props below.
+  if (!providerId) return null;
+  const state = resolveUsageChipState({ providerId, providerName, snapshots });
   const who = (providerName && CLI_USAGE_LABEL[providerName]) || providerLabel || 'CLI';
-  if (snap?.status === 'pending') {
+  if (state.kind === 'pending') {
     return (
       <UsagePendingChip
         displayName={who}
@@ -2289,7 +2298,7 @@ function HeaderUsageChip({
       />
     );
   }
-  if (snap?.status === 'needs_reconnect') {
+  if (state.kind === 'reconnect') {
     return (
       <UsageReconnectAction
         providerId={providerId}
@@ -2303,11 +2312,27 @@ function HeaderUsageChip({
       />
     );
   }
+  // The reconnect-only mount sits beside the recovery buttons and exists purely so a repair is
+  // on screen without scrolling. The fault chips below are statements, not repairs, so they
+  // stay out of it — the full chip in the title strip is where they belong.
   if (reconnectOnly) return null;
-  if (!snap || snap.status !== 'ok') return null;
+  if (state.kind === 'fault') {
+    return (
+      <UsageFaultChip
+        fault={state.fault}
+        displayName={who}
+        className={`ml-auto flex shrink-0 items-center gap-1 px-2 font-mono text-xs font-semibold ${
+          state.fault === 'not_connected'
+            ? 'text-amber-400 hover:text-amber-300'
+            : 'text-neutral-500'
+        }`}
+      />
+    );
+  }
+  if (state.kind !== 'meter') return null;
+  const snap = state.snapshot;
 
   const windows = usageWindowsOf(snap);
-  if (windows.length === 0) return null;
 
   const name =
     (providerName && CLI_USAGE_LABEL[providerName]) || providerLabel || providerName || 'CLI';

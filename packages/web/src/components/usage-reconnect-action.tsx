@@ -5,6 +5,12 @@ import type { CliProviderName } from '@/lib/api-client';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { UsageOauthModal } from '@/components/usage-oauth-modal';
 import { usageReconnectFix, usageReconnectHint, usageReconnectHref } from '@/lib/usage-reconnect';
+import {
+  usageFaultHref,
+  usageFaultText,
+  usageFaultTooltip,
+  type UsageChipFault,
+} from '@/lib/usage-chip-state';
 
 /** The dead-usage-token prompt, shared by the tasks-list strip and the task-detail header so
  *  the two cannot drift.
@@ -42,6 +48,46 @@ export function UsagePendingChip({
       <span aria-hidden>⏳</span>
       <span>{displayName}</span>
       <span>waiting for usage data…</span>
+    </span>
+  );
+}
+
+/** The chip for a meter that has no number to show AND a reason worth stating.
+ *
+ *  Three situations reach here, all of which used to render nothing at all: a metered CLI that
+ *  never produced a reading, a fetch that failed, and a vendor that answered with no window.
+ *  The fourth blank — a CLI with no usage endpoint at all — deliberately never reaches this;
+ *  see lib/usage-chip-state. Which fault applies is decided there, not here.
+ *
+ *  Only the actionable one is a link, matching the amber-acts / grey-informs split this file
+ *  already uses for UsageReconnectAction and UsagePendingChip. It opens in a new tab for the
+ *  same reason the reconnect prompt does: losing the task page mid-run to go fix a credential
+ *  is its own small disaster. */
+export function UsageFaultChip({
+  fault,
+  displayName,
+  className,
+}: {
+  fault: UsageChipFault;
+  displayName: string;
+  className?: string;
+}) {
+  const href = usageFaultHref(fault);
+  const title = usageFaultTooltip(fault, displayName);
+  const body = (
+    <>
+      <span aria-hidden>{href ? '⚠' : '—'}</span>
+      <span>{displayName}</span>
+      <span className={href ? 'underline' : undefined}>{usageFaultText(fault)}</span>
+    </>
+  );
+  return href ? (
+    <a href={href} target="_blank" rel="noopener noreferrer" className={className} title={title}>
+      {body}
+    </a>
+  ) : (
+    <span className={className} title={title}>
+      {body}
     </span>
   );
 }
