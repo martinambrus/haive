@@ -323,7 +323,12 @@ export async function runRagIndexSync(
       ctx.throwIfCancelled();
       const { relPath, sourceType } = allFiles[fi]!;
       processedPaths.add(relPath);
-      await ctx.emitProgress(`Syncing (${fi + 1}/${allFiles.length}): ${relPath}`);
+      // "Scanning", not "Syncing": this fires before the hash comparison, so on a
+      // healthy incremental run it is announcing a skip. A sync that correctly
+      // skipped 3091 of 3620 chunks read as a full re-ingest because every file
+      // scrolled past under a verb that means work. The Indexing line below is
+      // emitted only when chunks are actually embedded.
+      await ctx.emitProgress(`Scanning (${fi + 1}/${allFiles.length}): ${relPath}`);
 
       let text: string;
       try {
@@ -440,6 +445,12 @@ export async function runRagIndexSync(
           );
           deleted += 1;
         }
+      }
+
+      if (toEmbed.length > 0) {
+        await ctx.emitProgress(
+          `Indexing (${fi + 1}/${allFiles.length}): ${relPath} — ${toEmbed.length} chunks`,
+        );
       }
 
       // Embed and insert new/updated chunks in batches
