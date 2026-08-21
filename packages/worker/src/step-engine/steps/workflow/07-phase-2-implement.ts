@@ -2,11 +2,12 @@ import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveSpecView } from './_spec-artifact.js';
+import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { ddevConfigGuidanceLines, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
-import { loadFixLoopDiagnosis, loadPriorFixContext } from './_fix-loop.js';
+import { FIX_LOOP_TARGET_STEP_ID, loadFixLoopDiagnosis, loadPriorFixContext } from './_fix-loop.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { ensureAppServing } from './_app-runtime.js';
 import { startBrowserDesktop } from '../../../sandbox/ddev-runner.js';
@@ -427,12 +428,34 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
   },
 
   async apply(ctx, args): Promise<ImplementApply> {
+    // The ledger, not `task_steps.output`, is what later steps read: a step reset nulls
+    // the output column, and a fact this agent paid to establish must outlive that.
+    // Each call is a no-op for an empty string.
+    const record = async (out: {
+      summary: string;
+      notes: string;
+      environmentFindings: string;
+    }): Promise<void> => {
+      const entry = { stepId: FIX_LOOP_TARGET_STEP_ID, round: ctx.round };
+      await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
+        ...entry,
+        text: out.summary,
+        kind: 'change',
+      });
+      await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
+        ...entry,
+        text: out.environmentFindings,
+      });
+      await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, { ...entry, text: out.notes });
+    };
+
     const parsed = parseImplementOutput(args.llmOutput ?? null);
     if (parsed) {
       ctx.logger.info(
         { filesTouched: parsed.filesTouched.length, source: 'llm' },
         'implementation summary parsed',
       );
+      await record(parsed);
       return {
         summary: parsed.summary,
         filesTouched: parsed.filesTouched,
@@ -450,6 +473,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         { filesTouched: salvaged.filesTouched.length, source: 'llm' },
         'implementation summary salvaged from off-format agent output',
       );
+      await record(salvaged);
       return { ...salvaged, source: 'llm' };
     }
     const stub = stubImplement(args.detected);

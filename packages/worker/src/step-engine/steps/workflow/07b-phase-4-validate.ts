@@ -5,6 +5,7 @@ import { STEP_CLI_ROLES } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveSpecView } from './_spec-artifact.js';
+import { recordLedgerEntry } from '../../task-ledger.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
@@ -578,6 +579,9 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           '',
           'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
           '{ "fixes_made": ["<each correction>"], "notes": "<caveats or empty>" }',
+          'Put anything you established about this sandbox, its tooling or its runtime into',
+          '`notes` (including what you ruled out) — later agents are fresh processes and are',
+          'given your notes so they need not re-derive it.',
           '',
           '=== Spec (the original requirements) ===',
           d.spec || '(no spec recorded)',
@@ -624,6 +628,13 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       const prior = latestValidator(previous);
       const allFixes = [...fixesSoFar, ...fixer.fixesMade];
       ctx.logger.info({ fixes: fixer.fixesMade.length }, 'phase-4 fixer pass complete');
+      // No-op for empty text. `notes` is where the contract asks the fixer to put what it
+      // established about the sandbox, so later agents inherit it instead of re-probing.
+      await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
+        stepId: '07b-phase-4-validate',
+        round: ctx.round,
+        text: fixer.notes,
+      });
       return {
         verdict: prior?.verdict ?? 'ISSUES_FOUND',
         summary: prior?.summary ?? '',
@@ -686,6 +697,11 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           };
         }),
       );
+      await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
+        stepId: '07b-phase-4-validate',
+        round: ctx.round,
+        text: parsed.summary,
+      });
       return {
         verdict: parsed.verdict,
         summary: parsed.summary,

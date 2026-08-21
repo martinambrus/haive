@@ -9,6 +9,7 @@ import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveSpecView } from './_spec-artifact.js';
+import { recordLedgerEntry } from '../../task-ledger.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
 import { isStepGuidanceEnabled } from '../../guidance-context.js';
@@ -1063,6 +1064,13 @@ async function applyMcp(
     const prior = latestTester(args.previousIterations);
     const shots = [...accumulatedScreenshots(args.previousIterations), ...fix.screenshots];
     ctx.logger.info({ fixes: fix.fixesMade.length }, 'browser-test fixer pass complete');
+    // This agent drove the LIVE app, so its notes are runtime facts no later agent has.
+    // No-op for empty text.
+    await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
+      stepId: '08a-browser-verify',
+      round: ctx.round,
+      text: fix.notes,
+    });
     return {
       ...base,
       failures: prior?.failures ?? [],
@@ -1079,6 +1087,13 @@ async function applyMcp(
 
   // Tester pass: parse the verdict. A parse miss = FAILED (never silently pass).
   const verdict = parseBrowserTestOutput(args.llmOutput ?? null);
+  if (verdict) {
+    await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
+      stepId: '08a-browser-verify',
+      round: ctx.round,
+      text: verdict.notes,
+    });
+  }
   const fixesSoFar = accumulatedFixes(args.previousIterations);
   const shotsSoFar = accumulatedScreenshots(args.previousIterations);
   if (!verdict) {
@@ -1157,6 +1172,9 @@ function buildTesterPrompt(d: BrowserVerifyDetect, appUrl: string): string {
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
     '{ "passed": true|false, "failures": [{ "description": "...", "evidence": "file:line or screenshot path" }], "visual_verdict": "STYLED|NEEDS_POLISH|UNSTYLED|SKIPPED", "fix_scope": "trivial|implementation", "screenshots": [{ "file": "01-login-page-loaded.webp", "caption": "<what the shot shows>", "test_case": "<the case it evidences>", "result": "pass|fail|info" }], "notes": "" }',
+    'Put anything you established about this sandbox, its tooling or the running app into',
+    '`notes` (including what you ruled out) — later agents are fresh processes and are given',
+    'your notes so they need not re-derive it.',
     'passed=false if ANY functional OR blocking visual check failed. visual_verdict SKIPPED for',
     'backend-only changes. On a failure, set fix_scope "trivial" ONLY for a tiny self-evident bug',
     '(a JS typo, a one-line logic slip, a wrong CSS value) a focused fixer can patch in place; use',
@@ -1193,6 +1211,9 @@ function buildFixerPrompt(d: BrowserVerifyDetect, failures: TestFailure[]): stri
     '',
     'When finished emit ONE JSON object inside a ```json fenced code block with EXACTLY this shape:',
     '{ "fixes_made": ["<each fix>"], "screenshots": [{ "file": "01-fix-login-page-loaded.webp", "caption": "<what the shot shows>", "test_case": "<the failure it evidences>", "result": "pass|fail|info" }], "notes": "<caveats or empty>" }',
+    'Put anything you established about this sandbox, its tooling or the running app into',
+    '`notes` (including what you ruled out) — later agents are fresh processes and are given',
+    'your notes so they need not re-derive it.',
     '',
     '=== Spec (the expected behavior) ===',
     d.spec || '(no spec recorded)',

@@ -66,6 +66,7 @@ import { resolveMergePhase } from './merge-resolver.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
 import { augmentPromptWithAttachments } from './attachments-context.js';
+import { augmentPromptWithLedger } from './task-ledger.js';
 import { augmentPromptWithTerseness } from './terseness-context.js';
 import { augmentPromptWithLearnedGuidance } from './guidance-context.js';
 import { writeStepContextUsage } from './step-context-usage.js';
@@ -665,6 +666,10 @@ async function resolveLlmPhase(
   // Make every CLI adapter aware of user-attached task files (the prompt flows
   // through the dispatcher unchanged). No-op when the task has no attachments.
   prompt = await augmentPromptWithAttachments(db, params.taskId, prompt);
+  // Carry what earlier steps established (sandbox/tooling/runtime facts) into this
+  // agent's fresh CLI process. No-op (byte-identical prompt) while the ledger is empty,
+  // so every pre-implementation step pays nothing.
+  prompt = await augmentPromptWithLedger(db, params.taskId, prompt);
   // Append human-approved guidance learned from earlier runs of THIS step. Append
   // only — a stored row never replaces the built prompt, so the result still flows
   // through resolveTaskDispatch and its per-CLI capability adaptation below. No-op

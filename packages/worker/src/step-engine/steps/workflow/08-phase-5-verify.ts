@@ -4,6 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { runnerHandleForTask, ddevExec } from '../../../sandbox/ddev-runner.js';
@@ -513,6 +514,28 @@ export const phase5VerifyStep: StepDefinition<VerifyDetect, VerifyApply> = {
       },
       'verify phase complete',
     );
+
+    // This step has no agent — the facts it establishes are the COMMANDS that exist in
+    // this workspace and whether they pass. Every later agent otherwise re-derives the
+    // same thing by probing for a test runner that may not be there.
+    const slotFact = (name: string, r: CheckResult): string =>
+      r.ran
+        ? `${name}: \`${r.command}\` ${r.passed ? 'passes' : 'FAILS'}`
+        : r.command
+          ? `${name}: \`${r.command}\` exists but was not run this pass`
+          : `${name}: no runner detected in this workspace`;
+    await recordLedgerEntry(ctx.db, ctx.taskId, ctx.taskStepId, {
+      stepId: '08-phase-5-verify',
+      round: ctx.round,
+      text: [
+        slotFact('test', test),
+        slotFact('lint', lint),
+        slotFact('typecheck', typecheck),
+        runtimeSmoke.ran
+          ? `runtime smoke: ${runtimeSmoke.url} answered ${runtimeSmoke.httpStatus ?? 'nothing'}`
+          : 'runtime smoke: no servable runtime',
+      ].join('; '),
+    });
     return { test, lint, typecheck, passed, runtimeSmoke };
   },
 };

@@ -585,23 +585,24 @@ describe('loadHonoredConstraints', () => {
 // --- Layer 2: cross-round fix ledger ------------------------------------------
 
 describe('loadPriorFixContext', () => {
-  // Table-aware mock: loadPriorFixContext queries BOTH task_steps (prior implement
-  // outputs) and task_events (prior diagnoses), so route rows by drizzle table name.
+  // Everything loadPriorFixContext reads now lives in task_events: the ledger entries
+  // (ledger.entry) and the prior diagnoses (fix_loop.requested). The two payload shapes
+  // are mutually exclusive — a ledger row has `stepId`, a diagnosis row has `diagnosis` —
+  // so one mocked table can serve both queries and each filter ignores the other's rows.
+  // task_steps deliberately returns NOTHING: _step-reset.ts nulls task_steps.output, and
+  // the whole point of the ledger is that a reset cannot erase these facts.
   function priorCtx(opts: {
     round: number;
-    implRows?: { round: number; output: unknown }[];
+    ledger?: { payload: Record<string, unknown> }[];
     events?: { payload: Record<string, unknown> }[];
   }): StepContext {
     const db = {
       select: () => ({
         from: (table: unknown) => {
-          const name = tableNameOf(table);
           const rows =
-            name === 'task_steps'
-              ? (opts.implRows ?? [])
-              : name === 'task_events'
-                ? (opts.events ?? [])
-                : [];
+            tableNameOf(table) === 'task_events'
+              ? [...(opts.ledger ?? []), ...(opts.events ?? [])]
+              : [];
           return { where: () => ({ orderBy: async () => rows }) };
         },
       }),
@@ -609,34 +610,49 @@ describe('loadPriorFixContext', () => {
     return { db, taskId: 't', round: opts.round } as unknown as StepContext;
   }
 
+  /** A ledger.entry payload. */
+  function led(
+    stepId: string,
+    round: number,
+    text: string,
+    kind?: 'change' | 'finding',
+  ): { payload: Record<string, unknown> } {
+    return { payload: { stepId, round, text, ...(kind ? { kind } : {}) } };
+  }
+
   it('returns empty on the original pass (round 0)', async () => {
     expect(
       await loadPriorFixContext(
-        priorCtx({ round: 0, implRows: [{ round: 0, output: { summary: 'x' } }] }),
+        priorCtx({ round: 0, ledger: [led('07-phase-2-implement', 0, 'x', 'change')] }),
       ),
     ).toBe('');
   });
 
-  it('aggregates prior implement summaries, environmentFindings, and prior diagnoses', async () => {
+  it('aggregates prior ledger changes, findings, and prior diagnoses', async () => {
     const block = await loadPriorFixContext(
       priorCtx({
         round: 2,
-        implRows: [
-          {
-            round: 1,
-            output: {
-              summary: 'added init.php guard',
-              environmentFindings: 'ddev not on PATH in sandbox',
-            },
-          },
+        ledger: [
+          led('07-phase-2-implement', 1, 'added init.php guard', 'change'),
+          led('07-phase-2-implement', 1, 'ddev not on PATH in sandbox'),
         ],
         events: [ev('07b-phase-4-validate', 1, 'missing error handling in foo')],
       }),
     );
     expect(block).toContain('WHAT EARLIER FIX ROUNDS');
-    expect(block).toContain('round 1: added init.php guard');
+    expect(block).toContain('Changes already made:');
+    expect(block).toContain('added init.php guard');
+    expect(block).toContain('Environment / investigation already established:');
     expect(block).toContain('ddev not on PATH in sandbox');
     expect(block).toContain('missing error handling in foo');
+  });
+
+  it('reads findings the step reset would have destroyed on task_steps.output', async () => {
+    // The mock's task_steps is empty — as it is after a reset. The facts still arrive.
+    const block = await loadPriorFixContext(
+      priorCtx({ round: 2, ledger: [led('08-phase-5-verify', 1, 'no lint runner detected')] }),
+    );
+    expect(block).toContain('no lint runner detected');
   });
 
   it('dedups prior diagnoses by fingerprint (same complaint shows once)', async () => {
@@ -668,7 +684,10 @@ describe('loadPriorFixContext', () => {
 
   it('caps an overlong block', async () => {
     const block = await loadPriorFixContext(
-      priorCtx({ round: 2, implRows: [{ round: 1, output: { summary: 'x'.repeat(8000) } }] }),
+      priorCtx({
+        round: 2,
+        ledger: [led('07-phase-2-implement', 1, 'x'.repeat(8000), 'change')],
+      }),
     );
     expect(block.length).toBeLessThanOrEqual(4000);
   });

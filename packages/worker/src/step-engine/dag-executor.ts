@@ -34,6 +34,7 @@ import { overrideOr } from './dispatch-timeout.js';
 import type { DagCoderContext, StepContext, StepDefinition } from './step-definition.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolvePreferredCli } from './step-runner.js';
+import { augmentPromptWithLedger, recordLedgerEntry } from './task-ledger.js';
 import { worktreeDirName, worktreeDirPaths, WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
@@ -1675,7 +1676,14 @@ export async function resolveDagPhase(
       const specView = (await resolveSpecView(ctx)).text;
       let dispatched = 0;
       for (const issue of undispatched) {
-        const prompt = spec.buildCoderPrompt(coderContext(issue, specView), upstreamDebt);
+        // This path bypasses resolveLlmPhase's augmentation chain entirely, so the ledger
+        // is applied here directly. (Attachments and terseness are still missing on this
+        // path — a pre-existing gap, not addressed here.)
+        const prompt = await augmentPromptWithLedger(
+          db,
+          ctx.taskId,
+          spec.buildCoderPrompt(coderContext(issue, specView), upstreamDebt),
+        );
         const worktreeRel = issueWorktreeRel(issue);
         const planDispatch = await resolveTaskDispatch(db, params.taskId, {
           providers,
@@ -1846,6 +1854,13 @@ export async function resolveDagPhase(
             updatedAt: new Date(),
           })
           .where(eq(schema.taskDagIssues.id, issue.id));
+        // A coder's concerns are what it learned the hard way about this workspace.
+        // Carry them to every later agent rather than leaving them on the issue row.
+        await recordLedgerEntry(db, ctx.taskId, current.id, {
+          stepId: `06c-dag-execute/${issue.issueKey}`,
+          round: current.round,
+          text: result.concerns,
+        });
         await db
           .update(schema.cliInvocations)
           .set({ consumedAt: new Date() })

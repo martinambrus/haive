@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto';
-import { and, asc, desc, eq, lt } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
+import { cleanText, contentFingerprint, loadLedgerEntries } from '../../task-ledger.js';
 
 // Durable channel for the fix-loop diagnosis. When a downstream step finds a blocking
 // defect it returns `loop_back`; handleResult records the diagnosis here and re-enters
@@ -171,10 +171,6 @@ export interface FixLoopRequest {
   round: number;
 }
 
-// ANSI escape sequences (terminal colour/cursor codes) — a stable, specified format
-// (ECMA-48), safe to strip and pure noise in a text prompt.
-const ANSI_RE = /\x1B\[[0-9;?]*[A-Za-z]/g;
-
 /** Strip ANSI escape codes and normalise whitespace so raw tool output reads cleanly
  *  in a prompt. Deliberately does NOT try to recognise or remove tool banners / promo
  *  text: that copy changes shape over time, so pattern-matching it is brittle and
@@ -182,36 +178,15 @@ const ANSI_RE = /\x1B\[[0-9;?]*[A-Za-z]/g;
  *  locate the actual error within the output (the LLM is the dynamic extractor).
  *  Keeps the tail when very long — CLI errors put the summary last. */
 export function cleanDiagnosis(raw: string): string {
-  const cleaned = raw
-    .replace(ANSI_RE, '')
-    .replace(/[ \t]+$/gm, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-  return cleaned.length > 6000 ? cleaned.slice(-6000) : cleaned;
+  return cleanText(raw, 6000);
 }
-
-// Volatile tokens that differ between otherwise-identical diagnoses and must be removed
-// before fingerprinting: uuids (task ids, snapshot names), file paths, and bare numbers
-// (line numbers, ports, php/db versions, round counters). Stripping them keeps the SAME
-// recurring complaint stable while leaving genuinely different complaints distinct.
-const FP_UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
-const FP_PATH_RE = /[/\\][^\s'"]+/g;
-const FP_DIGITS_RE = /\d+/g;
 
 /** Stable signature of a fix-loop diagnosis, namespaced by its source step. Two diagnoses
  *  from the SAME step that say the same thing (modulo ids, paths, and numbers) hash equal;
  *  diagnoses from different steps never collide (sourceStepId is part of the key). Lets
  *  detectFixLoopOscillation spot a step re-raising the same complaint across rounds. */
 export function fixLoopFingerprint(sourceStepId: string, diagnosis: string): string {
-  const normalized = cleanDiagnosis(diagnosis)
-    .toLowerCase()
-    .replace(FP_UUID_RE, '')
-    .replace(FP_PATH_RE, '')
-    .replace(FP_DIGITS_RE, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  const hash = createHash('sha256').update(normalized).digest('hex').slice(0, 16);
-  return `${sourceStepId}:${hash}`;
+  return contentFingerprint(sourceStepId, diagnosis);
 }
 
 /** Record a fix-loop request as a task_event so the round-N implement can read it. The
@@ -521,35 +496,17 @@ export async function loadHonoredConstraints(ctx: StepContext): Promise<string> 
 export async function loadPriorFixContext(ctx: StepContext): Promise<string> {
   if (ctx.round <= 0) return '';
 
-  // Prior-round implementation outputs. loadPreviousStepOutput returns only the latest
-  // round, so query every earlier round of the implement step directly.
-  const implRows = await ctx.db
-    .select({ round: schema.taskSteps.round, output: schema.taskSteps.output })
-    .from(schema.taskSteps)
-    .where(
-      and(
-        eq(schema.taskSteps.taskId, ctx.taskId),
-        eq(schema.taskSteps.stepId, FIX_LOOP_TARGET_STEP_ID),
-        lt(schema.taskSteps.round, ctx.round),
-      ),
-    )
-    .orderBy(asc(schema.taskSteps.round));
-
-  const changeLines: string[] = [];
+  // What earlier rounds established, read from the task ledger rather than from
+  // prior-round `task_steps.output`: _step-reset.ts nulls that column, so a task that
+  // was reset once lost every prior finding here. task_events survive the reset.
+  // Unchanged when no reset happened; strictly better after one.
   const findingLines: string[] = [];
-  for (const r of implRows) {
-    const o = (r.output ?? null) as {
-      summary?: string;
-      notes?: string;
-      environmentFindings?: string;
-    } | null;
-    if (!o) continue;
-    const summary = (o.summary ?? '').trim();
-    if (summary.length > 0) changeLines.push(`- round ${r.round}: ${summary}`);
-    const env = (o.environmentFindings ?? '').trim();
-    if (env.length > 0) findingLines.push(`- round ${r.round}: ${env}`);
-    const notes = (o.notes ?? '').trim();
-    if (notes.length > 0) findingLines.push(`- round ${r.round} (notes): ${notes}`);
+  const changeLines: string[] = [];
+  for (const e of await loadLedgerEntries(ctx.db, ctx.taskId)) {
+    if (e.round >= ctx.round) continue;
+    const line = `- round ${e.round} (${e.stepId}): ${e.text}`;
+    if (e.kind === 'change') changeLines.push(line);
+    else findingLines.push(line);
   }
 
   // Prior diagnoses (the defects earlier rounds were asked to fix), deduped by fingerprint
