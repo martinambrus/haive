@@ -226,3 +226,134 @@ just text. Flag explicitly as optional.
   default-set "lock" applies to every step until a per-step override is set.
 - Migration: `drizzle-kit push --force` on a clean DB, confirm the three columns exist and default
   correctly; confirm dropping them (rollback) leaves the single path working.
+
+---
+
+# Amendment — 2026-08-21: status, re-verified anchors, sequencing, and an evidence bar
+
+**Status: none of this is built.** `grep -r 'model_set|modelSet|ModelSet' packages/` returns zero
+hits — no columns, no shared types, no route, no UI. `consolidator` in code hits only unrelated
+strings (a sort comment in `08d-adversarial-qa.ts:394`, an onboarding hint). No feature branch
+exists; the plan has a single commit (`083a003`, the bulk plan archive).
+
+## Every line anchor in the body above has drifted
+
+The body was written against a ~1600-line `step-runner.ts` that is now 3269 lines. Re-verified
+2026-08-21; the body is left byte-identical per the plan-archive convention, so read the anchors
+through this table and grep the symbol rather than trusting either column later.
+
+| Body says | Actually (2026-08-21) |
+|---|---|
+| `resolvePreferredCli` step-runner.ts:117 | 145 |
+| `resolveLlmPhase` :370, `.limit(1)` readback :397 | 436, readback 475 |
+| failed-invocation arm :465 | 479 |
+| LLM call sites pre-form :1129 / post-form :1345 | 1571 / 1787 (inside `advanceStep`, 1438) |
+| `resolveAgentMiningPhase` :773 | 972 |
+| `dispatchMiningAgents` :863, pins one provider :873 | 1236, pin at 1246 |
+| `MiningWaveError` step-definition.ts:270, handled :1432 | 312, handled 1887 |
+| apply-throw retry block :1521 | 1974 |
+| loop re-enter :1614, `markLatestInvocationConsumed` :1589 | 2060, 2035 |
+| auto-continue form gate :1166-1299 | 1606-1639 |
+| `tasks.stepLoopLimits` / `preAnswers` schema :196,213 | 294, 311 |
+| `CliProviderMetadata.effortScale` catalog.ts:40 | 54 |
+| `createTaskRequestSchema` :64, `setCliProviderRequestSchema` :164 | 65, 205 |
+| `clampEffort` steps.ts:38, cli-provider handler :765 | 65, 1125 |
+| `enrichStepsWithCliPreferences` _helpers.ts:85 | 85 (unchanged) |
+| web `changeStepProvider` :853, `effortSelectFor` :2423 | 1069, 2720 |
+| task creation persist `index.ts:~230` | 313 (`createTaskRequestSchema.parse`), provider write 352 |
+| dag coder loop `dag-executor.ts:~1378` | per-level coder dispatch around 643 |
+
+## Approach B already ships, and the cheapest win lives inside it
+
+The plan frames this as "fan out across models, then consolidate" (call it **A**). The alternative
+it never names is **B**: one main CLI drives the step, other CLIs check and complement it. B is not
+hypothetical here — Haive already implements it three ways:
+
+- **Different model per step**: `user_step_cli_preferences` (`packages/database/src/schema/cli-providers.ts:224`).
+- **Different model per ROLE inside a loop step**: `user_step_cli_role_preferences` (same file, 253),
+  resolved at `step-runner.ts:672` through `stepDef.loop.resolveRole`. Spec-quality's reviewer and
+  corrector can already be two different CLIs.
+- **Driver plus independent critics with an evidence bar**: 07 implements; `08c-code-review.ts` runs
+  peer and security reviewers in parallel via mining, then a second `MiningWaveError` wave of
+  refuters (three lenses, unanimity, fail-closed); `08d-adversarial-qa.ts` runs N adversaries that
+  must produce a non-destructive PoC before a finding counts.
+
+What is missing from B is exactly one line of variance: `dispatchMiningAgents` calls
+`resolvePreferredCli` ONCE and pins that provider for the whole fan-out, so every mining agent today
+is the same model wearing a different persona. Note also that when 08c needed diverse voters it
+bought diversity with prompt lenses rather than models (`08c-code-review.ts:319`) — a deliberate
+house choice, not an oversight.
+
+## What each shape optimises — decide per step KIND, not once for the product
+
+| | A: fan-out + consolidate | B: driver + critics |
+|---|---|---|
+| Optimises | recall — the union of what N models see | precision — killing a wrong claim |
+| Failure it fixes | one model missed a thing | one model asserted a wrong thing |
+| Failure it ADDS | unique-but-false additions get merged in | nobody looks where nobody was told to look |
+| Merge unit | prose or JSON drafts | a verdict plus cited evidence |
+| Marginal cost | (members + 1) new invocations | +0 on a fan-out that already exists |
+
+Both directions are evidenced by `benchmarks/README.md` (66 runs, 19 models):
+
+- **For A**: `grok-4.6` produced four findings appearing in no other run of 66; Opus 5 max alone
+  found the search stub; `muse-xhigh` alone found the inverted `in_array` guard. Models genuinely
+  see disjoint things.
+- **Against naive A**: two "only run in N" uniqueness claims inherited from the 8 August edition
+  were checked before reuse and both were wrong; `muse-high` emitted four citations naming a real
+  file and an in-range line belonging to a different function, "a defect no automated checker in
+  this benchmark can see"; `glm53-max` described its own sandbox by-products as project structure.
+  Unique does not mean true, and a consolidator reading only drafts cannot tell the two apart.
+
+## Sequencing
+
+1. **First, and cheapest by a wide margin: unpin the provider in the fan-out.** Give
+   `dispatchMiningAgents` a per-dispatch provider instead of one resolved for the whole set. Then
+   08c's peer reviewer runs on a different model from 07's implementer, and 08d's adversaries spread
+   across models. Zero extra invocations — those agents already run — and no new columns, no
+   barrier, no consolidator. This delivers the "different CLIs check each other" property on its own
+   and should land before Phase 1 is started.
+2. **Then Phase 1 (A), but ONLY for divergent, generative steps**: 03 discovery, 03b business
+   requirements, 04 pre-planning, 05 spec quality, `deep_scan`, KB mining. There the product IS a
+   union of observations, a missed requirement costs a whole re-run, and a wrong addition is cheap
+   because a human reads it at gate 1. Union-merge is the right primitive there.
+3. **Never A for verdict or code steps**: 08c, 08d, the gates, 07, 12. Consolidating N verdicts
+   averages away the one model that was right, and consolidating N code drafts means reconciling
+   file edits rather than text — Phase 2c already concedes this. B covers these correctly today.
+4. **Nothing for deterministic steps** (01 worktree, 06a db-migrate, env-replicate). No ground truth
+   to triangulate, pure cost.
+
+This makes Phase 2b optional rather than the goal: `kind-riding-dream.md` already declares it
+optional, and under this sequencing 2c should be dropped rather than deferred.
+
+## The consolidator needs the refuter's evidence bar
+
+Phase 1b says that for anything ONE model added, the consolidator should "validate before
+including". That is precisely the operation the benchmark shows failing — the wrong-function
+citations were invisible to every checker in the round, and two inherited uniqueness claims were
+simply false. A consolidator that reasons over drafts alone will promote one model's hallucination
+into the merged answer, which is worse than not running A at all.
+
+So `buildConsolidatorPrompt` must give the consolidator repo access and hold unique additions to
+08c's refuter bar: an addition present in only one draft survives only with a cited `file:line` that
+supports it; otherwise it is dropped, or demoted into the `<<CONSOLIDATION_REPORT>>` as advisory.
+Agreements across two or more drafts keep the cheap path. This raises the consolidator from a
+prose-merging call to a real tool-using sandbox invocation — cost it accordingly, and keep the
+existing caveat that reconciliation remains best-effort judgement.
+
+## Cost reality on the reference dev host
+
+`MAX_PARALLEL_AGENTS_PER_TASK` defaults to 5 (`config.service.ts:454`) but the real ceiling is the
+measured agent pool, floored at `DEFAULT_AGENT_FLOOR` 2 (`host-resources.ts:157`) with
+`agentWeightMb` 2048. On the WSL2 dev host the pool sits near that floor, so a 3-member step plus a
+consolidator is 4 invocations drained two at a time — roughly triple the wall clock for that step,
+before the consolidator's own tool use. Step 1 of the sequencing costs nothing extra. That gap is
+the whole argument for the ordering.
+
+## Measure before building Phase 1
+
+Nobody has yet measured whether a consolidator of N drafts beats the best single draft under the
+benchmark's own scoring; the uniqueness evidence is per-run anecdote. The drafts already exist —
+take three scored runs of one task, merge them by hand under the rules in 1b plus the evidence bar
+above, and score the merge. If the merge does not beat the best single run, Phase 1 is not worth its
+multiplier and step 1 of the sequencing is the entire feature.
