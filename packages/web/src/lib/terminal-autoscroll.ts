@@ -50,6 +50,10 @@ export function shouldFollowRunningTerminals(prev: string[] | null, next: string
  *  landed on a finished terminal. Panels carry `scroll-mt-12` so their header row
  *  clears the fixed top bar.
  *
+ *  Exception: a step with exactly ONE panel frames the STEP top instead, because the
+ *  status line describing that run sits above the terminal and panel-top framing is
+ *  what scrolls it away. See the call site below.
+ *
  *  Prefers the newest RUNNING run: the last panel (and the toggle below it) is
  *  often a queued, empty terminal — a step that fans out more invocations than the
  *  concurrency cap (03-phase-0a-discovery: 8 dispatched, ~5 run at once) leaves the
@@ -57,13 +61,20 @@ export function shouldFollowRunningTerminals(prev: string[] | null, next: string
  *  visible), then the last panel, when nothing is running yet; both are list-tail
  *  targets, so they keep `block: 'end'`. */
 export function scrollToNewestRunningTerminal(root: Element): boolean {
+  const panels = root.querySelectorAll('[data-cli-terminal]');
   const running = root.querySelectorAll('[data-cli-terminal][data-cli-running]');
   const newest = running[running.length - 1];
   if (newest) {
-    newest.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // One-panel step: that run's only status line is the STEP's own, which renders
+    // ABOVE the terminal — the in-panel copy is gated on 2+ runs (InvocationPanel's
+    // `total > 1`). Framing the panel top pushes that line off the screen, so frame
+    // the step top instead, exactly like a step with no terminal. `closest` matches
+    // the element itself, so it resolves for both call sites: the page-level effect
+    // passes the step element, StepTerminal passes its own inner container.
+    const stepTop = panels.length === 1 ? root.closest('[data-step-id]') : null;
+    (stepTop ?? newest).scrollIntoView({ behavior: 'smooth', block: 'start' });
     return true;
   }
-  const panels = root.querySelectorAll('[data-cli-terminal]');
   const tail = root.querySelector('[data-cli-autoscroll]') ?? panels[panels.length - 1] ?? null;
   if (!tail) return false;
   tail.scrollIntoView({ behavior: 'smooth', block: 'end' });
