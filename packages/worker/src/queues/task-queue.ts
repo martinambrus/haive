@@ -1549,6 +1549,23 @@ async function resolveAdmissionRuntimeKind(
   }
 }
 
+/** Has the orchestrator moved past `(stepId, round)`?
+ *
+ *  True only on EVIDENCE — the task points at a different step or round. A null
+ *  `currentStepId` (a task that has not advanced yet) is NOT evidence and answers false,
+ *  so a duplicate delivery there still re-drives its hand-off rather than stranding.
+ *
+ *  Exported for the unit test: handleAdvanceStep itself needs the whole worker surface
+ *  (db, queues, registry, providers) to call, so the predicate is the testable part. */
+export function advanceChainHasMoved(
+  task: { currentStepId: string | null; currentRound: number },
+  stepId: string,
+  round: number,
+): boolean {
+  if (task.currentStepId === null) return false;
+  return task.currentStepId !== stepId || task.currentRound !== round;
+}
+
 async function handleAdvanceStep(
   db: Database,
   payload: TaskJobPayload,
@@ -1696,6 +1713,37 @@ async function handleAdvanceStep(
       );
       return;
     }
+  }
+
+  // Already finalized at this round — a duplicate delivery must NOT re-run apply().
+  // The same-step guard above only covers a row still 'running', so a second job that
+  // arrives AFTER the first finished matched nothing and re-executed the whole step.
+  // MEASURED on 08-phase-5-verify: two step.done events 0.63s apart with no retry
+  // between, so its verify commands ran twice. Free on a repo with no test runner, a
+  // duplicated test suite on one that has them. It slipped the other-active guard by a
+  // hair too — that read ran in the same instant the successor's row was being created,
+  // so it saw nothing active.
+  //
+  // Re-drive the hand-off ONLY on evidence the chain has not moved (the task still
+  // points at this step + round). Re-driving unconditionally would enqueue an advance
+  // for an already-done successor, which would re-drive ITS successor, cascading; never
+  // re-driving would strand the chain when a job dies between advanceStep and
+  // handleResult (adjacent lines in one try block). Same rule as the pause guard below:
+  // act on positive evidence, not on a bare mismatch.
+  if (existing?.status === 'done') {
+    const chainMoved = advanceChainHasMoved(ctx, payload.stepId, round);
+    logger.warn(
+      { taskId: ctx.taskId, stepId: payload.stepId, round, chainMoved },
+      'advance-step skipped: step already done (duplicate delivery)',
+    );
+    if (!chainMoved) {
+      await handleResult(db, ctx, payload.stepId, {
+        status: 'done',
+        row: existing,
+        output: existing.output,
+      });
+    }
+    return;
   }
 
   // Finalized out-of-band — a user Skip via the api set this step to 'skipped'.
