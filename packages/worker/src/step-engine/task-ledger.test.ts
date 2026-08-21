@@ -162,25 +162,50 @@ describe('augmentPromptWithLedger', () => {
     expect(out.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(1);
   });
 
-  it('prefers a step summary over the raw entries it covers when over budget', async () => {
-    const big = 'z'.repeat(1500);
+  it('prefers a step summary over the CHANGE entries it covers when over budget', async () => {
+    // The shape production actually emits for 07b: a curated summary mirrored at
+    // finalize, plus the explicit apply()-time writes on the same step row. The
+    // previous fixture put a summary beside raw entries in a combination the code
+    // could not produce, so the test passed while the branch was unreachable.
+    // Big enough that header + entries exceeds LEDGER_BLOCK_TARGET (4000); otherwise
+    // the budget path never runs and the assertions below prove nothing.
+    const big = 'z'.repeat(2600);
     const rows = [
-      { payload: { stepId: '08c', round: 0, text: `raw one ${big}` }, taskStepId: 'step-a' },
-      { payload: { stepId: '08c', round: 0, text: `raw two ${big}` }, taskStepId: 'step-a' },
       {
-        payload: { stepId: '08c', round: 0, text: 'the recap', kind: 'summary' },
+        payload: { stepId: '07b', round: 0, text: `changed ${big}`, kind: 'change' },
         taskStepId: 'step-a',
       },
-      { payload: { stepId: '08d', round: 0, text: `other ${big}` }, taskStepId: 'step-b' },
+      {
+        payload: { stepId: '07b', round: 0, text: `env fact ${big}`, kind: 'finding' },
+        taskStepId: 'step-a',
+      },
+      {
+        payload: { stepId: '07b', round: 0, text: 'the recap', kind: 'summary' },
+        taskStepId: 'step-a',
+      },
     ];
     const { db } = mockDb(rows as never);
     const out = await augmentPromptWithLedger(db, 't1', 'ORIGINAL');
 
-    // step-a's two raw entries collapse into its summary; step-b has no summary so it stays.
     expect(out).toContain('the recap');
-    expect(out).not.toContain('raw one');
-    expect(out).not.toContain('raw two');
-    expect(out).toContain('other');
+    // The change is superseded by the summary that condenses it...
+    expect(out).not.toContain('changed');
+    // ...but the environment finding is NOT: a summary recaps the change, not the
+    // facts the agent had to establish, and those are what the ledger exists to carry.
+    expect(out).toContain('env fact');
+  });
+
+  it('never lets a summary supersede a finding, even from the same step', async () => {
+    const big = 'q'.repeat(2500);
+    const { db } = mockDb([
+      {
+        payload: { stepId: '08', round: 0, text: `sandbox fact ${big}`, kind: 'finding' },
+        taskStepId: 's1',
+      },
+      { payload: { stepId: '08', round: 0, text: 'recap', kind: 'summary' }, taskStepId: 's1' },
+    ] as never);
+    const out = await augmentPromptWithLedger(db, 't1', 'P');
+    expect(out).toContain('sandbox fact');
   });
 
   it('does not repeat a fact the prompt already renders itself', async () => {

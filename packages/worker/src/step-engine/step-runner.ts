@@ -66,7 +66,7 @@ import { resolveMergePhase } from './merge-resolver.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
 import { augmentPromptWithAttachments } from './attachments-context.js';
-import { augmentPromptWithLedger } from './task-ledger.js';
+import { augmentPromptWithLedger, recordLedgerEntry } from './task-ledger.js';
 import { augmentPromptWithTerseness } from './terseness-context.js';
 import { augmentPromptWithLearnedGuidance } from './guidance-context.js';
 import { writeStepContextUsage } from './step-context-usage.js';
@@ -2111,10 +2111,24 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       }
     }
 
-    // No curated summary field was available → kick off a best-effort async LLM
-    // summarizer that fills task_steps.summary later. We are past the loop hook here,
-    // so this runs once per step finalization (not per loop pass) and never blocks it.
-    if (!curatedSummary && (stepDef.llm || stepDef.agentMining || stepDef.dagExecute)) {
+    // Every agent step's recap reaches the task ledger, by one of two routes.
+    //
+    // A step that emits its OWN summary field (07, 07b, 08a, and the spec steps) never
+    // ran the async summarizer, so slice 4's mirror had nothing to copy and those steps
+    // were invisible to later prompts. Mirror the curated text directly instead — it is
+    // already in hand at finalize, so this costs no LLM call.
+    //
+    // Otherwise fall back to the best-effort async summarizer, whose completion handler
+    // mirrors its result. We are past the loop hook here, so this runs once per step
+    // finalization (not per loop pass) and never blocks it.
+    if (curatedSummary) {
+      await recordLedgerEntry(db, params.taskId, current.id, {
+        stepId: stepDef.metadata.id,
+        round: current.round,
+        text: curatedSummary,
+        kind: 'summary',
+      });
+    } else if (stepDef.llm || stepDef.agentMining || stepDef.dagExecute) {
       await maybeEnqueueStepSummary(db, stepDef, current, params, output, ctx.logger);
     }
 

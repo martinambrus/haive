@@ -95,7 +95,15 @@ export async function recordLedgerEntry(
       taskId,
       taskStepId,
       eventType: LEDGER_EVENT,
-      payload: { ...entry, text, fingerprint: contentFingerprint(entry.stepId, text) },
+      payload: {
+        ...entry,
+        text,
+        // Stamped at WRITE time so the column is always populated and the rows are
+        // queryable as they stand. loadLedgerEntries keeps coercing null for rows
+        // written before this.
+        kind: entry.kind ?? 'finding',
+        fingerprint: contentFingerprint(entry.stepId, text),
+      },
     });
   } catch (err) {
     log.warn({ err, taskId, stepId: entry.stepId }, 'failed to record a task ledger entry');
@@ -170,13 +178,18 @@ export async function augmentPromptWithLedger(
     LEDGER_HEADER.length + list.reduce((n, e) => n + render(e).length + 1, 0);
 
   if (size(kept) > LEDGER_BLOCK_TARGET) {
-    // Compact before discarding: where a step produced a summary, its raw entries are what
-    // that summary already condenses, so the summary carries the same ground in less room.
+    // Compact before discarding: a step's summary already condenses the work that step
+    // DID, so its `change` entries are redundant beside it.
+    //
+    // Scoped to `change` on purpose. A summary recaps the CHANGE; a `finding` records an
+    // environment fact the agent had to establish — the two are orthogonal, and the
+    // findings are the half this ledger exists to carry. Letting a summary supersede
+    // them would evict the more valuable content first.
     const summarised = new Set(
       kept.filter((e) => e.kind === 'summary' && e.taskStepId).map((e) => e.taskStepId),
     );
     const compacted = kept.filter(
-      (e) => e.kind === 'summary' || !e.taskStepId || !summarised.has(e.taskStepId),
+      (e) => e.kind !== 'change' || !e.taskStepId || !summarised.has(e.taskStepId),
     );
     if (compacted.length < kept.length) {
       log.info(
