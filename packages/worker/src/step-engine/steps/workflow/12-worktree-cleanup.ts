@@ -558,10 +558,46 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         );
     }
 
+    // DAG runs fork one branch per issue off the integration branch, and those survived
+    // the cleanup that deleted the integration branch itself — five dead refs per DAG task
+    // (MEASURED on task de2b313d: all 5 still present, all `--merged HEAD`).
+    //
+    // `git branch -d` is the whole safety mechanism here: it REFUSES a branch whose work
+    // is not already reachable, so an issue that ended failed_unrecoverable keeps its
+    // branch and its work stays recoverable. Never -D.
+    let issueBranchesDeleted = 0;
+    if (branchDeleted && d.branchName) {
+      const issuePrefix = `${d.branchName}--`;
+      const listed = await gitRun(ctx.repoPath, [
+        'branch',
+        '--list',
+        '--format=%(refname:short)',
+        `${issuePrefix}*`,
+      ]);
+      const issueBranches =
+        listed.code === 0
+          ? listed.stdout
+              .split('\n')
+              .map((l) => l.trim())
+              .filter(Boolean)
+          : [];
+      for (const branch of issueBranches) {
+        const del = await gitRun(ctx.repoPath, ['branch', '-d', branch]);
+        if (del.code === 0) issueBranchesDeleted += 1;
+        else
+          ctx.logger.warn(
+            { branch, stderr: del.stderr },
+            'issue branch not deleted (git refused — its work is not merged); left in place',
+          );
+      }
+    }
+
     const parts: string[] = [];
     if (merged) parts.push(`merged ${d.branchName} into ${mergeTarget}`);
     parts.push(`removed worktree ${d.worktreePath}`);
     if (branchDeleted) parts.push(`deleted branch ${d.branchName}`);
+    if (issueBranchesDeleted > 0)
+      parts.push(`deleted ${issueBranchesDeleted} merged DAG issue branch(es)`);
     else if (action === 'remove_only') parts.push(`kept branch ${d.branchName}`);
     // A requested delete that git refused must not read as a silent success.
     else if (values.deleteBranch && d.branchName)
