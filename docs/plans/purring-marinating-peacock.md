@@ -357,3 +357,143 @@ benchmark's own scoring; the uniqueness evidence is per-run anecdote. The drafts
 take three scored runs of one task, merge them by hand under the rules in 1b plus the evidence bar
 above, and score the merge. If the merge does not beat the best single run, Phase 1 is not worth its
 multiplier and step 1 of the sequencing is the entire feature.
+
+---
+
+# Amendment — 2026-08-21 (later): Phases 1 and 2 are BACKLOGGED; the fan-out unpin is carved out
+
+**Decision: do not build Phase 1 or Phase 2 now.** Not cancelled — backlogged, because the
+measurement the previous amendment asked for is still the thing that would reopen them. What
+changed is that the extrapolation it called for has now been done, against the full published
+corpus rather than per-run anecdote: 60 full-workflow runs, 66 README-quality runs and 64
+onboarding runs, 190 single-model runs in total. There is still no multi-model data anywhere, so
+everything below is a projection from single-model runs, under three stated assumptions: a
+combination scores the per-dimension MAX of its members (a perfect consolidator, i.e. a ceiling
+and never an expectation), the cost axis is RECOMPUTED from combined cost rather than maxed, and
+Delivery does not merge.
+
+## What the projection says, per task type
+
+**Full workflow — shape A is negative.** Taking Delivery as the member mean (a text merge of N
+code drafts does not inherit the disciplined implementer's rejection count; Phase 2c already
+concedes this) and re-scoring Efficiency on summed tokens, EVERY 2- and 3-member set lands below
+the best single run of 78. Best 2-member 77.2, best 3-member 77.7. The Efficiency axis alone
+costs 6.1 and 7.5 composite points, and the dimensions a merge can actually improve — Artifact
+20%, Rigor 14%, Knowledge 10% — are worth less combined than Delivery's 28% on its own. The
+Efficiency reconstruction used here reproduces the published values exactly (r = 1.000, mean
+absolute error 0.8 points over 60 runs), so the cost side of that arithmetic is not an estimate.
+
+**Quick fix — no headroom exists.** The rubric's practical maximum is 98 (accuracy and
+completeness both reach 10; clarity has never scored above 9 in 66 runs) and THREE single runs
+already sit on it, one of them Opus 5 medium at 11.2k implement tokens. So the incumbent is
+simultaneously the best and among the cheapest. Worse, one hallucination costs 6.099 composite
+points (r = -0.760, n = 66) and almost exactly one accuracy point (slope -1.003, r = -0.833). A
+false claim is by construction unique to one draft, so it lands squarely in the consolidator's
+"validate before including" path — the operation the previous amendment already flagged as the
+one this benchmark shows failing. Maximum available gain is +3; one leaked invention costs twice
+that. Every member set that beats its own best member does so only because both members are
+mediocre (the largest, Sonnet 5 low + Sonnet 4.6 medium, goes 74 to 82 — sixteen points below
+what one Opus 5 medium delivers alone).
+
+**Onboarding — the only defensible case, and the rubric cannot see it.** Best 2-member oracle
+gain is +0.08 and best 3-member +0.15, against a 9.07 best single run. But confirmed landmine
+recall over the eight documented source defects goes from 2 of 8 (Opus 5 medium, the benchmark
+winner) to 8 of 8 for `Grok 4.6 + Sonnet 5 high + Opus 5 medium`. The composite is nearly blind
+to that: regressing composite on confirmed recall across all 64 runs gives r = 0.093. So the
+score says "negligible" about the one axis the fan-out actually moves. That is not an argument
+that Phase 1 pays — it is the reason the hand-merge below has to settle it instead of the
+leaderboard.
+
+## What IS worth building, and it is not per-step CLI assignment
+
+Sequencing step 1 of the previous amendment — give `dispatchMiningAgents` a per-dispatch provider
+instead of one resolved for the whole fan-out — is carved out of this plan and will be specified
+separately. It must not be conflated with the per-step and per-role CLI preferences that already
+ship (`user_step_cli_preferences`, `user_step_cli_role_preferences`): those choose the model for a
+STEP, while the pin is inside a step, so every mining agent in 08c, 08d and the KB mining steps is
+currently the same model wearing a different persona. No amount of per-step assignment reaches it.
+Zero extra invocations, no new columns, no barrier, no consolidator.
+
+It is also the only way to MEASURE the uncomfortable finding in this corpus: deeper review rounds
+go with MORE hands-on rejections, not fewer — r = 0.53 across all 60 runs, 0.57 excluding Codex
+and Haiku, and 0.73 within the Claude family alone, where only the effort setting varies. That
+cannot currently be read as "a foreign critic hurts", because today the reviewer IS the
+implementer and deep-reviewing models are also bad implementers. The pin is exactly what makes
+the two separable.
+
+For the record, the delivery constraint this corpus does identify is scope discipline, not review
+depth. Median application PHP files modified, by outcome: 1 for the three first-pass runs, 2
+shipped-after-rework, 3 heavy rework, 21 for the seven that never delivered.
+
+## Reopening conditions
+
+Phase 1 comes back off the backlog only if BOTH hold:
+
+1. The hand-merge experiment (previous amendment, "Measure before building Phase 1") shows a merge
+   of three onboarding runs beating the best single run — judged on defect recall and on the
+   survival rate of unique-to-one-model claims under the evidence bar, NOT on the published
+   composite, which r = 0.093 says cannot see the effect.
+2. The unpinned fan-out has shipped and shown that cross-model review actually converts into
+   fewer hands-on rejections.
+
+Phase 2b stays optional and 2c stays dropped, unchanged from the previous amendment.
+
+## Hand-merge experiment — RUN 2026-08-21. Reopening condition 1 FAILS.
+
+Done as specified: three scored onboarding runs of the same task, merged under the 1b rules plus
+the evidence bar, on the artifacts themselves rather than on the leaderboard. Members were
+`grok-4.6`, `sonnet-5 high` and `opus-5 medium` (task ids `7f65dbe6`, `f8f774c1`, `e0fe4ed6`),
+read at each repository's ROOT COMMIT via `git archive` — the benchmark's own methodology, because
+later README/DDEV tasks modified `.claude/knowledge_base/` in these same clones. Canonical
+`.claude/` copies only; the `.agents/`, `.codex/` and `.grok/` mirrors are the same bytes.
+
+**Corrects an error in the amendment above.** That section claims the merge takes landmine recall
+from "2 of 8" to "8 of 8". The 2/8 was read out of the published audit PROSE — what the auditors
+chose to praise in a run — and that is not what the run's knowledge base contains. Measured
+directly against the artifacts, the individual runs already cover:
+
+| landmine | grok-4.6 | sonnet-5 high | opus-5 medium |
+|---|---|---|---|
+| `Db::Update` inverted return | 4 files | **0** | 4 files |
+| `/e` preg_replace sites | 2 | 1 | 2 |
+| `elocks` / edit lock | 12 | 2 | 22 |
+| `History::Add` | 6 | 1 | 1 |
+| SECHASH | 5 | 1 | 4 |
+| `encryptPW` weak hash | 9 | 4 | 6 |
+| captcha `eval` | 2 | 2 | 1 |
+| FCKeditor guard | 2 | 4 | 5 |
+
+grok-4.6 covers 8 of 8 alone. opus-5 medium covers 8 of 8 alone. sonnet-5 high covers 7 (it never
+documents the `Db::Update` inversion). **The union's gain on landmine recall is therefore zero to
+one, not six.** The headline argument for shape A on onboarding does not survive contact with the
+artifacts.
+
+What the merge DOES add, measured over 1,568 distinct `file:line` citations in the union:
+
+- Breadth: 91 distinct application files cited, against 74 for the best single run — **+17 files**
+  of an 830-file tree.
+- Density: 1,568 citations against 1,013 for the best single run — **+55%**.
+- 74.1% of the union (1,162 citations) is unique to ONE run, i.e. the consolidator's expensive
+  path; only 25.9% is the cheap agreement path.
+- 99.7% of the union resolves structurally (file exists, line in range), consistent with the
+  published per-run figures.
+
+And the finding that genuinely cuts against the pessimism above: a hand-verified sample of **24
+unique-to-one-run claims, 8 per member, read against the source, was 24/24 semantically correct** —
+including the failure mode the structural checker cannot see (a real file and an in-range line
+belonging to a different function). At 24 of 1,162 that bounds the error rate at roughly 12% at 95%
+confidence, not at zero, but the union of these three members is substantially TRUE. The
+`muse-high` wrong-function citations and the two false uniqueness claims cited above came from
+WEAK members. So unique-but-false is a property of member selection, not of union-merging as such,
+and the hallucination counts already in the corpus (Muse 13 across 4 runs, Haiku 16 across 5) are
+the screen if Phase 1 ever ships.
+
+**Verdict: the merge does not beat the best single run.** It buys 23% more of the tree documented
+and 55% more citations, apparently truthful, on ground the best single member already covers at
+the level that decides the score. Nothing measured here justifies a 2-3x invocation multiplier.
+Two limits stated rather than hidden: the published composite could not be reproduced (it comes
+from a structured multi-agent source-verified audit, not from a script), and nothing here shows
+that a larger evidence base improves any downstream task outcome — which is the only thing that
+would actually justify the multiplier.
+
+Phase 1 stays backlogged, now on a measurement rather than a projection.
