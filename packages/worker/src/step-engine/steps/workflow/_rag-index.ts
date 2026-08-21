@@ -30,6 +30,7 @@ import {
   capChunks,
   contextHeader,
   CODE_EXTENSIONS,
+  isMinifiedPath,
   MAX_FILE_BYTES,
   type RagChunk,
 } from '../onboarding/_rag-chunkers.js';
@@ -115,6 +116,10 @@ export async function collectCodeFiles(
       // list stay in scope. Empty list → no-op.
       if (isDeniedFile(rel, isDir, exclude)) return false;
       if (isDir) return false;
+      // Same exclusion onboarding applies (10-rag-populate). Without it every
+      // workflow run re-ingests the repo's minified bundles under paths
+      // onboarding deliberately skipped.
+      if (isMinifiedPath(rel)) return false;
       return codeExts.has(path.extname(rel).toLowerCase());
     },
     8,
