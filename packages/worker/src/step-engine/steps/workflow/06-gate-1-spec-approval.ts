@@ -2,6 +2,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { recordSpecDecision } from './_spec-feedback.js';
+import { resolveTaskWorktreePath, writeSpecArtifact } from './_spec-artifact.js';
 import { coerceReviewSeverity, isBlockingSeverity } from '@haive/shared/review';
 
 interface SpecGateDetect {
@@ -336,6 +337,22 @@ export const gate1SpecApprovalStep: StepDefinition<SpecGateDetect, SpecGateApply
     // Approve: the run configuration is collected by the next step (06-run-config).
     // Clears any outstanding spec rejection so a later, unrelated re-draft starts clean.
     await recordSpecDecision(ctx, 'approve', feedback);
+    // Materialize the approved spec inside the worktree so every later agent can Read it
+    // instead of carrying the whole document in its prompt. Best-effort: a missing artifact
+    // only means the spec consumers fall back to embedding the full text, so it must never
+    // fail the gate.
+    const spec = args.detected.specBody;
+    if (spec.trim().length > 0) {
+      try {
+        const worktreePath = await resolveTaskWorktreePath(ctx);
+        if (worktreePath) {
+          await writeSpecArtifact(worktreePath, spec);
+          ctx.logger.info({ worktreePath }, 'approved spec written to the worktree');
+        }
+      } catch (err) {
+        ctx.logger.warn({ err }, 'failed to write the approved spec artifact (non-fatal)');
+      }
+    }
     return { decision, feedback };
   },
 };

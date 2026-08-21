@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { copyFile, mkdir } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { and, asc, desc, eq, isNotNull, isNull } from 'drizzle-orm';
 import { schema, isUniqueViolation, type Database } from '@haive/database';
@@ -17,6 +19,7 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
 import { loadPreviousStepOutput, pathExists } from './steps/onboarding/_helpers.js';
+import { SPEC_ARTIFACT_RELPATH } from './steps/workflow/_spec-artifact.js';
 import {
   isCliPreemptionFailure,
   isFatalProviderFailure,
@@ -176,6 +179,24 @@ async function createIssueWorktree(
   // Always check reused worktrees too: retry/recovery can encounter one created
   // by an older worker and left root-owned.
   await ensureSandboxWritableTree(worktreePath);
+
+  // `.haive/` is git-excluded, so the approved-spec artifact gate 1 wrote into the
+  // integration worktree is untracked and `git worktree add` does NOT carry it over.
+  // Copy it in so each coder can Read the spec its prompt points at. Best-effort: a
+  // missing copy only means the coder's spec view degrades to the embedded index.
+  try {
+    const src = join(integration.path, SPEC_ARTIFACT_RELPATH);
+    if (await pathExists(src)) {
+      const dest = join(worktreePath, SPEC_ARTIFACT_RELPATH);
+      await mkdir(dirname(dest), { recursive: true });
+      await copyFile(src, dest);
+    }
+  } catch (err) {
+    ctx.logger.warn(
+      { err, worktreePath },
+      'failed to copy the spec artifact into the issue worktree',
+    );
+  }
 }
 
 /** Pre-formatted notes from completed lower-level issues that carried debt, so
