@@ -797,6 +797,14 @@ export interface TaskStep {
   cliRoleProviders?: Record<string, string | null>;
   /** Per-role effort override for multi-CLI steps; parallels cliRoleProviders. */
   cliRoleEfforts?: Record<string, string | null>;
+  /** Fan-out steps (08c review, 08d adversarial QA) expose one seat per agent in the
+   *  fan-out, so each reviewer/adversary/refuter-lens can run on a different model.
+   *  Kept separate from cliRoles: that field's presence and length drive LOOP display
+   *  (round badges, Resume), which a parallel fan-out must not inherit. */
+  miningSeats?: { id: string; label: string }[];
+  miningSeatProviders?: Record<string, string | null>;
+  /** Per-seat effort override; parallels miningSeatProviders. */
+  miningSeatEfforts?: Record<string, string | null>;
   /** True iff this step was skipped via the user-clicked "Skip" action.
    *  Auto-skipped steps (shouldRun → false, or detect setting skipReason)
    *  have this as false. Used to hide the retry button on auto-skips. */

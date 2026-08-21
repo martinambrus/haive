@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { configService, logger } from '@haive/shared';
+import { configService, logger, STEP_MINING_SEATS } from '@haive/shared';
 import {
   parsePeerReview,
   parseSecurityReview,
@@ -884,6 +884,25 @@ describe('codeReviewStep refutation pass', () => {
   /** apply() with no wave dispatched yet — the first pass, which may throw. */
   const firstPass = (results: AgentMiningResult[]) => runReview(results, true, false);
 
+  it('seats each refuter by its LENS, not by the per-finding agent id', async () => {
+    // The agent id here is derived from the finding, so it is unbounded and cannot be a
+    // configurable seat. The lens repeats across every finding, so that is the seat — and
+    // it is namespaced so a lens id can never collide with a wave-1 reviewer id.
+    const err = await firstPass([
+      mining('peer-reviewer', CRITICAL_PEER),
+      mining('security-code-reviewer', CLEAN_SECURITY),
+    ]).catch((e: unknown) => e);
+    const dispatches = (err as MiningWaveError).dispatches;
+    expect(dispatches.map((d) => d.roleKey)).toEqual([
+      'refuter:reach',
+      'refuter:impact',
+      'refuter:defense',
+    ]);
+    // Every seat it emits must be one the UI can actually offer.
+    const seats = new Set(STEP_MINING_SEATS['08c-code-review']!.map((s) => s.id));
+    for (const d of dispatches) expect(seats.has(d.roleKey!), d.roleKey).toBe(true);
+  });
+
   it('fans out one panel per blocking finding, a voter per lens', async () => {
     const err = await firstPass([
       mining('peer-reviewer', CRITICAL_PEER),
@@ -1328,5 +1347,41 @@ describe('fix-loop diagnosis carries the location', () => {
     );
     expect(d).toContain('conf.ts:3');
     expect(d).not.toContain('AKIAIOSFODNN7EXAMPLE');
+  });
+});
+
+describe('08c mining seats', () => {
+  it('seats every wave-1 reviewer by its own agent id', async () => {
+    // These are fixed personas, so the agent id already IS the stable seat.
+    const agents = await codeReviewStep.agentMining!.selectAgents({
+      detected: { spec: 's', implementationFiles: [], debtBlock: '', level: 'enterprise' },
+    } as never);
+    for (const a of agents) expect(a.roleKey, a.agentId).toBe(a.agentId);
+  });
+
+  it('registers every seat both waves can dispatch', async () => {
+    // The registry is what the UI offers. A seat the step emits but the registry omits is
+    // unconfigurable; one the registry lists but no wave emits is a dead control. Enterprise
+    // is the widest roster, so it is what the registry must cover.
+    const agents = await codeReviewStep.agentMining!.selectAgents({
+      detected: { spec: 's', implementationFiles: [], debtBlock: '', level: 'enterprise' },
+    } as never);
+    const emitted = [
+      ...agents.map((a) => a.roleKey!),
+      'refuter:reach',
+      'refuter:impact',
+      'refuter:defense',
+    ];
+    const registered = STEP_MINING_SEATS['08c-code-review']!.map((s) => s.id);
+    expect([...emitted].sort()).toEqual([...registered].sort());
+  });
+
+  it('keeps the lens reviewers out of the registry-only column', () => {
+    // lensesForLevel is cumulative, so every lens id must be a registered seat even though
+    // a 'standard' task only ever dispatches the first one.
+    const registered = new Set(STEP_MINING_SEATS['08c-code-review']!.map((s) => s.id));
+    for (const lens of lensesForLevel('enterprise')) {
+      expect(registered.has(lens.id), lens.id).toBe(true);
+    }
   });
 });

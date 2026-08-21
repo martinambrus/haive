@@ -1254,17 +1254,32 @@ async function dispatchMiningAgents(
   existing: MiningRetryTargets | null,
 ): Promise<number> {
   const spec = stepDef.agentMining!;
-  const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
-    await resolvePreferredCli(
+  // Per-SEAT provider selection. This used to resolve once for the whole fan-out, which
+  // made every agent the same model wearing a different persona — so 08c's refuter panel
+  // (three lenses, unanimity, fail-closed) was three identical models, and anything that
+  // model could not see, none of the three saw. A dispatch's `roleKey` names its seat;
+  // memoised because the refuter wave dispatches one agent PER FINDING over only three
+  // distinct lenses, so N agents must not cost N lookups.
+  //
+  // A dispatch with no roleKey resolves 'default', which is byte-for-byte the call this
+  // replaced — an un-opted-in step is unchanged.
+  const seatCache = new Map<string, { cliProviderId: string | null; effortLevel: string | null }>();
+  const resolveSeat = async (roleKey: string) => {
+    const hit = seatCache.get(roleKey);
+    if (hit) return hit;
+    const resolved = await resolvePreferredCli(
       db,
       params.userId,
       stepDef.metadata.id,
       params.cliProviderId ?? null,
       params.providers!,
-      'default',
+      roleKey,
       params.taskId,
       params.ignoreSavedStepClis ?? false,
     );
+    seatCache.set(roleKey, resolved);
+    return resolved;
+  };
   // Each mining agent is its own Claude-family invocation with its own terminal,
   // so each is independently steerable (gated globally + by adapter support).
   const steeringRequested = await resolveSteeringEnabled();
@@ -1300,6 +1315,9 @@ async function dispatchMiningAgents(
     // while the ledger is empty.
     const prompt = await augmentPromptWithTerseness(
       await augmentPromptWithLedger(db, params.taskId, dispatch.prompt),
+    );
+    const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } = await resolveSeat(
+      dispatch.roleKey ?? 'default',
     );
     const plan = await resolveTaskDispatch(db, params.taskId, {
       providers: params.providers!,

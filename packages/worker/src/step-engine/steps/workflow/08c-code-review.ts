@@ -1056,17 +1056,26 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       // doesn't enqueue real CLI jobs (mirrors 03-discovery's empty-persona path).
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const d = detected as CodeReviewDetect;
+      // roleKey === agentId here: every reviewer in this wave is a fixed persona, so its
+      // id is already the stable seat STEP_MINING_SEATS enumerates.
       return [
-        { agentId: 'peer-reviewer', agentTitle: 'Peer Reviewer', prompt: buildPeerPrompt(d) },
+        {
+          agentId: 'peer-reviewer',
+          agentTitle: 'Peer Reviewer',
+          prompt: buildPeerPrompt(d),
+          roleKey: 'peer-reviewer',
+        },
         {
           agentId: 'security-code-reviewer',
           agentTitle: 'Security Code Reviewer',
           prompt: buildSecurityPrompt(d),
+          roleKey: 'security-code-reviewer',
         },
         ...lensesForLevel(d.level).map((lens) => ({
           agentId: lens.id,
           agentTitle: lens.title,
           prompt: buildLensPrompt(lens, d),
+          roleKey: lens.id,
         })),
       ];
     },
@@ -1263,11 +1272,16 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
           'dispatching refuters for blocking findings',
         );
         throw new MiningWaveError(
+          // The agent id here is per FINDING and unbounded, so it cannot be a seat. The
+          // LENS is what repeats across the wave and is what a per-seat model choice is
+          // about, so that is the roleKey — namespaced so a lens id can never collide
+          // with a wave-1 reviewer id. A null lens (panel disabled) is one 'refuter' seat.
           wave.flatMap((f, i) =>
             refuteLenses.map((lens) => ({
               agentId: lensAgentId(f.agentId, lens),
               agentTitle: refuterTitle(f, i, wave.length, lens),
               prompt: buildRefutePrompt(args.detected, f, lens),
+              roleKey: lens ? `refuter:${lens.id}` : 'refuter',
             })),
           ),
         );

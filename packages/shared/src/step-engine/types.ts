@@ -103,6 +103,54 @@ export const STEP_CLI_ROLES: Record<string, readonly CliRoleDescriptor[]> = {
   ],
 };
 
+/** Per-step MINING SEATS: the individually addressable agents inside a fan-out step,
+ *  keyed by step id. A seat's id is the `roleKey` its dispatch carries, and per-seat
+ *  provider choices are stored in the SAME `user_step_cli_role_preferences` table the
+ *  loop roles above use — the table is keyed (user, step, role) and does not care which
+ *  kind of seat a role names.
+ *
+ *  DELIBERATELY SEPARATE FROM STEP_CLI_ROLES, not an extension of it. That map's
+ *  PRESENCE is the api/web marker for a multi-pass LOOP step and its LENGTH is
+ *  `loopPassesPerRound` (api `_helpers.ts` / `_step-label.ts`, web `iterationBadgeLabel`
+ *  and `isResumableStep`). Listing 08c's eight seats there would make a parallel fan-out
+ *  report eight sequential passes per round and render loop badges and Resume semantics
+ *  that do not apply to it. Every loop-semantics read must keep reading STEP_CLI_ROLES.
+ *
+ *  A seat left unset resolves through `resolvePreferredCli`'s existing fall-through to
+ *  the step's `default` pref and then the task provider, so an unconfigured fan-out
+ *  behaves exactly as it did before per-seat selection existed.
+ *
+ *  Rosters are CUMULATIVE BY QA LEVEL, so not every seat listed here runs on every task:
+ *  08c's lens reviewers arrive at `standard` (operational) and `enterprise` (all three),
+ *  and 08d's roster is 2 at `poc`, 4 at `standard`, 6 at `enterprise`. The registry lists
+ *  every seat that can exist; a seat the level never dispatches simply goes unused.
+ *
+ *  Keep in sync with `REVIEW_LENSES` / `REFUTE_LENSES` in 08c-code-review.ts and
+ *  `ADVERSARIES` in 08d-adversarial-qa.ts. */
+export const STEP_MINING_SEATS: Record<string, readonly CliRoleDescriptor[]> = {
+  '08c-code-review': [
+    { id: 'peer-reviewer', label: 'Peer Reviewer' },
+    { id: 'security-code-reviewer', label: 'Security Code Reviewer' },
+    { id: 'operational-reviewer', label: 'Operational Reviewer' },
+    { id: 'performance-reviewer', label: 'Performance Reviewer' },
+    { id: 'simplicity-reviewer', label: 'Simplicity Reviewer' },
+    // The refuter wave dispatches one agent per finding per lens, so the finding-derived
+    // agent id is unbounded and the LENS is the stable seat. Namespaced so a lens id can
+    // never collide with a reviewer id above.
+    { id: 'refuter:reach', label: 'Refuter: reachability' },
+    { id: 'refuter:impact', label: 'Refuter: impact' },
+    { id: 'refuter:defense', label: 'Refuter: defenses' },
+  ],
+  '08d-adversarial-qa': [
+    { id: 'edge-case-breaker', label: 'Edge Case Breaker' },
+    { id: 'workflow-disruptor', label: 'Workflow Disruptor' },
+    { id: 'auth-bandit', label: 'Auth Bandit' },
+    { id: 'injection-infector', label: 'Injection Infector' },
+    { id: 'logic-lunatic', label: 'Logic Lunatic' },
+    { id: 'chaos-creator', label: 'Chaos Creator' },
+  ],
+};
+
 /** Step ids whose StepDefinition sets `metadata.allowSkip = true`. The user
  *  Skip action is permitted ONLY on these; the API skip handler enforces it
  *  (the api can't import the worker step registry). Keep in sync with the

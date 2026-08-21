@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { logger } from '@haive/shared';
+import { logger, STEP_MINING_SEATS } from '@haive/shared';
 import {
   parseAdversaryOutput,
   adversaryIdsForLevel,
@@ -169,5 +169,47 @@ describe('adversarialQaStep.apply de-silence', () => {
     ).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(MiningRetryError);
     expect((err as MiningRetryError).agentIds).toEqual(['edge-case-breaker']);
+  });
+});
+
+describe('08d mining seats', () => {
+  it('seats every adversary by its own id', async () => {
+    // The roster is a fixed catalog, so each adversary's id is already the stable seat.
+    const agents = await adversarialQaStep.agentMining!.selectAgents({
+      detected: {
+        level: 'enterprise',
+        spec: 's',
+        implementationFiles: [],
+        appUrl: null,
+      },
+    } as never);
+    expect(agents.length).toBeGreaterThan(0);
+    for (const a of agents) expect(a.roleKey, a.agentId).toBe(a.agentId);
+  });
+
+  it('registers exactly the seats the widest roster dispatches', async () => {
+    // A seat the step emits but the registry omits is unconfigurable in the UI; one the
+    // registry lists but no roster emits is a dead control.
+    const agents = await adversarialQaStep.agentMining!.selectAgents({
+      detected: {
+        level: 'enterprise',
+        spec: 's',
+        implementationFiles: [],
+        appUrl: null,
+      },
+    } as never);
+    const registered = STEP_MINING_SEATS['08d-adversarial-qa']!.map((s) => s.id);
+    expect(agents.map((a) => a.roleKey!).sort()).toEqual([...registered].sort());
+  });
+
+  it('keeps a narrower level a strict subset of the registry', async () => {
+    // poc/standard dispatch fewer adversaries; every one must still be a registered seat.
+    const registered = new Set(STEP_MINING_SEATS['08d-adversarial-qa']!.map((s) => s.id));
+    for (const level of ['poc', 'standard'] as const) {
+      const agents = await adversarialQaStep.agentMining!.selectAgents({
+        detected: { level, spec: 's', implementationFiles: [], appUrl: null },
+      } as never);
+      for (const a of agents) expect(registered.has(a.roleKey!), a.roleKey).toBe(true);
+    }
   });
 });

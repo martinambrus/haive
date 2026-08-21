@@ -2924,6 +2924,37 @@ function StepCardImpl({
                 {effortSelectFor(effectiveCliProviderId, step.preferredEffortLevel)}
               </>
             ))}
+          {/* Fan-out steps (08c, 08d) keep the single CLI dropdown above as the step-wide
+              default — an unset seat falls through to it — and add one dropdown per SEAT,
+              so each reviewer, adversary or refutation lens can answer on a different
+              model. Rendered alongside rather than instead of the default, and separate
+              from cliRoles, whose presence drives loop round badges and Resume. */}
+          {showCliPicker &&
+            step.miningSeats?.map((seat) => (
+              <div key={seat.id} className="flex items-center gap-2">
+                <label
+                  htmlFor={`${cliPickerId}-seat-${seat.id}`}
+                  className="text-xs font-medium text-neutral-400"
+                >
+                  {seat.label}
+                </label>
+                <select
+                  id={`${cliPickerId}-seat-${seat.id}`}
+                  disabled={cliLocked || cliBusy}
+                  value={step.miningSeatProviders?.[seat.id] ?? ''}
+                  onChange={(e) => void onChangeCli(e.target.value || null, seat.id)}
+                  className={cliSelectClass}
+                >
+                  <option value="">(step default)</option>
+                  {cliOptions}
+                </select>
+                {effortSelectFor(
+                  step.miningSeatProviders?.[seat.id] ?? '',
+                  step.miningSeatEfforts?.[seat.id],
+                  seat.id,
+                )}
+              </div>
+            ))}
           {showCliPicker && cliLocked && (
             <span className="text-[11px] text-neutral-500">locked while step running</span>
           )}

@@ -329,10 +329,13 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
       // No bypass stub for mining; return [] under test bypass (08c pattern).
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const d = detected as AdversarialDetect;
+      // roleKey === agentId: the roster is a fixed catalog, so each adversary's id is
+      // already the stable seat STEP_MINING_SEATS enumerates.
       return rosterForLevel(d.level).map((a) => ({
         agentId: a.id,
         agentTitle: a.title,
         prompt: buildAdversaryPrompt(a, d),
+        roleKey: a.id,
       }));
     },
     // One re-roll per adversary. An adversary whose output cannot be read leaves a

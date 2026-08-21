@@ -119,6 +119,20 @@ export interface AgentMiningDispatch {
   agentId: string;
   agentTitle: string | null;
   prompt: string;
+  /** Which SEAT in the fan-out this agent occupies, for per-seat CLI selection.
+   *
+   *  Resolved as the `role` in `resolvePreferredCli`, against the same
+   *  `user_step_cli_role_preferences` rows the loop roles use, and enumerated per step
+   *  in `STEP_MINING_SEATS` (@haive/shared) so the UI can offer a picker.
+   *
+   *  Distinct from `agentId`, which is often content-derived and unbounded — 08c's
+   *  refuters are one agent PER FINDING, so the stable seat there is the refutation
+   *  lens, not the agent. Steps whose agents have no stable identity (per-repo
+   *  personas, per-skill or per-draft ids) leave this unset.
+   *
+   *  Unset means `'default'`, which resolves exactly as the whole fan-out did before
+   *  per-seat selection existed: the step's own preference, then the task provider. */
+  roleKey?: string;
 }
 
 export interface AgentMiningResult {

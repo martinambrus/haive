@@ -8,6 +8,7 @@ import {
   MODEL_HEALTH_STEP_IDS,
   SKIPPABLE_STEP_IDS,
   STEP_CLI_ROLES,
+  STEP_MINING_SEATS,
   type AuthMode,
   type CliProviderName,
   type CliRoleDescriptor,
@@ -99,6 +100,13 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
     cliRoles?: readonly CliRoleDescriptor[];
     cliRoleProviders?: Record<string, string | null>;
     cliRoleEfforts?: Record<string, string | null>;
+    /** Present only for fan-out steps (STEP_MINING_SEATS); drives the per-seat
+     *  dropdowns. Deliberately a SEPARATE field from cliRoles: that one's presence and
+     *  length carry loop semantics (loopPassesPerRound, isResumableStep), which a
+     *  parallel fan-out must not inherit. */
+    miningSeats?: readonly CliRoleDescriptor[];
+    miningSeatProviders?: Record<string, string | null>;
+    miningSeatEfforts?: Record<string, string | null>;
   })[]
 > {
   const stepIds = [...new Set(steps.map((s) => s.stepId))];
@@ -140,8 +148,9 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
       byStepEffort.set(p.stepId, p.effortLevel);
     }
 
-    // Per-role prefs, only for steps that declare CLI roles.
-    const roleStepIds = stepIds.filter((sid) => STEP_CLI_ROLES[sid]);
+    // Per-role prefs, only for steps that declare CLI roles or fan-out seats. Both kinds
+    // live in the same (user, step, role) table, so one query serves both.
+    const roleStepIds = stepIds.filter((sid) => STEP_CLI_ROLES[sid] ?? STEP_MINING_SEATS[sid]);
     if (roleStepIds.length > 0) {
       const rolePrefs = await db
         .select()
@@ -165,6 +174,7 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
   }
   return steps.map((s) => {
     const roles = STEP_CLI_ROLES[s.stepId];
+    const seats = STEP_MINING_SEATS[s.stepId];
     const roleProviders = roleByStep.get(s.stepId) ?? new Map<string, string>();
     const roleEfforts = roleEffortByStep.get(s.stepId) ?? new Map<string, string | null>();
     const touchedRoles = touchedByStep.get(s.stepId);
@@ -185,6 +195,17 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
             ),
             cliRoleEfforts: Object.fromEntries(
               roles.map((r) => [r.id, honor(r.id, roleEfforts.get(r.id) ?? null)]),
+            ),
+          }
+        : {}),
+      ...(seats
+        ? {
+            miningSeats: seats,
+            miningSeatProviders: Object.fromEntries(
+              seats.map((r) => [r.id, honor(r.id, roleProviders.get(r.id) ?? null)]),
+            ),
+            miningSeatEfforts: Object.fromEntries(
+              seats.map((r) => [r.id, honor(r.id, roleEfforts.get(r.id) ?? null)]),
             ),
           }
         : {}),
