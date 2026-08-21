@@ -1,5 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, SPEC_VIEW_MODES, type SpecViewMode } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
 import { condenseDocument } from '../_doc-view.js';
@@ -31,14 +33,21 @@ export async function resolveApprovedSpec(ctx: StepContext): Promise<string> {
   );
 }
 
-/** The task worktree on the WORKER filesystem, from 01-worktree-setup's output. Null
- *  when that step has not run or produced no worktree (onboarding, read-only local
- *  repos). Deliberately not ctx.repoPath: a cli-exec invocation mounts the worktree
- *  alone, so an artifact written at the repo root is invisible to the agent. */
+/** The task worktree on the WORKER filesystem. Null when the task has no worktree
+ *  (onboarding, read-only local repos).
+ *
+ *  Read from `tasks.worktree_path`, which 01-worktree-setup stamps alongside
+ *  `worktree_branch` — the same durable source `resolveInvocationRepoMount` trusts, and
+ *  for the same reason: it survives a Retry that nulls the 01 step output.
+ *
+ *  Deliberately not ctx.repoPath: a cli-exec invocation mounts the worktree ALONE at the
+ *  sandbox workdir, so an artifact written at the repo root is invisible to the agent. */
 export async function resolveTaskWorktreePath(ctx: StepContext): Promise<string | null> {
-  const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
-  const p = (worktree?.output as { worktreePath?: string } | null)?.worktreePath;
-  return typeof p === 'string' && p.length > 0 ? p : null;
+  const task = await ctx.db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { worktreePath: true },
+  });
+  return task?.worktreePath && task.worktreePath.length > 0 ? task.worktreePath : null;
 }
 
 /** Write the spec to `<worktreePath>/.haive/spec.md`. Idempotent (plain overwrite, so a

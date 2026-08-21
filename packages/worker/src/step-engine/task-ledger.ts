@@ -15,6 +15,9 @@ const LEDGER_EVENT = 'ledger.entry';
 /** Whole-block char target for the injected context. */
 const LEDGER_BLOCK_TARGET = 4000;
 
+/** Shortest entry that may be suppressed as "the prompt already says this". */
+const DEDUPE_MIN_CHARS = 40;
+
 // ANSI escape sequences (terminal colour/cursor codes) — a stable, specified format
 // (ECMA-48), safe to strip and pure noise in a text prompt.
 const ANSI_RE = /\x1B\[[0-9;?]*[A-Za-z]/g;
@@ -156,8 +159,10 @@ export async function augmentPromptWithLedger(
   }
   // A step that renders a ledger fact in its OWN prompt body (07's fix-round context
   // block) must not be handed the same text again here. Exact identity on strings this
-  // module produced, so there is nothing to drift.
-  let kept = entries.filter((e) => !prompt.includes(e.text));
+  // module produced, so there is nothing to drift. The length floor is what keeps this
+  // honest: a one-word entry ("apache") occurs incidentally in half the prompts in this
+  // codebase, and suppressing a fact on an accidental match is worse than repeating it.
+  let kept = entries.filter((e) => e.text.length < DEDUPE_MIN_CHARS || !prompt.includes(e.text));
   if (kept.length === 0) return prompt;
 
   const render = (e: LedgerEntry): string => `- ${e.stepId} (round ${e.round}): ${e.text}`;

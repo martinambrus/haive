@@ -184,16 +184,26 @@ describe('augmentPromptWithLedger', () => {
   });
 
   it('does not repeat a fact the prompt already renders itself', async () => {
-    const { db } = mockDb([entry('ddev is not on PATH')]);
-    const prompt = 'PRIOR CONTEXT: ddev is not on PATH\n\nDo the work.';
+    const fact = 'ddev is not on PATH inside the cli-exec sandbox';
+    const { db } = mockDb([entry(fact)]);
+    const prompt = `PRIOR CONTEXT: ${fact}\n\nDo the work.`;
     expect(await augmentPromptWithLedger(db, 't1', prompt)).toBe(prompt);
   });
 
+  it('never suppresses a SHORT entry on an incidental prompt match', async () => {
+    // 'apache' occurs in half the prompts in this codebase; dropping a fact on that
+    // would be worse than repeating it.
+    const { db } = mockDb([entry('apache')]);
+    const out = await augmentPromptWithLedger(db, 't1', 'the webserver is apache');
+    expect(out).toContain('- 07-phase-2-implement (round 0): apache');
+  });
+
   it('still injects the entries the prompt does not already carry', async () => {
-    const { db } = mockDb([entry('already here'), entry('brand new fact')]);
-    const out = await augmentPromptWithLedger(db, 't1', 'already here — do the work');
-    expect(out).toContain('brand new fact');
-    expect(out.split('already here').length - 1).toBe(1);
+    const dupe = 'composer is available but has no vendor dir yet';
+    const { db } = mockDb([entry(dupe), entry('brand new fact about the runtime')]);
+    const out = await augmentPromptWithLedger(db, 't1', `${dupe} — do the work`);
+    expect(out).toContain('brand new fact about the runtime');
+    expect(out.split(dupe).length - 1).toBe(1);
   });
 
   it('keeps at least one entry even when a single entry blows the budget', async () => {

@@ -7,6 +7,9 @@ vi.mock('../onboarding/_helpers.js', () => ({
   pathExists: (...args: unknown[]) => pathExists(...args),
 }));
 
+vi.mock('@haive/database', () => ({ schema: { tasks: { id: 'id' } } }));
+vi.mock('drizzle-orm', () => ({ eq: () => undefined }));
+
 const configGet = vi.fn();
 vi.mock('@haive/shared', () => ({
   CONFIG_KEYS: { SPEC_VIEW_MODE: 'config:output:specViewMode' },
@@ -25,21 +28,21 @@ const LONG_SPEC = [
   ...Array.from({ length: 30 }, (_, i) => `model line ${i}`),
 ].join('\n');
 
-/** Wire the three step lookups resolveSpecView makes: 04 / 05 / 05a for the spec body,
- *  then 01-worktree-setup for the artifact path. */
+let taskWorktreePath: string | null = null;
+
+/** Wire the three step lookups resolveSpecView makes for the spec body (04 / 05 / 05a).
+ *  The worktree comes from `tasks.worktree_path`, not from a step row. */
 function wireSteps(spec: string, worktreePath: string | null): void {
+  taskWorktreePath = worktreePath;
   loadPreviousStepOutput.mockImplementation(async (_db: unknown, _task: string, stepId: string) => {
     if (stepId === '05a-resolve-spec-warnings') return { output: { spec } };
-    if (stepId === '01-worktree-setup') {
-      return worktreePath ? { output: { worktreePath } } : null;
-    }
     return null;
   });
 }
 
 function ctx(): Ctx {
   return {
-    db: {},
+    db: { query: { tasks: { findFirst: async () => ({ worktreePath: taskWorktreePath }) } } },
     taskId: 'task-1',
     sandboxWorkdir: '/haive/workdir',
     logger: { warn: vi.fn(), info: vi.fn() },
