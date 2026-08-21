@@ -47,6 +47,17 @@ describe('collectCodeFiles', () => {
     expect(await collectCodeFiles(repo, { exclude: ['docs'] })).toEqual(['src/a.js']);
   });
 
+  it('excludes a trailing-slash deny entry, as FRAMEWORK_PATTERNS writes them', async () => {
+    // 01-env-detect contributes FRAMEWORK_PATTERNS.excludePaths verbatim, and
+    // every one of those is written 'core/' / 'vendor/' / 'wp-admin/'.
+    await seed(['src/a.js', 'core/lib.js', 'vendor-ui/w.js']);
+
+    expect(await collectCodeFiles(repo, { exclude: ['core/'] })).toEqual([
+      'src/a.js',
+      'vendor-ui/w.js',
+    ]);
+  });
+
   it('honors 09_7 extension and folder picks so the orphan sweep cannot delete them', async () => {
     // The workflow steps reconcile against whatever this collects: an extension
     // onboarding indexed but this call misses is swept out of RAG, not skipped.

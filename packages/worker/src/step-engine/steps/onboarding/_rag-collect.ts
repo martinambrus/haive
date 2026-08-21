@@ -70,7 +70,11 @@ export async function collectCodeFiles(
   opts: CodeCollectOptions = {},
 ): Promise<string[]> {
   const codeExts = new Set(opts.extensionSet ?? Object.keys(CODE_EXTENSIONS));
-  const exclude = opts.exclude ?? [];
+  // FRAMEWORK_PATTERNS.excludePaths — the 01-env-detect half of this list — are
+  // written WITH a trailing slash ('core/', 'vendor/', 'wp-admin/'), while
+  // isDeniedPath anchors on `rel === g || rel.startsWith(g + '/')`. Left as-is,
+  // 'core/' matches nothing and a Drupal repo indexes all of core.
+  const exclude = (opts.exclude ?? []).map((p) => p.replace(/\/$/, ''));
   const dirFilter =
     opts.selectedDirs && opts.selectedDirs.length > 0 ? new Set(opts.selectedDirs) : null;
 
