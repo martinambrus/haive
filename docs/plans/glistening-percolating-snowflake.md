@@ -198,3 +198,52 @@ via `BASE_STAGE_PATHS`, as the body assumes.
 The accidental-safety premise is confirmed, at drifted anchors: `10-rag-populate.ts:87` still reads
 `const SOURCE_PREFIXES = ['.claude/knowledge_base/'];` with its `collectKbFiles` at `:112` (body says
 `:83`), and the workflow-side `collectKbFiles` is `_rag-index.ts:79` (body says `:44`).
+
+---
+
+# Amendment — 2026-08-21: shipped
+
+Built and merged as `2b4c3ad` (relocation) + `16550ae` (picker safety). Split along the plan's own
+two workstreams so the mechanical 40-file rename does not bury the ~8-file behavioural change.
+
+Anchors in the body that had drifted by implementation time, beyond the ones the first amendment
+already corrected:
+
+- `packages/web/src/lib/api-client.ts:200` is now `:248` — the cosmetic reference is the
+  `onboarded?` doc comment listing the onboarding markers.
+- `_retrieval-guidance.ts` lives at `step-engine/steps/`, not `steps/workflow/`, and carries the KB
+  path twice, not once.
+- `_agent-templates.ts` has ONE `.claude/knowledge_base/learnings.md` reference (in
+  `learning-recorder`), not the two the body predicted at `:789`/`:801`.
+
+Where the build differs from the body, and why:
+
+- **`KB_ROOT` was deleted, not repointed.** It was a three-use local alias for the same path;
+  `_kb-write.ts` now uses `KB_DIR` directly, and its prefix-strip regex is derived from the constant
+  so the pattern cannot drift from the path it strips.
+- **The strip drops DESCENDANT globs too.** The body names "both directions" but lists only
+  equality and ancestry; a glob INSIDE the KB (`.haive-data/knowledge_base/investigations`) also
+  carves a hole in the guarantee, so overlap is tested both ways.
+- **The badge is one shared helper, not three call sites.** `tagManagedKnowledgeNodes` lives beside
+  the constants and is called by 06_7, 09_7 and the api's `scope-tree` route. It is deliberately NOT
+  inside `buildScopeTree`, whose doc comment declares it a pure structural walk with badges applied
+  by the caller.
+- **`learning-recorder` needed five lines fixed, not one.** The template did not merely point at the
+  wrong path — it described a single `learnings.md` log with prepend semantics, while step 11 writes
+  one file per learning id. Responsibilities, two execution steps, a quality criterion and an
+  anti-pattern were corrected together; leaving them would have emitted self-contradicting
+  instructions. Body-only, so `schemaVersion` is not bumped.
+- **`ONBOARDING_RESET_DIRS` gained the two knowledge dirs but not `.haive-data` itself**, so a
+  re-onboard wipes knowledge and leaves the mirror JSONs for step 12 to regenerate, as the body asks.
+
+Verification actually performed: `pnpm typecheck` and `pnpm test` green across all seven packages
+(11 new tests — `knowledge-paths.test.ts`, `scope-knowledge-immunity.test.ts`); the five smokes the
+change touches (`onboarding-full`, `drupal7`, `workflow`, `workflow-commit`, `fix-loop`) run green
+against a scratch database; and the picker guarantee exercised end to end against the running stack
+with a fixture repo — a PATCH carrying `.haive-data`, a descendant glob and a slash-wrapped
+`/.haive-data/learnings/` persisted `['vendor']` alone, the two dirs rendered their green badge, and
+unticking `.haive-data` in the browser left the stored list untouched.
+
+NOT verified: a real onboarding run end to end (agentic, operator-driven). The body's step-4 checks —
+KB markdown landing under `.haive-data/knowledge_base/`, `10-rag-populate` reporting
+`kbFileCount > 0`, step 12 staging it — are covered by the smokes at fixture scale only.
