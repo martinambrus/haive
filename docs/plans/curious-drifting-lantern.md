@@ -187,7 +187,8 @@ the step with `message: 'push skipped'` instead of failing.
 
 ## F7 — 08a reports `passed: true` when browser testing was impossible
 
-**Severity: HIGH. Not fixed. Found on the DAG verification run.**
+**Severity: HIGH. FIXED — commit `1243213`.** Live proof pending: needs an 08a mcp run
+that captures nothing (i.e. F8 still unresolved) to show NO EVIDENCE at gate 2.
 
 MEASURED on task `de2b313d` (repo `rs_glm_53_max`, `browserMode: mcp`):
 
@@ -265,7 +266,7 @@ fault is in delivery (the MCP config the CLI actually loaded) rather than the se
 
 ## F9 — DAG issue branches survive worktree cleanup
 
-**Severity: low (clutter). Found on the DAG verification run.**
+**Severity: low (clutter). FIXED — commit `53aa478`.**
 
 `12-worktree-cleanup` with `action: merge_remove, deleteBranch: true` removed all six
 worktrees and deleted the INTEGRATION branch, but left all five per-issue branches:
