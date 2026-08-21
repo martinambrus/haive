@@ -31,7 +31,8 @@ Fix these before the DAG verification run.
 
 ## F1 — The summary mirror only covers steps with no curated summary
 
-**Severity: medium. Agreed fix.**
+**Severity: medium. FIXED — commit `6e72b08`.** Live proof pending: 03/04/06b should
+appear as `summary` ledger entries on the next run.
 
 `step-runner.ts` gates the summarizer on `!curatedSummary`, and `resolveCuratedSummary`
 returns the first non-empty of `findingsSummary` > `summary` > `notes`. So a step that
@@ -72,7 +73,9 @@ cannot produce. Green test, dead code.
 
 ## F2 — `08-phase-5-verify` runs its `apply()` twice
 
-**Severity: medium. Pre-existing; surfaced by slice 3, not caused by it.**
+**Severity: medium. NARROWED — commit `d73bb55`.** The duplicate delivery is now
+harmless (a finalized row is not re-run). It is still ENQUEUED; who enqueues it is
+unresolved — see the open question at the end of this section.
 
 MEASURED: two `ledger.entry` rows for `08-phase-5-verify`, 0.6s apart
 (`19:27:44.966` and `19:27:45.591`), identical text, identical fingerprint, SAME
@@ -87,12 +90,23 @@ duplicated test run per verify step.
 Deterministic ledger writes are what made this observable — nothing else about the step
 is idempotency-sensitive, so it had no visible symptom before.
 
-**Fix:** diagnose why `advanceStep` reaches `apply()` twice for this step row. Suspects:
-a duplicate `ADVANCE_STEP` job that the orchestration-epoch guard did not catch, or a
-re-entry on the `runRuntimeSmoke` path. Confirm whether other deterministic steps do the
-same (check for duplicate `ledger.entry` rows per `task_step_id` across tasks).
+**Root cause (found):** the same-step duplicate guard in `handleAdvanceStep` only fires
+for a row still `running`. The second job arrived AFTER the first finished, so
+`existing.status === 'done'` matched neither it nor the `skipped` guard, and the step
+re-executed. It also slipped the other-active guard, which read `otherActive` in the same
+instant the successor's row was being created.
 
-**Verify:** one `ledger.entry` per `(task_step_id, fingerprint)` on a clean run.
+**Done:** a finalized row returns instead of re-running, re-driving the hand-off only when
+`tasks.current_step_id` still points at this step and round.
+
+**STILL OPEN:** two advance-step jobs for one step at one epoch are still being ENQUEUED.
+The guard makes the second harmless; it does not stop it being created. Prime suspect is
+the pause/resume path — the duplicate landed 0.63s after the first, far too fast for a
+BullMQ stalled re-delivery, and the task had been resumed from a global pause moments
+earlier. Worth confirming before assuming it is benign.
+
+**Verify:** one `ledger.entry` per `(task_step_id, fingerprint)` on a clean run, and a
+`advance-step skipped: step already done` warn line where the duplicate used to re-run.
 
 ---
 
@@ -116,7 +130,7 @@ The `08c` half of that reasoning IS confirmed: it reached the ledger via the mir
 
 ## F4 — `ledger.entry` stores `kind` as null for findings
 
-**Severity: cosmetic.**
+**Severity: cosmetic. FIXED — commit `6e72b08`.**
 
 `recordLedgerEntry` writes `kind` only when the caller passes it, and callers pass it
 only for `change`/`summary`. `loadLedgerEntries` coerces null to `finding` at read time,
@@ -130,7 +144,10 @@ Read-side coercion stays as the compatibility path for rows already written.
 
 ## F6 — Gate 4 makes `remoteUrl` required on a path its own `apply()` supports
 
-**Severity: medium. Genuine product bug, hit live.**
+**Severity: medium. FIXED — commit `d5162d5`.** Unit-proven against the real gate-4
+schema. NOT yet proven end-to-end: retrying gate 4 on the completed task hit the
+no-git branch (step 12 had removed the worktree), which the change does not touch.
+The DAG run will reach it with a live worktree and no origin.
 
 `11a-gate-4-push` `form()` builds a no-origin branch whose `remoteUrl` field is
 `required: true` with NO `visibleWhen` gate, alongside a `push` checkbox defaulting to
