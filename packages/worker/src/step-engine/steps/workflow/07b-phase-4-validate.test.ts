@@ -283,3 +283,41 @@ describe('phase4ValidateStep fixer browser guidance', () => {
     expect(fixerPrompt(false)).not.toContain('chrome-devtools');
   });
 });
+
+describe('phase4ValidateStep scope fence', () => {
+  const detected = {
+    worktreePath: '/wt',
+    sandboxWorktreePath: '/ws',
+    spec: 'spec',
+    implementationFiles: [],
+    debtBlock: '',
+    honoredBlock: '',
+    browserTesting: false,
+  };
+
+  // Both validator passes carry the fence: the validator<->fixer loop edits files
+  // directly with no refutation and no gate, so an out-of-scope issue here is a legacy
+  // rewrite that then widens every later round's changed-file list.
+  const prompts = [
+    () => phase4ValidateStep.llm!.buildPrompt!({ detected } as never),
+    () =>
+      phase4ValidateStep.loop!.buildIterationPrompt!({
+        detected: detected as never,
+        formValues: {},
+        iteration: 2, // even = validator re-pass
+        previousIterations: [],
+      }),
+  ];
+
+  it('fences both validator passes without contradicting the repo-wide Step 4 search', () => {
+    for (const build of prompts) {
+      const prompt = build();
+      expect(prompt).toContain('SCOPE FENCE. IN SCOPE =');
+      // `issues` is what reaches the fix agent, so that is what the fence guards...
+      expect(prompt).toContain('never in `issues`');
+      // ...and the carve-out keeps Step 4 (a stale caller of something THIS change
+      // renamed is in scope wherever it lives) from reading as fenced out.
+      expect(prompt).toContain('renamed or removed (Step 4) is in scope wherever it lives');
+    }
+  });
+});

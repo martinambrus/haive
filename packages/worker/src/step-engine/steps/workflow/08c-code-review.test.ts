@@ -13,6 +13,7 @@ import {
   lensAgentId,
   codeReviewStep,
 } from './08c-code-review.js';
+import { isOutOfScope } from '../_scope-fence.js';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 
@@ -657,6 +658,171 @@ describe('collectRefutable', () => {
       [],
     );
     expect(r).toHaveLength(2);
+  });
+});
+
+describe('scope fence', () => {
+  /** A security finding as the reviewer emits it, minus the scope flag. */
+  const legacy = {
+    severity: 'critical' as const,
+    path: 'functions.php',
+    line: 1200,
+    issue: 'SQL injection in a pre-existing helper',
+    fix: 'bind the parameter',
+  };
+  const fenced = { ...legacy, in_scope: 'no' };
+
+  describe('isOutOfScope', () => {
+    it('is true only on an explicit no', () => {
+      expect(isOutOfScope({ in_scope: 'no' })).toBe(true);
+      expect(isOutOfScope({ in_scope: 'NO' })).toBe(true);
+      expect(isOutOfScope({ in_scope: ' no ' })).toBe(true);
+      // The agent template prints the value with a gloss, and reviewers echo the gloss.
+      expect(isOutOfScope({ in_scope: 'no (pre-existing)' })).toBe(true);
+      expect(isOutOfScope({ in_scope: 'pre-existing' })).toBe(true);
+      // A reviewer that answers with the boolean instead of the word means the same thing.
+      expect(isOutOfScope({ in_scope: false })).toBe(true);
+    });
+
+    it('treats absent, unreadable, and uncertain answers as IN scope', () => {
+      // Fail CLOSED — the same asymmetry the refuter uses. A reviewer that ignores the
+      // field, or a repo still carrying a pre-fence agent definition, keeps blocking.
+      expect(isOutOfScope({})).toBe(false);
+      expect(isOutOfScope({ in_scope: undefined })).toBe(false);
+      expect(isOutOfScope({ in_scope: '' })).toBe(false);
+      expect(isOutOfScope({ in_scope: 'yes' })).toBe(false);
+      expect(isOutOfScope({ in_scope: true })).toBe(false);
+      // Starts with the same two letters and means the opposite.
+      expect(isOutOfScope({ in_scope: 'not sure' })).toBe(false);
+      expect(isOutOfScope({ in_scope: 'none of the changed files' })).toBe(false);
+      expect(isOutOfScope({ in_scope: 42 })).toBe(false);
+    });
+  });
+
+  it('does NOT block on a critical the reviewer itself placed outside the change', () => {
+    expect(computeBlocking({ findings: [] }, { findings: [fenced] })).toBe(false);
+  });
+
+  it('STILL blocks on a critical with no scope flag at all', () => {
+    // The silent-regression guard: a reviewer that never answers the question must not
+    // have its findings quietly demoted.
+    expect(computeBlocking({ findings: [] }, { findings: [legacy] })).toBe(true);
+    expect(computeBlocking({ findings: [] }, { findings: [{ ...legacy, in_scope: 'yes' }] })).toBe(
+      true,
+    );
+  });
+
+  it('fences only the security list — a peer or lens critical is unaffected', () => {
+    // in_scope is the security reviewer's field; the others dispose of out-of-scope
+    // observations through `## INSIGHTS` instead, so nothing here reads a flag.
+    expect(computeBlocking({ findings: [{ severity: 'critical' }] }, { findings: [fenced] })).toBe(
+      true,
+    );
+    expect(
+      computeBlocking({ findings: [] }, { findings: [fenced] }, [
+        { findings: [{ severity: 'high' }] },
+      ]),
+    ).toBe(true);
+  });
+
+  it('spends no refuter on a fenced-out finding', () => {
+    // Each blocking finding costs a refuter invocation before it is dismissed or stands.
+    // A finding that cannot block has nothing to buy.
+    expect(collectRefutable({ findings: [] }, { findings: [fenced] }, [])).toHaveLength(0);
+    expect(collectRefutable({ findings: [] }, { findings: [legacy] }, [])).toHaveLength(1);
+  });
+
+  it('still refutes a bug the PEER reviewer raised without fencing it', () => {
+    // The filter is per row, not per bug: security fencing a defect does not speak for
+    // the peer reviewer, whose row still blocks and so still earns its refuter.
+    const r = collectRefutable(
+      { findings: [{ severity: 'critical' as const, path: 'functions.php', issue: 'sqli' }] },
+      { findings: [{ ...fenced, path: 'functions.php', issue: 'SQLi' }] },
+      [],
+    );
+    expect(r).toHaveLength(1);
+    expect(r[0]!.reviewerId).toBe('peer-reviewer');
+  });
+
+  it('keeps a fenced-out finding out of the fix-loop diagnosis', () => {
+    // The cost this whole fence exists to stop: the implementer rewriting legacy code,
+    // which then enters the next round's changed-file list.
+    const v = codeReviewStep.fixLoop!.evaluate({
+      blocking: true,
+      peer: {
+        verdict: 'REQUEST_CHANGES',
+        findings: [{ severity: 'critical', path: 'installer/db.php', issue: 'npe', fix: 'guard' }],
+        positives: [],
+      },
+      security: {
+        verdict: 'VULNERABLE',
+        findings: [fenced, { ...legacy, path: 'installer/x.php' }],
+      },
+      extraLenses: [],
+    } as never);
+    expect(v).not.toBeNull();
+    expect(v!.diagnosis).toContain('installer/db.php');
+    // the unfenced security finding still reaches the implementer
+    expect(v!.diagnosis).toContain('installer/x.php');
+    expect(v!.diagnosis).not.toContain('functions.php');
+  });
+
+  it('reaches EVERY dispatched reviewer prompt, not just the security one', async () => {
+    // The fence is prompt text, so a persona that never receives it is a reviewer with the
+    // old licence. Enterprise selects the full roster (peer, security + three lenses).
+    const agents = await codeReviewStep.agentMining!.selectAgents({
+      detected: { spec: 's', implementationFiles: [], debtBlock: '', level: 'enterprise' },
+    } as never);
+    expect(agents).toHaveLength(5);
+    for (const a of agents) expect(a.prompt, a.agentId).toContain('SCOPE FENCE. IN SCOPE =');
+    const security = agents.find((a) => a.agentId === 'security-code-reviewer')!.prompt;
+    // The licence this whole plan traced the off-scope reviews back to is gone...
+    expect(security).not.toContain('including pre-existing, low-severity, and dead-code ones');
+    // ...while the intent it carried — report it anyway, in full — is not.
+    expect(security).toContain('Report EVERY vulnerability you find IN FULL');
+  });
+
+  it('records the fenced-out finding, with blocking false', async () => {
+    // Recorded, not dropped — that is the whole reason the field is kept rather than
+    // deleted. It stays queryable and visible at gate 2 as advisory.
+    let recorded: Record<string, unknown>[] = [];
+    const ctx = {
+      logger: logger.child({ test: '08c-scope' }),
+      taskId: 't1',
+      taskStepId: 's1',
+      round: 0,
+      db: {
+        insert: () => ({
+          values: (rows: Record<string, unknown>[]) => {
+            recorded = rows;
+            return { onConflictDoNothing: async () => undefined };
+          },
+        }),
+      },
+    } as unknown as StepContext;
+    const out = await codeReviewStep.apply(ctx, {
+      detected: { spec: 's', implementationFiles: [], debtBlock: '', level: 'none' },
+      agentMiningResults: [
+        mining('peer-reviewer', '```json\n{"verdict":"APPROVE","findings":[],"positives":[]}\n```'),
+        mining(
+          'security-code-reviewer',
+          `\`\`\`json\n${JSON.stringify({ verdict: 'VULNERABLE', findings: [fenced] })}\n\`\`\``,
+        ),
+      ],
+      isFinalMiningAttempt: true,
+      // No wave dispatched and none possible: a fenced-out finding must not fan out.
+      miningWaveExhausted: false,
+    } as unknown as Parameters<typeof codeReviewStep.apply>[1]);
+
+    expect(out.blocking).toBe(false);
+    expect(out.security.findings).toHaveLength(1);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]!.blocking).toBe(false);
+    expect(recorded[0]!.disposition).toBe('open');
+    expect(recorded[0]!.path).toBe('functions.php');
+    // A bare VULNERABLE still holds gate 2 off its approve default — the fence changes
+    // what costs a fix round, not what the developer is shown.
+    expect(out.advisoryVerdict).toBe(true);
   });
 });
 

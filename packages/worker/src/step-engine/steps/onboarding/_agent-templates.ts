@@ -1,6 +1,7 @@
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { AgentColor, AgentExpertise, AgentKbRefs, AgentModel, AgentSpec } from '@haive/shared';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
+import { SCOPE_FENCE_INSIGHTS, SCOPE_FENCE_IN_SCOPE_FLAG } from '../_scope-fence.js';
 import { retrievalGuidanceLinesFor } from '../_retrieval-guidance.js';
 
 // Re-export the canonical types so existing worker imports keep working without
@@ -68,6 +69,20 @@ const RESPONSE_STYLE_EXEMPT_IDS = new Set<string>([
   'markdown-humanizer',
   'accessibility-specialist',
 ]);
+
+// The scope fence, rendered as an execution step. The on-disk agent definition OVERRIDES
+// the inline persona in 08c (agentDefinitionGuidance), so an unfenced agent file would
+// silently undo the fence for every onboarded repo. Both read the same constant, which is
+// why the text is imported rather than restated. Body-only change per CLAUDE.md rule 1 —
+// contentHash recomputes on worker boot and upgrade-status reports these agents as changed.
+const SCOPE_FENCE_STEP = {
+  title: 'Stay inside the change',
+  body: SCOPE_FENCE_INSIGHTS.join('\n'),
+};
+const SCOPE_FENCE_SECURITY_STEP = {
+  title: 'Stay inside the change',
+  body: SCOPE_FENCE_IN_SCOPE_FLAG.join('\n'),
+};
 
 function firstCharLower(s: string): string {
   return s.length === 0 ? s : s.charAt(0).toLowerCase() + s.slice(1);
@@ -1333,6 +1348,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
           QA_LENS_NUMBERED,
         ].join('\n'),
       },
+      SCOPE_FENCE_STEP,
       {
         title: 'Compile constructive feedback',
         body: 'Group findings by severity with a concrete fix for each, record genuine positives, and issue a verdict. Propose fixes in prose; never edit the code.',
@@ -1359,6 +1375,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       'All 14 review dimensions were considered as written; any weak or missing one is raised as a finding',
       'The failure, replay and safeguard pass was run; any failed lens (error path, replay/double-write, blast radius, missing safeguard) is raised as a finding',
       'A clear verdict (APPROVE / REQUEST_CHANGES / DISCUSS) is issued',
+      'Every finding is about THIS change; valid observations about untouched code went to `## INSIGHTS`',
     ],
     antiPatterns: [
       'Only criticize — failing to acknowledge good work erodes trust',
@@ -1366,18 +1383,19 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       'Nitpick style while a correctness or security issue goes unmentioned',
       'Approve a change that still has a critical issue',
       'Rewrite the code yourself instead of proposing the fix',
+      'File a pre-existing problem in untouched code as a finding — it sends the whole change back to be reimplemented for something it never caused',
     ],
   },
   {
     id: 'security-code-reviewer',
     title: 'Security Code Reviewer',
     description:
-      'Security-focused review of a diff: injection, access control, secret and data exposure. Reports full details for every finding, including pre-existing and low-severity ones.',
+      'Security-focused review of a diff: injection, access control, secret and data exposure. Reports full details for every finding, including pre-existing and low-severity ones, each marked in or out of scope for the change.',
     color: 'red',
     field: 'security',
     tools: ['Read', 'Grep', 'Glob', 'Bash'],
     coreMission:
-      'Catch security vulnerabilities before they reach production. Think like an attacker, trace every untrusted input to where it is used, and give an actionable fix for each finding — including pre-existing and low-severity ones, so the author can decide with full information.',
+      'Catch security vulnerabilities before they reach production. Think like an attacker, trace every untrusted input to where it is used, and give an actionable fix for each finding — including pre-existing and low-severity ones, so the author can decide with full information. Mark each finding in or out of scope for the change under review; both are reported, only in-scope ones send the change back.',
     responsibilities: [
       '**Find injection** — SQL/NoSQL injection, XSS, command and template injection from untrusted input.',
       '**Verify access control** — Confirm authentication and authorization are enforced on every privileged path.',
@@ -1406,13 +1424,14 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
         title: 'Report every finding in full',
         body: 'For each finding give severity, file:line, description, an attack scenario, the vulnerable snippet, and a fix — even when it is pre-existing, low-severity, or dead code. The user cannot decide without full detail.',
       },
+      SCOPE_FENCE_SECURITY_STEP,
     ],
     outputFormat: [
       '```',
       'verdict: SECURE | NEEDS_FIXES | VULNERABLE',
       'findings:',
       '  - severity: critical | high | medium | low',
-      '    in_scope: yes | no (pre-existing)',
+      '    in_scope: yes | no      # yes ONLY if this change introduced, altered, or newly reaches it',
       '    path: <file>',
       '    line: <n>',
       '    cwe: <id or n/a>',
@@ -1427,11 +1446,13 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       'Access control verified on every privileged operation',
       'No hardcoded secrets left unflagged',
       'Every finding has file:line, attack scenario, and a fix — including pre-existing and low-severity ones',
+      'Every finding carries an explicit in_scope: yes or no',
     ],
     antiPatterns: [
       'Approve a change that still has a critical or high vulnerability',
       'Report a finding without its file:line, attack scenario, and fix',
       'Omit pre-existing, low-severity, or dead-code findings — the user still needs to know',
+      'Mark a pre-existing vulnerability in_scope: yes — that sends the whole change back to be reimplemented for code it never touched',
       'Check only obvious inputs and miss headers, cookies, and stored data',
       'Assume an ORM or framework neutralizes all injection',
     ],
@@ -1471,6 +1492,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
         title: 'Audit each operational dimension',
         body: 'For observability, operational readiness, migration/rollback safety, backward compatibility, and documentation, confirm the change either addresses it or that it genuinely does not apply. Do NOT review test coverage or security — separate agents own those.',
       },
+      SCOPE_FENCE_STEP,
       {
         title: 'Compile findings',
         body: 'Group findings by severity with a concrete fix for each, name the dimension in the issue, and issue a verdict. Propose fixes in prose; never edit the code.',
@@ -1492,6 +1514,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       'Every finding names the dimension and has a file + line and a concrete fix',
       'Test coverage and security were left to their own reviewers (not duplicated here)',
       'A clear verdict (APPROVE / REQUEST_CHANGES / DISCUSS) is issued',
+      'Every finding is about THIS change; valid observations about untouched code went to `## INSIGHTS`',
     ],
     antiPatterns: [
       'Approve a change that adds runtime behavior with no logging or metrics',
@@ -1499,6 +1522,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       'Overlook a breaking change to an existing caller, API, or stored format',
       'Duplicate the security or test-coverage review instead of focusing on operability',
       'Rewrite the code yourself instead of proposing the fix',
+      'File a pre-existing gap in untouched code as a finding — it sends the whole change back to be reimplemented for something it never caused',
     ],
   },
   {
@@ -1536,6 +1560,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
         title: 'Audit each performance dimension',
         body: 'Check query efficiency, unbounded work, hot-path blocking, data integrity under concurrency, and memory/payload size. Confirm each either is handled or genuinely does not apply.',
       },
+      SCOPE_FENCE_STEP,
       {
         title: 'Compile findings',
         body: 'Group findings by severity with a concrete fix for each (e.g. the index to add, the query to batch, the guard to introduce), and issue a verdict. Propose fixes in prose; never edit the code.',
@@ -1558,6 +1583,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       'Concurrency-sensitive writes were checked for transactions/constraints/idempotency',
       'Every finding has a file + line and a concrete fix',
       'A clear verdict (APPROVE / REQUEST_CHANGES / DISCUSS) is issued',
+      'Every finding is about THIS change; valid observations about untouched code went to `## INSIGHTS`',
     ],
     antiPatterns: [
       'Approve a new query inside a loop or a missing index on a filtered column',
@@ -1565,6 +1591,7 @@ export const BASELINE_AGENT_SPECS: AgentSpec[] = [
       'Overlook a concurrent write that needs a transaction or idempotency guard',
       'Flag micro-optimizations while ignoring an algorithmic or N+1 problem',
       'Rewrite the code yourself instead of proposing the fix',
+      'File a pre-existing inefficiency in untouched code as a finding — it sends the whole change back to be reimplemented for something it never caused',
     ],
   },
   {

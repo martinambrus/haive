@@ -6,6 +6,7 @@ import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput, pathExists } from '../onboarding/_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
+import { isOutOfScope } from '../_scope-fence.js';
 import { getTaskEnvTemplate } from '../env-replicate/_shared.js';
 import { resolveDdevWorkspace, loadAppBootOutput } from './_task-meta.js';
 import {
@@ -196,6 +197,7 @@ interface Phase8cOutput {
     verdict?: string;
     findings?: {
       severity?: string;
+      in_scope?: unknown;
       path?: string;
       line?: string | number;
       issue?: string;
@@ -222,6 +224,14 @@ interface Phase8cOutput {
 /** Prefix marking a finding a refuter disproved (08c's refutation pass). Advisory only. */
 function refutedTag(f: { refuted?: boolean }): string {
   return f.refuted ? '[refuted] ' : '';
+}
+
+/** Prefix marking a security finding the REVIEWER placed outside the change (08c's scope
+ *  fence). Same job as refutedTag: the finding is shown in full and the human here is the
+ *  one entitled to act on it, but without the tag a `[critical]` that did not block reads
+ *  as an inconsistency rather than as the pre-existing issue it is. */
+function scopeTag(f: { in_scope?: unknown }): string {
+  return isOutOfScope(f) ? '[pre-existing] ' : '';
 }
 
 interface Phase5aOutput {
@@ -478,7 +488,7 @@ export const gate2VerifyApprovalStep: StepDefinition<VerifyGateDetect, VerifyGat
           `${refutedTag(f)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.lines ? `:${f.lines}` : ''} ${f.issue ?? ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
         securityFindings: (pc.security?.findings ?? []).map((f) =>
-          `${refutedTag(f)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.line ? `:${f.line}` : ''} ${f.issue ?? ''}${f.attack ? ` (attack: ${f.attack})` : ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
+          `${refutedTag(f)}${scopeTag(f)}[${f.severity ?? '?'}] ${f.path ?? ''}${f.line ? `:${f.line}` : ''} ${f.issue ?? ''}${f.attack ? ` (attack: ${f.attack})` : ''}${f.fix ? ` → ${f.fix}` : ''}`.trim(),
         ),
         lensFindings: (pc.extraLenses ?? []).flatMap((lens) =>
           (lens.findings ?? []).map((f) =>

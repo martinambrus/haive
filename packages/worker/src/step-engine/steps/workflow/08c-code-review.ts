@@ -18,6 +18,7 @@ import {
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
+import { isOutOfScope, SCOPE_FENCE_INSIGHTS, SCOPE_FENCE_IN_SCOPE_FLAG } from '../_scope-fence.js';
 import { REPO_CLAIMS_ARE_NOT_EVIDENCE_LINES, REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { hasAnyKey, parseAgentJson, parseReviewJson } from './_agent-json.js';
 import {
@@ -87,7 +88,14 @@ interface PeerFinding {
 }
 interface SecurityFinding {
   severity: ReviewSeverity;
-  in_scope?: string;
+  /** The reviewer's own placement of the finding relative to the change. Typed
+   *  `unknown`, and normalized by `isOutOfScope` rather than at the boundary, for the
+   *  same reason `severity` and `cwe` are coerced below: a reviewer answering `false`
+   *  instead of `"no"` must not fail the whole finding — and now that the field decides
+   *  whether a change is sent back to be reimplemented, it must not fail the whole
+   *  REVIEW either. Stored verbatim on the finding so `review_findings.raw` records
+   *  what the reviewer actually said. */
+  in_scope?: unknown;
   path?: string;
   line?: string | number;
   cwe?: string;
@@ -160,7 +168,7 @@ const securitySchema = z.object({
           .unknown()
           .optional()
           .transform((v) => coerceReviewSeverity(v, 'low')),
-        in_scope: z.string().optional(),
+        in_scope: z.unknown().optional(),
         path: z.string().optional(),
         line: z.union([z.string(), z.number()]).optional(),
         // Normalized at the boundary rather than at each reader: isCredentialCwe decides
@@ -251,15 +259,21 @@ export function parseReviewLens(raw: unknown): { verdict: string; findings: Peer
  *
  *  Those verdicts are not ignored: `hasNonApprovingVerdict` keeps them off the gate-2
  *  approve default. The cost moves from an automatic reimplementation to a human glance.
+ *
+ *  The one exception to "severity and nothing else" is the scope fence: a security finding
+ *  the REVIEWER ITSELF marked `in_scope: no` names a pre-existing defect in code this change
+ *  never touched, so reimplementing the change cannot fix it. It is recorded and shown at
+ *  gate 2, it just does not spend a fix round. `isOutOfScope` is deliberately strict about
+ *  what counts as an explicit "no" (see there); everything else still blocks.
  */
 export function computeBlocking(
   peer: { findings?: { severity: ReviewSeverity }[] } | null,
-  security: { findings: { severity: ReviewSeverity }[] } | null,
+  security: { findings: { severity: ReviewSeverity; in_scope?: unknown }[] } | null,
   lenses: { findings?: { severity: ReviewSeverity }[] }[] = [],
 ): boolean {
   const findings = [
     ...(peer?.findings ?? []),
-    ...(security?.findings ?? []),
+    ...(security?.findings ?? []).filter((f) => !isOutOfScope(f)),
     ...lenses.flatMap((l) => l.findings ?? []),
   ];
   return findings.some((f) => isBlockingSeverity(f.severity));
@@ -442,6 +456,11 @@ export function collectRefutable(
   const byBug = new Map<string, RefutableFinding>();
   for (const { reviewerId, f } of rows) {
     if (!isBlockingSeverity(f.severity)) continue;
+    // Fenced out by its own reviewer, so it cannot block — and a refuter is only ever spent
+    // to stop a fix round. Filtered per ROW, not per reviewer: when the peer reviewer names
+    // the same defect without fencing it, that row still dispatches a refuter and the bug is
+    // examined once, which is exactly what the dedupe below is for.
+    if ('in_scope' in f && isOutOfScope(f)) continue;
     const path = f.path ?? '';
     const key = dispatchKey(path, f.issue);
     const fingerprint = findingFingerprint(reviewerId, path, f.issue);
@@ -610,6 +629,13 @@ function live<T extends { refuted?: boolean }>(findings: T[]): T[] {
   return findings.filter((f) => !f.refuted);
 }
 
+/** The security findings that still stand AND belong to this change. The security list is
+ *  the only one carrying `in_scope`, and a fenced-out finding travels exactly like a refuted
+ *  one from here on: visible at gate 2, never handed to the implementer. */
+function liveInScope(findings: SecurityFinding[]): SecurityFinding[] {
+  return live(findings).filter((f) => !isOutOfScope(f));
+}
+
 const SEARCH_LADDER = [
   'When you need conventions or context, search in this order:',
   ...retrievalGuidanceLines(),
@@ -645,17 +671,20 @@ const PEER_PERSONA = [
   'example where it helps); mark critical issues critical (never soften to low). Report',
   'EVERY finding in full — never just counts. Do NOT edit code and do NOT run git (it is',
   'unavailable here — work from the changed-files list and read them directly).',
+  '',
+  ...SCOPE_FENCE_INSIGHTS,
 ] as const;
 
 const SECURITY_PERSONA = [
   'You are the Security Code Reviewer. Think like an attacker: trace every untrusted input from',
   'entry (param, header, cookie, body, upload) to every sink (database, output, file, shell) and',
   'verify sanitization at each step. Check injection (SQL/NoSQL/XSS/command/template),',
-  'access-control on every privileged path, secret handling, and data exposure. Report EVERY',
-  'finding in full — including pre-existing, low-severity, and dead-code ones — each with',
-  'file:line, the offending code snippet, an attack scenario, and a fix, so the author can decide',
-  'with full information. Report EVERY finding in full — never just counts. Do NOT edit code and do',
-  'NOT run git (it is unavailable here — work from the changed-files list and read them directly).',
+  'access-control on every privileged path, secret handling, and data exposure. Give every finding',
+  'a file:line, the offending code snippet, an attack scenario, and a fix. Report EVERY finding in',
+  'full — never just counts. Do NOT edit code and do NOT run git (it is unavailable here — work',
+  'from the changed-files list and read them directly).',
+  '',
+  ...SCOPE_FENCE_IN_SCOPE_FLAG,
 ] as const;
 
 const OPERATIONAL_PERSONA = [
@@ -677,6 +706,8 @@ const OPERATIONAL_PERSONA = [
   'Every finding needs a file + line, the offending snippet, and a concrete fix. Report EVERY finding',
   'in full — never just counts. Do NOT edit code and do NOT run git (it is unavailable here — work',
   'from the changed-files list and read them directly).',
+  '',
+  ...SCOPE_FENCE_INSIGHTS,
 ] as const;
 
 const PERFORMANCE_PERSONA = [
@@ -696,6 +727,8 @@ const PERFORMANCE_PERSONA = [
   'Every finding needs a file + line, the offending snippet, and a concrete fix. Report EVERY finding',
   'in full — never just counts. Do NOT edit code and do NOT run git (it is unavailable here — work',
   'from the changed-files list and read them directly).',
+  '',
+  ...SCOPE_FENCE_INSIGHTS,
 ] as const;
 
 const SIMPLICITY_PERSONA = [
@@ -717,6 +750,8 @@ const SIMPLICITY_PERSONA = [
   'file + line, the offending snippet, and a concrete fix (name the simpler existing path). Report',
   'EVERY finding in full — never just counts. Do NOT edit code and do NOT run git (it is unavailable',
   'here — work from the changed-files list and read them directly).',
+  '',
+  ...SCOPE_FENCE_INSIGHTS,
 ] as const;
 
 interface ReviewLensDef {
@@ -951,7 +986,10 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       // capped fix round arguing with a claim a refuter already disproved. They stay
       // visible at gate 2, where a human can disagree.
       const peerFindings = live(out.peer.findings);
-      const securityFindings = live(out.security.findings);
+      // Fenced-out findings are dropped for the same reason refuted ones are: the
+      // implementer must not spend a capped fix round rewriting legacy code the change
+      // never touched — which is what then widens the changed-file list every later round.
+      const securityFindings = liveInScope(out.security.findings);
       // One element: `parts` is joined with a blank line, so the preamble must arrive
       // as a single block rather than one paragraph per line.
       const parts: string[] = [VALIDATE_THEN_ACT];
@@ -1302,7 +1340,9 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         path: f.path,
         lines: f.line,
         fix: f.fix,
-        blocking: isBlockingSeverity(f.severity) && !f.refuted,
+        // Written, not dropped — the whole point of keeping the field rather than deleting
+        // it. The row stays queryable as the advisory it is, with `blocking: false`.
+        blocking: isBlockingSeverity(f.severity) && !f.refuted && !isOutOfScope(f),
         disposition: f.refuted ? ('dismissed_refuted' as const) : ('open' as const),
         dispositionSource: f.refuted ? 'refuter' : undefined,
         raw: f,
@@ -1323,9 +1363,12 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       ),
     ]);
 
-    const securityCriticalHigh = live(securityOut.findings).filter((f) =>
+    const securityCriticalHigh = liveInScope(securityOut.findings).filter((f) =>
       isBlockingSeverity(f.severity),
     ).length;
+    // Logged beside it so the fence can be MEASURED rather than assumed: a run where this
+    // is large and `blocking` is false is the fence working, not a review that found nothing.
+    const securityOutOfScope = securityOut.findings.filter(isOutOfScope).length;
     // After applyRefutations, so a verdict its refuted findings no longer support has
     // already been downgraded and does not hold the gate.
     const advisoryVerdict = !blocking && hasNonApprovingVerdict(peerOut, securityOut);
@@ -1336,6 +1379,7 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
         securityVerdict: securityOut.verdict,
         peerFindings: peerOut.findings.length,
         securityCriticalHigh,
+        securityOutOfScope,
         lenses: extraLenses.map((l) => `${l.id}:${l.verdict}`),
         blocking,
         advisoryVerdict,

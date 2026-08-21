@@ -7,6 +7,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
+import { SCOPE_FENCE_REPORT_ONLY } from '../_scope-fence.js';
 import {
   changedFilesBlock,
   collectImplementationFiles,
@@ -343,6 +344,8 @@ const VALIDATOR_DEFINITION = [
   'Anti-patterns (what NOT to do): do not assume code is correct because it exists; do not skip',
   "edge-case validation; do not only check that code runs (check that it's RIGHT); do not miss",
   'missing functionality.',
+  '',
+  ...SCOPE_FENCE_REPORT_ONLY,
   '',
   'You may fix what your protocol REQUIRES you to fix (stale callers in Step 4, dead-code removal',
   'in Step 5) by editing files directly. All OTHER issues you find are reported, not fixed - a',
