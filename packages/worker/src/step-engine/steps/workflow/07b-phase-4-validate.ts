@@ -4,17 +4,19 @@ import { schema } from '@haive/database';
 import { STEP_CLI_ROLES } from '@haive/shared';
 import type { StepContext, StepDefinition, StepLoopPassRecord } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { resolveSpecView } from './_spec-artifact.js';
+import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
-import { SCOPE_FENCE_REPORT_ONLY } from '../_scope-fence.js';
+import { SCOPE_FENCE_DOC_REPORT_ONLY, SCOPE_FENCE_REPORT_ONLY } from '../_scope-fence.js';
 import {
   changedFilesBlock,
   collectImplementationFiles,
+  isDocsOnlyChange,
   type ImplementationFileSet,
 } from './_impl-changes.js';
+import { loadTaskMeta } from './_task-meta.js';
 import { loadHonoredConstraints } from './_fix-loop.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
 import { isStepGuidanceEnabled } from '../../guidance-context.js';
@@ -53,6 +55,9 @@ function roleForIteration(iteration: number): string {
 interface ValidateDetect {
   worktreePath: string;
   sandboxWorktreePath: string;
+  /** What this change must deliver: the approved spec, or — on lightweight paths that
+   *  skip 03/04/05 — the raw task title + description, the same brief 07 implements
+   *  from. Never '' unless the task itself is untitled and undescribed. */
   spec: string;
   implementationFiles: ImplementationFileSet;
   /** Pre-formatted KNOWN TECHNICAL DEBT block from DAG execution ('' if none). */
@@ -66,6 +71,10 @@ interface ValidateDetect {
    *  INSTRUCTION defect behind the issues it found. Resolved in detect() and carried on
    *  the payload because buildPrompt is pure and has no ctx. */
   promptDefectCapture: boolean;
+  /** This change touched documentation only, so the validator runs the documentation
+   *  protocol instead of the code one. Resolved in detect() for the same reason as
+   *  promptDefectCapture above. */
+  docsOnly: boolean;
 }
 
 export type ValidationVerdict = 'VALID' | 'ISSUES_FOUND' | 'UNPARSEABLE';
@@ -269,7 +278,7 @@ const SEARCH_LADDER = [
 // names are kept as EXAMPLES ("e.g. ... or your framework's equivalent") so the
 // validator works on any target repo; the legacy RAG/LSP sections are replaced
 // by the house search ladder and "code-navigation tools if available".
-const VALIDATOR_DEFINITION = [
+const CODE_VALIDATOR_DEFINITION = [
   'You are the Implementation Validator, a specialized agent that verifies implementation',
   'correctness before browser testing begins. You catch logic errors early.',
   '',
@@ -360,19 +369,152 @@ const VALIDATOR_DEFINITION = [
   'separate fix agent applies them.',
 ] as const;
 
-function outputContract(): string[] {
+// The documentation validator, used when the change set is documentation only
+// (isDocsOnlyChange). A separate protocol rather than the code one with most rows
+// scored N/A: 12 of the 14 code dimensions cannot apply to prose, and the code
+// protocol's Steps 4-6 tell the agent to search the whole repository for stale
+// callers, delete dead code and check UI translation — repo-wide edit instructions
+// that have no referent on a prose change and every reason to be absent from it.
+//
+// What it checks instead is what the README-quality benchmark measured 66 runs
+// failing at. Two findings drive the content. Accuracy dominates the score and one
+// hallucination costs about six composite points, so Step 3 makes an uncitable claim
+// an issue rather than a stylistic note. And the gap between a very good document and
+// the rubric's ceiling was consistently DISCLOSURE, not error: top runs stated weak
+// password hashing and a hardcoded default salt as neutral facts, never telling the
+// reader either was a risk. That is Step 4, and it is the reason this protocol exists.
+const DOC_VALIDATOR_DEFINITION = [
+  'You are the Documentation Validator, a specialized agent that verifies a documentation change',
+  'against the repository it describes. This change touched documentation only, so there is no',
+  'code behaviour to trace. What you verify is whether every statement in the document is TRUE of',
+  'this tree, and whether the document tells its reader what that reader needs to know.',
+  '',
+  'Core responsibilities:',
+  '1. Verify every factual claim against the source, by reading the source',
+  '2. Catch invented mechanisms - an API, table, column, config key or flow this repo lacks',
+  '3. Catch undisclosed risk - a mechanism stated neutrally that the reader must be warned about',
+  '4. Catch omissions - something a reader of this document needs and will not find in it',
+  '',
+  'Execution protocol:',
+  '',
+  'Step 1 - Read the brief below: what this document was asked to cover.',
+  '',
+  'Step 2 - Read the changed documentation files completely.',
+  '',
+  'Step 3 - Verify claim by claim (THE MAIN WORK). For EVERY factual statement the document',
+  'makes, locate the code, config or metadata that supports it and record the file:line. A claim',
+  'you cannot locate in this tree is an issue: severity high when a reader would ACT on it (setup',
+  'and install steps, commands, API shapes, schema, file paths, dependencies), medium otherwise.',
+  'Do not accept a claim because it is plausible, conventional for this kind of project, or',
+  'stated confidently - the failure mode here is a fluent document that is quietly wrong, and',
+  'confident phrasing is what makes it dangerous rather than what makes it true.',
+  '',
+  'Step 4 - Security posture pass (THE ONE MOST OFTEN MISSED). For each security-relevant',
+  'mechanism the document names - authentication, password or credential storage, session and',
+  'identity handling, input validation, output escaping, file upload, access control, CSRF or',
+  'equivalent request authenticity, cryptography, secrets in the tree - read the CODE, decide',
+  'whether it is sound by current practice, and then check what the document SAYS about it.',
+  'Describing a weak mechanism as a neutral fact is an ISSUE: a reader who is not already an',
+  'expert cannot tell it is a risk, and the document is where they were entitled to learn it.',
+  'Naming the mechanism is not disclosure - saying plainly that it is weak, and why, is.',
+  'The reverse is equally an issue: do not invent or imply a weakness the code does not have. If',
+  'a mechanism is sound, the absence of a warning about it is correct.',
+  '',
+  'Step 5 - Review dimensions validation (MANDATORY): score each dimension PASS / FAIL / N/A:',
+  '1. Factual accuracy - every stated fact is traceable to a file:line in this repository',
+  '   (cross-reference Step 3)',
+  '2. Security posture disclosure - every security-relevant mechanism the document names is',
+  '   labelled safe or unsafe rather than described neutrally (cross-reference Step 4)',
+  '3. Coverage - the subsystems a reader of this document must know about are present; note any',
+  '   the document silently omits',
+  '4. No invention - no API, table, column, config key, command or dependency that does not',
+  '   exist in this tree',
+  '5. No harness bleed - nothing belonging to the sandbox, container or toolchain this agent',
+  '   runs in is presented as a fact about the project',
+  '6. Currency - version numbers, release metadata, licence and author claims match the tree',
+  '',
+  'Anti-patterns (what NOT to do): do not verify prose against other prose - a claim repeated in',
+  'two documents is still unverified; do not treat the document as correct because it reads well;',
+  'do not report style preferences as issues; do not pad the document with generic sections that',
+  'say nothing about THIS project.',
+  '',
+  ...SCOPE_FENCE_DOC_REPORT_ONLY,
+  '',
+  'CITE OR DROP. Every issue you file must carry the file:line that proves it, and every',
+  'correction you require must be supportable the same way. If you cannot cite it, do not require',
+  'it - an unsupported "improvement" written into the document is a new false claim, which is the',
+  'exact defect you are here to prevent, and it costs more than the omission it replaced.',
+  '',
+  'You fix nothing yourself. Every issue you find is reported; a separate fix agent applies them.',
+] as const;
+
+/** The protocol this pass runs. Documentation-only changes get their own; everything
+ *  else gets the code protocol, byte-for-byte as before this branch existed. */
+function validatorDefinition(docsOnly: boolean): readonly string[] {
+  return docsOnly ? DOC_VALIDATOR_DEFINITION : CODE_VALIDATOR_DEFINITION;
+}
+
+/** The evidence bar for the FIXER pass on a documentation-only change. The validator
+ *  carries its own copy inside DOC_VALIDATOR_DEFINITION; the fixer never receives that
+ *  definition, and the fixer is the pass that writes the text. */
+const DOC_FIXER_EVIDENCE_BAR = [
+  '',
+  'CITE OR DROP. You are editing a document that a reader will trust. Every sentence you add',
+  'or change must be supported by something you have actually read in this repository - name',
+  'the file:line in your notes for each one. If you cannot support a correction, do not write',
+  'it: say so in `notes` and leave the gap. An invented sentence is a worse outcome than the',
+  'omission it replaced, because the omission was visible and the invention is not.',
+  'Fix the document. Do NOT edit application code, configuration or tooling to make a sentence',
+  'true - if an issue can only be resolved that way, leave it and explain in `notes`.',
+] as const;
+
+/** Heading over the brief. On lightweight paths there is no spec document at all and
+ *  the brief is the task title + description, so calling it "Spec" would tell the
+ *  agent to expect a structure that was never written. */
+function specHeading(docsOnly: boolean): string {
+  return docsOnly
+    ? '=== Brief (what the document was asked to cover) ==='
+    : '=== Spec (what the implementation must deliver) ===';
+}
+
+// What the report must contain, per protocol: the code pass names artifacts only it
+// produces (refactoring impact, dead code, UI language), the documentation pass names
+// its own. The JSON shape below is identical for both — `dimensions[].name` is free
+// text, so a different dimension set needs no contract change.
+const CODE_REPORT_CONTENTS = [
+  'First write your full validation report as markdown (verdict, requirement table, issues with',
+  'file:line + suggested fix, refactoring-impact result, dead code removed, UI language findings,',
+  'the 14-dimension table with PASS/FAIL/N/A).',
+] as const;
+
+const DOC_REPORT_CONTENTS = [
+  'First write your full validation report as markdown (verdict, the claim-by-claim verification',
+  'with its file:line evidence, the security-posture findings, issues with the required',
+  'correction for each, the dimension table with PASS/FAIL/N/A).',
+] as const;
+
+// What VALID means, per protocol. The code pass has to exclude the repairs its own
+// protocol required it to make; the documentation pass fixes nothing, so it does not.
+const CODE_VERDICT_KEY = [
+  'verdict VALID = no blocking issues (the dead code you removed and stale callers you fixed do',
+  'not count as open issues). verdict ISSUES_FOUND = open issues remain that a fix agent must',
+  'address; list each one.',
+] as const;
+
+const DOC_VERDICT_KEY = [
+  'verdict VALID = no blocking issues remain in the document. verdict ISSUES_FOUND = open issues',
+  'remain that a fix agent must address; list each one.',
+] as const;
+
+function outputContract(docsOnly: boolean): string[] {
   return [
-    'First write your full validation report as markdown (verdict, requirement table, issues with',
-    'file:line + suggested fix, refactoring-impact result, dead code removed, UI language findings,',
-    'the 14-dimension table with PASS/FAIL/N/A).',
+    ...(docsOnly ? DOC_REPORT_CONTENTS : CODE_REPORT_CONTENTS),
     'Then emit ONE JSON object inside a ```json fenced code block as the FINAL thing in your',
     'response, with EXACTLY this shape:',
     '{ "verdict": "VALID|ISSUES_FOUND", "summary": "<one paragraph>", "issues": [{ "severity":',
     '"critical|high|medium|low", "file": "path:line", "description": "...", "fix": "<required fix>" }],',
     '"dimensions": [{ "name": "Security", "status": "PASS|FAIL|N/A", "note": "<one line>" }] }',
-    'verdict VALID = no blocking issues (the dead code you removed and stale callers you fixed do',
-    'not count as open issues). verdict ISSUES_FOUND = open issues remain that a fix agent must',
-    'address; list each one.',
+    ...(docsOnly ? DOC_VERDICT_KEY : CODE_VERDICT_KEY),
   ];
 }
 
@@ -428,7 +570,17 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     // Section index + a pointer to the on-disk `.haive/spec.md` gate 1 wrote, not the whole
     // document: this agent is a fresh CLI process that only needs to know what the change
     // must deliver, and can Read any section it needs in full.
-    const spec = (await resolveSpecView(ctx)).text;
+    const view = await resolveSpecView(ctx);
+    let spec = view.text;
+    if (view.spec.trim().length === 0) {
+      // Lightweight paths (quick_bugfix) skip 03/04/05, so no spec was ever drafted and
+      // this used to render as "(no spec recorded)" while the protocol asked whether the
+      // code matched what the spec promised — a validator grading against nothing. 07
+      // already falls back to the raw task title + description here; share the helper so
+      // the implementer and the validator cannot drift on what was asked.
+      const meta = await loadTaskMeta(ctx.db, ctx.taskId);
+      spec = briefFromTaskMeta(meta.title, meta.description);
+    }
 
     // DAG runs: documented debt items must not be flagged (legacy debt awareness).
     let debtBlock = '';
@@ -463,16 +615,20 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       envTemplate?.status === 'ready' &&
       !!(envTemplate.declaredDeps as Record<string, unknown> | null)?.browserTesting;
 
+    // Hoisted out of the literal below because docsOnly is derived from it.
+    const implementationFiles = await collectImplementationFiles(ctx, wt.worktreePath);
+
     return {
       worktreePath: wt.worktreePath,
       // Worktree is mounted alone at the workdir root — agent workspace is ctx.sandboxWorkdir.
       sandboxWorktreePath: ctx.sandboxWorkdir,
       spec,
-      implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
+      implementationFiles,
       debtBlock,
       honoredBlock: await loadHonoredConstraints(ctx),
       browserTesting,
       promptDefectCapture: await isStepGuidanceEnabled(ctx.db, ctx.taskId),
+      docsOnly: isDocsOnlyChange(implementationFiles),
     };
   },
 
@@ -497,7 +653,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     buildPrompt: (args) => {
       const d = args.detected as ValidateDetect;
       return [
-        ...VALIDATOR_DEFINITION,
+        ...validatorDefinition(d.docsOnly),
         '',
         '=== Your assignment ===',
         `An implementation just finished in the workspace: ${d.sandboxWorktreePath}`,
@@ -514,10 +670,10 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         'and do NOT run the test suite (a later step does).',
         ...SEARCH_LADDER,
         '',
-        ...outputContract(),
+        ...outputContract(d.docsOnly),
         '',
-        '=== Spec (what the implementation must deliver) ===',
-        d.spec || '(no spec recorded)',
+        specHeading(d.docsOnly),
+        d.spec || '(no brief recorded)',
         d.promptDefectCapture ? `\n${PROMPT_DEFECT_INSTRUCTION}` : '',
       ]
         .filter(Boolean)
@@ -564,6 +720,12 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           '',
           'Make ONLY the fixes needed - do not add unrelated changes.',
           'Do NOT run git and do NOT run the test suite.',
+          // The fixer is the agent that actually writes the prose, so the evidence bar has
+          // to reach IT, not only the validator that raised the issue. Measured over 66
+          // README runs: one unsupported claim costs about six composite points, against a
+          // ceiling only three points above the best unaided run — so an invented sentence
+          // written while closing a gap costs more than the gap did.
+          ...(d.docsOnly ? DOC_FIXER_EVIDENCE_BAR : []),
           ...SEARCH_LADDER,
           ...(d.browserTesting
             ? [
@@ -583,14 +745,16 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           '`notes` (including what you ruled out) — later agents are fresh processes and are',
           'given your notes so they need not re-derive it.',
           '',
-          '=== Spec (the original requirements) ===',
-          d.spec || '(no spec recorded)',
+          d.docsOnly
+            ? '=== Brief (what the document was asked to cover) ==='
+            : '=== Spec (the original requirements) ===',
+          d.spec || '(no brief recorded)',
         ].join('\n');
       }
       // Validator re-pass after fixes.
       const fixes = accumulatedFixes(previousIterations);
       return [
-        ...VALIDATOR_DEFINITION,
+        ...validatorDefinition(d.docsOnly),
         '',
         '=== Your assignment (RE-VALIDATION) ===',
         `A fix agent just addressed your previous findings in the workspace: ${d.sandboxWorktreePath}`,
@@ -604,10 +768,10 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         'Do NOT run git and do NOT run the test suite.',
         ...SEARCH_LADDER,
         '',
-        ...outputContract(),
+        ...outputContract(d.docsOnly),
         '',
-        '=== Spec (what the implementation must deliver) ===',
-        d.spec || '(no spec recorded)',
+        specHeading(d.docsOnly),
+        d.spec || '(no brief recorded)',
         d.promptDefectCapture ? `\n${PROMPT_DEFECT_INSTRUCTION}` : '',
       ]
         .filter(Boolean)

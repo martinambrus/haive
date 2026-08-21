@@ -122,3 +122,20 @@ export async function resolveSpecView(
     condensed: true,
   };
 }
+
+/**
+ * The implementation brief when no spec document exists.
+ *
+ * Lightweight paths (quick_bugfix) skip the spec chain (03/04/05), so `resolveApprovedSpec`
+ * returns '' and the agent would otherwise be handed "(no spec recorded)" while being asked
+ * whether the code matches what the spec promised. The raw task title + description IS the
+ * whole request on those paths, so it is the brief.
+ *
+ * Shared by 07-phase-2-implement and 07b-phase-4-validate so the implementer and the
+ * validator cannot drift on what was asked. Pure — the caller reads the task row.
+ */
+export function briefFromTaskMeta(title: string, description: string): string {
+  const t = title.trim();
+  const d = description.trim();
+  return [t ? `# ${t}` : '', d].filter((s) => s.length > 0).join('\n\n');
+}

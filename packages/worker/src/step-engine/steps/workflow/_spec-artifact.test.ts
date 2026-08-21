@@ -17,7 +17,8 @@ vi.mock('@haive/shared', () => ({
   SPEC_VIEW_MODES: ['toc', 'full'],
 }));
 
-const { resolveSpecView, SPEC_ARTIFACT_RELPATH } = await import('./_spec-artifact.js');
+const { resolveSpecView, SPEC_ARTIFACT_RELPATH, briefFromTaskMeta } =
+  await import('./_spec-artifact.js');
 type Ctx = Parameters<typeof resolveSpecView>[0];
 
 /** A spec long enough that condensing always drops something. */
@@ -131,5 +132,31 @@ describe('resolveSpecView', () => {
       },
     );
     expect((await resolveSpecView(ctx(), { full: true })).spec).toBe('AMENDED');
+  });
+});
+
+describe('briefFromTaskMeta', () => {
+  it('renders the title as a heading above the description', () => {
+    expect(briefFromTaskMeta('Add DDEV', 'Set up a local environment.')).toBe(
+      '# Add DDEV\n\nSet up a local environment.',
+    );
+  });
+
+  it('returns the title alone when there is no description', () => {
+    expect(briefFromTaskMeta('Add README', '   ')).toBe('# Add README');
+  });
+
+  it('returns the description alone when there is no title', () => {
+    expect(briefFromTaskMeta('', 'Document the install steps.')).toBe(
+      'Document the install steps.',
+    );
+  });
+
+  it('returns empty string when the task has neither', () => {
+    expect(briefFromTaskMeta('  ', '')).toBe('');
+  });
+
+  it('trims surrounding whitespace on both parts', () => {
+    expect(briefFromTaskMeta('  Add DDEV  ', '  Do it.  ')).toBe('# Add DDEV\n\nDo it.');
   });
 });

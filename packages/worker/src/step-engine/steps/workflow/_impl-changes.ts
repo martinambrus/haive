@@ -143,3 +143,30 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
     'clean result as though it covered the whole change.',
   ].join('\n');
 }
+
+/** Documentation file extensions. A change confined to these touches no executable
+ *  code, which is what lets a reviewer swap its code dimensions for documentation
+ *  ones (07b-phase-4-validate). */
+const DOC_EXTENSIONS = ['.md', '.mdx', '.rst', '.adoc', '.txt'];
+
+/**
+ * Whether this change set is documentation only.
+ *
+ * Fails CLOSED — false is "not established", never "no docs". Three ways to get it:
+ * a bare pre-coverage array or a missing set (no coverage was recorded, so nothing
+ * can be concluded), a `truncated` set (the unlisted files are unknown, and calling a
+ * partial list docs-only is exactly the silent-cap failure `changedFilesBlock`'s
+ * coverage notice exists to prevent), and an empty list (a claim about no files).
+ *
+ * The cost of a wrong true is a code change reviewed by a documentation protocol, so
+ * the bar is "every listed path is a doc AND the list is known to be complete".
+ */
+export function isDocsOnlyChange(value: MaybeFileSet): boolean {
+  const set = asFileSet(value);
+  if (!set || set.truncated) return false;
+  if (set.files.length === 0) return false;
+  return set.files.every((f) => {
+    const lower = f.toLowerCase();
+    return DOC_EXTENSIONS.some((ext) => lower.endsWith(ext));
+  });
+}

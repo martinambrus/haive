@@ -1,7 +1,7 @@
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { resolveSpecView } from './_spec-artifact.js';
+import { briefFromTaskMeta, resolveSpecView } from './_spec-artifact.js';
 import { recordLedgerEntry } from '../../task-ledger.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
@@ -246,12 +246,10 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       // implementation brief ("hand the agent the problem directly"). Full/plan paths
       // always have a spec here, so this never changes their behavior.
       const meta = await loadTaskMeta(ctx.db, ctx.taskId);
-      const title = meta.title.trim();
-      const description = meta.description.trim();
-      spec = [title ? `# ${title}` : '', description].filter((s) => s.length > 0).join('\n\n');
+      spec = briefFromTaskMeta(meta.title, meta.description);
       // Already the whole brief, and far too short to index.
       specView = spec;
-      if (specSummary.length === 0) specSummary = title;
+      if (specSummary.length === 0) specSummary = meta.title.trim();
     }
     // Fix-loop: on a round > 0 re-entry, the diagnosis a downstream step recorded, plus whether
     // it came from a human reject gate (authoritative) vs a machine check (filterable output).

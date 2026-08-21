@@ -5,7 +5,7 @@ vi.mock('../onboarding/_helpers.js', () => ({
   loadPreviousStepOutput: (...args: unknown[]) => loadPreviousStepOutput(...args),
 }));
 
-const { changedFilesBlock, collectImplementationFiles, fileCoverage } =
+const { changedFilesBlock, collectImplementationFiles, fileCoverage, isDocsOnlyChange } =
   await import('./_impl-changes.js');
 type StepContextLike = Parameters<typeof collectImplementationFiles>[0];
 
@@ -114,5 +114,49 @@ describe('changedFilesBlock', () => {
     );
     expect(block).toContain('state plainly in your output that the unlisted files were not');
     expect(block).toContain('clean result');
+  });
+});
+
+describe('isDocsOnlyChange', () => {
+  const set = (files: string[], truncated = false) => ({
+    files,
+    total: truncated ? files.length + 1 : files.length,
+    truncated,
+  });
+
+  it('is true when every listed file is documentation', () => {
+    expect(isDocsOnlyChange(set(['README.md', 'docs/install.rst', 'NOTES.txt']))).toBe(true);
+  });
+
+  it('is false when any listed file is not documentation', () => {
+    expect(isDocsOnlyChange(set(['README.md', 'index.php']))).toBe(false);
+  });
+
+  it('matches extensions case-insensitively', () => {
+    expect(isDocsOnlyChange(set(['README.MD', 'Docs/Guide.AdOc']))).toBe(true);
+  });
+
+  it('is false for a truncated set even when every listed file is documentation', () => {
+    // The unlisted files are unknown; calling this docs-only would hand a code change
+    // the documentation protocol on the strength of a capped list.
+    expect(isDocsOnlyChange(set(['README.md'], true))).toBe(false);
+  });
+
+  it('is false for an empty file list', () => {
+    expect(isDocsOnlyChange(set([]))).toBe(false);
+  });
+
+  it('is false for a replayed pre-coverage bare array', () => {
+    // No coverage was recorded, so completeness cannot be established.
+    expect(isDocsOnlyChange(['README.md'])).toBe(false);
+  });
+
+  it('is false when there is no file set at all', () => {
+    expect(isDocsOnlyChange(undefined)).toBe(false);
+  });
+
+  it('does not treat a file merely containing a doc extension as documentation', () => {
+    expect(isDocsOnlyChange(set(['src/md.php']))).toBe(false);
+    expect(isDocsOnlyChange(set(['app/readme.md.php']))).toBe(false);
   });
 });

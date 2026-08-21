@@ -321,3 +321,114 @@ describe('phase4ValidateStep scope fence', () => {
     }
   });
 });
+
+describe('phase4ValidateStep documentation protocol', () => {
+  const detect = (docsOnly: boolean, spec = 'THE BRIEF') => ({
+    worktreePath: '/wt',
+    sandboxWorktreePath: '/ws',
+    spec,
+    implementationFiles: [],
+    debtBlock: '',
+    honoredBlock: '',
+    browserTesting: false,
+    promptDefectCapture: false,
+    docsOnly,
+  });
+
+  // Both validator passes must branch identically: pass 0 and the re-validation pass
+  // after a fix. A branch on only one of them is how a re-pass silently reverts to the
+  // code protocol halfway through a documentation run.
+  const validatorPrompts = (docsOnly: boolean, spec?: string) => [
+    phase4ValidateStep.llm!.buildPrompt!({ detected: detect(docsOnly, spec) } as never),
+    phase4ValidateStep.loop!.buildIterationPrompt!({
+      detected: detect(docsOnly, spec) as never,
+      formValues: {},
+      iteration: 2, // even = validator re-pass
+      previousIterations: [],
+    }),
+  ];
+
+  it('runs the documentation protocol on a docs-only change', () => {
+    for (const prompt of validatorPrompts(true)) {
+      expect(prompt).toContain('You are the Documentation Validator');
+      expect(prompt).toContain('Step 4 - Security posture pass');
+      expect(prompt).toContain('Security posture disclosure');
+      expect(prompt).toContain('labelled safe or unsafe rather than described neutrally');
+      expect(prompt).toContain('CITE OR DROP.');
+    }
+  });
+
+  it('drops the code-only protocol steps on a docs-only change', () => {
+    for (const prompt of validatorPrompts(true)) {
+      expect(prompt).not.toContain('You are the Implementation Validator');
+      expect(prompt).not.toContain('Step 4 - Refactoring impact check');
+      expect(prompt).not.toContain('Step 5 - Dead code detection');
+      expect(prompt).not.toContain('Step 6 - UI language validation');
+      expect(prompt).not.toContain('the 14-dimension table');
+    }
+  });
+
+  it('fences the documentation pass to the document, not the repository', () => {
+    for (const prompt of validatorPrompts(true)) {
+      expect(prompt).toContain('SCOPE FENCE. This change touched documentation only.');
+      expect(prompt).toContain('never by changing the project to match a sentence');
+      // Disposition C names a Step 4 carve-out this protocol does not have.
+      expect(prompt).not.toContain('renamed or removed (Step 4) is in scope wherever it lives');
+    }
+  });
+
+  it('leaves the code protocol untouched when the change is not docs-only', () => {
+    for (const prompt of validatorPrompts(false)) {
+      expect(prompt).toContain('You are the Implementation Validator');
+      expect(prompt).toContain('Step 4 - Refactoring impact check');
+      expect(prompt).toContain('Step 5 - Dead code detection');
+      expect(prompt).toContain('Step 6 - UI language validation');
+      expect(prompt).toContain('the 14-dimension table with PASS/FAIL/N/A');
+      expect(prompt).toContain('SCOPE FENCE. IN SCOPE =');
+      expect(prompt).not.toContain('Documentation Validator');
+      expect(prompt).not.toContain('CITE OR DROP.');
+    }
+  });
+
+  it('labels the brief per protocol on every pass, fixer included', () => {
+    const fixerPrompt = (docsOnly: boolean) =>
+      phase4ValidateStep.loop!.buildIterationPrompt!({
+        detected: detect(docsOnly) as never,
+        formValues: {},
+        iteration: 1, // odd = fixer pass
+        previousIterations: [validatorRecord(0, ['README.md:5'])],
+      });
+    for (const prompt of [...validatorPrompts(true), fixerPrompt(true)]) {
+      expect(prompt).toContain('=== Brief (what the document was asked to cover) ===');
+      expect(prompt).toContain('THE BRIEF');
+    }
+    expect(validatorPrompts(false)[0]).toContain(
+      '=== Spec (what the implementation must deliver) ===',
+    );
+    expect(fixerPrompt(false)).toContain('=== Spec (the original requirements) ===');
+  });
+
+  it('gives the FIXER the evidence bar on a docs-only change, and not otherwise', () => {
+    // The fixer never receives the validator definition, so the bar that lives there does
+    // not reach the pass that actually writes the prose.
+    const fixerPrompt = (docsOnly: boolean) =>
+      phase4ValidateStep.loop!.buildIterationPrompt!({
+        detected: detect(docsOnly) as never,
+        formValues: {},
+        iteration: 1, // odd = fixer pass
+        previousIterations: [validatorRecord(0, ['README.md:5'])],
+      });
+    expect(fixerPrompt(true)).toContain('CITE OR DROP.');
+    expect(fixerPrompt(true)).toContain('Do NOT edit application code');
+    expect(fixerPrompt(false)).not.toContain('CITE OR DROP.');
+  });
+
+  it('says "no brief recorded" rather than "no spec recorded" when the task has neither', () => {
+    // detect() now falls back to the task title + description, so an empty string here
+    // means the task itself was untitled and undescribed — not that a spec step was skipped.
+    for (const prompt of validatorPrompts(false, '')) {
+      expect(prompt).toContain('(no brief recorded)');
+      expect(prompt).not.toContain('(no spec recorded)');
+    }
+  });
+});

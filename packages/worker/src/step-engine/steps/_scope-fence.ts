@@ -82,6 +82,30 @@ export const SCOPE_FENCE_REPORT_ONLY = [
   'renamed or removed (Step 4) is in scope wherever it lives, and you fix it.',
 ] as const;
 
+/** Disposition D — the 07b validator on a DOCUMENTATION-ONLY change.
+ *
+ *  Disposition C cannot be reused: it ends on a carve-out naming Step 4, and the
+ *  documentation protocol has no Step 4 to carve out. The boundary also needs
+ *  restating rather than reusing SCOPE_BOUNDARY, because "the files this change
+ *  touched" is the wrong axis here — the whole repository is legitimately in play as
+ *  EVIDENCE while none of it is the work surface.
+ *
+ *  Measured: of 66 README runs, exactly one modified the application during a
+ *  documentation task. It committed installer output, an error log and its own dev
+ *  scripts alongside the README and then described them in the README as project
+ *  structure — a document made true by changing the project, which is the failure
+ *  this fence exists to stop. */
+export const SCOPE_FENCE_DOC_REPORT_ONLY = [
+  'SCOPE FENCE. This change touched documentation only. Read anything in the repository you need',
+  'as EVIDENCE for a claim — that is the job — but the source code is NOT the work surface here.',
+  'Every entry you put in `issues` must be a defect in the DOCUMENT, because a fix agent reads',
+  'them and will edit whatever they point at. Never file an issue whose fix is a change to',
+  'application code, configuration or tooling: the document is made true by correcting the',
+  'document, never by changing the project to match a sentence.',
+  'A real problem you notice in the code belongs in your markdown report as an observation, where',
+  'the developer sees it at the approval gate — never in `issues`.',
+] as const;
+
 /** Values a reviewer uses to place a finding OUTSIDE the change. `pre-existing` is
  *  here because the agent template's own output format prints it as a gloss
  *  (`in_scope: yes | no (pre-existing)`) and reviewers echo the gloss back. */
