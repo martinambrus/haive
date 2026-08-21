@@ -263,6 +263,28 @@ fault is in delivery (the MCP config the CLI actually loaded) rather than the se
 
 ---
 
+## F9 — DAG issue branches survive worktree cleanup
+
+**Severity: low (clutter). Found on the DAG verification run.**
+
+`12-worktree-cleanup` with `action: merge_remove, deleteBranch: true` removed all six
+worktrees and deleted the INTEGRATION branch, but left all five per-issue branches:
+
+    feature/harden-the-admin-dashboard--ISSUE-001 .. --ISSUE-005
+
+MEASURED: `git branch --merged HEAD --list '*--ISSUE-*'` returns all 5, so they are
+fully merged and safe to delete — they just are not. Five dead refs accumulate per DAG
+task, and the naming (`<branch>--ISSUE-00N`) makes them easy to identify.
+
+Not a correctness problem: the work is merged, and `git worktree prune` already ran (no
+worktrees left). Purely refs left behind.
+
+**Fix direction:** when `deleteBranch` is set and the mode was DAG, delete the issue
+branches too — but ONLY those the merge actually absorbed (`--merged`), never a branch
+whose issue ended `failed_unrecoverable`, whose work would then be unreachable.
+
+---
+
 ## F5 — Runbook: `docker inspect StartedAt` does not detect a tsx reload
 
 **Severity: none (process note). Worth recording so it is not re-learned.**
