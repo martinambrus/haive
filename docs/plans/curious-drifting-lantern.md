@@ -231,7 +231,11 @@ honest in `notes` — the step just does not read it.
 
 ## F8 — chrome-devtools MCP never connected in 08a mcp mode
 
-**Severity: medium. Root cause NOT determined. Found on the DAG verification run.**
+**Severity: medium. ROOT CAUSE FOUND, not yet fixed.**
+
+**The agent's MCP discovery window (~50s) is less than half chrome-devtools-mcp's cold
+npx download (MEASURED 111s).** The server was still fetching from npm when the agent
+concluded it did not exist and fell back to static analysis.
 
 Everything that should have made it work checks out, verified live while the runner was
 still up:
@@ -258,9 +262,58 @@ from the sandbox — MEASURED, returns 000. `.ddev.site` resolves to 127.0.0.1, 
 inside the sandbox is the sandbox. Agents are meant to reach the app through the
 CDP-wired MCP, not by URL. Do not "fix" this by exposing the app URL to the sandbox.
 
-**Next step:** run `chrome-devtools-mcp` with Haive's exact args against a live runner
-CDP from a container on both networks, and capture stderr. If it starts cleanly, the
-fault is in delivery (the MCP config the CLI actually loaded) rather than the server.
+### Evidence
+
+The transcript IS recoverable — it lives in `cli_invocations.stream_log` (a DB column with
+a multi-day retention sweep), NOT only in the Redis `cli-stream:<id>` key, which trims
+within hours. 126 KB recovered for invocation `e7ca1e24-...`:
+
+    "mcp_servers":[{"name":"chrome-devtools","status":"pending"},
+                   {"name":"filesystem","status":"pending"},
+                   {"name":"git","status":"pending"},
+                   {"name":"haive-rag","status":"pending"},
+                   {"name":"ddev-control","status":"pending"}]
+
+    22:56:22  invocation starts
+    22:57:12  ToolSearch "chrome-devtools"       -> matches: [], total_deferred_tools: 23
+    22:57:16  ToolSearch "+chrome screenshot..." -> matches: [], total_deferred_tools: 23
+              agent: "Chrome DevTools MCP tools haven't loaded yet" -> falls back
+
+MCP itself was NOT broken: `mcp__ddev-control__ddev_status` was invoked successfully in the
+same run. The difference is purely how each server starts:
+
+| server          | launch                                  | result            |
+|-----------------|-----------------------------------------|-------------------|
+| ddev-control    | bind-mounted .mjs via `node`            | connected, used   |
+| haive-rag       | bind-mounted .mjs via `node`            | available         |
+| chrome-devtools | `npx -y chrome-devtools-mcp@latest`     | never loaded      |
+
+MEASURED on this host: cold `npx -y chrome-devtools-mcp@latest` = **111s**; `node` starting
+a bind-mounted script = **1s**.
+
+### Fix direction (needs a decision — base-image rebuild)
+
+Bake chrome-devtools-mcp into `packages/worker/sandbox-image/Dockerfile` (currently
+`node:24-bookworm-slim` + a small apt set) at a pinned default version, and have
+mcp-config invoke the INSTALLED binary when no per-repo version pin is set, falling back
+to `npx -y chrome-devtools-mcp@<pin>` only when a repo explicitly pins a different one.
+
+Cost: rebuilding `haive-cli-sandbox:latest` invalidates every derived per-CLI image
+(they are all `FROM haive-cli-sandbox:latest`), so this is not a free change.
+
+Cheaper alternatives considered and rejected:
+- A shared npm cache volume — helps the SECOND run, not the first.
+- Pinning `chrome_devtools_mcp_version` — still downloads; the pin is not a cache.
+- Telling the agent to wait longer in the prompt — model-dependent, and 111s is a long
+  time to hold an agent idle even when it works.
+
+### Separate observation, worth its own check
+
+`SANDBOX_CHROME_PATH = '/usr/bin/chromium'` is passed as `--executable-path` on the
+HEADLESS fallback path, but the sandbox base image installs no chromium (its apt set is
+ca-certificates, curl, git, nano, ripgrep, tini, tmux). So the headless fallback looks
+like it cannot work either. Not exercised on this run (we had a runner CDP URL, so the
+browser-url branch was taken) — verify before relying on it.
 
 ---
 
