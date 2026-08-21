@@ -1294,7 +1294,13 @@ async function dispatchMiningAgents(
     // Apply the same directive so the level reaches mining output (skill-gen, discovery,
     // review). Agent-backed mining also carries its agent-file RESPONSE_STYLE_BLOCK; the
     // runtime directive is appended last and governs at prompt scope.
-    const prompt = await augmentPromptWithTerseness(dispatch.prompt);
+    //
+    // The task ledger has the same gap and it matters more here: a fan-out is N fresh
+    // processes that would each re-derive what 07/07b/08/08a already established. No-op
+    // while the ledger is empty.
+    const prompt = await augmentPromptWithTerseness(
+      await augmentPromptWithLedger(db, params.taskId, dispatch.prompt),
+    );
     const plan = await resolveTaskDispatch(db, params.taskId, {
       providers: params.providers!,
       preferredProviderId,
