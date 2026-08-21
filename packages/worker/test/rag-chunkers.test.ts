@@ -48,6 +48,17 @@ describe('extractMarkdownSections', () => {
     expect(byId.get('docker')?.breadcrumb).toEqual(['Deployment', 'Docker']);
     expect(byId.get('deployment')?.breadcrumb).toEqual(['Deployment']);
   });
+
+  it('never emits the same section id twice for a repeated heading', () => {
+    const md = ['# Doc', 'intro text', '## Same', 'first body', '## Same', 'second body'].join(
+      '\n',
+    );
+
+    const ids = extractMarkdownSections(md, 'doc.md').map((s) => s.sectionId);
+
+    expect(ids.filter((id) => id.startsWith('same')).length).toBe(2);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
 });
 
 describe('heading-only sections', () => {
@@ -148,6 +159,23 @@ describe('extractCodeSections — full coverage', () => {
     for (const s of extractCodeSections(php, 'Foo.php')) {
       expect(s.sectionId).not.toContain(':');
     }
+  });
+
+  it('never emits the same section id twice in one file', () => {
+    // `${sectionId}:${chunkIndex}` is the row key. Two same-named functions used
+    // to collide onto one key, so the unique index kept whichever landed last and
+    // the next sync compared the OTHER one's hash — re-embedding it every run.
+    const js =
+      'function dup() {\n  return 1;\n}\n\n' +
+      'function other() {\n  return 2;\n}\n\n' +
+      'function dup() {\n  return 3;\n}\n';
+    const sections = extractCodeSections(js, 'dup.js');
+    const keys = sections.flatMap((s) =>
+      chunkSection(s).map((c) => `${c.sectionId}:${c.chunkIndex}`),
+    );
+
+    expect(sections.filter((s) => s.sectionId.startsWith('function-dup')).length).toBe(2);
+    expect(new Set(keys).size).toBe(keys.length);
   });
 
   it('names a PHP method after its enclosing class', () => {

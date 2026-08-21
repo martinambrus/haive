@@ -112,6 +112,31 @@ function safeSectionId(id: string): string {
   return id.replace(/:/g, '-');
 }
 
+/** Make section ids unique within one file. Extractors name a section after its
+ *  construct (`function-_Replace`, a heading slug), which is NOT unique: a file
+ *  declaring the same name twice, or repeating a heading, produced two sections
+ *  sharing one `(section_id, chunk_index)` row key.
+ *
+ *  That key is the RAG dedup key, so the collision was silently destructive:
+ *  the unique index kept whichever chunk landed last, the sibling's row never
+ *  existed, and the next sync compared the sibling's hash against the survivor's
+ *  and re-embedded it. Every run, forever. MEASURED on one repo: 25 such keys,
+ *  3 of them re-embedding on a sync whose other 3091 chunks were correctly
+ *  skipped.
+ *
+ *  The nth repeat becomes `${id}~${n}`. '~' is used because no extractor and no
+ *  slug can emit it, so a suffixed id can never collide with a real one that
+ *  happens to end in a digit — and it is not ':' , which safeSectionId reserves
+ *  as the stale-key separator. */
+function uniqueSectionIds(sections: RagSection[]): RagSection[] {
+  const seen = new Map<string, number>();
+  return sections.map((section) => {
+    const n = (seen.get(section.sectionId) ?? 0) + 1;
+    seen.set(section.sectionId, n);
+    return n === 1 ? section : { ...section, sectionId: `${section.sectionId}~${n}` };
+  });
+}
+
 /* ------------------------------------------------------------------ */
 /* Markdown section extraction                                         */
 /* ------------------------------------------------------------------ */
@@ -186,7 +211,7 @@ export function extractMarkdownSections(content: string, _filePath: string): Rag
 
   flush();
 
-  return sections.length > 0 ? sections : headingOnly;
+  return uniqueSectionIds(sections.length > 0 ? sections : headingOnly);
 }
 
 /* ------------------------------------------------------------------ */
@@ -456,7 +481,7 @@ export function assembleSections(content: string, ranges: SectionRange[]): RagSe
   }
   pushGap(cursor, content.length);
 
-  return sections;
+  return uniqueSectionIds(sections);
 }
 
 export function extractCodeSections(content: string, filePath: string): RagSection[] {
