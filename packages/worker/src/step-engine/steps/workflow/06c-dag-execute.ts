@@ -39,6 +39,7 @@ function buildCoderPrompt(issue: DagCoderContext, upstreamDebt: string): string 
     issue.specSections.length > 0
       ? `Spec sections to implement:\n- ${issue.specSections.join('\n- ')}`
       : '',
+    issue.spec ? `\n=== Spec (the sections above live in this document) ===\n${issue.spec}` : '',
     issue.acceptanceCriteria.length > 0
       ? `Acceptance criteria (for this issue only):\n- ${issue.acceptanceCriteria.join('\n- ')}`
       : '',

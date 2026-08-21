@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { resolveSpecView } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { hasAnyKey, parseAgentJson } from './_agent-json.js';
@@ -132,14 +133,10 @@ export const codeAuditStep: StepDefinition<CodeAuditDetect, CodeAuditApply> = {
     if (!wt?.worktreePath) {
       throw new Error('08c2-code-audit requires 01-worktree-setup to have produced a worktree');
     }
-    const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
-    const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
-    const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
-    const spec =
-      ((resolved?.output as { spec?: string } | null)?.spec ??
-        (quality?.output as { spec?: string } | null)?.spec ??
-        (plan?.output as { spec?: string } | null)?.spec) ||
-      '';
+    // Section index + a pointer to the on-disk `.haive/spec.md` gate 1 wrote, not the whole
+    // document: this agent is a fresh CLI process that only needs to know what the change
+    // must deliver, and can Read any section it needs in full.
+    const spec = (await resolveSpecView(ctx)).text;
     return {
       spec,
       implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),

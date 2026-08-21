@@ -31,9 +31,8 @@ import {
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
 import { isStepGuidanceEnabled } from '../../guidance-context.js';
-import { promises as fs } from 'node:fs';
-import { join } from 'node:path';
 import { CONFIG_KEYS, configService } from '@haive/shared';
+import { resolveSpecView } from './_spec-artifact.js';
 import {
   coerceReviewSeverity,
   isBlockingSeverity,
@@ -71,9 +70,6 @@ interface CodeReviewDetect {
   debtBlock: string;
   /** Task adversarial-QA level, reused to gate the extra review lenses. */
   level: QaLevel;
-  /** Condensed spec for the review fan-out, set only when REVIEW_FANOUT_DISTILL is on
-   *  and the spec was actually trimmed; reviewers fall back to the full `spec`. */
-  specForReview?: string;
   /** Learned-guidance capture is on for this task: every reviewer in the fan-out is
    *  invited to name an INSTRUCTION defect behind the findings it raised. Resolved in
    *  detect() and carried on the payload because the prompt builders are pure. */
@@ -558,7 +554,7 @@ function buildRefutePrompt(
     'the finding stands. Cite the line you actually read.',
     '',
     '=== Spec (the intended behavior) ===',
-    d.specForReview || d.spec || '(no spec recorded)',
+    d.spec || '(no spec recorded)',
   ]
     .filter(Boolean)
     .join('\n');
@@ -786,37 +782,6 @@ export function lensesForLevel(level: QaLevel): ReviewLensDef[] {
   return [];
 }
 
-const REVIEW_SPEC_RELPATH = '.haive/review-context/spec.md';
-// Body lines kept under each heading before the section tail is dropped.
-const REVIEW_SPEC_HEAD_LINES = 8;
-
-// Condense a markdown spec for the review fan-out: keep every heading plus a bounded
-// lead of each section, drop the verbose tail. Deterministic, no LLM. Returns
-// dropped:false (spec unchanged) when nothing was trimmed, so the caller skips the
-// on-disk artifact + pointer. When trimmed, the full spec is written to disk and a
-// pointer to REVIEW_SPEC_RELPATH is appended so reviewers can Read any omitted section.
-function condenseSpecForReview(spec: string): { text: string; dropped: boolean } {
-  const out: string[] = [];
-  let bodyKept = 0;
-  let dropped = false;
-  for (const line of spec.split('\n')) {
-    if (/^#{1,6}\s/.test(line)) {
-      out.push(line);
-      bodyKept = 0;
-    } else if (bodyKept < REVIEW_SPEC_HEAD_LINES) {
-      out.push(line);
-      bodyKept++;
-    } else {
-      dropped = true;
-    }
-  }
-  if (!dropped) return { text: spec, dropped: false };
-  return {
-    text: `${out.join('\n').trim()}\n\n[Spec condensed for review. Full spec on disk — Read \`${REVIEW_SPEC_RELPATH}\` for any omitted section.]`,
-    dropped: true,
-  };
-}
-
 function reviewAssignment(d: CodeReviewDetect): string {
   return [
     changedFilesBlock(
@@ -829,7 +794,7 @@ function reviewAssignment(d: CodeReviewDetect): string {
     ...SEARCH_LADDER,
     '',
     '=== Spec (what the change must deliver) ===',
-    d.specForReview || d.spec || '(no spec recorded)',
+    d.spec || '(no spec recorded)',
     '',
     INSIGHTS_INSTRUCTION,
     d.promptDefectCapture ? `\n${PROMPT_DEFECT_INSTRUCTION}` : '',
@@ -1022,29 +987,11 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       throw new Error('08c-code-review requires 01-worktree-setup to have produced a worktree');
     }
 
-    const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
-    const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
-    const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
-    const spec =
-      ((resolved?.output as { spec?: string } | null)?.spec ??
-        (quality?.output as { spec?: string } | null)?.spec ??
-        (plan?.output as { spec?: string } | null)?.spec) ||
-      '';
-
-    // Opt-in fan-out spec condensing (default off). The parallel reviewers each embed
-    // the spec in their own prompt and prompt caching can't dedup it (separate
-    // sessions), so when enabled we trim the spec for the prompt and drop the full spec
-    // to a worktree artifact the reviewers can Read on demand.
-    let specForReview: string | undefined;
-    if (spec && (await configService.getBoolean(CONFIG_KEYS.REVIEW_FANOUT_DISTILL, false))) {
-      const condensed = condenseSpecForReview(spec);
-      if (condensed.dropped) {
-        const dir = join(wt.worktreePath, '.haive', 'review-context');
-        await fs.mkdir(dir, { recursive: true });
-        await fs.writeFile(join(dir, 'spec.md'), spec, 'utf8');
-        specForReview = condensed.text;
-      }
-    }
+    // Index + pointer, not the whole document: each parallel reviewer embeds the spec in
+    // its OWN prompt and prompt caching can't dedup across sessions, so the fan-out pays
+    // for the spec once per agent. Gate 1 already wrote the full text to `.haive/spec.md`,
+    // which the pointer names.
+    const spec = (await resolveSpecView(ctx)).text;
 
     // DAG debt: documented compromises reviewers must not flag (07b pattern).
     let debtBlock = '';
@@ -1082,7 +1029,6 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
 
     return {
       spec,
-      specForReview,
       implementationFiles: await collectImplementationFiles(ctx, wt.worktreePath),
       debtBlock,
       level,

@@ -19,7 +19,7 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { extractFencedJson } from './steps/_fenced-json.js';
 import { buildMergeFixPrompt, completeMergeHostSide } from './git-merge.js';
 import { loadPreviousStepOutput, pathExists } from './steps/onboarding/_helpers.js';
-import { SPEC_ARTIFACT_RELPATH } from './steps/workflow/_spec-artifact.js';
+import { resolveSpecView, SPEC_ARTIFACT_RELPATH } from './steps/workflow/_spec-artifact.js';
 import {
   isCliPreemptionFailure,
   isFatalProviderFailure,
@@ -222,11 +222,12 @@ async function buildUpstreamDebt(db: Database, planId: string, level: number): P
   ].join('\n');
 }
 
-function coderContext(issue: DagIssueRow): DagCoderContext {
+function coderContext(issue: DagIssueRow, specView: string): DagCoderContext {
   return {
     issueKey: issue.issueKey,
     title: issue.title,
     description: issue.description ?? '',
+    spec: specView,
     specSections: (issue.specSections ?? []) as string[],
     acceptanceCriteria: (issue.acceptanceCriteria ?? []) as string[],
     provides: issue.provides ?? '',
@@ -1668,9 +1669,13 @@ export async function resolveDagPhase(
         params.ignoreSavedStepClis ?? false,
       );
       const upstreamDebt = await buildUpstreamDebt(db, plan.id, curLevel.level);
+      // Resolved once for the level: every coder on it gets the same view, and
+      // createIssueWorktree already copied the artifact the pointer names into each
+      // issue worktree.
+      const specView = (await resolveSpecView(ctx)).text;
       let dispatched = 0;
       for (const issue of undispatched) {
-        const prompt = spec.buildCoderPrompt(coderContext(issue), upstreamDebt);
+        const prompt = spec.buildCoderPrompt(coderContext(issue, specView), upstreamDebt);
         const worktreeRel = issueWorktreeRel(issue);
         const planDispatch = await resolveTaskDispatch(db, params.taskId, {
           providers,

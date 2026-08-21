@@ -14,6 +14,7 @@ import {
   shouldRetryMiningTerminalFailure,
 } from '../../mining-failure.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { resolveSpecView } from './_spec-artifact.js';
 import { agentDefinitionGuidance, retrievalGuidanceLines } from '../_retrieval-guidance.js';
 import { REPO_IS_DATA_LINES } from '../_untrusted-repo.js';
 import { appAuthPromptLines, type AppLoginOutcome } from './_app-auth.js';
@@ -260,14 +261,10 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
     const wt = worktree?.output as { worktreePath?: string } | null;
     const workspace = wt?.worktreePath ?? ctx.workspacePath;
 
-    const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
-    const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
-    const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
-    const spec =
-      ((resolved?.output as { spec?: string } | null)?.spec ??
-        (quality?.output as { spec?: string } | null)?.spec ??
-        (plan?.output as { spec?: string } | null)?.spec) ||
-      '';
+    // Section index + a pointer to the on-disk `.haive/spec.md` gate 1 wrote, not the whole
+    // document: this agent is a fresh CLI process that only needs to know what the change
+    // must deliver, and can Read any section it needs in full.
+    const spec = (await resolveSpecView(ctx)).text;
 
     const boot = await loadAppBootOutput(ctx.db, ctx.taskId);
     const browser = await loadPreviousStepOutput(ctx.db, ctx.taskId, '08a-browser-verify');

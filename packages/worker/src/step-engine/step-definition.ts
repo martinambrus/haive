@@ -184,6 +184,11 @@ export interface DagCoderContext {
   issueKey: string;
   title: string;
   description: string;
+  /** The approved spec as this coder should see it: its section index plus a pointer to
+   *  the copy in the coder's own worktree, or the whole document when the admin picked
+   *  'full'. Empty when the run has no spec. Distinct from `specSections`, which names
+   *  WHICH sections this issue owns — the view tells the coder where to read them. */
+  spec: string;
   specSections: string[];
   acceptanceCriteria: string[];
   provides: string;

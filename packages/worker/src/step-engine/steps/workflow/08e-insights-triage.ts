@@ -3,6 +3,7 @@ import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { resolveSpecView } from './_spec-artifact.js';
 import { retrievalGuidanceLines } from '../_retrieval-guidance.js';
 
 // Insight collection (legacy insight-collection.md). Agents may append a
@@ -108,14 +109,10 @@ export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
   async detect(ctx: StepContext): Promise<TriageDetect> {
     const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const wt = worktree?.output as { worktreePath?: string; sandboxWorktreePath?: string } | null;
-    const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
-    const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
-    const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
-    const spec =
-      ((resolved?.output as { spec?: string } | null)?.spec ??
-        (quality?.output as { spec?: string } | null)?.spec ??
-        (plan?.output as { spec?: string } | null)?.spec) ||
-      '';
+    // Section index + a pointer to the on-disk `.haive/spec.md` gate 1 wrote, not the whole
+    // document: this agent is a fresh CLI process that only needs to know what the change
+    // must deliver, and can Read any section it needs in full.
+    const spec = (await resolveSpecView(ctx)).text;
     return {
       worktreePath: wt?.worktreePath ?? ctx.workspacePath,
       // Worktree is mounted alone at the workdir root — agent workspace is ctx.sandboxWorkdir.

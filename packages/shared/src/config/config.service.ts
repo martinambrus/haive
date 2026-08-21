@@ -272,12 +272,15 @@ export const CONFIG_KEYS = {
   // config cache); a change needs no redeploy.
   TERSENESS_LEVEL: 'config:output:tersenessLevel',
 
-  // Opt-in (default off): condense the spec passed to the 08c code-review fan-out and
-  // write the full spec to a worktree artifact reviewers can Read on demand. Trims the
-  // duplicated spec input across the parallel reviewers; lossy but retrievable. Caching
-  // can't dedup the fan-out (separate sessions), so this is the only lever — kept off by
-  // default until token metrics justify it.
-  REVIEW_FANOUT_DISTILL: 'config:output:reviewFanoutDistill',
+  // How much of the approved spec post-implementation agents get in their prompt.
+  // 'toc' (default) sends the heading index plus a bounded lead of each section and
+  // points the agent at the on-disk `.haive/spec.md` artifact for anything omitted;
+  // 'full' embeds the whole document as before. Every CLI invocation is a fresh
+  // process, so the same spec is otherwise re-sent to a dozen agents per run and
+  // prompt caching cannot dedup it (separate sessions). The steps that REASON OVER the
+  // whole spec (audit, quality, resolve-warnings, run-config, sprint planning) always
+  // get the full text regardless of this setting. Read per step; no redeploy needed.
+  SPEC_VIEW_MODE: 'config:output:specViewMode',
 
   // --- Cost / pricing -----------------------------------------------------
   // Master switch for the per-model price sync. OFF stops both feeds being fetched at
@@ -441,6 +444,12 @@ export const CONFIG_KEYS = {
 export const TERSENESS_LEVELS = ['off', 'lite', 'full', 'ultra'] as const;
 export type TersenessLevel = (typeof TERSENESS_LEVELS)[number];
 
+/** Allowed values for CONFIG_KEYS.SPEC_VIEW_MODE — how much of the approved spec a
+ *  post-implementation agent receives inline. 'toc' is the condensed section index plus
+ *  a pointer to the on-disk spec; 'full' is the whole document. */
+export const SPEC_VIEW_MODES = ['toc', 'full'] as const;
+export type SpecViewMode = (typeof SPEC_VIEW_MODES)[number];
+
 /** Allowed levels for CONFIG_KEYS.ALLOWANCE_WATCH_MODE — how Haive reacts to a task that
  *  failed on a provider outage once that provider recovers. */
 export const ALLOWANCE_WATCH_MODES = ['off', 'notify', 'auto'] as const;
@@ -507,7 +516,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS]: '2560',
   [CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED]: 'true',
   [CONFIG_KEYS.TERSENESS_LEVEL]: 'full',
-  [CONFIG_KEYS.REVIEW_FANOUT_DISTILL]: 'false',
+  [CONFIG_KEYS.SPEC_VIEW_MODE]: 'toc',
   // Pricing: sync ON by default (a fresh install should price itself without setup);
   // display in USD, which is also the storage currency, so the default path applies no
   // conversion at all.

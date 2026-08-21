@@ -258,11 +258,14 @@ describe('fix-loop engine', () => {
 describe('fix-mode implement prompt (slice 3)', () => {
   const buildPrompt = phase2ImplementStep.llm!.buildPrompt;
 
-  it('leads with the diagnosis, then appends the full spec', () => {
+  it('leads with the diagnosis, then appends the spec view', () => {
     const prompt = buildPrompt({
       detected: {
         specSummary: 's',
+        // `spec` is the whole document (ddev keyword scan, form size line); `specView`
+        // is what the prompt embeds.
         spec: 'THE-FULL-SPEC-BODY',
+        specView: 'THE-FULL-SPEC-BODY',
         sandboxWorkspacePath: '/ws',
         gateFeedback: '',
         fixContext: 'webserver_type: apache is invalid; DDEV wants apache-fpm',
@@ -283,6 +286,7 @@ describe('fix-mode implement prompt (slice 3)', () => {
       detected: {
         specSummary: 's',
         spec: 'SPEC',
+        specView: 'SPEC',
         sandboxWorkspacePath: '/ws',
         gateFeedback: '',
         fixContext: null,

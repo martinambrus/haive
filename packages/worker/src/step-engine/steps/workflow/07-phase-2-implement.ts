@@ -1,6 +1,7 @@
 import type { FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { resolveSpecView } from './_spec-artifact.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { ddevConfigGuidanceLines, retrievalGuidanceLines } from '../_retrieval-guidance.js';
@@ -13,7 +14,13 @@ import { startBrowserDesktop as startAppBrowserDesktop } from '../../../sandbox/
 
 interface ImplementDetect {
   specSummary: string;
+  /** The WHOLE approved spec. Not for the prompt — used for the ddev keyword scan and
+   *  the form's size line. */
   spec: string;
+  /** What the prompt embeds: the spec's section index plus a pointer to the on-disk
+   *  `.haive/spec.md`, or the whole spec when the admin picked 'full' / there is no
+   *  artifact to point at. */
+  specView: string;
   sandboxWorkspacePath: string;
   gateFeedback: string;
   /** Fix-loop diagnosis to address on this round, or null on the original pass
@@ -210,13 +217,9 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
 
   async detect(ctx: StepContext): Promise<ImplementDetect> {
     const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
-    const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
-    const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
     const gate = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06-gate-1-spec-approval');
     const worktree = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const planOutput = (plan?.output as PrePlanningOutput | null) ?? {};
-    const qualityOutput = (quality?.output as { spec?: string } | null) ?? {};
-    const resolvedOutput = (resolved?.output as { spec?: string } | null) ?? {};
     const gateOutput = (gate?.output as Gate1Output | null) ?? {};
     const worktreeOutput = (worktree?.output as { sandboxWorktreePath?: string } | null) ?? {};
     if (!worktreeOutput.sandboxWorktreePath) {
@@ -228,9 +231,13 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     const browserTesting =
       envTemplate?.status === 'ready' &&
       !!(envTemplate.declaredDeps as Record<string, unknown> | null)?.browserTesting;
-    // Implement from the spec the user APPROVED at gate 1: the post-checkpoint spec
-    // (05a user/agent fixes), then the 05 amended body, then the 04 draft.
-    let spec = resolvedOutput.spec ?? qualityOutput.spec ?? planOutput.spec ?? '';
+    // Implement from the spec the user APPROVED at gate 1. `spec` stays the WHOLE document
+    // — the ddev keyword scan and the form's size line both need it — while `specView` is
+    // what actually goes into the prompt (the section index plus a pointer to the on-disk
+    // artifact, unless the admin asked for the full text).
+    const view = await resolveSpecView(ctx);
+    let spec = view.spec;
+    let specView = view.text;
     let specSummary = planOutput.summary ?? '';
     if (spec.trim().length === 0) {
       // Lightweight paths (quick_bugfix) skip the spec steps (03/04/05), so there is
@@ -241,6 +248,8 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
       const title = meta.title.trim();
       const description = meta.description.trim();
       spec = [title ? `# ${title}` : '', description].filter((s) => s.length > 0).join('\n\n');
+      // Already the whole brief, and far too short to index.
+      specView = spec;
       if (specSummary.length === 0) specSummary = title;
     }
     // Fix-loop: on a round > 0 re-entry, the diagnosis a downstream step recorded, plus whether
@@ -249,6 +258,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
     return {
       specSummary,
       spec,
+      specView,
       // The worktree is mounted alone at the sandbox workdir root (per-invocation
       // isolation), so the agent's workspace IS ctx.sandboxWorkdir — not the old
       // repo-root-mount subdir. The guard above still confirms 01 set the worktree up.
@@ -394,7 +404,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
           'intended behavior, but only change what is needed to resolve the defect above.',
           '',
           '=== Spec ===',
-          detected.spec || '(empty spec)',
+          detected.specView || '(empty spec)',
           '',
           INSIGHTS_INSTRUCTION,
         ].join('\n');
@@ -409,7 +419,7 @@ export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply
         ...common,
         '',
         '=== Spec ===',
-        detected.spec || '(empty spec — default to minimal safe change)',
+        detected.specView || '(empty spec — default to minimal safe change)',
         '',
         INSIGHTS_INSTRUCTION,
       ].join('\n');

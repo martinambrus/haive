@@ -10,6 +10,7 @@ import {
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
+import { resolveSpecView } from './_spec-artifact.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { buildAnchors, overlapRefinedEstimate } from './_estimate.js';
 
@@ -291,18 +292,15 @@ export const sprintPlanningStep: StepDefinition<SprintPlanningDetect, SprintPlan
   },
 
   async detect(ctx: StepContext): Promise<SprintPlanningDetect> {
-    // Load the spec approved at gate 1, same precedence as 07-phase-2-implement.
     const plan = await loadPreviousStepOutput(ctx.db, ctx.taskId, '04-phase-0b-pre-planning');
-    const quality = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05-phase-0b5-spec-quality');
-    const resolved = await loadPreviousStepOutput(ctx.db, ctx.taskId, '05a-resolve-spec-warnings');
     const gate = await loadPreviousStepOutput(ctx.db, ctx.taskId, '06-gate-1-spec-approval');
     const planOutput = (plan?.output as PrePlanningOutput | null) ?? {};
-    const qualityOutput = (quality?.output as { spec?: string } | null) ?? {};
-    const resolvedOutput = (resolved?.output as { spec?: string } | null) ?? {};
     const gateOutput = (gate?.output as Gate1Output | null) ?? {};
     return {
       specSummary: planOutput.summary ?? '',
-      spec: resolvedOutput.spec ?? qualityOutput.spec ?? planOutput.spec ?? '',
+      // The planner reads the WHOLE spec — it is what carves the document into the issue
+      // sections every coder is then pointed at, so an index would plan against headings.
+      spec: (await resolveSpecView(ctx, { full: true })).text,
       gateFeedback: gateOutput.feedback ?? '',
     };
   },

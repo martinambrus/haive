@@ -151,8 +151,8 @@ export default function AdminPage() {
   const [savingPromptCaching1h, setSavingPromptCaching1h] = useState(false);
   const [tersenessLevel, setTersenessLevel] = useState<string | null>(null);
   const [savingTerseness, setSavingTerseness] = useState(false);
-  const [reviewDistillEnabled, setReviewDistillEnabled] = useState<boolean | null>(null);
-  const [savingReviewDistill, setSavingReviewDistill] = useState(false);
+  const [specViewMode, setSpecViewMode] = useState<string | null>(null);
+  const [savingSpecView, setSavingSpecView] = useState(false);
   const [stepGuidanceEnabled, setStepGuidanceEnabled] = useState<boolean | null>(null);
   const [savingStepGuidance, setSavingStepGuidance] = useState(false);
   const [reviewRefuteLenses, setReviewRefuteLenses] = useState<number>(3);
@@ -212,7 +212,7 @@ export default function AdminPage() {
         promptCaching1hData,
         pricingData,
         tersenessData,
-        reviewDistillData,
+        specViewData,
         stepGuidanceData,
         reviewRefuteData,
         usageWindowData,
@@ -247,7 +247,7 @@ export default function AdminPage() {
           '/admin/config/cli-pricing',
         ),
         api.get<{ level: string }>('/admin/config/terseness'),
-        api.get<{ enabled: boolean }>('/admin/config/review-fanout-distill'),
+        api.get<{ mode: string }>('/admin/config/spec-view'),
         api.get<{ enabled: boolean }>('/admin/config/step-guidance'),
         api.get<{ enabled: boolean; lenses: number }>('/admin/config/review-refute'),
         api.get<{ enabled: boolean }>('/admin/config/usage-window'),
@@ -281,7 +281,7 @@ export default function AdminPage() {
       setPromptCaching1hEnabled(promptCaching1hData.enabled);
       setPricing(pricingData);
       setTersenessLevel(tersenessData.level);
-      setReviewDistillEnabled(reviewDistillData.enabled);
+      setSpecViewMode(specViewData.mode);
       setStepGuidanceEnabled(stepGuidanceData.enabled);
       setReviewRefuteEnabled(reviewRefuteData.enabled);
       setReviewRefuteLenses(reviewRefuteData.lenses ?? 3);
@@ -674,18 +674,18 @@ export default function AdminPage() {
     }
   }
 
-  async function setReviewDistill(next: boolean) {
-    setSavingReviewDistill(true);
+  async function setSpecView(next: string) {
+    setSavingSpecView(true);
     try {
-      const result = await api.put<{ enabled: boolean }>('/admin/config/review-fanout-distill', {
-        enabled: next,
+      const result = await api.put<{ mode: string }>('/admin/config/spec-view', {
+        mode: next,
       });
-      setReviewDistillEnabled(result.enabled);
+      setSpecViewMode(result.mode);
       setError(null);
     } catch (err) {
-      setError((err as Error).message ?? 'Failed to update review distill');
+      setError((err as Error).message ?? 'Failed to update spec view mode');
     } finally {
-      setSavingReviewDistill(false);
+      setSavingSpecView(false);
     }
   }
 
@@ -1698,29 +1698,35 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {reviewDistillEnabled !== null && (
+      {specViewMode !== null && (
         <Card>
           <CardHeader>
-            <CardTitle>Condense code-review fan-out spec</CardTitle>
+            <CardTitle>Spec sent to agents</CardTitle>
             <CardDescription>
-              Opt-in (default OFF). The parallel code-review agents (peer, security, lenses) each
-              embed the full spec in their own prompt, and prompt caching can&apos;t dedup it
-              (separate sessions). When on, the spec is condensed for the reviewers and the full
-              spec is written to a worktree file they can Read on demand &mdash; lossy but
-              retrievable. Leave off until the per-step token panel shows the review fan-out is a
-              heavy share. Takes effect within ~30s, persists across restarts.
+              How much of the approved spec each post-implementation agent (implement, simplify,
+              validate, browser verify, code review, audit, adversarial QA, insights triage, DAG
+              coders) receives inline. Every CLI invocation is a fresh process and prompt caching
+              can&apos;t dedup across them, so the same document is otherwise re-sent in full a
+              dozen times per run. <strong>toc</strong> (default) sends the heading index plus a
+              bounded lead of each section and points the agent at the on-disk{' '}
+              <code>.haive/spec.md</code> artifact for anything omitted; <strong>full</strong>{' '}
+              embeds the whole document. The steps that reason over the whole spec (audit, quality
+              review, resolve warnings, run config, sprint planning) always get the full text either
+              way, and so does any run whose on-disk artifact is missing. Takes effect within ~30s,
+              persists across restarts.
             </CardDescription>
           </CardHeader>
           <label className="flex items-center gap-2 text-sm text-neutral-200">
-            <input
-              type="checkbox"
-              checked={reviewDistillEnabled}
-              disabled={savingReviewDistill}
-              onChange={(e) => void setReviewDistill(e.target.checked)}
-              className="h-4 w-4"
-            />
-            {reviewDistillEnabled ? 'Enabled' : 'Disabled'}
-            {savingReviewDistill && <span className="text-xs text-neutral-500">saving…</span>}
+            <select
+              value={specViewMode}
+              disabled={savingSpecView}
+              onChange={(e) => void setSpecView(e.target.value)}
+              className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm"
+            >
+              <option value="toc">toc</option>
+              <option value="full">full</option>
+            </select>
+            {savingSpecView && <span className="text-xs text-neutral-500">saving…</span>}
           </label>
         </Card>
       )}

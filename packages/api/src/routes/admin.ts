@@ -24,6 +24,7 @@ import {
   readHostAvailableMb,
   readHostResources,
   TERSENESS_LEVELS,
+  SPEC_VIEW_MODES,
   DISPLAY_CURRENCIES,
   isDisplayCurrency,
 } from '@haive/shared';
@@ -829,21 +830,22 @@ adminRoutes.put('/config/step-guidance', async (c) => {
   return c.json({ enabled });
 });
 
-const reviewFanoutDistillSchema = z.object({ enabled: z.boolean() });
+const specViewSchema = z.object({ mode: z.enum(SPEC_VIEW_MODES) });
 
-// Opt-in (default off): condense the spec passed to the 08c code-review fan-out (full
-// spec written to a worktree artifact reviewers can Read). The worker reads it in 08c
-// detect per task; a change needs no redeploy.
-adminRoutes.get('/config/review-fanout-distill', async (c) => {
-  const enabled = await configService.getBoolean(CONFIG_KEYS.REVIEW_FANOUT_DISTILL, false);
-  return c.json({ enabled });
+// How much of the approved spec post-implementation agents get inline: 'toc' (default)
+// is the section index plus a pointer to the on-disk `.haive/spec.md`, 'full' embeds the
+// whole document. The worker reads it per step, so a change needs no redeploy.
+adminRoutes.get('/config/spec-view', async (c) => {
+  const raw = await configService.get(CONFIG_KEYS.SPEC_VIEW_MODE);
+  const mode = (SPEC_VIEW_MODES as readonly string[]).includes(raw ?? '') ? raw : 'toc';
+  return c.json({ mode });
 });
 
-adminRoutes.put('/config/review-fanout-distill', async (c) => {
-  const { enabled } = reviewFanoutDistillSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.REVIEW_FANOUT_DISTILL, enabled ? 'true' : 'false');
-  log.info({ enabled }, 'global review-fanout-distill switch updated');
-  return c.json({ enabled });
+adminRoutes.put('/config/spec-view', async (c) => {
+  const { mode } = specViewSchema.parse(await c.req.json());
+  await configService.set(CONFIG_KEYS.SPEC_VIEW_MODE, mode);
+  log.info({ mode }, 'global spec view mode updated');
+  return c.json({ mode });
 });
 
 // 3 = the full lens panel (reachability, impact, defenses); 1 = the original single
