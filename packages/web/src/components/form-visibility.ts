@@ -1,14 +1,14 @@
 import type { FormField, FormValues } from '@haive/shared';
+import { isFieldVisible as sharedIsFieldVisible } from '@haive/shared/schemas';
 
 /** Evaluate a field's optional `visibleWhen` predicate against the current form
- *  values. A field whose predicate fails is not rendered (or validated). Works
- *  for both top-level and accordion-nested fields since `values` is the whole
- *  form's value map. */
+ *  values. A field whose predicate fails is not rendered (or validated).
+ *
+ *  Re-exported from @haive/shared/schemas rather than reimplemented: the renderer
+ *  and `validateFormValues` MUST agree on what is visible. They did not, and a field
+ *  hidden here stayed `required` server-side, which failed a task outright. Imported
+ *  from the `/schemas` subpath, never the barrel — the barrel pulls ioredis into the
+ *  browser bundle. */
 export function isFieldVisible(field: FormField, values: FormValues): boolean {
-  const vw = field.visibleWhen;
-  if (!vw) return true;
-  const current = values[vw.field];
-  if (vw.equals !== undefined) return current === vw.equals;
-  if (vw.notEquals !== undefined) return current !== vw.notEquals;
-  return true;
+  return sharedIsFieldVisible(field, values);
 }

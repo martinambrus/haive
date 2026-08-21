@@ -197,12 +197,25 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
         'No origin remote is configured. Add one to push this branch.',
       ].join('\n'),
       fields: [
+        // The checkbox leads: everything below it only applies once the user opts in,
+        // and a field revealed by a control BELOW it reads backwards.
+        {
+          type: 'checkbox',
+          id: 'push',
+          label: 'Add origin and push',
+          default: false,
+        },
         {
           type: 'text',
           id: 'remoteUrl',
           label: 'Origin remote URL',
           placeholder: 'https://github.com/owner/repo.git',
           required: true,
+          // Required only once the user asks to push. Without this gate the form
+          // demanded a URL even to DECLINE the push — an input apply() explicitly
+          // handles (`if (!values.push) ... 'push skipped'`) — so a repo with no origin
+          // had no valid submission and the step failed the whole task.
+          visibleWhen: { field: 'push', equals: true },
         },
         {
           type: 'select',
@@ -212,12 +225,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
             'Used only for this push; the token is never written to git config. Choose "manually" for SSH or public remotes.',
           options: credentialOptions,
           default: defaultCredential,
-        },
-        {
-          type: 'checkbox',
-          id: 'push',
-          label: 'Add origin and push',
-          default: false,
+          visibleWhen: { field: 'push', equals: true },
         },
       ],
       submitLabel: 'Add origin & push',

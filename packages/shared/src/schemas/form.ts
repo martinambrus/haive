@@ -360,3 +360,27 @@ export const formSubmissionSchema = z.object({
 });
 
 export type FormSubmission = z.infer<typeof formSubmissionSchema>;
+
+/** Evaluate a field's optional `visibleWhen` predicate against the current form values.
+ *  A field whose predicate fails is neither rendered NOR validated — the user is never
+ *  shown it, so holding its `required` flag against them is incoherent.
+ *
+ *  Shared deliberately: the renderer decides what to SHOW and `validateFormValues`
+ *  decides what to ENFORCE, and the two disagreeing is exactly the bug this fixes
+ *  (11a-gate-4-push marked `remoteUrl` required behind an unticked `push` box, so
+ *  declining the push — an input its own apply() handles — failed the whole task).
+ *
+ *  Works for accordion-nested fields too, since `values` is the whole form's map. */
+export function isFieldVisible(
+  field: {
+    visibleWhen?: { field: string; equals?: string | boolean; notEquals?: string | boolean };
+  },
+  values: Record<string, unknown>,
+): boolean {
+  const vw = field.visibleWhen;
+  if (!vw) return true;
+  const current = values[vw.field];
+  if (vw.equals !== undefined) return current === vw.equals;
+  if (vw.notEquals !== undefined) return current !== vw.notEquals;
+  return true;
+}

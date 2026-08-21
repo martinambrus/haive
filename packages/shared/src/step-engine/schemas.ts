@@ -1,4 +1,4 @@
-import type { FormField, FormSchema } from '../schemas/form.js';
+import { isFieldVisible, type FormField, type FormSchema } from '../schemas/form.js';
 
 export interface FormValidationSuccess {
   success: true;
@@ -41,15 +41,20 @@ function processField(
     }
     return;
   }
+  // A field the renderer hides is one the user was never offered, so enforcing its
+  // `required` flag rejects a submission they had no way to complete. Treated as
+  // optional rather than dropped: a hidden field still contributes its default, which
+  // is what hidden-and-optional fields already did.
+  const visible = isFieldVisible(field, input);
   const raw = input[field.id];
-  const coerced = coerceField(field, raw, issues);
+  const coerced = coerceField(field, raw, issues, visible);
   if (coerced !== undefined) data[field.id] = coerced;
 }
 
-function coerceField(field: FormField, raw: unknown, issues: string[]): unknown {
+function coerceField(field: FormField, raw: unknown, issues: string[], visible = true): unknown {
   const present = raw !== undefined && raw !== null && raw !== '';
   if (!present) {
-    if (field.required) {
+    if (field.required && visible) {
       issues.push(`${field.id}: required`);
       return undefined;
     }
