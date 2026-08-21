@@ -35,7 +35,7 @@ import {
 } from '@haive/shared';
 import { resolveAgentConcurrency } from '../../sandbox/runtime-admission.js';
 import { resolvePause } from '../../orchestrator/pause.js';
-import { recordLedgerEntry } from '../../step-engine/task-ledger.js';
+import { LEDGER_SUMMARY_MAX_CHARS, recordLedgerEntry } from '../../step-engine/task-ledger.js';
 import {
   refreshAllCliVersions,
   refreshAllToolVersions,
@@ -229,7 +229,7 @@ export async function handleCliExecJob(
     // Best-effort per-step summarizer: write task_steps.summary and stop. This
     // invocation is unlinked (taskStepId=null) so it must not resume the step.
     if (payload.purpose === 'step_summary') {
-      const summaryText = (result.rawOutput ?? '').trim().slice(0, 2000);
+      const summaryText = (result.rawOutput ?? '').trim().slice(0, LEDGER_SUMMARY_MAX_CHARS);
       if (payload.summaryForStepId && result.exitCode === 0 && summaryText) {
         const [step] = await db
           .update(schema.taskSteps)

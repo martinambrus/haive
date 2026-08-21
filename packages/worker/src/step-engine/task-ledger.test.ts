@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { Database } from '@haive/database';
 import {
   augmentPromptWithLedger,
+  capSummaryForLedger,
   cleanText,
   contentFingerprint,
   loadLedgerEntries,
@@ -116,6 +117,35 @@ describe('loadLedgerEntries', () => {
     const { db } = mockDb([entry('a'), entry('b', { kind: 'change' })]);
     const out = await loadLedgerEntries(db, 't1');
     expect(out.map((e) => e.kind)).toEqual(['finding', 'change']);
+  });
+});
+
+describe('capSummaryForLedger', () => {
+  it('leaves a genuine recap alone', () => {
+    expect(capSummaryForLedger('  short recap  ')).toBe('short recap');
+  });
+
+  it('head-slices an oversized one and says so', () => {
+    // 03-phase-0a-discovery's curated `summary` is its whole findings document —
+    // MEASURED 18,139 chars on a live task, 23k-42k historically. Uncapped it survives
+    // the drop loop (which always keeps one entry) and rides into every later prompt.
+    const out = capSummaryForLedger('x'.repeat(18_139));
+    expect(out.length).toBeLessThan(2_100);
+    expect(out).toContain('[recap truncated for the ledger]');
+    // Head, not tail: a recap states its point up front.
+    expect(out.startsWith('x')).toBe(true);
+  });
+
+  it('keeps a whole block of capped entries inside the budget', async () => {
+    const rows = ['a', 'b', 'c'].map((n) => ({
+      payload: { stepId: `step-${n}`, round: 0, text: capSummaryForLedger('y'.repeat(18_139)) },
+      taskStepId: `s-${n}`,
+    }));
+    const { db } = mockDb(rows as never);
+    const out = await augmentPromptWithLedger(db, 't1', 'ORIGINAL');
+    // Two of three fit; the drop loop trims the rest. Before the cap, ONE entry alone
+    // was 4.5x the whole budget.
+    expect(out.length).toBeLessThan(6_000);
   });
 });
 

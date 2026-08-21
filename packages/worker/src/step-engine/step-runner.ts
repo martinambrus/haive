@@ -66,7 +66,7 @@ import { resolveMergePhase } from './merge-resolver.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
 import { augmentPromptWithAttachments } from './attachments-context.js';
-import { augmentPromptWithLedger, recordLedgerEntry } from './task-ledger.js';
+import { augmentPromptWithLedger, capSummaryForLedger, recordLedgerEntry } from './task-ledger.js';
 import { augmentPromptWithTerseness } from './terseness-context.js';
 import { augmentPromptWithLearnedGuidance } from './guidance-context.js';
 import { writeStepContextUsage } from './step-context-usage.js';
@@ -2125,7 +2125,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       await recordLedgerEntry(db, params.taskId, current.id, {
         stepId: stepDef.metadata.id,
         round: current.round,
-        text: curatedSummary,
+        // Capped: a curated summary field is not always short (discovery's is its whole
+        // findings document), and one oversized entry survives the drop loop and rides
+        // into every later prompt.
+        text: capSummaryForLedger(curatedSummary),
         kind: 'summary',
       });
     } else if (stepDef.llm || stepDef.agentMining || stepDef.dagExecute) {

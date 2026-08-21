@@ -18,6 +18,23 @@ const LEDGER_BLOCK_TARGET = 4000;
 /** Shortest entry that may be suppressed as "the prompt already says this". */
 const DEDUPE_MIN_CHARS = 40;
 
+/** Cap for a step recap entering the ledger.
+ *
+ *  The async summarizer already trims its output to this. A CURATED summary field is not
+ *  a recap at all for some steps — 03-phase-0a-discovery's is its entire findings
+ *  document (MEASURED 23k-42k chars across prior tasks) — so the same cap has to apply
+ *  when mirroring one, or a single entry blows the whole block budget and, because the
+ *  drop loop always keeps at least one entry, rides into every later prompt intact. */
+export const LEDGER_SUMMARY_MAX_CHARS = 2000;
+
+/** Head-slice a recap to the ledger cap. Head, not tail: a summary states its point up
+ *  front, unlike the raw tool output cleanText handles, where the error is last. */
+export function capSummaryForLedger(text: string): string {
+  const t = text.trim();
+  if (t.length <= LEDGER_SUMMARY_MAX_CHARS) return t;
+  return `${t.slice(0, LEDGER_SUMMARY_MAX_CHARS)}\n[recap truncated for the ledger]`;
+}
+
 // ANSI escape sequences (terminal colour/cursor codes) — a stable, specified format
 // (ECMA-48), safe to strip and pure noise in a text prompt.
 const ANSI_RE = /\x1B\[[0-9;?]*[A-Za-z]/g;
