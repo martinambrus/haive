@@ -35,9 +35,30 @@ export const KNOWLEDGE_SOURCE_PREFIXES = [`${KB_DIR}/`, `${LEARNINGS_DIR}/`] as 
 export const MANAGED_KNOWLEDGE_DIRS = [KB_DIR, LEARNINGS_DIR] as const;
 
 /** Strip surrounding slashes so a hand-edited or legacy glob (`/.haive-data/`)
- *  compares the same as a picker-produced one. */
-function normalizeGlob(glob: string): string {
-  return glob.replace(/^\/+|\/+$/g, '');
+ *  compares the same as a picker-produced one.
+ *
+ *  Deliberately NOT `replace(/^\/+|\/+$/g, '')`, which is what this was and what
+ *  every other trim site in the codebase copied. That pattern is polynomial: once a
+ *  non-slash tail defeats the `$` anchor, the `\/+$` alternative is retried at every
+ *  start position and each attempt backtracks through the whole slash run. MEASURED
+ *  on `'x' + '/'.repeat(n) + 'x'` — 0.7ms at n=1000, 2.8 at 2000, 11 at 4000, 40 at
+ *  8000, 167 at 16000, 650 at 32000: a clean 4x per doubling, so a ~320 KB string
+ *  stalls the event loop for about a minute. (The obvious probe `'/'.repeat(n) + 'x'`
+ *  shows NOTHING, because `^\/+` swallows the run in one match and leaves nothing to
+ *  rescan — the slash run has to start past index 0.)
+ *
+ *  That input is reachable from outside: the api takes these globs verbatim from a
+ *  request body (`routes/repos.ts`), and the onboarding scope seed parses them out of
+ *  a CLONED USER REPO's `composer.json` installer-path keys and `.gitignore` lines
+ *  (`_scope-seed.ts`), which is attacker-supplied by construction. This loop is O(n)
+ *  and byte-identical in output — verified over the empty string, bare and repeated
+ *  slashes, and every leading/trailing/interior combination. */
+export function trimGlobSlashes(glob: string): string {
+  let start = 0;
+  while (start < glob.length && glob[start] === '/') start += 1;
+  let end = glob.length;
+  while (end > start && glob[end - 1] === '/') end -= 1;
+  return glob.slice(start, end);
 }
 
 /** True when the `glob` subtree and the `dir` subtree overlap in either
@@ -55,7 +76,7 @@ function overlaps(glob: string, dir: string): boolean {
  *  order, so this is a no-op for the overwhelmingly common case. */
 export function stripManagedKnowledgeGlobs(globs: readonly string[]): string[] {
   return globs.filter((glob) => {
-    const normalized = normalizeGlob(glob);
+    const normalized = trimGlobSlashes(glob);
     if (normalized.length === 0) return true;
     return !MANAGED_KNOWLEDGE_DIRS.some((dir) => overlaps(normalized, dir));
   });

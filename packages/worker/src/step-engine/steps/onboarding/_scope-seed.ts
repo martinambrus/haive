@@ -1,5 +1,6 @@
 import { FRAMEWORK_PATTERNS } from '@haive/shared';
 import { NO_RECURSE_DIRS } from '@haive/shared/scope-tree';
+import { trimGlobSlashes } from '@haive/shared/knowledge-paths';
 
 /** Directory prefixes Composer manages as third-party installs (Drupal core,
  *  contrib modules/themes, libraries, drush contrib). Derived from
@@ -23,7 +24,7 @@ export function composerExcludeDirs(composer: unknown): string[] {
   for (const key of Object.keys(ip as Record<string, unknown>)) {
     const brace = key.indexOf('{$');
     const raw = brace >= 0 ? key.slice(0, brace) : key;
-    const dir = raw.replace(/^\/+|\/+$/g, '');
+    const dir = trimGlobSlashes(raw);
     if (!dir) continue;
     if (/(^|\/)custom(\/|$)/i.test(dir)) continue;
     dirs.add(dir);
@@ -48,7 +49,7 @@ export function gitignoreExcludeDirs(gitignore: string | null | undefined): stri
     const line = raw.trim();
     if (!line || line.startsWith('#') || line.startsWith('!')) continue;
     if (/[*?\[\]]/.test(line)) continue;
-    const norm = line.replace(/^\/+|\/+$/g, '');
+    const norm = trimGlobSlashes(line);
     if (norm) out.add(norm);
   }
   return [...out];
@@ -94,7 +95,7 @@ export function computeSeedExcludeGlobs(sources: SeedSources): string[] {
     ? FRAMEWORK_PATTERNS[framework as keyof typeof FRAMEWORK_PATTERNS]
     : undefined;
   for (const p of pattern?.excludePaths ?? []) {
-    const norm = p.replace(/^\/+|\/+$/g, '');
+    const norm = trimGlobSlashes(p);
     if (norm) candidates.add(norm);
   }
 

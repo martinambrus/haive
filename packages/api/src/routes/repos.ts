@@ -18,6 +18,7 @@ import {
   KB_DIR,
   LEARNINGS_DIR,
   stripManagedKnowledgeGlobs,
+  trimGlobSlashes,
   tagManagedKnowledgeNodes,
 } from '@haive/shared/knowledge-paths';
 import { getDb } from '../db.js';
@@ -635,11 +636,7 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
   // tree. This is the server-side backstop for the same strip the picker steps
   // and the repos page apply.
   const scopeExcludeGlobs = stripManagedKnowledgeGlobs(
-    Array.from(
-      new Set(
-        body.scopeExcludeGlobs.map((p) => p.replace(/^\/+|\/+$/g, '')).filter((p) => p.length > 0),
-      ),
-    ),
+    Array.from(new Set(body.scopeExcludeGlobs.map(trimGlobSlashes).filter((p) => p.length > 0))),
   ).sort();
 
   const updated = await db
